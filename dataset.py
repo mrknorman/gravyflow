@@ -1115,6 +1115,7 @@ def get_ifo_data(
                     )
                 
                 cropped_injections = []
+                amplitudes = []
                 for injection_index, config in enumerate(injection_configs):
                                         
                     scaled_injections = \
@@ -1130,6 +1131,10 @@ def get_ifo_data(
                     
                     scaled_injections = \
                         replace_nan_and_inf_with_zero(scaled_injections)
+                    
+                    amplitudes.append(
+                        tf.reduce_max(tf.abs(scaled_injections), axis=1)*100
+                    )
                     
                     batched_onsource += scaled_injections
 
@@ -1168,7 +1173,8 @@ def get_ifo_data(
                         'gps_time': lambda: tf.convert_to_tensor(batched_gps_times, dtype=tf.int64),
                         'injections': lambda: cropped_injections,
                         'injection_masks': lambda: injection_masks[:, batch_index],
-                        'snr': lambda: snrs[:, batch_index]
+                        'snr': lambda: snrs[:, batch_index],
+                        'amplitude': lambda: amplitudes
                     }
 
                     return {key: operations[key]() for key in keys if key in operations}
@@ -1236,8 +1242,15 @@ def get_ifo_data_generator(
                 ), 
                 dtype=tf.bool
             ),
-        
         'snr' : 
+            tf.TensorSpec(
+                shape=(
+                    num_injection_configs,
+                    num_examples_per_batch
+                ), 
+                dtype=tf.float64
+            ),
+        'amplitude' : 
             tf.TensorSpec(
                 shape=(
                     num_injection_configs,
