@@ -171,18 +171,16 @@ def plot_time_series(
                 
 def test_injection(): 
     
-    sample_rate_hertz = 8196
+    sample_rate_hertz = 8192.0
     duration_seconds = 1.0
     
     injection_configs = [
         {
             "type" : "cbc",
             "snr"  : {"value" : 50, "distribution_type": "constant", "dtype" : int},
-            "injection_chance" : 0.5,
+            "injection_chance" : 1.0,
             "padding_seconds" : {"front" : 0.2, "back" : 0.1},
             "args" : {
-                "approximant_enum" : \
-                    {"value" : 1, "distribution_type": "constant", "dtype" : int}, 
                 "mass_1_msun" : \
                     {"min_value" : 5, "max_value": 95, "distribution_type": "uniform"},
                 "mass_2_msun" : \
@@ -204,9 +202,9 @@ def test_injection():
                 "mean_periastron_anomaly" : \
                     {"min_value" : 0, "max_value": 2*np.pi, "distribution_type": "uniform"},
                 "spin_1_in" : \
-                    {"min_value" : -0.5, "max_value": 0.5, "distribution_type": "uniform", "num_values" : 3},
+                    {"min_value" : -0.5, "max_value": 0.5, "distribution_type": "uniform"},
                 "spin_2_in" : \
-                    {"min_value" : -0.5, "max_value": 0.5, "distribution_type": "uniform", "num_values" : 3}
+                    {"min_value" : -0.5, "max_value": 0.5, "distribution_type": "uniform"}
             }
         }
     ]
@@ -218,7 +216,7 @@ def test_injection():
         injection_configs = injection_configs,
         sample_rate_hertz = sample_rate_hertz,
         onsource_duration_seconds = duration_seconds,
-        max_segment_size = 3600,
+        max_segment_size = 1000,
         num_examples_per_batch = 32,
         order = "random",
         force_generation = True,
@@ -306,7 +304,7 @@ def test_injection():
 
 if __name__ == "__main__":
     
-    gpus = find_available_GPUs(10000, 1)
+    gpus = find_available_GPUs(4000, 1)
     setup_cuda(gpus, max_memory_limit = 2000, verbose = True)    
     test_injection()
     #test_noise()

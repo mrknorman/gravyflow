@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from itertools import cycle
 
-from .cuphenom.py.cuphenom import generate_phenom
+from .cuphenom.py.cuphenom import generate_phenom_d
 from .whiten import whiten
 from .snr    import scale_to_snr
 from .setup  import randomise_arguments, randomise_dict
@@ -315,11 +315,9 @@ def roll_vector_zero_padding(tensor, min_roll, max_roll):
         lambda vec: roll_vector_zero_padding_(vec, min_roll, max_roll), tensor
     )
 
-def load_generate_injections(
+def generate_injections(
     config: Dict[str, Any],
     num_injections: int, 
-    injection_filename: str,
-    injection_key: str,
     common_args: dict,
     fduration: float,
     sample_rate_hertz: float,
@@ -334,30 +332,55 @@ def load_generate_injections(
     injection_masks = []
     snrs = []
     
-    injection_masks_key = f"injections/masks/{injection_key}"
-    with open_hdf5_file(injection_filename) as injection_file:
-
-        if injection_key in injection_file:
-            injection_masks = injection_file[injection_masks_key][()]
-            injections = injection_file[injection_key][()]
-        else:
-            injection_masks = np.random.choice(
-                [False, True], 
-                size=num_injections, 
-                p=[1-injection_chance, injection_chance]
-            )
-
-            for _ in range(np.sum(injection_masks)):
-
-                injection, injection_parameters = \
-                    randomise_arguments(
-                        config["args"], generate_phenom
-                    )
-                injection *= 10.0E20 
-                injections.append(injection[:, 1])
-                
-            injection_file.create_dataset(injection_key, data=np.stack(injections))
-            injection_file.create_dataset(injection_masks_key, data=np.array(injection_masks))
+    injection_masks = np.random.choice(
+        [False, True], 
+        size=num_injections, 
+        p=[1-injection_chance, injection_chance]
+    )
+    
+    print(injection_masks, sum(injection_masks), len(injection_masks))
+    
+    num_waveforms = np.sum(injection_masks)
+        
+    config["args"].update({
+        "num_waveforms":
+            {
+            "value": num_waveforms, 
+            "distribution_type": "constant",
+            "dtype" : "int"
+            }
+        })
+    
+    length_one_args = ['num_waveforms', 'sample_rate_hertz', 'duration_seconds']
+    length_three_args = ['spin_1_in', 'spin_2_in']
+    
+    # Update dictionary to create random variables for each waveform:
+    for key, value in config["args"].items():
+        if key not in length_one_args + length_three_args:    
+            value.update({"num_values": num_waveforms})
+            config["args"].update({key: value})
+    
+    num_spin_components = 3
+    # Spins have three times more variables:
+    for key, value in config["args"].items():
+        if key in length_three_args:
+            value.update({"num_values": num_waveforms*num_spin_components})
+            config["args"].update({key: value})
+                    
+    injections, injection_parameters = \
+        randomise_arguments(
+            config["args"], generate_phenom_d
+        )
+    
+    # At the moment take only one polarization: 
+    injections = injections[:, 0]
+        
+    # Reshape to split injections:
+    num_samples = int(sample_rate_hertz*(onsource_duration_seconds + fduration))
+    injections = injections.reshape(-1, num_samples)
+    
+    # Arbitrary scale factor:
+    injections *= 10.0E20 
         
     for i in range(np.sum(injection_masks)):
         if type(config["snr"]) == np.ndarray:  
@@ -759,7 +782,6 @@ def get_sorted_values(dictionary):
 def generate_filenames(
     data_directory: Union[str, Path],         
     segment_parameters: List[Any], 
-    injection_configs: List[Dict[str, Any]],
     seed: int
     ) -> (Path, List[Path]):
     """
@@ -772,13 +794,11 @@ def generate_filenames(
         The directory where the data is stored.
     segment_parameters : List[Any]
         The list of parameters used for segment generation.
-    injection_configs : List[Dict[str, Any]]
-        The list of injection configurations.
 
     Returns
     -------
-    tuple (Path, List[Path])
-        The segment filename and the list of injection filenames.
+    Path
+        The segment filename
 
     """
     # Generate the hash for the segment parameters
@@ -786,21 +806,8 @@ def generate_filenames(
     # Construct the segment filename using the hash
     segment_filename = \
         Path(data_directory) / f"segment_data_{segment_hash}.hdf5"
-    
-    # Generate the hashes for the injection configurations    
-    injection_hashes = [ 
-        generate_hash_from_list( 
-            get_sorted_values(config['args']) + [seed] + [config['injection_chance']]
-        ) 
-        for config in injection_configs
-    ]
-    # Construct the injection filenames using the hashes
-    injection_file_names = [
-        Path(data_directory) / f"injection_data_{injection_hash}" 
-        for injection_hash in injection_hashes
-    ]
 
-    return segment_filename, injection_file_names
+    return segment_filename
 
 
 @tf.function
@@ -939,11 +946,10 @@ def get_ifo_data(
             sample_rate_hertz
         ]  
     
-    segment_filename, injection_filenames = \
+    segment_filename = \
         generate_filenames(
             data_directory,         
             segment_parameters, 
-            injection_configs,
             seed
         )
         
@@ -1017,7 +1023,8 @@ def get_ifo_data(
                         current_segment_data.t0.value, 
                         current_segment_data.sample_rate.value
                     )
-                #current_segment_data = current_segment_data.downsample(sample_rate_hertz) 
+                #current_segment_data = 
+                    #current_segment_data.downsample(sample_rate_hertz) 
                 
                 if save_segment_data:
                     segment_file.create_dataset(
@@ -1042,7 +1049,10 @@ def get_ifo_data(
             # Set common parameters before entering the loop
             common_args = {
                 "sample_rate_hertz": \
-                    {"value": sample_rate_hertz, "distribution_type": "constant"},
+                    {
+                        "value": sample_rate_hertz, 
+                         "distribution_type": "constant"
+                    },
                 "duration_seconds": \
                     {
                         "value": onsource_duration_seconds + fduration, 
@@ -1054,24 +1064,12 @@ def get_ifo_data(
             injections = []
             injection_masks = []
             snrs = []
-            for config, file_name in zip(injection_configs, injection_filenames):    
-                
-                num_batches_per_file = int(1.0E5)
-                max_segment_index = num_batches_per_file // max_batch_count
-                injection_file_index = int(segment_index // max_segment_index)
-                
-                file_name = f"{file_name}_{injection_file_index}.hdf5"
-                
-                injection_key = \
-                    f"injections/injections_{segment_index}"\
-                    f"_{current_max_batch_count*num_examples_per_batch}"
+            for config in injection_configs:    
     
                 injections_, injection_masks_, snrs_ = \
-                    load_generate_injections(
+                    generate_injections(
                         config,
                         current_max_batch_count*num_examples_per_batch, 
-                        file_name,
-                        injection_key,
                         common_args,
                         fduration,
                         sample_rate_hertz,
@@ -1168,16 +1166,35 @@ def get_ifo_data(
                                 
                 def create_dict(keys, batch_index=None):
                     operations = {
-                        'onsource': lambda: tf.cast(batched_onsource, tf.float16),
-                        'offsource': lambda: tf.cast(batched_offsource, tf.float16),
-                        'gps_time': lambda: tf.convert_to_tensor(batched_gps_times, dtype=tf.int64),
-                        'injections': lambda: cropped_injections,
-                        'injection_masks': lambda: injection_masks[:, batch_index],
-                        'snr': lambda: snrs[:, batch_index],
-                        'amplitude': lambda: amplitudes
+                        'onsource': lambda: \
+                            tf.cast(
+                                batched_onsource, 
+                                tf.float16
+                            ),
+                        'offsource': lambda: \
+                            tf.cast(
+                                batched_offsource, 
+                                tf.float16
+                            ),
+                        'gps_time': lambda: \
+                            tf.convert_to_tensor(
+                                batched_gps_times,
+                                dtype=tf.int64
+                            ),
+                        'injections': lambda: \
+                            cropped_injections,
+                        'injection_masks': lambda: \
+                            injection_masks[:, batch_index],
+                        'snr': lambda: \
+                            snrs[:, batch_index],
+                        'amplitude': lambda: \
+                            amplitudes
                     }
 
-                    return {key: operations[key]() for key in keys if key in operations}
+                    return {
+                        key: operations[key]() \
+                        for key in keys if key in operations
+                    }
 
                 input_dict = create_dict(input_keys, batch_index)
                 output_dict = create_dict(output_keys, batch_index)
@@ -1205,8 +1222,10 @@ def get_ifo_data_generator(
     ):
     
     num_examples_per_batch = kwargs.get('num_examples_per_batch', 1)
-    num_onsource_samples = int(kwargs.get('onsource_duration_seconds', 1.0)*sample_rate_hertz)
-    num_offsource_samples = int(kwargs.get('offsource_duration_seconds', 16.0)*sample_rate_hertz)
+    num_onsource_samples = \
+        int(kwargs.get('onsource_duration_seconds', 1.0)*sample_rate_hertz)
+    num_offsource_samples = \
+        int(kwargs.get('offsource_duration_seconds', 16.0)*sample_rate_hertz)
     num_injection_configs = len(kwargs.get('injection_configs', {}))
     
     output_signature_dict = {
