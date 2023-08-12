@@ -337,9 +337,7 @@ def generate_injections(
         size=num_injections, 
         p=[1-injection_chance, injection_chance]
     )
-    
-    print(injection_masks, sum(injection_masks), len(injection_masks))
-    
+        
     num_waveforms = np.sum(injection_masks)
         
     config["args"].update({
@@ -403,7 +401,7 @@ def generate_injections(
         int((onsource_duration_seconds + fduration) *sample_rate_hertz) - \
         int((crop_duration \
              + config["padding_seconds"]["front"])*sample_rate_hertz) 
-    
+        
     injections = tf.convert_to_tensor(injections, dtype = tf.float32)
     injection_masks = tf.convert_to_tensor(injection_masks, dtype = tf.bool)
     snrs = tf.convert_to_tensor(snrs, dtype = tf.float32)

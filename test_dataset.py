@@ -171,7 +171,7 @@ def plot_time_series(
                 
 def test_injection(): 
     
-    sample_rate_hertz = 8192.0
+    sample_rate_hertz = 4096.0
     duration_seconds = 1.0
     
     injection_configs = [
@@ -225,56 +225,50 @@ def test_injection():
         output_keys = ["injections", "injection_masks"],
         save_segment_data = True,
     )
-    
-    exit_count = 0
+        
     for data in islice(ifo_data_generator, 1):
         
-        for onsource, injection, mask in zip(
+        for i, (onsource, injection, mask) in enumerate(zip(
                 data[0]['onsource'].numpy(), 
                 data[1]['injections'][0].numpy(),
                 data[1]['injection_masks'][0].numpy()
-            ):
+            )):
             
-            if mask and not exit_count:
+            if mask:
                 
                 plot_time_series(
                     onsource, 
                     injection, 
                     sample_rate_hertz, 
                     duration_seconds, 
-                    file_path = Path('./py_ml_data/injection_test.html')
+                    file_path = Path(f'./py_ml_data/injection_test_{i}.html')
                 )
                 plot_spectrogram(
                     onsource, 
                     sample_rate_hertz, 
                     nperseg=256, 
                     noverlap=128, 
-                    file_path = Path('./py_ml_data/injection_spectrogram.png')
+                    file_path = Path(f'./py_ml_data/injection_spectrogram_{i}.png')
                 )
-                
-                exit_count += 1
-                
-            elif not mask and exit_count:
+                            
+            elif not mask :
                 
                 plot_time_series(
                     onsource, 
                     injection, 
                     sample_rate_hertz, 
                     duration_seconds, 
-                    file_path = Path('./py_ml_data/noise_test.html')
+                    file_path = Path(f'./py_ml_data/noise_test_{i}.html')
                 )
                 plot_spectrogram(
                     onsource, 
                     sample_rate_hertz, 
                     nperseg=256, 
                     noverlap=128, 
-                    file_path = Path('./py_ml_data/noise_spectrogram.png')
+                    file_path = Path(f'./py_ml_data/noise_spectrogram_{i}.png')
                 )
-                
-                exit_count += 1
-                
-            if (exit_count >= 2):
-                break
+
+    quit()
     
     ifo_data_generator = get_ifo_data_generator(
         time_interval = O3,
@@ -283,7 +277,7 @@ def test_injection():
         injection_configs = injection_configs,
         sample_rate_hertz = sample_rate_hertz,
         onsource_duration_seconds = duration_seconds,
-        max_segment_size = 3600,
+        max_segment_size = 1000,
         num_examples_per_batch = 32,
         force_generation = True,
         order = "random",
