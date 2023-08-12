@@ -395,8 +395,7 @@ def generate_injections(
     crop_duration = fduration / 2.0
 
     min_roll_num_samples = \
-        int((crop_duration \
-             + config["padding_seconds"]["back"])*sample_rate_hertz) 
+        int((config["padding_seconds"]["back"] + crop_duration)*sample_rate_hertz) 
     max_roll_num_samples = \
         int((onsource_duration_seconds + fduration) *sample_rate_hertz) - \
         int((crop_duration \

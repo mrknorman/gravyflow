@@ -179,7 +179,7 @@ def test_injection():
             "type" : "cbc",
             "snr"  : {"value" : 50, "distribution_type": "constant", "dtype" : int},
             "injection_chance" : 1.0,
-            "padding_seconds" : {"front" : 0.2, "back" : 0.1},
+            "padding_seconds" : {"front" : 0.3, "back" : 0.0},
             "args" : {
                 "mass_1_msun" : \
                     {"min_value" : 5, "max_value": 95, "distribution_type": "uniform"},
@@ -196,7 +196,7 @@ def test_injection():
                 "reference_orbital_phase_in" : \
                     {"min_value" : 0, "max_value": 2*np.pi, "distribution_type": "uniform"},
                 "ascending_node_longitude" : \
-                    {"min_value" : 0, "max_value": 2*np.pi, "distribution_type": "uniform"},
+                    {"min_value" : 0, "max_value": np.pi, "distribution_type": "uniform"},
                 "eccentricity" : \
                     {"min_value" : 0, "max_value": 0.1, "distribution_type": "uniform"},
                 "mean_periastron_anomaly" : \
