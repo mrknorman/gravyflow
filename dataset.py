@@ -869,8 +869,9 @@ def crop_samples(
         The cropped batched_onsource.
     """
     
-    if len(batched_onsource.shape) == 1:
-        batched_onsource = tf.expand_dims(batched_onsource, 0)
+    dims = len(batched_onsource.shape)
+    if dims == 1:
+        batched_onsource = tf.expand_dims(batched_onsource, 0) 
     
     # Calculate the desired number of samples based on example duration and 
     # sample rate:
@@ -882,6 +883,9 @@ def crop_samples(
     
     # Crop the batched_onsource
     batched_onsource = batched_onsource[..., start:end]
+    
+    if dims == 1:
+        batched_onsource = tf.squeeze(batched_onsource) 
     
     return batched_onsource
 
