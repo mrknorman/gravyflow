@@ -190,6 +190,18 @@ def get_all_event_times() -> np.ndarray:
         
     return gps_times    
 
+def get_all_glitch_segments(ifo):
+    
+    glitches = EventTable.fetch('gravityspy', 'glitches')
+    glitches = glitches[glitches["ifo"] == ifo]
+    
+    segments = list(
+        zip(glitches['start_time'].data, 
+            glitches['start_time'].data + glitches['duration'].data)
+    )
+        
+    return segments    
+
 def pad_gps_times_with_veto_window(
         arr: np.ndarray, 
         offset: int = 60, 
@@ -314,6 +326,29 @@ def roll_vector_zero_padding(tensor, min_roll, max_roll):
     return tf.map_fn(
         lambda vec: roll_vector_zero_padding_(vec, min_roll, max_roll), tensor
     )
+
+@tf.function
+def check_glitch_overlap(
+        tensor_start_times, 
+        duration, 
+        segments_start,
+        segments_end
+    ):
+    # Calculate the end times for each segment in the tensor
+    tensor_end_times = tensor_start_times + duration
+    
+    # Expand dimensions for broadcasting
+    tensor_start_times_exp = tf.expand_dims(tensor_start_times, -1)  # Shape: (N, 1)
+    tensor_end_times_exp = tf.expand_dims(tensor_end_times, -1)
+    
+    # Check for overlap using broadcasting
+    condition1 = tensor_start_times_exp <= segments_end  # (N, num_segments)
+    condition2 = tensor_end_times_exp >= segments_start  # (N, num_segments)
+    
+    # Combine conditions to find overlaps
+    overlaps = tf.reduce_any(condition1 & condition2, axis=-1)  # Reduce over the segments dimension
+    
+    return overlaps
 
 def generate_injections(
     config: Dict[str, Any],
@@ -656,11 +691,10 @@ def process_valid_segments(
     if "events" not in data_labels:
         event_times = get_all_event_times()
         veto_segments.append(pad_gps_times_with_veto_window(event_times))
+        print(veto_segments)
     if "glitches" not in data_labels:
-        # glitches = EventTable.fetch('gravityspy', 'glitches')
-        # print(glitches)
-        print("Glitch vetos not implemented!")
         pass
+        #veto_segments.append(get_all_glitch_segments(ifo))
     
     if veto_segments != []:
         veto_segments = np.concatenate(veto_segments)
@@ -778,8 +812,7 @@ def get_sorted_values(dictionary):
 
 def generate_filenames(
     data_directory: Union[str, Path],         
-    segment_parameters: List[Any], 
-    seed: int
+    segment_parameters: List[Any]
     ) -> (Path, List[Path]):
     """
     Generate unique filenames based on a hash of the input parameters and 
@@ -946,8 +979,7 @@ def get_ifo_data(
     segment_filename = \
         generate_filenames(
             data_directory,         
-            segment_parameters, 
-            seed
+            segment_parameters
         )
         
     # Get segment start and stop times given input parameters
@@ -966,8 +998,18 @@ def get_ifo_data(
             order
         )
     
-    batch_index = 0
-    injection_indicies = [0] * len(injection_configs)
+    """
+    #Store for later
+    glitch_segments = get_all_glitch_segments(ifo)
+    
+    # Convert segments list to tensors
+    glitch_segments_start, glitch_segments_end = zip(*glitch_segments)
+    glitch_segments_start = tf.constant(glitch_segments_start, dtype=tf.float32)
+    glitch_segments_end = tf.constant(glitch_segments_end, dtype=tf.float32)
+    """
+    
+    onsource_duration_seconds_tf = \
+        tf.constant(onsource_duration_seconds, dtype=tf.float32)
     
     with open_hdf5_file(segment_filename) as segment_file:
         
@@ -1109,6 +1151,8 @@ def get_ifo_data(
                         num_examples_per_batch
                     )
                 
+                batched_gps_times = batched_gps_times + fduration/0.5
+                
                 cropped_injections = []
                 amplitudes = []
                 for injection_index, config in enumerate(injection_configs):
@@ -1160,7 +1204,17 @@ def get_ifo_data(
                     onsource_duration_seconds, 
                     sample_rate_hertz
                 )
-                                
+                
+                """
+                glitch_overlap = \
+                    check_glitch_overlap(
+                        batched_gps_times, 
+                        onsource_duration_seconds_tf, 
+                        glitch_segments_start, 
+                        glitch_segments_end
+                    )
+                """
+                
                 def create_dict(keys, batch_index=None):
                     operations = {
                         'onsource': lambda: \
@@ -1176,7 +1230,7 @@ def get_ifo_data(
                         'gps_time': lambda: \
                             tf.convert_to_tensor(
                                 batched_gps_times,
-                                dtype=tf.int64
+                                dtype=tf.float65
                             ),
                         'injections': lambda: \
                             cropped_injections,

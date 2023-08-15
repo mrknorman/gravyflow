@@ -211,7 +211,7 @@ def test_injection():
     
     ifo_data_generator = get_ifo_data(
         time_interval = O3,
-        data_labels = ["noise", "glitches"],
+        data_labels = ["noise"], #, "glitches"],
         ifo = "L1",
         injection_configs = injection_configs,
         sample_rate_hertz = sample_rate_hertz,
@@ -267,8 +267,6 @@ def test_injection():
                     noverlap=128, 
                     file_path = Path(f'./py_ml_data/noise_spectrogram_{i}.png')
                 )
-
-    quit()
     
     ifo_data_generator = get_ifo_data_generator(
         time_interval = O3,
