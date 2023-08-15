@@ -1,9 +1,10 @@
 from .dataset import get_ifo_data, O3, roll_vector_zero_padding, crop_samples
-from .cuphenom.py.cuphenom import generate_phenom
+from .cuphenom.py.cuphenom import generate_phenom_d
 from gwpy.timeseries import TimeSeries
 from .whiten import whiten
 from .psd import calculate_psd
 from .snr import scale_to_snr
+from .setup import setup_cuda, find_available_GPUs
 from scipy.signal import welch
 from itertools import islice
 import tensorflow as tf
@@ -223,6 +224,9 @@ def plot_results(
 if __name__ == "__main__":
     # Call generatePhenom function
     
+    gpus = find_available_GPUs(4000, 1)
+    setup_cuda(gpus, max_memory_limit = 2000, verbose = True)  
+    
     sample_rate_hertz = 2048.0
     onsource_duration_seconds = 8.0
     
@@ -236,18 +240,19 @@ if __name__ == "__main__":
         ifo = "L1",
         sample_rate_hertz = sample_rate_hertz,
         onsource_duration_seconds = onsource_duration_seconds,
-        num_examples_per_batch = 32,
+        num_examples_per_batch = 1,
         order = "random",
         apply_whitening = False,
-        return_keys = ["onsource", "offsource"]
+        input_keys = ["onsource", "offsource"],
+        output_keys = []
     )
     
-    for background in islice(background_noise_iterator, 1):
+    for background, _ in islice(background_noise_iterator, 1):
         
         # Generate phenom injection
         injection = \
-            generate_phenom(
-                approximant_enum = 1, 
+            generate_phenom_d(
+                num_waveforms = 1, 
                 mass_1_msun = 30, 
                 mass_2_msun = 30,
                 sample_rate_hertz = sample_rate_hertz,
@@ -262,30 +267,34 @@ if __name__ == "__main__":
                 spin_2_in = [0.0, 0.0, 0.0]
             )
         
-        
         # Scale injection to avoid precision error when converting to 32 bit 
         # float for tensorflow compatability:
         injection *= 1.0E20
 
         #some kind of projection here
+        injection = tf.convert_to_tensor(injection[:, 0], dtype = tf.float32)
+        injection = tf.expand_dims(injection, 0)
         
-        injection = tf.convert_to_tensor(injection[:, 1], dtype = tf.float32)
         injection = roll_vector_zero_padding(injection, int(1.2 * sample_rate_hertz), int(4.8 * sample_rate_hertz))
         offsource = tf.cast(background["offsource"][0], dtype = tf.float32)
         onsource  = tf.cast(background["onsource"][0], dtype = tf.float32)
+        injection = injection[0]
         
         onsource_duration_seconds = 6.0
         
+        print(injection.shape)
+
         scaled_injection = \
             scale_to_snr(
                 injection, 
                 onsource,
                 30.0,
-                window_duration_seconds = 4.0, 
                 sample_rate_hertz = sample_rate_hertz, 
                 fft_duration_seconds = 4.0, 
                 overlap_duration_seconds = 0.5,
             )        
+        
+        print(scaled_injection, scaled_injection.shape)
         
         onsource_plus_injection = onsource + scaled_injection
         
@@ -387,6 +396,8 @@ if __name__ == "__main__":
             onsource_duration_seconds,
             sample_rate_hertz
             )
+        
+        print(injection.shape, scaled_injection.shape)
         
         scaled_injection_whitened_tf = whiten(
             scaled_injection, 
