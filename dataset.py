@@ -691,7 +691,6 @@ def process_valid_segments(
     if "events" not in data_labels:
         event_times = get_all_event_times()
         veto_segments.append(pad_gps_times_with_veto_window(event_times))
-        print(veto_segments)
     if "glitches" not in data_labels:
         pass
         #veto_segments.append(get_all_glitch_segments(ifo))
@@ -1166,7 +1165,6 @@ def get_ifo_data(
                             injections[injection_index][batch_index], 
                             batched_onsource, 
                             snrs[injection_index][batch_index],
-                            window_duration_seconds=1.0,
                             sample_rate_hertz=sample_rate_hertz,
                             fft_duration_seconds=1.0,
                             overlap_duration_seconds=0.5
