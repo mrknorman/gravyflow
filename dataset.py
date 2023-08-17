@@ -365,7 +365,6 @@ def generate_injections(
 
     injections = []
     injection_masks = []
-    snrs = []
     
     injection_masks = np.random.choice(
         [False, True], 
@@ -414,18 +413,6 @@ def generate_injections(
     
     # Arbitrary scale factor:
     injections *= 10.0E20 
-        
-    for i in range(np.sum(injection_masks)):
-        if type(config["snr"]) == np.ndarray:  
-            snr = config["snr"][-1]
-            if i < len(config["snr"]):
-                snr = config["snr"][i]
-        elif type(config["snr"]) == dict:
-            snr = randomise_dict(config["snr"])
-        else:
-            raise ValueError("Unsupported SNR type!") 
-
-        snrs.append(snr)         
 
     crop_duration = fduration / 2.0
 
@@ -438,7 +425,6 @@ def generate_injections(
         
     injections = tf.convert_to_tensor(injections, dtype = tf.float32)
     injection_masks = tf.convert_to_tensor(injection_masks, dtype = tf.bool)
-    snrs = tf.convert_to_tensor(snrs, dtype = tf.float32)
             
     injections = \
         roll_vector_zero_padding( 
@@ -453,65 +439,39 @@ def generate_injections(
             injection_masks
         )
     
+    return injections, injection_masks
+
+def generate_snrs(
+        injection_masks,
+        num_examples_per_batch,
+        config,
+        example_index
+    ):
+    
+    snrs = []
+    for snr_index in range(np.sum(injection_masks)):
+        snr_index += example_index
+        
+        if type(config["snr"]) == np.ndarray:  
+            snr = config["snr"][-1]
+            if snr_index < len(config["snr"]):
+                snr = config["snr"][snr_index]
+        elif type(config["snr"]) == dict:
+            snr = randomise_dict(config["snr"])
+        else:
+            raise ValueError("Unsupported SNR type!") 
+
+        snrs.append(snr)      
+
+    snrs = tf.convert_to_tensor(snrs, dtype = tf.float32)
+
     snrs = \
         expand_tensor(
             snrs,
             injection_masks
         )
     
-    injections = batch_tensor(injections, num_examples_per_batch)
-    injection_masks = batch_tensor(injection_masks, num_examples_per_batch)
-    snrs = batch_tensor(snrs, num_examples_per_batch)
-    
-    return injections, injection_masks, snrs
-
-@tf.function
-def expand_tensor(signal: tf.Tensor, mask: tf.Tensor) -> tf.Tensor:
-    """
-    This function expands a tensor along the X axis by inserting zeros wherever a 
-    corresponding boolean in a 1D tensor is False, and elements from the original 
-    tensor where the boolean is True. It works for both 1D and 2D tensors.
-
-    Parameters
-    ----------
-    signal : tf.Tensor
-        A 1D or 2D tensor representing signal injections, where the length of 
-        the tensor's first dimension equals the number of True values in the mask.
-    mask : tf.Tensor
-        A 1D boolean tensor. Its length will determine the length of the expanded tensor.
-
-    Returns
-    -------
-    tf.Tensor
-        The expanded tensor.
-
-    """
-    # Ensure that the signal tensor is 1D or 2D
-    assert signal.ndim in (1, 2), 'Signal must be a 1D or 2D tensor'
-    
-    # Ensure that the mask is 1D
-    assert mask.ndim == 1, 'Mask must be a 1D tensor'
-    
-    # Ensure that the length of the signal tensor matches the number of True 
-    # values in the mask
-    assert tf.reduce_sum(tf.cast(mask, tf.int32)) == signal.shape[0], \
-        'Signal tensor length must match number of True values in mask'
-    
-    # Create a tensor full of zeros with the final shape
-    if signal.ndim == 1:
-        expanded_signal = tf.zeros(mask.shape[0], dtype=signal.dtype)
-    else: # signal.ndim == 2
-        N = signal.shape[1]
-        expanded_signal = tf.zeros((mask.shape[0], N), dtype=signal.dtype)
-
-    # Get the indices where mask is True
-    indices = tf.where(mask)
-
-    # Scatter the signal tensor elements/rows into the expanded_signal tensor at the 
-    # positions where mask is True
-    expanded_signal = tf.tensor_scatter_nd_update(expanded_signal, indices, signal)
-
-    return expanded_signal
+    return snrs
 
 def expand_tensor(signal: tf.Tensor, mask: tf.Tensor) -> tf.Tensor:
     """
@@ -1014,6 +974,7 @@ def get_ifo_data(
     onsource_duration_seconds_tf = \
         tf.constant(onsource_duration_seconds, dtype=tf.float32)
     
+    example_index = 0
     with open_hdf5_file(segment_filename) as segment_file:
         
         segment_file.require_group("segments")
@@ -1108,7 +1069,7 @@ def get_ifo_data(
             snrs = []
             for config in injection_configs:    
     
-                injections_, injection_masks_, snrs_ = \
+                injections_, injection_masks_ = \
                     generate_injections(
                         config,
                         current_max_batch_count*num_examples_per_batch, 
@@ -1118,23 +1079,33 @@ def get_ifo_data(
                         onsource_duration_seconds,
                         num_examples_per_batch
                     )
-
+        
+                snrs_ = \
+                    generate_snrs(
+                        injection_masks_,
+                        num_examples_per_batch,
+                        config,
+                        example_index
+                    )
+                
+                snrs.append(
+                    batch_tensor(snrs_,  num_examples_per_batch)
+                )
+                
                 injections.append(
-                    injections_
+                    batch_tensor(injections_, num_examples_per_batch)
                 )    
             
                 injection_masks.append(
-                    injection_masks_
-                )
-                
-                snrs.append(
-                    snrs_
+                    batch_tensor(injection_masks_, num_examples_per_batch)
                 )
                 
             injection_masks = tf.stack(injection_masks)
             snrs = tf.stack(snrs)
             
             for batch_index in range(current_max_batch_count):
+                
+                example_index += num_examples_per_batch
                 
                 num_onsource_samples = \
                     int(

@@ -7,9 +7,50 @@ import numpy as np
 from tensorflow.data.experimental import AutoShardPolicy
 from .dataset import get_ifo_data_generator, O3
 
-#REMOVE WHEN STRAIN IS RENAMED TO ONSOURCE IN MODEL:
-def getInput(element):
-    return element['onsource']
+def calculate_efficiency_scores(
+        model : tf.keras.Model, 
+        generator_args : dict,
+        num_examples_per_batch : int,
+        max_snr : float,
+        num_snr_steps : int,
+        examples_per_snr_step : int,
+    ) -> np.ndarray:
+    
+    snr_values = \
+        np.repeat(
+            np.linspace(0.0, max_snr, num_snr_steps),
+            examples_per_snr_step
+        )
+        
+    injection_config = generator_args["injection_configs"][0].copy()
+    injection_config.update({
+        "injection_chance" : 1.0,
+        "snr" : snr_values
+    })
+    
+    options = tf.data.Options()
+    options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
+    
+    generator_args["injection_configs"] = [injection_config]
+
+    efficiency_dataset = \
+        get_ifo_data_generator(
+            **generator_args
+        ).with_options(options).take(
+            (examples_per_snr_step*num_snr_steps) // num_examples_per_batch
+        )
+
+    # Process all examples in one go
+    combined_scores = model.predict(efficiency_dataset, verbose=1)
+    
+    # Split predictions back into separate arrays for each SNR level
+    scores = [
+        combined_scores[
+            i * examples_per_snr_step: (i + 1) * examples_per_snr_step
+        ] for i in range(num_snr_steps)
+    ]
+    
+    return np.array(scores)
 
 @tf.function 
 def nan_to_zero(tensor):
@@ -198,88 +239,6 @@ def validate_far(
     )
 
     return score_thresholds
-
-def validate_efficiency(
-    model: tf.keras.Model,
-    sample_rate_hertz: int,
-    onsource_duration_seconds: float,
-    ifo: str,
-    time_interval: str = O3,
-    num_examples: int = 1.0E5,
-    num_examples_per_batch: int = 32,
-    seed: int = 100,
-    max_snr: float = 10.0
-    ):
-    
-    num_examples = int(num_examples)
-    num_batches = int(num_examples // num_examples_per_batch)
-    
-    injection_configs = [
-        {
-            "type" : "cbc",
-            "snr"  : np.linspace(0.0, max_snr, num_batches),
-            "injection_chance" : 1.0,
-            "padding_seconds" : {"front" : 0.2, "back" : 0.1},
-            "args" : {
-                "approximant_enum" : \
-                    {"value" : 1, "distribution_type": "constant", "dtype" : int}, 
-                "mass_1_msun" : \
-                    {"min_value" : 5, "max_value": 95, "distribution_type": "uniform"},
-                "mass_2_msun" : \
-                    {"min_value" : 5, "max_value": 95, "distribution_type": "uniform"},
-                "sample_rate_hertz" : \
-                    {"value" : sample_rate_hertz, "distribution_type": "constant"},
-                "duration_seconds" : \
-                    {"value" : onsource_duration_seconds, "distribution_type": "constant"},
-                "inclination_radians" : \
-                    {"min_value" : 0, "max_value": np.pi, "distribution_type": "uniform"},
-                "distance_mpc" : \
-                    {"min_value" : 10, "max_value": 1000, "distribution_type": "uniform"},
-                "reference_orbital_phase_in" : \
-                    {"min_value" : 0, "max_value": 2*np.pi, "distribution_type": "uniform"},
-                "ascending_node_longitude" : \
-                    {"min_value" : 0, "max_value": 2*np.pi, "distribution_type": "uniform"},
-                "eccentricity" : \
-                    {"min_value" : 0, "max_value": 0.1, "distribution_type": "uniform"},
-                "mean_periastron_anomaly" : \
-                    {"min_value" : 0, "max_value": 2*np.pi, "distribution_type": "uniform"},
-                "spin_1_in" : \
-                    {"min_value" : -0.5, "max_value": 0.5, "distribution_type": "uniform", "num_values" : 3},
-                "spin_2_in" : \
-                    {"min_value" : -0.5, "max_value": 0.5, "distribution_type": "uniform", "num_values" : 3}
-            }
-        }
-    ]
-    
-    # Setting options for data distribution
-    options = tf.data.Options()
-    options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
-    
-     # Creating the noise dataset
-    cbc_ds = get_ifo_data_generator(
-        time_interval = time_interval,
-        data_labels = ["noise", "glitches"],
-        ifo = ifo,
-        injection_configs = injection_configs,
-        sample_rate_hertz = sample_rate_hertz,
-        onsource_duration_seconds = onsource_duration_seconds,
-        max_segment_size = 3600,
-        num_examples_per_batch = num_examples_per_batch,
-        order = "random",
-        seed = seed,
-        apply_whitening = True,
-        return_keys = ["onsource"], 
-    ).map(getInput, num_parallel_calls=tf.data.AUTOTUNE) \
-    .prefetch(tf.data.experimental.AUTOTUNE).with_options(options)
-    
-    # Calculating the number of steps for model prediction
-    cbc_ds = cbc_ds.take(num_batches)
-    
-    # Predicting the scores and getting the second column ([:, 1])
-    efficiency_scores = model.predict(cbc_ds, steps = num_batches, verbose=2)
-    efficiency_scores = nan_to_zero(efficiency_scores)
-    
-    return efficiency_scores
 
 @tf.function
 def roc_curve_and_auc(y_true, y_scores, chunk_size=500):
