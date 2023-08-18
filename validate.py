@@ -18,7 +18,7 @@ from bokeh.embed import components, file_html
 from bokeh.io import export_png, output_file, save
 from bokeh.layouts import column, gridplot
 from bokeh.models import (ColumnDataSource, CustomJS, Dropdown, HoverTool, 
-                          Legend, LogAxis, LogTicker, Range1d, Slider)
+                          Legend, LogAxis, LogTicker, Range1d, Slider, Select)
 from bokeh.plotting import figure, show
 from bokeh.resources import INLINE, Resources
 
@@ -63,9 +63,7 @@ def calculate_efficiency_scores(
     
     # Make copy of generator args so original is not affected:
     generator_args = generator_args.copy()
-    
-    print(num_examples_per_snr_step)
-    
+        
     # Integer arguments are integers:
     num_examples_per_snr_step = int(num_examples_per_snr_step)
     num_examples_per_batch = int(num_examples_per_batch)
@@ -196,7 +194,8 @@ def calculate_far_score_thresholds(
     Returns
     -------
     score_thresholds : Dict[float, Tuple[float, float]]
-        Dictionary of false alarm rates and their corresponding score thresholds.
+        Dictionary of false alarm rates and their corresponding score 
+        thresholds.
 
     """
     # Sorting the FAR scores in descending order
@@ -211,10 +210,14 @@ def calculate_far_score_thresholds(
     # Find the indexes of the closest FAR values in the far_axis
     idxs = np.abs(np.subtract.outer(far_axis, fars)).argmin(axis=0)
     # Find the indexes of the closest scores in the far_scores
-    idxs = np.abs(np.subtract.outer(far_scores, far_scores[idxs])).argmin(axis=0)
+    idxs = np.abs(
+        np.subtract.outer(far_scores, far_scores[idxs])
+    ).argmin(axis=0)
 
     # Build the score thresholds dictionary
-    score_thresholds = {far: (far, far_scores[idx]) for far, idx in zip(fars, idxs)}
+    score_thresholds = {
+        far: (far, far_scores[idx]) for far, idx in zip(fars, idxs)
+    }
 
     # If any score is 1, set the corresponding threshold to 1.1
     for far, (_, score) in score_thresholds.items():
@@ -294,7 +297,8 @@ def roc_curve_and_auc(
         chunk_size=500
     ):
     num_thresholds = 1000
-     # Use logspace with a range between 0 and 6, which corresponds to values between 1 and 1e-6
+    # Use logspace with a range between 0 and 6, which corresponds to values 
+    # between 1 and 1e-6:
     log_thresholds = tf.exp(tf.linspace(0, -6, num_thresholds))
     # Generate thresholds focusing on values close to 1
     thresholds = 1 - log_thresholds
@@ -305,7 +309,8 @@ def roc_curve_and_auc(
     num_samples = y_true.shape[0]
     num_chunks = (num_samples + chunk_size - 1) // chunk_size
 
-    # Initialize accumulators for true positives, false positives, true negatives, and false negatives
+    # Initialize accumulators for true positives, false positives, true 
+    # negatives, and false negatives
     tp_acc = tf.zeros(num_thresholds, dtype=tf.float32)
     fp_acc = tf.zeros(num_thresholds, dtype=tf.float32)
     fn_acc = tf.zeros(num_thresholds, dtype=tf.float32)
@@ -430,7 +435,7 @@ def calculate_multi_rocs(
     num_examples_per_batch: int = 32,
     num_examples: int = 1.0E5,
     snr_ranges: list = [
-        (8.0, 20),
+        (8.0, 20.0),
         8.0,
         10.0,
         12.0
@@ -444,14 +449,14 @@ def calculate_multi_rocs(
         
         if (type(snr_range) == tuple):
             snr = {
-                "min_value"   : snr_range[0], 
-                "max_value"   : snr_range[1],
-                "distribiton" : "uniform"
+                "min_value"         : snr_range[0], 
+                "max_value"         : snr_range[1],
+                "distribution_type" : "uniform"
             }
         else:
             snr = {
-                "value"        : snr_range,
-                "distribution" : "constant"
+                "value"             : snr_range,
+                "distribution_type" : "constant"
             }
         
         injection_config = generator_args["injection_configs"][0].copy()
@@ -477,7 +482,7 @@ def check_equal_duration(
     if not validators:  # Check if list is empty
         return
 
-    # Take the `input_duration_seconds` property of the first object as reference
+    # Take the input_duration_seconds property of the first object as reference
     reference_duration = validators[0].input_duration_seconds
 
     for validator in validators[1:]:  # Start from the second object
@@ -562,7 +567,13 @@ def plot_efficiency_curves(
             data=dict(x=snrs, y=acc_all_fars[0], name=[title] * len(snrs))
         )
         all_sources[name] = source
-        line = p.line(x='x', y='y', source=source, line_width=1, line_color=color)
+        line = p.line(
+            x='x', 
+            y='y', 
+            source=source, 
+            line_width=1, 
+            line_color=color
+        )
         legend_items.append((title, [line]))
 
     legend = Legend(items=legend_items, location="bottom_right")
@@ -607,11 +618,19 @@ def plot_efficiency_curves(
     slider.js_on_change('value', callback)
 
     # Add a separate callback to update the slider's title
-    slider_title_callback = CustomJS(args=dict(slider=slider, far_keys=far_keys), code="""
-        const far_index = slider.value;
-        const far_value = far_keys[far_index];
-        slider.title = 'FAR Index: ' + far_value;
-    """)
+    slider_title_callback = \
+        CustomJS(
+            args=dict(
+                slider=slider, 
+                far_keys=far_keys
+            ), 
+            code = \
+            """
+                const far_index = slider.value;
+                const far_value = far_keys[far_index];
+                slider.title = 'FAR Index: ' + far_value;
+            """
+        )
     slider.js_on_change('value', slider_title_callback)
 
     layout = column(slider, p)
@@ -621,7 +640,8 @@ def plot_efficiency_curves(
     
 def downsample_data(x, y, num_points):
     """
-    Downsample x, y data to a specific number of points using logarithmic interpolation.
+    Downsample x, y data to a specific number of points using logarithmic 
+    interpolation.
     
     Parameters:
         - x: Original x data.
@@ -677,16 +697,28 @@ def plot_far_curves(
                 
         far_scores = np.sort(far_scores)[::-1]
         total_num_seconds = len(far_scores) * validator.input_duration_seconds
-        far_axis = (np.arange(total_num_seconds, dtype=float) + 1) / total_num_seconds
+        far_axis = (
+                np.arange(total_num_seconds, dtype=float) + 1
+            ) / total_num_seconds
 
         downsampled_far_scores, downsampled_far_axis = \
             downsample_data(far_scores, far_axis, max_num_points)
         
         source = ColumnDataSource(
-            data=dict(x=downsampled_far_scores, y=downsampled_far_axis, name=[title]*len(downsampled_far_scores))
+            data=dict(
+                x=downsampled_far_scores, 
+                y=downsampled_far_axis,
+                name=[title]*len(downsampled_far_scores)
+            )
         )
         
-        line = p.line("x", "y", source=source, line_color=color, legend_label=title)
+        line = p.line(
+            "x", 
+            "y", 
+            source=source, 
+            line_color=color,
+            legend_label=title
+        )
 
     hover = HoverTool()
     hover.tooltips = tooltips
@@ -700,23 +732,19 @@ def plot_far_curves(
     save(p)
     
 def plot_roc_curves(
-    validators : list,
-    output_file_path : Path
+    validators: list, 
+    output_file_path: Path
     ):
     
-    p = figure(title="Receiver Operating Characteristic (ROC) Curves",
-               x_axis_label='False Positive Rate',
-               y_axis_label='True Positive Rate',
-               width=800, height=600,
-               x_axis_type='log', x_range=[1e-6, 1], y_range=[0, 1])
-
-    p.line(
-        [0, 1], 
-        [0, 1], 
-        color='navy', 
-        line_width=2,
-        line_dash='dashed', 
-        legend_label="Random (area = 0.5)"
+    p = figure(
+        title="Receiver Operating Characteristic (ROC) Curves",
+        x_axis_label='False Positive Rate',
+        y_axis_label='True Positive Rate',
+        width=800, 
+        height=600,
+        x_axis_type='log', 
+        x_range=[1e-6, 1], 
+        y_range=[0, 1]
     )
 
     colors = cycle([
@@ -727,46 +755,105 @@ def plot_roc_curves(
         'orange', 
         'brown', 
         'pink', 
-        'cyan',
+        'cyan', 
         'magenta', 
-        'yellow']
-    )
+        'yellow'
+    ])
     
     max_num_points = 500
     
+    # Initial population key:
+    initial_population_key = list(validators[0].roc_data.keys())[0]
+    all_sources = {}
+    
     for color, validator in zip(colors, validators):
-        print(validator.roc_data.keys)
-        
-        roc_data = validator.roc_data["12.0"]
-        
+        roc_data = validator.roc_data[initial_population_key]
         name = validator.name
         title = snake_to_capitalized_spaces(name)
 
         fpr = roc_data["fpr"]
         tpr = roc_data["tpr"]
         roc_auc = roc_data["roc_auc"]
-        
+
         reduced_fpr, reduced_tpr = downsample_data(fpr, tpr, max_num_points)
-        source = ColumnDataSource(data=dict(x=reduced_fpr, y=reduced_tpr))
+        source = ColumnDataSource(
+            data=dict(
+                x=reduced_fpr, 
+                y=reduced_tpr, 
+                roc_auc=[roc_auc] * len(reduced_fpr))
+            )
+        all_sources[name] = source
         line = p.line(
-            x='x',
+            x='x', 
             y='y', 
-            source=source, 
-            color=color,
+            source=source,
+            color=color, 
             width=2, 
             legend_label=f'{title} (area = {roc_auc:.5f})'
         )
         
-        hover = HoverTool(tooltips=[("Series", title),
-                                     ("False Positive Rate", "$x{0.0000}"),
-                                     ("True Positive Rate", "$y{0.0000}")],
-                          renderers=[line])
+        hover = HoverTool(
+            tooltips=[
+                ("Series", title),
+                ("False Positive Rate", "$x{0.0000}"),
+                ("True Positive Rate", "$y{0.0000}")
+            ],
+            renderers=[line]
+        )
         p.add_tools(hover)
 
     p.legend.location = "bottom_right"
+    
+    # Dropdown to select the test population
+    populations = list(validators[0].roc_data.keys())
+    select = \
+        Select(
+            title="Test Population:", 
+            value=initial_population_key, 
+            options=populations
+        )
+
+    # JS code to update the curves when the test population changes
+    update_code = """
+        const selected_population = cb_obj.value;
+        
+        for (let name in all_sources) {
+            const source = all_sources[name];
+            const new_data = all_data[name][selected_population];
+            source.data.x = new_data.fpr;
+            source.data.y = new_data.tpr;
+            source.data.roc_auc = new Array(new_data.fpr.length).fill(new_data.roc_auc);
+            source.change.emit();
+        }
+    """
+
+    # Organize all data in a structured way for JS to easily pick it
+    all_data = {}
+    for validator in validators:
+        name = validator.name
+        all_data[name] = {}
+        for population, data in validator.roc_data.items():
+            fpr, tpr = downsample_data(data["fpr"], data["tpr"], max_num_points)
+            all_data[name][population] = {
+                'fpr': fpr,
+                'tpr': tpr,
+                'roc_auc': data['roc_auc']
+            }
+
+    callback = CustomJS(
+        args=
+        {
+            'all_sources': all_sources, 
+            'all_data': all_data
+        }, 
+        code=update_code
+    )
+    select.js_on_change('value', callback)
+
+    layout = column(select, p)
 
     output_file(output_file_path)
-    save(p)
+    save(layout)
 
 def calculate_validation_data(
     model : tf.keras.Model, 
@@ -966,14 +1053,17 @@ class Validator:
         with h5py.File(file_path, 'r') as h5f:
             # Load title:
             validator.name = h5f['name'][()].decode()
-            validator.input_duration_seconds = float(h5f['input_duration_seconds'][()])
+            validator.input_duration_seconds = \
+                float(h5f['input_duration_seconds'][()])
             logging.info(f"Loading validation data for {validator.name}...")
             
             # Load efficiency scores:
             eff_group = h5f['efficiency_data']
             efficiency_data = {
                 'snrs': eff_group['snrs'][:],
-                'scores': [eff_group[f'score_{i}'][:] for i in range(len(eff_group) - 1)]
+                'scores': [
+                    eff_group[f'score_{i}'][:] for i in range(len(eff_group) - 1)
+                ]
             }
 
             # Load FAR scores:
