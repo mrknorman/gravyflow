@@ -12,15 +12,15 @@ import logging
 from tensorflow.data.experimental import AutoShardPolicy
 from .dataset import get_ifo_data_generator, O3
 
-from itertools import cycle
-
 from bokeh.embed import components, file_html
 from bokeh.io import export_png, output_file, save
 from bokeh.layouts import column, gridplot
 from bokeh.models import (ColumnDataSource, CustomJS, Dropdown, HoverTool, 
-                          Legend, LogAxis, LogTicker, Range1d, Slider, Select)
+                          Legend, LogAxis, LogTicker, Range1d, Slider, Select,
+                         Div)
 from bokeh.plotting import figure, show
 from bokeh.resources import INLINE, Resources
+from bokeh.palettes import Bright
 
 from scipy.interpolate import interp1d
 
@@ -223,70 +223,6 @@ def calculate_far_score_thresholds(
     for far, (_, score) in score_thresholds.items():
         if score == 1:
             score_thresholds[far] = (far, 1.1)
-
-    return score_thresholds
-
-def validate_far(
-    model: tf.keras.Model,
-    sample_rate_hertz: int,
-    onsource_duration_seconds: float,
-    ifo: str,
-    time_interval: str = O3,
-    num_examples_per_batch: int = 32,
-    seed: int = 100,
-    num_examples: float = 1E5,
-    validation_fars: Optional[np.ndarray] = None
-    ):
-    """
-    Validate the False Alarm Rate (FAR) of the model.
-
-    Parameters
-    ----------
-    model : tf.keras.Model
-        The model used to predict FAR scores.
-    sample_rate_hertz : int
-        The sample rate in hertz.
-    onsource_duration_seconds : float
-        The duration of onsource in seconds.
-    ifo : str
-        The name of the Interferometric Gravitational-Wave Observatory.
-    time_interval : str, optional
-        The time interval for the IFO data generator, default is 'O3'.
-    num_examples_per_batch : int, optional
-        The number of examples per batch, default is 32.
-    seed : int, optional
-        The seed used for random number generation, default is 100.
-    num_examples : float, optional
-        The total number of examples to be used, default is 1E5.
-    validation_fars : np.ndarray, optional
-        The array of false alarm rates for validation, default is logspace from 
-        1/(num_examples*onsource_duration_seconds) to 1.
-
-    """
-    # If validation_fars not provided, generate it from num_examples and 
-    # onsource_duration_seconds
-    if validation_fars is None:
-        start_power = np.log10(1/(num_examples*onsource_duration_seconds))
-         # Calculate number of points to cover all integer exponents
-        num_points = int(np.ceil(1 - start_power)) + 1 
-        validation_fars = np.logspace(start_power, 0, num=num_points)
-    
-    far_scores = calculate_far_scores(
-        model,
-        sample_rate_hertz,
-        onsource_duration_seconds,
-        ifo,
-        time_interval,
-        num_examples_per_batch,
-        seed,
-        num_examples
-    )
-    
-    score_thresholds = calculate_far_score_thresholds(
-        far_scores, 
-        onsource_duration_seconds,
-        validation_fars
-    )
 
     return score_thresholds
 
@@ -495,10 +431,10 @@ def check_equal_duration(
 def snake_to_capitalized_spaces(snake_str: str) -> str:
     return ' '.join(word.capitalize() for word in snake_str.split('_'))
 
-def plot_efficiency_curves(
+def generate_efficiency_curves(
         validators : list,
         fars : np.ndarray,
-        output_file_path : Path
+        colors : list[str] = Bright[7]
     ):
     
     # Check input durations are equal:
@@ -509,19 +445,19 @@ def plot_efficiency_curves(
     
     plot_width = 800
     plot_height = 600
-    colors = cycle(['red', 'blue', 'green', 'orange'])
 
     p = figure(
+        title = "Efficiency Curves",
         width=plot_width,
         height=plot_height,
         x_axis_label="SNR",
-        y_axis_label="Accuracy"
+        y_axis_label="Accuracy",
+        y_range=(0.0, 1.0)  # Set y-axis bounds here
     )
 
     # Set the initial plot title
     far_keys = list(fars)
-    p.title.text = f'FAR: {far_keys[0]}'
-
+    
     legend_items = []
     all_sources = {}
     acc_data = {}
@@ -561,7 +497,7 @@ def plot_efficiency_curves(
                 acc.append(total / len(score))
             
             acc_all_fars.append(acc)
-        
+                
         acc_data[name] = acc_all_fars
         source = ColumnDataSource(
             data=dict(x=snrs, y=acc_all_fars[0], name=[title] * len(snrs))
@@ -571,12 +507,12 @@ def plot_efficiency_curves(
             x='x', 
             y='y', 
             source=source, 
-            line_width=1, 
+            line_width=2, 
             line_color=color
         )
         legend_items.append((title, [line]))
 
-    legend = Legend(items=legend_items, location="bottom_right")
+    legend = Legend(items=legend_items, location="top_left")
     p.add_layout(legend)
     p.legend.click_policy = "hide"
 
@@ -589,9 +525,8 @@ def plot_efficiency_curves(
         end=len(fars) - 1, 
         value=0,
         step=1, 
-        title=f"FAR Index: {far_keys[0]}"
+        title=f"False Alarm Rate (FAR): {far_keys[0]}"
     )
-    
     slider.background = 'white'
 
     callback = CustomJS(args=dict(
@@ -605,8 +540,7 @@ def plot_efficiency_curves(
     ), code="""
         const far_index = slider.value;
         const far_value = far_keys[far_index];
-        plot_title.text = 'FAR: ' + far_value;
-
+        
         for (const key in sources) {
             if (sources.hasOwnProperty(key)) {
                 const source = sources[key];
@@ -628,15 +562,12 @@ def plot_efficiency_curves(
             """
                 const far_index = slider.value;
                 const far_value = far_keys[far_index];
-                slider.title = 'FAR Index: ' + far_value;
+                slider.title = 'False Alarm Rate (FAR): ' + far_value;
             """
         )
     slider.js_on_change('value', slider_title_callback)
-
-    layout = column(slider, p)
     
-    output_file(output_file_path)
-    save(layout) 
+    return p, slider
     
 def downsample_data(x, y, num_points):
     """
@@ -662,9 +593,9 @@ def downsample_data(x, y, num_points):
         
     return downsampled_x, downsampled_y
     
-def plot_far_curves(
+def generate_far_curves(
         validators : list,
-        output_path : Path
+        colors : list[str] = Bright[7]
     ):
     
     plot_width = 800
@@ -676,17 +607,16 @@ def plot_far_curves(
     ]
 
     p = figure(
+        title = "False Alarm Rate (FAR) curves",
         width=plot_width,
         height=plot_height,
         x_axis_label="Score Threshold",
-        y_axis_label="False Alarms per Second",
+        y_axis_label="False Alarms per Second (Hz)",
         tooltips=tooltips,
         x_axis_type="log",
         y_axis_type="log"
     )
-    
-    colors = cycle(['red', 'blue', 'green', 'orange'])
-    
+        
     max_num_points = 500
 
     for color, validator in zip(colors, validators):
@@ -717,6 +647,7 @@ def plot_far_curves(
             "y", 
             source=source, 
             line_color=color,
+            line_width = 2,
             legend_label=title
         )
 
@@ -724,41 +655,27 @@ def plot_far_curves(
     hover.tooltips = tooltips
     p.add_tools(hover)
     
-    p.legend.location = "top_right"
+    p.legend.location = "bottom_left"
     p.legend.click_policy = "hide"
     p.legend.click_policy = "hide"
-
-    output_file(output_path, title="FAR Plot (Logarithmic)")
-    save(p)
     
-def plot_roc_curves(
-    validators: list, 
-    output_file_path: Path
+    return p
+
+def generate_roc_curves(
+    validators: list,
+    colors : list[str] = Bright[7]
     ):
     
     p = figure(
         title="Receiver Operating Characteristic (ROC) Curves",
-        x_axis_label='False Positive Rate',
-        y_axis_label='True Positive Rate',
+        x_axis_label='False Alarm Rate',
+        y_axis_label='Accuracy',
         width=800, 
         height=600,
         x_axis_type='log', 
         x_range=[1e-6, 1], 
-        y_range=[0, 1]
+        y_range=[0.0, 1.0]
     )
-
-    colors = cycle([
-        'red', 
-        'green', 
-        'blue', 
-        'purple',
-        'orange', 
-        'brown', 
-        'pink', 
-        'cyan', 
-        'magenta', 
-        'yellow'
-    ])
     
     max_num_points = 500
     
@@ -803,6 +720,8 @@ def plot_roc_curves(
         p.add_tools(hover)
 
     p.legend.location = "bottom_right"
+    p.legend.click_policy = "hide"
+    p.legend.click_policy = "hide"
     
     # Dropdown to select the test population
     populations = list(validators[0].roc_data.keys())
@@ -812,6 +731,7 @@ def plot_roc_curves(
             value=initial_population_key, 
             options=populations
         )
+    select.background = 'white'
 
     # JS code to update the curves when the test population changes
     update_code = """
@@ -849,11 +769,8 @@ def plot_roc_curves(
         code=update_code
     )
     select.js_on_change('value', callback)
-
-    layout = column(select, p)
-
-    output_file(output_file_path)
-    save(layout)
+    
+    return p, select
 
 def calculate_validation_data(
     model : tf.keras.Model, 
@@ -1089,13 +1006,55 @@ class Validator:
 
         return validator
 
-    @classmethod
     def plot(
-        cls,
-        validators : list
+        self,
+        file_path : Path,
+        comparison_validators : list = [],
+        fars : np.ndarray = np.logspace(-1, -7, 500)
     ):
-        pass
+        
+        validators = comparison_validators + [self]
+        
+        efficiency_curves, slider = \
+            generate_efficiency_curves(
+                validators, 
+                fars
+            )
 
+        far_curves = \
+            generate_far_curves(
+                validators
+            )
+
+        roc_curves, dropdown = \
+            generate_roc_curves(
+                validators
+            )
+
+        # Define an output path for the dashboard
+        output_file(file_path)
+
+        # Arrange the plots in a grid. 
+        grid = \
+            gridplot([
+                [dropdown, slider],
+                [roc_curves, efficiency_curves], 
+                [far_curves, None] 
+            ])
+        
+        # Define CSS to make background white
+        div = Div(
+            text="""
+                <style>
+                    body {
+                        background-color: white !important;
+                    }
+                </style>
+                """
+        )
+
+        # Save the combined dashboard
+        save(column(div, grid))
         
         
         

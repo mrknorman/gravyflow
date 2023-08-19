@@ -805,7 +805,6 @@ def crop_samples(
     onsource_duration_seconds: float, 
     sample_rate_hertz: float
     ) -> tf.Tensor:
-    
     """
     Crop to remove edge effects and ensure same data is retrieved in all cases.
     
@@ -850,6 +849,7 @@ def crop_samples(
 
 @tf.function
 def batch_tensor(tensor: tf.Tensor, batch_size: int) -> tf.Tensor:
+    
     """
     Batches a tensor into batches of a specified size. If the first dimension
     of the tensor is not exactly divisible by the batch size, remaining elements
@@ -889,7 +889,8 @@ def get_ifo_data(
     time_interval: Union[tuple, ObservingRun], 
     data_labels: List[str], 
     ifo: str,
-    sample_rate_hertz: float,    
+    sample_rate_hertz: float,   
+    noise_type = "real",
     data_quality: str = "best",
     channel: str = None,
     frame_type: str = None,
@@ -901,7 +902,7 @@ def get_ifo_data(
     apply_whitening: bool = False,
     num_examples_per_batch: int = 1,
     scale_factor: float = 1.0e20,
-    max_segment_size = 2000,
+    max_segment_size = 2048,
     order: str = "random",
     seed: int = 1000,
     force_generation: bool = False,
@@ -917,59 +918,60 @@ def get_ifo_data(
     tf.random.set_seed(seed)
     np.random.seed(seed)
     
-    # Pull information from observing run object:
-    start, stop, frame_type, channel, state_flag = \
-        process_time_interval(
-            time_interval,
-            frame_type,
-            channel,
-            state_flag,
-            data_quality
-        )
-    
-    max_segments_per_file = 1.0E6 
-    
-    segment_parameters = \
-        [
-            frame_type, 
-            channel, 
-            state_flag, 
-            str(max_segment_size),
-            str(data_labels), 
-            sample_rate_hertz
-        ]  
-    
-    segment_filename = \
-        generate_filenames(
-            data_directory,         
-            segment_parameters
-        )
-        
-    # Get segment start and stop times given input parameters
-    valid_segments = \
-        process_valid_segments(
-            start, 
-            stop, 
-            ifo, 
-            state_flag, 
-            data_labels, 
-            max_segment_size, 
-            onsource_duration_seconds, 
-            fduration, 
-            num_examples_per_batch, 
-            offsource_duarion_seconds,
-            order
-        )
-    
-    """
-    #Store for later
-    glitch_segments = get_all_glitch_segments(ifo)
-    
-    # Convert segments list to tensors
-    glitch_segments_start, glitch_segments_end = zip(*glitch_segments)
-    glitch_segments_start = tf.constant(glitch_segments_start, dtype=tf.float32)
-    glitch_segments_end = tf.constant(glitch_segments_end, dtype=tf.float32)
-    """
+    if (noise_type == "real"):
+        # Pull information from observing run object:
+        start, stop, frame_type, channel, state_flag = \
+            process_time_interval(
+                time_interval,
+                frame_type,
+                channel,
+                state_flag,
+                data_quality
+            )
+
+        max_segments_per_file = 1.0E6 
+
+        segment_parameters = \
+            [
+                frame_type, 
+                channel, 
+                state_flag, 
+                str(max_segment_size),
+                str(data_labels), 
+                sample_rate_hertz
+            ]  
+
+        segment_filename = \
+            generate_filenames(
+                data_directory,         
+                segment_parameters
+            )
+
+        # Get segment start and stop times given input parameters
+        valid_segments = \
+            process_valid_segments(
+                start, 
+                stop, 
+                ifo, 
+                state_flag, 
+                data_labels, 
+                max_segment_size, 
+                onsource_duration_seconds, 
+                fduration, 
+                num_examples_per_batch, 
+                offsource_duarion_seconds,
+                order
+            )
+
+        """
+        #Store for later
+        glitch_segments = get_all_glitch_segments(ifo)
+
+        # Convert segments list to tensors
+        glitch_segments_start, glitch_segments_end = zip(*glitch_segments)
+        glitch_segments_start = tf.constant(glitch_segments_start, dtype=tf.float32)
+        glitch_segments_end = tf.constant(glitch_segments_end, dtype=tf.float32)
+        """
     
     onsource_duration_seconds_tf = \
         tf.constant(onsource_duration_seconds, dtype=tf.float32)
