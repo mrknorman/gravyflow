@@ -10,7 +10,8 @@ import h5py
 import logging
 
 from tensorflow.data.experimental import AutoShardPolicy
-from .dataset import get_ifo_data_generator, O3
+from tensorflow.keras.callbacks import Callback
+from .dataset import get_ifo_data_generator, O3, extract_data_from_indicies
 
 from bokeh.embed import components, file_html
 from bokeh.io import export_png, output_file, save
@@ -282,6 +283,30 @@ def roc_curve_and_auc(
 
     return fpr, tpr, auc
 
+class CaptureWorstPredictions(Callback):
+    def __init__(self, n_worst=10):
+        super().__init__()
+        self.n_worst = n_worst
+        self.all_scores = []
+        self.all_indices = []
+
+    def on_predict_batch_end(self, batch, logs=None):
+        logs = logs or {}
+        batch_predictions = logs.get('outputs')
+        
+        # Add scores and indices to the global list
+        scores = batch_predictions[:, 1].tolist()
+        indices = list(range(batch * len(scores), (batch + 1) * len(scores)))
+
+        self.all_scores.extend(scores)
+        self.all_indices.extend(indices)
+
+    def on_predict_end(self, logs=None):
+        # Sort the global list based on scores to get the worst predictions
+        sorted_indices = np.argsort(self.all_scores)[:self.n_worst]
+        self.worst_global_indices = np.array(self.all_indices)[sorted_indices]
+        self.worst_scores = np.array(self.all_scores)[sorted_indices]
+
 def calculate_roc(    
     model: tf.keras.Model,
     generator_args : dict,
@@ -358,8 +383,12 @@ def calculate_roc(
     y_true = tf.concat(tensor_list, axis=0)
 
     # Get the model predictions
-    y_scores = model.predict(x_dataset, steps = num_batches, verbose = 2)[:, 1]
-
+    y_scores = model.predict(
+        x_dataset, 
+        steps = num_batches, 
+        verbose = 2
+    )[:, 1]
+    
     # Calculate the ROC curve and AUC
     fpr, tpr, roc_auc = roc_curve_and_auc(y_true, y_scores)
     
@@ -410,6 +439,97 @@ def calculate_multi_rocs(
             )
     
     return roc_results
+
+def calculate_tar_scores(
+        model : tf.keras.Model, 
+        generator_args : dict, 
+        num_examples_per_batch : int = 32,  
+        snr : int = 20.0,
+        num_examples : int = 1E5
+    ) -> np.ndarray:
+    
+    """
+    Calculate the True Alarm Rate (FAR) scores for a given model.
+
+    Parameters
+    ----------
+    model : tf.keras.Model
+        The model used to predict FAR scores.
+    generator_args : dict
+        Dictionary containing options for dataset generator.
+    num_examples_per_batch : int, optional
+        The number of examples per batch, default is 32.
+    num_examples : float, optional
+        The total number of examples to be used, default is 1E5.
+    
+    Returns
+    -------
+    far_scores : np.ndarray
+        The calculated FAR scores.
+    """
+    
+    # Make copy of generator args so original is not affected:
+    generator_args = generator_args.copy()
+    
+    # Integer arguments are integers:
+    num_examples = int(num_examples)
+    num_examples_per_batch = int(num_examples_per_batch)
+    
+    # Calculate number of batches required given batch size:
+    num_batches = num_examples // num_examples_per_batch
+
+    # Setting options for data distribution:
+    options = tf.data.Options()
+    options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
+    
+    # Ensure dataset has no injections:
+    generator_args["num_examples_per_batch"] = num_examples_per_batch
+    generator_args["output_keys"] = ["injection_masks"]
+    injection_config = generator_args["injection_configs"][0].copy()
+    injection_config.update({
+        "injection_chance" : 1.0,
+        "snr" : {"value": snr, "distribution_type" : "constant"}
+    })
+    generator_args["injection_configs"] = [injection_config]
+    
+    # Initlize generator:
+    dataset = \
+        get_ifo_data_generator(
+            **generator_args
+        ).with_options(options).take(num_batches)
+    
+    callback = CaptureWorstPredictions(n_worst=10)
+    
+    # Predict the scores and get the second column ([:, 1]):
+    tar_scores = model.predict(
+        dataset, 
+        callbacks = [callback],
+        steps = num_batches, 
+        verbose=2
+    )[:, 1]
+    
+    generator_args["output_keys"] = ["whitened_injections"]
+    
+    # Initlize generator:
+    dataset = \
+        get_ifo_data_generator(
+            **generator_args
+        ).with_options(options).take(num_batches)
+    
+    worst_performers = \
+        extract_data_from_indicies(
+            dataset,
+            callback.worst_global_indices,
+            num_examples_per_batch
+        )
+    
+    for index, element in enumerate(worst_performers):
+        for key in element:
+            element[key] = element[key].numpy()
+        element["score"] = callback.worst_scores[index]
+
+    
+    return tar_scores, worst_performers
 
 def check_equal_duration(
     validators : list
@@ -772,6 +892,57 @@ def generate_roc_curves(
     
     return p, select
 
+def generate_waveform_plot(
+    data : dict,
+    onsource_duration_seconds : float,
+    colors : list = Bright[7]
+    ):
+    
+    p = figure(
+        title=f"Worst Performing Input Score: {data['score']}",
+        x_axis_label='Time Seconds',
+        y_axis_label='Strain',
+        width=800, 
+        height=300
+    )
+    
+    source = ColumnDataSource(
+        data=dict(
+            x=np.linspace(0,onsource_duration_seconds, len(data['onsource'])), 
+            y=data['onsource']
+        )
+    )
+    line = p.line(
+        x='x', 
+        y='y', 
+        source=source,
+        color=colors[0], 
+        width=2, 
+        legend_label=f'Whitened Strain + Injection'
+    )
+        
+    source = ColumnDataSource(
+        data=dict(
+            x= np.linspace(0,onsource_duration_seconds, len(data['onsource'])),
+            y= data['whitened_injections']
+        )
+    )
+    line = p.line(
+        x='x', 
+        y='y', 
+        source=source,
+        color=colors[1], 
+        width=2, 
+        legend_label=f'Whitened Injection'
+    )
+    
+    p.legend.location = "bottom_right"
+    p.legend.click_policy = "hide"
+    p.legend.click_policy = "hide"
+    
+    return p
+    
+
 def calculate_validation_data(
     model : tf.keras.Model, 
     generator_args : dict,
@@ -872,6 +1043,18 @@ class Validator:
         validator.input_duration_seconds = \
             generator_args["onsource_duration_seconds"]
         
+        logging.info(f"Worst performing inputs for {validator.name}...")
+        tar_scores, worst_performers = \
+            calculate_tar_scores(
+                model, 
+                generator_args, 
+                num_examples_per_batch,
+                snr = 20.0,
+                num_examples = 1E3
+            )
+        validator.worst_performers = worst_performers
+        logging.info(f"Done")
+                
         logging.info(f"Calculating efficiency scores for {validator.name}...")
         validator.efficiency_data = \
             calculate_efficiency_scores(
@@ -891,7 +1074,7 @@ class Validator:
                 **far_config
             )
         logging.info(f"Done")
-
+        
         logging.info(f"Calculating ROC data for {validator.name}...")
         validator.roc_data = \
             calculate_multi_rocs(    
@@ -901,7 +1084,7 @@ class Validator:
                 **roc_config
             )
         logging.info(f"Done")
-        
+                
         return validator
 
     def save(
@@ -956,6 +1139,13 @@ class Validator:
                     data=value['tpr']
                 )
                 roc_group.attrs[f'{key}_roc_auc'] = value['roc_auc']
+                
+            worst_performers = self.worst_performers
+            
+            for idx, entry in enumerate(worst_performers):
+                group = h5f.create_group(f'worst_perfomers_{idx}')
+                for key, value in entry.items():
+                    group.create_dataset(key, data=value, dtype=np.float16)
         
             logging.info("Done.")
         
@@ -1002,6 +1192,16 @@ class Validator:
             validator.far_scores = far_scores
             validator.roc_data = roc_data
             
+            print("wont work")
+            worst_performers = []
+            for group_name in h5f:
+                group_data = {}
+                for key in hf5[group_name]:
+                    group_data[key] = hf[group_name][key][()]
+            worst_performers.append(group_data)
+                
+            self.worst_performers = worst_performers
+                                
             logging.info("Done.")
 
         return validator
@@ -1030,17 +1230,25 @@ class Validator:
             generate_roc_curves(
                 validators
             )
+        
+        layout = [
+            [dropdown, slider],
+            [roc_curves, efficiency_curves], 
+            [far_curves, None]
+        ]
+        
+        for waveform in self.worst_performers:
+            waveform_plot = generate_waveform_plot(
+                waveform,
+                self.input_duration_seconds
+            )
+            layout.append([waveform_plot, None])
 
         # Define an output path for the dashboard
         output_file(file_path)
 
         # Arrange the plots in a grid. 
-        grid = \
-            gridplot([
-                [dropdown, slider],
-                [roc_curves, efficiency_curves], 
-                [far_curves, None] 
-            ])
+        grid = gridplot(layout)
         
         # Define CSS to make background white
         div = Div(
@@ -1055,9 +1263,3 @@ class Validator:
 
         # Save the combined dashboard
         save(column(div, grid))
-        
-        
-        
-
-
-
