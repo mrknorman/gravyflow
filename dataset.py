@@ -1284,6 +1284,8 @@ def get_ifo_data(
                         onsource_duration_seconds,
                         num_examples_per_batch
                     )
+                                
+                _injection_parameters = {key: value for key, value in injection_parameters_.items() if key in input_keys + output_keys}
         
                 snrs_ = \
                     generate_snrs(
@@ -1296,9 +1298,7 @@ def get_ifo_data(
                 snrs.append(
                     batch_tensor(snrs_,  num_examples_per_batch)
                 )
-                
-                print(injection_parameters_)
-                
+                                
                 injection_parameters.append(
                     batch_injection_parameters(
                         injection_parameters_, 

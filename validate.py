@@ -508,7 +508,13 @@ def calculate_tar_scores(
         verbose=2
     )[:, 1]
     
-    generator_args["output_keys"] = ["whitened_injections"]
+    generator_args["output_keys"] = \
+        [
+            "whitened_injections",
+            "injections",
+            "mass_1_msun",
+            "mass_2_msun"
+        ]
     
     # Initlize generator:
     dataset = \
@@ -527,7 +533,6 @@ def calculate_tar_scores(
         for key in element:
             element[key] = element[key].numpy()
         element["score"] = callback.worst_scores[index]
-
     
     return tar_scores, worst_performers
 
@@ -899,7 +904,7 @@ def generate_waveform_plot(
     ):
     
     p = figure(
-        title=f"Worst Performing Input Score: {data['score']}",
+        title=f"Worst Performing Input Score: {data['score']}, {data['mass_1_msun']}, {data['mass_2_msun']}",
         x_axis_label='Time Seconds',
         y_axis_label='Strain',
         width=800, 
@@ -934,6 +939,21 @@ def generate_waveform_plot(
         color=colors[1], 
         width=2, 
         legend_label=f'Whitened Injection'
+    )
+    
+    source = ColumnDataSource(
+        data=dict(
+            x=np.linspace(0,onsource_duration_seconds, len(data['onsource'])), 
+            y=data['injections']*20.0
+        )
+    )
+    line = p.line(
+        x='x', 
+        y='y', 
+        source=source,
+        color=colors[2], 
+        width=2, 
+        legend_label=f'Scaled Raw Injections'
     )
     
     p.legend.location = "bottom_right"
