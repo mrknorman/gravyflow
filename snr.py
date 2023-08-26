@@ -14,7 +14,7 @@ def find_closest(tensor, scalar):
     
     return closest_index
 
-#@tf.function 
+@tf.function 
 def calculate_snr(
     injection: tf.Tensor, 
     background: tf.Tensor,
