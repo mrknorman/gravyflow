@@ -101,7 +101,33 @@ class IFOData:
         """Converts the data to a numpy array."""
         return self.data.numpy()
 
-@tf.function
+def get_cbc_parameter_shapes(num_examples_per_batch):
+
+    length_one_args = \
+        [
+            'mass_1_msun', 
+            'mass_2_msun', 
+            'inclination_radians',
+            "distance_mpc",
+            "reference_orbital_phase_in",
+            "ascending_node_longitude",
+            "eccentricity",
+            "mean_periastron_anomaly"
+            "spin_1_in",
+            "spin_2_in"
+        ]
+    length_three_args = ['spin_1_in', 'spin_2_in']
+    parameter_shapes = {}
+    
+    for key in length_one_args:
+        parameter_shapes[key] = num_examples_per_batch
+    
+    for key in length_three_args:
+        parameter_shapes[key] = num_examples_per_batch*3
+    
+    return parameter_shapes
+    
+                
 def random_subsection(
         data: tf.Tensor,
         dt  : float,
@@ -189,6 +215,18 @@ def get_all_event_times() -> np.ndarray:
         gps_times = np.append(gps_times, events["GPS"].data.compressed())
         
     return gps_times    
+
+def get_all_glitch_segments(ifo):
+    
+    glitches = EventTable.fetch('gravityspy', 'glitches')
+    glitches = glitches[glitches["ifo"] == ifo]
+    
+    segments = list(
+        zip(glitches['start_time'].data, 
+            glitches['start_time'].data + glitches['duration'].data)
+    )
+        
+    return segments    
 
 def pad_gps_times_with_veto_window(
         arr: np.ndarray, 
@@ -315,6 +353,68 @@ def roll_vector_zero_padding(tensor, min_roll, max_roll):
         lambda vec: roll_vector_zero_padding_(vec, min_roll, max_roll), tensor
     )
 
+@tf.function
+def check_glitch_overlap(
+        tensor_start_times, 
+        duration, 
+        segments_start,
+        segments_end
+    ):
+    # Calculate the end times for each segment in the tensor
+    tensor_end_times = tensor_start_times + duration
+    
+    # Expand dimensions for broadcasting
+    tensor_start_times_exp = tf.expand_dims(tensor_start_times, -1)  # Shape: (N, 1)
+    tensor_end_times_exp = tf.expand_dims(tensor_end_times, -1)
+    
+    # Check for overlap using broadcasting
+    condition1 = tensor_start_times_exp <= segments_end  # (N, num_segments)
+    condition2 = tensor_end_times_exp >= segments_start  # (N, num_segments)
+    
+    # Combine conditions to find overlaps
+    overlaps = tf.reduce_any(condition1 & condition2, axis=-1)  # Reduce over the segments dimension
+    
+    return overlaps
+
+def batch_injection_parameters(
+    injection_parameters, 
+    num_injections_per_batch, 
+    num_waveforms
+    ):
+    """
+    Splits the given dictionary into smaller dictionaries containing N waveforms.
+
+    Parameters
+    ----------
+    data : dict
+        The input dictionary containing waveforms data.
+    N : int
+        The number of waveforms for each smaller dictionary.
+
+    Returns
+    -------
+    list
+        A list of dictionaries containing the split waveforms.
+    """
+    
+    num_chunks = num_waveforms // num_injections_per_batch
+    result = []
+    
+    for i in range(num_chunks):
+        chunk = {}
+        for key, value in injection_parameters.items():            
+            if len(value) == num_waveforms: 
+                chunk[key] = value[i * num_injections_per_batch: (i + 1) *num_injections_per_batch]
+            elif len(value) == num_waveforms * 3:
+                chunk[key] = value[i * num_injections_per_batch * 3: (i + 1) * num_injections_per_batch * 3]
+            else:
+                print("Warning non standard length!")
+                quit()
+        
+        result.append(chunk)
+
+    return result
+
 def generate_injections(
     config: Dict[str, Any],
     num_injections: int, 
@@ -330,7 +430,6 @@ def generate_injections(
 
     injections = []
     injection_masks = []
-    snrs = []
     
     injection_masks = np.random.choice(
         [False, True], 
@@ -379,18 +478,6 @@ def generate_injections(
     
     # Arbitrary scale factor:
     injections *= 10.0E20 
-        
-    for i in range(np.sum(injection_masks)):
-        if type(config["snr"]) == np.ndarray:  
-            snr = config["snr"][-1]
-            if i < len(config["snr"]):
-                snr = config["snr"][i]
-        elif type(config["snr"]) == dict:
-            snr = randomise_dict(config["snr"])
-        else:
-            raise ValueError("Unsupported SNR type!") 
-
-        snrs.append(snr)         
 
     crop_duration = fduration / 2.0
 
@@ -403,7 +490,6 @@ def generate_injections(
         
     injections = tf.convert_to_tensor(injections, dtype = tf.float32)
     injection_masks = tf.convert_to_tensor(injection_masks, dtype = tf.bool)
-    snrs = tf.convert_to_tensor(snrs, dtype = tf.float32)
             
     injections = \
         roll_vector_zero_padding( 
@@ -418,65 +504,39 @@ def generate_injections(
             injection_masks
         )
     
+    return injections, injection_parameters, injection_masks
+
+def generate_snrs(
+        injection_masks,
+        num_examples_per_batch,
+        config,
+        example_index
+    ):
+    
+    snrs = []
+    for snr_index in range(np.sum(injection_masks)):
+        snr_index += example_index
+        
+        if type(config["snr"]) == np.ndarray:  
+            snr = config["snr"][-1]
+            if snr_index < len(config["snr"]):
+                snr = config["snr"][snr_index]
+        elif type(config["snr"]) == dict:
+            snr = randomise_dict(config["snr"])
+        else:
+            raise ValueError("Unsupported SNR type!") 
+
+        snrs.append(snr)      
+
+    snrs = tf.convert_to_tensor(snrs, dtype = tf.float32)
+
     snrs = \
         expand_tensor(
             snrs,
             injection_masks
         )
     
-    injections = batch_tensor(injections, num_examples_per_batch)
-    injection_masks = batch_tensor(injection_masks, num_examples_per_batch)
-    snrs = batch_tensor(snrs, num_examples_per_batch)
-    
-    return injections, injection_masks, snrs
-
-@tf.function
-def expand_tensor(signal: tf.Tensor, mask: tf.Tensor) -> tf.Tensor:
-    """
-    This function expands a tensor along the X axis by inserting zeros wherever a 
-    corresponding boolean in a 1D tensor is False, and elements from the original 
-    tensor where the boolean is True. It works for both 1D and 2D tensors.
-
-    Parameters
-    ----------
-    signal : tf.Tensor
-        A 1D or 2D tensor representing signal injections, where the length of 
-        the tensor's first dimension equals the number of True values in the mask.
-    mask : tf.Tensor
-        A 1D boolean tensor. Its length will determine the length of the expanded tensor.
-
-    Returns
-    -------
-    tf.Tensor
-        The expanded tensor.
-
-    """
-    # Ensure that the signal tensor is 1D or 2D
-    assert signal.ndim in (1, 2), 'Signal must be a 1D or 2D tensor'
-    
-    # Ensure that the mask is 1D
-    assert mask.ndim == 1, 'Mask must be a 1D tensor'
-    
-    # Ensure that the length of the signal tensor matches the number of True 
-    # values in the mask
-    assert tf.reduce_sum(tf.cast(mask, tf.int32)) == signal.shape[0], \
-        'Signal tensor length must match number of True values in mask'
-    
-    # Create a tensor full of zeros with the final shape
-    if signal.ndim == 1:
-        expanded_signal = tf.zeros(mask.shape[0], dtype=signal.dtype)
-    else: # signal.ndim == 2
-        N = signal.shape[1]
-        expanded_signal = tf.zeros((mask.shape[0], N), dtype=signal.dtype)
-
-    # Get the indices where mask is True
-    indices = tf.where(mask)
-
-    # Scatter the signal tensor elements/rows into the expanded_signal tensor at the 
-    # positions where mask is True
-    expanded_signal = tf.tensor_scatter_nd_update(expanded_signal, indices, signal)
-
-    return expanded_signal
+    return snrs
 
 def expand_tensor(signal: tf.Tensor, mask: tf.Tensor) -> tf.Tensor:
     """
@@ -657,10 +717,8 @@ def process_valid_segments(
         event_times = get_all_event_times()
         veto_segments.append(pad_gps_times_with_veto_window(event_times))
     if "glitches" not in data_labels:
-        # glitches = EventTable.fetch('gravityspy', 'glitches')
-        # print(glitches)
-        print("Glitch vetos not implemented!")
         pass
+        #veto_segments.append(get_all_glitch_segments(ifo))
     
     if veto_segments != []:
         veto_segments = np.concatenate(veto_segments)
@@ -778,8 +836,7 @@ def get_sorted_values(dictionary):
 
 def generate_filenames(
     data_directory: Union[str, Path],         
-    segment_parameters: List[Any], 
-    seed: int
+    segment_parameters: List[Any]
     ) -> (Path, List[Path]):
     """
     Generate unique filenames based on a hash of the input parameters and 
@@ -813,7 +870,6 @@ def crop_samples(
     onsource_duration_seconds: float, 
     sample_rate_hertz: float
     ) -> tf.Tensor:
-    
     """
     Crop to remove edge effects and ensure same data is retrieved in all cases.
     
@@ -858,6 +914,7 @@ def crop_samples(
 
 @tf.function
 def batch_tensor(tensor: tf.Tensor, batch_size: int) -> tf.Tensor:
+    
     """
     Batches a tensor into batches of a specified size. If the first dimension
     of the tensor is not exactly divisible by the batch size, remaining elements
@@ -893,11 +950,122 @@ def batch_tensor(tensor: tf.Tensor, batch_size: int) -> tf.Tensor:
 
     return batched_tensor
 
+def get_value_from_injections(
+        parameter_name: str,
+        injection_parameters: List[Dict[str, tf.Tensor]],
+        parameter_shapes: Dict[str, Tuple[int]]
+    ) -> tf.Tensor:
+        """
+        Collect the parameter values from injections, aligning with zeros when the parameter is missing.
+
+        Parameters
+        ----------
+        parameter_name : str
+            Name of the parameter to extract.
+        injection_parameters : List[Dict[str, tf.Tensor]]
+            List of dictionaries containing the injection parameters.
+        parameter_shapes : Dict[str, Tuple[int]]
+            Dictionary containing the expected shapes for each parameter.
+
+        Returns
+        -------
+        tf.Tensor
+            Tensor containing the extracted values.
+        """
+        values = []
+        for config in injection_parameters:
+            value = config.get(parameter_name, tf.zeros(parameter_shapes[parameter_name]))
+            values.append(value)
+            
+        # Stack to create a tensor with the first axis representing the injection index
+        return values
+
+def create_dict(
+    keys: List[str],
+    batched_onsource: tf.Tensor,
+    batched_offsource: tf.Tensor,
+    batched_gps_times: tf.Tensor,
+    cropped_injections: tf.Tensor,
+    whitened_injections: tf.Tensor,
+    injection_masks: tf.Tensor,
+    snrs: tf.Tensor,
+    amplitudes: tf.Tensor,
+    injection_parameters: List[Dict[str, tf.Tensor]],
+    batch_index: int,
+    parameter_shapes: Dict[str, Tuple[int]]
+) -> Dict[str, tf.Tensor]:
+    """
+    Create a dictionary containing the tensors required for model training.
+
+    Parameters
+    ----------
+    keys : List[str]
+        List of strings representing the keys that will be included in the 
+        resulting dictionary.
+    batched_onsource : tf.Tensor
+        Tensor containing the onsource data.
+    batched_offsource : tf.Tensor
+        Tensor containing the offsource data.
+    batched_gps_times : tf.Tensor
+        Tensor containing the GPS times.
+    cropped_injections : tf.Tensor
+        Tensor containing the cropped injections.
+    whitened_injections : tf.Tensor
+        Tensor containing the whitened injections.
+    injection_masks : tf.Tensor
+        Tensor containing the injection masks.
+    snrs : tf.Tensor
+        Tensor containing the SNRs.
+    amplitudes : tf.Tensor
+        Tensor containing the amplitudes.
+    injection_parameters : List[Dict[str, tf.Tensor]]
+        List of dictionaries containing the injection parameters.
+    batch_index : Optional[int], optional
+        Index for the batch, by default None.
+    parameter_shapes : Optional[Dict[str, Tuple[int]]], optional
+        Dictionary containing the expected shapes for each parameter, by default 
+        None.
+
+    Returns
+    -------
+    Dict[str, tf.Tensor]
+        Dictionary containing the tensors corresponding to the specified keys.
+    """
+    
+    # Define operations for various keys
+    operations = {
+        'onsource': lambda: tf.cast(batched_onsource, tf.float16),
+        'offsource': lambda: tf.cast(batched_offsource, tf.float16),
+        'gps_time': lambda: tf.convert_to_tensor(batched_gps_times, dtype=tf.float64),
+        'injections': lambda: cropped_injections,
+        'whitened_injections': lambda: whitened_injections,
+        'injection_masks': lambda: injection_masks[:, batch_index],
+        'snr': lambda: snrs[:, batch_index],
+        'amplitude': lambda: amplitudes,
+    }
+    
+        
+    if len(injection_parameters):
+        # Handle injection parameters
+        all_injection_keys = set(
+            key for parameters in injection_parameters[:, batch_index] for key in parameters.keys()
+        )
+        
+        for key in all_injection_keys:
+            operations[key] = lambda k=key: \
+                get_value_from_injections(k, injection_parameters[:, batch_index], parameter_shapes)
+    
+    
+    return_dict = {key: operations[key]() for key in keys if key in operations}
+        
+    return return_dict
+
 def get_ifo_data(
     time_interval: Union[tuple, ObservingRun], 
     data_labels: List[str], 
     ifo: str,
-    sample_rate_hertz: float,    
+    sample_rate_hertz: float,   
+    noise_type = "real",
     data_quality: str = "best",
     channel: str = None,
     frame_type: str = None,
@@ -909,70 +1077,95 @@ def get_ifo_data(
     apply_whitening: bool = False,
     num_examples_per_batch: int = 1,
     scale_factor: float = 1.0e20,
-    max_segment_size = 2000,
+    max_segment_size = 2048,
     order: str = "random",
     seed: int = 1000,
     force_generation: bool = False,
     data_directory: Union[str, Path] = "./generator_data",
     save_segment_data: bool = True,
-    input_keys = ["onsource", "offsource", "gps_time", "injectons", "snr"],
-    output_keys = ["onsource", "offsource", "gps_time", "injectons", "snr"],
+    input_keys = [
+        "onsource", 
+        "offsource", 
+        "gps_time", 
+        "injectons", 
+        "snr"
+    ],
+    output_keys = [
+        "onsource", 
+        "offsource", 
+        "gps_time", 
+        "injectons", 
+        "snr"
+    ],
     fduration = 1.0
-):
+    ):
+    
     data_directory = Path(data_directory)
     ensure_directory_exists(data_directory)
     
     tf.random.set_seed(seed)
     np.random.seed(seed)
     
-    # Pull information from observing run object:
-    start, stop, frame_type, channel, state_flag = \
-        process_time_interval(
-            time_interval,
-            frame_type,
-            channel,
-            state_flag,
-            data_quality
-        )
+    if (noise_type == "real"):
+        # Pull information from observing run object:
+        start, stop, frame_type, channel, state_flag = \
+            process_time_interval(
+                time_interval,
+                frame_type,
+                channel,
+                state_flag,
+                data_quality
+            )
+
+        max_segments_per_file = 1.0E6 
+
+        segment_parameters = \
+            [
+                frame_type, 
+                channel, 
+                state_flag, 
+                str(max_segment_size),
+                str(data_labels), 
+                sample_rate_hertz
+            ]  
+
+        segment_filename = \
+            generate_filenames(
+                data_directory,         
+                segment_parameters
+            )
+
+        # Get segment start and stop times given input parameters
+        valid_segments = \
+            process_valid_segments(
+                start, 
+                stop, 
+                ifo, 
+                state_flag, 
+                data_labels, 
+                max_segment_size, 
+                onsource_duration_seconds, 
+                fduration, 
+                num_examples_per_batch, 
+                offsource_duarion_seconds,
+                order
+            )
+
+        """
+        #Store for later
+        glitch_segments = get_all_glitch_segments(ifo)
+
+        # Convert segments list to tensors
+        glitch_segments_start, glitch_segments_end = zip(*glitch_segments)
+        glitch_segments_start = \
+            tf.constant(glitch_segments_start, dtype=tf.float32)
+        glitch_segments_end = tf.constant(glitch_segments_end, dtype=tf.float32)
+        """
     
-    max_segments_per_file = 1.0E6 
+    onsource_duration_seconds_tf = \
+        tf.constant(onsource_duration_seconds, dtype=tf.float32)
     
-    segment_parameters = \
-        [
-            frame_type, 
-            channel, 
-            state_flag, 
-            str(max_segment_size),
-            str(data_labels), 
-            sample_rate_hertz
-        ]  
-    
-    segment_filename = \
-        generate_filenames(
-            data_directory,         
-            segment_parameters, 
-            seed
-        )
-        
-    # Get segment start and stop times given input parameters
-    valid_segments = \
-        process_valid_segments(
-            start, 
-            stop, 
-            ifo, 
-            state_flag, 
-            data_labels, 
-            max_segment_size, 
-            onsource_duration_seconds, 
-            fduration, 
-            num_examples_per_batch, 
-            offsource_duarion_seconds,
-            order
-        )
-    
-    batch_index = 0
-    injection_indicies = [0] * len(injection_configs)
-    
+    example_index = 0
     with open_hdf5_file(segment_filename) as segment_file:
         
         segment_file.require_group("segments")
@@ -1064,10 +1257,11 @@ def get_ifo_data(
             #Generate injections:
             injections = []
             injection_masks = []
+            injection_parameters = []
             snrs = []
             for config in injection_configs:    
     
-                injections_, injection_masks_, snrs_ = \
+                injections_, injection_parameters_, injection_masks_ = \
                     generate_injections(
                         config,
                         current_max_batch_count*num_examples_per_batch, 
@@ -1077,23 +1271,63 @@ def get_ifo_data(
                         onsource_duration_seconds,
                         num_examples_per_batch
                     )
+                
+                length_one_args = ['num_waveforms', 'sample_rate_hertz', 'duration_seconds']
+                length_three_args = ['spin_1_in', 'spin_2_in']
+            
+                _injection_parameters = {
+                    key: value for key, value in injection_parameters_.items() 
+                    if key in input_keys + output_keys
+                }
+                
+                reduced_injection_params = {}
+                for key, parameter in _injection_parameters.items():
+                    if key not in length_one_args + length_three_args:    
+                        parameter = tf.convert_to_tensor(parameter)
 
+                        parameter = expand_tensor(
+                            parameter, 
+                            injection_masks
+                        )
+
+                        reduced_injection_params[key] = \
+                            parameter
+                
+                snrs_ = \
+                    generate_snrs(
+                        injection_masks_,
+                        num_examples_per_batch,
+                        config,
+                        example_index
+                    )
+                
+                snrs.append(
+                    batch_tensor(snrs_,  num_examples_per_batch)
+                )
+                                
+                injection_parameters.append(
+                    batch_injection_parameters(
+                        reduced_injection_params, 
+                        num_examples_per_batch,
+                        injections_.shape[0]
+                    )
+                )
+                
                 injections.append(
-                    injections_
+                    batch_tensor(injections_, num_examples_per_batch)
                 )    
             
                 injection_masks.append(
-                    injection_masks_
+                    batch_tensor(injection_masks_, num_examples_per_batch)
                 )
-                
-                snrs.append(
-                    snrs_
-                )
-                
+            
+            injection_parameters = np.array(injection_parameters)
             injection_masks = tf.stack(injection_masks)
             snrs = tf.stack(snrs)
             
             for batch_index in range(current_max_batch_count):
+                
+                example_index += num_examples_per_batch
                 
                 num_onsource_samples = \
                     int(
@@ -1113,6 +1347,8 @@ def get_ifo_data(
                         num_examples_per_batch
                     )
                 
+                batched_gps_times = batched_gps_times + fduration/0.5
+                
                 cropped_injections = []
                 amplitudes = []
                 for injection_index, config in enumerate(injection_configs):
@@ -1122,7 +1358,6 @@ def get_ifo_data(
                             injections[injection_index][batch_index], 
                             batched_onsource, 
                             snrs[injection_index][batch_index],
-                            window_duration_seconds=1.0,
                             sample_rate_hertz=sample_rate_hertz,
                             fft_duration_seconds=1.0,
                             overlap_duration_seconds=0.5
@@ -1146,6 +1381,7 @@ def get_ifo_data(
                     )
                 
                 # Whiten data: 
+                whitened_injections = None
                 if apply_whitening:
                     batched_onsource = \
                         whiten(
@@ -1157,6 +1393,19 @@ def get_ifo_data(
                             fduration = fduration
                         )
                     
+                    if ("whitened_injections" in input_keys) or \
+                        ("whitened_injections" in output_keys):
+                        whitened_injections = [
+                            whiten(
+                                injections, 
+                                batched_offsource, 
+                                sample_rate_hertz, 
+                                fftlength = 1.0,
+                                overlap = 0.5,
+                                fduration = fduration
+                            ) for injections in cropped_injections
+                        ]
+                    
                 # Crop to remove edge effects, crop with or without whitening to
                 # ensure same data is retrieve in both cases
                 batched_onsource = crop_samples(
@@ -1164,41 +1413,53 @@ def get_ifo_data(
                     onsource_duration_seconds, 
                     sample_rate_hertz
                 )
-                                
-                def create_dict(keys, batch_index=None):
-                    operations = {
-                        'onsource': lambda: \
-                            tf.cast(
-                                batched_onsource, 
-                                tf.float16
-                            ),
-                        'offsource': lambda: \
-                            tf.cast(
-                                batched_offsource, 
-                                tf.float16
-                            ),
-                        'gps_time': lambda: \
-                            tf.convert_to_tensor(
-                                batched_gps_times,
-                                dtype=tf.int64
-                            ),
-                        'injections': lambda: \
-                            cropped_injections,
-                        'injection_masks': lambda: \
-                            injection_masks[:, batch_index],
-                        'snr': lambda: \
-                            snrs[:, batch_index],
-                        'amplitude': lambda: \
-                            amplitudes
-                    }
-
-                    return {
-                        key: operations[key]() \
-                        for key in keys if key in operations
-                    }
-
-                input_dict = create_dict(input_keys, batch_index)
-                output_dict = create_dict(output_keys, batch_index)
+                
+                """
+                glitch_overlap = \
+                    check_glitch_overlap(
+                        batched_gps_times, 
+                        onsource_duration_seconds_tf, 
+                        glitch_segments_start, 
+                        glitch_segments_end
+                    )
+                """
+                
+                #Get shapes of injection configs so they can be shaped for return
+                parameter_shapes = get_cbc_parameter_shapes(
+                    num_examples_per_batch
+                )
+                
+                input_dict = \
+                    create_dict(
+                        input_keys,
+                        batched_onsource,
+                        batched_offsource,
+                        batched_gps_times,
+                        cropped_injections,
+                        whitened_injections,
+                        injection_masks,
+                        snrs,
+                        amplitudes,
+                        injection_parameters,
+                        batch_index,
+                        parameter_shapes
+                    )
+                
+                output_dict = \
+                    create_dict(
+                        output_keys,
+                        batched_onsource,
+                        batched_offsource,
+                        batched_gps_times,
+                        cropped_injections,
+                        whitened_injections,
+                        injection_masks,
+                        snrs,
+                        amplitudes,
+                        injection_parameters,
+                        batch_index,
+                        parameter_shapes
+                    )
                                 
                 yield (input_dict, output_dict)
 
@@ -1254,6 +1515,15 @@ def get_ifo_data_generator(
                 ), 
                 dtype=tf.float16
             ),
+        'whitened_injections' :
+            tf.TensorSpec(
+                shape=(
+                    num_injection_configs, 
+                    num_examples_per_batch, 
+                    num_onsource_samples
+                ), 
+                dtype=tf.float16
+            ),
         'injection_masks' : 
             tf.TensorSpec(
                 shape=(
@@ -1280,6 +1550,21 @@ def get_ifo_data_generator(
             ),
     }
     
+    parameter_shapes = get_cbc_parameter_shapes(
+        num_examples_per_batch
+    )
+    
+    # Add injection parameters to output options
+    for key, value in parameter_shapes.items():
+        output_signature_dict[key] =  \
+            tf.TensorSpec(
+                shape=(
+                    num_injection_configs,
+                    value
+                ), 
+                dtype=tf.float32
+            )   
+    
     output_signature = (
         {k: output_signature_dict[k] for k in input_keys},
         {k: output_signature_dict[k] for k in output_keys}
@@ -1295,8 +1580,46 @@ def get_ifo_data_generator(
             output_keys = output_keys,
             **kwargs
         )
-    
+        
     return tf.data.Dataset.from_generator(
             generator = generator,
             output_signature = output_signature
         )
+
+def extract_data_from_indicies(
+        dataset,
+        indicies : list, 
+        num_examples_per_batch : int
+    ) -> list:
+    
+    indicies = sorted(indicies) 
+    
+    dataset_elements = []
+    current_index = 0
+    for batch_index, (in_dict, out_dict) in enumerate(dataset):
+        # Calculate the range of global indices for this batch
+        start_index = batch_index * num_examples_per_batch
+        end_index = (batch_index + 1) * num_examples_per_batch
+
+        # Find the worst examples in the current batch
+        while current_index < len(indicies) and \
+            indicies[current_index] < end_index:
+            
+            # Calculate in-batch index
+            in_batch_index = indicies[current_index] % num_examples_per_batch  
+            
+            # Extract the corresponding data from in_dict and out_dict using 
+            # in_batch_index
+            example_element = \
+                {key: value[in_batch_index] for key, value in in_dict.items()}
+            out_element = \
+                {key: value[0][in_batch_index] for key, value in out_dict.items()}
+            
+            for key, value in out_element.items():
+                example_element[key] = value
+            
+            dataset_elements.append(example_element)
+
+            current_index += 1  # Move to the next worst index
+            
+    return dataset_elements

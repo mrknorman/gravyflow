@@ -209,9 +209,10 @@ def test_injection():
         }
     ]
     
+    """
     ifo_data_generator = get_ifo_data(
         time_interval = O3,
-        data_labels = ["noise", "glitches"],
+        data_labels = ["noise"], #, "glitches"],
         ifo = "L1",
         injection_configs = injection_configs,
         sample_rate_hertz = sample_rate_hertz,
@@ -222,7 +223,7 @@ def test_injection():
         force_generation = True,
         apply_whitening = True,
         input_keys = ["onsource"], 
-        output_keys = ["injections", "injection_masks"],
+        output_keys = ["injections", "injection_masks", "mass_1_msun"],
         save_segment_data = True,
     )
         
@@ -233,9 +234,8 @@ def test_injection():
                 data[1]['injections'][0].numpy(),
                 data[1]['injection_masks'][0].numpy()
             )):
-            
+                        
             if mask:
-                
                 plot_time_series(
                     onsource, 
                     injection, 
@@ -267,8 +267,7 @@ def test_injection():
                     noverlap=128, 
                     file_path = Path(f'./py_ml_data/noise_spectrogram_{i}.png')
                 )
-
-    quit()
+    """
     
     ifo_data_generator = get_ifo_data_generator(
         time_interval = O3,
@@ -283,7 +282,7 @@ def test_injection():
         order = "random",
         apply_whitening = True,
         input_keys = ["onsource"], 
-        output_keys = ["injections"],
+        output_keys = ["injections", "mass_1_msun"],
         save_segment_data = True
     )
     
@@ -292,6 +291,7 @@ def test_injection():
     
     ifo_data_generator = ifo_data_generator.take(num_test)
     for data in tqdm(islice(ifo_data_generator, num_test), total=num_test):
+        print(data[1]['mass_1_msun'][0].numpy())
         pass
     
     print("Complete!")
@@ -302,6 +302,3 @@ if __name__ == "__main__":
     setup_cuda(gpus, max_memory_limit = 2000, verbose = True)    
     test_injection()
     #test_noise()
-
-    
-   
