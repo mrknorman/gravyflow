@@ -517,7 +517,12 @@ class ModelBuilder:
         
         self.metrics = []
 
-    def build_model(self, input_shape: Union[int, tuple], output_shape: int):
+    def build_model(
+        self, 
+        input_shape: Union[int, tuple], 
+        output_shape: int,
+        output_name : str
+    ):
         """
         Builds the model.
         
@@ -566,10 +571,12 @@ class ModelBuilder:
                 raise ValueError(f"Layer type '{layer.layer_type.value}' not recognized")
         
         model.add(tf.keras.layers.Flatten())
-        model.add(tf.keras.layers.Dense(2, activation='linear', dtype='float32', bias_initializer=tf.keras.initializers.Constant([1.0, 2.0])))#, name='snr',  bias_initializer=tf.keras.initializers.Constant([1.0, 2.0])))  # Different biases for each unit))
+        model.add(
+            tf.keras.layers.Dense(2, activation='linear', dtype='float32', bias_initializer=tf.keras.initializers.Constant([1.0, 2.0]))
+        )#, name='snr',  bias_initializer=tf.keras.initializers.Constant([1.0, 2.0])))  # Different biases for each unit))
         #model.add(Lambda(cap_value))
         
-        model.add(IndependentFoldedNormal(1, name='snr'))
+        model.add(IndependentFoldedNormal(1, name=output_name))
         
         #model.add(tfp.layers.IndependentNormal(1, name = 'snr'))
         
