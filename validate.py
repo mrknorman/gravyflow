@@ -178,8 +178,8 @@ def calculate_far_score_thresholds(
     far_scores: np.ndarray, 
     onsource_duration_seconds: float,
     fars: np.ndarray
-    ) -> Dict[float, Tuple[float, float]]:
-    
+) -> Dict[float, Tuple[float, float]]:
+
     """
     Calculate the score thresholds for False Alarm Rate (FAR).
 
