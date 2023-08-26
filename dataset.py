@@ -490,19 +490,6 @@ def generate_injections(
         
     injections = tf.convert_to_tensor(injections, dtype = tf.float32)
     injection_masks = tf.convert_to_tensor(injection_masks, dtype = tf.bool)
-    
-    reduced_injection_params = {}
-    for key, parameter in injection_parameters.items():
-        if key not in length_one_args + length_three_args:    
-            parameter = tf.convert_to_tensor(parameter)
-
-            parameter = expand_tensor(
-                parameter, 
-                injection_masks
-            )
-
-            reduced_injection_params[key] = \
-                parameter
             
     injections = \
         roll_vector_zero_padding( 
@@ -517,7 +504,7 @@ def generate_injections(
             injection_masks
         )
     
-    return injections, reduced_injection_params, injection_masks
+    return injections, injection_parameters, injection_masks
 
 def generate_snrs(
         injection_masks,
@@ -1284,9 +1271,28 @@ def get_ifo_data(
                         onsource_duration_seconds,
                         num_examples_per_batch
                     )
-                                
-                _injection_parameters = {key: value for key, value in injection_parameters_.items() if key in input_keys + output_keys}
-        
+                
+                length_one_args = ['num_waveforms', 'sample_rate_hertz', 'duration_seconds']
+                length_three_args = ['spin_1_in', 'spin_2_in']
+            
+                _injection_parameters = {
+                    key: value for key, value in injection_parameters_.items() 
+                    if key in input_keys + output_keys
+                }
+                
+                reduced_injection_params = {}
+                for key, parameter in _injection_parameters.items():
+                    if key not in length_one_args + length_three_args:    
+                        parameter = tf.convert_to_tensor(parameter)
+
+                        parameter = expand_tensor(
+                            parameter, 
+                            injection_masks
+                        )
+
+                        reduced_injection_params[key] = \
+                            parameter
+                
                 snrs_ = \
                     generate_snrs(
                         injection_masks_,
@@ -1301,7 +1307,7 @@ def get_ifo_data(
                                 
                 injection_parameters.append(
                     batch_injection_parameters(
-                        injection_parameters_, 
+                        reduced_injection_params, 
                         num_examples_per_batch,
                         injections_.shape[0]
                     )

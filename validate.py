@@ -88,6 +88,8 @@ def calculate_efficiency_scores(
     options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
     
     # Ensure generator args are correctly set up:
+    
+    generator_args["max_segment_size"] = num_examples_per_batch*8
     generator_args["num_examples_per_batch"] = num_examples_per_batch
     injection_config = generator_args["injection_configs"][0].copy()
     injection_config.update({
@@ -710,7 +712,6 @@ def downsample_data(x, y, num_points):
     
     if len(x) <= num_points:
         return x, y
-    
 
     interpolator = interp1d(x, y)
     downsampled_x = np.linspace(min(x), max(x), num_points)
@@ -742,7 +743,7 @@ def generate_far_curves(
         y_axis_type="log"
     )
         
-    max_num_points = 500
+    max_num_points = 2000
 
     for color, validator in zip(colors, validators):
         far_scores = validator.far_scores
@@ -1212,15 +1213,16 @@ class Validator:
             validator.far_scores = far_scores
             validator.roc_data = roc_data
             
-            print("wont work")
             worst_performers = []
             for group_name in h5f:
                 group_data = {}
-                for key in hf5[group_name]:
-                    group_data[key] = hf[group_name][key][()]
-            worst_performers.append(group_data)
+                if group_name.startswith(f"worst_performers_"): 
+                    for key in h5f[group_name]:
+                        group_data[key] = h5f[group_name][key][()]
+                    print(group_data)
+                    worst_performers.append(group_data)
                 
-            self.worst_performers = worst_performers
+            validator.worst_performers = worst_performers
                                 
             logging.info("Done.")
 
