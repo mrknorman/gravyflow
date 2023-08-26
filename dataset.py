@@ -4,7 +4,9 @@ from datetime import datetime
 
 import numpy as np
 import hashlib
+
 import tensorflow as tf
+from tensorflow.data.experimental import AutoShardPolicy
 
 from gwdatafind import find_urls
 from gwpy.segments import DataQualityDict
@@ -20,6 +22,8 @@ from .cuphenom.py.cuphenom import generate_phenom_d
 from .whiten import whiten
 from .snr    import scale_to_snr
 from .setup  import randomise_arguments, randomise_dict
+
+from collections import defaultdict
 
 import h5py
 
@@ -303,6 +307,53 @@ def split_periods(periods: np.ndarray, max_length: float) -> np.ndarray:
 
 def remove_short_periods(periods: np.ndarray, min_length: float) -> np.ndarray:
     return periods[np.where(periods[:, 1] - periods[:, 0] >= min_length)]
+
+def distribute_segments_by_ratio(
+        segments: np.ndarray, 
+        group_ratios: Dict[str, float],
+        group_name : str
+    ) -> np.ndarray:
+    
+    """
+    Distribute segments into groups based on specified ratios.
+
+    Parameters
+    ----------
+    segments : np.ndarray
+        2D NumPy array of shape (N, 2) where N is the number of segments.
+        Each row represents a segment with the first and second columns 
+        being the start and end times, respectively.
+    group_ratios : Dict[str, float]
+        Dictionary with group names as keys and their corresponding ratios as values.
+
+    Returns
+    -------
+    Dict[str, np.ndarray]
+        Dictionary with group names as keys and 2D NumPy arrays of segments as values.
+
+    """
+    # Calculate total duration from the 2D NumPy array
+    total_duration = np.sum(segments[:, 1] - segments[:, 0])
+    target_durations = {group: total_duration * ratio for group, ratio in group_ratios.items()}
+    
+    # Initialize dictionaries to hold result and accumulated durations
+    result = defaultdict(list)
+    accumulated_durations = {group: 0.0 for group in group_ratios.keys()}
+
+    # Sort segments by start_time for representative sampling
+    sorted_segments = segments[np.argsort(segments[:, 0])]
+
+    for segment in sorted_segments:
+        start, end = segment
+        segment_duration = end - start
+        min_group = min(accumulated_durations, key=lambda k: accumulated_durations[k]/target_durations[k])
+        
+        # Append this segment to the group with the least proportion of its target duration filled
+        result[min_group].append(segment)
+        accumulated_durations[min_group] += segment_duration
+
+    # Convert lists to 2D NumPy arrays before returning
+    return np.array(result[group_name])
 
 def open_hdf5_file(
     file_path : Union[str, Path], 
@@ -661,8 +712,10 @@ def process_valid_segments(
     fduration: int, 
     num_examples_per_batch: int, 
     offsource_duarion_seconds: int,
+    groups : dict[str, float],
+    group_name : str,
     order: str
-    ) -> Union[np.ndarray, cycle]:
+    ) -> cycle:
     """
     Process the valid segments given the start, stop times, ifo, and state flag. 
     This involves multiple steps including getting segment times, vetoing 
@@ -729,6 +782,11 @@ def process_valid_segments(
         valid_segments, 
         (onsource_duration_seconds + fduration)*num_examples_per_batch 
         + offsource_duarion_seconds
+    )
+    valid_segments = distribute_segments_by_ratio(
+        valid_segments, 
+        groups,
+        group_name
     )
     
     if (len(valid_segments) == 0):
@@ -1097,7 +1155,13 @@ def get_ifo_data(
         "injectons", 
         "snr"
     ],
-    fduration = 1.0
+    groups : dict = {
+        "train" : 0.98,
+        "validate" : 0.01,
+        "test" : 0.01
+    },
+    group_name = "train",
+    fduration : float = 1.0
     ):
     
     data_directory = Path(data_directory)
@@ -1148,6 +1212,8 @@ def get_ifo_data(
                 fduration, 
                 num_examples_per_batch, 
                 offsource_duarion_seconds,
+                groups,
+                group_name,
                 order
             )
 
@@ -1580,11 +1646,14 @@ def get_ifo_data_generator(
             output_keys = output_keys,
             **kwargs
         )
+    
+    options = tf.data.Options()
+    options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
         
     return tf.data.Dataset.from_generator(
             generator = generator,
             output_signature = output_signature
-        )
+        ).with_options(options)
 
 def extract_data_from_indicies(
         dataset,
@@ -1623,3 +1692,15 @@ def extract_data_from_indicies(
             current_index += 1  # Move to the next worst index
             
     return dataset_elements
+
+def group_split_dataset(
+    generator_args : dict,
+    group_name : str,
+    num_examples : int
+    ):
+    
+    num_batches = num_examples//generator_args["num_examples_per_batch"]
+    
+    args = generator_args.copy()
+    args.update({"group_name" : group_name})
+    return get_ifo_data_generator(**args).take(num_batches)

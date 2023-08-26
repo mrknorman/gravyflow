@@ -7,6 +7,9 @@ from tensorflow.python.framework.ops import EagerTensor
 from tensorflow.data import Dataset
 import subprocess
 from scipy.stats import truncnorm
+from pathlib import Path
+
+import json
 
 def setup_cuda(device_num: str, max_memory_limit: int, verbose: bool = False) -> Strategy:
     """
@@ -204,4 +207,31 @@ def randomise_arguments(input_dict, func):
 
     return func(**output_dict), output_dict
     
+def read_injection_config_file(
+    config_path: Path,
+    sample_rate_hertz: float,
+    onsource_duration_seconds: float
+) -> dict:
+    # Define replacement mapping
+    replacements = {
+        "sample_rate_hertz": sample_rate_hertz,
+        "onsource_duration_seconds": onsource_duration_seconds,
+        "pi": np.pi,
+        "2*pi": 2.0 * np.pi
+    }
+
+    # Load injection config
+    with open(config_path, "r") as file:
+        config = json.load(file)
     
+    # Replacing placeholders
+    for key, value in config["args"].items():
+        
+        if "value" in value:
+            value["value"] = \
+                replacements.get(value["value"], value["value"])
+        if "max_value" in value:
+            value["max_value"] = \
+                replacements.get(value.get("max_value"), value["max_value"])
+
+    return config
