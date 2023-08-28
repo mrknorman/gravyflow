@@ -4,8 +4,12 @@ from typing import Union, List, Dict, Optional
 import numpy as np
 from copy import deepcopy
 
+from tensorflow import keras
+
 from keras.layers import Lambda
 from keras import backend as K
+from keras.callbacks import Callback
+
 
 import tensorflow_probability as tfp
 
@@ -498,7 +502,13 @@ def cap_value(x):
     return K.clip(x, 1.0e-5, 1000)  # values will be constrained to [-1, 1]
 
 class ModelBuilder:
-    def __init__(self, layers: List[BaseLayer], optimizer: str, loss: str, batch_size: int):
+    def __init__(
+        self, 
+        layers: List[BaseLayer], 
+        optimizer: str, 
+        loss: str, 
+        batch_size: int
+    ):
         """
         Initializes a ModelBuilder instance.
         
@@ -517,7 +527,12 @@ class ModelBuilder:
         
         self.metrics = []
 
-    def build_model(self, input_shape: Union[int, tuple], output_shape: int):
+    def build_model(
+        self, 
+        input_config : dict,
+        output_config : dict,
+        metrics : list = []
+    ):
         """
         Builds the model.
         
@@ -526,20 +541,59 @@ class ModelBuilder:
         output_shape: Shape of the output data.
         """        
         
-        model = tf.keras.Sequential()
-        model.add(tf.keras.layers.InputLayer(input_shape=input_shape, name='onsource'))
-        model.add(tf.keras.layers.Reshape((-1, 1)))
-
+        self.model = tf.keras.Sequential()
+        
+        # Build input layer:
+        self.build_input_layer(input_config)
+        
+        # Build hidden layers:
         for layer in self.layers:
-            if layer.layer_type == "Dense":
-                model.add(
+            self.build_hidden_layer(layer)
+        
+        # Build output layer
+        self.build_output_layer(output_config)
+        
+        # If metrics is empty use best guess
+        if not metrics:
+            match output_config["type"]:
+                case "normal":
+                    metrics = [tf.keras.metrics.RootMeanSquaredError()]
+                case "binary":
+                    metrics = [tf.keras.metrics.SparseCategoricalAccuracy()]
+        
+        # Compile model
+        self.model.compile(
+            optimizer = self.optimizer.value, 
+            loss = self.loss.value,
+            metrics = metrics
+        )
+    
+    def build_input_layer(
+        self,
+        input_config : dict
+        ):
+        self.model.add(
+            tf.keras.layers.InputLayer(
+                input_shape = input_config["shape"], 
+                name = input_config["name"]
+            )
+        )
+        self.model.add(tf.keras.layers.Reshape((-1, 1)))
+    
+    def build_hidden_layer(
+        self,
+        layer : BaseLayer
+    ):        
+        # Get layer type:
+        match layer.layer_type:        
+            case "Dense":
+                new_layer = \
                     tf.keras.layers.Dense(
                         layer.units.value, 
                         activation=layer.activation.value
                     )
-                )
-            elif layer.layer_type == "Convolutional":
-                model.add(
+            case "Convolutional":
+                new_layer = \
                     tf.keras.layers.Conv1D(
                         layer.filters.value, 
                         (layer.kernel_size.value,), 
@@ -547,42 +601,59 @@ class ModelBuilder:
                         activation=layer.activation.value,
                         padding = layer.padding.value
                     )
-                )
-            elif layer.layer_type == "Pooling":
-                model.add(
+            case "Pooling":
+                new_layer = \
                     tf.keras.layers.MaxPool1D(
                         (layer.pool_size.value,),
                         strides=(layer.strides.value,),
                         padding = layer.padding.value
                     )
-                )
-            elif layer.layer_type == "Dropout":
-                model.add(
+            case "Dropout":
+                new_layer = \
                     tf.keras.layers.Dropout(
                         layer.rate.value
                     )
+            case _:
+                raise ValueError(
+                    f"Layer type '{layer.layer_type.value}' not recognized"
                 )
-            else:
-                raise ValueError(f"Layer type '{layer.layer_type.value}' not recognized")
         
-        model.add(tf.keras.layers.Flatten())
-        model.add(tf.keras.layers.Dense(2, activation='linear', dtype='float32', bias_initializer=tf.keras.initializers.Constant([1.0, 2.0])))#, name='snr',  bias_initializer=tf.keras.initializers.Constant([1.0, 2.0])))  # Different biases for each unit))
-        #model.add(Lambda(cap_value))
+        # Add new layer to model:
+        self.model.add(new_layer)
+            
+    def build_output_layer(
+        self,
+        output_config : dict
+        ):
         
-        model.add(IndependentFoldedNormal(1, name='snr'))
+        match output_config["type"]:        
+            case "normal":
+                self.model.add(tf.keras.layers.Flatten())
+                self.model.add(
+                    tf.keras.layers.Dense(
+                        2, 
+                        activation='linear', 
+                        dtype='float32', 
+                        bias_initializer=tf.keras.initializers.Constant([1.0, 2.0])
+                    )
+                )
+                self.model.add(IndependentFoldedNormal(1, name=output["name"]))
+            case "binary":
+                self.model.add(tf.keras.layers.Flatten())
+                self.model.add(
+                    tf.keras.layers.Dense(
+                        1, 
+                        activation='softmax', 
+                        dtype='float32',
+                        name = output_config["name"]
+                    )
+                )
         
-        #model.add(tfp.layers.IndependentNormal(1, name = 'snr'))
-        
-        model.compile(optimizer=self.optimizer.value, loss=self.loss.value,
-                metrics=[tf.keras.metrics.RootMeanSquaredError()])
-                
-        self.model = model
-
     def train_model(
         self, 
         train_dataset: tf.data.Dataset, 
-        num_batches: int, 
-        num_epochs: int = 1
+        training_config: dict,
+        callbacks = []
         ):
         """
         Trains the model.
@@ -591,12 +662,32 @@ class ModelBuilder:
         train_dataset: Dataset to train on.
         num_epochs: Number of epochs to train for.
         """
+        
+        callbacks += [
+          keras.callbacks.EarlyStopping(
+                monitor  = 'val_loss',
+                patience = training_config["patience"],
+                restore_best_weights=True,
+                start_from_epoch=4
+            ),
+            keras.callbacks.ModelCheckpoint(
+                training_config["model_path"],
+                monitor="val_loss",
+                save_best_only=True,
+                save_freq="epoch", 
+            )
+        ]
+        
+        num_batches = \
+            training_config["num_examples_per_epoc"]//self.batch_size.value
+        
         self.metrics.append(
             self.model.fit(
                 train_dataset, 
-                epochs=num_epochs, 
-                steps_per_epoch=num_batches,
-                batch_size=self.batch_size.value
+                epochs = training_config["max_epochs"], 
+                steps_per_epoch = num_batches,
+                callbacks = callbacks,
+                batch_size = self.batch_size.value
             )
         )
         
