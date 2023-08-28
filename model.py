@@ -376,16 +376,25 @@ class BaseLayer:
 
 @dataclass
 class DenseLayer(BaseLayer):
-    units: [HyperParameter, int]
+    units: HyperParameter
+    activation: HyperParameter
 
-    def __init__(self, units: HyperParameter, activation: HyperParameter):
+    def __init__(
+            self, 
+            units: Union[HyperParameter, int], 
+            activation: Union[HyperParameter, str] = "relu"
+        ):
         """
         Initializes a DenseLayer instance.
         
         Args:
-        units: HyperParameter specifying the number of units in this layer.
-        activation: HyperParameter specifying the activation function for this layer.
+        ---
+        units : Union[HyperParameter, int]
+            HyperParameter specifying the number of units in this layer.
+        activation : Union[HyperParameter, int]
+            HyperParameter specifying the activation function for this layer.
         """
+        
         self.layer_type = "Dense"
         self.activation = ensure_hp(activation)
         self.units = ensure_hp(units)
@@ -652,6 +661,7 @@ class ModelBuilder:
     def train_model(
         self, 
         train_dataset: tf.data.Dataset, 
+        validate_dataset: tf.data.Dataset,
         training_config: dict,
         callbacks = []
         ):
@@ -683,7 +693,8 @@ class ModelBuilder:
         
         self.metrics.append(
             self.model.fit(
-                train_dataset, 
+                train_dataset,
+                validation_data = validate_dataset,
                 epochs = training_config["max_epochs"], 
                 steps_per_epoch = num_batches,
                 callbacks = callbacks,
@@ -691,7 +702,7 @@ class ModelBuilder:
             )
         )
         
-    def validate_model(self, validation_dataset: tf.data.Dataset):
+    def validate_model(self, test_dataset: tf.data.Dataset):
         pass
 
     def test_model(self, validation_datasets: tf.data.Dataset, num_batches: int):
