@@ -81,12 +81,12 @@ def detrend(data, axis=-1, type='linear', bp=0, overwrite_data=False):
 
 @tf.function 
 def calculate_psd(
-        signal, 
-        nperseg, 
-        noverlap=None, 
-        sample_rate_hertz = 1.0, 
-        mode="mean"
-    ):
+        signal : tf.Tensor, 
+        nperseg : int, 
+        noverlap : int = None, 
+        sample_rate_hertz : float = 1.0, 
+        mode : str ="mean"
+    ) -> (tf.Tensor, tf.Tensor):
     
     if noverlap is None:
         noverlap = nperseg // 2
@@ -103,10 +103,13 @@ def calculate_psd(
     window = tf.signal.hann_window(nperseg, dtype = tf.float32)
     windowed_frames = frames * window
     
-    # Step 3: Compute the periodogram (scaled, absolute value of FFT) for each segment
-    periodograms = tf.abs(tf.signal.rfft(windowed_frames)) ** 2 / tf.reduce_sum(window ** 2)
+    # Step 3: Compute the periodogram (scaled, absolute value of FFT) for each 
+    # segment
+    periodograms = \
+        tf.abs(tf.signal.rfft(windowed_frames))**2 / tf.reduce_sum(window**2)
     
-    # Step 4: Compute the median or mean of the periodograms based on the median_mode
+    # Step 4: Compute the median or mean of the periodograms based on the 
+    #median_mode
     if mode == "median":
         pxx = tfp.stats.percentile(periodograms, 50.0, axis=-2)
     elif mode == "mean":
@@ -119,6 +122,14 @@ def calculate_psd(
     
     #Create mask to multiply all but the 0 and nyquist frequency by 2
     X = pxx.shape[-1]
-    mask = tf.concat([tf.constant([1.]), tf.ones([X-2], dtype=tf.float32) * 2., tf.constant([1.])], axis=0)
+    mask = \
+        tf.concat(
+            [
+                tf.constant([1.]), 
+                tf.ones([X-2], dtype=tf.float32) * 2.0, 
+                tf.constant([1.])
+            ], 
+            axis=0
+        )
         
     return freqs, (mask*pxx / sample_rate_hertz)
