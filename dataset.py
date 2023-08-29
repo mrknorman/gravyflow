@@ -1,1310 +1,89 @@
-from dataclasses import dataclass
+from .noise import NoiseObtainer
 from typing import List, Tuple, Union, Dict, Any
-from datetime import datetime
 
-import numpy as np
-import hashlib
-
-import tensorflow as tf
-from tensorflow.data.experimental import AutoShardPolicy
-
-from gwdatafind import find_urls
-from gwpy.segments import DataQualityDict
-from gwpy.timeseries import TimeSeries
-from gwpy.table import EventTable
-
-from pathlib import Path
-from dataclasses import dataclass
-from datetime import datetime
-from itertools import cycle
-
-from .cuphenom.py.cuphenom import generate_phenom_d
-from .whiten import whiten
-from .snr    import scale_to_snr
-from .setup  import randomise_arguments, randomise_dict
-
-from collections import defaultdict
-
-import h5py
-
-@dataclass
-class ObservingRun:
-    name: str
-    start_date_time: datetime
-    end_date_time: datetime
-    channels: dict
-    frame_types: dict
-    state_flags: dict
-
-    def __post_init__(self):
-        self.start_gps_time = self._to_gps_time(self.start_date_time)
-        self.end_gps_time = self._to_gps_time(self.end_date_time)
-
-    @staticmethod
-    def _to_gps_time(date_time: datetime) -> float:
-        gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
-        time_diff = date_time - gps_epoch
-        # Current number of leap seconds as of 2021 (change if needed):
-        leap_seconds = 18  
-        total_seconds = time_diff.total_seconds() - leap_seconds
-        return total_seconds
-
-IFOS = ("H1", "L1", "V1")
-
-observing_run_data = (
-    ("O1", datetime(2015, 9, 12, 0, 0, 0), datetime(2016, 1, 19, 0, 0, 0),
-     {"best": "DCS-CALIB_STRAIN_CLEAN_C01"},
-     {"best": "HOFT_C01"},
-     {"best": "DCS-ANALYSIS_READY_C01:1"}),
-    ("O2", datetime(2016, 11, 30, 0, 0, 0), datetime(2017, 8, 25, 0, 0, 0),
-     {"best": "DCS-CALIB_STRAIN_CLEAN_C01"},
-     {"best": "HOFT_C01"},
-     {"best": "DCS-ANALYSIS_READY_C01:1"}),
-    ("O3", datetime(2019, 4, 1, 0, 0, 0), datetime(2020, 3, 27, 0, 0, 0),
-     {"best": "DCS-CALIB_STRAIN_CLEAN_C01"},
-     {"best": "HOFT_C01"},
-     {"best": "DCS-ANALYSIS_READY_C01:1"})
-)
-
-OBSERVING_RUNS = {
-    name: ObservingRun(
-        name, start_date_time, end_date_time, channels, frame_types, state_flags
-    ) for name, start_date_time, end_date_time, channels, frame_types, state_flags in observing_run_data}
-
-O1 = OBSERVING_RUNS["O1"]
-O2 = OBSERVING_RUNS["O2"]
-O3 = OBSERVING_RUNS["O3"]  
-
-@dataclass
-class IFOData:
-    data        : Union[TimeSeries, tf.Tensor, np.ndarray]
-    t0          : float
-    sample_rate : float
-    
-    def __post_init__(self):
-        if (type(self.data) == TimeSeries):
-            self.data = tf.convert_to_tensor(self.data.value, dtype=tf.float32)
-        elif (type(self.data) == np.ndarray):
-            self.data = tf.convert_to_tensor(self.data, dtype=tf.float32)
-        
-        self.data = replace_nan_and_inf_with_zero(self.data)
-                    
-        self.duration = \
-            tf.cast(tf.shape(self.data)[0], tf.float32) / self.sample_rate
-        self.dt = 1.0 / self.sample_rate
-            
-    def downsample(self, new_sample_rate: Union[int, float]):    
-        #to impliment
-        return self
-    
-    def scale(self, scale_factor:  Union[int, float]):
-        self.data *= scale_factor
-        return self
-    
-    def numpy(self):
-        """Converts the data to a numpy array."""
-        return self.data.numpy()
-
-def get_cbc_parameter_shapes(num_examples_per_batch):
-
-    length_one_args = \
-        [
-            'mass_1_msun', 
-            'mass_2_msun', 
-            'inclination_radians',
-            "distance_mpc",
-            "reference_orbital_phase_in",
-            "ascending_node_longitude",
-            "eccentricity",
-            "mean_periastron_anomaly"
-            "spin_1_in",
-            "spin_2_in"
-        ]
-    length_three_args = ['spin_1_in', 'spin_2_in']
-    parameter_shapes = {}
-    
-    for key in length_one_args:
-        parameter_shapes[key] = num_examples_per_batch
-    
-    for key in length_three_args:
-        parameter_shapes[key] = num_examples_per_batch*3
-    
-    return parameter_shapes
-    
-                
-def random_subsection(
-        data: tf.Tensor,
-        dt  : float,
-        t0  : float,
-        num_onsource_samples: int, 
-        num_offsource_samples: int, 
-        num_examples_per_batch: int
-    ):      
-        assert len(data.shape) == 1, "Input array must be 1D"
-
-        N = tf.shape(data)[0]
-
-        maxval = N - num_onsource_samples - num_offsource_samples + 1
-        random_starts = tf.random.uniform(
-            shape=(num_examples_per_batch,), 
-            minval=num_offsource_samples, 
-            maxval=maxval, 
-            dtype=tf.int32
-        )
-
-        def slice_data(start, num_samples):
-            return tf.slice(data, [start], [num_samples])
-
-        batch_subarrays = tf.map_fn(
-            lambda start: slice_data(start, num_onsource_samples), 
-            random_starts, 
-            fn_output_signature=tf.TensorSpec(
-                shape=[num_onsource_samples], dtype=tf.float32
-            )
-        )
-
-        batch_background_chunks = tf.map_fn(
-            lambda start: \
-                slice_data(start - num_offsource_samples, num_offsource_samples), 
-            random_starts, 
-            fn_output_signature=tf.TensorSpec(
-                shape=[num_offsource_samples], dtype=tf.float32)
-        )
-
-        t0_subsections = tf.cast(t0, tf.float32) + \
-            tf.cast(random_starts, tf.float32) * tf.cast(dt, tf.float32)
-
-        return batch_subarrays, batch_background_chunks, t0_subsections
-
-@tf.function
-def replace_nan_and_inf_with_zero(tensor):
-    tensor = tf.where(tf.math.is_nan(tensor), tf.zeros_like(tensor), tensor)
-    tensor = tf.where(tf.math.is_inf(tensor), tf.zeros_like(tensor), tensor)
-    return tensor    
-
-def get_segment_times(
-    start: float,
-    stop: float,
-    ifo: str,
-    state_flag: str
-    ) -> list:
-    
-    segments = DataQualityDict.query_dqsegdb(
-        [f"{ifo}:{state_flag}"],
-        start,
-        stop,
-    )
-    
-    intersection = segments[f"{ifo}:{state_flag}"].active.copy()
-    
-    return np.array(intersection)
-    
-def get_all_event_times() -> np.ndarray:
-    
-    catalogues = [
-        "GWTC", 
-        "GWTC-1-confident", 
-        "GWTC-1-marginal", 
-        "GWTC-2", 
-        "GWTC-2.1-auxiliary", 
-        "GWTC-2.1-confident", 
-        "GWTC-2.1-marginal", 
-        "GWTC-3-confident", 
-        "GWTC-3-marginal"
-    ]
-    
-    gps_times = np.array([])
-    for catalogue in catalogues:
-        events = EventTable.fetch_open_data(catalogue)
-        gps_times = np.append(gps_times, events["GPS"].data.compressed())
-        
-    return gps_times    
-
-def get_all_glitch_segments(ifo):
-    
-    glitches = EventTable.fetch('gravityspy', 'glitches')
-    glitches = glitches[glitches["ifo"] == ifo]
-    
-    segments = list(
-        zip(glitches['start_time'].data, 
-            glitches['start_time'].data + glitches['duration'].data)
-    )
-        
-    return segments    
-
-def pad_gps_times_with_veto_window(
-        arr: np.ndarray, 
-        offset: int = 60, 
-        increment: int = 10
-    ) -> np.ndarray:
-    left = arr - offset
-    right = arr + increment
-    result = np.stack((left, right), axis=1)
-    return result
-
-def compress_periods(periods: np.ndarray) -> np.ndarray:
-    periods = periods[periods[:,0].argsort()]
-    compressed = []
-
-    for period in periods:
-        if not compressed or compressed[-1][1] < period[0]:
-            compressed.append(period)
-        else:
-            compressed[-1] = (
-                compressed[-1][0], max(compressed[-1][1], period[1])
-            )
-
-    return np.array(compressed)
-
-def remove_overlap(
-    start: float,
-    end: float, 
-    veto_periods: np.ndarray
-    ) -> np.ndarray:
-    
-    result = np.array([[start, end]])
-    for veto_start, veto_end in veto_periods:
-        new_result = []
-        for period_start, period_end in result:
-            if period_start < veto_start < period_end \
-            and period_start < veto_end < period_end:
-                new_result.append([period_start, veto_start])
-                new_result.append([veto_end, period_end])
-            elif veto_start <= period_start < veto_end < period_end:
-                new_result.append([veto_end, period_end])
-            elif period_start < veto_start < period_end <= veto_end:
-                new_result.append([period_start, veto_start])
-            elif veto_end <= period_start or period_end <= veto_start:
-                new_result.append([period_start, period_end])
-        result = np.array(new_result)
-    return result
-
-def veto_time_periods(
-    valid_periods: np.ndarray, 
-    veto_periods: np.ndarray
-    ) -> np.ndarray:
-    
-    valid_periods = compress_periods(valid_periods)
-    veto_periods = compress_periods(veto_periods)
-    result = np.vstack([
-        remove_overlap(valid_start, valid_end, veto_periods) 
-        for valid_start, valid_end in valid_periods
-    ])
-    return result
-
-def split_periods(periods: np.ndarray, max_length: float) -> np.ndarray:
-    result = []
-    for start, end in periods:
-        n_splits = int(np.ceil((end - start) / max_length))
-        starts = np.linspace(
-            start, 
-            start + max_length * (n_splits - 1), 
-            n_splits
-        )
-        ends = np.minimum(starts + max_length, end)
-        result.append(np.vstack((starts, ends)).T)
-    return np.vstack(result)
-
-def remove_short_periods(periods: np.ndarray, min_length: float) -> np.ndarray:
-    return periods[np.where(periods[:, 1] - periods[:, 0] >= min_length)]
-
-def distribute_segments_by_ratio(
-        segments: np.ndarray, 
-        group_ratios: Dict[str, float],
-        group_name : str
-    ) -> np.ndarray:
-    
-    """
-    Distribute segments into groups based on specified ratios.
-
-    Parameters
-    ----------
-    segments : np.ndarray
-        2D NumPy array of shape (N, 2) where N is the number of segments.
-        Each row represents a segment with the first and second columns 
-        being the start and end times, respectively.
-    group_ratios : Dict[str, float]
-        Dictionary with group names as keys and their corresponding ratios as values.
-
-    Returns
-    -------
-    Dict[str, np.ndarray]
-        Dictionary with group names as keys and 2D NumPy arrays of segments as values.
-
-    """
-    # Calculate total duration from the 2D NumPy array
-    total_duration = np.sum(segments[:, 1] - segments[:, 0])
-    target_durations = {group: total_duration * ratio for group, ratio in group_ratios.items()}
-    
-    # Initialize dictionaries to hold result and accumulated durations
-    result = defaultdict(list)
-    accumulated_durations = {group: 0.0 for group in group_ratios.keys()}
-
-    # Sort segments by start_time for representative sampling
-    sorted_segments = segments[np.argsort(segments[:, 0])]
-
-    for segment in sorted_segments:
-        start, end = segment
-        segment_duration = end - start
-        min_group = min(accumulated_durations, key=lambda k: accumulated_durations[k]/target_durations[k])
-        
-        # Append this segment to the group with the least proportion of its target duration filled
-        result[min_group].append(segment)
-        accumulated_durations[min_group] += segment_duration
-
-    # Convert lists to 2D NumPy arrays before returning
-    return np.array(result[group_name])
-
-def open_hdf5_file(
-    file_path : Union[str, Path], 
-    mode : str ='r+'
-    ) -> h5py.File:
-    
-    file_path = Path(file_path)
-    try:
-        # Try to open the HDF5 file in the specified mode
-        f = h5py.File(file_path, mode)
-        f.close()
-    except OSError:
-        # The file does not exist, so create it in write mode
-        f = h5py.File(file_path, 'w')
-        f.close()
-        print(f'The file {file_path} was created in write mode.')
-    else:
-        print(f'The file {file_path} was opened in {mode} mode.')
-    return h5py.File(file_path, mode)
-
-def ensure_directory_exists(
-    directory: Union[str, Path]
+def get_ifo_data(    
+        # Random Seed:
+        seed: int = 1000,
+        # Temporal components:
+        sample_rate_hertz: float = 2048.0,   
+        onsource_duration_seconds: float = 1.0,
+        offsource_duarion_seconds: float = 16.0,
+        maximum_segment_duration_seconds : float = 2048.0,
+        window_duration_seconds : float = 1.0,
+        # Noise: 
+        noise_obtainer : NoiseObtainer = None ,
+        # Injections:
+        injection_configs: List = None, 
+        injection_scale_factor: float = 1.0E20,
+        # Data conditioning:
+        apply_whitening: bool = False,
+        # Outpu configuration:
+        num_examples_per_batch: int = 1,
+        input_keys : List[str] = None,
+        output_keys : List[str] = None
     ):
     
-    directory = Path(directory)  # Convert to Path if not already
-    if not directory.exists():
-        directory.mkdir(parents=True, exist_ok=True)
-
-@tf.function
-def roll_vector_zero_padding_(vector, min_roll, max_roll):
-    roll_amount = tf.random.uniform(
-        shape=(), minval=min_roll, maxval=max_roll, dtype=tf.int32
-    )
-
-    # Create a zero vector of the same size as the input
-    zeros = tf.zeros_like(vector)
-
-    # Create the rolled vector by concatenating the sliced vector and zeros
-    rolled_vector = tf.concat(
-        [vector[roll_amount:], zeros[:roll_amount]], axis=-1
-    )
-
-    return rolled_vector
-
-@tf.function
-def roll_vector_zero_padding(tensor, min_roll, max_roll):
-    return tf.map_fn(
-        lambda vec: roll_vector_zero_padding_(vec, min_roll, max_roll), tensor
-    )
-
-@tf.function
-def check_glitch_overlap(
-        tensor_start_times, 
-        duration, 
-        segments_start,
-        segments_end
-    ):
-    # Calculate the end times for each segment in the tensor
-    tensor_end_times = tensor_start_times + duration
-    
-    # Expand dimensions for broadcasting
-    tensor_start_times_exp = tf.expand_dims(tensor_start_times, -1)  # Shape: (N, 1)
-    tensor_end_times_exp = tf.expand_dims(tensor_end_times, -1)
-    
-    # Check for overlap using broadcasting
-    condition1 = tensor_start_times_exp <= segments_end  # (N, num_segments)
-    condition2 = tensor_end_times_exp >= segments_start  # (N, num_segments)
-    
-    # Combine conditions to find overlaps
-    overlaps = tf.reduce_any(condition1 & condition2, axis=-1)  # Reduce over the segments dimension
-    
-    return overlaps
-
-def batch_injection_parameters(
-    injection_parameters, 
-    num_injections_per_batch, 
-    num_waveforms
-    ):
-    """
-    Splits the given dictionary into smaller dictionaries containing N waveforms.
-
-    Parameters
-    ----------
-    data : dict
-        The input dictionary containing waveforms data.
-    N : int
-        The number of waveforms for each smaller dictionary.
-
-    Returns
-    -------
-    list
-        A list of dictionaries containing the split waveforms.
-    """
-    
-    num_chunks = num_waveforms // num_injections_per_batch
-    result = []
-    
-    for i in range(num_chunks):
-        chunk = {}
-        for key, value in injection_parameters.items():            
-            if len(value) == num_waveforms: 
-                chunk[key] = value[i * num_injections_per_batch: (i + 1) *num_injections_per_batch]
-            elif len(value) == num_waveforms * 3:
-                chunk[key] = value[i * num_injections_per_batch * 3: (i + 1) * num_injections_per_batch * 3]
-            else:
-                print("Warning non standard length!")
-                quit()
+    # Set defaults here as if initilised as default arguments objects are global
+    if not noise_obtainer:
+        noise_obtainer = NoiseObtainer()
         
-        result.append(chunk)
-
-    return result
-
-def generate_injections(
-    config: Dict[str, Any],
-    num_injections: int, 
-    common_args: dict,
-    fduration: float,
-    sample_rate_hertz: float,
-    onsource_duration_seconds: float,
-    num_examples_per_batch: int
-    ):
-
-    config["args"].update(common_args)
-    injection_chance = config["injection_chance"]
-
-    injections = []
-    injection_masks = []
-    
-    injection_masks = np.random.choice(
-        [False, True], 
-        size=num_injections, 
-        p=[1-injection_chance, injection_chance]
-    )
+    if not injection_configs:
+        injection_configs = []
         
-    num_waveforms = np.sum(injection_masks)
+    if not input_keys:
+        input_keys = []
         
-    config["args"].update({
-        "num_waveforms":
-            {
-            "value": num_waveforms, 
-            "distribution_type": "constant",
-            "dtype" : "int"
-            }
-        })
+    if not output_keys:
+        output_keys = []
     
-    length_one_args = ['num_waveforms', 'sample_rate_hertz', 'duration_seconds']
-    length_three_args = ['spin_1_in', 'spin_2_in']
-    
-    # Update dictionary to create random variables for each waveform:
-    for key, value in config["args"].items():
-        if key not in length_one_args + length_three_args:    
-            value.update({"num_values": num_waveforms})
-            config["args"].update({key: value})
-    
-    num_spin_components = 3
-    # Spins have three times more variables:
-    for key, value in config["args"].items():
-        if key in length_three_args:
-            value.update({"num_values": num_waveforms*num_spin_components})
-            config["args"].update({key: value})
-                    
-    injections, injection_parameters = \
-        randomise_arguments(
-            config["args"], generate_phenom_d
-        )
-    
-    # At the moment take only one polarization: 
-    injections = injections[:, 0]
-        
-    # Reshape to split injections:
-    num_samples = int(sample_rate_hertz*(onsource_duration_seconds + fduration))
-    injections = injections.reshape(-1, num_samples)
-    
-    # Arbitrary scale factor:
-    injections *= 10.0E20 
-
-    crop_duration = fduration / 2.0
-
-    min_roll_num_samples = \
-        int((config["padding_seconds"]["back"] + crop_duration)*sample_rate_hertz) 
-    max_roll_num_samples = \
-        int((onsource_duration_seconds + fduration) *sample_rate_hertz) - \
-        int((crop_duration \
-             + config["padding_seconds"]["front"])*sample_rate_hertz) 
-        
-    injections = tf.convert_to_tensor(injections, dtype = tf.float32)
-    injection_masks = tf.convert_to_tensor(injection_masks, dtype = tf.bool)
-            
-    injections = \
-        roll_vector_zero_padding( 
-            injections, 
-            min_roll_num_samples, 
-            max_roll_num_samples
-        )
-    
-    injections = \
-        expand_tensor(
-            injections, 
-            injection_masks
-        )
-    
-    return injections, injection_parameters, injection_masks
-
-def generate_snrs(
-        injection_masks,
-        num_examples_per_batch,
-        config,
-        example_index
-    ):
-    
-    snrs = []
-    for snr_index in range(np.sum(injection_masks)):
-        snr_index += example_index
-        
-        if type(config["snr"]) == np.ndarray:  
-            snr = config["snr"][-1]
-            if snr_index < len(config["snr"]):
-                snr = config["snr"][snr_index]
-        elif type(config["snr"]) == dict:
-            snr = randomise_dict(config["snr"])
-        else:
-            raise ValueError("Unsupported SNR type!") 
-
-        snrs.append(snr)      
-
-    snrs = tf.convert_to_tensor(snrs, dtype = tf.float32)
-
-    snrs = \
-        expand_tensor(
-            snrs,
-            injection_masks
-        )
-    
-    return snrs
-
-def expand_tensor(signal: tf.Tensor, mask: tf.Tensor) -> tf.Tensor:
-    """
-    This function expands a tensor along the X axis by inserting zeros wherever a 
-    corresponding boolean in a 1D tensor is False, and elements from the original 
-    tensor where the boolean is True. It works for both 1D and 2D tensors.
-
-    Parameters
-    ----------
-    signal : tf.Tensor
-        A 1D or 2D tensor representing signal injections, where the length of 
-        the tensor's first dimension equals the number of True values in the mask.
-    mask : tf.Tensor
-        A 1D boolean tensor. Its length will determine the length of the expanded tensor.
-
-    Returns
-    -------
-    tf.Tensor
-        The expanded tensor.
-
-    """
-    # Ensure that the signal tensor is 1D or 2D
-    assert signal.ndim in (1, 2), 'Signal must be a 1D or 2D tensor'
-    
-    # Ensure that the mask is 1D
-    assert mask.ndim == 1, 'Mask must be a 1D tensor'
-    
-    # Ensure that the length of the signal tensor matches the number of True 
-    # values in the mask
-    assert tf.reduce_sum(tf.cast(mask, tf.int32)) == signal.shape[0], \
-        'Signal tensor length must match number of True values in mask'
-    
-    # Create a tensor full of zeros with the final shape
-    if signal.ndim == 1:
-        expanded_signal = tf.zeros(mask.shape[0], dtype=signal.dtype)
-    else: # signal.ndim == 2
-        N = signal.shape[1]
-        expanded_signal = tf.zeros((mask.shape[0], N), dtype=signal.dtype)
-
-    # Get the indices where mask is True
-    indices = tf.where(mask)
-
-    # Scatter the signal tensor elements/rows into the expanded_signal tensor at the 
-    # positions where mask is True
-    expanded_signal = tf.tensor_scatter_nd_update(expanded_signal, indices, signal)
-
-    return expanded_signal
-
-def process_time_interval(
-    time_interval: Union[Tuple, 'ObservingRun'], 
-    frame_type: str = None, 
-    channel: str = None, 
-    state_flag: str = None, 
-    data_quality: str = None
-    ) -> Tuple[str, str, str]:
-    """
-    Processes the given time interval, and return the appropriate start, 
-    stop time, frame_type, channel, and state_flag.
-
-    If time_interval is an instance of ObservingRun, then it uses the properties 
-    of the ObservingRun object. If not, it expects time_interval to be a tuple 
-    representing the start and stop times.
-
-    Parameters
-    ----------
-    time_interval : Union[Tuple, 'ObservingRun']
-        The time interval to be processed. It can be either a tuple or an 
-        ObservingRun object.
-    frame_type : str, optional
-        The frame type to use. If None, it will be derived from the 
-        time_interval if it's an ObservingRun object.
-    channel : str, optional
-        The channel to use. If None, it will be derived from the time_interval 
-        if it's an ObservingRun object.
-    state_flag : str, optional
-        The state flag to use. If None, it will be derived from the 
-        time_interval if it's an ObservingRun object.
-    data_quality : str, optional
-        The data quality to use to derive frame_type, channel, and state_flag 
-        if they are None and time_interval is an ObservingRun object.
-
-    Returns
-    -------
-    Tuple[str, str, str]
-        The final values of frame_type, channel, and state_flag.
-
-    Raises
-    ------
-    TypeError
-        If the time_interval is not a tuple or an ObservingRun object.
-    """
-    
-    # Check the type of time_interval
-    if isinstance(time_interval, tuple):
-        start, stop = time_interval
-    elif isinstance(time_interval, ObservingRun):
-        start, stop = time_interval.start_gps_time, time_interval.end_gps_time    
-
-        # Set the frame_type, channel, and state_flag if not provided, based on 
-        # the ObservingRun object
-        if frame_type is None:
-            frame_type = time_interval.frame_types[data_quality]
-        if channel is None:
-            channel = time_interval.channels[data_quality]
-        if state_flag is None:
-            state_flag = time_interval.state_flags[data_quality]
-    else:
-        raise TypeError(
-            "time_interval must be either a tuple or an ObservingRun object"
-        )
-    
-    return start, stop, frame_type, channel, state_flag
-
-def process_valid_segments(
-    start: str, 
-    stop: str, 
-    ifo: str, 
-    state_flag: str, 
-    data_labels: List[str], 
-    max_segment_size: int, 
-    onsource_duration_seconds: int, 
-    fduration: int, 
-    num_examples_per_batch: int, 
-    offsource_duarion_seconds: int,
-    groups : dict[str, float],
-    group_name : str,
-    order: str
-    ) -> cycle:
-    """
-    Process the valid segments given the start, stop times, ifo, and state flag. 
-    This involves multiple steps including getting segment times, vetoing 
-    certain segments, and adjusting segment times.
-
-    Parameters
-    ----------
-    start : str
-        The start time.
-    stop : str
-        The stop time.
-    ifo : str
-        The IFO (Interferometric Gravitational-Wave Observatory) to use.
-    state_flag : str
-        The state flag to use.
-    data_labels : List[str]
-        The list of data labels.
-    max_segment_size : int
-        The maximum segment size.
-    onsource_duration_seconds : int
-        The example duration in seconds.
-    fduration : int
-        The fduration to use.
-    num_examples_per_batch : int
-        The number of examples per batch.
-    offsource_duarion_seconds : int
-        The background duration in seconds.
-    order: str
-        How to order the segments.
-        
-    Returns
-    -------
-    Union[np.ndarray, cycle]
-        The processed valid segments.
-        
-    Raises
-    ------
-    ValueError
-        If no valid segments were found.
-    ValueError
-        If inputted order value not recognised.
-    """
-    valid_segments = get_segment_times(
-        start,
-        stop,
-        ifo,
-        state_flag
-    )
-    
-    veto_segments = []
-    if "events" not in data_labels:
-        event_times = get_all_event_times()
-        veto_segments.append(pad_gps_times_with_veto_window(event_times))
-    if "glitches" not in data_labels:
-        pass
-        #veto_segments.append(get_all_glitch_segments(ifo))
-    
-    if veto_segments != []:
-        veto_segments = np.concatenate(veto_segments)
-        valid_segments = veto_time_periods(valid_segments, veto_segments)
-    
-    valid_segments = split_periods(valid_segments, max_segment_size)
-    valid_segments = remove_short_periods(
-        valid_segments, 
-        (onsource_duration_seconds + fduration)*num_examples_per_batch 
-        + offsource_duarion_seconds
-    )
-    valid_segments = distribute_segments_by_ratio(
-        valid_segments, 
-        groups,
-        group_name
-    )
-    
-    if (len(valid_segments) == 0):
-        raise ValueError("No valid segments!")
-        
-    if order == "random":
-        np.random.shuffle(valid_segments)
-    elif order == "shortest_first":
-        sort_by_duration = \
-            lambda segments: \
-                segments[np.argsort(segments[:, 1] - segments[:, 0])]
-        valid_segments = sort_by_duration(valid_segments)
-    elif order == "chronological":
-        pass
-    else:
-        raise ValueError(
-            f"Order {order} not recognised, please choose from \"random\","
-            "\"shortest_firsr\", or \"chronological\"."
-        )
-    
-    valid_segments = cycle(valid_segments)
-    
-    return valid_segments
-
-def get_new_segment_data(
-    segment_start: int, 
-    segment_end: int, 
-    ifo: str, 
-    frame_type: str, 
-    channel: str
-    ) -> TimeSeries:
-    """
-    Fetches new segment data from specific URLs and reads it into a TimeSeries 
-    object.
-    
-    The URLs are found using the provided segment start and end times, ifo, and 
-    frame type. The TimeSeries data is then read from these files with the given 
-    channel.
-
-    Parameters
-    ----------
-    segment_start : int
-        The start time of the segment.
-    segment_end : int
-        The end time of the segment.
-    ifo : str
-        The Interferometric Gravitational-Wave Observatory (IFO) to use.
-    frame_type : str
-        The frame type to use.
-    channel : str
-        The channel to use.
-
-    Returns
-    -------
-    TimeSeries
-        The segment data read into a TimeSeries object.
-    """
-    
-    files = find_urls(
-        site=ifo.strip("1"),
-        frametype=f"{ifo}_{frame_type}",
-        gpsstart=segment_start,
-        gpsend=segment_end,
-        urltype="file",
-    )
-    data = TimeSeries.read(
-        files, 
-        channel=f"{ifo}:{channel}", 
-        start=segment_start, 
-        end=segment_end, 
-        nproc=4
-    )
-
-    return data
-
-def generate_hash_from_list(input_list: List[Any]) -> str:
-    """
-    Generate a unique hash based on the input list.
-
-    The function creates a SHA-1 hash from the string representation of the 
-    input list.
-
-    Parameters
-    ----------
-    input_list : List[Any]
-        The input list to be hashed.
-
-    Returns
-    -------
-    str
-        The SHA-1 hash of the input list.
-
-    """
-    # Convert the list to a string:
-    input_string = str(input_list)  
-    # Generate a SHA-1 hash from the string
-    input_hash = hashlib.sha1(input_string.encode()).hexdigest()  
-
-    return input_hash
-
-def get_sorted_values(dictionary):
-    sorted_keys = sorted(dictionary.keys())
-    sorted_values = [dictionary[key] for key in sorted_keys]
-    return sorted_values
-
-def generate_filenames(
-    data_directory: Union[str, Path],         
-    segment_parameters: List[Any]
-    ) -> (Path, List[Path]):
-    """
-    Generate unique filenames based on a hash of the input parameters and 
-    injection configurations.
-
-    Parameters
-    ----------
-    data_directory : Union[str, Path]
-        The directory where the data is stored.
-    segment_parameters : List[Any]
-        The list of parameters used for segment generation.
-
-    Returns
-    -------
-    Path
-        The segment filename
-
-    """
-    # Generate the hash for the segment parameters
-    segment_hash = generate_hash_from_list(segment_parameters)
-    # Construct the segment filename using the hash
-    segment_filename = \
-        Path(data_directory) / f"segment_data_{segment_hash}.hdf5"
-
-    return segment_filename
-
-
-@tf.function
-def crop_samples(
-    batched_onsource: tf.Tensor, 
-    onsource_duration_seconds: float, 
-    sample_rate_hertz: float
-    ) -> tf.Tensor:
-    """
-    Crop to remove edge effects and ensure same data is retrieved in all cases.
-    
-    This function calculates the desired number of samples based on the duration 
-    of examples in seconds and the sample rate, then it finds the start and end 
-    index for cropping. It then crops the batched_onsource using these indices.
-    
-    Parameters
-    ----------
-    batched_onsource : tf.Tensor
-        The batch of examples to be cropped.
-    onsource_duration_seconds : float
-        The duration of an example in seconds.
-    sample_rate_hertz : float
-        The sample rate in hertz.
-    
-    Returns
-    -------
-    tf.Tensor
-        The cropped batched_onsource.
-    """
-    
-    dims = len(batched_onsource.shape)
-    if dims == 1:
-        batched_onsource = tf.expand_dims(batched_onsource, 0) 
-    
-    # Calculate the desired number of samples based on example duration and 
-    # sample rate:
-    desired_num_samples = int(onsource_duration_seconds * sample_rate_hertz)
-    
-    # Calculate the start and end index for cropping
-    start = (batched_onsource.shape[-1] - desired_num_samples) // 2
-    end = start + desired_num_samples
-    
-    # Crop the batched_onsource
-    batched_onsource = batched_onsource[..., start:end]
-    
-    if dims == 1:
-        batched_onsource = tf.squeeze(batched_onsource) 
-    
-    return batched_onsource
-
-@tf.function
-def batch_tensor(tensor: tf.Tensor, batch_size: int) -> tf.Tensor:
-    
-    """
-    Batches a tensor into batches of a specified size. If the first dimension
-    of the tensor is not exactly divisible by the batch size, remaining elements
-    are discarded.
-
-    Parameters
-    ----------
-    tensor : tf.Tensor
-        The tensor to be batched.
-    batch_size : int
-        The size of each batch.
-
-    Returns
-    -------
-    tf.Tensor
-        The reshaped tensor in batches.
-    """
-    # Ensure that the tensor is 1D or 2D
-    assert len(tensor.shape) in (1, 2), 'Tensor must be 1D or 2D'
-
-    # Calculate the number of full batches that can be created
-    num_batches = tensor.shape[0] // batch_size
-
-    # Slice the tensor to only include enough elements for the full batches
-    tensor = tensor[:num_batches * batch_size]
-
-    if len(tensor.shape) == 1:
-        # Reshape the 1D tensor into batches
-        batched_tensor = tf.reshape(tensor, (num_batches, batch_size))
-    else: # tensor.ndim == 2
-        # Reshape the 2D tensor into batches
-        batched_tensor = tf.reshape(tensor, (num_batches, batch_size, -1))
-
-    return batched_tensor
-
-def get_value_from_injections(
-        parameter_name: str,
-        injection_parameters: List[Dict[str, tf.Tensor]],
-        parameter_shapes: Dict[str, Tuple[int]]
-    ) -> tf.Tensor:
-        """
-        Collect the parameter values from injections, aligning with zeros when the parameter is missing.
-
-        Parameters
-        ----------
-        parameter_name : str
-            Name of the parameter to extract.
-        injection_parameters : List[Dict[str, tf.Tensor]]
-            List of dictionaries containing the injection parameters.
-        parameter_shapes : Dict[str, Tuple[int]]
-            Dictionary containing the expected shapes for each parameter.
-
-        Returns
-        -------
-        tf.Tensor
-            Tensor containing the extracted values.
-        """
-        values = []
-        for config in injection_parameters:
-            value = config.get(parameter_name, tf.zeros(parameter_shapes[parameter_name]))
-            values.append(value)
-            
-        # Stack to create a tensor with the first axis representing the injection index
-        return values
-
-def create_dict(
-    keys: List[str],
-    batched_onsource: tf.Tensor,
-    batched_offsource: tf.Tensor,
-    batched_gps_times: tf.Tensor,
-    cropped_injections: tf.Tensor,
-    whitened_injections: tf.Tensor,
-    injection_masks: tf.Tensor,
-    snrs: tf.Tensor,
-    amplitudes: tf.Tensor,
-    injection_parameters: List[Dict[str, tf.Tensor]],
-    batch_index: int,
-    parameter_shapes: Dict[str, Tuple[int]]
-) -> Dict[str, tf.Tensor]:
-    """
-    Create a dictionary containing the tensors required for model training.
-
-    Parameters
-    ----------
-    keys : List[str]
-        List of strings representing the keys that will be included in the 
-        resulting dictionary.
-    batched_onsource : tf.Tensor
-        Tensor containing the onsource data.
-    batched_offsource : tf.Tensor
-        Tensor containing the offsource data.
-    batched_gps_times : tf.Tensor
-        Tensor containing the GPS times.
-    cropped_injections : tf.Tensor
-        Tensor containing the cropped injections.
-    whitened_injections : tf.Tensor
-        Tensor containing the whitened injections.
-    injection_masks : tf.Tensor
-        Tensor containing the injection masks.
-    snrs : tf.Tensor
-        Tensor containing the SNRs.
-    amplitudes : tf.Tensor
-        Tensor containing the amplitudes.
-    injection_parameters : List[Dict[str, tf.Tensor]]
-        List of dictionaries containing the injection parameters.
-    batch_index : Optional[int], optional
-        Index for the batch, by default None.
-    parameter_shapes : Optional[Dict[str, Tuple[int]]], optional
-        Dictionary containing the expected shapes for each parameter, by default 
-        None.
-
-    Returns
-    -------
-    Dict[str, tf.Tensor]
-        Dictionary containing the tensors corresponding to the specified keys.
-    """
-    
-    # Define operations for various keys
-    operations = {
-        'onsource': lambda: tf.cast(batched_onsource, tf.float16),
-        'offsource': lambda: tf.cast(batched_offsource, tf.float16),
-        'gps_time': lambda: tf.convert_to_tensor(batched_gps_times, dtype=tf.float64),
-        'injections': lambda: cropped_injections,
-        'whitened_injections': lambda: whitened_injections,
-        'injection_masks': lambda: injection_masks[:, batch_index],
-        'snr': lambda: snrs[:, batch_index],
-        'amplitude': lambda: amplitudes,
-    }
-    
-        
-    if len(injection_parameters):
-        # Handle injection parameters
-        all_injection_keys = set(
-            key for parameters in injection_parameters[:, batch_index] for key in parameters.keys()
-        )
-        
-        for key in all_injection_keys:
-            operations[key] = lambda k=key: \
-                get_value_from_injections(k, injection_parameters[:, batch_index], parameter_shapes)
-    
-    
-    return_dict = {key: operations[key]() for key in keys if key in operations}
-        
-    return return_dict
-
-def get_ifo_data(
-    time_interval: Union[tuple, ObservingRun], 
-    data_labels: List[str], 
-    ifo: str,
-    sample_rate_hertz: float,   
-    noise_type = "real",
-    data_quality: str = "best",
-    channel: str = None,
-    frame_type: str = None,
-    state_flag: str = None,
-    injection_configs: list = [], 
-    saturation: float = 1.0,
-    onsource_duration_seconds: float = 1.0,
-    offsource_duarion_seconds: float = 16.0,
-    apply_whitening: bool = False,
-    num_examples_per_batch: int = 1,
-    scale_factor: float = 1.0e20,
-    max_segment_size = 2048,
-    order: str = "random",
-    seed: int = 1000,
-    force_generation: bool = False,
-    data_directory: Union[str, Path] = "./generator_data",
-    save_segment_data: bool = True,
-    input_keys = [
-        "onsource", 
-        "offsource", 
-        "gps_time", 
-        "injectons", 
-        "snr"
-    ],
-    output_keys = [
-        "onsource", 
-        "offsource", 
-        "gps_time", 
-        "injectons", 
-        "snr"
-    ],
-    groups : dict = {
-        "train" : 0.98,
-        "validate" : 0.01,
-        "test" : 0.01
-    },
-    group_name = "train",
-    fduration : float = 1.0
-    ):
-    
+    # Ensure variable types:
     data_directory = Path(data_directory)
+    
+    # Ensure output directory exists and is of expected type:
     ensure_directory_exists(data_directory)
     
-    tf.random.set_seed(seed)
-    np.random.seed(seed)
+    # Set random seeds for Tensorflow and Numpy to ensure deterministic results
+    # with the same seed. This means that if the seed is the concerved the
+    # dataset produced will be identical:
+    set_random_seeds(seed)
+
+    # Setup noise config:
+    noise_obtainer.setup_noise()
+
+    '''
+    # Get segments which contain gravityspy glitches:
+    glitch_segments = get_all_glitch_segments(ifo)
+
+    # Convert segments list to tensors
+    glitch_segments_start, glitch_segments_end = zip(*glitch_segments)
+    glitch_segments_start = \
+        tf.constant(glitch_segments_start, dtype=tf.float32)
+    glitch_segments_end = tf.constant(glitch_segments_end, dtype=tf.float32)
+    '''
     
-    if (noise_type == "real"):
-        # Pull information from observing run object:
-        start, stop, frame_type, channel, state_flag = \
-            process_time_interval(
-                time_interval,
-                frame_type,
-                channel,
-                state_flag,
-                data_quality
-            )
-
-        max_segments_per_file = 1.0E6 
-
-        segment_parameters = \
-            [
-                frame_type, 
-                channel, 
-                state_flag, 
-                str(max_segment_size),
-                str(data_labels), 
-                sample_rate_hertz
-            ]  
-
-        segment_filename = \
-            generate_filenames(
-                data_directory,         
-                segment_parameters
-            )
-
-        # Get segment start and stop times given input parameters
-        valid_segments = \
-            process_valid_segments(
-                start, 
-                stop, 
-                ifo, 
-                state_flag, 
-                data_labels, 
-                max_segment_size, 
-                onsource_duration_seconds, 
-                fduration, 
-                num_examples_per_batch, 
-                offsource_duarion_seconds,
-                groups,
-                group_name,
-                order
-            )
-
-        """
-        #Store for later
-        glitch_segments = get_all_glitch_segments(ifo)
-
-        # Convert segments list to tensors
-        glitch_segments_start, glitch_segments_end = zip(*glitch_segments)
-        glitch_segments_start = \
-            tf.constant(glitch_segments_start, dtype=tf.float32)
-        glitch_segments_end = tf.constant(glitch_segments_end, dtype=tf.float32)
-        """
-    
+    # Covert the onsource_duration parameter into TensorFlow constant for use
+    # in subsequent tensorflow calculations:
     onsource_duration_seconds_tf = \
         tf.constant(onsource_duration_seconds, dtype=tf.float32)
     
+    noise = \
+        noise_obtainer.get_noise(
+            sample_rate_hertz : float,
+            onsource_duration_seconds : float,
+            num_examples_per_batch : float,
+            scale_factor : float = 1.0
+        )
+    
+    #injections = \
+    
+    for onsource, offsource, gps_times in noise:
+        print(onsource.numpy())
+
+        quit()
+        
+"""
     example_index = 0
     with open_hdf5_file(segment_filename) as segment_file:
-        
-        segment_file.require_group("segments")
-        for segment_index, (current_segment_start, current_segment_end) in enumerate(valid_segments):
-            
-            segment_key = \
-                f"segments/segment_{current_segment_start}_{current_segment_end}"
-                            
-            current_segment_data = None
-            
-            expected_duration_seconds = \
-                    current_segment_end - current_segment_start
-            if (segment_key in segment_file) and save_segment_data:
-                
-                print(
-                    f"Reading segments of duration "
-                    f"{expected_duration_seconds}..."
-                )
-                current_segment_data = \
-                    IFOData(
-                        segment_file[segment_key][()], 
-                        current_segment_start, 
-                        sample_rate_hertz)
-            else: 
-                print(f"Acquiring segments of duration "
-                      f"{expected_duration_seconds}..."
-                     )
-                try:
-                    current_segment_data = \
-                        get_new_segment_data(
-                            current_segment_start, 
-                            current_segment_end, 
-                            ifo, 
-                            frame_type, 
-                            channel
-                        )
-                    
-                    #Would be nice to do this on the gpu:
-                    current_segment_data = \
-                        current_segment_data.resample(sample_rate_hertz)
-                
-                except Exception as e:
-                    print(f"Unexpected error: {type(e).__name__}, {str(e)}")
-                    continue
-                
-                current_segment_data = \
-                    IFOData(
-                        current_segment_data, 
-                        current_segment_data.t0.value, 
-                        current_segment_data.sample_rate.value
-                    )
-                #current_segment_data = 
-                    #current_segment_data.downsample(sample_rate_hertz) 
-                
-                if save_segment_data:
-                    segment_file.create_dataset(
-                        segment_key, 
-                        data = current_segment_data.numpy()
-                    )
-            print("Complete!")
-            
-            current_segment_data = current_segment_data.scale(scale_factor)  
-            max_batch_count = \
-                int(
-                    max_segment_size
-                    / (saturation * num_examples_per_batch)
-                )
-            
-            current_max_batch_count = \
-                int(
-                      (current_segment_end - current_segment_start) 
-                    / (saturation * num_examples_per_batch)
-                )
             
             # Set common parameters before entering the loop
             common_args = {
@@ -1480,7 +259,7 @@ def get_ifo_data(
                     sample_rate_hertz
                 )
                 
-                """
+                '''
                 glitch_overlap = \
                     check_glitch_overlap(
                         batched_gps_times, 
@@ -1488,7 +267,7 @@ def get_ifo_data(
                         glitch_segments_start, 
                         glitch_segments_end
                     )
-                """
+                '''
                 
                 #Get shapes of injection configs so they can be shaped for return
                 parameter_shapes = get_cbc_parameter_shapes(
@@ -1528,6 +307,8 @@ def get_ifo_data(
                     )
                                 
                 yield (input_dict, output_dict)
+
+"""
 
 def get_ifo_data_generator(
     time_interval: Union[tuple, ObservingRun], 
@@ -1703,4 +484,31 @@ def group_split_dataset(
     
     args = generator_args.copy()
     args.update({"group_name" : group_name})
+    
     return get_ifo_data_generator(**args).take(num_batches)
+
+def set_random_seeds(
+    seed : int = 100
+    ):
+    
+    """
+    Set random seeds for Tensorflow, Numpy, and Core Python to ensure 
+    deterministic results with the same seed. This means that if the seed is the 
+    concerved the dataset produced will be identical.
+    
+    Args
+    ---
+    
+    seed : int
+        Random seed which will be used to set both Numpy and TensorFlow seeds
+    
+    """
+    
+    # Set tensorflow random seed:
+    tf.random.set_seed(seed)
+    
+    # Set Numpy random seed:
+    np.random.seed(seed)
+    
+    # Set core Python.random seed just in case, I don't think its used:
+    random.seed(10)

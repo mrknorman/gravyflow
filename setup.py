@@ -235,3 +235,22 @@ def read_injection_config_file(
                 replacements.get(value.get("max_value"), value["max_value"])
 
     return config
+
+def open_hdf5_file(
+    file_path : Union[str, Path], 
+    mode : str ='r+'
+    ) -> h5py.File:
+    
+    file_path = Path(file_path)
+    try:
+        # Try to open the HDF5 file in the specified mode
+        f = h5py.File(file_path, mode)
+        f.close()
+    except OSError:
+        # The file does not exist, so create it in write mode
+        f = h5py.File(file_path, 'w')
+        f.close()
+        print(f'The file {file_path} was created in write mode.')
+    else:
+        print(f'The file {file_path} was opened in {mode} mode.')
+    return h5py.File(file_path, mode)

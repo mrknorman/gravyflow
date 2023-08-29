@@ -44,7 +44,4 @@ if __name__ == "__main__":
         SegmentOrder.RANDOM
     )
     
-    print(data_config.valid_segments)
-    print(len(data_config.valid_segments))
-    
         

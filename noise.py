@@ -1,4 +1,4 @@
-from .data_acquisition import (IFODataConfig, ObservingRun, DataQuality,
+from .data_acquisition import (IFODataObtainer, ObservingRun, DataQuality,
                                DataLabel, SegmentOrder, IFO)
 from pathlib import Path
 from enum import Enum, auto
@@ -10,11 +10,11 @@ class NoiseType(Enum):
     REAL = auto()
 
 @dataclass
-class NoiseConfig:
+class NoiseObtainer:
     noise_data_path : Path = Path("./generator_data")
     force_segment_aquisition : bool = False
     save_segment_data: bool = True
-    ifo_data_config : Union[None, IFODataConfig] = None
+    ifo_data_config : Union[None, IFODataObtainer] = None
     noise_type : NoiseType = NoiseType.REAL
     order: str = SegmentOrder.RANDOM
     saturation: float = 1.0
@@ -27,6 +27,8 @@ class NoiseConfig:
     group_name = "train"
     
     def setup_noise(self):
+        # Configure noise based on type
+        
         match self.noise_type:
             case NoiseType.WHITE:
                 print("Not implemented")
@@ -43,7 +45,7 @@ class NoiseConfig:
                 # If noise type is real, get real noise time segments that fit 
                 # criteria, segments will be stored as a 2D numpy array as pairs 
                 # of start and end times:
-                self.data_config.get_valid_segments(
+                self.ifo_data_config.get_valid_segments(
                     max_segment_duration_seconds,
                     min_segment_duration_seconds,
                     groups,
@@ -56,7 +58,7 @@ class NoiseConfig:
                 if save_segment_data or not force_segment_aquisition:
                     
                     # Generate file for user cache:
-                    data_config.generate_file_path(
+                    ifo_data_config.generate_file_path(
                         max_segment_duration_seconds,
                         sample_rate_hertz
                     )
@@ -70,6 +72,29 @@ class NoiseConfig:
                     or NoiseType.REAL.
                     """
                 )
-    
-                    
-    
+                
+    def get_noise(
+        sample_rate_hertz : float,
+        onsource_duration_seconds : float,
+        num_examples_per_batch : float,
+        scale_factor : float = 1.0
+    ) -> (tf.Tensor, tf.Tensor, tf.Tensor):
+        
+        match self.noise_type:
+            case NoiseType.WHITE:
+                print("Not implemented")
+                
+            case NoiseType.COLORED:
+                print("Not implemented")
+            
+            case NoiseType.PSEUDO_REAL:
+                print("Not implemented")
+            
+            case NoiseType.REAL:
+                yield \
+                    self.ifo_data_config.get_onsource_offsource_chunks(
+                        sample_rate_hertz,
+                        onsource_duration_seconds,
+                        num_examples_per_batch,
+                        scale_factor
+                    )
