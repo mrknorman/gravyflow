@@ -34,7 +34,6 @@ if __name__ == "__main__":
             ],
             IFO.L1
         )
-    
 
     # Get valid data segments:
     data_config.get_valid_segments(

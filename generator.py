@@ -2,31 +2,25 @@ from .noise import NoiseConfig
 from typing import List, Tuple, Union, Dict, Any
 
 def get_ifo_data(    
-    
-    # Random Seed:
-    seed: int = 1000,
-
-    # Temporal components:
-    sample_rate_hertz: float = 2048.0,   
-    onsource_duration_seconds: float = 1.0,
-    offsource_duarion_seconds: float = 16.0,
-    maximum_segment_duration_seconds : float = 2048.0,
-    window_duration_seconds : float = 1.0,
-    
-    # Noise: 
-    noise_config : NoiseConfig = NoiseConfig()
-
-    # Injections:
-    injection_configs: List = [], 
-    injection_scale_factor: float = 1.0E20,
-
-    # Data conditioning:
-    apply_whitening: bool = False,
-    
-    # Outpu configuration
-    num_examples_per_batch: int = 1,
-    input_keys : List[str] = [],
-    output_keys : List[str] = []
+        # Random Seed:
+        seed: int = 1000,
+        # Temporal components:
+        sample_rate_hertz: float = 2048.0,   
+        onsource_duration_seconds: float = 1.0,
+        offsource_duarion_seconds: float = 16.0,
+        maximum_segment_duration_seconds : float = 2048.0,
+        window_duration_seconds : float = 1.0,
+        # Noise: 
+        noise_config : NoiseConfig = NoiseConfig(),
+        # Injections:
+        injection_configs: List = [], 
+        injection_scale_factor: float = 1.0E20,
+        # Data conditioning:
+        apply_whitening: bool = False,
+        # Outpu configuration:
+        num_examples_per_batch: int = 1,
+        input_keys : List[str] = [],
+        output_keys : List[str] = []
     ):
     
     # Ensure variable types:
