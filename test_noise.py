@@ -20,7 +20,7 @@ def test_real_noise(num_tests : int = 10):
     scale_factor : float = 1.0E20
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer = \
+    ifo_data_obtainer : IFODataObtainer = \
         IFODataObtainer(
             ObservingRun.O3, 
             DataQuality.BEST, 
@@ -35,14 +35,14 @@ def test_real_noise(num_tests : int = 10):
         )
     
     # Initilise noise generator wrapper:
-    noise = \
+    noise : NoiseObtainer = \
         NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
             noise_type = NoiseType.REAL
         )
     
     # Create generator:
-    generator = \
+    generator : Iterator = \
         noise.init_generator(
             sample_rate_hertz,
             onsource_duration_seconds,
@@ -50,6 +50,24 @@ def test_real_noise(num_tests : int = 10):
             offsource_duration_seconds,
             num_examples_per_batch,
             scale_factor
+        )
+    
+    # Generate onsource time axis for plotting:
+    total_onsource_duration_seconds : float = 
+        onsource_duration_seconds + padding_duration_seconds
+    total_num_onsource_samples : int = \
+        int(total_onsource_duration_seconds * sample_rate_hertz)
+    onsource_time_axis : np.ndarray = \
+        np.linspace(
+            0.0, total_onsource_duration_seconds, total_num_onsource_samples
+        )
+    
+    # Generate offsource time axis for plotting:
+    num_offsource_samples : int = \
+        int(offsource_duration_seconds * sample_rate_hertz)
+    offsource_time_axis : np.ndarray = \
+        np.linspace(
+            0.0, total_offsource_duration_seconds, total_num_offsource_samples
         )
         
     # Iterate through num_tests batches to check correct operation:
