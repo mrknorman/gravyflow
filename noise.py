@@ -100,14 +100,14 @@ class NoiseObtainer:
             case _:
                 # Raise error if noisetyp not recognised.
                 raise ValueError(
-                    f"""
-                    NoiseType {self.noise_type} not recognised, please choose 
-                    from NoiseType.WHITE, NoiseType.COLORED, NoiseType.PSEUDO_REAL,
-                    or NoiseType.REAL.
-                    """
+                    f"NoiseType {self.noise_type} not recognised, please choose"
+                    "from NoiseType.WHITE, NoiseType.COLORED, "
+                    "NoiseType.PSEUDO_REAL, or NoiseType.REAL. "
                 )
                 
         if self.generator is None:
-            raise ValueError("Noise generator failed to initlise, for some reason...")
+            raise ValueError(
+                "Noise generator failed to initilise.."
+            )
                 
         return self.generator

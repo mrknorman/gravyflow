@@ -20,7 +20,7 @@ from gwpy.table import EventTable
 from gwpy.timeseries import TimeSeries
 
 from .setup import open_hdf5_file
-from .tf_maths import replace_nan_and_inf_with_zero 
+from .maths import replace_nan_and_inf_with_zero 
 
 # Enums
 class DataQuality(Enum):

@@ -83,7 +83,8 @@ def setup_cuda(
                 " initialized first. Error message: {e}")
             raise
 
-    # MirroredStrategy performs synchronous distributed training on multiple GPUs on one machine.
+    # MirroredStrategy performs synchronous distributed training on multiple GPUs 
+    # on one machine.
     # It creates one replica of the model on each GPU available.
     strategy = tf.distribute.MirroredStrategy()
 
