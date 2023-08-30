@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import sys
 import h5py
 import subprocess
 from pathlib import Path
@@ -17,7 +18,7 @@ from tensorflow.data import Dataset
 def setup_cuda(
         device_num: str, 
         max_memory_limit: int, 
-        verbose: bool = False
+        logging_level: int = logging.WARNING
     ) -> Strategy:
     
     """
@@ -36,20 +37,28 @@ def setup_cuda(
         tf.distribute.MirroredStrategy: The TensorFlow MirroredStrategy instance.
     """
 
-    # Set up logging to file - this is beneficial in debugging scenarios and for traceability.
-    logging.basicConfig(filename='tensorflow_setup.log', level=logging.INFO)
+    # Set up logging to file - this is beneficial in debugging scenarios and for 
+    # traceability.
+    logger = logging.getLogger("tensorflow_logger")
+    stream_handler = logging.StreamHandler(sys.stdout)
+    logger.addHandler(stream_handler)
+    logger.setLevel(logging_level)
     
     try:
         # Set the device number for CUDA to recognize.
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device_num)
     except Exception as e:
-        logging.error(f"Failed to set CUDA_VISIBLE_DEVICES environment variable: {e}")
+        logging.error(
+            f"Failed to set CUDA_VISIBLE_DEVICES environment variable: {e}"
+        )
         raise
 
     # Confirm TensorFlow and CUDA version compatibility.
     tf_version = tf.__version__
     cuda_version = tf.sysconfig.get_build_info()['cuda_version']
-    logging.info(f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}")
+    logging.info(
+        f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}"
+    )
 
     # List all the physical GPUs.
     gpus = tf.config.list_physical_devices('GPU')
@@ -69,7 +78,9 @@ def setup_cuda(
 
         except RuntimeError as e:
             # This needs to be set before initializing GPUs.
-            logging.error(f"Failed to set memory growth or set memory limit: GPUs must be initialized first. Error message: {e}")
+            logging.error(
+                f"Failed to set memory growth or set memory limit: GPUs must be"
+                " initialized first. Error message: {e}")
             raise
 
     # MirroredStrategy performs synchronous distributed training on multiple GPUs on one machine.
@@ -79,9 +90,8 @@ def setup_cuda(
     # Set the logging level to ERROR to reduce logging noise.
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
-    # If verbose, print the list of GPUs.
-    if verbose:
-        print(tf.config.list_physical_devices("GPU"))
+    # If logging level = logging.INFO, print the list of GPUs.
+    logging.info(tf.config.list_physical_devices("GPU"))
 
     # Return the MirroredStrategy instance.
     return strategy
@@ -186,7 +196,8 @@ def randomise_dict(value):
     num_values = value.get('num_values', 1)
 
     if distribution_type == 'constant':
-        constant_value = float(value.get('value', 0.0)) # Default value is 0 if not provided
+        # Default value is 0 if not provided
+        constant_value = float(value.get('value', 0.0)) 
         random_values = [constant_value] * num_values
     else:
         min_value = float(value.get('min_value', '-inf'))
@@ -266,3 +277,11 @@ def open_hdf5_file(
     else:
         logging.info(f'The file {file_path} was opened in {mode} mode.')
     return h5py.File(file_path, mode)
+
+def ensure_directory_exists(
+    directory: Union[str, Path]
+    ):
+    
+    directory = Path(directory)  # Convert to Path if not already
+    if not directory.exists():
+        directory.mkdir(parents=True, exist_ok=True)
