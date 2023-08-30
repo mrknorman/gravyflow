@@ -68,10 +68,10 @@ def get_ifo_data(
     
     noise = \
         noise_obtainer.get_noise(
-            sample_rate_hertz : float,
-            onsource_duration_seconds : float,
-            num_examples_per_batch : float,
-            scale_factor : float = 1.0
+            sample_rate_hertz,
+            onsource_duration_seconds,
+            num_examples_per_batch,
+            scale_factor = 1.0
         )
     
     #injections = \
@@ -308,8 +308,6 @@ def get_ifo_data(
                                 
                 yield (input_dict, output_dict)
 
-"""
-
 def get_ifo_data_generator(
     time_interval: Union[tuple, ObservingRun], 
     data_labels: List[str], 
@@ -486,6 +484,7 @@ def group_split_dataset(
     args.update({"group_name" : group_name})
     
     return get_ifo_data_generator(**args).take(num_batches)
+"""
 
 def set_random_seeds(
     seed : int = 100

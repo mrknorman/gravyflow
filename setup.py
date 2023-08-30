@@ -1,24 +1,36 @@
 import os
 import logging
-import tensorflow as tf
+import json
+import h5py
+import subprocess
+from pathlib import Path
+from typing import Union
+
 import numpy as np
+import tensorflow as tf
+
+from scipy.stats import truncnorm
 from tensorflow.python.distribute.distribute_lib import Strategy
 from tensorflow.python.framework.ops import EagerTensor
 from tensorflow.data import Dataset
-import subprocess
-from scipy.stats import truncnorm
-from pathlib import Path
 
-import json
-
-def setup_cuda(device_num: str, max_memory_limit: int, verbose: bool = False) -> Strategy:
+def setup_cuda(
+        device_num: str, 
+        max_memory_limit: int, 
+        verbose: bool = False
+    ) -> Strategy:
+    
     """
-    Sets up CUDA for TensorFlow. Configures memory growth, logging verbosity, and returns the strategy for distributed computing.
+    Sets up CUDA for TensorFlow. Configures memory growth, logging verbosity, 
+    and returns the strategy for distributed computing.
 
     Args:
-        device_num (str): The GPU device number to be made visible for TensorFlow.
-        max_memory_limit (int): The maximum GPU memory limit in MB.
-        verbose (bool, optional): If True, prints the list of GPU devices. Defaults to False.
+        device_num (str): 
+            The GPU device number to be made visible for TensorFlow.
+        max_memory_limit (int): 
+            The maximum GPU memory limit in MB.
+        verbose (bool, optional):
+            If True, prints the list of GPU devices. Defaults to False.
 
     Returns:
         tf.distribute.MirroredStrategy: The TensorFlow MirroredStrategy instance.
@@ -250,7 +262,7 @@ def open_hdf5_file(
         # The file does not exist, so create it in write mode
         f = h5py.File(file_path, 'w')
         f.close()
-        print(f'The file {file_path} was created in write mode.')
+        logging.info(f'The file {file_path} was created in write mode.')
     else:
-        print(f'The file {file_path} was opened in {mode} mode.')
+        logging.info(f'The file {file_path} was opened in {mode} mode.')
     return h5py.File(file_path, mode)

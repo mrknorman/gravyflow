@@ -8,6 +8,7 @@ import random
 from typing import List, Tuple, Union, Dict, Any
 from pathlib import Path
 import logging
+import sys
 
 # Third-party imports
 import numpy as np
@@ -19,6 +20,7 @@ from gwpy.table import EventTable
 from gwpy.timeseries import TimeSeries
 
 from .setup import open_hdf5_file
+from .tf_maths import replace_nan_and_inf_with_zero 
 
 # Enums
 class DataQuality(Enum):
@@ -149,38 +151,35 @@ class IFOData:
                 shape=[num_offsource_samples], dtype=tf.float32)
         )
 
-        subsections_start_gps_time = tf.cast(start_gps_time, tf.float32) + \
-            tf.cast(random_starts, tf.float32) 
-                * tf.cast(self.time_interval_seconds, tf.float32)
+        subsections_start_gps_time = tf.cast(self.start_gps_time, tf.float32) + \
+            tf.cast(random_starts, tf.float32) \
+            * tf.cast(self.time_interval_seconds, tf.float32)
 
         return batch_subarrays, batch_background_chunks, subsections_start_gps_time
     
 @dataclass
 class IFODataObtainer:
-    start_gps_times : List[float]
-    end_gps_times : List[float]
-    frame_types : List[str]
-    channels : List[str]
-    state_flags : List[str]
-    data_quality : DataQuality
-    data_labels : List[DataLabel]
-    ifos  : List[IFO]
-    file_path : Path
-    valid_segments : np.ndarray
-    force_aquisition : bool = False,
-    save_segments : bool = True
     
     def __init__(
-        self, 
-        observing_runs : Union[ObservingRun, List[ObservingRun]],
-        data_quality : DataQuality,
-        data_labels : Union[DataLabel, List[DataLabel]],
-        ifos : Union[IFO, List[IFO]],
-        saturation : float = 1.0
-        force_aquisition : bool = False,
-        save_segments : bool = True
-        overrides : dict = None
+            self, 
+            observing_runs : Union[ObservingRun, List[ObservingRun]],
+            data_quality : DataQuality,
+            data_labels : Union[DataLabel, List[DataLabel]],
+            ifos : Union[IFO, List[IFO]],
+            segment_order : SegmentOrder = SegmentOrder.RANDOM,
+            max_segment_duration_seconds : float = 2048.0,
+            saturation : float = 1.0,
+            force_acquisition : bool = False,
+            cache_segments : bool = True,
+            overrides : dict = None,
+            logging_level : int = logging.WARNING
         ):
+        
+        # Initiate logging for ifo_data:
+        self.logger = logging.getLogger("ifo_data_aquisition")
+        stream_handler = logging.StreamHandler(sys.stdout)
+        self.logger.addHandler(stream_handler)
+        self.logger.setLevel(logging_level)
         
         # Ensure parameters are lists for consistency:
         if not isinstance(observing_runs, list):
@@ -190,13 +189,15 @@ class IFODataObtainer:
         if not isinstance(ifos, list):
             ifos = [ifos]
         
-        #Set parameters:
+        #Set class atributed with parameters:
         self.data_quality = data_quality
         self.data_labels = data_labels
         self.ifos = ifos
+        self.segment_order = segment_order
+        self.max_segment_duration_seconds = max_segment_duration_seconds
         self.saturation = saturation
-        self.force_aquisition = force_aquisition
-        self.save_segments = save_segments
+        self.force_acquisition = force_acquisition
+        self.cache_segments = cache_segments
             
         # Unpack parameters from input observing runs:
         self.unpack_observing_runs(observing_runs, data_quality)
@@ -241,9 +242,8 @@ class IFODataObtainer:
         
     def generate_file_path(
         self,
-        max_segment_duration_seconds : float,
         sample_rate_hertz : float,
-        data_directory : Path = Path("./")
+        data_directory_path : Path = Path("./")
         ) -> Path:
         
         # Generate unique segment filename from list of independent 
@@ -254,7 +254,7 @@ class IFODataObtainer:
                 self.channels, 
                 self.state_flags, 
                 self.data_labels, 
-                max_segment_duration_seconds,
+                self.max_segment_duration_seconds,
                 sample_rate_hertz
             ]  
         
@@ -269,7 +269,7 @@ class IFODataObtainer:
         
         # Construct the segment filename using the hash
         self.file_path = \
-            Path(data_directory) / f"segment_data_{segment_hash}.hdf5"
+            Path(data_directory_path) / f"segment_data_{segment_hash}.hdf5"
         
         return self.file_path
     
@@ -330,17 +330,32 @@ class IFODataObtainer:
         
     def get_valid_segments(
         self,
-        max_segment_duration_seconds : float,
-        min_segment_duration_seconds : float,
-        groups : Dict[str, float] = \
-        {
-            "train" : 0.98,
-            "validate" : 0.01,
-            "test" : 0.01
-        },
+        groups : Dict[str, float] = None,
         group_name : str = "train",
-        segment_order : SegmentOrder = SegmentOrder.RANDOM
+        segment_order : SegmentOrder = None
     ):
+        
+        # If no segment_order requested use class atribute as default, defaults
+        # to SegmentOrder.RANDOM
+        if not segment_order:
+            segment_order = self.segment_order
+        
+        # If not groups dictionary input, resort to default test, train,
+        # validate split: 
+        if not groups:
+            groups = \
+                {
+                    "train" : 0.98,
+                    "validate" : 0.01,
+                    "test" : 0.01
+                }
+        
+        # Check to ensure group name is key in group dictionary:
+        if group_name not in groups:
+            raise KeyError(
+                f"Group {group_name} not present in groups dictionary check "
+                 "input."
+            )
         
         # Get segments which fall within gps time boundaries and have the 
         # requested ifo and state flag:
@@ -367,18 +382,7 @@ class IFODataObtainer:
         valid_segments = \
             self.split_segments(
                 valid_segments, 
-                max_segment_duration_seconds
-            )
-        
-        # Remove segments which are shorter than than
-        # (onsource_duration_seconds + window_duration_seconds) *
-        # num_examples_per_batch + offsource duration seconds
-        # This ensures that at least one batch with enough room for offsource
-        # can be gathered:
-        valid_segments = \
-            self.remove_short_segments(
-                valid_segments, 
-                min_segment_duration_seconds
+                self.max_segment_duration_seconds
             )
         
         # Finally distibute segments deterministically amongst groups, thos can
@@ -590,14 +594,19 @@ class IFODataObtainer:
     def acquire(
         self,
         sample_rate_hertz : float,
+        valid_segments : np.ndarray = None,
         scale_factor : float = 1.0
     ): 
         # Check if self.file_path is intitiated:
-        if not self.file_path:
+        if self.file_path is None:
             raise ValueError("""
             Segment file path not initulised. Ensure to run generate_file_path
             before attempting to load
             """)
+        
+        # If no valid segments inputted revert to default list:
+        if valid_segments is None:
+            valid_segments = self.valid_segments
 
         for segment_start_gps_time, segment_end_gps_time in self.valid_segments:
 
@@ -605,22 +614,26 @@ class IFODataObtainer:
             # associated hdf5 file:
             segment_key = \
                 f"segments/segment_{segment_start_gps_time}_{segment_end_gps_time}"
-
+            
             # Acquire segment data, either from local stored file or remote:
             segment = \
-                self.get_segment_data(
+                self.get_segment(
                     segment_start_gps_time,
                     segment_end_gps_time,
                     sample_rate_hertz,
                     segment_key
                 )
 
-            if segment not None:
-
+            if segment is not None:
+                
                 # Save aquired segment if it does not alread exist in the local file:
-                if self.save_segments:
+                if self.cache_segments:
                     with open_hdf5_file(self.file_path, mode = "w") as segment_file:
-                        if (segment_key not in segment_file) or self.force_aquisition:
+                        
+                        # Ensure hdf5 file has group "segments":
+                        segment_file.require_group("segments")
+                        
+                        if (segment_key not in segment_file) or self.force_acquisition:
                             segment_file.create_dataset(
                                 segment_key, 
                                 data = segment.data.numpy()
@@ -634,6 +647,59 @@ class IFODataObtainer:
             else:
                 # If no segment was retrieved move to next loop iteration:
                 continue
+                
+    def get_segment_data(
+            self,
+            segment_start_gps_time: float, 
+            segment_end_gps_time: float, 
+            ifo: str, 
+            frame_type: str, 
+            channel: str
+        ) -> TimeSeries:
+
+        """
+        Fetches new segment data from specific URLs and reads it into a TimeSeries 
+        object.
+
+        The URLs are found using the provided segment start and end times, ifo, and 
+        frame type. The TimeSeries data is then read from these files with the given 
+        channel.
+
+        Parameters
+        ----------
+        segment_start : int
+            The start time of the segment.
+        segment_end : int
+            The end time of the segment.
+        ifo : IFO
+            The Interferometric Gravitational-Wave Observatory (IFO) to use.
+        frame_type : str
+            The frame type to use.
+        channel : str
+            The channel to use.
+
+        Returns
+        -------
+        TimeSeries
+            The segment data read into a TimeSeries object.
+        """
+
+        files = find_urls(
+            site=ifo.name.strip("1"),
+            frametype=f"{ifo.name}_{frame_type}",
+            gpsstart=segment_start_gps_time,
+            gpsend=segment_end_gps_time,
+            urltype="file",
+        )
+        data = TimeSeries.read(
+            files, 
+            channel=f"{ifo.name}:{channel}", 
+            start=segment_start_gps_time, 
+            end=segment_end_gps_time, 
+            nproc=4
+        )
+
+        return data
     
     def get_segment(
             self,
@@ -645,93 +711,126 @@ class IFODataObtainer:
         
         # Default segment data to None in case of very possible aquisition error:
         segment = None
-        expected_duration_seconds = \
+        expected_duration_seconds : float = \
                 segment_end_gps_time - segment_start_gps_time
         
         # Open segment file as segment_file:
         with open_hdf5_file(self.file_path, mode = "r") as segment_file:
             
-            # Ensure hdf5 file has group "segments":
-            segment_file.require_group("segments")
-            
             # Check if segment_key is present in segment file, and load if it
             # else acquire segment from database
-            if (segment_key in segment_file) and not self.force_aquisition:
-                logging.info(
+            if (segment_key in segment_file) and not self.force_acquisition:
+                self.logger.info(
                     f"Reading segments of duration "
                     f"{expected_duration_seconds}..."
                 )
-                segment = \
+                segment : IFOData = \
                     IFOData(
                         segment_file[segment_key][()], 
                         segment_start_gps_time, 
                         sample_rate_hertz
                     )
             else: 
-                logging.info(
+                self.logger.info(
                       "Acquiring segments of duration "
                       f"{expected_duration_seconds}..."
                 )
                 try:
-                    segment = \
-                        get_new_segment_data(
+                    segment : Timseries = \
+                        self.get_segment_data(
                             segment_start_gps_time, 
                             segment_end_gps_time, 
                             self.ifos[0], 
                             self.frame_types[0], 
                             self.channels[0]
                     )
-
                 except Exception as e:
                     
                     # If any exception raised, skip segment
-                    logging.error(
+                    self.logger.error(
                         f"Unexpected error: {type(e).__name__}, {str(e)}"
                     )
                     
                     segment = None
         
-        if segment not None:
-            # Resample segment using GwPy function
-            #Would be nice to do this on the gpu:
-            segment = \
-                segment.resample(sample_rate_hertz)
+                if segment is not None:
+                    # Resample segment using GwPy function
+                    #Would be nice to do this on the gpu:
+                    segment : TimeSeries = \
+                        segment.resample(sample_rate_hertz)
 
-            # Convert to IFOData class which uses tf.Tensors
-            segment = \
-                IFOData(
-                    segment, 
-                    segment.t0.value, 
-                    segment.sample_rate.value
-                )
+                    # Convert to IFOData class which uses tf.Tensors
+                    segment : IFOData = \
+                        IFOData(
+                            segment, 
+                            segment.t0.value, 
+                            segment.sample_rate.value
+                        )
 
-            logging.info("Complete!")
+            self.logger.info("Complete!")
 
         return segment
     
     def get_onsource_offsource_chunks(
-            self
+            self,
             sample_rate_hertz : float,
             onsource_duration_seconds : float,
+            padding_duration_seconds : float,
+            offsource_duration_seconds : float,
             num_examples_per_batch : int = 32,
             scale_factor : float = 1.0
         ) -> (tf.Tensor, tf.Tensor, tf.Tensor, int):
         
-        for segment in self.acquire(sample_rate_hertz, scale_factor):
+        # Padding is multiplied by 2 because it's two sided:
+        total_padding_duration_seconds : float = padding_duration_seconds * 2.0
+        
+        # Total onsource duration includes padding:
+        total_onsource_duration_seconds : float = \
+            onsource_duration_seconds + total_padding_duration_seconds 
+        
+        # Remove segments which are shorter than than
+        # (onsource_duration_seconds + padding_duration_seconds * 2.0) *
+        # num_examples_per_batch + offsource_duration_seconds
+        # This ensures that at least one batch with enough room for offsource
+        # can be gathered:
+        min_segment_duration_seconds : int = \
+            (total_onsource_duration_seconds) \
+            * num_examples_per_batch + offsource_duration_seconds
+        
+        # Remove short segments:
+        valid_segments : np.ndarray = \
+            self.remove_short_segments(
+                self.valid_segments, 
+                min_segment_duration_seconds
+            )
+        
+        # Calculate number of samples required to fullfill onsource and offsource
+        # durations:
+        num_onsource_samples : int = \
+            int(total_onsource_duration_seconds * sample_rate_hertz)
+        num_offsource_samples : int = \
+            int(offsource_duration_seconds * sample_rate_hertz)
+        
+        for segment in self.acquire(
+                sample_rate_hertz, 
+                valid_segments, 
+                scale_factor
+            ):
             
-            num_batches_in_segment = \
+            # Calculate number of batches current segment can produce, this
+            # is dependant on the segment duration and the onsource duration:
+            num_batches_in_segment : int = \
                 int(
                       segment.duration_seconds
-                    / (self.saturation * num_examples_per_batch)
+                    / (
+                        self.saturation * 
+                        num_examples_per_batch * total_onsource_duration_seconds
+                    )
                 )
             
+            # Yeild offsource, onsource, and gps_times for unique batches untill
+            # current segment is exausted:
             for batch_index in range(num_batches_in_segment):
-                
-                num_onsource_samples = \
-                    int(onsource_duration_seconds * sample_rate_hertz)
-                num_offsource_samples = \
-                    int(offsource_duarion_seconds * sample_rate_hertz)
-                
                 yield segment.random_subsection(
                         num_onsource_samples, 
                         num_offsource_samples, 

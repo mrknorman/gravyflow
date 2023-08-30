@@ -1,4 +1,4 @@
-from .data_acquisition import (IFODataConfig, ObservingRun, DataQuality,
+from .data_acquisition import (IFODataObtainer, ObservingRun, DataQuality,
                                DataLabel, SegmentOrder, IFO)
 from pathlib import Path
 
@@ -24,8 +24,8 @@ if __name__ == "__main__":
         num_examples_per_batch + offsource_duration_seconds
     
     # Setup data IFOConfig:
-    data_config = \
-        IFODataConfig(
+    data_obtainer = \
+        IFODataObtainer(
             ObservingRun.O3, 
             DataQuality.BEST, 
             [
@@ -36,7 +36,7 @@ if __name__ == "__main__":
         )
 
     # Get valid data segments:
-    data_config.get_valid_segments(
+    data_obtainer.get_valid_segments(
         max_segment_duration_seconds,
         min_segment_duration_seconds,
         groups,
