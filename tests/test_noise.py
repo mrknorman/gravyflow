@@ -3,11 +3,11 @@ from pathlib import Path
 import logging
 
 # Local imports:
-from .setup import find_available_GPUs, setup_cuda, ensure_directory_exists
-from .acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
+from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
+from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
                           DataQuality, DataLabel, IFO)
-from .noise import NoiseObtainer, NoiseType
-from .plotting import generate_strain_plot
+from ..noise import NoiseObtainer, NoiseType
+from ..plotting import generate_strain_plot
 
 # Library imports:
 from bokeh.io import output_file, save
@@ -21,7 +21,7 @@ def test_real_noise(
     # Test parameters:
     sample_rate_hertz : float = 1024.0
     onsource_duration_seconds : float = 1.0    
-    padding_duration_seconds : float = 0.5
+    crop_duration_seconds : float = 0.5
     offsource_duration_seconds : float = 4.0
     num_examples_per_batch : int = num_tests
     scale_factor : float = 1.0E20
@@ -53,7 +53,7 @@ def test_real_noise(
         noise.init_generator(
             sample_rate_hertz,
             onsource_duration_seconds,
-            padding_duration_seconds,
+            crop_duration_seconds,
             offsource_duration_seconds,
             num_examples_per_batch,
             scale_factor
@@ -61,7 +61,7 @@ def test_real_noise(
     
     # Calculate total onsource length including padding
     total_onsource_duration_seconds : float = \
-        onsource_duration_seconds + (padding_duration_seconds * 2.0)
+        onsource_duration_seconds + (crop_duration_seconds * 2.0)
         
     # Iterate through num_tests batches to check correct operation:
     onsource, offsource, gps_times  = next(generator)

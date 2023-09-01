@@ -36,7 +36,7 @@ class NoiseObtainer:
             self,
             sample_rate_hertz : float,
             onsource_duration_seconds : float,
-            padding_duration_seconds : float,
+            crop_duration_seconds : float,
             offsource_duration_seconds : float,
             num_examples_per_batch : float,
             scale_factor : float = 1.0
@@ -91,7 +91,7 @@ class NoiseObtainer:
                     self.ifo_data_obtainer.get_onsource_offsource_chunks(
                         sample_rate_hertz,
                         onsource_duration_seconds,
-                        padding_duration_seconds,
+                        crop_duration_seconds,
                         offsource_duration_seconds,
                         num_examples_per_batch,
                         scale_factor
