@@ -2,6 +2,10 @@
 from pathlib import Path
 import logging
 
+# Library imports:
+from bokeh.io import output_file, save
+from bokeh.layouts import gridplot
+
 # Local imports:
 from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
 from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
@@ -9,13 +13,9 @@ from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun,
 from ..noise import NoiseObtainer, NoiseType
 from ..plotting import generate_strain_plot
 
-# Library imports:
-from bokeh.io import output_file, save
-from bokeh.layouts import gridplot
-
 def test_real_noise(
         num_tests : int = 8, 
-        output_diretory_path : Path = Path("./py_ml_data/noise/")
+        output_diretory_path : Path = Path("./py_ml_data/tests/")
     ):
     
     # Test parameters:
