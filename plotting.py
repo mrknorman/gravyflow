@@ -2,9 +2,11 @@ from typing import Dict, Union
 
 import numpy as np
 import tensorflow as tf
+from scipy.signal import spectrogram
 
+from bokeh.io import save, output_file
 from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, Legend
+from bokeh.models import ColumnDataSource, Legend, ColorBar, LogTicker, LinearColorMapper
 from bokeh.palettes import Bright
 
 def check_ndarrays_same_length(
@@ -114,5 +116,77 @@ def generate_strain_plot(
     p.legend.click_policy = "hide"
 
     return p
+
+def generate_spectrogram(
+        strain: np.ndarray, 
+        sample_rate_hertz: float,
+        duration_seconds: float,
+        nperseg: int = 128, 
+        noverlap: int = 64
+    ) -> figure:
+    """
+    Plot a spectrogram using Bokeh and return the figure.
+
+    Parameters
+    ----------
+    strain : np.ndarray
+        Strain time-series data.
+    sample_rate_hertz : float
+        Sample rate in Hz.
+    nperseg : int, optional
+        Number of samples per segment, default is 128.
+    noverlap : int, optional
+        Number of samples to overlap, default is 64.
+
+    Returns
+    -------
+    figure
+        Bokeh figure object containing the spectrogram plot.
+    """
+    
+    # Parameters:
+    width : int = int(800*duration_seconds)
+    height : int = 600
+
+    # Compute the spectrogram
+    f, t, Sxx = spectrogram(strain, fs=sample_rate_hertz, nperseg=nperseg, noverlap=noverlap)
+    
+    f = f[1:]
+    Sxx = Sxx[1:]
+    
+    # Convert to dB
+    Sxx_dB = 10 * np.log10(Sxx)
+
+    # Validate dimensions
+    if Sxx_dB.shape != (len(f), len(t)):
+        raise ValueError("Dimension mismatch between Sxx_dB and frequency/time vectors.")
+
+    # Create Bokeh figure
+    p = figure(
+        title="Spectrogram",
+        x_axis_label='Time (seconds)',
+        y_axis_label='Frequency (Hz)',
+        y_axis_type="log",
+        width = width,
+        height = height
+    )
+
+    # Adjust axes range
+    p.x_range.start = t[0]
+    p.x_range.end = t[-1]
+    p.y_range.start = f[0]
+    p.y_range.end = f[-1]
         
+    # Create color mapper
+    mapper = LinearColorMapper(palette="Inferno256", low=Sxx_dB.min(), high=Sxx_dB.max())
+        
+    # Plotting the spectrogram
+    p.image(image=[Sxx_dB], x=t[0], y=f[0], dw=(t[-1] - t[0]), dh=(f[-1] - f[0]), color_mapper=mapper)
+    
+    # Add color bar
+    color_bar = ColorBar(color_mapper=mapper, location=(0, 0), ticker=LogTicker())
+    p.add_layout(color_bar, 'right')
+
+    return p
+
     
