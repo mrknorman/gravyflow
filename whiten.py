@@ -322,11 +322,11 @@ def whiten(
     timeseries: tf.Tensor, 
     background: tf.Tensor,
     sample_rate_hertz: float, 
-    fftlength: int = 4, 
-    overlap: int = 2,
-    highpass: float = None,
+    fft_duration_seconds: int = 4, 
+    overlap_duration_seconds: int = 2,
+    highpass_hertz: float = None,
     detrend: str ='constant',
-    fduration: int = 2.0,
+    filter_duration_seconds: float = 2.0,
     window: str = "hann"
     ) -> tf.Tensor:
     """
@@ -340,13 +340,13 @@ def whiten(
         The time series to use to calculate the asd.
     sample_rate_hertz : float
         The sample rate of the time series data.
-    fftlength : int, optional
+    fft_duration_seconds : int, optional
         Length of the FFT window, default is 4.
-    overlap : int, optional
-        Overlap of the FFT windows, default is 2.
-    highpass : float, optional
-        Highpass frequency, default is None.
-    fduration : int, optional
+    overlap_duration_seconds : int, optional
+        overlap_duration_seconds of the FFT windows, default is 2.
+    highpass_hertz : float, optional
+        highpass_hertz frequency, default is None.
+    filter_duration_seconds : float, optional
         Duration of the filter in seconds, default is 2.
     window : str, optional
         Window function to use, default is 'hann'.
@@ -368,8 +368,8 @@ def whiten(
     
     freqs, psd = calculate_psd(
         background, 
-        nperseg=int(sample_rate_hertz*fftlength), 
-        noverlap=int(sample_rate_hertz*overlap), 
+        nperseg=int(sample_rate_hertz*fft_duration_seconds), 
+        noverlap=int(sample_rate_hertz*overlap_duration_seconds), 
         sample_rate_hertz=sample_rate_hertz
     )
     asd = tf.sqrt(psd)
@@ -387,8 +387,8 @@ def whiten(
             axis=-1
         )
 
-    ncorner = int(highpass / df) if highpass else 0
-    ntaps = int(fduration * sample_rate_hertz)
+    ncorner = int(highpass_hertz / df) if highpass_hertz else 0
+    ntaps = int(filter_duration_seconds * sample_rate_hertz)
     transfer = 1.0 / asd
 
     tdw = fir_from_transfer(transfer, ntaps, window=window, ncorner=ncorner)

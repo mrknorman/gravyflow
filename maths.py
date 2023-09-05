@@ -1,6 +1,7 @@
 from enum import Enum, auto
 from typing import Union, Type, List
 from dataclasses import dataclass
+import random
 
 import numpy as np
 
@@ -20,9 +21,8 @@ class Distribution:
     mean : float = None
     std : float = None
     type_ : DistributionType = DistributionType.CONSTANT
-    num_samples : int = 1
 
-    def sample(self) -> Union[List[Union[int, float]], Union[int, float]]:
+    def sample(self, num_samples : int = 1) -> Union[List[Union[int, float]], Union[int, float]]:
         
         match self.type_:
             
@@ -33,7 +33,7 @@ class Distribution:
                         "No constant value given in constant distribution."
                     )
                 else:
-                    samples = [self.value] * self.num_samples
+                    samples = [self.value] * num_samples
             
             case DistributionType.UNIFORM:
                 
@@ -50,7 +50,7 @@ class Distribution:
                         np.random.uniform(
                             self.min_, 
                             self.max_, 
-                            self.num_samples
+                            num_samples
                         )
                     
             case DistributionType.NORMAL:
@@ -76,16 +76,16 @@ class Distribution:
                             (self.max_ - self.mean) / self.std,
                             loc=self.mean_value,
                             scale=self.std,
-                            size=self.num_samples
+                            size=num_samples
                         )
             
             case _:
-                raise ValueError('Unsupported distribution type')
+                raise ValueError(f'Unsupported distribution type {self.type_}')
 
         if self.dtype == int:
             samples = [int(sample) for sample in samples]
         
-        samples = samples if self.num_samples > 1 else samples[0]
+        samples = samples if num_samples > 1 else samples[0]
         return samples
     
 def randomise_arguments(input_dict, func):
@@ -247,3 +247,77 @@ def batch_tensor(tensor: tf.Tensor, batch_size: int) -> tf.Tensor:
         batched_tensor = tf.reshape(tensor, (num_batches, batch_size, -1))
 
     return batched_tensor
+
+def set_random_seeds(
+    seed : int = 100
+    ):
+    
+    """
+    Set random seeds for Tensorflow, Numpy, and Core Python to ensure 
+    deterministic results with the same seed. This means that if the seed is the 
+    concerved the dataset produced will be identical.
+    
+    Args
+    ---
+    
+    seed : int
+        Random seed which will be used to set both Numpy and TensorFlow seeds
+    
+    """
+    
+    # Set tensorflow random seed:
+    tf.random.set_seed(seed)
+    
+    # Set Numpy random seed:
+    np.random.seed(seed)
+    
+    # Set core Python.random seed just in case, I don't think its used:
+    random.seed(10)
+    
+@tf.function
+def crop_samples(
+    batched_onsource: tf.Tensor, 
+    onsource_duration_seconds: float, 
+    sample_rate_hertz: float
+    ) -> tf.Tensor:
+    """
+    Crop to remove edge effects and ensure same data is retrieved in all cases.
+    
+    This function calculates the desired number of samples based on the duration 
+    of examples in seconds and the sample rate, then it finds the start and end 
+    index for cropping. It then crops the batched_onsource using these indices.
+    
+    Parameters
+    ----------
+    batched_onsource : tf.Tensor
+        The batch of examples to be cropped.
+    onsource_duration_seconds : float
+        The duration of an example in seconds.
+    sample_rate_hertz : float
+        The sample rate in hertz.
+    
+    Returns
+    -------
+    tf.Tensor
+        The cropped batched_onsource.
+    """
+    
+    dims = len(batched_onsource.shape)
+    if dims == 1:
+        batched_onsource = tf.expand_dims(batched_onsource, 0) 
+    
+    # Calculate the desired number of samples based on example duration and 
+    # sample rate:
+    desired_num_samples = int(onsource_duration_seconds * sample_rate_hertz)
+    
+    # Calculate the start and end index for cropping
+    start = (batched_onsource.shape[-1] - desired_num_samples) // 2
+    end = start + desired_num_samples
+    
+    # Crop the batched_onsource
+    batched_onsource = batched_onsource[..., start:end]
+    
+    if dims == 1:
+        batched_onsource = tf.squeeze(batched_onsource) 
+    
+    return batched_onsource

@@ -15,6 +15,8 @@ from tensorflow.python.distribute.distribute_lib import Strategy
 from tensorflow.python.framework.ops import EagerTensor
 from tensorflow.data import Dataset
 
+from .maths import Distribution, DistributionType
+
 def setup_cuda(
         device_num: str, 
         max_memory_limit: int, 
@@ -191,75 +193,6 @@ def get_element_shape(dataset):
     for element in dataset.take(1):
         return element[0].shape
     
-def randomise_dict(value):
-    distribution_type = value.get('distribution_type', 'constant')
-    dtype = value.get('dtype', 'float')
-    num_values = value.get('num_values', 1)
-
-    if distribution_type == 'constant':
-        # Default value is 0 if not provided
-        constant_value = float(value.get('value', 0.0)) 
-        random_values = [constant_value] * num_values
-    else:
-        min_value = float(value.get('min_value', '-inf'))
-        max_value = float(value.get('max_value', 'inf'))
-        mean_value = float(value.get('mean_value', 0.0))
-        std = float(value.get('std', 1.0))
-
-        if distribution_type == 'uniform':
-            random_values = np.random.uniform(min_value, max_value, num_values)
-        elif distribution_type == 'normal':
-            random_values = truncnorm.rvs(
-                (min_value - mean_value) / std,
-                (max_value - mean_value) / std,
-                loc=mean_value,
-                scale=std,
-                size=num_values)
-        else:
-            raise ValueError('Unsupported distribution type')
-
-    if dtype == 'int':
-        random_values = [int(rv) for rv in random_values]
-    
-    random_values = random_values if num_values > 1 else random_values[0]
-    return random_values
-    
-def randomise_arguments(input_dict, func):
-    output_dict = {}
-    for key, value in input_dict.items():
-        output_dict[key] = randomise_dict(value)
-
-    return func(**output_dict), output_dict
-    
-def read_injection_config_file(
-    config_path: Path,
-    sample_rate_hertz: float,
-    onsource_duration_seconds: float
-) -> dict:
-    # Define replacement mapping
-    replacements = {
-        "sample_rate_hertz": sample_rate_hertz,
-        "onsource_duration_seconds": onsource_duration_seconds,
-        "pi": np.pi,
-        "2*pi": 2.0 * np.pi
-    }
-
-    # Load injection config
-    with open(config_path, "r") as file:
-        config = json.load(file)
-    
-    # Replacing placeholders
-    for key, value in config["args"].items():
-        
-        if "value" in value:
-            value["value"] = \
-                replacements.get(value["value"], value["value"])
-        if "max_value" in value:
-            value["max_value"] = \
-                replacements.get(value.get("max_value"), value["max_value"])
-
-    return config
-
 def open_hdf5_file(
     file_path : Union[str, Path], 
     mode : str ='r+'

@@ -123,7 +123,7 @@ def scale_to_snr(
     fft_duration_seconds: float = 4.0, 
     overlap_duration_seconds: float = 2.0,
     lower_frequency_cutoff: float = 20.0
-    ):
+    ) -> tf.Tensor:
     
     current_snr = calculate_snr(
         injection, 
@@ -135,8 +135,8 @@ def scale_to_snr(
     )
     
     scale_factor = desired_snr/current_snr
-    scale_factor = tf.where(tf.math.is_inf(scale_factor), 0.0, scale_factor)
-    
+    scale_factor = tf.where(tf.math.is_nan(scale_factor), 0.0, scale_factor)
+        
     if len(scale_factor.shape) == 1: 
         scale_factor = tf.reshape(scale_factor, (-1, 1))
     

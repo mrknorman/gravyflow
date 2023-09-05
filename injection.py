@@ -1,25 +1,100 @@
+from __future__ import annotations
+
 # Built-In imports:
+from pathlib import Path
 from enum import Enum, auto
 from dataclasses import dataclass
-from typing import Union, List, Dict
+from typing import Union, List, Dict, Type
+import json
 
 # Library imports
 import numpy as np
 import tensorflow as tf
 
 from .cuphenom.py.cuphenom import generate_phenom_d
-from .maths import Distribution, DistributionType, expand_tensor, batch_tensor
+from .maths import (Distribution, DistributionType, expand_tensor, batch_tensor,
+                    set_random_seeds, crop_samples)
+from .snr import scale_to_snr
 
-@dataclass
-class WNBConfig:
-    nothing_yet : int = 1.0
+def replace_placeholders(
+        value: dict, 
+        replacements: dict
+    ) -> None:
+        
+    """Replace placeholders in the config dictionary with actual values."""
+    for k in ["value", "max_", "type_"]:
 
+        if isinstance(value, dict):
+            if k in value:
+                value[k] = replacements.get(value[k], value[k])
+
+@dataclass 
+class ReturnVariable:
+    index : str
+    shape: tuple = (1,)
+
+class ReturnVariables(Enum):
+    ONSOURCE = ReturnVariable(auto())
+    WHITENED_ONSOURCE = ReturnVariable(auto())
+    OFFSOURCE = ReturnVariable(auto())
+    GPS_TIME = ReturnVariable(auto())
+    INJECTIONS = ReturnVariable(auto())
+    WHITENED_INJECTIONS = ReturnVariable(auto())
+    INJECTION_MASKS = ReturnVariable(auto())
+    SNR = ReturnVariable(auto())
+    AMPLITUDE = ReturnVariable(auto())
+    
 @dataclass
 class WaveformGenerator:
     snr : Union[float, np.ndarray] = None
     injection_chance : float = 1.0
     front_padding_duration_seconds : float = 0.3
     back_padding_duration_seconds : float = 0.0
+    
+    @classmethod
+    def load(
+        cls,
+        config_path: Path, 
+        sample_rate_hertz: float, 
+        onsource_duration_seconds: float, 
+        snr: Union[np.ndarray, Distribution] = None
+    ) -> Type[cls]:
+    
+        # Define replacement mapping
+        replacements = {
+            "pi": np.pi,
+            "2*pi": 2.0 * np.pi,
+            "constant": DistributionType.CONSTANT,
+            "uniform": DistributionType.UNIFORM,
+            "normal": DistributionType.NORMAL
+        }
+
+        # Load injection config
+        with config_path.open("r") as file:
+            config = json.load(file)
+
+        # Replace placeholders
+        for value in config.values():
+            replace_placeholders(value, replacements)
+        
+        generator = None
+        # Construct generator based on type
+        match config["type"]:
+            case 'PhenomD': 
+                generator = cuPhenomDGenerator(
+                    **{k: Distribution(**v) for k, v in config.items() if k not in 
+                       ["type", "injection_chance", "front_padding_duration_seconds", "back_padding_duration_seconds"]},
+                    injection_chance=config["injection_chance"],
+                    front_padding_duration_seconds=config["front_padding_duration_seconds"],
+                    back_padding_duration_seconds=config["back_padding_duration_seconds"]
+                )
+                
+                if snr is not None:
+                    config["snr"] = snr
+            case _:
+                raise ValueError("This waveform type is not implemented.")
+
+        return generator
 
 @dataclass 
 class WaveformParameter:
@@ -46,6 +121,10 @@ class WaveformParameters(Enum):
             raise ValueError(f"{key} not found in WaveformParameters")
         
         return member
+
+@dataclass
+class WNBGenerator(WaveformGenerator):
+    nothing_yet : int = 1.0
     
 @dataclass
 class cuPhenomDGenerator(WaveformGenerator):
@@ -83,11 +162,8 @@ class cuPhenomDGenerator(WaveformGenerator):
             if is_not_inherited(self, attribute):
                 parameter = \
                     WaveformParameters.get(attribute)
-                shape = parameter.value.shape[-1]
-                
-                value.num_samples = num_waveforms * shape
-                
-                parameters[attribute] = value.sample()
+                shape = parameter.value.shape[-1]                
+                parameters[attribute] = value.sample(num_waveforms * shape)
         
         # Generate phenom_d waveform:
         waveforms = \
@@ -104,23 +180,31 @@ class cuPhenomDGenerator(WaveformGenerator):
     
 @dataclass
 class InjectionGenerator:
-    configs : List[Union[cuPhenomDGenerator, WNBConfig]]
+    configs : List[Union[cuPhenomDGenerator, WNBGenerator]]
     sample_rate_hertz : float
     onsource_duration_seconds : float
     crop_duration_seconds : float
     num_examples_per_generation_batch : int
     num_examples_per_batch : int
     scale_factor : float = 10.0E20
-    parameters_to_return : List[WaveformParameters] = None
+    variables_to_return : List[WaveformParameters] = None
+    index : int = 0
     
     def generate(self):
         
-        if not isinstance(self.configs, list):
+        self.variables_to_return = \
+            [item for item in self.variables_to_return if \
+             isinstance(item.value, WaveformParameter)]
+        
+        if self.configs is False:
+            yield None, None, None
+            
+        elif not isinstance(self.configs, list):
             self.configs = [self.configs]
                     
         injections = []
         mask = []
-        parameters = {key : [] for key in self.parameters_to_return}
+        parameters = {key : [] for key in self.variables_to_return}
         for config in self.configs:
                         
             injection_, mask_, parameters_ = \
@@ -133,7 +217,9 @@ class InjectionGenerator:
                 if key in parameters_:
                     parameters[key].append(parameters_[key])
                 else:
-                    parameters[key].append(tf.zeros([key.shape[-1] * num_examples_per_batch]))
+                    parameters[key].append(
+                        tf.zeros([key.shape[-1] * num_examples_per_batch])
+                    )
                     
         injections = tf.stack(injections)
         mask = tf.stack(mask)
@@ -145,8 +231,8 @@ class InjectionGenerator:
     
     def generate_one(self, config):
         # Create default empty list for requested parameter returns:
-        if self.parameters_to_return is None:
-            self.parameters_to_return = []
+        if self.variables_to_return is None:
+            self.variables_to_return = []
         
         total_duration_seconds : float = \
             self.onsource_duration_seconds + (self.crop_duration_seconds * 2.0)
@@ -167,7 +253,8 @@ class InjectionGenerator:
                 * self.sample_rate_hertz
             )
         
-        num_batches : int = self.num_examples_per_generation_batch // self.num_examples_per_batch
+        num_batches : int = \
+            self.num_examples_per_generation_batch // self.num_examples_per_batch
         
         while 1:
             mask = \
@@ -205,14 +292,14 @@ class InjectionGenerator:
             
             # If no parameters requested, skip parameter processing and return
             # empty dict:
-            if self.parameters_to_return:
+            if self.variables_to_return:
                 
                 # Retrive parameters that are requested to reduce unneccisary
                 # post processing:
                 reduced_parameters = {
                     WaveformParameters.get(key) : value 
                         for key, value in parameters.items() 
-                        if WaveformParameters.get(key) in self.parameters_to_return
+                        if WaveformParameters.get(key) in self.variables_to_return
                 }
                 
                 # Conver to tensor and expand parameter dims for remaining parameters:
@@ -238,7 +325,7 @@ class InjectionGenerator:
                 
             else:
                 parameters = [{}] * num_batches
-                
+            
             # Split generation batches into smaller batches of size 
             # num_examples_per_batch:
             injections = batch_tensor(injections, self.num_examples_per_batch)
@@ -246,6 +333,136 @@ class InjectionGenerator:
             
             for injections_, mask_, parameters_ in zip(injections, mask, parameters):
                 yield injections_, mask_, parameters_
+                
+    def generate_snrs_(
+        self,
+        mask: tf.Tensor,
+        config : WaveformGenerator
+    ) -> tf.Tensor:
+    
+        """
+        Generate Signal-to-Noise Ratios (SNRs) given a mask, generator and example 
+        index.
+
+        Parameters
+        ----------
+        mask : Tensor
+            A tensor representing the injection mask.
+            
+        Returns
+        -------
+        Tensor
+            A tensor representing generated SNRs.
+        """
+
+        mask = mask.numpy()
+
+        num_injections = np.sum(mask)
+        
+        match config.snr:
+            case np.ndarray():
+
+                snrs = []
+                for index in range(self.index, self.index + num_injections):
+                    if index < len(config.snr):
+                        snrs.append(config.snr[index])
+                    else:
+                        snrs.append(config.snr[-1])
+                        
+                    self.index += 1
+
+            case Distribution():
+                snrs = config.snr.sample(num_injections)
+
+            case _:
+                raise ValueError(f"Unsupported SNR type: {type(config.snr)}!") 
+
+        snrs = tf.convert_to_tensor(snrs, dtype = tf.float32)
+                
+        snrs = \
+            expand_tensor(
+                snrs,
+                mask
+            )
+
+        return snrs
+    
+    def generate_snrs(
+        self,
+        masks : tf.Tensor
+        ):
+        
+        snrs = []
+        for mask, config in zip(masks, self.configs):
+            snrs.append(
+                self.generate_snrs_(
+                    mask,
+                    config
+                )
+            )
+            
+        return tf.stack(snrs)
+    
+    def add_injections_to_onsource(
+            self,
+            injections : tf.Tensor,
+            mask : tf.Tensor,
+            onsource : tf.Tensor,
+            variables_to_return : List
+        ) -> tf.Tensor:
+        
+        # Generate SNR values for injections based on inputed config values:
+        snrs = self.generate_snrs(mask)
+        
+        amplitudes = []
+        cropped_injections = []
+        for injections_, mask_, snrs_ in zip(injections, mask, snrs):
+
+            # Scale injections to SNR:
+            scaled_injections = scale_to_snr(
+                injections_, 
+                onsource,
+                snrs_,
+                self.sample_rate_hertz,
+                fft_duration_seconds=1.0,
+                overlap_duration_seconds=0.5
+            )
+
+            # Add scaled injections to onsource:
+            onsource += scaled_injections
+            
+            if ReturnVariables.AMPLITUDE in variables_to_return:
+                # Calculate amplitude of scaled injections:
+                amplitudes.append(
+                    tf.reduce_max(tf.abs(scaled_injections), axis=1)
+                )
+            if (ReturnVariables.INJECTIONS in variables_to_return) or \
+                (ReturnVariables.WHITENED_INJECTIONS in variables_to_return):
+                # Crop injections so that they appear the same size as output 
+                # onsource:
+                cropped_injections.append(
+                    crop_samples(
+                        scaled_injections, 
+                        self.onsource_duration_seconds, 
+                        self.sample_rate_hertz
+                    )
+                )
+        
+        if ReturnVariables.AMPLITUDE in variables_to_return:
+            amplitudes = tf.stack(amplitudes)
+        else: 
+            amplitudes = None
+        
+        if (ReturnVariables.INJECTIONS in variables_to_return) or \
+            (ReturnVariables.WHITENED_INJECTIONS in variables_to_return):
+            cropped_injections = tf.stack(cropped_injections)
+        else:
+            cropped_injections = None
+            
+        if (ReturnVariables.SNR not in variables_to_return):
+            snrs = None
+        
+        return onsource, cropped_injections, amplitudes, snrs
     
 @tf.function
 def roll_vector_zero_padding_(vector, min_roll, max_roll):

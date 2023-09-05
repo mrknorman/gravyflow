@@ -100,7 +100,6 @@ def test_real_noise(
         
     save(grid)
 
-
 if __name__ == "__main__":
     
     # ---- User parameters ---- #
