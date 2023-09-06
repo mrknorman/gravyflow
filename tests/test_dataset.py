@@ -97,7 +97,7 @@ def test_generator(
     mass_1_msun = input_dict[WaveformParameters.MASS_1_MSUN].numpy()
     mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN].numpy()
     
-    plots = [
+    layout = [
         [generate_strain_plot(
             {
                 "Whitened Onsouce + Injection": onsource_,
@@ -111,8 +111,7 @@ def test_generator(
         ), 
         generate_spectrogram(
             onsource_, 
-            sample_rate_hertz,
-            onsource_duration_seconds
+            sample_rate_hertz
         )]
         for onsource_, whitened_injection, injection, m1, m2 in zip(
             onsource,
@@ -122,9 +121,7 @@ def test_generator(
             mass_2_msun[0]
         )
     ]
-    
-    layout = [item for item in plots]
-    
+        
     # Ensure output directory exists
     ensure_directory_exists(output_diretory_path)
     
@@ -157,5 +154,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     # Test IFO noise generator:
-    test_generator()
+    with strategy.scope():
+        test_generator()
     

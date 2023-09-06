@@ -63,7 +63,7 @@ def generate_strain_plot(
     ):
     
     # Parameters:
-    width : int = int(800*duration_seconds)
+    width : int = 1600
     height : int = 600
         
     # Get num samples and check dictionies:
@@ -118,10 +118,66 @@ def generate_strain_plot(
 
     return p
 
+def generate_psd_plot(
+    psd : Dict[str, np.ndarray],
+    frequencies : float = np.ndarray,
+    title : str = "",
+    colors : list = Bright[7]
+    ):
+    
+    # Parameters:
+    width : int = 1600
+    height : int = 600
+        
+    # Get num samples and check dictionies:
+    num_samples = check_ndarrays_same_length(psd)
+    
+    # If inputs are tensors, convert to numpy array:
+    for key, value in psd.items():
+        if isinstance(value, tf.Tensor):
+            psd[key] = value.numpy()
+    
+    # Create data dictionary to use as source:
+    data : Dict = { "frequency" : frequencies }
+    for key, value in psd.items():
+        data[key] = value
+    
+    # Preparing the data:
+    source = ColumnDataSource(data)
+    
+    # Prepare y_axis:
+    y_axis_label = f"PSD"
+    
+    # Create a new plot with a title and axis labels
+    p = \
+        figure(
+            title=title, 
+            x_axis_label="Frequency (Hertz)", 
+            y_axis_label=y_axis_label,
+            width=width,
+            height=height
+        )
+    
+    # Add lines to figure for every line in psd
+    for index, (key, value) in enumerate(psd.items()):
+        p.line(
+            "frequency", 
+            key, 
+            source=source, 
+            line_width=2, 
+            line_color = colors[index],
+            legend_label = key
+        )
+        
+    legend = Legend(location="top_left")
+    p.add_layout(legend)
+    p.legend.click_policy = "hide"
+
+    return p
+
 def generate_spectrogram(
         strain: np.ndarray, 
         sample_rate_hertz: float,
-        duration_seconds: float,
         nperseg: int = 128, 
         noverlap: int = 64
     ) -> figure:
@@ -146,7 +202,7 @@ def generate_spectrogram(
     """
     
     # Parameters:
-    width : int = int(800*duration_seconds)
+    width : int = 1600
     height : int = 600
 
     # Compute the spectrogram

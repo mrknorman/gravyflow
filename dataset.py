@@ -96,7 +96,8 @@ def get_ifo_data(
     for (onsource, offsource, gps_times), (injections_, mask, parameters) \
         in zip(noise, injections):
                 
-        if injections_ is not None:
+        if len(injection_generators):
+            
             # Add injections to waveform scaled by inputted SNR config values:
             onsource, scaled_injections, amplitudes, snrs = \
                 injection_generator.add_injections_to_onsource(
@@ -123,6 +124,7 @@ def get_ifo_data(
                 
         # Whiten data: 
         if ReturnVariables.WHITENED_ONSOURCE in variables_to_return:
+            
             whitened_onsource = \
                 whiten(
                     onsource, 

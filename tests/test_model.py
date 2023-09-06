@@ -168,5 +168,6 @@ if __name__ == "__main__":
     # Set logging level:
     logging.basicConfig(level=logging.INFO)
     
+    # Test Genetic Algorithm Optimiser:
     with strategy.scope():
         test_model()

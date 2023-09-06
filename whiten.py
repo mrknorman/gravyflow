@@ -210,17 +210,18 @@ def fftconvolve_(in1, in2, mode="full"):
             "acceptable mode flags are 'valid', 'same', or 'full'"
         )
 
-@tf.function 
+@tf.function
 def _centered(arr, newsize):
     # Ensure correct dimensionality
     if len(arr.shape) == 1:
         arr = tf.expand_dims(arr, 0)
     # Calculate start and end indices
-    start_ind = (arr.shape[-1] - newsize) // 2
+    arr_shape = tf.shape(arr)
+    start_ind = (arr_shape[-1] - newsize) // 2
     end_ind = start_ind + newsize
     return arr[..., start_ind:end_ind]
 
-@tf.function 
+@tf.function
 def fftconvolve(in1, in2, mode="full"):
     # Extract shapes
     s1 = tf.shape(in1)[-1]
@@ -240,9 +241,8 @@ def fftconvolve(in1, in2, mode="full"):
     elif mode == "valid":
         cropped = _centered(ret, s1 - s2 + 1)
     else:
-        raise ValueError("Acceptable mode flags are 'valid',"
-                         " 'same', or 'full'.")
-
+        raise ValueError("Acceptable mode flags are 'valid', 'same', or 'full'.")
+    
     return cropped
 
 @tf.function 
@@ -294,26 +294,66 @@ def convolve(
     if nfft >= timeseries_new.shape[-1]/2:
         conv = fftconvolve(timeseries_new, fir, mode='same')
     else:
-        nstep = nfft - 2*pad
-        conv[:, :nfft-pad] = fftconvolve(
-            timeseries_new[:, :nfft], 
-            fir, 
-            mode='same'
-        )[:, :nfft-pad]
+        # Initialize
+        nstep = nfft - 2 * pad
+        num_samples, num_timesteps = timeseries_new.shape
+        k = tf.convert_to_tensor(nfft - pad, dtype=tf.int32)
+        final_k = num_timesteps - nfft + pad
+        accumulated_middle_parts = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
 
-        k = nfft - pad
-        while k < timeseries_new.shape[-1] - nfft + pad:
+        # First part
+        first_part = fftconvolve(timeseries_new[:, :nfft], fir, mode="same")[:, :nfft - pad]
+
+        # Define the loop body for tf.while_loop
+        def loop_body(k, accumulated_middle_parts):
             yk = fftconvolve(
-                timeseries_new[:, k-pad:k+nstep+pad], 
-                fir,
-                mode='same'
+                timeseries_new[:, k - pad: k + nstep + pad], fir, mode="same"
             )
-            conv[:, k:k+yk.shape[-1]-2*pad] = yk[:, pad:-pad]
+            updated_parts = accumulated_middle_parts.write(k, yk[:, pad: -pad])
+            k = k + nstep
+            return k, updated_parts
+
+        # Run the loop
+        _, final_middle_parts = tf.while_loop(
+            cond=lambda k, *_: k < final_k,
+            body=loop_body,
+            loop_vars=[k, accumulated_middle_parts]
+        )
+
+        # Stack all middle parts
+        middle_parts = final_middle_parts.stack()
+        
+        middle_parts = tf.reshape(middle_parts, [num_samples, -1])
+
+        # Last part
+        last_part = fftconvolve(timeseries_new[:, -nfft:], fir, mode="same")[:, -nfft + pad:]
+
+        # Combine all
+        conv = tf.concat([first_part, middle_parts, last_part], axis=1)
+        
+        """
+        # Initialize variables
+        nstep = nfft - 2 * pad
+        num_samples, num_timesteps = timeseries_new.shape
+        conv = np.zeros((num_samples, num_timesteps), dtype=timeseries_new.dtype)
+
+        # First part
+        conv[:, :nfft - pad] = \
+            fftconvolve(timeseries_new[:, :nfft], fir, mode="same")[:, :nfft - pad]
+
+        # Middle part
+        k = nfft - pad
+        while k < num_timesteps - nfft + pad:
+            yk = fftconvolve(
+                timeseries_new[:, k - pad : k + nstep + pad], fir, mode="same"
+            )
+            conv[:, k : k + yk.shape[-1] - 2 * pad] = yk[:, pad : -pad]
             k += nstep
 
-        conv[:, -nfft+pad:] = fftconvolve(
-            timeseries_new[:, -nfft:], fir, mode='same'
-        )[:, -nfft+pad:]
+        # Last part
+        conv[:, -nfft + pad :] = \
+            fftconvolve(timeseries_new[:, -nfft:], fir, mode="same")[:, -nfft + pad :]
+        """
 
     return conv
 

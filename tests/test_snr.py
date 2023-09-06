@@ -1,19 +1,33 @@
-from .dataset import get_ifo_data, O3, roll_vector_zero_padding, crop_samples
-from .cuphenom.py.cuphenom import generate_phenom_d
-from gwpy.timeseries import TimeSeries
-from .whiten import whiten
-from .psd import calculate_psd
-from .snr import scale_to_snr
-from .setup import setup_cuda, find_available_GPUs
-from scipy.signal import welch
-from itertools import islice
+#Built-in imports
+from pathlib import Path
+import logging
+
+#Library imports
 import tensorflow as tf
 import numpy as np
-
+from scipy.signal import welch
+from gwpy.timeseries import TimeSeries
 from bokeh.plotting import figure, output_file, save, show
-from bokeh.palettes import Category10
+from bokeh.palettes import Bright
 from bokeh.layouts import gridplot
 from bokeh.models import ColumnDataSource, HoverTool, Legend
+
+# Local imports:
+from ..cuphenom.py.cuphenom import generate_phenom_d
+from ..maths import Distribution, DistributionType, crop_samples
+from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
+from ..injection import (cuPhenomDGenerator, InjectionGenerator, 
+                         WaveformParameters, WaveformGenerator, 
+                         roll_vector_zero_padding)
+from ..plotting import generate_strain_plot
+from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
+                          DataQuality, DataLabel, IFO)
+from ..noise import NoiseObtainer, NoiseType
+from ..whiten import whiten
+from ..psd import calculate_psd
+from ..snr import scale_to_snr
+from ..plotting import generate_strain_plot, generate_spectrogram
+from ..dataset import get_ifo_data, ReturnVariables, get_ifo_data_generator
     
 def plot_psd(
         frequencies, 
@@ -33,32 +47,34 @@ def plot_psd(
     p.line(
         frequencies, 
         onsource_plus_injection_whitened_tf_psd_scipy, 
-        legend_label="Onsource + Injection Whitened Tf PSD", 
+        legend_label="Onsource + Injection Whitened Tensorflow PSD Tensorflow", 
         line_width = 2, 
-        line_color=Category10[5][1]
-    )
-    p.line(
-        frequencies, 
-        onsource_whitened_tf_psd_scipy, 
-        legend_label="Onsource Whitened TF PSD Scipy", 
-        line_width = 2, 
-        line_color=Category10[5][2]
+        line_color=Bright[7][0],
     )
     p.line(
         frequencies, 
         onsource_whitened_tf_psd_tf, 
-        legend_label="Onsource Whitened TF PSD TF", 
+        legend_label="Onsource Whitened Tensorflow PSD Tensorflow", 
         line_width = 2, 
-        line_color=Category10[5][3], 
-        line_dash="dashed"
+        line_color=Bright[7][1]    
     )
+    
+    p.line(
+        frequencies, 
+        onsource_whitened_tf_psd_scipy, 
+        legend_label="Onsource Whitened Tensorflow PSD Scipy", 
+        line_width = 2, 
+        line_color=Bright[7][2],
+        line_dash="dotdash"
+    )
+
     p.line(
         frequencies, 
         onsource_whitened_gwpy_psd_scipy, 
-        legend_label="Onsource Whitened GWPY PSD SciPy", 
+        legend_label="Onsource Whitened GWPy PSD SciPy", 
         line_width = 2, 
-        line_color=Category10[5][4], 
-        line_dash="dashed"
+        line_color=Bright[7][3], 
+        line_dash="dotted"
     )
 
     # Output to static HTML file
@@ -66,394 +82,307 @@ def plot_psd(
 
     # Save the figure
     save(p)
-
-def plot_and_save(background, injection, o_injection, scaled_injection, signal_duration):
-    # convert tensors to numpy arrays
-    background = background.numpy()
-    injection = injection.numpy()
-    scaled_injection = scaled_injection.numpy()
-    o_injection = o_injection.numpy()
-
-    # Prepare output file
-    output_file("timeseries_plot.html")
-
-    # Create a new plot with a title and axis labels
-    p1 = figure(title="Background", x_axis_label='x', y_axis_label='y')
-    p2 = figure(title="Injection", x_axis_label='x', y_axis_label='y')
-    p3 = figure(title="Scaled Injection", x_axis_label='x', y_axis_label='y')
-
-    # Add a line renderer with legend and line thickness
     
-    x = np.linspace(0, signal_duration, len(background))
-    p = figure(width=600, height=400)
-
-    # Here x-values are assumed to be the indices. 
-    # If you have a separate x-array, use that instead.
-
-    # Plot background
-    p.line(x, background, legend_label="Background", line_color=Category10[3][0])
-
-    # Plot injection
-    p.line(x, injection, legend_label="Whitened Injection", line_color=Category10[3][1])
-
-    # Plot scaled_injection
-    p.line(x, scaled_injection, legend_label="Whitened Scaled Injection", line_color=Category10[3][2])
-    
-    p.line(x, o_injection, legend_label="Original Injection", line_color=Category10[4][3])
-
-
-    p.legend.location = "top_left"
-
-    # Save the html
-    save(p)
-    
-def analyse_signal(
-    signal,
-    noise,
-    sample_rate_hertz,
-    crop_duration_seconds,
-    apply_whitening = True,
-    whiten_fft_length_seconds = 4.0,
-    whiten_overlap_seconds = 2.0,
-    psd_fft_length_seconds = 1/32
+def compare_whitening(
+    strain : tf.Tensor,
+    sample_rate_hertz : float,
+    duration_seconds : float,
+    fft_duration_seconds : float = 4.0, 
+    overlap_duration_seconds : float = 2.0
     ):
     
-    signal_gwpy = TimeSeries(signal, sample_rate=sample_rate_hertz)
-    signal_tf = signal
-    
-    if apply_whitening:
-        signal_tf = whiten(
-            signal_tf, 
-            noise, #offsource, 
+    # Tensorflow whitening:
+    whitened_tensorflow = \
+        whiten(
+            strain, 
+            strain, 
             sample_rate_hertz, 
-            fftlength=4.0, 
-            overlap=2.0
+            fft_duration_seconds=4.0, 
+            overlap_duration_seconds=2.0
         )
-        
-        # Create a GWpy TimeSeries object
-        signal_gwpy = signal_gwpy.whiten(fftlength=4.0, overlap=2.0).value
-
-    signals = {"tensorflow": signal_tf, "gwpy": signal_gwpy}
-    psds = {}
     
-    for key, value in signals.items(): 
-        signals[key] = crop_samples(
-            value,
-            crop_duration_seconds,
+    # GWPy whitening:
+    ts = TimeSeries(
+        strain,
+        sample_rate=sample_rate_hertz
+    )
+    whitened_gwpy = \
+        ts.whiten(
+            fftlength=fft_duration_seconds, 
+            overlap=overlap_duration_seconds
+        ).value
+    
+    whitened_tensorflow = \
+        crop_samples(
+            whitened_tensorflow,
+            duration_seconds,
             sample_rate_hertz
         )
-        
-        psds[key] = {}
-            
-        frequencies, psd = \
-            welch(
-                value, 
-                sample_rate_hertz, 
-                nperseg=int(psd_fft_length_seconds*sample_rate_hertz)
-            )
-        
-        psds[key]["scipy"] = psd
-        
-        value = tf.convert_to_tensor(value, dtype = tf.float32)
-        
-        frequencies, psd = \
-            calculate_psd(
-                value, 
-                sample_rate_hertz = sample_rate_hertz, 
-                nperseg=int((1/32)*sample_rate_hertz)
-            )
-        
-        frequencies = frequencies.numpy()
-        psd = psd.numpy()
-        
-        psds[key]["tf"] = psd
-    
-    return frequencies, psds, signals
 
-def plot_results(
-        results_dict, 
-        sample_rate_hertz,
-        whiten_fft_length_seconds,
-        whiten_overlap_seconds,
-        psd_fft_length_seconds
+    whitened_gwpy = crop_samples(
+        whitened_gwpy,
+        duration_seconds,
+        sample_rate_hertz
+        )
+    
+    return whitened_tensorflow, whitened_gwpy
+
+def compare_psd_methods(
+    strain : tf.Tensor, 
+    sample_rate_hertz : float, 
+    nperseg : int
     ):
-    # create a list of colors for the lines
-    colors = ['red', 'blue', 'green', 'purple', 'orange']
+    
+    strain = tf.cast(strain, dtype=tf.float32)
+    
+    frequencies_scipy, strain_psd_scipy = \
+        welch(
+            strain, 
+            sample_rate_hertz, 
+            nperseg=nperseg
+        )
+    
+    frequencies_tensorflow, strain_psd_tensorflow = \
+        calculate_psd(
+            strain, 
+            sample_rate_hertz = sample_rate_hertz, 
+            nperseg=nperseg
+        )
+    
+    assert all(frequencies_scipy == frequencies_tensorflow), "Frequencies not equal."
+    
+    return frequencies_tensorflow, strain_psd_tensorflow, strain_psd_scipy
 
-    # create empty figures for the time series and the PSD
-    p1 = figure(width=800, height=400, title='Time Series')
-    p2 = figure(width=800, height=400, title='PSD')
-    
-    legend1_items = []
-    legend2_items = []
-    for i, (key, result) in enumerate(results_dict.items()):
-        # retrieve the frequencies, PSDs, and signals
-        frequencies, psds, signals = result
+def test_snr(
+    output_diretory_path : Path = Path("./py_ml_data/tests/")
+    ):
 
-        for sig_key in signals.keys():
-            # add the time series line to the time series figure
-            source = ColumnDataSource(data=dict(x=list(range(len(signals[sig_key].numpy()))), y=signals[sig_key].numpy()))
-            ts_line = p1.line('x', 'y', source=source, color=colors[i], line_width=2)
-            legend1_items.append((f"{key}_{sig_key}", [ts_line]))
-            p1.add_tools(HoverTool())
+    # Test Parameters:
+    num_examples_per_generation_batch : int = 2048
+    num_examples_per_batch : int = 1
+    sample_rate_hertz : float = 2048.0
+    onsource_duration_seconds : float = 16.0
+    offsource_duration_seconds : float = 16.0
+    crop_duration_seconds : float = 0.5
+    scale_factor : float = 1.0E21
+    
+    # Setup ifo data acquisition object:
+    ifo_data_obtainer : IFODataObtainer = \
+        IFODataObtainer(
+            ObservingRun.O3, 
+            DataQuality.BEST, 
+            [
+                DataLabel.NOISE, 
+                DataLabel.GLITCHES
+            ],
+            IFO.L1,
+            SegmentOrder.RANDOM,
+            force_acquisition = True,
+            cache_segments = False
+        )
+    
+    # Initilise noise generator wrapper:
+    noise_obtainer: NoiseObtainer = \
+        NoiseObtainer(
+            ifo_data_obtainer = ifo_data_obtainer,
+            noise_type = NoiseType.REAL
+        )
+    
+    generator = \
+        get_ifo_data_generator(
+            # Random Seed:
+            seed= 1000,
+            # Temporal components:
+            sample_rate_hertz=sample_rate_hertz,   
+            onsource_duration_seconds=onsource_duration_seconds,
+            offsource_duration_seconds=offsource_duration_seconds,
+            crop_duration_seconds=crop_duration_seconds,
+            # Noise: 
+            noise_obtainer=noise_obtainer,
+            # Output configuration:
+            num_examples_per_batch=1,
+            input_variables = [
+                ReturnVariables.ONSOURCE, 
+                ReturnVariables.OFFSOURCE
+            ]
+        )
+    
+    background, _ = next(iter(generator))
+            
+    # Generate phenom injection:
+    injection = \
+        generate_phenom_d(
+            num_waveforms = num_examples_per_batch, 
+            mass_1_msun = 30, 
+            mass_2_msun = 30,
+            sample_rate_hertz = sample_rate_hertz,
+            duration_seconds = onsource_duration_seconds,
+            inclination_radians = 1.0,
+            distance_mpc = 100,
+            reference_orbital_phase_in = 0.0,
+            ascending_node_longitude = 100.0,
+            eccentricity = 0.0,
+            mean_periastron_anomaly = 0.0, 
+            spin_1_in = [0.0, 0.0, 0.0],
+            spin_2_in = [0.0, 0.0, 0.0]
+        )
 
-        # add the PSD line to the PSD figure
-        for psd_key in psds.keys():
-            source = ColumnDataSource(data=dict(x=frequencies, y=psds[psd_key]['scipy']))
-            ts_line = p2.line('x', 'y', source=source, color=colors[i], line_width=2)
-            legend2_items.append((f"{key}_{psd_key}", [ts_line]))
-            p2.add_tools(HoverTool())
+    # Scale injection to avoid precision error when converting to 32 bit 
+    # float for tensorflow compatability:
+    injection *= 1.0E21
 
-    # Add the legends to the figures
-    legend1 = Legend(items=legend1_items, location=(10,0))
-    legend2 = Legend(items=legend2_items, location=(10,0))
-
-    p1.add_layout(legend1, 'right')
-    p2.add_layout(legend2, 'right')
+    injection = tf.convert_to_tensor(injection[:, 0], dtype = tf.float32)
+    injection = tf.expand_dims(injection, 0)
     
-    # create a gridplot
-    grid = gridplot([[p1], [p2]])
-    
-    filename = f"psd_comparison_{sample_rate_hertz}_{whiten_fft_length_seconds}_{whiten_overlap_seconds}_{psd_fft_length_seconds}.html"
-    
-    output_file(filename)
-
-    # show the plot
-    show(grid)
-
-if __name__ == "__main__":
-    # Call generatePhenom function
-    
-    gpus = find_available_GPUs(4000, 1)
-    setup_cuda(gpus, max_memory_limit = 2000, verbose = True)  
-    
-    sample_rate_hertz = 2048.0
-    onsource_duration_seconds = 8.0
-    
-    #0.25, 0.5
-    
-    background_noise_iterator = get_ifo_data(
-        time_interval = O3,
-        data_labels = ["noise", "glitches"],
-        seed = 400,
-        force_generation = True,
-        ifo = "L1",
-        sample_rate_hertz = sample_rate_hertz,
-        onsource_duration_seconds = onsource_duration_seconds,
-        num_examples_per_batch = 1,
-        order = "random",
-        apply_whitening = False,
-        input_keys = ["onsource", "offsource"],
-        output_keys = []
+    min_roll : int = int(crop_duration_seconds * sample_rate_hertz)
+    max_roll : int = int(
+        (onsource_duration_seconds/2 + crop_duration_seconds) * sample_rate_hertz
+    )
+        
+    injection = roll_vector_zero_padding(
+        injection, 
+        min_roll, 
+        max_roll
     )
     
-    for background, _ in islice(background_noise_iterator, 1):
-        
-        # Generate phenom injection
-        injection = \
-            generate_phenom_d(
-                num_waveforms = 1, 
-                mass_1_msun = 30, 
-                mass_2_msun = 30,
-                sample_rate_hertz = sample_rate_hertz,
-                duration_seconds = onsource_duration_seconds,
-                inclination_radians = 1.0,
-                distance_mpc = 100,
-                reference_orbital_phase_in = 0.0,
-                ascending_node_longitude = 100.0,
-                eccentricity = 0.0,
-                mean_periastron_anomaly = 0.0, 
-                spin_1_in = [0.0, 0.0, 0.0],
-                spin_2_in = [0.0, 0.0, 0.0]
+    # Get first elements, and return to float 32 to tf functions:
+    injection = injection[0]
+    offsource = tf.cast(background[ReturnVariables.OFFSOURCE][0], tf.float32)
+    onsource = tf.cast(background[ReturnVariables.ONSOURCE][0], tf.float32)
+    
+    # Scale to SNR 30:
+    snr : float = 30.0
+    scaled_injection = \
+        scale_to_snr(
+            injection, 
+            onsource,
+            snr,
+            sample_rate_hertz = sample_rate_hertz, 
+            fft_duration_seconds = 4.0, 
+            overlap_duration_seconds = 0.5,
+        )        
+                
+    onsource_plus_injection = onsource + scaled_injection
+    
+    for_whitening_comparison = {
+        "onsource" : onsource,
+        "onsource_plus_injection" : onsource_plus_injection,
+        "scaled_injection" : scaled_injection,
+        "injection" : injection
+    }
+    
+    whitening_results = {}
+    for key, strain in for_whitening_comparison.items():
+        whitened_tf, whitened_gwpy = \
+            compare_whitening(
+                strain,
+                sample_rate_hertz,
+                onsource_duration_seconds,
+                fft_duration_seconds=4.0,
+                overlap_duration_seconds=2.0
             )
         
-        # Scale injection to avoid precision error when converting to 32 bit 
-        # float for tensorflow compatability:
-        injection *= 1.0E20
-
-        #some kind of projection here
-        injection = tf.convert_to_tensor(injection[:, 0], dtype = tf.float32)
-        injection = tf.expand_dims(injection, 0)
-        
-        injection = roll_vector_zero_padding(injection, int(1.2 * sample_rate_hertz), int(4.8 * sample_rate_hertz))
-        offsource = tf.cast(background["offsource"][0], dtype = tf.float32)
-        onsource  = tf.cast(background["onsource"][0], dtype = tf.float32)
-        injection = injection[0]
-        
-        onsource_duration_seconds = 6.0
-        
-        print(injection.shape)
-
-        scaled_injection = \
-            scale_to_snr(
-                injection, 
-                onsource,
-                30.0,
-                sample_rate_hertz = sample_rate_hertz, 
-                fft_duration_seconds = 4.0, 
-                overlap_duration_seconds = 0.5,
-            )        
-        
-        print(scaled_injection, scaled_injection.shape)
-        
-        onsource_plus_injection = onsource + scaled_injection
-        
-        signals = {
-            "whitened_onsource_plus_injection" : onsource_plus_injection,
-            "whitened_onsource" : onsource, 
-            "whitened_scaled_injection" : scaled_injection, 
-            "whitened_injection": injection, 
-            "injection": injection
+        whitening_results[key] = {
+            "tensorflow" : whitened_tf,
+            "gwpy" : whitened_gwpy
         }
         
-        results_dict = {}
-        for key, value in signals.items():
-            
-            apply_whitening = True,
-            whiten_fft_length_seconds = 4.0,
-            whiten_overlap_seconds = 2.0,
-            psd_fft_length_seconds = 1/32
-            
-            if (key == "injection"):
-                apply_whitening = False
-            
-            results_dict[key] = \
-                analyse_signal(
-                    value,
-                    onsource,
-                    sample_rate_hertz,
-                    onsource_duration_seconds,
-                    apply_whitening = apply_whitening,
-                    whiten_fft_length_seconds = whiten_fft_length_seconds,
-                    whiten_overlap_seconds = whiten_overlap_seconds,
-                    psd_fft_length_seconds = psd_fft_length_seconds
-                )
-            
-        print(results_dict.keys())
-        
-        scaled_injection = crop_samples(
-            scaled_injection,
-            onsource_duration_seconds,
-            sample_rate_hertz
-            )
-                
-        plot_results(
-            results_dict, 
+    layout = [
+        [generate_strain_plot(
+            {
+                "Whitened (tf) Onsouce + Injection": \
+                    whitening_results["onsource_plus_injection"]["tensorflow"],
+                "Whitened (tf) Injection" : \
+                    whitening_results["injection"]["tensorflow"],
+                "Injection": injection
+            },
             sample_rate_hertz,
-            whiten_fft_length_seconds,
-            whiten_overlap_seconds,
-            psd_fft_length_seconds
-        )
-                    
-        onsource_whitened_tf = whiten(
-            onsource, 
-            onsource, #offsource, 
-            sample_rate_hertz, 
-            fftlength=4.0, 
-            overlap=2.0
-        )
-        
-        onsource_whitened_tf = crop_samples(
-            onsource_whitened_tf,
             onsource_duration_seconds,
-            sample_rate_hertz
-            )
-        
-         # Create a GWpy TimeSeries object
-        ts = TimeSeries(onsource, sample_rate=sample_rate_hertz)
-        onsource_whitened_gwpy = ts.whiten(fftlength=4.0, overlap=2.0).value
-        
-        onsource_whitened_gwpy = crop_samples(
-            onsource_whitened_gwpy,
+            title=f"cuPhenomD injection example tf whitening",
+            scale_factor=scale_factor
+        ), 
+        generate_spectrogram(
+            whitening_results["onsource_plus_injection"]["tensorflow"], 
+            sample_rate_hertz,
+        )],
+        [generate_strain_plot(
+            {
+                "Whitened (gwpy) Onsouce + Injection": \
+                    whitening_results["onsource_plus_injection"]["gwpy"],
+                "Whitened (gwpy) Injection" : \
+                    whitening_results["injection"]["gwpy"],
+                "Injection": injection
+            },
+            sample_rate_hertz,
             onsource_duration_seconds,
-            sample_rate_hertz
+            title=f"cuPhenomD injection example gwpy whitening",
+            scale_factor=scale_factor
+        ), 
+        generate_spectrogram(
+            whitening_results["onsource_plus_injection"]["gwpy"], 
+            sample_rate_hertz,
+        )]
+    ]
+    
+    # Ensure output directory exists
+    ensure_directory_exists(output_diretory_path)
+    
+    # Define an output path for the dashboard
+    output_file(output_diretory_path / "whitening_test_plots.html")
+
+    # Arrange the plots in a grid. 
+    grid = gridplot(layout)
+        
+    save(grid)
+    
+    nperseg : int = int((1.0/32.0)*sample_rate_hertz)
+    
+    psd_results = {}
+    common_params = {'sample_rate_hertz': sample_rate_hertz, 'nperseg': nperseg}
+
+    # Compute PSD for different methods and data types
+    for data_type in ["onsource_plus_injection", "onsource"]:
+        for method in ["tensorflow", "gwpy"]:
+            key = f"{data_type}_{method}"
+
+            frequencies, psd_tensorflow, psd_scipy = compare_psd_methods(
+                whitening_results[data_type][method], 
+                **common_params
             )
-        
-        onsource_plus_injection_whitened_tf  = whiten(
-            onsource_plus_injection, 
-            onsource, #offsource, 
-            sample_rate_hertz, 
-            fftlength=4.0, 
-            overlap=2.0
-        )
-        
-        onsource_plus_injection_whitened_tf = crop_samples(
-            onsource_plus_injection_whitened_tf,
-            onsource_duration_seconds,
-            sample_rate_hertz
-            )
-                
-        injection_whitened_tf = whiten(
-            injection, 
-            onsource, #offsource, 
-            sample_rate_hertz, 
-            fftlength=4.0, 
-            overlap=2.0
-        )
-        
-        injection_whitened_tf = crop_samples(
-            injection_whitened_tf,
-            onsource_duration_seconds,
-            sample_rate_hertz
-            )
-        
-        print(injection.shape, scaled_injection.shape)
-        
-        scaled_injection_whitened_tf = whiten(
-            scaled_injection, 
-            onsource, #offsource, 
-            sample_rate_hertz, 
-            fftlength=4.0, 
-            overlap=2.0
-        )
-        
-        scaled_injection_whitened_tf = crop_samples(
-            scaled_injection_whitened_tf,
-            onsource_duration_seconds,
-            sample_rate_hertz
-            )
-        
-        plot_and_save(
-            onsource_plus_injection_whitened_tf, 
-            injection_whitened_tf, 
-            scaled_injection, 
-            scaled_injection_whitened_tf, 
-            onsource_duration_seconds
-        )
-        
-        frequencies, onsource_plus_injection_whitened_tf_psd = \
-            welch(
-                onsource_plus_injection_whitened_tf , 
-                sample_rate_hertz, 
-                nperseg=(1/32)*sample_rate_hertz
-            )
-                
-        frequencies, onsource_whitened_tf_psd_tf = \
-            calculate_psd(
-                onsource_whitened_tf, 
-                sample_rate_hertz = sample_rate_hertz, 
-                nperseg=int((1/32)*sample_rate_hertz)
-            )
-        
-        frequencies, onsource_whitened_gwpy_psd_scipy = \
-            welch(
-                onsource_whitened_gwpy, 
-                sample_rate_hertz, 
-                nperseg=int((1/32)*sample_rate_hertz)
-            )
-                
-        frequencies, onsource_whitened_tf_psd_scipy = \
-            welch(
-                onsource_whitened_tf, 
-                sample_rate_hertz, 
-                nperseg = (1/32)*sample_rate_hertz
-            )
-        
-        plot_psd(
-            frequencies, 
-            onsource_plus_injection_whitened_tf_psd, 
-            onsource_whitened_tf_psd_scipy, 
-            onsource_whitened_tf_psd_tf.numpy(),  
-            onsource_whitened_gwpy_psd_scipy,
-            "psd_test.html"
-        )    
+
+            psd_results[key] = {
+                'tensorflow': psd_tensorflow.numpy(), 
+                'scipy': psd_scipy
+            }
+
+    plot_psd(
+        frequencies.numpy(), 
+        psd_results["onsource_plus_injection_tensorflow"]["tensorflow"],
+        psd_results["onsource_tensorflow"]["scipy"],
+        psd_results["onsource_tensorflow"]["tensorflow"],
+        psd_results["onsource_gwpy"]["scipy"],
+        Path("./py_ml_data/tests/whitening_psds.html")
+    )
+
+if __name__ == "__main__":    
+    # ---- User parameters ---- #
+    
+    # GPU setup:
+    min_gpu_memory_mb : int = 4000
+    num_gpus_to_request : int = 1
+    memory_to_allocate_tf : int = 2000
+    
+    # Setup CUDA
+    gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
+    strategy = setup_cuda(
+        gpus, 
+        max_memory_limit=memory_to_allocate_tf, 
+        logging_level=logging.WARNING
+    )    
+    
+    # Set logging level:
+    logging.basicConfig(level=logging.INFO)
+    
+    # Test SNR:
+    with strategy.scope():
+        test_snr()
