@@ -14,7 +14,8 @@ def check_ndarrays_same_length(
     ):
 
     """
-    Check if all values in the dictionary are np.ndarrays and have the same length.
+    Check if all values in the dictionary are np.ndarrays and have the same 
+    length.
 
     Parameters:
         my_dict (dict): The dictionary to check.

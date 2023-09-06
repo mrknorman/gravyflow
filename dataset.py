@@ -4,6 +4,8 @@ from pathlib import Path
 from dataclasses import dataclass
 
 import tensorflow as tf
+from tensorflow.data.experimental import AutoShardPolicy
+from tensorflow.data import Options
 
 from .noise import NoiseObtainer
 from .injection import (cuPhenomDGenerator, InjectionGenerator, 
@@ -34,14 +36,17 @@ def get_ifo_data(
     ):
     
     # Set defaults here as if initilised as default arguments objects are global
-    if not noise_obtainer:
+    if noise_obtainer is None:
         noise_obtainer = NoiseObtainer()
         
-    if not input_variables:
+    if input_variables is None:
         input_variables = []
         
-    if not output_variables:
+    if output_variables is None:
         output_variables = []
+        
+    if injection_generators is None:
+        injection_generators = []
         
     # Create set with unique elements of input and output variables so that they
     # can be calculated during loop if required:
@@ -134,6 +139,7 @@ def get_ifo_data(
                 onsource_duration_seconds, 
                 sample_rate_hertz
             )
+            whitened_onsource = tf.cast(whitened_onsource, tf.float16)
         
         else:
             whitened_onsource = None
@@ -146,35 +152,31 @@ def get_ifo_data(
                 onsource_duration_seconds, 
                 sample_rate_hertz
             )
+            onsource = tf.cast(onsource, tf.float16)
+            
+        if ReturnVariables.OFFSOURCE in variables_to_return:
+            offsource = tf.cast(offsource, tf.float16)
+            
+        if ReturnVariables.GPS_TIME in variables_to_return:
+            gps_times = tf.cast(gps_times, tf.float64),
                 
         # Construct dictionary:
-        input_dict = create_variable_dictionary(
-            input_variables,
-            onsource,
-            whitened_onsource,
-            offsource,
-            gps_times,
-            scaled_injections,
-            whitened_injections,
-            mask,
-            snrs,
-            amplitudes,
-            parameters
-        )
-        output_dict = create_variable_dictionary(
-            output_variables,
-            onsource,
-            whitened_onsource,
-            offsource,
-            gps_times,
-            scaled_injections,
-            whitened_injections,
-            mask,
-            snrs,
-            amplitudes,
-            parameters
-        )
-        
+        input_dict, output_dict = [
+            create_variable_dictionary(
+                var_list,
+                onsource,
+                whitened_onsource,
+                offsource,
+                gps_times,
+                scaled_injections,
+                whitened_injections,
+                mask,
+                snrs,
+                amplitudes,
+                parameters
+            ) for var_list in [input_variables, output_variables]
+        ]
+                
         yield (input_dict, output_dict)
 
 def create_variable_dictionary(
@@ -192,21 +194,168 @@ def create_variable_dictionary(
     ):
 
     operations = {
-        ReturnVariables.ONSOURCE: lambda: tf.cast(onsource, tf.float16),
-        ReturnVariables.WHITENED_ONSOURCE: lambda: tf.cast(whitened_onsource, tf.float16),
-        ReturnVariables.OFFSOURCE: lambda: tf.cast(offsource, tf.float16),
-        ReturnVariables.GPS_TIME: lambda: tf.cast(gps_times, tf.float64),
-        ReturnVariables.INJECTIONS: lambda: injections,
-        ReturnVariables.WHITENED_INJECTIONS: lambda: whitened_injections,
-        ReturnVariables.INJECTION_MASKS: lambda: mask,
-        ReturnVariables.SNR: lambda: snrs,
-        ReturnVariables.AMPLITUDE: lambda: amplitudes
+        ReturnVariables.ONSOURCE: onsource,
+        ReturnVariables.WHITENED_ONSOURCE: whitened_onsource,
+        ReturnVariables.OFFSOURCE: offsource,
+        ReturnVariables.GPS_TIME: gps_times,
+        ReturnVariables.INJECTIONS: injections,
+        ReturnVariables.WHITENED_INJECTIONS: whitened_injections,
+        ReturnVariables.INJECTION_MASKS: mask,
+        ReturnVariables.SNR: snrs,
+        ReturnVariables.AMPLITUDE: amplitudes
+    }
+
+    # Extend operations with any relevant keys from injection_parameters
+    operations.update({key: value for key, value in injection_parameters.items() if key in return_variables})
+
+    return {key: operations[key] for key in return_variables if key in operations}
+
+def get_ifo_data_generator(
+        seed: int = 1000,
+        sample_rate_hertz: float = 2048.0,
+        onsource_duration_seconds: float = 1.0,
+        offsource_duration_seconds: float = 16.0,
+        crop_duration_seconds: float = 0.5,
+        scale_factor: float = 1.0E21,
+        noise_obtainer: NoiseObtainer = None,
+        injection_generators: List[Union[cuPhenomDGenerator, WNBGenerator]] = None,
+        num_examples_per_generation_batch: int = 2048,
+        num_examples_per_batch: int = 1,
+        input_variables: List = None,
+        output_variables: List = None
+) -> tf.data.Dataset:
+    """
+    Generates a TensorFlow dataset with Interferometer data.
+    
+    Parameters:
+        seed (int): Random seed.
+        sample_rate_hertz (float): Sample rate in Hz.
+        onsource_duration_seconds (float): On-source duration in seconds.
+        offsource_duration_seconds (float): Off-source duration in seconds.
+        crop_duration_seconds (float): Crop duration in seconds.
+        scale_factor (float): Scale factor.
+        noise_obtainer (NoiseObtainer): Object to obtain noise.
+        injection_generators (list): List of injection generators.
+        num_examples_per_generation_batch (int): Number of examples per generation batch.
+        num_examples_per_batch (int): Number of examples per batch.
+        input_variables (list): List of input variables.
+        output_variables (list): List of output variables.
+    
+    Returns:
+        tf.data.Dataset: TensorFlow Dataset object.
+    """
+    
+    if input_variables is None:
+        input_variables = []
+        
+    if output_variables is None:
+        output_variables = []
+    
+    # Set defaults here as if initilised as default arguments objects are global
+    if injection_generators is None:
+        injection_generators = []
+    elif not isinstance(injection_generators, list):
+        injection_generators = [injection_generators]
+
+    num_onsource_samples = int(onsource_duration_seconds * sample_rate_hertz)
+    num_offsource_samples = int(offsource_duration_seconds * sample_rate_hertz)
+    num_injection_configs = len(injection_generators)
+
+    output_signature_dict = {
+        ReturnVariables.ONSOURCE:
+            tf.TensorSpec(
+                shape=(num_examples_per_batch, num_onsource_samples), 
+                dtype=tf.float16
+            ),
+        ReturnVariables.WHITENED_ONSOURCE: 
+            tf.TensorSpec(
+                shape=(num_examples_per_batch, num_onsource_samples),
+                dtype=tf.float16
+            ),
+        ReturnVariables.OFFSOURCE: 
+            tf.TensorSpec(
+                shape=(num_examples_per_batch, num_offsource_samples), 
+                dtype=tf.float16
+            ),
+        ReturnVariables.GPS_TIME: 
+            tf.TensorSpec(
+                shape=(num_examples_per_batch,), 
+                dtype=tf.int64
+            ),
+        ReturnVariables.INJECTIONS: 
+            tf.TensorSpec(
+                shape=(
+                    num_injection_configs, 
+                    num_examples_per_batch, 
+                    num_onsource_samples
+                ),
+                dtype=tf.float16
+            ),
+        ReturnVariables.WHITENED_INJECTIONS: 
+            tf.TensorSpec(
+                shape=(
+                    num_injection_configs, 
+                    num_examples_per_batch, 
+                    num_onsource_samples
+                ),
+                dtype=tf.float16
+            ),
+        ReturnVariables.INJECTION_MASKS: 
+            tf.TensorSpec(
+                shape=(num_injection_configs, num_examples_per_batch), 
+                dtype=tf.bool
+            ),
+        ReturnVariables.SNR:
+            tf.TensorSpec(
+                shape=(num_injection_configs, num_examples_per_batch), 
+                dtype=tf.float64
+            ),
+        ReturnVariables.AMPLITUDE: 
+            tf.TensorSpec(
+                shape=(num_injection_configs, num_examples_per_batch), 
+                dtype=tf.float64
+            )
     }
     
-    for key, value in injection_parameters.items():
-        if key in return_variables:
-            operations[key] = lambda key=key: injection_parameters[key]
-            
-    return_dict = {key: operations[key]() for key in return_variables if key in operations}
-        
-    return {key: operations[key]() for key in return_variables if key in operations}
+    parameters_to_return = {
+        item for item in (input_variables + output_variables) if \
+        isinstance(item.value, WaveformParameter)
+    }
+
+    output_signature_dict.update({
+        item: tf.TensorSpec(
+            shape=(
+                num_injection_configs, 
+                num_examples_per_batch * item.value.shape[-1]
+            ),
+            dtype=tf.float32
+        ) for item in parameters_to_return
+    })
+
+    output_signature = (
+        {k: output_signature_dict[k] for k in input_variables},
+        {k: output_signature_dict[k] for k in output_variables}
+    )
+
+    generator = lambda: get_ifo_data(
+        seed=seed,
+        sample_rate_hertz=sample_rate_hertz,
+        onsource_duration_seconds=onsource_duration_seconds,
+        offsource_duration_seconds=offsource_duration_seconds,
+        crop_duration_seconds=crop_duration_seconds,
+        scale_factor=scale_factor,
+        noise_obtainer=noise_obtainer,
+        injection_generators=injection_generators,
+        num_examples_per_generation_batch=num_examples_per_generation_batch,
+        num_examples_per_batch=num_examples_per_batch,
+        input_variables=input_variables,
+        output_variables=output_variables
+    )
+
+    options = tf.data.Options()
+    options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
+
+    return tf.data.Dataset.from_generator(
+        generator=generator,
+        output_signature=output_signature
+    ).with_options(options)

@@ -17,7 +17,7 @@ from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun,
                           DataQuality, DataLabel, IFO)
 from ..noise import NoiseObtainer, NoiseType
 from ..plotting import generate_strain_plot, generate_spectrogram
-from ..dataset import get_ifo_data, ReturnVariables
+from ..dataset import get_ifo_data, ReturnVariables, get_ifo_data_generator
 
 def test_generator(
     num_tests : int = 32,
@@ -64,7 +64,7 @@ def test_generator(
             noise_type = NoiseType.REAL
         )
     
-    generator = get_ifo_data(    
+    generator = get_ifo_data_generator(
         # Random Seed:
         seed= 1000,
         # Temporal components:
@@ -88,7 +88,7 @@ def test_generator(
         ],
     )
     
-    input_dict, output_dict = next(generator)
+    input_dict, output_dict = next(iter(generator))
         
     onsource = input_dict[ReturnVariables.WHITENED_ONSOURCE].numpy()
     injections = input_dict[ReturnVariables.INJECTIONS].numpy()

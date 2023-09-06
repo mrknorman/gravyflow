@@ -30,19 +30,23 @@ def replace_placeholders(
 
 @dataclass 
 class ReturnVariable:
-    index : str
+    index : int
     shape: tuple = (1,)
 
 class ReturnVariables(Enum):
-    ONSOURCE = ReturnVariable(auto())
-    WHITENED_ONSOURCE = ReturnVariable(auto())
-    OFFSOURCE = ReturnVariable(auto())
-    GPS_TIME = ReturnVariable(auto())
-    INJECTIONS = ReturnVariable(auto())
-    WHITENED_INJECTIONS = ReturnVariable(auto())
-    INJECTION_MASKS = ReturnVariable(auto())
-    SNR = ReturnVariable(auto())
-    AMPLITUDE = ReturnVariable(auto())
+    ONSOURCE = ReturnVariable(0)
+    WHITENED_ONSOURCE = ReturnVariable(1)
+    OFFSOURCE = ReturnVariable(2)
+    GPS_TIME = ReturnVariable(3)
+    INJECTIONS = ReturnVariable(4)
+    WHITENED_INJECTIONS = ReturnVariable(5)
+    INJECTION_MASKS = ReturnVariable(6)
+    SNR = ReturnVariable(7)
+    AMPLITUDE = ReturnVariable(8)
+    
+    def __lt__(self, other):
+        # Implement less-than logic
+        return self.value.index < other.value.index
     
 @dataclass
 class WaveformGenerator:
@@ -102,16 +106,16 @@ class WaveformParameter:
     shape: tuple = (1,)
     
 class WaveformParameters(Enum):
-    MASS_1_MSUN = WaveformParameter(auto())
-    MASS_2_MSUN = WaveformParameter(auto())
-    INCLINATION_RADIANS = WaveformParameter(auto())
-    DISTANCE_MPC = WaveformParameter(auto())
-    REFERENCE_ORBITAL_PHASE_IN = WaveformParameter(auto())
-    ASCENDING_NODE_LONGITUDE = WaveformParameter(auto())
-    ECCENTRICITY = WaveformParameter(auto())
-    MEAN_PERIASTRON_ANOMALY = WaveformParameter(auto())
-    SPIN_1_IN = WaveformParameter(auto(), (3,))
-    SPIN_2_IN = WaveformParameter(auto(), (3,))
+    MASS_1_MSUN = WaveformParameter(100)
+    MASS_2_MSUN = WaveformParameter(101)
+    INCLINATION_RADIANS = WaveformParameter(102)
+    DISTANCE_MPC = WaveformParameter(103)
+    REFERENCE_ORBITAL_PHASE_IN = WaveformParameter(104)
+    ASCENDING_NODE_LONGITUDE = WaveformParameter(105)
+    ECCENTRICITY = WaveformParameter(106)
+    MEAN_PERIASTRON_ANOMALY = WaveformParameter(107)
+    SPIN_1_IN = WaveformParameter(108, (3,))
+    SPIN_2_IN = WaveformParameter(109, (3,))
     
     @classmethod
     def get(cls, key):
@@ -121,6 +125,10 @@ class WaveformParameters(Enum):
             raise ValueError(f"{key} not found in WaveformParameters")
         
         return member
+    
+    def __lt__(self, other):
+        # Implement less-than logic
+        return self.value.index < other.value.index
 
 @dataclass
 class WNBGenerator(WaveformGenerator):
