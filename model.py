@@ -807,8 +807,8 @@ class Population:
 
             # Build the model with input shape (input_dim,)
             builder.build_model(
-                input_shape=(input_size,), 
-                output_shape = output_size
+                input_config={}, 
+                output_config={}
             )
             population.append(builder)
             builder.summary()

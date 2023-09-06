@@ -147,7 +147,7 @@ if __name__ == "__main__":
     
     # Setup CUDA
     gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    stratergy = setup_cuda(
+    strategy = setup_cuda(
         gpus, 
         max_memory_limit = memory_to_allocate_tf, 
         logging_level=logging.WARNING

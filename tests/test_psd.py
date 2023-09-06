@@ -24,9 +24,7 @@ def test_welch_method():
                y_axis_type="log", plot_width=800, plot_height=400)
     p.line(f_scipy, Pxx_scipy, legend_label="scipy", line_color="blue")
     p.line(f_tf, Pxx_tf, legend_label="tensorflow", line_color="red", line_dash="dashed")
-    
-    print(f_tf, Pxx_tf)
-    
+        
     # Specify the output file and save the plot
     output_file("./py_ml_data/psd_test.html")
     save(p)
