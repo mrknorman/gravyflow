@@ -25,7 +25,8 @@ def get_ifo_data(
         # Scale factor:
         scale_factor : float = 1.0E21,
         # Noise: 
-        noise_obtainer : NoiseObtainer = None ,
+        noise_obtainer : NoiseObtainer = None,
+        group : str = "train",
         # Injections:
         injection_generators: List[Union[cuPhenomDGenerator, WNBGenerator]] = None, 
         num_examples_per_generation_batch : int = 2048,
@@ -48,6 +49,9 @@ def get_ifo_data(
     if injection_generators is None:
         injection_generators = []
         
+    if not isinstance(injection_generators, list):
+        injection_generators = [injection_generators]
+    
     # Create set with unique elements of input and output variables so that they
     # can be calculated during loop if required:
     variables_to_return = set(input_variables + output_variables)
@@ -68,7 +72,8 @@ def get_ifo_data(
             crop_duration_seconds,
             offsource_duration_seconds,
             num_examples_per_batch,
-            scale_factor
+            scale_factor,
+            group
         )
     
     # Create Injection Generator    
@@ -220,6 +225,7 @@ def get_ifo_dataset(
         crop_duration_seconds: float = 0.5,
         scale_factor: float = 1.0E21,
         noise_obtainer: NoiseObtainer = None,
+        group : str = "train",
         injection_generators: List[Union[cuPhenomDGenerator, WNBGenerator]] = None,
         num_examples_per_generation_batch: int = 2048,
         num_examples_per_batch: int = 1,
@@ -347,6 +353,7 @@ def get_ifo_dataset(
         crop_duration_seconds=crop_duration_seconds,
         scale_factor=scale_factor,
         noise_obtainer=noise_obtainer,
+        group=group,
         injection_generators=injection_generators,
         num_examples_per_generation_batch=num_examples_per_generation_batch,
         num_examples_per_batch=num_examples_per_batch,

@@ -623,9 +623,9 @@ class IFODataObtainer:
                     sample_rate_hertz,
                     segment_key
                 )
-
+            
             if segment is not None:
-                
+                                
                 # Save aquired segment if it does not alread exist in the local file:
                 if self.cache_segments:
                     with open_hdf5_file(self.file_path, mode = "w") as segment_file:
@@ -641,7 +641,7 @@ class IFODataObtainer:
                 
                 # Scale to reduce precision errors:
                 segment = segment.scale(scale_factor)  
-
+                                
                 yield segment
 
             else:
@@ -828,9 +828,13 @@ class IFODataObtainer:
                     )
                 )
             
+            assert num_batches_in_segment > 0, \
+                "Num_batches_in_segment should be greater than 0. Check batch size."
+            
             # Yeild offsource, onsource, and gps_times for unique batches untill
             # current segment is exausted:
             for batch_index in range(num_batches_in_segment):
+                
                 yield segment.random_subsection(
                         num_onsource_samples, 
                         num_offsource_samples, 

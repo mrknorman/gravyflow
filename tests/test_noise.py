@@ -1,10 +1,12 @@
 # Built-In imports:
 from pathlib import Path
 import logging
+from itertools import islice
 
 # Library imports:
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
+from tqdm import tqdm
 
 # Local imports:
 from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
@@ -12,6 +14,61 @@ from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun,
                           DataQuality, DataLabel, IFO)
 from ..noise import NoiseObtainer, NoiseType
 from ..plotting import generate_strain_plot
+
+def test_iteration(
+    num_tests : int = int(1.0E3)
+    ):
+    
+    # Test parameters:
+    sample_rate_hertz : float = 1024.0
+    onsource_duration_seconds : float = 1.0    
+    crop_duration_seconds : float = 0.5
+    offsource_duration_seconds : float = 4.0
+    num_examples_per_batch : int = 32
+    scale_factor : float = 1.0E20
+    
+    # Setup ifo data acquisition object:
+    ifo_data_obtainer : IFODataObtainer = \
+        IFODataObtainer(
+            ObservingRun.O3, 
+            DataQuality.BEST, 
+            [
+                DataLabel.NOISE, 
+                DataLabel.GLITCHES
+            ],
+            IFO.L1,
+            SegmentOrder.RANDOM,
+            force_acquisition=True,
+            cache_segments=False,
+            logging_level=logging.INFO
+        )
+    
+    # Initilise noise generator wrapper:
+    noise : NoiseObtainer = \
+        NoiseObtainer(
+            ifo_data_obtainer = ifo_data_obtainer,
+            noise_type = NoiseType.REAL
+        )
+    
+    # Create generator:
+    generator : Iterator = \
+        noise.init_generator(
+            sample_rate_hertz,
+            onsource_duration_seconds,
+            crop_duration_seconds,
+            offsource_duration_seconds,
+            num_examples_per_batch,
+            scale_factor
+        )
+    
+    logging.info("Start iteration tests...")
+    for index, _ in tqdm(enumerate(islice(generator, num_tests))):
+        pass
+    
+    assert index == num_tests - 1, \
+        "Warning! Noise generator does not iterate the required number of batches"
+    
+    logging.info("Complete")
 
 def test_real_noise(
         num_tests : int = 8, 
@@ -111,7 +168,7 @@ if __name__ == "__main__":
     
     # Setup CUDA
     gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    stratergy = setup_cuda(
+    strategy = setup_cuda(
         gpus, 
         max_memory_limit = memory_to_allocate_tf, 
         logging_level=logging.WARNING
@@ -121,6 +178,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     # Test IFO noise generator:
-    test_real_noise()
+    with strategy.scope():
+        test_iteration()
+        test_real_noise()
     
     

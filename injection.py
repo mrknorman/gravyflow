@@ -212,33 +212,37 @@ class InjectionGenerator:
             
         elif not isinstance(self.configs, list):
             self.configs = [self.configs]
-                    
-        injections = []
-        mask = []
-        parameters = {key : [] for key in self.variables_to_return}
-        for config in self.configs:
-                        
-            injection_, mask_, parameters_ = \
-                next(self.generate_one(config))
             
-            injections.append(injection_)
-            mask.append(mask_)
             
-            for key in parameters:
-                if key in parameters_:
-                    parameters[key].append(parameters_[key])
-                else:
-                    parameters[key].append(
-                        tf.zeros([key.shape[-1] * num_examples_per_batch])
-                    )
-                    
-        injections = tf.stack(injections)
-        mask = tf.stack(mask)
+        iterators = [self.generate_one(config) for config in self.configs]
         
-        for key, value in parameters.items():
-            parameters[key] = tf.stack(value)
-            
-        yield injections, mask, parameters
+        while 1: 
+            injections = []
+            mask = []
+            parameters = {key : [] for key in self.variables_to_return}
+            for iterator in iterators:
+
+                injection_, mask_, parameters_ = \
+                    next(iterator)
+
+                injections.append(injection_)
+                mask.append(mask_)
+
+                for key in parameters:
+                    if key in parameters_:
+                        parameters[key].append(parameters_[key])
+                    else:
+                        parameters[key].append(
+                            tf.zeros([key.shape[-1] * num_examples_per_batch])
+                        )
+
+            injections = tf.stack(injections)
+            mask = tf.stack(mask)
+
+            for key, value in parameters.items():
+                parameters[key] = tf.stack(value)
+
+            yield injections, mask, parameters
     
     def generate_one(self, config):
         # Create default empty list for requested parameter returns:
@@ -274,21 +278,21 @@ class InjectionGenerator:
                     config.injection_chance
                 )
             num_waveforms = tf.reduce_sum(tf.cast(mask, tf.int32)).numpy()
-            
+
             waveforms, parameters = \
                 config.generate(
                     num_waveforms, 
                     self.sample_rate_hertz,
                     total_duration_seconds
                 )
-            
+
             # Convert to tensorflow tensor:
             waveforms = \
                 tf.convert_to_tensor(waveforms, dtype = tf.float32)
-            
+
             # Scale by arbitrary factor to reduce chance of precision errors:
             waveforms *= self.scale_factor
-            
+
             #Roll Tensor to randomise start time:
             waveforms = \
                 roll_vector_zero_padding( 
@@ -296,15 +300,15 @@ class InjectionGenerator:
                     min_roll_num_samples, 
                     max_roll_num_samples
                 )
-            
+
             # Create zero filled injections to fill spots where injection did 
             # not generate due to injection masks:
             injections = expand_tensor(waveforms, mask)
-            
+
             # If no parameters requested, skip parameter processing and return
             # empty dict:
             if self.variables_to_return:
-                
+
                 # Retrive parameters that are requested to reduce unneccisary
                 # post processing:
                 reduced_parameters = {
@@ -312,11 +316,11 @@ class InjectionGenerator:
                         for key, value in parameters.items() 
                         if WaveformParameters.get(key) in self.variables_to_return
                 }
-                
+
                 # Conver to tensor and expand parameter dims for remaining parameters:
                 expanded_parameters = {}
                 for key, parameter in reduced_parameters.items():
-                    
+
                     # Currenly only possible for parameters with same lenght as 
                     # num_waveforms:
                     if key.value.shape[-1] == 1:
@@ -327,21 +331,21 @@ class InjectionGenerator:
                                 parameter, 
                                 mask
                             )
-                                    
+
                 parameters = batch_injection_parameters(
                     expanded_parameters,
                     self.num_examples_per_batch,
                     num_batches
                 )
-                
+
             else:
                 parameters = [{}] * num_batches
-            
+
             # Split generation batches into smaller batches of size 
             # num_examples_per_batch:
             injections = batch_tensor(injections, self.num_examples_per_batch)
             mask = batch_tensor(mask, self.num_examples_per_batch)
-            
+
             for injections_, mask_, parameters_ in zip(injections, mask, parameters):
                 yield injections_, mask_, parameters_
                 

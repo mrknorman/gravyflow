@@ -1,12 +1,14 @@
 # Built-In imports:
 import logging
 from pathlib import Path
+from itertools import islice
 
 # Library imports:
 import numpy as np
 import tensorflow as tf
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
+from tqdm import tqdm
 
 # Local imports:
 from ..maths import Distribution, DistributionType
@@ -17,8 +19,114 @@ from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun,
                           DataQuality, DataLabel, IFO)
 from ..noise import NoiseObtainer, NoiseType
 from ..plotting import generate_strain_plot, generate_spectrogram
-from ..dataset import get_ifo_dataset, ReturnVariables
+from ..dataset import get_ifo_dataset, get_ifo_data, ReturnVariables
 
+def test_iteration(
+    num_tests : int = int(1.0E3)
+    ):
+    
+     # Test Parameters:
+    num_examples_per_generation_batch : int = 2048
+    num_examples_per_batch : int = 32
+    sample_rate_hertz : float = 2048.0
+    onsource_duration_seconds : float = 1.0
+    offsource_duration_seconds : float = 16.0
+    crop_duration_seconds : float = 0.5
+    scale_factor : float = 1.0E21
+    
+    # Load injection config:
+    phenom_d_generator_high_mass : cuPhenomDGenerator = \
+        WaveformGenerator.load(
+            Path("./py_ml_tools/tests/injection_parameters.json"), 
+            sample_rate_hertz, 
+            onsource_duration_seconds,
+            snr=Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM)
+        )
+    
+    # Setup ifo data acquisition object:
+    ifo_data_obtainer : IFODataObtainer = \
+        IFODataObtainer(
+            ObservingRun.O3, 
+            DataQuality.BEST, 
+            [
+                DataLabel.NOISE, 
+                DataLabel.GLITCHES
+            ],
+            IFO.L1,
+            SegmentOrder.RANDOM,
+            force_acquisition = True,
+            cache_segments = False
+        )
+    
+    # Initilise noise generator wrapper:
+    noise_obtainer: NoiseObtainer = \
+        NoiseObtainer(
+            ifo_data_obtainer = ifo_data_obtainer,
+            noise_type = NoiseType.REAL
+        )
+    
+    data : tf.data.Dataset = get_ifo_data(
+        # Random Seed:
+        seed= 1000,
+        # Temporal components:
+        sample_rate_hertz=sample_rate_hertz,   
+        onsource_duration_seconds=onsource_duration_seconds,
+        offsource_duration_seconds=offsource_duration_seconds,
+        crop_duration_seconds=crop_duration_seconds,
+        # Noise: 
+        noise_obtainer=noise_obtainer,
+        # Injections:
+        injection_generators=phenom_d_generator_high_mass, 
+        # Output configuration:
+        num_examples_per_batch=num_examples_per_batch,
+        input_variables = [
+            ReturnVariables.WHITENED_ONSOURCE, 
+            ReturnVariables.INJECTION_MASKS, 
+            ReturnVariables.INJECTIONS,
+            ReturnVariables.WHITENED_INJECTIONS,
+            WaveformParameters.MASS_1_MSUN, 
+            WaveformParameters.MASS_2_MSUN
+        ],
+    )
+    
+    logging.info("Start iteration tests...")
+    for index, _ in tqdm(enumerate(islice(data, num_tests))):
+        pass
+    logging.info("Complete.")
+    
+    assert index == num_tests, \
+        "Warning! Data does not iterate the required number of batches"
+    
+    dataset : tf.data.Dataset = get_ifo_dataset(
+        # Random Seed:
+        seed= 1000,
+        # Temporal components:
+        sample_rate_hertz=sample_rate_hertz,   
+        onsource_duration_seconds=onsource_duration_seconds,
+        offsource_duration_seconds=offsource_duration_seconds,
+        crop_duration_seconds=crop_duration_seconds,
+        # Noise: 
+        noise_obtainer=noise_obtainer,
+        # Injections:
+        injection_generators=phenom_d_generator_high_mass, 
+        # Output configuration:
+        num_examples_per_batch=num_examples_per_batch,
+        input_variables = [
+            ReturnVariables.WHITENED_ONSOURCE, 
+            ReturnVariables.INJECTION_MASKS, 
+            ReturnVariables.INJECTIONS,
+            ReturnVariables.WHITENED_INJECTIONS,
+            WaveformParameters.MASS_1_MSUN, 
+            WaveformParameters.MASS_2_MSUN
+        ],
+    )
+    
+    for index, _ in tqdm(enumerate(dataset.take(num_tests))):
+        pass
+    
+    assert index == num_tests - 1, \
+        "Warning! Dataset does not iterate the required number of batches"
+    
 def test_dataset(
     num_tests : int = 32,
     output_diretory_path : Path = Path("./py_ml_data/tests/")
@@ -155,5 +263,5 @@ if __name__ == "__main__":
     
     # Test IFO noise dataset:
     with strategy.scope():
+        test_iteration()
         test_dataset()
-    

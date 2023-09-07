@@ -39,7 +39,8 @@ class NoiseObtainer:
             crop_duration_seconds : float,
             offsource_duration_seconds : float,
             num_examples_per_batch : float,
-            scale_factor : float = 1.0
+            scale_factor : float = 1.0,
+            group : str = "train"
         ) -> Iterator:
         
         # Configure noise based on type
@@ -76,7 +77,7 @@ class NoiseObtainer:
                     
                     self.ifo_data_obtainer.get_valid_segments(
                         self.groups,
-                        "train"
+                        group
                     )
                 
                     # Setup noise_file_path, file path is created from

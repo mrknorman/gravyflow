@@ -1,11 +1,13 @@
 # Built-In imports:
 import logging
 from pathlib import Path
+from itertools import islice
 
 # Library imports:
 import numpy as np
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
+from tqdm import tqdm
 
 # Local imports:
 from ..maths import Distribution, DistributionType
@@ -14,6 +16,48 @@ from ..injection import (cuPhenomDGenerator, InjectionGenerator,
                          WaveformParameters, WaveformGenerator)
 from ..plotting import generate_strain_plot
 
+def test_iteration(
+    num_tests : int = int(1.0E3)
+    ):
+    
+     # Test Parameters:
+    num_examples_per_generation_batch : int = 2048
+    num_examples_per_batch : int = num_tests
+    sample_rate_hertz : float = 2048.0
+    onsource_duration_seconds : float = 1.0
+    crop_duration_seconds : float = 0.5
+    scale_factor : float = 1.0E21
+    
+    phenom_d_generator : cuPhenomDGenerator = \
+        WaveformGenerator.load(
+            Path("./py_ml_tools/tests/injection_parameters.json"), 
+            sample_rate_hertz, 
+            onsource_duration_seconds
+        )
+    
+    generator : InjectionGenerator = \
+        InjectionGenerator(
+            phenom_d_generator,
+            sample_rate_hertz,
+            onsource_duration_seconds,
+            crop_duration_seconds,
+            num_examples_per_generation_batch,
+            num_examples_per_batch,
+            scale_factor,
+            variables_to_return = \
+                [WaveformParameters.MASS_1_MSUN, WaveformParameters.MASS_2_MSUN]
+        )
+    
+    logging.info("Start iteration tests...")
+    for index, _ in tqdm(enumerate(islice(generator.generate(), num_tests))):
+        pass
+    
+    assert index == num_tests - 1, \
+        "Warning! Injection generator does not iterate the required number of batches"
+    
+    logging.info("Compete!")
+
+    
 def test_phenom_d_injection(
     num_tests : int = 10,
     output_diretory_path : Path = Path("./py_ml_data/tests/")
@@ -124,5 +168,7 @@ if __name__ == "__main__":
     # Set logging level:
     logging.basicConfig(level=logging.INFO)
     
-    # Test IFO noise generator:
-    test_phenom_d_injection()
+    # Test injection generation:
+    with strategy.scope():
+        test_iteration()
+        test_phenom_d_injection()
