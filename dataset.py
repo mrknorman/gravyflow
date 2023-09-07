@@ -335,8 +335,8 @@ def get_ifo_data_generator(
     })
 
     output_signature = (
-        {k: output_signature_dict[k.name] for k in input_variables},
-        {k: output_signature_dict[k.name] for k in output_variables}
+        {k.name: output_signature_dict[k.name] for k in input_variables},
+        {k.name: output_signature_dict[k.name] for k in output_variables}
     )
 
     generator = lambda: get_ifo_data(

@@ -1,5 +1,6 @@
 # Standard library
 from pathlib import Path
+import logging
 
 # Third-party libraries
 import numpy as np
@@ -74,4 +75,25 @@ def test_welch_method() -> None:
     save(plot)
 
 if __name__ == "__main__":
-    test_welch_method()
+        
+    # ---- User parameters ---- #
+    
+    # GPU setup:
+    min_gpu_memory_mb : int = 4000
+    num_gpus_to_request : int = 1
+    memory_to_allocate_tf : int = 2000
+    
+    # Setup CUDA
+    gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
+    strategy = setup_cuda(
+        gpus, 
+        max_memory_limit = memory_to_allocate_tf, 
+        logging_level=logging.WARNING
+    )    
+    
+    # Set logging level:
+    logging.basicConfig(level=logging.INFO)
+    
+    # Test IFO noise generator:
+    with strategy.scope():
+        test_welch_method()

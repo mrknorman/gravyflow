@@ -1,8 +1,10 @@
-from .validate import validate_far, validate_efficiency
-from .setup import setup_cuda, find_available_GPUs
+import logging
+
 import tensorflow as tf
 from tensorflow.keras import mixed_precision
-import logging
+
+from ..validate import validate_far, validate_efficiency
+from ..setup import setup_cuda, find_available_GPUs
 
 if __name__ == "__main__":
     
