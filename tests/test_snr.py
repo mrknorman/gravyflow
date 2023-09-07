@@ -27,7 +27,7 @@ from ..whiten import whiten
 from ..psd import calculate_psd
 from ..snr import scale_to_snr
 from ..plotting import generate_strain_plot, generate_spectrogram
-from ..dataset import get_ifo_data, ReturnVariables, get_ifo_data_generator
+from ..dataset import ReturnVariables, get_ifo_dataset
     
 def plot_psd(
         frequencies, 
@@ -188,8 +188,7 @@ def test_snr(
             noise_type = NoiseType.REAL
         )
     
-    generator = \
-        get_ifo_data_generator(
+    dataset : tf.data.Dataset = get_ifo_dataset(
             # Random Seed:
             seed= 1000,
             # Temporal components:
@@ -207,7 +206,7 @@ def test_snr(
             ]
         )
     
-    background, _ = next(iter(generator))
+    background, _ = next(iter(dataset))
             
     # Generate phenom injection:
     injection = \

@@ -28,7 +28,7 @@ from ..whiten import whiten
 from ..psd import calculate_psd
 from ..snr import scale_to_snr
 from ..plotting import generate_strain_plot, generate_psd_plot
-from ..dataset import get_ifo_data, ReturnVariables, get_ifo_data_generator
+from ..dataset import ReturnVariables, get_ifo_dataset
     
 def plot_whiten_functions(
     sample_rate_hertz : float = 8192, 
@@ -274,8 +274,7 @@ def real_noise_test(
             noise_type = NoiseType.REAL
         )
     
-    generator = \
-        get_ifo_data_generator(
+    generator  : tf.data.Dataset = get_ifo_dataset(
             # Random Seed:
             seed= 1000,
             # Temporal components:

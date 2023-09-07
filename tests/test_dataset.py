@@ -4,6 +4,7 @@ from pathlib import Path
 
 # Library imports:
 import numpy as np
+import tensorflow as tf
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
 
@@ -12,14 +13,13 @@ from ..maths import Distribution, DistributionType
 from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
 from ..injection import (cuPhenomDGenerator, InjectionGenerator, 
                          WaveformParameters, WaveformGenerator)
-from ..plotting import generate_strain_plot
 from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
                           DataQuality, DataLabel, IFO)
 from ..noise import NoiseObtainer, NoiseType
 from ..plotting import generate_strain_plot, generate_spectrogram
-from ..dataset import get_ifo_data, ReturnVariables, get_ifo_data_generator
+from ..dataset import get_ifo_dataset, ReturnVariables
 
-def test_generator(
+def test_dataset(
     num_tests : int = 32,
     output_diretory_path : Path = Path("./py_ml_data/tests/")
     ):
@@ -64,7 +64,7 @@ def test_generator(
             noise_type = NoiseType.REAL
         )
     
-    generator = get_ifo_data_generator(
+    dataset : tf.data.Dataset = get_ifo_dataset(
         # Random Seed:
         seed= 1000,
         # Temporal components:
@@ -88,7 +88,7 @@ def test_generator(
         ],
     )
     
-    input_dict, output_dict = next(iter(generator))
+    input_dict, output_dict = next(iter(dataset))
         
     onsource = input_dict[ReturnVariables.WHITENED_ONSOURCE.name].numpy()
     injections = input_dict[ReturnVariables.INJECTIONS.name].numpy()
@@ -153,7 +153,7 @@ if __name__ == "__main__":
     # Set logging level:
     logging.basicConfig(level=logging.INFO)
     
-    # Test IFO noise generator:
+    # Test IFO noise dataset:
     with strategy.scope():
-        test_generator()
+        test_dataset()
     

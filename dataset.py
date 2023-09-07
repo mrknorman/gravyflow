@@ -212,7 +212,7 @@ def create_variable_dictionary(
 
     return {key.name: operations[key] for key in return_variables if key in operations}
 
-def get_ifo_data_generator(
+def get_ifo_dataset(
         seed: int = 1000,
         sample_rate_hertz: float = 2048.0,
         onsource_duration_seconds: float = 1.0,
@@ -361,3 +361,53 @@ def get_ifo_data_generator(
         generator=generator,
         output_signature=output_signature
     ).with_options(options)
+
+def extract_data_from_indicies(
+        dataset : tf.data.Dataset,
+        indicies : list, 
+        num_examples_per_batch : int
+    ) -> list:
+    
+    indicies : List = sorted(indicies) 
+    
+    dataset_elements : List = []
+    current_index : int = 0
+    for batch_index, (in_dict, out_dict) in enumerate(dataset):
+        # Calculate the range of global indices for this batch
+        start_index = batch_index * num_examples_per_batch
+        end_index = (batch_index + 1) * num_examples_per_batch
+
+        # Find the worst examples in the current batch
+        while current_index < len(indicies) and \
+            indicies[current_index] < end_index:
+            
+            # Calculate in-batch index
+            in_batch_index = indicies[current_index] % num_examples_per_batch  
+            
+            # Extract the corresponding data from in_dict and out_dict using 
+            # in_batch_index
+            example_element = \
+                {key: value[in_batch_index] for key, value in in_dict.items()}
+            out_element = \
+                {key: value[0][in_batch_index] for key, value in out_dict.items()}
+            
+            for key, value in out_element.items():
+                example_element[key] = value
+            
+            dataset_elements.append(example_element)
+
+            current_index += 1  # Move to the next worst index
+            
+    return dataset_elements
+
+def group_split_dataset(
+    generator_args : dict,
+    group_name : str,
+    num_examples : int
+    ):
+    
+    num_batches = num_examples//generator_args["num_examples_per_batch"]
+    
+    args = generator_args.copy()
+    args.update({"group_name" : group_name})
+    return get_ifo_dataset(**args).take(num_batches)

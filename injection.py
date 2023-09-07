@@ -55,6 +55,9 @@ class WaveformGenerator:
     front_padding_duration_seconds : float = 0.3
     back_padding_duration_seconds : float = 0.0
     
+    def __copy__(self):
+        return WaveformGenerator(self.value)
+    
     @classmethod
     def load(
         cls,

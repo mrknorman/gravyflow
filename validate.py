@@ -1,18 +1,13 @@
-from .dataset import get_ifo_data, O3
-from typing import Dict, Tuple, Optional
 from pathlib import Path
-
-import tensorflow as tf
-import numpy as np
-
+from typing import Dict, Tuple, Optional, List, Union
 import h5py
-
 import logging
 
+import numpy as np
+from scipy.interpolate import interp1d
+import tensorflow as tf
 from tensorflow.data.experimental import AutoShardPolicy
 from tensorflow.keras.callbacks import Callback
-from .dataset import get_ifo_data_generator, O3, extract_data_from_indicies
-
 from bokeh.embed import components, file_html
 from bokeh.io import export_png, output_file, save
 from bokeh.layouts import column, gridplot
@@ -23,42 +18,20 @@ from bokeh.plotting import figure, show
 from bokeh.resources import INLINE, Resources
 from bokeh.palettes import Bright
 
-from scipy.interpolate import interp1d
-
-"""
-generator = get_ifo_data_generator(
-    # Random Seed:
-    seed= 1000,
-    # Temporal components:
-    sample_rate_hertz=sample_rate_hertz,   
-    onsource_duration_seconds=onsource_duration_seconds,
-    offsource_duration_seconds=offsource_duration_seconds,
-    crop_duration_seconds=crop_duration_seconds,
-    # Noise: 
-    noise_obtainer=noise_obtainer,
-    # Injections:
-    injection_generators=phenom_d_generator_high_mass, 
-    # Output configuration:
-    num_examples_per_batch=num_examples_per_batch,
-    input_variables = [
-        ReturnVariables.WHITENED_ONSOURCE, 
-        ReturnVariables.INJECTION_MASKS, 
-        ReturnVariables.INJECTIONS,
-        ReturnVariables.WHITENED_INJECTIONS,
-        WaveformParameters.MASS_1_MSUN, 
-        WaveformParameters.MASS_2_MSUN
-    ],
-)
-"""
+from .dataset import (get_ifo_dataset, extract_data_from_indicies, 
+                      ReturnVariables)
+from .plotting import generate_strain_plot, generate_spectrogram
+from .injection import WaveformGenerator
+from .maths import Distribution, DistributionType
 
 def calculate_efficiency_scores(
         model : tf.keras.Model, 
-        generator_args : dict,
+        dataset_args : Dict[str, Union[float, List, int]],
         num_examples_per_batch : int = 32,
         max_snr : float = 20.0,
         num_snr_steps : int = 21,
         num_examples_per_snr_step : int = 2048,
-    ) -> dict:
+    ) -> Dict:
     
     """
     Calculate the Efficiency scores for a given model.
@@ -67,7 +40,7 @@ def calculate_efficiency_scores(
     ----------
     model : tf.keras.Model
         The model used to predict FAR scores.
-    generator_args : dict
+    dataset_args : dict
         Dictionary containing options for dataset generator.
     num_examples_per_batch : int, optional
         The number of examples per batch, default is 32.
@@ -89,7 +62,7 @@ def calculate_efficiency_scores(
     """
     
     # Make copy of generator args so original is not affected:
-    generator_args = generator_args.copy()
+    dataset_args = dataset_args.copy()
         
     # Integer arguments are integers:
     num_examples_per_snr_step = int(num_examples_per_snr_step)
@@ -113,25 +86,22 @@ def calculate_efficiency_scores(
     options = tf.data.Options()
     options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
     
-    # Ensure generator args are correctly set up:
-    
-    generator_args["max_segment_size"] = num_examples_per_batch*8
-    generator_args["num_examples_per_batch"] = num_examples_per_batch
-    injection_config = generator_args["injection_configs"][0].copy()
-    injection_config.update({
-        "injection_chance" : 1.0,
-        "snr" : snr_values
-    })
-    generator_args["injection_configs"] = [injection_config]
+    # Ensure dataset is full of injections:
+    dataset_args["num_examples_per_batch"] = num_examples_per_batch
+    dataset_args["output_variables"] = [ReturnVariables.INJECTION_MASKS]
+    injection_config : WaveformGenerator = \
+        dataset_args["injection_configs"][0].copy()
+    injection_config.injection_chances = 1.0
+    injection_config.snr = snr_values
+    dataset_args["injection_configs"][0] = injection_config
     
     # Initlize generator:
-    dataset = \
-        get_ifo_data_generator(
-            **generator_args
-        ).with_options(options).take(num_batches)
+    dataset : tf.data.Dataset = get_ifo_dataset(
+            **dataset_args
+        ).take(num_batches)
 
     # Process all examples in one go:
-    combined_scores = model.predict(dataset, steps = num_batches, verbose = 2)
+    combined_scores = model.predict(dataset, steps=num_batches, verbose=2)
     
     # Split predictions back into separate arrays for each SNR level:
     scores = [ 
@@ -145,7 +115,7 @@ def calculate_efficiency_scores(
 
 def calculate_far_scores(
         model : tf.keras.Model, 
-        generator_args : dict, 
+        dataset_args : dict, 
         num_examples_per_batch : int = 32,  
         num_examples : int = 1E5
     ) -> np.ndarray:
@@ -157,7 +127,7 @@ def calculate_far_scores(
     ----------
     model : tf.keras.Model
         The model used to predict FAR scores.
-    generator_args : dict
+    dataset_args : dict
         Dictionary containing options for dataset generator.
     num_examples_per_batch : int, optional
         The number of examples per batch, default is 32.
@@ -171,7 +141,7 @@ def calculate_far_scores(
     """
     
     # Make copy of generator args so original is not affected:
-    generator_args = generator_args.copy()
+    dataset_args = dataset_args.copy()
     
     # Integer arguments are integers:
     num_examples = int(num_examples)
@@ -185,15 +155,14 @@ def calculate_far_scores(
     options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
     
     # Ensure dataset has no injections:
-    generator_args["num_examples_per_batch"] = num_examples_per_batch
-    generator_args["injection_configs"] = []
-    generator_args["output_keys"] = []
+    dataset_args["num_examples_per_batch"] = num_examples_per_batch
+    dataset_args["injection_configs"] = []
+    dataset_args["output_variables"] = []
 
     # Initlize generator:
-    dataset = \
-        get_ifo_data_generator(
-            **generator_args
-        ).with_options(options).take(num_batches)
+    dataset : tf.data.Dataset = get_ifo_dataset(
+            **dataset_args
+        ).take(num_batches)
         
     # Predict the scores and get the second column ([:, 1]):
     far_scores = model.predict(dataset, steps = num_batches, verbose=2)[:, 1]
@@ -337,7 +306,7 @@ class CaptureWorstPredictions(Callback):
 
 def calculate_roc(    
     model: tf.keras.Model,
-    generator_args : dict,
+    dataset_args : dict,
     num_examples_per_batch: int = 32,
     num_examples: int = 1.0E5
     ) -> dict:
@@ -349,7 +318,7 @@ def calculate_roc(
     ----------
     model : tf.keras.Model
         The model used to predict FAR scores.
-    generator_args : dict
+    dataset_args : dict
         Dictionary containing options for dataset generator.        
     num_examples_per_batch : int, optional
         The number of examples per batch, default is 32.
@@ -371,7 +340,7 @@ def calculate_roc(
     """
         
     # Make copy of generator args so original is not affected:
-    generator_args = generator_args.copy()
+    dataset_args = dataset_args.copy()
     
     # Integer arguments are integers:
     num_examples = int(num_examples)
@@ -384,23 +353,25 @@ def calculate_roc(
     options = tf.data.Options()
     options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
     
-    # Ensure dataset has no injections:
-    generator_args["num_examples_per_batch"] = num_examples_per_batch
-    injection_config = generator_args["injection_configs"][0].copy()
-    injection_config.update({"injection_chance" : 0.5})
-    generator_args["injection_configs"] = [injection_config]
-    generator_args["output_keys"] = ["injection_masks"]
+    # Ensure dataset has balanced injections:
+    dataset_args["num_examples_per_batch"] = num_examples_per_batch
+    dataset_args["output_variables"] = [ReturnVariables.INJECTION_MASKS]
+    injection_config : WaveformGenerator = \
+        dataset_args["injection_configs"][0].copy()
+    injection_config.injection_chances = 0.5
+    dataset_args["injection_configs"][0] = injection_config
     
     # Initlize generator:
-    dataset = \
-        get_ifo_data_generator(
-            **generator_args
+    dataset : tf.data.Dataset = get_ifo_dataset(
+            **dataset_args
         ).with_options(options).take(num_batches)
     
     # Use .map() to extract the true labels and model inputs
     x_dataset = dataset.map(lambda x, y: x)
     y_true_dataset = dataset.map(
-        lambda x, y: tf.cast(y['injection_masks'][0], tf.int32)
+        lambda x, y: tf.cast(
+            y[ReturnVariables.INJECTION_MASKS.name][0], tf.int32
+        )
     )
         
     # Convert the true labels dataset to a tensor using reduce
@@ -424,7 +395,7 @@ def calculate_roc(
 
 def calculate_multi_rocs(    
     model: tf.keras.Model,
-    generator_args : dict,
+    dataset_args : dict,
     num_examples_per_batch: int = 32,
     num_examples: int = 1.0E5,
     snr_ranges: list = [
@@ -438,30 +409,30 @@ def calculate_multi_rocs(
     roc_results = {}
     for snr_range in snr_ranges:
         # Make copy of generator args so original is not affected:
-        generator_args = generator_args.copy()
+        dataset_args = dataset_args.copy()
         
         if (type(snr_range) == tuple):
-            snr = {
-                "min_value"         : snr_range[0], 
-                "max_value"         : snr_range[1],
-                "distribution_type" : "uniform"
-            }
+            snr = Distribution(
+                min_=snr_range[0], 
+                max_=snr_range[1],
+                distribution=DistributionType.UNIFORM
+            )
         else:
-            snr = {
-                "value"             : snr_range,
-                "distribution_type" : "constant"
-            }
-        
-        injection_config = generator_args["injection_configs"][0].copy()
-        injection_config.update({
-            "snr" : snr
-        })
-        generator_args["injection_configs"] = [injection_config]
+            snr = Distribution(
+                value=snr_range, 
+                distribution=DistributionType.CONSTANT
+            )
+            
+        # Set desired injection SNR
+        injection_config : WaveformGenerator = \
+            dataset_args["injection_configs"][0].copy()
+        injection_config.snr = snr
+        dataset_args["injection_configs"][0] = injection_config
         
         roc_results[str(snr_range)] = \
             calculate_roc(    
                 model,
-                generator_args,
+                dataset_args,
                 num_examples_per_batch,
                 num_examples
             )
@@ -470,7 +441,7 @@ def calculate_multi_rocs(
 
 def calculate_tar_scores(
         model : tf.keras.Model, 
-        generator_args : dict, 
+        dataset_args : dict, 
         num_examples_per_batch : int = 32,  
         snr : int = 20.0,
         num_examples : int = 1E5
@@ -483,7 +454,7 @@ def calculate_tar_scores(
     ----------
     model : tf.keras.Model
         The model used to predict FAR scores.
-    generator_args : dict
+    dataset_args : dict
         Dictionary containing options for dataset generator.
     num_examples_per_batch : int, optional
         The number of examples per batch, default is 32.
@@ -497,7 +468,7 @@ def calculate_tar_scores(
     """
     
     # Make copy of generator args so original is not affected:
-    generator_args = generator_args.copy()
+    dataset_args = dataset_args.copy()
     
     # Integer arguments are integers:
     num_examples = int(num_examples)
@@ -505,26 +476,21 @@ def calculate_tar_scores(
     
     # Calculate number of batches required given batch size:
     num_batches = num_examples // num_examples_per_batch
-
-    # Setting options for data distribution:
-    options = tf.data.Options()
-    options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
     
-    # Ensure dataset has no injections:
-    generator_args["num_examples_per_batch"] = num_examples_per_batch
-    generator_args["output_keys"] = ["injection_masks"]
-    injection_config = generator_args["injection_configs"][0].copy()
-    injection_config.update({
-        "injection_chance" : 1.0,
-        "snr" : {"value": snr, "distribution_type" : "constant"}
-    })
-    generator_args["injection_configs"] = [injection_config]
+    # Ensure dataset is full of injections:
+    dataset_args["num_examples_per_batch"] = num_examples_per_batch
+    dataset_args["output_variables"] = [ReturnVariables.INJECTION_MASKS]
+    injection_config : WaveformGenerator = \
+        dataset_args["injection_configs"][0].copy()
+    injection_config.injection_chances = 1.0
+    injection_config.snr = \
+        Distribution(value=snr, distribution=DistributionType.CONSTANT)
+    dataset_args["injection_configs"][0] = injection_config
     
     # Initlize generator:
-    dataset = \
-        get_ifo_data_generator(
-            **generator_args
-        ).with_options(options).take(num_batches)
+    dataset : tf.data.Dataset = get_ifo_dataset(
+            **dataset_args
+        ).take(num_batches)
     
     callback = CaptureWorstPredictions(n_worst=10)
     
@@ -536,18 +502,17 @@ def calculate_tar_scores(
         verbose=2
     )[:, 1]
     
-    generator_args["output_keys"] = \
+    dataset_args["output_variables"] = \
         [
-            "whitened_injections",
-            "injections",
-            "mass_1_msun",
-            "mass_2_msun"
+            ReturnVariables.WHITENED_INJECTIONS,
+            ReturnVariables.INJECTIONS,
+            ReturnVariables.MASS_1_MSUN,
+            ReturnVariables.MASS_2_MSUN
         ]
     
     # Initlize generator:
-    dataset = \
-        get_ifo_data_generator(
-            **generator_args
+    dataset : tf.data.Dataset = get_ifo_dataset(
+            **dataset_args
         ).with_options(options).take(num_batches)
     
     worst_performers = \
@@ -988,70 +953,6 @@ def generate_waveform_plot(
     p.legend.click_policy = "hide"
     
     return p
-    
-
-def calculate_validation_data(
-    model : tf.keras.Model, 
-    generator_args : dict,
-    num_examples_per_batch : int = 32,
-    efficiency_config : dict = \
-        {
-            "max_snr" : 20.0, 
-            "num_snr_steps" : 21, 
-            "num_examples_per_snr_step" : 2048
-        },
-    far_config : dict = \
-        {
-            "num_exammples" : 1.0E5
-        },
-    roc_config : dict = \
-        {
-            "num_exammples" : 1.0E5,
-            "snr_ranges" :  [
-                (8.0, 20),
-                8.0,
-                10.0,
-                12.0
-            ]    
-        }
-    ) -> dict:
-    
-    logging.info(f"Calculating efficiency scores...")
-    efficiency_data = \
-        calculate_efficiency_scores(
-            model, 
-            generator_args,
-            num_examples_per_batch,
-            **efficiency_config
-        )
-    logging.info(f"Done")
-    
-    logging.info(f"Calculating FAR scores...")
-    far_scores = \
-        calculate_far_scores(
-            model, 
-            generator_args, 
-            num_examples_per_batch,  
-            **far_config
-        )
-    logging.info(f"Done")
-    
-    logging.info(f"Calculating ROC data...")
-    roc_data = \
-        calculate_multi_rocs(    
-            model,
-            generator_args,
-            num_examples_per_batch,
-            **roc_config
-        )
-    logging.info(f"Done")
-    report = {
-        "efficiency_data" : efficiency_data, 
-        "far_scores" : far_scores,
-        "roc_data" : roc_data
-    }
-    
-    return report
 
 class Validator:
     
@@ -1060,7 +961,7 @@ class Validator:
         cls, 
         model : tf.keras.Model, 
         name : str,
-        generator_args : dict,
+        dataset_args : dict,
         num_examples_per_batch : int = 32,
         efficiency_config : dict = \
         {
@@ -1088,16 +989,16 @@ class Validator:
         
         validator.name = name
         validator.input_duration_seconds = \
-            generator_args["onsource_duration_seconds"]
+            dataset_args["onsource_duration_seconds"]
         
         logging.info(f"Worst performing inputs for {validator.name}...")
         tar_scores, worst_performers = \
             calculate_tar_scores(
                 model, 
-                generator_args, 
+                dataset_args, 
                 num_examples_per_batch,
-                snr = 20.0,
-                num_examples = 1E3
+                snr=20.0,
+                num_examples=1.0E3
             )
         validator.worst_performers = worst_performers
         logging.info(f"Done")
@@ -1106,7 +1007,7 @@ class Validator:
         validator.efficiency_data = \
             calculate_efficiency_scores(
                 model, 
-                generator_args,
+                dataset_args,
                 num_examples_per_batch,
                 **efficiency_config
             )
@@ -1116,7 +1017,7 @@ class Validator:
         validator.far_scores = \
             calculate_far_scores(
                 model, 
-                generator_args, 
+                dataset_args, 
                 num_examples_per_batch,  
                 **far_config
             )
@@ -1126,7 +1027,7 @@ class Validator:
         validator.roc_data = \
             calculate_multi_rocs(    
                 model,
-                generator_args,
+                dataset_args,
                 num_examples_per_batch,
                 **roc_config
             )
