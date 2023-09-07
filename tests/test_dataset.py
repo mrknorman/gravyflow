@@ -90,12 +90,12 @@ def test_generator(
     
     input_dict, output_dict = next(iter(generator))
         
-    onsource = input_dict[ReturnVariables.WHITENED_ONSOURCE].numpy()
-    injections = input_dict[ReturnVariables.INJECTIONS].numpy()
-    whitened_injections = input_dict[ReturnVariables.WHITENED_INJECTIONS].numpy()
-    masks = input_dict[ReturnVariables.INJECTION_MASKS].numpy()
-    mass_1_msun = input_dict[WaveformParameters.MASS_1_MSUN].numpy()
-    mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN].numpy()
+    onsource = input_dict[ReturnVariables.WHITENED_ONSOURCE.name].numpy()
+    injections = input_dict[ReturnVariables.INJECTIONS.name].numpy()
+    whitened_injections = input_dict[ReturnVariables.WHITENED_INJECTIONS.name].numpy()
+    masks = input_dict[ReturnVariables.INJECTION_MASKS.name].numpy()
+    mass_1_msun = input_dict[WaveformParameters.MASS_1_MSUN.name].numpy()
+    mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN.name].numpy()
     
     layout = [
         [generate_strain_plot(

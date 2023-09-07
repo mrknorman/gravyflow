@@ -210,7 +210,7 @@ def create_variable_dictionary(
     # Extend operations with any relevant keys from injection_parameters
     operations.update({key: value for key, value in injection_parameters.items() if key in return_variables})
 
-    return {key: operations[key] for key in return_variables if key in operations}
+    return {key.name: operations[key] for key in return_variables if key in operations}
 
 def get_ifo_data_generator(
         seed: int = 1000,
@@ -264,27 +264,27 @@ def get_ifo_data_generator(
     num_injection_configs = len(injection_generators)
 
     output_signature_dict = {
-        ReturnVariables.ONSOURCE:
+        ReturnVariables.ONSOURCE.name:
             tf.TensorSpec(
                 shape=(num_examples_per_batch, num_onsource_samples), 
                 dtype=tf.float16
             ),
-        ReturnVariables.WHITENED_ONSOURCE: 
+        ReturnVariables.WHITENED_ONSOURCE.name: 
             tf.TensorSpec(
                 shape=(num_examples_per_batch, num_onsource_samples),
                 dtype=tf.float16
             ),
-        ReturnVariables.OFFSOURCE: 
+        ReturnVariables.OFFSOURCE.name: 
             tf.TensorSpec(
                 shape=(num_examples_per_batch, num_offsource_samples), 
                 dtype=tf.float16
             ),
-        ReturnVariables.GPS_TIME: 
+        ReturnVariables.GPS_TIME.name: 
             tf.TensorSpec(
                 shape=(num_examples_per_batch,), 
                 dtype=tf.int64
             ),
-        ReturnVariables.INJECTIONS: 
+        ReturnVariables.INJECTIONS.name: 
             tf.TensorSpec(
                 shape=(
                     num_injection_configs, 
@@ -293,7 +293,7 @@ def get_ifo_data_generator(
                 ),
                 dtype=tf.float16
             ),
-        ReturnVariables.WHITENED_INJECTIONS: 
+        ReturnVariables.WHITENED_INJECTIONS.name: 
             tf.TensorSpec(
                 shape=(
                     num_injection_configs, 
@@ -302,17 +302,17 @@ def get_ifo_data_generator(
                 ),
                 dtype=tf.float16
             ),
-        ReturnVariables.INJECTION_MASKS: 
+        ReturnVariables.INJECTION_MASKS.name: 
             tf.TensorSpec(
                 shape=(num_injection_configs, num_examples_per_batch), 
                 dtype=tf.bool
             ),
-        ReturnVariables.SNR:
+        ReturnVariables.SNR.name:
             tf.TensorSpec(
                 shape=(num_injection_configs, num_examples_per_batch), 
                 dtype=tf.float64
             ),
-        ReturnVariables.AMPLITUDE: 
+        ReturnVariables.AMPLITUDE.name: 
             tf.TensorSpec(
                 shape=(num_injection_configs, num_examples_per_batch), 
                 dtype=tf.float64
@@ -325,7 +325,7 @@ def get_ifo_data_generator(
     }
 
     output_signature_dict.update({
-        item: tf.TensorSpec(
+        item.name: tf.TensorSpec(
             shape=(
                 num_injection_configs, 
                 num_examples_per_batch * item.value.shape[-1]
@@ -335,8 +335,8 @@ def get_ifo_data_generator(
     })
 
     output_signature = (
-        {k: output_signature_dict[k] for k in input_variables},
-        {k: output_signature_dict[k] for k in output_variables}
+        {k: output_signature_dict[k.name] for k in input_variables},
+        {k: output_signature_dict[k.name] for k in output_variables}
     )
 
     generator = lambda: get_ifo_data(

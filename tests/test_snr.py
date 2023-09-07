@@ -247,8 +247,8 @@ def test_snr(
     
     # Get first elements, and return to float 32 to tf functions:
     injection = injection[0]
-    offsource = tf.cast(background[ReturnVariables.OFFSOURCE][0], tf.float32)
-    onsource = tf.cast(background[ReturnVariables.ONSOURCE][0], tf.float32)
+    offsource = tf.cast(background[ReturnVariables.OFFSOURCE.name][0], tf.float32)
+    onsource = tf.cast(background[ReturnVariables.ONSOURCE.name][0], tf.float32)
     
     # Scale to SNR 30:
     snr : float = 30.0

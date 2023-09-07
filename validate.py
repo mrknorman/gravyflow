@@ -25,6 +25,32 @@ from bokeh.palettes import Bright
 
 from scipy.interpolate import interp1d
 
+"""
+generator = get_ifo_data_generator(
+    # Random Seed:
+    seed= 1000,
+    # Temporal components:
+    sample_rate_hertz=sample_rate_hertz,   
+    onsource_duration_seconds=onsource_duration_seconds,
+    offsource_duration_seconds=offsource_duration_seconds,
+    crop_duration_seconds=crop_duration_seconds,
+    # Noise: 
+    noise_obtainer=noise_obtainer,
+    # Injections:
+    injection_generators=phenom_d_generator_high_mass, 
+    # Output configuration:
+    num_examples_per_batch=num_examples_per_batch,
+    input_variables = [
+        ReturnVariables.WHITENED_ONSOURCE, 
+        ReturnVariables.INJECTION_MASKS, 
+        ReturnVariables.INJECTIONS,
+        ReturnVariables.WHITENED_INJECTIONS,
+        WaveformParameters.MASS_1_MSUN, 
+        WaveformParameters.MASS_2_MSUN
+    ],
+)
+"""
+
 def calculate_efficiency_scores(
         model : tf.keras.Model, 
         generator_args : dict,

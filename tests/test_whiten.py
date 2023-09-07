@@ -296,9 +296,9 @@ def real_noise_test(
     background, _ = next(iter(generator))
             
     raw_noise : tf.Tensor = \
-        background[ReturnVariables.ONSOURCE].numpy()[0]
+        background[ReturnVariables.ONSOURCE.name].numpy()[0]
     whitened_noise : tf.Tensor = \
-        background[ReturnVariables.WHITENED_ONSOURCE].numpy()[0]
+        background[ReturnVariables.WHITENED_ONSOURCE.name].numpy()[0]
     
     # Create a GWpy TimeSeries object
     ts = TimeSeries(raw_noise, sample_rate=sample_rate_hertz)
