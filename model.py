@@ -568,7 +568,7 @@ class ModelBuilder:
                 case "normal":
                     metrics = [tf.keras.metrics.RootMeanSquaredError()]
                 case "binary":
-                    metrics = [tf.keras.metrics.SparseCategoricalAccuracy()]
+                    metrics = [tf.keras.metrics.BinaryAccuracy()]
         
         # Compile model
         self.model.compile(
@@ -652,7 +652,7 @@ class ModelBuilder:
                 self.model.add(
                     tf.keras.layers.Dense(
                         1, 
-                        activation='softmax', 
+                        activation='sigmoid', 
                         dtype='float32',
                         name = output_config["name"]
                     )

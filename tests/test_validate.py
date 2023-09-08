@@ -22,7 +22,7 @@ from ..validate import Validator
 
 def test_validate(
     output_diretory_path : Path = Path("./py_ml_data/tests/"),
-    noise_directory_path : Path = Path("../py_ml_data/tests/")
+    noise_directory_path : Path = Path("./py_ml_data/test_data/")
     ):
         
     # Test Parameters:
@@ -105,8 +105,10 @@ def test_validate(
         # Output configuration:
         "num_examples_per_batch" : num_examples_per_batch,
         "input_variables" : [
-            ReturnVariables.WHITENED_ONSOURCE, 
-            ReturnVariables.INJECTION_MASKS
+            ReturnVariables.WHITENED_ONSOURCE
+        ],
+        "output_variables" : [
+             ReturnVariables.INJECTION_MASKS
         ]
     }
 

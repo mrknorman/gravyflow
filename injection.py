@@ -6,6 +6,7 @@ from enum import Enum, auto
 from dataclasses import dataclass
 from typing import Union, List, Dict, Type
 import json
+from copy import deepcopy
 
 # Library imports
 import numpy as np
@@ -55,8 +56,8 @@ class WaveformGenerator:
     front_padding_duration_seconds : float = 0.3
     back_padding_duration_seconds : float = 0.0
     
-    def __copy__(self):
-        return WaveformGenerator(self.value)
+    def copy(self):
+        return deepcopy(self)
     
     @classmethod
     def load(
@@ -167,25 +168,28 @@ class cuPhenomDGenerator(WaveformGenerator):
             duration_seconds : float
         ):
         
-        # Draw parameter samples from distributions:
-        parameters = {}
-        for attribute, value in self.__dict__.items():        
-            if is_not_inherited(self, attribute):
-                parameter = \
-                    WaveformParameters.get(attribute)
-                shape = parameter.value.shape[-1]                
-                parameters[attribute] = value.sample(num_waveforms * shape)
+        if (num_waveforms > 0):
+            
+            # Draw parameter samples from distributions:
+            parameters = {}
+            for attribute, value in self.__dict__.items():        
+                if is_not_inherited(self, attribute):
+                    parameter = \
+                        WaveformParameters.get(attribute)
+                    shape = parameter.value.shape[-1]                
+                    parameters[attribute] = value.sample(num_waveforms * shape)
+
+            # Generate phenom_d waveform:
         
-        # Generate phenom_d waveform:
-        waveforms = \
-            generate_phenom_d(num_waveforms, sample_rate_hertz, **parameters) 
-        
-        # At the moment take only one polarization: 
-        waveforms = waveforms[:, 0]
-        
-        # Reshape to split injections:
-        num_samples = int(sample_rate_hertz*duration_seconds)
-        waveforms = waveforms.reshape(-1, num_samples)
+            waveforms = \
+                generate_phenom_d(num_waveforms, sample_rate_hertz, **parameters) 
+
+            # At the moment take only one polarization: 
+            waveforms = waveforms[:, 0]
+
+            # Reshape to split injections:
+            num_samples = int(sample_rate_hertz*duration_seconds)
+            waveforms = waveforms.reshape(-1, num_samples)
         
         return waveforms, parameters
     
@@ -278,32 +282,35 @@ class InjectionGenerator:
                     config.injection_chance
                 )
             num_waveforms = tf.reduce_sum(tf.cast(mask, tf.int32)).numpy()
+            
+            if num_waveforms > 0:
+                waveforms, parameters = \
+                    config.generate(
+                        num_waveforms, 
+                        self.sample_rate_hertz,
+                        total_duration_seconds
+                    )
 
-            waveforms, parameters = \
-                config.generate(
-                    num_waveforms, 
-                    self.sample_rate_hertz,
-                    total_duration_seconds
-                )
+                # Convert to tensorflow tensor:
+                waveforms = \
+                    tf.convert_to_tensor(waveforms, dtype = tf.float32)
 
-            # Convert to tensorflow tensor:
-            waveforms = \
-                tf.convert_to_tensor(waveforms, dtype = tf.float32)
+                # Scale by arbitrary factor to reduce chance of precision errors:
+                waveforms *= self.scale_factor
 
-            # Scale by arbitrary factor to reduce chance of precision errors:
-            waveforms *= self.scale_factor
+                #Roll Tensor to randomise start time:
+                waveforms = \
+                    roll_vector_zero_padding( 
+                        waveforms, 
+                        min_roll_num_samples, 
+                        max_roll_num_samples
+                    )
 
-            #Roll Tensor to randomise start time:
-            waveforms = \
-                roll_vector_zero_padding( 
-                    waveforms, 
-                    min_roll_num_samples, 
-                    max_roll_num_samples
-                )
-
-            # Create zero filled injections to fill spots where injection did 
-            # not generate due to injection masks:
-            injections = expand_tensor(waveforms, mask)
+                # Create zero filled injections to fill spots where injection did 
+                # not generate due to injection masks:
+                injections = expand_tensor(waveforms, mask)
+            else:
+                injections = tf.zeros(shape=(num_batches, total_duration_num_samples))
 
             # If no parameters requested, skip parameter processing and return
             # empty dict:

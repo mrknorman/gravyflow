@@ -23,6 +23,7 @@ from ..model import ConvLayer, DenseLayer, PoolLayer, DropLayer, ModelBuilder
 
 def test_training(
     num_train_examples : int = int(1.0E5),
+    num_validation_examples : int = int(1.0E4),
     output_diretory_path : Path = Path("./py_ml_data/tests/")
     ):
     
@@ -38,10 +39,10 @@ def test_training(
     training_config = \
     {
         "num_examples_per_epoc" : num_train_examples,
-        "patience" : 2,
+        "patience" : 3,
         "learning_rate" : 1e-4,
-        "max_epochs" : 1,
-        "model_path" : output_diretory_path / "example_models/"
+        "max_epochs" : 10,
+        "model_path" : output_diretory_path / "example_cnn/"
     }
     
     # Load injection config:
@@ -68,8 +69,8 @@ def test_training(
             ],
             IFO.L1,
             SegmentOrder.RANDOM,
-            force_acquisition = True,
-            cache_segments = False
+            force_acquisition = False,
+            cache_segments = True
         )
     
     # Initilise noise generator wrapper:
@@ -100,25 +101,26 @@ def test_training(
     }
     
     train_args = dataset_args.copy()
-    train_args["seed"] = 1001
+    train_args["seed"] = 1000
     train_args["group"] = "train"
     
     def get_first_injection_features(features, labels):
         labels[ReturnVariables.INJECTION_MASKS.name] = \
-            labels[ReturnVariables.INJECTION_MASKS.name][0]
+            tf.expand_dims(labels[ReturnVariables.INJECTION_MASKS.name][0], 1)
         return features, labels
     
     train_dataset : tf.data.Dataset = get_ifo_dataset(
-        **dataset_args
+        **train_args
     ).map(get_first_injection_features)
         
     validate_args = dataset_args.copy()
     validate_args["seed"] = 1001
-    train_args["group"] = "validate"
+    validate_args["group"] = "validate"
+   # validate_args["noise_obtainer"].ifo_data_obtainer.cache_segments = False
     
     validate_dataset : tf.data.Dataset = get_ifo_dataset(
         **validate_args
-    ).map(get_first_injection_features)
+    ).map(get_first_injection_features).take(num_validation_examples//num_examples_per_batch)
     
     test_args = dataset_args.copy()
     test_args["seed"] = 1002
@@ -130,15 +132,14 @@ def test_training(
     
     hidden_layers = [
         ConvLayer(64, 8, "relu"),
-        PoolLayer(8),
+        PoolLayer(4),
         ConvLayer(32, 8, "relu"),
         ConvLayer(32, 16, "relu"),
-        PoolLayer(6),
+        PoolLayer(4),
         ConvLayer(16, 16, "relu"),
         ConvLayer(16, 32, "relu"),
         ConvLayer(16, 32, "relu"),
-        DenseLayer(64),
-        DropLayer(0.1)
+        DenseLayer(64)
     ]
     
     # Initilise model
@@ -183,9 +184,6 @@ if __name__ == "__main__":
     num_gpus_to_request : int = 1
     memory_to_allocate_tf : int = 8000
     
-    policy = mixed_precision.Policy('mixed_float16')
-    mixed_precision.set_global_policy(policy)
-    
     # Setup CUDA
     gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
     strategy = setup_cuda(
@@ -194,6 +192,9 @@ if __name__ == "__main__":
         logging_level=logging.WARNING
     )
     
+    #policy = mixed_precision.Policy('mixed_float16')
+    #mixed_precision.set_global_policy(policy)
+        
     # Set logging level:
     logging.basicConfig(level=logging.INFO)
     

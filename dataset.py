@@ -165,7 +165,11 @@ def get_ifo_data(
             offsource = tf.cast(offsource, tf.float16)
             
         if ReturnVariables.GPS_TIME in variables_to_return:
-            gps_times = tf.cast(gps_times, tf.float64),
+            gps_times = tf.cast(gps_times, tf.float64)
+            
+        if ReturnVariables.INJECTION_MASKS in variables_to_return:
+            mask = tf.cast(mask, tf.float32)
+
                 
         # Construct dictionary:
         input_dict, output_dict = [
@@ -311,7 +315,7 @@ def get_ifo_dataset(
         ReturnVariables.INJECTION_MASKS.name: 
             tf.TensorSpec(
                 shape=(num_injection_configs, num_examples_per_batch), 
-                dtype=tf.bool
+                dtype=tf.float32
             ),
         ReturnVariables.SNR.name:
             tf.TensorSpec(
@@ -390,7 +394,7 @@ def extract_data_from_indicies(
             
             # Calculate in-batch index
             in_batch_index = indicies[current_index] % num_examples_per_batch  
-            
+                        
             # Extract the corresponding data from in_dict and out_dict using 
             # in_batch_index
             example_element = \

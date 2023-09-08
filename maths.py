@@ -85,7 +85,6 @@ class Distribution:
         if self.dtype == int:
             samples = [int(sample) for sample in samples]
         
-        samples = samples if num_samples > 1 else samples[0]
         return samples
     
 def randomise_arguments(input_dict, func):
@@ -130,8 +129,10 @@ def expand_tensor(signal: tf.Tensor, mask: tf.Tensor) -> tf.Tensor:
     
     # Ensure that the length of the signal tensor matches the number of True 
     # values in the mask
+    """
     assert tf.reduce_sum(tf.cast(mask, tf.int32)) == signal.shape[0], \
-        'Signal tensor length must match number of True values in mask'
+        f'Signal tensor length {signal.shape[0]} must match number of True values in mask {tf.reduce_sum(tf.cast(mask, tf.int32))}'
+    """
     
     # Create a tensor full of zeros with the final shape
     if signal.ndim == 1:

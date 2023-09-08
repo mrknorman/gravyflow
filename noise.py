@@ -84,6 +84,7 @@ class NoiseObtainer:
                     # hash of unique parameters
                     self.ifo_data_obtainer.generate_file_path(
                         sample_rate_hertz,
+                        group,
                         self.data_directory_path
                     )
                 

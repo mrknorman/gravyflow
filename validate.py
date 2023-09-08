@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, List, Union
 import h5py
 import logging
+from copy import deepcopy
 
 import numpy as np
 from scipy.interpolate import interp1d
@@ -21,7 +22,7 @@ from bokeh.palettes import Bright
 from .dataset import (get_ifo_dataset, extract_data_from_indicies, 
                       ReturnVariables)
 from .plotting import generate_strain_plot, generate_spectrogram
-from .injection import WaveformGenerator
+from .injection import WaveformGenerator, WaveformParameters
 from .maths import Distribution, DistributionType
 
 def calculate_efficiency_scores(
@@ -62,7 +63,7 @@ def calculate_efficiency_scores(
     """
     
     # Make copy of generator args so original is not affected:
-    dataset_args = dataset_args.copy()
+    dataset_args = deepcopy(dataset_args)
         
     # Integer arguments are integers:
     num_examples_per_snr_step = int(num_examples_per_snr_step)
@@ -82,18 +83,16 @@ def calculate_efficiency_scores(
             num_examples_per_snr_step
         )
     
-    # Setting options for data distribution:
-    options = tf.data.Options()
-    options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
+    #Ensure injection generators is list for subsequent logic:
+    if not isinstance(dataset_args["injection_generators"], list):
+        dataset_args["injection_generators"] = \
+            [dataset_args["injection_generators"]]
     
     # Ensure dataset is full of injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
     dataset_args["output_variables"] = [ReturnVariables.INJECTION_MASKS]
-    injection_config : WaveformGenerator = \
-        dataset_args["injection_configs"][0].copy()
-    injection_config.injection_chances = 1.0
-    injection_config.snr = snr_values
-    dataset_args["injection_configs"][0] = injection_config
+    dataset_args["injection_generators"][0].injection_chance = 1.0
+    dataset_args["injection_generators"][0].snr = snr_values
     
     # Initlize generator:
     dataset : tf.data.Dataset = get_ifo_dataset(
@@ -141,7 +140,7 @@ def calculate_far_scores(
     """
     
     # Make copy of generator args so original is not affected:
-    dataset_args = dataset_args.copy()
+    dataset_args = deepcopy(dataset_args)
     
     # Integer arguments are integers:
     num_examples = int(num_examples)
@@ -156,7 +155,7 @@ def calculate_far_scores(
     
     # Ensure dataset has no injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
-    dataset_args["injection_configs"] = []
+    dataset_args["injection_generators"] = []
     dataset_args["output_variables"] = []
 
     # Initlize generator:
@@ -165,7 +164,7 @@ def calculate_far_scores(
         ).take(num_batches)
         
     # Predict the scores and get the second column ([:, 1]):
-    far_scores = model.predict(dataset, steps = num_batches, verbose=2)[:, 1]
+    far_scores = model.predict(dataset, steps = num_batches, verbose=2)
     
     return far_scores
 
@@ -291,12 +290,15 @@ class CaptureWorstPredictions(Callback):
         logs = logs or {}
         batch_predictions = logs.get('outputs')
         
-        # Add scores and indices to the global list
-        scores = batch_predictions[:, 1].tolist()
-        indices = list(range(batch * len(scores), (batch + 1) * len(scores)))
+        if batch_predictions is not None:
+            # Add scores and indices to the global list
+            scores = batch_predictions.tolist()
+            indices = list(range(batch * len(scores), (batch + 1) * len(scores)))
 
-        self.all_scores.extend(scores)
-        self.all_indices.extend(indices)
+            self.all_scores.extend(scores)
+            self.all_indices.extend(indices)
+        else:
+            print("Warning: 'outputs' not found in logs for batch", batch)
 
     def on_predict_end(self, logs=None):
         # Sort the global list based on scores to get the worst predictions
@@ -340,7 +342,7 @@ def calculate_roc(
     """
         
     # Make copy of generator args so original is not affected:
-    dataset_args = dataset_args.copy()
+    dataset_args = deepcopy(dataset_args)
     
     # Integer arguments are integers:
     num_examples = int(num_examples)
@@ -349,22 +351,20 @@ def calculate_roc(
     # Calculate number of batches required given batch size:
     num_batches = num_examples // num_examples_per_batch
     
-    # Setting options for data distribution
-    options = tf.data.Options()
-    options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
+    #Ensure injection generators is list for subsequent logic:
+    if not isinstance(dataset_args["injection_generators"], list):
+        dataset_args["injection_generators"] = \
+            [dataset_args["injection_generators"]]
     
     # Ensure dataset has balanced injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
     dataset_args["output_variables"] = [ReturnVariables.INJECTION_MASKS]
-    injection_config : WaveformGenerator = \
-        dataset_args["injection_configs"][0].copy()
-    injection_config.injection_chances = 0.5
-    dataset_args["injection_configs"][0] = injection_config
+    dataset_args["injection_generators"][0].injection_chance = 0.5
     
     # Initlize generator:
     dataset : tf.data.Dataset = get_ifo_dataset(
             **dataset_args
-        ).with_options(options).take(num_batches)
+        ).take(num_batches)
     
     # Use .map() to extract the true labels and model inputs
     x_dataset = dataset.map(lambda x, y: x)
@@ -386,7 +386,7 @@ def calculate_roc(
         x_dataset, 
         steps = num_batches, 
         verbose = 2
-    )[:, 1]
+    )
     
     # Calculate the ROC curve and AUC
     fpr, tpr, roc_auc = roc_curve_and_auc(y_true, y_scores)
@@ -409,25 +409,26 @@ def calculate_multi_rocs(
     roc_results = {}
     for snr_range in snr_ranges:
         # Make copy of generator args so original is not affected:
-        dataset_args = dataset_args.copy()
+        dataset_args = deepcopy(dataset_args)
         
-        if (type(snr_range) == tuple):
+        if isinstance(snr_range, tuple):
             snr = Distribution(
                 min_=snr_range[0], 
                 max_=snr_range[1],
-                distribution=DistributionType.UNIFORM
+                type_=DistributionType.UNIFORM
             )
         else:
             snr = Distribution(
                 value=snr_range, 
-                distribution=DistributionType.CONSTANT
+                type_=DistributionType.CONSTANT
             )
+        #Ensure injection generators is list for subsequent logic:
+        if not isinstance(dataset_args["injection_generators"], list):
+            dataset_args["injection_generators"] = \
+                [dataset_args["injection_generators"]]
             
         # Set desired injection SNR
-        injection_config : WaveformGenerator = \
-            dataset_args["injection_configs"][0].copy()
-        injection_config.snr = snr
-        dataset_args["injection_configs"][0] = injection_config
+        dataset_args["injection_generators"][0].snr = snr
         
         roc_results[str(snr_range)] = \
             calculate_roc(    
@@ -468,7 +469,7 @@ def calculate_tar_scores(
     """
     
     # Make copy of generator args so original is not affected:
-    dataset_args = dataset_args.copy()
+    dataset_args = deepcopy(dataset_args)
     
     # Integer arguments are integers:
     num_examples = int(num_examples)
@@ -477,43 +478,61 @@ def calculate_tar_scores(
     # Calculate number of batches required given batch size:
     num_batches = num_examples // num_examples_per_batch
     
+    #Ensure injection generators is list for subsequent logic:
+    if not isinstance(dataset_args["injection_generators"], list):
+        dataset_args["injection_generators"] = \
+            [dataset_args["injection_generators"]]
+    
     # Ensure dataset is full of injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
-    dataset_args["output_variables"] = [ReturnVariables.INJECTION_MASKS]
-    injection_config : WaveformGenerator = \
-        dataset_args["injection_configs"][0].copy()
-    injection_config.injection_chances = 1.0
-    injection_config.snr = \
-        Distribution(value=snr, distribution=DistributionType.CONSTANT)
-    dataset_args["injection_configs"][0] = injection_config
+    dataset_args["output_variables"] = []
+    dataset_args["injection_generators"][0].injection_chance = 0.0
+    dataset_args["injection_generators"][0].snr = \
+        Distribution(value=snr, type_=DistributionType.CONSTANT)
+    
     
     # Initlize generator:
     dataset : tf.data.Dataset = get_ifo_dataset(
             **dataset_args
         ).take(num_batches)
-    
+        
     callback = CaptureWorstPredictions(n_worst=10)
+    
+    model.summary()
+    # Get the output layers
+    output_layers = [layer.output for layer in model.layers]
+
+    # Print the output shapes of each output layer
+    for layer in output_layers:
+        print(layer.name, layer.shape)
+    
+    print(num_examples_per_batch, num_examples)
+    print(next(iter(dataset)))
     
     # Predict the scores and get the second column ([:, 1]):
     tar_scores = model.predict(
         dataset, 
+        batch_size = num_examples_per_batch,
         callbacks = [callback],
         steps = num_batches, 
         verbose=2
-    )[:, 1]
+    )
+    
+    print(num_batches)
+    print(tar_scores)
     
     dataset_args["output_variables"] = \
         [
             ReturnVariables.WHITENED_INJECTIONS,
             ReturnVariables.INJECTIONS,
-            ReturnVariables.MASS_1_MSUN,
-            ReturnVariables.MASS_2_MSUN
+            WaveformParameters.MASS_1_MSUN,
+            WaveformParameters.MASS_2_MSUN
         ]
     
     # Initlize generator:
     dataset : tf.data.Dataset = get_ifo_dataset(
             **dataset_args
-        ).with_options(options).take(num_batches)
+        ).take(num_batches)
     
     worst_performers = \
         extract_data_from_indicies(
