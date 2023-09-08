@@ -233,7 +233,7 @@ def roc_curve_and_auc(
         y_scores, 
         chunk_size=500
     ):
-    num_thresholds = 1000
+    num_thresholds = 1024
     # Use logspace with a range between 0 and 6, which corresponds to values 
     # between 1 and 1e-6:
     log_thresholds = tf.exp(tf.linspace(0, -6, num_thresholds))
