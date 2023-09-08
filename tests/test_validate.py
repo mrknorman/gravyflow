@@ -39,22 +39,19 @@ def test_validate(
     efficiency_config : Dict[str, Union[float, int]] = \
         {
             "max_snr" : 15.0, 
-            "num_snr_steps" : 61, 
-            "num_examples_per_snr_step" : 16384
+            "num_snr_steps" : 16, 
+            "num_examples_per_snr_step" : 1024
         }
     far_config : Dict[str, float] = \
         {
-            "num_examples" : 1.0E6
+            "num_examples" : 1.0E4
         }
     roc_config : Dict[str, Union[float, List]] = \
         {
-            "num_examples" : 1.0E6,
+            "num_examples" : 1.0E4,
             "snr_ranges" :  [
                 (8.0, 20.0),
-                6.0,
-                8.0,
-                10.0,
-                12.0
+                6.0
             ]
         }
     

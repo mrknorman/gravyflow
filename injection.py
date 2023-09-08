@@ -311,6 +311,7 @@ class InjectionGenerator:
                 injections = expand_tensor(waveforms, mask)
             else:
                 injections = tf.zeros(shape=(num_batches, total_duration_num_samples))
+                parameters = { }
 
             # If no parameters requested, skip parameter processing and return
             # empty dict:

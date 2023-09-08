@@ -387,28 +387,29 @@ def extract_data_from_indicies(
         # Calculate the range of global indices for this batch
         start_index = batch_index * num_examples_per_batch
         end_index = (batch_index + 1) * num_examples_per_batch
-
+        
         # Find the worst examples in the current batch
         while current_index < len(indicies) and \
             indicies[current_index] < end_index:
-            
+                        
             # Calculate in-batch index
             in_batch_index = indicies[current_index] % num_examples_per_batch  
-                        
+                                    
             # Extract the corresponding data from in_dict and out_dict using 
             # in_batch_index
             example_element = \
-                {key: value[in_batch_index] for key, value in in_dict.items()}
+                {key: value[in_batch_index[0]] for key, value in in_dict.items()}
+                        
             out_element = \
-                {key: value[0][in_batch_index] for key, value in out_dict.items()}
-            
+                {key: value[0][in_batch_index[0]] for key, value in out_dict.items()}
+                        
             for key, value in out_element.items():
                 example_element[key] = value
             
             dataset_elements.append(example_element)
 
             current_index += 1  # Move to the next worst index
-            
+                
     return dataset_elements
 
 def group_split_dataset(

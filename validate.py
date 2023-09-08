@@ -25,6 +25,9 @@ from .plotting import generate_strain_plot, generate_spectrogram
 from .injection import WaveformGenerator, WaveformParameters
 from .maths import Distribution, DistributionType
 
+import psutil
+
+
 def calculate_efficiency_scores(
         model : tf.keras.Model, 
         dataset_args : Dict[str, Union[float, List, int]],
@@ -98,10 +101,10 @@ def calculate_efficiency_scores(
     dataset : tf.data.Dataset = get_ifo_dataset(
             **dataset_args
         ).take(num_batches)
-
+        
     # Process all examples in one go:
     combined_scores = model.predict(dataset, steps=num_batches, verbose=2)
-    
+        
     # Split predictions back into separate arrays for each SNR level:
     scores = [ 
         combined_scores[
@@ -109,6 +112,7 @@ def calculate_efficiency_scores(
             (index + 1) * num_examples_per_snr_step
         ] for index in range(num_snr_steps)
     ]
+    
     
     return {"snrs" : efficiency_snrs, "scores": np.array(scores)}
 
@@ -486,10 +490,9 @@ def calculate_tar_scores(
     # Ensure dataset is full of injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
     dataset_args["output_variables"] = []
-    dataset_args["injection_generators"][0].injection_chance = 0.0
+    dataset_args["injection_generators"][0].injection_chance = 1.0
     dataset_args["injection_generators"][0].snr = \
         Distribution(value=snr, type_=DistributionType.CONSTANT)
-    
     
     # Initlize generator:
     dataset : tf.data.Dataset = get_ifo_dataset(
@@ -501,13 +504,6 @@ def calculate_tar_scores(
     model.summary()
     # Get the output layers
     output_layers = [layer.output for layer in model.layers]
-
-    # Print the output shapes of each output layer
-    for layer in output_layers:
-        print(layer.name, layer.shape)
-    
-    print(num_examples_per_batch, num_examples)
-    print(next(iter(dataset)))
     
     # Predict the scores and get the second column ([:, 1]):
     tar_scores = model.predict(
@@ -517,10 +513,7 @@ def calculate_tar_scores(
         steps = num_batches, 
         verbose=2
     )
-    
-    print(num_batches)
-    print(tar_scores)
-    
+            
     dataset_args["output_variables"] = \
         [
             ReturnVariables.WHITENED_INJECTIONS,
@@ -533,19 +526,19 @@ def calculate_tar_scores(
     dataset : tf.data.Dataset = get_ifo_dataset(
             **dataset_args
         ).take(num_batches)
-    
+            
     worst_performers = \
         extract_data_from_indicies(
             dataset,
             callback.worst_global_indices,
             num_examples_per_batch
         )
-    
+        
     for index, element in enumerate(worst_performers):
         for key in element:
             element[key] = element[key].numpy()
         element["score"] = callback.worst_scores[index]
-    
+        
     return tar_scores, worst_performers
 
 def check_equal_duration(
@@ -1021,7 +1014,7 @@ class Validator:
             )
         validator.worst_performers = worst_performers
         logging.info(f"Done")
-                
+                        
         logging.info(f"Calculating efficiency scores for {validator.name}...")
         validator.efficiency_data = \
             calculate_efficiency_scores(
