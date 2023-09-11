@@ -396,6 +396,21 @@ def whiten(
     out : tf.Tensor
         The whitened time series.
     """
+    
+    # Validate highpass frequency, if applicable
+    if highpass_hertz:
+        if highpass_hertz < 0 or highpass_hertz >= (sample_rate_hertz / 2):
+            raise ValueError("Invalid highpass frequency.")
+
+    # Validate filter duration
+    if filter_duration_seconds <= 0:
+        raise ValueError("Filter duration should be greater than zero.")
+
+    # Validate window parameter
+    if window not in ["hann"]:  # Extend list as needed
+        raise ValueError("Invalid window type.")
+    
+    epsilon = 1e-8  # Small constant to avoid division by zero
 
     # Check if input is 1D or 2D
     is_1d = len(timeseries.shape) == 1
@@ -412,6 +427,9 @@ def whiten(
         noverlap=int(sample_rate_hertz*overlap_duration_seconds), 
         sample_rate_hertz=sample_rate_hertz
     )
+    
+    # Ensure psd doesn't contain negative values
+    psd = tf.math.maximum(psd, 0)
     asd = tf.sqrt(psd)
     
     df = 1.0 / (timeseries.shape[-1] / sample_rate_hertz)
@@ -429,6 +447,9 @@ def whiten(
 
     ncorner = int(highpass_hertz / df) if highpass_hertz else 0
     ntaps = int(filter_duration_seconds * sample_rate_hertz)
+    
+    # Ensure asd doesn't contain zeros to avoid division by zero
+    asd = tf.math.maximum(asd, epsilon)
     transfer = 1.0 / asd
 
     tdw = fir_from_transfer(transfer, ntaps, window=window, ncorner=ncorner)

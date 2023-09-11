@@ -24,9 +24,7 @@ from .dataset import (get_ifo_dataset, extract_data_from_indicies,
 from .plotting import generate_strain_plot, generate_spectrogram
 from .injection import WaveformGenerator, WaveformParameters
 from .maths import Distribution, DistributionType
-
-import psutil
-
+from .setup import get_tf_memory_usage
 
 def calculate_efficiency_scores(
         model : tf.keras.Model, 
@@ -73,7 +71,7 @@ def calculate_efficiency_scores(
     num_examples_per_batch = int(num_examples_per_batch)
     num_snr_steps = int(num_snr_steps)
     
-    # Calculate number of batches required given batch size:
+    # Calculate number of batches reuanuired given batch size:
     num_examples = num_examples_per_snr_step*num_snr_steps
     num_batches = num_examples // num_examples_per_batch
     
@@ -113,7 +111,6 @@ def calculate_efficiency_scores(
         ] for index in range(num_snr_steps)
     ]
     
-    
     return {"snrs" : efficiency_snrs, "scores": np.array(scores)}
 
 def calculate_far_scores(
@@ -142,10 +139,10 @@ def calculate_far_scores(
     far_scores : np.ndarray
         The calculated FAR scores.
     """
-    
+        
     # Make copy of generator args so original is not affected:
     dataset_args = deepcopy(dataset_args)
-    
+        
     # Integer arguments are integers:
     num_examples = int(num_examples)
     num_examples_per_batch = int(num_examples_per_batch)
@@ -153,10 +150,6 @@ def calculate_far_scores(
     # Calculate number of batches required given batch size:
     num_batches = num_examples // num_examples_per_batch
 
-    # Setting options for data distribution:
-    options = tf.data.Options()
-    options.experimental_distribute.auto_shard_policy = AutoShardPolicy.DATA
-    
     # Ensure dataset has no injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
     dataset_args["injection_generators"] = []
@@ -168,8 +161,8 @@ def calculate_far_scores(
         ).take(num_batches)
         
     # Predict the scores and get the second column ([:, 1]):
-    far_scores = model.predict(dataset, steps = num_batches, verbose=2)
-    
+    far_scores = model.predict(dataset, steps = num_batches, verbose=2)[:,0]
+        
     return far_scores
 
 def calculate_far_score_thresholds(
@@ -219,7 +212,7 @@ def calculate_far_score_thresholds(
     score_thresholds = {
         far: (far, far_scores[idx]) for far, idx in zip(fars, idxs)
     }
-
+    
     # If any score is 1, set the corresponding threshold to 1.1
     for far, (_, score) in score_thresholds.items():
         if score == 1:
@@ -231,9 +224,10 @@ def calculate_far_score_thresholds(
 def roc_curve_and_auc(
         y_true, 
         y_scores, 
-        chunk_size=500
+        chunk_size=512
     ):
-    num_thresholds = 1024
+    
+    num_thresholds = 512
     # Use logspace with a range between 0 and 6, which corresponds to values 
     # between 1 and 1e-6:
     log_thresholds = tf.exp(tf.linspace(0, -6, num_thresholds))
@@ -244,7 +238,8 @@ def roc_curve_and_auc(
     y_true = tf.cast(y_true, tf.float32)
 
     num_samples = y_true.shape[0]
-    num_chunks = (num_samples + chunk_size - 1) // chunk_size
+    num_chunks = num_samples // chunk_size 
+    #num_chunks = (num_samples + chunk_size - 1) // chunk_size
 
     # Initialize accumulators for true positives, false positives, true 
     # negatives, and false negatives
@@ -254,7 +249,7 @@ def roc_curve_and_auc(
     tn_acc = tf.zeros(num_thresholds, dtype=tf.float32)
 
     # Process data in chunks
-    for chunk_idx in range(num_chunks):
+    for chunk_idx in range(num_chunks):        
         start_idx = chunk_idx * chunk_size
         end_idx = min((chunk_idx + 1) * chunk_size, num_samples)
 
@@ -269,13 +264,13 @@ def roc_curve_and_auc(
         fp = tf.reduce_sum((1 - y_true_chunk) * y_pred, axis=0)
         fn = tf.reduce_sum(y_true_chunk * (1 - y_pred), axis=0)
         tn = tf.reduce_sum((1 - y_true_chunk) * (1 - y_pred), axis=0)
-
+        
         # Update accumulators
         tp_acc += tp
         fp_acc += fp
         fn_acc += fn
         tn_acc += tn
-
+    
     tpr = tp_acc / (tp_acc + fn_acc)
     fpr = fp_acc / (fp_acc + tn_acc)
 
@@ -390,7 +385,7 @@ def calculate_roc(
         x_dataset, 
         steps = num_batches, 
         verbose = 2
-    )
+    )[:,0]
     
     # Calculate the ROC curve and AUC
     fpr, tpr, roc_auc = roc_curve_and_auc(y_true, y_scores)
@@ -501,10 +496,6 @@ def calculate_tar_scores(
         
     callback = CaptureWorstPredictions(n_worst=10)
     
-    model.summary()
-    # Get the output layers
-    output_layers = [layer.output for layer in model.layers]
-    
     # Predict the scores and get the second column ([:, 1]):
     tar_scores = model.predict(
         dataset, 
@@ -512,7 +503,7 @@ def calculate_tar_scores(
         callbacks = [callback],
         steps = num_batches, 
         verbose=2
-    )
+    )[:,0]
             
     dataset_args["output_variables"] = \
         [
@@ -521,6 +512,8 @@ def calculate_tar_scores(
             WaveformParameters.MASS_1_MSUN,
             WaveformParameters.MASS_2_MSUN
         ]
+    
+    #quant
     
     # Initlize generator:
     dataset : tf.data.Dataset = get_ifo_dataset(
@@ -618,7 +611,7 @@ def generate_efficiency_curves(
             acc = []
 
             for score in scores:
-                score = score[:, 1]
+                score = score[:, 0]
                 if threshold != 0:
                     total = np.sum(score >= threshold)
                 else:
@@ -908,7 +901,9 @@ def generate_waveform_plot(
     ):
     
     p = figure(
-        title=f"Worst Performing Input Score: {data['score']}, {data['mass_1_msun']}, {data['mass_2_msun']}",
+        title=f"Worst Performing Input Score: {data['score']}, "
+        f"{data[WaveformParameters.MASS_1_MSUN.name]}, "
+        f"{data[WaveformParameters.MASS_2_MSUN.name]}.",
         x_axis_label='Time Seconds',
         y_axis_label='Strain',
         width=800, 
@@ -917,8 +912,12 @@ def generate_waveform_plot(
     
     source = ColumnDataSource(
         data=dict(
-            x=np.linspace(0,onsource_duration_seconds, len(data['onsource'])), 
-            y=data['onsource']
+            x=np.linspace(
+                0,
+                onsource_duration_seconds, 
+                len(data[ReturnVariables.WHITENED_ONSOURCE.name])
+            ), 
+            y=data[ReturnVariables.WHITENED_ONSOURCE.name]
         )
     )
     line = p.line(
@@ -932,8 +931,8 @@ def generate_waveform_plot(
         
     source = ColumnDataSource(
         data=dict(
-            x= np.linspace(0,onsource_duration_seconds, len(data['onsource'])),
-            y= data['whitened_injections']
+            x= np.linspace(0,onsource_duration_seconds, len(data[ReturnVariables.WHITENED_ONSOURCE.name])),
+            y= data[ReturnVariables.WHITENED_INJECTIONS.name]
         )
     )
     line = p.line(
@@ -947,8 +946,8 @@ def generate_waveform_plot(
     
     source = ColumnDataSource(
         data=dict(
-            x=np.linspace(0,onsource_duration_seconds, len(data['onsource'])), 
-            y=data['injections']*20.0
+            x=np.linspace(0,onsource_duration_seconds, len(data[ReturnVariables.WHITENED_ONSOURCE.name])), 
+            y=data[ReturnVariables.WHITENED_INJECTIONS.name]*20.0
         )
     )
     line = p.line(
@@ -1003,6 +1002,9 @@ class Validator:
         validator.input_duration_seconds = \
             dataset_args["onsource_duration_seconds"]
         
+        print("Start:")
+        print(get_tf_memory_usage())
+        
         logging.info(f"Worst performing inputs for {validator.name}...")
         tar_scores, worst_performers = \
             calculate_tar_scores(
@@ -1014,6 +1016,9 @@ class Validator:
             )
         validator.worst_performers = worst_performers
         logging.info(f"Done")
+        
+        print("TAR:")
+        print(get_tf_memory_usage())
                         
         logging.info(f"Calculating efficiency scores for {validator.name}...")
         validator.efficiency_data = \
@@ -1024,6 +1029,9 @@ class Validator:
                 **efficiency_config
             )
         logging.info(f"Done")
+        
+        print("Efficiency:")
+        print(get_tf_memory_usage())
 
         logging.info(f"Calculating FAR scores for {validator.name}...")
         validator.far_scores = \
@@ -1035,6 +1043,9 @@ class Validator:
             )
         logging.info(f"Done")
         
+        print("FAR:")
+        print(get_tf_memory_usage())
+                
         logging.info(f"Calculating ROC data for {validator.name}...")
         validator.roc_data = \
             calculate_multi_rocs(    
@@ -1044,6 +1055,9 @@ class Validator:
                 **roc_config
             )
         logging.info(f"Done")
+        
+        print("ROC::")
+        print(get_tf_memory_usage())
                 
         return validator
 
@@ -1158,7 +1172,6 @@ class Validator:
                 if group_name.startswith(f"worst_performers_"): 
                     for key in h5f[group_name]:
                         group_data[key] = h5f[group_name][key][()]
-                    print(group_data)
                     worst_performers.append(group_data)
                 
             validator.worst_performers = worst_performers
@@ -1181,7 +1194,7 @@ class Validator:
                 validators, 
                 fars
             )
-
+        
         far_curves = \
             generate_far_curves(
                 validators

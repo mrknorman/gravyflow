@@ -1,6 +1,7 @@
 # Built-In imports:
 import logging
 from pathlib import Path
+from copy import deepcopy
 
 # Library imports:
 import numpy as np
@@ -22,8 +23,8 @@ from ..dataset import get_ifo_dataset, ReturnVariables
 from ..model import ConvLayer, DenseLayer, PoolLayer, DropLayer, ModelBuilder
 
 def test_training(
-    num_train_examples : int = int(1.0E5),
-    num_validation_examples : int = int(1.0E4),
+    num_train_examples : int = int(1.0E6),
+    num_validation_examples : int = int(1.0E3),
     output_diretory_path : Path = Path("./py_ml_data/tests/")
     ):
     
@@ -100,29 +101,42 @@ def test_training(
         ]
     }
     
-    train_args = dataset_args.copy()
+    train_args = deepcopy(dataset_args)
     train_args["seed"] = 1000
     train_args["group"] = "train"
+    train_args["noise_obtainer"].ifo_data_obtainer.force_acquisition = True
+    train_args["noise_obtainer"].ifo_data_obtainer.cache_segments = False
     
     def get_first_injection_features(features, labels):
         labels[ReturnVariables.INJECTION_MASKS.name] = \
             tf.expand_dims(labels[ReturnVariables.INJECTION_MASKS.name][0], 1)
+        
+        # Check for NaN in features
+        for key, feature_tensor in features.items():
+            tf.debugging.check_numerics(feature_tensor, f"NaN detected in features under key '{key}'.")
+
+        # Check for NaN in labels
+        for key, label_tensor in labels.items():
+            tf.debugging.check_numerics(label_tensor, f"NaN detected in labels under key '{key}'.")
+        
         return features, labels
+
     
     train_dataset : tf.data.Dataset = get_ifo_dataset(
         **train_args
     ).map(get_first_injection_features)
         
-    validate_args = dataset_args.copy()
+    validate_args = deepcopy(dataset_args)
     validate_args["seed"] = 1001
     validate_args["group"] = "validate"
-   # validate_args["noise_obtainer"].ifo_data_obtainer.cache_segments = False
+    validate_args["noise_obtainer"].ifo_data_obtainer.force_acquisition = True
+    validate_args["noise_obtainer"].ifo_data_obtainer.cache_segments = False
     
     validate_dataset : tf.data.Dataset = get_ifo_dataset(
         **validate_args
     ).map(get_first_injection_features).take(num_validation_examples//num_examples_per_batch)
     
-    test_args = dataset_args.copy()
+    test_args = deepcopy(dataset_args)
     test_args["seed"] = 1002
     train_args["group"] = "test"
     
@@ -191,9 +205,6 @@ if __name__ == "__main__":
         max_memory_limit = memory_to_allocate_tf, 
         logging_level=logging.WARNING
     )
-    
-    #policy = mixed_precision.Policy('mixed_float16')
-    #mixed_precision.set_global_policy(policy)
         
     # Set logging level:
     logging.basicConfig(level=logging.INFO)

@@ -219,3 +219,19 @@ def ensure_directory_exists(
     directory = Path(directory)  # Convert to Path if not already
     if not directory.exists():
         directory.mkdir(parents=True, exist_ok=True)
+        
+def get_tf_memory_usage() -> int:
+    """Get TensorFlow's current GPU memory usage for a specific device.
+    
+    Returns
+    -------
+    int
+        The current memory usage in megabytes.
+    """
+    
+    # Extract device index
+    device_index = int(tf.config.list_physical_devices("GPU")[0].name.split(":")[-1])
+    
+    device_name = f"GPU:{device_index}"
+    memory_info = tf.config.experimental.get_memory_info(device_name)
+    return memory_info["current"] // (1024 * 1024)

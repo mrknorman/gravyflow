@@ -21,7 +21,7 @@ from ..dataset import get_ifo_dataset, ReturnVariables
 from ..validate import Validator
 
 def test_validate(
-    output_diretory_path : Path = Path("./py_ml_data/tests/"),
+    output_directory_path : Path = Path("./py_ml_data/tests/"),
     noise_directory_path : Path = Path("./py_ml_data/test_data/")
     ):
         
@@ -39,16 +39,16 @@ def test_validate(
     efficiency_config : Dict[str, Union[float, int]] = \
         {
             "max_snr" : 15.0, 
-            "num_snr_steps" : 16, 
-            "num_examples_per_snr_step" : 1024
+            "num_snr_steps" : 31, 
+            "num_examples_per_snr_step" : 2048
         }
     far_config : Dict[str, float] = \
         {
-            "num_examples" : 1.0E4
+            "num_examples" : 1.0E5
         }
     roc_config : Dict[str, Union[float, List]] = \
         {
-            "num_examples" : 1.0E4,
+            "num_examples" : 1.0E5,
             "snr_ranges" :  [
                 (8.0, 20.0),
                 6.0
@@ -129,31 +129,22 @@ def test_validate(
 
     # Save validation data:
     validator.save(
-        output_data_directory / f"{model_name}_validation_data.h5", 
+        output_directory_path / f"{model_name}_validation_data.h5", 
     )
 
     # Plot validation data:
     validator.plot(
-        output_data_directory / f"{model_name}_validation_plots.html"
+        output_directory_path / f"{model_name}_validation_plots.html"
     )
-
-    validators.append(validator)
-            
-    # Plot all model validation data comparison:            
-    validators[0].plot(
-        output_data_directory / "test_validation_plots.html",
-        comparison_validators = validators[1:]
-    )
-    
             
 if __name__ == "__main__":
         
      # ---- User parameters ---- #
     
     # GPU setup:
-    min_gpu_memory_mb : int = 4000
+    min_gpu_memory_mb : int = 10000
     num_gpus_to_request : int = 1
-    memory_to_allocate_tf : int = 2000
+    memory_to_allocate_tf : int = 8000
     
     # Setup CUDA
     gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)

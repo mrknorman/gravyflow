@@ -14,7 +14,7 @@ import tensorflow as tf
 
 from .cuphenom.py.cuphenom import generate_phenom_d
 from .maths import (Distribution, DistributionType, expand_tensor, batch_tensor,
-                    set_random_seeds, crop_samples)
+                    set_random_seeds, crop_samples, replace_nan_and_inf_with_zero)
 from .snr import scale_to_snr
 
 def replace_placeholders(
@@ -216,7 +216,6 @@ class InjectionGenerator:
             
         elif not isinstance(self.configs, list):
             self.configs = [self.configs]
-            
             
         iterators = [self.generate_one(config) for config in self.configs]
         
@@ -450,6 +449,10 @@ class InjectionGenerator:
                 fft_duration_seconds=1.0,
                 overlap_duration_seconds=0.5
             )
+            
+            scaled_injections = replace_nan_and_inf_with_zero(scaled_injections)
+            
+            tf.debugging.check_numerics(scaled_injections, f"NaN detected in scaled_injections'.")
 
             # Add scaled injections to onsource:
             onsource += scaled_injections

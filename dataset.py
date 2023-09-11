@@ -11,7 +11,8 @@ from .noise import NoiseObtainer
 from .injection import (cuPhenomDGenerator, InjectionGenerator, 
                         WaveformParameters, WNBGenerator, WaveformParameter,
                         ReturnVariable, ReturnVariables)
-from .maths import expand_tensor, Distribution, set_random_seeds, crop_samples
+from .maths import (expand_tensor, Distribution, set_random_seeds, crop_samples,
+                    replace_nan_and_inf_with_zero)
 from .whiten import whiten
 
 def get_ifo_data(    
@@ -102,7 +103,7 @@ def get_ifo_data(
         in zip(noise, injections):
                 
         if len(injection_generators):
-            
+                        
             # Add injections to waveform scaled by inputted SNR config values:
             onsource, scaled_injections, amplitudes, snrs = \
                 injection_generator.add_injections_to_onsource(
@@ -124,6 +125,10 @@ def get_ifo_data(
                             filter_duration_seconds=1.0
                         ) for scaled_injection_ in scaled_injections
                     ])
+                
+                whitened_injections = \
+                    eplace_nan_and_inf_with_zero(whitened_injections)
+
         else:
             scaled_injections = None
                 
@@ -139,6 +144,8 @@ def get_ifo_data(
                     overlap_duration_seconds=0.5,
                     filter_duration_seconds=1.0
                 )
+
+            
             # Crop to remove edge effects, crop with or without whitening to
             # ensure same data is retrieve in both cases
             whitened_onsource = crop_samples(
@@ -146,8 +153,17 @@ def get_ifo_data(
                 onsource_duration_seconds, 
                 sample_rate_hertz
             )
+
             whitened_onsource = tf.cast(whitened_onsource, tf.float16)
-        
+            
+            whitened_onsource = replace_nan_and_inf_with_zero(whitened_onsource)
+
+            
+            tf.debugging.check_numerics(
+                whitened_onsource, 
+                f"NaN detected in whitened_onsource after cast."
+            )
+                    
         else:
             whitened_onsource = None
         
@@ -169,7 +185,6 @@ def get_ifo_data(
             
         if ReturnVariables.INJECTION_MASKS in variables_to_return:
             mask = tf.cast(mask, tf.float32)
-
                 
         # Construct dictionary:
         input_dict, output_dict = [
