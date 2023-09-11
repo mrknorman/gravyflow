@@ -1,43 +1,66 @@
 import os
 import logging
-import tensorflow as tf
+import json
+import sys
+import h5py
+import subprocess
+from pathlib import Path
+from typing import Union
+
 import numpy as np
+import tensorflow as tf
+
+from scipy.stats import truncnorm
 from tensorflow.python.distribute.distribute_lib import Strategy
 from tensorflow.python.framework.ops import EagerTensor
 from tensorflow.data import Dataset
-import subprocess
-from scipy.stats import truncnorm
-from pathlib import Path
 
-import json
+from .maths import Distribution, DistributionType
 
-def setup_cuda(device_num: str, max_memory_limit: int, verbose: bool = False) -> Strategy:
+def setup_cuda(
+        device_num: str, 
+        max_memory_limit: int, 
+        logging_level: int = logging.WARNING
+    ) -> Strategy:
+    
     """
-    Sets up CUDA for TensorFlow. Configures memory growth, logging verbosity, and returns the strategy for distributed computing.
+    Sets up CUDA for TensorFlow. Configures memory growth, logging verbosity, 
+    and returns the strategy for distributed computing.
 
     Args:
-        device_num (str): The GPU device number to be made visible for TensorFlow.
-        max_memory_limit (int): The maximum GPU memory limit in MB.
-        verbose (bool, optional): If True, prints the list of GPU devices. Defaults to False.
+        device_num (str): 
+            The GPU device number to be made visible for TensorFlow.
+        max_memory_limit (int): 
+            The maximum GPU memory limit in MB.
+        verbose (bool, optional):
+            If True, prints the list of GPU devices. Defaults to False.
 
     Returns:
         tf.distribute.MirroredStrategy: The TensorFlow MirroredStrategy instance.
     """
 
-    # Set up logging to file - this is beneficial in debugging scenarios and for traceability.
-    logging.basicConfig(filename='tensorflow_setup.log', level=logging.INFO)
+    # Set up logging to file - this is beneficial in debugging scenarios and for 
+    # traceability.
+    logger = logging.getLogger("tensorflow_logger")
+    stream_handler = logging.StreamHandler(sys.stdout)
+    logger.addHandler(stream_handler)
+    logger.setLevel(logging_level)
     
     try:
         # Set the device number for CUDA to recognize.
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device_num)
     except Exception as e:
-        logging.error(f"Failed to set CUDA_VISIBLE_DEVICES environment variable: {e}")
+        logging.error(
+            f"Failed to set CUDA_VISIBLE_DEVICES environment variable: {e}"
+        )
         raise
 
     # Confirm TensorFlow and CUDA version compatibility.
     tf_version = tf.__version__
     cuda_version = tf.sysconfig.get_build_info()['cuda_version']
-    logging.info(f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}")
+    logging.info(
+        f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}"
+    )
 
     # List all the physical GPUs.
     gpus = tf.config.list_physical_devices('GPU')
@@ -57,19 +80,21 @@ def setup_cuda(device_num: str, max_memory_limit: int, verbose: bool = False) ->
 
         except RuntimeError as e:
             # This needs to be set before initializing GPUs.
-            logging.error(f"Failed to set memory growth or set memory limit: GPUs must be initialized first. Error message: {e}")
+            logging.error(
+                f"Failed to set memory growth or set memory limit: GPUs must be"
+                " initialized first. Error message: {e}")
             raise
 
-    # MirroredStrategy performs synchronous distributed training on multiple GPUs on one machine.
+    # MirroredStrategy performs synchronous distributed training on multiple GPUs 
+    # on one machine.
     # It creates one replica of the model on each GPU available.
     strategy = tf.distribute.MirroredStrategy()
 
     # Set the logging level to ERROR to reduce logging noise.
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
-    # If verbose, print the list of GPUs.
-    if verbose:
-        print(tf.config.list_physical_devices("GPU"))
+    # If logging level = logging.INFO, print the list of GPUs.
+    logging.info(tf.config.list_physical_devices("GPU"))
 
     # Return the MirroredStrategy instance.
     return strategy
@@ -168,70 +193,45 @@ def get_element_shape(dataset):
     for element in dataset.take(1):
         return element[0].shape
     
-def randomise_dict(value):
-    distribution_type = value.get('distribution_type', 'constant')
-    dtype = value.get('dtype', 'float')
-    num_values = value.get('num_values', 1)
-
-    if distribution_type == 'constant':
-        constant_value = float(value.get('value', 0.0)) # Default value is 0 if not provided
-        random_values = [constant_value] * num_values
+def open_hdf5_file(
+    file_path : Union[str, Path], 
+    mode : str ='r+'
+    ) -> h5py.File:
+    
+    file_path = Path(file_path)
+    try:
+        # Try to open the HDF5 file in the specified mode
+        f = h5py.File(file_path, mode)
+        f.close()
+    except OSError:
+        # The file does not exist, so create it in write mode
+        f = h5py.File(file_path, 'w')
+        f.close()
+        logging.info(f'The file {file_path} was created in write mode.')
     else:
-        min_value = float(value.get('min_value', '-inf'))
-        max_value = float(value.get('max_value', 'inf'))
-        mean_value = float(value.get('mean_value', 0.0))
-        std = float(value.get('std', 1.0))
+        logging.info(f'The file {file_path} was opened in {mode} mode.')
+    return h5py.File(file_path, mode)
 
-        if distribution_type == 'uniform':
-            random_values = np.random.uniform(min_value, max_value, num_values)
-        elif distribution_type == 'normal':
-            random_values = truncnorm.rvs(
-                (min_value - mean_value) / std,
-                (max_value - mean_value) / std,
-                loc=mean_value,
-                scale=std,
-                size=num_values)
-        else:
-            raise ValueError('Unsupported distribution type')
-
-    if dtype == 'int':
-        random_values = [int(rv) for rv in random_values]
+def ensure_directory_exists(
+    directory: Union[str, Path]
+    ):
     
-    random_values = random_values if num_values > 1 else random_values[0]
-    return random_values
-    
-def randomise_arguments(input_dict, func):
-    output_dict = {}
-    for key, value in input_dict.items():
-        output_dict[key] = randomise_dict(value)
-
-    return func(**output_dict), output_dict
-    
-def read_injection_config_file(
-    config_path: Path,
-    sample_rate_hertz: float,
-    onsource_duration_seconds: float
-) -> dict:
-    # Define replacement mapping
-    replacements = {
-        "sample_rate_hertz": sample_rate_hertz,
-        "onsource_duration_seconds": onsource_duration_seconds,
-        "pi": np.pi,
-        "2*pi": 2.0 * np.pi
-    }
-
-    # Load injection config
-    with open(config_path, "r") as file:
-        config = json.load(file)
-    
-    # Replacing placeholders
-    for key, value in config["args"].items():
+    directory = Path(directory)  # Convert to Path if not already
+    if not directory.exists():
+        directory.mkdir(parents=True, exist_ok=True)
         
-        if "value" in value:
-            value["value"] = \
-                replacements.get(value["value"], value["value"])
-        if "max_value" in value:
-            value["max_value"] = \
-                replacements.get(value.get("max_value"), value["max_value"])
-
-    return config
+def get_tf_memory_usage() -> int:
+    """Get TensorFlow's current GPU memory usage for a specific device.
+    
+    Returns
+    -------
+    int
+        The current memory usage in megabytes.
+    """
+    
+    # Extract device index
+    device_index = int(tf.config.list_physical_devices("GPU")[0].name.split(":")[-1])
+    
+    device_name = f"GPU:{device_index}"
+    memory_info = tf.config.experimental.get_memory_info(device_name)
+    return memory_info["current"] // (1024 * 1024)

@@ -210,17 +210,18 @@ def fftconvolve_(in1, in2, mode="full"):
             "acceptable mode flags are 'valid', 'same', or 'full'"
         )
 
-@tf.function 
+@tf.function
 def _centered(arr, newsize):
     # Ensure correct dimensionality
     if len(arr.shape) == 1:
         arr = tf.expand_dims(arr, 0)
     # Calculate start and end indices
-    start_ind = (arr.shape[-1] - newsize) // 2
+    arr_shape = tf.shape(arr)
+    start_ind = (arr_shape[-1] - newsize) // 2
     end_ind = start_ind + newsize
     return arr[..., start_ind:end_ind]
 
-@tf.function 
+@tf.function
 def fftconvolve(in1, in2, mode="full"):
     # Extract shapes
     s1 = tf.shape(in1)[-1]
@@ -240,9 +241,8 @@ def fftconvolve(in1, in2, mode="full"):
     elif mode == "valid":
         cropped = _centered(ret, s1 - s2 + 1)
     else:
-        raise ValueError("Acceptable mode flags are 'valid',"
-                         " 'same', or 'full'.")
-
+        raise ValueError("Acceptable mode flags are 'valid', 'same', or 'full'.")
+    
     return cropped
 
 @tf.function 
@@ -294,26 +294,66 @@ def convolve(
     if nfft >= timeseries_new.shape[-1]/2:
         conv = fftconvolve(timeseries_new, fir, mode='same')
     else:
-        nstep = nfft - 2*pad
-        conv[:, :nfft-pad] = fftconvolve(
-            timeseries_new[:, :nfft], 
-            fir, 
-            mode='same'
-        )[:, :nfft-pad]
+        # Initialize
+        nstep = nfft - 2 * pad
+        num_samples, num_timesteps = timeseries_new.shape
+        k = tf.convert_to_tensor(nfft - pad, dtype=tf.int32)
+        final_k = num_timesteps - nfft + pad
+        accumulated_middle_parts = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
 
-        k = nfft - pad
-        while k < timeseries_new.shape[-1] - nfft + pad:
+        # First part
+        first_part = fftconvolve(timeseries_new[:, :nfft], fir, mode="same")[:, :nfft - pad]
+
+        # Define the loop body for tf.while_loop
+        def loop_body(k, accumulated_middle_parts):
             yk = fftconvolve(
-                timeseries_new[:, k-pad:k+nstep+pad], 
-                fir,
-                mode='same'
+                timeseries_new[:, k - pad: k + nstep + pad], fir, mode="same"
             )
-            conv[:, k:k+yk.shape[-1]-2*pad] = yk[:, pad:-pad]
+            updated_parts = accumulated_middle_parts.write(k, yk[:, pad: -pad])
+            k = k + nstep
+            return k, updated_parts
+
+        # Run the loop
+        _, final_middle_parts = tf.while_loop(
+            cond=lambda k, *_: k < final_k,
+            body=loop_body,
+            loop_vars=[k, accumulated_middle_parts]
+        )
+
+        # Stack all middle parts
+        middle_parts = final_middle_parts.stack()
+        
+        middle_parts = tf.reshape(middle_parts, [num_samples, -1])
+
+        # Last part
+        last_part = fftconvolve(timeseries_new[:, -nfft:], fir, mode="same")[:, -nfft + pad:]
+
+        # Combine all
+        conv = tf.concat([first_part, middle_parts, last_part], axis=1)
+        
+        """
+        # Initialize variables
+        nstep = nfft - 2 * pad
+        num_samples, num_timesteps = timeseries_new.shape
+        conv = np.zeros((num_samples, num_timesteps), dtype=timeseries_new.dtype)
+
+        # First part
+        conv[:, :nfft - pad] = \
+            fftconvolve(timeseries_new[:, :nfft], fir, mode="same")[:, :nfft - pad]
+
+        # Middle part
+        k = nfft - pad
+        while k < num_timesteps - nfft + pad:
+            yk = fftconvolve(
+                timeseries_new[:, k - pad : k + nstep + pad], fir, mode="same"
+            )
+            conv[:, k : k + yk.shape[-1] - 2 * pad] = yk[:, pad : -pad]
             k += nstep
 
-        conv[:, -nfft+pad:] = fftconvolve(
-            timeseries_new[:, -nfft:], fir, mode='same'
-        )[:, -nfft+pad:]
+        # Last part
+        conv[:, -nfft + pad :] = \
+            fftconvolve(timeseries_new[:, -nfft:], fir, mode="same")[:, -nfft + pad :]
+        """
 
     return conv
 
@@ -322,11 +362,11 @@ def whiten(
     timeseries: tf.Tensor, 
     background: tf.Tensor,
     sample_rate_hertz: float, 
-    fftlength: int = 4, 
-    overlap: int = 2,
-    highpass: float = None,
+    fft_duration_seconds: int = 4, 
+    overlap_duration_seconds: int = 2,
+    highpass_hertz: float = None,
     detrend: str ='constant',
-    fduration: int = 2.0,
+    filter_duration_seconds: float = 2.0,
     window: str = "hann"
     ) -> tf.Tensor:
     """
@@ -340,13 +380,13 @@ def whiten(
         The time series to use to calculate the asd.
     sample_rate_hertz : float
         The sample rate of the time series data.
-    fftlength : int, optional
+    fft_duration_seconds : int, optional
         Length of the FFT window, default is 4.
-    overlap : int, optional
-        Overlap of the FFT windows, default is 2.
-    highpass : float, optional
-        Highpass frequency, default is None.
-    fduration : int, optional
+    overlap_duration_seconds : int, optional
+        overlap_duration_seconds of the FFT windows, default is 2.
+    highpass_hertz : float, optional
+        highpass_hertz frequency, default is None.
+    filter_duration_seconds : float, optional
         Duration of the filter in seconds, default is 2.
     window : str, optional
         Window function to use, default is 'hann'.
@@ -356,6 +396,21 @@ def whiten(
     out : tf.Tensor
         The whitened time series.
     """
+    
+    # Validate highpass frequency, if applicable
+    if highpass_hertz:
+        if highpass_hertz < 0 or highpass_hertz >= (sample_rate_hertz / 2):
+            raise ValueError("Invalid highpass frequency.")
+
+    # Validate filter duration
+    if filter_duration_seconds <= 0:
+        raise ValueError("Filter duration should be greater than zero.")
+
+    # Validate window parameter
+    if window not in ["hann"]:  # Extend list as needed
+        raise ValueError("Invalid window type.")
+    
+    epsilon = 1e-8  # Small constant to avoid division by zero
 
     # Check if input is 1D or 2D
     is_1d = len(timeseries.shape) == 1
@@ -368,10 +423,13 @@ def whiten(
     
     freqs, psd = calculate_psd(
         background, 
-        nperseg=int(sample_rate_hertz*fftlength), 
-        noverlap=int(sample_rate_hertz*overlap), 
+        nperseg=int(sample_rate_hertz*fft_duration_seconds), 
+        noverlap=int(sample_rate_hertz*overlap_duration_seconds), 
         sample_rate_hertz=sample_rate_hertz
     )
+    
+    # Ensure psd doesn't contain negative values
+    psd = tf.math.maximum(psd, 0)
     asd = tf.sqrt(psd)
     
     df = 1.0 / (timeseries.shape[-1] / sample_rate_hertz)
@@ -387,8 +445,11 @@ def whiten(
             axis=-1
         )
 
-    ncorner = int(highpass / df) if highpass else 0
-    ntaps = int(fduration * sample_rate_hertz)
+    ncorner = int(highpass_hertz / df) if highpass_hertz else 0
+    ntaps = int(filter_duration_seconds * sample_rate_hertz)
+    
+    # Ensure asd doesn't contain zeros to avoid division by zero
+    asd = tf.math.maximum(asd, epsilon)
     transfer = 1.0 / asd
 
     tdw = fir_from_transfer(transfer, ntaps, window=window, ncorner=ncorner)
