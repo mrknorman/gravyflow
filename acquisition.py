@@ -38,10 +38,32 @@ class SegmentOrder(Enum):
     SHORTEST_FIRST = auto()
     CHRONOLOGICAL = auto()
     
+@dataclass
+class IFO_:
+    name: str
+    optimal_psd_path : Path
+
+noise_profile_directory_path : Path = Path("./py_ml_tools/res/noise_profiles/")
+
+ifo_data : Dict = {
+    "livingston" : {
+        "name": "Livingston",
+        "optimal_psd_path" : noise_profile_directory_path / "livingston.csv"
+    },
+    "hanford" : {
+        "name": "Hanford",
+        "optimal_psd_path" : noise_profile_directory_path / "handford.csv"
+    },
+    "virgo" : {
+        "name": "Virgo",
+        "optimal_psd_path" : noise_profile_directory_path / "virgo.csv"
+    }
+}
+    
 class IFO(Enum):
-    L1 = auto()
-    H1 = auto()
-    V1 = auto()
+    L1 = IFO_(**ifo_data["livingston"])
+    H1 = IFO_(**ifo_data["hanford"])
+    V1 = IFO_(**ifo_data["virgo"])
     
 @dataclass
 class ObservingRunData:
@@ -65,7 +87,7 @@ class ObservingRunData:
         total_seconds = time_diff.total_seconds() - leap_seconds
         return total_seconds
 
-observing_run_data = {
+observing_run_data : Dict = {
     "O1" : ("O1", datetime(2015, 9, 12, 0, 0, 0), datetime(2016, 1, 19, 0, 0, 0),
      {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
      {DataQuality.BEST: "HOFT_C01"},
@@ -617,7 +639,7 @@ class IFODataObtainer:
         self,
         sample_rate_hertz : float,
         valid_segments : np.ndarray = None,
-        ifos : List[IFO] = [IFO.L1],
+        ifos : List[IFO] = IFO.L1,
         scale_factor : float = 1.0
     ): 
         # Check if self.file_path is intitiated:
@@ -803,7 +825,7 @@ class IFODataObtainer:
             padding_duration_seconds : float,
             offsource_duration_seconds : float,
             num_examples_per_batch : int = 32,
-            ifos : List[IFO] = [IFO.L1],
+            ifos : List[IFO] = IFO.L1,
             scale_factor : float = 1.0
         ) -> (tf.Tensor, tf.Tensor, tf.Tensor, int):
         
