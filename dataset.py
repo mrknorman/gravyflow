@@ -2,18 +2,62 @@ from typing import List, Tuple, Union, Dict, Any
 from enum import Enum, auto
 from pathlib import Path
 from dataclasses import dataclass
+import warnings
 
 import tensorflow as tf
 from tensorflow.data.experimental import AutoShardPolicy
 from tensorflow.data import Options
 
-from .noise import NoiseObtainer
+from .noise import NoiseObtainer, NoiseType
 from .injection import (cuPhenomDGenerator, InjectionGenerator, 
                         WaveformParameters, WNBGenerator, WaveformParameter,
                         ReturnVariable, ReturnVariables)
 from .maths import (expand_tensor, Distribution, set_random_seeds, crop_samples,
                     replace_nan_and_inf_with_zero)
 from .whiten import whiten
+
+def validate_noise_settings(
+        noise_obtainer: NoiseObtainer, 
+        variables_to_return: List[Union[WaveformParameters, ReturnVariables]]
+    ) -> None:
+    """
+    Validates noise settings and emits warnings or errors as appropriate.
+    
+    Parameters
+    ----------
+    noise_obtainer : NoiseObtainer
+        The object containing noise settings.
+    variables_to_return : Union[List[str], List[Enum]]
+        List of variables expected to be returned.
+        
+    Raises
+    ------
+    ValueError
+        If incompatible settings are found.
+    """
+    
+    # Validate noise type and ifo_data_obtainer
+    if noise_obtainer.noise_type in [NoiseType.WHITE, NoiseType.COLORED]:
+        
+        if noise_obtainer.ifo_data_obtainer is not None:
+            warn(
+                "Noise is not REAL or PSEUDO-REAL, yet data obtainer is defined.", 
+                UserWarning
+            )
+            
+        if ReturnVariables.GPS_TIME in variables_to_return:
+            raise ValueError("Cannot return GPS time from simulated Noise")
+    
+    # Validate whitening for white noise
+    if noise_obtainer.noise_type is NoiseType.WHITE:
+    
+        if ReturnVariables.WHITENED_INJECTIONS in variables_to_return or \
+           ReturnVariables.WHITENED_ONSOURCE in variables_to_return:
+            
+            warn(
+                "Whitening requested for WHITE NOISE.", 
+                UserWarning
+            )
 
 def get_ifo_data(    
         # Random Seed:
@@ -33,8 +77,8 @@ def get_ifo_data(
         num_examples_per_generation_batch : int = 2048,
         # Output configuration:
         num_examples_per_batch: int = 1,
-        input_variables : List = None,
-        output_variables : List = None
+        input_variables : List[Union[WaveformParameters, ReturnVariables]] = None,
+        output_variables : List[Union[WaveformParameters, ReturnVariables]] = None
     ):
     
     # Set defaults here as if initilised as default arguments objects are global
@@ -49,7 +93,7 @@ def get_ifo_data(
         
     if injection_generators is None:
         injection_generators = []
-        
+                
     if not isinstance(injection_generators, list):
         injection_generators = [injection_generators]
     
@@ -59,6 +103,8 @@ def get_ifo_data(
     
     if not variables_to_return:
         raise ValueError("No return variables requested. What's the point?")
+
+    validate_noise_settings(noise_obtainer, variables_to_return)
     
     # Set random seeds for Tensorflow and Numpy to ensure deterministic results
     # with the same seed. This means that if the seed is the concerved the
@@ -127,7 +173,7 @@ def get_ifo_data(
                     ])
                 
                 whitened_injections = \
-                    eplace_nan_and_inf_with_zero(whitened_injections)
+                    replace_nan_and_inf_with_zero(whitened_injections)
 
         else:
             scaled_injections = None
@@ -157,7 +203,6 @@ def get_ifo_data(
             whitened_onsource = tf.cast(whitened_onsource, tf.float16)
             
             whitened_onsource = replace_nan_and_inf_with_zero(whitened_onsource)
-
             
             tf.debugging.check_numerics(
                 whitened_onsource, 

@@ -261,7 +261,6 @@ def real_noise_test(
                 DataLabel.NOISE, 
                 DataLabel.GLITCHES
             ],
-            IFO.L1,
             SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
@@ -270,13 +269,14 @@ def real_noise_test(
     # Initilise noise generator wrapper:
     noise_obtainer: NoiseObtainer = \
         NoiseObtainer(
-            ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL
+            ifo_data_obtainer=ifo_data_obtainer,
+            noise_type=NoiseType.REAL,
+            ifos=IFO.L1
         )
     
     generator  : tf.data.Dataset = get_ifo_dataset(
             # Random Seed:
-            seed= 1000,
+            seed=1000,
             # Temporal components:
             sample_rate_hertz=sample_rate_hertz,   
             onsource_duration_seconds=onsource_duration_seconds,

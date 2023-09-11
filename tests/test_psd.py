@@ -94,6 +94,6 @@ if __name__ == "__main__":
     # Set logging level:
     logging.basicConfig(level=logging.INFO)
     
-    # Test IFO noise generator:
+    # Test psd calculation:
     with strategy.scope():
         test_welch_method()

@@ -68,7 +68,6 @@ def test_training(
                 DataLabel.NOISE, 
                 DataLabel.GLITCHES
             ],
-            IFO.L1,
             SegmentOrder.RANDOM,
             force_acquisition = False,
             cache_segments = True
@@ -78,7 +77,8 @@ def test_training(
     noise: NoiseObtainer = \
         NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL
+            noise_type = NoiseType.REAL,
+            ifos = IFO.L1
         )
     
     dataset_args = {
@@ -209,7 +209,7 @@ if __name__ == "__main__":
     # Set logging level:
     logging.basicConfig(level=logging.INFO)
     
-    # Test IFO noise dataset:
+    # Test model_training:
     with strategy.scope():
         test_training()
     

@@ -1,4 +1,4 @@
-from .data_acquisition import (IFODataObtainer, ObservingRun, DataQuality,
+from ..acquisition import (IFODataObtainer, ObservingRun, DataQuality,
                                DataLabel, SegmentOrder, IFO)
 from pathlib import Path
 
@@ -31,14 +31,12 @@ if __name__ == "__main__":
             [
                 DataLabel.NOISE, 
                 DataLabel.GLITCHES
-            ],
-            IFO.L1
+            ]
         )
 
     # Get valid data segments:
     data_obtainer.get_valid_segments(
-        max_segment_duration_seconds,
-        min_segment_duration_seconds,
+        IFO.L1,
         groups,
         "train",
         SegmentOrder.RANDOM

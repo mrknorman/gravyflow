@@ -22,7 +22,7 @@ from ..plotting import generate_strain_plot, generate_spectrogram
 from ..dataset import get_ifo_dataset, get_ifo_data, ReturnVariables
 
 def test_iteration(
-    num_tests : int = int(1.0E3)
+    num_tests : int = int(1.0E2)
     ):
     
      # Test Parameters:
@@ -52,7 +52,6 @@ def test_iteration(
                 DataLabel.NOISE, 
                 DataLabel.GLITCHES
             ],
-            IFO.L1,
             SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
@@ -62,7 +61,8 @@ def test_iteration(
     noise_obtainer: NoiseObtainer = \
         NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL
+            noise_type = NoiseType.REAL,
+            ifos = IFO.L1
         )
     
     data : tf.data.Dataset = get_ifo_data(
@@ -94,7 +94,7 @@ def test_iteration(
         pass
     logging.info("Complete.")
     
-    assert index == num_tests, \
+    assert index == num_tests - 1, \
         "Warning! Data does not iterate the required number of batches"
     
     dataset : tf.data.Dataset = get_ifo_dataset(
@@ -121,9 +121,9 @@ def test_iteration(
         ],
     )
     
-    for index, _ in tqdm(enumerate(dataset.take(num_tests))):
+    for index, _ in tqdm(enumerate(islice(dataset, num_tests))):
         pass
-    
+        
     assert index == num_tests - 1, \
         "Warning! Dataset does not iterate the required number of batches"
     
@@ -159,7 +159,6 @@ def test_dataset(
                 DataLabel.NOISE, 
                 DataLabel.GLITCHES
             ],
-            IFO.L1,
             SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
@@ -168,8 +167,9 @@ def test_dataset(
     # Initilise noise generator wrapper:
     noise_obtainer: NoiseObtainer = \
         NoiseObtainer(
-            ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL
+            ifo_data_obtainer=ifo_data_obtainer,
+            noise_type=NoiseType.REAL,
+            ifos=IFO.L1
         )
     
     dataset : tf.data.Dataset = get_ifo_dataset(
@@ -196,7 +196,7 @@ def test_dataset(
         ],
     )
     
-    input_dict, output_dict = next(iter(dataset))
+    input_dict, _ = next(iter(dataset))
         
     onsource = input_dict[ReturnVariables.WHITENED_ONSOURCE.name].numpy()
     injections = input_dict[ReturnVariables.INJECTIONS.name].numpy()

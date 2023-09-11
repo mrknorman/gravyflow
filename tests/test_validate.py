@@ -73,7 +73,6 @@ def test_validate(
                 DataLabel.NOISE, 
                 DataLabel.GLITCHES
             ],
-            IFO.L1,
             SegmentOrder.RANDOM,
             force_acquisition = False,
             cache_segments = True
@@ -85,6 +84,7 @@ def test_validate(
             data_directory_path=noise_directory_path,
             ifo_data_obtainer=ifo_data_obtainer,
             noise_type=NoiseType.REAL,
+            ifos=IFO.L1
         )
     
     dataset_args : Dict[str, Union[float, List, int]] = {

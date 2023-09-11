@@ -60,7 +60,6 @@ def test_model(
                 DataLabel.NOISE, 
                 DataLabel.GLITCHES
             ],
-            IFO.L1,
             SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
@@ -70,7 +69,8 @@ def test_model(
     noise_obtainer: NoiseObtainer = \
         NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL
+            noise_type = NoiseType.REAL,
+            ifos = IFO.L1
         )
     
     generator = get_ifo_data_generator(

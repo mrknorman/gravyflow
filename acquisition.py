@@ -170,7 +170,6 @@ class IFODataObtainer:
             observing_runs : Union[ObservingRun, List[ObservingRun]],
             data_quality : DataQuality,
             data_labels : Union[DataLabel, List[DataLabel]],
-            ifos : Union[IFO, List[IFO]],
             segment_order : SegmentOrder = SegmentOrder.RANDOM,
             max_segment_duration_seconds : float = 2048.0,
             saturation : float = 1.0,
@@ -191,13 +190,10 @@ class IFODataObtainer:
             observing_runs = [observing_runs]
         if not isinstance(data_labels, list):
             data_labels = [data_labels]
-        if not isinstance(ifos, list):
-            ifos = [ifos]
         
         #Set class atributed with parameters:
         self.data_quality = data_quality
         self.data_labels = data_labels
-        self.ifos = ifos
         self.segment_order = segment_order
         self.max_segment_duration_seconds = max_segment_duration_seconds
         self.saturation = saturation
@@ -311,7 +307,10 @@ class IFODataObtainer:
 
         return np.array(intersection)
     
-    def get_all_segment_times(self) -> np.ndarray:
+    def get_all_segment_times(
+        self,
+        ifos : List[IFO]
+    ) -> np.ndarray:
         
         valid_segments = []
         for index, start_gps_time in enumerate(self.start_gps_times):         
@@ -319,7 +318,7 @@ class IFODataObtainer:
                 self.get_segment_times(
                     self.start_gps_times[index],
                     self.end_gps_times[index],
-                    self.ifos[0],
+                    ifos[0],
                     self.state_flags[index]
                 )
             )
@@ -349,10 +348,14 @@ class IFODataObtainer:
         
     def get_valid_segments(
         self,
+        ifos : List[IFO],
         groups : Dict[str, float] = None,
         group_name : str = "train",
         segment_order : SegmentOrder = None
     ):
+        # Ensure parameters are lists for consistency:
+        if not isinstance(ifos, list):
+            ifos = [ifos]
         
         # If no segment_order requested use class atribute as default, defaults
         # to SegmentOrder.RANDOM
@@ -378,7 +381,7 @@ class IFODataObtainer:
         
         # Get segments which fall within gps time boundaries and have the 
         # requested ifo and state flag:
-        valid_segments = self.get_all_segment_times()
+        valid_segments = self.get_all_segment_times(ifos)
         
         # Collect veto segment times from excluded data labels: 
         veto_segments = []
@@ -614,6 +617,7 @@ class IFODataObtainer:
         self,
         sample_rate_hertz : float,
         valid_segments : np.ndarray = None,
+        ifos : List[IFO] = [IFO.L1],
         scale_factor : float = 1.0
     ): 
         # Check if self.file_path is intitiated:
@@ -640,6 +644,7 @@ class IFODataObtainer:
                     segment_start_gps_time,
                     segment_end_gps_time,
                     sample_rate_hertz,
+                    ifos,
                     segment_key
                 )
 
@@ -726,6 +731,7 @@ class IFODataObtainer:
             segment_start_gps_time : float,
             segment_end_gps_time : float,
             sample_rate_hertz : float,
+            ifos : List[IFO],
             segment_key : str
         ) -> IFOData:
         
@@ -759,7 +765,7 @@ class IFODataObtainer:
                         self.get_segment_data(
                             segment_start_gps_time, 
                             segment_end_gps_time, 
-                            self.ifos[0], 
+                            ifos[0], 
                             self.frame_types[0], 
                             self.channels[0]
                     )
@@ -797,8 +803,13 @@ class IFODataObtainer:
             padding_duration_seconds : float,
             offsource_duration_seconds : float,
             num_examples_per_batch : int = 32,
+            ifos : List[IFO] = [IFO.L1],
             scale_factor : float = 1.0
         ) -> (tf.Tensor, tf.Tensor, tf.Tensor, int):
+        
+        # Ensure ifos are list:
+        if not isinstance(ifos, list):
+            ifos = [ifos]
         
         # Padding is multiplied by 2 because it's two sided:
         total_padding_duration_seconds : float = padding_duration_seconds * 2.0
@@ -836,6 +847,7 @@ class IFODataObtainer:
         for segment in self.acquire(
                 sample_rate_hertz, 
                 valid_segments, 
+                ifos,
                 scale_factor
             ):
             

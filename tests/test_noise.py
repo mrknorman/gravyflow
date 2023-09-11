@@ -36,7 +36,6 @@ def test_iteration(
                 DataLabel.NOISE, 
                 DataLabel.GLITCHES
             ],
-            IFO.L1,
             SegmentOrder.RANDOM,
             force_acquisition=True,
             cache_segments=False,
@@ -47,7 +46,8 @@ def test_iteration(
     noise : NoiseObtainer = \
         NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL
+            noise_type = NoiseType.REAL,
+            ifos = IFO.L1
         )
     
     # Create generator:
@@ -92,7 +92,6 @@ def test_real_noise(
                 DataLabel.NOISE, 
                 DataLabel.GLITCHES
             ],
-            IFO.L1,
             SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
@@ -102,7 +101,8 @@ def test_real_noise(
     noise : NoiseObtainer = \
         NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL
+            noise_type = NoiseType.REAL,
+            ifos = IFO.L1
         )
     
     # Create generator:

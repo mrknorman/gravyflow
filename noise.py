@@ -1,7 +1,7 @@
 from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Union, Iterator
+from typing import Union, Iterator, List
 
 import tensorflow as tf
 
@@ -13,15 +13,80 @@ class NoiseType(Enum):
     COLORED = auto()
     PSEUDO_REAL = auto()
     REAL = auto()
+    
+@tf.function
+def _generate_white_noise(
+    num_examples_per_batch: int,
+    num_samples: int
+) -> tf.Tensor:
+    """
+    Optimized function to generate white Gaussian noise.
+
+    Parameters:
+    ----------
+    num_examples_per_batch : int
+        Number of examples per batch.
+    num_samples : int
+        Number of samples per example.
+        
+    Returns:
+    -------
+    tf.Tensor
+        A tensor containing white Gaussian noise.
+    """
+    return tf.random.normal(
+        shape=[num_examples_per_batch, num_samples],
+        mean=0.0,
+        stddev=1.0,
+        dtype=tf.float16
+    )
+
+def white_noise_generator(
+    num_examples_per_batch: int,
+    onsource_duration_seconds: float,
+    offsource_duration_seconds: float,
+    sample_rate_hertz: float
+) -> Iterator[tf.Tensor]:
+    """
+    Generator function that yields white Gaussian noise.
+
+    Parameters:
+    ----------
+    num_examples_per_batch : int
+        Number of examples per batch.
+    onsource_duration_seconds : float
+        Duration of the onsource segment in seconds.
+    sample_rate_hertz : float
+        Sample rate in Hz.
+
+    Yields:
+    -------
+    tf.Tensor
+        A tensor containing white Gaussian noise.
+    """
+    num_onsource_samples : int = \
+        int(onsource_duration_seconds * sample_rate_hertz)
+    
+    num_offsource_samples : int = \
+        int(offsource_duration_seconds * sample_rate_hertz)
+
+    while True:
+        yield _generate_white_noise(num_examples_per_batch, num_onsource_samples), \
+            _generate_white_noise(num_examples_per_batch, num_offsource_samples), \
+            tf.fill([num_examples_per_batch], -1.0)
 
 @dataclass
 class NoiseObtainer:
     data_directory_path : Path = Path("./generator_data")
     ifo_data_obtainer : Union[None, IFODataObtainer] = None
+    ifos : List[IFO] = [IFO.L1]
     noise_type : NoiseType = NoiseType.REAL
     groups : dict = None
     
     def __post_init__(self):
+        
+        if not isinstance(self.ifos, list):
+            self.ifos = [self.ifos]
         
         # Set default groups here as dataclass will not allow mutable defaults:
         if not self.groups:
@@ -49,13 +114,22 @@ class NoiseObtainer:
         
         match self.noise_type:
             case NoiseType.WHITE:
-                print("Not implemented")
+                self.generator = \
+                    white_noise_generator(
+                        num_examples_per_batch,
+                        onsource_duration_seconds,
+                        offsource_duration_seconds,
+                        sample_rate_hertz
+                    )
                 
             case NoiseType.COLORED:
-                print("Not implemented")
+                
+                np.load_text()
+                
+                raise ValueError("Not implemented")
             
             case NoiseType.PSEUDO_REAL:
-                print("Not implemented")
+                raise ValueError("Not implemented")
             
             case NoiseType.REAL:
                 # Get real ifo data
@@ -76,6 +150,7 @@ class NoiseObtainer:
                 else:
                     
                     self.ifo_data_obtainer.get_valid_segments(
+                        self.ifos,
                         self.groups,
                         group
                     )
@@ -96,6 +171,7 @@ class NoiseObtainer:
                         crop_duration_seconds,
                         offsource_duration_seconds,
                         num_examples_per_batch,
+                        self.ifos,
                         scale_factor
                     )
                 
