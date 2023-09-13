@@ -2,7 +2,7 @@ from typing import List, Tuple, Union, Dict, Any
 from enum import Enum, auto
 from pathlib import Path
 from dataclasses import dataclass
-import warnings
+from warnings import warn
 
 import tensorflow as tf
 from tensorflow.data.experimental import AutoShardPolicy
@@ -46,7 +46,10 @@ def validate_noise_settings(
             )
             
         if ReturnVariables.GPS_TIME in variables_to_return:
-            raise ValueError("Cannot return GPS time from simulated Noise")
+            warn(
+                "Cannot return GPS time from simulated Noise defaulting to -1",
+                UserWarning
+            )
     
     # Validate whitening for white noise
     if noise_obtainer.noise_type is NoiseType.WHITE:

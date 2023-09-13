@@ -380,7 +380,7 @@ class IFODataObtainer:
             ifos = [ifos]
         
         # If no segment_order requested use class atribute as default, defaults
-        # to SegmentOrder.RANDOM
+        # to SegmentOrder.RANDOM:
         if not segment_order:
             segment_order = self.segment_order
         
@@ -422,20 +422,29 @@ class IFODataObtainer:
             valid_segments = \
                 self.veto_time_segments(valid_segments, veto_segments)
         
-        # Split seconds so that max duration is no greateer than max
-        valid_segments = \
+        # First split by a constant duration so that groups always contain the
+        # same times no matter what max duration is:
+        group_split_seconds : float = 8196.0
+        valid_segments : np.ndarray = \
             self.split_segments(
                 valid_segments, 
-                self.max_segment_duration_seconds
+                group_split_seconds
             )
-        
-        # Finally distibute segments deterministically amongst groups, thos can
+                
+        # Distibute segments deterministically amongst groups, thos can
         # be used to separate validation and testing data from training data:
-        valid_segments =\
+        valid_segments : np.ndarray = \
             self.distribute_segments_by_ratio(
                 valid_segments, 
                 groups,
                 group_name
+            )
+        
+        # Finally, split seconds so that max duration is no greateer than max:
+        valid_segments : np.ndarray = \
+            self.split_segments(
+                valid_segments, 
+                self.max_segment_duration_seconds
             )
         
         # If there are no valid segments raise and error:
@@ -447,6 +456,8 @@ class IFODataObtainer:
         
         # Order segments by requested order:
         self.order_segments(segment_order)
+        
+        return self.valid_segments
     
     def pad_gps_times_with_veto_window(
         self,

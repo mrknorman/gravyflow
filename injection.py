@@ -7,12 +7,14 @@ from dataclasses import dataclass
 from typing import Union, List, Dict, Type
 import json
 from copy import deepcopy
+from warnings import warn
 
 # Library imports
 import numpy as np
 import tensorflow as tf
 
 from .cuphenom.py.cuphenom import generate_phenom_d
+from .wnb import generate_white_noise_burst
 from .maths import (Distribution, DistributionType, expand_tensor, batch_tensor,
                     set_random_seeds, crop_samples, replace_nan_and_inf_with_zero)
 from .snr import scale_to_snr
@@ -96,11 +98,19 @@ class WaveformGenerator:
                     front_padding_duration_seconds=config["front_padding_duration_seconds"],
                     back_padding_duration_seconds=config["back_padding_duration_seconds"]
                 )
-                
-                if snr is not None:
-                    config["snr"] = snr
+            case 'WNB':
+                generator = WNBGenerator(
+                    **{k: Distribution(**v) for k, v in config.items() if k not in 
+                       ["type", "injection_chance", "front_padding_duration_seconds", "back_padding_duration_seconds"]},
+                    injection_chance=config["injection_chance"],
+                    front_padding_duration_seconds=config["front_padding_duration_seconds"],
+                    back_padding_duration_seconds=config["back_padding_duration_seconds"]
+                )
             case _:
                 raise ValueError("This waveform type is not implemented.")
+                
+        if snr is not None:
+            config["snr"] = snr
 
         return generator
 
@@ -110,6 +120,8 @@ class WaveformParameter:
     shape: tuple = (1,)
     
 class WaveformParameters(Enum):
+    
+    # CBC parameters:
     MASS_1_MSUN = WaveformParameter(100)
     MASS_2_MSUN = WaveformParameter(101)
     INCLINATION_RADIANS = WaveformParameter(102)
@@ -120,6 +132,11 @@ class WaveformParameters(Enum):
     MEAN_PERIASTRON_ANOMALY = WaveformParameter(107)
     SPIN_1_IN = WaveformParameter(108, (3,))
     SPIN_2_IN = WaveformParameter(109, (3,))
+    
+    # WNB paramters:
+    DURATION_SECONDS = WaveformParameter(201)
+    MIN_FREQUENCY_HERTZ = WaveformParameter(202)
+    MAX_FREQUENCY_HERTZ = WaveformParameter(202)
     
     @classmethod
     def get(cls, key):
@@ -136,7 +153,65 @@ class WaveformParameters(Enum):
 
 @dataclass
 class WNBGenerator(WaveformGenerator):
-    nothing_yet : int = 1.0
+    duration_seconds : Distribution = \
+        Distribution(min_=0.1, max_=1.0, type_=DistributionType.UNIFORM)
+    min_frequency_hertz: Distribution = \
+        Distribution(min_=5.0, max_=95.0, type_=DistributionType.UNIFORM)
+    max_frequency_hertz: Distribution = \
+        Distribution(min_=5.0, max_=95.0, type_=DistributionType.UNIFORM)
+
+    def generate(
+            self,
+            num_waveforms: int,
+            sample_rate_hertz: float,
+            max_duration_seconds: float
+    ):
+        
+        if (num_waveforms > 0):
+            
+            if self.duration_seconds.max_ > max_duration_seconds \
+                and self.duration_seconds.type_ is not DistributionType.CONSTANT:
+                
+                warn("Max duration distibution is greater than requested "
+                     "injection duration. Adjusting", UserWarning)
+                self.duration_seconds.max_ = max_duration_seconds
+            
+            if self.duration_seconds.min_ < 0.0 and \
+                self.duration_seconds.type_ is not DistributionType.CONSTANT:
+                
+                warn("Min duration distibution is less than zero "
+                     "injection duration. Adjusting", UserWarning)
+                
+                self.duration_seconds.min_ = 0.0
+            
+            # Draw parameter samples from distributions:
+            parameters = {}
+            for attribute, value in self.__dict__.items():        
+                if is_not_inherited(self, attribute):
+                    parameter = \
+                        WaveformParameters.get(attribute)
+                    shape = parameter.value.shape[-1]                
+                    parameters[attribute] = tf.convert_to_tensor(value.sample(num_waveforms * shape))
+                    
+            parameters["max_frequency_hertz"], parameters["min_frequency_hertz"] = \
+                np.maximum(
+                    parameters["max_frequency_hertz"], 
+                    parameters["min_frequency_hertz"]
+                ), \
+                np.minimum(
+                    parameters["max_frequency_hertz"],
+                    parameters["min_frequency_hertz"]
+                )
+                                    
+            # Generate WNB waveform at the moment take only one polarization: 
+            waveforms = generate_white_noise_burst(
+                num_waveforms,
+                sample_rate_hertz, 
+                max_duration_seconds, 
+                **parameters
+            )
+            
+        return waveforms, parameters
     
 @dataclass
 class cuPhenomDGenerator(WaveformGenerator):
@@ -182,7 +257,12 @@ class cuPhenomDGenerator(WaveformGenerator):
             # Generate phenom_d waveform:
         
             waveforms = \
-                generate_phenom_d(num_waveforms, sample_rate_hertz, **parameters) 
+                generate_phenom_d(
+                    num_waveforms, 
+                    sample_rate_hertz, 
+                    duration_seconds,
+                    **parameters
+                ) 
 
             # At the moment take only one polarization: 
             waveforms = waveforms[:, 0]

@@ -330,30 +330,6 @@ def convolve(
 
         # Combine all
         conv = tf.concat([first_part, middle_parts, last_part], axis=1)
-        
-        """
-        # Initialize variables
-        nstep = nfft - 2 * pad
-        num_samples, num_timesteps = timeseries_new.shape
-        conv = np.zeros((num_samples, num_timesteps), dtype=timeseries_new.dtype)
-
-        # First part
-        conv[:, :nfft - pad] = \
-            fftconvolve(timeseries_new[:, :nfft], fir, mode="same")[:, :nfft - pad]
-
-        # Middle part
-        k = nfft - pad
-        while k < num_timesteps - nfft + pad:
-            yk = fftconvolve(
-                timeseries_new[:, k - pad : k + nstep + pad], fir, mode="same"
-            )
-            conv[:, k : k + yk.shape[-1] - 2 * pad] = yk[:, pad : -pad]
-            k += nstep
-
-        # Last part
-        conv[:, -nfft + pad :] = \
-            fftconvolve(timeseries_new[:, -nfft:], fir, mode="same")[:, -nfft + pad :]
-        """
 
     return conv
 

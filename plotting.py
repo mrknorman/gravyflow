@@ -3,6 +3,7 @@ from typing import Dict, Union
 import numpy as np
 import tensorflow as tf
 from scipy.signal import spectrogram
+from scipy.constants import golden
 
 from bokeh.io import save, output_file
 from bokeh.plotting import figure
@@ -63,8 +64,8 @@ def generate_strain_plot(
     ):
     
     # Parameters:
-    width : int = 1600
-    height : int = 600
+    height : int = 300
+    width : int = int(height*golden)
         
     # Get num samples and check dictionies:
     num_samples = check_ndarrays_same_length(strain)
@@ -88,15 +89,15 @@ def generate_strain_plot(
     
     # Prepare y_axis:
     y_axis_label = f"Strain"
-    if scale_factor is not None:
+    if scale_factor is not None or scale_factor == 1.0:
         y_axis_label += f" (scaled by {scale_factor})"
     
     # Create a new plot with a title and axis labels
     p = \
         figure(
-            title=title, 
             x_axis_label="Time (seconds)", 
             y_axis_label=y_axis_label,
+            title=title,
             width=width,
             height=height
         )
@@ -115,6 +116,10 @@ def generate_strain_plot(
     legend = Legend(location="top_left")
     p.add_layout(legend)
     p.legend.click_policy = "hide"
+    
+    # Disable x and y grid
+    p.xgrid.visible = False
+    p.ygrid.visible = False
 
     return p
 
@@ -126,8 +131,8 @@ def generate_psd_plot(
     ):
     
     # Parameters:
-    width : int = 1600
-    height : int = 600
+    height : int = 400
+    width : int = int(height*golden)
         
     # Get num samples and check dictionies:
     num_samples = check_ndarrays_same_length(psd)
@@ -202,9 +207,9 @@ def generate_spectrogram(
     """
     
     # Parameters:
-    width : int = 1600
-    height : int = 600
-
+    height : int = 400
+    width : int = int(height*golden)
+    
     # Compute the spectrogram
     f, t, Sxx = spectrogram(strain, fs=sample_rate_hertz, nperseg=nperseg, noverlap=noverlap)
     
@@ -245,5 +250,3 @@ def generate_spectrogram(
     p.add_layout(color_bar, 'right')
 
     return p
-
-    

@@ -12,7 +12,7 @@ from tqdm import tqdm
 # Local imports:
 from ..maths import Distribution, DistributionType
 from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
-from ..injection import (cuPhenomDGenerator, InjectionGenerator, 
+from ..injection import (cuPhenomDGenerator, WNBGenerator, InjectionGenerator, 
                          WaveformParameters, WaveformGenerator)
 from ..plotting import generate_strain_plot
 
@@ -56,7 +56,6 @@ def test_iteration(
         "Warning! Injection generator does not iterate the required number of batches"
     
     logging.info("Compete!")
-
     
 def test_phenom_d_injection(
     num_tests : int = 10,
@@ -147,6 +146,84 @@ def test_phenom_d_injection(
     grid = gridplot(layout)
         
     save(grid)
+    
+def test_wnb_injection(
+    num_tests : int = 10,
+    output_diretory_path : Path = Path("./py_ml_data/tests/")
+    ):
+    
+    # Test Parameters:
+    num_examples_per_generation_batch : int = 2048
+    num_examples_per_batch : int = num_tests
+    sample_rate_hertz : float = 2048.0
+    onsource_duration_seconds : float = 1.0
+    crop_duration_seconds : float = 0.5
+    scale_factor : float = 1.0E21
+    
+    wnb_generator : WNBGenerator = \
+        WaveformGenerator.load(
+            Path("./py_ml_tools/tests/wnb_parameters.json"), 
+            sample_rate_hertz, 
+            onsource_duration_seconds
+        )
+    
+    injection_generator : InjectionGenerator = \
+        InjectionGenerator(
+            [wnb_generator],
+            sample_rate_hertz,
+            onsource_duration_seconds,
+            crop_duration_seconds,
+            num_examples_per_generation_batch,
+            num_examples_per_batch,
+            scale_factor,
+            variables_to_return = \
+                [
+                    WaveformParameters.DURATION_SECONDS,
+                    WaveformParameters.MIN_FREQUENCY_HERTZ, 
+                    WaveformParameters.MAX_FREQUENCY_HERTZ
+                ]
+        )
+    
+    total_onsource_duration_seconds : float = \
+        onsource_duration_seconds + (crop_duration_seconds * 2.0)
+        
+    generator : Iterator = injection_generator.generate
+    
+    injections, mask, parameters = next(generator())
+    
+    print(
+        parameters[WaveformParameters.MIN_FREQUENCY_HERTZ], 
+        parameters[WaveformParameters.MAX_FREQUENCY_HERTZ]
+    )
+
+    layout = [
+        [generate_strain_plot(
+            {"Injection Test": injection},
+            sample_rate_hertz,
+            total_onsource_duration_seconds,
+            title=f"WNB injection example: min frequency {min_frequency_hertz} "
+            f"hertz; min frequency {max_frequency_hertz} hertz; duration "
+            f"{duration} seconds.",
+            scale_factor=scale_factor
+        )]
+        for injection, duration, min_frequency_hertz, max_frequency_hertz in zip(
+            injections[0], 
+            parameters[WaveformParameters.DURATION_SECONDS][0],
+            parameters[WaveformParameters.MIN_FREQUENCY_HERTZ][0], 
+            parameters[WaveformParameters.MAX_FREQUENCY_HERTZ][0],
+        )
+    ]
+            
+    # Ensure output directory exists
+    ensure_directory_exists(output_diretory_path)
+    
+    # Define an output path for the dashboard
+    output_file(output_diretory_path / "wnb_plots.html")
+
+    # Arrange the plots in a grid. 
+    grid = gridplot(layout)
+        
+    save(grid)
 
 if __name__ == "__main__":
     
@@ -170,5 +247,6 @@ if __name__ == "__main__":
     
     # Test injection generation:
     with strategy.scope():
+        test_wnb_injection()
         test_iteration()
         test_phenom_d_injection()
