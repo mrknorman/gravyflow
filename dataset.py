@@ -139,7 +139,6 @@ def get_ifo_data(
             crop_duration_seconds,
             num_examples_per_generation_batch,
             num_examples_per_batch,
-            scale_factor,
             variables_to_return=waveform_parameters_to_return
         )
     

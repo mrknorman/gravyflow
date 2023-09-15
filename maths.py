@@ -100,54 +100,63 @@ def replace_nan_and_inf_with_zero(tensor):
     tensor = tf.where(tf.math.is_inf(tensor), tf.zeros_like(tensor), tensor)
     return tensor    
 
-def expand_tensor(signal: tf.Tensor, mask: tf.Tensor) -> tf.Tensor:
+def expand_tensor(signal: tf.Tensor, mask: tf.Tensor, group_size: int = 1) -> tf.Tensor:
     """
-    This function expands a tensor along the X axis by inserting zeros wherever a 
-    corresponding boolean in a 1D tensor is False, and elements from the original 
-    tensor where the boolean is True. It works for both 1D and 2D tensors.
+    Expands a tensor by inserting zeros (or zero arrays) based on a mask tensor. It
+    works for both 1D and 2D tensors.
 
     Parameters
     ----------
     signal : tf.Tensor
-        A 1D or 2D tensor representing signal injections, where the length of 
-        the tensor's first dimension equals the number of True values in the mask.
+        A tensor representing signal injections.
     mask : tf.Tensor
-        A 1D boolean tensor. Its length will determine the length of the expanded 
-        tensor.
+        A 1D boolean tensor. Its length will determine the length of the expanded tensor.
+    group_size : int
+        The number of elements in a group in the signal tensor.
 
     Returns
     -------
     tf.Tensor
         The expanded tensor.
-
     """
-    # Ensure that the signal tensor is 1D or 2D
+    
+    # Validation checks:
     assert signal.ndim in (1, 2), 'Signal must be a 1D or 2D tensor'
-    
-    # Ensure that the mask is 1D
     assert mask.ndim == 1, 'Mask must be a 1D tensor'
+    assert group_size > 0, 'Group size must be greater than 0'
     
-    # Ensure that the length of the signal tensor matches the number of True 
-    # values in the mask
-    """
-    assert tf.reduce_sum(tf.cast(mask, tf.int32)) == signal.shape[0], \
-        f'Signal tensor length {signal.shape[0]} must match number of True values in mask {tf.reduce_sum(tf.cast(mask, tf.int32))}'
-    """
+    # The number of groups in the signal must match the number of True values in the mask
+    assert tf.reduce_sum(tf.cast(mask, tf.int32)) == signal.shape[0] // group_size, \
+        'Number of groups in signal must match number of True values in mask'
     
-    # Create a tensor full of zeros with the final shape
+    # Create an expanded tensor full of zeros with the final shape:
     if signal.ndim == 1:
-        expanded_signal = tf.zeros(mask.shape[0], dtype=signal.dtype)
-    else: # signal.ndim == 2
-        N = signal.shape[1]
-        expanded_signal = tf.zeros((mask.shape[0], N), dtype=signal.dtype)
-
-    # Get the indices where mask is True
-    indices = tf.where(mask)
-
-    # Scatter the signal tensor elements/rows into the expanded_signal tensor at the 
-    # positions where mask is True
-    expanded_signal = tf.tensor_scatter_nd_update(expanded_signal, indices, signal)
-
+        expanded_signal = tf.zeros(
+            mask.shape[0] * group_size, dtype=signal.dtype
+        )
+    else:
+        expanded_signal = tf.zeros(
+            (mask.shape[0] * group_size, signal.shape[1]), dtype=signal.dtype
+        )
+    
+    # Get the indices where mask is True:
+    true_indices = tf.where(mask) * group_size
+    
+    # Create a range based on group_size for each index:
+    true_indices = tf.cast(true_indices, dtype=tf.int32)
+    indices = tf.reshape(tf.range(group_size, dtype=tf.int32) \
+                         + tf.reshape(true_indices, (-1, 1)), (-1, 1))
+    
+    # Split the signal into the right groups and reshape:
+    scattered_values = tf.reshape(signal, (-1, group_size, *signal.shape[1:]))
+    
+    # Scatter the groups into the expanded_signal tensor:
+    expanded_signal = tf.tensor_scatter_nd_update(
+        expanded_signal, 
+        indices, 
+        tf.reshape(scattered_values, (-1, *signal.shape[1:]))
+    )
+    
     return expanded_signal
 
 @tf.function

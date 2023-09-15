@@ -33,11 +33,15 @@ def test_iteration(
     offsource_duration_seconds : float = 16.0
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
+        
+    # Define injection directory path:
+    injection_directory_path : Path = \
+        Path("./py_ml_tools/tests/example_injection_parameters")
     
     # Load injection config:
-    phenom_d_generator_high_mass : cuPhenomDGenerator = \
+    phenom_d_generator : cuPhenomDGenerator = \
         WaveformGenerator.load(
-            Path("./py_ml_tools/tests/injection_parameters.json"), 
+            injection_directory_path / "phenom_d_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds,
             snr=Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM)
@@ -75,8 +79,9 @@ def test_iteration(
         crop_duration_seconds=crop_duration_seconds,
         # Noise: 
         noise_obtainer=noise_obtainer,
+        scale_factor=scale_factor,
         # Injections:
-        injection_generators=phenom_d_generator_high_mass, 
+        injection_generators=phenom_d_generator, 
         # Output configuration:
         num_examples_per_batch=num_examples_per_batch,
         input_variables = [
@@ -108,7 +113,7 @@ def test_iteration(
         # Noise: 
         noise_obtainer=noise_obtainer,
         # Injections:
-        injection_generators=phenom_d_generator_high_mass, 
+        injection_generators=phenom_d_generator, 
         # Output configuration:
         num_examples_per_batch=num_examples_per_batch,
         input_variables = [
@@ -141,10 +146,14 @@ def test_dataset(
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
     
+    # Define injection directory path:
+    injection_directory_path : Path = \
+        Path("./py_ml_tools/tests/example_injection_parameters")
+    
     # Load injection config:
-    phenom_d_generator_high_mass : cuPhenomDGenerator = \
+    phenom_d_generator : cuPhenomDGenerator = \
         WaveformGenerator.load(
-            Path("./py_ml_tools/tests/injection_parameters.json"), 
+            injection_directory_path / "phenom_d_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds,
             snr=Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM)
@@ -183,7 +192,7 @@ def test_dataset(
         # Noise: 
         noise_obtainer=noise_obtainer,
         # Injections:
-        injection_generators=phenom_d_generator_high_mass, 
+        injection_generators=phenom_d_generator, 
         # Output configuration:
         num_examples_per_batch=num_examples_per_batch,
         input_variables = [

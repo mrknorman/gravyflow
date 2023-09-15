@@ -57,6 +57,7 @@ class WaveformGenerator:
     injection_chance : float = 1.0
     front_padding_duration_seconds : float = 0.3
     back_padding_duration_seconds : float = 0.0
+    scale_factor : float = None
     
     def copy(self):
         return deepcopy(self)
@@ -67,7 +68,8 @@ class WaveformGenerator:
         config_path: Path, 
         sample_rate_hertz: float, 
         onsource_duration_seconds: float, 
-        snr: Union[np.ndarray, Distribution] = None
+        snr: Union[np.ndarray, Distribution] = None,
+        scale_factor : float = None
     ) -> Type[cls]:
     
         # Define replacement mapping
@@ -86,6 +88,15 @@ class WaveformGenerator:
         # Replace placeholders
         for value in config.values():
             replace_placeholders(value, replacements)
+            
+        # Create list of not Distibution type variables:
+        not_distribution = (
+            "type", 
+            "injection_chance", 
+            "front_padding_duration_seconds", 
+            "back_padding_duration_seconds",
+            "scale_factor"
+        )
         
         generator = None
         # Construct generator based on type
@@ -93,7 +104,8 @@ class WaveformGenerator:
             case 'PhenomD': 
                 generator = cuPhenomDGenerator(
                     **{k: Distribution(**v) for k, v in config.items() if k not in 
-                       ["type", "injection_chance", "front_padding_duration_seconds", "back_padding_duration_seconds"]},
+                       not_distribution},
+                    scale_factor=config["scale_factor"],
                     injection_chance=config["injection_chance"],
                     front_padding_duration_seconds=config["front_padding_duration_seconds"],
                     back_padding_duration_seconds=config["back_padding_duration_seconds"]
@@ -101,7 +113,8 @@ class WaveformGenerator:
             case 'WNB':
                 generator = WNBGenerator(
                     **{k: Distribution(**v) for k, v in config.items() if k not in 
-                       ["type", "injection_chance", "front_padding_duration_seconds", "back_padding_duration_seconds"]},
+                       not_distribution},
+                    scale_factor=config["scale_factor"],
                     injection_chance=config["injection_chance"],
                     front_padding_duration_seconds=config["front_padding_duration_seconds"],
                     back_padding_duration_seconds=config["back_padding_duration_seconds"]
@@ -111,6 +124,9 @@ class WaveformGenerator:
                 
         if snr is not None:
             config["snr"] = snr
+            
+        if scale_factor is not None:
+            config["scale_factor"] = scale_factor
 
         return generator
 
@@ -136,7 +152,7 @@ class WaveformParameters(Enum):
     # WNB paramters:
     DURATION_SECONDS = WaveformParameter(201)
     MIN_FREQUENCY_HERTZ = WaveformParameter(202)
-    MAX_FREQUENCY_HERTZ = WaveformParameter(202)
+    MAX_FREQUENCY_HERTZ = WaveformParameter(203)
     
     @classmethod
     def get(cls, key):
@@ -211,6 +227,9 @@ class WNBGenerator(WaveformGenerator):
                 **parameters
             )
             
+            # Scale by arbitrary factor to reduce chance of precision errors:
+            waveforms *= self.scale_factor
+            
         return waveforms, parameters
     
 @dataclass
@@ -255,7 +274,6 @@ class cuPhenomDGenerator(WaveformGenerator):
                     parameters[attribute] = value.sample(num_waveforms * shape)
 
             # Generate phenom_d waveform:
-        
             waveforms = \
                 generate_phenom_d(
                     num_waveforms, 
@@ -270,6 +288,8 @@ class cuPhenomDGenerator(WaveformGenerator):
             # Reshape to split injections:
             num_samples = int(sample_rate_hertz*duration_seconds)
             waveforms = waveforms.reshape(-1, num_samples)
+            
+            waveforms *= self.scale_factor
         
         return waveforms, parameters
     
@@ -281,7 +301,6 @@ class InjectionGenerator:
     crop_duration_seconds : float
     num_examples_per_generation_batch : int
     num_examples_per_batch : int
-    scale_factor : float = 10.0E20
     variables_to_return : List[WaveformParameters] = None
     index : int = 0
     
@@ -310,13 +329,13 @@ class InjectionGenerator:
 
                 injections.append(injection_)
                 mask.append(mask_)
-
+                                
                 for key in parameters:
                     if key in parameters_:
                         parameters[key].append(parameters_[key])
                     else:
                         parameters[key].append(
-                            tf.zeros([key.shape[-1] * num_examples_per_batch])
+                            tf.zeros([key.value.shape[-1] * self.num_examples_per_batch], dtype = tf.float64)
                         )
 
             injections = tf.stack(injections)
@@ -374,9 +393,6 @@ class InjectionGenerator:
                 waveforms = \
                     tf.convert_to_tensor(waveforms, dtype = tf.float32)
 
-                # Scale by arbitrary factor to reduce chance of precision errors:
-                waveforms *= self.scale_factor
-
                 #Roll Tensor to randomise start time:
                 waveforms = \
                     roll_vector_zero_padding( 
@@ -408,23 +424,21 @@ class InjectionGenerator:
                 expanded_parameters = {}
                 for key, parameter in reduced_parameters.items():
 
-                    # Currenly only possible for parameters with same lenght as 
-                    # num_waveforms:
-                    if key.value.shape[-1] == 1:
-                        parameter = tf.convert_to_tensor(parameter)
+                    parameter = tf.convert_to_tensor(parameter)
 
-                        expanded_parameters[key] = \
-                            expand_tensor(
-                                parameter, 
-                                mask
-                            )
-
+                    expanded_parameters[key] = \
+                        expand_tensor(
+                            parameter, 
+                            mask,
+                            group_size=key.value.shape[-1] 
+                        )
+                
                 parameters = batch_injection_parameters(
                     expanded_parameters,
                     self.num_examples_per_batch,
                     num_batches
                 )
-
+                
             else:
                 parameters = [{}] * num_batches
 

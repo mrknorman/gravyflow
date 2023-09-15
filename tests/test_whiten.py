@@ -17,9 +17,6 @@ from bokeh.models import ColumnDataSource, HoverTool, Legend
 from ..cuphenom.py.cuphenom import generate_phenom_d
 from ..maths import Distribution, DistributionType, crop_samples
 from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
-from ..injection import (cuPhenomDGenerator, InjectionGenerator, 
-                         WaveformParameters, WaveformGenerator, 
-                         roll_vector_zero_padding)
 from ..plotting import generate_strain_plot
 from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
                           DataQuality, DataLabel, IFO)

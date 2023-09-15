@@ -28,9 +28,13 @@ def test_iteration(
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
     
+    # Define injection directory path:
+    injection_directory_path : Path = \
+        Path("./py_ml_tools/tests/example_injection_parameters")
+    
     phenom_d_generator : cuPhenomDGenerator = \
         WaveformGenerator.load(
-            Path("./py_ml_tools/tests/injection_parameters.json"), 
+            injection_directory_path / "phenom_d_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds
         )
@@ -43,7 +47,6 @@ def test_iteration(
             crop_duration_seconds,
             num_examples_per_generation_batch,
             num_examples_per_batch,
-            scale_factor,
             variables_to_return = \
                 [WaveformParameters.MASS_1_MSUN, WaveformParameters.MASS_2_MSUN]
         )
@@ -69,17 +72,21 @@ def test_phenom_d_injection(
     onsource_duration_seconds : float = 1.0
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
+        
+    # Define injection directory path:
+    injection_directory_path : Path = \
+        Path("./py_ml_tools/tests/example_injection_parameters")
     
     phenom_d_generator_high_mass : cuPhenomDGenerator = \
         WaveformGenerator.load(
-            Path("./py_ml_tools/tests/injection_parameters_high_mass.json"), 
+            injection_directory_path / "phenom_d_parameters_high_mass.json", 
             sample_rate_hertz, 
             onsource_duration_seconds
         )
     
     phenom_d_generator_low_mass : cuPhenomDGenerator = \
         WaveformGenerator.load(
-            Path("./py_ml_tools/tests/injection_parameters_low_mass.json"), 
+            injection_directory_path / "phenom_d_parameters_low_mass.json", 
             sample_rate_hertz, 
             onsource_duration_seconds
         )
@@ -92,7 +99,6 @@ def test_phenom_d_injection(
             crop_duration_seconds,
             num_examples_per_generation_batch,
             num_examples_per_batch,
-            scale_factor,
             variables_to_return = \
                 [WaveformParameters.MASS_1_MSUN, WaveformParameters.MASS_2_MSUN]
         )
@@ -160,9 +166,13 @@ def test_wnb_injection(
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
     
+    # Define injection directory path:
+    injection_directory_path : Path = \
+        Path("./py_ml_tools/tests/example_injection_parameters")
+    
     wnb_generator : WNBGenerator = \
         WaveformGenerator.load(
-            Path("./py_ml_tools/tests/wnb_parameters.json"), 
+            injection_directory_path / "wnb_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds
         )
@@ -175,7 +185,6 @@ def test_wnb_injection(
             crop_duration_seconds,
             num_examples_per_generation_batch,
             num_examples_per_batch,
-            scale_factor,
             variables_to_return = \
                 [
                     WaveformParameters.DURATION_SECONDS,

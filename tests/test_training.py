@@ -35,7 +35,6 @@ def test_training(
     onsource_duration_seconds : float = 1.0
     offsource_duration_seconds : float = 16.0
     crop_duration_seconds : float = 0.5
-    scale_factor : float = 1.0E21
     
     training_config = \
     {
@@ -46,10 +45,14 @@ def test_training(
         "model_path" : output_diretory_path / "example_cnn/"
     }
     
+    # Define injection directory path:
+    injection_directory_path : Path = \
+        Path("./py_ml_tools/tests/example_injection_parameters")
+    
     # Load injection config:
     phenom_d_generator: cuPhenomDGenerator = \
         WaveformGenerator.load(
-            Path("./py_ml_tools/tests/injection_parameters.json"), 
+            injection_directory_path / "phenom_d_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds,
             snr=Distribution(

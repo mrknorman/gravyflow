@@ -9,6 +9,32 @@ from bokeh.io import save, output_file
 from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource, Legend, ColorBar, LogTicker, LinearColorMapper
 from bokeh.palettes import Bright
+from bokeh.models import Div
+
+def create_info_panel(params: dict) -> Div:
+    style = """
+        <style>
+            .centered-content {
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                height: 100%;
+                font-family: Arial, sans-serif;
+                background-color: #f4f4f4;
+                padding: 10px;
+                border-radius: 5px;
+                border: 1px solid #ddd;
+            }
+            li {
+                margin-bottom: 5px;
+            }
+            strong {
+                color: #2c3e50;
+            }
+        </style>
+    """
+    html_content = "<div class='centered-content'>" + "".join([f"<li><strong>{key}</strong>:<br>{value}</li>" for key, value in params.items()]) + "</div>"
+    return Div(text=style + html_content, width=190, height=200)
 
 def check_ndarrays_same_length(
         my_dict : Dict[str, Union[np.ndarray, tf.Tensor]]
@@ -112,9 +138,8 @@ def generate_strain_plot(
             line_color = colors[index],
             legend_label = key
         )
-        
-    legend = Legend(location="top_left")
-    p.add_layout(legend)
+    
+    p.legend.location = "top_left"
     p.legend.click_policy = "hide"
     
     # Disable x and y grid
@@ -174,8 +199,7 @@ def generate_psd_plot(
             legend_label = key
         )
         
-    legend = Legend(location="top_left")
-    p.add_layout(legend)
+    p.legend.location = "top_left"
     p.legend.click_policy = "hide"
 
     return p
@@ -207,7 +231,7 @@ def generate_spectrogram(
     """
     
     # Parameters:
-    height : int = 400
+    height : int = 300
     width : int = int(height*golden)
     
     # Compute the spectrogram
@@ -250,3 +274,4 @@ def generate_spectrogram(
     p.add_layout(color_bar, 'right')
 
     return p
+

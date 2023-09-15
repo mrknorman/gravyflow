@@ -5,17 +5,18 @@
         "max_": 20.0,
         "type_": "uniform"
     },
-    "injection_chance": 0.5,
+    "scale_factor" : 1.0E21,
+    "injection_chance": 1.0,
     "front_padding_duration_seconds": 0.3,
     "back_padding_duration_seconds": 0.0,
     "mass_1_msun": {
         "min_": 5,
-        "max_": 95,
+        "max_": 50,
         "type_": "uniform"
     },
     "mass_2_msun": {
         "min_": 5,
-        "max_": 95,
+        "max_": 50,
         "type_": "uniform"
     },
     "inclination_radians": {

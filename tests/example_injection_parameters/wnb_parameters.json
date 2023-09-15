@@ -5,6 +5,7 @@
         "max_": 20.0,
         "type_": "uniform"
     },
+    "scale_factor" : 1.0,
     "injection_chance": 1.0,
     "front_padding_duration_seconds": 0.3,
     "back_padding_duration_seconds": 0.0,
