@@ -12,7 +12,8 @@ from bokeh.layouts import gridplot
 from ..maths import Distribution, DistributionType
 from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
 from ..injection import (cuPhenomDGenerator, InjectionGenerator, 
-                         WaveformParameters, WaveformGenerator)
+                         WaveformParameters, WaveformGenerator, ScalingMethod,
+                         ScalingTypes, ScalingType)
 from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
                           DataQuality, DataLabel, IFO)
 from ..noise import NoiseObtainer, NoiseType
@@ -38,9 +39,9 @@ def test_validate(
     
     efficiency_config : Dict[str, Union[float, int]] = \
         {
-            "max_snr" : 15.0, 
-            "num_snr_steps" : 31, 
-            "num_examples_per_snr_step" : 2048
+            "max_scaling" : 15.0, 
+            "num_scaling_steps" : 31, 
+            "num_examples_per_scaling_step" : 2048
         }
     far_config : Dict[str, float] = \
         {
@@ -49,19 +50,30 @@ def test_validate(
     roc_config : Dict[str, Union[float, List]] = \
         {
             "num_examples" : 1.0E5,
-            "snr_ranges" :  [
+            "scaling_ranges" :  [
                 (8.0, 20.0),
                 6.0
             ]
         }
     
+    # Intilise Scaling Method:
+    scaling_method = \
+        ScalingMethod(
+            Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM),
+            ScalingTypes.SNR
+        )
+    
+    # Define injection directory path:
+    injection_directory_path : Path = \
+        Path("./py_ml_tools/tests/example_injection_parameters")
+    
     # Load injection config:
     phenom_d_generator_high_mass : cuPhenomDGenerator = \
         WaveformGenerator.load(
-            Path("./py_ml_tools/tests/injection_parameters.json"), 
+            Path(injection_directory_path / "phenom_d_parameters.json"), 
             sample_rate_hertz, 
             onsource_duration_seconds,
-            snr=Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM)
+            scaling_method=scaling_method
         )
     
     # Setup ifo data acquisition object:

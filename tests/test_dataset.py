@@ -14,7 +14,8 @@ from tqdm import tqdm
 from ..maths import Distribution, DistributionType
 from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
 from ..injection import (cuPhenomDGenerator, InjectionGenerator, 
-                         WaveformParameters, WaveformGenerator)
+                         WaveformParameters, WaveformGenerator, ScalingMethod, 
+                         ScalingTypes)
 from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
                           DataQuality, DataLabel, IFO)
 from ..noise import NoiseObtainer, NoiseType
@@ -38,13 +39,20 @@ def test_iteration(
     injection_directory_path : Path = \
         Path("./py_ml_tools/tests/example_injection_parameters")
     
+    # Intilise Scaling Method:
+    scaling_method = \
+        ScalingMethod(
+            Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM),
+            ScalingTypes.SNR
+        )
+    
     # Load injection config:
     phenom_d_generator : cuPhenomDGenerator = \
         WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds,
-            snr=Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM)
+            scaling_method=scaling_method     
         )
     
     # Setup ifo data acquisition object:
@@ -150,13 +158,20 @@ def test_dataset(
     injection_directory_path : Path = \
         Path("./py_ml_tools/tests/example_injection_parameters")
     
+    # Intilise Scaling Method:
+    scaling_method = \
+        ScalingMethod(
+            Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM),
+            ScalingTypes.SNR
+        )
+    
     # Load injection config:
     phenom_d_generator : cuPhenomDGenerator = \
         WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds,
-            snr=Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM)
+            scaling_method=scaling_method
         )
     
     # Setup ifo data acquisition object:

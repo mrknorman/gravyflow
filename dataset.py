@@ -11,7 +11,8 @@ from tensorflow.data import Options
 from .noise import NoiseObtainer, NoiseType
 from .injection import (cuPhenomDGenerator, InjectionGenerator, 
                         WaveformParameters, WNBGenerator, WaveformParameter,
-                        ReturnVariable, ReturnVariables)
+                        ReturnVariable, ReturnVariables, ScalingMethod, 
+                        ScalingTypes, ScalingType)
 from .maths import (expand_tensor, Distribution, set_random_seeds, crop_samples,
                     replace_nan_and_inf_with_zero)
 from .whiten import whiten
@@ -128,7 +129,9 @@ def get_ifo_data(
     
     # Create Injection Generator    
     waveform_parameters_to_return = [
-        item for item in variables_to_return if isinstance(item.value, WaveformParameter)
+        item for item in variables_to_return if isinstance(
+            item.value, WaveformParameter
+        )
     ]
     
     injection_generator : InjectionGenerator = \
@@ -145,21 +148,23 @@ def get_ifo_data(
     injections : Iterator = injection_generator.generate()
     
     whitened_injections = None
-    amplitudes = None
-    snrs = None
     for (onsource, offsource, gps_times), (injections_, mask, parameters) \
         in zip(noise, injections):
                 
         if len(injection_generators):
-                        
+            
             # Add injections to waveform scaled by inputted SNR config values:
-            onsource, scaled_injections, amplitudes, snrs = \
+            onsource, scaled_injections, scaling_parameters = \
                 injection_generator.add_injections_to_onsource(
                     injections_,
                     mask,
                     onsource,
                     variables_to_return=variables_to_return
                 ) 
+            
+            for key, value in scaling_parameters.items():
+                if key in variables_to_return:
+                    parameters[key] = item
             
             if ReturnVariables.WHITENED_INJECTIONS in variables_to_return:
                 whitened_injections = \
@@ -244,8 +249,6 @@ def get_ifo_data(
                 scaled_injections,
                 whitened_injections,
                 mask,
-                snrs,
-                amplitudes,
                 parameters
             ) for var_list in [input_variables, output_variables]
         ]
@@ -261,8 +264,6 @@ def create_variable_dictionary(
     injections : tf.Tensor,
     whitened_injections : tf.Tensor,
     mask : tf.Tensor,
-    snrs : tf.Tensor,
-    amplitudes : tf.Tensor,
     injection_parameters : Dict
     ):
 
@@ -273,13 +274,13 @@ def create_variable_dictionary(
         ReturnVariables.GPS_TIME: gps_times,
         ReturnVariables.INJECTIONS: injections,
         ReturnVariables.WHITENED_INJECTIONS: whitened_injections,
-        ReturnVariables.INJECTION_MASKS: mask,
-        ReturnVariables.SNR: snrs,
-        ReturnVariables.AMPLITUDE: amplitudes
+        ReturnVariables.INJECTION_MASKS: mask
     }
 
     # Extend operations with any relevant keys from injection_parameters
-    operations.update({key: value for key, value in injection_parameters.items() if key in return_variables})
+    operations.update(
+        {key: value for key, value in injection_parameters.items() if key in return_variables}
+    )
 
     return {key.name: operations[key] for key in return_variables if key in operations}
 
@@ -297,23 +298,36 @@ def get_ifo_dataset(
         num_examples_per_batch: int = 1,
         input_variables: List = None,
         output_variables: List = None
-) -> tf.data.Dataset:
+    ) -> tf.data.Dataset:
+    
     """
     Generates a TensorFlow dataset with Interferometer data.
     
     Parameters:
-        seed (int): Random seed.
-        sample_rate_hertz (float): Sample rate in Hz.
-        onsource_duration_seconds (float): On-source duration in seconds.
-        offsource_duration_seconds (float): Off-source duration in seconds.
-        crop_duration_seconds (float): Crop duration in seconds.
-        scale_factor (float): Scale factor.
-        noise_obtainer (NoiseObtainer): Object to obtain noise.
-        injection_generators (list): List of injection generators.
-        num_examples_per_generation_batch (int): Number of examples per generation batch.
-        num_examples_per_batch (int): Number of examples per batch.
-        input_variables (list): List of input variables.
-        output_variables (list): List of output variables.
+        seed (int): 
+            Random seed.
+        sample_rate_hertz (float): 
+            Sample rate in Hz.
+        onsource_duration_seconds (float): 
+            On-source duration in seconds.
+        offsource_duration_seconds (float):
+            Off-source duration in seconds.
+        crop_duration_seconds (float):
+            Crop duration in seconds.
+        scale_factor (float):
+            Scale factor.
+        noise_obtainer (NoiseObtainer): 
+            Object to obtain noise.
+        injection_generators (list):
+            List of injection generators.
+        num_examples_per_generation_batch (int):
+            Number of examples per generation batch.
+        num_examples_per_batch (int):
+            Number of examples per batch.
+        input_variables (list):
+            List of input variables.
+        output_variables (list):
+            List of output variables.
     
     Returns:
         tf.data.Dataset: TensorFlow Dataset object.
@@ -378,22 +392,12 @@ def get_ifo_dataset(
             tf.TensorSpec(
                 shape=(num_injection_configs, num_examples_per_batch), 
                 dtype=tf.float32
-            ),
-        ReturnVariables.SNR.name:
-            tf.TensorSpec(
-                shape=(num_injection_configs, num_examples_per_batch), 
-                dtype=tf.float64
-            ),
-        ReturnVariables.AMPLITUDE.name: 
-            tf.TensorSpec(
-                shape=(num_injection_configs, num_examples_per_batch), 
-                dtype=tf.float64
             )
     }
     
     parameters_to_return = {
         item for item in (input_variables + output_variables) if \
-        isinstance(item.value, WaveformParameter)
+        (isinstance(item.value, WaveformParameter) or isinstance(item.value, ScalingType))
     }
 
     output_signature_dict.update({

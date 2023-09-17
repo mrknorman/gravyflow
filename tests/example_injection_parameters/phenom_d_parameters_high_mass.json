@@ -1,6 +1,7 @@
 {
     "type": "PhenomD",
-    "snr": {
+    "scaling_type" : "snr",
+    "scaling_distribution": {
         "min_": 8.0,
         "max_": 20.0,
         "type_": "uniform"

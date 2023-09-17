@@ -24,6 +24,11 @@ def create_info_panel(params: dict) -> Div:
                 padding: 10px;
                 border-radius: 5px;
                 border: 1px solid #ddd;
+
+                width: 190px;             /* Set the fixed width */
+                max-width: 190px;         /* Ensure it doesn't grow beyond this width */
+                min-width: 190px;         /* Ensure it doesn't shrink below this width */
+                overflow-wrap: break-word; /* Wrap overflowing text */
             }
             li {
                 margin-bottom: 5px;
@@ -86,6 +91,7 @@ def generate_strain_plot(
     duration_seconds : float,
     title : str = "",
     colors : list = Bright[7],
+    has_legend : bool = True,
     scale_factor : float = None
     ):
     
@@ -141,6 +147,7 @@ def generate_strain_plot(
     
     p.legend.location = "top_left"
     p.legend.click_policy = "hide"
+    p.legend.visible = has_legend
     
     # Disable x and y grid
     p.xgrid.visible = False

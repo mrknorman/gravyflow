@@ -30,9 +30,9 @@ def calculate_efficiency_scores(
         model : tf.keras.Model, 
         dataset_args : Dict[str, Union[float, List, int]],
         num_examples_per_batch : int = 32,
-        max_snr : float = 20.0,
-        num_snr_steps : int = 21,
-        num_examples_per_snr_step : int = 2048,
+        max_scaling : float = 20.0,
+        num_scaling_steps : int = 21,
+        num_examples_per_scaling_step : int = 2048,
     ) -> Dict:
     
     """
@@ -46,19 +46,19 @@ def calculate_efficiency_scores(
         Dictionary containing options for dataset generator.
     num_examples_per_batch : int, optional
         The number of examples per batch, default is 32.
-    max_snr: float, optional
-        The max SNR value to generate an efficiency score for, default is 20.0.
-    num_snr_steps: int, optional 
-        The number of snr values at which to generate and efficiency score,
+    max_scaling: float, optional
+        The max scaling value to generate an efficiency score for, default is 20.0.
+    num_scaling_steps: int, optional 
+        The number of scaling values at which to generate and efficiency score,
         default is 21.
-    num_examples_per_snr_step : float, optional
+    num_examples_per_scaling_step : float, optional
         The number of examples to be used for each efficiency score calculation, 
         default is 2048.
     
     Returns
     -------
-    snr_array : np.ndarray
-        Array of SNRs ar which the efficieny is calculated
+    scaling_array : np.ndarray
+        Array of scalings ar which the efficieny is calculated
     efficiency_scores : np.ndarray
         The calculated efficiency scores.
     """
@@ -67,21 +67,21 @@ def calculate_efficiency_scores(
     dataset_args = deepcopy(dataset_args)
         
     # Integer arguments are integers:
-    num_examples_per_snr_step = int(num_examples_per_snr_step)
+    num_examples_per_scaling_step = int(num_examples_per_scaling_step)
     num_examples_per_batch = int(num_examples_per_batch)
-    num_snr_steps = int(num_snr_steps)
+    num_scaling_steps = int(num_scaling_steps)
     
     # Calculate number of batches reuanuired given batch size:
-    num_examples = num_examples_per_snr_step*num_snr_steps
+    num_examples = num_examples_per_scaling_step*num_scaling_steps
     num_batches = num_examples // num_examples_per_batch
     
-    # Generate array of snr values used in dataset generation:
-    efficiency_snrs = np.linspace(0.0, max_snr, num_snr_steps)
+    # Generate array of scaling values used in dataset generation:
+    efficiency_scalings = np.linspace(0.0, max_scaling, num_scaling_steps)
     
-    snr_values = \
+    scaling_values = \
         np.repeat(
-            efficiency_snrs,
-            num_examples_per_snr_step
+            efficiency_scalings,
+            num_examples_per_scaling_step
         )
     
     #Ensure injection generators is list for subsequent logic:
@@ -93,7 +93,7 @@ def calculate_efficiency_scores(
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
     dataset_args["output_variables"] = [ReturnVariables.INJECTION_MASKS]
     dataset_args["injection_generators"][0].injection_chance = 1.0
-    dataset_args["injection_generators"][0].snr = snr_values
+    dataset_args["injection_generators"][0].scaling_method.value = scaling_values
     
     # Initlize generator:
     dataset : tf.data.Dataset = get_ifo_dataset(
@@ -103,15 +103,15 @@ def calculate_efficiency_scores(
     # Process all examples in one go:
     combined_scores = model.predict(dataset, steps=num_batches, verbose=2)
         
-    # Split predictions back into separate arrays for each SNR level:
+    # Split predictions back into separate arrays for each scaling level:
     scores = [ 
         combined_scores[
-            index * num_examples_per_snr_step : 
-            (index + 1) * num_examples_per_snr_step
-        ] for index in range(num_snr_steps)
+            index * num_examples_per_scaling_step : 
+            (index + 1) * num_examples_per_scaling_step
+        ] for index in range(num_scaling_steps)
     ]
     
-    return {"snrs" : efficiency_snrs, "scores": np.array(scores)}
+    return {"scalings" : efficiency_scalings, "scores": np.array(scores)}
 
 def calculate_far_scores(
         model : tf.keras.Model, 
@@ -397,7 +397,7 @@ def calculate_multi_rocs(
     dataset_args : dict,
     num_examples_per_batch: int = 32,
     num_examples: int = 1.0E5,
-    snr_ranges: list = [
+    scaling_ranges: list = [
         (8.0, 20.0),
         8.0,
         10.0,
@@ -406,19 +406,19 @@ def calculate_multi_rocs(
     ) -> dict:
     
     roc_results = {}
-    for snr_range in snr_ranges:
+    for scaling_range in scaling_ranges:
         # Make copy of generator args so original is not affected:
         dataset_args = deepcopy(dataset_args)
         
-        if isinstance(snr_range, tuple):
-            snr = Distribution(
-                min_=snr_range[0], 
-                max_=snr_range[1],
+        if isinstance(scaling_range, tuple):
+            scaling_disribution = Distribution(
+                min_=scaling_range[0], 
+                max_=scaling_range[1],
                 type_=DistributionType.UNIFORM
             )
         else:
-            snr = Distribution(
-                value=snr_range, 
+            scaling_disribution = Distribution(
+                value=scaling_range, 
                 type_=DistributionType.CONSTANT
             )
         #Ensure injection generators is list for subsequent logic:
@@ -426,10 +426,10 @@ def calculate_multi_rocs(
             dataset_args["injection_generators"] = \
                 [dataset_args["injection_generators"]]
             
-        # Set desired injection SNR
-        dataset_args["injection_generators"][0].snr = snr
+        # Set desired injection scalings:
+        dataset_args["injection_generators"][0].scaling_method.value = scaling_disribution
         
-        roc_results[str(snr_range)] = \
+        roc_results[str(scaling_range)] = \
             calculate_roc(    
                 model,
                 dataset_args,
@@ -443,7 +443,7 @@ def calculate_tar_scores(
         model : tf.keras.Model, 
         dataset_args : dict, 
         num_examples_per_batch : int = 32,  
-        snr : int = 20.0,
+        scaling : int = 20.0,
         num_examples : int = 1E5
     ) -> np.ndarray:
     
@@ -486,8 +486,8 @@ def calculate_tar_scores(
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
     dataset_args["output_variables"] = []
     dataset_args["injection_generators"][0].injection_chance = 1.0
-    dataset_args["injection_generators"][0].snr = \
-        Distribution(value=snr, type_=DistributionType.CONSTANT)
+    dataset_args["injection_generators"][0].scaling_method.value = \
+        Distribution(value=scaling, type_=DistributionType.CONSTANT)
     
     # Initlize generator:
     dataset : tf.data.Dataset = get_ifo_dataset(
@@ -597,7 +597,7 @@ def generate_efficiency_curves(
         
         # Unpack arrays:
         scores = validator.efficiency_data["scores"]
-        snrs = validator.efficiency_data["snrs"]
+        scalings = validator.efficiency_data["scalings"]
         name = validator.name
         title = snake_to_capitalized_spaces(name)
         
@@ -623,7 +623,7 @@ def generate_efficiency_curves(
                 
         acc_data[name] = acc_all_fars
         source = ColumnDataSource(
-            data=dict(x=snrs, y=acc_all_fars[0], name=[title] * len(snrs))
+            data=dict(x=scalings, y=acc_all_fars[0], name=[title] * len(scalings))
         )
         all_sources[name] = source
         line = p.line(
@@ -976,9 +976,9 @@ class Validator:
         num_examples_per_batch : int = 32,
         efficiency_config : dict = \
         {
-            "max_snr" : 20.0, 
-            "num_snr_steps" : 21, 
-            "num_examples_per_snr_step" : 2048
+            "max_scaling" : 20.0, 
+            "num_scaling_steps" : 21, 
+            "num_examples_per_scaling_step" : 2048
         },
         far_config : dict = \
         {
@@ -987,7 +987,7 @@ class Validator:
         roc_config : dict = \
         {
             "num_exammples" : 1.0E5,
-            "snr_ranges" :  [
+            "scaling_ranges" :  [
                 (8.0, 20),
                 8.0,
                 10.0,
@@ -1011,7 +1011,7 @@ class Validator:
                 model, 
                 dataset_args, 
                 num_examples_per_batch,
-                snr=20.0,
+                scaling=20.0,
                 num_examples=1.0E3
             )
         validator.worst_performers = worst_performers
@@ -1071,7 +1071,7 @@ class Validator:
         with h5py.File(file_path, 'w') as h5f:
 
             # Unpack:
-            snrs = self.efficiency_data['snrs']
+            scalings = self.efficiency_data['scalings']
             efficiency_scores = self.efficiency_data['scores']
 
             # Save model title: 
@@ -1083,7 +1083,7 @@ class Validator:
 
             # Save efficiency scores:
             eff_group = h5f.create_group('efficiency_data')
-            eff_group.create_dataset(f'snrs', data=snrs)
+            eff_group.create_dataset(f'scalings', data=scalings)
             for i, score in enumerate(efficiency_scores):
                 eff_group.create_dataset(f'score_{i}', data=score)
 
@@ -1141,7 +1141,7 @@ class Validator:
             # Load efficiency scores:
             eff_group = h5f['efficiency_data']
             efficiency_data = {
-                'snrs': eff_group['snrs'][:],
+                'scalings': eff_group['scalings'][:],
                 'scores': [
                     eff_group[f'score_{i}'][:] for i in range(len(eff_group) - 1)
                 ]

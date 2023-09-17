@@ -1,8 +1,9 @@
 import tensorflow as tf
-from .psd import calculate_psd
 import tensorflow_probability as tfp
 import tensorflow.signal as tfs
 import numpy as np
+
+from .psd import calculate_psd
 
 @tf.function 
 def find_closest(tensor, scalar):
@@ -64,7 +65,8 @@ def calculate_snr(
     # Calculate and normalize the Fourier transform of the signal
     inj_fft = tf.signal.rfft(injection) / sample_rate_hertz
     df = 1.0 / injection_duration_seconds
-    fsamples = tf.range(0, (injection_num_samples // 2 + 1), dtype=tf.float32) * df
+    fsamples = \
+        tf.range(0, (injection_num_samples // 2 + 1), dtype=tf.float32) * df
 
     # Get rid of DC
     inj_fft_no_dc  = inj_fft[:,1:]
@@ -125,6 +127,11 @@ def scale_to_snr(
     lower_frequency_cutoff: float = 20.0
     ) -> tf.Tensor:
     
+    # Small value to prevent divide by zero errors:
+    epsilon : float = 1.0E-7
+    
+    # Calculate the current SNR of the injection in the background, so that
+    # it can be scaled to the desired value:
     current_snr = calculate_snr(
         injection, 
         background,
@@ -134,12 +141,15 @@ def scale_to_snr(
         lower_frequency_cutoff = lower_frequency_cutoff
     )
     
-    scale_factor = desired_snr/current_snr
-    scale_factor = tf.where(tf.math.is_nan(scale_factor), 0.0, scale_factor)
-        
+    # Calculate factor required to scale injection to desired SNR:
+    scale_factor : tf.Tensor = desired_snr/(current_snr + epsilon)
+    
+    # Reshape tensor to allow for compatible shapes in the multiplication
+    # operation:
     if len(scale_factor.shape) == 1: 
         scale_factor = tf.reshape(scale_factor, (-1, 1))
     
+    # Scale by scale factor:
     return injection*scale_factor
     
     

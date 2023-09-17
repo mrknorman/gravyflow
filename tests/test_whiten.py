@@ -23,7 +23,6 @@ from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun,
 from ..noise import NoiseObtainer, NoiseType
 from ..whiten import whiten
 from ..psd import calculate_psd
-from ..snr import scale_to_snr
 from ..plotting import generate_strain_plot, generate_psd_plot
 from ..dataset import ReturnVariables, get_ifo_dataset
     
@@ -417,7 +416,7 @@ if __name__ == "__main__":
     # Set logging level:
     logging.basicConfig(level=logging.INFO)
     
-    # Test SNR:
+    #Run Tests:
     with strategy.scope():    
         test_whiten_functions()
         plot_whiten_functions()

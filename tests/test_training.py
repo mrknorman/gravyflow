@@ -49,17 +49,20 @@ def test_training(
     injection_directory_path : Path = \
         Path("./py_ml_tools/tests/example_injection_parameters")
     
+    # Intilise Scaling Method:
+    scaling_method = \
+        ScalingMethod(
+            Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM),
+            ScalingTypes.SNR
+        )
+    
     # Load injection config:
     phenom_d_generator: cuPhenomDGenerator = \
         WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds,
-            snr=Distribution(
-                min_=8.0,
-                max_=15.0,
-                type_=DistributionType.UNIFORM
-            )
+            scaling_method=scaling_method
         )
     
     # Setup ifo data acquisition object:
@@ -116,11 +119,17 @@ def test_training(
         
         # Check for NaN in features
         for key, feature_tensor in features.items():
-            tf.debugging.check_numerics(feature_tensor, f"NaN detected in features under key '{key}'.")
+            tf.debugging.check_numerics(
+                feature_tensor, 
+                f"NaN detected in features under key '{key}'."
+            )
 
         # Check for NaN in labels
         for key, label_tensor in labels.items():
-            tf.debugging.check_numerics(label_tensor, f"NaN detected in labels under key '{key}'.")
+            tf.debugging.check_numerics(
+                label_tensor, 
+                f"NaN detected in labels under key '{key}'."
+            )
         
         return features, labels
 

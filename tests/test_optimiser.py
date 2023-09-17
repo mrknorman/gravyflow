@@ -41,6 +41,13 @@ def test_model(
     
     num_train_examples : int = int(1.0E3)
     num_validate_examples : int = int(1.0E2)
+    
+    # Intilise Scaling Method:
+    scaling_method = \
+        ScalingMethod(
+            Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM),
+            ScalingTypes.SNR
+        )
 
     # Load injection config:
     phenom_d_generator_high_mass : cuPhenomDGenerator = \
@@ -48,7 +55,7 @@ def test_model(
             Path("./py_ml_tools/tests/injection_parameters.json"), 
             sample_rate_hertz, 
             onsource_duration_seconds,
-            snr=Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM)
+            scaling_method=scaling_method
         )
     
     # Setup ifo data acquisition object:

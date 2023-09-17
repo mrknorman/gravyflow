@@ -9,27 +9,152 @@ import json
 from copy import deepcopy
 from warnings import warn
 
-# Library imports
+# Library imports:
 import numpy as np
 import tensorflow as tf
 
+# Local imports:
 from .cuphenom.py.cuphenom import generate_phenom_d
 from .wnb import generate_white_noise_burst
 from .maths import (Distribution, DistributionType, expand_tensor, batch_tensor,
-                    set_random_seeds, crop_samples, replace_nan_and_inf_with_zero)
-from .snr import scale_to_snr
+                    set_random_seeds, crop_samples, 
+                    replace_nan_and_inf_with_zero)
+from .snr import scale_to_snr, calculate_snr
 
-def replace_placeholders(
-        value: dict, 
-        replacements: dict
-    ) -> None:
+@dataclass 
+class ScalingType:
+    index : int
+    shape: tuple = (1,)
+
+class ScalingTypes(Enum):
+    SNR = ScalingType(1)
+    HRSS = ScalingType(2)
+    HPEAK = ScalingType(3)
+    
+    @classmethod
+    def get(cls, key):
+        member = cls.__members__.get(key.upper()) 
         
-    """Replace placeholders in the config dictionary with actual values."""
-    for k in ["value", "max_", "type_"]:
+        if member is None:
+            raise ValueError(f"{key} not found in WaveformParameters")
+        
+        return member
 
-        if isinstance(value, dict):
-            if k in value:
-                value[k] = replacements.get(value[k], value[k])
+@dataclass
+class ScalingMethod:
+    value : Union[Distribution, np.ndarray]
+    type_ : ScalingTypes
+    
+    def scale(
+        self,
+        injections : tf.Tensor, 
+        onsource : tf.Tensor,
+        scaling_parameters : tf.Tensor,
+        sample_rate_hertz : float
+        ):
+        
+        scaled_injections = None
+        match self.type_:
+
+            case ScalingTypes.SNR:
+                scaled_injections = scale_to_snr(
+                    injections, 
+                    onsource,
+                    scaling_parameters,
+                    sample_rate_hertz,
+                    fft_duration_seconds=1.0,
+                    overlap_duration_seconds=0.5
+                )
+
+            case ScalingTypes.HRSS:
+                scaled_injections = scale_to_hrss(
+                    injections,
+                    scaling_parameters,
+                )
+                
+            case ScalingTypes.HPEAK:
+                scaled_injections = scale_to_hpeak(
+                    injections,
+                    scaling_parameters,
+                )
+
+            case _:
+                raise ValueError(f"Scaling type {method.type_} not recognised.")
+        
+        if scaled_injections is not None:
+            scaled_injections = replace_nan_and_inf_with_zero(scaled_injections)    
+            tf.debugging.check_numerics(
+                scaled_injections, 
+                f"NaN detected in scaled_injections'."
+            )
+        
+        return scaled_injections
+
+@tf.function
+def calculate_hrss(
+    injection: tf.Tensor
+    ):
+    
+    # Return the root sum sqaure of the inputted injections:
+    return tf.sqrt(tf.reduce_sum(injection*injection, axis = -1))
+
+@tf.function
+def calculate_hpeak(
+    injection: tf.Tensor
+    ):
+    
+    # Return the root sum sqaure of the inputted injections:
+    return tf.reduce_max(tf.abs(scaled_injections), axis=-1)
+
+def scale_to_hrss(
+    injection: tf.Tensor, 
+    desired_hrss: float
+    ) -> tf.Tensor:
+    
+    # Small value to prevent divide by zero errors:
+    epsilon = 1.0E-7
+    
+    # Calculate the current HRSS of the injection in the background, so that
+    # it can be scaled to the desired value:
+    current_hrss = calculate_hrss(
+        injection
+    )
+    
+    # Calculate factor required to scale injection to desired HRSS:
+    scale_factor = desired_hrss/(current_hrss + epsilon)
+    
+    # Reshape tensor to allow for compatible shapes in the multiplication
+    # operation:
+    if len(scale_factor.shape) == 1: 
+        scale_factor = tf.reshape(scale_factor, (-1, 1))
+    
+    # Return injection scaled by scale factor:
+    return injection*scale_factor
+
+def scale_to_hpeak(
+    injection: tf.Tensor, 
+    desired_hrss: float
+    ) -> tf.Tensor:
+    
+    # Small value to prevent divide by zero errors:
+    epsilon = 1.0E-7
+    
+    # Calculate the current HRSS of the injection in the background, so that
+    # it can be scaled to the desired value:
+    current_hpeak = calculate_hrss(
+        injection
+    )
+    
+    # Calculate factor required to scale injection to desired HRSS:
+    scale_factor = desired_hrss/(current_hrss + epsilon)
+    
+    # Reshape tensor to allow for compatible shapes in the multiplication
+    # operation:
+    if len(scale_factor.shape) == 1: 
+        scale_factor = tf.reshape(scale_factor, (-1, 1))
+    
+    # Return injection scaled by scale factor:
+    return injection*scale_factor
 
 @dataclass 
 class ReturnVariable:
@@ -44,16 +169,26 @@ class ReturnVariables(Enum):
     INJECTIONS = ReturnVariable(4)
     WHITENED_INJECTIONS = ReturnVariable(5)
     INJECTION_MASKS = ReturnVariable(6)
-    SNR = ReturnVariable(7)
-    AMPLITUDE = ReturnVariable(8)
     
     def __lt__(self, other):
         # Implement less-than logic
         return self.value.index < other.value.index
     
+def replace_placeholders(
+        value: dict, 
+        replacements: dict
+    ) -> None:
+        
+    """Replace placeholders in the config dictionary with actual values."""
+    for k in ["value", "max_", "type_"]:
+
+        if isinstance(value, dict):
+            if k in value:
+                value[k] = replacements.get(value[k], value[k])
+
 @dataclass
 class WaveformGenerator:
-    snr : Union[float, np.ndarray] = None
+    scaling_method : ScalingMethod = None
     injection_chance : float = 1.0
     front_padding_duration_seconds : float = 0.3
     back_padding_duration_seconds : float = 0.0
@@ -68,7 +203,7 @@ class WaveformGenerator:
         config_path: Path, 
         sample_rate_hertz: float, 
         onsource_duration_seconds: float, 
-        snr: Union[np.ndarray, Distribution] = None,
+        scaling_method: ScalingMethod = None,
         scale_factor : float = None
     ) -> Type[cls]:
     
@@ -78,7 +213,10 @@ class WaveformGenerator:
             "2*pi": 2.0 * np.pi,
             "constant": DistributionType.CONSTANT,
             "uniform": DistributionType.UNIFORM,
-            "normal": DistributionType.NORMAL
+            "normal": DistributionType.NORMAL,
+            "hrss" : ScalingTypes.HRSS,
+            "hpeak" : ScalingTypes.HPEAK,
+            "snr" : ScalingTypes.SNR
         }
 
         # Load injection config
@@ -89,44 +227,50 @@ class WaveformGenerator:
         for value in config.values():
             replace_placeholders(value, replacements)
             
-        # Create list of not Distibution type variables:
-        not_distribution = (
-            "type", 
-            "injection_chance", 
-            "front_padding_duration_seconds", 
-            "back_padding_duration_seconds",
-            "scale_factor"
-        )
-        
-        generator = None
-        # Construct generator based on type
-        match config["type"]:
-            case 'PhenomD': 
-                generator = cuPhenomDGenerator(
-                    **{k: Distribution(**v) for k, v in config.items() if k not in 
-                       not_distribution},
-                    scale_factor=config["scale_factor"],
-                    injection_chance=config["injection_chance"],
-                    front_padding_duration_seconds=config["front_padding_duration_seconds"],
-                    back_padding_duration_seconds=config["back_padding_duration_seconds"]
-                )
-            case 'WNB':
-                generator = WNBGenerator(
-                    **{k: Distribution(**v) for k, v in config.items() if k not in 
-                       not_distribution},
-                    scale_factor=config["scale_factor"],
-                    injection_chance=config["injection_chance"],
-                    front_padding_duration_seconds=config["front_padding_duration_seconds"],
-                    back_padding_duration_seconds=config["back_padding_duration_seconds"]
-                )
-            case _:
-                raise ValueError("This waveform type is not implemented.")
-                
-        if snr is not None:
-            config["snr"] = snr
+        if scaling_method is not None:
+            config["scaling_method"] = scaling_method
+            
+            if "scaling_distribution" in config:
+                config.pop("scaling_distribution")
+            if "scaling_type" in config:
+                config.pop("scaling_type")
+            
+        elif "scaling_type" and "scaling_distribution" in config:
+            config["scaling_method"] = ScalingMethod(
+                Distribution(
+                    **config.pop("scaling_disribution"),
+                ),
+                config.pop("scaling_type")
+            )
+        else:
+            raise ValueError("Missing Scaling Type!")
             
         if scale_factor is not None:
             config["scale_factor"] = scale_factor
+        
+        generator = None
+        # Construct generator based on type:
+        match config.pop("type"):
+            case 'PhenomD': 
+                generator = cuPhenomDGenerator(
+                    scaling_method=config.pop("scaling_method"),
+                    scale_factor=config.pop("scale_factor"),
+                    injection_chance=config.pop("injection_chance"),
+                    front_padding_duration_seconds=config.pop("front_padding_duration_seconds"),
+                    back_padding_duration_seconds=config.pop("back_padding_duration_seconds"),
+                    **{k: Distribution(**v) for k, v in config.items()},
+                )
+            case 'WNB':
+                generator = WNBGenerator(
+                    scaling_method=config.pop("scaling_method"),
+                    scale_factor=config.pop("scale_factor"),
+                    injection_chance=config.pop("injection_chance"),
+                    front_padding_duration_seconds=config.pop("front_padding_duration_seconds"),
+                    back_padding_duration_seconds=config.pop("back_padding_duration_seconds")
+                    **{k: Distribution(**v) for k, v in config.items()},
+                )
+            case _:
+                raise ValueError("This waveform type is not implemented.")
 
         return generator
 
@@ -202,10 +346,17 @@ class WNBGenerator(WaveformGenerator):
             
             # Draw parameter samples from distributions:
             parameters = {}
-            for attribute, value in self.__dict__.items():        
+            for attribute, value in self.__dict__.items():    
                 if is_not_inherited(self, attribute):
-                    parameter = \
-                        WaveformParameters.get(attribute)
+                    
+                    parameter = None
+                    try:
+                        parameter = \
+                            WaveformParameters.get(attribute)
+                    except:
+                        parameter = \
+                            ScalingTypes.get(attribute) 
+                    
                     shape = parameter.value.shape[-1]                
                     parameters[attribute] = tf.convert_to_tensor(value.sample(num_waveforms * shape))
                     
@@ -266,10 +417,17 @@ class cuPhenomDGenerator(WaveformGenerator):
             
             # Draw parameter samples from distributions:
             parameters = {}
-            for attribute, value in self.__dict__.items():        
+            for attribute, value in self.__dict__.items():    
                 if is_not_inherited(self, attribute):
-                    parameter = \
-                        WaveformParameters.get(attribute)
+                    
+                    parameter = None
+                    try:
+                        parameter = \
+                            WaveformParameters.get(attribute)
+                    except:
+                        parameter = \
+                            ScalingTypes.get(attribute) 
+                    
                     shape = parameter.value.shape[-1]                
                     parameters[attribute] = value.sample(num_waveforms * shape)
 
@@ -450,14 +608,14 @@ class InjectionGenerator:
             for injections_, mask_, parameters_ in zip(injections, mask, parameters):
                 yield injections_, mask_, parameters_
                 
-    def generate_snrs_(
+    def generate_scaling_parameters_(
         self,
         mask: tf.Tensor,
         config : WaveformGenerator
     ) -> tf.Tensor:
     
         """
-        Generate Signal-to-Noise Ratios (SNRs) given a mask, generator and example 
+        Generate scaling parameter (SNRs or HRSS) given a mask, generator and example 
         index.
 
         Parameters
@@ -468,56 +626,57 @@ class InjectionGenerator:
         Returns
         -------
         Tensor
-            A tensor representing generated SNRs.
+            A tensor representing generated scaling parameters.
         """
 
         mask = mask.numpy()
 
         num_injections = np.sum(mask)
         
-        match config.snr:
+        match config.scaling_method.value:
             case np.ndarray():
 
-                snrs = []
+                scaling_parameters = []
                 for index in range(self.index, self.index + num_injections):
-                    if index < len(config.snr):
-                        snrs.append(config.snr[index])
+                    if index < len(config.scaling_method.value):
+                        scaling_parameters.append(config.scaling_method.value[index])
                     else:
-                        snrs.append(config.snr[-1])
+                        scaling_parameters.append(config.scaling_method.value[-1])
                         
                     self.index += 1
 
             case Distribution():
-                snrs = config.snr.sample(num_injections)
+                scaling_parameters = config.scaling_method.value.sample(num_injections)
 
             case _:
-                raise ValueError(f"Unsupported SNR type: {type(config.snr)}!") 
+                raise ValueError("Unsupported scaling method value type: "
+                                 f"{type(config.scaling_method.value)}!") 
 
-        snrs = tf.convert_to_tensor(snrs, dtype = tf.float32)
+        scaling_parameters = tf.convert_to_tensor(scaling_parameters, dtype = tf.float32)
                 
-        snrs = \
+        scaling_parameters = \
             expand_tensor(
-                snrs,
+                scaling_parameters,
                 mask
             )
 
-        return snrs
+        return scaling_parameters
     
-    def generate_snrs(
+    def generate_scaling_parameters(
         self,
         masks : tf.Tensor
         ):
         
-        snrs = []
+        scaling_parameters = []
         for mask, config in zip(masks, self.configs):
-            snrs.append(
-                self.generate_snrs_(
+            scaling_parameters.append(
+                self.generate_scaling_parameters_(
                     mask,
                     config
                 )
             )
             
-        return tf.stack(snrs)
+        return tf.stack(scaling_parameters)
     
     def add_injections_to_onsource(
             self,
@@ -525,37 +684,58 @@ class InjectionGenerator:
             mask : tf.Tensor,
             onsource : tf.Tensor,
             variables_to_return : List
-        ) -> tf.Tensor:
+        ) -> Tuple[tf.Tensor, Union[tf.Tesnor, None], Dict]:
         
-        # Generate SNR values for injections based on inputed config values:
-        snrs = self.generate_snrs(mask)
+        # Generate SNR or HRSS values for injections based on inputed config values:
+        scaling_parameters = self.generate_scaling_parameters(mask)
         
-        amplitudes = []
+        return_variables = {}
         cropped_injections = []
-        for injections_, mask_, snrs_ in zip(injections, mask, snrs):
+        for injections_, mask_, scaling_parameters_, config in \
+            zip(injections, mask, scaling_parameters, self.configs):
 
-            # Scale injections to SNR:
-            scaled_injections = scale_to_snr(
-                injections_, 
-                onsource,
-                snrs_,
-                self.sample_rate_hertz,
-                fft_duration_seconds=1.0,
-                overlap_duration_seconds=0.5
-            )
-            
-            scaled_injections = replace_nan_and_inf_with_zero(scaled_injections)
-            
-            tf.debugging.check_numerics(scaled_injections, f"NaN detected in scaled_injections'.")
+            # Scale injections with selected scaling method:
+            scaled_injections = \
+                config.scaling_method.scale(
+                    injections_,
+                    onsource,
+                    scaling_parameters_,
+                    self.sample_rate_hertz
+                )
 
             # Add scaled injections to onsource:
             onsource += scaled_injections
+                        
+            if ScalingTypes.HPEAK in variables_to_return:
+                # Calculate hpeak of scaled injections:
+                
+                if config.scaling_method.type_ is not ScalingTypes.HPEAK:
+                    return_variables[ScalingTypes.HPEAK].append(
+                        calculate_hpeak(scaled_injections)
+                    )
+                    
+            if ScalingTypes.SNR in variables_to_return:
+                # Calculate snr of scaled injections:
+                
+                if config.scaling_method.type_ is not ScalingTypes.SNR:
+                    return_variables[ScalingTypes.SNR].append(
+                        calculate_snr(
+                            scaled_injections, 
+                            onsource,
+                            self.sample_rate_hertz, 
+                            fft_duration_seconds=1.0,
+                            overlap_duration_seconds=0.5
+                        ) 
+                    )
+                    
+            if ScalingTypes.HRSS in variables_to_return:
+                # Calculate hrss of scaled injections:
+                
+                if config.scaling_method.type_ is not ScalingTypes.HRSS:
+                    return_variables[ScalingTypes.HRSS].append(
+                        calculate_hrss(scaled_injections) 
+                    )
             
-            if ReturnVariables.AMPLITUDE in variables_to_return:
-                # Calculate amplitude of scaled injections:
-                amplitudes.append(
-                    tf.reduce_max(tf.abs(scaled_injections), axis=1)
-                )
             if (ReturnVariables.INJECTIONS in variables_to_return) or \
                 (ReturnVariables.WHITENED_INJECTIONS in variables_to_return):
                 # Crop injections so that they appear the same size as output 
@@ -567,22 +747,23 @@ class InjectionGenerator:
                         self.sample_rate_hertz
                     )
                 )
-        
-        if ReturnVariables.AMPLITUDE in variables_to_return:
-            amplitudes = tf.stack(amplitudes)
-        else: 
-            amplitudes = None
-        
+                                
         if (ReturnVariables.INJECTIONS in variables_to_return) or \
             (ReturnVariables.WHITENED_INJECTIONS in variables_to_return):
             cropped_injections = tf.stack(cropped_injections)
         else:
             cropped_injections = None
             
-        if (ReturnVariables.SNR not in variables_to_return):
-            snrs = None
+        # Add scaling parameters to return dictionary
+        for scaling_type in ScalingTypes:
+            if scaling_type in variables_to_return:
+                if config.scaling_method.type_ is not scaling_type:
+                    return_variables[scaling_type] = \
+                        tf.stack(return_variables[scaling_type])
+                else:
+                    return_variables[scaling_type] = scaling_parameters
         
-        return onsource, cropped_injections, amplitudes, snrs
+        return onsource, cropped_injections, return_variables
     
 @tf.function
 def roll_vector_zero_padding_(vector, min_roll, max_roll):
