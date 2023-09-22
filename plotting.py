@@ -38,7 +38,7 @@ def create_info_panel(params: dict) -> Div:
             }
         </style>
     """
-    html_content = "<div class='centered-content'>" + "".join([f"<li><strong>{key}</strong>:<br>{value}</li>" for key, value in params.items()]) + "</div>"
+    html_content = "<div class='centered-content'><ul>" + "".join([f"<li><strong>{key}:</strong> {value}</li>" for key, value in params.items()]) + "</ul></div>"
     return Div(text=style + html_content, width=190, height=200)
 
 def check_ndarrays_same_length(

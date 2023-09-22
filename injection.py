@@ -104,7 +104,7 @@ def calculate_hpeak(
     ):
     
     # Return the root sum sqaure of the inputted injections:
-    return tf.reduce_max(tf.abs(scaled_injections), axis=-1)
+    return tf.reduce_max(tf.abs(injection), axis=-1)
 
 def scale_to_hrss(
     injection: tf.Tensor, 
@@ -238,7 +238,7 @@ class WaveformGenerator:
         elif "scaling_type" and "scaling_distribution" in config:
             config["scaling_method"] = ScalingMethod(
                 Distribution(
-                    **config.pop("scaling_disribution"),
+                    **config.pop("scaling_distribution"),
                 ),
                 config.pop("scaling_type")
             )
@@ -266,7 +266,7 @@ class WaveformGenerator:
                     scale_factor=config.pop("scale_factor"),
                     injection_chance=config.pop("injection_chance"),
                     front_padding_duration_seconds=config.pop("front_padding_duration_seconds"),
-                    back_padding_duration_seconds=config.pop("back_padding_duration_seconds")
+                    back_padding_duration_seconds=config.pop("back_padding_duration_seconds"),
                     **{k: Distribution(**v) for k, v in config.items()},
                 )
             case _:
@@ -329,20 +329,19 @@ class WNBGenerator(WaveformGenerator):
         
         if (num_waveforms > 0):
             
-            if self.duration_seconds.max_ > max_duration_seconds \
-                and self.duration_seconds.type_ is not DistributionType.CONSTANT:
-                
-                warn("Max duration distibution is greater than requested "
-                     "injection duration. Adjusting", UserWarning)
-                self.duration_seconds.max_ = max_duration_seconds
-            
-            if self.duration_seconds.min_ < 0.0 and \
-                self.duration_seconds.type_ is not DistributionType.CONSTANT:
-                
-                warn("Min duration distibution is less than zero "
-                     "injection duration. Adjusting", UserWarning)
-                
-                self.duration_seconds.min_ = 0.0
+            if self.duration_seconds.type_ is not DistributionType.CONSTANT:
+                if self.duration_seconds.max_ > max_duration_seconds:                
+                    warn("Max duration distibution is greater than requested "
+                         "injection duration. Adjusting", UserWarning)
+                    self.duration_seconds.max_ = max_duration_seconds
+
+                if self.duration_seconds.min_ < 0.0 and \
+                    self.duration_seconds.type_ is not DistributionType.CONSTANT:
+
+                    warn("Min duration distibution is less than zero "
+                         "injection duration. Adjusting", UserWarning)
+
+                    self.duration_seconds.min_ = 0.0
             
             # Draw parameter samples from distributions:
             parameters = {}
@@ -689,8 +688,8 @@ class InjectionGenerator:
         # Generate SNR or HRSS values for injections based on inputed config values:
         scaling_parameters = self.generate_scaling_parameters(mask)
         
-        return_variables = {}
-        cropped_injections = []
+        return_variables = {key : [] for key in ScalingTypes if key in variables_to_return}
+        cropped_injections = []    
         for injections_, mask_, scaling_parameters_, config in \
             zip(injections, mask, scaling_parameters, self.configs):
 

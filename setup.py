@@ -17,14 +17,17 @@ from tensorflow.data import Dataset
 
 from .maths import Distribution, DistributionType
 
-def setup_cuda(device_num: str, max_memory_limit: int,  logging_level: int = logging.WARNING) -> Strategy:
+def setup_cuda(device_num: str, 
+               max_memory_limit: int, 
+               logging_level: int = logging.WARNING) -> tf.distribute.Strategy:
     """
-    Sets up CUDA for TensorFlow. Configures memory growth, logging verbosity, and returns the strategy for distributed computing.
+    Sets up CUDA for TensorFlow. Configures memory growth, logging verbosity, and returns the strategy 
+    for distributed computing.
 
     Args:
         device_num (str): The GPU device number to be made visible for TensorFlow.
         max_memory_limit (int): The maximum GPU memory limit in MB.
-        verbose (bool, optional): If True, prints the list of GPU devices. Defaults to False.
+        logging_level (int, optional): Sets the logging level. Defaults to logging.WARNING.
 
     Returns:
         tf.distribute.MirroredStrategy: The TensorFlow MirroredStrategy instance.
@@ -33,12 +36,8 @@ def setup_cuda(device_num: str, max_memory_limit: int,  logging_level: int = log
     # Set up logging to file - this is beneficial in debugging scenarios and for traceability.
     logging.basicConfig(filename='tensorflow_setup.log', level=logging_level)
     
-    try:
-        # Set the device number for CUDA to recognize.
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(device_num)
-    except Exception as e:
-        logging.error(f"Failed to set CUDA_VISIBLE_DEVICES environment variable: {e}")
-        raise
+    # Set the device number for CUDA to recognize.
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(device_num)
 
     # Confirm TensorFlow and CUDA version compatibility.
     tf_version = tf.__version__
@@ -47,31 +46,22 @@ def setup_cuda(device_num: str, max_memory_limit: int,  logging_level: int = log
 
     # List all the physical GPUs.
     gpus = tf.config.list_physical_devices('GPU')
-
+    
     # If any GPU is present.
     if gpus:
-        try:
-            # Currently, memory growth needs to be the same across GPUs.
-            # Enable memory growth for each GPU and set memory limit.
-            for gpu in gpus:
-                # Limit the GPU memory.
-                tf.config.experimental.set_virtual_device_configuration(
-                    gpu,
-                    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=max_memory_limit)])
-                
-                #tf.config.experimental.set_memory_growth(gpu, False)
+        # Currently, memory growth needs to be the same across GPUs.
+        # Enable memory growth for each GPU and set memory limit.
+        for gpu in gpus:
+            tf.config.experimental.set_virtual_device_configuration(
+                gpu,
+                [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=max_memory_limit)])
 
-        except RuntimeError as e:
-            # This needs to be set before initializing GPUs.
-            logging.error(f"Failed to set memory growth or set memory limit: GPUs must be initialized first. Error message: {e}")
-            raise
+    # Set the logging level to ERROR to reduce logging noise.
+    tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
     # MirroredStrategy performs synchronous distributed training on multiple GPUs on one machine.
     # It creates one replica of the model on each GPU available.
     strategy = tf.distribute.MirroredStrategy()
-
-    # Set the logging level to ERROR to reduce logging noise.
-    tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
     # If verbose, print the list of GPUs.
     logging.info(tf.config.list_physical_devices("GPU"))

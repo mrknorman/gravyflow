@@ -2,6 +2,7 @@
 import logging
 from pathlib import Path
 from itertools import islice
+from copy import deepcopy
 
 # Library imports:
 import numpy as np
@@ -77,29 +78,38 @@ def test_iteration(
             ifos = IFO.L1
         )
     
-    data : tf.data.Dataset = get_ifo_data(
+    input_variables = [
+        ReturnVariables.WHITENED_ONSOURCE, 
+        ReturnVariables.INJECTION_MASKS, 
+        ReturnVariables.INJECTIONS,
+        ReturnVariables.WHITENED_INJECTIONS,
+        WaveformParameters.MASS_1_MSUN, 
+        WaveformParameters.MASS_2_MSUN
+    ]
+    
+    data_args : Dict = {
         # Random Seed:
-        seed= 1000,
+        "seed" : 1000,
         # Temporal components:
-        sample_rate_hertz=sample_rate_hertz,   
-        onsource_duration_seconds=onsource_duration_seconds,
-        offsource_duration_seconds=offsource_duration_seconds,
-        crop_duration_seconds=crop_duration_seconds,
+        "sample_rate_hertz" : sample_rate_hertz,   
+        "onsource_duration_seconds" : onsource_duration_seconds,
+        "offsource_duration_seconds" : offsource_duration_seconds,
+        "crop_duration_seconds" : crop_duration_seconds,
         # Noise: 
-        noise_obtainer=noise_obtainer,
-        scale_factor=scale_factor,
+        "noise_obtainer" : noise_obtainer,
+        "scale_factor" : scale_factor,
         # Injections:
-        injection_generators=phenom_d_generator, 
+        "injection_generators" : phenom_d_generator, 
         # Output configuration:
-        num_examples_per_batch=num_examples_per_batch,
-        input_variables = [
-            ReturnVariables.WHITENED_ONSOURCE, 
-            ReturnVariables.INJECTION_MASKS, 
-            ReturnVariables.INJECTIONS,
-            ReturnVariables.WHITENED_INJECTIONS,
-            WaveformParameters.MASS_1_MSUN, 
-            WaveformParameters.MASS_2_MSUN
-        ],
+        "num_examples_per_batch" : num_examples_per_batch,
+        "input_variables" : input_variables
+    }
+    
+    # Deepcopy before running tests to ensure args remain constant:
+    dataset_args : Dict = deepcopy(data_args)
+    
+    data : tf.data.Dataset = get_ifo_data(
+        **data_argss
     )
     
     logging.info("Start iteration tests...")
@@ -109,29 +119,9 @@ def test_iteration(
     
     assert index == num_tests - 1, \
         "Warning! Data does not iterate the required number of batches"
-    
+
     dataset : tf.data.Dataset = get_ifo_dataset(
-        # Random Seed:
-        seed= 1000,
-        # Temporal components:
-        sample_rate_hertz=sample_rate_hertz,   
-        onsource_duration_seconds=onsource_duration_seconds,
-        offsource_duration_seconds=offsource_duration_seconds,
-        crop_duration_seconds=crop_duration_seconds,
-        # Noise: 
-        noise_obtainer=noise_obtainer,
-        # Injections:
-        injection_generators=phenom_d_generator, 
-        # Output configuration:
-        num_examples_per_batch=num_examples_per_batch,
-        input_variables = [
-            ReturnVariables.WHITENED_ONSOURCE, 
-            ReturnVariables.INJECTION_MASKS, 
-            ReturnVariables.INJECTIONS,
-            ReturnVariables.WHITENED_INJECTIONS,
-            WaveformParameters.MASS_1_MSUN, 
-            WaveformParameters.MASS_2_MSUN
-        ],
+        **dataset_args
     )
     
     for index, _ in tqdm(enumerate(islice(dataset, num_tests))):

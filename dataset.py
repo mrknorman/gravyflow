@@ -164,7 +164,7 @@ def get_ifo_data(
             
             for key, value in scaling_parameters.items():
                 if key in variables_to_return:
-                    parameters[key] = item
+                    parameters[key] = value
             
             if ReturnVariables.WHITENED_INJECTIONS in variables_to_return:
                 whitened_injections = \
