@@ -20,8 +20,8 @@ from .maths import (Distribution, DistributionType, expand_tensor, batch_tensor,
                     set_random_seeds, crop_samples, 
                     replace_nan_and_inf_with_zero)
 from .snr import scale_to_snr, calculate_snr
+from .setup import replace_placeholders
 
-@dataclass 
 class ScalingType:
     index : int
     shape: tuple = (1,)
@@ -173,18 +173,6 @@ class ReturnVariables(Enum):
     def __lt__(self, other):
         # Implement less-than logic
         return self.value.index < other.value.index
-    
-def replace_placeholders(
-        value: dict, 
-        replacements: dict
-    ) -> None:
-        
-    """Replace placeholders in the config dictionary with actual values."""
-    for k in ["value", "max_", "type_"]:
-
-        if isinstance(value, dict):
-            if k in value:
-                value[k] = replacements.get(value[k], value[k])
 
 @dataclass
 class WaveformGenerator:

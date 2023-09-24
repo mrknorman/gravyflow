@@ -21,7 +21,8 @@ from gwpy.table import EventTable
 from gwpy.timeseries import TimeSeries
 
 from .setup import open_hdf5_file, ensure_directory_exists
-from .maths import replace_nan_and_inf_with_zero 
+from .maths import replace_nan_and_inf_with_zero
+from .detector import IFO
 
 # Enums
 class DataQuality(Enum):
@@ -37,33 +38,6 @@ class SegmentOrder(Enum):
     RANDOM = auto()
     SHORTEST_FIRST = auto()
     CHRONOLOGICAL = auto()
-    
-@dataclass
-class IFO_:
-    name: str
-    optimal_psd_path : Path
-
-noise_profile_directory_path : Path = Path("./py_ml_tools/res/noise_profiles/")
-
-ifo_data : Dict = {
-    "livingston" : {
-        "name": "Livingston",
-        "optimal_psd_path" : noise_profile_directory_path / "livingston.csv"
-    },
-    "hanford" : {
-        "name": "Hanford",
-        "optimal_psd_path" : noise_profile_directory_path / "handford.csv"
-    },
-    "virgo" : {
-        "name": "Virgo",
-        "optimal_psd_path" : noise_profile_directory_path / "virgo.csv"
-    }
-}
-    
-class IFO(Enum):
-    L1 = IFO_(**ifo_data["livingston"])
-    H1 = IFO_(**ifo_data["hanford"])
-    V1 = IFO_(**ifo_data["virgo"])
     
 @dataclass
 class ObservingRunData:

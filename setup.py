@@ -17,23 +17,30 @@ from tensorflow.data import Dataset
 
 from .maths import Distribution, DistributionType
 
-def setup_cuda(device_num: str, 
-               max_memory_limit: int, 
-               logging_level: int = logging.WARNING) -> tf.distribute.Strategy:
+def setup_cuda(
+        device_num: str, 
+        max_memory_limit: int, 
+        logging_level: int = logging.WARNING
+    ) -> tf.distribute.Strategy:
     """
-    Sets up CUDA for TensorFlow. Configures memory growth, logging verbosity, and returns the strategy 
-    for distributed computing.
+    Sets up CUDA for TensorFlow. Configures memory growth, logging verbosity, 
+    and returns the strategy for distributed computing.
 
     Args:
-        device_num (str): The GPU device number to be made visible for TensorFlow.
-        max_memory_limit (int): The maximum GPU memory limit in MB.
-        logging_level (int, optional): Sets the logging level. Defaults to logging.WARNING.
+        device_num (str): 
+            The GPU device number to be made visible for TensorFlow.
+        max_memory_limit (int): 
+            The maximum GPU memory limit in MB.
+        logging_level (int, optional): 
+            Sets the logging level. Defaults to logging.WARNING.
 
     Returns:
-        tf.distribute.MirroredStrategy: The TensorFlow MirroredStrategy instance.
+        tf.distribute.MirroredStrategy: 
+            The TensorFlow MirroredStrategy instance.
     """
 
-    # Set up logging to file - this is beneficial in debugging scenarios and for traceability.
+    # Set up logging to file - this is beneficial in debugging scenarios and for 
+    # traceability.
     logging.basicConfig(filename='tensorflow_setup.log', level=logging_level)
     
     # Set the device number for CUDA to recognize.
@@ -42,7 +49,9 @@ def setup_cuda(device_num: str,
     # Confirm TensorFlow and CUDA version compatibility.
     tf_version = tf.__version__
     cuda_version = tf.sysconfig.get_build_info()['cuda_version']
-    logging.info(f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}")
+    logging.info(
+        f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}"
+    )
 
     # List all the physical GPUs.
     gpus = tf.config.list_physical_devices('GPU')
@@ -54,13 +63,19 @@ def setup_cuda(device_num: str,
         for gpu in gpus:
             tf.config.experimental.set_virtual_device_configuration(
                 gpu,
-                [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=max_memory_limit)])
+                [
+                    tf.config.experimental.VirtualDeviceConfiguration(
+                        memory_limit=max_memory_limit
+                    )
+                ]
+            )
 
     # Set the logging level to ERROR to reduce logging noise.
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
-    # MirroredStrategy performs synchronous distributed training on multiple GPUs on one machine.
-    # It creates one replica of the model on each GPU available.
+    # MirroredStrategy performs synchronous distributed training on multiple 
+    # GPUs on one machine. It creates one replica of the model on each GPU 
+    # available:
     strategy = tf.distribute.MirroredStrategy()
 
     # If verbose, print the list of GPUs.
@@ -100,8 +115,10 @@ def find_available_GPUs(
             universal_newlines=True
         )
     except subprocess.CalledProcessError as e:
-        print(f"Unable to run NVIDIA-SMI. Please check your environment. " \
-              "Exiting! Error: {e.output}")
+        print(
+            f"Unable to run NVIDIA-SMI. Please check your environment. Exiting!"
+            " Error: {e.output}"
+        )
         return None
 
     # Split the output into lines
@@ -113,7 +130,8 @@ def find_available_GPUs(
     # Convert to integers
     memory_array = np.array(memory_array, dtype=int)
     
-    # Find the indices of GPUs which have available memory more than min_memory_MB
+    # Find the indices of GPUs which have available memory more than 
+    # min_memory_MB
     available_gpus = np.where(memory_array > min_memory_MB)[0].tolist()
     
     if (max_needed != -1) and (max_needed < len(available_gpus)):
@@ -200,8 +218,22 @@ def get_tf_memory_usage() -> int:
     """
     
     # Extract device index
-    device_index = int(tf.config.list_physical_devices("GPU")[0].name.split(":")[-1])
+    device_index = int(
+        tf.config.list_physical_devices("GPU")[0].name.split(":")[-1]
+    )
     
     device_name = f"GPU:{device_index}"
     memory_info = tf.config.experimental.get_memory_info(device_name)
     return memory_info["current"] // (1024 * 1024)
+
+def replace_placeholders(
+        value: dict, 
+        replacements: dict
+    ) -> None:
+        
+    """Replace placeholders in the config dictionary with actual values."""
+    for k in ["value", "max_", "min_", "type_"]:
+
+        if isinstance(value, dict):
+            if k in value:
+                value[k] = replacements.get(value[k], value[k])
