@@ -1,4 +1,6 @@
 from __future__ import annotations
+from dataclasses import dataclass
+import logging
 
 # Built-In imports:
 from pathlib import Path
@@ -22,6 +24,7 @@ from .maths import (Distribution, DistributionType, expand_tensor, batch_tensor,
 from .snr import scale_to_snr, calculate_snr
 from .setup import replace_placeholders
 
+@dataclass
 class ScalingType:
     index : int
     shape: tuple = (1,)
@@ -449,6 +452,17 @@ class InjectionGenerator:
     variables_to_return : List[WaveformParameters] = None
     index : int = 0
     
+    
+    def __post_init__(self):
+        
+        if (self.num_examples_per_batch > self.num_examples_per_generation_batch):
+            logging.warning(
+                ("num_injections_per_batch must be less than "
+                 "num_examples_per_generation_batch adjusting to compensate")
+            )
+            
+            self.num_examples_per_generation_batch = self.num_examples_per_batch
+    
     def generate(self):
         
         self.variables_to_return = \
@@ -480,7 +494,10 @@ class InjectionGenerator:
                         parameters[key].append(parameters_[key])
                     else:
                         parameters[key].append(
-                            tf.zeros([key.value.shape[-1] * self.num_examples_per_batch], dtype = tf.float64)
+                            tf.zeros(
+                                [key.value.shape[-1] * self.num_examples_per_batch], 
+                                dtype = tf.float64
+                            )
                         )
 
             injections = tf.stack(injections)
@@ -517,7 +534,7 @@ class InjectionGenerator:
         
         num_batches : int = \
             self.num_examples_per_generation_batch // self.num_examples_per_batch
-        
+                
         while 1:
             mask = \
                 generate_mask(
@@ -546,11 +563,13 @@ class InjectionGenerator:
                         max_roll_num_samples
                     )
 
-                # Create zero filled injections to fill spots where injection did 
-                # not generate due to injection masks:
+                # Create zero filled injections to fill spots where injection 
+                # did not generate due to injection masks:
                 injections = expand_tensor(waveforms, mask)
             else:
-                injections = tf.zeros(shape=(num_batches, total_duration_num_samples))
+                injections = tf.zeros(
+                    shape=(num_batches, total_duration_num_samples)
+                )
                 parameters = { }
 
             # If no parameters requested, skip parameter processing and return
@@ -565,7 +584,8 @@ class InjectionGenerator:
                         if WaveformParameters.get(key) in self.variables_to_return
                 }
 
-                # Conver to tensor and expand parameter dims for remaining parameters:
+                # Conver to tensor and expand parameter dims for remaining 
+                # parameters:
                 expanded_parameters = {}
                 for key, parameter in reduced_parameters.items():
 
@@ -592,7 +612,9 @@ class InjectionGenerator:
             injections = batch_tensor(injections, self.num_examples_per_batch)
             mask = batch_tensor(mask, self.num_examples_per_batch)
 
-            for injections_, mask_, parameters_ in zip(injections, mask, parameters):
+            for injections_, mask_, parameters_ in zip(
+                injections, mask, parameters
+                ):
                 yield injections_, mask_, parameters_
                 
     def generate_scaling_parameters_(
@@ -602,8 +624,8 @@ class InjectionGenerator:
     ) -> tf.Tensor:
     
         """
-        Generate scaling parameter (SNRs or HRSS) given a mask, generator and example 
-        index.
+        Generate scaling parameter (SNRs or HRSS) given a mask, generator and 
+        example index.
 
         Parameters
         ----------
@@ -626,26 +648,34 @@ class InjectionGenerator:
                 scaling_parameters = []
                 for index in range(self.index, self.index + num_injections):
                     if index < len(config.scaling_method.value):
-                        scaling_parameters.append(config.scaling_method.value[index])
+                        scaling_parameters.append(
+                            config.scaling_method.value[index]
+                        )
                     else:
-                        scaling_parameters.append(config.scaling_method.value[-1])
+                        scaling_parameters.append(
+                            config.scaling_method.value[-1]
+                        )
                         
                     self.index += 1
 
             case Distribution():
-                scaling_parameters = config.scaling_method.value.sample(num_injections)
+                scaling_parameters = config.scaling_method.value.sample(
+                    num_injections
+                )
 
             case _:
                 raise ValueError("Unsupported scaling method value type: "
                                  f"{type(config.scaling_method.value)}!") 
 
-        scaling_parameters = tf.convert_to_tensor(scaling_parameters, dtype = tf.float32)
+        scaling_parameters = tf.convert_to_tensor(
+            scaling_parameters, 
+            dtype = tf.float32
+        )
                 
-        scaling_parameters = \
-            expand_tensor(
-                scaling_parameters,
-                mask
-            )
+        scaling_parameters = expand_tensor(
+            scaling_parameters,
+            mask
+        )
 
         return scaling_parameters
     
@@ -673,10 +703,13 @@ class InjectionGenerator:
             variables_to_return : List
         ) -> Tuple[tf.Tensor, Union[tf.Tesnor, None], Dict]:
         
-        # Generate SNR or HRSS values for injections based on inputed config values:
+        # Generate SNR or HRSS values for injections based on inputed config 
+        # values:
         scaling_parameters = self.generate_scaling_parameters(mask)
         
-        return_variables = {key : [] for key in ScalingTypes if key in variables_to_return}
+        return_variables = {
+            key : [] for key in ScalingTypes if key in variables_to_return
+        }
         cropped_injections = []    
         for injections_, mask_, scaling_parameters_, config in \
             zip(injections, mask, scaling_parameters, self.configs):
@@ -848,7 +881,8 @@ def batch_injection_parameters(
         num_batches: int
     ) -> List[Dict[str, Union[List[float], List[int]]]]:
     """
-    Splits the given dictionary into smaller dictionaries containing N waveforms.
+    Splits the given dictionary into smaller dictionaries containing N 
+    waveforms.
 
     Parameters
     ----------

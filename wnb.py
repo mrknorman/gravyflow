@@ -81,7 +81,11 @@ def generate_white_noise_burst(
     #If the enveloped flag is set, apply the envelope
     if enveloped:
         # Create a Hann window for each waveform based on its duration
-        envelope_list = [tf.pad(tf.signal.hann_window(num_samples), [[max_num_samples - num_samples, 0]]) for num_samples in tf.unstack(num_samples_array)]        
+        envelope_list = [
+            tf.pad(
+                tf.signal.hann_window(num_samples), 
+                [[max_num_samples - num_samples, 0]]
+            ) for num_samples in tf.unstack(num_samples_array)]        
         
         envelope = tf.stack(envelope_list)
         

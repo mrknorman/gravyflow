@@ -10,7 +10,7 @@ from astropy import coordinates, units
 from astropy.coordinates.matrix_utilities import rotation_matrix
 from astropy.units import meter
 
-from .maths import Distribution, DistributionType
+from .maths import Distribution, DistributionType, rfftfreq
 from .setup import replace_placeholders
 
 
@@ -414,7 +414,7 @@ class Network:
         time_delay = tf.tensordot(location, ehat, axes=[[1], [0]]) 
         time_delay = time_delay / C  # Normalize by speed of light
         
-        time_delay = tf.squeeze(time_delay)
+        time_delay = tf.transpose(tf.squeeze(time_delay))
         
         return tf.cast(time_delay, dtype=tf.float32)
     
@@ -430,14 +430,45 @@ class Network:
             self.location
         )
     
-    def project_Wave(
+    def project_wave(
         self,
         hc : tf.Tensor,
         hp : tf.Tensor,
-        right_ascension: tf.Tensor, 
-        declination: tf.Tensor, 
-        polarization: tf.Tensor
+        sample_frequency_hertz : float,
+        right_ascension: tf.Tensor = None,
+        declination: tf.Tensor = None,
+        polarization: tf.Tensor = None
     ):
+        
+        num_injections = tf.shape(hc)[0]
+        
+        if right_ascension == None:
+            right_ascension = tf.constant(
+                np.random.uniform(
+                    0, 
+                    2 * np.pi, 
+                    size=(num_injections,)
+                ), 
+                dtype=tf.float32
+            )
+        if declination == None:
+            declination = tf.constant(
+                np.random.uniform(
+                    -np.pi / 2, 
+                    np.pi / 2, 
+                    size=(num_injections,)
+                ), 
+                dtype=tf.float32
+            )
+        if polarization == None:
+            polarization = tf.constant(
+                np.random.uniform(
+                    0, 
+                    2 * np.pi, 
+                    size=(num_injections,)
+                ), 
+                dtype=tf.float32
+                )
         
         fc, fp = self.get_antenna_pattern(
             right_ascension, 
@@ -445,33 +476,51 @@ class Network:
             polarization
         ) 
         
+        hc = tf.expand_dims(hc, axis=1)
+        hp = tf.expand_dims(hp, axis=1)
+        fc = tf.expand_dims(fc, axis=-1)
+        fp = tf.expand_dims(fp, axis=-1)
+                
         strain = hc*fc + hp*fp
         
         time_shift_seconds = self.get_time_delay(
             right_ascension, 
             declination
         ) 
-        
+                
         return shift_waveform(
             strain, 
-            frequency_axis, 
+            sample_frequency_hertz, 
             time_shift_seconds
         )
         
-@tf.function
+#@tf.function
 def shift_waveform(
         strain : tf.Tensor, 
-        frequency_axis : tf.Tensor, 
+        sample_frequency_hertz : float, 
         time_shift_seconds : tf.Tensor
     ):
+
+    frequency_axis = rfftfreq(
+        tf.shape(strain)[-1],
+        1.0/sample_frequency_hertz
+    )
+    
+    frequency_axis = tf.expand_dims(
+        tf.expand_dims(frequency_axis, axis=0), 
+        axis=0
+    )
+    time_shift_seconds = tf.expand_dims(time_shift_seconds, axis=-1)
     
     PI = tf.constant(3.14159, dtype=tf.float32)
 
     strain_fft = tf.signal.rfft(strain) 
+    
+    imaj_part = -2.0*PI*frequency_axis*time_shift_seconds
     phase_factor = tf.exp(
         tf.complex(
-            tf.cast(0.0, tf.float32), 
-            -2.0*PI*frequency_axis*time_shift_seconds
+            tf.zeros_like(imaj_part),
+            imaj_part
         )
     )
     shitfted_strain = tf.signal.irfft(phase_factor * strain_fft)
@@ -588,40 +637,3 @@ def single_arm_frequency_response(
     
     # Compute and return the single arm frequency response
     return tf.math.real(a * (b - c) * 2.0)
-
-def batched_matmul_4D(tensor1: tf.Tensor, tensor2: tf.Tensor) -> tf.Tensor:
-    """
-    Perform batched matrix multiplication on 4D tensors with two batch dimensions.
-    
-    Parameters
-    ----------
-    tensor1 : tf.Tensor
-        A 4D tensor with shape (batch_dim1, batch_dim2, m, n).
-    tensor2 : tf.Tensor
-        A 4D tensor with shape (batch_dim1, batch_dim2, n, p).
-    
-    Returns
-    -------
-    tf.Tensor
-        A 4D tensor with shape (batch_dim1, batch_dim2, m, p).
-    """
-    
-    # Check for shape compatibility
-    if tensor1.shape[:2] != tensor2.shape[:2]:
-        raise ValueError("Batch dimensions must match between the two tensors.")
-    
-    if tensor1.shape[-1] != tensor2.shape[-2]:
-        raise ValueError("Inner dimensions must match for matrix multiplication.")
-    
-    # Reshape tensors to merge the multiple batch dimensions into one
-    merged_shape = tf.reduce_prod(tf.shape(tensor1)[:2])
-    tensor1_reshaped = tf.reshape(tensor1, [merged_shape, tensor1.shape[-2], tensor1.shape[-1]])
-    tensor2_reshaped = tf.reshape(tensor2, [merged_shape, tensor2.shape[-2], tensor2.shape[-1]])
-    
-    # Perform batched matrix multiplication on reshaped tensors
-    result_reshaped = tf.linalg.matmul(tensor1_reshaped, tensor2_reshaped)
-    
-    # Reshape the result back to original form
-    result = tf.reshape(result_reshaped, [tensor1.shape[0], tensor1.shape[1], tensor1.shape[-2], tensor2.shape[-1]])
-    
-    return result

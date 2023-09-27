@@ -22,7 +22,10 @@ class Distribution:
     std : float = None
     type_ : DistributionType = DistributionType.CONSTANT
 
-    def sample(self, num_samples : int = 1) -> Union[List[Union[int, float]], Union[int, float]]:
+    def sample(
+        self, 
+        num_samples : int = 1
+        ) -> Union[List[Union[int, float]], Union[int, float]]:
         
         match self.type_:
             
@@ -100,17 +103,22 @@ def replace_nan_and_inf_with_zero(tensor):
     tensor = tf.where(tf.math.is_inf(tensor), tf.zeros_like(tensor), tensor)
     return tensor    
 
-def expand_tensor(signal: tf.Tensor, mask: tf.Tensor, group_size: int = 1) -> tf.Tensor:
+def expand_tensor(
+        signal: tf.Tensor, 
+        mask: tf.Tensor, 
+        group_size: int = 1
+    ) -> tf.Tensor:
     """
-    Expands a tensor by inserting zeros (or zero arrays) based on a mask tensor. It
-    works for both 1D and 2D tensors.
+    Expands a tensor by inserting zeros (or zero arrays) based on a mask tensor. 
+    It works for both 1D and 2D tensors.
 
     Parameters
     ----------
     signal : tf.Tensor
         A tensor representing signal injections.
     mask : tf.Tensor
-        A 1D boolean tensor. Its length will determine the length of the expanded tensor.
+        A 1D boolean tensor. Its length will determine the length of the 
+        expanded tensor.
     group_size : int
         The number of elements in a group in the signal tensor.
 
@@ -125,7 +133,8 @@ def expand_tensor(signal: tf.Tensor, mask: tf.Tensor, group_size: int = 1) -> tf
     assert mask.ndim == 1, 'Mask must be a 1D tensor'
     assert group_size > 0, 'Group size must be greater than 0'
     
-    # The number of groups in the signal must match the number of True values in the mask
+    # The number of groups in the signal must match the number of True values 
+    # in the mask
     assert tf.reduce_sum(tf.cast(mask, tf.int32)) == signal.shape[0] // group_size, \
         'Number of groups in signal must match number of True values in mask'
     
@@ -162,17 +171,20 @@ def expand_tensor(signal: tf.Tensor, mask: tf.Tensor, group_size: int = 1) -> tf
 @tf.function
 def expand_tensor_(signal: tf.Tensor, mask: tf.Tensor) -> tf.Tensor:
     """
-    This function expands a tensor along the X axis by inserting zeros wherever a 
-    corresponding boolean in a 1D tensor is False, and elements from the original 
-    tensor where the boolean is True. It works for both 1D and 2D tensors.
+    This function expands a tensor along the X axis by inserting zeros wherever 
+    a corresponding boolean in a 1D tensor is False, and elements from the 
+    original tensor where the boolean is True. It works for both 1D and 2D 
+    tensors.
 
     Parameters
     ----------
     signal : tf.Tensor
         A 1D or 2D tensor representing signal injections, where the length of 
-        the tensor's first dimension equals the number of True values in the mask.
+        the tensor's first dimension equals the number of True values in the 
+        mask.
     mask : tf.Tensor
-        A 1D boolean tensor. Its length will determine the length of the expanded tensor.
+        A 1D boolean tensor. Its length will determine the length of the 
+        expanded tensor.
 
     Returns
     -------
@@ -331,3 +343,42 @@ def crop_samples(
         batched_onsource = tf.squeeze(batched_onsource) 
     
     return batched_onsource
+
+@tf.function
+def rfftfreq(
+        num_samples: int, 
+        frequency_interval_hertz: Union[float, int] = 1.0
+    ) -> tf.Tensor:
+    """
+    Return the Discrete Fourier Transform sample frequencies
+    (for usage with rfft, irfft) using TensorFlow operations.
+
+    Parameters
+    ----------
+    n : int
+        Window length.
+    d : scalar, optional
+        Sample spacing (inverse of the sampling rate). Defaults to 1.
+
+    Returns
+    -------
+    f : tf.Tensor
+        Tensor of shape ``(n//2 + 1,)`` containing the sample frequencies.
+
+    Examples
+    --------
+    >>> n = 10
+    >>> sample_rate = 100
+    >>> freq = rfftfreq_tf(n, d=1./sample_rate)
+    """
+    
+    num_samples = tf.cast(num_samples, tf.float32)
+    
+    val = 1.0 / (num_samples * frequency_interval_hertz)
+    num_frequency_samples = num_samples // 2 + 1
+
+    # Create a range tensor and scale it
+    results = tf.range(0, num_frequency_samples, dtype=tf.int32)
+    frequency_tensor = tf.cast(results, dtype=tf.float32) * val
+    
+    return frequency_tensor

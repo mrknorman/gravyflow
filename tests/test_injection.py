@@ -199,11 +199,6 @@ def test_wnb_injection(
     generator : Iterator = injection_generator.generate
     
     injections, mask, parameters = next(generator())
-    
-    print(
-        parameters[WaveformParameters.MIN_FREQUENCY_HERTZ], 
-        parameters[WaveformParameters.MAX_FREQUENCY_HERTZ]
-    )
 
     layout = [
         [generate_strain_plot(
