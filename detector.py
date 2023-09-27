@@ -15,63 +15,53 @@ from .setup import replace_placeholders
 
 @dataclass
 class IFO_:
+    """Data class to represent information about an Interferometer."""
+
     name: str
     optimal_psd_path : Path
     longitude_radians : float
     latitude_radians : float
-    response : np.ndarray
-    location : np.ndarray
+    y_angle_radians : float
+    x_angle_radians : float
+    height_meters : float
+    x_length_meters : float
+    y_length_meters : float
 
-noise_profile_directory_path : Path = Path("./py_ml_tools/res/noise_profiles/")
+NOISE_PROFILE_DIRECTORY_PATH : Path = Path("./py_ml_tools/res/noise_profiles/")
 
 ifo_data : Dict = {
     "livingston" : {
         "name": "Livingston",
-        "optimal_psd_path" : noise_profile_directory_path / "livingston.csv",
+        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / "livingston.csv",
         "longitude_radians" : -1.5843093707829257, 
         "latitude_radians" : 0.5334231350225018,
-        "response" : np.array(
-            [
-                [ 0.41128087,  0.14021027,  0.24729459],
-                [ 0.14021027, -0.10900569, -0.18161564],
-                [ 0.24729459 ,-0.18161564, -0.30227515]
-            ]
-        ),
-        "location" : np.array(
-            [-74276.0447238, -5496283.71971, 3224257.01744]
-        )
+        "x_angle_radians" : 4.403177738189697,
+        "y_angle_radians" : 2.8323814868927,
+        "x_length_meters" : 4000.0,
+        "y_length_meters" : 4000.0,
+        "height_meters" : -6.573999881744385
     },
     "hanford" : {
         "name": "Hanford",
-        "optimal_psd_path" : noise_profile_directory_path / "handford.csv",
+        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / "hanford.csv",
         "longitude_radians" : -2.08405676916594, 
         "latitude_radians" : 0.810795263791696,
-        "response" : np.array(
-            [
-                [-0.3926141,  -0.07761341, -0.24738905],
-                [-0.07761341,  0.31952408,  0.22799784],
-                [-0.24738905,  0.22799784,  0.07309003]
-            ]
-        ),
-        "location" : np.array(
-            [-2161414.92636, -3834695.17889,  4600350.22664]
-        )     
+        "x_angle_radians": 5.654877185821533,
+        "y_angle_radians": 4.084080696105957,
+        "x_length_meters": 4000.0,
+        "y_length_meters": 4000.0,
+        "height_meters": 142.5540008544922
     },
     "virgo" : {
         "name": "Virgo",
-        "optimal_psd_path" : noise_profile_directory_path / "virgo.csv",
+        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / "virgo.csv",
         "longitude_radians" : 0.1833380521285067, 
         "latitude_radians" : 0.7615118398044829,
-        "response" : np.array(
-            [
-                [ 0.24387404, -0.09908378, -0.23257622],
-                [-0.09908378, -0.44782585,  0.1878331 ],
-                [-0.23257622,  0.1878331,   0.2039518 ]
-            ]
-        ),
-        "location" : np.array(
-            [4546374.099, 842989.697626, 4378576.96241]
-        )    
+        "x_angle_radians": 0.3391628563404083,
+        "y_angle_radians": 5.051551818847656,
+        "x_length_meters": 3000.0,
+        "y_length_meters": 3000.0,
+        "height_meters": 51.88399887084961
     }
 }
     
@@ -86,6 +76,7 @@ class Network:
         parameters : Union[List[IFO], Dict]
         ):
         
+        arguments = {}
         match parameters:
             
             case dict():
@@ -99,7 +90,6 @@ class Network:
                 else:
                     num_detectors = None
                     
-                arguments = {}
                 for key, value in parameters.items():
                                         
                     match value:
@@ -127,58 +117,43 @@ class Network:
                                     value.sample(num_detectors), 
                                     dtype=tf.float32
                                 )
-                                
-                self.init_parameters(
-                    **arguments
-                )
-                
+                    
             case list():
                 
-                latitude_radians = []
-                longitude_radians = []
-                response = []
-                location = []
-                for ifo in parameters:
-                    
-                    if not isinstance(ifo, IFO):
+                attributes = [
+                    "latitude_radians", 
+                    "longitude_radians", 
+                    "x_angle_radians", 
+                    "y_angle_radians", 
+                    "x_length_meters", 
+                    "y_length_meters", 
+                    "height_meters"
+                ]
+                
+                for attribute in attributes:
+                    attribute_list = [
+                        getattr(ifo.value, attribute) for ifo in parameters \
+                        if isinstance(ifo, IFO)]
+                    if len(attribute_list) != len(parameters):
                         raise ValueError(
-                            "When initilising a network from a list, all "
-                            "elements must be IFO Enums."
-                        )
-                        
-                    ifo = ifo.value
-                    
-                    latitude_radians.append(
-                        ifo.latitude_radians
+                            "When initializing a network from a list, all "
+                            "elements must be IFO Enums.")
+
+                    tensor = tf.convert_to_tensor(
+                        attribute_list, 
+                        dtype=tf.float32
                     )
-                    longitude_radians.append(
-                        ifo.longitude_radians
-                    )
-                    response.append(
-                        ifo.response
-                    )
-                    location.append(
-                        ifo.response
-                    )
-                
-                self.latitude_radians = tf.convert_to_tensor(
-                    latitude_radians, dtype=tf.float32
-                )
-                self.longitude_radians = tf.convert_to_tensor(
-                    longitude_radians, dtype=tf.float32
-                )
-                self.response = tf.convert_to_tensor(
-                    response, dtype=tf.float32
-                )
-                self.location = tf.convert_to_tensor(
-                    location, dtype=tf.float32
-                )
-                
+                    arguments[attribute] = tensor
+
             case _:
                 raise ValueError(
                     f"Unsuported type {type(parameters)} for Network "
                     "initilisation."
                 )
+                
+        self.init_parameters(
+            **arguments
+        )
     
     def init_parameters(
         self,
@@ -225,6 +200,7 @@ class Network:
 
             resp = tf.matmul(resp, rm)
             resp = tf.matmul(tf.transpose(rm, perm=[0, 2, 1]), resp) / 4.0
+            
             resps.append(resp)
             
             angle_vector = tf.stack([
@@ -262,10 +238,115 @@ class Network:
         self.y_angle_radians = y_angle_radians
         self.x_angle_radians = x_angle_radians
         self.height_meters = height_meters
-        self.x_altitude = tf.zeros_like(height_meters)
-        self.y_altitude = tf.zeros_like(height_meters)
+        self.x_altitude_meters = tf.zeros_like(height_meters)
+        self.y_altitude_meters = tf.zeros_like(height_meters)
         self.y_length_meters = y_length_meters
         self.x_length_meters = x_length_meters
+    
+    #@tf.function
+    def antenna_pattern(
+        self,
+        right_ascension: tf.Tensor, 
+        declination: tf.Tensor, 
+        polarization: tf.Tensor,
+        frequency: tf.Tensor = None, 
+        polarization_type: str = 'tensor'
+    ) -> (tf.Tensor, tf.Tensor):
+        
+        right_ascension = tf.expand_dims(right_ascension, 1)
+        declination = tf.expand_dims(declination, 1)
+        polarization = tf.expand_dims(polarization, 1)
+        
+        xvec = tf.expand_dims(self.xvec, 0)   
+        yvec = tf.expand_dims(self.yvec, 0)   
+        x_length_meters = tf.expand_dims(self.x_length_meters, 0)  
+        y_length_meters = tf.expand_dims(self.y_length_meters, 0)  
+        xresp = tf.expand_dims(self.xresp, 0)  
+        yresp = tf.expand_dims(self.yresp, 0)  
+        
+        cos_ra = tf.math.cos(right_ascension)
+        sin_ra = tf.math.sin(right_ascension)
+        cos_dec = tf.math.cos(declination)
+        sin_dec = tf.math.sin(declination)
+        cos_psi = tf.math.cos(polarization)
+        sin_psi = tf.math.sin(polarization)
+
+        if frequency is None:
+            frequency = tf.zeros_like(right_ascension)
+            resp = self.response
+            resp = tf.expand_dims(resp, 0)
+        else:
+            frequency = tf.expand_dims(frequency, 1)
+            
+            nhat = tf.stack([cos_dec * cos_ra, cos_dec * sin_ra, sin_dec], axis=-1)
+            
+            nx = tf.reduce_sum(nhat * xvec, axis=-1)
+            ny = tf.reduce_sum(nhat * yvec, axis=-1)
+                    
+            rx = single_arm_frequency_response(frequency, nx, x_length_meters)
+            ry = single_arm_frequency_response(frequency, ny, y_length_meters)
+            
+            rx = tf.expand_dims(tf.expand_dims(rx, axis=-1), axis=-1)
+            ry = tf.expand_dims(tf.expand_dims(ry, axis=-1), axis=-1)
+            
+            resp = ry * yresp - rx * xresp
+                        
+        x = tf.stack([
+            -cos_psi * sin_ra - sin_psi * cos_ra * sin_dec,
+            -cos_psi * cos_ra + sin_psi * sin_ra * sin_dec,
+            sin_psi * cos_dec
+        ], axis=-1)
+
+        y = tf.stack([
+            sin_psi * sin_ra - cos_psi * cos_ra * sin_dec,
+            sin_psi * cos_ra + cos_psi * sin_ra * sin_dec,
+            cos_psi * cos_dec
+        ], axis=-1)
+        
+        dx = tf.tensordot(resp, x, axes=[[2], [2]])
+        dy = tf.tensordot(resp, y, axes=[[2], [2]])
+        
+        dx = tf.squeeze(dx)
+        dy = tf.squeeze(dy)
+        
+        dx = tf.transpose(dx, perm=[2, 0, 1])
+        dy = tf.transpose(dy, perm=[2, 0, 1])
+        
+        x = tf.expand_dims(x, axis=0)
+        y = tf.expand_dims(y, axis=0)
+        
+        dx = tf.expand_dims(dx, axis=0)
+        dy = tf.expand_dims(dy, axis=0)
+        
+        # Function to compute final response
+        def compute_response(
+                dx: tf.Tensor, 
+                dy: tf.Tensor, 
+                a: tf.Tensor, 
+                b: tf.Tensor
+            ) -> tf.Tensor:
+            
+            return tf.squeeze(tf.reduce_sum(a * dx + b * dy, axis=-1))
+
+        if polarization_type == 'tensor':
+            return (
+                compute_response(dx, -dy, x, y), 
+                compute_response(dy, dx, x, y)
+            )
+        elif polarization_type == 'vector':
+            z = tf.stack([-cos_dec * cos_ra, cos_dec * sin_ra, -sin_dec], axis=-1)
+            dz = tf.tensordot(resp, z, axes=[[2], [2]])
+            return (
+                compute_response(dx, dz, z, x), 
+                compute_response(dy, dz, z, y)
+            )
+        else:
+            z = tf.stack([-cos_dec * cos_ra, cos_dec * sin_ra, -sin_dec], axis=-1)
+            dz = tf.tensordot(resp, z, axes=[[2], [2]])
+            return (
+                compute_response(dx, dy, x, y), 
+                compute_response(dz, 0, z, None)    
+            )
     
     @classmethod
     def load(
@@ -451,3 +532,82 @@ def add_detectors_on_earth(
         'y_length_meters': y_length_meters,
         'x_length_meters': x_length_meters
     }
+
+
+# Define the speed of light constant (in m/s)
+C = 299792458.0
+
+def single_arm_frequency_response(
+        frequency: tf.Tensor, 
+        n: tf.Tensor, 
+        arm_length_meters: tf.Tensor
+    ) -> tf.Tensor:
+    
+    """
+    Compute the relative amplitude factor of the arm response due to signal 
+    delay.
+    """
+    
+    # Cast inputs to complex128 for compatibility
+    frequency = tf.cast(frequency, dtype=tf.complex64)
+    arm_length_meters = tf.cast(arm_length_meters, dtype=tf.complex64)
+        
+    # Calculate the complex phase term
+    phase = 2.0j * tf.constant(np.pi, dtype=tf.complex64) * \
+        (arm_length_meters / C) * frequency
+    
+    # Manually clip the real and imaginary parts
+    n_real = tf.math.real(n)
+    n_imag = tf.math.imag(n)
+    lower_bound = tf.constant(-0.999, dtype=tf.float32)
+    upper_bound = tf.constant(0.999, dtype=tf.float32)
+    n_real = tf.maximum(lower_bound, tf.minimum(n_real, upper_bound))
+    n_imag = tf.maximum(lower_bound, tf.minimum(n_imag, upper_bound))
+    
+    # Reassemble into a complex tensor
+    n = tf.complex(n_real, n_imag)
+            
+    # Compute components a, b, and c
+    a = 1.0 / (4.0 * phase)
+    b = (1 - tf.exp(-phase * (1 - n))) / (1 - n)
+    c = tf.exp(-2.0 * phase) * (1 - tf.exp(phase * (1 + n))) / (1 + n)
+    
+    # Compute and return the single arm frequency response
+    return tf.math.real(a * (b - c) * 2.0)
+
+def batched_matmul_4D(tensor1: tf.Tensor, tensor2: tf.Tensor) -> tf.Tensor:
+    """
+    Perform batched matrix multiplication on 4D tensors with two batch dimensions.
+    
+    Parameters
+    ----------
+    tensor1 : tf.Tensor
+        A 4D tensor with shape (batch_dim1, batch_dim2, m, n).
+    tensor2 : tf.Tensor
+        A 4D tensor with shape (batch_dim1, batch_dim2, n, p).
+    
+    Returns
+    -------
+    tf.Tensor
+        A 4D tensor with shape (batch_dim1, batch_dim2, m, p).
+    """
+    
+    # Check for shape compatibility
+    if tensor1.shape[:2] != tensor2.shape[:2]:
+        raise ValueError("Batch dimensions must match between the two tensors.")
+    
+    if tensor1.shape[-1] != tensor2.shape[-2]:
+        raise ValueError("Inner dimensions must match for matrix multiplication.")
+    
+    # Reshape tensors to merge the multiple batch dimensions into one
+    merged_shape = tf.reduce_prod(tf.shape(tensor1)[:2])
+    tensor1_reshaped = tf.reshape(tensor1, [merged_shape, tensor1.shape[-2], tensor1.shape[-1]])
+    tensor2_reshaped = tf.reshape(tensor2, [merged_shape, tensor2.shape[-2], tensor2.shape[-1]])
+    
+    # Perform batched matrix multiplication on reshaped tensors
+    result_reshaped = tf.linalg.matmul(tensor1_reshaped, tensor2_reshaped)
+    
+    # Reshape the result back to original form
+    result = tf.reshape(result_reshaped, [tensor1.shape[0], tensor1.shape[1], tensor1.shape[-2], tensor2.shape[-1]])
+    
+    return result
