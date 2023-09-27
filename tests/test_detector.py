@@ -41,7 +41,7 @@ def test_detector():
         )
     
     np.testing.assert_allclose(
-        network.xvec.numpy()[0], 
+        network.x_vector.numpy()[0], 
         _ground_detectors["test"]["xvec"],
         rtol=0, 
         atol=1e-07, 

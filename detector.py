@@ -182,14 +182,14 @@ class Network:
         rm = tf.matmul(rm2, rm1)
 
         # Calculate response in earth centered coordinates
-        resps = []
+        responses = []
         vecs = []
 
         for angle in [y_angle_radians, x_angle_radians]:
             a, b = tf.cos(2 * angle), tf.sin(2 * angle)
 
             batch_size = tf.shape(a)[0]
-            resp = tf.stack([
+            response = tf.stack([
                 tf.stack([-a, b, tf.zeros_like(a)], axis=-1), 
                 tf.stack([b, a, tf.zeros_like(a)], axis=-1), 
                 tf.stack(
@@ -202,10 +202,10 @@ class Network:
                 )
             ], axis=1)
 
-            resp = tf.matmul(resp, rm)
-            resp = tf.matmul(tf.transpose(rm, perm=[0, 2, 1]), resp) / 4.0
+            response = tf.matmul(response, rm)
+            response = tf.matmul(tf.transpose(rm, perm=[0, 2, 1]), response) / 4.0
             
-            resps.append(resp)
+            responses.append(response)
             
             angle_vector = tf.stack([
                 -tf.cos(angle),
@@ -219,7 +219,7 @@ class Network:
             vec = tf.squeeze(vec, axis=-1)
             vecs.append(vec)
 
-        full_resp = resps[0] - resps[1]
+        full_response = responses[0] - responses[1]
 
         # Handling the coordinates.EarthLocation method
         locations = []
@@ -234,11 +234,11 @@ class Network:
         loc = tf.constant(locations, dtype=tf.float32)
 
         self.location = loc
-        self.response = full_resp
-        self.xresp = resps[1]
-        self.yresp = resps[0]
-        self.xvec = vecs[1]
-        self.yvec = vecs[0]
+        self.response = full_response
+        self.x_response = responses[1]
+        self.y_response = responses[0]
+        self.x_vector = vecs[1]
+        self.y_vector = vecs[0]
         self.y_angle_radians = y_angle_radians
         self.x_angle_radians = x_angle_radians
         self.height_meters = height_meters
@@ -253,26 +253,26 @@ class Network:
         right_ascension: tf.Tensor, 
         declination: tf.Tensor, 
         polarization: tf.Tensor,
-        xvec: tf.Tensor,
-        yvec: tf.Tensor,
+        x_vector: tf.Tensor,
+        y_vector: tf.Tensor,
         x_length_meters: tf.Tensor,
         y_length_meters: tf.Tensor,
-        xresp : tf.Tensor,
-        yresp : tf.Tensor,
-        resp : tf.Tensor
+        x_response : tf.Tensor,
+        y_response : tf.Tensor,
+        response : tf.Tensor
     ) -> (tf.Tensor, tf.Tensor):
         
         right_ascension = tf.expand_dims(right_ascension, 1)
         declination = tf.expand_dims(declination, 1)
         polarization = tf.expand_dims(polarization, 1)
         
-        xvec = tf.expand_dims(xvec, 0)   
-        yvec = tf.expand_dims(yvec, 0)   
+        x_vector = tf.expand_dims(x_vector, 0)   
+        y_vector = tf.expand_dims(y_vector, 0)   
         x_length_meters = tf.expand_dims(x_length_meters, 0)  
         y_length_meters = tf.expand_dims(y_length_meters, 0)  
-        xresp = tf.expand_dims(xresp, 0)  
-        yresp = tf.expand_dims(yresp, 0)  
-        resp = tf.expand_dims(resp, 0)
+        x_response = tf.expand_dims(x_response, 0)  
+        y_response = tf.expand_dims(y_response, 0)  
+        response = tf.expand_dims(response, 0)
 
         cos_ra = tf.math.cos(right_ascension)
         sin_ra = tf.math.sin(right_ascension)
@@ -296,9 +296,9 @@ class Network:
         # Calculate dx and dy via tensordot, and immediately squeeze and 
         # transpose them
         dx = tf.transpose(
-            tf.squeeze(tf.tensordot(resp, x, axes=[[2], [2]])), perm=[2, 0, 1])
+            tf.squeeze(tf.tensordot(response, x, axes=[[2], [2]])), perm=[2, 0, 1])
         dy = tf.transpose(
-            tf.squeeze(tf.tensordot(resp, y, axes=[[2], [2]])), perm=[2, 0, 1])
+            tf.squeeze(tf.tensordot(response, y, axes=[[2], [2]])), perm=[2, 0, 1])
 
         # Expand dimensions for x, y, dx, dy along axis 0
         x = tf.expand_dims(x, axis=0)
@@ -332,12 +332,12 @@ class Network:
             right_ascension, 
             declination, 
             polarization,
-            self.xvec,
-            self.yvec,
+            self.x_vector,
+            self.y_vector,
             self.x_length_meters,
             self.y_length_meters,
-            self.xresp,
-            self.yresp,
+            self.x_response,
+            self.y_response,
             self.response
         )
     
@@ -440,40 +440,80 @@ class Network:
         polarization: tf.Tensor = None
     ):
         
+        return self.project_wave_(
+            hc,
+            hp,
+            sample_frequency_hertz,
+            self.x_vector,
+            self.y_vector,
+            self.x_length_meters,
+            self.y_length_meters,
+            self.x_response,
+            self.y_response,
+            self.response,
+            self.location,
+            right_ascension=right_ascension,
+            declination=declination,
+            polarization=polarization
+        )
+    
+    @tf.function
+    def project_wave_(
+        self,
+        hc : tf.Tensor,
+        hp : tf.Tensor,
+        sample_frequency_hertz : float,
+        x_vector: tf.Tensor,
+        y_vector: tf.Tensor,
+        x_length_meters: tf.Tensor,
+        y_length_meters: tf.Tensor,
+        x_response : tf.Tensor,
+        y_response : tf.Tensor,
+        response : tf.Tensor,
+        location : tf.Tensor,
+        right_ascension: tf.Tensor = None,
+        declination: tf.Tensor = None,
+        polarization: tf.Tensor = None
+    ):
+        
         num_injections = tf.shape(hc)[0]
+        PI = tf.constant(3.14159, dtype=tf.float32)
         
-        if right_ascension == None:
-            right_ascension = tf.constant(
-                np.random.uniform(
-                    0, 
-                    2 * np.pi, 
-                    size=(num_injections,)
-                ), 
+        if right_ascension is None:
+            right_ascension = tf.random.uniform(
+                shape=[num_injections], 
+                minval=0.0, 
+                maxval=2.0 * PI, 
                 dtype=tf.float32
             )
-        if declination == None:
-            declination = tf.constant(
-                np.random.uniform(
-                    -np.pi / 2, 
-                    np.pi / 2, 
-                    size=(num_injections,)
-                ), 
+
+        if declination is None:
+            declination = tf.random.uniform(
+                shape=[num_injections], 
+                minval=-PI / 2.0, 
+                maxval=PI / 2.0, 
                 dtype=tf.float32
             )
-        if polarization == None:
-            polarization = tf.constant(
-                np.random.uniform(
-                    0, 
-                    2 * np.pi, 
-                    size=(num_injections,)
-                ), 
+
+        if polarization is None:
+            polarization = tf.random.uniform(
+                shape=[num_injections], 
+                minval=0.0, 
+                maxval=2 * PI, 
                 dtype=tf.float32
-                )
+            )
         
-        fc, fp = self.get_antenna_pattern(
+        fc, fp = self.get_antenna_pattern_(
             right_ascension, 
             declination, 
-            polarization
+            polarization,
+            x_vector,
+            y_vector,
+            x_length_meters,
+            y_length_meters,
+            x_response,
+            y_response,
+            response
         ) 
         
         hc = tf.expand_dims(hc, axis=1)
@@ -483,10 +523,11 @@ class Network:
                 
         strain = hc*fc + hp*fp
         
-        time_shift_seconds = self.get_time_delay(
+        time_shift_seconds = self.get_time_delay_(
             right_ascension, 
-            declination
-        ) 
+            declination,
+            location
+        )
                 
         return shift_waveform(
             strain, 
@@ -494,7 +535,7 @@ class Network:
             time_shift_seconds
         )
         
-#@tf.function
+@tf.function
 def shift_waveform(
         strain : tf.Tensor, 
         sample_frequency_hertz : float, 

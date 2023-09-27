@@ -452,7 +452,6 @@ class InjectionGenerator:
     variables_to_return : List[WaveformParameters] = None
     index : int = 0
     
-    
     def __post_init__(self):
         
         if (self.num_examples_per_batch > self.num_examples_per_generation_batch):
