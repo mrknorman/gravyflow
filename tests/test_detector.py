@@ -1,6 +1,7 @@
 # Built-In imports:
 import logging
 from pathlib import Path
+from timeit import Timer
 
 # Library imports:
 import tensorflow as tf
@@ -62,6 +63,7 @@ def test_detector():
     #print(tf.shape(network.response))
     
     test_antenna_pattern()
+    test_time_delay()
     
 def test_antenna_pattern():
     # Generating random values for our function
@@ -72,7 +74,7 @@ def test_antenna_pattern():
         test_detectors
     )
     
-    num_tests = 10
+    num_tests = 1000000
     
     right_ascension = tf.constant(
         np.random.uniform(0, 2 * np.pi, size=(num_tests,)), dtype=tf.float32
@@ -86,15 +88,12 @@ def test_antenna_pattern():
     frequency = tf.constant(
         np.random.uniform(0, 2000, size=(num_tests,)), dtype=tf.float32
     )  # Example range, adjust as needed
-    polarization_type = "tensor"  # Example type, can be changed to "vector" or "scalar"
-
+    
     # Compute the output
-    f_plus, f_cross = network.antenna_pattern(
+    f_plus, f_cross = network.get_antenna_pattern(
         right_ascension, 
         declination, 
-        polarization, 
-        None, 
-        polarization_type
+        polarization
     )
     
     d = Detector("L1") 
@@ -111,14 +110,55 @@ def test_antenna_pattern():
         polarization.numpy(),
         630763213
     )
-    
-    print(f_plus_zomb, f_plus)
-    
+        
     # Check the output shape
     assert f_plus.shape == (num_tests,len(test_detectors)), f"Unexpected shape for f_plus: {f_plus.shape}"
     assert f_cross.shape == (num_tests,len(test_detectors)), f"Unexpected shape for f_cross: {f_cross.shape}"
     print("Test passed!")
     
+    # Measure the time for network.get_antenna_pattern
+    timer = Timer(lambda: network.get_antenna_pattern(right_ascension, declination, polarization))
+    print(f"Time for network.get_antenna_pattern: {timer.timeit(number=1)} seconds")
+
+    # Measure the time for zomb_antenna_pattern
+    d = Detector("L1")
+    timer = Timer(lambda: zomb_antenna_pattern(right_ascension.numpy(), declination.numpy(), polarization.numpy(), 630763213))
+    print(f"Time for zomb_antenna_pattern: {timer.timeit(number=1)} seconds")
+
+    # Measure the time for d.antenna_pattern using PyCBC
+    timer = Timer(lambda: d.antenna_pattern(right_ascension.numpy(), declination.numpy(), polarization.numpy(), 630763213))
+    print(f"Time for PyCBC's d.antenna_pattern: {timer.timeit(number=1)} seconds")
+    
+    
+def test_time_delay():
+    
+    num_tests = 10090
+    
+    d = Detector("L1") 
+    
+    #print(d.time_delay_from_earth_center(self, right_ascension, declination, t_gps))
+    
+    test_detectors = [IFO.L1, IFO.H1, IFO.V1]
+    # Create from Enum:
+    network = Network(
+        test_detectors
+    )
+    
+    right_ascension = tf.constant(
+        np.random.uniform(0, 2 * np.pi, size=(num_tests,)), dtype=tf.float32
+    )
+    declination = tf.constant(
+        np.random.uniform(-np.pi / 2, np.pi / 2, size=(num_tests,)), dtype=tf.float32
+    )
+    
+    delay = network.get_time_delay(right_ascension, declination).numpy()
+    
+    print(np.max(delay[0] - delay[1]))
+    
+    assert np.allclose(delay[0], delay[1], atol=0.011)
+    
+    assert np.allclose(delay[0], delay[2], atol=0.032)
+
 def zomb_antenna_pattern(
         right_ascension, 
         declination, 

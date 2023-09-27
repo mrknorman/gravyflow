@@ -13,6 +13,10 @@ from astropy.units import meter
 from .maths import Distribution, DistributionType
 from .setup import replace_placeholders
 
+
+# Define the speed of light constant (in m/s)
+C = 299792458.0
+
 @dataclass
 class IFO_:
     """Data class to represent information about an Interferometer."""
@@ -243,54 +247,40 @@ class Network:
         self.y_length_meters = y_length_meters
         self.x_length_meters = x_length_meters
     
-    #@tf.function
-    def antenna_pattern(
+    @tf.function
+    def get_antenna_pattern_(
         self,
         right_ascension: tf.Tensor, 
         declination: tf.Tensor, 
         polarization: tf.Tensor,
-        frequency: tf.Tensor = None, 
-        polarization_type: str = 'tensor'
+        xvec: tf.Tensor,
+        yvec: tf.Tensor,
+        x_length_meters: tf.Tensor,
+        y_length_meters: tf.Tensor,
+        xresp : tf.Tensor,
+        yresp : tf.Tensor,
+        resp : tf.Tensor
     ) -> (tf.Tensor, tf.Tensor):
         
         right_ascension = tf.expand_dims(right_ascension, 1)
         declination = tf.expand_dims(declination, 1)
         polarization = tf.expand_dims(polarization, 1)
         
-        xvec = tf.expand_dims(self.xvec, 0)   
-        yvec = tf.expand_dims(self.yvec, 0)   
-        x_length_meters = tf.expand_dims(self.x_length_meters, 0)  
-        y_length_meters = tf.expand_dims(self.y_length_meters, 0)  
-        xresp = tf.expand_dims(self.xresp, 0)  
-        yresp = tf.expand_dims(self.yresp, 0)  
-        
+        xvec = tf.expand_dims(xvec, 0)   
+        yvec = tf.expand_dims(yvec, 0)   
+        x_length_meters = tf.expand_dims(x_length_meters, 0)  
+        y_length_meters = tf.expand_dims(y_length_meters, 0)  
+        xresp = tf.expand_dims(xresp, 0)  
+        yresp = tf.expand_dims(yresp, 0)  
+        resp = tf.expand_dims(resp, 0)
+
         cos_ra = tf.math.cos(right_ascension)
         sin_ra = tf.math.sin(right_ascension)
         cos_dec = tf.math.cos(declination)
         sin_dec = tf.math.sin(declination)
         cos_psi = tf.math.cos(polarization)
         sin_psi = tf.math.sin(polarization)
-
-        if frequency is None:
-            frequency = tf.zeros_like(right_ascension)
-            resp = self.response
-            resp = tf.expand_dims(resp, 0)
-        else:
-            frequency = tf.expand_dims(frequency, 1)
-            
-            nhat = tf.stack([cos_dec * cos_ra, cos_dec * sin_ra, sin_dec], axis=-1)
-            
-            nx = tf.reduce_sum(nhat * xvec, axis=-1)
-            ny = tf.reduce_sum(nhat * yvec, axis=-1)
-                    
-            rx = single_arm_frequency_response(frequency, nx, x_length_meters)
-            ry = single_arm_frequency_response(frequency, ny, y_length_meters)
-            
-            rx = tf.expand_dims(tf.expand_dims(rx, axis=-1), axis=-1)
-            ry = tf.expand_dims(tf.expand_dims(ry, axis=-1), axis=-1)
-            
-            resp = ry * yresp - rx * xresp
-                        
+        
         x = tf.stack([
             -cos_psi * sin_ra - sin_psi * cos_ra * sin_dec,
             -cos_psi * cos_ra + sin_psi * sin_ra * sin_dec,
@@ -303,18 +293,16 @@ class Network:
             cos_psi * cos_dec
         ], axis=-1)
         
-        dx = tf.tensordot(resp, x, axes=[[2], [2]])
-        dy = tf.tensordot(resp, y, axes=[[2], [2]])
-        
-        dx = tf.squeeze(dx)
-        dy = tf.squeeze(dy)
-        
-        dx = tf.transpose(dx, perm=[2, 0, 1])
-        dy = tf.transpose(dy, perm=[2, 0, 1])
-        
+        # Calculate dx and dy via tensordot, and immediately squeeze and 
+        # transpose them
+        dx = tf.transpose(
+            tf.squeeze(tf.tensordot(resp, x, axes=[[2], [2]])), perm=[2, 0, 1])
+        dy = tf.transpose(
+            tf.squeeze(tf.tensordot(resp, y, axes=[[2], [2]])), perm=[2, 0, 1])
+
+        # Expand dimensions for x, y, dx, dy along axis 0
         x = tf.expand_dims(x, axis=0)
         y = tf.expand_dims(y, axis=0)
-        
         dx = tf.expand_dims(dx, axis=0)
         dy = tf.expand_dims(dy, axis=0)
         
@@ -328,25 +316,30 @@ class Network:
             
             return tf.squeeze(tf.reduce_sum(a * dx + b * dy, axis=-1))
 
-        if polarization_type == 'tensor':
-            return (
-                compute_response(dx, -dy, x, y), 
-                compute_response(dy, dx, x, y)
-            )
-        elif polarization_type == 'vector':
-            z = tf.stack([-cos_dec * cos_ra, cos_dec * sin_ra, -sin_dec], axis=-1)
-            dz = tf.tensordot(resp, z, axes=[[2], [2]])
-            return (
-                compute_response(dx, dz, z, x), 
-                compute_response(dy, dz, z, y)
-            )
-        else:
-            z = tf.stack([-cos_dec * cos_ra, cos_dec * sin_ra, -sin_dec], axis=-1)
-            dz = tf.tensordot(resp, z, axes=[[2], [2]])
-            return (
-                compute_response(dx, dy, x, y), 
-                compute_response(dz, 0, z, None)    
-            )
+        return (
+            compute_response(dx, -dy, x, y), 
+            compute_response(dy, dx, x, y)
+        )
+    
+    def get_antenna_pattern(
+            self,
+            right_ascension: tf.Tensor, 
+            declination: tf.Tensor, 
+            polarization: tf.Tensor
+        ):
+        
+        return self.get_antenna_pattern_(
+            right_ascension, 
+            declination, 
+            polarization,
+            self.xvec,
+            self.yvec,
+            self.x_length_meters,
+            self.y_length_meters,
+            self.xresp,
+            self.yresp,
+            self.response
+        )
     
     @classmethod
     def load(
@@ -378,6 +371,112 @@ class Network:
         
         return Network(arguments)
     
+    @tf.function
+    def get_time_delay_(
+        self,
+        right_ascension: tf.Tensor, 
+        declination: tf.Tensor,
+        location : tf.Tensor
+    ) -> tf.Tensor:
+        """
+        Calculate the time delay for various combinations of right ascension,
+        declination, and detector locations.
+
+        Parameters
+        ----------
+        right_ascension : tf.Tensor, shape (N,)
+            The right ascension (in rad) of the signal.
+        declination : tf.Tensor, shape (N,)
+            The declination (in rad) of the signal.
+        location : tf.Tensor, shape (X, 3)
+            Array of detector location coordinates.
+
+        Returns
+        -------
+        tf.Tensor, shape (X, N)
+            The arrival time difference for each combination of detector 
+            location and sky signal.
+        """
+
+        cos_declination = tf.math.cos(declination)
+        sin_declination = tf.math.sin(declination)
+        cos_ra_angle = tf.math.cos(right_ascension)
+        sin_ra_angle = tf.math.sin(right_ascension)
+
+        e0 = cos_declination * cos_ra_angle
+        e1 = cos_declination * -sin_ra_angle
+        e2 = sin_declination
+
+        ehat = tf.stack([e0, e1, e2], axis=0)  # Shape (3, N)
+        ehat = tf.expand_dims(ehat, 1)  # Shape (3, 1, N) to allow broadcasting
+
+        # Compute the dot product using tensordot
+        time_delay = tf.tensordot(location, ehat, axes=[[1], [0]]) 
+        time_delay = time_delay / C  # Normalize by speed of light
+        
+        time_delay = tf.squeeze(time_delay)
+        
+        return tf.cast(time_delay, dtype=tf.float32)
+    
+    def get_time_delay(
+        self,
+        right_ascension: tf.Tensor, 
+        declination: tf.Tensor
+    ) -> tf.Tensor:
+        
+        return self.get_time_delay_(
+            right_ascension, 
+            declination,
+            self.location
+        )
+    
+    def project_Wave(
+        self,
+        hc : tf.Tensor,
+        hp : tf.Tensor,
+        right_ascension: tf.Tensor, 
+        declination: tf.Tensor, 
+        polarization: tf.Tensor
+    ):
+        
+        fc, fp = self.get_antenna_pattern(
+            right_ascension, 
+            declination, 
+            polarization
+        ) 
+        
+        strain = hc*fc + hp*fp
+        
+        time_shift_seconds = self.get_time_delay(
+            right_ascension, 
+            declination
+        ) 
+        
+        return shift_waveform(
+            strain, 
+            frequency_axis, 
+            time_shift_seconds
+        )
+        
+@tf.function
+def shift_waveform(
+        strain : tf.Tensor, 
+        frequency_axis : tf.Tensor, 
+        time_shift_seconds : tf.Tensor
+    ):
+    
+    PI = tf.constant(3.14159, dtype=tf.float32)
+
+    strain_fft = tf.signal.rfft(strain) 
+    phase_factor = tf.exp(
+        tf.complex(
+            tf.cast(0.0, tf.float32), 
+            -2.0*PI*frequency_axis*time_shift_seconds
+        )
+    )
+    shitfted_strain = tf.signal.irfft(phase_factor * strain_fft)
+
+    return tf.math.real(shitfted_strain)
 
 @tf.function
 def rotation_matrix_x(angle: tf.Tensor) -> tf.Tensor:
@@ -451,91 +550,6 @@ def rotation_matrix_z(angle: tf.Tensor) -> tf.Tensor:
     row3 = tf.stack([zeros, zeros, ones], axis=-1)
 
     return tf.stack([row1, row2, row3], axis=-2)
-
-def add_detectors_on_earth(
-        longitude_radians: tf.Tensor,  # Batched tensor
-        latitude_radians: tf.Tensor,   # Batched tensor
-        y_angle_radians: tf.Tensor = None,  # Batched tensor
-        x_angle_radians: tf.Tensor = None,  # Batched tensor or None
-        height_meters: tf.Tensor = None,  # Batched tensor
-        x_length_meters: tf.Tensor = None,  # Batched tensor
-        y_length_meters: tf.Tensor = None   # Batched tensor
-    ) -> dict:
-
-    """Add a new detector on the earth using TensorFlow operations."""
-        
-    PI = tf.constant(np.pi, dtype=tf.float32)
-    
-    if x_angle_radians is None:
-        x_angle_radians = y_angle_radians + tf.constant(PI / 2.0, dtype=tf.float32)
-    
-    # Rotation matrices using the provided functions
-    rm1 = rotation_matrix_z(longitude_radians)
-    rm2 = rotation_matrix_y(PI / 2.0 - latitude_radians)    
-    rm = tf.matmul(rm2, rm1)
-
-    # Calculate response in earth centered coordinates
-    resps = []
-    vecs = []
-
-    for angle in [y_angle_radians, x_angle_radians]:
-        a, b = tf.cos(2 * angle), tf.sin(2 * angle)
-        
-        batch_size = tf.shape(a)[0]
-        resp = tf.stack([
-            tf.stack([-a, b, tf.zeros_like(a)], axis=-1), 
-            tf.stack([b, a, tf.zeros_like(a)], axis=-1), 
-            tf.stack(
-                [tf.zeros_like(a), tf.zeros_like(a), tf.zeros_like(a)], 
-                axis=-1
-            )
-        ], axis=1)
-
-        resp = tf.matmul(resp, rm)
-        resp = tf.matmul(tf.transpose(rm, perm=[0, 2, 1]), resp) / 4.0
-        resps.append(resp)
-                
-        vec = tf.matmul(
-            tf.transpose(rm, perm=[0, 2, 1]), 
-            tf.stack([
-                -tf.cos(angle),
-                tf.sin(angle),
-                tf.zeros_like(angle)
-            ], axis=0)
-        )
-        vec = tf.squeeze(vec, axis=-1)
-        vecs.append(vec)
-
-    full_resp = resps[0] - resps[1]
-    
-    # Handling the coordinates.EarthLocation method
-    locations = []
-    for long, lat, h in zip(longitude_radians, latitude_radians, height_meters):
-        loc = coordinates.EarthLocation.from_geodetic(
-            long * units.rad, lat * units.rad, h*units.meter
-        )
-        locations.append([loc.x.value, loc.y.value, loc.z.value])
-    loc = tf.constant(locations, dtype=tf.float32)
-
-    return {
-        'location': loc,
-        'response': full_resp,
-        'xresp': resps[1],
-        'yresp': resps[0],
-        'xvec': vecs[1],
-        'yvec': vecs[0],
-        'y_angle_radians': y_angle_radians,
-        'x_angle_radians': x_angle_radians,
-        'height_meters': height_meters,
-        'xaltitude': tf.zeros_like(height_meters),
-        'yaltitude': tf.zeros_like(height_meters),
-        'y_length_meters': y_length_meters,
-        'x_length_meters': x_length_meters
-    }
-
-
-# Define the speed of light constant (in m/s)
-C = 299792458.0
 
 def single_arm_frequency_response(
         frequency: tf.Tensor, 
