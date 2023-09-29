@@ -112,7 +112,7 @@ def test_phenom_d_injection(
         
     high_mass = [
         generate_strain_plot(
-            {"Injection Test": injection},
+            {"Plus": injection[0], "Cross": injection[1]},
             sample_rate_hertz,
             total_onsource_duration_seconds,
             title=f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2} msun",
@@ -127,7 +127,7 @@ def test_phenom_d_injection(
 
     low_mass = [
         generate_strain_plot(
-            {"Injection Test": injection},
+            {"Plus": injection[0], "Cross": injection[1]},
             sample_rate_hertz,
             total_onsource_duration_seconds,
             title=f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2} msun",
@@ -251,6 +251,6 @@ if __name__ == "__main__":
     
     # Test injection generation:
     with strategy.scope():
+        test_phenom_d_injection()
         test_wnb_injection()
         test_iteration()
-        test_phenom_d_injection()

@@ -103,19 +103,25 @@ def replace_nan_and_inf_with_zero(tensor):
     tensor = tf.where(tf.math.is_inf(tensor), tf.zeros_like(tensor), tensor)
     return tensor    
 
+@tf.function
 def expand_tensor(
         signal: tf.Tensor, 
         mask: tf.Tensor, 
         group_size: int = 1
     ) -> tf.Tensor:
     """
-    Expands a tensor by inserting zeros (or zero arrays) based on a mask tensor. 
+    This function expands a tensor (or zero arrays) along the X axis by 
+    inserting zeros wherever a corresponding boolean in a 1D tensor is False, 
+    and elements from the original tensor where the boolean is True. It works 
+    for both 1D and 2D tensors.
     It works for both 1D and 2D tensors.
 
     Parameters
     ----------
     signal : tf.Tensor
-        A tensor representing signal injections.
+        A 1D, 2D or 3D tensor representing signal injections, where the length 
+        of the tensor's first dimension equals the number of True values in the 
+        mask.
     mask : tf.Tensor
         A 1D boolean tensor. Its length will determine the length of the 
         expanded tensor.
@@ -129,32 +135,67 @@ def expand_tensor(
     """
     
     # Validation checks:
-    assert signal.ndim in (1, 2), 'Signal must be a 1D or 2D tensor'
-    assert mask.ndim == 1, 'Mask must be a 1D tensor'
-    assert group_size > 0, 'Group size must be greater than 0'
-    
-    # The number of groups in the signal must match the number of True values 
-    # in the mask
-    assert tf.reduce_sum(tf.cast(mask, tf.int32)) == signal.shape[0] // group_size, \
-        'Number of groups in signal must match number of True values in mask'
-    
-    # Create an expanded tensor full of zeros with the final shape:
-    if signal.ndim == 1:
+    tf.debugging.assert_greater(
+        group_size, 
+        0, 
+        message='Group size must be greater than 0'
+    )
+    tf.debugging.assert_rank(
+        mask, 
+        1,
+        message='Mask must be a 1D tensor'
+    )
+
+    tf.debugging.assert_rank_in(
+        signal, 
+        [1, 2, 3], 
+        message='Signal must be a 1D or 2D tensor in this case'
+    )
+
+    # Number of true values in the mask
+    num_true_in_mask = tf.reduce_sum(tf.cast(mask, tf.int32))
+
+    # Expected true values
+    expected_true_values = signal.shape[0] // group_size
+
+    # TensorFlow assertion for equality check
+    tf.debugging.assert_equal(
+        num_true_in_mask, 
+        expected_true_values,
+        message=('Number of groups in signal must match number of True values '
+                 'in mask')
+    )
+        
+    # Get static shape if available, otherwise use dynamic shape
+    signal_shape = signal.shape
+    ndim = len(signal.shape)
+    if ndim == 1:
         expanded_signal = tf.zeros(
-            mask.shape[0] * group_size, dtype=signal.dtype
+            tf.shape(mask)[0] * group_size, 
+            dtype=signal.dtype
+        )
+    elif ndim == 2:
+        expanded_signal = tf.zeros(
+            (tf.shape(mask)[0] * group_size, signal_shape[1]), 
+            dtype=signal.dtype
+        )
+    elif ndim == 3:
+        expanded_signal = tf.zeros(
+            (tf.shape(mask)[0] * group_size, signal_shape[1], signal_shape[2]), 
+            dtype=signal.dtype
         )
     else:
-        expanded_signal = tf.zeros(
-            (mask.shape[0] * group_size, signal.shape[1]), dtype=signal.dtype
-        )
+        raise ValueError("Unsupported shape for signal tensor")
     
     # Get the indices where mask is True:
     true_indices = tf.where(mask) * group_size
     
     # Create a range based on group_size for each index:
     true_indices = tf.cast(true_indices, dtype=tf.int32)
-    indices = tf.reshape(tf.range(group_size, dtype=tf.int32) \
-                         + tf.reshape(true_indices, (-1, 1)), (-1, 1))
+    indices = tf.reshape(
+        tf.range(group_size, dtype=tf.int32) 
+        + tf.reshape(true_indices, (-1, 1)), (-1, 1)
+    )
     
     # Split the signal into the right groups and reshape:
     scattered_values = tf.reshape(signal, (-1, group_size, *signal.shape[1:]))
@@ -169,71 +210,11 @@ def expand_tensor(
     return expanded_signal
 
 @tf.function
-def expand_tensor_(signal: tf.Tensor, mask: tf.Tensor) -> tf.Tensor:
-    """
-    This function expands a tensor along the X axis by inserting zeros wherever 
-    a corresponding boolean in a 1D tensor is False, and elements from the 
-    original tensor where the boolean is True. It works for both 1D and 2D 
-    tensors.
-
-    Parameters
-    ----------
-    signal : tf.Tensor
-        A 1D or 2D tensor representing signal injections, where the length of 
-        the tensor's first dimension equals the number of True values in the 
-        mask.
-    mask : tf.Tensor
-        A 1D boolean tensor. Its length will determine the length of the 
-        expanded tensor.
-
-    Returns
-    -------
-    tf.Tensor
-        The expanded tensor.
-
-    """
-
-    # Ensure that the signal tensor is 1D or 2D
-    tf.debugging.assert_rank_in(
-        signal, [1, 2], message='Signal must be a 1D or 2D tensor'
-    )
-
-    # Ensure that the mask is 1D
-    tf.debugging.assert_rank(mask, 1, message='Mask must be a 1D tensor')
-    
-    # Ensure that the length of the signal tensor matches the number of True 
-    # values in the mask
-    tf.debugging.assert_equal(
-        tf.reduce_sum(tf.cast(mask, tf.int32)), 
-        tf.shape(signal)[0],
-        message='Signal tensor length must match number of True values in mask'
-    )
-    
-    # Determine the shape of the expanded_signal tensor
-    def true_fn():
-        return tf.shape(mask)
-
-    def false_fn():
-        return tf.concat([tf.shape(mask), tf.shape(signal)[1:]], axis=0)
-
-    expanded_shape = tf.cond(tf.equal(tf.rank(signal), 1), true_fn, false_fn)
-    
-    # Create a tensor full of zeros with the determined shape
-    expanded_signal = tf.zeros(expanded_shape, dtype=signal.dtype)
-
-    # Get the indices where mask is True
-    indices = tf.where(mask)
-
-    # Scatter the signal tensor elements/rows into the expanded_signal tensor at 
-    # the positions where mask is True
-    expanded_signal = tf.tensor_scatter_nd_update(
-        expanded_signal, indices, tf.reshape(signal, [-1])
-    )
-
-    return expanded_signal
-
-@tf.function
-def batch_tensor(tensor: tf.Tensor, batch_size: int) -> tf.Tensor:
+def batch_tensor(
+        tensor: tf.Tensor, 
+        batch_size: int,
+        extra_dims = (2,)
+    ) -> tf.Tensor:
     
     """
     Batches a tensor into batches of a specified size. If the first dimension
@@ -252,9 +233,6 @@ def batch_tensor(tensor: tf.Tensor, batch_size: int) -> tf.Tensor:
     tf.Tensor
         The reshaped tensor in batches.
     """
-    # Ensure that the tensor is 1D or 2D
-    assert len(tensor.shape) in (1, 2), 'Tensor must be 1D or 2D'
-
     # Calculate the number of full batches that can be created
     num_batches = tensor.shape[0] // batch_size
 
@@ -264,9 +242,16 @@ def batch_tensor(tensor: tf.Tensor, batch_size: int) -> tf.Tensor:
     if len(tensor.shape) == 1:
         # Reshape the 1D tensor into batches
         batched_tensor = tf.reshape(tensor, (num_batches, batch_size))
-    else: # tensor.ndim == 2
+    elif len(tensor.shape) == 2:
         # Reshape the 2D tensor into batches
         batched_tensor = tf.reshape(tensor, (num_batches, batch_size, -1))
+    elif len(tensor.shape) == 3:
+        batched_tensor = tf.reshape(
+            tensor, 
+            (num_batches, batch_size, extra_dims[0], -1)
+        )
+    else:
+        raise ValueError("Unsupported num dimensions when batching!")
 
     return batched_tensor
 

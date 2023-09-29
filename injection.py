@@ -19,7 +19,7 @@ import tensorflow as tf
 from .cuphenom.py.cuphenom import generate_phenom_d
 from .wnb import generate_white_noise_burst
 from .maths import (Distribution, DistributionType, expand_tensor, batch_tensor,
-                    set_random_seeds, crop_samples, 
+                    set_random_seeds, crop_samples,
                     replace_nan_and_inf_with_zero)
 from .snr import scale_to_snr, calculate_snr
 from .setup import replace_placeholders
@@ -247,8 +247,12 @@ class WaveformGenerator:
                     scaling_method=config.pop("scaling_method"),
                     scale_factor=config.pop("scale_factor"),
                     injection_chance=config.pop("injection_chance"),
-                    front_padding_duration_seconds=config.pop("front_padding_duration_seconds"),
-                    back_padding_duration_seconds=config.pop("back_padding_duration_seconds"),
+                    front_padding_duration_seconds=config.pop(
+                        "front_padding_duration_seconds"
+                    ),
+                    back_padding_duration_seconds=config.pop(
+                        "back_padding_duration_seconds"
+                    ),
                     **{k: Distribution(**v) for k, v in config.items()},
                 )
             case 'WNB':
@@ -256,8 +260,12 @@ class WaveformGenerator:
                     scaling_method=config.pop("scaling_method"),
                     scale_factor=config.pop("scale_factor"),
                     injection_chance=config.pop("injection_chance"),
-                    front_padding_duration_seconds=config.pop("front_padding_duration_seconds"),
-                    back_padding_duration_seconds=config.pop("back_padding_duration_seconds"),
+                    front_padding_duration_seconds=config.pop(
+                        "front_padding_duration_seconds"
+                    ),
+                    back_padding_duration_seconds=config.pop(
+                        "back_padding_duration_seconds"
+                    ),
                     **{k: Distribution(**v) for k, v in config.items()},
                 )
             case _:
@@ -341,24 +349,23 @@ class WNBGenerator(WaveformGenerator):
                     
                     parameter = None
                     try:
-                        parameter = \
-                            WaveformParameters.get(attribute)
+                        parameter = WaveformParameters.get(attribute)
                     except:
-                        parameter = \
-                            ScalingTypes.get(attribute) 
+                        parameter = ScalingTypes.get(attribute)
                     
                     shape = parameter.value.shape[-1]                
-                    parameters[attribute] = tf.convert_to_tensor(value.sample(num_waveforms * shape))
+                    parameters[attribute] = tf.convert_to_tensor(
+                        value.sample(num_waveforms * shape)
+                    )
                     
-            parameters["max_frequency_hertz"], parameters["min_frequency_hertz"] = \
-                np.maximum(
-                    parameters["max_frequency_hertz"], 
-                    parameters["min_frequency_hertz"]
-                ), \
-                np.minimum(
-                    parameters["max_frequency_hertz"],
-                    parameters["min_frequency_hertz"]
-                )
+            parameters["max_frequency_hertz"] = np.maximum(
+                parameters["max_frequency_hertz"], 
+                parameters["min_frequency_hertz"]
+            )
+            parameters["min_frequency_hertz"] = np.minimum(
+                parameters["max_frequency_hertz"],
+                parameters["min_frequency_hertz"]
+            )
                                     
             # Generate WNB waveform at the moment take only one polarization: 
             waveforms = generate_white_noise_burst(
@@ -412,30 +419,20 @@ class cuPhenomDGenerator(WaveformGenerator):
                     
                     parameter = None
                     try:
-                        parameter = \
-                            WaveformParameters.get(attribute)
+                        parameter = WaveformParameters.get(attribute)
                     except:
-                        parameter = \
-                            ScalingTypes.get(attribute) 
+                        parameter = ScalingTypes.get(attribute) 
                     
                     shape = parameter.value.shape[-1]                
                     parameters[attribute] = value.sample(num_waveforms * shape)
 
             # Generate phenom_d waveform:
-            waveforms = \
-                generate_phenom_d(
+            waveforms = generate_phenom_d(
                     num_waveforms, 
                     sample_rate_hertz, 
                     duration_seconds,
                     **parameters
-                ) 
-
-            # At the moment take only one polarization: 
-            waveforms = waveforms[:, 0]
-
-            # Reshape to split injections:
-            num_samples = int(sample_rate_hertz*duration_seconds)
-            waveforms = waveforms.reshape(-1, num_samples)
+                )
             
             waveforms *= self.scale_factor
         
@@ -785,27 +782,29 @@ class InjectionGenerator:
         return onsource, cropped_injections, return_variables
     
 @tf.function
-def roll_vector_zero_padding_(vector, min_roll, max_roll):
-    roll_amount = tf.random.uniform(
-        shape=(), minval=min_roll, maxval=max_roll, dtype=tf.int32
-    )
-
-    # Create a zero vector of the same size as the input
+def roll_vector_zero_padding_(vector, roll_amount):
     zeros = tf.zeros_like(vector)
-
-    # Create the rolled vector by concatenating the sliced vector and zeros
-    rolled_vector = tf.concat(
-        [vector[roll_amount:], zeros[:roll_amount]], axis=-1
-    )
-
+    rolled_vector = tf.concat([vector[roll_amount:], zeros[:roll_amount]], axis=-1)
     return rolled_vector
 
 @tf.function
 def roll_vector_zero_padding(tensor, min_roll, max_roll):
-    return tf.map_fn(
-        lambda vec: roll_vector_zero_padding_(
-            vec, min_roll, max_roll), tensor
+    # Generate an array of roll amounts
+    roll_amounts = tf.random.uniform(
+        shape=[tensor.shape[0]], minval=min_roll, maxval=max_roll, dtype=tf.int32
     )
+
+    # Define a function to apply rolling to each sub_tensor with corresponding roll_amount
+    def map_fn_outer(idx):
+        sub_tensor = tensor[idx]
+        roll_amount = roll_amounts[idx]
+        return tf.map_fn(lambda vec: roll_vector_zero_padding_(vec, roll_amount), sub_tensor)
+
+    # Create an index tensor and map over it
+    indices = tf.range(start=0, limit=tensor.shape[0], dtype=tf.int32)
+    result = tf.map_fn(map_fn_outer, indices, fn_output_signature=tf.TensorSpec(shape=tensor.shape[1:], dtype=tensor.dtype))
+
+    return result
 
 @tf.function
 def generate_mask(
@@ -844,7 +843,6 @@ def generate_mask(
     injection_masks = tf.cast(injection_masks, tf.bool)
 
     return injection_masks
-
             
 def is_not_inherited(instance, attr: str) -> bool:
     """

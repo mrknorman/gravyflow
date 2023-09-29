@@ -87,11 +87,14 @@ def test_antenna_pattern():
     )
 
     # Compute the output
-    f_plus, f_cross = network.get_antenna_pattern(
+    antenna_pattern = network.get_antenna_pattern(
         right_ascension, 
         declination, 
         polarization
     )
+    
+    f_plus = antenna_pattern[:,0]
+    f_cross = antenna_pattern[:,1]
     
     d = Detector("L1") 
     f_plus_zomb, f_cross_zomb = zomb_antenna_pattern(
@@ -230,8 +233,8 @@ def test_project_wave(
     
     # Test Parameters:
     num_examples_per_generation_batch : int = 2048
-    num_examples_per_batch : int = num_tests
-    sample_rate_hertz : float = 2048.0
+    num_examples_per_batch : int = 32
+    sample_rate_hertz : float = 8196.0 #2048.0
     onsource_duration_seconds : float = 1.0
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
@@ -271,7 +274,7 @@ def test_project_wave(
     network = Network([IFO.L1, IFO.H1, IFO.V1])
     
     projected_injections = \
-        network.project_wave(injections[0], injections[0], sample_rate_hertz)
+        network.project_wave(injections[0], sample_rate_hertz)
     
     injection_one = projected_injections.numpy()[0]
     

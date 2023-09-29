@@ -247,7 +247,7 @@ class Network:
         self.y_length_meters = y_length_meters
         self.x_length_meters = x_length_meters
     
-    @tf.function
+    #@tf.function
     def get_antenna_pattern_(
         self,
         right_ascension: tf.Tensor, 
@@ -296,9 +296,13 @@ class Network:
         # Calculate dx and dy via tensordot, and immediately squeeze and 
         # transpose them
         dx = tf.transpose(
-            tf.squeeze(tf.tensordot(response, x, axes=[[2], [2]])), perm=[2, 0, 1])
+            tf.squeeze(
+                tf.tensordot(response, x, axes=[[2], [2]])), perm=[2, 0, 1]
+        )
         dy = tf.transpose(
-            tf.squeeze(tf.tensordot(response, y, axes=[[2], [2]])), perm=[2, 0, 1])
+            tf.squeeze(
+                tf.tensordot(response, y, axes=[[2], [2]])), perm=[2, 0, 1]
+        )
 
         # Expand dimensions for x, y, dx, dy along axis 0
         x = tf.expand_dims(x, axis=0)
@@ -315,11 +319,16 @@ class Network:
             ) -> tf.Tensor:
             
             return tf.squeeze(tf.reduce_sum(a * dx + b * dy, axis=-1))
-
-        return (
-            compute_response(dx, -dy, x, y), 
-            compute_response(dy, dx, x, y)
+        
+        antenna_pattern = tf.stack(
+            [
+                compute_response(dx, -dy, x, y), 
+                compute_response(dy, dx, x, y)
+            ], 
+            axis=-1
         )
+
+        return antenna_pattern
     
     def get_antenna_pattern(
             self,
@@ -432,8 +441,7 @@ class Network:
     
     def project_wave(
         self,
-        hc : tf.Tensor,
-        hp : tf.Tensor,
+        strain : tf.Tensor,
         sample_frequency_hertz : float,
         right_ascension: tf.Tensor = None,
         declination: tf.Tensor = None,
@@ -441,8 +449,7 @@ class Network:
     ):
         
         return self.project_wave_(
-            hc,
-            hp,
+            strain,
             sample_frequency_hertz,
             self.x_vector,
             self.y_vector,
@@ -460,8 +467,7 @@ class Network:
     @tf.function
     def project_wave_(
         self,
-        hc : tf.Tensor,
-        hp : tf.Tensor,
+        strain : tf.Tensor,
         sample_frequency_hertz : float,
         x_vector: tf.Tensor,
         y_vector: tf.Tensor,
@@ -476,7 +482,7 @@ class Network:
         polarization: tf.Tensor = None
     ):
         
-        num_injections = tf.shape(hc)[0]
+        num_injections = tf.shape(strain)[0]
         PI = tf.constant(3.14159, dtype=tf.float32)
         
         if right_ascension is None:
@@ -503,7 +509,7 @@ class Network:
                 dtype=tf.float32
             )
         
-        fc, fp = self.get_antenna_pattern_(
+        antenna_patern = self.get_antenna_pattern_(
             right_ascension, 
             declination, 
             polarization,
@@ -516,13 +522,10 @@ class Network:
             response
         ) 
         
-        hc = tf.expand_dims(hc, axis=1)
-        hp = tf.expand_dims(hp, axis=1)
-        fc = tf.expand_dims(fc, axis=-1)
-        fp = tf.expand_dims(fp, axis=-1)
+        antenna_patern = tf.expand_dims(antenna_patern, axis=-1)
+        strain = tf.expand_dims(strain, axis=1)
+        injection = tf.reduce_sum(strain*antenna_patern, axis = 2)
                 
-        strain = hc*fc + hp*fp
-        
         time_shift_seconds = self.get_time_delay_(
             right_ascension, 
             declination,
@@ -530,7 +533,7 @@ class Network:
         )
                 
         return shift_waveform(
-            strain, 
+            injection, 
             sample_frequency_hertz, 
             time_shift_seconds
         )
