@@ -60,7 +60,13 @@ def detrend(data, axis=-1, type='linear', bp=0, overwrite_data=False):
             raise ValueError("Breakpoints must be less than length "
                              "of data along given axis.")
         Nreg = tf.shape(bp)[0] - 1
-        newdims = tf.concat([axis, tf.range(0, axis), tf.range(axis + 1, tf.rank(data))], axis=0)
+        newdims = tf.concat(
+            [
+                axis,
+                tf.range(0, axis), tf.range(axis + 1, tf.rank(data))
+            ], 
+            axis=0
+        )
         newdata = tf.reshape(tf.transpose(data, perm=newdims),
                              [N, tf.math.reduce_prod(tf.shape(data)) // N])
         if not overwrite_data:
@@ -75,7 +81,9 @@ def detrend(data, axis=-1, type='linear', bp=0, overwrite_data=False):
             newdata = newdata[sl] - tf.linalg.matvec(A, coef)
         tdshape = tf.gather(tf.shape(data), newdims)
         ret = tf.reshape(newdata, tdshape)
-        olddims = list(range(1, tf.rank(data)))[:axis] + [0] + list(range(1, tf.rank(data)))[axis:]
+        olddims = list(
+            range(1, tf.rank(data)))[:axis] \
+            + [0] + list(range(1, tf.rank(data)))[axis:]
         ret = tf.transpose(ret, perm=olddims)
         return ret
 

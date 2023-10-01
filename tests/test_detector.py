@@ -227,16 +227,16 @@ def zomb_antenna_pattern(
         return fplus, fcross
     
 def test_project_wave(
-    num_tests : int = 2049,
+    num_tests : int = 2048,
     output_diretory_path : Path = Path("./py_ml_data/tests/")
     ):
     
     # Test Parameters:
     num_examples_per_generation_batch : int = 2048
     num_examples_per_batch : int = 32
-    sample_rate_hertz : float = 8196.0 #2048.0
-    onsource_duration_seconds : float = 1.0
-    crop_duration_seconds : float = 0.5
+    sample_rate_hertz : float = 2048.0
+    onsource_duration_seconds : float = 0.3
+    crop_duration_seconds : float = 0.05
     scale_factor : float = 1.0E21
         
     # Define injection directory path:
@@ -251,6 +251,9 @@ def test_project_wave(
         )
     
     phenom_d_generator.injection_chance = 1.0
+    phenom_d_generator.front_padding_duration_seconds = 0.20
+    phenom_d_generator.back_padding_duration_seconds = 0.05
+    
     
     injection_generator : InjectionGenerator = \
         InjectionGenerator(

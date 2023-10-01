@@ -152,7 +152,7 @@ def get_ifo_data(
         in zip(noise, injections):
                 
         if len(injection_generators):
-            
+                        
             # Add injections to waveform scaled by inputted SNR config values:
             onsource, scaled_injections, scaling_parameters = \
                 injection_generator.add_injections_to_onsource(
@@ -197,7 +197,6 @@ def get_ifo_data(
                     overlap_duration_seconds=0.5,
                     filter_duration_seconds=1.0
                 )
-
             
             # Crop to remove edge effects, crop with or without whitening to
             # ensure same data is retrieve in both cases
@@ -397,7 +396,9 @@ def get_ifo_dataset(
     
     parameters_to_return = {
         item for item in (input_variables + output_variables) if \
-        (isinstance(item.value, WaveformParameter) or isinstance(item.value, ScalingType))
+        (isinstance(item.value, WaveformParameter) or isinstance(
+            item.value, ScalingType)
+        )
     }
 
     output_signature_dict.update({

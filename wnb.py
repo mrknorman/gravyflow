@@ -1,95 +1,109 @@
 import tensorflow as tf
-import numpy as np
 
+@tf.function
+def generate_envelopes(num_samples_array: tf.Tensor, max_num_samples: tf.Tensor):
+    """
+    Generate envelopes using Hann windows.
+
+    Parameters:
+    - num_samples_array: tf.Tensor, tensor containing the lengths of each 
+        sequence
+    - max_num_samples: tf.Tensor, maximum length among all sequences
+
+    Returns:
+    - envelopes: tf.Tensor, tensor containing padded Hann windows for each 
+        sequence
+    """
+
+    # Create a tensor array to store each envelope
+    envelopes = tf.TensorArray(
+        dtype=tf.float32, size=0, dynamic_size=True, clear_after_read=False
+    )
+
+    # Function to generate and store each envelope
+    def loop_body(envelopes, num_samples):
+        hann_win = tf.signal.hann_window(num_samples)
+        padded_hann_win = tf.pad(hann_win, [[max_num_samples - num_samples, 0]])
+        return envelopes.write(envelopes.size(), padded_hann_win)
+
+    # Iterate through num_samples_array to generate and store each envelope
+    envelopes = tf.foldl(loop_body, num_samples_array, initializer=envelopes)
+
+    # Stack the tensor array into a single tensor
+    envelopes = envelopes.stack()
+
+    return envelopes
+
+@tf.function
 def generate_white_noise_burst(
-    num_waveforms : int,
-    sample_rate_hertz: float, 
-    max_duration_seconds : float,
-    duration_seconds: tf.Tensor, 
-    min_frequency_hertz: tf.Tensor, 
-    max_frequency_hertz: tf.Tensor, 
-    enveloped: bool = True
-    ):
+    num_waveforms: int,
+    sample_rate_hertz: float,
+    max_duration_seconds: float,
+    duration_seconds: tf.Tensor,
+    min_frequency_hertz: tf.Tensor,
+    max_frequency_hertz: tf.Tensor
+) -> tf.Tensor:
+    """Generates white noise bursts with desired frequency range and duration."""
     
+    # Casting
     min_frequency_hertz = tf.cast(min_frequency_hertz, tf.float32)
     max_frequency_hertz = tf.cast(max_frequency_hertz, tf.float32)
 
-    num_samples_array : tf.Tensor = sample_rate_hertz*duration_seconds
-    num_samples_array = tf.cast(num_samples_array, tf.int32)
-        
-    max_num_samples = \
-        tf.cast(max_duration_seconds * sample_rate_hertz, tf.int32)
-    
-    gaussian_noise = tf.random.normal([num_waveforms, max_num_samples])
-    
-    # Create a mask to zero out elements beyond the desired duration for each waveform
+    # Convert duration to number of samples
+    num_samples_array = tf.cast(sample_rate_hertz * duration_seconds, tf.int32)
+    max_num_samples = tf.cast(max_duration_seconds * sample_rate_hertz, tf.int32)
+
+    # Generate Gaussian noise
+    gaussian_noise = tf.random.normal([num_waveforms, 2, max_num_samples])
+
+    # Create time mask for valid duration
     mask = tf.sequence_mask(num_samples_array, max_num_samples, dtype=tf.float32)
     mask = tf.reverse(mask, axis=[-1])
-
-    # Multiply the noise by the mask to zero out undesired elements:
-    white_noise_burst = gaussian_noise * mask
+    mask = tf.expand_dims(mask, axis=1)
     
-    # Create a window function for the maximum duration
-    window = tf.signal.hann_window(max_num_samples)
+    # Mask the noise
+    white_noise_burst = gaussian_noise * mask
 
-    # Apply the window to the white noise
+    # Window function
+    window = tf.signal.hann_window(max_num_samples)
     windowed_noise = white_noise_burst * window
 
-    # Transform to the frequency domain using RFFT
+    # Fourier transform
     noise_freq_domain = tf.signal.rfft(windowed_noise)
-    
-    max_num_samples_f = \
-        tf.cast(max_duration_seconds * sample_rate_hertz, tf.float32)
 
+    # Frequency index limits
+    max_num_samples_f = tf.cast(max_num_samples, tf.float32)
     num_bins = max_num_samples_f // 2 + 1
     nyquist_freq = sample_rate_hertz / 2.0
-    
-    min_freq_idx = tf.cast(tf.round(min_frequency_hertz * (max_num_samples_f // 2 + 1) / (sample_rate_hertz / 2)), tf.int32)
-    max_freq_idx = tf.cast(tf.round(max_frequency_hertz * (max_num_samples_f // 2 + 1) / (sample_rate_hertz / 2)), tf.int32)
-    
-    # Create a binary mask to keep only the desired frequencies for each waveform
-    def create_mask(min_freq_idx, max_freq_idx, max_num_samples):
-        mask = tf.concat([
-            tf.zeros(min_freq_idx, dtype=tf.complex64),
-            tf.ones(max_freq_idx - min_freq_idx, dtype=tf.complex64),
-            tf.zeros((max_num_samples // 2 + 1) - max_freq_idx, dtype=tf.complex64)
-        ], axis=0)
-        return mask
-    
-    # Assuming min_frequency_hertz and max_frequency_hertz are 1D tensors of the same length
-    num_elements = min_frequency_hertz.shape[0]
 
-    # Use a python list to accumulate the results
-    masks_list = []
+    min_freq_idx = tf.cast(
+        tf.round(min_frequency_hertz * num_bins / nyquist_freq), tf.int32)
+    max_freq_idx = tf.cast(
+        tf.round(max_frequency_hertz * num_bins / nyquist_freq), tf.int32)
 
-    for i in range(num_elements):
-        mask_result = create_mask(min_freq_idx[i], max_freq_idx[i], max_num_samples)
-        masks_list.append(mask_result)
+    # Create frequency masks using vectorized operations
+    total_freq_bins = max_num_samples // 2 + 1
+    freq_indices = tf.range(total_freq_bins, dtype=tf.int32)
+    freq_indices = tf.expand_dims(freq_indices, 0)
+    min_freq_idx = tf.expand_dims(min_freq_idx, -1)
+    max_freq_idx = tf.expand_dims(max_freq_idx, -1)
+    lower_mask = freq_indices >= min_freq_idx
+    upper_mask = freq_indices <= max_freq_idx
+    combined_mask = tf.cast(lower_mask & upper_mask, dtype=tf.complex64)
+    combined_mask = tf.expand_dims(combined_mask, axis=1)
 
-    # Convert the list of tensors back to a single tensor
-    masks = tf.stack(masks_list)
-    
-    #masks = tf.vectorized_map(
-       # lambda args: create_mask(args[0], args[1], max_num_samples), (min_freq_idx, max_freq_idx))
+    # Filter out undesired frequencies
+    filtered_noise_freq = noise_freq_domain * combined_mask
 
-    # Multiply the frequency domain signal by the mask to zero out undesired frequencies
-    filtered_noise_freq = noise_freq_domain * masks
-
-    # Transform back to the time domain using IRFFT
+    # Inverse Fourier transform
     filtered_noise = tf.signal.irfft(filtered_noise_freq)
-        
-    #If the enveloped flag is set, apply the envelope
-    if enveloped:
-        # Create a Hann window for each waveform based on its duration
-        envelope_list = [
-            tf.pad(
-                tf.signal.hann_window(num_samples), 
-                [[max_num_samples - num_samples, 0]]
-            ) for num_samples in tf.unstack(num_samples_array)]        
-        
-        envelope = tf.stack(envelope_list)
-        
-        filtered_noise = filtered_noise * envelope
-            
+    
+    envelopes = generate_envelopes(num_samples_array, max_num_samples)
+    envelopes = tf.expand_dims(envelopes, axis=1)
+
+    filtered_noise = filtered_noise * envelopes
+
     return filtered_noise
+    
+
         

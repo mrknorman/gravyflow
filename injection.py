@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from enum import Enum, auto
 from dataclasses import dataclass
-from typing import Union, List, Dict, Type
+from typing import Union, List, Dict, Type, List
 import json
 from copy import deepcopy
 from warnings import warn
@@ -23,16 +23,22 @@ from .maths import (Distribution, DistributionType, expand_tensor, batch_tensor,
                     replace_nan_and_inf_with_zero)
 from .snr import scale_to_snr, calculate_snr
 from .setup import replace_placeholders
+from .detector import Network
+
+class ScalingOrdinality(Enum):
+    BEFORE_PROJECTION = auto()
+    AFTER_PROJECTION = auto()
 
 @dataclass
 class ScalingType:
     index : int
+    ordinality : ScalingOrdinality
     shape: tuple = (1,)
 
 class ScalingTypes(Enum):
-    SNR = ScalingType(1)
-    HRSS = ScalingType(2)
-    HPEAK = ScalingType(3)
+    SNR = ScalingType(1, ScalingOrdinality.AFTER_PROJECTION)
+    HRSS = ScalingType(2,  ScalingOrdinality.BEFORE_PROJECTION)
+    HPEAK = ScalingType(3, ScalingOrdinality.BEFORE_PROJECTION)
     
     @classmethod
     def get(cls, key):
@@ -99,7 +105,12 @@ def calculate_hrss(
     ):
     
     # Return the root sum sqaure of the inputted injections:
-    return tf.sqrt(tf.reduce_sum(injection*injection, axis = -1))
+    return tf.sqrt(
+        tf.reduce_sum(
+            tf.reduce_sum(injection*injection, axis = 1), 
+            axis = -1
+        )
+    )
 
 @tf.function
 def calculate_hpeak(
@@ -130,6 +141,8 @@ def scale_to_hrss(
     # operation:
     if len(scale_factor.shape) == 1: 
         scale_factor = tf.reshape(scale_factor, (-1, 1))
+        
+    scale_factor = tf.expand_dims(scale_factor, axis = 1)
     
     # Return injection scaled by scale factor:
     return injection*scale_factor
@@ -184,6 +197,31 @@ class WaveformGenerator:
     front_padding_duration_seconds : float = 0.3
     back_padding_duration_seconds : float = 0.0
     scale_factor : float = None
+    network : Union[List[IFOs], Network, Path] = None
+        
+    def __post_init__(self):
+        self.network = self.init_network(self.network)
+    
+    @classmethod
+    def init_network(cls, network):
+        
+        match network:
+            case list():
+                network = Network(network)
+
+            case Path():
+                network = Network.load(network)
+                
+            case None | Network():
+                pass
+            
+            case _:
+                raise ValueError(
+                    ("Unable to initiate network with this type: "
+                    f"{type(network)}.")
+                )
+                
+        return network
     
     def copy(self):
         return deepcopy(self)
@@ -195,9 +233,10 @@ class WaveformGenerator:
         sample_rate_hertz: float, 
         onsource_duration_seconds: float, 
         scaling_method: ScalingMethod = None,
-        scale_factor : float = None
+        scale_factor : float = None,
+        network : Union[List[IFOs], Network, Path] = None
     ) -> Type[cls]:
-    
+        
         # Define replacement mapping
         replacements = {
             "pi": np.pi,
@@ -235,7 +274,7 @@ class WaveformGenerator:
             )
         else:
             raise ValueError("Missing Scaling Type!")
-            
+                        
         if scale_factor is not None:
             config["scale_factor"] = scale_factor
         
@@ -246,6 +285,7 @@ class WaveformGenerator:
                 generator = cuPhenomDGenerator(
                     scaling_method=config.pop("scaling_method"),
                     scale_factor=config.pop("scale_factor"),
+                    network=cls.init_network(network),
                     injection_chance=config.pop("injection_chance"),
                     front_padding_duration_seconds=config.pop(
                         "front_padding_duration_seconds"
@@ -696,7 +736,7 @@ class InjectionGenerator:
             injections : tf.Tensor,
             mask : tf.Tensor,
             onsource : tf.Tensor,
-            variables_to_return : List
+            variables_to_return : List,
         ) -> Tuple[tf.Tensor, Union[tf.Tesnor, None], Dict]:
         
         # Generate SNR or HRSS values for injections based on inputed config 
@@ -709,15 +749,55 @@ class InjectionGenerator:
         cropped_injections = []    
         for injections_, mask_, scaling_parameters_, config in \
             zip(injections, mask, scaling_parameters, self.configs):
+            
+            network = config.network
+            
+            match config.scaling_method.type_.value.ordinality:
+                
+                case ScalingOrdinality.BEFORE_PROJECTION:
+                
+                    scaled_injections = \
+                        config.scaling_method.scale(
+                            injections_,
+                            onsource,
+                            scaling_parameters_,
+                            self.sample_rate_hertz
+                        )
 
-            # Scale injections with selected scaling method:
-            scaled_injections = \
-                config.scaling_method.scale(
-                    injections_,
-                    onsource,
-                    scaling_parameters_,
-                    self.sample_rate_hertz
-                )
+                    if network is not None:
+                        scaled_injections = network.project_wave(
+                            scaled_injections, self.sample_rate_hertz
+                        )
+                    else:
+                        scaled_injections = scaled_injections[:, 0, :]
+            
+                case ScalingOrdinality.AFTER_PROJECTION:
+                
+                    if network is not None:
+                        injections_ = network.project_wave(
+                            injections_, self.sample_rate_hertz
+                        )
+                    else:
+                        injections_ = injections_[:, 0, :]
+                        
+                    print(injections_.shape)
+
+                    # Scale injections with selected scaling method:
+                    scaled_injections = \
+                        config.scaling_method.scale(
+                            injections_,
+                            onsource,
+                            scaling_parameters_,
+                            self.sample_rate_hertz
+                        )
+                
+                case _:
+                    
+                    raise ValueError(
+                        ("Scaling ordinality "
+                        f"{config.scaling_method.type_.value.order} not "
+                         " recognised.")
+                    )
 
             # Add scaled injections to onsource:
             onsource += scaled_injections
@@ -727,7 +807,7 @@ class InjectionGenerator:
                 
                 if config.scaling_method.type_ is not ScalingTypes.HPEAK:
                     return_variables[ScalingTypes.HPEAK].append(
-                        calculate_hpeak(scaled_injections)
+                        calculate_hpeak(injections_)
                     )
                     
             if ScalingTypes.SNR in variables_to_return:
@@ -749,7 +829,7 @@ class InjectionGenerator:
                 
                 if config.scaling_method.type_ is not ScalingTypes.HRSS:
                     return_variables[ScalingTypes.HRSS].append(
-                        calculate_hrss(scaled_injections) 
+                        calculate_hrss(injections_) 
                     )
             
             if (ReturnVariables.INJECTIONS in variables_to_return) or \

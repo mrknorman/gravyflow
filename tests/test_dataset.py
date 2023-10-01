@@ -35,6 +35,7 @@ def test_iteration(
     offsource_duration_seconds : float = 16.0
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
+    ifos = [IFO.L1, IFO.H1, IFO.V1]
         
     # Define injection directory path:
     injection_directory_path : Path = \
@@ -53,7 +54,8 @@ def test_iteration(
             injection_directory_path / "phenom_d_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds,
-            scaling_method=scaling_method     
+            scaling_method=scaling_method,    
+            network = ifos
         )
     
     # Setup ifo data acquisition object:
@@ -75,7 +77,7 @@ def test_iteration(
         NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
             noise_type = NoiseType.REAL,
-            ifos = IFO.L1
+            ifos = ifos
         )
     
     input_variables = [
@@ -109,7 +111,7 @@ def test_iteration(
     dataset_args : Dict = deepcopy(data_args)
     
     data : tf.data.Dataset = get_ifo_data(
-        **data_argss
+        **data_args
     )
     
     logging.info("Start iteration tests...")
@@ -214,7 +216,9 @@ def test_dataset(
         
     onsource = input_dict[ReturnVariables.WHITENED_ONSOURCE.name].numpy()
     injections = input_dict[ReturnVariables.INJECTIONS.name].numpy()
-    whitened_injections = input_dict[ReturnVariables.WHITENED_INJECTIONS.name].numpy()
+    whitened_injections = input_dict[
+        ReturnVariables.WHITENED_INJECTIONS.name
+    ].numpy()
     masks = input_dict[ReturnVariables.INJECTION_MASKS.name].numpy()
     mass_1_msun = input_dict[WaveformParameters.MASS_1_MSUN.name].numpy()
     mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN.name].numpy()
@@ -228,7 +232,8 @@ def test_dataset(
             },
             sample_rate_hertz,
             onsource_duration_seconds,
-            title=f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2} msun",
+            title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2}"
+                   " msun"),
             scale_factor=scale_factor
         ), 
         generate_spectrogram(

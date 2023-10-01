@@ -21,7 +21,7 @@ def test_iteration(
     ):
     
      # Test Parameters:
-    num_examples_per_generation_batch : int = 2048
+    num_examples_per_generation_batch : int = 1024
     num_examples_per_batch : int = num_tests
     sample_rate_hertz : float = 2048.0
     onsource_duration_seconds : float = 1.0
@@ -177,6 +177,8 @@ def test_wnb_injection(
             onsource_duration_seconds
         )
     
+    wnb_generator.injection_chance = 1.0
+    
     injection_generator : InjectionGenerator = \
         InjectionGenerator(
             [wnb_generator],
@@ -202,7 +204,7 @@ def test_wnb_injection(
 
     layout = [
         [generate_strain_plot(
-            {"Injection Test": injection},
+            {"Plus": injection[0], "Cross": injection[1]},
             sample_rate_hertz,
             total_onsource_duration_seconds,
             title=f"WNB injection example: min frequency {min_frequency_hertz} "
@@ -234,9 +236,9 @@ if __name__ == "__main__":
     # ---- User parameters ---- #
     
     # GPU setup:
-    min_gpu_memory_mb : int = 4000
+    min_gpu_memory_mb : int = 6000
     num_gpus_to_request : int = 1
-    memory_to_allocate_tf : int = 2000
+    memory_to_allocate_tf : int = 4000
     
     # Setup CUDA
     gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
