@@ -92,12 +92,14 @@ def generate_strain_plot(
     title : str = "",
     colors : list = Bright[7],
     has_legend : bool = True,
-    scale_factor : float = None
+    scale_factor : float = None,
+    height : int = 300,
+    width : int = None
     ):
     
     # Parameters:
-    height : int = 300
-    width : int = int(height*golden)
+    if width is None:
+        width : int = int(height*golden)
         
     # Get num samples and check dictionies:
     num_samples = check_ndarrays_same_length(strain)
@@ -159,11 +161,12 @@ def generate_psd_plot(
     psd : Dict[str, np.ndarray],
     frequencies : float = np.ndarray,
     title : str = "",
-    colors : list = Bright[7]
+    colors : list = Bright[7],
+    has_legend : bool = True
     ):
     
     # Parameters:
-    height : int = 400
+    height : int = 300
     width : int = int(height*golden)
         
     # Get num samples and check dictionies:
@@ -189,10 +192,12 @@ def generate_psd_plot(
     p = \
         figure(
             title=title, 
-            x_axis_label="Frequency (Hertz)", 
+            x_axis_label="Frequency (hertz)", 
             y_axis_label=y_axis_label,
             width=width,
-            height=height
+            height=height,
+            x_axis_type="log", 
+            y_axis_type="log"
         )
     
     # Add lines to figure for every line in psd
@@ -208,6 +213,11 @@ def generate_psd_plot(
         
     p.legend.location = "top_left"
     p.legend.click_policy = "hide"
+    p.legend.visible = has_legend
+    
+    # Disable x and y grid
+    p.xgrid.visible = False
+    p.ygrid.visible = False
 
     return p
 

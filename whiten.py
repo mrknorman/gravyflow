@@ -153,7 +153,7 @@ def fir_from_transfer(
         raise ValueError("ntaps must be an even number")
     
     transfer = truncate_transfer(transfer, ncorner=ncorner)
-    impulse = tf.signal.irfft(tf.cast(transfer, dtype=tf.complex64)) # the equivalent of irfft
+    impulse = tf.signal.irfft(tf.cast(transfer, dtype=tf.complex64))
     impulse = truncate_impulse(impulse, ntaps=ntaps, window=window)
     
     impulse = tf.roll(impulse, shift=int(ntaps/2 - 1), axis=-1)[:,: ntaps]

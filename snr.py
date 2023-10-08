@@ -97,12 +97,16 @@ def calculate_snr(
     
     # Compute the SNR numerator in the frequency window
     inj_fft_squared = tf.abs(inj_fft_no_dc*tf.math.conj(inj_fft_no_dc))    
+    
     snr_numerator = \
         inj_fft_squared[:,start_freq_num_samples:end_freq_num_samples]
     
-    # Use the interpolated ASD in the frequency window for SNR calculation
-    snr_denominator = psd_interp[:,start_freq_num_samples:end_freq_num_samples]
-    
+    if len(injection.shape) == 2:
+        # Use the interpolated ASD in the frequency window for SNR calculation
+        snr_denominator = psd_interp[:,start_freq_num_samples:end_freq_num_samples]
+    elif len(injection.shape) == 3: 
+        snr_denominator = psd_interp[:, :, start_freq_num_samples:end_freq_num_samples]
+        
     # Calculate the SNR
     SNR = tf.math.sqrt(
         (4.0 / injection_duration_seconds) 

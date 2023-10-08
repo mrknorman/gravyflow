@@ -779,9 +779,7 @@ class InjectionGenerator:
                         )
                     else:
                         injections_ = injections_[:, 0, :]
-                        
-                    print(injections_.shape)
-
+                    
                     # Scale injections with selected scaling method:
                     scaled_injections = \
                         config.scaling_method.scale(

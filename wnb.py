@@ -100,7 +100,7 @@ def generate_white_noise_burst(
     
     envelopes = generate_envelopes(num_samples_array, max_num_samples)
     envelopes = tf.expand_dims(envelopes, axis=1)
-
+        
     filtered_noise = filtered_noise * envelopes
 
     return filtered_noise

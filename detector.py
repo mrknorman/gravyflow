@@ -203,7 +203,10 @@ class Network:
             ], axis=1)
 
             response = tf.matmul(response, rm)
-            response = tf.matmul(tf.transpose(rm, perm=[0, 2, 1]), response) / 4.0
+            response = tf.matmul(
+                tf.transpose(rm, perm=[0, 2, 1]), 
+                response
+            ) / 4.0
             
             responses.append(response)
             
@@ -247,7 +250,7 @@ class Network:
         self.y_length_meters = y_length_meters
         self.x_length_meters = x_length_meters
     
-    #@tf.function
+    @tf.function
     def get_antenna_pattern_(
         self,
         right_ascension: tf.Tensor, 

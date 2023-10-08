@@ -9,6 +9,7 @@ from bokeh.plotting import figure, output_file, save
 from scipy.signal import welch
 
 # Local application imports
+from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
 from ..psd import calculate_psd
 
 def test_welch_method() -> None:

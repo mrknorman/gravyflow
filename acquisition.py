@@ -123,9 +123,6 @@ class IFOData:
         
         maxval = N.numpy() - num_onsource_samples - num_offsource_samples + 1
         
-        if maxval < num_offsource_samples:
-            print(N, num_onsource_samples, num_offsource_samples)
-        
         random_starts = tf.random.uniform(
             shape=(num_examples_per_batch,), 
             minval=num_offsource_samples, 
@@ -288,19 +285,27 @@ class IFODataObtainer:
         self,
         start: float,
         stop: float,
-        ifo: IFO,
+        ifos: List[IFO],
         state_flag: str
     ) -> np.ndarray:
+        
+        if not isinstance(ifos, list):
+            ifos = [ifos]
+        
+        segment_times = []
+    
+        for ifo in ifos:
+            segments = \
+                DataQualityDict.query_dqsegdb(
+                    [f"{ifo.name}:{state_flag}"],
+                    start,
+                    stop,
+                )
 
-        segments = \
-            DataQualityDict.query_dqsegdb(
-                [f"{ifo.name}:{state_flag}"],
-                start,
-                stop,
-            )
-
-        intersection = segments[f"{ifo.name}:{state_flag}"].active.copy()
-
+            intersection = segments[f"{ifo.name}:{state_flag}"].active.copy()
+            
+            segment_times.append(intersection)
+        
         return np.array(intersection)
     
     def get_all_segment_times(
@@ -314,10 +319,12 @@ class IFODataObtainer:
                 self.get_segment_times(
                     self.start_gps_times[index],
                     self.end_gps_times[index],
-                    ifos[0],
+                    ifos,
                     self.state_flags[index]
                 )
             )
+        
+        valid_segments = np.array(valid_segments)
         return np.concatenate(valid_segments)
     
     def get_all_event_times(self) -> np.ndarray:
@@ -684,7 +691,7 @@ class IFODataObtainer:
             self,
             segment_start_gps_time: float, 
             segment_end_gps_time: float, 
-            ifo: str, 
+            ifos: List[IFO], 
             frame_type: str, 
             channel: str
         ) -> TimeSeries:
@@ -715,23 +722,24 @@ class IFODataObtainer:
         TimeSeries
             The segment data read into a TimeSeries object.
         """
+        
+        for ifo in ifos:
+            files = find_urls(
+                site=ifo.name.strip("1"),
+                frametype=f"{ifo.name}_{frame_type}",
+                gpsstart=segment_start_gps_time,
+                gpsend=segment_end_gps_time,
+                urltype="file",
+            )
+            data = TimeSeries.read(
+                files, 
+                channel=f"{ifo.name}:{channel}", 
+                start=segment_start_gps_time, 
+                end=segment_end_gps_time, 
+                nproc=4
+            )
 
-        files = find_urls(
-            site=ifo.name.strip("1"),
-            frametype=f"{ifo.name}_{frame_type}",
-            gpsstart=segment_start_gps_time,
-            gpsend=segment_end_gps_time,
-            urltype="file",
-        )
-        data = TimeSeries.read(
-            files, 
-            channel=f"{ifo.name}:{channel}", 
-            start=segment_start_gps_time, 
-            end=segment_end_gps_time, 
-            nproc=4
-        )
-
-        return data
+            return data
     
     def get_segment(
             self,
@@ -772,7 +780,7 @@ class IFODataObtainer:
                         self.get_segment_data(
                             segment_start_gps_time, 
                             segment_end_gps_time, 
-                            ifos[0], 
+                            ifos, 
                             self.frame_types[0], 
                             self.channels[0]
                     )

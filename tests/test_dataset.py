@@ -35,7 +35,7 @@ def test_iteration(
     offsource_duration_seconds : float = 16.0
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
-    ifos = [IFO.L1, IFO.H1, IFO.V1]
+    ifos = [IFO.L1] #, IFO.H1, IFO.V1]
         
     # Define injection directory path:
     injection_directory_path : Path = \
@@ -55,7 +55,7 @@ def test_iteration(
             sample_rate_hertz, 
             onsource_duration_seconds,
             scaling_method=scaling_method,    
-            network = ifos
+            network = None # ifos
         )
     
     # Setup ifo data acquisition object:
