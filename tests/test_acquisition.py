@@ -35,11 +35,17 @@ if __name__ == "__main__":
         )
 
     # Get valid data segments:
-    data_obtainer.get_valid_segments(
-        IFO.L1,
+    segments = data_obtainer.get_valid_segments(
+        [IFO.L1],
         groups,
         "train",
         SegmentOrder.RANDOM
     )
+    
+    print(len(segments))
+    print(segments)
+    
+
+    
     
         

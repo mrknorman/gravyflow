@@ -78,9 +78,15 @@ def white_noise_generator(
         int(offsource_duration_seconds * sample_rate_hertz)
 
     while True:
-        yield _generate_white_noise(num_examples_per_batch, num_onsource_samples), \
-            _generate_white_noise(num_examples_per_batch, num_offsource_samples), \
-            tf.fill([num_examples_per_batch], -1.0)
+        yield _generate_white_noise(
+            num_examples_per_batch, 
+            num_onsource_samples
+        ), 
+        _generate_white_noise(
+            num_examples_per_batch, 
+            num_offsource_samples
+        ),
+        tf.fill([num_examples_per_batch], -1.0)
         
 @tf.function
 def _generate_colored_noise(
@@ -180,7 +186,10 @@ def colored_noise_generator(
     total_onsource_duration_seconds : float = \
         onsource_duration_seconds + (crop_duration_seconds * 2.0)
     
-    durations_seconds = [total_onsource_duration_seconds, offsource_duration_seconds]
+    durations_seconds = [
+        total_onsource_duration_seconds, 
+        offsource_duration_seconds
+    ]
     
     frequencies, psd = np.loadtxt(
         ifo.value.optimal_psd_path, delimiter=","
@@ -310,7 +319,7 @@ class NoiseObtainer:
                         self.groups,
                         group
                     )
-                
+                    
                     # Setup noise_file_path, file path is created from
                     # hash of unique parameters
                     self.ifo_data_obtainer.generate_file_path(

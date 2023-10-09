@@ -156,6 +156,93 @@ def test_real_noise(
     grid = gridplot(layout)
         
     save(grid)
+    
+def test_multi_noise(
+        num_tests : int = 8, 
+        output_diretory_path : Path = Path("./py_ml_data/tests/")
+    ):
+    
+    # Test parameters:
+    sample_rate_hertz : float = 1024.0
+    onsource_duration_seconds : float = 1.0    
+    crop_duration_seconds : float = 0.5
+    offsource_duration_seconds : float = 4.0
+    num_examples_per_batch : int = num_tests
+    scale_factor : float = 1.0E20
+    
+    # Setup ifo data acquisition object:
+    ifo_data_obtainer : IFODataObtainer = \
+        IFODataObtainer(
+            ObservingRun.O3, 
+            DataQuality.BEST, 
+            [
+                DataLabel.NOISE, 
+                DataLabel.GLITCHES
+            ],
+            SegmentOrder.RANDOM,
+            force_acquisition = True,
+            cache_segments = False
+        )
+    
+    # Initilise noise generator wrapper:
+    noise : NoiseObtainer = \
+        NoiseObtainer(
+            ifo_data_obtainer = ifo_data_obtainer,
+            noise_type = NoiseType.REAL,
+            ifos = [IFO.L1, IFO.H1]
+        )
+    
+    # Create generator:
+    generator : Iterator = \
+        noise.init_generator(
+            sample_rate_hertz,
+            onsource_duration_seconds,
+            crop_duration_seconds,
+            offsource_duration_seconds,
+            num_examples_per_batch,
+            scale_factor
+        )
+    
+    # Calculate total onsource length including padding
+    total_onsource_duration_seconds : float = \
+        onsource_duration_seconds + (crop_duration_seconds * 2.0)
+        
+    # Iterate through num_tests batches to check correct operation:
+    onsource, offsource, gps_times  = next(generator)
+        
+    layout = []
+    for onsource_, offsource_, gps_time in zip(onsource, offsource, gps_times):
+        
+        onsource_strain_plot = \
+            generate_strain_plot(
+                {"Onsource Noise" : onsource_},
+                sample_rate_hertz,
+                total_onsource_duration_seconds,
+                title = f"Onsource Background noise at {gps_time}",
+                scale_factor = scale_factor
+            )
+        
+        offsource_strain_plot = \
+            generate_strain_plot(
+                {"Offsource Noise" : offsource_},
+                sample_rate_hertz,
+                offsource_duration_seconds,
+                title = f"Offsource Background noise at {gps_time}",
+                scale_factor = scale_factor
+            )
+        
+        layout.append([onsource_strain_plot, offsource_strain_plot])
+    
+    # Ensure output directory exists
+    ensure_directory_exists(output_diretory_path)
+    
+    # Define an output path for the dashboard
+    output_file(output_diretory_path / "multi_noise_plots.html")
+
+    # Arrange the plots in a grid. 
+    grid = gridplot(layout)
+        
+    save(grid)
 
 if __name__ == "__main__":
     
@@ -179,7 +266,8 @@ if __name__ == "__main__":
     
     # Test IFO noise generator:
     with strategy.scope():
-        test_iteration()
+        test_multi_noise()
         test_real_noise()
+        test_iteration()
     
     

@@ -9,6 +9,7 @@ from typing import List, Tuple, Union, Dict, Any
 from pathlib import Path
 import logging
 import sys
+import time
 from contextlib import closing
 
 # Third-party imports
@@ -83,20 +84,33 @@ class ObservingRun(Enum):
 
 @dataclass
 class IFOData:
-    data               : Union[TimeSeries, tf.Tensor, np.ndarray]
-    start_gps_time     : float
+    data               : Union[List[TimeSeries], tf.Tensor, np.ndarray]
     sample_rate_hertz  : float
+    start_gps_time     : List[float] = None
         
     def __post_init__(self):
-        if (type(self.data) == TimeSeries):
-            self.data = tf.convert_to_tensor(self.data.value, dtype=tf.float32)
+        
+        if (type(self.data) == list()):
+            
+            timeseries_data = []
+            timeseries_gps_times = []
+            for series in timeseries:
+                timeseries_data.append(series.value)
+                timeseries_gps_times.append(series.t0.value)
+            
+            self.data = tf.convert_to_tensor(timeseries_data, dtype=tf.float32)
+            
         elif (type(self.data) == np.ndarray):
             self.data = tf.convert_to_tensor(self.data, dtype=tf.float32)
         
         self.data = replace_nan_and_inf_with_zero(self.data)
-                    
-        self.duration_seconds = \
-            tf.cast(tf.shape(self.data)[0], tf.float32) / self.sample_rate_hertz
+        
+        self.duration_seconds = []
+        for duration in self.duration_seconds:
+            self.duration_seconds.append(
+                tf.cast(tf.shape(self.data)[0], tf.float32) / self.sample_rate_hertz
+            )
+        
         self.time_interval_seconds = 1.0 / self.sample_rate_hertz
             
     def downsample(self, new_sample_rate_hertz: Union[int, float]):    
@@ -285,32 +299,24 @@ class IFODataObtainer:
         self,
         start: float,
         stop: float,
-        ifos: List[IFO],
+        ifo: IFO,
         state_flag: str
     ) -> np.ndarray:
         
-        if not isinstance(ifos, list):
-            ifos = [ifos]
-        
-        segment_times = []
-    
-        for ifo in ifos:
-            segments = \
-                DataQualityDict.query_dqsegdb(
-                    [f"{ifo.name}:{state_flag}"],
-                    start,
-                    stop,
-                )
+        segments = \
+            DataQualityDict.query_dqsegdb(
+                [f"{ifo.name}:{state_flag}"],
+                start,
+                stop,
+            )
 
-            intersection = segments[f"{ifo.name}:{state_flag}"].active.copy()
-            
-            segment_times.append(intersection)
-        
+        intersection = segments[f"{ifo.name}:{state_flag}"].active.copy()
+                    
         return np.array(intersection)
     
     def get_all_segment_times(
         self,
-        ifos : List[IFO]
+        ifo : IFO
     ) -> np.ndarray:
         
         valid_segments = []
@@ -319,7 +325,7 @@ class IFODataObtainer:
                 self.get_segment_times(
                     self.start_gps_times[index],
                     self.end_gps_times[index],
-                    ifos,
+                    ifo,
                     self.state_flags[index]
                 )
             )
@@ -355,7 +361,7 @@ class IFODataObtainer:
         groups : Dict[str, float] = None,
         group_name : str = "train",
         segment_order : SegmentOrder = None
-    ):
+    ) -> List:
         # Ensure parameters are lists for consistency:
         if not isinstance(ifos, list):
             ifos = [ifos]
@@ -381,62 +387,81 @@ class IFODataObtainer:
                 f"Group {group_name} not present in groups dictionary check "
                  "input."
             )
-        
-        # Get segments which fall within gps time boundaries and have the 
-        # requested ifo and state flag:
-        valid_segments = self.get_all_segment_times(ifos)
-        
-        # Collect veto segment times from excluded data labels: 
-        veto_segments = []
-        if DataLabel.EVENTS not in self.data_labels:
-            event_times = self.get_all_event_times()
-            veto_segments.append(
-                self.pad_gps_times_with_veto_window(event_times)
-            )
-        if DataLabel.GLITCHES not in self.data_labels:
-            pass
-            #veto_segments.append(get_all_glitch_segments(ifo))
-        
-        # Remove veto segment segments from valid segments list:
-        if veto_segments:
-            veto_segments = np.concatenate(veto_segments)
-            valid_segments = \
-                self.veto_time_segments(valid_segments, veto_segments)
-        
-        # First split by a constant duration so that groups always contain the
-        # same times no matter what max duration is:
-        group_split_seconds : float = 8196.0
-        valid_segments : np.ndarray = \
-            self.split_segments(
-                valid_segments, 
-                group_split_seconds
-            )
+            
+        self.valid_segments = []
+            
+        for ifo in ifos:
+
+            # Get segments which fall within gps time boundaries and have the 
+            # requested ifo and state flag:
+            valid_segments = self.get_all_segment_times(ifo)
+
+            # Collect veto segment times from excluded data labels: 
+            veto_segments = []
+            if DataLabel.EVENTS not in self.data_labels:
+                event_times = self.get_all_event_times()
+                veto_segments.append(
+                    self.pad_gps_times_with_veto_window(event_times)
+                )
+            if DataLabel.GLITCHES not in self.data_labels:
+                pass
+                #veto_segments.append(get_all_glitch_segments(ifo))
+
+            # Remove veto segment segments from valid segments list:
+            if veto_segments:
+                veto_segments = np.concatenate(veto_segments)
+                valid_segments = \
+                    self.veto_time_segments(valid_segments, veto_segments)
+
+            # First split by a constant duration so that groups always contain 
+            # the same times no matter what max duration is:
+            group_split_seconds : float = 8196.0
+            valid_segments : np.ndarray = \
+                self.cut_segments(
+                    valid_segments, 
+                    group_split_seconds
+                )
+
+            # Distibute segments deterministically amongst groups, thos can
+            # be used to separate validation and testing data from training 
+            # data:
+            valid_segments : np.ndarray = \
+                self.distribute_segments_by_ratio(
+                    valid_segments, 
+                    groups,
+                    group_name
+                )
+
+            # Finally, split seconds so that max duration is no greateer than 
+            # max:
+            valid_segments : np.ndarray = \
+                self.cut_segments(
+                    valid_segments, 
+                    self.max_segment_duration_seconds
+                )
+
+            # If there are no valid segments raise and error:
+            if (len(valid_segments) == 0):
+                raise ValueError("No valid segments!")
                 
-        # Distibute segments deterministically amongst groups, thos can
-        # be used to separate validation and testing data from training data:
-        valid_segments : np.ndarray = \
-            self.distribute_segments_by_ratio(
-                valid_segments, 
-                groups,
-                group_name
-            )
-        
-        # Finally, split seconds so that max duration is no greateer than max:
-        valid_segments : np.ndarray = \
-            self.split_segments(
-                valid_segments, 
+            self.valid_segments.append(valid_segments)
+                                
+        self.valid_segments = self.merge_bins(
+                self.valid_segments, 
                 self.max_segment_duration_seconds
             )
         
-        # If there are no valid segments raise and error:
-        if (len(valid_segments) == 0):
-            raise ValueError("No valid segments!")
-            
-        # Set class atribute:
-        self.valid_segments = valid_segments
+        self.valid_segments = self.largest_segments_per_bin(
+                self.valid_segments
+            )
+        
+        self.valid_segments  = np.swapaxes(self.valid_segments, 1, 0)
         
         # Order segments by requested order:
-        self.order_segments(segment_order)
+        self.valid_segments = self.order_segments(
+            self.valid_segments, 
+            segment_order
+        )
         
         return self.valid_segments
     
@@ -469,34 +494,67 @@ class IFODataObtainer:
         
         return result
     
-    def split_segments(
-        self,
-        segments: np.ndarray, 
-        maximum_duration_seconds: float
-    ) -> np.ndarray:
-        
-        result = []
-        for start, end in segments:
-            n_splits = int(np.ceil((end - start) / maximum_duration_seconds))
-            starts = np.linspace(
-                start, 
-                start + maximum_duration_seconds * (n_splits - 1), 
-                n_splits
-            )
-            ends = np.minimum(starts + maximum_duration_seconds, end)
-            result.append(np.vstack((starts, ends)).T)
-        
-        return np.vstack(result)
+    def cut_segments(self, segments, interval):
+        """
+        Splits time segments in each array at fixed intervals.
+
+        Parameters:
+        segments (np.ndarray): 
+            2D array where each row contains a time segment (start, end).
+        interval (float): 
+            Time interval at which to make cuts.
+
+        Returns:
+        np.ndarray: 2D array with split segments.
+        """
+
+        # Calculate cut_points for all segments at once
+        start_points = np.ceil(segments[:, 0] / interval) * interval
+        end_points = segments[:, 1]
+        cut_points = [
+            np.arange(start, end, interval) for start, end in zip(start_points, end_points)
+        ]
+
+        # Split segments based on calculated cut_points
+        new_segments = []
+        for (start, end), cuts in zip(segments, cut_points):
+            if cuts.size > 0:
+                new_segs = np.column_stack(
+                    (np.concatenate(([start], cuts)), 
+                     np.concatenate((cuts, [end])))
+                )
+                new_segments.extend(new_segs)
+            else:
+                new_segments.append([start, end])
+
+        return np.array(new_segments)
 
     def remove_short_segments(
-        self,
-        segments: np.ndarray, 
-        minimum_duration_seconds: float
-    ) -> np.ndarray:
+            self,
+            segments: np.ndarray, 
+            minimum_duration_seconds: float
+        ) -> np.ndarray:
         
-        return segments[
-            np.where(segments[:, 1] - segments[:, 0] >= minimum_duration_seconds)
-        ]
+        """
+        Removes columns where at least one of the durations in the column is 
+        less than the specified minimum duration.
+
+        Parameters:
+        segments (np.ndarray): Input array of shape [X, N, 2].
+        minimum_duration_seconds (float): Minimum allowed duration.
+
+        Returns:
+        np.ndarray: Array with columns removed.
+        """
+        # Calculate durations for each pair in each column:
+        durations = segments[:, :, 1] - segments[:, :, 0] 
+        
+        # Check if all durations in a column are valid:
+        valid_columns = np.all(durations >= minimum_duration_seconds, axis=1) 
+        
+         # Select only columns where all durations are valid:
+        filtered_segments = segments[valid_columns, :, :] 
+        return filtered_segments
     
     def compress_segments(
         self,
@@ -601,19 +659,21 @@ class IFODataObtainer:
     
     def order_segments(
         self,
+        valid_segments : np.ndarray,
         segment_order : SegmentOrder
     ):
         # Order segments by requested order:
         match segment_order:
             case SegmentOrder.RANDOM:
                 # Shuffle data sements randomly.
-                np.random.shuffle(self.valid_segments)
+                np.random.shuffle(valid_segments)
+
             case SegmentOrder.SHORTEST_FIRST:
                 # Sort by shortest first (usefull for debugging).
                 sort_by_duration = \
                     lambda segments: \
-                        segments[np.argsort(segments[:, 1] - segments[:, 0])]
-                valid_segments = sort_by_duration(self.valid_segments)
+                        segments[np.argsort(segments[0][:, 1] - segments[0][:, 0])]
+                valid_segments = sort_by_duration(valid_segments)
             case SegmentOrder.CHRONOLOGICAL:
                 # Do nothing as default order should be chronological.
                 pass
@@ -626,6 +686,83 @@ class IFODataObtainer:
                     SegmentOrder.CHRONOLOGICAL
                     """
                 )
+        
+        return valid_segments
+    
+    def merge_bins(self, new_segments_list, interval):
+        """
+        Merges split segments into bins of shape [G, N].
+
+        Parameters:
+        new_segments_list (list of np.ndarray): 
+            List of 2D arrays with split segments.
+        interval (float): 
+            Time interval of bins.
+
+        Returns:
+        list of list of np.ndarray: List of lists of arrays, with shape [G, N].
+        """
+        # Determine the global minimum and maximum times
+        min_time = min(segment[0, 0] for segment in new_segments_list)
+        max_time = max(segment[-1, 1] for segment in new_segments_list)
+
+        # Create bins covering the global time range
+        bins = np.arange(
+            np.floor(min_time / interval) * interval, 
+            np.ceil(max_time / interval) * interval, interval
+        )
+
+        # Initialize the result data structure
+        result = [[] for _ in bins]
+
+        # Iterate over each bin and each array, collecting segments within each bin
+        for i, bin_start in enumerate(bins):
+            for segments in new_segments_list:
+                # Find segments that fall within this bin
+                in_bin = segments[
+                    (segments[:, 0] < bin_start + interval) & (segments[:, 1] > bin_start)
+                ]
+                if in_bin.size > 0:
+                    # Adjust the segments to fit within the bin
+                    in_bin[:, 0] = np.maximum(in_bin[:, 0], bin_start)
+                    in_bin[:, 1] = np.minimum(in_bin[:, 1], bin_start + interval)
+                    result[i].append(in_bin)
+                else:
+                    result[i].append(np.empty((0, 2)))
+                    
+        # Filter out bins where one of the lists is empty
+        filtered_result = [bin for bin in result if all(len(arr) > 0 for arr in bin)]
+
+        return filtered_result
+    
+    def largest_segments_per_bin(self, filtered_bins_result):
+        """
+        Extracts the largest segment in each bin from each list and converts 
+        back to a list of 2 arrays.
+
+        Parameters:
+        filtered_bins_result (list of list of np.ndarray): 
+            Filtered result from merge_bins function.
+
+        Returns:
+        list of np.ndarray: 
+            List of 2 arrays of largest segments, with equal length.
+        """
+        # Initialize lists to store largest segments from each original array
+        largest_segments_list = [[] for _ in range(len(filtered_bins_result[0]))]
+
+        # Iterate over each bin
+        for bin in filtered_bins_result:
+            # For each list in a bin, find the segment with the largest duration
+            for j, segments in enumerate(bin):
+                durations = segments[:, 1] - segments[:, 0]  # Calculate durations of segments
+                largest_segment_index = np.argmax(durations)  # Find index of largest segment
+                largest_segments_list[j].append(segments[largest_segment_index])  # Add largest segment to list
+        
+        # Convert lists of largest segments into arrays
+        result_arrays = [np.array(segments) for segments in largest_segments_list]
+
+        return np.array(largest_segments_list)
                 
     def acquire(
         self,
@@ -644,48 +781,68 @@ class IFODataObtainer:
         # If no valid segments inputted revert to default list:
         if valid_segments is None:
             valid_segments = self.valid_segments
-                        
-        for segment_start_gps_time, segment_end_gps_time in valid_segments:
+            
+        assert valid_segments.shape[1] == len(ifos), \
+            "Num ifos should equal num segment lists"
+                                
+        for segment_times in valid_segments:
+            
+            segments = []
+            for ifo, (segment_start_gps_time, segment_end_gps_time) in \
+                zip(ifos, segment_times):
 
-            # Generate segment key to use to locate or save segment data within the
-            # associated hdf5 file:
-            segment_key = \
-                f"segments/segment_{segment_start_gps_time}_{segment_end_gps_time}"
+                # Generate segment key to use to locate or save segment data within 
+                # the associated hdf5 file:
+                segment_key = \
+                    f"segments/segment_{segment_start_gps_time}_{segment_end_gps_time}"
 
-            # Acquire segment data, either from local stored file or remote:
-            segment = \
-                self.get_segment(
-                    segment_start_gps_time,
-                    segment_end_gps_time,
-                    sample_rate_hertz,
-                    ifos,
-                    segment_key
+                # Acquire segment data, either from local stored file or remote:
+                segment = \
+                    self.get_segment(
+                        segment_start_gps_time,
+                        segment_end_gps_time,
+                        sample_rate_hertz,
+                        ifos,
+                        segment_key
+                    )
+                
+                segments.append(segment)
+
+                if segment is not None:
+
+                    # Save aquired segment if it does not alread exist in the local 
+                    # file:
+                    if self.cache_segments:  
+
+                        with closing(
+                            open_hdf5_file(self.file_path, mode = "r+")
+                            ) as segment_file:    
+
+                            # Ensure hdf5 file has group "segments":
+                            segment_file.require_group("segments")
+
+                            if (segment_key not in segment_file) or self.force_acquisition:
+                                segment_file.create_dataset(
+                                    segment_key, 
+                                    data = segment.data.value()
+                                )
+                else:
+                    # If no segment was retrieved move to next loop iteration:
+                    continue
+                
+            # Convert to IFOData class which uses tf.Tensors
+            multi_segment : IFOData = \
+                IFOData(
+                    segments, 
+                    sample_rate_hertz
                 )
 
-            if segment is not None:
+            # Scale to reduce precision errors:
+            multi_segment = multi_segment.scale(scale_factor)  
 
-                # Save aquired segment if it does not alread exist in the local file:
-                if self.cache_segments:  
-                    
-                    with closing(open_hdf5_file(self.file_path, mode = "r+")) as segment_file:    
+            yield multi_segment
 
-                        # Ensure hdf5 file has group "segments":
-                        segment_file.require_group("segments")
 
-                        if (segment_key not in segment_file) or self.force_acquisition:
-                            segment_file.create_dataset(
-                                segment_key, 
-                                data = segment.data.numpy()
-                            )
-
-                # Scale to reduce precision errors:
-                segment = segment.scale(scale_factor)  
-
-                yield segment
-
-            else:
-                # If no segment was retrieved move to next loop iteration:
-                continue
                 
     def get_segment_data(
             self,
@@ -798,15 +955,7 @@ class IFODataObtainer:
                     #Would be nice to do this on the gpu:
                     segment : TimeSeries = \
                         segment.resample(sample_rate_hertz)
-
-                    # Convert to IFOData class which uses tf.Tensors
-                    segment : IFOData = \
-                        IFOData(
-                            segment, 
-                            segment.t0.value, 
-                            segment.sample_rate.value
-                        )
-
+            
             self.logger.info("Complete!")
 
         return segment
@@ -845,9 +994,7 @@ class IFODataObtainer:
         # Multiply by 2 for saftey odd things were happening
         min_segment_duration_seconds *= 2.0
         
-        # Remove short segments:
-        valid_segments : np.ndarray = \
-            self.remove_short_segments(
+        valid_segments = self.remove_short_segments(
                 self.valid_segments, 
                 min_segment_duration_seconds
             )
