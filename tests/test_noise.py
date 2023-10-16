@@ -213,25 +213,19 @@ def test_multi_noise(
     layout = []
     for onsource_, offsource_, gps_time in zip(onsource, offsource, gps_times):
         
-        onsource_strain_plot = \
-            generate_strain_plot(
-                {"Onsource Noise" : onsource_},
-                sample_rate_hertz,
-                total_onsource_duration_seconds,
-                title = f"Onsource Background noise at {gps_time}",
-                scale_factor = scale_factor
+        list_of_onsource = []
+        for onsource_ifo in onsource_: 
+            list_of_onsource.append(
+                generate_strain_plot(
+                    {"Onsource Noise" : onsource_ifo},
+                    sample_rate_hertz,
+                    total_onsource_duration_seconds,
+                    title = f"Onsource Background noise at {gps_time}",
+                    scale_factor = scale_factor
+                )
             )
         
-        offsource_strain_plot = \
-            generate_strain_plot(
-                {"Offsource Noise" : offsource_},
-                sample_rate_hertz,
-                offsource_duration_seconds,
-                title = f"Offsource Background noise at {gps_time}",
-                scale_factor = scale_factor
-            )
-        
-        layout.append([onsource_strain_plot, offsource_strain_plot])
+        layout.append(list_of_onsource)
     
     # Ensure output directory exists
     ensure_directory_exists(output_diretory_path)
@@ -268,6 +262,7 @@ if __name__ == "__main__":
     with strategy.scope():
         test_multi_noise()
         test_real_noise()
+        quit()
         test_iteration()
     
     

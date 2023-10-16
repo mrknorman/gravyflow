@@ -307,7 +307,7 @@ class NoiseObtainer:
                     # Check to see if obtatainer object has been set up, raise
                     # error if not
                     raise ValueError("""
-                        No IFO obtainer object present. In order to aquire real 
+                        No IFO obtainer object present. In order to acquire real 
                         noise please parse a IFOObtainer object to NoiseObtainer
                         either during initlisation or through setting
                         NoiseObtainer.ifo_data_obtainer
@@ -369,7 +369,10 @@ class NoiseObtainer:
         total_onsource_duration_seconds : float = \
             onsource_duration_seconds + (crop_duration_seconds * 2.0)  
         
-        durations_seconds = [total_onsource_duration_seconds, offsource_duration_seconds]
+        durations_seconds = [
+            total_onsource_duration_seconds, 
+            offsource_duration_seconds
+        ]
         
         num_samples_list = [
             int(duration * sample_rate_hertz) for duration in durations_seconds
@@ -379,7 +382,7 @@ class NoiseObtainer:
             # Check to see if obtatainer object has been set up, raise
             # error if not
             raise ValueError("""
-                No IFO obtainer object present. In order to aquire real 
+                No IFO obtainer object present. In order to acquire real 
                 noise please parse a IFOObtainer object to NoiseObtainer
                 either during initlisation or through setting
                 NoiseObtainer.ifo_data_obtainer

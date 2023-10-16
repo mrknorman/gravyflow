@@ -86,31 +86,27 @@ class ObservingRun(Enum):
 class IFOData:
     data               : Union[List[TimeSeries], tf.Tensor, np.ndarray]
     sample_rate_hertz  : float
-    start_gps_time     : List[float] = None
+    start_gps_time     : List[float]
         
     def __post_init__(self):
-        
-        if (type(self.data) == list()):
+                
+        if isinstance(self.data, list):
+            new_data = [
+                tf.convert_to_tensor(data, dtype=tf.float32) for data in self.data
+            ]
+            new_data = [
+                replace_nan_and_inf_with_zero(data) for data in new_data
+            ]
             
-            timeseries_data = []
-            timeseries_gps_times = []
-            for series in timeseries:
-                timeseries_data.append(series.value)
-                timeseries_gps_times.append(series.t0.value)
+            self.data = new_data      
             
-            self.data = tf.convert_to_tensor(timeseries_data, dtype=tf.float32)
+        elif isinstance(self.data, np.ndarray):
+            self.data = [tf.convert_to_tensor(self.data, dtype=tf.float32)]
             
-        elif (type(self.data) == np.ndarray):
-            self.data = tf.convert_to_tensor(self.data, dtype=tf.float32)
-        
-        self.data = replace_nan_and_inf_with_zero(self.data)
-        
-        self.duration_seconds = []
-        for duration in self.duration_seconds:
-            self.duration_seconds.append(
-                tf.cast(tf.shape(self.data)[0], tf.float32) / self.sample_rate_hertz
-            )
-        
+        self.duration_seconds = [
+            tf.cast(tf.shape(ifo_data)[0], tf.float32) / self.sample_rate_hertz for ifo_data in self.data
+        ]
+
         self.time_interval_seconds = 1.0 / self.sample_rate_hertz
             
     def downsample(self, new_sample_rate_hertz: Union[int, float]):    
@@ -118,7 +114,7 @@ class IFOData:
         return self
     
     def scale(self, scale_factor:  Union[int, float]):
-        self.data *= scale_factor
+        self.data = [data * scale_factor for data in self.data]
         return self
     
     def numpy(self):
@@ -127,47 +123,72 @@ class IFOData:
     
     def random_subsection(
         self,
-        num_onsource_samples: int, 
-        num_offsource_samples: int, 
+        num_onsource_samples: int,
+        num_offsource_samples: int,
         num_examples_per_batch: int
     ):      
-        assert len(self.data.shape) == 1, "Input array must be 1D"
 
-        N = tf.shape(self.data)[0]
-        
-        maxval = N.numpy() - num_onsource_samples - num_offsource_samples + 1
-        
-        random_starts = tf.random.uniform(
-            shape=(num_examples_per_batch,), 
-            minval=num_offsource_samples, 
-            maxval=maxval, 
-            dtype=tf.int32
-        )
+        # Create lists to store the batched data for all tensors
+        all_batch_subarrays = []
+        all_batch_background_chunks = []
+        all_subsections_start_gps_time = []
 
-        def slice_data(start, num_samples):
-            return tf.slice(self.data, [start], [num_samples])
+        for tensor_data, start_gps_time in zip(self.data, self.start_gps_time):
 
-        batch_subarrays = tf.map_fn(
-            lambda start: slice_data(start, num_onsource_samples), 
-            random_starts, 
-            fn_output_signature=tf.TensorSpec(
-                shape=[num_onsource_samples], dtype=tf.float32
+            # Ensure the tensor is 1D
+            assert len(tensor_data.shape) == 1, "Input tensor must be 1D"
+
+            N = tf.shape(tensor_data)[0]
+
+            maxval = N.numpy() - num_onsource_samples - num_offsource_samples + 1
+
+            random_starts = tf.random.uniform(
+                shape=(num_examples_per_batch,), 
+                minval=num_offsource_samples, 
+                maxval=maxval, 
+                dtype=tf.int32
             )
-        )
 
-        batch_background_chunks = tf.map_fn(
-            lambda start: \
-                slice_data(start - num_offsource_samples, num_offsource_samples), 
-            random_starts, 
-            fn_output_signature=tf.TensorSpec(
-                shape=[num_offsource_samples], dtype=tf.float32)
-        )
+            def slice_data(start, num_samples, tensor_data=tensor_data):  # default argument ensures correct tensor is used
+                return tf.slice(tensor_data, [start], [num_samples])
 
-        subsections_start_gps_time = tf.cast(self.start_gps_time, tf.float32) + \
-            tf.cast(random_starts, tf.float32) \
-            * tf.cast(self.time_interval_seconds, tf.float32)
+            batch_subarrays = tf.map_fn(
+                lambda start: slice_data(start, num_onsource_samples), 
+                random_starts, 
+                fn_output_signature=tf.TensorSpec(
+                    shape=[num_onsource_samples], dtype=tf.float32
+                )
+            )
 
-        return batch_subarrays, batch_background_chunks, subsections_start_gps_time
+            batch_background_chunks = tf.map_fn(
+                lambda start: \
+                    slice_data(start - num_offsource_samples, num_offsource_samples), 
+                random_starts, 
+                fn_output_signature=tf.TensorSpec(
+                    shape=[num_offsource_samples], dtype=tf.float32
+                )
+            )
+
+            subsections_start_gps_time = tf.cast(start_gps_time, tf.float32) + \
+                tf.cast(random_starts, tf.float32) \
+                * tf.cast(self.time_interval_seconds, tf.float32)
+
+            all_batch_subarrays.append(batch_subarrays)
+            all_batch_background_chunks.append(batch_background_chunks)
+            all_subsections_start_gps_time.append(subsections_start_gps_time)
+        
+        if (len(self.data) > 1):
+            # Stack results across the new dimension
+            stacked_batch_subarrays = tf.stack(all_batch_subarrays, axis=1)
+            stacked_batch_background_chunks = tf.stack(all_batch_background_chunks, axis=1)
+            stacked_subsections_start_gps_time = tf.stack(all_subsections_start_gps_time, axis=1)
+        else:
+            # Stack results across the new dimension
+            stacked_batch_subarrays = all_batch_subarrays[0]
+            stacked_batch_background_chunks = all_batch_subarrays[0]
+            stacked_subsections_start_gps_time = all_batch_subarrays[0]
+
+        return stacked_batch_subarrays, stacked_batch_background_chunks, stacked_subsections_start_gps_time
     
 @dataclass
 class IFODataObtainer:
@@ -784,6 +805,8 @@ class IFODataObtainer:
             
         assert valid_segments.shape[1] == len(ifos), \
             "Num ifos should equal num segment lists"
+        
+        gps_start_times = []
                                 
         for segment_times in valid_segments:
             
@@ -791,8 +814,8 @@ class IFODataObtainer:
             for ifo, (segment_start_gps_time, segment_end_gps_time) in \
                 zip(ifos, segment_times):
 
-                # Generate segment key to use to locate or save segment data within 
-                # the associated hdf5 file:
+                # Generate segment key to use to locate or save segment data  
+                # within the associated hdf5 file:
                 segment_key = \
                     f"segments/segment_{segment_start_gps_time}_{segment_end_gps_time}"
 
@@ -807,11 +830,12 @@ class IFODataObtainer:
                     )
                 
                 segments.append(segment)
+                gps_start_times.append(segment_start_gps_time)
 
                 if segment is not None:
 
-                    # Save aquired segment if it does not alread exist in the local 
-                    # file:
+                    # Save aquired segment if it does not alread exist in the  
+                    # local file:
                     if self.cache_segments:  
 
                         with closing(
@@ -824,7 +848,7 @@ class IFODataObtainer:
                             if (segment_key not in segment_file) or self.force_acquisition:
                                 segment_file.create_dataset(
                                     segment_key, 
-                                    data = segment.data.value()
+                                    data = segment.data
                                 )
                 else:
                     # If no segment was retrieved move to next loop iteration:
@@ -834,7 +858,8 @@ class IFODataObtainer:
             multi_segment : IFOData = \
                 IFOData(
                     segments, 
-                    sample_rate_hertz
+                    sample_rate_hertz,
+                    gps_start_times
                 )
 
             # Scale to reduce precision errors:
@@ -854,12 +879,12 @@ class IFODataObtainer:
         ) -> TimeSeries:
 
         """
-        Fetches new segment data from specific URLs and reads it into a TimeSeries 
-        object.
+        Fetches new segment data from specific URLs and reads it into a 
+        TimeSeries object.
 
-        The URLs are found using the provided segment start and end times, ifo, and 
-        frame type. The TimeSeries data is then read from these files with the given 
-        channel.
+        The URLs are found using the provided segment start and end times, ifo, 
+        and frame type. The TimeSeries data is then read from these files with 
+        the given channel.
 
         Parameters
         ----------
@@ -905,7 +930,7 @@ class IFODataObtainer:
             sample_rate_hertz : float,
             ifos : List[IFO],
             segment_key : str
-        ) -> IFOData:
+        ) -> np.ndarray:
         
         # Default segment data to None in case of very possible aquisition error:
         segment = None
@@ -921,12 +946,7 @@ class IFODataObtainer:
                     f"Reading segments of duration "
                     f"{expected_duration_seconds}..."
                 )
-                segment : IFOData = \
-                    IFOData(
-                        segment_file[segment_key][()], 
-                        segment_start_gps_time, 
-                        sample_rate_hertz
-                    )
+                segment = segment_file[segment_key][()],
             else: 
                 self.logger.info(
                       "Acquiring segments of duration "
@@ -958,7 +978,7 @@ class IFODataObtainer:
             
             self.logger.info("Complete!")
 
-        return segment
+        return segment.value
     
     def get_onsource_offsource_chunks(
             self,
@@ -999,8 +1019,8 @@ class IFODataObtainer:
                 min_segment_duration_seconds
             )
         
-        # Calculate number of samples required to fullfill onsource and offsource
-        # durations:
+        # Calculate number of samples required to fullfill onsource and 
+        # offsource durations:
         num_onsource_samples : int = \
             int(total_onsource_duration_seconds * sample_rate_hertz)
         num_offsource_samples : int = \
@@ -1012,22 +1032,26 @@ class IFODataObtainer:
                 ifos,
                 scale_factor
             ):
-            
-            if tf.shape(segment.data)[0] < (num_onsource_samples + num_offsource_samples):
-                continue
                         
+            min_length = min([tf.shape(tensor)[0] for tensor in segment.data])
+
+            if min_length < (num_onsource_samples + num_offsource_samples):
+                continue
+                
+            min_length = tf.cast(min_length, tf.float32)
+
             # Calculate number of batches current segment can produce, this
             # is dependant on the segment duration and the onsource duration:
             num_batches_in_segment : int = \
                 int(
-                      segment.duration_seconds
+                      min_length * sample_rate_hertz
                     / (
                         self.saturation * 
                         num_examples_per_batch * total_onsource_duration_seconds
                     )
                 )
             
-            # Yeild offsource, onsource, and gps_times for unique batches untill
+            # Yield offsource, onsource, and gps_times for unique batches untill
             # current segment is exausted:
             for batch_index in range(num_batches_in_segment):
                 
