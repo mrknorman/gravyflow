@@ -134,6 +134,8 @@ class Network:
                     "height_meters"
                 ]
                 
+                num_detectors = len(parameters)
+                
                 for attribute in attributes:
                     attribute_list = [
                         getattr(ifo.value, attribute) for ifo in parameters \
@@ -154,6 +156,8 @@ class Network:
                     f"Unsuported type {type(parameters)} for Network "
                     "initilisation."
                 )
+                
+        self.num_detectors = num_detectors
                 
         self.init_parameters(
             **arguments

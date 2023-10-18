@@ -347,49 +347,84 @@ def get_ifo_dataset(
     num_onsource_samples = int(onsource_duration_seconds * sample_rate_hertz)
     num_offsource_samples = int(offsource_duration_seconds * sample_rate_hertz)
     num_injection_configs = len(injection_generators)
-
+    
+    num_detectors = 1
+    if injection_generators is not None: 
+        
+        if injection_generators[0].network is not None:
+            num_detectors = injection_generators[0].network.num_detectors 
+        else:
+            num_detectors = 1
+    elif noise_obtainer is not None:
+        num_detectors = len(noise_obtainer.ifos)
+    
+    if num_detectors is None:
+        num_detectors = 1
+    
+    if num_detectors == 1:
+        onsource_shape = (num_examples_per_batch, num_onsource_samples)
+        offsource_shape = (num_examples_per_batch, num_offsource_samples)
+        detectors_shape = (num_examples_per_batch,)
+        injections_shape = (
+                num_injection_configs, 
+                num_examples_per_batch, 
+                num_onsource_samples
+            )
+        per_injection_shape = (num_injection_configs, num_examples_per_batch)
+    else:
+        onsource_shape = (
+            num_examples_per_batch, num_detectors, num_onsource_samples
+        )
+        offsource_shape = (
+            num_examples_per_batch, num_detectors, num_offsource_samples
+        )
+        detectors_shape = (
+            num_examples_per_batch, num_detectors
+        )
+        injections_shape = (
+                num_injection_configs, 
+                num_examples_per_batch,
+                num_detectors,
+                num_onsource_samples
+            )
+        per_injection_shape = (
+            num_injection_configs, num_examples_per_batch
+        )
+    
     output_signature_dict = {
         ReturnVariables.ONSOURCE.name:
             tf.TensorSpec(
-                shape=(num_examples_per_batch, num_onsource_samples), 
+                shape=onsource_shape, 
                 dtype=tf.float16
             ),
         ReturnVariables.WHITENED_ONSOURCE.name: 
             tf.TensorSpec(
-                shape=(num_examples_per_batch, num_onsource_samples),
+                shape=onsource_shape,
                 dtype=tf.float16
             ),
         ReturnVariables.OFFSOURCE.name: 
             tf.TensorSpec(
-                shape=(num_examples_per_batch, num_offsource_samples), 
+                shape=offsource_shape, 
                 dtype=tf.float16
             ),
         ReturnVariables.GPS_TIME.name: 
             tf.TensorSpec(
-                shape=(num_examples_per_batch,), 
+                shape=detectors_shape, 
                 dtype=tf.int64
             ),
         ReturnVariables.INJECTIONS.name: 
             tf.TensorSpec(
-                shape=(
-                    num_injection_configs, 
-                    num_examples_per_batch, 
-                    num_onsource_samples
-                ),
+                shape=injections_shape,
                 dtype=tf.float16
             ),
         ReturnVariables.WHITENED_INJECTIONS.name: 
             tf.TensorSpec(
-                shape=(
-                    num_injection_configs, 
-                    num_examples_per_batch, 
-                    num_onsource_samples
-                ),
+                shape=injections_shape,
                 dtype=tf.float16
             ),
         ReturnVariables.INJECTION_MASKS.name: 
             tf.TensorSpec(
-                shape=(num_injection_configs, num_examples_per_batch), 
+                shape=per_injection_shape, 
                 dtype=tf.float32
             )
     }
@@ -465,10 +500,14 @@ def extract_data_from_indicies(
             # Extract the corresponding data from in_dict and out_dict using 
             # in_batch_index
             example_element = \
-                {key: value[in_batch_index[0]] for key, value in in_dict.items()}
+            {
+                key: value[in_batch_index[0]] for key, value in in_dict.items()
+            }
                         
             out_element = \
-                {key: value[0][in_batch_index[0]] for key, value in out_dict.items()}
+            {
+                key: value[0][in_batch_index[0]] for key, value in out_dict.items()
+            }
                         
             for key, value in out_element.items():
                 example_element[key] = value

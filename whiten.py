@@ -70,8 +70,8 @@ def truncate_transfer(
         
     plank = planck(nsamp-ncorner, nleft=5, nright=5)
     
-    transfer_zeros = tf.zeros_like(transfer[:,:ncorner])
-    transfer_mod = tf.multiply(transfer[:,ncorner:nsamp], plank)
+    transfer_zeros = tf.zeros_like(transfer[...,:ncorner])
+    transfer_mod = tf.multiply(transfer[...,ncorner:nsamp], plank)
     new_transfer = tf.concat([transfer_zeros, transfer_mod], axis=-1)
     
     return new_transfer
@@ -113,9 +113,9 @@ def truncate_impulse(
     else:
         raise ValueError(f"Window function {window} not supported")
     
-    impulse_start = impulse[:,:trunc_start] * window[trunc_start:ntaps]
-    impulse_stop = impulse[:,trunc_stop:] * window[:trunc_start]
-    impulse_middle = tf.zeros_like(impulse[:,trunc_start:trunc_stop])
+    impulse_start = impulse[...,:trunc_start] * window[trunc_start:ntaps]
+    impulse_stop = impulse[...,trunc_stop:] * window[:trunc_start]
+    impulse_middle = tf.zeros_like(impulse[...,trunc_start:trunc_stop])
     
     new_impulse = tf.concat([impulse_start, impulse_middle, impulse_stop], axis=-1)
 
@@ -156,7 +156,7 @@ def fir_from_transfer(
     impulse = tf.signal.irfft(tf.cast(transfer, dtype=tf.complex64))
     impulse = truncate_impulse(impulse, ntaps=ntaps, window=window)
     
-    impulse = tf.roll(impulse, shift=int(ntaps/2 - 1), axis=-1)[:,: ntaps]
+    impulse = tf.roll(impulse, shift=int(ntaps/2 - 1), axis=-1)[...,: ntaps]
     return impulse
 
 @tf.function 
@@ -280,15 +280,15 @@ def convolve(
     else:
         raise ValueError(f"Window function {window} not supported")
 
-    timeseries_new_front = timeseries[:, :pad] * window[:pad]
-    timeseries_new_back = timeseries[:, -pad:] * window[-pad:]
-    timeseries_new_middle = timeseries[:, pad:-pad]
+    timeseries_new_front = timeseries[..., :pad] * window[:pad]
+    timeseries_new_back = timeseries[..., -pad:] * window[-pad:]
+    timeseries_new_middle = timeseries[..., pad:-pad]
 
     timeseries_new = tf.concat([
         timeseries_new_front, 
         timeseries_new_middle, 
         timeseries_new_back
-    ], axis=1)
+    ], axis=-1)
 
     conv = tf.zeros_like(timeseries_new)
     if nfft >= timeseries_new.shape[-1]/2:
@@ -302,14 +302,14 @@ def convolve(
         accumulated_middle_parts = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
 
         # First part
-        first_part = fftconvolve(timeseries_new[:, :nfft], fir, mode="same")[:, :nfft - pad]
+        first_part = fftconvolve(timeseries_new[..., :nfft], fir, mode="same")[..., :nfft - pad]
 
         # Define the loop body for tf.while_loop
         def loop_body(k, accumulated_middle_parts):
             yk = fftconvolve(
-                timeseries_new[:, k - pad: k + nstep + pad], fir, mode="same"
+                timeseries_new[..., k - pad: k + nstep + pad], fir, mode="same"
             )
-            updated_parts = accumulated_middle_parts.write(k, yk[:, pad: -pad])
+            updated_parts = accumulated_middle_parts.write(k, yk[..., pad: -pad])
             k = k + nstep
             return k, updated_parts
 
@@ -326,10 +326,10 @@ def convolve(
         middle_parts = tf.reshape(middle_parts, [num_samples, -1])
 
         # Last part
-        last_part = fftconvolve(timeseries_new[:, -nfft:], fir, mode="same")[:, -nfft + pad:]
+        last_part = fftconvolve(timeseries_new[..., -nfft:], fir, mode="same")[..., -nfft + pad:]
 
         # Combine all
-        conv = tf.concat([first_part, middle_parts, last_part], axis=1)
+        conv = tf.concat([first_part, middle_parts, last_part], axis=-1)
 
     return conv
 
