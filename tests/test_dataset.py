@@ -35,7 +35,7 @@ def test_iteration(
     offsource_duration_seconds : float = 16.0
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
-    ifos = [IFO.L1] #, IFO.H1, IFO.V1]
+    ifos = [IFO.L1]
         
     # Define injection directory path:
     injection_directory_path : Path = \
@@ -259,6 +259,136 @@ def test_dataset(
     grid = gridplot(layout)
         
     save(grid)
+    
+def test_dataset_multi(
+    num_tests : int = 32,
+    output_diretory_path : Path = Path("./py_ml_data/tests/")
+    ):
+    
+    # Test Parameters:
+    num_examples_per_generation_batch : int = 2048
+    num_examples_per_batch : int = num_tests
+    sample_rate_hertz : float = 2048.0
+    onsource_duration_seconds : float = 1.0
+    offsource_duration_seconds : float = 16.0
+    crop_duration_seconds : float = 0.5
+    scale_factor : float = 1.0E21
+    ifos = [IFO.L1, IFO.H1]
+    
+    # Define injection directory path:
+    injection_directory_path : Path = \
+        Path("./py_ml_tools/tests/example_injection_parameters")
+    
+    # Intilise Scaling Method:
+    scaling_method = \
+        ScalingMethod(
+            Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM),
+            ScalingTypes.SNR
+        )
+    
+    # Load injection config:
+    phenom_d_generator : cuPhenomDGenerator = \
+        WaveformGenerator.load(
+            injection_directory_path / "phenom_d_parameters.json", 
+            sample_rate_hertz, 
+            onsource_duration_seconds,
+            scaling_method=scaling_method,
+            network=ifos
+        )
+    
+    # Setup ifo data acquisition object:
+    ifo_data_obtainer : IFODataObtainer = \
+        IFODataObtainer(
+            ObservingRun.O3, 
+            DataQuality.BEST, 
+            [
+                DataLabel.NOISE, 
+                DataLabel.GLITCHES
+            ],
+            SegmentOrder.RANDOM,
+            force_acquisition = True,
+            cache_segments = False
+        )
+    
+    # Initilise noise generator wrapper:
+    noise_obtainer: NoiseObtainer = \
+        NoiseObtainer(
+            ifo_data_obtainer=ifo_data_obtainer,
+            noise_type=NoiseType.REAL,
+            ifos=ifos
+        )
+    
+    dataset : tf.data.Dataset = get_ifo_dataset(
+        # Random Seed:
+        seed= 1000,
+        # Temporal components:
+        sample_rate_hertz=sample_rate_hertz,   
+        onsource_duration_seconds=onsource_duration_seconds,
+        offsource_duration_seconds=offsource_duration_seconds,
+        crop_duration_seconds=crop_duration_seconds,
+        # Noise: 
+        noise_obtainer=noise_obtainer,
+        # Injections:
+        injection_generators=phenom_d_generator, 
+        # Output configuration:
+        num_examples_per_batch=num_examples_per_batch,
+        input_variables = [
+            ReturnVariables.WHITENED_ONSOURCE, 
+            ReturnVariables.INJECTION_MASKS, 
+            ReturnVariables.INJECTIONS,
+            ReturnVariables.WHITENED_INJECTIONS,
+            WaveformParameters.MASS_1_MSUN, 
+            WaveformParameters.MASS_2_MSUN
+        ],
+    )
+    
+    input_dict, _ = next(iter(dataset))
+        
+    onsource = input_dict[ReturnVariables.WHITENED_ONSOURCE.name].numpy()
+    injections = input_dict[ReturnVariables.INJECTIONS.name].numpy()
+    whitened_injections = input_dict[
+        ReturnVariables.WHITENED_INJECTIONS.name
+    ].numpy()
+    masks = input_dict[ReturnVariables.INJECTION_MASKS.name].numpy()
+    mass_1_msun = input_dict[WaveformParameters.MASS_1_MSUN.name].numpy()
+    mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN.name].numpy()
+    
+    layout = [
+        [generate_strain_plot(
+            {
+                "Whitened Onsouce + Injection": onsource_,
+                "Whitened Injection" : whitened_injection,
+                "Injection": injection
+            },
+            sample_rate_hertz,
+            onsource_duration_seconds,
+            title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2}"
+                   " msun"),
+            scale_factor=scale_factor
+        ), 
+        generate_spectrogram(
+            onsource_, 
+            sample_rate_hertz
+        )]
+        for onsource_, whitened_injection, injection, m1, m2 in zip(
+            onsource,
+            whitened_injections[0],
+            injections[0], 
+            mass_1_msun[0], 
+            mass_2_msun[0]
+        )
+    ]
+        
+    # Ensure output directory exists
+    ensure_directory_exists(output_diretory_path)
+    
+    # Define an output path for the dashboard
+    output_file(output_diretory_path / "dataset_plots.html")
+
+    # Arrange the plots in a grid. 
+    grid = gridplot(layout)
+        
+    save(grid)
 
 if __name__ == "__main__":
     
@@ -282,5 +412,6 @@ if __name__ == "__main__":
     
     # Test IFO noise dataset:
     with strategy.scope():
-        test_iteration()
+        test_dataset_multi()
         test_dataset()
+        test_iteration()
