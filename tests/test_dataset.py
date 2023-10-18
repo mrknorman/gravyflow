@@ -356,19 +356,17 @@ def test_dataset_multi(
     layout = [
         [generate_strain_plot(
             {
-                "Whitened Onsouce + Injection": onsource_,
-                "Whitened Injection" : whitened_injection,
-                "Injection": injection
+                "Whitened Onsouce + Injection": onsource_det,
+                "Whitened Injection" : whitened_injection_det,
+                "Injection": injection_det
             },
             sample_rate_hertz,
             onsource_duration_seconds,
             title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2}"
                    " msun"),
             scale_factor=scale_factor
-        ), 
-        generate_spectrogram(
-            onsource_, 
-            sample_rate_hertz
+        ) for onsource_det, whitened_injection_det, injection_det in zip(
+            onsource_, whitened_injection, injection
         )]
         for onsource_, whitened_injection, injection, m1, m2 in zip(
             onsource,
@@ -383,7 +381,7 @@ def test_dataset_multi(
     ensure_directory_exists(output_diretory_path)
     
     # Define an output path for the dashboard
-    output_file(output_diretory_path / "dataset_plots.html")
+    output_file(output_diretory_path / "dataset_plots_multi.html")
 
     # Arrange the plots in a grid. 
     grid = gridplot(layout)
