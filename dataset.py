@@ -167,6 +167,7 @@ def get_ifo_data(
                     parameters[key] = value
             
             if ReturnVariables.WHITENED_INJECTIONS in variables_to_return:
+                                
                 whitened_injections = \
                     tf.stack([
                         whiten(
@@ -178,7 +179,7 @@ def get_ifo_data(
                             filter_duration_seconds=1.0
                         ) for scaled_injection_ in scaled_injections
                     ])
-                
+                                
                 whitened_injections = \
                     replace_nan_and_inf_with_zero(whitened_injections)
 

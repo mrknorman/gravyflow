@@ -132,6 +132,7 @@ def calculate_snr(
 
     return SNR
 
+@tf.function
 def scale_to_snr(
     injection: tf.Tensor, 
     background: tf.Tensor,

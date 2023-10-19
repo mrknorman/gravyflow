@@ -120,6 +120,7 @@ def calculate_hpeak(
     # Return the root sum sqaure of the inputted injections:
     return tf.reduce_max(tf.abs(injection), axis=-1)
 
+@tf.function
 def scale_to_hrss(
     injection: tf.Tensor, 
     desired_hrss: float
@@ -147,6 +148,7 @@ def scale_to_hrss(
     # Return injection scaled by scale factor:
     return injection*scale_factor
 
+@tf.function
 def scale_to_hpeak(
     injection: tf.Tensor, 
     desired_hrss: float
@@ -360,10 +362,10 @@ class WNBGenerator(WaveformGenerator):
         Distribution(min_=5.0, max_=95.0, type_=DistributionType.UNIFORM)
 
     def generate(
-            self,
-            num_waveforms: int,
-            sample_rate_hertz: float,
-            max_duration_seconds: float
+        self,
+        num_waveforms: int,
+        sample_rate_hertz: float,
+        max_duration_seconds: float
     ):
         
         if (num_waveforms > 0):
@@ -407,7 +409,7 @@ class WNBGenerator(WaveformGenerator):
                 parameters["min_frequency_hertz"]
             )
                                     
-            # Generate WNB waveform at the moment take only one polarization: 
+            # Generate WNB waveform:
             waveforms = generate_white_noise_burst(
                 num_waveforms,
                 sample_rate_hertz, 
@@ -418,8 +420,8 @@ class WNBGenerator(WaveformGenerator):
             # Scale by arbitrary factor to reduce chance of precision errors:
             waveforms *= self.scale_factor
             
-        return waveforms, parameters
-    
+            return waveforms, parameters
+
 @dataclass
 class cuPhenomDGenerator(WaveformGenerator):
     mass_1_msun : Distribution = \
@@ -476,11 +478,48 @@ class cuPhenomDGenerator(WaveformGenerator):
             
             waveforms *= self.scale_factor
         
+            return waveforms, parameters
+    
+class IncoherentGenerator(WaveformGenerator):
+    component_generators : List(WaveformGenerator)
+    
+    def __init__(self, component_generators):
+        self.component_generators = component_generators
+        self.scaling_method = component_generators[0].scaling_method
+        self.injection_chance = component_generators[0].injection_chance
+        self.front_padding_duration_seconds = component_generators[0].front_padding_duration_seconds
+        self.back_padding_duration_seconds = component_generators[0].back_padding_duration_seconds
+        self.scale_factor = component_generators[0].scale_factor
+        self.network = component_generators[0].network
+            
+    def generate(
+        self,
+        num_waveforms: int,
+        sample_rate_hertz: float,
+        duration_seconds : float
+    ):
+                    
+        if len(self.component_generators) > 0:
+            
+            waveforms, parameters = [], []
+            for generator in self.component_generators: 
+                waveforms_, parameters_ = generator.generate(
+                    num_waveforms,
+                    sample_rate_hertz, 
+                    duration_seconds
+                )
+                
+                waveforms.append(waveforms_)
+                parameters.append(parameters_)
+        
+        waveforms = tf.stack(waveforms, axis = 1)
+        parameters = parameters[0]
+
         return waveforms, parameters
     
 @dataclass
 class InjectionGenerator:
-    configs : List[Union[cuPhenomDGenerator, WNBGenerator]]
+    configs : Union[List[Union[cuPhenomDGenerator, WNBGenerator]], List[List[Union[cuPhenomDGenerator, WNBGenerator]]]]
     sample_rate_hertz : float
     onsource_duration_seconds : float
     crop_duration_seconds : float
@@ -545,6 +584,7 @@ class InjectionGenerator:
             yield injections, mask, parameters
     
     def generate_one(self, config):
+        
         # Create default empty list for requested parameter returns:
         if self.variables_to_return is None:
             self.variables_to_return = []
@@ -580,6 +620,7 @@ class InjectionGenerator:
             num_waveforms = tf.reduce_sum(tf.cast(mask, tf.int32)).numpy()
             
             if num_waveforms > 0:
+                
                 waveforms, parameters = \
                     config.generate(
                         num_waveforms, 
@@ -598,7 +639,7 @@ class InjectionGenerator:
                         min_roll_num_samples, 
                         max_roll_num_samples
                     )
-
+                
                 # Create zero filled injections to fill spots where injection 
                 # did not generate due to injection masks:
                 injections = expand_tensor(waveforms, mask)
@@ -858,11 +899,49 @@ class InjectionGenerator:
                     return_variables[scaling_type] = scaling_parameters
         
         return onsource, cropped_injections, return_variables
-    
+
 @tf.function
 def roll_vector_zero_padding_(vector, roll_amount):
     zeros = tf.zeros_like(vector)
-    rolled_vector = tf.concat([vector[roll_amount:], zeros[:roll_amount]], axis=-1)
+    rolled_vector = tf.concat(
+        [vector[roll_amount:], zeros[:roll_amount]], 
+        axis=-1
+    )
+    return rolled_vector
+
+@tf.function
+def roll_vector_zero_padding(tensor, min_roll, max_roll):
+    # Generate an array of roll amounts
+    roll_amounts = tf.random.uniform(
+        shape=[tensor.shape[0]], 
+        minval=min_roll, 
+        maxval=max_roll, 
+        dtype=tf.int32
+    )
+
+    # Define a function to apply rolling to each sub_tensor with corresponding roll_amount
+    def map_fn_outer(idx):
+        sub_tensor = tensor[idx]
+        roll_amount = roll_amounts[idx]
+        return tf.map_fn(lambda vec: roll_vector_zero_padding_(vec, roll_amount), sub_tensor)
+    
+    # Create an index tensor and map over it
+    indices = tf.range(start=0, limit=tensor.shape[0], dtype=tf.int32)
+    result = tf.map_fn(
+        map_fn_outer, 
+        indices, 
+        fn_output_signature=tf.TensorSpec(shape=tensor.shape[1:], dtype=tensor.dtype))
+
+    return result
+
+@tf.function
+def roll_vector_zero_padding_(vector, roll_amount):
+    # Create zeros tensor with the same shape as vector
+    zeros = tf.zeros_like(vector)
+
+    # Roll the vector along the last dimension and replace the end values with zeros
+    rolled_vector = tf.concat([vector[..., roll_amount:], zeros[..., :roll_amount]], axis=-1)
+    
     return rolled_vector
 
 @tf.function
@@ -876,7 +955,9 @@ def roll_vector_zero_padding(tensor, min_roll, max_roll):
     def map_fn_outer(idx):
         sub_tensor = tensor[idx]
         roll_amount = roll_amounts[idx]
-        return tf.map_fn(lambda vec: roll_vector_zero_padding_(vec, roll_amount), sub_tensor)
+
+        # Apply the roll_vector_zero_padding_ function along the last dimension for each element in the sub_tensor
+        return roll_vector_zero_padding_(sub_tensor, roll_amount)
 
     # Create an index tensor and map over it
     indices = tf.range(start=0, limit=tensor.shape[0], dtype=tf.int32)

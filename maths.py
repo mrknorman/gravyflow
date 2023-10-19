@@ -148,8 +148,8 @@ def expand_tensor(
 
     tf.debugging.assert_rank_in(
         signal, 
-        [1, 2, 3], 
-        message='Signal must be a 1D or 2D tensor in this case'
+        [1, 2, 3, 4], 
+        message='Signal must be a 1, 2, 3, or 4D tensor in this case'
     )
 
     # Number of true values in the mask
@@ -184,6 +184,15 @@ def expand_tensor(
             (tf.shape(mask)[0] * group_size, signal_shape[1], signal_shape[2]), 
             dtype=signal.dtype
         )
+    elif ndim == 4:
+        expanded_signal = tf.zeros(
+            (tf.shape(mask)[0] * group_size, 
+             signal_shape[1], 
+             signal_shape[2], 
+             signal_shape[3]
+            ), 
+            dtype=signal.dtype
+        )
     else:
         raise ValueError("Unsupported shape for signal tensor")
     
@@ -213,7 +222,6 @@ def expand_tensor(
 def batch_tensor(
         tensor: tf.Tensor, 
         batch_size: int,
-        extra_dims = (2,)
     ) -> tf.Tensor:
     
     """
@@ -235,21 +243,29 @@ def batch_tensor(
     """
     # Calculate the number of full batches that can be created
     num_batches = tensor.shape[0] // batch_size
-
+    
     # Slice the tensor to only include enough elements for the full batches
     tensor = tensor[:num_batches * batch_size]
+    
+    original_shape = tf.shape(tensor)
 
     if len(tensor.shape) == 1:
         # Reshape the 1D tensor into batches
         batched_tensor = tf.reshape(tensor, (num_batches, batch_size))
     elif len(tensor.shape) == 2:
         # Reshape the 2D tensor into batches
-        batched_tensor = tf.reshape(tensor, (num_batches, batch_size, -1))
+        batched_tensor = tf.reshape(tensor, (num_batches, batch_size, original_shape[-1]))
     elif len(tensor.shape) == 3:
         batched_tensor = tf.reshape(
             tensor, 
-            (num_batches, batch_size, extra_dims[0], -1)
+            (num_batches, batch_size, original_shape[-2], original_shape[-1])
         )
+    elif len(tensor.shape) == 4:  
+        batched_tensor = tf.reshape(
+            tensor, 
+            (num_batches, batch_size, original_shape[-3], original_shape[-2], original_shape[-1])
+        )
+    
     else:
         raise ValueError("Unsupported num dimensions when batching!")
 

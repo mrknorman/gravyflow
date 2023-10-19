@@ -530,7 +530,9 @@ class Network:
         ) 
         
         antenna_patern = tf.expand_dims(antenna_patern, axis=-1)
-        strain = tf.expand_dims(strain, axis=1)
+        if (len(tf.shape(strain)) == 3):
+            strain = tf.expand_dims(strain, axis=1)
+        
         injection = tf.reduce_sum(strain*antenna_patern, axis = 2)
                 
         time_shift_seconds = self.get_time_delay_(
