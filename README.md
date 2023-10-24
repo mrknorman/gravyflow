@@ -1,5 +1,5 @@
-# py_ml_tools
-Generic python tensorflow helper tools for machine learning in gravitational wave physics
+# GravitationalFlow
+TensorFlow tools to facilitate machine learning for gravitational-wave data analysis. 
 
 # Environment Setup:
 
