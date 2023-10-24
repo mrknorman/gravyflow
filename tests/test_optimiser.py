@@ -52,7 +52,7 @@ def test_model(
     # Load injection config:
     phenom_d_generator_high_mass : cuPhenomDGenerator = \
         WaveformGenerator.load(
-            Path("./py_ml_tools/tests/injection_parameters.json"), 
+            Path("./gravitationalflow/tests/injection_parameters.json"), 
             sample_rate_hertz, 
             onsource_duration_seconds,
             scaling_method=scaling_method

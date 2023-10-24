@@ -98,7 +98,7 @@ def generate_white_noise_burst(
 
     # Generate Gaussian noise:
     gaussian_noise = tf.random.normal([num_waveforms, 2, max_num_samples])
-
+    
     # Create time mask for valid duration:
     mask = tf.sequence_mask(
         num_samples_array, max_num_samples, dtype=tf.float32
@@ -115,7 +115,7 @@ def generate_white_noise_burst(
 
     # Fourier transform:
     noise_freq_domain = tf.signal.rfft(windowed_noise)
-
+    
     # Frequency index limits:
     max_num_samples_f = tf.cast(max_num_samples, tf.float32)
     num_bins = max_num_samples_f // 2 + 1
@@ -140,7 +140,7 @@ def generate_white_noise_burst(
 
     # Filter out undesired frequencies:
     filtered_noise_freq = noise_freq_domain * combined_mask
-
+    
     # Inverse Fourier transform:
     filtered_noise = tf.signal.irfft(filtered_noise_freq)
     

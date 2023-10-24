@@ -34,7 +34,7 @@ def test_validate(
     offsource_duration_seconds : float = 16.0
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
-    model_path : Path = Path("./py_ml_tools/tests/example_models")
+    model_path : Path = Path("./gravitationalflow/tests/example_models")
     model_name : str = "example_cnn"
     
     efficiency_config : Dict[str, Union[float, int]] = \
@@ -65,7 +65,7 @@ def test_validate(
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./py_ml_tools/tests/example_injection_parameters")
+        Path("./gravitationalflow/tests/example_injection_parameters")
     
     # Load injection config:
     phenom_d_generator_high_mass : cuPhenomDGenerator = \

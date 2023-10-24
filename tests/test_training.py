@@ -47,7 +47,7 @@ def test_training(
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./py_ml_tools/tests/example_injection_parameters")
+        Path("./gravitationalflow/tests/example_injection_parameters")
     
     # Intilise Scaling Method:
     scaling_method = \

@@ -63,8 +63,9 @@ class ScalingMethod:
         ):
         
         scaled_injections = None
+        
         match self.type_:
-
+            
             case ScalingTypes.SNR:
                 scaled_injections = scale_to_snr(
                     injections, 
@@ -283,9 +284,17 @@ class WaveformGenerator:
         
         generator = None
         # Construct generator based on type:
+        
+        waveform_cls = None
         match config.pop("type"):
             case 'PhenomD': 
-                generator = cuPhenomDGenerator(
+                waveform_cls = cuPhenomDGenerator
+            case 'WNB':
+                waveform_cls = WNBGenerator
+            case _:
+                raise ValueError("This waveform type is not implemented.")
+                
+        generator = waveform_cls(
                     scaling_method=config.pop("scaling_method"),
                     scale_factor=config.pop("scale_factor"),
                     network=cls.init_network(network),
@@ -298,21 +307,6 @@ class WaveformGenerator:
                     ),
                     **{k: Distribution(**v) for k, v in config.items()},
                 )
-            case 'WNB':
-                generator = WNBGenerator(
-                    scaling_method=config.pop("scaling_method"),
-                    scale_factor=config.pop("scale_factor"),
-                    injection_chance=config.pop("injection_chance"),
-                    front_padding_duration_seconds=config.pop(
-                        "front_padding_duration_seconds"
-                    ),
-                    back_padding_duration_seconds=config.pop(
-                        "back_padding_duration_seconds"
-                    ),
-                    **{k: Distribution(**v) for k, v in config.items()},
-                )
-            case _:
-                raise ValueError("This waveform type is not implemented.")
 
         return generator
 
@@ -575,7 +569,7 @@ class InjectionGenerator:
                                 dtype = tf.float64
                             )
                         )
-
+            
             injections = tf.stack(injections)
             mask = tf.stack(mask)
 
@@ -628,7 +622,7 @@ class InjectionGenerator:
                         self.sample_rate_hertz,
                         total_duration_seconds
                     )
-
+                
                 # Convert to tensorflow tensor:
                 waveforms = \
                     tf.convert_to_tensor(waveforms, dtype = tf.float32)
@@ -646,7 +640,7 @@ class InjectionGenerator:
                 injections = expand_tensor(waveforms, mask)
             else:
                 injections = tf.zeros(
-                    shape=(num_batches, total_duration_num_samples)
+                    shape=(num_batches, 2, total_duration_num_samples)
                 )
                 parameters = { }
 
@@ -693,6 +687,7 @@ class InjectionGenerator:
             for injections_, mask_, parameters_ in zip(
                 injections, mask, parameters
                 ):
+                
                 yield injections_, mask_, parameters_
                 
     def generate_scaling_parameters_(
@@ -814,7 +809,7 @@ class InjectionGenerator:
                         scaled_injections = scaled_injections[:, 0, :]
             
                 case ScalingOrdinality.AFTER_PROJECTION:
-                
+                    
                     if network is not None:
                         injections_ = network.project_wave(
                             injections_, self.sample_rate_hertz
@@ -970,7 +965,7 @@ def roll_vector_zero_padding(tensor, min_roll, max_roll):
 def generate_mask(
     num_injections: int, 
     injection_chance: float
-) -> tf.Tensor:
+    ) -> tf.Tensor:
 
     """
     Generate injection masks using TensorFlow.

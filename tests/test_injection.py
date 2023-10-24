@@ -30,7 +30,7 @@ def test_iteration(
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./py_ml_tools/tests/example_injection_parameters")
+        Path("./gravitationalflow/tests/example_injection_parameters")
     
     phenom_d_generator : cuPhenomDGenerator = \
         WaveformGenerator.load(
@@ -75,7 +75,7 @@ def test_phenom_d_injection(
         
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./py_ml_tools/tests/example_injection_parameters")
+        Path("./gravitationalflow/tests/example_injection_parameters")
     
     phenom_d_generator_high_mass : cuPhenomDGenerator = \
         WaveformGenerator.load(
@@ -168,7 +168,7 @@ def test_wnb_injection(
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./py_ml_tools/tests/example_injection_parameters")
+        Path("./gravitationalflow/tests/example_injection_parameters")
     
     wnb_generator : WNBGenerator = \
         WaveformGenerator.load(

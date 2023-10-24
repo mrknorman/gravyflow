@@ -39,7 +39,7 @@ def test_iteration(
         
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./py_ml_tools/tests/example_injection_parameters")
+        Path("./gravitationalflow/tests/example_injection_parameters")
     
     # Intilise Scaling Method:
     scaling_method = \
@@ -148,7 +148,7 @@ def test_dataset(
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./py_ml_tools/tests/example_injection_parameters")
+        Path("./gravitationalflow/tests/example_injection_parameters")
     
     # Intilise Scaling Method:
     scaling_method = \
@@ -277,7 +277,7 @@ def test_dataset_multi(
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./py_ml_tools/tests/example_injection_parameters")
+        Path("./gravitationalflow/tests/example_injection_parameters")
     
     # Intilise Scaling Method:
     scaling_method = \
@@ -354,18 +354,18 @@ def test_dataset_multi(
     mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN.name].numpy()
     
     layout = [
-        generate_strain_plot(
+        [generate_strain_plot(
             {
-                "Whitened Onsouce + Injection": onsource_det,
-                "Whitened Injection" : whitened_injection_det,
-                "Injection": injection_det
+                "Whitened Onsouce + Injection": onsource_,
+                "Whitened Injection" : whitened_injection,
+                "Injection": injection
             },
             sample_rate_hertz,
             onsource_duration_seconds,
             title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2}"
                    " msun"),
             scale_factor=scale_factor
-        )
+        )]
         for onsource_, whitened_injection, injection, m1, m2 in zip(
             onsource,
             whitened_injections[0],
@@ -403,7 +403,7 @@ def test_dataset_incoherent(
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./py_ml_tools/tests/example_injection_parameters")
+        Path("./gravitationalflow/tests/example_injection_parameters")
     
     # Intilise Scaling Method:
     scaling_method = \
@@ -492,7 +492,7 @@ def test_dataset_incoherent(
     mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN.name].numpy()
     
     layout = [
-        generate_strain_plot(
+        [generate_strain_plot(
             {
                 "Whitened Onsouce + Injection": onsource_,
                 "Whitened Injection" : whitened_injection,
@@ -503,7 +503,7 @@ def test_dataset_incoherent(
             title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2}"
                    " msun"),
             scale_factor=scale_factor
-        )
+        )]
         for onsource_, whitened_injection, injection, m1, m2 in zip(
             onsource,
             whitened_injections[0],

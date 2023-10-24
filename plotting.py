@@ -10,7 +10,7 @@ from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource, Legend, ColorBar, LogTicker, LinearColorMapper
 from bokeh.palettes import Bright
 from bokeh.models import Div
-from bokeh.layouts import grid
+from bokeh.layouts import grid, column
 
 def create_info_panel(params: dict) -> Div:
     style = """
@@ -100,7 +100,7 @@ def generate_strain_plot(
     
     if colors is None:
         colors = Bright[7]  # Assuming Bright is a known list elsewhere in your code.
-
+        
     if width is None:
         width = int(height * golden)  # Assuming golden is a known constant elsewhere in your code.
     
@@ -110,6 +110,7 @@ def generate_strain_plot(
         strains = [strain]
     else:
         N = strain[first_key].shape[0]
+        height = height//N
         strains = [{key: strain[key][i] for key in strain} for i in range(N)]
 
     plots = []
@@ -165,7 +166,7 @@ def generate_strain_plot(
     if len(plots) == 1:
         return plots[0]
     else:
-        return plots
+        return column(*plots)
 
 def generate_psd_plot(
     psd : Dict[str, np.ndarray],
@@ -176,7 +177,7 @@ def generate_psd_plot(
     ):
     
     # Parameters:
-    height : int = 300
+    height : int = 400
     width : int = int(height*golden)
         
     # Get num samples and check dictionies:
@@ -258,7 +259,7 @@ def generate_spectrogram(
     """
     
     # Parameters:
-    height : int = 300
+    height : int = 400
     width : int = int(height*golden)
     
     # Compute the spectrogram
@@ -308,7 +309,7 @@ def generate_correlation_plot(
     title: str = "",
     colors: list = None,
     has_legend: bool = True,
-    height: int = 300,
+    height: int = 400,
     width: int = None
     ):
         
@@ -337,7 +338,7 @@ def generate_correlation_plot(
 
     source = ColumnDataSource(data)
     
-    y_axis_label = "Correlation"
+    y_axis_label = "Pearson Correlation"
     
     p = figure(
         x_axis_label="Arrival Time Difference (seconds)", 
@@ -362,5 +363,7 @@ def generate_correlation_plot(
     p.legend.visible = has_legend
     p.xgrid.visible = False
     p.ygrid.visible = False
+    p.y_range.start = -1.0
+    p.y_range.end = 1.0
 
     return p

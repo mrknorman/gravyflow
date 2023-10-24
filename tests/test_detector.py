@@ -52,7 +52,7 @@ def test_detector():
     
     # From loading:
     example_network_directory : Path = Path(
-        "./py_ml_tools/tests/example_network_parameters/example_network.json"
+        "./gravitationalflow/tests/example_network_parameters/example_network.json"
     )
     
     network = Network.load(example_network_directory)
@@ -241,7 +241,7 @@ def test_project_wave(
         
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./py_ml_tools/tests/example_injection_parameters")
+        Path("./gravitationalflow/tests/example_injection_parameters")
     
     phenom_d_generator : cuPhenomDGenerator = \
         WaveformGenerator.load(

@@ -1,7 +1,7 @@
 import tensorflow as tf
 
 # Compute Pearson correlation
-#@tf.function
+@tf.function
 def pearson_corr(x, y):
     
     x = tf.cast(x, tf.float32)
@@ -13,7 +13,7 @@ def pearson_corr(x, y):
     
     return tf.cast(numerator / (denominator + 1e-5), tf.float16) # Adding epsilon for stability
 
-#@tf.function
+@tf.function
 def calculate_rolling_pearson(tensor: tf.Tensor, 
                               max_arival_time_difference_seconds: float,
                               sample_rate_hertz: float) -> tf.Tensor:

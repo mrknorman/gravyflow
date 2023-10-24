@@ -142,7 +142,7 @@ def scale_to_snr(
     overlap_duration_seconds: float = 2.0,
     lower_frequency_cutoff: float = 20.0
     ) -> tf.Tensor:
-    
+        
     # Small value to prevent divide by zero errors:
     epsilon : float = 1.0E-7
     
