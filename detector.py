@@ -253,6 +253,8 @@ class Network:
         self.y_altitude_meters = tf.zeros_like(height_meters)
         self.y_length_meters = y_length_meters
         self.x_length_meters = x_length_meters
+        
+        self.calculate_max_arrival_time_difference()
     
     @tf.function
     def get_antenna_pattern_(
@@ -546,6 +548,31 @@ class Network:
             sample_frequency_hertz, 
             time_shift_seconds
         )
+    
+    def calculate_max_arrival_time_difference(self):
+        """
+        Compute pairwise distances between each points.
+
+        Args:
+        - points: A tensor of shape [N, 3] representing N 3D points.
+
+        Returns:
+        - A tensor of shape [N, N] where entry (i, j) is the Euclidean distance
+          between points[i] and points[j].
+        """
+        # Expand dimensions to compute pairwise distances
+        p1 = tf.expand_dims(self.location, 1)  # Shape: [N, 1, 3]
+        p2 = tf.expand_dims(self.location, 0)  # Shape: [1, N, 3]
+
+        # Compute pairwise differences
+        diff = p1 - p2  # Shape: [N, N, 3]
+
+        # Compute pairwise Euclidean distances
+        self.distances = tf.norm(diff, axis=2)  # Shape: [N, N]
+        
+        max_distance = tf.reduce_max(self.distances)
+        
+        self.max_arrival_time_difference_seconds = max_distance/C
         
 @tf.function
 def shift_waveform(

@@ -16,6 +16,7 @@ from .injection import (cuPhenomDGenerator, InjectionGenerator,
 from .maths import (expand_tensor, Distribution, set_random_seeds, crop_samples,
                     replace_nan_and_inf_with_zero)
 from .whiten import whiten
+from .pearson import calculate_rolling_pearson
 
 def validate_noise_settings(
         noise_obtainer: NoiseObtainer, 
@@ -62,6 +63,27 @@ def validate_noise_settings(
                 "Whitening requested for WHITE NOISE.", 
                 UserWarning
             )
+            
+def get_max_arrival_time_difference(
+    injection_generators : List
+    ) -> float:
+    
+    max_arival_time_difference_seconds : float = 0.01
+    
+    max_arrival_time_differences = []
+    for config in injection_generators: 
+        if (config is not None) and (config.network is not None):
+            max_arrival_time_differences.append(
+                config.network.max_arrival_time_difference_seconds
+            )        
+    
+    if len(max_arrival_time_differences):
+        max_arrival_time_differences = tf.stack(max_arrival_time_differences)
+        max_arival_time_difference_seconds = tf.reduce_max(
+            max_arrival_time_differences
+        )
+    
+    return max_arival_time_difference_seconds
 
 def get_ifo_data(    
         # Random Seed:
@@ -127,7 +149,7 @@ def get_ifo_data(
             group
         )
     
-    # Create Injection Generator    
+    # Create Injection Generator: 
     waveform_parameters_to_return = [
         item for item in variables_to_return if isinstance(
             item.value, WaveformParameter
@@ -187,7 +209,8 @@ def get_ifo_data(
             scaled_injections = None
                 
         # Whiten data: 
-        if ReturnVariables.WHITENED_ONSOURCE in variables_to_return:
+        if (ReturnVariables.WHITENED_ONSOURCE in variables_to_return) or \
+            (ReturnVariables.ROLLING_PEARSON_ONSOURCE in variables_to_return):
             
             whitened_onsource = \
                 whiten(
@@ -215,9 +238,22 @@ def get_ifo_data(
                 whitened_onsource, 
                 f"NaN detected in whitened_onsource after cast."
             )
-                    
+            
+            if (ReturnVariables.ROLLING_PEARSON_ONSOURCE in variables_to_return):
+                max_arival_time_difference_seconds: float = \
+                    get_max_arrival_time_difference(injection_generators)
+                
+                rolling_pearson_onsource = calculate_rolling_pearson(
+                    whitened_onsource,
+                    max_arival_time_difference_seconds,
+                    sample_rate_hertz
+                    )
+            else:
+                rolling_pearson_onsource = None
+
         else:
             whitened_onsource = None
+            rolling_pearson_onsource = None
         
         if ReturnVariables.ONSOURCE in variables_to_return:
             # Crop to remove edge effects, crop with or without whitening to
@@ -249,6 +285,7 @@ def get_ifo_data(
                 scaled_injections,
                 whitened_injections,
                 mask,
+                rolling_pearson_onsource,
                 parameters
             ) for var_list in [input_variables, output_variables]
         ]
@@ -264,8 +301,9 @@ def create_variable_dictionary(
     injections : tf.Tensor,
     whitened_injections : tf.Tensor,
     mask : tf.Tensor,
+    rolling_pearson_onsource : tf.Tensor,
     injection_parameters : Dict
-    ):
+    ) -> Dict:
 
     operations = {
         ReturnVariables.ONSOURCE: onsource,
@@ -274,7 +312,8 @@ def create_variable_dictionary(
         ReturnVariables.GPS_TIME: gps_times,
         ReturnVariables.INJECTIONS: injections,
         ReturnVariables.WHITENED_INJECTIONS: whitened_injections,
-        ReturnVariables.INJECTION_MASKS: mask
+        ReturnVariables.INJECTION_MASKS: mask,
+        ReturnVariables.ROLLING_PEARSON_ONSOURCE: rolling_pearson_onsource
     }
 
     # Extend operations with any relevant keys from injection_parameters
@@ -361,6 +400,12 @@ def get_ifo_dataset(
     
     if num_detectors is None:
         num_detectors = 1
+        
+    max_arival_time_difference_seconds: float = \
+        get_max_arrival_time_difference(injection_generators)
+
+    max_arival_time_difference_samples : float = \
+        int(max_arival_time_difference_seconds * sample_rate_hertz)
     
     if num_detectors == 1:
         onsource_shape = (num_examples_per_batch, num_onsource_samples)
@@ -372,6 +417,11 @@ def get_ifo_dataset(
                 num_onsource_samples
             )
         per_injection_shape = (num_injection_configs, num_examples_per_batch)
+        
+        pearson_shape = (
+            num_examples_per_batch, 
+            max_arival_time_difference_samples
+        )
     else:
         onsource_shape = (
             num_examples_per_batch, num_detectors, num_onsource_samples
@@ -390,6 +440,12 @@ def get_ifo_dataset(
             )
         per_injection_shape = (
             num_injection_configs, num_examples_per_batch
+        )
+        
+        pearson_shape = (
+            num_examples_per_batch, 
+            num_detectors * (num_detectors - 1) // 2,
+            max_arival_time_difference_samples
         )
     
     output_signature_dict = {
@@ -423,6 +479,11 @@ def get_ifo_dataset(
                 shape=injections_shape,
                 dtype=tf.float16
             ),
+        ReturnVariables.ROLLING_PEARSON_ONSOURCE.name:
+            tf.TensorSpec(
+                shape=pearson_shape,
+                dtype=tf.float16
+            ),   
         ReturnVariables.INJECTION_MASKS.name: 
             tf.TensorSpec(
                 shape=per_injection_shape, 
@@ -487,19 +548,19 @@ def extract_data_from_indicies(
     dataset_elements : List = []
     current_index : int = 0
     for batch_index, (in_dict, out_dict) in enumerate(dataset):
-        # Calculate the range of global indices for this batch
+        # Calculate the range of global indices for this batch:
         start_index = batch_index * num_examples_per_batch
         end_index = (batch_index + 1) * num_examples_per_batch
         
-        # Find the worst examples in the current batch
+        # Find the worst examples in the current batch:
         while current_index < len(indicies) and \
             indicies[current_index] < end_index:
                         
-            # Calculate in-batch index
+            # Calculate in-batch index:
             in_batch_index = indicies[current_index] % num_examples_per_batch  
                                     
             # Extract the corresponding data from in_dict and out_dict using 
-            # in_batch_index
+            # in_batch_index:
             example_element = \
             {
                 key: value[in_batch_index[0]] for key, value in in_dict.items()

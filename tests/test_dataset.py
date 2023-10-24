@@ -476,6 +476,7 @@ def test_dataset_incoherent(
             ReturnVariables.INJECTION_MASKS, 
             ReturnVariables.INJECTIONS,
             ReturnVariables.WHITENED_INJECTIONS,
+            ReturnVariables.ROLLING_PEARSON_ONSOURCE,
             WaveformParameters.MASS_1_MSUN, 
             WaveformParameters.MASS_2_MSUN
         ],
