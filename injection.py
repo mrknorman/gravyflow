@@ -809,7 +809,7 @@ class InjectionGenerator:
                         scaled_injections = scaled_injections[:, 0, :]
             
                 case ScalingOrdinality.AFTER_PROJECTION:
-                    
+                                        
                     if network is not None:
                         injections_ = network.project_wave(
                             injections_, self.sample_rate_hertz

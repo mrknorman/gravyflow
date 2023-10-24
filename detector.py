@@ -302,16 +302,13 @@ class Network:
             cos_psi * cos_dec
         ], axis=-1)
         
-        # Calculate dx and dy via tensordot, and immediately squeeze and 
-        # transpose them
-        dx = tf.transpose(
-            tf.squeeze(
-                tf.tensordot(response, x, axes=[[2], [2]])), perm=[2, 0, 1]
-        )
-        dy = tf.transpose(
-            tf.squeeze(
-                tf.tensordot(response, y, axes=[[2], [2]])), perm=[2, 0, 1]
-        )
+        # Calculate dx and dy via tensordot, and immediately remove singleton 
+        # dimensions and transpose them
+        tensor_product_dx = tf.tensordot(response, x, axes=[[2], [2]])
+        dx = tf.transpose(tensor_product_dx[0, :, :, 0], perm=[2, 0, 1])
+
+        tensor_product_dy = tf.tensordot(response, y, axes=[[2], [2]])
+        dy = tf.transpose(tensor_product_dy[0, :, :, 0], perm=[2, 0, 1])
 
         # Expand dimensions for x, y, dx, dy along axis 0
         x = tf.expand_dims(x, axis=0)

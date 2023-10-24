@@ -12,7 +12,7 @@ from bokeh.palettes import Bright
 from bokeh.models import Div
 from bokeh.layouts import grid, column
 
-def create_info_panel(params: dict) -> Div:
+def create_info_panel(params: dict, height = 200) -> Div:
     style = """
         <style>
             .centered-content {
@@ -40,7 +40,7 @@ def create_info_panel(params: dict) -> Div:
         </style>
     """
     html_content = "<div class='centered-content'><ul>" + "".join([f"<li><strong>{key}:</strong> {value}</li>" for key, value in params.items()]) + "</ul></div>"
-    return Div(text=style + html_content, width=190, height=200)
+    return Div(text=style + html_content, width=190, height=height)
 
 def check_ndarrays_same_length(
         my_dict : Dict[str, Union[np.ndarray, tf.Tensor]]

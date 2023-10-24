@@ -229,10 +229,6 @@ def get_ifo_data(
                 onsource_duration_seconds, 
                 sample_rate_hertz
             )
-
-            whitened_onsource = tf.cast(whitened_onsource, tf.float16)
-            
-            whitened_onsource = replace_nan_and_inf_with_zero(whitened_onsource)
             
             tf.debugging.check_numerics(
                 whitened_onsource, 
@@ -250,6 +246,9 @@ def get_ifo_data(
                     )
             else:
                 rolling_pearson_onsource = None
+                
+            whitened_onsource = tf.cast(whitened_onsource, tf.float16)
+            whitened_onsource = replace_nan_and_inf_with_zero(whitened_onsource)
 
         else:
             whitened_onsource = None
@@ -389,8 +388,7 @@ def get_ifo_dataset(
     num_injection_configs = len(injection_generators)
     
     num_detectors = 1
-    if injection_generators is not None: 
-        
+    if injection_generators: 
         if injection_generators[0].network is not None:
             num_detectors = injection_generators[0].network.num_detectors 
         else:
@@ -482,7 +480,7 @@ def get_ifo_dataset(
         ReturnVariables.ROLLING_PEARSON_ONSOURCE.name:
             tf.TensorSpec(
                 shape=pearson_shape,
-                dtype=tf.float16
+                dtype=tf.float32
             ),   
         ReturnVariables.INJECTION_MASKS.name: 
             tf.TensorSpec(
@@ -497,7 +495,18 @@ def get_ifo_dataset(
             item.value, ScalingType)
         )
     }
+    
+    if not injection_generators:
+        keys_to_remove = {
+            ReturnVariables.INJECTION_MASKS, 
+            ReturnVariables.INJECTIONS, 
+            ReturnVariables.WHITENED_INJECTIONS
+        }
 
+        parameters_to_return -= keys_to_remove
+        input_variables = [item for item in input_variables if item not in keys_to_remove]
+        output_variables = [item for item in output_variables if item not in keys_to_remove]
+    
     output_signature_dict.update({
         item.name: tf.TensorSpec(
             shape=(
