@@ -1,4 +1,4 @@
-# GravitationalFlow
+# GravyFlow
 TensorFlow tools to facilitate machine learning for gravitational-wave data analysis. 
 
 # Environment Setup:
