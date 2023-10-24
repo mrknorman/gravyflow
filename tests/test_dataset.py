@@ -354,7 +354,7 @@ def test_dataset_multi(
     mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN.name].numpy()
     
     layout = [
-        [generate_strain_plot(
+        generate_strain_plot(
             {
                 "Whitened Onsouce + Injection": onsource_det,
                 "Whitened Injection" : whitened_injection_det,
@@ -365,9 +365,7 @@ def test_dataset_multi(
             title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2}"
                    " msun"),
             scale_factor=scale_factor
-        ) for onsource_det, whitened_injection_det, injection_det in zip(
-            onsource_, whitened_injection, injection
-        )]
+        )
         for onsource_, whitened_injection, injection, m1, m2 in zip(
             onsource,
             whitened_injections[0],
@@ -494,20 +492,18 @@ def test_dataset_incoherent(
     mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN.name].numpy()
     
     layout = [
-        [generate_strain_plot(
+        generate_strain_plot(
             {
-                "Whitened Onsouce + Injection": onsource_det,
-                "Whitened Injection" : whitened_injection_det,
-                "Injection": injection_det
+                "Whitened Onsouce + Injection": onsource_,
+                "Whitened Injection" : whitened_injection,
+                "Injection": injection
             },
             sample_rate_hertz,
             onsource_duration_seconds,
             title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2}"
                    " msun"),
             scale_factor=scale_factor
-        ) for onsource_det, whitened_injection_det, injection_det in zip(
-            onsource_, whitened_injection, injection
-        )]
+        )
         for onsource_, whitened_injection, injection, m1, m2 in zip(
             onsource,
             whitened_injections[0],

@@ -10,6 +10,7 @@ from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource, Legend, ColorBar, LogTicker, LinearColorMapper
 from bokeh.palettes import Bright
 from bokeh.models import Div
+from bokeh.layouts import grid
 
 def create_info_panel(params: dict) -> Div:
     style = """
@@ -90,72 +91,81 @@ def generate_strain_plot(
     sample_rate_hertz : float,
     duration_seconds : float,
     title : str = "",
-    colors : list = Bright[7],
+    colors : list = None, # We'll handle default value inside the function
     has_legend : bool = True,
     scale_factor : float = None,
     height : int = 300,
     width : int = None
     ):
     
-    # Parameters:
+    if colors is None:
+        colors = Bright[7]  # Assuming Bright is a known list elsewhere in your code.
+
     if width is None:
-        width : int = int(height*golden)
-        
-    # Get num samples and check dictionies:
-    num_samples = check_ndarrays_same_length(strain)
+        width = int(height * golden)  # Assuming golden is a known constant elsewhere in your code.
     
-    # If inputs are tensors, convert to numpy array:
-    for key, value in strain.items():
-        if isinstance(value, tf.Tensor):
-            strain[key] = value.numpy()
-        
-    # Generate time axis for plotting:
-    time_axis : np.ndarray = \
-        np.linspace(0.0, duration_seconds, num_samples)
+    # Detect if the data has an additional dimension
+    first_key = next(iter(strain))
+    if len(strain[first_key].shape) == 1:
+        strains = [strain]
+    else:
+        N = strain[first_key].shape[0]
+        strains = [{key: strain[key][i] for key in strain} for i in range(N)]
+
+    plots = []
+    for curr_strain in strains:
+        # If inputs are tensors, convert to numpy array:
+        for key, value in curr_strain.items():
+            if isinstance(value, tf.Tensor):
+                curr_strain[key] = value.numpy()
+                
+        # Get num samples and check dictionaries:
+        num_samples = check_ndarrays_same_length(curr_strain)
+
+        # Generate time axis for plotting:
+        time_axis = np.linspace(0.0, duration_seconds, num_samples)
     
-    # Create data dictionary to use as source:
-    data : Dict = { "time" : time_axis }
-    for key, value in strain.items():
-        data[key] = value
+        # Create data dictionary to use as source:
+        data = { "time" : time_axis }
+        for key, value in curr_strain.items():
+            data[key] = value
+
+        source = ColumnDataSource(data)
     
-    # Preparing the data:
-    source = ColumnDataSource(data)
+        y_axis_label = f"Strain"
+        if scale_factor is not None or scale_factor == 1.0:
+            y_axis_label += f" (scaled by {scale_factor})"
     
-    # Prepare y_axis:
-    y_axis_label = f"Strain"
-    if scale_factor is not None or scale_factor == 1.0:
-        y_axis_label += f" (scaled by {scale_factor})"
-    
-    # Create a new plot with a title and axis labels
-    p = \
-        figure(
+        p = figure(
             x_axis_label="Time (seconds)", 
             y_axis_label=y_axis_label,
             title=title,
             width=width,
             height=height
         )
-    
-    # Add lines to figure for every line in strain
-    for index, (key, value) in enumerate(strain.items()):
-        p.line(
-            "time", 
-            key, 
-            source=source, 
-            line_width=2, 
-            line_color = colors[index],
-            legend_label = key
-        )
-    
-    p.legend.location = "top_left"
-    p.legend.click_policy = "hide"
-    p.legend.visible = has_legend
-    
-    # Disable x and y grid
-    p.xgrid.visible = False
-    p.ygrid.visible = False
 
-    return p
+        for index, (key, value) in enumerate(curr_strain.items()):
+            p.line(
+                "time", 
+                key, 
+                source=source, 
+                line_width=2, 
+                line_color=colors[index % len(colors)],  # Cycle through colors if there are more lines than colors
+                legend_label=key
+            )
+    
+        p.legend.location = "top_left"
+        p.legend.click_policy = "hide"
+        p.legend.visible = has_legend
+        p.xgrid.visible = False
+        p.ygrid.visible = False
+
+        plots.append(p)
+
+    if len(plots) == 1:
+        return plots[0]
+    else:
+        return plots
 
 def generate_psd_plot(
     psd : Dict[str, np.ndarray],
@@ -292,3 +302,65 @@ def generate_spectrogram(
 
     return p
 
+def generate_correlation_plot(
+    correlation: np.ndarray,
+    sample_rate_hertz: float,
+    title: str = "",
+    colors: list = None,
+    has_legend: bool = True,
+    height: int = 300,
+    width: int = None
+    ):
+        
+    if colors is None:
+        colors = Bright[7]
+
+    if width is None:
+        golden = 1.618  # Golden ratio
+        width = int(height * golden)
+    
+    num_pairs, num_samples = correlation.shape
+
+    # Convert tensor to numpy array if needed
+    if isinstance(correlation, tf.Tensor):
+        correlation = correlation.numpy()
+        
+    duration_seconds : float = num_samples*(1/sample_rate_hertz)
+
+    # Generate time axis for plotting:
+    time_axis = np.linspace(0.0, duration_seconds, num_samples)
+    
+    # Create data dictionary to use as source:
+    data = {"time": time_axis}
+    for i in range(num_pairs):
+        data[f"pair_{i}"] = correlation[i]
+
+    source = ColumnDataSource(data)
+    
+    y_axis_label = "Correlation"
+    
+    p = figure(
+        x_axis_label="Arrival Time Difference (seconds)", 
+        y_axis_label=y_axis_label,
+        title=str(title),
+        width=width,
+        height=height
+    )
+
+    for i in range(num_pairs):
+        p.line(
+            "time", 
+            f"pair_{i}", 
+            source=source, 
+            line_width=2, 
+            line_color=colors[i % len(colors)],  # Cycle through colors
+            legend_label=f"Pair {i}"
+        )
+    
+    p.legend.location = "top_left"
+    p.legend.click_policy = "hide"
+    p.legend.visible = has_legend
+    p.xgrid.visible = False
+    p.ygrid.visible = False
+
+    return p
