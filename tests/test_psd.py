@@ -9,8 +9,7 @@ from bokeh.plotting import figure, output_file, save
 from scipy.signal import welch
 
 # Local application imports
-from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
-from ..psd import calculate_psd
+import gravyflow as gf
 
 def test_welch_method() -> None:
     """
@@ -42,7 +41,7 @@ def test_welch_method() -> None:
 
     # Step 3: Compute PSD using TensorFlow
     signal_tensor: tf.Tensor = tf.constant(signal_array, dtype=tf.float32)
-    frequencies_tf_hertz, psd_tf = calculate_psd(
+    frequencies_tf_hertz, psd_tf = gf.psd(
         signal_tensor, nperseg=1024, sample_rate_hertz=sample_rate_hertz
     )
     frequencies_tf_hertz, psd_tf = frequencies_tf_hertz.numpy(), psd_tf.numpy()
@@ -85,8 +84,8 @@ if __name__ == "__main__":
     memory_to_allocate_tf : int = 2000
     
     # Setup CUDA
-    gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    strategy = setup_cuda(
+    gpus = gw.find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
+    strategy = gw.setup_cuda(
         gpus, 
         max_memory_limit = memory_to_allocate_tf, 
         logging_level=logging.WARNING

@@ -14,17 +14,7 @@ from bokeh.layouts import gridplot
 from bokeh.models import ColumnDataSource, HoverTool, Legend
 
 # Local imports:
-from ..cuphenom.py.cuphenom import generate_phenom_d
-from ..maths import Distribution, DistributionType, crop_samples
-from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
-from ..plotting import generate_strain_plot
-from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
-                          DataQuality, DataLabel, IFO)
-from ..noise import NoiseObtainer, NoiseType
-from ..whiten import whiten
-from ..psd import calculate_psd
-from ..plotting import generate_strain_plot, generate_psd_plot
-from ..dataset import ReturnVariables, get_ifo_dataset
+import gravyflow as gw
     
 def plot_whiten_functions(
     sample_rate_hertz : float = 8192, 
@@ -100,7 +90,7 @@ def plot_whiten_functions(
     _, gwpy_whitened_noise_psd = calc_psd(whitened_gwpy)
     
     # TensorFlow whitening
-    whitened_tensorflow = whiten(
+    whitened_tensorflow = gw.whiten(
         data, 
         data, 
         sample_rate_hertz, 
@@ -122,7 +112,7 @@ def plot_whiten_functions(
     }
     
     layout = [
-        [generate_strain_plot(
+        [gw.generate_strain_plot(
             {key : value},
             sample_rate_hertz,
             duration_seconds,
@@ -145,7 +135,7 @@ def plot_whiten_functions(
     }
     
     layout = [
-        [generate_psd_plot(
+        [gw.generate_psd_plot(
             {key : value},
             frequencies,
             title=key
@@ -196,7 +186,7 @@ def test_whiten_functions() -> None:
     
     # Whitening using TensorFlow
     timeseries = tf.convert_to_tensor(data, dtype=tf.float32)
-    whitened_tensorflow = whiten(
+    whitened_tensorflow = gw.whiten(
         timeseries, 
         timeseries,
         sample_rate_hertz, 
@@ -206,7 +196,7 @@ def test_whiten_functions() -> None:
     whitened_tensorflow = whitened_tensorflow.numpy()
     
     # Calculate PSD using Scipy
-    def calculate_psd(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def psd_scipy(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         return scipy.signal.csd(
             data, data, fs=sample_rate_hertz, window='hann',
             nperseg=int(sample_rate_hertz * fft_duration_seconds),
@@ -214,9 +204,9 @@ def test_whiten_functions() -> None:
             average='median'
         )
     
-    f, data_psd = calculate_psd(data)
-    _, gwpy_whitened_noise_psd = calculate_psd(whitened_gwpy)
-    _, tensorflow_whitened_noise_psd = calculate_psd(whitened_tensorflow)
+    f, data_psd = psd_scipy(data)
+    _, gwpy_whitened_noise_psd = psd_scipy(whitened_gwpy)
+    _, tensorflow_whitened_noise_psd = psd_scipy(whitened_tensorflow)
     
     # Find peaks in PSD
     def find_peaks(psd: np.ndarray) -> np.ndarray:
@@ -249,28 +239,28 @@ def real_noise_test(
     scale_factor : float = 1.0E21
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+    ifo_data_obtainer : gw.IFODataObtainer = \
+        gw.IFODataObtainer(
+            gw.ObservingRun.O3, 
+            gw.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gw.DataLabel.NOISE, 
+                gw.DataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gw.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
     
     # Initilise noise generator wrapper:
-    noise_obtainer: NoiseObtainer = \
-        NoiseObtainer(
+    noise_obtainer: gw.NoiseObtainer = \
+        gw.NoiseObtainer(
             ifo_data_obtainer=ifo_data_obtainer,
-            noise_type=NoiseType.REAL,
-            ifos=IFO.L1
+            noise_type=gw.NoiseType.REAL,
+            ifos=gw.IFO.L1
         )
     
-    generator  : tf.data.Dataset = get_ifo_dataset(
+    generator  : tf.data.Dataset = gw.Dataset(
             # Random Seed:
             seed=1000,
             # Temporal components:
@@ -283,17 +273,17 @@ def real_noise_test(
             # Output configuration:
             num_examples_per_batch=num_examples_per_batch,
             input_variables = [
-                ReturnVariables.ONSOURCE, 
-                ReturnVariables.WHITENED_ONSOURCE
+                gw.ReturnVariables.ONSOURCE, 
+                gw.ReturnVariables.WHITENED_ONSOURCE
             ]
         )
     
     background, _ = next(iter(generator))
             
     raw_noise : tf.Tensor = \
-        background[ReturnVariables.ONSOURCE.name].numpy()[0]
+        background[gw.ReturnVariables.ONSOURCE.name].numpy()[0]
     whitened_noise : tf.Tensor = \
-        background[ReturnVariables.WHITENED_ONSOURCE.name].numpy()[0]
+        background[gw.ReturnVariables.WHITENED_ONSOURCE.name].numpy()[0]
     
     # Create a GWpy TimeSeries object
     ts = TimeSeries(raw_noise, sample_rate=sample_rate_hertz)
@@ -306,7 +296,7 @@ def real_noise_test(
         
     # Whitening using tensorflow-based function
     timeseries  = tf.convert_to_tensor(raw_noise, dtype = tf.float32)
-    noise_whitened_tensorflow = whiten(
+    noise_whitened_tensorflow = gw.whiten(
         timeseries, 
         timeseries, 
         sample_rate_hertz, 
@@ -359,7 +349,7 @@ def real_noise_test(
     }
     
     layout = [
-        [generate_strain_plot(
+        [gw.generate_strain_plot(
             {key : value},
             sample_rate_hertz,
             onsource_duration_seconds,
@@ -382,7 +372,7 @@ def real_noise_test(
     }
     
     layout = [
-        [generate_psd_plot(
+        [gw.generate_psd_plot(
             {key : value},
             frequencies,
             title=key
@@ -406,8 +396,8 @@ if __name__ == "__main__":
     memory_to_allocate_tf : int = 2000
     
     # Setup CUDA
-    gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    strategy = setup_cuda(
+    gpus = gw.find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
+    strategy = gw.setup_cuda(
         gpus, 
         max_memory_limit=memory_to_allocate_tf, 
         logging_level=logging.WARNING

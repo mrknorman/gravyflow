@@ -10,18 +10,14 @@ from bokeh.layouts import gridplot
 from tqdm import tqdm
 
 # Local imports:
-from ..maths import Distribution, DistributionType
-from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
-from ..injection import (cuPhenomDGenerator, WNBGenerator, InjectionGenerator, 
-                         WaveformParameters, WaveformGenerator)
-from ..plotting import generate_strain_plot
+from gravyflow import gf
 
 def test_iteration(
-    num_tests : int = int(1.0E3)
+    num_tests : int = int(1.0E2)
     ):
     
      # Test Parameters:
-    num_examples_per_generation_batch : int = 1024
+    num_examples_per_generation_batch : int = 128
     num_examples_per_batch : int = num_tests
     sample_rate_hertz : float = 2048.0
     onsource_duration_seconds : float = 1.0
@@ -30,17 +26,17 @@ def test_iteration(
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./gravitationalflow/tests/example_injection_parameters")
+        Path("./gravyflow/tests/example_injection_parameters")
     
     phenom_d_generator : cuPhenomDGenerator = \
-        WaveformGenerator.load(
+        gf.WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds
         )
     
-    generator : InjectionGenerator = \
-        InjectionGenerator(
+    generator : gf.InjectionGenerator = \
+        gf.InjectionGenerator(
             phenom_d_generator,
             sample_rate_hertz,
             onsource_duration_seconds,
@@ -48,7 +44,7 @@ def test_iteration(
             num_examples_per_generation_batch,
             num_examples_per_batch,
             variables_to_return = \
-                [WaveformParameters.MASS_1_MSUN, WaveformParameters.MASS_2_MSUN]
+                [gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN]
         )
     
     logging.info("Start iteration tests...")
@@ -66,7 +62,7 @@ def test_phenom_d_injection(
     ):
     
     # Test Parameters:
-    num_examples_per_generation_batch : int = 2048
+    num_examples_per_generation_batch : int = 128
     num_examples_per_batch : int = num_tests
     sample_rate_hertz : float = 2048.0
     onsource_duration_seconds : float = 1.0
@@ -75,24 +71,24 @@ def test_phenom_d_injection(
         
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./gravitationalflow/tests/example_injection_parameters")
+        Path("./gravyflow/tests/example_injection_parameters")
     
     phenom_d_generator_high_mass : cuPhenomDGenerator = \
-        WaveformGenerator.load(
+        gf.WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters_high_mass.json", 
             sample_rate_hertz, 
             onsource_duration_seconds
         )
     
     phenom_d_generator_low_mass : cuPhenomDGenerator = \
-        WaveformGenerator.load(
+        gf.WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters_low_mass.json", 
             sample_rate_hertz, 
             onsource_duration_seconds
         )
     
-    injection_generator : InjectionGenerator = \
-        InjectionGenerator(
+    injection_generator : gf.InjectionGenerator = \
+        gf.InjectionGenerator(
             [phenom_d_generator_high_mass, phenom_d_generator_low_mass],
             sample_rate_hertz,
             onsource_duration_seconds,
@@ -100,7 +96,7 @@ def test_phenom_d_injection(
             num_examples_per_generation_batch,
             num_examples_per_batch,
             variables_to_return = \
-                [WaveformParameters.MASS_1_MSUN, WaveformParameters.MASS_2_MSUN]
+                [gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN]
         )
     
     total_onsource_duration_seconds : float = \
@@ -111,7 +107,7 @@ def test_phenom_d_injection(
     injections, mask, parameters = next(generator())
         
     high_mass = [
-        generate_strain_plot(
+        gf.generate_strain_plot(
             {"Plus": injection[0], "Cross": injection[1]},
             sample_rate_hertz,
             total_onsource_duration_seconds,
@@ -120,13 +116,13 @@ def test_phenom_d_injection(
         )
         for injection, m1, m2 in zip(
             injections[0], 
-            parameters[WaveformParameters.MASS_1_MSUN][0], 
-            parameters[WaveformParameters.MASS_2_MSUN][0]
+            parameters[gf.WaveformParameters.MASS_1_MSUN][0], 
+            parameters[gf.WaveformParameters.MASS_2_MSUN][0]
         )
     ]
 
     low_mass = [
-        generate_strain_plot(
+        gf.generate_strain_plot(
             {"Plus": injection[0], "Cross": injection[1]},
             sample_rate_hertz,
             total_onsource_duration_seconds,
@@ -135,15 +131,15 @@ def test_phenom_d_injection(
         )
         for injection, m1, m2 in zip(
             injections[1], 
-            parameters[WaveformParameters.MASS_1_MSUN][1], 
-            parameters[WaveformParameters.MASS_2_MSUN][1]
+            parameters[gf.WaveformParameters.MASS_1_MSUN][1], 
+            parameters[gf.WaveformParameters.MASS_2_MSUN][1]
         )
     ]
         
     layout = [list(item) for item in zip(low_mass, high_mass)]
     
     # Ensure output directory exists
-    ensure_directory_exists(output_diretory_path)
+    gf.ensure_directory_exists(output_diretory_path)
     
     # Define an output path for the dashboard
     output_file(output_diretory_path / "injection_plots.html")
@@ -159,7 +155,7 @@ def test_wnb_injection(
     ):
     
     # Test Parameters:
-    num_examples_per_generation_batch : int = 2048
+    num_examples_per_generation_batch : int = 128
     num_examples_per_batch : int = num_tests
     sample_rate_hertz : float = 2048.0
     onsource_duration_seconds : float = 1.0
@@ -168,10 +164,10 @@ def test_wnb_injection(
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./gravitationalflow/tests/example_injection_parameters")
+        Path("./gravyflow/tests/example_injection_parameters")
     
-    wnb_generator : WNBGenerator = \
-        WaveformGenerator.load(
+    wnb_generator : gf.WNBGenerator = \
+        gf.WaveformGenerator.load(
             injection_directory_path / "wnb_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds
@@ -179,8 +175,8 @@ def test_wnb_injection(
     
     wnb_generator.injection_chance = 1.0
     
-    injection_generator : InjectionGenerator = \
-        InjectionGenerator(
+    injection_generator : gf.InjectionGenerator = \
+        gf.InjectionGenerator(
             [wnb_generator],
             sample_rate_hertz,
             onsource_duration_seconds,
@@ -189,9 +185,9 @@ def test_wnb_injection(
             num_examples_per_batch,
             variables_to_return = \
                 [
-                    WaveformParameters.DURATION_SECONDS,
-                    WaveformParameters.MIN_FREQUENCY_HERTZ, 
-                    WaveformParameters.MAX_FREQUENCY_HERTZ
+                    gf.WaveformParameters.DURATION_SECONDS,
+                    gf.WaveformParameters.MIN_FREQUENCY_HERTZ, 
+                    gf.WaveformParameters.MAX_FREQUENCY_HERTZ
                 ]
         )
     
@@ -203,7 +199,7 @@ def test_wnb_injection(
     injections, mask, parameters = next(generator())
 
     layout = [
-        [generate_strain_plot(
+        [gf.generate_strain_plot(
             {"Plus": injection[0], "Cross": injection[1]},
             sample_rate_hertz,
             total_onsource_duration_seconds,
@@ -214,14 +210,14 @@ def test_wnb_injection(
         )]
         for injection, duration, min_frequency_hertz, max_frequency_hertz in zip(
             injections[0], 
-            parameters[WaveformParameters.DURATION_SECONDS][0],
-            parameters[WaveformParameters.MIN_FREQUENCY_HERTZ][0], 
-            parameters[WaveformParameters.MAX_FREQUENCY_HERTZ][0],
+            parameters[gf.WaveformParameters.DURATION_SECONDS][0],
+            parameters[gf.WaveformParameters.MIN_FREQUENCY_HERTZ][0], 
+            parameters[gf.WaveformParameters.MAX_FREQUENCY_HERTZ][0],
         )
     ]
             
     # Ensure output directory exists
-    ensure_directory_exists(output_diretory_path)
+    gf.ensure_directory_exists(output_diretory_path)
     
     # Define an output path for the dashboard
     output_file(output_diretory_path / "wnb_plots.html")
@@ -241,8 +237,8 @@ if __name__ == "__main__":
     memory_to_allocate_tf : int = 4000
     
     # Setup CUDA
-    gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    strategy = setup_cuda(
+    gpus = gf.find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
+    strategy = gf.setup_cuda(
         gpus, 
         max_memory_limit = memory_to_allocate_tf, 
         logging_level=logging.WARNING

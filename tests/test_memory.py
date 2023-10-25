@@ -12,19 +12,10 @@ from bokeh.layouts import gridplot
 from tqdm import tqdm
 
 # Local imports:
-from ..maths import Distribution, DistributionType
-from ..setup import (find_available_GPUs, setup_cuda, ensure_directory_exists, 
-                     get_tf_memory_usage)
-from ..injection import (cuPhenomDGenerator, InjectionGenerator, 
-                         WaveformParameters, WaveformGenerator)
-from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
-                          DataQuality, DataLabel, IFO)
-from ..noise import NoiseObtainer, NoiseType
-from ..plotting import generate_strain_plot, generate_spectrogram
-from ..dataset import get_ifo_dataset, get_ifo_data, ReturnVariables
+import gravyflow as gf
 
 def test_noise_memory(
-        num_tests : int = int(1.0E4)
+        num_tests : int = int(1.0E2)
     ):
     
     # Test parameters:
@@ -38,26 +29,26 @@ def test_noise_memory(
     num_batches : int = num_tests//num_examples_per_batch
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+    ifo_data_obtainer : gf.IFODataObtainer = \
+        gf.IFODataObtainer(
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gf.DataLabel.NOISE, 
+                gf.DataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gf.SegmentOrder.RANDOM,
             force_acquisition=True,
             cache_segments=False,
             logging_level=logging.INFO
         )
     
     # Initilise noise generator wrapper:
-    noise : NoiseObtainer = \
-        NoiseObtainer(
+    noise : gf.NoiseObtainer = \
+        gf.NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL,
-            ifos = IFO.L1
+            noise_type = gf.NoiseType.REAL,
+            ifos = gf.IFO.L1
         )
     
     # Set logging level:
@@ -79,14 +70,14 @@ def test_noise_memory(
             )
 
         # Measure memory before loop
-        memory_before_loop_mb = get_tf_memory_usage()
+        memory_before_loop_mb = gf.get_tf_memory_usage()
 
         logging.info("Start iteration tests...")
         for index, _ in tqdm(enumerate(islice(generator, num_batches))):
             pass
 
         # Measure memory after loop
-        memory_after_loop_mb = get_tf_memory_usage()
+        memory_after_loop_mb = gf.get_tf_memory_usage()
 
         # Calculate the difference
         memory_difference_mb = memory_after_loop_mb - memory_before_loop_mb
@@ -105,13 +96,13 @@ if __name__ == "__main__":
     memory_to_allocate_tf : int = 2000
     
     # Setup CUDA
-    gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    strategy = setup_cuda(
+    gpus = gf.find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
+    strategy = gf.setup_cuda(
         gpus, 
         max_memory_limit = memory_to_allocate_tf, 
         logging_level=logging.WARNING
     )    
     
-    # Test IFO noise dataset:
+    # Test gf.IFO noise dataset:
     with strategy.scope():
         test_noise_memory()

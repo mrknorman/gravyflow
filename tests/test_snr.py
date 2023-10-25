@@ -13,21 +13,7 @@ from bokeh.layouts import gridplot
 from bokeh.models import ColumnDataSource, HoverTool, Legend
 
 # Local imports:
-from ..cuphenom.py.cuphenom import generate_phenom_d
-from ..maths import Distribution, DistributionType, crop_samples
-from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
-from ..injection import (cuPhenomDGenerator, InjectionGenerator, 
-                         WaveformParameters, WaveformGenerator, 
-                         roll_vector_zero_padding)
-from ..plotting import generate_strain_plot
-from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
-                          DataQuality, DataLabel, IFO)
-from ..noise import NoiseObtainer, NoiseType
-from ..whiten import whiten
-from ..psd import calculate_psd
-from ..snr import scale_to_snr
-from ..plotting import generate_strain_plot, generate_spectrogram
-from ..dataset import ReturnVariables, get_ifo_dataset
+import gravyflow as gf
     
 def plot_psd(
         frequencies, 
@@ -93,7 +79,7 @@ def compare_whitening(
     
     # Tensorflow whitening:
     whitened_tensorflow = \
-        whiten(
+        gfwhiten(
             strain, 
             strain, 
             sample_rate_hertz, 
@@ -113,13 +99,13 @@ def compare_whitening(
         ).value
     
     whitened_tensorflow = \
-        crop_samples(
+        gfcrop_samples(
             whitened_tensorflow,
             duration_seconds,
             sample_rate_hertz
         )
 
-    whitened_gwpy = crop_samples(
+    whitened_gwpy = gfcrop_samples(
         whitened_gwpy,
         duration_seconds,
         sample_rate_hertz
@@ -143,13 +129,14 @@ def compare_psd_methods(
         )
     
     frequencies_tensorflow, strain_psd_tensorflow = \
-        calculate_psd(
+        gfpsd(
             strain, 
             sample_rate_hertz = sample_rate_hertz, 
             nperseg=nperseg
         )
     
-    assert all(frequencies_scipy == frequencies_tensorflow), "Frequencies not equal."
+    assert all(frequencies_scipy == frequencies_tensorflow), \
+        "Frequencies not equal."
     
     return frequencies_tensorflow, strain_psd_tensorflow, strain_psd_scipy
 
@@ -167,28 +154,28 @@ def test_snr(
     scale_factor : float = 1.0E21
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
+    ifo_data_obtainer : gf.IFODataObtainer = \
+        gf.IFODataObtainer(
+            gfObservingRun.O3, 
             DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gfDataLabel.NOISE, 
+                gfDataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gfSegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
     
     # Initilise noise generator wrapper:
-    noise_obtainer: NoiseObtainer = \
-        NoiseObtainer(
+    noise_obtainer: gfNoiseObtainer = \
+        gfNoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL,
-            ifos = IFO.L1
+            noise_type = gfNoiseType.REAL,
+            ifos = gfIFO.L1
         )
     
-    dataset : tf.data.Dataset = get_ifo_dataset(
+    dataset : tf.data.Dataset = gfDataset(
             # Random Seed:
             seed= 1000,
             # Temporal components:
@@ -201,8 +188,8 @@ def test_snr(
             # Output configuration:
             num_examples_per_batch=1,
             input_variables = [
-                ReturnVariables.ONSOURCE, 
-                ReturnVariables.OFFSOURCE
+                gfReturnVariables.ONSOURCE, 
+                gfReturnVariables.OFFSOURCE
             ]
         )
     
@@ -210,7 +197,7 @@ def test_snr(
             
     # Generate phenom injection:
     injection = \
-        generate_phenom_d(
+        gf.imrphenomd(
             num_waveforms = num_examples_per_batch, 
             mass_1_msun = 30, 
             mass_2_msun = 30,
@@ -238,7 +225,7 @@ def test_snr(
         (onsource_duration_seconds/2 + crop_duration_seconds) * sample_rate_hertz
     )
         
-    injection = roll_vector_zero_padding(
+    injection = gfroll_vector_zero_padding(
         injection, 
         min_roll, 
         max_roll
@@ -246,13 +233,17 @@ def test_snr(
     
     # Get first elements, and return to float 32 to tf functions:
     injection = injection[0]
-    offsource = tf.cast(background[ReturnVariables.OFFSOURCE.name][0], tf.float32)
-    onsource = tf.cast(background[ReturnVariables.ONSOURCE.name][0], tf.float32)
+    offsource = tf.cast(
+        background[gfReturnVariables.OFFSOURCE.name][0], tf.float32
+    )
+    onsource = tf.cast(
+        background[gfReturnVariables.ONSOURCE.name][0], tf.float32
+    )
     
     # Scale to SNR 30:
     snr : float = 30.0
     scaled_injection = \
-        scale_to_snr(
+        gfscale_to_snr(
             injection, 
             onsource,
             snr,
@@ -287,7 +278,7 @@ def test_snr(
         }
         
     layout = [
-        [generate_strain_plot(
+        [gfgenerate_strain_plot(
             {
                 "Whitened (tf) Onsouce + Injection": \
                     whitening_results["onsource_plus_injection"]["tensorflow"],
@@ -300,11 +291,11 @@ def test_snr(
             title=f"cuPhenomD injection example tf whitening",
             scale_factor=scale_factor
         ), 
-        generate_spectrogram(
+        gfgenerate_spectrogram(
             whitening_results["onsource_plus_injection"]["tensorflow"], 
             sample_rate_hertz,
         )],
-        [generate_strain_plot(
+        [gfgenerate_strain_plot(
             {
                 "Whitened (gwpy) Onsouce + Injection": \
                     whitening_results["onsource_plus_injection"]["gwpy"],
@@ -317,14 +308,14 @@ def test_snr(
             title=f"cuPhenomD injection example gwpy whitening",
             scale_factor=scale_factor
         ), 
-        generate_spectrogram(
+        gfgenerate_spectrogram(
             whitening_results["onsource_plus_injection"]["gwpy"], 
             sample_rate_hertz,
         )]
     ]
     
     # Ensure output directory exists
-    ensure_directory_exists(output_diretory_path)
+    gfensure_directory_exists(output_diretory_path)
     
     # Define an output path for the dashboard
     output_file(output_diretory_path / "whitening_test_plots.html")
@@ -372,8 +363,8 @@ if __name__ == "__main__":
     memory_to_allocate_tf : int = 2000
     
     # Setup CUDA
-    gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    strategy = setup_cuda(
+    gpus = gffind_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
+    strategy = gfsetup_cuda(
         gpus, 
         max_memory_limit=memory_to_allocate_tf, 
         logging_level=logging.WARNING
