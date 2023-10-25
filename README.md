@@ -19,9 +19,9 @@ conda install tensorflow-probability==0.20.*
 conda install -c conda-forge python-lalframe
 conda install bokeh
 ```
-# Compile CuPhenom:
+# Compile cuPhenom:
 
-On the LIGO cluster CuPhenom should be compilable with little difficulty. Run these commands to install:
+On the LIGO cluster cuPhenom should be compilable with little difficulty. Run these commands to install:
 
 ```
 cd py_ml_tools\cuphenom
