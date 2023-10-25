@@ -2,7 +2,7 @@ import tensorflow as tf
 
 # Compute Pearson correlation
 @tf.function
-def pearson_corr(x, y):
+def pearson(x, y):
 
     mean_x, mean_y = tf.reduce_mean(x, -1, keepdims=True), tf.reduce_mean(y, -1, keepdims=True)
     numerator = tf.reduce_sum((x - mean_x) * (y - mean_y), axis=-1)
@@ -11,9 +11,11 @@ def pearson_corr(x, y):
     return numerator / (denominator + 1e-5) # Adding epsilon for stability
 
 @tf.function
-def calculate_rolling_pearson(tensor: tf.Tensor, 
-                              max_arival_time_difference_seconds: float,
-                              sample_rate_hertz: float) -> tf.Tensor:
+def rolling_pearson(
+        tensor: tf.Tensor, 
+        max_arival_time_difference_seconds: float,
+        sample_rate_hertz: float
+    ) -> tf.Tensor:
     
     # Calculate max arrival time difference in samples
     max_arival_time_difference_samples = int(max_arival_time_difference_seconds * sample_rate_hertz)
@@ -45,7 +47,7 @@ def calculate_rolling_pearson(tensor: tf.Tensor,
         y_shifted = tf.transpose(y_collect.stack(), [1, 0, 2])
         
         # Compute correlations using broadcasting
-        corr = pearson_corr(x, y_shifted)
+        corr = pearson(x, y_shifted)
                  
         corr = tf.expand_dims(corr, axis=1)  # Add an additional axis for pair
         all_correlations = all_correlations.write(pair_idx, corr)

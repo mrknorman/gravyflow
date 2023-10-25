@@ -13,9 +13,6 @@ import tensorflow as tf
 from scipy.stats import truncnorm
 from tensorflow.python.distribute.distribute_lib import Strategy
 from tensorflow.python.framework.ops import EagerTensor
-from tensorflow.data import Dataset
-
-from .maths import Distribution, DistributionType
 
 def setup_cuda(
         device_num: str, 
@@ -138,44 +135,6 @@ def find_available_GPUs(
         available_gpus = available_gpus[:-max_needed-1:-1]
 
     return ",".join(str(gpu) for gpu in available_gpus)
-
-def load_datasets(paths):
-    
-    dataset = tf.data.experimental.load(paths[0])
-    for path in paths[1:]:
-        dataset = dataset.concatenate(dataset)
-        
-    return dataset
-
-def add_labels(dataset, label):
-    dataset_size = dataset.cardinality().numpy()
-
-    labels = Dataset.from_tensor_slices(
-        np.full(dataset_size, label, dtype=np.float32))
-    
-    return Dataset.zip((dataset, labels))
-    
-def load_label_datasets(paths, label):
-    
-    dataset = load_datasets(paths)
-    return add_labels(dataset, label)
-
-def load_noise_signal_datasets(noise_paths, signal_paths):
-    
-    noise  = load_label_datasets(noise_paths, 0)
-    signal = load_label_datasets(signal_paths, 1)
-
-    return signal.concatenate(noise)
-
-def split_test_train(dataset, fraction):
-    dataset_size = dataset.cardinality().numpy()
-    test_size = fraction * dataset_size
-
-    dataset = dataset.shuffle(dataset_size)
-    test_dataset = dataset.take(test_size)
-    train_dataset = dataset.skip(test_size)
-
-    return test_dataset, train_dataset
 
 def get_element_shape(dataset):
     for element in dataset.take(1):

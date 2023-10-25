@@ -8,26 +8,18 @@ import tensorflow as tf
 from tensorflow.data.experimental import AutoShardPolicy
 from tensorflow.data import Options
 
-from .noise import NoiseObtainer, NoiseType
-from .injection import (cuPhenomDGenerator, InjectionGenerator, 
-                        WaveformParameters, WNBGenerator, WaveformParameter,
-                        ReturnVariable, ReturnVariables, ScalingMethod, 
-                        ScalingTypes, ScalingType)
-from .maths import (expand_tensor, Distribution, set_random_seeds, crop_samples,
-                    replace_nan_and_inf_with_zero)
-from .whiten import whiten
-from .pearson import calculate_rolling_pearson
+import gravyflow as gf
 
 def validate_noise_settings(
-        noise_obtainer: NoiseObtainer, 
-        variables_to_return: List[Union[WaveformParameters, ReturnVariables]]
+        noise_obtainer: gf.NoiseObtainer, 
+        variables_to_return: List[Union[gf.gf.WaveformParameters, gf.ReturnVariables]]
     ) -> None:
     """
     Validates noise settings and emits warnings or errors as appropriate.
     
     Parameters
     ----------
-    noise_obtainer : NoiseObtainer
+    noise_obtainer : gf.NoiseObtainer
         The object containing noise settings.
     variables_to_return : Union[List[str], List[Enum]]
         List of variables expected to be returned.
@@ -39,7 +31,7 @@ def validate_noise_settings(
     """
     
     # Validate noise type and ifo_data_obtainer
-    if noise_obtainer.noise_type in [NoiseType.WHITE, NoiseType.COLORED]:
+    if noise_obtainer.noise_type in [gf.NoiseType.WHITE, gf.NoiseType.COLORED]:
         
         if noise_obtainer.ifo_data_obtainer is not None:
             warn(
@@ -47,17 +39,17 @@ def validate_noise_settings(
                 UserWarning
             )
             
-        if ReturnVariables.GPS_TIME in variables_to_return:
+        if gf.ReturnVariables.GPS_TIME in variables_to_return:
             warn(
                 "Cannot return GPS time from simulated Noise defaulting to -1",
                 UserWarning
             )
     
     # Validate whitening for white noise
-    if noise_obtainer.noise_type is NoiseType.WHITE:
+    if noise_obtainer.noise_type is gf.NoiseType.WHITE:
     
-        if ReturnVariables.WHITENED_INJECTIONS in variables_to_return or \
-           ReturnVariables.WHITENED_ONSOURCE in variables_to_return:
+        if gf.ReturnVariables.WHITENED_INJECTIONS in variables_to_return or \
+           gf.ReturnVariables.WHITENED_ONSOURCE in variables_to_return:
             
             warn(
                 "Whitening requested for WHITE NOISE.", 
@@ -85,7 +77,7 @@ def get_max_arrival_time_difference(
     
     return max_arival_time_difference_seconds
 
-def get_ifo_data(    
+def data(    
         # Random Seed:
         seed: int = 1000,
         # Temporal components:
@@ -96,20 +88,20 @@ def get_ifo_data(
         # Scale factor:
         scale_factor : float = 1.0E21,
         # Noise: 
-        noise_obtainer : NoiseObtainer = None,
+        noise_obtainer : gf.NoiseObtainer = None,
         group : str = "train",
         # Injections:
-        injection_generators: List[Union[cuPhenomDGenerator, WNBGenerator]] = None, 
+        injection_generators: List[Union[gf.cuPhenomDGenerator, gf.WNBGenerator]] = None, 
         num_examples_per_generation_batch : int = 2048,
         # Output configuration:
         num_examples_per_batch: int = 1,
-        input_variables : List[Union[WaveformParameters, ReturnVariables]] = None,
-        output_variables : List[Union[WaveformParameters, ReturnVariables]] = None
+        input_variables : List[Union[gf.gf.WaveformParameters, gf.ReturnVariables]] = None,
+        output_variables : List[Union[gf.gf.WaveformParameters, gf.ReturnVariables]] = None
     ):
     
     # Set defaults here as if initilised as default arguments objects are global
     if noise_obtainer is None:
-        noise_obtainer = NoiseObtainer()
+        noise_obtainer = gf.NoiseObtainer()
         
     if input_variables is None:
         input_variables = []
@@ -135,7 +127,7 @@ def get_ifo_data(
     # Set random seeds for Tensorflow and Numpy to ensure deterministic results
     # with the same seed. This means that if the seed is the concerved the
     # dataset produced will be identical:
-    set_random_seeds(seed)
+    gf.set_random_seeds(seed)
     
     # Create Noise Generator:
     noise : Iterator = \
@@ -152,12 +144,12 @@ def get_ifo_data(
     # Create Injection Generator: 
     waveform_parameters_to_return = [
         item for item in variables_to_return if isinstance(
-            item.value, WaveformParameter
+            item.value, gf.WaveformParameter
         )
     ]
     
-    injection_generator : InjectionGenerator = \
-        InjectionGenerator(
+    injection_generator : gf.InjectionGenerator = \
+        gf.InjectionGenerator(
             injection_generators,
             sample_rate_hertz,
             onsource_duration_seconds,
@@ -188,11 +180,10 @@ def get_ifo_data(
                 if key in variables_to_return:
                     parameters[key] = value
             
-            if ReturnVariables.WHITENED_INJECTIONS in variables_to_return:
+            if gf.ReturnVariables.WHITENED_INJECTIONS in variables_to_return:
                                 
-                whitened_injections = \
-                    tf.stack([
-                        whiten(
+                whitened_injections = tf.stack([
+                        gf.whiten(
                             scaled_injection_, 
                             offsource, 
                             sample_rate_hertz, 
@@ -202,29 +193,29 @@ def get_ifo_data(
                         ) for scaled_injection_ in scaled_injections
                     ])
                                 
-                whitened_injections = \
-                    replace_nan_and_inf_with_zero(whitened_injections)
+                whitened_injections = gf.replace_nan_and_inf_with_zero(
+                    whitened_injections
+                )
 
         else:
             scaled_injections = None
                 
         # Whiten data: 
-        if (ReturnVariables.WHITENED_ONSOURCE in variables_to_return) or \
-            (ReturnVariables.ROLLING_PEARSON_ONSOURCE in variables_to_return):
+        if (gf.ReturnVariables.WHITENED_ONSOURCE in variables_to_return) or \
+            (gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in variables_to_return):
             
-            whitened_onsource = \
-                whiten(
-                    onsource, 
-                    offsource, 
-                    sample_rate_hertz, 
-                    fft_duration_seconds=1.0,
-                    overlap_duration_seconds=0.5,
-                    filter_duration_seconds=1.0
-                )
+            whitened_onsource = gf.whiten(
+                onsource, 
+                offsource, 
+                sample_rate_hertz, 
+                fft_duration_seconds=1.0,
+                overlap_duration_seconds=0.5,
+                filter_duration_seconds=1.0
+            )
             
             # Crop to remove edge effects, crop with or without whitening to
             # ensure same data is retrieve in both cases
-            whitened_onsource = crop_samples(
+            whitened_onsource = gf.crop_samples(
                 whitened_onsource, 
                 onsource_duration_seconds, 
                 sample_rate_hertz
@@ -235,42 +226,42 @@ def get_ifo_data(
                 f"NaN detected in whitened_onsource after cast."
             )
             
-            if (ReturnVariables.ROLLING_PEARSON_ONSOURCE in variables_to_return):
+            if (gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in variables_to_return):
                 max_arival_time_difference_seconds: float = \
                     get_max_arrival_time_difference(injection_generators)
                 
-                rolling_pearson_onsource = calculate_rolling_pearson(
+                rolling_pearson_onsource = gf.rolling_pearson(
                     whitened_onsource,
                     max_arival_time_difference_seconds,
                     sample_rate_hertz
-                    )
+                )
             else:
                 rolling_pearson_onsource = None
                 
             whitened_onsource = tf.cast(whitened_onsource, tf.float16)
-            whitened_onsource = replace_nan_and_inf_with_zero(whitened_onsource)
+            whitened_onsource = gf.replace_nan_and_inf_with_zero(whitened_onsource)
 
         else:
             whitened_onsource = None
             rolling_pearson_onsource = None
         
-        if ReturnVariables.ONSOURCE in variables_to_return:
+        if gf.ReturnVariables.ONSOURCE in variables_to_return:
             # Crop to remove edge effects, crop with or without whitening to
             # ensure same data is retrieve in both cases
-            onsource = crop_samples(
+            onsource = gf.crop_samples(
                 onsource, 
                 onsource_duration_seconds, 
                 sample_rate_hertz
             )
             onsource = tf.cast(onsource, tf.float16)
             
-        if ReturnVariables.OFFSOURCE in variables_to_return:
+        if gf.ReturnVariables.OFFSOURCE in variables_to_return:
             offsource = tf.cast(offsource, tf.float16)
             
-        if ReturnVariables.GPS_TIME in variables_to_return:
+        if gf.ReturnVariables.GPS_TIME in variables_to_return:
             gps_times = tf.cast(gps_times, tf.float64)
             
-        if ReturnVariables.INJECTION_MASKS in variables_to_return:
+        if gf.ReturnVariables.INJECTION_MASKS in variables_to_return:
             mask = tf.cast(mask, tf.float32)
                 
         # Construct dictionary:
@@ -292,7 +283,7 @@ def get_ifo_data(
         yield (input_dict, output_dict)
 
 def create_variable_dictionary(
-    return_variables: List[Union[ReturnVariables, WaveformParameters]],
+    return_variables: List[Union[gf.ReturnVariables, gf.gf.WaveformParameters]],
     onsource : tf.Tensor,
     whitened_onsource : tf.Tensor,
     offsource : tf.Tensor,
@@ -305,14 +296,14 @@ def create_variable_dictionary(
     ) -> Dict:
 
     operations = {
-        ReturnVariables.ONSOURCE: onsource,
-        ReturnVariables.WHITENED_ONSOURCE: whitened_onsource,
-        ReturnVariables.OFFSOURCE: offsource,
-        ReturnVariables.GPS_TIME: gps_times,
-        ReturnVariables.INJECTIONS: injections,
-        ReturnVariables.WHITENED_INJECTIONS: whitened_injections,
-        ReturnVariables.INJECTION_MASKS: mask,
-        ReturnVariables.ROLLING_PEARSON_ONSOURCE: rolling_pearson_onsource
+        gf.ReturnVariables.ONSOURCE: onsource,
+        gf.ReturnVariables.WHITENED_ONSOURCE: whitened_onsource,
+        gf.ReturnVariables.OFFSOURCE: offsource,
+        gf.ReturnVariables.GPS_TIME: gps_times,
+        gf.ReturnVariables.INJECTIONS: injections,
+        gf.ReturnVariables.WHITENED_INJECTIONS: whitened_injections,
+        gf.ReturnVariables.INJECTION_MASKS: mask,
+        gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE: rolling_pearson_onsource
     }
 
     # Extend operations with any relevant keys from injection_parameters
@@ -322,16 +313,16 @@ def create_variable_dictionary(
 
     return {key.name: operations[key] for key in return_variables if key in operations}
 
-def get_ifo_dataset(
+def Dataset(
         seed: int = 1000,
         sample_rate_hertz: float = 2048.0,
         onsource_duration_seconds: float = 1.0,
         offsource_duration_seconds: float = 16.0,
         crop_duration_seconds: float = 0.5,
         scale_factor: float = 1.0E21,
-        noise_obtainer: NoiseObtainer = None,
+        noise_obtainer: gf.NoiseObtainer = None,
         group : str = "train",
-        injection_generators: List[Union[cuPhenomDGenerator, WNBGenerator]] = None,
+        injection_generators: List[Union[gf.cuPhenomDGenerator, gf.WNBGenerator]] = None,
         num_examples_per_generation_batch: int = 2048,
         num_examples_per_batch: int = 1,
         input_variables: List = None,
@@ -354,7 +345,7 @@ def get_ifo_dataset(
             Crop duration in seconds.
         scale_factor (float):
             Scale factor.
-        noise_obtainer (NoiseObtainer): 
+        noise_obtainer (gf.NoiseObtainer): 
             Object to obtain noise.
         injection_generators (list):
             List of injection generators.
@@ -447,42 +438,42 @@ def get_ifo_dataset(
         )
     
     output_signature_dict = {
-        ReturnVariables.ONSOURCE.name:
+        gf.ReturnVariables.ONSOURCE.name:
             tf.TensorSpec(
                 shape=onsource_shape, 
                 dtype=tf.float16
             ),
-        ReturnVariables.WHITENED_ONSOURCE.name: 
+        gf.ReturnVariables.WHITENED_ONSOURCE.name: 
             tf.TensorSpec(
                 shape=onsource_shape,
                 dtype=tf.float16
             ),
-        ReturnVariables.OFFSOURCE.name: 
+        gf.ReturnVariables.OFFSOURCE.name: 
             tf.TensorSpec(
                 shape=offsource_shape, 
                 dtype=tf.float16
             ),
-        ReturnVariables.GPS_TIME.name: 
+        gf.ReturnVariables.GPS_TIME.name: 
             tf.TensorSpec(
                 shape=detectors_shape, 
                 dtype=tf.int64
             ),
-        ReturnVariables.INJECTIONS.name: 
+        gf.ReturnVariables.INJECTIONS.name: 
             tf.TensorSpec(
                 shape=injections_shape,
                 dtype=tf.float16
             ),
-        ReturnVariables.WHITENED_INJECTIONS.name: 
+        gf.ReturnVariables.WHITENED_INJECTIONS.name: 
             tf.TensorSpec(
                 shape=injections_shape,
                 dtype=tf.float16
             ),
-        ReturnVariables.ROLLING_PEARSON_ONSOURCE.name:
+        gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE.name:
             tf.TensorSpec(
                 shape=pearson_shape,
                 dtype=tf.float32
             ),   
-        ReturnVariables.INJECTION_MASKS.name: 
+        gf.ReturnVariables.INJECTION_MASKS.name: 
             tf.TensorSpec(
                 shape=per_injection_shape, 
                 dtype=tf.float32
@@ -491,16 +482,16 @@ def get_ifo_dataset(
     
     parameters_to_return = {
         item for item in (input_variables + output_variables) if \
-        (isinstance(item.value, WaveformParameter) or isinstance(
-            item.value, ScalingType)
+        (isinstance(item.value, gf.WaveformParameter) or isinstance(
+            item.value, gf.ScalingType)
         )
     }
     
     if not injection_generators:
         keys_to_remove = {
-            ReturnVariables.INJECTION_MASKS, 
-            ReturnVariables.INJECTIONS, 
-            ReturnVariables.WHITENED_INJECTIONS
+            gf.ReturnVariables.INJECTION_MASKS, 
+            gf.ReturnVariables.INJECTIONS, 
+            gf.ReturnVariables.WHITENED_INJECTIONS
         }
 
         parameters_to_return -= keys_to_remove
@@ -522,7 +513,7 @@ def get_ifo_dataset(
         {k.name: output_signature_dict[k.name] for k in output_variables}
     )
 
-    generator = lambda: get_ifo_data(
+    generator = lambda: data(
         seed=seed,
         sample_rate_hertz=sample_rate_hertz,
         onsource_duration_seconds=onsource_duration_seconds,
@@ -599,4 +590,4 @@ def group_split_dataset(
     
     args = generator_args.copy()
     args.update({"group_name" : group_name})
-    return get_ifo_dataset(**args).take(num_batches)
+    return dataset(**args).take(num_batches)

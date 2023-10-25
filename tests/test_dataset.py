@@ -12,16 +12,15 @@ from bokeh.layouts import gridplot
 from tqdm import tqdm
 
 # Local imports:
+import gravyflow as gf
+
 from ..maths import Distribution, DistributionType
 from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
 from ..injection import (cuPhenomDGenerator, InjectionGenerator, 
                          WaveformParameters, WaveformGenerator, ScalingMethod, 
                          ScalingTypes, IncoherentGenerator)
-from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
-                          DataQuality, DataLabel, IFO)
 from ..noise import NoiseObtainer, NoiseType
 from ..plotting import generate_strain_plot, generate_spectrogram
-from ..dataset import get_ifo_dataset, get_ifo_data, ReturnVariables
 
 def test_iteration(
     num_tests : int = int(1.0E2)
@@ -35,11 +34,11 @@ def test_iteration(
     offsource_duration_seconds : float = 16.0
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
-    ifos = [IFO.L1]
+    ifos = [gf.IFO.L1]
         
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./gravitationalflow/tests/example_injection_parameters")
+        Path("./gravyflow/tests/example_injection_parameters")
     
     # Intilise Scaling Method:
     scaling_method = \
@@ -59,15 +58,15 @@ def test_iteration(
         )
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+    ifo_data_obtainer : gf.IFODataObtainer = \
+        gf.IFODataObtainer(
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gf.DataLabel.NOISE, 
+                gf.DataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gf.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
@@ -81,10 +80,10 @@ def test_iteration(
         )
     
     input_variables = [
-        ReturnVariables.WHITENED_ONSOURCE, 
-        ReturnVariables.INJECTION_MASKS, 
-        ReturnVariables.INJECTIONS,
-        ReturnVariables.WHITENED_INJECTIONS,
+        gf.ReturnVariables.WHITENED_ONSOURCE, 
+        gf.ReturnVariables.INJECTION_MASKS, 
+        gf.ReturnVariables.INJECTIONS,
+        gf.ReturnVariables.WHITENED_INJECTIONS,
         WaveformParameters.MASS_1_MSUN, 
         WaveformParameters.MASS_2_MSUN
     ]
@@ -110,7 +109,7 @@ def test_iteration(
     # Deepcopy before running tests to ensure args remain constant:
     dataset_args : Dict = deepcopy(data_args)
     
-    data : tf.data.Dataset = get_ifo_data(
+    data : tf.data.Dataset = gf.data(
         **data_args
     )
     
@@ -122,7 +121,7 @@ def test_iteration(
     assert index == num_tests - 1, \
         "Warning! Data does not iterate the required number of batches"
 
-    dataset : tf.data.Dataset = get_ifo_dataset(
+    dataset : tf.data.Dataset = gf.Dataset(
         **dataset_args
     )
     
@@ -134,7 +133,7 @@ def test_iteration(
     
 def test_dataset(
     num_tests : int = 32,
-    output_diretory_path : Path = Path("./py_ml_data/tests/")
+    output_diretory_path : Path = Path("./gravyflow_data/tests/")
     ):
     
     # Test Parameters:
@@ -148,7 +147,7 @@ def test_dataset(
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./gravitationalflow/tests/example_injection_parameters")
+        Path("./gravyflow/tests/example_injection_parameters")
     
     # Intilise Scaling Method:
     scaling_method = \
@@ -167,15 +166,15 @@ def test_dataset(
         )
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+    ifo_data_obtainer : gf.IFODataObtainer = \
+        gf.IFODataObtainer(
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gf.DataLabel.NOISE, 
+                gf.DataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gf.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
@@ -185,10 +184,10 @@ def test_dataset(
         NoiseObtainer(
             ifo_data_obtainer=ifo_data_obtainer,
             noise_type=NoiseType.REAL,
-            ifos=IFO.L1
+            ifos=gf.IFO.L1
         )
     
-    dataset : tf.data.Dataset = get_ifo_dataset(
+    dataset : tf.data.Dataset = gf.Dataset(
         # Random Seed:
         seed= 1000,
         # Temporal components:
@@ -203,10 +202,10 @@ def test_dataset(
         # Output configuration:
         num_examples_per_batch=num_examples_per_batch,
         input_variables = [
-            ReturnVariables.WHITENED_ONSOURCE, 
-            ReturnVariables.INJECTION_MASKS, 
-            ReturnVariables.INJECTIONS,
-            ReturnVariables.WHITENED_INJECTIONS,
+            gf.ReturnVariables.WHITENED_ONSOURCE, 
+            gf.ReturnVariables.INJECTION_MASKS, 
+            gf.ReturnVariables.INJECTIONS,
+            gf.ReturnVariables.WHITENED_INJECTIONS,
             WaveformParameters.MASS_1_MSUN, 
             WaveformParameters.MASS_2_MSUN
         ],
@@ -214,12 +213,12 @@ def test_dataset(
     
     input_dict, _ = next(iter(dataset))
         
-    onsource = input_dict[ReturnVariables.WHITENED_ONSOURCE.name].numpy()
-    injections = input_dict[ReturnVariables.INJECTIONS.name].numpy()
+    onsource = input_dict[gf.ReturnVariables.WHITENED_ONSOURCE.name].numpy()
+    injections = input_dict[gf.ReturnVariables.INJECTIONS.name].numpy()
     whitened_injections = input_dict[
-        ReturnVariables.WHITENED_INJECTIONS.name
+        gf.ReturnVariables.WHITENED_INJECTIONS.name
     ].numpy()
-    masks = input_dict[ReturnVariables.INJECTION_MASKS.name].numpy()
+    masks = input_dict[gf.ReturnVariables.INJECTION_MASKS.name].numpy()
     mass_1_msun = input_dict[WaveformParameters.MASS_1_MSUN.name].numpy()
     mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN.name].numpy()
     
@@ -262,7 +261,7 @@ def test_dataset(
     
 def test_dataset_multi(
     num_tests : int = 32,
-    output_diretory_path : Path = Path("./py_ml_data/tests/")
+    output_diretory_path : Path = Path("./gravyflow_data/tests/")
     ):
     
     # Test Parameters:
@@ -273,11 +272,11 @@ def test_dataset_multi(
     offsource_duration_seconds : float = 16.0
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
-    ifos = [IFO.L1, IFO.H1]
+    ifos = [gf.IFO.L1, gf.IFO.H1]
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./gravitationalflow/tests/example_injection_parameters")
+        Path("./gravyflow/tests/example_injection_parameters")
     
     # Intilise Scaling Method:
     scaling_method = \
@@ -297,15 +296,15 @@ def test_dataset_multi(
         )
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+    ifo_data_obtainer : gf.IFODataObtainer = \
+        gf.IFODataObtainer(
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gf.DataLabel.NOISE, 
+                gf.DataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gf.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
@@ -318,7 +317,7 @@ def test_dataset_multi(
             ifos=ifos
         )
     
-    dataset : tf.data.Dataset = get_ifo_dataset(
+    dataset : tf.data.Dataset = gf.Dataset(
         # Random Seed:
         seed= 1000,
         # Temporal components:
@@ -333,10 +332,10 @@ def test_dataset_multi(
         # Output configuration:
         num_examples_per_batch=num_examples_per_batch,
         input_variables = [
-            ReturnVariables.WHITENED_ONSOURCE, 
-            ReturnVariables.INJECTION_MASKS, 
-            ReturnVariables.INJECTIONS,
-            ReturnVariables.WHITENED_INJECTIONS,
+            gf.ReturnVariables.WHITENED_ONSOURCE, 
+            gf.ReturnVariables.INJECTION_MASKS, 
+            gf.ReturnVariables.INJECTIONS,
+            gf.ReturnVariables.WHITENED_INJECTIONS,
             WaveformParameters.MASS_1_MSUN, 
             WaveformParameters.MASS_2_MSUN
         ],
@@ -344,12 +343,12 @@ def test_dataset_multi(
     
     input_dict, _ = next(iter(dataset))
         
-    onsource = input_dict[ReturnVariables.WHITENED_ONSOURCE.name].numpy()
-    injections = input_dict[ReturnVariables.INJECTIONS.name].numpy()
+    onsource = input_dict[gf.ReturnVariables.WHITENED_ONSOURCE.name].numpy()
+    injections = input_dict[gf.ReturnVariables.INJECTIONS.name].numpy()
     whitened_injections = input_dict[
-        ReturnVariables.WHITENED_INJECTIONS.name
+        gf.ReturnVariables.WHITENED_INJECTIONS.name
     ].numpy()
-    masks = input_dict[ReturnVariables.INJECTION_MASKS.name].numpy()
+    masks = input_dict[gf.ReturnVariables.INJECTION_MASKS.name].numpy()
     mass_1_msun = input_dict[WaveformParameters.MASS_1_MSUN.name].numpy()
     mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN.name].numpy()
     
@@ -388,7 +387,7 @@ def test_dataset_multi(
     
 def test_dataset_incoherent(
     num_tests : int = 32,
-    output_diretory_path : Path = Path("./py_ml_data/tests/")
+    output_diretory_path : Path = Path("./gravyflow_data/tests/")
     ):
     
     # Test Parameters:
@@ -399,11 +398,11 @@ def test_dataset_incoherent(
     offsource_duration_seconds : float = 16.0
     crop_duration_seconds : float = 0.5
     scale_factor : float = 1.0E21
-    ifos = [IFO.L1, IFO.H1]
+    ifos = [gf.IFO.L1, gf.IFO.H1]
     
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./gravitationalflow/tests/example_injection_parameters")
+        Path("./gravyflow/tests/example_injection_parameters")
     
     # Intilise Scaling Method:
     scaling_method = \
@@ -434,15 +433,15 @@ def test_dataset_incoherent(
     )
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+    ifo_data_obtainer : gf.IFODataObtainer = \
+        gf.IFODataObtainer(
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gf.DataLabel.NOISE, 
+                gf.DataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gf.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
@@ -455,7 +454,7 @@ def test_dataset_incoherent(
             ifos=ifos
         )
     
-    dataset : tf.data.Dataset = get_ifo_dataset(
+    dataset : tf.data.Dataset = gf.Dataset(
         # Random Seed:
         seed= 1000,
         # Temporal components:
@@ -470,11 +469,11 @@ def test_dataset_incoherent(
         # Output configuration:
         num_examples_per_batch=num_examples_per_batch,
         input_variables = [
-            ReturnVariables.WHITENED_ONSOURCE, 
-            ReturnVariables.INJECTION_MASKS, 
-            ReturnVariables.INJECTIONS,
-            ReturnVariables.WHITENED_INJECTIONS,
-            ReturnVariables.ROLLING_PEARSON_ONSOURCE,
+            gf.ReturnVariables.WHITENED_ONSOURCE, 
+            gf.ReturnVariables.INJECTION_MASKS, 
+            gf.ReturnVariables.INJECTIONS,
+            gf.ReturnVariables.WHITENED_INJECTIONS,
+            gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE,
             WaveformParameters.MASS_1_MSUN, 
             WaveformParameters.MASS_2_MSUN
         ],
@@ -482,12 +481,12 @@ def test_dataset_incoherent(
     
     input_dict, _ = next(iter(dataset))
         
-    onsource = input_dict[ReturnVariables.WHITENED_ONSOURCE.name].numpy()
-    injections = input_dict[ReturnVariables.INJECTIONS.name].numpy()
+    onsource = input_dict[gf.ReturnVariables.WHITENED_ONSOURCE.name].numpy()
+    injections = input_dict[gf.ReturnVariables.INJECTIONS.name].numpy()
     whitened_injections = input_dict[
-        ReturnVariables.WHITENED_INJECTIONS.name
+        gf.ReturnVariables.WHITENED_INJECTIONS.name
     ].numpy()
-    masks = input_dict[ReturnVariables.INJECTION_MASKS.name].numpy()
+    masks = input_dict[gf.ReturnVariables.INJECTION_MASKS.name].numpy()
     mass_1_msun = input_dict[WaveformParameters.MASS_1_MSUN.name].numpy()
     mass_2_msun = input_dict[WaveformParameters.MASS_2_MSUN.name].numpy()
     

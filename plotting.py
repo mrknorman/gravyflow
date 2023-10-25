@@ -4,7 +4,6 @@ import numpy as np
 import tensorflow as tf
 from scipy.signal import spectrogram
 from scipy.constants import golden
-
 from bokeh.io import save, output_file
 from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource, Legend, ColorBar, LogTicker, LinearColorMapper
@@ -94,7 +93,7 @@ def generate_strain_plot(
     colors : list = None, # We'll handle default value inside the function
     has_legend : bool = True,
     scale_factor : float = None,
-    height : int = 300,
+    height : int = 400,
     width : int = None
     ):
     

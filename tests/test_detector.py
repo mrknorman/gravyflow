@@ -12,8 +12,9 @@ from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
 
 # Local imports:
+import gravyflow as gf
+
 from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
-from ..detector import Network, IFO
 from ..injection import (cuPhenomDGenerator, WNBGenerator, InjectionGenerator, 
                          WaveformParameters, WaveformGenerator)
 from ..plotting import generate_strain_plot
@@ -24,7 +25,7 @@ def test_detector():
     latitude = 0.3
     longitude = 0.5
     
-    network = Network({
+    network = gf.Network({
         "longitude_radians" : latitude, 
         "latitude_radians" : longitude,
         "y_angle_radians" : 0.0,  # Batched tensor
@@ -46,20 +47,20 @@ def test_detector():
         rtol=0, 
         atol=1e-07, 
         equal_nan=True, 
-        err_msg="Tensorflow Network construction does not equal pycbc method.", 
+        err_msg="Tensorflow gf.Network construction does not equal pycbc method.", 
         verbose=True
     )
     
     # From loading:
     example_network_directory : Path = Path(
-        "./gravitationalflow/tests/example_network_parameters/example_network.json"
+        "./gravyflow/tests/example_network_parameters/example_network.json"
     )
     
-    network = Network.load(example_network_directory)
+    network = gf.Network.load(example_network_directory)
         
     # Create from Enum:
-    network = Network(
-        [IFO.L1, IFO.H1]
+    network = gf.Network(
+        [gf.IFO.L1, gf.IFO.H1]
     )
     
     test_antenna_pattern()
@@ -68,9 +69,9 @@ def test_detector():
 def test_antenna_pattern():
     # Generating random values for our function
     
-    test_detectors = [IFO.L1, IFO.H1]
+    test_detectors = [gf.IFO.L1, gf.IFO.H1]
     # Create from Enum:
-    network = Network(
+    network = gf.Network(
         test_detectors
     )
     
@@ -165,9 +166,9 @@ def test_time_delay():
     
     d = Detector("L1") 
         
-    test_detectors = [IFO.L1, IFO.H1, IFO.V1]
+    test_detectors = [gf.IFO.L1, gf.IFO.H1, gf.IFO.V1]
     # Create from Enum:
-    network = Network(
+    network = gf.Network(
         test_detectors
     )
     
@@ -228,7 +229,7 @@ def zomb_antenna_pattern(
     
 def test_project_wave(
     num_tests : int = 2048,
-    output_diretory_path : Path = Path("./py_ml_data/tests/")
+    output_diretory_path : Path = Path("./gravyflow_data/tests/")
     ):
     
     # Test Parameters:
@@ -241,7 +242,7 @@ def test_project_wave(
         
     # Define injection directory path:
     injection_directory_path : Path = \
-        Path("./gravitationalflow/tests/example_injection_parameters")
+        Path("./gravyflow/tests/example_injection_parameters")
     
     phenom_d_generator : cuPhenomDGenerator = \
         WaveformGenerator.load(
@@ -274,7 +275,7 @@ def test_project_wave(
     
     injections, mask, parameters = next(generator())
     
-    network = Network([IFO.L1, IFO.H1, IFO.V1])
+    network = gf.Network([gf.IFO.L1, gf.IFO.H1, gf.IFO.V1])
     
     projected_injections = \
         network.project_wave(injections[0], sample_rate_hertz)

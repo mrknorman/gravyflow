@@ -21,9 +21,7 @@ from gwpy.segments import DataQualityDict
 from gwpy.table import EventTable
 from gwpy.timeseries import TimeSeries
 
-from .setup import open_hdf5_file, ensure_directory_exists
-from .maths import replace_nan_and_inf_with_zero
-from .detector import IFO
+import gravyflow as gf
 
 # Enums
 class DataQuality(Enum):
@@ -63,18 +61,30 @@ class ObservingRunData:
         return total_seconds
 
 observing_run_data : Dict = {
-    "O1" : ("O1", datetime(2015, 9, 12, 0, 0, 0), datetime(2016, 1, 19, 0, 0, 0),
-     {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
-     {DataQuality.BEST: "HOFT_C01"},
-     {DataQuality.BEST: "DCS-ANALYSIS_READY_C01:1"}),
-    "O2" : ("O2", datetime(2016, 11, 30, 0, 0, 0), datetime(2017, 8, 25, 0, 0, 0),
-     {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
-     {DataQuality.BEST: "HOFT_C01"},
-     {DataQuality.BEST: "DCS-ANALYSIS_READY_C01:1"}),
-    "O3" : ("O3", datetime(2019, 4, 1, 0, 0, 0), datetime(2020, 3, 27, 0, 0, 0),
-     {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
-     {DataQuality.BEST: "HOFT_C01"},
-     {DataQuality.BEST: "DCS-ANALYSIS_READY_C01:1"})
+    "O1" : (
+        "O1", 
+        datetime(2015, 9, 12, 0, 0, 0), 
+        datetime(2016, 1, 19, 0, 0, 0),
+        {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
+        {DataQuality.BEST: "HOFT_C01"},
+        {DataQuality.BEST: "DCS-ANALYSIS_READY_C01:1"}
+    ),
+    "O2" : (
+        "O2", 
+        datetime(2016, 11, 30, 0, 0, 0), 
+        datetime(2017, 8, 25, 0, 0, 0),
+        {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
+        {DataQuality.BEST: "HOFT_C01"},
+        {DataQuality.BEST: "DCS-ANALYSIS_READY_C01:1"}
+    ),
+    "O3" : (
+        "O3", 
+        datetime(2019, 4, 1, 0, 0, 0), 
+        datetime(2020, 3, 27, 0, 0, 0),
+        {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
+        {DataQuality.BEST: "HOFT_C01"},
+        {DataQuality.BEST: "DCS-ANALYSIS_READY_C01:1"}
+    )
 }
 
 class ObservingRun(Enum):
@@ -92,10 +102,11 @@ class IFOData:
                 
         if isinstance(self.data, list):
             new_data = [
-                tf.convert_to_tensor(data, dtype=tf.float32) for data in self.data
+                tf.convert_to_tensor(data, dtype=tf.float32)
+                for data in self.data
             ]
             new_data = [
-                replace_nan_and_inf_with_zero(data) for data in new_data
+                gf.replace_nan_and_inf_with_zero(data) for data in new_data
             ]
             
             self.data = new_data      
@@ -104,7 +115,8 @@ class IFOData:
             self.data = [tf.convert_to_tensor(self.data, dtype=tf.float32)]
             
         self.duration_seconds = [
-            tf.cast(tf.shape(ifo_data)[0], tf.float32) / self.sample_rate_hertz for ifo_data in self.data
+            tf.cast(tf.shape(ifo_data)[0], tf.float32) / 
+            self.sample_rate_hertz for ifo_data in self.data
         ]
 
         self.time_interval_seconds = 1.0 / self.sample_rate_hertz
@@ -140,7 +152,8 @@ class IFOData:
 
             N = tf.shape(tensor_data)[0]
 
-            maxval = N.numpy() - num_onsource_samples - num_offsource_samples + 1
+            maxval = N.numpy() - num_onsource_samples - num_offsource_samples \
+                    + 1
 
             random_starts = tf.random.uniform(
                 shape=(num_examples_per_batch,), 
@@ -148,8 +161,9 @@ class IFOData:
                 maxval=maxval, 
                 dtype=tf.int32
             )
-
-            def slice_data(start, num_samples, tensor_data=tensor_data):  # default argument ensures correct tensor is used
+            
+            # Default argument ensures correct tensor is used:
+            def slice_data(start, num_samples, tensor_data=tensor_data):  
                 return tf.slice(tensor_data, [start], [num_samples])
 
             batch_subarrays = tf.map_fn(
@@ -162,7 +176,9 @@ class IFOData:
 
             batch_background_chunks = tf.map_fn(
                 lambda start: \
-                    slice_data(start - num_offsource_samples, num_offsource_samples), 
+                    slice_data(
+                        start - num_offsource_samples, num_offsource_samples
+                    ), 
                 random_starts, 
                 fn_output_signature=tf.TensorSpec(
                     shape=[num_offsource_samples], dtype=tf.float32
@@ -179,16 +195,23 @@ class IFOData:
         
         if (len(self.data) > 1):
             # Stack results across the new dimension
-            stacked_batch_subarrays = tf.stack(all_batch_subarrays, axis=1)
-            stacked_batch_background_chunks = tf.stack(all_batch_background_chunks, axis=1)
-            stacked_subsections_start_gps_time = tf.stack(all_subsections_start_gps_time, axis=1)
+            stacked_batch_subarrays = tf.stack(
+                all_batch_subarrays, axis=1
+            )
+            stacked_batch_background_chunks = tf.stack(
+                all_batch_background_chunks, axis=1
+            )
+            stacked_subsections_start_gps_time = tf.stack(
+                all_subsections_start_gps_time, axis=1
+            )
         else:
             # Stack results across the new dimension
             stacked_batch_subarrays = all_batch_subarrays[0]
             stacked_batch_background_chunks = all_batch_subarrays[0]
             stacked_subsections_start_gps_time = all_batch_subarrays[0]
 
-        return stacked_batch_subarrays, stacked_batch_background_chunks, stacked_subsections_start_gps_time
+        return (stacked_batch_subarrays, stacked_batch_background_chunks, 
+                stacked_subsections_start_gps_time)
     
 @dataclass
 class IFODataObtainer:
@@ -308,7 +331,7 @@ class IFODataObtainer:
         segment_hash = generate_hash_from_list(segment_parameters)
         
         # Ensure parent directory exists 
-        ensure_directory_exists(data_directory_path)
+        gf.ensure_directory_exists(data_directory_path)
         
         # Construct the segment filename using the hash
         self.file_path = \
@@ -320,7 +343,7 @@ class IFODataObtainer:
         self,
         start: float,
         stop: float,
-        ifo: IFO,
+        ifo: gf.IFO,
         state_flag: str
     ) -> np.ndarray:
         
@@ -337,7 +360,7 @@ class IFODataObtainer:
     
     def get_all_segment_times(
         self,
-        ifo : IFO
+        ifo : gf.IFO
     ) -> np.ndarray:
         
         valid_segments = []
@@ -378,7 +401,7 @@ class IFODataObtainer:
         
     def get_valid_segments(
         self,
-        ifos : List[IFO],
+        ifos : List[gf.IFO],
         groups : Dict[str, float] = None,
         group_name : str = "train",
         segment_order : SegmentOrder = None
@@ -533,7 +556,8 @@ class IFODataObtainer:
         start_points = np.ceil(segments[:, 0] / interval) * interval
         end_points = segments[:, 1]
         cut_points = [
-            np.arange(start, end, interval) for start, end in zip(start_points, end_points)
+            np.arange(start, end, interval) 
+            for start, end in zip(start_points, end_points)
         ]
 
         # Split segments based on calculated cut_points
@@ -691,9 +715,9 @@ class IFODataObtainer:
 
             case SegmentOrder.SHORTEST_FIRST:
                 # Sort by shortest first (usefull for debugging).
-                sort_by_duration = \
-                    lambda segments: \
-                        segments[np.argsort(segments[0][:, 1] - segments[0][:, 0])]
+                sort_by_duration = lambda segments: segments[
+                    np.argsort(segments[0][:, 1] - segments[0][:, 0])
+                ]
                 valid_segments = sort_by_duration(valid_segments)
             case SegmentOrder.CHRONOLOGICAL:
                 # Do nothing as default order should be chronological.
@@ -741,18 +765,23 @@ class IFODataObtainer:
             for segments in new_segments_list:
                 # Find segments that fall within this bin
                 in_bin = segments[
-                    (segments[:, 0] < bin_start + interval) & (segments[:, 1] > bin_start)
+                    (segments[:, 0] < bin_start + interval) 
+                    & (segments[:, 1] > bin_start)
                 ]
                 if in_bin.size > 0:
                     # Adjust the segments to fit within the bin
                     in_bin[:, 0] = np.maximum(in_bin[:, 0], bin_start)
-                    in_bin[:, 1] = np.minimum(in_bin[:, 1], bin_start + interval)
+                    in_bin[:, 1] = np.minimum(
+                        in_bin[:, 1], bin_start + interval
+                    )
                     result[i].append(in_bin)
                 else:
                     result[i].append(np.empty((0, 2)))
                     
         # Filter out bins where one of the lists is empty
-        filtered_result = [bin for bin in result if all(len(arr) > 0 for arr in bin)]
+        filtered_result = [
+            bin for bin in result if all(len(arr) > 0 for arr in bin)
+        ]
 
         return filtered_result
     
@@ -770,18 +799,28 @@ class IFODataObtainer:
             List of 2 arrays of largest segments, with equal length.
         """
         # Initialize lists to store largest segments from each original array
-        largest_segments_list = [[] for _ in range(len(filtered_bins_result[0]))]
+        largest_segments_list = [
+            [] for _ in range(len(filtered_bins_result[0]))
+        ]
 
         # Iterate over each bin
         for bin in filtered_bins_result:
             # For each list in a bin, find the segment with the largest duration
             for j, segments in enumerate(bin):
-                durations = segments[:, 1] - segments[:, 0]  # Calculate durations of segments
-                largest_segment_index = np.argmax(durations)  # Find index of largest segment
-                largest_segments_list[j].append(segments[largest_segment_index])  # Add largest segment to list
+                
+                # Calculate durations of segments:
+                durations = segments[:, 1] - segments[:, 0]  
+                
+                # Find index of largest segment:
+                largest_segment_index = np.argmax(durations)  
+                
+                # Add largest segment to list:
+                largest_segments_list[j].append(segments[largest_segment_index])  
         
         # Convert lists of largest segments into arrays
-        result_arrays = [np.array(segments) for segments in largest_segments_list]
+        result_arrays = [
+            np.array(segments) for segments in largest_segments_list
+        ]
 
         return np.array(largest_segments_list)
                 
@@ -789,7 +828,7 @@ class IFODataObtainer:
         self,
         sample_rate_hertz : float,
         valid_segments : np.ndarray = None,
-        ifos : List[IFO] = IFO.L1,
+        ifos : List[gf.IFO] = gf.IFO.L1,
         scale_factor : float = 1.0
     ): 
         # Check if self.file_path is intitiated:
@@ -817,7 +856,8 @@ class IFODataObtainer:
                 # Generate segment key to use to locate or save segment data  
                 # within the associated hdf5 file:
                 segment_key = \
-                    f"segments/segment_{segment_start_gps_time}_{segment_end_gps_time}"
+                    (f"segments/segment_{segment_start_gps_time}_"
+                     "{segment_end_gps_time}")
 
                 # Acquire segment data, either from local stored file or remote:
                 segment = \
@@ -839,13 +879,14 @@ class IFODataObtainer:
                     if self.cache_segments:  
 
                         with closing(
-                            open_hdf5_file(self.file_path, mode = "r+")
+                            gf.open_hdf5_file(self.file_path, mode = "r+")
                             ) as segment_file:    
 
                             # Ensure hdf5 file has group "segments":
                             segment_file.require_group("segments")
 
-                            if (segment_key not in segment_file) or self.force_acquisition:
+                            if (segment_key not in segment_file) or \
+                                self.force_acquisition:
                                 segment_file.create_dataset(
                                     segment_key, 
                                     data = segment.data
@@ -873,7 +914,7 @@ class IFODataObtainer:
             self,
             segment_start_gps_time: float, 
             segment_end_gps_time: float, 
-            ifos: List[IFO], 
+            ifos: List[gf.IFO], 
             frame_type: str, 
             channel: str
         ) -> TimeSeries:
@@ -892,7 +933,7 @@ class IFODataObtainer:
             The start time of the segment.
         segment_end : int
             The end time of the segment.
-        ifo : IFO
+        ifo : gf.IFO
             The Interferometric Gravitational-Wave Observatory (IFO) to use.
         frame_type : str
             The frame type to use.
@@ -928,16 +969,18 @@ class IFODataObtainer:
             segment_start_gps_time : float,
             segment_end_gps_time : float,
             sample_rate_hertz : float,
-            ifos : List[IFO],
+            ifos : List[gf.IFO],
             segment_key : str
         ) -> np.ndarray:
         
-        # Default segment data to None in case of very possible aquisition error:
+        # Default segment data to None in case of very possible aquisition 
+        # error:
         segment = None
         expected_duration_seconds : float = \
                 segment_end_gps_time - segment_start_gps_time
         
-        with closing(open_hdf5_file(self.file_path, mode = "r")) as segment_file:    
+        with closing(gf.open_hdf5_file(self.file_path, mode = "r")) as \
+            segment_file:    
 
             # Check if segment_key is present in segment file, and load if it
             # else acquire segment from database
@@ -987,7 +1030,7 @@ class IFODataObtainer:
             padding_duration_seconds : float,
             offsource_duration_seconds : float,
             num_examples_per_batch : int = 32,
-            ifos : List[IFO] = IFO.L1,
+            ifos : List[gf.IFO] = gf.IFO.L1,
             scale_factor : float = 1.0
         ) -> (tf.Tensor, tf.Tensor, tf.Tensor, int):
         
