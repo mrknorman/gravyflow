@@ -4,8 +4,8 @@ TensorFlow tools to facilitate machine learning for gravitational-wave data anal
 # Environment Setup:
 
 ```
-conda create -n py_ml_tools_310 python=3.10
-conda activate py_ml_tools_310
+conda create -n gravyflow python=3.10
+conda activate gravyflow
 conda install -c conda-forge cudatoolkit=11.8.0
 python3 -m pip install nvidia-cudnn-cu11==8.6.0.163 tensorflow==2.12.*
 mkdir -p $CONDA_PREFIX/etc/conda/activate.d
@@ -24,7 +24,7 @@ conda install bokeh
 On the LIGO cluster cuPhenom should be compilable with little difficulty. Run these commands to install:
 
 ```
-cd py_ml_tools\cuphenom
+cd gravyflow\cuphenom
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 export PATH=/usr/local/cuda/bin${PATH:+:${PATH}}$
 make shared
