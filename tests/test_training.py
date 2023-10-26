@@ -37,8 +37,9 @@ def test_training(
     }
     
     # Define injection directory path:
+    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
     injection_directory_path : Path = \
-        Path("./gravyflow/tests/example_injection_parameters")
+        Path(current_dir / "example_injection_parameters")
     
     # Intilise Scaling Method:
     scaling_method = \

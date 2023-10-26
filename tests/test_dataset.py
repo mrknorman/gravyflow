@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from itertools import islice
 from copy import deepcopy
+import os
 
 # Library imports:
 import numpy as np
@@ -29,10 +30,11 @@ def test_iteration(
         crop_duration_seconds : float = 0.5
         scale_factor : float = 1.0E21
         ifos = [gf.IFO.L1]
-
+        
         # Define injection directory path:
+        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
         injection_directory_path : Path = \
-            Path("./gravyflow/tests/example_injection_parameters")
+            Path(current_dir / "example_injection_parameters")
 
         # Intilise Scaling Method:
         scaling_method = \
@@ -142,8 +144,9 @@ def test_dataset(
         scale_factor : float = 1.0E21
 
         # Define injection directory path:
+        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
         injection_directory_path : Path = \
-            Path("./gravyflow/tests/example_injection_parameters")
+            Path(current_dir / "example_injection_parameters")
 
         # Intilise Scaling Method:
         scaling_method = \
@@ -273,8 +276,9 @@ def test_dataset_multi(
         ifos = [gf.IFO.L1, gf.IFO.H1]
 
         # Define injection directory path:
+        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
         injection_directory_path : Path = \
-            Path("./gravyflow/tests/example_injection_parameters")
+            Path(current_dir / "example_injection_parameters")
 
         # Intilise Scaling Method:
         scaling_method = \
@@ -401,8 +405,9 @@ def test_dataset_incoherent(
         ifos = [gf.IFO.L1, gf.IFO.H1]
 
         # Define injection directory path:
+        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
         injection_directory_path : Path = \
-            Path("./gravyflow/tests/example_injection_parameters")
+            Path(current_dir / "example_injection_parameters")
 
         # Intilise Scaling Method:
         scaling_method = \

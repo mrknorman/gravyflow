@@ -25,8 +25,9 @@ def test_iteration(
     scale_factor : float = 1.0E21
     
     # Define injection directory path:
+    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
     injection_directory_path : Path = \
-        Path("./gravyflow/tests/example_injection_parameters")
+        Path(current_dir / "example_injection_parameters")
     
     phenom_d_generator : cuPhenomDGenerator = \
         gf.WaveformGenerator.load(
@@ -70,8 +71,9 @@ def test_phenom_d_injection(
     scale_factor : float = 1.0E21
         
     # Define injection directory path:
+    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
     injection_directory_path : Path = \
-        Path("./gravyflow/tests/example_injection_parameters")
+        Path(current_dir / "example_injection_parameters")
     
     phenom_d_generator_high_mass : cuPhenomDGenerator = \
         gf.WaveformGenerator.load(
@@ -163,8 +165,9 @@ def test_wnb_injection(
     scale_factor : float = 1.0E21
     
     # Define injection directory path:
+    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
     injection_directory_path : Path = \
-        Path("./gravyflow/tests/example_injection_parameters")
+        Path(current_dir / "example_injection_parameters")
     
     wnb_generator : gf.WNBGenerator = \
         gf.WaveformGenerator.load(

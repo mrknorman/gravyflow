@@ -38,11 +38,16 @@ def test_model(
             gf.Distribution(min_=8.0,max_=15.0,type_=gf.DistributionType.UNIFORM),
             gf.ScalingTypes.SNR
         )
+    
+    # Define injection directory path:
+    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+    injection_directory_path : Path = \
+        Path(current_dir / "example_injection_parameters")
 
     # Load injection config:
     phenom_d_generator_high_mass : gf.cuPhenomDGenerator = \
-        WaveformGenerator.load(
-            Path("./gravitationalflow/tests/injection_parameters.json"), 
+        gf.WaveformGenerator.load(
+            injection_directory_path / "injection_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds,
             scaling_method=scaling_method
@@ -89,8 +94,8 @@ def test_model(
             gf.ReturnVariables.INJECTION_MASKS, 
             gf.ReturnVariables.INJECTIONS,
             gf.ReturnVariables.WHITENED_INJECTIONS,
-            gf.gf.WaveformGenerator.MASS_1_MSUN, 
-            gf.gf.WaveformGenerator.MASS_2_MSUN
+            gf.WaveformGenerator.MASS_1_MSUN, 
+            gf.WaveformGenerator.MASS_2_MSUN
         ],
     )
         

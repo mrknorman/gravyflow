@@ -51,9 +51,10 @@ def test_detector():
             verbose=True
         )
 
-        # From loading:
+        # Define injection directory path:
+        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
         example_network_directory : Path = Path(
-            "./gravyflow/tests/example_network_parameters/example_network.json"
+            current_dir / "example_network_parameters/example_network.json"
         )
 
         network = gf.Network.load(example_network_directory)
@@ -251,8 +252,9 @@ def test_project_wave(
         scale_factor : float = 1.0E21
 
         # Define injection directory path:
+        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
         injection_directory_path : Path = \
-            Path("./gravyflow/tests/example_injection_parameters")
+            Path(current_dir / "example_injection_parameters")
 
         phenom_d_generator : gf.cuPhenomDGenerator = \
             gf.WaveformGenerator.load(

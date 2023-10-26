@@ -79,7 +79,7 @@ def compare_whitening(
     
     # Tensorflow whitening:
     whitened_tensorflow = \
-        gfwhiten(
+        gf.whiten(
             strain, 
             strain, 
             sample_rate_hertz, 
@@ -99,7 +99,7 @@ def compare_whitening(
         ).value
     
     whitened_tensorflow = \
-        gfcrop_samples(
+        gf.crop_samples(
             whitened_tensorflow,
             duration_seconds,
             sample_rate_hertz
@@ -156,20 +156,20 @@ def test_snr(
     # Setup ifo data acquisition object:
     ifo_data_obtainer : gf.IFODataObtainer = \
         gf.IFODataObtainer(
-            gfObservingRun.O3, 
-            DataQuality.BEST, 
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
             [
-                gfDataLabel.NOISE, 
-                gfDataLabel.GLITCHES
+                gf.DataLabel.NOISE, 
+                gf.DataLabel.GLITCHES
             ],
-            gfSegmentOrder.RANDOM,
+            gf.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
     
     # Initilise noise generator wrapper:
     noise_obtainer: gfNoiseObtainer = \
-        gfNoiseObtainer(
+        gf.NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
             noise_type = gfNoiseType.REAL,
             ifos = gfIFO.L1
@@ -188,8 +188,8 @@ def test_snr(
             # Output configuration:
             num_examples_per_batch=1,
             input_variables = [
-                gfReturnVariables.ONSOURCE, 
-                gfReturnVariables.OFFSOURCE
+                gf.ReturnVariables.ONSOURCE, 
+                gf.ReturnVariables.OFFSOURCE
             ]
         )
     
@@ -234,10 +234,10 @@ def test_snr(
     # Get first elements, and return to float 32 to tf functions:
     injection = injection[0]
     offsource = tf.cast(
-        background[gfReturnVariables.OFFSOURCE.name][0], tf.float32
+        background[gf.ReturnVariables.OFFSOURCE.name][0], tf.float32
     )
     onsource = tf.cast(
-        background[gfReturnVariables.ONSOURCE.name][0], tf.float32
+        background[gf.ReturnVariables.ONSOURCE.name][0], tf.float32
     )
     
     # Scale to SNR 30:
@@ -278,7 +278,7 @@ def test_snr(
         }
         
     layout = [
-        [gfgenerate_strain_plot(
+        [gf.generate_strain_plot(
             {
                 "Whitened (tf) Onsouce + Injection": \
                     whitening_results["onsource_plus_injection"]["tensorflow"],
@@ -291,11 +291,11 @@ def test_snr(
             title=f"cuPhenomD injection example tf whitening",
             scale_factor=scale_factor
         ), 
-        gfgenerate_spectrogram(
+        gf.generate_spectrogram(
             whitening_results["onsource_plus_injection"]["tensorflow"], 
             sample_rate_hertz,
         )],
-        [gfgenerate_strain_plot(
+        [gf.generate_strain_plot(
             {
                 "Whitened (gwpy) Onsouce + Injection": \
                     whitening_results["onsource_plus_injection"]["gwpy"],
@@ -308,14 +308,14 @@ def test_snr(
             title=f"cuPhenomD injection example gwpy whitening",
             scale_factor=scale_factor
         ), 
-        gfgenerate_spectrogram(
+        gf.generate_spectrogram(
             whitening_results["onsource_plus_injection"]["gwpy"], 
             sample_rate_hertz,
         )]
     ]
     
     # Ensure output directory exists
-    gfensure_directory_exists(output_diretory_path)
+    gf.ensure_directory_exists(output_diretory_path)
     
     # Define an output path for the dashboard
     output_file(output_diretory_path / "whitening_test_plots.html")
@@ -356,23 +356,9 @@ def test_snr(
 
 if __name__ == "__main__":    
     # ---- User parameters ---- #
-    
-    # GPU setup:
-    min_gpu_memory_mb : int = 4000
-    num_gpus_to_request : int = 1
-    memory_to_allocate_tf : int = 2000
-    
-    # Setup CUDA
-    gpus = gffind_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    strategy = gfsetup_cuda(
-        gpus, 
-        max_memory_limit=memory_to_allocate_tf, 
-        logging_level=logging.WARNING
-    )    
-    
     # Set logging level:
     logging.basicConfig(level=logging.INFO)
     
     # Test SNR:
-    with strategy.scope():
+    with gf.env():
         test_snr()
