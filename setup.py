@@ -51,6 +51,10 @@ def setup_cuda(
     logging.info(
         f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}"
     )
+    
+    # Define the configuration
+    tf.config.threading.set_inter_op_parallelism_threads(2)
+    tf.config.threading.set_intra_op_parallelism_threads(2)
 
     # List all the physical GPUs.
     gpus = tf.config.list_physical_devices('GPU')
@@ -68,7 +72,7 @@ def setup_cuda(
                     )
                 ]
             )
-
+    
     # Set the logging level to ERROR to reduce logging noise.
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 

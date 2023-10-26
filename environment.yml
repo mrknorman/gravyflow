@@ -11,8 +11,8 @@ dependencies:
   - python-lalframe
   - bokeh
   - pycbc
+  - pytest
   - pip:
       - nvidia-cudnn-cu11==8.6.0.163
       - tensorflow==2.12.*
       - tensorflow-probability==0.20.*
-      - pytest

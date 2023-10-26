@@ -105,7 +105,7 @@ def compare_whitening(
             sample_rate_hertz
         )
 
-    whitened_gwpy = gfcrop_samples(
+    whitened_gwpy = gf.crop_samples(
         whitened_gwpy,
         duration_seconds,
         sample_rate_hertz
@@ -129,7 +129,7 @@ def compare_psd_methods(
         )
     
     frequencies_tensorflow, strain_psd_tensorflow = \
-        gfpsd(
+        gf.psd(
             strain, 
             sample_rate_hertz = sample_rate_hertz, 
             nperseg=nperseg
@@ -175,7 +175,7 @@ def test_snr(
             ifos = gfIFO.L1
         )
     
-    dataset : tf.data.Dataset = gfDataset(
+    dataset : tf.data.Dataset = gf.Dataset(
             # Random Seed:
             seed= 1000,
             # Temporal components:
@@ -225,7 +225,7 @@ def test_snr(
         (onsource_duration_seconds/2 + crop_duration_seconds) * sample_rate_hertz
     )
         
-    injection = gfroll_vector_zero_padding(
+    injection = gf.roll_vector_zero_padding(
         injection, 
         min_roll, 
         max_roll
@@ -243,7 +243,7 @@ def test_snr(
     # Scale to SNR 30:
     snr : float = 30.0
     scaled_injection = \
-        gfscale_to_snr(
+        gf.scale_to_snr(
             injection, 
             onsource,
             snr,

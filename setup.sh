@@ -56,8 +56,7 @@ if [[ $mamba_error == *"CondaValueError: prefix already exists"* ]]; then
     echo "NOTICE: The 'gravyflow' environment already exists. Checking its integrity..."
     
 else
-    echo "$mamba_error. Attempting reinstall."
-    reinstall_env
+    echo "$mamba_error."
 fi
 
 # Activate the environment

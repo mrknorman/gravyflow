@@ -2,6 +2,7 @@
 import logging
 from pathlib import Path
 from copy import deepcopy
+import os
 
 # Library imports:
 import numpy as np
@@ -14,8 +15,8 @@ from tensorflow.keras import losses, metrics, optimizers, mixed_precision
 import gravyflow as gf
 
 def test_training(
-    num_train_examples : int = int(1.0E6),
-    num_validation_examples : int = int(1.0E3),
+    num_train_examples : int = int(1.0E4),
+    num_validation_examples : int = int(1.0E2),
     output_diretory_path : Path = Path("./py_ml_data/tests/")
     ):
     
