@@ -15,7 +15,7 @@ from tqdm import tqdm
 import gravyflow as gf
 
 def test_noise_memory(
-        num_tests : int = int(1.0E2)
+        num_tests : int = int(1.0E4)
     ):
     
     # Test parameters:

@@ -51,10 +51,6 @@ def setup_cuda(
     logging.info(
         f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}"
     )
-    
-    # Define the configuration
-    tf.config.threading.set_inter_op_parallelism_threads(2)
-    tf.config.threading.set_intra_op_parallelism_threads(2)
 
     # List all the physical GPUs.
     gpus = tf.config.list_physical_devices('GPU')
@@ -72,7 +68,7 @@ def setup_cuda(
                     )
                 ]
             )
-    
+        
     # Set the logging level to ERROR to reduce logging noise.
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
@@ -211,16 +207,20 @@ def env(
     
     # Check if there's already a strategy in scope:
     current_strategy = tf.distribute.get_strategy()
-        
-    if isinstance(current_strategy, tf.distribute.Strategy):
+            
+    def is_default_strategy(strategy):
+        return "DefaultDistributionStrategy" in str(strategy)
+
+    if not is_default_strategy(current_strategy):
         logging.info("A TensorFlow distributed strategy is already in place.")
         return current_strategy.scope()
-
+    
     # Setup CUDA
     gpus = find_available_GPUs(
         min_gpu_memory_mb, 
         num_gpus_to_request
     )
+    
     strategy = setup_cuda(
         gpus, 
         max_memory_limit=memory_to_allocate_tf, 
