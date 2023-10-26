@@ -321,3 +321,5 @@ if __name__ == "__main__":
     # ---- User parameters ---- #
     test_detector()
     test_project_wave()
+    test_antenna_pattern()
+    test_time_delay()
