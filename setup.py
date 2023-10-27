@@ -13,9 +13,8 @@ import tensorflow as tf
 from scipy.stats import truncnorm
 from tensorflow.python.distribute.distribute_lib import Strategy
 from tensorflow.python.framework.ops import EagerTensor
-from tensorflow.data import Dataset
 
-from .maths import Distribution, DistributionType
+logging.basicConfig(level=logging.INFO)
 
 def setup_cuda(
         device_num: str, 
@@ -69,7 +68,7 @@ def setup_cuda(
                     )
                 ]
             )
-
+        
     # Set the logging level to ERROR to reduce logging noise.
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
@@ -139,44 +138,6 @@ def find_available_GPUs(
 
     return ",".join(str(gpu) for gpu in available_gpus)
 
-def load_datasets(paths):
-    
-    dataset = tf.data.experimental.load(paths[0])
-    for path in paths[1:]:
-        dataset = dataset.concatenate(dataset)
-        
-    return dataset
-
-def add_labels(dataset, label):
-    dataset_size = dataset.cardinality().numpy()
-
-    labels = Dataset.from_tensor_slices(
-        np.full(dataset_size, label, dtype=np.float32))
-    
-    return Dataset.zip((dataset, labels))
-    
-def load_label_datasets(paths, label):
-    
-    dataset = load_datasets(paths)
-    return add_labels(dataset, label)
-
-def load_noise_signal_datasets(noise_paths, signal_paths):
-    
-    noise  = load_label_datasets(noise_paths, 0)
-    signal = load_label_datasets(signal_paths, 1)
-
-    return signal.concatenate(noise)
-
-def split_test_train(dataset, fraction):
-    dataset_size = dataset.cardinality().numpy()
-    test_size = fraction * dataset_size
-
-    dataset = dataset.shuffle(dataset_size)
-    test_dataset = dataset.take(test_size)
-    train_dataset = dataset.skip(test_size)
-
-    return test_dataset, train_dataset
-
 def get_element_shape(dataset):
     for element in dataset.take(1):
         return element[0].shape
@@ -237,3 +198,38 @@ def replace_placeholders(
         if isinstance(value, dict):
             if k in value:
                 value[k] = replacements.get(value[k], value[k])
+                
+def env(
+    min_gpu_memory_mb: int = 4000,
+    num_gpus_to_request: int = 1,
+    memory_to_allocate_tf: int = 2000
+) -> tf.distribute.Strategy:
+    
+    # Check if there's already a strategy in scope:
+    current_strategy = tf.distribute.get_strategy()
+            
+    def is_default_strategy(strategy):
+        return "DefaultDistributionStrategy" in str(strategy)
+
+    if not is_default_strategy(current_strategy):
+        logging.info("A TensorFlow distributed strategy is already in place.")
+        return current_strategy.scope()
+    
+    # Setup CUDA
+    gpus = find_available_GPUs(
+        min_gpu_memory_mb, 
+        num_gpus_to_request
+    )
+    
+    strategy = setup_cuda(
+        gpus, 
+        max_memory_limit=memory_to_allocate_tf, 
+        logging_level=logging.WARNING
+    )    
+    
+    # Set logging level:
+    logging.basicConfig(level=logging.INFO)
+    
+    return strategy.scope()
+    
+    

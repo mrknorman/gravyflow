@@ -1,17 +1,14 @@
-import tensorflow as tf
 from dataclasses import dataclass
 from typing import Union, List, Dict, Optional
-import numpy as np
 from copy import deepcopy
 
+import numpy as np
+import tensorflow as tf
 from tensorflow import keras
-
+import tensorflow_probability as tfp
 from keras.layers import Lambda
 from keras import backend as K
 from keras.callbacks import Callback
-
-
-import tensorflow_probability as tfp
 
 def negative_loglikelihood(targets, estimated_distribution):
     
@@ -78,7 +75,11 @@ class IndependentGamma(tfpl.DistributionLambda):
     def params_size(event_shape=(), name=None):
         """The number of `params` needed to create a single distribution."""
         with tf.name_scope(name or 'IndependentGamma_params_size'):
-            event_shape = tf.convert_to_tensor(event_shape, name='event_shape', dtype_hint=tf.int32)
+            event_shape = tf.convert_to_tensor(
+                event_shape, 
+                name='event_shape', 
+                dtype_hint=tf.int32
+            )
             return np.int32(2) * np.prod(event_shape)
 
     def get_config(self):

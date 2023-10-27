@@ -1,8 +1,8 @@
 from __future__ import annotations
-from dataclasses import dataclass
-import logging
 
 # Built-In imports:
+from dataclasses import dataclass
+import logging
 from pathlib import Path
 from enum import Enum, auto
 from dataclasses import dataclass
@@ -16,14 +16,7 @@ import numpy as np
 import tensorflow as tf
 
 # Local imports:
-from .cuphenom.py.cuphenom import generate_phenom_d
-from .wnb import generate_white_noise_burst
-from .maths import (Distribution, DistributionType, expand_tensor, batch_tensor,
-                    set_random_seeds, crop_samples,
-                    replace_nan_and_inf_with_zero)
-from .snr import scale_to_snr, calculate_snr
-from .setup import replace_placeholders
-from .detector import Network
+import gravyflow as gf
 
 class ScalingOrdinality(Enum):
     BEFORE_PROJECTION = auto()
@@ -51,7 +44,7 @@ class ScalingTypes(Enum):
 
 @dataclass
 class ScalingMethod:
-    value : Union[Distribution, np.ndarray]
+    value : Union[gf.Distribution, np.ndarray]
     type_ : ScalingTypes
     
     def scale(
@@ -67,7 +60,7 @@ class ScalingMethod:
         match self.type_:
             
             case ScalingTypes.SNR:
-                scaled_injections = scale_to_snr(
+                scaled_injections = gf.scale_to_snr(
                     injections, 
                     onsource,
                     scaling_parameters,
@@ -92,7 +85,9 @@ class ScalingMethod:
                 raise ValueError(f"Scaling type {method.type_} not recognised.")
         
         if scaled_injections is not None:
-            scaled_injections = replace_nan_and_inf_with_zero(scaled_injections)    
+            scaled_injections = gf.replace_nan_and_inf_with_zero(
+                scaled_injections
+            )    
             tf.debugging.check_numerics(
                 scaled_injections, 
                 f"NaN detected in scaled_injections'."
@@ -201,7 +196,7 @@ class WaveformGenerator:
     front_padding_duration_seconds : float = 0.3
     back_padding_duration_seconds : float = 0.0
     scale_factor : float = None
-    network : Union[List[IFOs], Network, Path] = None
+    network : Union[List[IFOs], gf.Network, Path] = None
         
     def __post_init__(self):
         self.network = self.init_network(self.network)
@@ -211,12 +206,12 @@ class WaveformGenerator:
         
         match network:
             case list():
-                network = Network(network)
+                network = gf.Network(network)
 
             case Path():
-                network = Network.load(network)
+                network = gf.Network.load(network)
                 
-            case None | Network():
+            case None | gf.Network():
                 pass
             
             case _:
@@ -238,16 +233,16 @@ class WaveformGenerator:
         onsource_duration_seconds: float, 
         scaling_method: ScalingMethod = None,
         scale_factor : float = None,
-        network : Union[List[IFOs], Network, Path] = None
+        network : Union[List[IFOs], gf.Network, Path] = None
     ) -> Type[cls]:
         
         # Define replacement mapping
         replacements = {
             "pi": np.pi,
             "2*pi": 2.0 * np.pi,
-            "constant": DistributionType.CONSTANT,
-            "uniform": DistributionType.UNIFORM,
-            "normal": DistributionType.NORMAL,
+            "constant": gf.DistributionType.CONSTANT,
+            "uniform": gf.DistributionType.UNIFORM,
+            "normal": gf.DistributionType.NORMAL,
             "hrss" : ScalingTypes.HRSS,
             "hpeak" : ScalingTypes.HPEAK,
             "snr" : ScalingTypes.SNR
@@ -259,7 +254,7 @@ class WaveformGenerator:
 
         # Replace placeholders
         for value in config.values():
-            replace_placeholders(value, replacements)
+            gf.replace_placeholders(value, replacements)
             
         if scaling_method is not None:
             config["scaling_method"] = scaling_method
@@ -271,7 +266,7 @@ class WaveformGenerator:
             
         elif "scaling_type" and "scaling_distribution" in config:
             config["scaling_method"] = ScalingMethod(
-                Distribution(
+                gf.Distribution(
                     **config.pop("scaling_distribution"),
                 ),
                 config.pop("scaling_type")
@@ -305,7 +300,7 @@ class WaveformGenerator:
                     back_padding_duration_seconds=config.pop(
                         "back_padding_duration_seconds"
                     ),
-                    **{k: Distribution(**v) for k, v in config.items()},
+                    **{k: gf.Distribution(**v) for k, v in config.items()},
                 )
 
         return generator
@@ -349,12 +344,12 @@ class WaveformParameters(Enum):
 
 @dataclass
 class WNBGenerator(WaveformGenerator):
-    duration_seconds : Distribution = \
-        Distribution(min_=0.1, max_=1.0, type_=DistributionType.UNIFORM)
-    min_frequency_hertz: Distribution = \
-        Distribution(min_=5.0, max_=95.0, type_=DistributionType.UNIFORM)
-    max_frequency_hertz: Distribution = \
-        Distribution(min_=5.0, max_=95.0, type_=DistributionType.UNIFORM)
+    duration_seconds : gf.Distribution = \
+        gf.Distribution(min_=0.1, max_=1.0, type_=gf.DistributionType.UNIFORM)
+    min_frequency_hertz: gf.Distribution = \
+        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
+    max_frequency_hertz: gf.Distribution = \
+        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
 
     def generate(
         self,
@@ -365,14 +360,14 @@ class WNBGenerator(WaveformGenerator):
         
         if (num_waveforms > 0):
             
-            if self.duration_seconds.type_ is not DistributionType.CONSTANT:
+            if self.duration_seconds.type_ is not gf.DistributionType.CONSTANT:
                 if self.duration_seconds.max_ > max_duration_seconds:                
                     warn("Max duration distibution is greater than requested "
                          "injection duration. Adjusting", UserWarning)
                     self.duration_seconds.max_ = max_duration_seconds
 
                 if self.duration_seconds.min_ < 0.0 and \
-                    self.duration_seconds.type_ is not DistributionType.CONSTANT:
+                    self.duration_seconds.type_ is not gf.DistributionType.CONSTANT:
 
                     warn("Min duration distibution is less than zero "
                          "injection duration. Adjusting", UserWarning)
@@ -405,7 +400,7 @@ class WNBGenerator(WaveformGenerator):
             )
                                     
             # Generate WNB waveform:
-            waveforms = generate_white_noise_burst(
+            waveforms = gf.wnb(
                 num_waveforms,
                 sample_rate_hertz, 
                 max_duration_seconds, 
@@ -419,26 +414,26 @@ class WNBGenerator(WaveformGenerator):
 
 @dataclass
 class cuPhenomDGenerator(WaveformGenerator):
-    mass_1_msun : Distribution = \
-        Distribution(min_=5.0, max_=95.0, type_=DistributionType.UNIFORM)
-    mass_2_msun : Distribution = \
-        Distribution(min_=5.0, max_=95.0, type_=DistributionType.UNIFORM)
-    inclination_radians : Distribution = \
-        Distribution(min_=0.0, max_=np.pi, type_=DistributionType.UNIFORM)
-    distance_mpc : Distribution = \
-        Distribution(value=1000.0, type_=DistributionType.CONSTANT)
-    reference_orbital_phase_in : Distribution = \
-        Distribution(value=0.0, type_=DistributionType.CONSTANT)
-    ascending_node_longitude : Distribution = \
-        Distribution(value=0.0, type_=DistributionType.CONSTANT)
-    eccentricity : Distribution = \
-        Distribution(value=0.0, type_=DistributionType.CONSTANT)
-    mean_periastron_anomaly : Distribution = \
-        Distribution(value=0.0, type_=DistributionType.CONSTANT)
-    spin_1_in : Distribution = \
-        Distribution(value=0.0, type_=DistributionType.CONSTANT)
-    spin_2_in : Distribution = \
-        Distribution(value=0.0, type_=DistributionType.CONSTANT)
+    mass_1_msun : gf.Distribution = \
+        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
+    mass_2_msun : gf.Distribution = \
+        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
+    inclination_radians : gf.Distribution = \
+        gf.Distribution(min_=0.0, max_=np.pi, type_=gf.DistributionType.UNIFORM)
+    distance_mpc : gf.Distribution = \
+        gf.Distribution(value=1000.0, type_=gf.DistributionType.CONSTANT)
+    reference_orbital_phase_in : gf.Distribution = \
+        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
+    ascending_node_longitude : gf.Distribution = \
+        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
+    eccentricity : gf.Distribution = \
+        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
+    mean_periastron_anomaly : gf.Distribution = \
+        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
+    spin_1_in : gf.Distribution = \
+        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
+    spin_2_in : gf.Distribution = \
+        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
     
     def generate(
             self,
@@ -464,7 +459,7 @@ class cuPhenomDGenerator(WaveformGenerator):
                     parameters[attribute] = value.sample(num_waveforms * shape)
 
             # Generate phenom_d waveform:
-            waveforms = generate_phenom_d(
+            waveforms = gf.imrphenomd(
                     num_waveforms, 
                     sample_rate_hertz, 
                     duration_seconds,
@@ -637,7 +632,7 @@ class InjectionGenerator:
                 
                 # Create zero filled injections to fill spots where injection 
                 # did not generate due to injection masks:
-                injections = expand_tensor(waveforms, mask)
+                injections = gf.expand_tensor(waveforms, mask)
             else:
                 injections = tf.zeros(
                     shape=(num_batches, 2, total_duration_num_samples)
@@ -664,7 +659,7 @@ class InjectionGenerator:
                     parameter = tf.convert_to_tensor(parameter)
 
                     expanded_parameters[key] = \
-                        expand_tensor(
+                        gf.expand_tensor(
                             parameter, 
                             mask,
                             group_size=key.value.shape[-1] 
@@ -681,8 +676,8 @@ class InjectionGenerator:
 
             # Split generation batches into smaller batches of size 
             # num_examples_per_batch:
-            injections = batch_tensor(injections, self.num_examples_per_batch)
-            mask = batch_tensor(mask, self.num_examples_per_batch)
+            injections = gf.batch_tensor(injections, self.num_examples_per_batch)
+            mask = gf.batch_tensor(mask, self.num_examples_per_batch)
 
             for injections_, mask_, parameters_ in zip(
                 injections, mask, parameters
@@ -731,7 +726,7 @@ class InjectionGenerator:
                         
                     self.index += 1
 
-            case Distribution():
+            case gf.Distribution():
                 scaling_parameters = config.scaling_method.value.sample(
                     num_injections
                 )
@@ -745,7 +740,7 @@ class InjectionGenerator:
             dtype = tf.float32
         )
                 
-        scaling_parameters = expand_tensor(
+        scaling_parameters = gf.expand_tensor(
             scaling_parameters,
             mask
         )
@@ -850,7 +845,7 @@ class InjectionGenerator:
                 
                 if config.scaling_method.type_ is not ScalingTypes.SNR:
                     return_variables[ScalingTypes.SNR].append(
-                        calculate_snr(
+                        gf.snr(
                             scaled_injections, 
                             onsource,
                             self.sample_rate_hertz, 
@@ -872,7 +867,7 @@ class InjectionGenerator:
                 # Crop injections so that they appear the same size as output 
                 # onsource:
                 cropped_injections.append(
-                    crop_samples(
+                    gf.crop_samples(
                         scaled_injections, 
                         self.onsource_duration_seconds, 
                         self.sample_rate_hertz

@@ -4,7 +4,6 @@ import numpy as np
 import tensorflow as tf
 from scipy.signal import spectrogram
 from scipy.constants import golden
-
 from bokeh.io import save, output_file
 from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource, Legend, ColorBar, LogTicker, LinearColorMapper
@@ -91,18 +90,18 @@ def generate_strain_plot(
     sample_rate_hertz : float,
     duration_seconds : float,
     title : str = "",
-    colors : list = None, # We'll handle default value inside the function
+    colors : list = None,
     has_legend : bool = True,
     scale_factor : float = None,
-    height : int = 300,
+    height : int = 400,
     width : int = None
     ):
     
     if colors is None:
-        colors = Bright[7]  # Assuming Bright is a known list elsewhere in your code.
+        colors = Bright[7] 
         
     if width is None:
-        width = int(height * golden)  # Assuming golden is a known constant elsewhere in your code.
+        width = int(height * golden)
     
     # Detect if the data has an additional dimension
     first_key = next(iter(strain))

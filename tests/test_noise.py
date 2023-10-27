@@ -9,14 +9,10 @@ from bokeh.layouts import gridplot
 from tqdm import tqdm
 
 # Local imports:
-from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
-from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
-                          DataQuality, DataLabel, IFO)
-from ..noise import NoiseObtainer, NoiseType
-from ..plotting import generate_strain_plot
+import gravyflow as gw
 
 def test_iteration(
-    num_tests : int = int(1.0E3)
+    num_tests : int = int(1.0E2)
     ):
     
     # Test parameters:
@@ -28,26 +24,26 @@ def test_iteration(
     scale_factor : float = 1.0E20
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+    ifo_data_obtainer : gw.IFODataObtainer = \
+        gw.IFODataObtainer(
+            gw.ObservingRun.O3, 
+            gw.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gw.DataLabel.NOISE, 
+                gw.DataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gw.SegmentOrder.RANDOM,
             force_acquisition=True,
             cache_segments=False,
             logging_level=logging.INFO
         )
     
     # Initilise noise generator wrapper:
-    noise : NoiseObtainer = \
-        NoiseObtainer(
+    noise : gw.NoiseObtainer = \
+        gw.NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL,
-            ifos = IFO.L1
+            noise_type = gw.NoiseType.REAL,
+            ifos = gw.IFO.L1
         )
     
     # Create generator:
@@ -84,25 +80,25 @@ def test_real_noise(
     scale_factor : float = 1.0E20
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+    ifo_data_obtainer : gw.IFODataObtainer = \
+        gw.IFODataObtainer(
+            gw.ObservingRun.O3, 
+            gw.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gw.DataLabel.NOISE, 
+                gw.DataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gw.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
     
     # Initilise noise generator wrapper:
-    noise : NoiseObtainer = \
-        NoiseObtainer(
+    noise : gw.NoiseObtainer = \
+        gw.NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL,
-            ifos = IFO.L1
+            noise_type = gw.NoiseType.REAL,
+            ifos = gw.IFO.L1
         )
     
     # Create generator:
@@ -127,7 +123,7 @@ def test_real_noise(
     for onsource_, offsource_, gps_time in zip(onsource, offsource, gps_times):
         
         onsource_strain_plot = \
-            generate_strain_plot(
+            gw.generate_strain_plot(
                 {"Onsource Noise" : onsource_},
                 sample_rate_hertz,
                 total_onsource_duration_seconds,
@@ -136,7 +132,7 @@ def test_real_noise(
             )
         
         offsource_strain_plot = \
-            generate_strain_plot(
+            gw.generate_strain_plot(
                 {"Offsource Noise" : offsource_},
                 sample_rate_hertz,
                 offsource_duration_seconds,
@@ -147,7 +143,7 @@ def test_real_noise(
         layout.append([onsource_strain_plot, offsource_strain_plot])
     
     # Ensure output directory exists
-    ensure_directory_exists(output_diretory_path)
+    gw.ensure_directory_exists(output_diretory_path)
     
     # Define an output path for the dashboard
     output_file(output_diretory_path / "noise_plots.html")
@@ -171,25 +167,25 @@ def test_multi_noise(
     scale_factor : float = 1.0E20
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+    ifo_data_obtainer : gw.IFODataObtainer = \
+        gw.IFODataObtainer(
+            gw.ObservingRun.O3, 
+            gw.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gw.DataLabel.NOISE, 
+                gw.DataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gw.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
     
     # Initilise noise generator wrapper:
-    noise : NoiseObtainer = \
-        NoiseObtainer(
+    noise : gw.NoiseObtainer = \
+        gw.NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL,
-            ifos = [IFO.L1, IFO.H1]
+            noise_type = gw.NoiseType.REAL,
+            ifos = [gw.IFO.L1, gw.IFO.H1]
         )
     
     # Create generator:
@@ -216,7 +212,7 @@ def test_multi_noise(
         list_of_onsource = []
         for onsource_ifo in onsource_: 
             list_of_onsource.append(
-                generate_strain_plot(
+                gw.generate_strain_plot(
                     {"Onsource Noise" : onsource_ifo},
                     sample_rate_hertz,
                     total_onsource_duration_seconds,
@@ -228,7 +224,7 @@ def test_multi_noise(
         layout.append(list_of_onsource)
     
     # Ensure output directory exists
-    ensure_directory_exists(output_diretory_path)
+    gw.ensure_directory_exists(output_diretory_path)
     
     # Define an output path for the dashboard
     output_file(output_diretory_path / "multi_noise_plots.html")
@@ -248,8 +244,8 @@ if __name__ == "__main__":
     memory_to_allocate_tf : int = 2000
     
     # Setup CUDA
-    gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    strategy = setup_cuda(
+    gpus = gw.find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
+    strategy = gw.setup_cuda(
         gpus, 
         max_memory_limit = memory_to_allocate_tf, 
         logging_level=logging.WARNING
@@ -258,11 +254,10 @@ if __name__ == "__main__":
     # Set logging level:
     logging.basicConfig(level=logging.INFO)
     
-    # Test IFO noise generator:
+    # Test gw.IFO noise generator:
     with strategy.scope():
         test_multi_noise()
         test_real_noise()
-        quit()
         test_iteration()
     
     

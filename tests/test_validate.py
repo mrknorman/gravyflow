@@ -1,6 +1,7 @@
 # Built-In imports:
 import logging
 from pathlib import Path
+import os
 
 # Library imports:
 import numpy as np
@@ -9,17 +10,7 @@ from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
 
 # Local imports:
-from ..maths import Distribution, DistributionType
-from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
-from ..injection import (cuPhenomDGenerator, InjectionGenerator, 
-                         WaveformParameters, WaveformGenerator, ScalingMethod,
-                         ScalingTypes, ScalingType)
-from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
-                          DataQuality, DataLabel, IFO)
-from ..noise import NoiseObtainer, NoiseType
-from ..plotting import generate_strain_plot, generate_spectrogram
-from ..dataset import get_ifo_dataset, ReturnVariables
-from ..validate import Validator
+import gravyflow as gf
 
 def test_validate(
     output_directory_path : Path = Path("./py_ml_data/tests/"),
@@ -45,11 +36,11 @@ def test_validate(
         }
     far_config : Dict[str, float] = \
         {
-            "num_examples" : 1.0E5
+            "num_examples" : 1.0E4
         }
     roc_config : Dict[str, Union[float, List]] = \
         {
-            "num_examples" : 1.0E5,
+            "num_examples" : 1.0E4,
             "scaling_ranges" :  [
                 (8.0, 20.0),
                 6.0
@@ -58,18 +49,19 @@ def test_validate(
     
     # Intilise Scaling Method:
     scaling_method = \
-        ScalingMethod(
-            Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM),
-            ScalingTypes.SNR
+        gf.ScalingMethod(
+            gf.Distribution(min_=8.0,max_=15.0,type_=gf.DistributionType.UNIFORM),
+            gf.ScalingTypes.SNR
         )
     
     # Define injection directory path:
+    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
     injection_directory_path : Path = \
-        Path("./gravitationalflow/tests/example_injection_parameters")
+        Path(current_dir / "example_injection_parameters")
     
     # Load injection config:
-    phenom_d_generator_high_mass : cuPhenomDGenerator = \
-        WaveformGenerator.load(
+    phenom_d_generator_high_mass : gf.cuPhenomDGenerator = \
+        gf.WaveformGenerator.load(
             Path(injection_directory_path / "phenom_d_parameters.json"), 
             sample_rate_hertz, 
             onsource_duration_seconds,
@@ -77,26 +69,26 @@ def test_validate(
         )
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+    ifo_data_obtainer : gf.IFODataObtainer = \
+        gf.IFODataObtainer(
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gfDataLabel.NOISE, 
+                gfDataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gf.SegmentOrder.RANDOM,
             force_acquisition = False,
             cache_segments = True
         )
     
     # Initilise noise generator wrapper:
-    noise_obtainer: NoiseObtainer = \
-        NoiseObtainer(
+    noise_obtainer: gf.NoiseObtainer = \
+        gf.NoiseObtainer(
             data_directory_path=noise_directory_path,
             ifo_data_obtainer=ifo_data_obtainer,
-            noise_type=NoiseType.REAL,
-            ifos=IFO.L1
+            noise_type=gf.NoiseType.REAL,
+            ifos=gf.IFO.L1
         )
     
     dataset_args : Dict[str, Union[float, List, int]] = {
@@ -114,10 +106,10 @@ def test_validate(
         # Output configuration:
         "num_examples_per_batch" : num_examples_per_batch,
         "input_variables" : [
-            ReturnVariables.WHITENED_ONSOURCE
+            gf.ReturnVariables.WHITENED_ONSOURCE
         ],
         "output_variables" : [
-             ReturnVariables.INJECTION_MASKS
+             gf.ReturnVariables.INJECTION_MASKS
         ]
     }
 
@@ -129,7 +121,7 @@ def test_validate(
 
     # Validate model:
     validator = \
-        Validator.validate(
+        gf.Validator.validate(
             model, 
             model_name,
             dataset_args,
@@ -159,8 +151,8 @@ if __name__ == "__main__":
     memory_to_allocate_tf : int = 8000
     
     # Setup CUDA
-    gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    strategy = setup_cuda(
+    gpus = gf.find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
+    strategy = gf.setup_cuda(
         gpus, 
         max_memory_limit = memory_to_allocate_tf, 
         logging_level=logging.WARNING

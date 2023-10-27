@@ -1,7 +1,8 @@
 import tensorflow as tf
-from .psd import calculate_psd
 import tensorflow_probability  as tfp
 import tensorflow.signal as tfs
+
+import gravyflow as gf
 
 @tf.function 
 def planck(N: int, nleft: int, nright: int) -> tf.Tensor:
@@ -397,7 +398,7 @@ def whiten(
 
     dt = 1 / sample_rate_hertz
     
-    freqs, psd = calculate_psd(
+    freqs, psd = gf.psd(
         background, 
         nperseg=int(sample_rate_hertz*fft_duration_seconds), 
         noverlap=int(sample_rate_hertz*overlap_duration_seconds), 

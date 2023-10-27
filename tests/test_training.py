@@ -2,6 +2,7 @@
 import logging
 from pathlib import Path
 from copy import deepcopy
+import os
 
 # Library imports:
 import numpy as np
@@ -11,20 +12,11 @@ from bokeh.layouts import gridplot
 from tensorflow.keras import losses, metrics, optimizers, mixed_precision
 
 # Local imports:
-from ..maths import Distribution, DistributionType
-from ..setup import find_available_GPUs, setup_cuda, ensure_directory_exists
-from ..injection import (cuPhenomDGenerator, InjectionGenerator, 
-                         WaveformParameters, WaveformGenerator)
-from ..acquisition import (IFODataObtainer, SegmentOrder, ObservingRun, 
-                          DataQuality, DataLabel, IFO)
-from ..noise import NoiseObtainer, NoiseType
-from ..plotting import generate_strain_plot, generate_spectrogram
-from ..dataset import get_ifo_dataset, ReturnVariables
-from ..model import ConvLayer, DenseLayer, PoolLayer, DropLayer, ModelBuilder
+import gravyflow as gf
 
 def test_training(
-    num_train_examples : int = int(1.0E6),
-    num_validation_examples : int = int(1.0E3),
+    num_train_examples : int = int(1.0E4),
+    num_validation_examples : int = int(1.0E2),
     output_diretory_path : Path = Path("./py_ml_data/tests/")
     ):
     
@@ -46,19 +38,20 @@ def test_training(
     }
     
     # Define injection directory path:
+    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
     injection_directory_path : Path = \
-        Path("./gravitationalflow/tests/example_injection_parameters")
+        Path(current_dir / "example_injection_parameters")
     
     # Intilise Scaling Method:
     scaling_method = \
-        ScalingMethod(
-            Distribution(min_=8.0,max_=15.0,type_=DistributionType.UNIFORM),
-            ScalingTypes.SNR
+        gf.ScalingMethod(
+            gf.Distribution(min_=8.0,max_=15.0,type_=gf.DistributionType.UNIFORM),
+            gf.ScalingTypes.SNR
         )
     
     # Load injection config:
-    phenom_d_generator: cuPhenomDGenerator = \
-        WaveformGenerator.load(
+    phenom_d_generator: gf.cuPhenomDGenerator = \
+        gf.WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds,
@@ -66,25 +59,25 @@ def test_training(
         )
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : IFODataObtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+    ifo_data_obtainer : gf.IFODataObtainer = \
+        gf.IFODataObtainer(
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gf.DataLabel.NOISE, 
+                gf.DataLabel.GLITCHES
             ],
-            SegmentOrder.RANDOM,
+            gf.SegmentOrder.RANDOM,
             force_acquisition = False,
             cache_segments = True
         )
     
     # Initilise noise generator wrapper:
-    noise: NoiseObtainer = \
-        NoiseObtainer(
+    noise: gf.NoiseObtainer = \
+        gf.NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = NoiseType.REAL,
-            ifos = IFO.L1
+            noise_type = gf.NoiseType.REAL,
+            ifos = gf.IFO.L1
         )
     
     dataset_args = {
@@ -100,10 +93,10 @@ def test_training(
         # Output configuration:
         "num_examples_per_batch": num_examples_per_batch,
         "input_variables" : [
-            ReturnVariables.WHITENED_ONSOURCE, 
+            gf.ReturnVariables.WHITENED_ONSOURCE, 
         ],
         "output_variables" : [
-            ReturnVariables.INJECTION_MASKS, 
+            gf.ReturnVariables.INJECTION_MASKS, 
         ]
     }
     
@@ -114,8 +107,8 @@ def test_training(
     train_args["noise_obtainer"].ifo_data_obtainer.cache_segments = False
     
     def get_first_injection_features(features, labels):
-        labels[ReturnVariables.INJECTION_MASKS.name] = \
-            tf.expand_dims(labels[ReturnVariables.INJECTION_MASKS.name][0], 1)
+        labels[gf.ReturnVariables.INJECTION_MASKS.name] = \
+            tf.expand_dims(labels[gf.ReturnVariables.INJECTION_MASKS.name][0], 1)
         
         # Check for NaN in features
         for key, feature_tensor in features.items():
@@ -134,7 +127,7 @@ def test_training(
         return features, labels
 
     
-    train_dataset : tf.data.Dataset = get_ifo_dataset(
+    train_dataset : tf.data.Dataset = gf.Dataset(
         **train_args
     ).map(get_first_injection_features)
         
@@ -144,7 +137,7 @@ def test_training(
     validate_args["noise_obtainer"].ifo_data_obtainer.force_acquisition = True
     validate_args["noise_obtainer"].ifo_data_obtainer.cache_segments = False
     
-    validate_dataset : tf.data.Dataset = get_ifo_dataset(
+    validate_dataset : tf.data.Dataset = gf.Dataset(
         **validate_args
     ).map(get_first_injection_features).take(num_validation_examples//num_examples_per_batch)
     
@@ -152,24 +145,24 @@ def test_training(
     test_args["seed"] = 1002
     train_args["group"] = "test"
     
-    test_dataset : tf.data.Dataset = get_ifo_dataset(
+    test_dataset : tf.data.Dataset = gf.Dataset(
         **test_args
     ).map(get_first_injection_features)
     
     hidden_layers = [
-        ConvLayer(64, 8, "relu"),
-        PoolLayer(4),
-        ConvLayer(32, 8, "relu"),
-        ConvLayer(32, 16, "relu"),
-        PoolLayer(4),
-        ConvLayer(16, 16, "relu"),
-        ConvLayer(16, 32, "relu"),
-        ConvLayer(16, 32, "relu"),
-        DenseLayer(64)
+        gf.ConvLayer(64, 8, "relu"),
+        gf.PoolLayer(4),
+        gf.ConvLayer(32, 8, "relu"),
+        gf.ConvLayer(32, 16, "relu"),
+        gf.PoolLayer(4),
+        gf.ConvLayer(16, 16, "relu"),
+        gf.ConvLayer(16, 32, "relu"),
+        gf.ConvLayer(16, 32, "relu"),
+        gf.DenseLayer(64)
     ]
     
     # Initilise model
-    builder = ModelBuilder(
+    builder = gf.ModelBuilder(
         hidden_layers, 
         optimizer = \
             optimizers.Adam(learning_rate=training_config["learning_rate"]), 
@@ -179,12 +172,12 @@ def test_training(
     
     num_samples : int = int(sample_rate_hertz * onsource_duration_seconds)
     input_config = {
-        "name" : ReturnVariables.WHITENED_ONSOURCE.name,
+        "name" : gf.ReturnVariables.WHITENED_ONSOURCE.name,
         "shape" : (num_samples,)
     }
     
     output_config = {
-        "name" : ReturnVariables.INJECTION_MASKS.name,
+        "name" : gf.ReturnVariables.INJECTION_MASKS.name,
         "type" : "binary"
     }
     
@@ -211,8 +204,8 @@ if __name__ == "__main__":
     memory_to_allocate_tf : int = 8000
     
     # Setup CUDA
-    gpus = find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    strategy = setup_cuda(
+    gpus = gf.find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
+    strategy = gf.setup_cuda(
         gpus, 
         max_memory_limit = memory_to_allocate_tf, 
         logging_level=logging.WARNING

@@ -7,9 +7,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 import numpy as np
 
-from .acquisition import (IFODataObtainer, ObservingRun, DataQuality, DataLabel, 
-                          SegmentOrder, IFO)
-from.psd import calculate_psd
+import gravyflow as gf
 
 class NoiseType(Enum):
     WHITE = auto()
@@ -157,7 +155,7 @@ def colored_noise_generator(
     onsource_duration_seconds: float,
     crop_duration_seconds : float,
     offsource_duration_seconds: float,
-    ifo : IFO,
+    ifo : gf.IFO,
     sample_rate_hertz: float,
     scale_factor : float
 ) -> Iterator[tf.Tensor]:
@@ -228,8 +226,8 @@ def colored_noise_generator(
 @dataclass
 class NoiseObtainer:
     data_directory_path : Path = Path("./generator_data")
-    ifo_data_obtainer : Union[None, IFODataObtainer] = None
-    ifos : List[IFO] = IFO.L1
+    ifo_data_obtainer : Union[None, gf.IFODataObtainer] = None
+    ifos : List[gf.IFO] = gf.IFO.L1
     noise_type : NoiseType = NoiseType.REAL
     groups : dict = None
     
@@ -425,7 +423,7 @@ class NoiseObtainer:
             scale_factor
         ):
 
-            frequencies, psd = calculate_psd(
+            frequencies, psd = gf.psd(
                 segment.data, 
                 nperseg=1024, 
                 sample_rate_hertz=sample_rate_hertz

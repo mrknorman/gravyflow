@@ -19,12 +19,7 @@ from bokeh.plotting import figure, show
 from bokeh.resources import INLINE, Resources
 from bokeh.palettes import Bright
 
-from .dataset import (get_ifo_dataset, extract_data_from_indicies, 
-                      ReturnVariables)
-from .plotting import generate_strain_plot, generate_spectrogram
-from .injection import WaveformGenerator, WaveformParameters
-from .maths import Distribution, DistributionType
-from .setup import get_tf_memory_usage
+import gravyflow as gf
 
 def calculate_efficiency_scores(
         model : tf.keras.Model, 
@@ -91,12 +86,12 @@ def calculate_efficiency_scores(
     
     # Ensure dataset is full of injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
-    dataset_args["output_variables"] = [ReturnVariables.INJECTION_MASKS]
+    dataset_args["output_variables"] = [gf.ReturnVariables.INJECTION_MASKS]
     dataset_args["injection_generators"][0].injection_chance = 1.0
     dataset_args["injection_generators"][0].scaling_method.value = scaling_values
     
     # Initlize generator:
-    dataset : tf.data.Dataset = get_ifo_dataset(
+    dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
         ).take(num_batches)
         
@@ -156,7 +151,7 @@ def calculate_far_scores(
     dataset_args["output_variables"] = []
 
     # Initlize generator:
-    dataset : tf.data.Dataset = get_ifo_dataset(
+    dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
         ).take(num_batches)
         
@@ -357,11 +352,11 @@ def calculate_roc(
     
     # Ensure dataset has balanced injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
-    dataset_args["output_variables"] = [ReturnVariables.INJECTION_MASKS]
+    dataset_args["output_variables"] = [gf.ReturnVariables.INJECTION_MASKS]
     dataset_args["injection_generators"][0].injection_chance = 0.5
     
     # Initlize generator:
-    dataset : tf.data.Dataset = get_ifo_dataset(
+    dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
         ).take(num_batches)
     
@@ -369,7 +364,7 @@ def calculate_roc(
     x_dataset = dataset.map(lambda x, y: x)
     y_true_dataset = dataset.map(
         lambda x, y: tf.cast(
-            y[ReturnVariables.INJECTION_MASKS.name][0], tf.int32
+            y[gf.ReturnVariables.INJECTION_MASKS.name][0], tf.int32
         )
     )
         
@@ -411,15 +406,15 @@ def calculate_multi_rocs(
         dataset_args = deepcopy(dataset_args)
         
         if isinstance(scaling_range, tuple):
-            scaling_disribution = Distribution(
+            scaling_disribution = gf.WaveformParameters(
                 min_=scaling_range[0], 
                 max_=scaling_range[1],
-                type_=DistributionType.UNIFORM
+                type_=gf.WaveformParametersType.UNIFORM
             )
         else:
-            scaling_disribution = Distribution(
+            scaling_disribution = gf.WaveformParameters(
                 value=scaling_range, 
-                type_=DistributionType.CONSTANT
+                type_=gf.WaveformParametersType.CONSTANT
             )
         #Ensure injection generators is list for subsequent logic:
         if not isinstance(dataset_args["injection_generators"], list):
@@ -487,10 +482,10 @@ def calculate_tar_scores(
     dataset_args["output_variables"] = []
     dataset_args["injection_generators"][0].injection_chance = 1.0
     dataset_args["injection_generators"][0].scaling_method.value = \
-        Distribution(value=scaling, type_=DistributionType.CONSTANT)
+        gf.WaveformParameters(value=scaling, type_=gf.WaveformParametersType.CONSTANT)
     
     # Initlize generator:
-    dataset : tf.data.Dataset = get_ifo_dataset(
+    dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
         ).take(num_batches)
         
@@ -507,21 +502,21 @@ def calculate_tar_scores(
             
     dataset_args["output_variables"] = \
         [
-            ReturnVariables.WHITENED_INJECTIONS,
-            ReturnVariables.INJECTIONS,
-            WaveformParameters.MASS_1_MSUN,
-            WaveformParameters.MASS_2_MSUN
+            gf.ReturnVariables.WHITENED_INJECTIONS,
+            gf.ReturnVariables.INJECTIONS,
+            gf.WaveformParameters.MASS_1_MSUN,
+            gf.WaveformParameters.MASS_2_MSUN
         ]
     
     #quant
     
     # Initlize generator:
-    dataset : tf.data.Dataset = get_ifo_dataset(
+    dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
         ).take(num_batches)
             
     worst_performers = \
-        extract_data_from_indicies(
+        gf.extract_data_from_indicies(
             dataset,
             callback.worst_global_indices,
             num_examples_per_batch
@@ -902,8 +897,8 @@ def generate_waveform_plot(
     
     p = figure(
         title=f"Worst Performing Input Score: {data['score']}, "
-        f"{data[WaveformParameters.MASS_1_MSUN.name]}, "
-        f"{data[WaveformParameters.MASS_2_MSUN.name]}.",
+        f"{data[gf.WaveformParameters.MASS_1_MSUN.name]}, "
+        f"{data[gf.WaveformParameters.MASS_2_MSUN.name]}.",
         x_axis_label='Time Seconds',
         y_axis_label='Strain',
         width=800, 
@@ -915,9 +910,9 @@ def generate_waveform_plot(
             x=np.linspace(
                 0,
                 onsource_duration_seconds, 
-                len(data[ReturnVariables.WHITENED_ONSOURCE.name])
+                len(data[gf.ReturnVariables.WHITENED_ONSOURCE.name])
             ), 
-            y=data[ReturnVariables.WHITENED_ONSOURCE.name]
+            y=data[gf.ReturnVariables.WHITENED_ONSOURCE.name]
         )
     )
     line = p.line(
@@ -931,8 +926,8 @@ def generate_waveform_plot(
         
     source = ColumnDataSource(
         data=dict(
-            x= np.linspace(0,onsource_duration_seconds, len(data[ReturnVariables.WHITENED_ONSOURCE.name])),
-            y= data[ReturnVariables.WHITENED_INJECTIONS.name]
+            x= np.linspace(0,onsource_duration_seconds, len(data[gf.ReturnVariables.WHITENED_ONSOURCE.name])),
+            y= data[gf.ReturnVariables.WHITENED_INJECTIONS.name]
         )
     )
     line = p.line(
@@ -946,8 +941,8 @@ def generate_waveform_plot(
     
     source = ColumnDataSource(
         data=dict(
-            x=np.linspace(0,onsource_duration_seconds, len(data[ReturnVariables.WHITENED_ONSOURCE.name])), 
-            y=data[ReturnVariables.WHITENED_INJECTIONS.name]*20.0
+            x=np.linspace(0,onsource_duration_seconds, len(data[gf.ReturnVariables.WHITENED_ONSOURCE.name])), 
+            y=data[gf.ReturnVariables.WHITENED_INJECTIONS.name]*20.0
         )
     )
     line = p.line(
@@ -1002,9 +997,6 @@ class Validator:
         validator.input_duration_seconds = \
             dataset_args["onsource_duration_seconds"]
         
-        print("Start:")
-        print(get_tf_memory_usage())
-        
         logging.info(f"Worst performing inputs for {validator.name}...")
         tar_scores, worst_performers = \
             calculate_tar_scores(
@@ -1016,9 +1008,6 @@ class Validator:
             )
         validator.worst_performers = worst_performers
         logging.info(f"Done")
-        
-        print("TAR:")
-        print(get_tf_memory_usage())
                         
         logging.info(f"Calculating efficiency scores for {validator.name}...")
         validator.efficiency_data = \
@@ -1029,9 +1018,6 @@ class Validator:
                 **efficiency_config
             )
         logging.info(f"Done")
-        
-        print("Efficiency:")
-        print(get_tf_memory_usage())
 
         logging.info(f"Calculating FAR scores for {validator.name}...")
         validator.far_scores = \
@@ -1042,9 +1028,6 @@ class Validator:
                 **far_config
             )
         logging.info(f"Done")
-        
-        print("FAR:")
-        print(get_tf_memory_usage())
                 
         logging.info(f"Calculating ROC data for {validator.name}...")
         validator.roc_data = \
@@ -1055,9 +1038,6 @@ class Validator:
                 **roc_config
             )
         logging.info(f"Done")
-        
-        print("ROC::")
-        print(get_tf_memory_usage())
                 
         return validator
 

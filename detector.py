@@ -7,12 +7,8 @@ import json
 import tensorflow as tf
 import numpy as np
 from astropy import coordinates, units
-from astropy.coordinates.matrix_utilities import rotation_matrix
-from astropy.units import meter
 
-from .maths import Distribution, DistributionType, rfftfreq
-from .setup import replace_placeholders
-
+import gravyflow as gf
 
 # Define the speed of light constant (in m/s)
 C = 299792458.0
@@ -88,7 +84,7 @@ class Network:
                 if "num_detectors" in parameters:
                     num_detectors = parameters.pop("num_detectors")
                     
-                    if isinstance(num_detectors, Distribution):
+                    if isinstance(num_detectors, gf.Distribution):
                         num_detectors = num_detectors.sample(1)
                     
                 else:
@@ -113,7 +109,7 @@ class Network:
                                 value, dtype=tf.float32
                             )
                             
-                        case Distribution():
+                        case gf.Distribution():
                             if num_detectors is None:
                                 raise ValueError("Num detectors not specified")
                             else:
@@ -364,9 +360,9 @@ class Network:
         
         # Define replacement mapping
         replacements = {
-            "constant": DistributionType.CONSTANT,
-            "uniform": DistributionType.UNIFORM,
-            "normal": DistributionType.NORMAL,
+            "constant": gf.DistributionType.CONSTANT,
+            "uniform": gf.DistributionType.UNIFORM,
+            "normal": gf.DistributionType.NORMAL,
             "2pi" : np.pi*2.0,
             "pi/2" : np.pi/2.0,
             "-pi/2" : -np.pi/2.0
@@ -378,10 +374,10 @@ class Network:
         
         # Replace placeholders
         for value in config.values():
-            replace_placeholders(value, replacements)
+            gf.replace_placeholders(value, replacements)
         
         num_detectors = config.pop("num_detectors")        
-        arguments = {k: Distribution(**v) for k, v in config.items()}
+        arguments = {k: gf.Distribution(**v) for k, v in config.items()}
         arguments["num_detectors"] = num_detectors
         
         return Network(arguments)
@@ -578,7 +574,7 @@ def shift_waveform(
         time_shift_seconds : tf.Tensor
     ):
 
-    frequency_axis = rfftfreq(
+    frequency_axis = gf.rfftfreq(
         tf.shape(strain)[-1],
         1.0/sample_frequency_hertz
     )

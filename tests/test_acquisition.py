@@ -1,6 +1,6 @@
-from ..acquisition import (IFODataObtainer, ObservingRun, DataQuality,
-                               DataLabel, SegmentOrder, IFO)
 from pathlib import Path
+
+import gravyflow as gf
 
 if __name__ == "__main__":
     # User parameters:
@@ -25,25 +25,25 @@ if __name__ == "__main__":
     
     # Setup data IFOConfig:
     data_obtainer = \
-        IFODataObtainer(
-            ObservingRun.O3, 
-            DataQuality.BEST, 
+        gf.IFODataObtainer(
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
             [
-                DataLabel.NOISE, 
-                DataLabel.GLITCHES
+                gf.DataLabel.NOISE, 
+                gf.DataLabel.GLITCHES
             ]
         )
 
     # Get valid data segments:
     segments = data_obtainer.get_valid_segments(
-        [IFO.L1],
+        [gf.IFO.L1],
         groups,
         "train",
-        SegmentOrder.RANDOM
+        gf.SegmentOrder.RANDOM
     )
     
-    print(len(segments))
-    print(segments)
+    assert len(segments) > 10000, \
+        f"Num segments found {len(segments)} is too low!"
     
 
     

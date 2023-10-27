@@ -1,7 +1,7 @@
 import tensorflow as tf
-import tensorflow_probability  as tfp
+import tensorflow_probability as tfp
 
-@tf.function 
+@tf.function
 def fftfreq(n, d=1.0):
     val = 1.0 / (n * d)
     results = tf.range(0, n // 2 + 1, dtype=tf.float32)  # Note the +1 here
@@ -88,7 +88,7 @@ def detrend(data, axis=-1, type='linear', bp=0, overwrite_data=False):
         return ret
 
 @tf.function 
-def calculate_psd(
+def psd(
         signal : tf.Tensor, 
         nperseg : int, 
         noverlap : int = None, 

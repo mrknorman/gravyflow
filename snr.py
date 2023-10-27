@@ -3,7 +3,7 @@ import tensorflow_probability as tfp
 import tensorflow.signal as tfs
 import numpy as np
 
-from .psd import calculate_psd
+import gravyflow as gf
 
 @tf.function 
 def find_closest(tensor, scalar):
@@ -16,7 +16,7 @@ def find_closest(tensor, scalar):
     return closest_index
 
 @tf.function 
-def calculate_snr(
+def snr(
     injection: tf.Tensor, 
     background: tf.Tensor,
     sample_rate_hertz: float, 
@@ -46,7 +46,7 @@ def calculate_snr(
         The computed signal-to-noise ratio.
     """
     
-    injection_num_samples      = injection.shape[-1]
+    injection_num_samples = injection.shape[-1]
     injection_duration_seconds = injection_num_samples / sample_rate_hertz
         
     # Check if input is 1D or 2D
@@ -57,7 +57,7 @@ def calculate_snr(
         background = tf.expand_dims(background, axis=0)
         
     overlap_num_samples = int(sample_rate_hertz*overlap_duration_seconds)
-    fft_num_samples     = int(sample_rate_hertz*fft_duration_seconds)
+    fft_num_samples = int(sample_rate_hertz*fft_duration_seconds)
     
     # Set the frequency integration limits
     upper_frequency_cutoff = int(sample_rate_hertz / 2.0)
@@ -65,29 +65,28 @@ def calculate_snr(
     # Calculate and normalize the Fourier transform of the signal
     inj_fft = tf.signal.rfft(injection) / sample_rate_hertz
     df = 1.0 / injection_duration_seconds
-    fsamples = \
-        tf.range(0, (injection_num_samples // 2 + 1), dtype=tf.float32) * df
+    fsamples = tf.range(
+        0, (injection_num_samples // 2 + 1), dtype=tf.float32
+    ) * df
 
     # Get rid of DC
     inj_fft_no_dc  = inj_fft[:,1:]
     fsamples_no_dc = fsamples[1:]
 
     # Calculate PSD of the background noise
-    freqs, psd = \
-        calculate_psd(
-            background, 
-            sample_rate_hertz = sample_rate_hertz, 
-            nperseg           = fft_num_samples, 
-            noverlap          = overlap_num_samples,
-            mode="mean"
-        )
+    freqs, psd = gf.psd(
+        background, 
+        sample_rate_hertz = sample_rate_hertz, 
+        nperseg           = fft_num_samples, 
+        noverlap          = overlap_num_samples,
+        mode="mean"
+    )
             
     # Interpolate ASD to match the length of the original signal    
     freqs = tf.cast(freqs, tf.float32)
-    psd_interp = \
-        tfp.math.interp_regular_1d_grid(
-            fsamples_no_dc, freqs[0], freqs[-1], psd, axis=-1
-        )
+    psd_interp = tfp.math.interp_regular_1d_grid(
+        fsamples_no_dc, freqs[0], freqs[-1], psd, axis=-1
+    )
         
     # Compute the frequency window for SNR calculation
     start_freq_num_samples = \
@@ -148,7 +147,7 @@ def scale_to_snr(
     
     # Calculate the current SNR of the injection in the background, so that
     # it can be scaled to the desired value:
-    current_snr = calculate_snr(
+    current_snr = snr(
         injection, 
         background,
         sample_rate_hertz, 

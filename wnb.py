@@ -39,7 +39,7 @@ def generate_envelopes(
     return envelopes
 
 @tf.function
-def generate_white_noise_burst(
+def wnb(
     num_waveforms: int,
     sample_rate_hertz: float,
     max_duration_seconds: float,
