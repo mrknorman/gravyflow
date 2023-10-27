@@ -17,6 +17,9 @@ def calculate_rolling_pearson(tensor: tf.Tensor,
     
     # Calculate max arrival time difference in samples
     max_arival_time_difference_samples = int(max_arival_time_difference_seconds * sample_rate_hertz)
+    
+    # Multiply by two because could be shifted in either direction:
+    max_arival_time_difference_samples *= 2
 
     # Create pairs of indices for the arrays (for non-duplicate pairs)
     NUM_BATCHES, NUM_ARRAYS, ARRAY_SIZE = tensor.shape
@@ -39,6 +42,7 @@ def calculate_rolling_pearson(tensor: tf.Tensor,
         
         y_collect = tf.TensorArray(dtype=tf.float32, size=max_arival_time_difference_samples, dynamic_size=True)
         for offset in tf.range(max_arival_time_difference_samples):
+            offset -= offset//2
             y_collect = y_collect.write(offset, tf.roll(y, shift=-offset, axis=-1))
 
         # Shift y for all possible offsets
