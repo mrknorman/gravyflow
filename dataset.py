@@ -434,7 +434,7 @@ def Dataset(
         pearson_shape = (
             num_examples_per_batch, 
             num_detectors * (num_detectors - 1) // 2,
-            max_arival_time_difference_samples
+            2*max_arival_time_difference_samples
         )
     
     output_signature_dict = {

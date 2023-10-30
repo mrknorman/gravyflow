@@ -44,8 +44,8 @@ def rolling_pearson(
         
         y_collect = tf.TensorArray(dtype=tf.float32, size=max_arival_time_difference_samples, dynamic_size=True)
         for offset in tf.range(max_arival_time_difference_samples):
-            offset -= offset//2
-            y_collect = y_collect.write(offset, tf.roll(y, shift=-offset, axis=-1))
+            offset_mag = offset - max_arival_time_difference_samples
+            y_collect = y_collect.write(offset, tf.roll(y, shift=-offset_mag, axis=-1))
 
         # Shift y for all possible offsets
         y_shifted = tf.transpose(y_collect.stack(), [1, 0, 2])

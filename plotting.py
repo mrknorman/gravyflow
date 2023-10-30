@@ -328,7 +328,7 @@ def generate_correlation_plot(
     duration_seconds : float = num_samples*(1/sample_rate_hertz)
 
     # Generate time axis for plotting:
-    time_axis = np.linspace(0.0, duration_seconds, num_samples)
+    time_axis = np.linspace(-duration_seconds/2.0, duration_seconds/2.0, num_samples)
     
     # Create data dictionary to use as source:
     data = {"time": time_axis}
