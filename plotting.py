@@ -2,7 +2,7 @@ from typing import Dict, Union
 
 import numpy as np
 import tensorflow as tf
-from scipy.signal import spectrogram
+import scipy as sp
 from scipy.constants import golden
 from bokeh.io import save, output_file
 from bokeh.plotting import figure
@@ -10,6 +10,8 @@ from bokeh.models import ColumnDataSource, Legend, ColorBar, LogTicker, LinearCo
 from bokeh.palettes import Bright
 from bokeh.models import Div
 from bokeh.layouts import grid, column
+
+import gravyflow as gf
 
 def create_info_panel(params: dict, height = 200) -> Div:
     style = """
@@ -231,71 +233,71 @@ def generate_psd_plot(
 
     return p
 
+# Define the spectrogram visualization function using Bokeh
 def generate_spectrogram(
-        strain: np.ndarray, 
-        sample_rate_hertz: float,
-        nperseg: int = 128, 
-        noverlap: int = 64
-    ) -> figure:
+    strain: np.ndarray, 
+    sample_rate_hertz: float,
+    num_fft_samples: int = 256, 
+    height : int = 400,
+    width : int = None,
+    num_overlap_samples: int = 200
+) -> figure:
+    
     """
     Plot a spectrogram using Bokeh and return the figure.
-
-    Parameters
-    ----------
-    strain : np.ndarray
-        Strain time-series data.
-    sample_rate_hertz : float
-        Sample rate in Hz.
-    nperseg : int, optional
-        Number of samples per segment, default is 128.
-    noverlap : int, optional
-        Number of samples to overlap, default is 64.
-
-    Returns
-    -------
-    figure
-        Bokeh figure object containing the spectrogram plot.
     """
+        
+    if width is None:
+        width = int(height * golden)
     
-    # Parameters:
-    height : int = 400
-    width : int = int(height*golden)
+    # Compute the spectrogram using TensorFlow
+    tensor_strain = tf.convert_to_tensor(strain, dtype=tf.float32)
     
-    # Compute the spectrogram
-    f, t, Sxx = spectrogram(strain, fs=sample_rate_hertz, nperseg=nperseg, noverlap=noverlap)
+    num_step_samples = num_fft_samples - num_overlap_samples
+    spectrogram = gf.spectrogram(
+        tensor_strain, 
+        num_frame_samples=num_fft_samples, 
+        num_step_samples=num_step_samples, 
+        num_fft_samples=num_fft_samples
+    )
+    
+    # Convert the TF output to NumPy arrays for visualization
+    Sxx = spectrogram.numpy().T
+
+    # Frequency (since TensorFlow computes only half the FFT output, we need to 
+    # adapt the frequency axis accordingly)
+    f = np.linspace(0, sample_rate_hertz / 2, num_fft_samples // 2 + 1)
+
+    # Time
+    t = np.arange(0, Sxx.shape[1]) * (num_step_samples / sample_rate_hertz)
+
+    # Convert to dB
+    #Sxx_dB = 10 * np.log10(Sxx + 1e-10)  # Adding a small number to avoid log of
+    # zero
+    Sxx_dB = Sxx
     
     f = f[1:]
-    Sxx = Sxx[1:]
+    Sxx_dB = Sxx_dB[1:]
     
-    # Convert to dB
-    Sxx_dB = 10 * np.log10(Sxx)
-
-    # Validate dimensions
-    if Sxx_dB.shape != (len(f), len(t)):
-        raise ValueError("Dimension mismatch between Sxx_dB and frequency/time vectors.")
-
     # Create Bokeh figure
     p = figure(
-        title="Spectrogram",
         x_axis_label='Time (seconds)',
         y_axis_label='Frequency (Hz)',
         y_axis_type="log",
-        width = width,
-        height = height
+        height=height,
+        width=width
+    )
+    
+    # Create color mapper
+    mapper = LinearColorMapper(
+        palette="Plasma256", 
+        low=np.min(Sxx_dB), 
+        high=np.max(Sxx_dB)
     )
 
-    # Adjust axes range
-    p.x_range.start = t[0]
-    p.x_range.end = t[-1]
-    p.y_range.start = f[0]
-    p.y_range.end = f[-1]
-        
-    # Create color mapper
-    mapper = LinearColorMapper(palette="Inferno256", low=Sxx_dB.min(), high=Sxx_dB.max())
-        
     # Plotting the spectrogram
-    p.image(image=[Sxx_dB], x=t[0], y=f[0], dw=(t[-1] - t[0]), dh=(f[-1] - f[0]), color_mapper=mapper)
-    
+    p.image(image=[Sxx_dB], x=0, y=f[0], dw=t[-1], dh=f[-1], color_mapper=mapper)
+
     # Add color bar
     color_bar = ColorBar(color_mapper=mapper, location=(0, 0), ticker=LogTicker())
     p.add_layout(color_bar, 'right')

@@ -398,6 +398,9 @@ class IFODataObtainer:
             gps_times = np.append(gps_times, events["GPS"].data.compressed())
 
         return gps_times
+    
+    def get_glitch_times:
+        
         
     def get_valid_segments(
         self,
@@ -907,9 +910,7 @@ class IFODataObtainer:
             multi_segment = multi_segment.scale(scale_factor)  
 
             yield multi_segment
-
-
-                
+    
     def get_segment_data(
             self,
             segment_start_gps_time: float, 

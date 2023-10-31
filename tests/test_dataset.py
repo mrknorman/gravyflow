@@ -205,8 +205,9 @@ def test_dataset(
                 gf.ReturnVariables.INJECTION_MASKS, 
                 gf.ReturnVariables.INJECTIONS,
                 gf.ReturnVariables.WHITENED_INJECTIONS,
+                gf.ReturnVariables.SPECTROGRAM_ONSOURCE,
                 gf.WaveformParameters.MASS_1_MSUN, 
-                gf.WaveformParameters.MASS_2_MSUN
+                gf.WaveformParameters.MASS_2_MSUN,
             ],
         )
 
@@ -536,7 +537,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     # Test IFO noise dataset:
-    test_dataset_incoherent()
-    test_dataset_multi()
     test_dataset()
+    test_dataset_multi
+    test_dataset_incoherent()
     test_iteration()
+    

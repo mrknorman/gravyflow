@@ -12,6 +12,7 @@ dependencies:
   - bokeh
   - pycbc
   - pytest
+  - sqlalchemy
   - pip:
       - nvidia-cudnn-cu11==8.6.0.163
       - tensorflow==2.12.*

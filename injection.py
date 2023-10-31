@@ -184,6 +184,7 @@ class ReturnVariables(Enum):
     WHITENED_INJECTIONS = ReturnVariable(5)
     INJECTION_MASKS = ReturnVariable(6)
     ROLLING_PEARSON_ONSOURCE = ReturnVariable(7)
+    SPECTROGRAM_ONSOURCE = ReturnVariable(8)
     
     def __lt__(self, other):
         # Implement less-than logic
