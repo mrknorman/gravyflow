@@ -398,9 +398,6 @@ class IFODataObtainer:
             gps_times = np.append(gps_times, events["GPS"].data.compressed())
 
         return gps_times
-    
-    def get_glitch_times:
-        
         
     def get_valid_segments(
         self,
@@ -409,15 +406,18 @@ class IFODataObtainer:
         group_name : str = "train",
         segment_order : SegmentOrder = None
     ) -> List:
+        
+        start_time = time.perf_counter()
+        
         # Ensure parameters are lists for consistency:
         if not isinstance(ifos, list):
             ifos = [ifos]
-        
+                
         # If no segment_order requested use class atribute as default, defaults
         # to SegmentOrder.RANDOM:
         if not segment_order:
             segment_order = self.segment_order
-        
+                
         # If not groups dictionary input, resort to default test, train,
         # validate split: 
         if not groups:
@@ -434,10 +434,12 @@ class IFODataObtainer:
                 f"Group {group_name} not present in groups dictionary check "
                  "input."
             )
-            
+                
         self.valid_segments = []
             
-        for ifo in ifos:
+        for index, ifo in enumerate(ifos):
+            
+            loop_start = time.perf_counter()
 
             # Get segments which fall within gps time boundaries and have the 
             # requested ifo and state flag:
@@ -450,16 +452,28 @@ class IFODataObtainer:
                 veto_segments.append(
                     self.pad_gps_times_with_veto_window(event_times)
                 )
+                
             if DataLabel.GLITCHES not in self.data_labels:
-                pass
-                #veto_segments.append(get_all_glitch_segments(ifo))
+                glitch_times = gf.get_glitch_times(
+                    ifo,
+                    start_gps_time = self.start_gps_times[0],
+                    end_gps_time = self.end_gps_times[0]
+                )
+                
+                veto_segments.append(
+                    self.pad_gps_times_with_veto_window(
+                        glitch_times,
+                        offset=1.0,
+                        increment=1.0
+                    )
+                )
 
             # Remove veto segment segments from valid segments list:
             if veto_segments:
                 veto_segments = np.concatenate(veto_segments)
                 valid_segments = \
                     self.veto_time_segments(valid_segments, veto_segments)
-
+            
             # First split by a constant duration so that groups always contain 
             # the same times no matter what max duration is:
             group_split_seconds : float = 8196.0
@@ -468,7 +482,7 @@ class IFODataObtainer:
                     valid_segments, 
                     group_split_seconds
                 )
-
+            
             # Distibute segments deterministically amongst groups, thos can
             # be used to separate validation and testing data from training 
             # data:
@@ -478,7 +492,7 @@ class IFODataObtainer:
                     groups,
                     group_name
                 )
-
+            
             # Finally, split seconds so that max duration is no greateer than 
             # max:
             valid_segments : np.ndarray = \
@@ -486,23 +500,25 @@ class IFODataObtainer:
                     valid_segments, 
                     self.max_segment_duration_seconds
                 )
-
+            
             # If there are no valid segments raise and error:
             if (len(valid_segments) == 0):
                 raise ValueError("No valid segments!")
                 
             self.valid_segments.append(valid_segments)
+            
+        post_loop = time.perf_counter()
                                 
         self.valid_segments = self.merge_bins(
                 self.valid_segments, 
                 self.max_segment_duration_seconds
             )
-        
+                
         self.valid_segments = self.largest_segments_per_bin(
                 self.valid_segments
             )
-        
-        self.valid_segments  = np.swapaxes(self.valid_segments, 1, 0)
+                
+        self.valid_segments = np.swapaxes(self.valid_segments, 1, 0)
         
         # Order segments by requested order:
         self.valid_segments = self.order_segments(
@@ -522,22 +538,6 @@ class IFODataObtainer:
         left = gps_times - offset
         right = gps_times + increment
         result = np.stack((left, right), axis=1)
-        
-        return result
-    
-    def veto_time_segments(
-        self,
-        valid_segments: np.ndarray, 
-        veto_segments: np.ndarray
-        ) -> np.ndarray:
-
-        valid_segments = self.compress_segments(valid_segments)
-        veto_segments = self.compress_segments(veto_segments)
-        result = \
-            np.vstack([
-                self.remove_overlap(valid_start, valid_end, veto_segments) 
-                for valid_start, valid_end in valid_segments
-            ])
         
         return result
     
@@ -604,48 +604,56 @@ class IFODataObtainer:
         filtered_segments = segments[valid_columns, :, :] 
         return filtered_segments
     
-    def compress_segments(
-        self,
-        segments: np.ndarray
-    ) -> np.ndarray:
-        
-        segments = segments[segments[:,0].argsort()]
-        compressed = []
+    def veto_time_segments(self, valid_segments: np.ndarray, veto_segments: np.ndarray) -> np.ndarray:
+        # Assuming that both valid_segments and veto_segments are sorted
+        # If they are not, you should sort them beforehand
+        valid_segments = self.compress_segments(valid_segments)
+        veto_segments = self.compress_segments(veto_segments)
 
-        for segment in segments:
-            if not compressed or compressed[-1][1] < segment[0]:
-                compressed.append(segment)
-            else:
-                compressed[-1] = (
-                    compressed[-1][0], max(compressed[-1][1], segment[1])
-                )
-
-        return np.array(compressed)
-    
-    def remove_overlap(
-        self,
-        start: float,
-        end: float, 
-        veto_segments: np.ndarray
-        ) -> np.ndarray:
-
-        result = np.array([[start, end]])
+        # Process overlaps in a vectorized way if possible, this is a simplified example
+        # that will need to be adjusted based on the specific logic of overlap removal
         for veto_start, veto_end in veto_segments:
-            new_result = []
-            for segment_start, segment_end in result:
-                if segment_start < veto_start < segment_end \
-                and segment_start < veto_end < segment_end:
-                    new_result.append([segment_start, veto_start])
-                    new_result.append([veto_end, segment_end])
-                elif veto_start <= segment_start < veto_end < segment_end:
-                    new_result.append([veto_end, segment_end])
-                elif segment_start < veto_start < segment_end <= veto_end:
-                    new_result.append([segment_start, veto_start])
-                elif veto_end <= segment_start or segment_end <= veto_start:
-                    new_result.append([segment_start, segment_end])
-            result = np.array(new_result)
-        return result
+            # Mask for segments that are affected by the veto segment
+            affected = (valid_segments[:, 0] < veto_end) & (valid_segments[:, 1] > veto_start)
+            if not np.any(affected):
+                continue
 
+            # Adjust the start and end times of the affected valid segments
+            valid_segments[:, 0] = np.where(
+                (valid_segments[:, 0] < veto_start) & affected,
+                valid_segments[:, 0],
+                np.maximum(valid_segments[:, 0], veto_end)
+            )
+            valid_segments[:, 1] = np.where(
+                (valid_segments[:, 1] > veto_end) & affected,
+                np.minimum(valid_segments[:, 1], veto_start),
+                valid_segments[:, 1]
+            )
+
+        # Remove any zero-length segments that may have resulted from the veto process
+        non_zero_length_mask = valid_segments[:, 0] < valid_segments[:, 1]
+        valid_segments = valid_segments[non_zero_length_mask]
+
+        # Compress again to merge any overlapping segments created during the removal
+        return self.compress_segments(valid_segments)
+
+    def compress_segments(self, segments: np.ndarray) -> np.ndarray:
+        if segments.size == 0:
+            return segments
+
+        # Sorting and compressing using NumPy operations
+        segments = segments[segments[:, 0].argsort()]  # Ensures the segments are sorted by start time
+        compressed = segments.copy()
+
+        # Use a vectorized comparison to find segments that overlap with their predecessor
+        overlaps = compressed[1:, 0] <= compressed[:-1, 1]
+        # Update the end times of segments that overlap with their predecessor
+        compressed[:-1][overlaps, 1] = np.maximum(compressed[:-1][overlaps, 1], compressed[1:][overlaps, 1])
+        # Keep segments that do not overlap with their successor
+        keep_segments = np.append([True], ~overlaps)
+
+        return compressed[keep_segments]
+    
     def distribute_segments_by_ratio(
         self,
         segments: np.ndarray, 

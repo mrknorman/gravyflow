@@ -43,3 +43,10 @@ Then this guide:
 
 https://computing.docs.ligo.org/guide/auth/kerberos/
 
+8. Setup Gravity Spy permission:
+
+Go to https://secrets.ligo.org/secrets/144/ and log in with your LIGO credentials
+to get the username and password for Gravity Spy and enter them as follows:
+
+export GRAVITYSPY_DATABASE_USER=<user>
+export GRAVITYSPY_DATABASE_PASSWD=<password>

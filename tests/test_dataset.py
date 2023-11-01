@@ -59,8 +59,7 @@ def test_iteration(
                 gf.ObservingRun.O3, 
                 gf.DataQuality.BEST, 
                 [
-                    gf.DataLabel.NOISE, 
-                    gf.DataLabel.GLITCHES
+                    gf.DataLabel.NOISE,
                 ],
                 gf.SegmentOrder.RANDOM,
                 force_acquisition = True,
@@ -170,8 +169,7 @@ def test_dataset(
                 gf.ObservingRun.O3, 
                 gf.DataQuality.BEST, 
                 [
-                    gf.DataLabel.NOISE, 
-                    gf.DataLabel.GLITCHES
+                    gf.DataLabel.NOISE
                 ],
                 gf.SegmentOrder.RANDOM,
                 force_acquisition = True,
@@ -304,8 +302,7 @@ def test_dataset_multi(
                 gf.ObservingRun.O3, 
                 gf.DataQuality.BEST, 
                 [
-                    gf.DataLabel.NOISE, 
-                    gf.DataLabel.GLITCHES
+                    gf.DataLabel.NOISE
                 ],
                 gf.SegmentOrder.RANDOM,
                 force_acquisition = True,
@@ -444,8 +441,7 @@ def test_dataset_incoherent(
                 gf.ObservingRun.O3, 
                 gf.DataQuality.BEST, 
                 [
-                    gf.DataLabel.NOISE, 
-                    gf.DataLabel.GLITCHES
+                    gf.DataLabel.NOISE
                 ],
                 gf.SegmentOrder.RANDOM,
                 force_acquisition = True,
