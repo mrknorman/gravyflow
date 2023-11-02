@@ -96,13 +96,13 @@ def randomise_arguments(input_dict, func):
 
     return func(**output_dict), output_dict
 
-@tf.function
+@tf.function(jit_compile=True)
 def replace_nan_and_inf_with_zero(tensor):
     tensor = tf.where(tf.math.is_nan(tensor), tf.zeros_like(tensor), tensor)
     tensor = tf.where(tf.math.is_inf(tensor), tf.zeros_like(tensor), tensor)
     return tensor    
 
-@tf.function
+@tf.function(jit_compile=True)
 def expand_tensor(
         signal: tf.Tensor, 
         mask: tf.Tensor, 
@@ -217,7 +217,7 @@ def expand_tensor(
     
     return expanded_signal
 
-@tf.function
+@tf.function(jit_compile=True)
 def batch_tensor(
         tensor: tf.Tensor, 
         batch_size: int,
@@ -296,7 +296,7 @@ def set_random_seeds(
     # Set core Python.random seed just in case, I don't think its used:
     random.seed(10)
     
-@tf.function
+@tf.function(jit_compile=True)
 def crop_samples(
     batched_onsource: tf.Tensor, 
     onsource_duration_seconds: float, 
@@ -344,7 +344,7 @@ def crop_samples(
     
     return batched_onsource
 
-@tf.function
+@tf.function(jit_compile=True)
 def rfftfreq(
         num_samples: int, 
         frequency_interval_hertz: Union[float, int] = 1.0

@@ -252,7 +252,7 @@ class Network:
         
         self.calculate_max_arrival_time_difference()
     
-    @tf.function
+    @tf.function(jit_compile=True)
     def get_antenna_pattern_(
         self,
         right_ascension: tf.Tensor, 
@@ -382,7 +382,7 @@ class Network:
         
         return Network(arguments)
     
-    @tf.function
+    @tf.function(jit_compile=True)
     def get_time_delay_(
         self,
         right_ascension: tf.Tensor, 
@@ -466,7 +466,7 @@ class Network:
             polarization=polarization
         )
     
-    @tf.function
+    @tf.function(jit_compile=True)
     def project_wave_(
         self,
         strain : tf.Tensor,
@@ -567,7 +567,7 @@ class Network:
         
         self.max_arrival_time_difference_seconds = max_distance/C
         
-@tf.function
+@tf.function(jit_compile=True)
 def shift_waveform(
         strain : tf.Tensor, 
         sample_frequency_hertz : float, 
@@ -600,7 +600,7 @@ def shift_waveform(
 
     return tf.math.real(shitfted_strain)
 
-@tf.function
+@tf.function(jit_compile=True)
 def rotation_matrix_x(angle: tf.Tensor) -> tf.Tensor:
     """
     Generate a 3D rotation matrix around the X-axis using 
@@ -624,7 +624,7 @@ def rotation_matrix_x(angle: tf.Tensor) -> tf.Tensor:
     
     return tf.stack([row1, row2, row3], axis=-2)
 
-@tf.function
+@tf.function(jit_compile=True)
 def rotation_matrix_y(angle: tf.Tensor) -> tf.Tensor:
     """
     Generate a 3D rotation matrix around the Y-axis using 
@@ -649,7 +649,7 @@ def rotation_matrix_y(angle: tf.Tensor) -> tf.Tensor:
     return tf.stack([row1, row2, row3], axis=-2)
 
 
-@tf.function
+@tf.function(jit_compile=True)
 def rotation_matrix_z(angle: tf.Tensor) -> tf.Tensor:
     """
     Generate a 3D rotation matrix around the Z-axis using 
@@ -673,6 +673,7 @@ def rotation_matrix_z(angle: tf.Tensor) -> tf.Tensor:
 
     return tf.stack([row1, row2, row3], axis=-2)
 
+@tf.function(jit_compile=True)
 def single_arm_frequency_response(
         frequency: tf.Tensor, 
         n: tf.Tensor, 

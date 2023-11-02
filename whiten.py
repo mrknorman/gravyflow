@@ -4,7 +4,7 @@ import tensorflow.signal as tfs
 
 import gravyflow as gf
 
-@tf.function 
+@tf.function(jit_compile=True)
 def planck(N: int, nleft: int, nright: int) -> tf.Tensor:
     """
     Create a Planck-taper window.
@@ -40,7 +40,7 @@ def planck(N: int, nleft: int, nright: int) -> tf.Tensor:
     
     return window
 
-@tf.function 
+@tf.function(jit_compile=True)
 def truncate_transfer(
     transfer: tf.Tensor,
     ncorner: int = None
@@ -77,7 +77,7 @@ def truncate_transfer(
     
     return new_transfer
 
-@tf.function 
+@tf.function(jit_compile=True) 
 def truncate_impulse(
     impulse: tf.Tensor, 
     ntaps: int, 
@@ -123,7 +123,7 @@ def truncate_impulse(
     return new_impulse
 
 
-@tf.function 
+@tf.function(jit_compile=True)
 def fir_from_transfer(
     transfer: tf.Tensor, 
     ntaps: int, 
@@ -160,7 +160,7 @@ def fir_from_transfer(
     impulse = tf.roll(impulse, shift=int(ntaps/2 - 1), axis=-1)[...,: ntaps]
     return impulse
 
-@tf.function 
+@tf.function(jit_compile=True)
 def fftconvolve_(in1, in2, mode="full"):
     """Convolve two N-dimensional arrays using FFT.
 
@@ -211,7 +211,7 @@ def fftconvolve_(in1, in2, mode="full"):
             "acceptable mode flags are 'valid', 'same', or 'full'"
         )
 
-@tf.function
+@tf.function(jit_compile=True)
 def _centered(arr, newsize):
     # Ensure correct dimensionality
     if len(arr.shape) == 1:
@@ -222,7 +222,7 @@ def _centered(arr, newsize):
     end_ind = start_ind + newsize
     return arr[..., start_ind:end_ind]
 
-@tf.function
+@tf.function(jit_compile=True)
 def fftconvolve(in1, in2, mode="full"):
     # Extract shapes
     s1 = tf.shape(in1)[-1]
@@ -246,7 +246,7 @@ def fftconvolve(in1, in2, mode="full"):
     
     return cropped
 
-@tf.function 
+@tf.function(jit_compile=True)
 def convolve(
     timeseries: tf.Tensor, 
     fir: tf.Tensor, 
@@ -334,7 +334,7 @@ def convolve(
 
     return conv
 
-@tf.function 
+@tf.function(jit_compile=True)
 def whiten(
     timeseries: tf.Tensor, 
     background: tf.Tensor,

@@ -588,7 +588,7 @@ class ModelBuilder:
                 name = input_config["name"]
             )
         )
-        self.model.add(tf.keras.layers.Reshape((-1, 1)))
+        #self.model.add(tf.keras.layers.Reshape((-1, 1)))
     
     def build_hidden_layer(
         self,

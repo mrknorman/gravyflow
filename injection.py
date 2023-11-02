@@ -95,7 +95,7 @@ class ScalingMethod:
         
         return scaled_injections
 
-@tf.function
+@tf.function(jit_compile=True)
 def calculate_hrss(
     injection: tf.Tensor
     ):
@@ -108,7 +108,7 @@ def calculate_hrss(
         )
     )
 
-@tf.function
+@tf.function(jit_compile=True)
 def calculate_hpeak(
     injection: tf.Tensor
     ):
@@ -116,7 +116,7 @@ def calculate_hpeak(
     # Return the root sum sqaure of the inputted injections:
     return tf.reduce_max(tf.abs(injection), axis=-1)
 
-@tf.function
+@tf.function(jit_compile=True)
 def scale_to_hrss(
     injection: tf.Tensor, 
     desired_hrss: float
@@ -144,7 +144,7 @@ def scale_to_hrss(
     # Return injection scaled by scale factor:
     return injection*scale_factor
 
-@tf.function
+@tf.function(jit_compile=True)
 def scale_to_hpeak(
     injection: tf.Tensor, 
     desired_hrss: float
@@ -892,41 +892,7 @@ class InjectionGenerator:
         
         return onsource, cropped_injections, return_variables
 
-@tf.function
-def roll_vector_zero_padding_(vector, roll_amount):
-    zeros = tf.zeros_like(vector)
-    rolled_vector = tf.concat(
-        [vector[roll_amount:], zeros[:roll_amount]], 
-        axis=-1
-    )
-    return rolled_vector
-
-@tf.function
-def roll_vector_zero_padding(tensor, min_roll, max_roll):
-    # Generate an array of roll amounts
-    roll_amounts = tf.random.uniform(
-        shape=[tensor.shape[0]], 
-        minval=min_roll, 
-        maxval=max_roll, 
-        dtype=tf.int32
-    )
-
-    # Define a function to apply rolling to each sub_tensor with corresponding roll_amount
-    def map_fn_outer(idx):
-        sub_tensor = tensor[idx]
-        roll_amount = roll_amounts[idx]
-        return tf.map_fn(lambda vec: roll_vector_zero_padding_(vec, roll_amount), sub_tensor)
-    
-    # Create an index tensor and map over it
-    indices = tf.range(start=0, limit=tensor.shape[0], dtype=tf.int32)
-    result = tf.map_fn(
-        map_fn_outer, 
-        indices, 
-        fn_output_signature=tf.TensorSpec(shape=tensor.shape[1:], dtype=tensor.dtype))
-
-    return result
-
-@tf.function
+@tf.function(jit_compile=True)
 def roll_vector_zero_padding_(vector, roll_amount):
     # Create zeros tensor with the same shape as vector
     zeros = tf.zeros_like(vector)
@@ -936,7 +902,7 @@ def roll_vector_zero_padding_(vector, roll_amount):
     
     return rolled_vector
 
-@tf.function
+@tf.function(jit_compile=True)
 def roll_vector_zero_padding(tensor, min_roll, max_roll):
     # Generate an array of roll amounts
     roll_amounts = tf.random.uniform(
@@ -957,7 +923,7 @@ def roll_vector_zero_padding(tensor, min_roll, max_roll):
 
     return result
 
-@tf.function
+@tf.function(jit_compile=True)
 def generate_mask(
     num_injections: int, 
     injection_chance: float

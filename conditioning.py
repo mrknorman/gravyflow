@@ -42,7 +42,7 @@ class CreateSpectrogram(DataConditioner):
             self.num_fft_samples
         )
     
-@tf.function
+@tf.function(jit_compile=True)
 def spectrogram(
         timeseries : tf.Tensor, 
         num_frame_samples : int = 256, 

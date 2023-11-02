@@ -15,4 +15,4 @@ from .injection import *
 from .dataset import *
 from .plotting import *
 from .validate import *
-from .glitch import GlitchType, get_glitch_times
+from .glitch import GlitchType, get_glitch_times, get_glitch_segments
