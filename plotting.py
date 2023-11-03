@@ -88,16 +88,24 @@ def check_ndarrays_same_length(
     return first_length
 
 def generate_strain_plot(
-    strain : Dict[str, np.ndarray],
-    sample_rate_hertz : float,
-    duration_seconds : float,
-    title : str = "",
-    colors : list = None,
-    has_legend : bool = True,
-    scale_factor : float = None,
-    height : int = 400,
-    width : int = None
+        strain : Dict[str, np.ndarray],
+        sample_rate_hertz : float = None,
+        title : str = "",
+        colors : list = None,
+        has_legend : bool = True,
+        scale_factor : float = None,
+        height : int = 400,
+        width : int = None
     ):
+
+    if sample_rate_hertz is None:
+        sample_rate_hertz = gf.Defaults.sample_rate_hertz
+    if scale_factor is None:
+        scale_factor = gf.Defaults.scale_factor
+
+    duration_seconds = next(
+            iter(strain.values()), 'default'
+        ).shape[-1] / sample_rate_hertz
     
     if colors is None:
         colors = Bright[7] 
@@ -135,7 +143,7 @@ def generate_strain_plot(
         source = ColumnDataSource(data)
     
         y_axis_label = f"Strain"
-        if scale_factor is not None or scale_factor == 1.0:
+        if scale_factor is not None and scale_factor != 1:
             y_axis_label += f" (scaled by {scale_factor})"
     
         p = figure(

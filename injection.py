@@ -511,15 +511,26 @@ class IncoherentGenerator(WaveformGenerator):
 @dataclass
 class InjectionGenerator:
     configs : Union[List[Union[cuPhenomDGenerator, WNBGenerator]], List[List[Union[cuPhenomDGenerator, WNBGenerator]]]]
-    sample_rate_hertz : float
-    onsource_duration_seconds : float
-    crop_duration_seconds : float
-    num_examples_per_generation_batch : int
-    num_examples_per_batch : int
+    sample_rate_hertz : float = None
+    onsource_duration_seconds : float = None
+    crop_duration_seconds : float = None
+    num_examples_per_generation_batch : int = None
+    num_examples_per_batch : int = None
     variables_to_return : List[WaveformParameters] = None
     index : int = 0
     
     def __post_init__(self):
+        
+        if self.sample_rate_hertz is None:
+            self.sample_rate_hertz = gf.Defaults.sample_rate_hertz
+        if self.onsource_duration_seconds is None:
+            self.onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+        if self.crop_duration_seconds is None:
+            self.crop_duration_seconds = gf.Defaults.crop_duration_seconds
+        if self.num_examples_per_generation_batch is None:
+            self.num_examples_per_generation_batch = gf.Defaults.num_examples_per_generation_batch
+        if self.num_examples_per_batch is None:
+            self.num_examples_per_batch = gf.Defaults.num_examples_per_batch
         
         if (self.num_examples_per_batch > self.num_examples_per_generation_batch):
             logging.warning(
@@ -902,7 +913,7 @@ def roll_vector_zero_padding_(vector, roll_amount):
     
     return rolled_vector
 
-@tf.function(jit_compile=True)
+@tf.function
 def roll_vector_zero_padding(tensor, min_roll, max_roll):
     # Generate an array of roll amounts
     roll_amounts = tf.random.uniform(
@@ -923,7 +934,7 @@ def roll_vector_zero_padding(tensor, min_roll, max_roll):
 
     return result
 
-@tf.function(jit_compile=True)
+@tf.function
 def generate_mask(
     num_injections: int, 
     injection_chance: float

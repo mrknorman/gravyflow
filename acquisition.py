@@ -101,7 +101,7 @@ class IFOData:
     data               : Union[List[TimeSeries], tf.Tensor, np.ndarray]
     sample_rate_hertz  : float
     start_gps_time     : List[float]
-        
+
     def __post_init__(self):
                 
         if isinstance(self.data, list):
@@ -211,8 +211,8 @@ class IFOData:
         else:
             # Stack results across the new dimension
             stacked_batch_subarrays = all_batch_subarrays[0]
-            stacked_batch_background_chunks = all_batch_subarrays[0]
-            stacked_subsections_start_gps_time = all_batch_subarrays[0]
+            stacked_batch_background_chunks = all_batch_background_chunks[0]
+            stacked_subsections_start_gps_time = all_subsections_start_gps_time[0]
 
         return (stacked_batch_subarrays, stacked_batch_background_chunks, 
                 stacked_subsections_start_gps_time)
@@ -624,12 +624,6 @@ class IFODataObtainer:
                         valid_segments
                     )
                     
-                    print(feature_segments, feature_times)
-
-
-                    print(len(feature_segments), len(feature_times))
-                    quit()
-                    
                     self.feature_segments = self.order_segments(
                         feature_segments,
                         segment_order
@@ -651,9 +645,6 @@ class IFODataObtainer:
             )
                 
         self.valid_segments = np.swapaxes(self.valid_segments, 1, 0)
-        
-        print(self.valid_segments)
-        quit()
         
         # Order segments by requested order:
         self.valid_segments = self.order_segments(
@@ -972,11 +963,14 @@ class IFODataObtainer:
                 
     def acquire(
         self,
-        sample_rate_hertz : float,
+        sample_rate_hertz : float = None,
         valid_segments : np.ndarray = None,
         ifos : List[gf.IFO] = gf.IFO.L1,
         scale_factor : float = 1.0
     ): 
+        if sample_rate_hertz is None:
+            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+
         # Check if self.file_path is intitiated:
         if self.file_path is None:
             raise ValueError("""
@@ -1173,10 +1167,15 @@ class IFODataObtainer:
             onsource_duration_seconds : float,
             padding_duration_seconds : float,
             offsource_duration_seconds : float,
-            num_examples_per_batch : int = 32,
+            num_examples_per_batch : int = None,
             ifos : List[gf.IFO] = gf.IFO.L1,
-            scale_factor : float = 1.0
+            scale_factor : float = None
         ) -> (tf.Tensor, tf.Tensor, tf.Tensor, int):
+
+        if num_examples_per_batch is None:
+            num_examples_per_batch = gf.Defaults.num_examples_per_batch
+        if scale_factor is None:
+            scale_factor = gf.Defaults.scale_factor
         
         # Ensure ifos are list:
         if not isinstance(ifos, list):

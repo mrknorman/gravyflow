@@ -215,7 +215,7 @@ def calculate_far_score_thresholds(
 
     return score_thresholds
 
-@tf.function
+@tf.function(jit_compile=True)
 def roc_curve_and_auc(
         y_true, 
         y_scores, 

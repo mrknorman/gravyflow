@@ -102,7 +102,7 @@ def replace_nan_and_inf_with_zero(tensor):
     tensor = tf.where(tf.math.is_inf(tensor), tf.zeros_like(tensor), tensor)
     return tensor    
 
-@tf.function(jit_compile=True)
+@tf.function
 def expand_tensor(
         signal: tf.Tensor, 
         mask: tf.Tensor, 

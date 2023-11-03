@@ -85,14 +85,14 @@ def get_max_arrival_time_difference(
 
 def data(    
         # Random Seed:
-        seed: int = 1000,
+        seed: int = None,
         # Temporal components:
-        sample_rate_hertz: float = 2048.0,   
-        onsource_duration_seconds: float = 1.0,
-        offsource_duration_seconds: float = 16.0,
-        crop_duration_seconds: float = 0.5,
+        sample_rate_hertz: float = None,   
+        onsource_duration_seconds: float = None,
+        offsource_duration_seconds: float = None,
+        crop_duration_seconds: float = None,
         # Scale factor:
-        scale_factor : float = 1.0E21,
+        scale_factor : float = None,
         # Noise: 
         noise_obtainer : gf.NoiseObtainer = None,
         group : str = "train",
@@ -100,9 +100,9 @@ def data(
         injection_generators: List[
             Union[gf.cuPhenomDGenerator, gf.WNBGenerator]
         ] = None, 
-        num_examples_per_generation_batch : int = 2048,
+        num_examples_per_generation_batch : int = None,
         # Output configuration:
-        num_examples_per_batch: int = 1,
+        num_examples_per_batch: int = None,
         input_variables : List[
             Union[gf.gf.WaveformParameters, gf.ReturnVariables]
         ] = None,
@@ -110,8 +110,25 @@ def data(
             Union[gf.gf.WaveformParameters, gf.ReturnVariables]
         ] = None
     ):
+
+    if seed is None:
+        seed = gf.Defaults.seed
+    if sample_rate_hertz is None:
+        sample_rate_hertz = gf.Defaults.sample_rate_hertz
+    if onsource_duration_seconds is None:
+        onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+    if offsource_duration_seconds is None:
+        offsource_duration_seconds = gf.Defaults.offsource_duration_seconds
+    if crop_duration_seconds is None:
+        crop_duration_seconds = gf.Defaults.crop_duration_seconds
+    if scale_factor is None:
+        scale_factor = gf.Defaults.scale_factor
+    if num_examples_per_generation_batch is None:
+        num_examples_per_generation_batch = gf.Defaults.num_examples_per_generation_batch
+    if num_examples_per_batch is None:
+        num_examples_per_batch = gf.Defaults.num_examples_per_batch
     
-    # Set defaults here as if initilised as default arguments objects are global
+    # Set gf.Defaults here as if initilised as default arguments objects are global
     if noise_obtainer is None:
         noise_obtainer = gf.NoiseObtainer()
         
@@ -143,7 +160,7 @@ def data(
     
     # Create Noise Generator:
     noise : Iterator = \
-        noise_obtainer.init_generator(
+        noise_obtainer(
             sample_rate_hertz,
             onsource_duration_seconds,
             crop_duration_seconds,
@@ -348,19 +365,19 @@ def create_variable_dictionary(
     }
 
 def Dataset(
-        seed: int = 1000,
-        sample_rate_hertz: float = 2048.0,
-        onsource_duration_seconds: float = 1.0,
-        offsource_duration_seconds: float = 16.0,
-        crop_duration_seconds: float = 0.5,
-        scale_factor: float = 1.0E21,
+        seed: int = None,
+        sample_rate_hertz: float = None,
+        onsource_duration_seconds: float = None,
+        offsource_duration_seconds: float = None,
+        crop_duration_seconds: float = None,
+        scale_factor: float = None,
         noise_obtainer: gf.NoiseObtainer = None,
         group : str = "train",
         injection_generators: List[
             Union[gf.cuPhenomDGenerator, gf.WNBGenerator]
         ] = None,
-        num_examples_per_generation_batch: int = 2048,
-        num_examples_per_batch: int = 1,
+        num_examples_per_generation_batch: int = None,
+        num_examples_per_batch: int = None,
         input_variables: List = None,
         output_variables: List = None
     ) -> tf.data.Dataset:
@@ -397,6 +414,23 @@ def Dataset(
     Returns:
         tf.data.Dataset: TensorFlow Dataset object.
     """
+
+    if seed is None:
+        seed = gf.Defaults.seed
+    if sample_rate_hertz is None:
+        sample_rate_hertz = gf.Defaults.sample_rate_hertz
+    if onsource_duration_seconds is None:
+        onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+    if offsource_duration_seconds is None:
+        offsource_duration_seconds = gf.Defaults.offsource_duration_seconds
+    if crop_duration_seconds is None:
+        crop_duration_seconds = gf.Defaults.crop_duration_seconds
+    if scale_factor is None:
+        scale_factor = gf.Defaults.scale_factor
+    if num_examples_per_generation_batch is None:
+        num_examples_per_generation_batch = gf.Defaults.num_examples_per_generation_batch
+    if num_examples_per_batch is None:
+        num_examples_per_batch = gf.Defaults.num_examples_per_batch
     
     if input_variables is None:
         input_variables = []
@@ -404,7 +438,7 @@ def Dataset(
     if output_variables is None:
         output_variables = []
     
-    # Set defaults here as if initilised as default arguments objects are global
+    # Set gf.Defaults here as if initilised as default arguments objects are global
     if injection_generators is None:
         injection_generators = []
     elif not isinstance(injection_generators, list):

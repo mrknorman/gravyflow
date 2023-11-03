@@ -5,7 +5,7 @@ import numpy as np
 
 import gravyflow as gf
 
-@tf.function 
+@tf.function(jit_compile=True)
 def find_closest(tensor, scalar):
     # Calculate the absolute differences between the tensor and the scalar
     diffs = tf.abs(tensor - scalar)
@@ -15,7 +15,7 @@ def find_closest(tensor, scalar):
     
     return closest_index
 
-@tf.function 
+@tf.function(jit_compile=True)
 def snr(
     injection: tf.Tensor, 
     background: tf.Tensor,
@@ -131,7 +131,7 @@ def snr(
 
     return SNR
 
-@tf.function
+@tf.function(jit_compile=True)
 def scale_to_snr(
     injection: tf.Tensor, 
     background: tf.Tensor,

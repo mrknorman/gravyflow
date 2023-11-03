@@ -1,7 +1,7 @@
 import tensorflow as tf
 
 # Compute Pearson correlation
-@tf.function
+@tf.function(jit_compile=True)
 def pearson(x, y):
 
     mean_x, mean_y = tf.reduce_mean(x, -1, keepdims=True), tf.reduce_mean(y, -1, keepdims=True)

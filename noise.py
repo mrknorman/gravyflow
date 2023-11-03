@@ -245,16 +245,30 @@ class NoiseObtainer:
                 "test" : 0.01
             }
     
-    def init_generator(
+    def __call__(
             self,
-            sample_rate_hertz : float,
-            onsource_duration_seconds : float,
-            crop_duration_seconds : float,
-            offsource_duration_seconds : float,
-            num_examples_per_batch : float,
+            sample_rate_hertz : float  = None,
+            onsource_duration_seconds : float = None,
+            crop_duration_seconds : float = None,
+            offsource_duration_seconds : float = None,
+            num_examples_per_batch : float = None,
             scale_factor : float = 1.0,
             group : str = "train"
         ) -> Iterator:
+
+        # Set to defaults if values are None:
+        if sample_rate_hertz is None:
+            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+        if onsource_duration_seconds is None:
+            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+        if offsource_duration_seconds is None:
+            offsource_duration_seconds = gf.Defaults.offsource_duration_seconds
+        if crop_duration_seconds is None:
+            crop_duration_seconds = gf.Defaults.crop_duration_seconds
+        if scale_factor is None:
+            scale_factor = gf.Defaults.scale_factor
+        if num_examples_per_batch is None:
+            num_examples_per_batch = gf.Defaults.num_examples_per_batch
         
         # Configure noise based on type
         
