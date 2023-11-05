@@ -143,8 +143,10 @@ def get_element_shape(dataset):
         return element[0].shape
     
 def open_hdf5_file(
-    file_path : Union[str, Path], 
-    mode : str ='r+'
+        file_path : Union[str, Path], 
+        logger,
+        mode : str ='r+',
+        logging_level : int = logging.WARNING
     ) -> h5py.File:
     
     file_path = Path(file_path)
@@ -156,9 +158,9 @@ def open_hdf5_file(
         # The file does not exist, so create it in write mode
         f = h5py.File(file_path, 'w')
         f.close()
-        logging.info(f'The file {file_path} was created in write mode.')
+        logger.info(f'The file {file_path} was created in write mode.')
     else:
-        logging.info(f'The file {file_path} was opened in {mode} mode.')
+        logger.info(f'The file {file_path} was opened in {mode} mode.')
     return h5py.File(file_path, mode)
 
 def ensure_directory_exists(

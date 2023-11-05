@@ -230,12 +230,17 @@ class WaveformGenerator:
     def load(
         cls,
         config_path: Path, 
-        sample_rate_hertz: float, 
-        onsource_duration_seconds: float, 
+        sample_rate_hertz: float = None, 
+        onsource_duration_seconds: float = None, 
         scaling_method: ScalingMethod = None,
         scale_factor : float = None,
         network : Union[List[IFOs], gf.Network, Path] = None
     ) -> Type[cls]:
+
+        if sample_rate_hertz is None:
+            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+        if onsource_duration_seconds is None:
+            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
         
         # Define replacement mapping
         replacements = {
@@ -291,18 +296,18 @@ class WaveformGenerator:
                 raise ValueError("This waveform type is not implemented.")
                 
         generator = waveform_cls(
-                    scaling_method=config.pop("scaling_method"),
-                    scale_factor=config.pop("scale_factor"),
-                    network=cls.init_network(network),
-                    injection_chance=config.pop("injection_chance"),
-                    front_padding_duration_seconds=config.pop(
-                        "front_padding_duration_seconds"
-                    ),
-                    back_padding_duration_seconds=config.pop(
-                        "back_padding_duration_seconds"
-                    ),
-                    **{k: gf.Distribution(**v) for k, v in config.items()},
-                )
+            scaling_method=config.pop("scaling_method"),
+            scale_factor=config.pop("scale_factor"),
+            network=cls.init_network(network),
+            injection_chance=config.pop("injection_chance"),
+            front_padding_duration_seconds=config.pop(
+                "front_padding_duration_seconds"
+            ),
+            back_padding_duration_seconds=config.pop(
+                "back_padding_duration_seconds"
+            ),
+            **{k: gf.Distribution(**v) for k, v in config.items()},
+        )
 
         return generator
 

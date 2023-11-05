@@ -1,5 +1,6 @@
 import tensorflow as tf
 import tensorflow_probability  as tfp
+from tensorflow.keras.layers import Layer
 import tensorflow.signal as tfs
 
 import gravyflow as gf
@@ -437,3 +438,58 @@ def whiten(
         out = out[0]
 
     return out * tf.sqrt(2.0 * dt)
+
+class Whiten(Layer):
+    def __init__(
+            self, 
+            sample_rate_hertz = None,
+            onsource_duration_seconds = None,
+            fft_duration_seconds=4, 
+            overlap_duration_seconds=2,
+            highpass_hertz=None, 
+            detrend='constant', 
+            filter_duration_seconds=2.0, 
+            window="hann", 
+            **kwargs
+        ):
+        super().__init__(**kwargs)
+
+        if sample_rate_hertz is None:
+            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+        if onsource_duration_seconds is None:
+            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+
+        self.onsource_duration_seconds = onsource_duration_seconds
+        self.sample_rate_hertz = sample_rate_hertz
+        self.fft_duration_seconds = fft_duration_seconds
+        self.overlap_duration_seconds = overlap_duration_seconds
+        self.highpass_hertz = highpass_hertz
+        self.detrend = detrend
+        self.filter_duration_seconds = filter_duration_seconds
+        self.window = window
+
+    def build(self, input_shape):
+        # This layer doesn't have any trainable weights, but you could set up weights here if necessary.
+        super().build(input_shape)
+
+    @tf.function(jit_compile=True)
+    def call(self, inputs):
+        timeseries, background = inputs
+
+        whitened = whiten(timeseries, background, self.sample_rate_hertz)
+        cropped = gf.crop_samples(whitened, self.onsource_duration_seconds, self.sample_rate_hertz)
+
+        return cropped
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            'sample_rate_hertz': self.sample_rate_hertz,
+            'fft_duration_seconds': self.fft_duration_seconds,
+            'overlap_duration_seconds': self.overlap_duration_seconds,
+            'highpass_hertz': self.highpass_hertz,
+            'detrend': self.detrend,
+            'filter_duration_seconds': self.filter_duration_seconds,
+            'window': self.window,
+        })
+        return config

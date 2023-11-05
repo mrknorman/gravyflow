@@ -237,7 +237,6 @@ def test_dataset(
                     "Injection": injection
                 },
                 sample_rate_hertz,
-                onsource_duration_seconds,
                 title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 "
                        f"{m2} msun"),
                 scale_factor=scale_factor
@@ -369,7 +368,6 @@ def test_dataset_multi(
                     "Injection": injection
                 },
                 sample_rate_hertz,
-                onsource_duration_seconds,
                 title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2}"
                        " msun"),
                 scale_factor=scale_factor
@@ -509,7 +507,6 @@ def test_dataset_incoherent(
                     "Injection": injection
                 },
                 sample_rate_hertz,
-                onsource_duration_seconds,
                 title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2}"
                        " msun"),
                 scale_factor=scale_factor
@@ -627,7 +624,6 @@ def test_feature_dataset(
                     "Whitened Onsouce + Injection": onsource_
                 },
                 sample_rate_hertz,
-                onsource_duration_seconds,
                 scale_factor=scale_factor
             ), 
             gf.generate_spectrogram(

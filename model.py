@@ -10,6 +10,8 @@ from keras.layers import Lambda
 from keras import backend as K
 from keras.callbacks import Callback
 
+import gravyflow as gf
+
 def negative_loglikelihood(targets, estimated_distribution):
     
     targets = tf.cast(targets, dtype = tf.float32)
@@ -517,7 +519,7 @@ class ModelBuilder:
         layers: List[BaseLayer], 
         optimizer: str, 
         loss: str, 
-        batch_size: int
+        batch_size: int = None
     ):
         """
         Initializes a ModelBuilder instance.
@@ -527,7 +529,11 @@ class ModelBuilder:
         optimizer: Optimizer to use when training the model.
         loss: Loss function to use when training the model.
         batch_size: Batch size to use when training the model.
-        """        
+        """   
+
+        if batch_size is None:
+            batch_size = gf.Defaults.num_examples_per_batch
+
         self.layers = layers
         self.batch_size = ensure_hp(batch_size)
         self.optimizer = ensure_hp(optimizer)
@@ -577,25 +583,39 @@ class ModelBuilder:
             loss = self.loss.value,
             metrics = metrics
         )
-    
-    def build_input_layer(
-        self,
-        input_config : dict
+
+    def build_input_layers(
+            self, 
+            input_configs : Union[Dict, List[Dict]]
         ):
-        self.model.add(
-            tf.keras.layers.InputLayer(
-                input_shape = input_config["shape"], 
-                name = input_config["name"]
+        
+        if not isinstance(input_configs, list):
+            input_configs = [input_configs]
+
+        # Create a list to hold all input layers
+        input_layers = []
+        
+        # Iterate over the input configurations and create an input layer for each
+        for config in input_configs:
+            input_layer = tf.keras.layers.InputLayer(
+                input_shape=config["shape"], 
+                name=config["name"]
             )
-        )
-        #self.model.add(tf.keras.layers.Reshape((-1, 1)))
+            self.model.add(input_layer)
+            input_layers.append(input_layer)
     
     def build_hidden_layer(
-        self,
-        layer : BaseLayer
-    ):        
+            self,
+            layer : BaseLayer
+        ):
+
         # Get layer type:
-        match layer.layer_type:        
+        match layer.layer_type:       
+            case "Whiten":
+                new_layer = \
+                    gf.Whiten(
+                        layer.new_sample_rate_hertz
+                    )
             case "Dense":
                 new_layer = \
                     tf.keras.layers.Dense(
@@ -689,17 +709,18 @@ class ModelBuilder:
             )
         ]
         
-        num_batches = \
-            training_config["num_examples_per_epoc"]//self.batch_size.value
+        num_batches = training_config["num_examples_per_epoc"] // self.batch_size.value
+        num_validation_batches = training_config["num_validation_examples"] // self.batch_size.value
         
         self.metrics.append(
             self.model.fit(
                 train_dataset,
-                validation_data = validate_dataset,
+                validation_data = validate_dataset.take(num_validation_batches),
                 epochs = training_config["max_epochs"], 
                 steps_per_epoch = num_batches,
                 callbacks = callbacks,
-                batch_size = self.batch_size.value
+                batch_size = self.batch_size.value,
+                verbose = 1
             )
         )
         
