@@ -288,13 +288,6 @@ def data(
             spectrogram_onsource = None
         
         if gf.ReturnVariables.ONSOURCE in variables_to_return:
-            # Crop to remove edge effects, crop with or without whitening to
-            # ensure same data is retrieve in both cases
-            onsource = gf.crop_samples(
-                onsource, 
-                onsource_duration_seconds, 
-                sample_rate_hertz
-            )
             onsource = tf.cast(onsource, tf.float16)
             
         if gf.ReturnVariables.OFFSOURCE in variables_to_return:
@@ -444,7 +437,8 @@ def Dataset(
     elif not isinstance(injection_generators, list):
         injection_generators = [injection_generators]
 
-    num_onsource_samples = int(onsource_duration_seconds * sample_rate_hertz)
+    num_cropped_samples = int(onsource_duration_seconds * sample_rate_hertz)
+    num_onsource_samples = int((onsource_duration_seconds + 2*crop_duration_seconds) * sample_rate_hertz)
     num_offsource_samples = int(offsource_duration_seconds * sample_rate_hertz)
     num_injection_configs = len(injection_generators)
     
@@ -468,15 +462,15 @@ def Dataset(
     
     if num_detectors == 1:
         onsource_shape = (num_examples_per_batch, num_onsource_samples)
+        cropped_shape = (num_examples_per_batch, num_cropped_samples)
         offsource_shape = (num_examples_per_batch, num_offsource_samples)
         detectors_shape = (num_examples_per_batch,)
         injections_shape = (
                 num_injection_configs, 
                 num_examples_per_batch, 
-                num_onsource_samples
+                num_cropped_samples
             )
         per_injection_shape = (num_injection_configs, num_examples_per_batch)
-        
         pearson_shape = (
             num_examples_per_batch, 
             max_arival_time_difference_samples
@@ -484,6 +478,9 @@ def Dataset(
     else:
         onsource_shape = (
             num_examples_per_batch, num_detectors, num_onsource_samples
+        )
+        cropped_shape = (
+            num_examples_per_batch, num_detectors, num_cropped_samples
         )
         offsource_shape = (
             num_examples_per_batch, num_detectors, num_offsource_samples
@@ -495,7 +492,7 @@ def Dataset(
                 num_injection_configs, 
                 num_examples_per_batch,
                 num_detectors,
-                num_onsource_samples
+                num_cropped_samples
             )
         per_injection_shape = (
             num_injection_configs, num_examples_per_batch
@@ -506,8 +503,8 @@ def Dataset(
             2*max_arival_time_difference_samples
         )
         
-    spectrogram_shape = gf.spectrogram_shape(onsource_shape)
-    
+    spectrogram_shape = gf.spectrogram_shape(cropped_shape)
+
     output_signature_dict = {
         gf.ReturnVariables.ONSOURCE.name:
             tf.TensorSpec(
@@ -516,7 +513,7 @@ def Dataset(
             ),
         gf.ReturnVariables.WHITENED_ONSOURCE.name: 
             tf.TensorSpec(
-                shape=onsource_shape,
+                shape=cropped_shape,
                 dtype=tf.float16
             ),
         gf.ReturnVariables.OFFSOURCE.name: 

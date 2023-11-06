@@ -29,8 +29,7 @@ def test_noise_memory(
     num_batches : int = num_tests//num_examples_per_batch
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : gf.IFODataObtainer = \
-        gf.IFODataObtainer(
+    ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
             gf.ObservingRun.O3, 
             gf.DataQuality.BEST, 
             [
@@ -44,8 +43,7 @@ def test_noise_memory(
         )
     
     # Initilise noise generator wrapper:
-    noise : gf.NoiseObtainer = \
-        gf.NoiseObtainer(
+    noise : gf.NoiseObtainer = gf.NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
             noise_type = gf.NoiseType.REAL,
             ifos = gf.IFO.L1
@@ -59,8 +57,7 @@ def test_noise_memory(
 
     for _ in range(10):
         # Create generator:
-        generator : Iterator = \
-            noise.init_generator(
+        generator : Iterator = noise(
                 sample_rate_hertz,
                 onsource_duration_seconds,
                 crop_duration_seconds,

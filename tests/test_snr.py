@@ -168,11 +168,11 @@ def test_snr(
         )
     
     # Initilise noise generator wrapper:
-    noise_obtainer: gfNoiseObtainer = \
+    noise_obtainer: gf.NoiseObtainer = \
         gf.NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = gfNoiseType.REAL,
-            ifos = gfIFO.L1
+            noise_type = gf.NoiseType.REAL,
+            ifos = gf.IFO.L1
         )
     
     dataset : tf.data.Dataset = gf.Dataset(

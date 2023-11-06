@@ -598,9 +598,6 @@ class IFODataObtainer:
                 # Distibute segments deterministically amongst groups, thos can
                 # be used to separate validation and testing data from training 
                 # data:
-
-                print(group_name)
-
                 valid_segments : np.ndarray = self.get_segments_for_group(
                     valid_segments, 
                     group_split_seconds, 

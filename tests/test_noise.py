@@ -9,7 +9,7 @@ from bokeh.layouts import gridplot
 from tqdm import tqdm
 
 # Local imports:
-import gravyflow as gw
+import gravyflow as gf
 
 def test_iteration(
     num_tests : int = int(1.0E2)
@@ -47,8 +47,7 @@ def test_iteration(
         )
     
     # Create generator:
-    generator : Iterator = \
-        noise.init_generator(
+    generator : Iterator = noise(
             sample_rate_hertz,
             onsource_duration_seconds,
             crop_duration_seconds,
@@ -109,10 +108,6 @@ def test_real_noise(
             scale_factor
         )
     
-    # Calculate total onsource length including padding
-    total_onsource_duration_seconds : float = \
-        onsource_duration_seconds + (crop_duration_seconds * 2.0)
-        
     # Iterate through num_tests batches to check correct operation:
     onsource, offsource, gps_times  = next(generator)
         
@@ -123,7 +118,6 @@ def test_real_noise(
             gf.generate_strain_plot(
                 {"Onsource Noise" : onsource_},
                 sample_rate_hertz,
-                total_onsource_duration_seconds,
                 title = f"Onsource Background noise at {gps_time}",
                 scale_factor = scale_factor
             )
@@ -132,7 +126,6 @@ def test_real_noise(
             gf.generate_strain_plot(
                 {"Offsource Noise" : offsource_},
                 sample_rate_hertz,
-                offsource_duration_seconds,
                 title = f"Offsource Background noise at {gps_time}",
                 scale_factor = scale_factor
             )
@@ -186,8 +179,7 @@ def test_multi_noise(
         )
     
     # Create generator:
-    generator : Iterator = \
-        noise.init_generator(
+    generator : Iterator = noise(
             sample_rate_hertz,
             onsource_duration_seconds,
             crop_duration_seconds,
@@ -195,16 +187,12 @@ def test_multi_noise(
             num_examples_per_batch,
             scale_factor
         )
-    
-    # Calculate total onsource length including padding
-    total_onsource_duration_seconds : float = \
-        onsource_duration_seconds + (crop_duration_seconds * 2.0)
         
     # Iterate through num_tests batches to check correct operation:
-    onsource, offsource, gps_times  = next(generator)
+    onsource, _, gps_times  = next(generator)
         
     layout = []
-    for onsource_, offsource_, gps_time in zip(onsource, offsource, gps_times):
+    for onsource_, gps_time in zip(onsource, gps_times):
         
         list_of_onsource = []
         for onsource_ifo in onsource_: 
@@ -212,7 +200,6 @@ def test_multi_noise(
                 gf.generate_strain_plot(
                     {"Onsource Noise" : onsource_ifo},
                     sample_rate_hertz,
-                    total_onsource_duration_seconds,
                     title = f"Onsource Background noise at {gps_time}",
                     scale_factor = scale_factor
                 )

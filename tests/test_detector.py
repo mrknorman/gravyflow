@@ -301,7 +301,6 @@ def test_project_wave(
             [gf.generate_strain_plot(
                 {"Injection Test": injection},
                 sample_rate_hertz,
-                total_onsource_duration_seconds,
                 title=f"WNB injection example",
                 scale_factor=scale_factor
             )]

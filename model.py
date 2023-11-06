@@ -475,6 +475,17 @@ class DropLayer(BaseLayer):
         self.rate = ensure_hp(rate)
         self.mutable_attributes = [self.rate]
 
+class WhitenLayer(BaseLayer):
+    
+    def __init__(self):
+        """
+        Initializes a DropLayer instance.
+        
+        Args:
+        rate: HyperParameter specifying the whitening for this layer.
+        """
+        self.layer_type = "Whiten"
+
 def randomizeLayer(layer_types: List[str], default_layers: Dict[str, BaseLayer]) -> BaseLayer:
     """
     Returns a randomized layer of a random type.
@@ -545,7 +556,7 @@ class ModelBuilder:
 
     def build_model(
         self, 
-        input_config : dict,
+        input_configs : Union[List[Dict], Dict],
         output_config : dict,
         metrics : list = []
     ):
@@ -556,18 +567,32 @@ class ModelBuilder:
         input_shape: Shape of the input data.
         output_shape: Shape of the output data.
         """        
+
+        if not isinstance(input_configs, list):
+            input_configs = [input_configs]
         
-        self.model = tf.keras.Sequential()
-        
-        # Build input layer:
-        self.build_input_layer(input_config)
-        
-        # Build hidden layers:
+        # Create input tensors based on the provided configurations
+        inputs = {config["name"]: tf.keras.Input(shape=config["shape"], name=config["name"])
+                  for config in input_configs}
+
+        # The last output tensor, starting with the input tensors
+        last_output_tensors = list(inputs.values())
+
         for layer in self.layers:
-            self.build_hidden_layer(layer)
+            new_layer = self.build_hidden_layer(layer)
+
+            # Apply the layer to the last output tensor(s)
+            if isinstance(new_layer, gf.Whiten):
+                # Whiten expects a list of tensors
+                last_output_tensors = [new_layer(last_output_tensors)]
+            else:
+                # Apply the layer to each of the last output tensors (assuming they can all be processed by this layer)
+                last_output_tensors = [new_layer(tensor) for tensor in last_output_tensors]
         
         # Build output layer
-        self.build_output_layer(output_config)
+        output_tensor = self.build_output_layer(last_output_tensors[-1], output_config)
+
+        self.model = tf.keras.Model(inputs=inputs, outputs=output_tensor)
         
         # If metrics is empty use best guess
         if not metrics:
@@ -583,26 +608,6 @@ class ModelBuilder:
             loss = self.loss.value,
             metrics = metrics
         )
-
-    def build_input_layers(
-            self, 
-            input_configs : Union[Dict, List[Dict]]
-        ):
-        
-        if not isinstance(input_configs, list):
-            input_configs = [input_configs]
-
-        # Create a list to hold all input layers
-        input_layers = []
-        
-        # Iterate over the input configurations and create an input layer for each
-        for config in input_configs:
-            input_layer = tf.keras.layers.InputLayer(
-                input_shape=config["shape"], 
-                name=config["name"]
-            )
-            self.model.add(input_layer)
-            input_layers.append(input_layer)
     
     def build_hidden_layer(
             self,
@@ -612,19 +617,14 @@ class ModelBuilder:
         # Get layer type:
         match layer.layer_type:       
             case "Whiten":
-                new_layer = \
-                    gf.Whiten(
-                        layer.new_sample_rate_hertz
-                    )
+                new_layer = gf.Whiten()
             case "Dense":
-                new_layer = \
-                    tf.keras.layers.Dense(
+                new_layer = tf.keras.layers.Dense(
                         layer.units.value, 
                         activation=layer.activation.value
                     )
             case "Convolutional":
-                new_layer = \
-                    tf.keras.layers.Conv1D(
+                new_layer = tf.keras.layers.Conv1D(
                         layer.filters.value, 
                         (layer.kernel_size.value,), 
                         strides=(layer.strides.value,), 
@@ -632,15 +632,13 @@ class ModelBuilder:
                         padding = layer.padding.value
                     )
             case "Pooling":
-                new_layer = \
-                    tf.keras.layers.MaxPool1D(
+                new_layer = tf.keras.layers.MaxPool1D(
                         (layer.pool_size.value,),
                         strides=(layer.strides.value,),
                         padding = layer.padding.value
                     )
             case "Dropout":
-                new_layer = \
-                    tf.keras.layers.Dropout(
+                new_layer = tf.keras.layers.Dropout(
                         layer.rate.value
                     )
             case _:
@@ -648,36 +646,35 @@ class ModelBuilder:
                     f"Layer type '{layer.layer_type.value}' not recognized"
                 )
         
-        # Add new layer to model:
-        self.model.add(new_layer)
+        # Return new layer type:
+        return new_layer
             
-    def build_output_layer(
-        self,
-        output_config : dict
-        ):
-        
-        match output_config["type"]:        
-            case "normal":
-                self.model.add(tf.keras.layers.Flatten())
-                self.model.add(
-                    tf.keras.layers.Dense(
-                        2, 
-                        activation='linear', 
-                        dtype='float32', 
-                        bias_initializer=tf.keras.initializers.Constant([1.0, 2.0])
-                    )
-                )
-                self.model.add(IndependentFoldedNormal(1, name=output["name"]))
-            case "binary":
-                self.model.add(tf.keras.layers.Flatten())
-                self.model.add(
-                    tf.keras.layers.Dense(
-                        1, 
-                        activation='sigmoid', 
-                        dtype='float32',
-                        name = output_config["name"]
-                    )
-                )
+    def build_output_layer(self, last_output_tensor, output_config):
+        # Flatten the last output tensor
+        #x = tf.keras.layers.Flatten()(last_output_tensor)
+
+        x = last_output_tensor
+
+        # Based on the output type, add the final layers functionally
+        if output_config["type"] == "normal":
+            x = tf.keras.layers.Dense(
+                    2, 
+                    activation='linear', 
+                    dtype='float32', 
+                    bias_initializer=tf.keras.initializers.Constant([1.0, 2.0])
+                )(x)
+            output_tensor = IndependentFoldedNormal(1, name=output_config["name"])(x)
+        elif output_config["type"] == "binary":
+            output_tensor = tf.keras.layers.Dense(
+                                1, 
+                                activation='sigmoid', 
+                                dtype='float32',
+                                name=output_config["name"]
+                            )(x)
+        else:
+            raise ValueError(f"Unsupported output type: {output_config['type']}")
+
+        return output_tensor
         
     def train_model(
         self, 
@@ -720,7 +717,7 @@ class ModelBuilder:
                 steps_per_epoch = num_batches,
                 callbacks = callbacks,
                 batch_size = self.batch_size.value,
-                verbose = 1
+                verbose=2
             )
         )
         
@@ -829,7 +826,7 @@ class Population:
 
             # Build the model with input shape (input_dim,)
             builder.build_model(
-                input_config={}, 
+                input_configs={}, 
                 output_config={}
             )
             population.append(builder)

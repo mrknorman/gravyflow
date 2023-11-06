@@ -23,7 +23,6 @@ def test_iteration(
     sample_rate_hertz : float = 2048.0
     onsource_duration_seconds : float = 1.0
     crop_duration_seconds : float = 0.5
-    scale_factor : float = 1.0E21
     
     # Define injection directory path:
     current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
@@ -101,19 +100,15 @@ def test_phenom_d_injection(
             variables_to_return = \
                 [gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN]
         )
-    
-    total_onsource_duration_seconds : float = \
-        onsource_duration_seconds + (crop_duration_seconds * 2.0)
         
     generator : Iterator = injection_generator.generate
     
-    injections, mask, parameters = next(generator())
+    injections, _, parameters = next(generator())
         
     high_mass = [
         gf.generate_strain_plot(
             {"Plus": injection[0], "Cross": injection[1]},
             sample_rate_hertz,
-            total_onsource_duration_seconds,
             title=f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2} msun",
             scale_factor=scale_factor
         )
@@ -128,7 +123,6 @@ def test_phenom_d_injection(
         gf.generate_strain_plot(
             {"Plus": injection[0], "Cross": injection[1]},
             sample_rate_hertz,
-            total_onsource_duration_seconds,
             title=f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2} msun",
             scale_factor=scale_factor
         )
@@ -194,19 +188,15 @@ def test_wnb_injection(
                     gf.WaveformParameters.MAX_FREQUENCY_HERTZ
                 ]
         )
-    
-    total_onsource_duration_seconds : float = \
-        onsource_duration_seconds + (crop_duration_seconds * 2.0)
         
     generator : Iterator = injection_generator.generate
     
-    injections, mask, parameters = next(generator())
+    injections, _, parameters = next(generator())
 
     layout = [
         [gf.generate_strain_plot(
             {"Plus": injection[0], "Cross": injection[1]},
             sample_rate_hertz,
-            total_onsource_duration_seconds,
             title=f"WNB injection example: min frequency {min_frequency_hertz} "
             f"hertz; min frequency {max_frequency_hertz} hertz; duration "
             f"{duration} seconds.",

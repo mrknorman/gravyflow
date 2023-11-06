@@ -26,7 +26,7 @@ from .wnb import wnb
 from .conditioning import spectrogram, spectrogram_shape
 from .model import *
 from .cuphenom.python.cuphenom import imrphenomd
-from .whiten import whiten
+from .whiten import whiten, Whiten
 from .pearson import rolling_pearson
 from .detector import *
 from .acquisition import *
