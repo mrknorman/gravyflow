@@ -471,7 +471,7 @@ class cuPhenomDGenerator(WaveformGenerator):
                     duration_seconds,
                     **parameters
                 )
-            
+                        
             waveforms *= self.scale_factor
         
             return waveforms, parameters

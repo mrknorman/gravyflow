@@ -289,9 +289,21 @@ def data(
         
         if gf.ReturnVariables.ONSOURCE in variables_to_return:
             onsource = tf.cast(onsource, tf.float16)
+            onsource = gf.replace_nan_and_inf_with_zero(onsource)
+
+            tf.debugging.check_numerics(
+                onsource, 
+                f"NaN detected in onsource after cast."
+            )
             
         if gf.ReturnVariables.OFFSOURCE in variables_to_return:
             offsource = tf.cast(offsource, tf.float16)
+            offsource = gf.replace_nan_and_inf_with_zero(offsource)
+
+            tf.debugging.check_numerics(
+                offsource, 
+                f"NaN detected in offsource after cast."
+            )
             
         if gf.ReturnVariables.GPS_TIME in variables_to_return:
             gps_times = tf.cast(gps_times, tf.float64)

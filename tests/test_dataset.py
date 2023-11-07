@@ -68,7 +68,8 @@ def test_iteration(
                 ],
                 gf.SegmentOrder.RANDOM,
                 force_acquisition = True,
-                cache_segments = False
+                cache_segments = False,
+                logging_level = logging.INFO
             )
 
         # Initilise noise generator wrapper:
@@ -653,8 +654,8 @@ if __name__ == "__main__":
     
     # Test IFO noise dataset:
     #test_feature_dataset()
+    test_iteration()
     test_dataset()
     test_dataset_multi()
     test_dataset_incoherent()
-    test_iteration()
     

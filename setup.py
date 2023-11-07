@@ -145,8 +145,7 @@ def get_element_shape(dataset):
 def open_hdf5_file(
         file_path : Union[str, Path], 
         logger,
-        mode : str ='r+',
-        logging_level : int = logging.WARNING
+        mode : str ='r+'
     ) -> h5py.File:
     
     file_path = Path(file_path)
@@ -156,7 +155,7 @@ def open_hdf5_file(
         f.close()
     except OSError:
         # The file does not exist, so create it in write mode
-        f = h5py.File(file_path, 'w')
+        f = h5py.File(file_path, 'w') #swmr=True)
         f.close()
         logger.info(f'The file {file_path} was created in write mode.')
     else:
@@ -222,7 +221,7 @@ def env(
         min_gpu_memory_mb, 
         num_gpus_to_request
     )
-    
+            
     strategy = setup_cuda(
         gpus, 
         max_memory_limit=memory_to_allocate_tf, 
@@ -234,4 +233,9 @@ def env(
     
     return strategy.scope()
     
-    
+def is_redirected():
+    return (
+        not sys.stdin.isatty() or
+        not sys.stdout.isatty() or
+        not sys.stderr.isatty()
+    )

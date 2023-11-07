@@ -14,7 +14,9 @@ dependencies:
   - pytest
   - sqlalchemy
   - ipykernel
+  - python-prctl
   - pip:
       - nvidia-cudnn-cu11==8.6.0.163
       - tensorflow==2.12.*
       - tensorflow-probability==0.20.*
+      - tensorflow-io==0.32.0

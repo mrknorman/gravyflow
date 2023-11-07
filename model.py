@@ -709,6 +709,10 @@ class ModelBuilder:
         num_batches = training_config["num_examples_per_epoc"] // self.batch_size.value
         num_validation_batches = training_config["num_validation_examples"] // self.batch_size.value
         
+        verbose : int = 1
+        if gf.is_redirected():
+            verbose : int = 2
+
         self.metrics.append(
             self.model.fit(
                 train_dataset,
@@ -717,10 +721,10 @@ class ModelBuilder:
                 steps_per_epoch = num_batches,
                 callbacks = callbacks,
                 batch_size = self.batch_size.value,
-                verbose=2
+                verbose=verbose
             )
         )
-        
+            
     def validate_model(self, test_dataset: tf.data.Dataset):
         pass
 

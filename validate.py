@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 from typing import Dict, Tuple, Optional, List, Union
 import h5py
 import logging
@@ -234,7 +235,6 @@ def roc_curve_and_auc(
 
     num_samples = y_true.shape[0]
     num_chunks = num_samples // chunk_size 
-    #num_chunks = (num_samples + chunk_size - 1) // chunk_size
 
     # Initialize accumulators for true positives, false positives, true 
     # negatives, and false negatives
@@ -406,15 +406,15 @@ def calculate_multi_rocs(
         dataset_args = deepcopy(dataset_args)
         
         if isinstance(scaling_range, tuple):
-            scaling_disribution = gf.WaveformParameters(
+            scaling_disribution = gf.Distribution(
                 min_=scaling_range[0], 
                 max_=scaling_range[1],
-                type_=gf.WaveformParametersType.UNIFORM
+                type_=gf.DistributionType.UNIFORM
             )
         else:
-            scaling_disribution = gf.WaveformParameters(
+            scaling_disribution = gf.Distribution(
                 value=scaling_range, 
-                type_=gf.WaveformParametersType.CONSTANT
+                type_=gf.DistributionType.CONSTANT
             )
         #Ensure injection generators is list for subsequent logic:
         if not isinstance(dataset_args["injection_generators"], list):
@@ -482,7 +482,7 @@ def calculate_tar_scores(
     dataset_args["output_variables"] = []
     dataset_args["injection_generators"][0].injection_chance = 1.0
     dataset_args["injection_generators"][0].scaling_method.value = \
-        gf.WaveformParameters(value=scaling, type_=gf.WaveformParametersType.CONSTANT)
+        gf.Distribution(value=scaling, type_=gf.DistributionType.CONSTANT)
     
     # Initlize generator:
     dataset : tf.data.Dataset = gf.Dataset(
@@ -552,7 +552,7 @@ def snake_to_capitalized_spaces(snake_str: str) -> str:
 def generate_efficiency_curves(
         validators : list,
         fars : np.ndarray,
-        colors : list[str] = Bright[7]
+        colors : List[str] = Bright[7]
     ):
     
     # Check input durations are equal:
@@ -712,7 +712,7 @@ def downsample_data(x, y, num_points):
     
 def generate_far_curves(
         validators : list,
-        colors : list[str] = Bright[7]
+        colors : List[str] = Bright[7]
     ):
     
     plot_width = 800
@@ -780,7 +780,7 @@ def generate_far_curves(
 
 def generate_roc_curves(
     validators: list,
-    colors : list[str] = Bright[7]
+    colors : List[str] = Bright[7]
     ):
     
     p = figure(
@@ -968,7 +968,7 @@ class Validator:
         model : tf.keras.Model, 
         name : str,
         dataset_args : dict,
-        num_examples_per_batch : int = 32,
+        num_examples_per_batch : int = None,
         efficiency_config : dict = \
         {
             "max_scaling" : 20.0, 
@@ -988,16 +988,31 @@ class Validator:
                 10.0,
                 12.0
             ]    
-        }
+        },
+        logging_level : int = logging.INFO
     ):
+        if num_examples_per_batch is None:
+            num_examples_per_batch = gf.Defaults.num_examples_per_batch
+        
         # Create a new instance without executing any logic
         validator = cls()
         
         validator.name = name
-        validator.input_duration_seconds = \
-            dataset_args["onsource_duration_seconds"]
+        # Initiate logging for ifo_data:
+        validator.logger = logging.getLogger("ifo_data_aquisition")
+        stream_handler = logging.StreamHandler(sys.stdout)
+        validator.logger.addHandler(stream_handler)
+        validator.logger.setLevel(logging_level)
+
+        if "onsource_duration_seconds" in dataset_args:
+            if dataset_args["onsource_duration_seconds"] is None:
+                validator.input_duration_seconds = gf.Defaults.onsource_duration_seconds
+            else:
+                validator.input_duration_seconds = dataset_args["onsource_duration_seconds"]
+        else: 
+            validator.input_duration_seconds = gf.Defaults.onsource_duration_seconds
         
-        logging.info(f"Worst performing inputs for {validator.name}...")
+        validator.logger.info(f"Worst performing inputs for {validator.name}...")
         tar_scores, worst_performers = \
             calculate_tar_scores(
                 model, 
@@ -1007,9 +1022,9 @@ class Validator:
                 num_examples=1.0E3
             )
         validator.worst_performers = worst_performers
-        logging.info(f"Done")
+        validator.logger.info(f"Done")
                         
-        logging.info(f"Calculating efficiency scores for {validator.name}...")
+        validator.logger.info(f"Calculating efficiency scores for {validator.name}...")
         validator.efficiency_data = \
             calculate_efficiency_scores(
                 model, 
@@ -1017,9 +1032,9 @@ class Validator:
                 num_examples_per_batch,
                 **efficiency_config
             )
-        logging.info(f"Done")
+        validator.logger.info(f"Done")
 
-        logging.info(f"Calculating FAR scores for {validator.name}...")
+        validator.logger.info(f"Calculating FAR scores for {validator.name}...")
         validator.far_scores = \
             calculate_far_scores(
                 model, 
@@ -1027,9 +1042,9 @@ class Validator:
                 num_examples_per_batch,  
                 **far_config
             )
-        logging.info(f"Done")
+        validator.logger.info(f"Done")
                 
-        logging.info(f"Calculating ROC data for {validator.name}...")
+        validator.logger.info(f"Calculating ROC data for {validator.name}...")
         validator.roc_data = \
             calculate_multi_rocs(    
                 model,
@@ -1037,7 +1052,7 @@ class Validator:
                 num_examples_per_batch,
                 **roc_config
             )
-        logging.info(f"Done")
+        validator.logger.info(f"Done")
                 
         return validator
 
@@ -1045,34 +1060,39 @@ class Validator:
         self,
         file_path : Path
     ):
-        
-        logging.info(f"Saving validation data for {self.name}...")
-        
-        with h5py.File(file_path, 'w') as h5f:
+        self.logger.info(f"Saving validation data for {self.name}...")
 
+        gf.ensure_directory_exists(file_path.parent)
+
+        with gf.open_hdf5_file(
+                file_path, 
+                self.logger, 
+                mode = "w"
+            ) as validation_file:
+            
             # Unpack:
             scalings = self.efficiency_data['scalings']
             efficiency_scores = self.efficiency_data['scores']
 
             # Save model title: 
-            h5f.create_dataset('name', data=self.name.encode())
-            h5f.create_dataset(
+            validation_file.create_dataset('name', data=self.name.encode())
+            validation_file.create_dataset(
                 'input_duration_seconds', 
                 data=self.input_duration_seconds
             )
 
             # Save efficiency scores:
-            eff_group = h5f.create_group('efficiency_data')
+            eff_group = validation_file.create_group('efficiency_data')
             eff_group.create_dataset(f'scalings', data=scalings)
             for i, score in enumerate(efficiency_scores):
                 eff_group.create_dataset(f'score_{i}', data=score)
 
             # Save FAR scores
-            far_group = h5f.create_group('far_scores')
+            far_group = validation_file.create_group('far_scores')
             far_group.create_dataset('scores', data=self.far_scores)
 
             # Save ROC data:
-            roc_group = h5f.create_group('roc_data')
+            roc_group = validation_file.create_group('roc_data')
             
             roc_data = self.roc_data
 
@@ -1097,11 +1117,11 @@ class Validator:
             worst_performers = self.worst_performers
             
             for idx, entry in enumerate(worst_performers):
-                group = h5f.create_group(f'worst_perfomers_{idx}')
+                group = validation_file.create_group(f'worst_perfomers_{idx}')
                 for key, value in entry.items():
                     group.create_dataset(key, data=value, dtype=np.float16)
         
-            logging.info("Done.")
+            self.logger.info("Done.")
         
     @classmethod
     def load(
@@ -1116,7 +1136,7 @@ class Validator:
             validator.name = h5f['name'][()].decode()
             validator.input_duration_seconds = \
                 float(h5f['input_duration_seconds'][()])
-            logging.info(f"Loading validation data for {validator.name}...")
+            validator.logger.info(f"Loading validation data for {validator.name}...")
             
             # Load efficiency scores:
             eff_group = h5f['efficiency_data']
@@ -1156,7 +1176,7 @@ class Validator:
                 
             validator.worst_performers = worst_performers
                                 
-            logging.info("Done.")
+            validator.logger.info("Done.")
 
         return validator
 
@@ -1166,7 +1186,8 @@ class Validator:
         comparison_validators : list = [],
         fars : np.ndarray = np.logspace(-1, -7, 500)
     ):
-        
+        gf.ensure_directory_exists(file_path.parent)
+
         validators = comparison_validators + [self]
         
         efficiency_curves, slider = \
@@ -1192,12 +1213,16 @@ class Validator:
         ]
         
         for waveform in self.worst_performers:
+
+            pass
+            """
             waveform_plot = generate_waveform_plot(
                 waveform,
                 self.input_duration_seconds
             )
             layout.append([waveform_plot, None])
-
+            """
+        
         # Define an output path for the dashboard
         output_file(file_path)
 
