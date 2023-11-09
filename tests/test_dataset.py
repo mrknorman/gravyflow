@@ -654,8 +654,9 @@ if __name__ == "__main__":
     
     # Test IFO noise dataset:
     #test_feature_dataset()
-    test_iteration()
     test_dataset()
     test_dataset_multi()
     test_dataset_incoherent()
+    test_iteration()
+
     

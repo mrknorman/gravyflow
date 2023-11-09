@@ -9,9 +9,8 @@ from typing import List, Tuple, Union, Dict, Any
 from pathlib import Path
 import logging
 import sys
-import time
 from contextlib import closing
-import tensorflow_io as tfio
+import gc
 
 # Third-party imports
 import numpy as np
@@ -97,6 +96,46 @@ class ObservingRun(Enum):
     O2 = ObservingRunData(*observing_run_data["O2"])
     O3 = ObservingRunData(*observing_run_data["O3"])
 
+@tf.function(jit_compile=True)
+def random_subsection_(
+    tensor_data : tf.Tensor,
+    num_examples_per_batch : int,
+    num_onsource_samples : int,
+    num_offsource_samples : int,
+    time_interval_seconds : float,
+    start_gps_time : float,
+    seed
+):
+    # Ensure the seed is of the correct shape [2] and dtype int32
+    seed_tensor = tf.cast(seed, tf.int32)
+
+    time_interval_seconds = tf.cast(time_interval_seconds, tf.float32)
+    start_gps_time = tf.cast(start_gps_time, tf.float32)
+
+    N = tf.shape(tensor_data)[0]
+    maxval = N - num_onsource_samples - 16
+    minval = num_offsource_samples
+
+    random_starts = tf.random.stateless_uniform(
+        shape=(num_examples_per_batch,),
+        seed=seed_tensor,
+        minval=minval,
+        maxval=maxval,
+        dtype=tf.int32
+    )
+
+    # Create a 2D tensor where each row contains the indices for one subsection
+    indices_for_subarrays = random_starts[:, tf.newaxis] + tf.range(num_onsource_samples)[tf.newaxis, :]
+    batch_subarrays = tf.gather(tensor_data, indices_for_subarrays, axis=0)
+
+    # Create a 2D tensor where each row contains the indices for one offsource section
+    indices_for_background_chunks = (random_starts - num_offsource_samples)[:, tf.newaxis] + tf.range(num_offsource_samples)[tf.newaxis, :]
+    batch_background_chunks = tf.gather(tensor_data, indices_for_background_chunks, axis=0)
+
+    subsections_start_gps_time = start_gps_time + tf.cast(random_starts, tf.float32) * time_interval_seconds
+
+    return batch_subarrays, batch_background_chunks, subsections_start_gps_time
+
 @dataclass
 class IFOData:
     data               : Union[List[TimeSeries], tf.Tensor, np.ndarray]
@@ -131,94 +170,13 @@ class IFOData:
     def numpy(self):
         """Converts the data to a numpy array."""
         return self.data.numpy()
-    
-    def random_subsection_old(
-        self,
-        num_onsource_samples: int,
-        num_offsource_samples: int,
-        num_examples_per_batch: int
-    ):      
-
-        # Create lists to store the batched data for all tensors
-        all_batch_subarrays = []
-        all_batch_background_chunks = []
-        all_subsections_start_gps_time = []
-
-        for tensor_data, start_gps_time in zip(self.data, self.start_gps_time):
-
-            # Ensure the tensor is 1D
-            assert len(tensor_data.shape) == 1, "Input tensor must be 1D"
-
-            N = tf.shape(tensor_data)[0]
-
-            maxval = N.numpy() - num_onsource_samples - num_offsource_samples \
-                    - 16 # Buffer for indexing saftey
-
-            random_starts = tf.random.uniform(
-                shape=(num_examples_per_batch,), 
-                minval=num_offsource_samples, 
-                maxval=maxval, 
-                dtype=tf.int32
-            )
-            
-            # Default argument ensures correct tensor is used:
-            def slice_data(start, num_samples, tensor_data=tensor_data):  
-                return tf.slice(tensor_data, [start], [num_samples])
-
-            batch_subarrays = tf.map_fn(
-                lambda start: slice_data(start, num_onsource_samples), 
-                random_starts, 
-                fn_output_signature=tf.TensorSpec(
-                    shape=[num_onsource_samples], dtype=tf.float32
-                )
-            )
-
-            batch_background_chunks = tf.map_fn(
-                lambda start: \
-                    slice_data(
-                        start - num_offsource_samples, num_offsource_samples
-                    ), 
-                random_starts, 
-                fn_output_signature=tf.TensorSpec(
-                    shape=[num_offsource_samples], dtype=tf.float32
-                )
-            )
-
-            subsections_start_gps_time = tf.cast(start_gps_time, tf.float32) + \
-                tf.cast(random_starts, tf.float32) \
-                * tf.cast(self.time_interval_seconds, tf.float32)
-
-            all_batch_subarrays.append(batch_subarrays)
-            all_batch_background_chunks.append(batch_background_chunks)
-            all_subsections_start_gps_time.append(subsections_start_gps_time)
-        
-        if (len(self.data) > 1):
-            # Stack results across the new dimension
-            stacked_batch_subarrays = tf.stack(
-                all_batch_subarrays, axis=1
-            )
-            stacked_batch_background_chunks = tf.stack(
-                all_batch_background_chunks, axis=1
-            )
-            stacked_subsections_start_gps_time = tf.stack(
-                all_subsections_start_gps_time, axis=1
-            )
-        else:
-            # Stack results across the new dimension
-            stacked_batch_subarrays = all_batch_subarrays[0]
-            stacked_batch_background_chunks = all_batch_background_chunks[0]
-            stacked_subsections_start_gps_time = all_subsections_start_gps_time[0]
-
-        return (stacked_batch_subarrays, stacked_batch_background_chunks, 
-                stacked_subsections_start_gps_time)
 
     def random_subsection(
-            self, 
-            num_onsource_samples : int, 
-            num_offsource_samples : int, 
-            num_examples_per_batch : int
-        ):
-
+        self, 
+        num_onsource_samples: int, 
+        num_offsource_samples: int, 
+        num_examples_per_batch: int
+    ):
         minval = num_offsource_samples
         min_tensor_size = num_onsource_samples + num_offsource_samples + 16
         
@@ -228,67 +186,42 @@ class IFOData:
             all_subsections_start_gps_time = []
 
             for tensor_data, start_gps_time in zip(self.data, self.start_gps_time):
-                # Ensure the tensor is 1D
-
                 N = tf.shape(tensor_data)[0]
-                maxval = N - num_onsource_samples - 16  # Buffer for indexing safety
-
+                maxval = N.numpy() - num_onsource_samples - 16
+                
                 if len(tensor_data.shape) != 1:
-                    raise ValueError("Input tensor must be 1D")
-                if N < min_tensor_size:
-                    raise ValueError("Input tensor too small for the number of requested samples and buffer.")
+                    raise ValueError(f"Input tensor must be 1D, got shape {tensor_data.shape}")
+                if N.numpy() < min_tensor_size:
+                    raise ValueError(f"Input tensor too small ({N}) for the number of requested samples and buffer {min_tensor_size}.")
                 if maxval <= minval:
-                    raise ValueError("Invalid combination of onsource/offsource samples and buffer for the given data.")
+                    raise ValueError(f"Invalid combination of onsource/offsource samples and buffer for the given data. {maxval} <= {minval}!")
+                
+                time_interval_seconds : float = self.time_interval_seconds
 
-                random_starts = tf.random.uniform(
-                    shape=(num_examples_per_batch,),
-                    minval=minval,
-                    maxval=maxval,
-                    dtype=tf.int32
+                batch_subarrays, batch_background_chunks, subsections_start_gps_time = random_subsection_(
+                    tensor_data,
+                    num_examples_per_batch,
+                    num_onsource_samples,
+                    num_offsource_samples,
+                    time_interval_seconds,
+                    start_gps_time,
+                    np.random.randint(1E10, size=2)
                 )
-
-                batch_subarrays = tf.map_fn(
-                    lambda start: self.slice_data(start, num_onsource_samples, tensor_data=tensor_data),
-                    random_starts,
-                    fn_output_signature=tf.TensorSpec(
-                        shape=[num_onsource_samples], dtype=tf.float32
-                    )
-                )
-
-                batch_background_chunks = tf.map_fn(
-                    lambda start: self.slice_data(start - num_offsource_samples, num_offsource_samples, tensor_data=tensor_data),
-                    random_starts,
-                    fn_output_signature=tf.TensorSpec(
-                        shape=[num_offsource_samples], dtype=tf.float32
-                    )
-                )
-
-                subsections_start_gps_time = tf.cast(start_gps_time, tf.float32) + \
-                    tf.cast(random_starts, tf.float32) * tf.cast(self.time_interval_seconds, tf.float32)
 
                 all_batch_subarrays.append(batch_subarrays)
                 all_batch_background_chunks.append(batch_background_chunks)
                 all_subsections_start_gps_time.append(subsections_start_gps_time)
 
-            if len(all_batch_subarrays) > 1:
-                stacked_batch_subarrays = tf.stack(all_batch_subarrays, axis=1)
-                stacked_batch_background_chunks = tf.stack(all_batch_background_chunks, axis=1)
-                stacked_subsections_start_gps_time = tf.stack(all_subsections_start_gps_time, axis=1)
-            else:
-                stacked_batch_subarrays = all_batch_subarrays[0]
-                stacked_batch_background_chunks = all_batch_background_chunks[0]
-                stacked_subsections_start_gps_time = all_subsections_start_gps_time[0]
+            # Concatenate the batches
+            stacked_batch_subarrays = tf.concat(all_batch_subarrays, axis=0)
+            stacked_batch_background_chunks = tf.concat(all_batch_background_chunks, axis=0)
+            stacked_subsections_start_gps_time = tf.concat(all_subsections_start_gps_time, axis=0)
 
             return stacked_batch_subarrays, stacked_batch_background_chunks, stacked_subsections_start_gps_time
-
+        
         except Exception as e:
             print(e)
-            # Log the error if needed, e.g., print(e) or use logging module
             return None, None, None
-
-    def slice_data(self, start, num_samples, tensor_data):
-        start = tf.maximum(0, start)
-        return tf.slice(tensor_data, [start], [num_samples])
     
 @dataclass
 class IFODataObtainer:
@@ -389,8 +322,7 @@ class IFODataObtainer:
         
         # Generate unique segment filename from list of independent 
         # segment parameters:
-        segment_parameters = \
-            [
+        segment_parameters = [
                 self.frame_types, 
                 self.channels, 
                 self.state_flags, 
@@ -401,8 +333,7 @@ class IFODataObtainer:
             ]  
         
         # Ensure parameters are all strings so they can be hashed:
-        segment_parameters = \
-            [
+        segment_parameters = [
                 str(parameter) for parameter in segment_parameters
             ]
         
@@ -1250,52 +1181,62 @@ class IFODataObtainer:
                 )
 
             else: 
-                self.logger.info(
-                      "Acquiring segments of duration "
-                      f"{expected_duration_seconds}..."
+                segment = None
+        
+        if segment is None: 
+            self.logger.info(
+                    "Acquiring segments of duration "
+                    f"{expected_duration_seconds}..."
+            )
+            try:
+                # Added epsilon value to solve precision error:
+                segment : TimeSeries= self.get_segment_data(
+                        segment_start_gps_time + epsilon, 
+                        segment_end_gps_time - epsilon, 
+                        ifos, 
+                        self.frame_types[0], 
+                        self.channels[0]
                 )
-                try:
-                    # Added epsilon value to solve precision error:
-                    segment : tf.Tensor = self.get_segment_data(
-                            segment_start_gps_time + epsilon, 
-                            segment_end_gps_time - epsilon, 
-                            ifos, 
-                            self.frame_types[0], 
-                            self.channels[0]
-                    )
 
-                    original_sample_rate_hertz : float = float(segment.sample_rate.value)
+                original_sample_rate_hertz : float = float(segment.sample_rate.value)
 
-                    segment : tf.Tensor = tf.convert_to_tensor(
-                        segment.value, 
-                        dtype=tf.float32
-                    )
-                
-                except Exception as e:
+                segment : TimeSeries = segment.resample(sample_rate_hertz)
 
-                    # If any exception raised, skip segment
-                    self.logger.error(
-                        f"Unexpected error: {type(e).__name__}, {str(e)}"
-                    )
+            except Exception as e:
 
-                    segment = None
+                # If any exception raised, skip segment
+                self.logger.error(
+                    f"Unexpected error: {type(e).__name__}, {str(e)}"
+                )
 
-                if segment is not None:
-                    # Resample segment using GwPy function
-                    #Would be nice to do this on the gpu:
-
-                    segment : tf.Tensor = tfio.audio.resample(
-                        segment,
-                        rate_in=int(original_sample_rate_hertz),
-                        rate_out=int(sample_rate_hertz)
-                    )
-
-                else:
-                    self.logger.error(
-                        f"Segment is none for some reason, skipping."
-                    )           
+                segment = None
             
-            self.logger.info("Complete!")
+            if segment is not None:
+
+                segment : tf.Tensor = tf.convert_to_tensor(
+                    segment.value, 
+                    dtype=tf.float32
+                )
+
+                """
+                original_size = tf.size(segment)
+                segment_power_2 : tf.Tensor = gf.pad_to_power_of_two(segment)
+                segment : tf.Tensor = gf.resample(segment_power_2, original_size, original_sample_rate_hertz, sample_rate_hertz)
+
+                For some reason that is beyond me this causes a massive memory leak.
+                del original_segment
+                del segment_power_2
+                
+                del resample_segment
+                gc.collect()
+                """
+
+            else:
+                self.logger.error(
+                    f"Segment is none for some reason, skipping."
+                )           
+        
+        self.logger.info("Complete!")
 
         return segment
     

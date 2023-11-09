@@ -602,8 +602,7 @@ class InjectionGenerator:
             int(total_duration_seconds * self.sample_rate_hertz)
         
         # Calculate roll boundaries:
-        min_roll_num_samples = \
-            int(
+        min_roll_num_samples = int(
                 (config.back_padding_duration_seconds + self.crop_duration_seconds)
                 * self.sample_rate_hertz
             ) 
@@ -613,7 +612,7 @@ class InjectionGenerator:
             - int(
                 (self.crop_duration_seconds + config.front_padding_duration_seconds)
                 * self.sample_rate_hertz
-            )
+                )
         
         num_batches : int = \
             self.num_examples_per_generation_batch // self.num_examples_per_batch
@@ -622,7 +621,8 @@ class InjectionGenerator:
             mask = \
                 generate_mask(
                     self.num_examples_per_generation_batch,  
-                    config.injection_chance
+                    config.injection_chance,
+                    np.random.randint(1E10, size=2)
                 )
             num_waveforms = tf.reduce_sum(tf.cast(mask, tf.int32)).numpy()
             
@@ -640,11 +640,11 @@ class InjectionGenerator:
                     tf.convert_to_tensor(waveforms, dtype = tf.float32)
 
                 #Roll Tensor to randomise start time:
-                waveforms = \
-                    roll_vector_zero_padding( 
+                waveforms = roll_vector_zero_padding( 
                         waveforms, 
                         min_roll_num_samples, 
-                        max_roll_num_samples
+                        max_roll_num_samples, 
+                        np.random.randint(1E10, size=2)
                     )
                 
                 # Create zero filled injections to fill spots where injection 
@@ -830,8 +830,7 @@ class InjectionGenerator:
                         injections_ = injections_[:, 0, :]
                     
                     # Scale injections with selected scaling method:
-                    scaled_injections = \
-                        config.scaling_method.scale(
+                    scaled_injections = config.scaling_method.scale(
                             injections_,
                             onsource,
                             scaling_parameters_,
@@ -908,7 +907,7 @@ class InjectionGenerator:
         
         return onsource, cropped_injections, return_variables
 
-@tf.function(jit_compile=True)
+@tf.function
 def roll_vector_zero_padding_(vector, roll_amount):
     # Create zeros tensor with the same shape as vector
     zeros = tf.zeros_like(vector)
@@ -919,10 +918,14 @@ def roll_vector_zero_padding_(vector, roll_amount):
     return rolled_vector
 
 @tf.function
-def roll_vector_zero_padding(tensor, min_roll, max_roll):
+def roll_vector_zero_padding(tensor, min_roll, max_roll, seed):
+
+    # Ensure the seed is of the correct shape [2] and dtype int32
+    seed_tensor = tf.cast(seed, tf.int32)
+
     # Generate an array of roll amounts
-    roll_amounts = tf.random.uniform(
-        shape=[tensor.shape[0]], minval=min_roll, maxval=max_roll, dtype=tf.int32
+    roll_amounts = tf.random.stateless_uniform(
+        shape=[tensor.shape[0]], seed=seed_tensor, minval=min_roll, maxval=max_roll, dtype=tf.int32
     )
 
     # Define a function to apply rolling to each sub_tensor with corresponding roll_amount
@@ -942,7 +945,8 @@ def roll_vector_zero_padding(tensor, min_roll, max_roll):
 @tf.function
 def generate_mask(
     num_injections: int, 
-    injection_chance: float
+    injection_chance: float,
+    seed
     ) -> tf.Tensor:
 
     """
@@ -960,11 +964,16 @@ def generate_mask(
     tf.Tensor
         A tensor of shape (num_injections,) containing the injection masks.
     """
+
+    # Ensure the seed is of the correct shape [2] and dtype int32
+    seed_tensor = tf.cast(seed, tf.int32)
+
     # Logits for [False, True] categories
     logits = tf.math.log([1.0 - injection_chance, injection_chance])
 
     # Generate categorical random variables based on logits
-    sampled_indices = tf.random.categorical(
+    sampled_indices = tf.random.stateless_categorical(
+        seed=seed_tensor,
         logits=tf.reshape(logits, [1, -1]), 
         num_samples=num_injections
     )

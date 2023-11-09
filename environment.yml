@@ -1,4 +1,4 @@
-name: gravyflow
+name: gravyflow-212
 channels:
   - conda-forge
   - defaults
@@ -19,4 +19,3 @@ dependencies:
       - nvidia-cudnn-cu11==8.6.0.163
       - tensorflow==2.12.*
       - tensorflow-probability==0.20.*
-      - tensorflow-io==0.32.0

@@ -624,7 +624,7 @@ def Dataset(
     return tf.data.Dataset.from_generator(
         generator=generator,
         output_signature=output_signature
-    ).with_options(options)
+    ).with_options(options).prefetch(tf.data.AUTOTUNE)
 
 def extract_data_from_indicies(
         dataset : tf.data.Dataset,

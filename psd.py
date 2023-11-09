@@ -113,8 +113,9 @@ def psd(
     
     # Step 3: Compute the periodogram (scaled, absolute value of FFT) for each 
     # segment
-    periodograms = \
-        tf.abs(tf.signal.rfft(windowed_frames))**2 / tf.reduce_sum(window**2)
+    periodograms = tf.abs(
+            tf.signal.rfft(windowed_frames)
+        )**2 / tf.reduce_sum(window**2)
     
     # Step 4: Compute the median or mean of the periodograms based on the 
     #median_mode

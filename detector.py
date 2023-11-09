@@ -469,6 +469,7 @@ class Network:
     @tf.function(jit_compile=True)
     def project_wave_(
         self,
+        seed,
         strain : tf.Tensor,
         sample_frequency_hertz : float,
         x_vector: tf.Tensor,
@@ -481,14 +482,18 @@ class Network:
         location : tf.Tensor,
         right_ascension: tf.Tensor = None,
         declination: tf.Tensor = None,
-        polarization: tf.Tensor = None
+        polarization: tf.Tensor = None, 
     ):
+
+        # Ensure the seed is of the correct shape [2] and dtype int32
+        seed_tensor = tf.constant(seed, dtype=tf.int32)
         
         num_injections = tf.shape(strain)[0]
         PI = tf.constant(3.14159, dtype=tf.float32)
         
         if right_ascension is None:
-            right_ascension = tf.random.uniform(
+            right_ascension = tf.random.stateless_uniform(
+                seed=seed_tensor,
                 shape=[num_injections], 
                 minval=0.0, 
                 maxval=2.0 * PI, 
@@ -496,7 +501,8 @@ class Network:
             )
 
         if declination is None:
-            declination = tf.random.uniform(
+            declination = tf.random.stateless_uniform(
+                seed=seed_tensor*2.0,
                 shape=[num_injections], 
                 minval=-PI / 2.0, 
                 maxval=PI / 2.0, 
@@ -504,7 +510,8 @@ class Network:
             )
 
         if polarization is None:
-            polarization = tf.random.uniform(
+            polarization = tf.random.stateless_uniform(
+                seed=seed_tensor*3.0,
                 shape=[num_injections], 
                 minval=0.0, 
                 maxval=2 * PI, 

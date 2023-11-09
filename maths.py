@@ -48,8 +48,7 @@ class Distribution:
                         "No maximum value given in uniform distribution."
                     )
                 else:                
-                    samples = \
-                        np.random.uniform(
+                    samples = np.random.uniform(
                             self.min_, 
                             self.max_, 
                             num_samples
@@ -382,3 +381,106 @@ def rfftfreq(
     frequency_tensor = tf.cast(results, dtype=tf.float32) * val
     
     return frequency_tensor
+
+def print_active_gpu_memory_info():
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Currently active GPU is usually at index 0 when there's only one
+            memory_info = tf.config.experimental.get_memory_info('GPU:0')
+            print(f"Active GPU memory info: {memory_info}")
+        except RuntimeError as e:
+            print(e)
+    else:
+        print("No GPU devices found.")
+
+@tf.function(jit_compile=True)
+def pad_if_odd(tensor):
+    # Compute whether the size is odd using TensorFlow operations
+    size_is_odd = tf.equal(tf.size(tensor) % 2, 1)
+    
+    # Use tf.cond to conditionally pad the tensor
+    tensor = tf.cond(
+        size_is_odd,
+        lambda: tf.concat([tensor, [0]], 0),  # Pad with one zero if size is odd
+        lambda: tensor  # Return the tensor as-is if size is even
+    )
+    return tensor
+
+@tf.function(jit_compile=True)
+def round_to_even(tensor):
+    # Assuming tensor is of integer type and 1-D
+    # Check if each element is odd by looking at the least significant bit
+    is_odd = tf.math.mod(tensor, 2) == 1
+    
+    # Subtract 1 from all odd elements to make them even
+    nearest_even = tensor - tf.cast(is_odd, tensor.dtype)
+    return nearest_even    
+
+@tf.function(jit_compile=True)
+def pad_to_power_of_two(tensor):
+    # Get the current size of the tensor
+    current_size = tf.size(tensor)
+
+    # Calculate the next power of two
+    next_power_of_two = 2**tf.math.ceil(tf.math.log(tf.cast(current_size, tf.float32)) / tf.math.log(2.0))
+
+    # Calculate how much padding is needed
+    padding_size = tf.cast(next_power_of_two, tf.int32) - current_size
+
+    # Pad the tensor to the next power of two
+    tensor_padded = tf.pad(tensor, [[0, padding_size]], mode='CONSTANT')
+
+    return tensor_padded
+
+@tf.function(jit_compile=True)
+def resample(x, original_size, original_sample_rate_hertz, new_sample_rate_hertz):
+    """
+    Resample `x` to `num` samples using the Fourier method in TensorFlow, then cut to original size.
+
+    Parameters
+    ----------
+    x : 1D-Tensor
+        The data to be resampled.
+    original_size : int
+        The original size of the tensor before padding.
+    original_sample_rate_hertz : float
+        The sample rate of the original signal.
+    new_sample_rate_hertz : float
+        The desired sample rate after resampling.
+
+    Returns
+    -------
+    resampled_x : Tensor
+        The resampled tensor, cut to the original size.
+    """
+
+    fraction = original_sample_rate_hertz / new_sample_rate_hertz
+
+    new_num_samples = tf.math.floordiv(original_size, tf.cast(tf.round(fraction), tf.int32))
+
+    # Round to even for FFT
+    new_num_samples = round_to_even(new_num_samples)
+
+    # Perform the FFT
+    X = tf.signal.rfft(x)
+    
+    # Create the new frequency space
+    new_X = tf.signal.fftshift(X)
+    
+    # Slice out the central part of the spectrum to the new size
+    new_X = new_X[(original_size - new_num_samples) // 2:(original_size + new_num_samples) // 2]
+    
+    # Shift back the zero frequency to the beginning
+    new_X = tf.signal.ifftshift(new_X)
+    
+    # Perform the inverse FFT
+    resampled_x = tf.signal.irfft(new_X)
+    
+    # Normalize the amplitude
+    resampled_x *= float(new_num_samples) / float(original_size)
+
+    # Cut the resampled tensor back to the original size
+    resampled_x_cut = resampled_x[:original_size]
+    
+    return resampled_x_cut

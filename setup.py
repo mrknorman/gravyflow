@@ -44,6 +44,8 @@ def setup_cuda(
     
     # Set the device number for CUDA to recognize.
     os.environ["CUDA_VISIBLE_DEVICES"] = str(device_num)
+    # Set the TF_GPU_THREAD_MODE environment variable
+    os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
 
     # Confirm TensorFlow and CUDA version compatibility.
     tf_version = tf.__version__
@@ -51,6 +53,9 @@ def setup_cuda(
     logging.info(
         f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}"
     )
+
+    # Step 1: Set the mixed precision policy
+    #tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
     # List all the physical GPUs.
     gpus = tf.config.list_physical_devices('GPU')
@@ -83,25 +88,7 @@ def setup_cuda(
     # Return the MirroredStrategy instance.
     return strategy
 
-def find_available_GPUs(
-    min_memory_MB : int, 
-    max_needed : int = -1
-    ):
-    """
-    Finds the available GPUs that have memory available more than min_memory.
-
-    Parameters
-    ----------
-    min_memory_MB : int
-        The minimum free memory required.
-
-    Returns
-    -------
-    available_gpus : str
-        The list of indices of available GPUs ins string form for easy digestion
-        by setup_cuda above.
-    """
-    
+def get_memory_array():
     # Run the NVIDIA-SMI command
     try:
         output = subprocess.check_output(
@@ -127,7 +114,28 @@ def find_available_GPUs(
         memory_array = memory_array[:-1]
 
     # Convert to integers
-    memory_array = np.array(memory_array, dtype=int)
+    return np.array(memory_array, dtype=int)
+
+def find_available_GPUs(
+    min_memory_MB : int = None, 
+    max_needed : int = -1
+    ):
+    """
+    Finds the available GPUs that have memory available more than min_memory.
+
+    Parameters
+    ----------
+    min_memory_MB : int
+        The minimum free memory required.
+
+    Returns
+    -------
+    available_gpus : str
+        The list of indices of available GPUs ins string form for easy digestion
+        by setup_cuda above.
+    """
+    
+    memory_array = get_memory_array()
     
     # Find the indices of GPUs which have available memory more than 
     # min_memory_MB

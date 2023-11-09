@@ -699,11 +699,12 @@ class ModelBuilder:
                 start_from_epoch=4
             ),
             keras.callbacks.ModelCheckpoint(
-                training_config["model_path"],
+                str(training_config["model_path"]),
                 monitor="val_loss",
                 save_best_only=True,
                 save_freq="epoch", 
-            )
+            ),
+            tf.keras.callbacks.TensorBoard(log_dir="logs", histogram_freq=1)
         ]
         
         num_batches = training_config["num_examples_per_epoc"] // self.batch_size.value
@@ -716,7 +717,8 @@ class ModelBuilder:
         self.metrics.append(
             self.model.fit(
                 train_dataset,
-                validation_data = validate_dataset.take(num_validation_batches),
+                validation_data=validate_dataset,
+                validation_steps=num_validation_batches,
                 epochs = training_config["max_epochs"], 
                 steps_per_epoch = num_batches,
                 callbacks = callbacks,
