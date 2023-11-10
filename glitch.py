@@ -1,10 +1,36 @@
 from enum import Enum, auto
 from typing import Union, List
+import time
 
 import numpy as np
 from gwpy.table import GravitySpyTable
 
 import gravyflow as gf
+
+def fetch_event_times(selection, max_retries=10):
+    import time  # Importing time module for sleep function
+    
+    attempts = 0
+    while True:
+        try:
+            # Attempt to fetch the data
+            data = GravitySpyTable.fetch(
+                "gravityspy",
+                "glitches",
+                columns=["event_time"],  # Assuming we're only interested in the event times.
+                selection=selection
+            ).to_pandas().to_numpy()[:, 0]
+            return data  # If successful, return the data
+
+        except Exception as e:
+            # If an exception occurs, increment the attempts counter
+            attempts += 1
+            # Check if the maximum number of retries has been reached
+            if attempts >= max_retries:
+                raise Exception(f"Max retries reached: {max_retries}") from e
+            
+            # Wait for 10 seconds before retrying
+            time.sleep(30)
 
 class GlitchType(Enum):
     AIR_COMPRESSOR = 'Air_Compressor'
@@ -57,12 +83,7 @@ def get_glitch_times(
             glitch_name = glitch_type.value
             selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && ml_label={glitch_name} && No_Glitch<0.1"
             
-            data = GravitySpyTable.fetch(
-                "gravityspy",
-                "glitches",
-                columns=["event_time"],  # Assuming we're only interested in the event times.
-                selection=selection
-            ).to_pandas().to_numpy()[:, 0]
+            data = fetch_event_times(selection, max_retries=float('inf'))
             
             # Append the results to the all_data list.
             all_data.append(data)
@@ -73,12 +94,7 @@ def get_glitch_times(
         # If glitch_types is None or an empty list, it selects all glitch types.
         selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && No_Glitch<0.1"
 
-        data = GravitySpyTable.fetch(
-            "gravityspy",
-            "glitches",
-            columns=["event_time"],  # Added "ml_label" to the columns to be fetched.
-            selection=selection
-        ).to_pandas().to_numpy()[:, 0]
+        data = fetch_event_times(selection, max_retries=10)
 
         return data
     
@@ -113,12 +129,7 @@ def get_glitch_segments(
             glitch_name = glitch_type.value
             selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && ml_label={glitch_name} && No_Glitch<0.1"
             
-            data = GravitySpyTable.fetch(
-                "gravityspy",
-                "glitches",
-                columns=["start_time", "duration"],  # Assuming we're only interested in the event times.
-                selection=selection
-            ).to_pandas()
+            data = fetch_event_times(selection, max_retries=10)
             
             # Calculate 'end_time' by adding 'duration' to 'start_time'
             data['end_time'] = data['start_time'] + data['duration'] + end_padding_seconds
@@ -136,12 +147,7 @@ def get_glitch_segments(
         # If glitch_types is None or an empty list, it selects all glitch types.
         selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && No_Glitch<0.1"
 
-        data = GravitySpyTable.fetch(
-            "gravityspy",
-            "glitches",
-            columns=["start_time", "duration"],  # Assuming we're only interested in the event times.
-            selection=selection
-        ).to_pandas()
+        data = fetch_event_times(selection, max_retries=10)
         
         # Calculate 'end_time' by adding 'duration' to 'start_time'
         data['end_time'] = data['start_time'] + data['duration'] + end_padding_seconds

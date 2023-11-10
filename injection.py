@@ -614,9 +614,8 @@ class InjectionGenerator:
                 * self.sample_rate_hertz
                 )
         
-        num_batches : int = \
-            self.num_examples_per_generation_batch // self.num_examples_per_batch
-                
+        num_batches : int = self.num_examples_per_generation_batch // self.num_examples_per_batch
+
         while 1:
             mask = \
                 generate_mask(
@@ -696,11 +695,21 @@ class InjectionGenerator:
             injections = gf.batch_tensor(injections, self.num_examples_per_batch)
             mask = gf.batch_tensor(mask, self.num_examples_per_batch)
 
-            for injections_, mask_, parameters_ in zip(
-                injections, mask, parameters
-                ):
-                
-                yield injections_, mask_, parameters_
+            # Split into list to avoid iterating over tensors, which TensorFlow seems 
+            # to dislike:
+            injections_list = tf.unstack(injections, axis=0)
+            mask_list = tf.unstack(mask, axis=0)
+
+            # Now you can zip them together and iterate over them
+            for injection_, mask_, parameter_ in zip(injections_list, mask_list, parameters):
+                try:
+                    # Your processing logic here
+                    yield injection_, mask_, parameter_
+                except Exception as e:
+                    # Handle the exception here
+                    print(f"Caught an exception: {e}")
+                    # Optionally, you can break the loop or continue
+                    continue
                 
     def generate_scaling_parameters_(
         self,
@@ -778,7 +787,7 @@ class InjectionGenerator:
                 )
             )
             
-        return tf.stack(scaling_parameters)
+        return scaling_parameters
     
     def add_injections_to_onsource(
             self,
@@ -790,14 +799,23 @@ class InjectionGenerator:
         
         # Generate SNR or HRSS values for injections based on inputed config 
         # values:
-        scaling_parameters = self.generate_scaling_parameters(mask)
+        scaling_parameters : List = self.generate_scaling_parameters(mask)
         
         return_variables = {
             key : [] for key in ScalingTypes if key in variables_to_return
         }
         cropped_injections = []    
-        for injections_, mask_, scaling_parameters_, config in \
-            zip(injections, mask, scaling_parameters, self.configs):
+
+        # Unstack because TensorFlow hates tensor iteration: 
+        injections_list = tf.unstack(injections, axis=0)
+        mask_list = tf.unstack(mask, axis=0)
+
+        for injections_, mask_, scaling_parameters_, config in zip(
+                injections_list, 
+                mask_list, 
+                scaling_parameters, 
+                self.configs
+            ):
             
             network = config.network
             
@@ -805,8 +823,7 @@ class InjectionGenerator:
                 
                 case ScalingOrdinality.BEFORE_PROJECTION:
                 
-                    scaled_injections = \
-                        config.scaling_method.scale(
+                    scaled_injections = config.scaling_method.scale(
                             injections_,
                             onsource,
                             scaling_parameters_,
@@ -818,7 +835,11 @@ class InjectionGenerator:
                             scaled_injections, self.sample_rate_hertz
                         )
                     else:
-                        scaled_injections = scaled_injections[:, 0, :]
+                        scaled_injections = error_catch_injection_slicing(self.num_examples_per_batch, scaled_injections)
+
+                    if scaled_injections is None:
+                        print("Error when slicing before!")
+                        continue
             
                 case ScalingOrdinality.AFTER_PROJECTION:
                                         
@@ -827,15 +848,19 @@ class InjectionGenerator:
                             injections_, self.sample_rate_hertz
                         )
                     else:
-                        injections_ = injections_[:, 0, :]
+                        injections_ =  error_catch_injection_slicing(self.num_examples_per_batch, injections_)
                     
-                    # Scale injections with selected scaling method:
-                    scaled_injections = config.scaling_method.scale(
-                            injections_,
-                            onsource,
-                            scaling_parameters_,
-                            self.sample_rate_hertz
-                        )
+                    if injections_ is not None:
+                        # Scale injections with selected scaling method:
+                        scaled_injections = config.scaling_method.scale(
+                                injections_,
+                                onsource,
+                                scaling_parameters_,
+                                self.sample_rate_hertz
+                            )
+                    else:
+                        print("Error when slicing after!")
+                        continue
                 
                 case _:
                     
@@ -1049,3 +1074,37 @@ def batch_injection_parameters(
             result[i][key] = value[start_idx:end_idx]
 
     return result
+
+def error_catch_injection_slicing(
+    num_examples_per_batch : int,
+    injections_ : tf.Tensor
+    ):
+
+    # Assuming injections_ is a TensorFlow tensor with shape [Batch_size, 2, Sequence_length]
+    try:
+        # Explicitly check the shape of the tensor
+        expected_shape = (num_examples_per_batch, 2)  # None indicates any size is acceptable for Batch_size and Sequence_length
+        actual_shape = tuple(injections_.shape)
+
+        # Verify the actual shape matches the expected shape
+        if actual_shape[:-1] == expected_shape:
+            # Perform the slicing
+            injections_ = injections_[:, 0, :]
+        else:
+            # Raise an error if the shape is unexpected
+            raise ValueError(f"Expected injections_ to have shape [Batch_size, 2, Sequence_length], got {actual_shape}")
+
+    except tf.errors.InvalidArgumentError as e:
+        # Handle the TensorFlow InvalidArgumentError
+        print("An error occurred during slicing:", e)
+        # Potentially re-raise the error or handle it as needed for your application
+
+        injections_ = None
+    except ValueError as e:
+        print("Error!")
+        # Handle the ValueError if the shape is not as expected
+        print(e)
+
+        injections_ = None
+
+    return injections_

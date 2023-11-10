@@ -220,6 +220,7 @@ class IFOData:
             return stacked_batch_subarrays, stacked_batch_background_chunks, stacked_subsections_start_gps_time
         
         except Exception as e:
+            print("Failed to get data because:")
             print(e)
             return None, None, None
     
@@ -1079,6 +1080,9 @@ class IFODataObtainer:
                     raise ValueError("Input data should not be empty.")
                 # Check for positive sample sizes and batch size
             except:
+                print("multi_segment empty!")
+                raise ValueError("Input data should not be empty.")
+
                 continue
 
             # Scale to reduce precision errors:
@@ -1203,6 +1207,8 @@ class IFODataObtainer:
                 segment : TimeSeries = segment.resample(sample_rate_hertz)
 
             except Exception as e:
+
+                print("Unexpected acquistion error!")
 
                 # If any exception raised, skip segment
                 self.logger.error(

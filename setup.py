@@ -13,6 +13,7 @@ import tensorflow as tf
 from scipy.stats import truncnorm
 from tensorflow.python.distribute.distribute_lib import Strategy
 from tensorflow.python.framework.ops import EagerTensor
+from tensorflow.keras.callbacks import Callback
 
 logging.basicConfig(level=logging.INFO)
 
@@ -152,7 +153,7 @@ def get_element_shape(dataset):
     
 def open_hdf5_file(
         file_path : Union[str, Path], 
-        logger,
+        logger = None,
         mode : str ='r+'
     ) -> h5py.File:
     
@@ -165,9 +166,12 @@ def open_hdf5_file(
         # The file does not exist, so create it in write mode
         f = h5py.File(file_path, 'w') #swmr=True)
         f.close()
-        logger.info(f'The file {file_path} was created in write mode.')
+
+        if logger is not None:
+            logger.info(f'The file {file_path} was created in write mode.')
     else:
-        logger.info(f'The file {file_path} was opened in {mode} mode.')
+        if logger is not None:
+            logger.info(f'The file {file_path} was opened in {mode} mode.')
     return h5py.File(file_path, mode)
 
 def ensure_directory_exists(
@@ -211,7 +215,8 @@ def replace_placeholders(
 def env(
     min_gpu_memory_mb: int = 4000,
     num_gpus_to_request: int = 1,
-    memory_to_allocate_tf: int = 2000
+    memory_to_allocate_tf: int = 2000,
+    gpus: Union[int, str] = None
 ) -> tf.distribute.Strategy:
     
     # Check if there's already a strategy in scope:
@@ -225,11 +230,14 @@ def env(
         return current_strategy.scope()
     
     # Setup CUDA
-    gpus = find_available_GPUs(
-        min_gpu_memory_mb, 
-        num_gpus_to_request
-    )
-            
+
+    if gpus is None:
+        gpus = find_available_GPUs(
+            min_gpu_memory_mb, 
+            num_gpus_to_request
+        )
+        print(gpus)
+
     strategy = setup_cuda(
         gpus, 
         max_memory_limit=memory_to_allocate_tf, 
@@ -247,3 +255,40 @@ def is_redirected():
         not sys.stdout.isatty() or
         not sys.stderr.isatty()
     )
+
+def save_dict_to_hdf5(data_dict, filepath, force_overwrite=False):
+    # If force_overwrite is False and the file exists, try to append the data
+    if not force_overwrite and os.path.isfile(filepath):
+        with h5py.File(filepath, 'a') as hdf:  # Open in append mode
+            for key, data in data_dict.items():
+                if key in hdf:
+                    # Append the new data to the existing data
+                    hdf[key].resize((hdf[key].shape[0] + len(data)), axis=0)
+                    hdf[key][-len(data):] = data
+                else:
+                    # Create a new dataset if the key doesn't exist
+                    hdf.create_dataset(key, data=data, maxshape=(None,))
+            print(f"Data appended to {filepath}")
+    else:
+        # If the file doesn't exist or force_overwrite is True, create a new file
+        with h5py.File(filepath, 'w') as hdf:  # Open in write mode
+            for key, data in data_dict.items():
+                # Create datasets, allowing them to grow in size (maxshape=(None,))
+                hdf.create_dataset(key, data=data, maxshape=(None,))
+            print(f"Data saved to new file {filepath}")
+
+class CustomHistorySaver(Callback):
+    def __init__(self, filepath, force_overwrite=False):
+        super().__init__()
+        self.filepath = filepath
+        self.force_overwrite = force_overwrite
+
+    def on_epoch_end(self, epoch, logs=None):
+        # This method is called when the epoch ends
+        if logs is not None:
+            # Convert logs to a format that can be saved, which is a dict of lists
+            history_dict = {k: [v] for k, v in logs.items()}
+            # Call the save function
+
+            ensure_directory_exists(self.filepath)
+            save_dict_to_hdf5(history_dict, self.filepath / "history.hdf5", self.force_overwrite)
