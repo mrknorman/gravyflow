@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Union, List, Dict, Optional
 from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
@@ -558,6 +559,7 @@ class ModelBuilder:
         self, 
         input_configs : Union[List[Dict], Dict],
         output_config : dict,
+        model_path : Path = None,
         metrics : list = []
     ):
         """
@@ -567,6 +569,8 @@ class ModelBuilder:
         input_shape: Shape of the input data.
         output_shape: Shape of the output data.
         """        
+
+        self.model_path = model_path
 
         if not isinstance(input_configs, list):
             input_configs = [input_configs]
@@ -681,7 +685,9 @@ class ModelBuilder:
         train_dataset: tf.data.Dataset, 
         validate_dataset: tf.data.Dataset,
         training_config: dict,
-        callbacks = []
+        force_retrain : bool = True,
+        callbacks = None,
+        heart = None
         ):
         """
         Trains the model.
@@ -690,21 +696,44 @@ class ModelBuilder:
         train_dataset: Dataset to train on.
         num_epochs: Number of epochs to train for.
         """
+
+        if callbacks is None:
+            callbacks = []
+
+        checkpoint_monitor = "val_loss"
+
+        if not force_retrain:
+            model_path = self.model_path
+            history_data = gf.load_history(self.model_path)
+            best_metric = min(history_data[checkpoint_monitor]) #assuming loss for now
+            initial_epoch = len(list(history_data.items())[0])
+        else:
+            initial_epoch = 0
+            model_path = None
+            best_metric = None
+
+        early_stopping = gf.EarlyStoppingWithLoad(
+                monitor  = checkpoint_monitor,
+                patience = training_config["patience"],
+                start_from_epoch=4,
+                model_path=model_path
+            )
+        model_checkpoint = keras.callbacks.ModelCheckpoint(
+            str(training_config["model_path"]),
+            monitor=checkpoint_monitor,
+            save_best_only=True,
+            save_freq="epoch", 
+            initial_value_threshold=best_metric
+        )
+        history_saver = gf.CustomHistorySaver(self.model_path, force_overwrite=force_retrain)
+        wait_printer = gf.PrintWaitCallback(early_stopping)
         
         callbacks += [
-          keras.callbacks.EarlyStopping(
-                monitor  = 'val_loss',
-                patience = training_config["patience"],
-                restore_best_weights=True,
-                start_from_epoch=4
-            ),
-            keras.callbacks.ModelCheckpoint(
-                str(training_config["model_path"]),
-                monitor="val_loss",
-                save_best_only=True,
-                save_freq="epoch", 
-            ),
-            tf.keras.callbacks.TensorBoard(log_dir="logs", histogram_freq=1)
+            early_stopping,
+            model_checkpoint,
+            history_saver,
+            wait_printer
+            #tf.keras.callbacks.TensorBoard(log_dir="logs", histogram_freq=1)
         ]
         
         num_batches = training_config["num_examples_per_epoc"] // self.batch_size.value
@@ -713,6 +742,9 @@ class ModelBuilder:
         verbose : int = 1
         if gf.is_redirected():
             verbose : int = 2
+            
+            if heart is not None:
+                callbacks += [gf.HeartbeatCallback(heart, 1024)]
 
         self.metrics.append(
             self.model.fit(
@@ -720,6 +752,7 @@ class ModelBuilder:
                 validation_data=validate_dataset,
                 validation_steps=num_validation_batches,
                 epochs = training_config["max_epochs"], 
+                initial_epoch = initial_epoch,
                 steps_per_epoch = num_batches,
                 callbacks = callbacks,
                 batch_size = self.batch_size.value,

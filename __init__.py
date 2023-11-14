@@ -20,6 +20,7 @@ class Defaults:
 
 from .maths import *
 from .setup import *
+from .processes import *
 from .psd import psd
 from .snr import snr, scale_to_snr
 from .wnb import wnb

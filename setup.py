@@ -58,6 +58,11 @@ def setup_cuda(
     # Step 1: Set the mixed precision policy
     #tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
+    # Limit the number of threads
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
+
+
     # List all the physical GPUs.
     gpus = tf.config.list_physical_devices('GPU')
     
@@ -117,8 +122,36 @@ def get_memory_array():
     # Convert to integers
     return np.array(memory_array, dtype=int)
 
+def get_gpu_utilization_array():
+    # Run the NVIDIA-SMI command
+    try:
+        output = subprocess.check_output(
+            [
+                "/usr/bin/nvidia-smi", 
+                "--query-gpu=utilization.gpu",  # Querying GPU utilization
+                "--format=csv,noheader,nounits"  # Formatting the output
+            ], 
+            stderr=subprocess.STDOUT, 
+            universal_newlines=True
+        )
+    except subprocess.CalledProcessError as e:
+        print(
+            f"Unable to run NVIDIA-SMI. Please check your environment. Exiting! Error: {e.output}"
+        )
+        return None
+
+    # Split the output into lines
+    utilization_array = output.split("\n")
+    # Remove the last empty line if it exists
+    if utilization_array[-1] == "":
+        utilization_array = utilization_array[:-1]
+
+    # Convert to integers
+    return np.array(utilization_array, dtype=int)
+
 def find_available_GPUs(
     min_memory_MB : int = None, 
+    max_utilization_percent : float = 50,
     max_needed : int = -1
     ):
     """
@@ -137,10 +170,11 @@ def find_available_GPUs(
     """
     
     memory_array = get_memory_array()
+    utilization_array = get_gpu_utilization_array()
     
     # Find the indices of GPUs which have available memory more than 
     # min_memory_MB
-    available_gpus = np.where(memory_array > min_memory_MB)[0].tolist()
+    available_gpus = list(set(np.where(memory_array > min_memory_MB)[0].tolist()).intersection(np.where(utilization_array < max_utilization_percent)[0].tolist()))
     
     if (max_needed != -1) and (max_needed < len(available_gpus)):
         available_gpus = available_gpus[:-max_needed-1:-1]
@@ -236,7 +270,6 @@ def env(
             min_gpu_memory_mb, 
             num_gpus_to_request
         )
-        print(gpus)
 
     strategy = setup_cuda(
         gpus, 
@@ -277,18 +310,201 @@ def save_dict_to_hdf5(data_dict, filepath, force_overwrite=False):
                 hdf.create_dataset(key, data=data, maxshape=(None,))
             print(f"Data saved to new file {filepath}")
 
+def load_history(filepath):
+    history_path = filepath / "history.hdf5"
+
+    print("path", history_path)
+    if os.path.exists(history_path):
+        with h5py.File(history_path, 'r') as hfile:
+            return {k: list(v) for k, v in hfile.items()}
+    else:
+        return {}
+
 class CustomHistorySaver(Callback):
     def __init__(self, filepath, force_overwrite=False):
         super().__init__()
         self.filepath = filepath
+
+        if not isinstance(filepath, Path):
+            raise ValueError("Filepath must be Path!")
+
         self.force_overwrite = force_overwrite
+        self.history = load_history(filepath) if not self.force_overwrite else {}
 
     def on_epoch_end(self, epoch, logs=None):
-        # This method is called when the epoch ends
         if logs is not None:
-            # Convert logs to a format that can be saved, which is a dict of lists
-            history_dict = {k: [v] for k, v in logs.items()}
-            # Call the save function
+            # Append logs to existing history
+            for k, v in logs.items():
+                if k in self.history:
+                    self.history[k].append(v)
+                else:
+                    self.history[k] = [v]
 
             ensure_directory_exists(self.filepath)
-            save_dict_to_hdf5(history_dict, self.filepath / "history.hdf5", self.force_overwrite)
+            save_dict_to_hdf5(self.history, self.filepath / "history.hdf5", self.force_overwrite)
+            
+class EarlyStoppingWithLoad(Callback):
+
+    def __init__(
+        self,
+        model_path = None,
+        monitor="val_loss",
+        min_delta=0,
+        patience=0,
+        verbose=0,
+        mode="auto",
+        baseline=None,
+        restore_best_weights=False,
+        start_from_epoch=0,
+    ):
+        super().__init__()
+
+        self.model_path = model_path
+        self.monitor = monitor
+        self.patience = patience
+        self.verbose = verbose
+        self.baseline = baseline
+        self.min_delta = abs(min_delta)
+        self.wait = 0
+        self.stopped_epoch = 0
+        self.restore_best_weights = restore_best_weights
+        self.best_weights = None
+        self.start_from_epoch = start_from_epoch
+
+        if mode not in ["auto", "min", "max"]:
+            logging.warning(
+                "EarlyStopping mode %s is unknown, fallback to auto mode.",
+                mode,
+            )
+            mode = "auto"
+
+        if mode == "min":
+            self.monitor_op = np.less
+        elif mode == "max":
+            self.monitor_op = np.greater
+        else:
+            if (
+                self.monitor.endswith("acc")
+                or self.monitor.endswith("accuracy")
+                or self.monitor.endswith("auc")
+            ):
+                self.monitor_op = np.greater
+            else:
+                self.monitor_op = np.less
+
+        if self.monitor_op == np.greater:
+            self.min_delta *= 1
+        else:
+            self.min_delta *= -1
+
+    def on_train_begin(self, logs=None):
+        # Allow instances to be re-used
+        
+        if self.model_path is not None:
+            history_data = load_history(self.model_path) 
+            # Assuming history_data is a dictionary containing your historical metrics
+            last_epoch_metrics = {k: v for k, v in history_data.items()}
+
+            print(last_epoch_metrics)
+
+            if self.monitor in last_epoch_metrics:
+
+                initial_epoch = len(last_epoch_metrics[self.monitor])
+                
+                if initial_epoch and last_epoch_metrics:
+                    # Manually set their internal state
+                        
+                    best = min(last_epoch_metrics[self.monitor])
+                    best_epoch = np.argmax(last_epoch_metrics[self.monitor])
+
+                    self.wait = self.start_from_epoch - best_epoch
+                    self.stopped_epoch = 0
+                    self.best = best
+                    self.best_weights = tf.keras.models.load_model(self.model_path).get_weights()
+                    self.best_epoch = best_epoch
+
+                else:
+                    print("Empty history!")
+
+                    self.wait = 0
+                    self.stopped_epoch = 0
+                    self.best = np.Inf if self.monitor_op == np.less else -np.Inf
+                    self.best_weights = None
+                    self.best_epoch = 0
+            else:
+                raise ValueError("Key not in history dict!")
+        else:
+            self.wait = 0
+            self.stopped_epoch = 0
+            self.best = np.Inf if self.monitor_op == np.less else -np.Inf
+            self.best_weights = None
+            self.best_epoch = 0
+
+    def on_epoch_end(self, epoch, logs=None):
+        current = self.get_monitor_value(logs)
+        if current is None or epoch < self.start_from_epoch:
+            # If no monitor value exists or still in initial warm-up stage.
+            return
+        if self.restore_best_weights and self.best_weights is None:
+            # Restore the weights after first epoch if no progress is ever made.
+            self.best_weights = self.model.get_weights()
+
+        self.wait += 1
+        if self._is_improvement(current, self.best):
+            self.best = current
+            self.best_epoch = epoch
+            if self.restore_best_weights:
+                self.best_weights = self.model.get_weights()
+            # Only restart wait if we beat both the baseline and our previous
+            # best.
+            if self.baseline is None or self._is_improvement(
+                current, self.baseline
+            ):
+                self.wait = 0
+            return
+
+        # Only check after the first epoch.
+        if self.wait >= self.patience and epoch > 0:
+            self.stopped_epoch = epoch
+            self.model.stop_training = True
+            if self.restore_best_weights and self.best_weights is not None:
+                if self.verbose > 0:
+                    io_utils.print_msg(
+                        "Restoring model weights from "
+                        "the end of the best epoch: "
+                        f"{self.best_epoch + 1}."
+                    )
+                self.model.set_weights(self.best_weights)
+
+    def on_train_end(self, logs=None):
+        if self.stopped_epoch > 0 and self.verbose > 0:
+            io_utils.print_msg(
+                f"Epoch {self.stopped_epoch + 1}: early stopping"
+            )
+
+    def get_monitor_value(self, logs):
+        logs = logs or {}
+        monitor_value = logs.get(self.monitor)
+        if monitor_value is None:
+            logging.warning(
+                "Early stopping conditioned on metric `%s` "
+                "which is not available. Available metrics are: %s",
+                self.monitor,
+                ",".join(list(logs.keys())),
+            )
+        return monitor_value
+
+    def _is_improvement(self, monitor_value, reference_value):
+        return self.monitor_op(monitor_value - self.min_delta, reference_value)
+
+class PrintWaitCallback(Callback):
+    def __init__(self, early_stopping):
+        super().__init__()
+        self.early_stopping = early_stopping
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        wait = self.early_stopping.wait
+        best = self.early_stopping.best
+        best_epoch = self.early_stopping.best_epoch
+        print(f"\nBest model so far had a value of: {best} at Epoch: {best_epoch} which was {wait} epochs ago.")

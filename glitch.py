@@ -20,17 +20,20 @@ def fetch_event_times(selection, max_retries=10):
                 columns=["event_time"],  # Assuming we're only interested in the event times.
                 selection=selection
             ).to_pandas().to_numpy()[:, 0]
-            return data  # If successful, return the data
 
         except Exception as e:
+            print("Failed to acquire gravity spy data because: {e} retrying...")
             # If an exception occurs, increment the attempts counter
             attempts += 1
             # Check if the maximum number of retries has been reached
             if attempts >= max_retries:
                 raise Exception(f"Max retries reached: {max_retries}") from e
             
-            # Wait for 10 seconds before retrying
-            time.sleep(30)
+        # Wait for 10 seconds before retrying
+        time.sleep(30)
+    
+    return data  # If successful, return the data
+
 
 class GlitchType(Enum):
     AIR_COMPRESSOR = 'Air_Compressor'
@@ -83,7 +86,7 @@ def get_glitch_times(
             glitch_name = glitch_type.value
             selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && ml_label={glitch_name} && No_Glitch<0.1"
             
-            data = fetch_event_times(selection, max_retries=float('inf'))
+            data = fetch_event_times(selection, max_retries=10)
             
             # Append the results to the all_data list.
             all_data.append(data)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # Built-In imports:
 from dataclasses import dataclass
+from typing import Tuple
 import logging
 from pathlib import Path
 from enum import Enum, auto
@@ -82,7 +83,7 @@ class ScalingMethod:
                 )
 
             case _:
-                raise ValueError(f"Scaling type {method.type_} not recognised.")
+                raise ValueError(f"Scaling type {self.type_} not recognised.")
         
         if scaled_injections is not None:
             scaled_injections = gf.replace_nan_and_inf_with_zero(
@@ -160,7 +161,7 @@ def scale_to_hpeak(
     )
     
     # Calculate factor required to scale injection to desired HRSS:
-    scale_factor = desired_hrss/(current_hrss + epsilon)
+    scale_factor = desired_hrss/(current_hpeak + epsilon)
     
     # Reshape tensor to allow for compatible shapes in the multiplication
     # operation:
@@ -197,7 +198,7 @@ class WaveformGenerator:
     front_padding_duration_seconds : float = 0.3
     back_padding_duration_seconds : float = 0.0
     scale_factor : float = None
-    network : Union[List[IFOs], gf.Network, Path] = None
+    network : Union[List[IFO], gf.Network, Path] = None
         
     def __post_init__(self):
         self.network = self.init_network(self.network)
@@ -234,7 +235,7 @@ class WaveformGenerator:
         onsource_duration_seconds: float = None, 
         scaling_method: ScalingMethod = None,
         scale_factor : float = None,
-        network : Union[List[IFOs], gf.Network, Path] = None
+        network : Union[List[IFO], gf.Network, Path] = None
     ) -> Type[cls]:
 
         if sample_rate_hertz is None:
@@ -465,13 +466,24 @@ class cuPhenomDGenerator(WaveformGenerator):
                     parameters[attribute] = value.sample(num_waveforms * shape)
 
             # Generate phenom_d waveform:
-            waveforms = gf.imrphenomd(
-                    num_waveforms, 
-                    sample_rate_hertz, 
-                    duration_seconds,
-                    **parameters
-                )
-                        
+            waveforms = None
+            
+            while waveforms is None:
+                try:
+                    waveforms = gf.imrphenomd(
+                            num_waveforms, 
+                            sample_rate_hertz, 
+                            duration_seconds,
+                            **parameters
+                        )
+                except Exception as e:
+                    # If an exception occurs, increment the attempts counter
+                    attempts += 1
+                    # Check if the maximum number of retries has been reached
+                    waveforms = None
+                    if attempts >= max_retries:
+                        raise Exception(f"Max waveform generation retries reached: {max_retries}") from e
+            
             waveforms *= self.scale_factor
         
             return waveforms, parameters
