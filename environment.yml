@@ -1,4 +1,4 @@
-name: gravyflow-212
+name: gravyflow
 channels:
   - conda-forge
   - defaults

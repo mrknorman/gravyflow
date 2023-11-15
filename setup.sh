@@ -49,7 +49,7 @@ function gravyflow_cuphenom_install() {
 }
 
 # Try creating the conda environment and capture any errors
-mamba_error=$(mamba env create -f environment.yml 2>&1)
+mamba_error=$(mamba env create -f environment.yml 2>&1 | tee /dev/tty)
 
 # Check if the error about existing prefix is in the captured errors
 if [[ $mamba_error == *"CondaValueError: prefix already exists"* ]]; then

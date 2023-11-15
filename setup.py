@@ -290,6 +290,8 @@ def is_redirected():
     )
 
 def save_dict_to_hdf5(data_dict, filepath, force_overwrite=False):
+
+    ensure_directory_exists(filepath.parent)
     # If force_overwrite is False and the file exists, try to append the data
     if not force_overwrite and os.path.isfile(filepath):
         with h5py.File(filepath, 'a') as hdf:  # Open in append mode

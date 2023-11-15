@@ -12,31 +12,36 @@ import gravyflow as gf
 def fetch_event_times(selection, max_retries=10):
     def data_fetcher(selection, q, stop_signal):
 
-        while not stop_signal.is_set():
-            attempts = 0
-            while True:
-                try:
-                    # Attempt to fetch the data
-                    data = GravitySpyTable.fetch(
-                        "gravityspy",
-                        "glitches",
-                        columns=["event_time"],  # Assuming we're only interested in the event times.
-                        selection=selection
-                    ).to_pandas().to_numpy()[:, 0]
+        attempts = 0
+        while True:
 
-                    # Put the data into the queue for the main thread
-                    q.put(data)
+            if stop_signal.is_set():
+                return 0
+
+            try:
+                # Attempt to fetch the data
+                data = GravitySpyTable.fetch(
+                    "gravityspy",
+                    "glitches",
+                    columns=["event_time"],  # Assuming we're only interested in the event times.
+                    selection=selection
+                ).to_pandas().to_numpy()[:, 0]
+
+                # Put the data into the queue for the main thread
+                q.put(data)
+                return 0
+
+            except Exception as e:
+                print(f"Failed to acquire gravity spy data because: {e} retrying...")
+                attempts += 1
+                if attempts >= max_retries:
+                    # Put the exception into the queue to indicate failure
+                    q.put(e)
                     break
 
-                except Exception as e:
-                    print(f"Failed to acquire gravity spy data because: {e} retrying...")
-                    attempts += 1
-                    if attempts >= max_retries:
-                        # Put the exception into the queue to indicate failure
-                        q.put(e)
-                        break
-
-                    time.sleep(30)
+                time.sleep(30)
+        
+        return attempts
 
     # Create a queue for thread communication
     q = queue.Queue()
