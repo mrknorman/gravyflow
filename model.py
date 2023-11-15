@@ -709,7 +709,7 @@ class ModelBuilder:
             history_data = gf.load_history(self.model_path)
             if history_data != {}:
                 best_metric = min(history_data[checkpoint_monitor]) #assuming loss for now
-                initial_epoch = len(history_data[checkpoint_monitor]) - 1
+                initial_epoch = len(history_data[checkpoint_monitor])
             else:
                 initial_epoch = 0
                 model_path = None

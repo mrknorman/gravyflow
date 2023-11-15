@@ -186,19 +186,19 @@ def acquire_heartbeat(
                     if (name is not None) and (timestamp is not None):
                         return timestamp
                     else:
-                        return None
+                        logging.warning(f"Malformed received from {command.name}.")
+                        return 0
                 else:
-                    logging.info(f"No heartbeat received from {command.name}.")
-                    return None
+                    return 0
             else:
                 return 0
 
     except FileNotFoundError:
-        print(f"Named pipe {command.pipe_name} does not exist. Subprocess might have terminated.")
+        logging.error(f"Named pipe {command.pipe_name} does not exist. Subprocess might have terminated.")
         return None
     except Exception as e:
-        print(f"Error reading from pipe for {command.pipe_name}: {e}")
-        return None
+        logging.error(f"Error reading from pipe for {command.pipe_name}: {e}")
+        return 0
  
 def monitor_heartbeat(
         command, 
@@ -215,17 +215,17 @@ def monitor_heartbeat(
     """
     if not flags["should_exit"].is_set():
         
-        print(f"Acquiring heartbeat {command.name} at {command.id}...")
+        logging.info(f"Acquiring heartbeat {command.name} at {command.id}...")
         last_heartbeat_timestamp = acquire_heartbeat(
             command,
             acquisition_timeout_seconds=acquisition_timeout_seconds
         )
         if last_heartbeat_timestamp is None or last_heartbeat_timestamp == 0:
-            print("Failed to acquire heartbeat! Assumed dead!")
+            logging.warning("Failed to acquire heartbeat! Assumed dead!")
             flags["has_died"].set()
             return -1
         else:
-            print(f"{command.name} at {command.id} heartbeat acquired at: {last_heartbeat_timestamp} s.")
+            logging.info(f"{command.name} at {command.id} heartbeat acquired at: {last_heartbeat_timestamp} s.")
     else:
         return -1
 
@@ -235,15 +235,22 @@ def monitor_heartbeat(
             acquisition_timeout_seconds=missed_heartbeat_threshold
         )
 
-        if timestamp != 0:
-            last_heartbeat_timestamp = timestamp
-        elif timestamp is None:
+        if timestamp is None:
             flags["has_died"].set()
             return -1
-        elif timestamp == -1:
+
+        if timestamp != 0:
+            last_heartbeat_timestamp = timestamp
+
+        if timestamp == -1:
             return 0
 
-        time_since_last_beat = time.time() - last_heartbeat_timestamp
+        try:
+            time_since_last_beat = time.time() - last_heartbeat_timestamp
+        except:
+            logging.warning("Malformed timestamp crept through somehow...")
+            continue
+        
         if time_since_last_beat >= missed_heartbeat_threshold:
             logging.warning(f"It has been {time_since_last_beat} seconds since last heartbeat detected from {command.name}.")
             flags["has_died"].set()
@@ -252,8 +259,8 @@ def monitor_heartbeat(
         if flags["should_exit"].is_set():
             return -1
 
-        time.sleep(1)
-    
+        time.sleep(0.1)
+        
     return -1
         
 def start_monitoring_thread(command, flags):
