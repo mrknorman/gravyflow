@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Union, List, Dict, Optional
 from copy import deepcopy
 from pathlib import Path
+import logging
 
 import numpy as np
 import tensorflow as tf
@@ -704,13 +705,20 @@ class ModelBuilder:
 
         if not force_retrain:
             model_path = self.model_path
+
             history_data = gf.load_history(self.model_path)
-            best_metric = min(history_data[checkpoint_monitor]) #assuming loss for now
-            initial_epoch = len(list(history_data.items())[0])
+            if history_data != {}:
+                best_metric = min(history_data[checkpoint_monitor]) #assuming loss for now
+                initial_epoch = len(history_data[checkpoint_monitor]) - 1
+            else:
+                initial_epoch = 0
+                model_path = None
+                best_metric = None
         else:
             initial_epoch = 0
             model_path = None
             best_metric = None
+            gf.save_dict_to_hdf5({}, self.model_path / "history.hdf5", True)
 
         early_stopping = gf.EarlyStoppingWithLoad(
                 monitor  = checkpoint_monitor,
@@ -725,6 +733,12 @@ class ModelBuilder:
             save_freq="epoch", 
             initial_value_threshold=best_metric
         )
+
+        if force_retrain:
+            logging.info("Forcing retraining!")
+        else:
+            logging.info(f"Resuming from {initial_epoch}, current history : {history_data}")
+        
         history_saver = gf.CustomHistorySaver(self.model_path, force_overwrite=force_retrain)
         wait_printer = gf.PrintWaitCallback(early_stopping)
         
@@ -744,7 +758,7 @@ class ModelBuilder:
             verbose : int = 2
             
             if heart is not None:
-                callbacks += [gf.HeartbeatCallback(heart, 1024)]
+                callbacks += [gf.HeartbeatCallback(heart, 32)]
 
         self.metrics.append(
             self.model.fit(

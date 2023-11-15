@@ -341,7 +341,8 @@ class CustomHistorySaver(Callback):
                     self.history[k] = [v]
 
             ensure_directory_exists(self.filepath)
-            save_dict_to_hdf5(self.history, self.filepath / "history.hdf5", self.force_overwrite)
+            save_dict_to_hdf5(self.history, self.filepath / "history.hdf5", True)
+            self.force_overwrite = False
             
 class EarlyStoppingWithLoad(Callback):
 
@@ -413,9 +414,10 @@ class EarlyStoppingWithLoad(Callback):
                 
                 if initial_epoch and last_epoch_metrics:
                     # Manually set their internal state
-                        
+                    
+                    # Assuming loss
                     best = min(last_epoch_metrics[self.monitor])
-                    best_epoch = np.argmax(last_epoch_metrics[self.monitor])
+                    best_epoch = np.argmin(last_epoch_metrics[self.monitor])
 
                     self.wait = self.start_from_epoch - best_epoch
                     self.stopped_epoch = 0

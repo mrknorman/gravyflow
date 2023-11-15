@@ -1,6 +1,8 @@
 from enum import Enum, auto
 from typing import Union, List
 import time
+import threading
+import queue
 
 import numpy as np
 from gwpy.table import GravitySpyTable
@@ -8,31 +10,50 @@ from gwpy.table import GravitySpyTable
 import gravyflow as gf
 
 def fetch_event_times(selection, max_retries=10):
-    import time  # Importing time module for sleep function
-    
-    attempts = 0
-    while True:
-        try:
-            # Attempt to fetch the data
-            data = GravitySpyTable.fetch(
-                "gravityspy",
-                "glitches",
-                columns=["event_time"],  # Assuming we're only interested in the event times.
-                selection=selection
-            ).to_pandas().to_numpy()[:, 0]
+    def data_fetcher(selection, q):
+        attempts = 0
+        while True:
+            try:
+                # Attempt to fetch the data
+                data = GravitySpyTable.fetch(
+                    "gravityspy",
+                    "glitches",
+                    columns=["event_time"],  # Assuming we're only interested in the event times.
+                    selection=selection
+                ).to_pandas().to_numpy()[:, 0]
 
-        except Exception as e:
-            print("Failed to acquire gravity spy data because: {e} retrying...")
-            # If an exception occurs, increment the attempts counter
-            attempts += 1
-            # Check if the maximum number of retries has been reached
-            if attempts >= max_retries:
-                raise Exception(f"Max retries reached: {max_retries}") from e
-            
-        # Wait for 10 seconds before retrying
-        time.sleep(30)
-    
-    return data  # If successful, return the data
+                # Put the data into the queue for the main thread
+                q.put(data)
+                break
+
+            except Exception as e:
+                print(f"Failed to acquire gravity spy data because: {e} retrying...")
+                attempts += 1
+                if attempts >= max_retries:
+                    # Put the exception into the queue to indicate failure
+                    q.put(e)
+                    break
+
+                time.sleep(30)
+
+    # Create a queue for thread communication
+    q = queue.Queue()
+
+    # Start the data fetching in a separate thread
+    fetch_thread = threading.Thread(target=data_fetcher, args=(selection, q))
+    fetch_thread.start()
+
+    # Wait for the data or exception from the data-fetching thread
+    result = q.get()
+
+    # Join the thread (wait for it to complete)
+    fetch_thread.join()
+
+    # Check if the result is an exception and raise it if so
+    if isinstance(result, Exception):
+        raise result
+
+    return result
 
 
 class GlitchType(Enum):

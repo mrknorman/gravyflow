@@ -4,6 +4,7 @@ import sys
 import os
 import stat
 import threading
+import logging
 import time
 from datetime import datetime
 
@@ -83,15 +84,14 @@ def create_named_pipe(pipe_name):
     else:
         try:
             os.mkfifo(pipe_name)
-            print(f"Named pipe {pipe_name} created.")
+            logging.info(f"Named pipe {pipe_name} created.")
         except OSError as e:
-            print(f"Failed to create named pipe: {e}")
+            logging.error(f"Failed to create named pipe: {e}")
 
             error = e
 
-
     if not check_if_pipe_exists(pipe_name):
-        print(f"Failed to create named pipe: {e}")
+        logging.error(f"Failed to create named pipe: {e}")
 
 
 def write_non_blocking(pipe_name, message):
@@ -101,16 +101,15 @@ def write_non_blocking(pipe_name, message):
         with os.fdopen(fd, 'w') as fifo_writer:
             try:
                 fifo_writer.write(message)
-                print("Message written successfully.")
             except OSError as e:
                 if e.errno == errno.EAGAIN or e.errno == errno.EWOULDBLOCK:
-                    print("Write operation would block, no reader available.")
+                    logging.error("Write operation would block, no reader available.")
                 else:
                     raise  # Re-raise the exception if it's not a 'would block' error
     except FileNotFoundError:
-        print(f"Named pipe {pipe_name} does not exist.")
+        logging.error(f"Named pipe {pipe_name} does not exist.")
     except Exception as e:
-        print(f"Error opening/writing to pipe: {e}")
+        logging.error(f"Error opening/writing to pipe: {e}")
 
 def parse_name_and_time(input_string):
     # Split the input string into name and timestamp
@@ -141,16 +140,16 @@ def check_heartbeat_integrity(heartbeat, expected_command_name):
     name, timestamp = parse_name_and_time(heartbeat)
 
     if not name or not timestamp:
-        print("Malformed heartbeat, assumed dead.")
+        logging.error("Malformed heartbeat, assumed dead.")
         if not name:
-            print("Heartbeat name is missing!")
+            logging.error("Heartbeat name is missing!")
         if not timestamp:
-            print("Could not convert timestamp to float!")
+            logging.error("Could not convert timestamp to float!")
         return None, None
 
     if name != expected_command_name:
-        print("Malformed heartbeat, assumed dead.")
-        print("Heartbeat name does not match!")
+        logging.error("Malformed heartbeat, assumed dead.")
+        logging.error("Heartbeat name does not match!")
         return None, None
 
     return name, timestamp
@@ -161,7 +160,7 @@ def open_non_blocking(pipe_name):
     try:
         fd = os.open(pipe_name, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
-        print(f"Named pipe {pipe_name} does not exist. Subprocess might have terminated.")
+        logging.error(f"Named pipe {pipe_name} does not exist. Subprocess might have terminated.")
         return None
     
     return open(fd, 'r')
@@ -189,7 +188,7 @@ def acquire_heartbeat(
                     else:
                         return None
                 else:
-                    print(f"No heartbeat received from {command.name}.")
+                    logging.info(f"No heartbeat received from {command.name}.")
                     return None
             else:
                 return 0
@@ -233,7 +232,7 @@ def monitor_heartbeat(
     while not flags["should_exit"].is_set():
         timestamp = acquire_heartbeat(
             command,
-            acquisition_timeout_seconds=5
+            acquisition_timeout_seconds=missed_heartbeat_threshold
         )
 
         if timestamp != 0:
@@ -246,7 +245,7 @@ def monitor_heartbeat(
 
         time_since_last_beat = time.time() - last_heartbeat_timestamp
         if time_since_last_beat >= missed_heartbeat_threshold:
-            print(f"It has been {time_since_last_beat} seconds since last heartbeat detected from {command.name}.")
+            logging.warning(f"It has been {time_since_last_beat} seconds since last heartbeat detected from {command.name}.")
             flags["has_died"].set()
             return -1
 
@@ -271,7 +270,7 @@ def start_monitoring_thread(command, flags):
 def kill_process(pid):
     try:
         os.kill(pid, signal.SIGKILL)  # or signal.SIGKILL for a forceful kill
-        print(f"Process with PID {pid} has been terminated.")
+        logging.info(f"Process with PID {pid} has been terminated.")
     except OSError as e:
         return
 
@@ -281,9 +280,13 @@ class Heart:
         self.beat()
 
     def beat(self):
-        print("Boom boom.")
         write_non_blocking(
             f"./tmp/heartbeat_{self.pipe_name}", f"{self.pipe_name}:{str(time.time())}"
+        )
+
+    def complete(self):
+        write_non_blocking(
+            f"./tmp/heartbeat_{self.pipe_name}", f"{self.pipe_name}:-1"
         )
 
 # Keras callback
@@ -294,7 +297,5 @@ class HeartbeatCallback(Callback):
         self.interval = interval
 
     def on_batch_end(self, batch, logs=None):
-
-        print("Here!")
         if batch % self.interval == 0:
             self.heart.beat()
