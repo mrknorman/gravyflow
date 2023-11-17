@@ -723,7 +723,6 @@ class ModelBuilder:
         early_stopping = gf.EarlyStoppingWithLoad(
                 monitor  = checkpoint_monitor,
                 patience = training_config["patience"],
-                start_from_epoch=4,
                 model_path=model_path
             )
         model_checkpoint = keras.callbacks.ModelCheckpoint(

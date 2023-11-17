@@ -1,15 +1,15 @@
 from enum import Enum, auto
 from typing import Union, List
 import time
-import threading
+#import threading
 import queue
 
 import numpy as np
 from gwpy.table import GravitySpyTable
 
 import gravyflow as gf
-
-def fetch_event_times(selection, max_retries=10):
+"""
+def fetch_event_times_(selection, max_retries=10):
     def data_fetcher(selection, q, stop_signal):
 
         attempts = 0
@@ -42,7 +42,7 @@ def fetch_event_times(selection, max_retries=10):
                 time.sleep(30)
         
         return attempts
-
+    
     # Create a queue for thread communication
     q = queue.Queue()
     stop_signal = threading.Event()  # Thread-safe stop signal
@@ -63,7 +63,34 @@ def fetch_event_times(selection, max_retries=10):
         raise result
 
     return result
+"""
+def fetch_event_times(selection, max_retries=10):
+        
+    attempts = 0
+    while True:
+        try:
+            # Attempt to fetch the data
+            data = GravitySpyTable.fetch(
+                "gravityspy",
+                "glitches",
+                columns=["event_time"],  # Assuming we're only interested in the event times.
+                selection=selection
+            ).to_pandas().to_numpy()[:, 0]
 
+            return data
+
+        except Exception as e:
+            print("Failed to acquire gravity spy data because: {e} retrying...")
+            # If an exception occurs, increment the attempts counter
+            attempts += 1
+            # Check if the maximum number of retries has been reached
+            if attempts >= max_retries:
+                raise Exception(f"Max retries reached: {max_retries}") from e
+            
+            # Wait for 10 seconds before retrying
+            time.sleep(30)
+    
+    return -1  # If successful, return the data
 
 class GlitchType(Enum):
     AIR_COMPRESSOR = 'Air_Compressor'

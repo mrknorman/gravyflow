@@ -215,7 +215,7 @@ def monitor_heartbeat(
     """
     if not flags["should_exit"].is_set():
         
-        logging.info(f"Acquiring heartbeat {command.name} at {command.id}...")
+        logging.info(f"Acquiring heartbeat {command.name}...")
         last_heartbeat_timestamp = acquire_heartbeat(
             command,
             acquisition_timeout_seconds=acquisition_timeout_seconds
@@ -235,15 +235,20 @@ def monitor_heartbeat(
             acquisition_timeout_seconds=missed_heartbeat_threshold
         )
 
+        if flags["should_exit"].is_set():
+            return -1
+        
         if timestamp is None:
             flags["has_died"].set()
             return -1
 
-        if timestamp != 0:
-            last_heartbeat_timestamp = timestamp
-
         if timestamp == -1:
+            logging.info(f"{command.name} has succesfully completed. Enforcing shutdown.")
+            time.sleep(30)
+            flags["has_completed"].set()
             return 0
+        elif timestamp != 0:
+            last_heartbeat_timestamp = timestamp
 
         try:
             time_since_last_beat = time.time() - last_heartbeat_timestamp
@@ -254,9 +259,6 @@ def monitor_heartbeat(
         if time_since_last_beat >= missed_heartbeat_threshold:
             logging.warning(f"It has been {time_since_last_beat} seconds since last heartbeat detected from {command.name}.")
             flags["has_died"].set()
-            return -1
-
-        if flags["should_exit"].is_set():
             return -1
 
         time.sleep(0.1)

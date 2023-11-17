@@ -58,11 +58,6 @@ def setup_cuda(
     # Step 1: Set the mixed precision policy
     #tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
-    # Limit the number of threads
-    tf.config.threading.set_intra_op_parallelism_threads(1)
-    tf.config.threading.set_inter_op_parallelism_threads(1)
-
-
     # List all the physical GPUs.
     gpus = tf.config.list_physical_devices('GPU')
     
@@ -82,6 +77,8 @@ def setup_cuda(
         
     # Set the logging level to ERROR to reduce logging noise.
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
 
     # MirroredStrategy performs synchronous distributed training on multiple 
     # GPUs on one machine. It creates one replica of the model on each GPU 
@@ -419,9 +416,9 @@ class EarlyStoppingWithLoad(Callback):
                     
                     # Assuming loss
                     best = min(last_epoch_metrics[self.monitor])
-                    best_epoch = np.argmin(last_epoch_metrics[self.monitor])
+                    best_epoch = np.argmin(last_epoch_metrics[self.monitor]) + 1
 
-                    self.wait = self.start_from_epoch - best_epoch
+                    self.wait = initial_epoch - best_epoch
                     self.stopped_epoch = 0
                     self.best = best
                     self.best_weights = tf.keras.models.load_model(self.model_path).get_weights()
