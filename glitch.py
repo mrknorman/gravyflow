@@ -80,7 +80,7 @@ def fetch_event_times(selection, max_retries=10):
             return data
 
         except Exception as e:
-            print("Failed to acquire gravity spy data because: {e} retrying...")
+            print(f"Failed to acquire gravity spy data because: {e} retrying...")
             # If an exception occurs, increment the attempts counter
             attempts += 1
             # Check if the maximum number of retries has been reached
