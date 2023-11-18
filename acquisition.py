@@ -1139,7 +1139,7 @@ class IFODataObtainer:
                 channel=f"{ifo.name}:{channel}", 
                 start=segment_start_gps_time, 
                 end=segment_end_gps_time, 
-                nproc=100
+                nproc=4
             )
 
             return data

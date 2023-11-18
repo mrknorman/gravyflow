@@ -4,11 +4,15 @@ import sys
 import os
 import stat
 import threading
+import subprocess
+import copy
 import logging
 import time
+from typing import List
 from datetime import datetime
 
 from tensorflow.keras.callbacks import Callback
+import numpy as np
 
 import gravyflow as gf
 
@@ -278,8 +282,9 @@ def start_monitoring_thread(command, flags):
 
 def kill_process(pid):
     try:
-        os.kill(pid, signal.SIGKILL)  # or signal.SIGKILL for a forceful kill
-        logging.info(f"Process with PID {pid} has been terminated.")
+        if pid is not None:
+            os.kill(pid, signal.SIGKILL)  # or signal.SIGKILL for a forceful kill
+            logging.info(f"Process with PID {pid} has been terminated.")
     except OSError as e:
         return
 
@@ -308,3 +313,476 @@ class HeartbeatCallback(Callback):
     def on_batch_end(self, batch, logs=None):
         if batch % self.interval == 0:
             self.heart.beat()
+
+class Process:
+    def __init__(
+            self, 
+            command_string : str, 
+            name : str,
+            tensorflow_memory_mb : float, 
+            cuda_overhead_mb : float
+        ):
+
+        self.current_gpu = -1
+        self.memory_assigned = 0
+        self.tensorflow_memory_mb = tensorflow_memory_mb
+        self.cuda_overhead_mb = cuda_overhead_mb
+
+        self.flags = None
+        self.pipe_name = None
+        self.pipe_monitor_thread = None
+
+        self.process = None
+        self.id = -1
+        self.restart_count = 0
+        self.total_restart_count = 0
+        self.restart_counter = time.time()
+        self.full = command_string
+        self.name = name
+        self.has_failed = False
+        self.has_completed = False
+
+        self.manager = None
+
+        parts = command_string.split()
+    
+        # Check if the command starts with "python":
+        if parts and parts[0] == "python":
+            parts.pop(0)  # Remove 'python' from the command
+        else:
+            raise ValueError("Command does not start with 'python'.")
+
+        # Extract the script path and name
+        self.path = parts.pop(0)
+
+        # Parse arguments
+        self.args = {}
+        current_key = None
+        for part in parts:
+            if part.startswith("--"):
+                current_key = part[2:]
+                self.args[current_key] = []
+            elif current_key is not None:
+                self.args[current_key].append(part)
+
+        # Join the argument values if they were split due to spaces:
+        for key, value in self.args.items():
+            self.args[key] = " ".join(value)
+
+    # Modify the start_process function to track first-time start:
+    def start(self):
+        try:
+            process_gap_seconds = 3
+            logging.info((
+                f"Waiting {process_gap_seconds} s"
+                " to space out process activations."
+            ))
+            # Space out so not too many are run at the same time:
+            time.sleep(process_gap_seconds)  
+
+            # Determine the mode for log files based on 
+            # whether it's a first-time start:
+            mode = "w" if self.total_restart_count == 0 else "a"
+
+            with open(
+                    f"perceptron_logs/{self.name}_log.txt", 
+                    mode
+                ) as stdout_file, \
+                open(
+                    f"perceptron_logs/{self.name}_error.txt",
+                    mode
+                ) as stderr_file:
+
+                full_command = (
+                    f"{self.full} --gpu {self.current_gpu}"
+                    f" --request_memory {self.tensorflow_memory_mb}"
+                    f" --restart_count {self.total_restart_count}"
+                    f" --name {self.name}"
+                )
+
+                self.pipe_name = f"./tmp/heartbeat_{self.name}"
+                gf.create_named_pipe(self.pipe_name)
+
+                self.flags = {
+                    "has_died" : threading.Event(), 
+                    "should_exit" : threading.Event(), 
+                    "has_completed": threading.Event()
+                }
+                self.pipe_monitor_thread = gf.start_monitoring_thread(
+                    self, self.flags
+                )
+
+                self.process = subprocess.Popen(
+                    full_command, 
+                    shell=True, 
+                    stdout=stdout_file, 
+                    stderr=stderr_file, 
+                )
+
+                self.id = self.process.pid
+                logging.info(
+                    f"Process: {self.name} started at {self.id}"
+                )
+                
+                # Start restart counter:
+                self.restart_counter = time.time()
+
+        except Exception as e:
+            logging.exception((
+                f"Failed to start process {self.name}"
+                " on GPU {self.current_gpu}."
+            ))
+            self.restart_count += 1
+            self.total_restart_count += 1
+            return None
+
+    def kill(self):
+        
+        if (self.id is not None) or (self.id != -1):
+            gf.kill_process(self.id)
+        
+        if self in self.manager.running:
+            self.manager.running.remove(self)
+
+        if self.manager.allocated_memory is not None:
+            self.manager.allocated_memory[
+                self.current_gpu
+            ] -= self.memory_assigned
+        else:
+            logging.warning(
+                "Allocated memory is None when removing process. Concerning?"
+            )
+        
+        self.process = None
+        self.id = -1
+        self.current_gpu = -1
+        self.memory_assigned = 0
+        self.flags["should_exit"].set()
+        gf.cleanup_named_pipe(self.pipe_name)
+
+    def check_if_completed(self):
+
+        if self.has_completed:
+            self.kill()
+            self.has_completed = True
+            self.manager.completed.append(self)
+
+            if self in self.manager.running:
+                self.manager.running.remove(self)
+
+            return True
+
+        return False
+    
+    def check_if_failed(self):
+
+        # Check if already failed:
+        if self.has_failed or (self in self.manager.failed):
+            self.kill()
+            self.has_failed = True  # Mark process as failed
+            self.manager.failed.append(self)
+
+            return True
+        
+        # Update fail restart timer:
+        current_time = time.time()
+        if current_time - self.restart_counter > self.manager.restart_timeout_seconds:
+            self.restart_counter = current_time
+            self.restart_count = 0
+
+        # Check if the process has been restarted more than N times in X seconds:
+        if self.restart_count > self.manager.max_restarts:
+            logging.error((
+                f"Process {self.name} has been restarted "
+                f"{self.restart_count} times within "
+                f"{self.manager.restart_timeout_seconds} "
+                f"seconds. Marking as failed."
+            ))
+            self.has_failed = True  # <-- Mark process as failed
+            self.kill()
+            self.manager.failed.append(self)
+            return True
+        
+        return False      
+
+    def get_retcode(self):
+        return self.process.poll()
+
+    def print_stderr(self):
+        stdout, stderr = self.process.communicate()
+        if stdout:
+            logging.error((
+                f"Process {self.name} at {self.id}"
+                f" - STDOUT: {stdout.decode()}"
+            ))
+        if stderr:
+            logging.error((
+                f"Process {self.name} at {self.id}"
+                f" - STDERR: {stderr.decode()}"
+            ))
+
+    def complete(self):
+        self.kill()
+        self.has_completed = True
+        self.manager.completed.append(self)
+
+    def requeue(self):
+
+        self.restart_count += 1
+        self.total_restart_count += 1
+        if not self.check_if_failed():
+            self.manager.queued.insert(0, self)
+            self.manager.num_restarts += 1
+            self.kill()
+
+class Manager:
+
+    queued = []
+    running = []
+    failed = []
+    completed = []
+    all = []
+    
+    free_memory = None
+    allocated_memory = None
+
+    num_restarts = 0
+    num_iterations = 0
+
+    num_queued = 0
+    num_running = 0
+    num_failed = 0
+    num_completed = 0
+    total = 0
+
+    def tabulate(self):
+
+        # Calculate the number of lines to go back up in the terminal
+        lines_to_move_up = len(self.all) + 3  # +2 for headers and an extra line
+
+        # Clear the lines
+        for _ in range(lines_to_move_up):
+            print("\033[F\033[K", end="")
+        
+        # Print table headers
+        header = f"| {'ID':<7} | {'Name':<15} | {'GPU':<6} | {'Restart Timeout': <15} | {'Total Restarts': <15} | {'Total Mem':<10} | {'TF Mem':<10} | {'CUDA Overhead':<15} | {'Status':<8} |"
+        print(self)
+        print(header)
+
+
+        # Print each process in the table
+        for process in self.all:
+            restarts_string = f"{process.restart_count} / {self.max_restarts}"
+            status = "Failed" if process.has_failed else "Completed" if process.has_completed else "Running"
+            row = f"| {process.id:<7} | {process.name:<15} | {process.current_gpu:<6} | {restarts_string:<15} | {process.total_restart_count:<15} | {process.memory_assigned:<10} | {process.tensorflow_memory_mb:<10} | {process.cuda_overhead_mb:<15} | {status:<8} |"
+            print(row)
+
+    def __str__(self):
+        num_queued = len(self.queued)
+        num_running = len(self.running)
+        num_failed = len(self.failed)
+        num_completed = len(self.completed)
+        total = num_queued + num_running + num_failed + num_completed
+
+        return (
+            f"{num_running}/{total} running, "
+            f"{num_completed}/{total} completed, "
+            f"{num_failed}/{total} failed, "
+            f"{num_queued}/{total} in queue. "
+            f"{self.num_restarts} restarts."
+        )
+
+    def __init__(
+            self, 
+            initial_processes : List[Process],
+            max_restarts : int = 10,
+            restart_timeout_seconds : float = 1200, 
+            process_start_wait_seconds : float = 1, 
+            management_tick_length_seconds : float = 1,
+            max_num_concurent_processes : int = 10
+        ):
+
+        if not isinstance(initial_processes, list):
+            initial_processes = [initial_processes]
+
+        self.queued = initial_processes
+        self.all = copy.copy(initial_processes)
+
+        for process in self.queued:
+            process.manager = self
+
+        self.max_restarts = max_restarts
+        self.restart_timeout_seconds = restart_timeout_seconds
+        self.max_num_concurent_processes = max_num_concurent_processes
+        self.process_start_wait_seconds = process_start_wait_seconds
+        self.management_tick_length_seconds = management_tick_length_seconds
+
+    def __bool__(self):
+        
+        if (self.queued or self.running):
+            return True
+        else:
+            logging.info((
+                f"All processes finished. "
+                f"{len(self.completed)}/{self.total_processes}"
+                f" completed, {len(self.failed)}/{self.total_processes} failed."
+                f" {self.num_restarts} attempted restarts."
+            ))
+            return False
+
+    def __call__(self):
+
+        self.total_processes = len(self.queued) + len(self.running) \
+            + len(self.completed) + len(self.failed)
+
+        if not self.num_iterations:
+
+            try:
+                num_gpus = len(gf.get_memory_array())
+            except:
+                raise Exception("Cannot get num GPUs!")
+            
+            self.allocated_memory : np.ndarray = np.zeros([num_gpus], dtype = np.int64)
+
+            logging.info(
+                "Starting the process management system..."
+            )
+            logging.info((
+                f"Monitoring {self.total_processes} "
+                f"processes across {num_gpus} available GPUs."
+            ))
+
+        # Perform a single iteration of process management:
+        self.manage_running_processes()
+        self.start_processes()
+
+        if gf.is_redirected():
+            time.sleep(
+                self.management_tick_length_seconds
+            )
+
+        self.num_iterations += 1
+
+    def manage_running_processes(self):
+
+        for process in self.running[:]:
+            if process.process is not None:
+
+                if process.check_if_failed():
+                    logging.warning((
+                        "Failed process found in running jobs "
+                        "for some reason! This is concerning..."
+                    ))
+                    
+                    if process in self.queued:
+                        self.queued.remove(process)
+                    continue
+                if process.check_if_completed():
+                    logging.warning((
+                        "Completed process found in running jobs "
+                        "for some reason! This is concerning..."
+                    ))
+
+                    if process in self.queued:
+                        self.queued.remove(process)
+                    continue
+                
+                # Manage process exit:
+                retcode = process.get_retcode()
+                if retcode is not None:  # Process finished.
+
+                    process.print_stderr()
+                    process.kill()
+
+                    # Check if the process should be marked as failed
+                    if retcode != 0:  # Process failed, log the error
+                        logging.error((
+                            f"Process {process.name} at {process.id} "
+                            f"failed with return code {retcode} : "
+                            f"{gf.explain_exit_code(retcode)}. "
+                             "Attempting requeue."
+                        ))
+                        process.requeue()
+                    else:
+                        logging.info((
+                            f"Process {process.name} at {process.id} "
+                            f"completed sucessfully with return code {retcode}: "
+                            f"{gf.explain_exit_code(retcode)}."
+                        ))
+                        process.complete()
+
+                # Check if monitor thread has spotted completion signal:
+                elif process.flags["has_completed"].is_set():
+                    logging.error((
+                        f"Process {process.name} at {process.id}"
+                        " failed to complete gracefully. Forcing termination."
+                    ))
+                    process.complete()
+
+                # Check if monitor thread has marked process as dead:
+                elif process.flags["has_died"].is_set():
+                    logging.error((
+                        f"Process {process.name} at "
+                        "{process.id} heartbeat lost. "
+                        "Terminating."
+                    ))
+                    process.requeue()
+
+    def update_memory_array(self):
+        try:
+            self.free_memory = gf.get_memory_array()
+
+            if len(self.free_memory) != len(self.allocated_memory):
+                raise ValueError("Num GPUs changed! I don't feel so good.")
+            
+            self.free_memory -= self.allocated_memory
+        except Exception as e:
+            logging.exception(
+                f"Failed to update free memory array because {e}."
+            )
+
+    def assign_gpus(self):
+
+        self.update_memory_array()
+
+        if self.free_memory is None:
+            raise ValueError("Free memory array is None, for some reason!")
+
+        process_index = 0
+        for gpu_index, gpu_memory in enumerate(self.free_memory):
+            
+            while process_index < len(self.queued):
+
+                total_memory_required_mb = self.queued[process_index].tensorflow_memory_mb + self.queued[process_index].cuda_overhead_mb 
+
+                if (gpu_memory >= total_memory_required_mb):
+
+                    gpu_memory -= total_memory_required_mb
+
+                    self.queued[process_index].current_gpu = gpu_index
+                    self.queued[process_index].memory_assigned = total_memory_required_mb
+
+                    process_index += 1
+                else:
+                    break
+    
+    def start_processes(self):
+
+        self.assign_gpus()
+
+        for command in self.queued:
+            if command.current_gpu > -1 and self.queued \
+                and len(self.running) < self.max_num_concurent_processes:
+
+                self.queued.remove(command)
+
+                command.start()
+                
+                if command.process is not None:
+                    self.running.append(command)
+                elif not command.has_failed or not command.has_completed:
+                    logging.info(
+                        f"Attempting restart of {command.name}."
+                    )
+                    command.requeue()
+                    time.sleep(self.process_start_wait_seconds)
