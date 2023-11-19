@@ -10,6 +10,7 @@ import logging
 import time
 from typing import List
 from datetime import datetime
+from pathlib import Path
 
 from tensorflow.keras.callbacks import Callback
 import numpy as np
@@ -57,10 +58,11 @@ def signal_handler(signum, frame):
 
 # Function to clean up the named pipe
 def cleanup_named_pipe(pipe_name):
-    try:
-        os.remove(pipe_name)
-    except OSError:
-        pass
+    if pipe_name is not None:
+        try:
+            os.remove(pipe_name)
+        except OSError:
+            pass
 
 def check_if_pipe_exists(pipe_path):
     # Check if the path exists
@@ -282,7 +284,7 @@ def start_monitoring_thread(command, flags):
 
 def kill_process(pid):
     try:
-        if pid is not None:
+        if pid is not None and pid > 0:
             os.kill(pid, signal.SIGKILL)  # or signal.SIGKILL for a forceful kill
             logging.info(f"Process with PID {pid} has been terminated.")
     except OSError as e:
@@ -383,13 +385,16 @@ class Process:
             # Determine the mode for log files based on 
             # whether it's a first-time start:
             mode = "w" if self.total_restart_count == 0 else "a"
+            
+            log_directory_path = self.manager.log_directory_path
+            gf.ensure_directory_exists(log_directory_path)
 
             with open(
-                    f"perceptron_logs/{self.name}_log.txt", 
+                    f"{log_directory_path}/{self.name}_log.txt", 
                     mode
                 ) as stdout_file, \
                 open(
-                    f"perceptron_logs/{self.name}_error.txt",
+                    f"{log_directory_path}/{self.name}_error.txt",
                     mode
                 ) as stderr_file:
 
@@ -401,17 +406,17 @@ class Process:
                 )
 
                 self.pipe_name = f"./tmp/heartbeat_{self.name}"
-                gf.create_named_pipe(self.pipe_name)
+                create_named_pipe(self.pipe_name)
 
                 self.flags = {
                     "has_died" : threading.Event(), 
                     "should_exit" : threading.Event(), 
                     "has_completed": threading.Event()
                 }
-                self.pipe_monitor_thread = gf.start_monitoring_thread(
+                self.pipe_monitor_thread = start_monitoring_thread(
                     self, self.flags
                 )
-
+                
                 self.process = subprocess.Popen(
                     full_command, 
                     shell=True, 
@@ -439,7 +444,7 @@ class Process:
     def kill(self):
         
         if (self.id is not None) or (self.id != -1):
-            gf.kill_process(self.id)
+            kill_process(self.id)
         
         if self in self.manager.running:
             self.manager.running.remove(self)
@@ -457,8 +462,11 @@ class Process:
         self.id = -1
         self.current_gpu = -1
         self.memory_assigned = 0
-        self.flags["should_exit"].set()
-        gf.cleanup_named_pipe(self.pipe_name)
+        
+        if self.flags is not None:
+            self.flags["should_exit"].set()
+        
+        cleanup_named_pipe(self.pipe_name)
 
     def check_if_completed(self):
 
@@ -558,7 +566,7 @@ class Manager:
     def tabulate(self):
 
         # Calculate the number of lines to go back up in the terminal
-        lines_to_move_up = len(self.all) + 3  # +2 for headers and an extra line
+        lines_to_move_up = len(self.all) + 2  # +2 for headers and an extra line
 
         # Clear the lines
         for _ in range(lines_to_move_up):
@@ -573,7 +581,7 @@ class Manager:
         # Print each process in the table
         for process in self.all:
             restarts_string = f"{process.restart_count} / {self.max_restarts}"
-            status = "Failed" if process.has_failed else "Completed" if process.has_completed else "Running"
+            status = "Failed" if process.has_failed else "Completed" if process.has_completed else "Running" if gpu > 0 else "Waiting"
             row = f"| {process.id:<7} | {process.name:<15} | {process.current_gpu:<6} | {restarts_string:<15} | {process.total_restart_count:<15} | {process.memory_assigned:<10} | {process.tensorflow_memory_mb:<10} | {process.cuda_overhead_mb:<15} | {status:<8} |"
             print(row)
 
@@ -599,7 +607,8 @@ class Manager:
             restart_timeout_seconds : float = 1200, 
             process_start_wait_seconds : float = 1, 
             management_tick_length_seconds : float = 1,
-            max_num_concurent_processes : int = 10
+            max_num_concurent_processes : int = 10,
+            log_directory_path : Path = Path("./logs")
         ):
 
         if not isinstance(initial_processes, list):
@@ -611,6 +620,7 @@ class Manager:
         for process in self.queued:
             process.manager = self
 
+        self.log_directory_path = log_directory_path
         self.max_restarts = max_restarts
         self.restart_timeout_seconds = restart_timeout_seconds
         self.max_num_concurent_processes = max_num_concurent_processes

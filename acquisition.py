@@ -1139,10 +1139,8 @@ class IFODataObtainer:
                 channel=f"{ifo.name}:{channel}", 
                 start=segment_start_gps_time, 
                 end=segment_end_gps_time, 
-                nproc=4
+                nproc=1
             )
-
-            return data
     
     def get_segment(
             self,
@@ -1194,12 +1192,12 @@ class IFODataObtainer:
             )
             try:
                 # Added epsilon value to solve precision error:
-                segment : TimeSeries= self.get_segment_data(
-                        segment_start_gps_time + epsilon, 
-                        segment_end_gps_time - epsilon, 
-                        ifos, 
-                        self.frame_types[0], 
-                        self.channels[0]
+                segment : TimeSeries = self.get_segment_data(
+                    segment_start_gps_time + epsilon, 
+                    segment_end_gps_time - epsilon, 
+                    ifos, 
+                    self.frame_types[0], 
+                    self.channels[0]
                 )
 
                 original_sample_rate_hertz : float = float(segment.sample_rate.value)
