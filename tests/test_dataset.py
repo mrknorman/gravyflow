@@ -193,7 +193,7 @@ def test_dataset(
                 noise_type=gf.NoiseType.REAL,
                 ifos=gf.IFO.L1
             )
-
+        
         dataset : tf.data.Dataset = gf.Dataset(
             # Random Seed:
             seed= 1000,
@@ -654,9 +654,9 @@ if __name__ == "__main__":
     
     # Test IFO noise dataset:
     #test_feature_dataset()
-    test_dataset()
     test_dataset_multi()
     test_dataset_incoherent()
+    test_dataset()
     test_iteration()
 
     

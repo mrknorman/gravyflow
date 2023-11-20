@@ -13,6 +13,213 @@ import gravyflow as gf
 # Define the speed of light constant (in m/s)
 C = 299792458.0
 
+@tf.function(jit_compile=True)
+def get_time_delay_(
+    right_ascension: tf.Tensor, 
+    declination: tf.Tensor,
+    location : tf.Tensor
+) -> tf.Tensor:
+    """
+    Calculate the time delay for various combinations of right ascension,
+    declination, and detector locations.
+
+    Parameters
+    ----------
+    right_ascension : tf.Tensor, shape (N,)
+        The right ascension (in rad) of the signal.
+    declination : tf.Tensor, shape (N,)
+        The declination (in rad) of the signal.
+    location : tf.Tensor, shape (X, 3)
+        Array of detector location coordinates.
+
+    Returns
+    -------
+    tf.Tensor, shape (X, N)
+        The arrival time difference for each combination of detector 
+        location and sky signal.
+    """
+
+    cos_declination = tf.math.cos(declination)
+    sin_declination = tf.math.sin(declination)
+    cos_ra_angle = tf.math.cos(right_ascension)
+    sin_ra_angle = tf.math.sin(right_ascension)
+
+    e0 = cos_declination * cos_ra_angle
+    e1 = cos_declination * -sin_ra_angle
+    e2 = sin_declination
+
+    ehat = tf.stack([e0, e1, e2], axis=0)  # Shape (3, N)
+    ehat = tf.expand_dims(ehat, 1)  # Shape (3, 1, N) to allow broadcasting
+
+    # Compute the dot product using tensordot
+    time_delay = tf.tensordot(location, ehat, axes=[[1], [0]]) 
+    time_delay = time_delay / C  # Normalize by speed of light
+    
+    time_delay = tf.transpose(tf.squeeze(time_delay))
+    
+    return tf.cast(time_delay, dtype=tf.float32)
+    
+@tf.function(jit_compile=True)
+def get_antenna_pattern_(
+    right_ascension: tf.Tensor, 
+    declination: tf.Tensor, 
+    polarization: tf.Tensor,
+    x_vector: tf.Tensor,
+    y_vector: tf.Tensor,
+    x_length_meters: tf.Tensor,
+    y_length_meters: tf.Tensor,
+    x_response : tf.Tensor,
+    y_response : tf.Tensor,
+    response : tf.Tensor
+) -> (tf.Tensor, tf.Tensor):
+    
+    right_ascension = tf.expand_dims(right_ascension, 1)
+    declination = tf.expand_dims(declination, 1)
+    polarization = tf.expand_dims(polarization, 1)
+    
+    x_vector = tf.expand_dims(x_vector, 0)   
+    y_vector = tf.expand_dims(y_vector, 0)   
+    x_length_meters = tf.expand_dims(x_length_meters, 0)  
+    y_length_meters = tf.expand_dims(y_length_meters, 0)  
+    x_response = tf.expand_dims(x_response, 0)  
+    y_response = tf.expand_dims(y_response, 0)  
+    response = tf.expand_dims(response, 0)
+
+    cos_ra = tf.math.cos(right_ascension)
+    sin_ra = tf.math.sin(right_ascension)
+    cos_dec = tf.math.cos(declination)
+    sin_dec = tf.math.sin(declination)
+    cos_psi = tf.math.cos(polarization)
+    sin_psi = tf.math.sin(polarization)
+    
+    x = tf.stack([
+        -cos_psi * sin_ra - sin_psi * cos_ra * sin_dec,
+        -cos_psi * cos_ra + sin_psi * sin_ra * sin_dec,
+        sin_psi * cos_dec
+    ], axis=-1)
+
+    y = tf.stack([
+        sin_psi * sin_ra - cos_psi * cos_ra * sin_dec,
+        sin_psi * cos_ra + cos_psi * sin_ra * sin_dec,
+        cos_psi * cos_dec
+    ], axis=-1)
+    
+    # Calculate dx and dy via tensordot, and immediately remove singleton 
+    # dimensions and transpose them
+    tensor_product_dx = tf.tensordot(response, x, axes=[[2], [2]])
+    dx = tf.transpose(tensor_product_dx[0, :, :, 0], perm=[2, 0, 1])
+
+    tensor_product_dy = tf.tensordot(response, y, axes=[[2], [2]])
+    dy = tf.transpose(tensor_product_dy[0, :, :, 0], perm=[2, 0, 1])
+
+    # Expand dimensions for x, y, dx, dy along axis 0
+    x = tf.expand_dims(x, axis=0)
+    y = tf.expand_dims(y, axis=0)
+    dx = tf.expand_dims(dx, axis=0)
+    dy = tf.expand_dims(dy, axis=0)
+    
+    # Function to compute final response
+    def compute_response(
+            dx: tf.Tensor, 
+            dy: tf.Tensor, 
+            a: tf.Tensor, 
+            b: tf.Tensor
+        ) -> tf.Tensor:
+        
+        return tf.squeeze(tf.reduce_sum(a * dx + b * dy, axis=-1))
+    
+    antenna_pattern = tf.stack(
+        [
+            compute_response(dx, -dy, x, y), 
+            compute_response(dy, dx, x, y)
+        ], 
+        axis=-1
+    )
+
+    return antenna_pattern
+
+@tf.function(jit_compile=True)
+def project_wave_(
+    seed,
+    strain : tf.Tensor,
+    sample_frequency_hertz : float,
+    x_vector: tf.Tensor,
+    y_vector: tf.Tensor,
+    x_length_meters: tf.Tensor,
+    y_length_meters: tf.Tensor,
+    x_response : tf.Tensor,
+    y_response : tf.Tensor,
+    response : tf.Tensor,
+    location : tf.Tensor,
+    right_ascension: tf.Tensor = None,
+    declination: tf.Tensor = None,
+    polarization: tf.Tensor = None, 
+):
+
+    # Ensure the seed is of the correct shape [2] and dtype int32
+    seed_tensor = tf.cast(seed, dtype=tf.int32)
+    
+    num_injections = tf.shape(strain)[0]
+    PI = tf.constant(3.14159, dtype=tf.float32)
+    
+    if right_ascension is None:
+        right_ascension = tf.random.stateless_uniform(
+            seed=seed_tensor,
+            shape=[num_injections], 
+            minval=0.0, 
+            maxval=2.0 * PI, 
+            dtype=tf.float32
+        )
+
+    if declination is None:
+        declination = tf.random.stateless_uniform(
+            seed=seed_tensor+1,
+            shape=[num_injections], 
+            minval=-PI / 2.0, 
+            maxval=PI / 2.0, 
+            dtype=tf.float32
+        )
+
+    if polarization is None:
+        polarization = tf.random.stateless_uniform(
+            seed=seed_tensor+2,
+            shape=[num_injections], 
+            minval=0.0, 
+            maxval=2 * PI, 
+            dtype=tf.float32
+        )
+    
+    antenna_patern = get_antenna_pattern_(
+        right_ascension, 
+        declination, 
+        polarization,
+        x_vector,
+        y_vector,
+        x_length_meters,
+        y_length_meters,
+        x_response,
+        y_response,
+        response
+    ) 
+    
+    antenna_patern = tf.expand_dims(antenna_patern, axis=-1)
+    if (len(tf.shape(strain)) == 3):
+        strain = tf.expand_dims(strain, axis=1)
+    
+    injection = tf.reduce_sum(strain*antenna_patern, axis = 2)
+            
+    time_shift_seconds = get_time_delay_(
+        right_ascension, 
+        declination,
+        location
+    )
+            
+    return shift_waveform(
+        injection, 
+        sample_frequency_hertz, 
+        time_shift_seconds
+    )
+
 @dataclass
 class IFO_:
     """Data class to represent information about an Interferometer."""
@@ -252,86 +459,6 @@ class Network:
         
         self.calculate_max_arrival_time_difference()
     
-    @tf.function(jit_compile=True)
-    def get_antenna_pattern_(
-        self,
-        right_ascension: tf.Tensor, 
-        declination: tf.Tensor, 
-        polarization: tf.Tensor,
-        x_vector: tf.Tensor,
-        y_vector: tf.Tensor,
-        x_length_meters: tf.Tensor,
-        y_length_meters: tf.Tensor,
-        x_response : tf.Tensor,
-        y_response : tf.Tensor,
-        response : tf.Tensor
-    ) -> (tf.Tensor, tf.Tensor):
-        
-        right_ascension = tf.expand_dims(right_ascension, 1)
-        declination = tf.expand_dims(declination, 1)
-        polarization = tf.expand_dims(polarization, 1)
-        
-        x_vector = tf.expand_dims(x_vector, 0)   
-        y_vector = tf.expand_dims(y_vector, 0)   
-        x_length_meters = tf.expand_dims(x_length_meters, 0)  
-        y_length_meters = tf.expand_dims(y_length_meters, 0)  
-        x_response = tf.expand_dims(x_response, 0)  
-        y_response = tf.expand_dims(y_response, 0)  
-        response = tf.expand_dims(response, 0)
-
-        cos_ra = tf.math.cos(right_ascension)
-        sin_ra = tf.math.sin(right_ascension)
-        cos_dec = tf.math.cos(declination)
-        sin_dec = tf.math.sin(declination)
-        cos_psi = tf.math.cos(polarization)
-        sin_psi = tf.math.sin(polarization)
-        
-        x = tf.stack([
-            -cos_psi * sin_ra - sin_psi * cos_ra * sin_dec,
-            -cos_psi * cos_ra + sin_psi * sin_ra * sin_dec,
-            sin_psi * cos_dec
-        ], axis=-1)
-
-        y = tf.stack([
-            sin_psi * sin_ra - cos_psi * cos_ra * sin_dec,
-            sin_psi * cos_ra + cos_psi * sin_ra * sin_dec,
-            cos_psi * cos_dec
-        ], axis=-1)
-        
-        # Calculate dx and dy via tensordot, and immediately remove singleton 
-        # dimensions and transpose them
-        tensor_product_dx = tf.tensordot(response, x, axes=[[2], [2]])
-        dx = tf.transpose(tensor_product_dx[0, :, :, 0], perm=[2, 0, 1])
-
-        tensor_product_dy = tf.tensordot(response, y, axes=[[2], [2]])
-        dy = tf.transpose(tensor_product_dy[0, :, :, 0], perm=[2, 0, 1])
-
-        # Expand dimensions for x, y, dx, dy along axis 0
-        x = tf.expand_dims(x, axis=0)
-        y = tf.expand_dims(y, axis=0)
-        dx = tf.expand_dims(dx, axis=0)
-        dy = tf.expand_dims(dy, axis=0)
-        
-        # Function to compute final response
-        def compute_response(
-                dx: tf.Tensor, 
-                dy: tf.Tensor, 
-                a: tf.Tensor, 
-                b: tf.Tensor
-            ) -> tf.Tensor:
-            
-            return tf.squeeze(tf.reduce_sum(a * dx + b * dy, axis=-1))
-        
-        antenna_pattern = tf.stack(
-            [
-                compute_response(dx, -dy, x, y), 
-                compute_response(dy, dx, x, y)
-            ], 
-            axis=-1
-        )
-
-        return antenna_pattern
-    
     def get_antenna_pattern(
             self,
             right_ascension: tf.Tensor, 
@@ -339,7 +466,7 @@ class Network:
             polarization: tf.Tensor
         ):
         
-        return self.get_antenna_pattern_(
+        return get_antenna_pattern_(
             right_ascension, 
             declination, 
             polarization,
@@ -382,60 +509,13 @@ class Network:
         
         return Network(arguments)
     
-    @tf.function(jit_compile=True)
-    def get_time_delay_(
-        self,
-        right_ascension: tf.Tensor, 
-        declination: tf.Tensor,
-        location : tf.Tensor
-    ) -> tf.Tensor:
-        """
-        Calculate the time delay for various combinations of right ascension,
-        declination, and detector locations.
-
-        Parameters
-        ----------
-        right_ascension : tf.Tensor, shape (N,)
-            The right ascension (in rad) of the signal.
-        declination : tf.Tensor, shape (N,)
-            The declination (in rad) of the signal.
-        location : tf.Tensor, shape (X, 3)
-            Array of detector location coordinates.
-
-        Returns
-        -------
-        tf.Tensor, shape (X, N)
-            The arrival time difference for each combination of detector 
-            location and sky signal.
-        """
-
-        cos_declination = tf.math.cos(declination)
-        sin_declination = tf.math.sin(declination)
-        cos_ra_angle = tf.math.cos(right_ascension)
-        sin_ra_angle = tf.math.sin(right_ascension)
-
-        e0 = cos_declination * cos_ra_angle
-        e1 = cos_declination * -sin_ra_angle
-        e2 = sin_declination
-
-        ehat = tf.stack([e0, e1, e2], axis=0)  # Shape (3, N)
-        ehat = tf.expand_dims(ehat, 1)  # Shape (3, 1, N) to allow broadcasting
-
-        # Compute the dot product using tensordot
-        time_delay = tf.tensordot(location, ehat, axes=[[1], [0]]) 
-        time_delay = time_delay / C  # Normalize by speed of light
-        
-        time_delay = tf.transpose(tf.squeeze(time_delay))
-        
-        return tf.cast(time_delay, dtype=tf.float32)
-    
     def get_time_delay(
         self,
         right_ascension: tf.Tensor, 
         declination: tf.Tensor
     ) -> tf.Tensor:
         
-        return self.get_time_delay_(
+        return get_time_delay_(
             right_ascension, 
             declination,
             self.location
@@ -450,7 +530,8 @@ class Network:
         polarization: tf.Tensor = None
     ):
         
-        return self.project_wave_(
+        return project_wave_(
+            np.random.randint(1E10, size=2),
             strain,
             sample_frequency_hertz,
             self.x_vector,
@@ -464,89 +545,6 @@ class Network:
             right_ascension=right_ascension,
             declination=declination,
             polarization=polarization
-        )
-    
-    @tf.function(jit_compile=True)
-    def project_wave_(
-        self,
-        seed,
-        strain : tf.Tensor,
-        sample_frequency_hertz : float,
-        x_vector: tf.Tensor,
-        y_vector: tf.Tensor,
-        x_length_meters: tf.Tensor,
-        y_length_meters: tf.Tensor,
-        x_response : tf.Tensor,
-        y_response : tf.Tensor,
-        response : tf.Tensor,
-        location : tf.Tensor,
-        right_ascension: tf.Tensor = None,
-        declination: tf.Tensor = None,
-        polarization: tf.Tensor = None, 
-    ):
-
-        # Ensure the seed is of the correct shape [2] and dtype int32
-        seed_tensor = tf.constant(seed, dtype=tf.int32)
-        
-        num_injections = tf.shape(strain)[0]
-        PI = tf.constant(3.14159, dtype=tf.float32)
-        
-        if right_ascension is None:
-            right_ascension = tf.random.stateless_uniform(
-                seed=seed_tensor,
-                shape=[num_injections], 
-                minval=0.0, 
-                maxval=2.0 * PI, 
-                dtype=tf.float32
-            )
-
-        if declination is None:
-            declination = tf.random.stateless_uniform(
-                seed=seed_tensor*2.0,
-                shape=[num_injections], 
-                minval=-PI / 2.0, 
-                maxval=PI / 2.0, 
-                dtype=tf.float32
-            )
-
-        if polarization is None:
-            polarization = tf.random.stateless_uniform(
-                seed=seed_tensor*3.0,
-                shape=[num_injections], 
-                minval=0.0, 
-                maxval=2 * PI, 
-                dtype=tf.float32
-            )
-        
-        antenna_patern = self.get_antenna_pattern_(
-            right_ascension, 
-            declination, 
-            polarization,
-            x_vector,
-            y_vector,
-            x_length_meters,
-            y_length_meters,
-            x_response,
-            y_response,
-            response
-        ) 
-        
-        antenna_patern = tf.expand_dims(antenna_patern, axis=-1)
-        if (len(tf.shape(strain)) == 3):
-            strain = tf.expand_dims(strain, axis=1)
-        
-        injection = tf.reduce_sum(strain*antenna_patern, axis = 2)
-                
-        time_shift_seconds = self.get_time_delay_(
-            right_ascension, 
-            declination,
-            location
-        )
-                
-        return shift_waveform(
-            injection, 
-            sample_frequency_hertz, 
-            time_shift_seconds
         )
     
     def calculate_max_arrival_time_difference(self):

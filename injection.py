@@ -61,6 +61,7 @@ class ScalingMethod:
         match self.type_:
             
             case ScalingTypes.SNR:
+                
                 scaled_injections = gf.scale_to_snr(
                     injections, 
                     onsource,

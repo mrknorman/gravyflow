@@ -73,9 +73,9 @@ def fetch_event_times(selection, max_retries=10):
             data = GravitySpyTable.fetch(
                 "gravityspy",
                 "glitches",
-                columns=["event_time"],  # Assuming we're only interested in the event times.
+                columns=["event_time", "duration"],  # Assuming we're only interested in the event times.
                 selection=selection
-            ).to_pandas().to_numpy()[:, 0]
+            ).to_pandas()
 
             return data
 
@@ -143,7 +143,7 @@ def get_glitch_times(
             glitch_name = glitch_type.value
             selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && ml_label={glitch_name} && No_Glitch<0.1"
             
-            data = fetch_event_times(selection, max_retries=10)
+            data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
             
             # Append the results to the all_data list.
             all_data.append(data)
@@ -154,7 +154,7 @@ def get_glitch_times(
         # If glitch_types is None or an empty list, it selects all glitch types.
         selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && No_Glitch<0.1"
 
-        data = fetch_event_times(selection, max_retries=10)
+        data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
 
         return data
     
@@ -164,8 +164,6 @@ def get_glitch_segments(
     glitch_types: Union[List[GlitchType], GlitchType] = None,
     start_gps_time : float = None,
     end_gps_time : float = None,
-    start_padding_seconds : float = 0.5,
-    end_padding_seconds: float = 0.5
     ): 
     
     if start_gps_time is None:
@@ -192,8 +190,8 @@ def get_glitch_segments(
             data = fetch_event_times(selection, max_retries=10)
             
             # Calculate 'end_time' by adding 'duration' to 'start_time'
-            data['end_time'] = data['start_time'] + data['duration'] + end_padding_seconds
-            data['start_time'] = data['start_time'] - start_padding_seconds
+            data['end_time'] = data['event_time'] + data['duration'] 
+            data['start_time'] = data['event_time']
 
             # Select the 'start_time' and 'end_time' and convert to a NumPy array
             data = data[['start_time', 'end_time']].to_numpy()
@@ -210,8 +208,9 @@ def get_glitch_segments(
         data = fetch_event_times(selection, max_retries=10)
         
         # Calculate 'end_time' by adding 'duration' to 'start_time'
-        data['end_time'] = data['start_time'] + data['duration'] + end_padding_seconds
-        data['start_time'] = data['start_time'] - start_padding_seconds
+        
+        data['end_time'] = data['event_time'] + data['duration']
+        data['start_time'] = data['event_time']
 
         # Select the 'start_time' and 'end_time' and convert to a NumPy array
         data = data[['start_time', 'end_time']].to_numpy()

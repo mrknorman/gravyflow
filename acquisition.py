@@ -208,14 +208,26 @@ class IFOData:
                     np.random.randint(1E10, size=2)
                 )
 
+                if len(self.data) > 1:
+                    batch_subarrays = tf.expand_dims(batch_subarrays, 1)
+                    batch_background_chunks = tf.expand_dims(batch_background_chunks, 1)
+                    subsections_start_gps_time = tf.expand_dims(subsections_start_gps_time, 1)
+
+
                 all_batch_subarrays.append(batch_subarrays)
                 all_batch_background_chunks.append(batch_background_chunks)
                 all_subsections_start_gps_time.append(subsections_start_gps_time)
+            
+            if len(self.data) > 1:
 
-            # Concatenate the batches
-            stacked_batch_subarrays = tf.concat(all_batch_subarrays, axis=0)
-            stacked_batch_background_chunks = tf.concat(all_batch_background_chunks, axis=0)
-            stacked_subsections_start_gps_time = tf.concat(all_subsections_start_gps_time, axis=0)
+                # Concatenate the batches
+                stacked_batch_subarrays = tf.concat(all_batch_subarrays, axis=1)
+                stacked_batch_background_chunks = tf.concat(all_batch_background_chunks, axis=1)
+                stacked_subsections_start_gps_time = tf.concat(all_subsections_start_gps_time, axis=1)
+            else:
+                stacked_batch_subarrays = all_batch_subarrays[0]
+                stacked_batch_background_chunks = all_batch_background_chunks[0]
+                stacked_subsections_start_gps_time = all_subsections_start_gps_time[0]
 
             return stacked_batch_subarrays, stacked_batch_background_chunks, stacked_subsections_start_gps_time
         
@@ -1020,7 +1032,7 @@ class IFODataObtainer:
                         segment_start_gps_time,
                         segment_end_gps_time,
                         sample_rate_hertz,
-                        ifos,
+                        ifo,
                         segment_key
                     )
 
@@ -1094,7 +1106,7 @@ class IFODataObtainer:
             self,
             segment_start_gps_time: float, 
             segment_end_gps_time: float, 
-            ifos: List[gf.IFO], 
+            ifo: gf.IFO, 
             frame_type: str, 
             channel: str
         ) -> TimeSeries:
@@ -1125,29 +1137,30 @@ class IFODataObtainer:
         TimeSeries
             The segment data read into a TimeSeries object.
         """
-        
-        for ifo in ifos:
-            files = find_urls(
-                site=ifo.name.strip("1"),
-                frametype=f"{ifo.name}_{frame_type}",
-                gpsstart=segment_start_gps_time,
-                gpsend=segment_end_gps_time,
-                urltype="file",
-            )
-            data = TimeSeries.read(
-                files, 
-                channel=f"{ifo.name}:{channel}", 
-                start=segment_start_gps_time, 
-                end=segment_end_gps_time, 
-                nproc=1
-            )
+
+        files = find_urls(
+            site=ifo.name.strip("1"),
+            frametype=f"{ifo.name}_{frame_type}",
+            gpsstart=segment_start_gps_time,
+            gpsend=segment_end_gps_time,
+            urltype="file",
+        )
+        data = TimeSeries.read(
+            files, 
+            channel=f"{ifo.name}:{channel}", 
+            start=segment_start_gps_time, 
+            end=segment_end_gps_time, 
+            nproc=10
+        )
+
+        return data
     
     def get_segment(
             self,
             segment_start_gps_time : float,
             segment_end_gps_time : float,
             sample_rate_hertz : float,
-            ifos : List[gf.IFO],
+            ifo : gf.IFO,
             segment_key : str
         ) -> tf.Tensor:
 
@@ -1195,7 +1208,7 @@ class IFODataObtainer:
                 segment : TimeSeries = self.get_segment_data(
                     segment_start_gps_time + epsilon, 
                     segment_end_gps_time - epsilon, 
-                    ifos, 
+                    ifo, 
                     self.frame_types[0], 
                     self.channels[0]
                 )
