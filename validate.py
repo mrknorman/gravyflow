@@ -658,7 +658,7 @@ def generate_efficiency_curves(
             x='x', 
             y='y', 
             source=source, 
-            line_width=2, 
+            line_width=1, 
             line_color=color
         )
         legend_items.append((title, [line]))
