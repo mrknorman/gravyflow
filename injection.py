@@ -521,7 +521,12 @@ class IncoherentGenerator(WaveformGenerator):
                 waveforms.append(waveforms_)
                 parameters.append(parameters_)
         
-        waveforms = tf.stack(waveforms, axis = 1)
+        try:
+            waveforms = tf.stack(waveforms, axis = 1)
+        except: 
+            logging.error("Failed to stack waveforms!")
+            return None, None
+        
         parameters = parameters[0]
 
         return waveforms, parameters
@@ -595,11 +600,19 @@ class InjectionGenerator:
                             )
                         )
             
-            injections = tf.stack(injections)
-            mask = tf.stack(mask)
+            try:
+                injections = tf.stack(injections)
+                mask = tf.stack(mask)
+            except Exception as e:
+                logging.error(f"Failed to stack injections or mask because {e}")
+                return None, None, None
 
             for key, value in parameters.items():
-                parameters[key] = tf.stack(value)
+                try:
+                    parameters[key] = tf.stack(value)
+                except Exception as e:
+                    logging.error(f"Failed to stack injections parameters because {e}")
+                    return None, None, None
 
             yield injections, mask, parameters
     
@@ -640,16 +653,14 @@ class InjectionGenerator:
             
             if num_waveforms > 0:
                 
-                waveforms, parameters = \
-                    config.generate(
+                waveforms, parameters = config.generate(
                         num_waveforms, 
                         self.sample_rate_hertz,
                         total_duration_seconds
                     )
                 
                 # Convert to tensorflow tensor:
-                waveforms = \
-                    tf.convert_to_tensor(waveforms, dtype = tf.float32)
+                waveforms = tf.convert_to_tensor(waveforms, dtype = tf.float32)
 
                 #Roll Tensor to randomise start time:
                 waveforms = roll_vector_zero_padding( 
@@ -710,8 +721,13 @@ class InjectionGenerator:
 
             # Split into list to avoid iterating over tensors, which TensorFlow seems 
             # to dislike:
-            injections_list = tf.unstack(injections, axis=0)
-            mask_list = tf.unstack(mask, axis=0)
+
+            try:
+                injections_list = tf.unstack(injections, axis=0)
+                mask_list = tf.unstack(mask, axis=0)
+            except Exception as e:
+                print(f"Failed to unstack because: {e}")
+                continue
 
             # Now you can zip them together and iterate over them
             for injection_, mask_, parameter_ in zip(injections_list, mask_list, parameters):
@@ -719,9 +735,7 @@ class InjectionGenerator:
                     # Your processing logic here
                     yield injection_, mask_, parameter_
                 except Exception as e:
-                    # Handle the exception here
-                    print(f"Caught an exception: {e}")
-                    # Optionally, you can break the loop or continue
+                    print(f"Failed to yeild because: {e}")
                     continue
                 
     def generate_scaling_parameters_(
@@ -820,8 +834,12 @@ class InjectionGenerator:
         cropped_injections = []    
 
         # Unstack because TensorFlow hates tensor iteration: 
-        injections_list = tf.unstack(injections, axis=0)
-        mask_list = tf.unstack(mask, axis=0)
+        try:
+            injections_list = tf.unstack(injections, axis=0)
+            mask_list = tf.unstack(mask, axis=0)
+        except:
+            logging.error("Unstacking failed for some reason")
+            return None, None, None
 
         for injections_, mask_, scaling_parameters_, config in zip(
                 injections_list, 
@@ -843,27 +861,25 @@ class InjectionGenerator:
                             self.sample_rate_hertz
                         )
 
-                    if network is not None:
-                        scaled_injections = network.project_wave(
-                            scaled_injections, self.sample_rate_hertz
-                        )
-                    else:
-                        scaled_injections = error_catch_injection_slicing(self.num_examples_per_batch, scaled_injections)
+                    scaled_injections = network.project_wave(
+                        scaled_injections, self.sample_rate_hertz
+                    )
 
                     if scaled_injections is None:
-                        print("Error when slicing before!")
-                        continue
+                        logging.error("Error scaling injections before projection!")
+                        return None, None, None
             
                 case ScalingOrdinality.AFTER_PROJECTION:
-                                        
-                    if network is not None:
-                        injections_ = network.project_wave(
-                            injections_, self.sample_rate_hertz
-                        )
-                    else:
-                        injections_ =  error_catch_injection_slicing(self.num_examples_per_batch, injections_)
+                    
+                    injections_ = network.project_wave(
+                        injections_, self.sample_rate_hertz
+                    )
                     
                     if injections_ is not None:
+                        if injections_.shape != onsource.shape:
+                            logging.error(f"Shape mismatch {injections_.shape} {onsource.shape}")
+                            return None, None, None
+                        
                         # Scale injections with selected scaling method:
                         scaled_injections = config.scaling_method.scale(
                                 injections_,
@@ -872,8 +888,8 @@ class InjectionGenerator:
                                 self.sample_rate_hertz
                             )
                     else:
-                        print("Error when slicing after!")
-                        continue
+                        logging.error("Error scaling injections after projection!")
+                        return None, None, None
                 
                 case _:
                     
@@ -930,7 +946,11 @@ class InjectionGenerator:
                                 
         if (ReturnVariables.INJECTIONS in variables_to_return) or \
             (ReturnVariables.WHITENED_INJECTIONS in variables_to_return):
-            cropped_injections = tf.stack(cropped_injections)
+            try:
+                cropped_injections = tf.stack(cropped_injections)
+            except:
+                logging.error("Failed to stack injections!")
+                return None, None, None
         else:
             cropped_injections = None
             
@@ -938,11 +958,14 @@ class InjectionGenerator:
         for scaling_type in ScalingTypes:
             if scaling_type in variables_to_return:
                 if config.scaling_method.type_ is not scaling_type:
-                    return_variables[scaling_type] = \
-                        tf.stack(return_variables[scaling_type])
+                    try:
+                        return_variables[scaling_type] = tf.stack(return_variables[scaling_type])
+                    except:
+                        logging.error("Failed to stack return variables")
+                        return None, None, None
                 else:
                     return_variables[scaling_type] = scaling_parameters
-        
+                
         return onsource, cropped_injections, return_variables
 
 @tf.function
@@ -1087,37 +1110,3 @@ def batch_injection_parameters(
             result[i][key] = value[start_idx:end_idx]
 
     return result
-
-def error_catch_injection_slicing(
-    num_examples_per_batch : int,
-    injections_ : tf.Tensor
-    ):
-
-    # Assuming injections_ is a TensorFlow tensor with shape [Batch_size, 2, Sequence_length]
-    try:
-        # Explicitly check the shape of the tensor
-        expected_shape = (num_examples_per_batch, 2)  # None indicates any size is acceptable for Batch_size and Sequence_length
-        actual_shape = tuple(injections_.shape)
-
-        # Verify the actual shape matches the expected shape
-        if actual_shape[:-1] == expected_shape:
-            # Perform the slicing
-            injections_ = injections_[:, 0, :]
-        else:
-            # Raise an error if the shape is unexpected
-            raise ValueError(f"Expected injections_ to have shape [Batch_size, 2, Sequence_length], got {actual_shape}")
-
-    except tf.errors.InvalidArgumentError as e:
-        # Handle the TensorFlow InvalidArgumentError
-        print("An error occurred during slicing:", e)
-        # Potentially re-raise the error or handle it as needed for your application
-
-        injections_ = None
-    except ValueError as e:
-        print("Error!")
-        # Handle the ValueError if the shape is not as expected
-        print(e)
-
-        injections_ = None
-
-    return injections_

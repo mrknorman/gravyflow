@@ -55,7 +55,7 @@ def get_time_delay_(
     time_delay = tf.tensordot(location, ehat, axes=[[1], [0]]) 
     time_delay = time_delay / C  # Normalize by speed of light
     
-    time_delay = tf.transpose(tf.squeeze(time_delay))
+    time_delay = tf.transpose(tf.squeeze(time_delay, axis = 1))
     
     return tf.cast(time_delay, dtype=tf.float32)
     
@@ -126,7 +126,7 @@ def get_antenna_pattern_(
             b: tf.Tensor
         ) -> tf.Tensor:
         
-        return tf.squeeze(tf.reduce_sum(a * dx + b * dy, axis=-1))
+        return tf.squeeze(tf.reduce_sum(a * dx + b * dy, axis=-1), axis=0)
     
     antenna_pattern = tf.stack(
         [
@@ -138,7 +138,7 @@ def get_antenna_pattern_(
 
     return antenna_pattern
 
-@tf.function(jit_compile=True)
+#@tf.function(jit_compile=True)
 def project_wave_(
     seed,
     strain : tf.Tensor,
@@ -203,22 +203,24 @@ def project_wave_(
     ) 
     
     antenna_patern = tf.expand_dims(antenna_patern, axis=-1)
+
     if (len(tf.shape(strain)) == 3):
         strain = tf.expand_dims(strain, axis=1)
-    
     injection = tf.reduce_sum(strain*antenna_patern, axis = 2)
-            
+
     time_shift_seconds = get_time_delay_(
         right_ascension, 
         declination,
         location
     )
-            
-    return shift_waveform(
+    
+    shifted_waveoform = shift_waveform(
         injection, 
         sample_frequency_hertz, 
         time_shift_seconds
     )
+
+    return shifted_waveoform
 
 @dataclass
 class IFO_:
@@ -578,7 +580,7 @@ def shift_waveform(
         sample_frequency_hertz : float, 
         time_shift_seconds : tf.Tensor
     ):
-
+    
     frequency_axis = gf.rfftfreq(
         tf.shape(strain)[-1],
         1.0/sample_frequency_hertz
@@ -593,7 +595,7 @@ def shift_waveform(
     PI = tf.constant(3.14159, dtype=tf.float32)
 
     strain_fft = tf.signal.rfft(strain) 
-    
+
     imaj_part = -2.0*PI*frequency_axis*time_shift_seconds
     phase_factor = tf.exp(
         tf.complex(
@@ -602,7 +604,7 @@ def shift_waveform(
         )
     )
     shitfted_strain = tf.signal.irfft(phase_factor * strain_fft)
-
+    
     return tf.math.real(shitfted_strain)
 
 @tf.function(jit_compile=True)

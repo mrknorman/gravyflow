@@ -307,7 +307,7 @@ class Heart:
 
 # Keras callback
 class HeartbeatCallback(Callback):
-    def __init__(self, heart, interval):
+    def __init__(self, heart, interval = 32):
         super().__init__()
         self.heart = heart
         self.interval = interval
@@ -573,7 +573,7 @@ class Manager:
             print("\033[F\033[K", end="")
         
         # Print table headers
-        header = f"| {'ID':<7} | {'Name':<15} | {'GPU':<6} | {'Restart Timeout': <15} | {'Total Restarts': <15} | {'Assigned Mem':<13} | {'TF Mem':<10} | {'CUDA Overhead':<15} | {'Status':<8} |"
+        header = f"| {'ID':<7} | {'Name':<15} | {'GPU':<6} | {'Restart Timeout': <15} | {'Total Restarts': <15} | {'Assigned Mem':<15} | {'TF Mem':<10} | {'CUDA Overhead':<15} | {'Status':<8} |"
         print(self)
         print(header)
 
@@ -581,7 +581,7 @@ class Manager:
         for process in self.all:
             restarts_string = f"{process.restart_count} / {self.max_restarts}"
             status = "Failed" if process.has_failed else "Completed" if process.has_completed else "Running" if process.id > 0 else "Waiting"
-            row = f"| {process.id:<7} | {process.name:<15} | {process.current_gpu:<6} | {restarts_string:<15} | {process.total_restart_count:<15} | {process.memory_assigned:<10} | {process.tensorflow_memory_mb:<10} | {process.cuda_overhead_mb:<15} | {status:<8} |"
+            row = f"| {process.id:<7} | {process.name:<15} | {process.current_gpu:<6} | {restarts_string:<15} | {process.total_restart_count:<15} | {process.memory_assigned:<15} | {process.tensorflow_memory_mb:<10} | {process.cuda_overhead_mb:<15} | {status:<8} |"
             print(row)
 
     def __str__(self):
@@ -770,6 +770,7 @@ class Manager:
 
                     self.queued[process_index].current_gpu = gpu_index
                     self.queued[process_index].memory_assigned = total_memory_required_mb
+                    self.allocated_memory[gpu_index] += total_memory_required_mb
 
                     process_index += 1
                 else:

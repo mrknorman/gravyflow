@@ -29,6 +29,7 @@ def calculate_efficiency_scores(
         max_scaling : float = 20.0,
         num_scaling_steps : int = 21,
         num_examples_per_scaling_step : int = 2048,
+        heart : gf.Heart = None
     ) -> Dict:
     
     """
@@ -95,9 +96,18 @@ def calculate_efficiency_scores(
     dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
         ).take(num_batches)
+
+    callbacks = []
+    if heart is not None:
+        callbacks += [gf.HeartbeatCallback(heart)]
         
     # Process all examples in one go:
-    combined_scores = model.predict(dataset, steps=num_batches, verbose=2)
+    combined_scores = model.predict(
+        dataset, 
+        steps=num_batches,
+        callbacks=callbacks, 
+        verbose=2
+    )
         
     # Split predictions back into separate arrays for each scaling level:
     scores = [ 
@@ -113,7 +123,8 @@ def calculate_far_scores(
         model : tf.keras.Model, 
         dataset_args : dict, 
         num_examples_per_batch : int = 32,  
-        num_examples : int = 1E5
+        num_examples : int = 1E5,
+        heart : gf.Heart = None
     ) -> np.ndarray:
     
     """
@@ -155,9 +166,18 @@ def calculate_far_scores(
     dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
         ).take(num_batches)
+
+    callbacks = []
+    if heart is not None:
+        callbacks += [gf.HeartbeatCallback(heart)]
         
     # Predict the scores and get the second column ([:, 1]):
-    far_scores = model.predict(dataset, steps = num_batches, verbose=2)[:,0]
+    far_scores = model.predict(
+        dataset, 
+        steps=num_batches, 
+        callbacks=callbacks,
+        verbose=2
+    )[:,0]
         
     return far_scores
 
@@ -304,7 +324,8 @@ def calculate_roc(
     model: tf.keras.Model,
     dataset_args : dict,
     num_examples_per_batch: int = 32,
-    num_examples: int = 1.0E5
+    num_examples: int = 1.0E5,
+    heart : gf.Heart = None
     ) -> dict:
     
     """
@@ -375,10 +396,15 @@ def calculate_roc(
 
     y_true = tf.concat(tensor_list, axis=0)
 
+    callbacks = []
+    if heart is not None:
+        callbacks += [gf.HeartbeatCallback(heart)]
+
     # Get the model predictions
     y_scores = model.predict(
         x_dataset, 
         steps = num_batches, 
+        callbacks = callbacks,
         verbose = 2
     )[:,0]
     
@@ -397,7 +423,8 @@ def calculate_multi_rocs(
         8.0,
         10.0,
         12.0
-    ]
+    ],
+    heart : gf.Heart = None
     ) -> dict:
     
     roc_results = {}
@@ -429,7 +456,8 @@ def calculate_multi_rocs(
                 model,
                 dataset_args,
                 num_examples_per_batch,
-                num_examples
+                num_examples,
+                heart
             )
     
     return roc_results
@@ -439,7 +467,8 @@ def calculate_tar_scores(
         dataset_args : dict, 
         num_examples_per_batch : int = 32,  
         scaling : int = 20.0,
-        num_examples : int = 1E5
+        num_examples : int = 1E5,
+        heart : gf.Heart = None
     ) -> np.ndarray:
     
     """
@@ -489,13 +518,15 @@ def calculate_tar_scores(
             **dataset_args
         ).take(num_batches)
         
-    callback = CaptureWorstPredictions(n_worst=10)
+    callbacks = [CaptureWorstPredictions(n_worst=10)]
+    if heart is not None:
+        callbacks += [gf.HeartbeatCallback(heart)]
     
     # Predict the scores and get the second column ([:, 1]):
     tar_scores = model.predict(
         dataset, 
         batch_size = num_examples_per_batch,
-        callbacks = [callback],
+        callbacks = callbacks,
         steps = num_batches, 
         verbose=2
     )[:,0]
@@ -518,14 +549,14 @@ def calculate_tar_scores(
     worst_performers = \
         gf.extract_data_from_indicies(
             dataset,
-            callback.worst_global_indices,
+            callbacks[0].worst_global_indices,
             num_examples_per_batch
         )
         
     for index, element in enumerate(worst_performers):
         for key in element:
             element[key] = element[key].numpy()
-        element["score"] = callback.worst_scores[index]
+        element["score"] = callbacks[0].worst_scores[index]
         
     return tar_scores, worst_performers
 
@@ -989,15 +1020,21 @@ class Validator:
                 12.0
             ]    
         },
-        logging_level : int = logging.INFO
+        logging_level : int = logging.INFO,
+        heart : gf.Heart = None
     ):
         if num_examples_per_batch is None:
             num_examples_per_batch = gf.Defaults.num_examples_per_batch
+        
+        # Save model title: 
+        if isinstance(name, Path):
+            name = name.name
         
         # Create a new instance without executing any logic
         validator = cls()
         
         validator.name = name
+        validator.heart = heart
         # Initiate logging for ifo_data:
         validator.logger = logging.getLogger("ifo_data_aquisition")
         stream_handler = logging.StreamHandler(sys.stdout)
@@ -1019,7 +1056,8 @@ class Validator:
                 dataset_args, 
                 num_examples_per_batch,
                 scaling=20.0,
-                num_examples=1.0E3
+                num_examples=1.0E3,
+                heart=validator.heart
             )
         validator.worst_performers = worst_performers
         validator.logger.info(f"Done")
@@ -1030,6 +1068,7 @@ class Validator:
                 model, 
                 dataset_args,
                 num_examples_per_batch,
+                heart=validator.heart,
                 **efficiency_config
             )
         validator.logger.info(f"Done")
@@ -1040,6 +1079,7 @@ class Validator:
                 model, 
                 dataset_args, 
                 num_examples_per_batch,  
+                heart=validator.heart,
                 **far_config
             )
         validator.logger.info(f"Done")
@@ -1050,6 +1090,7 @@ class Validator:
                 model,
                 dataset_args,
                 num_examples_per_batch,
+                heart=validator.heart,
                 **roc_config
             )
         validator.logger.info(f"Done")
@@ -1074,7 +1115,6 @@ class Validator:
             scalings = self.efficiency_data['scalings']
             efficiency_scores = self.efficiency_data['scores']
 
-            # Save model title: 
             validation_file.create_dataset('name', data=self.name.encode())
             validation_file.create_dataset(
                 'input_duration_seconds', 

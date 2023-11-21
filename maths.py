@@ -484,3 +484,22 @@ def resample(x, original_size, original_sample_rate_hertz, new_sample_rate_hertz
     resampled_x_cut = resampled_x[:original_size]
     
     return resampled_x_cut
+
+def check_tensor_integrity(tensor, ndims, min_size):
+    # Check if the tensor is 1D
+    if tensor.ndim != ndims:
+        return False
+
+    # Check if the size of the tensor is greater than 1
+    if tensor.shape[0] <= min_size:
+        return False
+
+    # Check if the datatype of the tensor is float32
+    if tensor.dtype != tf.float32:
+        return False
+
+    # Check if the tensor contains any NaN or inf values
+    if tf.reduce_any(tf.math.is_nan(tensor)) or tf.reduce_any(tf.math.is_inf(tensor)):
+        return False
+
+    return True

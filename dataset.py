@@ -3,6 +3,7 @@ from enum import Enum, auto
 from pathlib import Path
 from dataclasses import dataclass
 from warnings import warn
+import logging
 
 import tensorflow as tf
 from tensorflow.data.experimental import AutoShardPolicy
@@ -143,6 +144,10 @@ def data(
                 
     if not isinstance(injection_generators, list):
         injection_generators = [injection_generators]
+
+    for config in injection_generators:
+        if config.network is None: 
+            config.network = gf.Network(noise_obtainer.ifos)
     
     # Create set with unique elements of input and output variables so that they
     # can be calculated during loop if required:
@@ -197,18 +202,27 @@ def data(
         if len(injection_generators):
                         
             # Add injections to waveform scaled by inputted SNR config values:
-            onsource, scaled_injections, scaling_parameters = \
-                injection_generator.add_injections_to_onsource(
-                    injections_,
-                    mask,
-                    onsource,
-                    variables_to_return=variables_to_return
-                ) 
+            
+            try:
+                onsource, scaled_injections, scaling_parameters = \
+                    injection_generator.add_injections_to_onsource(
+                        injections_,
+                        mask,
+                        onsource,
+                        variables_to_return=variables_to_return
+                    ) 
+            except Exception as e:
+                logging.error(f"Couldn't add injections to onsource because {e}!")
+                continue
+            
+            if onsource is None:
+                logging.error("Onsource is None!")
+                continue
             
             for key, value in scaling_parameters.items():
                 if key in variables_to_return:
                     parameters[key] = value
-            
+
             if gf.ReturnVariables.WHITENED_INJECTIONS in variables_to_return:
                                 
                 whitened_injections = tf.stack([
@@ -221,9 +235,21 @@ def data(
                             filter_duration_seconds=1.0
                         ) for scaled_injection_ in scaled_injections
                     ])
-                                
+
+                if whitened_injections.shape[2] == 1:
+                    whitened_injections = tf.squeeze(whitened_injections, axis = 2)
+
                 whitened_injections = gf.replace_nan_and_inf_with_zero(
                     whitened_injections
+                )
+
+            if gf.ReturnVariables.INJECTIONS in variables_to_return:
+
+                if scaled_injections.shape[2] == 1:
+                    scaled_injections = tf.squeeze(scaled_injections, axis = 2)
+
+                scaled_injections = gf.replace_nan_and_inf_with_zero(
+                    scaled_injections
                 )
 
         else:
@@ -291,6 +317,8 @@ def data(
             onsource = tf.cast(onsource, tf.float16)
             onsource = gf.replace_nan_and_inf_with_zero(onsource)
 
+            onsource = remove_singleton_dimension(onsource)
+
             tf.debugging.check_numerics(
                 onsource, 
                 f"NaN detected in onsource after cast."
@@ -299,6 +327,8 @@ def data(
         if gf.ReturnVariables.OFFSOURCE in variables_to_return:
             offsource = tf.cast(offsource, tf.float16)
             offsource = gf.replace_nan_and_inf_with_zero(offsource)
+
+            offsource = remove_singleton_dimension(offsource)
 
             tf.debugging.check_numerics(
                 offsource, 
@@ -329,6 +359,12 @@ def data(
         ]
                 
         yield (input_dict, output_dict)
+
+def remove_singleton_dimension(tensor):
+    if tensor.shape[1] == 1:
+        return tf.squeeze(tensor, axis=1)
+    else:
+        return tensor
 
 def create_variable_dictionary(
     return_variables: List[Union[gf.ReturnVariables, gf.gf.WaveformParameters]],

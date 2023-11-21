@@ -208,26 +208,17 @@ class IFOData:
                     np.random.randint(1E10, size=2)
                 )
 
-                if len(self.data) > 1:
-                    batch_subarrays = tf.expand_dims(batch_subarrays, 1)
-                    batch_background_chunks = tf.expand_dims(batch_background_chunks, 1)
-                    subsections_start_gps_time = tf.expand_dims(subsections_start_gps_time, 1)
-
-
-                all_batch_subarrays.append(batch_subarrays)
-                all_batch_background_chunks.append(batch_background_chunks)
-                all_subsections_start_gps_time.append(subsections_start_gps_time)
+                all_batch_subarrays.append(tf.expand_dims(batch_subarrays, 1))
+                all_batch_background_chunks.append(tf.expand_dims(batch_background_chunks, 1))
+                all_subsections_start_gps_time.append( tf.expand_dims(subsections_start_gps_time, 1))
             
-            if len(self.data) > 1:
-
-                # Concatenate the batches
+            # Concatenate the batches
+            try:
                 stacked_batch_subarrays = tf.concat(all_batch_subarrays, axis=1)
                 stacked_batch_background_chunks = tf.concat(all_batch_background_chunks, axis=1)
                 stacked_subsections_start_gps_time = tf.concat(all_subsections_start_gps_time, axis=1)
-            else:
-                stacked_batch_subarrays = all_batch_subarrays[0]
-                stacked_batch_background_chunks = all_batch_background_chunks[0]
-                stacked_subsections_start_gps_time = all_subsections_start_gps_time[0]
+            except:
+                raise ValueError("Failed to stack arrays!")
 
             return stacked_batch_subarrays, stacked_batch_background_chunks, stacked_subsections_start_gps_time
         
@@ -1026,7 +1017,7 @@ class IFODataObtainer:
                 # within the associated hdf5 file:
                 segment_key = (f"segments/segment_{segment_start_gps_time}_"
                      "{segment_end_gps_time}")
-
+                
                 # Acquire segment data, either from local stored file or remote:
                 segment = self.get_segment(
                         segment_start_gps_time,
@@ -1035,7 +1026,7 @@ class IFODataObtainer:
                         ifo,
                         segment_key
                     )
-
+                
                 if segment is not None:
 
                     segments.append(segment)
@@ -1092,11 +1083,8 @@ class IFODataObtainer:
                     raise ValueError("Input data should not be empty.")
                 # Check for positive sample sizes and batch size
             except:
-                print("multi_segment empty!")
-                raise ValueError("Input data should not be empty.")
-
                 continue
-
+            
             # Scale to reduce precision errors:
             multi_segment = multi_segment.scale(scale_factor)  
 
@@ -1172,7 +1160,7 @@ class IFODataObtainer:
         segment = None
         expected_duration_seconds : float = \
                 segment_end_gps_time - segment_start_gps_time - 2*epsilon
-        
+                
         with closing(
             gf.open_hdf5_file(
                 self.file_path, 
@@ -1194,7 +1182,15 @@ class IFODataObtainer:
                     segment, 
                     dtype=tf.float32
                 )
-
+                
+                if gf.check_tensor_integrity(segment, 1, 10):
+                    self.logger.info("Complete!")
+                    return segment
+                
+                else:
+                    self.logger.error("Segment integrity comprimised, skipping")
+                    return None
+                
             else: 
                 segment = None
         
@@ -1206,7 +1202,7 @@ class IFODataObtainer:
             try:
                 # Added epsilon value to solve precision error:
                 segment : TimeSeries = self.get_segment_data(
-                    segment_start_gps_time + epsilon, 
+                    segment_start_gps_time + epsilon,
                     segment_end_gps_time - epsilon, 
                     ifo, 
                     self.frame_types[0], 
@@ -1218,7 +1214,6 @@ class IFODataObtainer:
                 segment : TimeSeries = segment.resample(sample_rate_hertz)
 
             except Exception as e:
-
                 print("Unexpected acquistion error!")
 
                 # If any exception raised, skip segment
@@ -1234,7 +1229,15 @@ class IFODataObtainer:
                     segment.value, 
                     dtype=tf.float32
                 )
-
+                
+                if gf.check_tensor_integrity(segment, 1, 10):
+                    self.logger.info("Complete!")
+                    return segment
+                
+                else:
+                    self.logger.error("Segment integrity comprimised, skipping")
+                    return None
+                
                 """
                 original_size = tf.size(segment)
                 segment_power_2 : tf.Tensor = gf.pad_to_power_of_two(segment)
@@ -1251,11 +1254,8 @@ class IFODataObtainer:
             else:
                 self.logger.error(
                     f"Segment is none for some reason, skipping."
-                )           
-        
-        self.logger.info("Complete!")
-
-        return segment
+                )         
+                return None
     
     def get_onsource_offsource_chunks(
             self,
