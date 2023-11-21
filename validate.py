@@ -584,7 +584,9 @@ def snake_to_capitalized_spaces(snake_str: str) -> str:
 def generate_efficiency_curves(
         validators : list,
         fars : np.ndarray,
-        colors : List[str] = Bright[7]
+        colors : List[str] = Bright[7],
+        width : int = 800,
+        height : int = 600
     ):
 
     colors = cycle(colors)
@@ -594,14 +596,11 @@ def generate_efficiency_curves(
     
     # Unpack values:
     input_duration_seconds = validators[0].input_duration_seconds
-    
-    plot_width = 800
-    plot_height = 600
 
     p = figure(
         title = "Efficiency Curves",
-        width=plot_width,
-        height=plot_height,
+        width=width,
+        height=height,
         x_axis_label="SNR",
         y_axis_label="Accuracy",
         y_range=(0.0, 1.0)  # Set y-axis bounds here
@@ -746,13 +745,13 @@ def downsample_data(x, y, num_points):
     
 def generate_far_curves(
         validators : list,
-        colors : List[str] = Bright[7]
+        colors : List[str] = Bright[7],
+        width : int = 800,
+        height : int = 600
     ):
 
     colors = cycle(colors)
     
-    plot_width = 800
-    plot_height = 600
     tooltips = [
         ("Name", "@name"),
         ("Score Threshold", "@x"),
@@ -761,8 +760,8 @@ def generate_far_curves(
 
     p = figure(
         title = "False Alarm Rate (FAR) curves",
-        width=plot_width,
-        height=plot_height,
+        width=width,
+        height=height,
         x_axis_label="Score Threshold",
         y_axis_label="False Alarms per Second (Hz)",
         tooltips=tooltips,
@@ -816,7 +815,9 @@ def generate_far_curves(
 
 def generate_roc_curves(
     validators: list,
-    colors : List[str] = Bright[7]
+    colors : List[str] = Bright[7], 
+    width : int = 800,
+    height : int = 600
     ):
 
     colors = cycle(colors)
@@ -825,8 +826,8 @@ def generate_roc_curves(
         title="Receiver Operating Characteristic (ROC) Curves",
         x_axis_label='False Alarm Rate',
         y_axis_label='Accuracy',
-        width=800, 
-        height=600,
+        width=width, 
+        height=height,
         x_axis_type='log', 
         x_range=[1e-6, 1], 
         y_range=[0.0, 1.0]
@@ -1238,7 +1239,9 @@ class Validator:
         file_path : Path,
         comparison_validators : list = [],
         fars : np.ndarray = np.logspace(-1, -7, 500),
-        colors = Bright[7]
+        colors = Bright[7], 
+        width : int = 800,
+        height : int = 600
     ):
         gf.ensure_directory_exists(file_path.parent)
 
@@ -1247,17 +1250,23 @@ class Validator:
         efficiency_curves, slider = generate_efficiency_curves(
                 validators, 
                 fars,
-                colors=colors
+                colors=colors,
+                width=width,
+                height=height
             )
         
         far_curves = generate_far_curves(
                 validators,
-                colors=colors
+                colors=colors,
+                width=width,
+                height=height
             )
 
         roc_curves, dropdown = generate_roc_curves(
                 validators,
-                colors=colors
+                colors=colors,
+                width=width,
+                height=height
             )
         
         layout = [
