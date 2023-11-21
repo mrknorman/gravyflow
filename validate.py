@@ -4,6 +4,7 @@ from typing import Dict, Tuple, Optional, List, Union
 import h5py
 import logging
 from copy import deepcopy
+from itertools import cycle
 
 import numpy as np
 from scipy.interpolate import interp1d
@@ -585,6 +586,8 @@ def generate_efficiency_curves(
         fars : np.ndarray,
         colors : List[str] = Bright[7]
     ):
+
+    colors = cycle(colors)
     
     # Check input durations are equal:
     check_equal_duration(validators)
@@ -745,6 +748,8 @@ def generate_far_curves(
         validators : list,
         colors : List[str] = Bright[7]
     ):
+
+    colors = cycle(colors)
     
     plot_width = 800
     plot_height = 600
@@ -813,6 +818,8 @@ def generate_roc_curves(
     validators: list,
     colors : List[str] = Bright[7]
     ):
+
+    colors = cycle(colors)
     
     p = figure(
         title="Receiver Operating Characteristic (ROC) Curves",
@@ -925,6 +932,8 @@ def generate_waveform_plot(
     onsource_duration_seconds : float,
     colors : list = Bright[7]
     ):
+
+    colors = cycle(colors)
     
     p = figure(
         title=f"Worst Performing Input Score: {data['score']}, "
@@ -1036,7 +1045,7 @@ class Validator:
         validator.name = name
         validator.heart = heart
         # Initiate logging for ifo_data:
-        validator.logger = logging.getLogger("ifo_data_aquisition")
+        validator.logger = logging.getLogger("validator")
         stream_handler = logging.StreamHandler(sys.stdout)
         validator.logger.addHandler(stream_handler)
         validator.logger.setLevel(logging_level)
@@ -1166,7 +1175,8 @@ class Validator:
     @classmethod
     def load(
         cls, 
-        file_path: Path
+        file_path: Path,
+        logging_level = logging.INFO
     ):
         # Create a new instance without executing any logic
         validator = cls()
@@ -1176,6 +1186,9 @@ class Validator:
             validator.name = h5f['name'][()].decode()
             validator.input_duration_seconds = \
                 float(h5f['input_duration_seconds'][()])
+            
+            validator.logger = logging.getLogger("validator")
+            validator.logger.setLevel(logging_level)
             validator.logger.info(f"Loading validation data for {validator.name}...")
             
             # Load efficiency scores:
@@ -1224,26 +1237,27 @@ class Validator:
         self,
         file_path : Path,
         comparison_validators : list = [],
-        fars : np.ndarray = np.logspace(-1, -7, 500)
+        fars : np.ndarray = np.logspace(-1, -7, 500),
+        colors = Bright[7]
     ):
         gf.ensure_directory_exists(file_path.parent)
 
         validators = comparison_validators + [self]
         
-        efficiency_curves, slider = \
-            generate_efficiency_curves(
+        efficiency_curves, slider = generate_efficiency_curves(
                 validators, 
-                fars
+                fars,
+                colors=colors
             )
         
-        far_curves = \
-            generate_far_curves(
-                validators
+        far_curves = generate_far_curves(
+                validators,
+                colors=colors
             )
 
-        roc_curves, dropdown = \
-            generate_roc_curves(
-                validators
+        roc_curves, dropdown = generate_roc_curves(
+                validators,
+                colors=colors
             )
         
         layout = [
