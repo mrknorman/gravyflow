@@ -416,18 +416,29 @@ class IFODataObtainer:
     def remove_unwanted_segments(
         self,
         ifo : gf.IFO,
-        valid_segments : np.ndarray
+        valid_segments : np.ndarray,
+        get_times : List = None
         ):
+
+        if get_times is None:
+            get_times = []
         
         # Collect veto segment times from excluded data labels: 
         veto_segments = []
         
-        event_times = self.get_all_event_times()
-        glitch_times = gf.get_glitch_times(
-            ifo,
-            start_gps_time = self.start_gps_times[0],
-            end_gps_time = self.end_gps_times[0]
-        )
+        if DataLabel.EVENTS in get_times or DataLabel.EVENTS not in self.data_labels:
+            event_times = self.get_all_event_times()
+        else:
+            event_times = []
+
+        if DataLabel.GLITCHES in get_times or DataLabel.GLITCHES not in self.data_labels:
+            glitch_times = gf.get_glitch_times(
+                ifo,
+                start_gps_time = self.start_gps_times[0],
+                end_gps_time = self.end_gps_times[0]
+            )
+        else:
+            glitch_times = []
         
         if DataLabel.EVENTS not in self.data_labels:
             veto_segments.append(
@@ -1140,7 +1151,7 @@ class IFODataObtainer:
             end=segment_end_gps_time, 
             nproc=10
         )
-
+        
         return data
     
     def get_segment(
@@ -1200,6 +1211,7 @@ class IFODataObtainer:
                     f"{expected_duration_seconds}..."
             )
             try:
+
                 # Added epsilon value to solve precision error:
                 segment : TimeSeries = self.get_segment_data(
                     segment_start_gps_time + epsilon,
@@ -1214,8 +1226,6 @@ class IFODataObtainer:
                 segment : TimeSeries = segment.resample(sample_rate_hertz)
 
             except Exception as e:
-                print("Unexpected acquistion error!")
-
                 # If any exception raised, skip segment
                 self.logger.error(
                     f"Unexpected error: {type(e).__name__}, {str(e)}"

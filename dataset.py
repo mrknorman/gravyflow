@@ -196,9 +196,18 @@ def data(
     injections : Iterator = injection_generator.generate()
     
     whitened_injections = None
-    for (onsource, offsource, gps_times), (injections_, mask, parameters) \
-        in zip(noise, injections):
-                
+
+    while True:
+        try:
+            onsource, offsource, gps_times = next(noise)
+        except Exception as e:
+            logging.info(f"Noise failed because {e}")
+        
+        try:
+            injections_, mask, parameters = next(injections)
+        except Exception as e:
+            logging.info(f"Injection failed because {e}")
+
         if len(injection_generators):
                         
             # Add injections to waveform scaled by inputted SNR config values:
