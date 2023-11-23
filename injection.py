@@ -853,17 +853,23 @@ class InjectionGenerator:
             match config.scaling_method.type_.value.ordinality:
                 
                 case ScalingOrdinality.BEFORE_PROJECTION:
-                
-                    scaled_injections = config.scaling_method.scale(
-                            injections_,
-                            onsource,
-                            scaling_parameters_,
-                            self.sample_rate_hertz
-                        )
 
-                    scaled_injections = network.project_wave(
-                        scaled_injections, self.sample_rate_hertz
-                    )
+                    try:
+                        scaled_injections = config.scaling_method.scale(
+                                injections_,
+                                onsource,
+                                scaling_parameters_,
+                                self.sample_rate_hertz
+                            )
+                    except Exception as e:
+                        logger.error(f+-"Failed to scale injections because {e}")
+
+                    try:
+                        scaled_injections = network.project_wave(
+                            scaled_injections, self.sample_rate_hertz
+                        )
+                    except Exception as e:
+                        logger.error(f+-"Failed to project injections because {e}")
 
                     if scaled_injections is None:
                         logging.error("Error scaling injections before projection!")
@@ -871,22 +877,29 @@ class InjectionGenerator:
             
                 case ScalingOrdinality.AFTER_PROJECTION:
                     
-                    injections_ = network.project_wave(
-                        injections_, self.sample_rate_hertz
-                    )
-                    
+                    try:
+                        injections_ = network.project_wave(
+                            injections_, self.sample_rate_hertz
+                        )
+                    except Exception as e:
+                        logger.error(f+-"Failed to project injections because {e}")
+
                     if injections_ is not None:
                         if injections_.shape != onsource.shape:
                             logging.error(f"Shape mismatch {injections_.shape} {onsource.shape}")
                             return None, None, None
-                        
-                        # Scale injections with selected scaling method:
-                        scaled_injections = config.scaling_method.scale(
-                                injections_,
-                                onsource,
-                                scaling_parameters_,
-                                self.sample_rate_hertz
-                            )
+
+                        try:
+                            # Scale injections with selected scaling method:
+                            scaled_injections = config.scaling_method.scale(
+                                    injections_,
+                                    onsource,
+                                    scaling_parameters_,
+                                    self.sample_rate_hertz
+                                )
+                        except Exception as e:
+                            logger.error(f+-"Failed to scale injections because {e}")
+
                     else:
                         logging.error("Error scaling injections after projection!")
                         return None, None, None
@@ -900,8 +913,13 @@ class InjectionGenerator:
                     )
 
             # Add scaled injections to onsource:
-            onsource += scaled_injections
-                        
+            try:
+                onsource += scaled_injections
+            except Exception as e:
+                logger.error(f+-"Failed to add injections because {e}")
+                print(onsouce)
+                print(scaled_injections)
+
             if ScalingTypes.HPEAK in variables_to_return:
                 # Calculate hpeak of scaled injections:
                 

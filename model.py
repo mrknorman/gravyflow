@@ -406,6 +406,26 @@ class DenseLayer(BaseLayer):
         self.mutable_attributes = [self.activation, self.units]
 
 @dataclass
+class FlattenLayer(BaseLayer):
+
+    def __init__(
+            self
+        ):
+        """
+        Initializes a DenseLayer instance.
+        
+        Args:
+        ---
+        units : Union[HyperParameter, int]
+            HyperParameter specifying the number of units in this layer.
+        activation : Union[HyperParameter, int]
+            HyperParameter specifying the activation function for this layer.
+        """
+        
+        self.layer_type = "Flatten"
+        self.mutable_attributes = []
+
+@dataclass
 class ConvLayer(BaseLayer):
     filters: HyperParameter
     kernel_size: HyperParameter
@@ -623,6 +643,8 @@ class ModelBuilder:
         match layer.layer_type:       
             case "Whiten":
                 new_layer = gf.Whiten()
+            case "Flatten":
+                new_layer = tf.keras.layers.Flatten()
             case "Dense":
                 new_layer = tf.keras.layers.Dense(
                         layer.units.value, 
@@ -709,11 +731,22 @@ class ModelBuilder:
             history_data = gf.load_history(self.model_path)
             if history_data != {}:
                 best_metric = min(history_data[checkpoint_monitor]) #assuming loss for now
+                best_epoch = np.argmin(min(history_data[checkpoint_monitor]) + 1)
                 initial_epoch = len(history_data[checkpoint_monitor])
+
+                if initial_epoch - best_epoch > training_config["patience"]:
+                    logging.info("Model already completed training. Skipping!")
+                    self.model = tf.keras.models.load_model(
+                        self.model_path
+                    )
+                    self.metrics.append(history_data)
+                    
+                    return False
             else:
                 initial_epoch = 0
                 model_path = None
                 best_metric = None
+        
         else:
             initial_epoch = 0
             model_path = None
@@ -772,6 +805,8 @@ class ModelBuilder:
                 verbose=verbose
             )
         )
+
+        return True
             
     def validate_model(self, test_dataset: tf.data.Dataset):
         pass

@@ -26,6 +26,8 @@ import gravyflow as gf
 def calculate_efficiency_scores(
         model : tf.keras.Model, 
         dataset_args : Dict[str, Union[float, List, int]],
+        logger,
+        file_path : Path = None,
         num_examples_per_batch : int = 32,
         max_scaling : float = 20.0,
         num_scaling_steps : int = 21,
@@ -101,28 +103,58 @@ def calculate_efficiency_scores(
     callbacks = []
     if heart is not None:
         callbacks += [gf.HeartbeatCallback(heart)]
+
+    combined_scores = None
+    while combined_scores is None:
+        try:
+            combined_scores = model.predict(
+                dataset, 
+                steps=num_batches, 
+                callbacks=callbacks,
+                verbose=2
+            )
+
+            try:
+                # Split predictions back into separate arrays for each scaling level:
+                scores = [ 
+                    combined_scores[
+                        index * num_examples_per_scaling_step : 
+                        (index + 1) * num_examples_per_scaling_step
+                    ] for index in range(num_scaling_steps)
+                ]
+            except Exception as e:
+                raise Exception(f"Error splitting efficiency scores: {e}.")
+
+        except Exception as e:
+            logging.error(f"Error {e} calculating efficiency scores! Retrying.")
+            combined_scores = None
+            continue    
+
+    if file_path is not None:
+        with gf.open_hdf5_file(
+            file_path, 
+            logger, 
+            mode = "a"
+        ) as validation_file:
         
-    # Process all examples in one go:
-    combined_scores = model.predict(
-        dataset, 
-        steps=num_batches,
-        callbacks=callbacks, 
-        verbose=2
-    )
-        
-    # Split predictions back into separate arrays for each scaling level:
-    scores = [ 
-        combined_scores[
-            index * num_examples_per_scaling_step : 
-            (index + 1) * num_examples_per_scaling_step
-        ] for index in range(num_scaling_steps)
-    ]
+            # Unpack:
+            scalings = efficiency_scalings
+            efficiency_scores =  np.array(scores)
+
+            # Save efficiency scores:
+            if efficiency_scores is not None:
+                eff_group = validation_file.create_group('efficiency_data')
+                eff_group.create_dataset(f'scalings', data=scalings)
+                for i, score in enumerate(efficiency_scores):
+                    eff_group.create_dataset(f'score_{i}', data=score)
     
     return {"scalings" : efficiency_scalings, "scores": np.array(scores)}
 
 def calculate_far_scores(
         model : tf.keras.Model, 
         dataset_args : dict, 
+        logger,
+        file_path : Path,
         num_examples_per_batch : int = 32,  
         num_examples : int = 1E5,
         heart : gf.Heart = None
@@ -173,13 +205,41 @@ def calculate_far_scores(
         callbacks += [gf.HeartbeatCallback(heart)]
         
     # Predict the scores and get the second column ([:, 1]):
-    far_scores = model.predict(
-        dataset, 
-        steps=num_batches, 
-        callbacks=callbacks,
-        verbose=2
-    )[:,0]
-        
+
+    far_scores = None
+    while far_scores is None:
+        try:
+            far_scores = model.predict(
+                dataset, 
+                steps=num_batches, 
+                callbacks=callbacks,
+                verbose=2
+            )
+
+            try:
+                far_scores = far_scores[:,0]
+            except:
+                raise Exception(f"Error slicing FAR scores: {e}")
+
+        except Exception as e:
+            logging.error("Error calculatin FAR scores because {e}. Retrying.")
+            far_scores = None
+            continue
+
+    if file_path is not None:
+        with gf.open_hdf5_file(
+            file_path, 
+            logger, 
+            mode = "a"
+        ) as validation_file:
+
+            if "far_scores" not in validation_file:
+
+                logger.info("Saving FAR Scores!")
+
+                far_group = validation_file.create_group('far_scores')
+                far_group.create_dataset('scores', data=far_scores)
+
     return far_scores
 
 def calculate_far_score_thresholds(
@@ -322,11 +382,11 @@ class CaptureWorstPredictions(Callback):
         self.worst_scores = np.array(self.all_scores)[sorted_indices]
 
 def calculate_roc(    
-    model: tf.keras.Model,
-    dataset_args : dict,
-    num_examples_per_batch: int = 32,
-    num_examples: int = 1.0E5,
-    heart : gf.Heart = None
+        model: tf.keras.Model,
+        dataset_args : dict,
+        num_examples_per_batch: int = 32,
+        num_examples: int = 1.0E5,
+        heart : gf.Heart = None
     ) -> dict:
     
     """
@@ -402,12 +462,27 @@ def calculate_roc(
         callbacks += [gf.HeartbeatCallback(heart)]
 
     # Get the model predictions
-    y_scores = model.predict(
-        x_dataset, 
-        steps = num_batches, 
-        callbacks = callbacks,
-        verbose = 2
-    )[:,0]
+
+    y_scores = None
+    while y_scores is None:
+        try:
+            y_scores = model.predict(
+                x_dataset, 
+                steps=num_batches, 
+                callbacks=callbacks,
+                verbose=2
+            )
+
+            try:
+                y_scores = y_scores[:,0]
+
+            except Exception as e:
+                raise Exception(f"Error slicing y_scores {e}.")
+            
+        except Exception as e:
+            y_scores = None
+            logging.error(f"Error calculating ROC scores because {e}! Retrying.")
+            continue
     
     # Calculate the ROC curve and AUC
     fpr, tpr, roc_auc = roc_curve_and_auc(y_true, y_scores)
@@ -417,6 +492,8 @@ def calculate_roc(
 def calculate_multi_rocs(    
     model: tf.keras.Model,
     dataset_args : dict,
+    logger, 
+    file_path : Path = None,
     num_examples_per_batch: int = 32,
     num_examples: int = 1.0E5,
     scaling_ranges: list = [
@@ -427,11 +504,42 @@ def calculate_multi_rocs(
     ],
     heart : gf.Heart = None
     ) -> dict:
-    
+
+    if file_path is not None:
+        with gf.open_hdf5_file(
+            file_path, 
+            logger, 
+            mode = "a"
+        ) as validation_file:
+
+            if "roc_data" not in validation_file:
+                logger.info("Saving ROC data keys.")
+
+                roc_group = validation_file.create_group('roc_data')
+                keys_array = [str(item) for item in scaling_ranges]
+
+                string_dt = h5py.string_dtype(encoding='utf-8')
+                keys_array = np.array(keys_array, dtype=string_dt)
+
+                validation_file.create_dataset('roc_data/keys', data=keys_array)
+        
     roc_results = {}
     for scaling_range in scaling_ranges:
         # Make copy of generator args so original is not affected:
         dataset_args = deepcopy(dataset_args)
+
+        range_name = str(scaling_range)
+
+        if file_path is not None:
+            with gf.open_hdf5_file(
+                file_path, 
+                logger, 
+                mode = "r"
+            ) as validation_file:
+
+                if f"{range_name}_fpr" in validation_file["roc_data"]:
+                    logger.info(f"Range group: {range_name} already present in validation file. Skipping!")
+                    continue
         
         if isinstance(scaling_range, tuple):
             scaling_disribution = gf.Distribution(
@@ -452,7 +560,7 @@ def calculate_multi_rocs(
         # Set desired injection scalings:
         dataset_args["injection_generators"][0].scaling_method.value = scaling_disribution
         
-        roc_results[str(scaling_range)] = \
+        roc_results[range_name] = \
             calculate_roc(    
                 model,
                 dataset_args,
@@ -460,7 +568,37 @@ def calculate_multi_rocs(
                 num_examples,
                 heart
             )
-    
+
+        if file_path is not None:
+            with gf.open_hdf5_file(
+                file_path, 
+                logger, 
+                mode = "a"
+            ) as validation_file:
+
+                value = roc_results[range_name]
+
+                logger.info(f"Save roc data {range_name}!")
+
+                if f'roc_data/{range_name}_fpr' not in validation_file:
+                    logger.info(f"Save roc data {range_name}_fpr!")
+
+                    print(value['fpr'])
+
+                    validation_file.create_dataset(
+                        f'roc_data/{range_name}_fpr', 
+                        data=value['fpr']
+                    )
+
+                if f'roc_data/{range_name}_tpr' not in validation_file:
+                    logger.info(f"Save roc data {range_name}_tpr!")
+
+                    validation_file.create_dataset(
+                        f'roc_data/{range_name}_tpr', 
+                        data=value['tpr']
+                    )
+                    validation_file.create_dataset(f'roc_data/{range_name}_roc_auc', data=np.array([value['roc_auc']]))
+        
     return roc_results
 
 def calculate_tar_scores(
@@ -524,13 +662,27 @@ def calculate_tar_scores(
         callbacks += [gf.HeartbeatCallback(heart)]
     
     # Predict the scores and get the second column ([:, 1]):
-    tar_scores = model.predict(
-        dataset, 
-        batch_size = num_examples_per_batch,
-        callbacks = callbacks,
-        steps = num_batches, 
-        verbose=2
-    )[:,0]
+
+    tar_scores = None
+    while tar_scores is None:
+        try:
+            tar_scores = model.predict(
+                dataset, 
+                batch_size = num_examples_per_batch,
+                callbacks = callbacks,
+                steps = num_batches, 
+                verbose=2
+            )
+
+            try:
+                tar_scores = tar_scores[:,0]
+            except Exception as e:
+                raise Execption(f"Failed to slice Tar Scores because {e}.")
+
+        except Exception as e:
+            logging.error(f"Error calculating TAR score because {e}. Retrying.")
+            tar_scores = None
+            continue
             
     dataset_args["output_variables"] = \
         [
@@ -539,9 +691,7 @@ def calculate_tar_scores(
             gf.WaveformParameters.MASS_1_MSUN,
             gf.WaveformParameters.MASS_2_MSUN
         ]
-    
-    #quant
-    
+        
     # Initlize generator:
     dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
@@ -615,7 +765,7 @@ def generate_efficiency_curves(
     
     model_names = []
     
-    for validator, color in zip(validators, colors):
+    for index, (validator, color) in enumerate(zip(validators, colors)):
         
         thresholds = calculate_far_score_thresholds(
             validator.far_scores, 
@@ -627,7 +777,12 @@ def generate_efficiency_curves(
         scores = validator.efficiency_data["scores"]
         scalings = validator.efficiency_data["scalings"]
         name = validator.name
-        title = snake_to_capitalized_spaces(name)
+
+        if name is not None:
+            title = snake_to_capitalized_spaces(name)
+        else:
+            name = index
+            title = f"default_{index}"
         
         model_names.append(title)
         
@@ -771,11 +926,17 @@ def generate_far_curves(
         
     max_num_points = 2000
 
-    for color, validator in zip(colors, validators):
+    for index, (color, validator) in enumerate(zip(colors, validators)):
         far_scores = validator.far_scores
         
         name = validator.name
-        title = snake_to_capitalized_spaces(name)
+
+        if name is not None:
+            title = snake_to_capitalized_spaces(name)
+        else:
+            title = f"default_{index}"
+            name = index
+
                 
         far_scores = np.sort(far_scores)[::-1]
         total_num_seconds = len(far_scores) * validator.input_duration_seconds
@@ -834,15 +995,18 @@ def generate_roc_curves(
     )
     
     max_num_points = 500
-    
-    # Initial population key:
     initial_population_key = list(validators[0].roc_data.keys())[0]
     all_sources = {}
     
     for color, validator in zip(colors, validators):
         roc_data = validator.roc_data[initial_population_key]
         name = validator.name
-        title = snake_to_capitalized_spaces(name)
+        
+        if name is not None:
+            title = snake_to_capitalized_spaces(name)
+        else:
+            title = f"default_{index}"
+            name = index
 
         fpr = roc_data["fpr"]
         tpr = roc_data["tpr"]
@@ -1030,26 +1194,33 @@ class Validator:
                 12.0
             ]    
         },
+        checkpoint_file_path : Path = None,
         logging_level : int = logging.INFO,
         heart : gf.Heart = None
     ):
         if num_examples_per_batch is None:
             num_examples_per_batch = gf.Defaults.num_examples_per_batch
-        
+
         # Save model title: 
         if isinstance(name, Path):
             name = name.name
-        
-        # Create a new instance without executing any logic
+
+        if not isinstance(name, str):
+            raise ValueError("Requires model name!")
+
         validator = cls()
-        
-        validator.name = name
-        validator.heart = heart
-        # Initiate logging for ifo_data:
+
+        # Initiate logging:
         validator.logger = logging.getLogger("validator")
         stream_handler = logging.StreamHandler(sys.stdout)
         validator.logger.addHandler(stream_handler)
         validator.logger.setLevel(logging_level)
+
+        validator.efficiency_data = None
+        validator.far_scores = None
+        validator.roc_data = None
+
+        validator.name = name
 
         if "onsource_duration_seconds" in dataset_args:
             if dataset_args["onsource_duration_seconds"] is None:
@@ -1058,7 +1229,59 @@ class Validator:
                 validator.input_duration_seconds = dataset_args["onsource_duration_seconds"]
         else: 
             validator.input_duration_seconds = gf.Defaults.onsource_duration_seconds
+
+        if checkpoint_file_path is not None:
+
+            if checkpoint_file_path.exists():
+
+                validator = validator.load(
+                    checkpoint_file_path,
+                    logging_level=logging_level
+                )
+
+                if validator.name is None:
+                    if name is not None:
+                        validator.name = name
+                    else:
+                        validator.name = "Default"
+
+                    with gf.open_hdf5_file(
+                        checkpoint_file_path, 
+                        validator.logger, 
+                        mode = "w"
+                    ) as validation_file:
+
+                        if "name" not in validation_file:
+                            if validator.name is not None:
+                                validation_file.create_dataset('name', data=validator.name.encode())
+                            else:
+                                validation_file.create_dataset('name', data="default".encode())
+                       
+            else:
+
+                gf.ensure_directory_exists(checkpoint_file_path.parent)
+
+                with gf.open_hdf5_file(
+                        checkpoint_file_path, 
+                        validator.logger, 
+                        mode = "w"
+                    ) as validation_file:
+
+                    if "name" not in validation_file:
+                        if validator.name is not None:
+                            validation_file.create_dataset('name', data=validator.name.encode())
+                        else:
+                            validation_file.create_dataset('name', data="default".encode())
+
+                    if "input_duration_seconds" not in validation_file:             
+                        validation_file.create_dataset(
+                            'input_duration_seconds', 
+                            data=validator.input_duration_seconds
+                        )
+
+        validator.heart = heart
         
+        """
         validator.logger.info(f"Worst performing inputs for {validator.name}...")
         tar_scores, worst_performers = \
             calculate_tar_scores(
@@ -1071,35 +1294,49 @@ class Validator:
             )
         validator.worst_performers = worst_performers
         validator.logger.info(f"Done")
-                        
-        validator.logger.info(f"Calculating efficiency scores for {validator.name}...")
-        validator.efficiency_data = \
-            calculate_efficiency_scores(
-                model, 
-                dataset_args,
-                num_examples_per_batch,
-                heart=validator.heart,
-                **efficiency_config
-            )
-        validator.logger.info(f"Done")
+        """
+        validator.worst_performmers = None
 
-        validator.logger.info(f"Calculating FAR scores for {validator.name}...")
-        validator.far_scores = \
-            calculate_far_scores(
-                model, 
-                dataset_args, 
-                num_examples_per_batch,  
-                heart=validator.heart,
-                **far_config
-            )
-        validator.logger.info(f"Done")
-                
-        validator.logger.info(f"Calculating ROC data for {validator.name}...")
+        if validator.efficiency_data is None:   
+            validator.logger.info(f"Calculating efficiency scores for {validator.name}...")
+            validator.efficiency_data = \
+                calculate_efficiency_scores(
+                    model, 
+                    dataset_args,
+                    validator.logger,
+                    file_path=checkpoint_file_path,
+                    num_examples_per_batch=num_examples_per_batch,
+                    heart=validator.heart,
+                    **efficiency_config
+                )
+            validator.logger.info(f"Done")
+        else:
+            validator.logger.info("Validation file already contains efficiency scores! Loading...")
+
+        if (validator.far_scores is None):
+            validator.logger.info(f"Calculating FAR scores for {validator.name}...")
+            validator.far_scores = \
+                calculate_far_scores(
+                    model, 
+                    dataset_args, 
+                    validator.logger,
+                    file_path=checkpoint_file_path,
+                    num_examples_per_batch=num_examples_per_batch,  
+                    heart=validator.heart,
+                    **far_config
+                )
+            validator.logger.info(f"Done")
+        else:
+            validator.logger.info("Validation file already contains FAR scores! Loading...")
+        
+        validator.logger.info(f"Collecting ROC data for {validator.name}...")
         validator.roc_data = \
             calculate_multi_rocs(    
                 model,
                 dataset_args,
-                num_examples_per_batch,
+                validator.logger,
+                file_path=checkpoint_file_path,
+                num_examples_per_batch=num_examples_per_batch,
                 heart=validator.heart,
                 **roc_config
             )
@@ -1110,7 +1347,8 @@ class Validator:
     def save(
         self,
         file_path : Path
-    ):
+        ):
+
         self.logger.info(f"Saving validation data for {self.name}...")
 
         gf.ensure_directory_exists(file_path.parent)
@@ -1118,58 +1356,64 @@ class Validator:
         with gf.open_hdf5_file(
                 file_path, 
                 self.logger, 
-                mode = "w"
+                mode = "a"
             ) as validation_file:
             
             # Unpack:
             scalings = self.efficiency_data['scalings']
             efficiency_scores = self.efficiency_data['scores']
 
-            validation_file.create_dataset('name', data=self.name.encode())
+            if self.name is not None:
+                validation_file.create_dataset('name', data=self.name.encode())
+            else:
+                validation_file.create_dataset('name', data="default".encode())
+            
             validation_file.create_dataset(
                 'input_duration_seconds', 
                 data=self.input_duration_seconds
             )
 
             # Save efficiency scores:
-            eff_group = validation_file.create_group('efficiency_data')
-            eff_group.create_dataset(f'scalings', data=scalings)
-            for i, score in enumerate(efficiency_scores):
-                eff_group.create_dataset(f'score_{i}', data=score)
+            if efficiency_scores is not None:
+                eff_group = validation_file.create_group('efficiency_data')
+                eff_group.create_dataset(f'scalings', data=scalings)
+                for i, score in enumerate(efficiency_scores):
+                    eff_group.create_dataset(f'score_{i}', data=score)
 
             # Save FAR scores
-            far_group = validation_file.create_group('far_scores')
-            far_group.create_dataset('scores', data=self.far_scores)
+            if self.far_scores is not None:
+                far_group = validation_file.create_group('far_scores')
+                far_group.create_dataset('scores', data=self.far_scores)
 
             # Save ROC data:
-            roc_group = validation_file.create_group('roc_data')
-            
-            roc_data = self.roc_data
+            if roc_data is not None:
+                roc_group = validation_file.create_group('roc_data')
+                roc_data = self.roc_data
+                keys_array = [str(item) for item in roc_data.keys()]
 
-            keys_array = [str(item) for item in roc_data.keys()]
+                string_dt = h5py.string_dtype(encoding='utf-8')
+                keys_array = np.array(keys_array, dtype=string_dt)
 
-            string_dt = h5py.string_dtype(encoding='utf-8')
-            keys_array = np.array(keys_array, dtype=string_dt)
+                roc_group.create_dataset('keys', data=keys_array)
 
-            roc_group.create_dataset('keys', data=keys_array)
+                for key, value in roc_data.items():
+                    roc_group.create_dataset(
+                        f'{key}_fpr', 
+                        data=value['fpr']
+                    )
+                    roc_group.create_dataset(
+                        f'{key}_tpr', 
+                        data=value['tpr']
+                    )
+                    roc_group.attrs[f'{key}_roc_auc'] = value['roc_auc']
 
-            for key, value in roc_data.items():
-                roc_group.create_dataset(
-                    f'{key}_fpr', 
-                    data=value['fpr']
-                )
-                roc_group.create_dataset(
-                    f'{key}_tpr', 
-                    data=value['tpr']
-                )
-                roc_group.attrs[f'{key}_roc_auc'] = value['roc_auc']
+            if self.worst_perfomers is not None:         
+                worst_performers = self.worst_performers
                 
-            worst_performers = self.worst_performers
-            
-            for idx, entry in enumerate(worst_performers):
-                group = validation_file.create_group(f'worst_perfomers_{idx}')
-                for key, value in entry.items():
-                    group.create_dataset(key, data=value, dtype=np.float16)
+                for idx, entry in enumerate(worst_performers):
+                    group = validation_file.create_group(f'worst_perfomers_{idx}')
+                    for key, value in entry.items():
+                        group.create_dataset(key, data=value, dtype=np.float16)
         
             self.logger.info("Done.")
         
@@ -1183,53 +1427,66 @@ class Validator:
         validator = cls()
 
         with h5py.File(file_path, 'r') as h5f:
-            # Load title:
-            validator.name = h5f['name'][()].decode()
-            validator.input_duration_seconds = \
-                float(h5f['input_duration_seconds'][()])
+            # Check and load title:
+            validator.name = h5f['name'][()].decode() if 'name' in h5f else None
+
+            # Check and load input_duration_seconds
+            if 'input_duration_seconds' in h5f:
+                validator.input_duration_seconds = float(h5f['input_duration_seconds'][()])
+            else:
+                validator.input_duration_seconds = gf.Defaults.onsource_duration_seconds
             
             validator.logger = logging.getLogger("validator")
             validator.logger.setLevel(logging_level)
             validator.logger.info(f"Loading validation data for {validator.name}...")
-            
-            # Load efficiency scores:
-            eff_group = h5f['efficiency_data']
-            efficiency_data = {
-                'scalings': eff_group['scalings'][:],
-                'scores': [
-                    eff_group[f'score_{i}'][:] for i in range(len(eff_group) - 1)
-                ]
-            }
 
-            # Load FAR scores:
-            far_scores = h5f['far_scores']['scores'][:]
+            # Check and load efficiency scores:
+            if 'efficiency_data' in h5f:
+                eff_group = h5f['efficiency_data']
+                efficiency_data = {
+                    'scalings': eff_group['scalings'][:] if 'scalings' in eff_group else None,
+                    'scores': [
+                        eff_group[f'score_{i}'][:] for i in range(len(eff_group) - 1)
+                    ] if all(f'score_{i}' in eff_group for i in range(len(eff_group) - 1)) else None
+                }
+            else:
+                efficiency_data = None
 
-            # Load ROC data:
-            roc_group = h5f['roc_data']
-            keys_array = roc_group['keys'][:]
-            roc_data = {
-                key.decode('utf-8'): {
-                    'fpr': roc_group[f'{key.decode("utf-8")}_fpr'][:],
-                    'tpr': roc_group[f'{key.decode("utf-8")}_tpr'][:],
-                    'roc_auc': roc_group.attrs[f'{key.decode("utf-8")}_roc_auc']
-                } for key in keys_array
-            }
+            # Check and load FAR scores:
+            far_scores = h5f['far_scores']['scores'][:] if 'far_scores' in h5f and 'scores' in h5f['far_scores'] else None
+
+            # Check and load ROC data:
+            if 'roc_data' in h5f:
+                roc_group = h5f['roc_data']
+                keys_array = roc_group['keys'][:] if 'keys' in roc_group else []
+                
+                roc_data = {
+                    key.decode('utf-8'): {
+                        'fpr': roc_group[f'{key.decode("utf-8")}_fpr'][:],
+                        'tpr': roc_group[f'{key.decode("utf-8")}_tpr'][:],
+                        'roc_auc': roc_group[f'{key.decode("utf-8")}_roc_auc'][0],
+                    } for key in keys_array if all(f'{key.decode("utf-8")}_{metric}' in roc_group for metric in ['fpr', 'tpr', 'roc_auc'])
+                } if keys_array else None
+
+            else:
+                roc_data = None
 
             # Populate the Validator object's attributes with loaded data:
             validator.efficiency_data = efficiency_data
             validator.far_scores = far_scores
             validator.roc_data = roc_data
             
+            # Check and load worst performers:
             worst_performers = []
             for group_name in h5f:
                 group_data = {}
                 if group_name.startswith(f"worst_performers_"): 
                     for key in h5f[group_name]:
-                        group_data[key] = h5f[group_name][key][()]
+                        group_data[key] = h5f[group_name][key][()] if key in h5f[group_name] else None
                     worst_performers.append(group_data)
                 
-            validator.worst_performers = worst_performers
-                                
+            validator.worst_performers = worst_performers if worst_performers else None
+                                    
             validator.logger.info("Done.")
 
         return validator
@@ -1275,17 +1532,18 @@ class Validator:
             [far_curves, None]
         ]
         
-        for waveform in self.worst_performers:
+        if self.worst_performers is not None:
+            for waveform in self.worst_performers:
 
-            pass
-            """
-            waveform_plot = generate_waveform_plot(
-                waveform,
-                self.input_duration_seconds
-            )
-            layout.append([waveform_plot, None])
-            """
-        
+                pass
+                """
+                waveform_plot = generate_waveform_plot(
+                    waveform,
+                    self.input_duration_seconds
+                )
+                layout.append([waveform_plot, None])
+                """
+            
         # Define an output path for the dashboard
         output_file(file_path)
 

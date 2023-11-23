@@ -467,19 +467,21 @@ class Whiten(Layer):
         self.detrend = detrend
         self.filter_duration_seconds = filter_duration_seconds
         self.window = window
+        self.num_output_samples = int(self.onsource_duration_seconds*self.sample_rate_hertz)
 
     def build(self, input_shape):
         # This layer doesn't have any trainable weights, but you could set up weights here if necessary.
         super().build(input_shape)
 
-    @tf.function(jit_compile=True)
+    @tf.function
     def call(self, inputs):
         timeseries, background = inputs
 
         whitened = whiten(timeseries, background, self.sample_rate_hertz)
         cropped = gf.crop_samples(whitened, self.onsource_duration_seconds, self.sample_rate_hertz)
 
-        return cropped
+        dynamic_shape = tf.shape(timeseries)
+        return tf.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))
 
     def get_config(self):
         config = super().get_config().copy()
@@ -493,3 +495,9 @@ class Whiten(Layer):
             'window': self.window,
         })
         return config
+
+    def compute_output_shape(self, input_shape):
+        # Assuming input_shape is [(None, Y, A), (None, Y, B)]
+        # and your layer returns a shape of (None, Y, B)
+        timeseries_shape, _ = input_shape
+        return (timeseries_shape[0], timeseries_shape[1], self.onsource_duration_seconds*self.sample_rate_hertz) 

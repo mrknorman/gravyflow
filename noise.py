@@ -220,7 +220,7 @@ def colored_noise_generator(
                 num_samples_list[1], 
                 interpolated_psd_offsource
             ), \
-              tf.fill([num_examples_per_batch], -1.0)
+            tf.fill([num_examples_per_batch], -1.0)
     
 
 @dataclass
