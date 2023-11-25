@@ -735,7 +735,7 @@ class ModelBuilder:
                 initial_epoch = len(history_data[checkpoint_monitor])
 
                 if initial_epoch - best_epoch > training_config["patience"]:
-                    logging.info("Model already completed training. Skipping!")
+                    logging.info(f"Model already completed training. Skipping! Current epoch {initial_epoch}, best epoch {best_epoch}.")
                     self.model = tf.keras.models.load_model(
                         self.model_path
                     )

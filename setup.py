@@ -247,7 +247,8 @@ def env(
     min_gpu_memory_mb: int = 4000,
     num_gpus_to_request: int = 1,
     memory_to_allocate_tf: int = 2000,
-    gpus: Union[int, str] = None
+    gpus: Union[int, str] = None,
+    max_needed=1
 ) -> tf.distribute.Strategy:
     
     # Check if there's already a strategy in scope:
@@ -265,7 +266,8 @@ def env(
     if gpus is None:
         gpus = find_available_GPUs(
             min_gpu_memory_mb, 
-            num_gpus_to_request
+            num_gpus_to_request,
+            max_needed=max_needed
         )
 
     strategy = setup_cuda(

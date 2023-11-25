@@ -4,6 +4,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from warnings import warn
 import logging
+import traceback
 
 import tensorflow as tf
 from tensorflow.data.experimental import AutoShardPolicy
@@ -201,12 +202,14 @@ def data(
         try:
             onsource, offsource, gps_times = next(noise)
         except Exception as e:
-            logging.info(f"Noise failed because {e}")
+            logging.info(f"Noise failed because {e}\nTraceback: {traceback.format_exc()}")
+            continue
         
         try:
             injections_, mask, parameters = next(injections)
         except Exception as e:
-            logging.info(f"Injection failed because {e}")
+            logging.info(f"Injections failed because {e}\nTraceback: {traceback.format_exc()}")
+            continue 
 
         if len(injection_generators):
                         
@@ -220,14 +223,20 @@ def data(
                         onsource,
                         variables_to_return=variables_to_return
                     ) 
+                if scaled_injections.shape[2] == 1:
+                    scaled_injections = tf.squeeze(scaled_injections, axis = 2)
+                
             except Exception as e:
-                logging.error(f"Couldn't add injections to onsource because {e}!")
+                logging.error(f"Couldn't add injections to onsource because {e}\nTraceback: {traceback.format_exc()}")
                 continue
             
             if onsource is None:
                 logging.error("Onsource is None!")
                 continue
             
+            onsource = remove_singleton_dimension(onsource)
+            offsource = remove_singleton_dimension(offsource)
+
             for key, value in scaling_parameters.items():
                 if key in variables_to_return:
                     parameters[key] = value
@@ -244,10 +253,7 @@ def data(
                             filter_duration_seconds=1.0
                         ) for scaled_injection_ in scaled_injections
                     ])
-
-                if whitened_injections.shape[2] == 1:
-                    whitened_injections = tf.squeeze(whitened_injections, axis = 2)
-
+                
                 whitened_injections = gf.replace_nan_and_inf_with_zero(
                     whitened_injections
                 )
@@ -307,7 +313,6 @@ def data(
                 rolling_pearson_onsource = None
                 
             if (gf.ReturnVariables.SPECTROGRAM_ONSOURCE in variables_to_return):
-
                 spectrogram_onsource = gf.spectrogram(whitened_onsource)
             else:
                 spectrogram_onsource = None
@@ -326,8 +331,6 @@ def data(
             onsource = tf.cast(onsource, tf.float16)
             onsource = gf.replace_nan_and_inf_with_zero(onsource)
 
-            onsource = remove_singleton_dimension(onsource)
-
             tf.debugging.check_numerics(
                 onsource, 
                 f"NaN detected in onsource after cast."
@@ -336,8 +339,6 @@ def data(
         if gf.ReturnVariables.OFFSOURCE in variables_to_return:
             offsource = tf.cast(offsource, tf.float16)
             offsource = gf.replace_nan_and_inf_with_zero(offsource)
-
-            offsource = remove_singleton_dimension(offsource)
 
             tf.debugging.check_numerics(
                 offsource, 
@@ -349,6 +350,10 @@ def data(
             
         if gf.ReturnVariables.INJECTION_MASKS in variables_to_return:
             mask = tf.cast(mask, tf.float32)
+
+        print("scaled", scaled_injections.shape)
+        print("whitened", whitened_injections.shape)
+        print("onsource", onsource.shape)
                 
         # Construct dictionary:
         input_dict, output_dict = [
