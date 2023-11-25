@@ -748,7 +748,7 @@ def generate_efficiency_curves(
     input_duration_seconds = validators[0].input_duration_seconds
 
     p = figure(
-        title = "Efficiency Curves",
+        #title = "Efficiency Curves",
         width=width,
         height=height,
         x_axis_label="SNR",
@@ -821,6 +821,14 @@ def generate_efficiency_curves(
     legend = Legend(items=legend_items, location="top_left")
     p.add_layout(legend)
     p.legend.click_policy = "hide"
+    p.legend.label_text_font_size = "12pt"
+
+    # Increase font sizes
+    p.axis.axis_label_text_font_size = "14pt"  # Increase axis label font size
+    p.axis.major_label_text_font_size = "12pt"  # Increase tick label font size
+
+    # If you have titles
+    p.title.text_font_size = '16pt'
 
     hover = HoverTool()
     hover.tooltips = [("Name", "@name"), ("SNR", "@x"), ("Accuracy", "@y")]
@@ -914,7 +922,7 @@ def generate_far_curves(
     ]
 
     p = figure(
-        title = "False Alarm Rate (FAR) curves",
+        #title = "False Alarm Rate (FAR) curves",
         width=width,
         height=height,
         x_axis_label="Score Threshold",
@@ -971,7 +979,15 @@ def generate_far_curves(
     p.legend.location = "bottom_left"
     p.legend.click_policy = "hide"
     p.legend.click_policy = "hide"
-    
+    p.legend.label_text_font_size = "12pt"
+
+    # Increase font sizes
+    p.axis.axis_label_text_font_size = "14pt"  # Increase axis label font size
+    p.axis.major_label_text_font_size = "12pt"  # Increase tick label font size
+
+    # If you have titles
+    p.title.text_font_size = '16pt'
+
     return p
 
 def generate_roc_curves(
@@ -984,7 +1000,7 @@ def generate_roc_curves(
     colors = cycle(colors)
     
     p = figure(
-        title="Receiver Operating Characteristic (ROC) Curves",
+        #title="Receiver Operating Characteristic (ROC) Curves",
         x_axis_label='False Alarm Rate',
         y_axis_label='Accuracy',
         width=width, 
@@ -1042,6 +1058,14 @@ def generate_roc_curves(
     p.legend.location = "bottom_right"
     p.legend.click_policy = "hide"
     p.legend.click_policy = "hide"
+    p.legend.label_text_font_size = "12pt"
+
+    # Increase font sizes
+    p.axis.axis_label_text_font_size = "14pt"  # Increase axis label font size
+    p.axis.major_label_text_font_size = "12pt"  # Increase tick label font size
+
+    # If you have titles
+    p.title.text_font_size = '16pt'
     
     # Dropdown to select the test population
     populations = list(validators[0].roc_data.keys())
@@ -1162,6 +1186,14 @@ def generate_waveform_plot(
     p.legend.location = "bottom_right"
     p.legend.click_policy = "hide"
     p.legend.click_policy = "hide"
+    p.legend.label_text_font_size = "12pt"
+
+    # Increase font sizes
+    p.axis.axis_label_text_font_size = "14pt"  # Increase axis label font size
+    p.axis.major_label_text_font_size = "12pt"  # Increase tick label font size
+
+    # If you have titles
+    p.title.text_font_size = '16pt'
     
     return p
 
@@ -1459,6 +1491,11 @@ class Validator:
             if 'roc_data' in h5f:
                 roc_group = h5f['roc_data']
                 keys_array = roc_group['keys'][:] if 'keys' in roc_group else []
+
+                print(validator.name)
+                for i in roc_group:
+                    print(i)
+                print(keys_array)
                 
                 roc_data = {
                     key.decode('utf-8'): {
@@ -1467,6 +1504,8 @@ class Validator:
                         'roc_auc': roc_group[f'{key.decode("utf-8")}_roc_auc'][0],
                     } for key in keys_array if all(f'{key.decode("utf-8")}_{metric}' in roc_group for metric in ['fpr', 'tpr', 'roc_auc'])
                 } if keys_array else None
+
+                print(roc_data)
 
             else:
                 roc_data = None
