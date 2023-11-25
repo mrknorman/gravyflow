@@ -570,11 +570,10 @@ def generate_efficiency_curves(
     # Unpack values:
     input_duration_seconds = validators[0].input_duration_seconds
     
-    plot_width = 800
+    plot_width = 1200
     plot_height = 600
 
     p = figure(
-        title = "Efficiency Curves",
         width=plot_width,
         height=plot_height,
         x_axis_label="SNR",
@@ -633,8 +632,8 @@ def generate_efficiency_curves(
         line = p.line(
             x='x', 
             y='y', 
+            line_width=2,
             source=source, 
-            line_width=2, 
             line_color=color
         )
         legend_items.append((title, [line]))
@@ -642,6 +641,14 @@ def generate_efficiency_curves(
     legend = Legend(items=legend_items, location="top_left")
     p.add_layout(legend)
     p.legend.click_policy = "hide"
+    p.legend.label_text_font_size = "12pt"
+
+    # Increase font sizes
+    p.axis.axis_label_text_font_size = "14pt"  # Increase axis label font size
+    p.axis.major_label_text_font_size = "12pt"  # Increase tick label font size
+
+    # If you have titles
+    p.title.text_font_size = '16pt'
 
     hover = HoverTool()
     hover.tooltips = [("Name", "@name"), ("SNR", "@x"), ("Accuracy", "@y")]
@@ -724,7 +731,7 @@ def generate_far_curves(
         colors : list[str] = Bright[7]
     ):
     
-    plot_width = 800
+    plot_width = 1200
     plot_height = 600
     tooltips = [
         ("Name", "@name"),
@@ -733,7 +740,6 @@ def generate_far_curves(
     ]
 
     p = figure(
-        title = "False Alarm Rate (FAR) curves",
         width=plot_width,
         height=plot_height,
         x_axis_label="Score Threshold",
@@ -784,6 +790,14 @@ def generate_far_curves(
     p.legend.location = "bottom_left"
     p.legend.click_policy = "hide"
     p.legend.click_policy = "hide"
+    p.legend.label_text_font_size = "12pt"
+
+    # Increase font sizes
+    p.axis.axis_label_text_font_size = "14pt"  # Increase axis label font size
+    p.axis.major_label_text_font_size = "12pt"  # Increase tick label font size
+
+    # If you have titles
+    p.title.text_font_size = '16pt'
     
     return p
 
@@ -793,10 +807,9 @@ def generate_roc_curves(
     ):
     
     p = figure(
-        title="Receiver Operating Characteristic (ROC) Curves",
         x_axis_label='False Alarm Rate',
         y_axis_label='Accuracy',
-        width=800, 
+        width=1200, 
         height=600,
         x_axis_type='log', 
         x_range=[1e-6, 1], 
@@ -831,7 +844,7 @@ def generate_roc_curves(
             y='y', 
             source=source,
             color=color, 
-            width=2, 
+            line_width=2,
             legend_label=f'{title} (area = {roc_auc:.5f})'
         )
         
@@ -848,6 +861,15 @@ def generate_roc_curves(
     p.legend.location = "bottom_right"
     p.legend.click_policy = "hide"
     p.legend.click_policy = "hide"
+    p.legend.label_text_font_size = "12pt"
+
+    # Increase font sizes
+    p.axis.axis_label_text_font_size = "14pt"  # Increase axis label font size
+    p.axis.major_label_text_font_size = "12pt"  # Increase tick label font size
+
+    # If you have titles
+    p.title.text_font_size = '16pt'
+    
     
     # Dropdown to select the test population
     populations = list(validators[0].roc_data.keys())
@@ -908,7 +930,7 @@ def generate_waveform_plot(
         title=f"Worst Performing Input Score: {data['score']}, {data['mass_1_msun']}, {data['mass_2_msun']}",
         x_axis_label='Time Seconds',
         y_axis_label='Strain',
-        width=800, 
+        width=1200, 
         height=300
     )
     
@@ -921,9 +943,9 @@ def generate_waveform_plot(
     line = p.line(
         x='x', 
         y='y', 
+        line_width=2,
         source=source,
         color=colors[0], 
-        width=2, 
         legend_label=f'Whitened Strain + Injection'
     )
         
@@ -936,9 +958,9 @@ def generate_waveform_plot(
     line = p.line(
         x='x', 
         y='y', 
+        line_width=2,
         source=source,
         color=colors[1], 
-        width=2, 
         legend_label=f'Whitened Injection'
     )
     
@@ -951,15 +973,23 @@ def generate_waveform_plot(
     line = p.line(
         x='x', 
         y='y', 
+        line_width=2,
         source=source,
         color=colors[2], 
-        width=2, 
         legend_label=f'Scaled Raw Injections'
     )
     
     p.legend.location = "bottom_right"
     p.legend.click_policy = "hide"
     p.legend.click_policy = "hide"
+    p.legend.label_text_font_size = "12pt"
+
+    # Increase font sizes
+    p.axis.axis_label_text_font_size = "14pt"  # Increase axis label font size
+    p.axis.major_label_text_font_size = "12pt"  # Increase tick label font size
+
+    # If you have titles
+    p.title.text_font_size = '16pt'
     
     return p
     
