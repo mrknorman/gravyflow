@@ -50,11 +50,15 @@ def setup_cuda(
 
     # Confirm TensorFlow and CUDA version compatibility.
     tf_version = tf.__version__
-    cuda_version = tf.sysconfig.get_build_info()['cuda_version']
-    logging.info(
-        f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}"
-    )
 
+    if "cuda_version" in tf.sysconfig.get_build_info():
+        cuda_version = tf.sysconfig.get_build_info()['cuda_version']
+        logging.info(
+            f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}"
+        )
+    else:
+        logging.info("Running in CPU mode...")
+    
     # Step 1: Set the mixed precision policy
     #tf.keras.mixed_precision.set_global_policy('mixed_float16')
 
@@ -93,6 +97,10 @@ def setup_cuda(
 
 def get_memory_array():
     # Run the NVIDIA-SMI command
+
+    if not Path("/usr/bin/nvidia-smi").exists():
+        return None
+    
     try:
         output = subprocess.check_output(
             [
@@ -121,6 +129,10 @@ def get_memory_array():
 
 def get_gpu_utilization_array():
     # Run the NVIDIA-SMI command
+
+    if not Path("/usr/bin/nvidia-smi").exists():
+        return None
+
     try:
         output = subprocess.check_output(
             [
@@ -168,6 +180,11 @@ def find_available_GPUs(
     
     memory_array = get_memory_array()
     utilization_array = get_gpu_utilization_array()
+
+    if memory_array is None:
+        return "-1"
+    if utilization_array is None:
+        return "-1"
     
     # Find the indices of GPUs which have available memory more than 
     # min_memory_MB

@@ -214,7 +214,6 @@ def data(
         if len(injection_generators):
                         
             # Add injections to waveform scaled by inputted SNR config values:
-            
             try:
                 onsource, scaled_injections, scaling_parameters = \
                     injection_generator.add_injections_to_onsource(
@@ -222,9 +221,7 @@ def data(
                         mask,
                         onsource,
                         variables_to_return=variables_to_return
-                    ) 
-                if scaled_injections.shape[2] == 1:
-                    scaled_injections = tf.squeeze(scaled_injections, axis = 2)
+                    )
                 
             except Exception as e:
                 logging.error(f"Couldn't add injections to onsource because {e}\nTraceback: {traceback.format_exc()}")
@@ -233,9 +230,6 @@ def data(
             if onsource is None:
                 logging.error("Onsource is None!")
                 continue
-            
-            onsource = remove_singleton_dimension(onsource)
-            offsource = remove_singleton_dimension(offsource)
 
             for key, value in scaling_parameters.items():
                 if key in variables_to_return:
@@ -260,9 +254,6 @@ def data(
 
             if gf.ReturnVariables.INJECTIONS in variables_to_return:
 
-                if scaled_injections.shape[2] == 1:
-                    scaled_injections = tf.squeeze(scaled_injections, axis = 2)
-
                 scaled_injections = gf.replace_nan_and_inf_with_zero(
                     scaled_injections
                 )
@@ -274,7 +265,7 @@ def data(
         if (gf.ReturnVariables.WHITENED_ONSOURCE in variables_to_return) or \
         (gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in variables_to_return) \
         or (gf.ReturnVariables.SPECTROGRAM_ONSOURCE in variables_to_return):
-            
+
             whitened_onsource = gf.whiten(
                 onsource, 
                 offsource, 
@@ -316,7 +307,7 @@ def data(
                 spectrogram_onsource = gf.spectrogram(whitened_onsource)
             else:
                 spectrogram_onsource = None
-                
+            
             whitened_onsource = tf.cast(whitened_onsource, tf.float16)
             whitened_onsource = gf.replace_nan_and_inf_with_zero(
                 whitened_onsource
@@ -350,11 +341,7 @@ def data(
             
         if gf.ReturnVariables.INJECTION_MASKS in variables_to_return:
             mask = tf.cast(mask, tf.float32)
-
-        print("scaled", scaled_injections.shape)
-        print("whitened", whitened_injections.shape)
-        print("onsource", onsource.shape)
-                
+        
         # Construct dictionary:
         input_dict, output_dict = [
             create_variable_dictionary(
@@ -373,12 +360,6 @@ def data(
         ]
                 
         yield (input_dict, output_dict)
-
-def remove_singleton_dimension(tensor):
-    if tensor.shape[1] == 1:
-        return tf.squeeze(tensor, axis=1)
-    else:
-        return tensor
 
 def create_variable_dictionary(
     return_variables: List[Union[gf.ReturnVariables, gf.gf.WaveformParameters]],
@@ -521,49 +502,33 @@ def Dataset(
 
     max_arival_time_difference_samples : float = \
         int(max_arival_time_difference_seconds * sample_rate_hertz)
-    
-    if num_detectors == 1:
-        onsource_shape = (num_examples_per_batch, num_onsource_samples)
-        cropped_shape = (num_examples_per_batch, num_cropped_samples)
-        offsource_shape = (num_examples_per_batch, num_offsource_samples)
-        detectors_shape = (num_examples_per_batch,)
-        injections_shape = (
-                num_injection_configs, 
-                num_examples_per_batch, 
-                num_cropped_samples
-            )
-        per_injection_shape = (num_injection_configs, num_examples_per_batch)
-        pearson_shape = (
-            num_examples_per_batch, 
-            max_arival_time_difference_samples
+
+    onsource_shape = (
+        num_examples_per_batch, num_detectors, num_onsource_samples
+    )
+    cropped_shape = (
+        num_examples_per_batch, num_detectors, num_cropped_samples
+    )
+    offsource_shape = (
+        num_examples_per_batch, num_detectors, num_offsource_samples
+    )
+    detectors_shape = (
+        num_examples_per_batch, num_detectors
+    )
+    injections_shape = (
+            num_injection_configs, 
+            num_examples_per_batch,
+            num_detectors,
+            num_cropped_samples
         )
-    else:
-        onsource_shape = (
-            num_examples_per_batch, num_detectors, num_onsource_samples
-        )
-        cropped_shape = (
-            num_examples_per_batch, num_detectors, num_cropped_samples
-        )
-        offsource_shape = (
-            num_examples_per_batch, num_detectors, num_offsource_samples
-        )
-        detectors_shape = (
-            num_examples_per_batch, num_detectors
-        )
-        injections_shape = (
-                num_injection_configs, 
-                num_examples_per_batch,
-                num_detectors,
-                num_cropped_samples
-            )
-        per_injection_shape = (
-            num_injection_configs, num_examples_per_batch
-        )        
-        pearson_shape = (
-            num_examples_per_batch, 
-            num_detectors * (num_detectors - 1) // 2,
-            2*max_arival_time_difference_samples
-        )
+    per_injection_shape = (
+        num_injection_configs, num_examples_per_batch
+    )        
+    pearson_shape = (
+        num_examples_per_batch, 
+        num_detectors * (num_detectors - 1) // 2,
+        2*max_arival_time_difference_samples
+    )
         
     spectrogram_shape = gf.spectrogram_shape(cropped_shape)
 

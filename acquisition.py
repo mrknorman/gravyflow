@@ -1,4 +1,5 @@
 # Standard library imports
+from itertools import cycle
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -549,7 +550,7 @@ class IFODataObtainer:
             gf.DataLabel.GLITCHES : glitch_times    
         }
         
-        return valid_segments, feature_times
+        return cycle(valid_segments), feature_times
         
     def get_valid_segments(
         self,

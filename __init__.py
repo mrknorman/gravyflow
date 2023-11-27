@@ -26,7 +26,10 @@ from .snr import snr, scale_to_snr
 from .wnb import wnb
 from .conditioning import spectrogram, spectrogram_shape
 from .model import *
-from .cuphenom.python.cuphenom import imrphenomd
+try:
+    from .cuphenom.python.cuphenom import imrphenomd
+except Exception as e:
+    print(f"Failed to import cuphenom because {e}.")
 from .whiten import whiten, Whiten
 from .pearson import rolling_pearson
 from .detector import *

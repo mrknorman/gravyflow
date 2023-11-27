@@ -59,7 +59,7 @@ def test_iteration(
     
 def test_phenom_d_injection(
     num_tests : int = 10,
-    output_diretory_path : Path = Path("./py_ml_data/tests/")
+    output_diretory_path : Path = Path("./gravyflow_data/tests/")
     ):
     
     # Test Parameters:
@@ -148,7 +148,7 @@ def test_phenom_d_injection(
     
 def test_wnb_injection(
     num_tests : int = 10,
-    output_diretory_path : Path = Path("./py_ml_data/tests/")
+    output_diretory_path : Path = Path("./gravyflow_data/tests/")
     ):
     
     # Test Parameters:

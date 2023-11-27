@@ -138,7 +138,7 @@ def get_antenna_pattern_(
 
     return antenna_pattern
 
-#@tf.function(jit_compile=True)
+@tf.function(jit_compile=True)
 def project_wave_(
     seed,
     strain : tf.Tensor,
@@ -203,7 +203,8 @@ def project_wave_(
     ) 
     
     antenna_patern = tf.expand_dims(antenna_patern, axis=-1)
-
+    
+    # Deal with non-incoherent case:
     if (len(tf.shape(strain)) == 3):
         strain = tf.expand_dims(strain, axis=1)
     injection = tf.reduce_sum(strain*antenna_patern, axis = 2)

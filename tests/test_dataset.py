@@ -243,7 +243,7 @@ def test_dataset(
                 scale_factor=scale_factor
             ), 
             gf.generate_spectrogram(
-                onsource_, 
+                onsource_[0], 
                 sample_rate_hertz
             )]
             for onsource_, whitened_injection, injection, m1, m2 in zip(
@@ -304,6 +304,8 @@ def test_dataset_multi(
                 scaling_method=scaling_method,
                 network=ifos
             )
+
+        phenom_d_generator.injection_chance = 1.0
 
         # Setup ifo data acquisition object:
         ifo_data_obtainer : gf.IFODataObtainer = \
@@ -656,7 +658,7 @@ if __name__ == "__main__":
     #test_feature_dataset()
     test_dataset()
     test_dataset_multi()
-    test_dataset_incoherent()
+    #test_dataset_incoherent()
     #test_iteration()
 
     

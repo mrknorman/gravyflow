@@ -317,10 +317,90 @@ def test_project_wave(
         grid = gridplot(layout)
 
         save(grid)
+
+def test_project_wave_single(
+    output_diretory_path : Path = Path("./gravyflow_data/tests/")
+    ):
+    
+    with gf.env():
+    
+        # Test Parameters:
+        num_examples_per_generation_batch : int = 128
+        num_examples_per_batch : int = 32
+        sample_rate_hertz : float = 2048.0
+        onsource_duration_seconds : float = 0.3
+        crop_duration_seconds : float = 0.05
+        scale_factor : float = 1.0E21
+
+        # Define injection directory path:
+        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+        injection_directory_path : Path = \
+            Path(current_dir / "example_injection_parameters")
+
+        phenom_d_generator : gf.cuPhenomDGenerator = \
+            gf.WaveformGenerator.load(
+                injection_directory_path / "phenom_d_parameters.json", 
+                sample_rate_hertz, 
+                onsource_duration_seconds
+            )
+
+        phenom_d_generator.injection_chance = 1.0
+        phenom_d_generator.front_padding_duration_seconds = 0.20
+        phenom_d_generator.back_padding_duration_seconds = 0.05
+        
+        injection_generator : gf.InjectionGenerator = \
+            gf.InjectionGenerator(
+                [phenom_d_generator],
+                sample_rate_hertz,
+                onsource_duration_seconds,
+                crop_duration_seconds,
+                num_examples_per_generation_batch,
+                num_examples_per_batch,
+                variables_to_return = \
+                    [gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN]
+            )
+
+        total_onsource_duration_seconds : float = \
+            onsource_duration_seconds + (crop_duration_seconds * 2.0)
+
+        generator : Iterator = injection_generator.generate
+
+        injections, mask, parameters = next(generator())
+
+        network = gf.Network([gf.IFO.L1])
+
+        projected_injections = network.project_wave(injections[0], sample_rate_hertz)
+
+        injection_one = projected_injections.numpy()[0]
+
+        total_onsource_duration_seconds : float = \
+            onsource_duration_seconds + crop_duration_seconds
+
+        layout = [
+            [gf.generate_strain_plot(
+                {"Injection Test": injection},
+                sample_rate_hertz,
+                title=f"WNB injection example",
+                scale_factor=scale_factor
+            )]
+            for injection in injection_one
+        ]
+
+        # Ensure output directory exists
+        gf.ensure_directory_exists(output_diretory_path)
+
+        # Define an output path for the dashboard
+        output_file(output_diretory_path / "projection_plots_single.html")
+
+        # Arrange the plots in a grid. 
+        grid = gridplot(layout)
+
+        save(grid)
     
 if __name__ == "__main__":
             
     # ---- User parameters ---- #
+    test_project_wave_single()
     test_detector()
     test_project_wave()
     test_antenna_pattern()

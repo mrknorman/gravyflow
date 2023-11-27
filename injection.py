@@ -878,11 +878,14 @@ class InjectionGenerator:
                 case ScalingOrdinality.AFTER_PROJECTION:
                     
                     try:
-                        injections_ = network.project_wave(
-                            injections_, self.sample_rate_hertz
-                        )
+                        if network.num_detectors > 1:
+                            injections_ = network.project_wave(
+                                injections_, self.sample_rate_hertz
+                            )
+                        else:
+                            injections_ = tf.reduce_sum(injections_, axis=1, keepdims = True)
                     except Exception as e:
-                        logger.error(f+-"Failed to project injections because {e}")
+                        logging.error(f"Failed to project injections because {e}")
 
                     if injections_ is not None:
                         if injections_.shape != onsource.shape:
