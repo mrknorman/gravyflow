@@ -373,7 +373,7 @@ class CaptureWorstPredictions(Callback):
             self.all_scores.extend(scores)
             self.all_indices.extend(indices)
         else:
-            print("Warning: 'outputs' not found in logs for batch", batch)
+            self.logger.warning("Warning: 'outputs' not found in logs for batch", batch)
 
     def on_predict_end(self, logs=None):
         # Sort the global list based on scores to get the worst predictions
@@ -582,8 +582,6 @@ def calculate_multi_rocs(
 
                 if f'roc_data/{range_name}_fpr' not in validation_file:
                     logger.info(f"Save roc data {range_name}_fpr!")
-
-                    print(value['fpr'])
 
                     validation_file.create_dataset(
                         f'roc_data/{range_name}_fpr', 
@@ -1491,11 +1489,6 @@ class Validator:
             if 'roc_data' in h5f:
                 roc_group = h5f['roc_data']
                 keys_array = roc_group['keys'][:] if 'keys' in roc_group else []
-
-                print(validator.name)
-                for i in roc_group:
-                    print(i)
-                print(keys_array)
                 
                 roc_data = {
                     key.decode('utf-8'): {
@@ -1504,8 +1497,6 @@ class Validator:
                         'roc_auc': roc_group[f'{key.decode("utf-8")}_roc_auc'][0],
                     } for key in keys_array if all(f'{key.decode("utf-8")}_{metric}' in roc_group for metric in ['fpr', 'tpr', 'roc_auc'])
                 } if keys_array else None
-
-                print(roc_data)
 
             else:
                 roc_data = None
