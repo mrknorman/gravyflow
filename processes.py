@@ -312,7 +312,15 @@ class HeartbeatCallback(Callback):
         self.heart = heart
         self.interval = interval
 
-    def on_batch_end(self, batch, logs=None):
+    def on_train_batch_end(self, batch, logs=None):
+        if batch % self.interval == 0:
+            self.heart.beat()
+
+    def on_predict_batch_end(self, batch, logs=None):
+        if batch % self.interval == 0:
+            self.heart.beat()
+    
+    def on_test_batch_end(self, batch, logs=None):
         if batch % self.interval == 0:
             self.heart.beat()
 
@@ -322,7 +330,8 @@ class Process:
             command_string : str, 
             name : str,
             tensorflow_memory_mb : float, 
-            cuda_overhead_mb : float
+            cuda_overhead_mb : float,
+            initial_restart_count : int = 1
         ):
 
         self.current_gpu = -1
@@ -336,8 +345,8 @@ class Process:
 
         self.process = None
         self.id = -1
-        self.restart_count = 0
-        self.total_restart_count = 0
+        self.restart_count = initial_restart_count
+        self.total_restart_count = initial_restart_count
         self.restart_counter = time.time()
         self.full = command_string
         self.name = name
@@ -395,7 +404,7 @@ class Process:
                 ) as stdout_file, \
                 open(
                     f"{log_directory_path}/{self.name}_error.txt",
-                    mode
+                    "w"
                 ) as stderr_file:
 
                 full_command = (
@@ -607,7 +616,8 @@ class Manager:
             process_start_wait_seconds : float = 1, 
             management_tick_length_seconds : float = 1,
             max_num_concurent_processes : int = 10,
-            log_directory_path : Path = Path("./logs")
+            log_directory_path : Path = Path("./logs"),
+            force_retrain = False
         ):
 
         if not isinstance(initial_processes, list):
@@ -619,6 +629,7 @@ class Manager:
         for process in self.queued:
             process.manager = self
 
+        self.force_retrain = force_retrain
         self.log_directory_path = log_directory_path
         self.max_restarts = max_restarts
         self.restart_timeout_seconds = restart_timeout_seconds

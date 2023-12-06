@@ -143,10 +143,24 @@ def calculate_efficiency_scores(
 
             # Save efficiency scores:
             if efficiency_scores is not None:
-                eff_group = validation_file.create_group('efficiency_data')
-                eff_group.create_dataset(f'scalings', data=scalings)
+                if 'efficiency_data' not in validation_file:
+                    eff_group = validation_file.create_group('efficiency_data')
+                else:
+                    eff_group = validation_file['efficiency_data']
+
+                if 'scalings' not in eff_group:
+                    eff_group.create_dataset(f'scalings', data=scalings)
+                else:
+                    del eff_group['scalings']
+                    eff_group.create_dataset(f'scalings', data=scalings)
+                
                 for i, score in enumerate(efficiency_scores):
-                    eff_group.create_dataset(f'score_{i}', data=score)
+
+                    if f'score_{i}' not in eff_group:
+                        eff_group.create_dataset(f'score_{i}', data=score)
+                    else: 
+                        del eff_group[f'score_{i}']
+                        eff_group.create_dataset(f'score_{i}', data=score)
     
     return {"scalings" : efficiency_scalings, "scores": np.array(scores)}
 
@@ -437,14 +451,17 @@ def calculate_roc(
     dataset_args["output_variables"] = [gf.ReturnVariables.INJECTION_MASKS]
     dataset_args["injection_generators"][0].injection_chance = 0.5
     
-    # Initlize generator:
+    # Initlize generators (this is horrendous need to rewrite)
     dataset : tf.data.Dataset = gf.Dataset(
-            **dataset_args
+            **deepcopy(dataset_args)
+        ).take(num_batches)
+    scores_dataset : tf.data.Dataset = gf.Dataset(
+            **deepcopy(dataset_args)
         ).take(num_batches)
     
     # Use .map() to extract the true labels and model inputs
     x_dataset = dataset.map(lambda x, y: x)
-    y_true_dataset = dataset.map(
+    y_true_dataset = scores_dataset.map(
         lambda x, y: tf.cast(
             y[gf.ReturnVariables.INJECTION_MASKS.name][0], tf.int32
         )
@@ -514,17 +531,17 @@ def calculate_multi_rocs(
 
             if "roc_data" not in validation_file:
                 logger.info("Saving ROC data keys.")
-
                 roc_group = validation_file.create_group('roc_data')
+            
+            if "keys" not in validation_file["roc_data"]:
                 keys_array = [str(item) for item in scaling_ranges]
-
                 string_dt = h5py.string_dtype(encoding='utf-8')
                 keys_array = np.array(keys_array, dtype=string_dt)
-
-                validation_file.create_dataset('roc_data/keys', data=keys_array)
+                validation_file["roc_data"]["keys"]=keys_array
         
     roc_results = {}
     for scaling_range in scaling_ranges:
+
         # Make copy of generator args so original is not affected:
         dataset_args = deepcopy(dataset_args)
 
@@ -537,8 +554,19 @@ def calculate_multi_rocs(
                 mode = "r"
             ) as validation_file:
 
-                if f"{range_name}_fpr" in validation_file["roc_data"]:
+                roc_data = dict(validation_file["roc_data"])
+
+                if f"{range_name}_fpr" in roc_data and \
+                    f"{range_name}_tpr" in roc_data and \
+                    f"{range_name}_roc_auc"  in roc_data and 0:
+
                     logger.info(f"Range group: {range_name} already present in validation file. Skipping!")
+
+                    roc_results[range_name] = {}
+                    roc_results[range_name]["fpr"] = np.array(roc_data[f"{range_name}_fpr"])
+                    roc_results[range_name]["tpr"] = np.array(roc_data[f"{range_name}_tpr"])
+                    roc_results[range_name]["roc_auc"] = np.array(roc_data[f"{range_name}_roc_auc"])[0]
+                    
                     continue
         
         if isinstance(scaling_range, tuple):
@@ -595,7 +623,10 @@ def calculate_multi_rocs(
                         f'roc_data/{range_name}_tpr', 
                         data=value['tpr']
                     )
+
+                if f'roc_data/{range_name}_roc_auc' not in validation_file:
                     validation_file.create_dataset(f'roc_data/{range_name}_roc_auc', data=np.array([value['roc_auc']]))
+
         
     return roc_results
 
@@ -750,8 +781,8 @@ def generate_efficiency_curves(
         width=width,
         height=height,
         x_axis_label="SNR",
-        y_axis_label="Accuracy",
-        y_range=(0.0, 1.0)  # Set y-axis bounds here
+        y_axis_label="Accuracy (Per Cent)",
+        y_range=(0.0, 100.0)  # Set y-axis bounds here
     )
 
     # Set the initial plot title
@@ -798,7 +829,7 @@ def generate_efficiency_curves(
                 else:
                     total = np.sum(score > threshold)
                                         
-                acc.append(total / len(score))
+                acc.append((total / len(score)) * 100)
             
             acc_all_fars.append(acc)
                 
@@ -829,7 +860,7 @@ def generate_efficiency_curves(
     p.title.text_font_size = '16pt'
 
     hover = HoverTool()
-    hover.tooltips = [("Name", "@name"), ("SNR", "@x"), ("Accuracy", "@y")]
+    hover.tooltips = [("Name", "@name"), ("SNR", "@x"), ("Accuracy (Per Cent)", "@y")]
     p.add_tools(hover)
 
     slider = Slider(
@@ -916,7 +947,7 @@ def generate_far_curves(
     tooltips = [
         ("Name", "@name"),
         ("Score Threshold", "@x"),
-        ("False Alarms per Second", "@y"),
+        ("False Alarm Rate (Hz)", "@y"),
     ]
 
     p = figure(
@@ -924,7 +955,7 @@ def generate_far_curves(
         width=width,
         height=height,
         x_axis_label="Score Threshold",
-        y_axis_label="False Alarms per Second (Hz)",
+        y_axis_label="False Alarm Rate (Hz)",
         tooltips=tooltips,
         x_axis_type="log",
         y_axis_type="log"
@@ -999,31 +1030,32 @@ def generate_roc_curves(
     
     p = figure(
         #title="Receiver Operating Characteristic (ROC) Curves",
-        x_axis_label='False Alarm Rate',
-        y_axis_label='Accuracy',
+        x_axis_label='False Alarm Rate (Hz)',
+        y_axis_label='Accuracy (Per Cent)',
         width=width, 
         height=height,
         x_axis_type='log', 
         x_range=[1e-6, 1], 
-        y_range=[0.0, 1.0]
+        y_range=[0.0, 100.0]
     )
     
     max_num_points = 500
+
     initial_population_key = list(validators[0].roc_data.keys())[0]
     all_sources = {}
     
     for color, validator in zip(colors, validators):
         roc_data = validator.roc_data[initial_population_key]
         name = validator.name
-        
+                
         if name is not None:
             title = snake_to_capitalized_spaces(name)
         else:
             title = f"default_{index}"
             name = index
-
+        
         fpr = roc_data["fpr"]
-        tpr = roc_data["tpr"]
+        tpr = roc_data["tpr"]*100
         roc_auc = roc_data["roc_auc"]
 
         reduced_fpr, reduced_tpr = downsample_data(fpr, tpr, max_num_points)
@@ -1095,7 +1127,7 @@ def generate_roc_curves(
         name = validator.name
         all_data[name] = {}
         for population, data in validator.roc_data.items():
-            fpr, tpr = downsample_data(data["fpr"], data["tpr"], max_num_points)
+            fpr, tpr = downsample_data(data["fpr"], data["tpr"]*100, max_num_points)
             all_data[name][population] = {
                 'fpr': fpr,
                 'tpr': tpr,
@@ -1311,6 +1343,7 @@ class Validator:
 
         validator.heart = heart
         
+        validator.worst_performers = None
         """
         validator.logger.info(f"Worst performing inputs for {validator.name}...")
         tar_scores, worst_performers = \
@@ -1339,6 +1372,7 @@ class Validator:
                     heart=validator.heart,
                     **efficiency_config
                 )
+
             validator.logger.info(f"Done")
         else:
             validator.logger.info("Validation file already contains efficiency scores! Loading...")
@@ -1360,8 +1394,7 @@ class Validator:
             validator.logger.info("Validation file already contains FAR scores! Loading...")
         
         validator.logger.info(f"Collecting ROC data for {validator.name}...")
-        validator.roc_data = \
-            calculate_multi_rocs(    
+        validator.roc_data = calculate_multi_rocs(    
                 model,
                 dataset_args,
                 validator.logger,
@@ -1435,7 +1468,9 @@ class Validator:
                         f'{key}_tpr', 
                         data=value['tpr']
                     )
-                    roc_group.attrs[f'{key}_roc_auc'] = value['roc_auc']
+                    roc_group.create_dataset(
+                        f'{key}_roc_auc', data=np.array([value['roc_auc']])
+                    )
 
             if self.worst_perfomers is not None:         
                 worst_performers = self.worst_performers
@@ -1484,22 +1519,32 @@ class Validator:
 
             # Check and load FAR scores:
             far_scores = h5f['far_scores']['scores'][:] if 'far_scores' in h5f and 'scores' in h5f['far_scores'] else None
-
+            
+            roc_data = {}
             # Check and load ROC data:
             if 'roc_data' in h5f:
-                roc_group = h5f['roc_data']
+                roc_group = dict(h5f['roc_data'])
                 keys_array = roc_group['keys'][:] if 'keys' in roc_group else []
-                
-                roc_data = {
-                    key.decode('utf-8'): {
-                        'fpr': roc_group[f'{key.decode("utf-8")}_fpr'][:],
-                        'tpr': roc_group[f'{key.decode("utf-8")}_tpr'][:],
-                        'roc_auc': roc_group[f'{key.decode("utf-8")}_roc_auc'][0],
-                    } for key in keys_array if all(f'{key.decode("utf-8")}_{metric}' in roc_group for metric in ['fpr', 'tpr', 'roc_auc'])
-                } if keys_array else None
 
-            else:
-                roc_data = None
+                # Check if keys_array is not empty
+                for key in keys_array:
+                    key_str = key.decode('utf-8')
+
+                    # Check if all required metrics are present for the current key
+                    metrics_present = True
+                    for metric in ['fpr', 'tpr', 'roc_auc']:
+                        if f'{key_str}_{metric}' not in roc_group:
+                            metrics_present = False
+                            break
+
+                    if metrics_present:
+                        # All metrics are present, add them to the dictionary
+                        roc_data[key_str] = {
+                            'fpr': roc_group[f'{key_str}_fpr'][:],
+                            'tpr': roc_group[f'{key_str}_tpr'][:],
+                            'roc_auc': roc_group[f'{key_str}_roc_auc'][0],
+                        }
+
 
             # Populate the Validator object's attributes with loaded data:
             validator.efficiency_data = efficiency_data

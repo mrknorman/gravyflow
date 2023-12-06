@@ -261,8 +261,10 @@ class WaveformGenerator:
             config = json.load(file)
 
         # Replace placeholders
-        for value in config.values():
-            gf.replace_placeholders(value, replacements)
+        gf.replace_placeholders(
+            config, 
+            replacements
+        )
             
         if scaling_method is not None:
             config["scaling_method"] = scaling_method

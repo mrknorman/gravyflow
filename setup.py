@@ -248,17 +248,33 @@ def get_tf_memory_usage() -> int:
     memory_info = tf.config.experimental.get_memory_info(device_name)
     return memory_info["current"] // (1024 * 1024)
 
+
 def replace_placeholders(
-        value: dict, 
+        input: dict, 
         replacements: dict
     ) -> None:
         
     """Replace placeholders in the config dictionary with actual values."""
-    for k in ["value", "max_", "min_", "type_"]:
 
-        if isinstance(value, dict):
-            if k in value:
-                value[k] = replacements.get(value[k], value[k])
+    element = None
+
+    if isinstance(input, dict):
+        for key, value in input.items():
+            if isinstance(value, list) or isinstance(value, dict):
+                input[key] = replace_placeholders(value, replacements)
+            else:
+                input[key] = replacements.get(value, value)
+    elif isinstance(input, list):
+        for index, item in enumerate(input):
+
+            if isinstance(item, list) or isinstance(item, dict):
+                input[index] = replace_placeholders(item, replacements)
+            else:
+                input[index] = replacements.get(item, item)
+    else:
+        raise ValueError('Item not list or dict')
+    
+    return input
                 
 def env(
     min_gpu_memory_mb: int = 4000,

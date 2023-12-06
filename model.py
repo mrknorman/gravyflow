@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Union, List, Dict, Optional
 from copy import deepcopy
 from pathlib import Path
+import os
 import logging
 
 import numpy as np
@@ -11,6 +12,8 @@ import tensorflow_probability as tfp
 from keras.layers import Lambda
 from keras import backend as K
 from keras.callbacks import Callback
+from tensorflow.keras.layers import Layer
+import json
 
 import gravyflow as gf
 
@@ -352,9 +355,9 @@ def ensure_hp(parameter):
 
 @dataclass
 class BaseLayer:
-    layer_type: str
-    activation: Union[HyperParameter, str]
-    mutable_attributes: List
+    layer_type: str = "Base"
+    activation: Union[HyperParameter, str] = None
+    mutable_attributes: List = None
     
     def randomize(self):
         """
@@ -379,14 +382,39 @@ class BaseLayer:
             setattr(mutated_layer, attribute_name, mutated_value)
         return mutated_layer
 
+class Reshape(Layer):
+    def __init__(self, reshaping_mode = "depthwise", **kwargs):
+        super(Reshape, self).__init__(**kwargs)
+        
+        self.reshaping_mode = reshaping_mode
+
+    def call(self, inputs):
+        # Reshape the input tensor based on the specified mode
+        if self.reshaping_mode == 'lengthwise':
+            # (num_batches, num_features * num_steps, 1)
+            return tf.reshape(inputs, [tf.shape(inputs)[0], -1, 1])
+        elif self.reshaping_mode == 'depthwise':
+            # (num_batches, num_steps, num_features)
+            return tf.transpose(inputs, perm=[0, 2, 1])
+        elif self.reshaping_mode == 'heightwise':
+            # (num_batches, num_features, num_steps, 1)
+            return tf.expand_dims(inputs, axis=-1)
+        else:
+            raise ValueError("Invalid reshaping mode")
+
+    def get_config(self):
+        config = super(Reshape, self).get_config()
+        config.update({"reshaping_mode": self.reshaping_mode})
+        return config
+
 @dataclass
 class DenseLayer(BaseLayer):
-    units: HyperParameter
-    activation: HyperParameter
+    units: HyperParameter = 64
+    activation: HyperParameter = "relu"
 
     def __init__(
             self, 
-            units: Union[HyperParameter, int], 
+            units: Union[HyperParameter, int] = 64, 
             activation: Union[HyperParameter, str] = "relu"
         ):
         """
@@ -427,15 +455,16 @@ class FlattenLayer(BaseLayer):
 
 @dataclass
 class ConvLayer(BaseLayer):
-    filters: HyperParameter
-    kernel_size: HyperParameter
-    strides: HyperParameter
+    filters: HyperParameter = 16
+    kernel_size: HyperParameter = 16
+    strides: HyperParameter = 1
     
     def __init__(self, 
-        filters: HyperParameter, 
-        kernel_size: HyperParameter, 
-        activation: HyperParameter, 
-        strides: HyperParameter = hp(1)
+        filters: HyperParameter = 16, 
+        kernel_size: HyperParameter = 16, 
+        activation: HyperParameter = "relu", 
+        strides: HyperParameter = hp(1),
+        dilation: HyperParameter = hp(0)
         ):
         """
         Initializes a ConvLayer instance.
@@ -451,18 +480,19 @@ class ConvLayer(BaseLayer):
         self.filters = ensure_hp(filters)
         self.kernel_size = ensure_hp(kernel_size)
         self.strides = ensure_hp(strides)
+        self.dilation = ensure_hp(dilation)
 
         self.padding = hp("same")
         
-        self.mutable_attributes = [self.activation, self.filters, self.kernel_size, self.strides]
+        self.mutable_attributes = [self.activation, self.filters, self.kernel_size, self.strides, self.dilation]
         
 @dataclass
 class PoolLayer(BaseLayer):
-    pool_size: HyperParameter
-    strides: HyperParameter
+    pool_size: HyperParameter = 4
+    strides: HyperParameter = 4
     
     def __init__(self, 
-        pool_size: HyperParameter, 
+        pool_size: HyperParameter = 4, 
         strides: Optional[Union[HyperParameter, int]] = None
         ):
         """
@@ -484,7 +514,7 @@ class PoolLayer(BaseLayer):
         self.mutable_attributes = [self.pool_size, self.strides]
         
 class DropLayer(BaseLayer):
-    rate: HyperParameter
+    rate: HyperParameter = 0.5
     
     def __init__(self, rate: Union[HyperParameter, float]):
         """
@@ -546,16 +576,21 @@ class TruncatedNormal(tf.keras.layers.Layer):
 def cap_value(x):
     return K.clip(x, 1.0e-5, 1000)  # values will be constrained to [-1, 1]
 
-class ModelBuilder:
+class Model:
     def __init__(
         self, 
+        name : str,
         layers: List[BaseLayer], 
         optimizer: str, 
         loss: str, 
-        batch_size: int = None
+        input_configs : Union[List[Dict], Dict],
+        output_config : dict,
+        batch_size: int = None,
+        model_path : Path = None,
+        metrics : list = []
     ):
         """
-        Initializes a ModelBuilder instance.
+        Initializes a Model instance.
         
         Args:
         layers: List of BaseLayer instances making up the model.
@@ -563,6 +598,8 @@ class ModelBuilder:
         loss: Loss function to use when training the model.
         batch_size: Batch size to use when training the model.
         """   
+
+        self.name = name
 
         if batch_size is None:
             batch_size = gf.Defaults.num_examples_per_batch
@@ -573,10 +610,218 @@ class ModelBuilder:
         self.loss = ensure_hp(loss)
         
         self.fitness = []
-        
         self.metrics = []
 
-    def build_model(
+        self.build(
+            input_configs,
+            output_config,
+            model_path,
+            metrics
+        )
+
+    @classmethod
+    def from_config(
+        cls, 
+        model_name : str,
+        model_config_path : str, 
+        num_ifos : int, 
+        optimizer,
+        loss,
+        num_onsource_samples : int = None, 
+        num_offsource_samples : int = None,
+        model_path : Path = Path("./models")
+    ):
+        """
+        Loads a model configuration from a file and sets up the model according to the configuration.
+
+        Args:
+        - model_config_path (str): Path to the model configuration file.
+        - num_ifos (int): Number of interferometers.
+        - num_onsource_samples (int): Number of on-source samples.
+        - num_offsource_samples (int): Number of off-source samples.
+        - gf (module): A module containing custom layer classes and functions.
+
+        Returns:
+        - tuple: A tuple containing input configurations, output configuration, and hidden layers.
+        """
+
+        if num_onsource_samples is None:
+            num_onsource_samples = int(
+                (gf.Defaults.onsource_duration_seconds + 2.0*gf.Defaults.crop_duration_seconds)*
+                gf.Defaults.sample_rate_hertz
+            )
+        if num_offsource_samples is None:
+            num_offsource_samples = int(
+                gf.Defaults.offsource_duration_seconds*
+                gf.Defaults.sample_rate_hertz
+            )
+
+        with open(model_config_path) as file:
+            model_config = json.load(file)
+
+        # Replace placeholders in input configurations
+        input_configs = model_config["inputs"]
+        replacements = {
+            "num_ifos": num_ifos,
+            "num_onsource_samples": num_onsource_samples,
+            "num_offsource_samples": num_offsource_samples
+        }
+        input_configs = gf.replace_placeholders(input_configs, replacements=replacements)
+
+        # Get output configuration
+        output_config = model_config["outputs"][0]
+
+        # Process each layer and create corresponding layer objects
+        hidden_layers = []
+        for index, layer_config in enumerate(model_config["layers"]):
+            name = layer_config.get("name", f"layer_{index}")
+
+            if "type" not in layer_config:
+                raise Exception(f"Layer: {name} missing type!")
+
+            layer_type = layer_config["type"]
+            # Match layer type and add appropriate layer
+            match layer_type:       
+                case "Whiten":
+                    hidden_layers.append(gf.WhitenLayer())
+                case "Flatten":
+                    hidden_layers.append(gf.FlattenLayer())
+                case "Dense":
+                    hidden_layers.append(gf.DenseLayer(
+                        units=layer_config.get("num_neurons", 64), 
+                        activation=layer_config.get("activation", "relu")
+                    ))
+                case "Conv":
+                    hidden_layers.append(gf.ConvLayer(
+                        filters=layer_config.get("num_filters", 16), 
+                        kernel_size=layer_config.get("filter_size", 16), 
+                        activation=layer_config.get("activation", "relu"),
+                        strides=layer_config.get("filter_stride", 1), 
+                        dilation=layer_config.get("filter_dilation", 0)
+                    ))
+                case "Pool":
+                    hidden_layers.append(gf.PoolLayer(
+                        pool_size=layer_config.get("size", 16),
+                        strides=layer_config.get("stride", 16)
+                    ))
+                case "Drop":
+                    hidden_layers.append(gf.DropLayer(
+                        layer_config.get("rate", 0.5)
+                    ))
+                case _:
+                    raise ValueError(f"Layer type '{layer_type}' not recognized")
+
+            # Add dropout layer if specified
+            if "dropout" in layer_config:
+                hidden_layers.append(gf.DropLayer(
+                    layer_config.get("dropout", 0.5)
+                ))
+
+        model = cls(
+            model_name,
+            hidden_layers, 
+            input_configs=input_configs, 
+            output_config=output_config,
+            optimizer=optimizer, 
+            loss=loss,
+            model_path=model_path
+        )
+
+        return model
+
+    @classmethod
+    def load(
+            cls,
+            name : str,
+            model_load_path : Path,
+            optimizer: str, 
+            loss: str, 
+            input_configs : Union[List[Dict], Dict],
+            output_config : dict,
+            num_ifos : int,
+            hidden_layers = None,
+            model_config_path = None,
+            num_onsource_samples : int = None, 
+            num_offsource_samples : int = None,
+            model_path : Path = None,
+            force_overwrite = False
+        ):
+        
+        if num_onsource_samples is None:
+            num_onsource_samples = int(
+                (gf.Defaults.onsource_duration_seconds + 2.0*gf.Defaults.crop_duration_seconds)*
+                gf.Defaults.sample_rate_hertz
+            )
+        if num_offsource_samples is None:
+            num_offsource_samples = int(
+                gf.Defaults.offsource_duration_seconds*
+                gf.Defaults.sample_rate_hertz
+            )
+
+        if model_path is None:
+            model_path = model_load_path
+
+        if hidden_layers is not None and model_config_path is not None:
+            logging.warning("When attempting to load model, hidden layers and model_config_path are both not none. Using hidden layers.")
+        
+        blueprint_exists = True
+        if hidden_layers is not None:
+            model = cls(
+                name,
+                hidden_layers, 
+                input_configs=input_configs, 
+                output_config=output_config,
+                optimizer=optimizer, 
+                loss=loss,
+                model_path=model_path
+            )
+        elif model_config_path is not None:
+            model = cls.from_config(
+                name,
+                model_config_path=model_config_path, 
+                num_ifos=num_ifos, 
+                optimizer=optimizer,
+                loss=loss,
+                num_onsource_samples=num_onsource_samples, 
+                num_offsource_samples=num_offsource_samples,
+                model_path=model_path
+            )
+        else:  
+            blueprint_exists = False
+            model = cls(
+                name,
+                [], 
+                input_configs=input_configs, 
+                output_config=output_config,
+                optimizer=optimizer, 
+                loss=loss,
+                model_path=model_path
+            )
+        
+        # Check if the model file exists
+        if os.path.exists(model_load_path) and not force_overwrite:
+            try:
+                # Try to load the model
+                logging.info(f"Loading model from {model_load_path}")
+                model.model = tf.keras.models.load_model(model_load_path)
+                return model
+
+            except Exception as e:
+                logging.error(f"Error loading model: {e}")
+                if blueprint_exists:
+                    logging.info("Using new model...")
+                    return model
+                else:
+                    raise ValueError("No default model blueprint exists!")
+        else:
+            # If the model doesn't exist, build a new one
+            if blueprint_exists:
+                logging.info("No saved model found. Using new model...")
+                return model
+            else:
+                raise ValueError("No default model blueprint exists!")
+
+    def build(
         self, 
         input_configs : Union[List[Dict], Dict],
         output_config : dict,
@@ -604,15 +849,16 @@ class ModelBuilder:
         last_output_tensors = list(inputs.values())
 
         for layer in self.layers:
-            new_layer = self.build_hidden_layer(layer)
+            new_layers = self.build_hidden_layer(layer)
 
-            # Apply the layer to the last output tensor(s)
-            if isinstance(new_layer, gf.Whiten):
-                # Whiten expects a list of tensors
-                last_output_tensors = [new_layer(last_output_tensors)]
-            else:
-                # Apply the layer to each of the last output tensors (assuming they can all be processed by this layer)
-                last_output_tensors = [new_layer(tensor) for tensor in last_output_tensors]
+            for new_layer in new_layers:
+                # Apply the layer to the last output tensor(s)
+                if isinstance(new_layer, gf.Whiten):
+                    # Whiten expects a list of tensors
+                    last_output_tensors = [new_layer(last_output_tensors)]
+                else:
+                    # Apply the layer to each of the last output tensors (assuming they can all be processed by this layer)
+                    last_output_tensors = [new_layer(tensor) for tensor in last_output_tensors]
         
         # Build output layer
         output_tensor = self.build_output_layer(last_output_tensors[-1], output_config)
@@ -639,42 +885,47 @@ class ModelBuilder:
             layer : BaseLayer
         ):
 
+        new_layers = []
+
         # Get layer type:
         match layer.layer_type:       
             case "Whiten":
-                new_layer = gf.Whiten()
+                new_layers.append(gf.Whiten())
+                new_layers.append(gf.Reshape())
+
+
             case "Flatten":
-                new_layer = tf.keras.layers.Flatten()
+                new_layers.append(tf.keras.layers.Flatten())
             case "Dense":
-                new_layer = tf.keras.layers.Dense(
+                new_layers.append(tf.keras.layers.Dense(
                         layer.units.value, 
                         activation=layer.activation.value
-                    )
+                    ))
             case "Convolutional":
-                new_layer = tf.keras.layers.Conv1D(
+                new_layers.append(tf.keras.layers.Conv1D(
                         layer.filters.value, 
                         (layer.kernel_size.value,), 
                         strides=(layer.strides.value,), 
                         activation=layer.activation.value,
                         padding = layer.padding.value
-                    )
+                    ))
             case "Pooling":
-                new_layer = tf.keras.layers.MaxPool1D(
+                new_layers.append(tf.keras.layers.MaxPool1D(
                         (layer.pool_size.value,),
                         strides=(layer.strides.value,),
                         padding = layer.padding.value
-                    )
+                    ))
             case "Dropout":
-                new_layer = tf.keras.layers.Dropout(
+                new_layers.append(tf.keras.layers.Dropout(
                         layer.rate.value
-                    )
+                    ))
             case _:
                 raise ValueError(
                     f"Layer type '{layer.layer_type.value}' not recognized"
                 )
         
         # Return new layer type:
-        return new_layer
+        return new_layers
             
     def build_output_layer(self, last_output_tensor, output_config):
         # Flatten the last output tensor
@@ -703,7 +954,7 @@ class ModelBuilder:
 
         return output_tensor
         
-    def train_model(
+    def train(
         self, 
         train_dataset: tf.data.Dataset, 
         validate_dataset: tf.data.Dataset,
@@ -730,8 +981,9 @@ class ModelBuilder:
 
             history_data = gf.load_history(self.model_path)
             if history_data != {}:
+                print(history_data[checkpoint_monitor])
                 best_metric = min(history_data[checkpoint_monitor]) #assuming loss for now
-                best_epoch = np.argmin(min(history_data[checkpoint_monitor]) + 1)
+                best_epoch = np.argmin(history_data[checkpoint_monitor]) + 1
                 initial_epoch = len(history_data[checkpoint_monitor])
 
                 if initial_epoch - best_epoch > training_config["patience"]:
@@ -806,12 +1058,45 @@ class ModelBuilder:
             )
         )
 
+        if heart is not None:
+            heart.beat()
+
+        gf.save_dict_to_hdf5(
+            self.metrics[0].history, 
+            self.model_path / "metrics", 
+            force_overwrite=False
+        )
+
         return True
             
-    def validate_model(self, test_dataset: tf.data.Dataset):
-        pass
+    def validate(
+        self, 
+        dataset_arguments : dict,
+        efficiency_config : dict,
+        far_config : dict,
+        roc_config : dict,
+        model_path : Path,
+        heart : None
+    ):
+        validation_file_path : Path = Path(model_path) / "validation_data.h5"
+        
+        # Validate model:
+        validator = gf.Validator.validate(
+                self.model, 
+                self.name,
+                dataset_args=deepcopy(dataset_arguments),
+                efficiency_config=efficiency_config,
+                far_config=far_config,
+                roc_config=roc_config,
+                checkpoint_file_path=validation_file_path,
+                heart=heart
+            )
 
-    def test_model(self, validation_datasets: tf.data.Dataset, num_batches: int):
+        validator.plot(
+            model_path / "validation_plots.html"
+        )
+
+    def test(self, validation_datasets: tf.data.Dataset, num_batches: int):
         """
         Tests the model.
         
@@ -834,7 +1119,7 @@ class ModelBuilder:
         self.model.summary()
         
     @staticmethod
-    def crossover(parent1: 'ModelBuilder', parent2: 'ModelBuilder') -> 'ModelBuilder':
+    def crossover(parent1: 'Model', parent2: 'Model') -> 'Model':
         """
         Creates a new model whose hyperparameters are a combination of two parent models.
         The child model is then returned.
@@ -849,11 +1134,11 @@ class ModelBuilder:
         first_part, second_part = (short_layers[:split_point], long_layers[split_point:]) if np.random.random() < 0.5 else (long_layers[:split_point], short_layers[split_point:])
         child_layers = first_part + second_part
 
-        child_model = ModelBuilder(child_layers, parent1.optimizer, parent1.loss, parent1.batch_size)
+        child_model = Model(child_layers, parent1.optimizer, parent1.loss, parent1.batch_size)
 
         return child_model
     
-    def mutate(self, mutation_rate: float) -> 'ModelBuilder':
+    def mutate(self, mutation_rate: float) -> 'Model':
         """
         Returns a new model with mutated layers based on the mutation_rate.
         
@@ -861,10 +1146,10 @@ class ModelBuilder:
         mutation_rate: Probability of mutation.
         
         Returns:
-        mutated_model: New ModelBuilder instance with potentially mutated layers.
+        mutated_model: New Model instance with potentially mutated layers.
         """
         mutated_layers = [layer.mutate(mutation_rate) for layer in self.layers]
-        mutated_model = ModelBuilder(mutated_layers, self.optimizer, self.loss, self.batch_size)
+        mutated_model = Model(mutated_layers, self.optimizer, self.loss, self.batch_size)
 
         return mutated_model
 
@@ -888,7 +1173,7 @@ class Population:
             )
         self.fitnesses = np.ones(self.current_population_size)
         
-    def initilize_population(self, genome_template, input_size, output_size):
+    def initilize(self, genome_template, input_size, output_size):
     
         population = []
         for j in range(self.initial_population_size):   
@@ -903,8 +1188,8 @@ class Population:
                     randomizeLayer(*genome_template['layers'][i])
                 )
                 
-            # Create an instance of DenseModelBuilder with num_neurons list
-            builder = ModelBuilder(
+            # Create an instance of DenseModel with num_neurons list
+            builder = Model(
                 layers, 
                 optimizer = genome_template['base']['optimizer'], 
                 loss = hp(negative_loglikelihood), 
@@ -952,7 +1237,7 @@ class Population:
         # This should only happen due to rounding errors, and should be very rare.
         return self.population[-1]
     
-    def train_population(
+    def train(
         self, 
         num_generations, 
         num_train_examples, 
@@ -989,3 +1274,4 @@ class Population:
                         
             print(self.fitnesses)
             print(mean(self.fitnesses))
+

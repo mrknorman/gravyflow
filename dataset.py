@@ -319,7 +319,7 @@ def data(
             spectrogram_onsource = None
         
         if gf.ReturnVariables.ONSOURCE in variables_to_return:
-            onsource = tf.cast(onsource, tf.float16)
+            onsource = tf.cast(onsource, tf.float32)
             onsource = gf.replace_nan_and_inf_with_zero(onsource)
 
             tf.debugging.check_numerics(
@@ -328,7 +328,7 @@ def data(
             )
             
         if gf.ReturnVariables.OFFSOURCE in variables_to_return:
-            offsource = tf.cast(offsource, tf.float16)
+            offsource = tf.cast(offsource, tf.float32)
             offsource = gf.replace_nan_and_inf_with_zero(offsource)
 
             tf.debugging.check_numerics(
@@ -536,7 +536,7 @@ def Dataset(
         gf.ReturnVariables.ONSOURCE.name:
             tf.TensorSpec(
                 shape=onsource_shape, 
-                dtype=tf.float16
+                dtype=tf.float32
             ),
         gf.ReturnVariables.WHITENED_ONSOURCE.name: 
             tf.TensorSpec(
@@ -546,7 +546,7 @@ def Dataset(
         gf.ReturnVariables.OFFSOURCE.name: 
             tf.TensorSpec(
                 shape=offsource_shape, 
-                dtype=tf.float16
+                dtype=tf.float32
             ),
         gf.ReturnVariables.GPS_TIME.name: 
             tf.TensorSpec(
