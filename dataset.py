@@ -110,7 +110,8 @@ def data(
         ] = None,
         output_variables : List[
             Union[gf.gf.WaveformParameters, gf.ReturnVariables]
-        ] = None
+        ] = None,
+        mask_history = None
     ):
 
     if seed is None:
@@ -341,7 +342,9 @@ def data(
             
         if gf.ReturnVariables.INJECTION_MASKS in variables_to_return:
             mask = tf.cast(mask, tf.float32)
-        
+            if mask_history is not None:
+                mask_history.append(mask)
+                
         # Construct dictionary:
         input_dict, output_dict = [
             create_variable_dictionary(
@@ -415,7 +418,8 @@ def Dataset(
         num_examples_per_generation_batch: int = None,
         num_examples_per_batch: int = None,
         input_variables: List = None,
-        output_variables: List = None
+        output_variables: List = None,
+        mask_history = None
     ) -> tf.data.Dataset:
     
     """
@@ -630,7 +634,8 @@ def Dataset(
         num_examples_per_generation_batch=num_examples_per_generation_batch,
         num_examples_per_batch=num_examples_per_batch,
         input_variables=input_variables,
-        output_variables=output_variables
+        output_variables=output_variables,
+        mask_history=mask_history
     )
 
     options = tf.data.Options()

@@ -451,35 +451,21 @@ def calculate_roc(
     dataset_args["output_variables"] = [gf.ReturnVariables.INJECTION_MASKS]
     dataset_args["injection_generators"][0].injection_chance = 0.5
     
+    mask_history = []
     # Initlize generators (this is horrendous need to rewrite)
     dataset : tf.data.Dataset = gf.Dataset(
-            **deepcopy(dataset_args)
-        ).take(num_batches)
-    scores_dataset : tf.data.Dataset = gf.Dataset(
-            **deepcopy(dataset_args)
+            **dataset_args,
+            mask_history=mask_history
         ).take(num_batches)
     
     # Use .map() to extract the true labels and model inputs
     x_dataset = dataset.map(lambda x, y: x)
-    y_true_dataset = scores_dataset.map(
-        lambda x, y: tf.cast(
-            y[gf.ReturnVariables.INJECTION_MASKS.name][0], tf.int32
-        )
-    )
-        
-    # Convert the true labels dataset to a tensor using reduce
-    tensor_list = []
-    for batch in y_true_dataset:
-        tensor_list.append(batch)
-
-    y_true = tf.concat(tensor_list, axis=0)
 
     callbacks = []
     if heart is not None:
         callbacks += [gf.HeartbeatCallback(heart)]
 
     # Get the model predictions
-
     y_scores = None
     while y_scores is None:
         try:
@@ -500,6 +486,19 @@ def calculate_roc(
             y_scores = None
             logging.error(f"Error calculating ROC scores because {e}! Retrying.")
             continue
+    
+    y_true = tf.reshape(tf.concat(mask_history, axis=0), [-1]) 
+
+    # Calculate size difference
+    size_a = tf.size(y_true)
+    size_b = tf.size(y_scores)
+    size_difference = size_a - size_b
+
+    # Resize tensor_a
+    if size_difference > 0:
+        y_true = y_true[:size_a - size_difference]
+    else:
+        y_true = y_true
     
     # Calculate the ROC curve and AUC
     fpr, tpr, roc_auc = roc_curve_and_auc(y_true, y_scores)
@@ -558,7 +557,7 @@ def calculate_multi_rocs(
 
                 if f"{range_name}_fpr" in roc_data and \
                     f"{range_name}_tpr" in roc_data and \
-                    f"{range_name}_roc_auc"  in roc_data and 0:
+                    f"{range_name}_roc_auc"  in roc_data:
 
                     logger.info(f"Range group: {range_name} already present in validation file. Skipping!")
 

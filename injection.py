@@ -543,7 +543,7 @@ class InjectionGenerator:
     num_examples_per_batch : int = None
     variables_to_return : List[WaveformParameters] = None
     index : int = 0
-    
+
     def __post_init__(self):
         
         if self.sample_rate_hertz is None:
@@ -615,7 +615,7 @@ class InjectionGenerator:
                 except Exception as e:
                     logging.error(f"Failed to stack injections parameters because {e}")
                     return None, None, None
-
+            
             yield injections, mask, parameters
     
     def generate_one(self, config):
