@@ -696,9 +696,9 @@ def calculate_tar_scores(
         try:
             tar_scores = model.predict(
                 dataset, 
-                batch_size = num_examples_per_batch,
-                callbacks = callbacks,
-                steps = num_batches, 
+                batch_size=num_examples_per_batch,
+                callbacks=callbacks,
+                steps=num_batches, 
                 verbose=2
             )
 
@@ -841,7 +841,7 @@ def generate_efficiency_curves(
             x='x', 
             y='y', 
             source=source, 
-            line_width=1, 
+            line_width=2, 
             line_color=color
         )
         legend_items.append((title, [line]))
@@ -996,7 +996,7 @@ def generate_far_curves(
             "y", 
             source=source, 
             line_color=color,
-            line_width = 2,
+            line_width=2,
             legend_label=title
         )
 
