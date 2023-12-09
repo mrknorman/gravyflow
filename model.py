@@ -537,6 +537,7 @@ class WhitenLayer(BaseLayer):
         rate: HyperParameter specifying the whitening for this layer.
         """
         self.layer_type = "Whiten"
+        self.mutable_attributes = []
 
 def randomizeLayer(layer_types: List[str], default_layers: Dict[str, BaseLayer]) -> BaseLayer:
     """
@@ -851,6 +852,8 @@ class Model:
         for layer in self.layers:
             new_layers = self.build_hidden_layer(layer)
 
+            print(last_output_tensors)
+
             for new_layer in new_layers:
                 # Apply the layer to the last output tensor(s)
                 if isinstance(new_layer, gf.Whiten):
@@ -1159,42 +1162,38 @@ class Population:
         initial_population_size: int, 
         max_population_size: int,
         genome_template: int,
-        input_size : int,
-        output_size : int
+        num_onsource_samples : int = None,
+        num_offsource_samples : int = None,
+        population_directory_path : Path = Path("./population/"),
+        metrics : List = []
     ):
+        if num_onsource_samples is None:
+            self.num_onsource_samples = int(gf.Defaults.onsource_duration_seconds * gf.Defaults.sample_rate_hertz)
+        
+        if num_offsource_samples is None:
+            self.num_offsource_samples = int(gf.Defaults.offsource_duration_seconds * gf.Defaults.sample_rate_hertz)
+
         self.initial_population_size = initial_population_size
         self.current_population_size = initial_population_size
         self.max_population_size = max_population_size
-        self.population = self.initilize(
-                genome_template, 
-                input_size, 
-                output_size
-            )
+        self.population_directory_path = population_directory_path
+        self.metrics = metrics
+        self.genome_template = genome_template
+
+        self.population = []
+        self.initilize()
         self.fitnesses = np.ones(self.current_population_size)
         
-    def initilize(
-            self, 
-            genome_template, 
-            num_onsource_samples=None,
-            num_offsource_samples=None,
-            population_directory_path = Path("./population"),
-            metrics=[]
-        ):
-
-        if num_onsource_samples is None:
-            num_onsource_samples = gf.Defaults.num_onsource_samples
-        
-        if num_offsource_samples is None:
-            num_offsource_samples = gf.Defaults.num_offsource_samples
+    def initilize(self):
 
         input_configs = [
             {
                 "name" : gf.ReturnVariables.ONSOURCE.name,
-                "shape" : (num_onsource_samples,)
+                "shape" : (self.num_onsource_samples,)
             },
             {
                 "name" : gf.ReturnVariables.OFFSOURCE.name,
-                "shape" : (num_offsource_samples,)
+                "shape" : (self.num_offsource_samples,)
             }
         ]
         
@@ -1202,40 +1201,37 @@ class Population:
             "name" : gf.ReturnVariables.INJECTION_MASKS.name,
             "type" : "binary"
         }
-    
-        population = []
+
         for j in range(self.initial_population_size):   
 
             model_name = f"model_{j}"
             layers = []
             
-            genome_template['base']['num_layers'].randomize()
-            genome_template['base']['optimizer'].randomize()
-            self.batch_size = genome_template['base']['batch_size'].randomize()
+            self.genome_template['base']['num_layers'].randomize()
+            self.genome_template['base']['optimizer'].randomize()
+            batch_size = self.genome_template['base']['batch_size'].randomize()
             
-            for i in range(genome_template['base']['num_layers'].value):
+            for i in range(self.genome_template['base']['num_layers'].value):
                 layers.append(
-                    randomizeLayer(*genome_template['layers'][i])
+                    randomizeLayer(*self.genome_template['layers'][i])
                 )
-                
+
             # Create an instance of DenseModel with num_neurons list
             model = Model(
                 name=model_name,
                 layers=layers, 
-                optimizer=genome_template['base']['optimizer'], 
+                optimizer=self.genome_template['base']['optimizer'], 
                 loss=hp(negative_loglikelihood), 
                 input_configs=input_configs, 
                 output_config=output_config,
-                batch_size=genome_template['base']['batch_size'],
-                model_path=population_directory_path / model_name,
-                metrics=metrics
+                batch_size=self.genome_template['base']['batch_size'],
+                model_path=self.population_directory_path / model_name,
+                metrics=self.metrics
             )
 
-            population.append(model)
+            self.population.append(model)
             model.summary()
-            
-        return population
-    
+        
     def roulette_wheel_selection(self):
         """
         Performs roulette wheel selection on the population.
