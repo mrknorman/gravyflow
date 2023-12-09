@@ -1165,18 +1165,48 @@ class Population:
         self.initial_population_size = initial_population_size
         self.current_population_size = initial_population_size
         self.max_population_size = max_population_size
-        self.population = \
-            self.initilize_population(
+        self.population = self.initilize(
                 genome_template, 
                 input_size, 
                 output_size
             )
         self.fitnesses = np.ones(self.current_population_size)
         
-    def initilize(self, genome_template, input_size, output_size):
+    def initilize(
+            self, 
+            genome_template, 
+            num_onsource_samples=None,
+            num_offsource_samples=None,
+            population_directory_path = Path("./population"),
+            metrics=[]
+        ):
+
+        if num_onsource_samples is None:
+            num_onsource_samples = gf.Defaults.num_onsource_samples
+        
+        if num_offsource_samples is None:
+            num_offsource_samples = gf.Defaults.num_offsource_samples
+
+        input_configs = [
+            {
+                "name" : gf.ReturnVariables.ONSOURCE.name,
+                "shape" : (num_onsource_samples,)
+            },
+            {
+                "name" : gf.ReturnVariables.OFFSOURCE.name,
+                "shape" : (num_offsource_samples,)
+            }
+        ]
+        
+        output_config = {
+            "name" : gf.ReturnVariables.INJECTION_MASKS.name,
+            "type" : "binary"
+        }
     
         population = []
         for j in range(self.initial_population_size):   
+
+            model_name = f"model_{j}"
             layers = []
             
             genome_template['base']['num_layers'].randomize()
@@ -1189,20 +1219,20 @@ class Population:
                 )
                 
             # Create an instance of DenseModel with num_neurons list
-            builder = Model(
-                layers, 
-                optimizer = genome_template['base']['optimizer'], 
-                loss = hp(negative_loglikelihood), 
-                batch_size = genome_template['base']['batch_size']
+            model = Model(
+                name=model_name,
+                layers=layers, 
+                optimizer=genome_template['base']['optimizer'], 
+                loss=hp(negative_loglikelihood), 
+                input_configs=input_configs, 
+                output_config=output_config,
+                batch_size=genome_template['base']['batch_size'],
+                model_path=population_directory_path / model_name,
+                metrics=metrics
             )
 
-            # Build the model with input shape (input_dim,)
-            builder.build_model(
-                input_configs={}, 
-                output_config={}
-            )
-            population.append(builder)
-            builder.summary()
+            population.append(model)
+            model.summary()
             
         return population
     
