@@ -204,13 +204,13 @@ def data(
             onsource, offsource, gps_times = next(noise)
         except Exception as e:
             logging.info(f"Noise failed because {e}\nTraceback: {traceback.format_exc()}")
-            continue
+            raise Exception(f"Noise failed because {e}\nTraceback: {traceback.format_exc()}")
         
         try:
             injections_, mask, parameters = next(injections)
         except Exception as e:
             logging.info(f"Injections failed because {e}\nTraceback: {traceback.format_exc()}")
-            continue 
+            raise Exception(f"Noise failed because {e}\nTraceback: {traceback.format_exc()}")
 
         if len(injection_generators):
                         

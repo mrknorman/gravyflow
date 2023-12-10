@@ -12,6 +12,7 @@ import tensorflow_probability as tfp
 from keras.layers import Lambda
 from keras import backend as K
 from keras.callbacks import Callback
+from tensorflow.keras import losses
 from tensorflow.keras.layers import Layer
 import json
 
@@ -293,7 +294,6 @@ class IndependentBetaPrime(tfpl.DistributionLambda):
         base_config = super(IndependentBetaPrime, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
 
-
 @dataclass
 class HyperParameter:
     possible_values: Dict[str, Union[str, List[Union[int, float]]]]
@@ -319,7 +319,12 @@ class HyperParameter:
             low, high = self.possible_values['values']
             self.value = np.random.randint(low, high + 1)
         elif value_type == 'float_range':
-            self.value = np.random.uniform(*possible_values)
+            low, high = self.possible_values['values']
+            self.value = np.random.uniform(low, high)
+        elif value_type == 'log_range':
+            log_low, log_high = np.log10(self.possible_values['values'])
+            random_log_value = np.random.uniform(log_low, log_high)
+            self.value = 10 ** random_log_value
 
     def mutate(self, mutation_rate: float):
         """
@@ -352,6 +357,10 @@ def hp(N):
 
 def ensure_hp(parameter):
     return parameter if isinstance(parameter, HyperParameter) else hp(parameter)
+
+def adjust_features(features, labels):
+    labels['INJECTION_MASKS'] = labels['INJECTION_MASKS'][0]
+    return features, labels
 
 @dataclass
 class BaseLayer:
@@ -586,6 +595,8 @@ class Model:
         loss: str, 
         input_configs : Union[List[Dict], Dict],
         output_config : dict,
+        training_config : dict,
+        dataset_args : dict = None,
         batch_size: int = None,
         model_path : Path = None,
         metrics : list = []
@@ -598,7 +609,10 @@ class Model:
         optimizer: Optimizer to use when training the model.
         loss: Loss function to use when training the model.
         batch_size: Batch size to use when training the model.
-        """   
+        """ 
+        self.train_dataset = None
+        if dataset_args is not None:
+            self.train_dataset = gf.Dataset(**deepcopy(dataset_args)).map(adjust_features)
 
         self.name = name
 
@@ -609,6 +623,7 @@ class Model:
         self.batch_size = ensure_hp(batch_size)
         self.optimizer = ensure_hp(optimizer)
         self.loss = ensure_hp(loss)
+        self.training_config = training_config
         
         self.fitness = []
         self.metrics = []
@@ -946,6 +961,7 @@ class Model:
                 )(x)
             output_tensor = IndependentFoldedNormal(1, name=output_config["name"])(x)
         elif output_config["type"] == "binary":
+            x = tf.keras.layers.Flatten()(x)
             output_tensor = tf.keras.layers.Dense(
                                 1, 
                                 activation='sigmoid', 
@@ -959,9 +975,9 @@ class Model:
         
     def train(
         self, 
-        train_dataset: tf.data.Dataset, 
-        validate_dataset: tf.data.Dataset,
-        training_config: dict,
+        train_dataset: tf.data.Dataset = None, 
+        validate_dataset: tf.data.Dataset = None,
+        training_config: dict = None,
         force_retrain : bool = True,
         callbacks = None,
         heart = None
@@ -973,6 +989,18 @@ class Model:
         train_dataset: Dataset to train on.
         num_epochs: Number of epochs to train for.
         """
+
+        if validate_dataset is None:
+            raise ValueError("No validation dataset!")
+
+        if train_dataset is None:
+            train_dataset = self.train_dataset
+
+        if training_config is None:
+            if self.training_config is not None:
+                training_config = self.training_config
+            else:
+                raise ValueError("Missing training config")
 
         if callbacks is None:
             callbacks = []
@@ -1052,7 +1080,7 @@ class Model:
                 train_dataset,
                 validation_data=validate_dataset,
                 validation_steps=num_validation_batches,
-                epochs = training_config["max_epochs"], 
+                epochs=training_config["max_epochs"], 
                 initial_epoch = initial_epoch,
                 steps_per_epoch = num_batches,
                 callbacks = callbacks,
@@ -1162,16 +1190,21 @@ class Population:
         initial_population_size: int, 
         max_population_size: int,
         genome_template: int,
+        training_config: dict,
+        dataset_args : dict,
         num_onsource_samples : int = None,
         num_offsource_samples : int = None,
+        num_ifos : int = 1,
         population_directory_path : Path = Path("./population/"),
         metrics : List = []
     ):
         if num_onsource_samples is None:
-            self.num_onsource_samples = int(gf.Defaults.onsource_duration_seconds * gf.Defaults.sample_rate_hertz)
+            self.num_onsource_samples = int((gf.Defaults.onsource_duration_seconds + 2.0*gf.Defaults.crop_duration_seconds) * gf.Defaults.sample_rate_hertz)
         
         if num_offsource_samples is None:
             self.num_offsource_samples = int(gf.Defaults.offsource_duration_seconds * gf.Defaults.sample_rate_hertz)
+
+        
 
         self.initial_population_size = initial_population_size
         self.current_population_size = initial_population_size
@@ -1179,7 +1212,10 @@ class Population:
         self.population_directory_path = population_directory_path
         self.metrics = metrics
         self.genome_template = genome_template
-
+        self.training_config = training_config
+        self.dataset_args = dataset_args
+        self.num_ifos = num_ifos
+        
         self.population = []
         self.initilize()
         self.fitnesses = np.ones(self.current_population_size)
@@ -1189,11 +1225,11 @@ class Population:
         input_configs = [
             {
                 "name" : gf.ReturnVariables.ONSOURCE.name,
-                "shape" : (self.num_onsource_samples,)
+                "shape" : (self.num_ifos, self.num_onsource_samples,)
             },
             {
                 "name" : gf.ReturnVariables.OFFSOURCE.name,
-                "shape" : (self.num_offsource_samples,)
+                "shape" : (self.num_ifos, self.num_offsource_samples,)
             }
         ]
         
@@ -1216,14 +1252,18 @@ class Population:
                     randomizeLayer(*self.genome_template['layers'][i])
                 )
 
+            self.training_config["learning_rate"] = ensure_hp(self.training_config["learning_rate"]).randomize()
+
             # Create an instance of DenseModel with num_neurons list
             model = Model(
                 name=model_name,
                 layers=layers, 
                 optimizer=self.genome_template['base']['optimizer'], 
-                loss=hp(negative_loglikelihood), 
+                loss=hp(losses.BinaryCrossentropy()), 
                 input_configs=input_configs, 
                 output_config=output_config,
+                training_config=self.training_config,
+                dataset_args=deepcopy(self.dataset_args),
                 batch_size=self.genome_template['base']['batch_size'],
                 model_path=self.population_directory_path / model_name,
                 metrics=self.metrics
@@ -1265,34 +1305,27 @@ class Population:
     
     def train(
         self, 
-        num_generations, 
-        num_train_examples, 
-        num_validate_examples, 
-        num_examples_per_batch, 
-        ds
-    ):
-                
-        num_train_batches = int(num_train_examples // num_examples_per_batch)
-        
-        num_validate_batches = int(num_validate_examples // num_examples_per_batch)
-        
+        num_generations,
+        dataset_args
+    ):  
         for i in range(self.current_population_size):
-            training_ds = ds.take(num_train_batches)
-            validation_ds = ds.take(num_validate_batches)
-            
             model = self.population[i]
-            model.train_model(training_ds, num_train_batches)
-            self.fitnesses[i] = \
-                model.test_model(validation_ds, num_validate_batches)
-        
-        print(self.fitnesses)
-        
-        for _ in range(self.current_population_size*(num_generations - 1)):
-            training_ds = ds.take(num_train_batches)
-            validation_ds = ds.take(num_validate_batches)
+
+            test_args = deepcopy(dataset_args)
+            test_args["group"] = "test"
             
+            validate_args = deepcopy(dataset_args)
+            validate_args["group"] = "validate"
+
+            test_dataset = gf.Dataset(**test_args).map(adjust_features)
+            validate_dataset = gf.Dataset(**validate_args).map(adjust_features)
+
+            model.train(validate_dataset=test_dataset)
+            self.fitnesses[i] = model.test_model(validate_dataset, num_validate_batches)
+                
+        for _ in range(self.current_population_size*(num_generations - 1)):            
             i = self.roulette_wheel_selection()
-            self.population[i].train_model(training_ds, num_train_batches)
+            self.population[i].train()
             self.fitnesses[i] = \
                 model.test_model(validation_ds, num_validate_batches)
             
