@@ -25,6 +25,7 @@ from .psd import psd
 from .snr import snr, scale_to_snr
 from .wnb import wnb
 from .conditioning import spectrogram, spectrogram_shape
+from .genetics import *
 from .model import *
 try:
     from .cuphenom.python.cuphenom import imrphenomd

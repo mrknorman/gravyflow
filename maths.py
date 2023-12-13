@@ -10,6 +10,9 @@ class DistributionType(Enum):
     CONSTANT = auto()         
     UNIFORM = auto()
     NORMAL = auto()
+    CHOICE = auto()
+    LOG = auto()
+    POW_TWO = auto()
 
 @dataclass
 class Distribution:
@@ -19,6 +22,7 @@ class Distribution:
     max_ : Union[int, float] = None
     mean : float = None
     std : float = None
+    possible_values : List = None
     type_ : DistributionType = DistributionType.CONSTANT
 
     def sample(
@@ -71,19 +75,54 @@ class Distribution:
                     elif self.max_ is None:
                         self.max_ = float("inf")
                     
-                    samples = \
-                        truncnorm.rvs(
+                    samples = truncnorm.rvs(
                             (self.min_ - self.mean) / self.std,
                             (self.max_ - self.mean) / self.std,
                             loc=self.mean_value,
                             scale=self.std,
                             size=num_samples
                         )
+            case DistributionType.CHOICE:
+                if self.possible_values is None:
+                    raise ValueError(
+                        "No possible values given in choice distribution."
+                    )
+                samples = np.random.choice(self.possible_values, size=num_samples)
+            case DistributionType.LOG:
+                if self.min_ is None:
+                    raise ValueError(
+                        "No minumum value given in log distribution."
+                    )
+                elif self.max_ is None:
+                    raise ValueError(
+                        "No maximum value given in log distribution."
+                    )
+                samples = np.random.uniform(
+                            self.min_, 
+                            self.max_, 
+                            num_samples
+                        )
+                samples = 10 ** samples
+
+            case DistributionType.POW_TWO:
+                power_low, power_high = map(int, np.log2((self.min_, self.max_)))
+                power = np.random.randint(power_low, power_high + 1, size=num_samples)
+                samples = 2**power
             
             case _:
                 raise ValueError(f'Unsupported distribution type {self.type_}')
 
         if self.dtype == int:
+
+            if self.type_ == DistributionType.LOG:
+                raise ValueError(
+                    "Cannot convert log values to ints."
+                )
+            elif self.type_ == DistributionType.CHOICE:
+                raise ValueError(
+                    "Cannot convert choice values to ints."
+                )
+
             samples = [int(sample) for sample in samples]
         
         return samples

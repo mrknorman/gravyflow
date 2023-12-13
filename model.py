@@ -294,70 +294,6 @@ class IndependentBetaPrime(tfpl.DistributionLambda):
         base_config = super(IndependentBetaPrime, self).get_config()
         return dict(list(base_config.items()) + list(config.items()))
 
-@dataclass
-class HyperParameter:
-    possible_values: Dict[str, Union[str, List[Union[int, float]]]]
-    value: Union[int, float, str] = None
-    
-    def __post_init__(self):
-        self.randomize()
-
-    def randomize(self):
-        """
-        Randomizes this hyperparameter based on its possible_values.
-        """
-        value_type = self.possible_values['type']
-        possible_values = self.possible_values['values']
-        
-        if value_type == 'list':
-            self.value = np.random.choice(possible_values)
-        elif value_type == 'power_2_range':
-            power_low, power_high = map(int, np.log2(self.possible_values['values']))
-            power = np.random.randint(power_low, power_high + 1)
-            self.value = 2**power
-        elif value_type == 'int_range':
-            low, high = self.possible_values['values']
-            self.value = np.random.randint(low, high + 1)
-        elif value_type == 'float_range':
-            low, high = self.possible_values['values']
-            self.value = np.random.uniform(low, high)
-        elif value_type == 'log_range':
-            log_low, log_high = np.log10(self.possible_values['values'])
-            random_log_value = np.random.uniform(log_low, log_high)
-            self.value = 10 ** random_log_value
-
-    def mutate(self, mutation_rate: float):
-        """
-        Returns a new HyperParameter with a mutated value, based on the mutation_rate.
-        
-        Args:
-        mutation_rate: Probability of mutation.
-        
-        Returns:
-        mutated_param: New HyperParameter instance with potentially mutated value.
-        """
-        mutated_param = deepcopy(self) 
-        if np.random.random() < mutation_rate:
-            value_type = self.possible_values['type']
-            possible_values = self.possible_values['values']
-            if value_type in ['int_range', 'power_2_range', 'float_range']:
-                mutation = np.random.normal(scale=(possible_values[1] - possible_values[0]) / 10)
-                new_value = self.value + mutation
-                # Make sure new value is in the allowed range
-                new_value = min(max(new_value, *possible_values))
-                mutated_param.value = new_value
-            else:
-                mutated_param.randomize()
-            return mutated_param
-        else:
-            return deepcopy(self)
-        
-def hp(N):
-    return HyperParameter({'type': 'list', 'values': [N]})
-
-def ensure_hp(parameter):
-    return parameter if isinstance(parameter, HyperParameter) else hp(parameter)
-
 def adjust_features(features, labels):
     labels['INJECTION_MASKS'] = labels['INJECTION_MASKS'][0]
     return features, labels
@@ -365,7 +301,7 @@ def adjust_features(features, labels):
 @dataclass
 class BaseLayer:
     layer_type: str = "Base"
-    activation: Union[HyperParameter, str] = None
+    activation: Union[gf.HyperParameter, str] = None
     mutable_attributes: List = None
     
     def randomize(self):
@@ -385,11 +321,8 @@ class BaseLayer:
         Returns:
         mutated_layer: New BaseLayer instance with potentially mutated hyperparameters.
         """
-        mutated_layer = deepcopy(self)
-        for attribute_name in mutated_layer.mutable_attributes:
-            mutated_value = getattr(mutated_layer, attribute_name).mutate(mutation_rate)
-            setattr(mutated_layer, attribute_name, mutated_value)
-        return mutated_layer
+        for attribute in self.mutable_attributes:
+            attribute.mutate(mutation_rate)
 
 class Reshape(Layer):
     def __init__(self, reshaping_mode = "depthwise", **kwargs):
@@ -418,28 +351,28 @@ class Reshape(Layer):
 
 @dataclass
 class DenseLayer(BaseLayer):
-    units: HyperParameter = 64
-    activation: HyperParameter = "relu"
+    units: gf.HyperParameter = 64
+    activation: gf.HyperParameter = "relu"
 
     def __init__(
             self, 
-            units: Union[HyperParameter, int] = 64, 
-            activation: Union[HyperParameter, str] = "relu"
+            units: Union[gf.HyperParameter, int] = 64, 
+            activation: Union[gf.HyperParameter, str] = "relu"
         ):
         """
         Initializes a DenseLayer instance.
         
         Args:
         ---
-        units : Union[HyperParameter, int]
-            HyperParameter specifying the number of units in this layer.
-        activation : Union[HyperParameter, int]
-            HyperParameter specifying the activation function for this layer.
+        units : Union[gf.HyperParameter, int]
+            gf.HyperParameter specifying the number of units in this layer.
+        activation : Union[gf.HyperParameter, int]
+            gf.HyperParameter specifying the activation function for this layer.
         """
         
         self.layer_type = "Dense"
-        self.activation = ensure_hp(activation)
-        self.units = ensure_hp(units)
+        self.activation = gf.HyperParameter(activation)
+        self.units = gf.HyperParameter(units)
         self.mutable_attributes = [self.activation, self.units]
 
 @dataclass
@@ -453,10 +386,10 @@ class FlattenLayer(BaseLayer):
         
         Args:
         ---
-        units : Union[HyperParameter, int]
-            HyperParameter specifying the number of units in this layer.
-        activation : Union[HyperParameter, int]
-            HyperParameter specifying the activation function for this layer.
+        units : Union[gf.HyperParameter, int]
+            gf.HyperParameter specifying the number of units in this layer.
+        activation : Union[gf.HyperParameter, int]
+            gf.HyperParameter specifying the activation function for this layer.
         """
         
         self.layer_type = "Flatten"
@@ -464,76 +397,76 @@ class FlattenLayer(BaseLayer):
 
 @dataclass
 class ConvLayer(BaseLayer):
-    filters: HyperParameter = 16
-    kernel_size: HyperParameter = 16
-    strides: HyperParameter = 1
+    filters: gf.HyperParameter = 16
+    kernel_size: gf.HyperParameter = 16
+    strides: gf.HyperParameter = 1
     
     def __init__(self, 
-        filters: HyperParameter = 16, 
-        kernel_size: HyperParameter = 16, 
-        activation: HyperParameter = "relu", 
-        strides: HyperParameter = hp(1),
-        dilation: HyperParameter = hp(0)
+        filters: gf.HyperParameter = 16, 
+        kernel_size: gf.HyperParameter = 16, 
+        activation: gf.HyperParameter = "relu", 
+        strides: gf.HyperParameter = gf.HyperParameter(1),
+        dilation: gf.HyperParameter = gf.HyperParameter(0)
         ):
         """
         Initializes a ConvLayer instance.
         
         Args:
-        filters: HyperParameter specifying the number of filters in this layer.
-        kernel_size: HyperParameter specifying the kernel size in this layer.
-        activation: HyperParameter specifying the activation function for this layer.
-        strides: HyperParameter specifying the stride length for this layer.
+        filters: gf.HyperParameter specifying the number of filters in this layer.
+        kernel_size: gf.HyperParameter specifying the kernel size in this layer.
+        activation: gf.HyperParameter specifying the activation function for this layer.
+        strides: gf.HyperParameter specifying the stride length for this layer.
         """
         self.layer_type = "Convolutional"
-        self.activation = ensure_hp(activation)
-        self.filters = ensure_hp(filters)
-        self.kernel_size = ensure_hp(kernel_size)
-        self.strides = ensure_hp(strides)
-        self.dilation = ensure_hp(dilation)
+        self.activation = gf.HyperParameter(activation)
+        self.filters = gf.HyperParameter(filters)
+        self.kernel_size = gf.HyperParameter(kernel_size)
+        self.strides = gf.HyperParameter(strides)
+        self.dilation = gf.HyperParameter(dilation)
 
-        self.padding = hp("same")
+        self.padding = gf.HyperParameter("same")
         
         self.mutable_attributes = [self.activation, self.filters, self.kernel_size, self.strides, self.dilation]
         
 @dataclass
 class PoolLayer(BaseLayer):
-    pool_size: HyperParameter = 4
-    strides: HyperParameter = 4
+    pool_size: gf.HyperParameter = 4
+    strides: gf.HyperParameter = 4
     
     def __init__(self, 
-        pool_size: HyperParameter = 4, 
-        strides: Optional[Union[HyperParameter, int]] = None
+        pool_size: gf.HyperParameter = 4, 
+        strides: Optional[Union[gf.HyperParameter, int]] = None
         ):
         """
         Initializes a PoolingLayer instance.
         
         Args:
-        pool_size: HyperParameter specifying the size of the pooling window.
-        strides: HyperParameter specifying the stride length for moving the pooling window.
+        pool_size: gf.HyperParameter specifying the size of the pooling window.
+        strides: gf.HyperParameter specifying the stride length for moving the pooling window.
         """
         self.layer_type = "Pooling"
-        self.pool_size = ensure_hp(pool_size)
+        self.pool_size = gf.HyperParameter(pool_size)
         
         if strides is None:
             self.strides = self.pool_size
         else:
-            self.strides = ensure_hp(strides)
+            self.strides = gf.HyperParameter(strides)
         
-        self.padding = hp("same")
+        self.padding = gf.HyperParameter("same")
         self.mutable_attributes = [self.pool_size, self.strides]
         
 class DropLayer(BaseLayer):
-    rate: HyperParameter = 0.5
+    rate: gf.HyperParameter = 0.5
     
-    def __init__(self, rate: Union[HyperParameter, float]):
+    def __init__(self, rate: Union[gf.HyperParameter, float]):
         """
         Initializes a DropLayer instance.
         
         Args:
-        rate: HyperParameter specifying the dropout rate for this layer.
+        rate: gf.HyperParameter specifying the dropout rate for this layer.
         """
         self.layer_type = "Dropout"
-        self.rate = ensure_hp(rate)
+        self.rate = gf.HyperParameter(rate)
         self.mutable_attributes = [self.rate]
 
 class WhitenLayer(BaseLayer):
@@ -543,26 +476,10 @@ class WhitenLayer(BaseLayer):
         Initializes a DropLayer instance.
         
         Args:
-        rate: HyperParameter specifying the whitening for this layer.
+        rate: gf.HyperParameter specifying the whitening for this layer.
         """
         self.layer_type = "Whiten"
         self.mutable_attributes = []
-
-def randomizeLayer(layer_types: List[str], default_layers: Dict[str, BaseLayer]) -> BaseLayer:
-    """
-    Returns a randomized layer of a random type.
-    
-    Args:
-    layer_types: List of possible layer types.
-    default_layers: Dictionary mapping layer types to default layers of that type.
-    
-    Returns:
-    layer: New BaseLayer instance of a random type, with randomized hyperparameters.
-    """
-    layer_type = np.random.choice(layer_types)
-    layer = default_layers[layer_type]
-    layer.randomize()
-    return layer
 
 """
 class TruncatedNormal(tf.keras.layers.Layer):
@@ -599,7 +516,8 @@ class Model:
         dataset_args : dict = None,
         batch_size: int = None,
         model_path : Path = None,
-        metrics : list = []
+        metrics : list = [],
+        genome : gf.ModelGenome = None
     ):
         """
         Initializes a Model instance.
@@ -616,13 +534,15 @@ class Model:
 
         self.name = name
 
+        self.genome = genome
+
         if batch_size is None:
             batch_size = gf.Defaults.num_examples_per_batch
 
         self.layers = layers
-        self.batch_size = ensure_hp(batch_size)
-        self.optimizer = ensure_hp(optimizer)
-        self.loss = ensure_hp(loss)
+        self.batch_size = gf.HyperParameter(batch_size)
+        self.optimizer = gf.HyperParameter(optimizer)
+        self.loss = gf.HyperParameter(loss)
         self.training_config = training_config
         
         self.fitness = []
@@ -634,6 +554,47 @@ class Model:
             model_path,
             metrics
         )
+
+    @classmethod
+    def from_genome(
+        cls,
+        genome : gf.ModelGenome,
+        name : str,
+        input_configs : dict, 
+        output_config : dict,
+        training_config : dict,
+        dataset_args : dict,
+        model_path : Path,
+        metrics : List 
+    ):
+
+        layers = []            
+        for i in range(genome.num_layers.value):
+            layers.append(
+                deepcopy(genome.layer_genomes[i].value)
+            )
+        
+        training_config["model_path"] = model_path
+        training_config["learning_rate"] = genome.learning_rate.value
+
+        dataset_args = deepcopy(dataset_args)
+        
+        # Create an instance of DenseModel with num_neurons list
+        model = cls(
+            name=name,
+            layers=layers, 
+            optimizer=genome.optimizer.value, 
+            loss=gf.HyperParameter(losses.BinaryCrossentropy()), 
+            input_configs=input_configs, 
+            output_config=output_config,
+            training_config=training_config,
+            dataset_args=dataset_args,
+            batch_size=genome.batch_size.value,
+            model_path=model_path,
+            metrics=metrics
+        )
+
+        return model
 
     @classmethod
     def from_config(
@@ -838,18 +799,23 @@ class Model:
                 raise ValueError("No default model blueprint exists!")
 
     def build(
-        self, 
-        input_configs : Union[List[Dict], Dict],
-        output_config : dict,
-        model_path : Path = None,
-        metrics : list = []
-    ):
+            self, 
+            input_configs : Union[List[Dict], Dict],
+            output_config : dict,
+            model_path : Path = None,
+            metrics : list = []
+        ):
+
         """
         Builds the model.
         
         Args:
-        input_shape: Shape of the input data.
-        output_shape: Shape of the output data.
+        input_configs: Dict
+            Dictionary containing input information.
+        output_config: Dict
+            Dictionary containing input information.
+        model_path: Path
+            Path to save model data.
         """        
 
         self.model_path = model_path
@@ -858,17 +824,15 @@ class Model:
             input_configs = [input_configs]
         
         # Create input tensors based on the provided configurations
-        inputs = {config["name"]: tf.keras.Input(shape=config["shape"], name=config["name"])
-                  for config in input_configs}
+        inputs = {
+            config["name"]: tf.keras.Input(shape=config["shape"], name=config["name"]) for config in input_configs
+        }
 
         # The last output tensor, starting with the input tensors
         last_output_tensors = list(inputs.values())
 
         for layer in self.layers:
             new_layers = self.build_hidden_layer(layer)
-
-            print(last_output_tensors)
-
             for new_layer in new_layers:
                 # Apply the layer to the last output tensor(s)
                 if isinstance(new_layer, gf.Whiten):
@@ -910,7 +874,6 @@ class Model:
             case "Whiten":
                 new_layers.append(gf.Whiten())
                 new_layers.append(gf.Reshape())
-
 
             case "Flatten":
                 new_layers.append(tf.keras.layers.Flatten())
@@ -979,6 +942,7 @@ class Model:
         validate_dataset: tf.data.Dataset = None,
         training_config: dict = None,
         force_retrain : bool = True,
+        max_epochs_per_lesson = None,
         callbacks = None,
         heart = None
         ):
@@ -1006,13 +970,11 @@ class Model:
             callbacks = []
 
         checkpoint_monitor = "val_loss"
-
         if not force_retrain:
             model_path = self.model_path
 
             history_data = gf.load_history(self.model_path)
             if history_data != {}:
-                print(history_data[checkpoint_monitor])
                 best_metric = min(history_data[checkpoint_monitor]) #assuming loss for now
                 best_epoch = np.argmin(history_data[checkpoint_monitor]) + 1
                 initial_epoch = len(history_data[checkpoint_monitor])
@@ -1035,14 +997,20 @@ class Model:
             model_path = None
             best_metric = None
             gf.save_dict_to_hdf5({}, self.model_path / "history.hdf5", True)
+        
+        if max_epochs_per_lesson is None:
+            current_max_epoch = training_config["max_epoch"]
+        else:
+            current_max_epoch = initial_epoch + max_epochs_per_lesson
 
         early_stopping = gf.EarlyStoppingWithLoad(
                 monitor  = checkpoint_monitor,
                 patience = training_config["patience"],
                 model_path=model_path
             )
+
         model_checkpoint = keras.callbacks.ModelCheckpoint(
-            str(training_config["model_path"]),
+            self.model_path,
             monitor=checkpoint_monitor,
             save_best_only=True,
             save_freq="epoch", 
@@ -1080,7 +1048,7 @@ class Model:
                 train_dataset,
                 validation_data=validate_dataset,
                 validation_steps=num_validation_batches,
-                epochs=training_config["max_epochs"], 
+                epochs=current_max_epoch, 
                 initial_epoch = initial_epoch,
                 steps_per_epoch = num_batches,
                 callbacks = callbacks,
@@ -1139,9 +1107,6 @@ class Model:
         self.fitness.append(1.0 / self.model.evaluate(validation_datasets, steps=num_batches)[0])
         
         return self.fitness[-1]
-    
-    def check_death(self, patience):
-        return np.all(self.fitness[-int(patience)] > self.fitness[-int(patience)+1:])
         
     def summary(self):
         """
@@ -1184,12 +1149,71 @@ class Model:
 
         return mutated_model
 
+@dataclass
+class PopulationSector:
+    name : str
+    save_directory : Path
+    models : List = None
+    num_models : int = 0
+    fitnesses : float = None
+    accuracies : List = None
+    losses : List = None
+
+    mean_accuracy_history : List = None
+    mean_fitness_history : List = None
+    mean_loss_history : List = None
+
+    def __post_init__(self):
+        if self.models is None:
+            self.models = []
+        self.num_models = len(self.models)
+        self.fitnesses = list(np.ones(self.num_models))
+        self.accuracies = list(np.zeros(self.num_models))
+        self.losses = list(np.ones(self.num_models))
+
+        self.mean_accuracy_history = []
+        self.mean_fitness_history = []
+        self.mean_loss_history = []
+
+    def add(self, new_model):
+        self.models.append(new_model)
+        self.fitnesses.append(1)
+        self.accuracies.append(0)
+        self.losses.append(1)
+        self.num_models += 1
+
+    def transfer(self, population, index):
+        self.models.append(population.models.pop(index))
+        self.fitnesses.append(population.fitnesses.pop(index))
+        self.accuracies.append(population.accuracies.pop(index))
+        self.losses.append(population.losses.pop(index))
+        self.num_models += 1
+
+    def tick(self):
+        self.mean_accuracy_history.append(np.mean(self.accuracies))
+        self.mean_loss_history.append(np.mean(self.losses))
+        self.mean_fitness_history.append(np.mean(self.fitnesses))
+        self.num_models = len(self.models)
+
+    def save(self):
+        np.save(self.save_directory / f"{self.name}_fitnesses", self.fitnesses)
+        np.save(self.save_directory / f"{self.name}_accuracies", self.fitnesses)
+        np.save(self.save_directory / f"{self.name}_losses", self.losses)
+
+        np.save(self.save_directory / f"{self.name}_fitness_history", self.mean_accuracy_history)
+        np.save(self.save_directory / f"{self.name}_accuracy_history", self.mean_fitness_history)
+        np.save(self.save_directory / f"{self.name}_loss_history", self.mean_loss_history)
+
+        for model in self.models:
+            if model.genome is not None:
+                model.genome.save(f"{model.model_path}/genome")
+        
 class Population:
     def __init__(
         self, 
         initial_population_size: int, 
         max_population_size: int,
-        genome_template: int,
+        default_genome: gf.ModelGenome,
         training_config: dict,
         dataset_args : dict,
         num_onsource_samples : int = None,
@@ -1204,23 +1228,22 @@ class Population:
         if num_offsource_samples is None:
             self.num_offsource_samples = int(gf.Defaults.offsource_duration_seconds * gf.Defaults.sample_rate_hertz)
 
-        
-
         self.initial_population_size = initial_population_size
         self.current_population_size = initial_population_size
         self.max_population_size = max_population_size
         self.population_directory_path = population_directory_path
         self.metrics = metrics
-        self.genome_template = genome_template
+        self.default_genome = default_genome
         self.training_config = training_config
         self.dataset_args = dataset_args
         self.num_ifos = num_ifos
-        
-        self.population = []
+        self.current_id = 0
+
+        self.orchard = PopulationSector("orchard", population_directory_path)
+        self.nursary = PopulationSector("nursary", population_directory_path)
         self.initilize()
-        self.fitnesses = np.ones(self.current_population_size)
-        
-    def initilize(self):
+
+    def add_model(self, genome):
 
         input_configs = [
             {
@@ -1238,41 +1261,30 @@ class Population:
             "type" : "binary"
         }
 
-        for j in range(self.initial_population_size):   
+        model_number = self.current_id
+        self.current_id += 1
 
-            model_name = f"model_{j}"
-            layers = []
-            
-            self.genome_template['base']['num_layers'].randomize()
-            self.genome_template['base']['optimizer'].randomize()
-            batch_size = self.genome_template['base']['batch_size'].randomize()
-            
-            for i in range(self.genome_template['base']['num_layers'].value):
-                layers.append(
-                    randomizeLayer(*self.genome_template['layers'][i])
-                )
+        model_name = f"model_{model_number}"
 
-            self.training_config["learning_rate"] = ensure_hp(self.training_config["learning_rate"]).randomize()
+        model = gf.Model.from_genome(
+            genome=genome,
+            name=model_name,
+            input_configs=input_configs, 
+            output_config=output_config,
+            training_config=self.training_config,
+            dataset_args=self.dataset_args,
+            model_path=self.population_directory_path / model_name,
+            metrics=self.metrics 
+        )
 
-            # Create an instance of DenseModel with num_neurons list
-            model = Model(
-                name=model_name,
-                layers=layers, 
-                optimizer=self.genome_template['base']['optimizer'], 
-                loss=hp(losses.BinaryCrossentropy()), 
-                input_configs=input_configs, 
-                output_config=output_config,
-                training_config=self.training_config,
-                dataset_args=deepcopy(self.dataset_args),
-                batch_size=self.genome_template['base']['batch_size'],
-                model_path=self.population_directory_path / model_name,
-                metrics=self.metrics
-            )
-
-            self.population.append(model)
-            model.summary()
+        self.nursary.add(model)
+        model.summary()
         
-    def roulette_wheel_selection(self):
+    def initilize(self):
+        for j in range(self.initial_population_size): 
+            self.random_sapling()
+            
+    def roulette_wheel_selection(self, fitnesses):
         """
         Performs roulette wheel selection on the population.
 
@@ -1285,8 +1297,8 @@ class Population:
         """
 
         # Convert the fitnesses to probabilities.
-        total_fit = sum(self.fitnesses)
-        prob = [fit/total_fit for fit in self.fitnesses]
+        total_fit = sum(fitnesses)
+        prob = [fit/total_fit for fit in fitnesses]
 
         # Calculate the cumulative probabilities.
         cumulative_probs = np.cumsum(prob)
@@ -1295,42 +1307,112 @@ class Population:
         r = np.random.rand()
 
         # Find the index of the individual to select.
-        for i in range(len(self.population)):
+        for i in range(len(fitnesses)):
             if r <= cumulative_probs[i]:
                 return i
 
         # If we've gotten here, just return the last individual in the population.
         # This should only happen due to rounding errors, and should be very rare.
-        return self.population[-1]
+        return 0
     
     def train(
         self, 
         num_generations,
-        dataset_args
+        dataset_args,
+        num_validate_examples,
+        num_examples_per_batch,
+        max_num_epochs_per_generation=1
     ):  
+
+        test_args = deepcopy(dataset_args)
+        test_args["group"] = "test"
+        test_args["seed"] = 1984
+        test_dataset = gf.Dataset(**test_args).map(adjust_features)
+
+        num_validate_batches = int(num_validate_examples/num_examples_per_batch)
         for i in range(self.current_population_size):
-            model = self.population[i]
+            logging.info(f"Training model: {i}")
+            model = self.nursary.models[i]
 
-            test_args = deepcopy(dataset_args)
-            test_args["group"] = "test"
-            
-            validate_args = deepcopy(dataset_args)
-            validate_args["group"] = "validate"
+            model.train(
+                validate_dataset=test_dataset, 
+                max_epochs_per_lesson=max_num_epochs_per_generation
+            )
+            self.nursary.fitnesses[i] = 1.0/self.nursary.models[i].metrics[-1].history['val_loss'][-1]
 
-            test_dataset = gf.Dataset(**test_args).map(adjust_features)
-            validate_dataset = gf.Dataset(**validate_args).map(adjust_features)
-
-            model.train(validate_dataset=test_dataset)
-            self.fitnesses[i] = model.test_model(validate_dataset, num_validate_batches)
+            self.nursary.save()
                 
-        for _ in range(self.current_population_size*(num_generations - 1)):            
-            i = self.roulette_wheel_selection()
-            self.population[i].train()
-            self.fitnesses[i] = \
-                model.test_model(validation_ds, num_validate_batches)
-            
-            print("is_alive:", model.check_death(10))
-                        
-            print(self.fitnesses)
-            print(mean(self.fitnesses))
+        while 1:     
+            i = self.roulette_wheel_selection(self.nursary.fitnesses)
+            logging.info(f"Training model: {self.nursary.models[i].name}")
 
+            is_alive = self.nursary.models[i].train(
+                validate_dataset=test_dataset, 
+                max_epochs_per_lesson=max_num_epochs_per_generation, 
+                force_retrain=False
+            )   
+
+            if not isinstance(self.nursary.models[i].metrics[-1], dict):
+                self.nursary.fitnesses[i] = 1.0/self.nursary.models[i].metrics[-1].history['val_loss'][-1]
+                self.nursary.accuracies[i] = self.nursary.models[i].metrics[-1].history['val_binary_accuracy'][-1]
+            else:
+                self.nursary.fitnesses[i] = 1.0/self.nursary.models[i].metrics[-1]['val_loss'][-1]
+                self.nursary.accuracies[i] = self.nursary.models[i].metrics[-1]['val_binary_accuracy'][-1]
+
+            # Birth if conditions are correct:  
+            # Flip if random or offspring
+            if not is_alive:
+                self.orchard.transfer(self.nursary, i)
+
+            plant_condition = self.nursary.num_models < self.max_population_size
+            exploration_rate = 0.5
+            if plant_condition:
+                if np.random.random() < exploration_rate and self.orchard.num_models > 1: 
+                    self.germinate_sapling()
+                else:
+                    self.random_sapling()
+
+                self.nursary.models[-1].train(
+                    validate_dataset=test_dataset, 
+                    max_epochs_per_lesson=max_num_epochs_per_generation, 
+                    force_retrain=True
+                )   
+            
+            if self.nursary.num_models == 0:
+                break
+
+            self.nursary.tick()
+            self.orchard.tick()
+
+            self.nursary.save()
+            self.orchard.save()
+
+            print("Nursary History:", self.nursary.mean_accuracy_history)
+            print("Orchard History:", self.orchard.mean_accuracy_history)
+
+        print("Final scores:", self.orchard.fitnesses)
+        print("Final Accuracies:", self.orchard.accuracies)
+
+    def germinate_sapling(self):
+        
+        parent_a = self.orchard.models[self.roulette_wheel_selection(self.orchard.fitnesses)]
+        parent_b = self.orchard.models[self.roulette_wheel_selection(self.orchard.fitnesses)]
+
+        #Crossover
+        new_genome = parent_a.genome.crossover(parent_b.genome)
+
+        #Mutate
+        new_genome.mutate()
+
+        logging.info('Germinated new model.')
+
+        self.add_model(new_genome)
+
+    def random_sapling(self):
+        new_genome = deepcopy(self.default_genome)  
+        new_genome.randomize()
+
+        logging.info('Randomised new model.')
+
+        self.add_model(new_genome)
+        
