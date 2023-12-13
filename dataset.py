@@ -493,6 +493,8 @@ def Dataset(
     if injection_generators: 
         if injection_generators[0].network is not None:
             num_detectors = injection_generators[0].network.num_detectors 
+        elif noise_obtainer is not None:
+            num_detectors = len(noise_obtainer.ifos)
         else:
             num_detectors = 1
     elif noise_obtainer is not None:

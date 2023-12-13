@@ -149,7 +149,7 @@ def generate_strain_plot(
         p = figure(
             x_axis_label="Time (seconds)", 
             y_axis_label=y_axis_label,
-            title=title,
+            #title=title,
             width=width,
             height=height
         )
