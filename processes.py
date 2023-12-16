@@ -404,7 +404,7 @@ class Process:
                 ) as stdout_file, \
                 open(
                     f"{log_directory_path}/{self.name}_error.txt",
-                    "w"
+                    mode
                 ) as stderr_file:
 
                 full_command = (

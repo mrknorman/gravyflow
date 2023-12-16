@@ -15,6 +15,7 @@ from keras.callbacks import Callback
 from tensorflow.keras import losses
 from tensorflow.keras.layers import Layer
 import json
+import pickle
 
 import gravyflow as gf
 
@@ -83,7 +84,7 @@ class HyperParameter:
                 case gf.DistributionType.POW_TWO:
                     power_low, power_high = map(int, np.log2((self.distribution.min_, self.distribution.max_)))
                     log_value = mutate_value(
-                        np.ln(self.value), power_low, power_high, mutation_strength
+                        np.log2(self.value), power_low, power_high, mutation_strength
                     )
                     self.value = 2**log_value
             
@@ -100,6 +101,69 @@ class HyperParameter:
 
                 self.value = int(self.value)
 
+    def crossover(self, other, crossover_rate):
+        if (np.random() < crossover_rate):
+            self.distribution = other.distribution
+            self.value = other.value
+
+class HyperInjectionGenerator: 
+
+    def __init__(
+            self,
+            min_ : HyperParameter,
+            max_ : HyperParameter,
+            mean : HyperParameter,
+            std : HyperParameter,
+            distribution : HyperParameter,
+            chance : HyperParameter,
+            generator : HyperParameter
+        ):
+
+        self.min_ = min_
+        self.max_ = max_
+        self.mean = mean
+        self.std = std
+        self.distribution = distribution
+        self.chance = chance
+        self.generator = deepcopy(generator)
+
+        self.genes = [
+            self.min_,
+            self.max_,
+            self.mean,
+            self.std,
+            self.distribution,
+            self.chance,
+            self.generator
+        ]
+
+    def randomize(self):
+        """
+        Randomizes this hyperparameter based on its possible_values.
+        """
+        for gene in self.genes:
+            gene.randomize()
+
+    def mutate(self, mutation_rate):
+        for gene in self.genes:
+            gene.mutate(mutation_rate)
+
+    def crossover(self, other, crossover_rate = 0.5):
+        for old, new in zip(self.genes, other.genes):
+            old.crossover(new, crossover_rate)
+
+    def return_generator(self):
+        generator = self.generator.value
+        
+        generator.scaling_method.value.min_ = self.min_.value
+        generator.scaling_method.value.max_ = self.max_.value
+        generator.scaling_method.value.mean = self.mean.value
+        generator.scaling_method.value.std = self.std.value
+        generator.scaling_method.value.distribution = self.distribution.value
+        generator.injection_chance = self.chance.value
+
+        return generator
+        
 class ModelGenome:
 
     def __init__(
@@ -107,22 +171,48 @@ class ModelGenome:
         optimizer : HyperParameter,
         batch_size : HyperParameter,
         learning_rate: HyperParameter,
+        injection_generators : List[HyperInjectionGenerator],
+        noise_type : HyperParameter,
+        exclude_glitches : HyperParameter,
+        onsource_duration_seconds : HyperParameter, 
+        offsource_duration_seconds : HyperParameter,
+        sample_rate_hertz : HyperParameter,
         num_layers : HyperParameter,
         layer_genomes : List
     ):
+        # Training genes:
         self.optimizer = optimizer
         self.batch_size = batch_size
         self.learning_rate = learning_rate
+
+        self.injection_generators = injection_generators
+
+        #Noise Genes:
+        self.exclude_glitches = exclude_glitches
+        self.noise_type = noise_type
+
+        # Temporal properties:
+        self.onsource_duration_seconds = onsource_duration_seconds
+        self.offsource_duration_seconds = offsource_duration_seconds
+        self.sample_rate_hertz = sample_rate_hertz
+
+        # Architecture genome:
         self.num_layers = num_layers
         self.layer_genomes = layer_genomes
 
+        # Gene list:
         self.genes = [
             self.optimizer,
             self.batch_size,
             self.learning_rate,
-            self.num_layers,
-         ] + self.layer_genomes
-
+            self.noise_type,
+            self.exclude_glitches,
+            self.onsource_duration_seconds,
+            self.offsource_duration_seconds,
+            self.sample_rate_hertz,
+            self.num_layers
+         ] + self.layer_genomes + self.injection_generators
+    
     def randomize(self):
         for gene in self.genes:
             gene.randomize()    
@@ -131,7 +221,6 @@ class ModelGenome:
             for possibility in layer_genome.distribution.possible_values:
                 possibility.randomize()
 
-
     def mutate(self, mutation_rate):
         for gene in self.genes:
             gene.mutate(mutation_rate)    
@@ -139,14 +228,11 @@ class ModelGenome:
         for layer_genome in self.layer_genomes:
             for possibility in layer_genome.distribution.possible_values:
                 possibility.mutate(mutation_rate)
-        
-    def crossover(self, genome):
-        new_genes = []
-        for old_gene, new_gene in zip(self.genes, genome.genes):
-            new_genes.append(np.choice(old_gene, new_gene))
-        
-        self.genes = new_genes
-
+    
+    def crossover(self, cls, genome, crossover_rate = 0.5):
+        for old, new in zip(self.genes, genome.genes):
+            old.crossover(new, crossover_rate)
+    
     # Using pickle here for now:
     def save(self, filename):
         with open(filename, 'wb') as file:
@@ -156,4 +242,3 @@ class ModelGenome:
     def load(filename):
         with open(filename, 'rb') as file:
             return pickle.load(file)
-        

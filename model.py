@@ -324,6 +324,19 @@ class BaseLayer:
         for attribute in self.mutable_attributes:
             attribute.mutate(mutation_rate)
 
+    def crossover(self, other, crossover_rate: float = 0.5):
+        """
+        Returns a new layer with mutated hyperparameters based on the mutation_rate.
+        
+        Args:
+        mutation_rate: Probability of mutation.
+        
+        Returns:
+        mutated_layer: New BaseLayer instance with potentially mutated hyperparameters.
+        """
+        for old, new in (self.mutable_attributes, other.mutable_attributes):
+            old.crossover(new, crossover_rate)
+
 class Reshape(Layer):
     def __init__(self, reshaping_mode = "depthwise", **kwargs):
         super(Reshape, self).__init__(**kwargs)
@@ -481,6 +494,18 @@ class WhitenLayer(BaseLayer):
         self.layer_type = "Whiten"
         self.mutable_attributes = []
 
+class WhitenPassLayer(BaseLayer):
+    
+    def __init__(self):
+        """
+        Initializes a DropLayer instance.
+        
+        Args:
+        rate: gf.HyperParameter specifying the whitening for this layer.
+        """
+        self.layer_type = "WhitenPass"
+        self.mutable_attributes = []
+
 """
 class TruncatedNormal(tf.keras.layers.Layer):
     def __init__(self, event_shape=1, **kwargs):
@@ -512,7 +537,7 @@ class Model:
         loss: str, 
         input_configs : Union[List[Dict], Dict],
         output_config : dict,
-        training_config : dict,
+        training_config : dict = None,
         dataset_args : dict = None,
         batch_size: int = None,
         model_path : Path = None,
@@ -544,6 +569,7 @@ class Model:
         self.optimizer = gf.HyperParameter(optimizer)
         self.loss = gf.HyperParameter(loss)
         self.training_config = training_config
+        self.loaded = False
         
         self.fitness = []
         self.metrics = []
@@ -577,6 +603,11 @@ class Model:
         training_config["model_path"] = model_path
         training_config["learning_rate"] = genome.learning_rate.value
 
+        dataset_args["injection_generators"] = [
+            generator.return_generator() for generator in genome.injection_generators 
+        ]
+
+        #dataset_args["noise_obtainer"].type = genome.noise_type.value
         dataset_args = deepcopy(dataset_args)
         
         # Create an instance of DenseModel with num_neurons list
@@ -591,7 +622,8 @@ class Model:
             dataset_args=dataset_args,
             batch_size=genome.batch_size.value,
             model_path=model_path,
-            metrics=metrics
+            metrics=metrics,
+            genome=genome
         )
 
         return model
@@ -661,6 +693,8 @@ class Model:
             match layer_type:       
                 case "Whiten":
                     hidden_layers.append(gf.WhitenLayer())
+                case "WhitenPass":
+                    hidden_layers.append(gf.WhitenPassLayer())
                 case "Flatten":
                     hidden_layers.append(gf.FlattenLayer())
                 case "Dense":
@@ -711,17 +745,21 @@ class Model:
             cls,
             name : str,
             model_load_path : Path,
-            optimizer: str, 
-            loss: str, 
             input_configs : Union[List[Dict], Dict],
             output_config : dict,
-            num_ifos : int,
+            num_ifos : int = None,
+            optimizer: str = None, 
+            loss: str = None, 
+            training_config : dict = None,
             hidden_layers = None,
             model_config_path = None,
             num_onsource_samples : int = None, 
             num_offsource_samples : int = None,
             model_path : Path = None,
-            force_overwrite = False
+            force_overwrite = False,
+            load_genome = False, 
+            dataset_args= None,
+            genome=None
         ):
         
         if num_onsource_samples is None:
@@ -748,6 +786,7 @@ class Model:
                 hidden_layers, 
                 input_configs=input_configs, 
                 output_config=output_config,
+                training_config=training_config,
                 optimizer=optimizer, 
                 loss=loss,
                 model_path=model_path
@@ -763,6 +802,17 @@ class Model:
                 num_offsource_samples=num_offsource_samples,
                 model_path=model_path
             )
+        elif genome is not None:
+            model = cls.from_genome(
+                genome=genome, 
+                name=name,
+                input_configs=input_configs, 
+                output_config=output_config,
+                training_config=training_config,
+                dataset_args=dataset_args, 
+                model_path=model_path,
+                metrics=[]
+            )
         else:  
             blueprint_exists = False
             model = cls(
@@ -772,7 +822,8 @@ class Model:
                 output_config=output_config,
                 optimizer=optimizer, 
                 loss=loss,
-                model_path=model_path
+                model_path=model_path,
+                training_config=training_config,
             )
         
         # Check if the model file exists
@@ -781,6 +832,11 @@ class Model:
                 # Try to load the model
                 logging.info(f"Loading model from {model_load_path}")
                 model.model = tf.keras.models.load_model(model_load_path)
+                model.loaded=True
+
+                if load_genome:
+                    model.genome = gf.ModelGenome.load(model_path / "genome")
+
                 return model
 
             except Exception as e:
@@ -874,6 +930,9 @@ class Model:
             case "Whiten":
                 new_layers.append(gf.Whiten())
                 new_layers.append(gf.Reshape())
+            case "WhitenPass":
+                new_layers.append(gf.WhitenPassthrough())
+                new_layers.append(gf.Reshape())
 
             case "Flatten":
                 new_layers.append(tf.keras.layers.Flatten())
@@ -952,7 +1011,7 @@ class Model:
         Args:
         train_dataset: Dataset to train on.
         num_epochs: Number of epochs to train for.
-        """
+        """ 
 
         if validate_dataset is None:
             raise ValueError("No validation dataset!")
@@ -969,6 +1028,8 @@ class Model:
         if callbacks is None:
             callbacks = []
 
+        gf.ensure_directory_exists(self.model_path)
+
         checkpoint_monitor = "val_loss"
         if not force_retrain:
             model_path = self.model_path
@@ -980,7 +1041,9 @@ class Model:
                 initial_epoch = len(history_data[checkpoint_monitor])
 
                 if initial_epoch - best_epoch > training_config["patience"]:
-                    logging.info(f"Model already completed training. Skipping! Current epoch {initial_epoch}, best epoch {best_epoch}.")
+                    logging.info(
+                        f"Model already completed training. Skipping! Current epoch {initial_epoch}, best epoch {best_epoch}."
+                    )
                     self.model = tf.keras.models.load_model(
                         self.model_path
                     )
@@ -991,15 +1054,17 @@ class Model:
                 initial_epoch = 0
                 model_path = None
                 best_metric = None
-        
         else:
             initial_epoch = 0
             model_path = None
             best_metric = None
             gf.save_dict_to_hdf5({}, self.model_path / "history.hdf5", True)
+
+        if self.genome is not None:
+            self.genome.save(self.model_path / "genome")
         
         if max_epochs_per_lesson is None:
-            current_max_epoch = training_config["max_epoch"]
+            current_max_epoch = training_config["max_epochs"]
         else:
             current_max_epoch = initial_epoch + max_epochs_per_lesson
 
@@ -1148,7 +1213,6 @@ class Model:
         mutated_model = Model(mutated_layers, self.optimizer, self.loss, self.batch_size)
 
         return mutated_model
-
 @dataclass
 class PopulationSector:
     name : str
@@ -1204,10 +1268,6 @@ class PopulationSector:
         np.save(self.save_directory / f"{self.name}_accuracy_history", self.mean_fitness_history)
         np.save(self.save_directory / f"{self.name}_loss_history", self.mean_loss_history)
 
-        for model in self.models:
-            if model.genome is not None:
-                model.genome.save(f"{model.model_path}/genome")
-        
 class Population:
     def __init__(
         self, 
@@ -1266,15 +1326,15 @@ class Population:
 
         model_name = f"model_{model_number}"
 
-        model = gf.Model.from_genome(
-            genome=genome,
+        model = gf.Model.load(
             name=model_name,
-            input_configs=input_configs, 
-            output_config=output_config,
+            model_load_path=Path(f"./population/{model_name}"),
+            genome=genome,
+            num_ifos=self.num_ifos,
             training_config=self.training_config,
-            dataset_args=self.dataset_args,
-            model_path=self.population_directory_path / model_name,
-            metrics=self.metrics 
+            input_configs=input_configs,
+            output_config=output_config,
+            dataset_args=self.dataset_args
         )
 
         self.nursary.add(model)
@@ -1329,18 +1389,44 @@ class Population:
         test_args["seed"] = 1984
         test_dataset = gf.Dataset(**test_args).map(adjust_features)
 
-        num_validate_batches = int(num_validate_examples/num_examples_per_batch)
         for i in range(self.current_population_size):
             logging.info(f"Training model: {i}")
             model = self.nursary.models[i]
 
-            model.train(
-                validate_dataset=test_dataset, 
-                max_epochs_per_lesson=max_num_epochs_per_generation
-            )
-            self.nursary.fitnesses[i] = 1.0/self.nursary.models[i].metrics[-1].history['val_loss'][-1]
+            if not model.loaded:
+                model.train(
+                    validate_dataset=test_dataset, 
+                    max_epochs_per_lesson=max_num_epochs_per_generation,
+                    force_retrain=True
+                )
+                self.nursary.fitnesses[i] = 1.0/self.nursary.models[i].metrics[-1].history['val_loss'][-1]
+
+            model.metrics = []
+            model.model = None
 
             self.nursary.save()
+
+        current_dir = Path(__file__).resolve().parent.parent
+        initial_processes = [
+            gf.Process(f"python train.py", name, tensorflow_memory_mb=8000, cuda_overhead_mb=4000, initial_restart_count=1)
+            for name in [f"model_{i}" for i in range(self.current_population_size)]
+        ]
+
+        manager = gf.Manager(
+            initial_processes,
+            max_restarts=20,
+            restart_timeout_seconds=3600.0, 
+            process_start_wait_seconds=1.0, 
+            management_tick_length_seconds=5.0,
+            max_num_concurent_processes=4,
+            log_directory_path = Path(f"{current_dir}/population/logs/")
+        )
+
+        while manager:
+            manager()
+            manager.tabulate()
+
+        quit()
                 
         while 1:     
             i = self.roulette_wheel_selection(self.nursary.fitnesses)
@@ -1414,5 +1500,6 @@ class Population:
 
         logging.info('Randomised new model.')
 
-        self.add_model(new_genome)
-        
+        self.add_model(new_genome)    
+
+
