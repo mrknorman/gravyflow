@@ -1408,7 +1408,7 @@ class Population:
 
         current_dir = Path(__file__).resolve().parent.parent
         initial_processes = [
-            gf.Process(f"python train.py", name, tensorflow_memory_mb=8000, cuda_overhead_mb=4000, initial_restart_count=1)
+            gf.Process(f"python train.py", name, tensorflow_memory_mb=4000, cuda_overhead_mb=2000, initial_restart_count=1)
             for name in [f"model_{i}" for i in range(self.current_population_size)]
         ]
 
@@ -1418,7 +1418,7 @@ class Population:
             restart_timeout_seconds=3600.0, 
             process_start_wait_seconds=1.0, 
             management_tick_length_seconds=5.0,
-            max_num_concurent_processes=4,
+            max_num_concurent_processes=8,
             log_directory_path = Path(f"{current_dir}/population/logs/")
         )
 
