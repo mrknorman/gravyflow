@@ -558,12 +558,18 @@ class Model:
             self.train_dataset = gf.Dataset(**deepcopy(dataset_args)).map(adjust_features)
 
         self.name = name
-
+        self.path = model_path
         self.genome = genome
 
         if batch_size is None:
             batch_size = gf.Defaults.num_examples_per_batch
 
+        if optimizer is None:
+            optimizer = "adam"
+
+        if loss is None:
+            loss = losses.BinaryCrossentropy()
+        
         self.layers = layers
         self.batch_size = gf.HyperParameter(batch_size)
         self.optimizer = gf.HyperParameter(optimizer)
@@ -931,7 +937,7 @@ class Model:
                 new_layers.append(gf.Whiten())
                 new_layers.append(gf.Reshape())
             case "WhitenPass":
-                new_layers.append(gf.WhitenPassthrough())
+                new_layers.append(gf.Whiten())
                 new_layers.append(gf.Reshape())
 
             case "Flatten":
@@ -1037,7 +1043,7 @@ class Model:
             history_data = gf.load_history(self.model_path)
             if history_data != {}:
                 best_metric = min(history_data[checkpoint_monitor]) #assuming loss for now
-                best_epoch = np.argmin(history_data[checkpoint_monitor]) + 1
+                best_epoch = np.argmin(history_data[checkpoint_monitor])
                 initial_epoch = len(history_data[checkpoint_monitor])
 
                 if initial_epoch - best_epoch > training_config["patience"]:
@@ -1107,6 +1113,8 @@ class Model:
             
             if heart is not None:
                 callbacks += [gf.HeartbeatCallback(heart, 32)]
+        else:
+            print("Training... or at least trying to.")
 
         self.metrics.append(
             self.model.fit(
@@ -1178,7 +1186,7 @@ class Model:
         Prints a summary of the model.
         """
         self.model.summary()
-        
+    
     @staticmethod
     def crossover(parent1: 'Model', parent2: 'Model') -> 'Model':
         """
@@ -1301,6 +1309,7 @@ class Population:
 
         self.orchard = PopulationSector("orchard", population_directory_path)
         self.nursary = PopulationSector("nursary", population_directory_path)
+        self.lumberyard = PopulationSector("lumberyard", population_directory_path)
         self.initilize()
 
     def add_model(self, genome):
@@ -1334,16 +1343,21 @@ class Population:
             training_config=self.training_config,
             input_configs=input_configs,
             output_config=output_config,
-            dataset_args=self.dataset_args
+            dataset_args=self.dataset_args,
+            load_genome=True
         )
 
         self.nursary.add(model)
         model.summary()
         
     def initilize(self):
+
         for j in range(self.initial_population_size): 
-            self.random_sapling()
-            
+            if Path(f"./population/model_{self.current_id}/genome").exists() and Path(f"./population/model_{self.current_id}/saved_model.pb").exists() and Path(f"./population/model_{self.current_id}/fingerprint.pb").exists():
+                self.add_model(None)
+            else:
+                self.random_sapling()
+                
     def roulette_wheel_selection(self, fitnesses):
         """
         Performs roulette wheel selection on the population.
@@ -1407,11 +1421,14 @@ class Population:
             self.nursary.save()
 
         current_dir = Path(__file__).resolve().parent.parent
+
+        model_names = [f"model_{i}" for i in range(self.current_population_size)]
         initial_processes = [
             gf.Process(f"python train.py", name, tensorflow_memory_mb=4000, cuda_overhead_mb=2000, initial_restart_count=1)
-            for name in [f"model_{i}" for i in range(self.current_population_size)]
+            for name in model_names
         ]
 
+        """
         manager = gf.Manager(
             initial_processes,
             max_restarts=20,
@@ -1424,10 +1441,73 @@ class Population:
 
         while manager:
             manager()
-            manager.tabulate()
+            #manager.tabulate()
+        """
 
-        quit()
+        for model_index in range(self.current_population_size):
+            self.nursary.models[model_index].genome = gf.ModelGenome.load(self.nursary.models[model_index].path / "genome")
+        
+        start_generation = 3
+        for generation_index in range(1, num_generations):
+            self.nursary.fitnesses = load_and_calculate_fitness(
+                generation_index,
+                num_per_generation = self.current_population_size
+            )
+
+            print(self.nursary.fitnesses)
+
+            for _ in range(self.current_population_size):
+                self.orchard.transfer(self.nursary, -1)
+
+            for _ in range(self.current_population_size):
+                if Path(f"./population/model_{self.current_id}/genome").exists():
+                    self.add_model(None)
+                else:
+                    self.germinate_sapling()
+
+            for _ in range(self.current_population_size):
+                self.lumberyard.transfer(self.orchard, -1)
+
+            for i in range(self.current_population_size):
                 
+                model = self.nursary.models[i]
+                logging.info(f"Training model: {model.name}")
+
+                if not model.loaded:
+                    model.train(
+                        validate_dataset=test_dataset, 
+                        max_epochs_per_lesson=max_num_epochs_per_generation,
+                        force_retrain=True
+                    )
+                    self.nursary.fitnesses[i] = 1.0/self.nursary.models[i].metrics[-1].history['val_loss'][-1]
+
+            model.metrics = []
+            model.model = None
+
+            model_names = [f"model_{j}" for j in range(
+                    (self.current_population_size  * generation_index),
+                    (self.current_population_size * (generation_index + 1))
+                )
+            ]
+            initial_processes = [
+                gf.Process(f"python train.py", name, tensorflow_memory_mb=4000, cuda_overhead_mb=2000, initial_restart_count=1)
+                for name in model_names
+            ]
+
+            if generation_index >= start_generation:
+                manager = gf.Manager(
+                    initial_processes,
+                    max_restarts=20,
+                    restart_timeout_seconds=3600.0, 
+                    process_start_wait_seconds=1.0, 
+                    management_tick_length_seconds=5.0,
+                    max_num_concurent_processes=8,
+                    log_directory_path = Path(f"{current_dir}/population/logs/")
+                )
+
+                while manager:
+                    manager()
+
         while 1:     
             i = self.roulette_wheel_selection(self.nursary.fitnesses)
             logging.info(f"Training model: {self.nursary.models[i].name}")
@@ -1480,15 +1560,19 @@ class Population:
         print("Final Accuracies:", self.orchard.accuracies)
 
     def germinate_sapling(self):
-        
-        parent_a = self.orchard.models[self.roulette_wheel_selection(self.orchard.fitnesses)]
-        parent_b = self.orchard.models[self.roulette_wheel_selection(self.orchard.fitnesses)]
+
+        parent_a_index = self.roulette_wheel_selection(self.orchard.fitnesses)
+        parent_b_index = self.roulette_wheel_selection(self.orchard.fitnesses)
+
+        parent_a = self.orchard.models[parent_a_index]
+        parent_b = self.orchard.models[parent_b_index]
 
         #Crossover
-        new_genome = parent_a.genome.crossover(parent_b.genome)
+        new_genome = deepcopy(parent_a.genome)
+        new_genome.crossover(deepcopy(parent_b.genome))
 
         #Mutate
-        new_genome.mutate()
+        new_genome.mutate(0.05)
 
         logging.info('Germinated new model.')
 
@@ -1502,4 +1586,60 @@ class Population:
 
         self.add_model(new_genome)    
 
+def snake_case_to_capitalised_first_with_spaces(text):
+    """
+    Convert a string from snake_case to Capitalised First With Spaces format.
+    """
+
+    text.replace('val', 'validate') if 'val' in text else text
+    # Split the string at underscores
+    words = text.split('_')
+    
+    # Capitalise the first letter of each word and join them with spaces
+    return ' '.join(word.capitalize() for word in words)
+
+def transform_string(s):
+    # Remove the 'perceptron_' prefix and split by underscore
+    name = s.replace('model_', '')
+
+    return snake_case_to_capitalised_first_with_spaces(name)
+
+def load_and_calculate_fitness(generation, num_per_generation = 100, scaling_threshold = 8):
+
+    fitnesses = []
+
+    directory_path = Path(f'./population/')
+    for entry in directory_path.iterdir():
+        if entry.name.startswith(f"model_"):
+            name = transform_string(entry.name)
+
+            number = int(entry.name.split('_')[-1])
+            if (number < (generation-1) * num_per_generation) or (number >= (generation) * num_per_generation):
+                continue
+
+            history = gf.load_history(entry)
+            validator = gf.validate.Validator.load(entry / "validation_data.h5")
+
+            score_threshold = list(gf.validate.calculate_far_score_thresholds(
+                validator.far_scores, 
+                gf.Defaults.onsource_duration_seconds,
+                [10E-4]
+            ).values())[0][1]
+            print(score_threshold)
+
+            efficiency_data = validator.efficiency_data
+
+            valid_scores = np.array([])
+            for scaling, scores in zip(efficiency_data["scalings"], efficiency_data["scores"]):
+                if scaling > scaling_threshold:
+                    valid_scores = np.append(valid_scores, scores.flatten())
+            
+            num_valid_scores_above = len(valid_scores[valid_scores > score_threshold])
+
+            if (num_valid_scores_above > 0):
+                fitnesses.append(num_valid_scores_above/ len(valid_scores))
+            else:
+                fitnesses.append(0)
+    
+    return fitnesses
 

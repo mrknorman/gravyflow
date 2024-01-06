@@ -466,6 +466,68 @@ def whiten(
 
     return out * tf.sqrt(2.0 * dt)
 
+class WhitenP(Layer):
+    def __init__(
+            self, 
+            sample_rate_hertz = None,
+            onsource_duration_seconds = None,
+            fft_duration_seconds=4, 
+            overlap_duration_seconds=2,
+            highpass_hertz=None, 
+            detrend='constant', 
+            filter_duration_seconds=2.0, 
+            window="hann", 
+            **kwargs
+        ):
+        super().__init__(**kwargs)
+
+        if sample_rate_hertz is None:
+            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+        if onsource_duration_seconds is None:
+            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+
+        self.onsource_duration_seconds = onsource_duration_seconds
+        self.sample_rate_hertz = sample_rate_hertz
+        self.fft_duration_seconds = fft_duration_seconds
+        self.overlap_duration_seconds = overlap_duration_seconds
+        self.highpass_hertz = highpass_hertz
+        self.detrend = detrend
+        self.filter_duration_seconds = filter_duration_seconds
+        self.window = window
+        self.num_output_samples = int(self.onsource_duration_seconds*self.sample_rate_hertz)
+
+    def build(self, input_shape):
+        # This layer doesn't have any trainable weights, but you could set up weights here if necessary.
+        super().build(input_shape)
+
+    @tf.function
+    def call(self, inputs):
+        timeseries, _ = inputs
+
+        cropped = gf.crop_samples(timeseries, self.onsource_duration_seconds, self.sample_rate_hertz)
+
+        dynamic_shape = tf.shape(timeseries)
+        return tf.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            'sample_rate_hertz': self.sample_rate_hertz,
+            'fft_duration_seconds': self.fft_duration_seconds,
+            'overlap_duration_seconds': self.overlap_duration_seconds,
+            'highpass_hertz': self.highpass_hertz,
+            'detrend': self.detrend,
+            'filter_duration_seconds': self.filter_duration_seconds,
+            'window': self.window,
+        })
+        return config
+
+    def compute_output_shape(self, input_shape):
+        # Assuming input_shape is [(None, Y, A), (None, Y, B)]
+        # and your layer returns a shape of (None, Y, B)
+        timeseries_shape, _ = input_shape
+        return (timeseries_shape[0], timeseries_shape[1], self.onsource_duration_seconds*self.sample_rate_hertz) 
+
 class Whiten(Layer):
     def __init__(
             self, 
@@ -506,68 +568,6 @@ class Whiten(Layer):
 
         whitened = whiten(timeseries, background, self.sample_rate_hertz)
         cropped = gf.crop_samples(whitened, self.onsource_duration_seconds, self.sample_rate_hertz)
-
-        dynamic_shape = tf.shape(timeseries)
-        return tf.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))
-
-    def get_config(self):
-        config = super().get_config().copy()
-        config.update({
-            'sample_rate_hertz': self.sample_rate_hertz,
-            'fft_duration_seconds': self.fft_duration_seconds,
-            'overlap_duration_seconds': self.overlap_duration_seconds,
-            'highpass_hertz': self.highpass_hertz,
-            'detrend': self.detrend,
-            'filter_duration_seconds': self.filter_duration_seconds,
-            'window': self.window,
-        })
-        return config
-
-    def compute_output_shape(self, input_shape):
-        # Assuming input_shape is [(None, Y, A), (None, Y, B)]
-        # and your layer returns a shape of (None, Y, B)
-        timeseries_shape, _ = input_shape
-        return (timeseries_shape[0], timeseries_shape[1], self.onsource_duration_seconds*self.sample_rate_hertz) 
-
-class WhitenPassthrough(Layer):
-    def __init__(
-            self, 
-            sample_rate_hertz = None,
-            onsource_duration_seconds = None,
-            fft_duration_seconds=4, 
-            overlap_duration_seconds=2,
-            highpass_hertz=None, 
-            detrend='constant', 
-            filter_duration_seconds=2.0, 
-            window="hann", 
-            **kwargs
-        ):
-        super().__init__(**kwargs)
-
-        if sample_rate_hertz is None:
-            sample_rate_hertz = gf.Defaults.sample_rate_hertz
-        if onsource_duration_seconds is None:
-            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
-
-        self.onsource_duration_seconds = onsource_duration_seconds
-        self.sample_rate_hertz = sample_rate_hertz
-        self.fft_duration_seconds = fft_duration_seconds
-        self.overlap_duration_seconds = overlap_duration_seconds
-        self.highpass_hertz = highpass_hertz
-        self.detrend = detrend
-        self.filter_duration_seconds = filter_duration_seconds
-        self.window = window
-        self.num_output_samples = int(self.onsource_duration_seconds*self.sample_rate_hertz)
-
-    def build(self, input_shape):
-        # This layer doesn't have any trainable weights, but you could set up weights here if necessary.
-        super().build(input_shape)
-
-    @tf.function
-    def call(self, inputs):
-        timeseries = inputs
-        
-        cropped = gf.crop_samples(timeseries, self.onsource_duration_seconds, self.sample_rate_hertz)
 
         dynamic_shape = tf.shape(timeseries)
         return tf.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))

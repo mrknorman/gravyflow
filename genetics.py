@@ -75,7 +75,7 @@ class HyperParameter:
                         self.value, self.distribution.min_, self.distribution.max_, mutation_strength
                     )
                 case gf.DistributionType.CHOICE:
-                    self.value = self.distribution.sample()
+                    self.value = self.distribution.sample()[0]
                 case gf.DistributionType.LOG:
                     log_value = mutate_value(
                         np.log(self.value), self.distribution.min_, self.distribution.max_, mutation_strength
@@ -101,8 +101,8 @@ class HyperParameter:
 
                 self.value = int(self.value)
 
-    def crossover(self, other, crossover_rate):
-        if (np.random() < crossover_rate):
+    def crossover(self, other, crossover_rate = 0.5):
+        if (np.random.random() < crossover_rate):
             self.distribution = other.distribution
             self.value = other.value
 
@@ -229,7 +229,7 @@ class ModelGenome:
             for possibility in layer_genome.distribution.possible_values:
                 possibility.mutate(mutation_rate)
     
-    def crossover(self, cls, genome, crossover_rate = 0.5):
+    def crossover(self, genome, crossover_rate = 0.5):
         for old, new in zip(self.genes, genome.genes):
             old.crossover(new, crossover_rate)
     

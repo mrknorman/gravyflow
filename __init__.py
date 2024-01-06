@@ -31,7 +31,7 @@ try:
     from .cuphenom.python.cuphenom import imrphenomd
 except Exception as e:
     print(f"Failed to import cuphenom because {e}.")
-from .whiten import whiten, Whiten, WhitenPassthrough
+from .whiten import whiten, Whiten, WhitenP
 from .pearson import rolling_pearson
 from .detector import *
 from .acquisition import *
