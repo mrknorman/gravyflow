@@ -14,7 +14,10 @@ from keras import backend as K
 from keras.callbacks import Callback
 from tensorflow.keras import losses
 from tensorflow.keras.layers import Layer
+from tqdm import tqdm
 import json
+
+import pickle
 
 import gravyflow as gf
 
@@ -302,6 +305,9 @@ def adjust_features(features, labels):
 class BaseLayer:
     layer_type: str = "Base"
     activation: Union[gf.HyperParameter, str] = None
+    dropout_present : Union[gf.Hyperparameter, bool] = None 
+    dropout_value : Union[gf.Hyperparameter, str] = None
+    batch_normalisation_present : Union[gf.Hyperparameter, bool] = None
     mutable_attributes: List = None
     
     def randomize(self):
@@ -366,10 +372,16 @@ class Reshape(Layer):
 class DenseLayer(BaseLayer):
     units: gf.HyperParameter = 64
     activation: gf.HyperParameter = "relu"
+    dropout_present : Union[gf.Hyperparameter, bool] = None 
+    dropout_value : Union[gf.Hyperparameter, str] = None
+    batch_normalisation_present : Union[gf.Hyperparameter, bool] = None
 
     def __init__(
             self, 
             units: Union[gf.HyperParameter, int] = 64, 
+            dropout_present : Union[gf.Hyperparameter, bool] = False,
+            dropout_value : Union[gf.Hyperparameter, str] = 0.0,
+            batch_normalisation_present : Union[gf.Hyperparameter, bool] = False,
             activation: Union[gf.HyperParameter, str] = "relu"
         ):
         """
@@ -386,7 +398,10 @@ class DenseLayer(BaseLayer):
         self.layer_type = "Dense"
         self.activation = gf.HyperParameter(activation)
         self.units = gf.HyperParameter(units)
-        self.mutable_attributes = [self.activation, self.units]
+        self.dropout_present = gf.HyperParameter(dropout_present)
+        self.dropout_value = gf.HyperParameter(dropout_value)
+        self.batch_normalisation_present = gf.HyperParameter(batch_normalisation_present)
+        self.mutable_attributes = [self.activation, self.units, self.dropout_present, self.dropout_value, self.batch_normalisation_present]
 
 @dataclass
 class FlattenLayer(BaseLayer):
@@ -413,13 +428,20 @@ class ConvLayer(BaseLayer):
     filters: gf.HyperParameter = 16
     kernel_size: gf.HyperParameter = 16
     strides: gf.HyperParameter = 1
+    activation: gf.HyperParameter = "relu"
+    dropout_present : Union[gf.Hyperparameter, bool] = None 
+    dropout_value : Union[gf.Hyperparameter, str] = None
+    batch_normalisation_present : Union[gf.Hyperparameter, bool] = None
     
     def __init__(self, 
         filters: gf.HyperParameter = 16, 
         kernel_size: gf.HyperParameter = 16, 
         activation: gf.HyperParameter = "relu", 
         strides: gf.HyperParameter = gf.HyperParameter(1),
-        dilation: gf.HyperParameter = gf.HyperParameter(0)
+        dilation: gf.HyperParameter = gf.HyperParameter(0),
+        dropout_present : Union[gf.Hyperparameter, bool] = False,
+        dropout_value : Union[gf.Hyperparameter, str] = 0.0,
+        batch_normalisation_present : Union[gf.Hyperparameter, bool] = False
         ):
         """
         Initializes a ConvLayer instance.
@@ -436,10 +458,13 @@ class ConvLayer(BaseLayer):
         self.kernel_size = gf.HyperParameter(kernel_size)
         self.strides = gf.HyperParameter(strides)
         self.dilation = gf.HyperParameter(dilation)
+        self.dropout_present = gf.HyperParameter(dropout_present)
+        self.dropout_value = gf.HyperParameter(dropout_value)
+        self.batch_normalisation_present = gf.HyperParameter(batch_normalisation_present)
 
         self.padding = gf.HyperParameter("same")
         
-        self.mutable_attributes = [self.activation, self.filters, self.kernel_size, self.strides, self.dilation]
+        self.mutable_attributes = [self.activation, self.filters, self.kernel_size, self.strides, self.dilation, self.dropout_present, self.dropout_value, self.batch_normalisation_present]
         
 @dataclass
 class PoolLayer(BaseLayer):
@@ -481,6 +506,17 @@ class DropLayer(BaseLayer):
         self.layer_type = "Dropout"
         self.rate = gf.HyperParameter(rate)
         self.mutable_attributes = [self.rate]
+
+class BatchNormLayer(BaseLayer):
+    
+    def __init__(self):
+        """
+        Initializes a DropLayer instance.
+        
+        Args:
+        rate: gf.HyperParameter specifying the dropout rate for this layer.
+        """
+        self.layer_type = "BatchNorm"
 
 class WhitenLayer(BaseLayer):
     
@@ -554,6 +590,7 @@ class Model:
         batch_size: Batch size to use when training the model.
         """ 
         self.train_dataset = None
+
         if dataset_args is not None:
             self.train_dataset = gf.Dataset(**deepcopy(dataset_args)).map(adjust_features)
 
@@ -608,14 +645,49 @@ class Model:
         
         training_config["model_path"] = model_path
         training_config["learning_rate"] = genome.learning_rate.value
+        training_config["batch_size"] = genome.batch_size.value
+        training_config["onsource_duration_seconds"] = genome.onsource_duration_seconds.value
+        training_config["offsource_duration_seconds"] = genome.offsource_duration_seconds.value
+        training_config["sample_rate_hertz"] = genome.sample_rate_hertz.value
+
+        dataset_args["num_examples_per_batch"] = genome.batch_size.value
+        dataset_args["onsource_duration_seconds"] = genome.onsource_duration_seconds.value
+        dataset_args["offsource_duration_seconds"] = genome.offsource_duration_seconds.value
+        dataset_args["sample_rate_hertz"] = genome.sample_rate_hertz.value
+
+        gf.Defaults.set(
+            num_examples_per_batch=dataset_args["num_examples_per_batch"],
+            sample_rate_hertz=dataset_args["sample_rate_hertz"],
+            onsource_duration_seconds=dataset_args["onsource_duration_seconds"],
+            offsource_duration_seconds=dataset_args["offsource_duration_seconds"]
+        )
+
+        num_onsource_samples = int((genome.onsource_duration_seconds.value + 2.0*gf.Defaults.crop_duration_seconds) * genome.sample_rate_hertz.value)
+        num_offsource_samples = int(genome.offsource_duration_seconds.value * genome.sample_rate_hertz.value)
+        
+        input_configs = [
+            {
+                "name" : gf.ReturnVariables.ONSOURCE.name,
+                "shape" : (1, num_onsource_samples,)
+            },
+            {
+                "name" : gf.ReturnVariables.OFFSOURCE.name,
+                "shape" : (1, num_offsource_samples,)
+            }
+        ]
+    
+        output_config = {
+            "name" : gf.ReturnVariables.INJECTION_MASKS.name,
+            "type" : "binary"
+        }
 
         dataset_args["injection_generators"] = [
             generator.return_generator() for generator in genome.injection_generators 
         ]
+        dataset_args["noise_obtainer"].noise_type = genome.noise_type.value
 
-        #dataset_args["noise_obtainer"].type = genome.noise_type.value
         dataset_args = deepcopy(dataset_args)
-        
+
         # Create an instance of DenseModel with num_neurons list
         model = cls(
             name=name,
@@ -729,10 +801,13 @@ class Model:
                     raise ValueError(f"Layer type '{layer_type}' not recognized")
 
             # Add dropout layer if specified
-            if "dropout" in layer_config:
-                hidden_layers.append(gf.DropLayer(
-                    layer_config.get("dropout", 0.5)
-                ))
+            if "dropout_present" in layer_config:
+                if layer_config["dropout_present"]:
+                    hidden_layers.append(gf.DropLayer(
+                        layer_config.get("dropout_value", 0.5)
+                    ))
+            if "batch_normalisation_present" in layer_config:
+                hidden_layers.append(gf.BatchNormLayer(BaseLayer))
 
         model = cls(
             model_name,
@@ -850,6 +925,23 @@ class Model:
                 if blueprint_exists:
                     logging.info("Using new model...")
                     return model
+                elif load_genome is True:
+                    genome_path = Path(f"{model_load_path}/genome")
+                    if genome_path.exists():
+                        genome = gf.ModelGenome.load(genome_path)
+                        
+                        return cls.from_genome(
+                            genome=genome, 
+                            name=name,
+                            input_configs=input_configs, 
+                            output_config=output_config,
+                            training_config=training_config,
+                            dataset_args=dataset_args, 
+                            model_path=model_path,
+                            metrics=[]
+                        )
+                    else: 
+                        raise ValueError("No genome exists!")
                 else:
                     raise ValueError("No default model blueprint exists!")
         else:
@@ -965,6 +1057,8 @@ class Model:
                 new_layers.append(tf.keras.layers.Dropout(
                         layer.rate.value
                     ))
+            case "BatchNorm" :
+                new_layers.append(tf.keras.layers.BatchNormalization())
             case _:
                 raise ValueError(
                     f"Layer type '{layer.layer_type.value}' not recognized"
@@ -1005,6 +1099,7 @@ class Model:
         self, 
         train_dataset: tf.data.Dataset = None, 
         validate_dataset: tf.data.Dataset = None,
+        validate_args : dict = None,
         training_config: dict = None,
         force_retrain : bool = True,
         max_epochs_per_lesson = None,
@@ -1019,11 +1114,28 @@ class Model:
         num_epochs: Number of epochs to train for.
         """ 
 
-        if validate_dataset is None:
+        if validate_dataset is None and validate_args is None:
             raise ValueError("No validation dataset!")
+        
+        if validate_dataset is not None and not validate_args:
+            raise ValueError("Validation argument and validateion datasets")
+
+        if validate_args is not None:
+            
+            if self.genome is not None:
+                validate_args["onsource_duration_seconds"] = self.genome.onsource_duration_seconds.value
+                validate_args["offsource_duration_seconds"] = self.genome.offsource_duration_seconds.value
+                validate_args["sample_rate_hertz"] = self.genome.sample_rate_hertz.value
+
+            validate_dataset : tf.data.Dataset = gf.Dataset(
+                **deepcopy(validate_args),
+                group="validate"
+            ).map(adjust_features)
 
         if train_dataset is None:
             train_dataset = self.train_dataset
+        elif self.train_dataset is not None:
+            raise ValueError("Warning train dataset passed even though internal dataset it set.")
 
         if training_config is None:
             if self.training_config is not None:
@@ -1105,7 +1217,7 @@ class Model:
         ]
         
         num_batches = training_config["num_examples_per_epoc"] // self.batch_size.value
-        num_validation_batches = training_config["num_validation_examples"] // self.batch_size.value
+        num_validation_batches = training_config["num_validation_examples"] // 32
         
         verbose : int = 1
         if gf.is_redirected():
@@ -1290,6 +1402,8 @@ class Population:
         population_directory_path : Path = Path("./population/"),
         metrics : List = []
     ):
+        self.current_generation = 0
+
         if num_onsource_samples is None:
             self.num_onsource_samples = int((gf.Defaults.onsource_duration_seconds + 2.0*gf.Defaults.crop_duration_seconds) * gf.Defaults.sample_rate_hertz)
         
@@ -1310,53 +1424,53 @@ class Population:
         self.orchard = PopulationSector("orchard", population_directory_path)
         self.nursary = PopulationSector("nursary", population_directory_path)
         self.lumberyard = PopulationSector("lumberyard", population_directory_path)
+
         self.initilize()
+        self.save()
+    
+    def save(self, path = None):
+        if path is None:
+            path = self.population_directory_path / "checkpoint.pkl"
+
+        with open(path, 'wb') as file:
+            pickle.dump(self, file)
+
+    @classmethod
+    def load(cls, path = None):
+        if path is None:
+            path = Path("./population/") / "checkpoint.pkl"
+
+        if path.exists():
+            with open(path, 'rb') as file:
+                return pickle.load(file)
+        else:
+            return None
 
     def add_model(self, genome):
-
-        input_configs = [
-            {
-                "name" : gf.ReturnVariables.ONSOURCE.name,
-                "shape" : (self.num_ifos, self.num_onsource_samples,)
-            },
-            {
-                "name" : gf.ReturnVariables.OFFSOURCE.name,
-                "shape" : (self.num_ifos, self.num_offsource_samples,)
-            }
-        ]
-        
-        output_config = {
-            "name" : gf.ReturnVariables.INJECTION_MASKS.name,
-            "type" : "binary"
-        }
 
         model_number = self.current_id
         self.current_id += 1
 
         model_name = f"model_{model_number}"
+        model_path = self.population_directory_path / f"generation_{self.current_generation}" / f"{model_name}"
 
-        model = gf.Model.load(
-            name=model_name,
-            model_load_path=Path(f"./population/{model_name}"),
-            genome=genome,
-            num_ifos=self.num_ifos,
-            training_config=self.training_config,
-            input_configs=input_configs,
-            output_config=output_config,
-            dataset_args=self.dataset_args,
-            load_genome=True
-        )
+        gf.ensure_directory_exists(model_path)
+        model = {
+            "name" : model_name,
+            "number" : model_number,
+            "path" : model_path
+        }
+
+        genome.save(model_path / "genome")
 
         self.nursary.add(model)
-        model.summary()
         
     def initilize(self):
-
-        for j in range(self.initial_population_size): 
-            if Path(f"./population/model_{self.current_id}/genome").exists() and Path(f"./population/model_{self.current_id}/saved_model.pb").exists() and Path(f"./population/model_{self.current_id}/fingerprint.pb").exists():
-                self.add_model(None)
-            else:
-                self.random_sapling()
+        if self.current_generation == 0:
+            for j in tqdm(range(self.initial_population_size)): 
+                if not Path(self.population_directory_path / f"generation_{self.current_generation}" / f"model_{j}/genome").exists():
+                    self.random_sapling()
+        
                 
     def roulette_wheel_selection(self, fitnesses):
         """
@@ -1422,39 +1536,37 @@ class Population:
 
         current_dir = Path(__file__).resolve().parent.parent
 
-        model_names = [f"model_{i}" for i in range(self.current_population_size)]
-        initial_processes = [
-            gf.Process(f"python train.py", name, tensorflow_memory_mb=4000, cuda_overhead_mb=2000, initial_restart_count=1)
-            for name in model_names
-        ]
+        if generation == 0:
+                        
+            model_names = [f"model_{i}" for i in range(self.current_population_size)]
+            initial_processes = [
+                gf.Process(f"python train.py", name, tensorflow_memory_mb=4000, cuda_overhead_mb=2000, initial_restart_count=1)
+                for name in model_names
+            ]
 
-        """
-        manager = gf.Manager(
-            initial_processes,
-            max_restarts=20,
-            restart_timeout_seconds=3600.0, 
-            process_start_wait_seconds=1.0, 
-            management_tick_length_seconds=5.0,
-            max_num_concurent_processes=8,
-            log_directory_path = Path(f"{current_dir}/population/logs/")
-        )
+            manager = gf.Manager(
+                initial_processes,
+                max_restarts=20,
+                restart_timeout_seconds=3600.0, 
+                process_start_wait_seconds=1.0, 
+                management_tick_length_seconds=5.0,
+                max_num_concurent_processes=8,
+                log_directory_path = Path(f"{current_dir}/population/logs/")
+            )
 
-        while manager:
-            manager()
-            #manager.tabulate()
-        """
+            while manager:
+                manager()
 
-        for model_index in range(self.current_population_size):
-            self.nursary.models[model_index].genome = gf.ModelGenome.load(self.nursary.models[model_index].path / "genome")
+            for model_index in range(self.current_population_size):
+                self.nursary.models[model_index].genome = gf.ModelGenome.load(self.nursary.models[model_index].path / "genome")
+
+            generation += 1
         
-        start_generation = 3
         for generation_index in range(1, num_generations):
             self.nursary.fitnesses = load_and_calculate_fitness(
                 generation_index,
                 num_per_generation = self.current_population_size
             )
-
-            print(self.nursary.fitnesses)
 
             for _ in range(self.current_population_size):
                 self.orchard.transfer(self.nursary, -1)
@@ -1507,57 +1619,6 @@ class Population:
 
                 while manager:
                     manager()
-
-        while 1:     
-            i = self.roulette_wheel_selection(self.nursary.fitnesses)
-            logging.info(f"Training model: {self.nursary.models[i].name}")
-
-            is_alive = self.nursary.models[i].train(
-                validate_dataset=test_dataset, 
-                max_epochs_per_lesson=max_num_epochs_per_generation, 
-                force_retrain=False
-            )   
-
-            if not isinstance(self.nursary.models[i].metrics[-1], dict):
-                self.nursary.fitnesses[i] = 1.0/self.nursary.models[i].metrics[-1].history['val_loss'][-1]
-                self.nursary.accuracies[i] = self.nursary.models[i].metrics[-1].history['val_binary_accuracy'][-1]
-            else:
-                self.nursary.fitnesses[i] = 1.0/self.nursary.models[i].metrics[-1]['val_loss'][-1]
-                self.nursary.accuracies[i] = self.nursary.models[i].metrics[-1]['val_binary_accuracy'][-1]
-
-            # Birth if conditions are correct:  
-            # Flip if random or offspring
-            if not is_alive:
-                self.orchard.transfer(self.nursary, i)
-
-            plant_condition = self.nursary.num_models < self.max_population_size
-            exploration_rate = 0.5
-            if plant_condition:
-                if np.random.random() < exploration_rate and self.orchard.num_models > 1: 
-                    self.germinate_sapling()
-                else:
-                    self.random_sapling()
-
-                self.nursary.models[-1].train(
-                    validate_dataset=test_dataset, 
-                    max_epochs_per_lesson=max_num_epochs_per_generation, 
-                    force_retrain=True
-                )   
-            
-            if self.nursary.num_models == 0:
-                break
-
-            self.nursary.tick()
-            self.orchard.tick()
-
-            self.nursary.save()
-            self.orchard.save()
-
-            print("Nursary History:", self.nursary.mean_accuracy_history)
-            print("Orchard History:", self.orchard.mean_accuracy_history)
-
-        print("Final scores:", self.orchard.fitnesses)
-        print("Final Accuracies:", self.orchard.accuracies)
 
     def germinate_sapling(self):
 
@@ -1625,7 +1686,6 @@ def load_and_calculate_fitness(generation, num_per_generation = 100, scaling_thr
                 gf.Defaults.onsource_duration_seconds,
                 [10E-4]
             ).values())[0][1]
-            print(score_threshold)
 
             efficiency_data = validator.efficiency_data
 

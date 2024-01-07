@@ -3,6 +3,7 @@ from typing import Union, List, Dict
 from dataclasses import dataclass
 from enum import Enum
 import json
+import os
 
 import tensorflow as tf
 import numpy as np
@@ -237,7 +238,8 @@ class IFO_:
     x_length_meters : float
     y_length_meters : float
 
-NOISE_PROFILE_DIRECTORY_PATH : Path = Path("./py_ml_tools/res/noise_profiles/")
+current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
+NOISE_PROFILE_DIRECTORY_PATH : Path = Path(f"{current_dir}/res/noise_profiles/")
 
 ifo_data : Dict = {
     "livingston" : {
