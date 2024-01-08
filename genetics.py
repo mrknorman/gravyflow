@@ -171,7 +171,7 @@ class ModelGenome:
         optimizer : HyperParameter,
         batch_size : HyperParameter,
         learning_rate: HyperParameter,
-        injection_generators : List[HyperInjectionGenerator],
+        injection_generators : Dict[str, HyperInjectionGenerator],
         noise_type : HyperParameter,
         exclude_glitches : HyperParameter,
         onsource_duration_seconds : HyperParameter, 
@@ -211,7 +211,7 @@ class ModelGenome:
             self.offsource_duration_seconds,
             self.sample_rate_hertz,
             self.num_layers
-         ] + self.layer_genomes + self.injection_generators
+         ] + self.layer_genomes + [gen["hp"] for gen in self.injection_generators.values()]
     
     def randomize(self):
         for gene in self.genes:

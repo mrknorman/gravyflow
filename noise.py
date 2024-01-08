@@ -222,21 +222,21 @@ def colored_noise_generator(
             interpolated_psd_offsource
         )
     
-    interpolated_onsource_psds_ = tf.concat(interpolated_onsource_psds, axis=1)
-    interpolated_offsource_psds_ = tf.concat(interpolated_offsource_psds, axis=1)        
+    interpolated_onsource_psds = tf.concat(interpolated_onsource_psds, axis=1)
+    interpolated_offsource_psds = tf.concat(interpolated_offsource_psds, axis=1)        
     
     while True:
         yield _generate_colored_noise(
                 num_examples_per_batch, 
                 len(ifos),
                 num_samples_list[0], 
-                interpolated_onsource_psds_
+                interpolated_onsource_psds
             ), \
               _generate_colored_noise(
                 num_examples_per_batch, 
                 len(ifos),
                 num_samples_list[1], 
-                interpolated_offsource_psds_
+                interpolated_offsource_psds
             ), \
             tf.fill([num_examples_per_batch], -1.0)
     
@@ -423,23 +423,8 @@ class NoiseObtainer:
             valid_segments = self.ifo_data_obtainer.get_valid_segments(
                 self.ifos,
                 self.groups,
-                group
-            )
-
-            # In the case of pseduo real noise we only want to acquire
-            # offsource_duration amount of data:
-            valid_segments : np.ndarray = \
-                self.ifo_data_obtainer.split_segments(
-                    valid_segments, 
-                    offsource_duration_seconds
-                )
-
-            # Ensure all segments are at least length:
-            valid_segments : np.ndarray = \
-                self.ifo_data_obtainer.remove_short_segments(
-                    self.ifo_data_obtainer.valid_segments, 
-                    offsource_duration_seconds
-                )
+                group_name = group
+            ) 
 
             # Setup noise_file_path, file path is created from
             # hash of unique parameters:
@@ -456,18 +441,32 @@ class NoiseObtainer:
             scale_factor
         ):
 
-            frequencies, psd = gf.psd(
-                segment.data, 
-                nperseg=1024, 
-                sample_rate_hertz=sample_rate_hertz
-            )
-            
-            interpolated_psd_onsource, interpolated_psd_offsource = \
-                interpolate_onsource_offsource_psd(
-                    num_samples_list,
-                    frequencies,
-                    psd
+            interpolated_onsource_psds = []
+            interpolated_offsource_psds = []
+            for data in segment.data:
+
+                frequencies, psd = gf.psd(
+                    data, 
+                    nperseg=1024, 
+                    sample_rate_hertz=sample_rate_hertz
                 )
+                
+                interpolated_psd_onsource, interpolated_psd_offsource = \
+                    interpolate_onsource_offsource_psd(
+                        num_samples_list,
+                        frequencies,
+                        psd
+                    )
+                
+                interpolated_onsource_psds.append(
+                    interpolated_psd_onsource
+                )
+                interpolated_offsource_psds.append(
+                    interpolated_psd_offsource
+                )
+
+            interpolated_onsource_psds = tf.concat(interpolated_onsource_psds, axis=1)
+            interpolated_offsource_psds = tf.concat(interpolated_offsource_psds, axis=1)     
             
             # Calculate number of batches current segment can produce, this
             # is dependant on the segment duration and the onsource duration:
@@ -479,20 +478,19 @@ class NoiseObtainer:
                         num_examples_per_batch * onsource_duration_seconds
                     )
                 )
-            
+                        
             for _ in range(num_batches_in_segment):
                 yield _generate_colored_noise(
                         num_examples_per_batch, 
-                        len(ifos),
+                        len(self.ifos),
                         num_samples_list[0], 
-                        interpolated_psd_onsource
+                        interpolated_onsource_psds
                     ), \
                       _generate_colored_noise(
                         num_examples_per_batch, 
-                        len(ifos),
+                        len(self.ifos),
                         num_samples_list[1], 
-                        interpolated_psd_offsource
+                        interpolated_offsource_psds
                     ), \
-                      tf.fill([num_examples_per_batch], segment.start_gps_time)
-            
+                    tf.fill([num_examples_per_batch], -1) #segment.start_gps_time)            
             
