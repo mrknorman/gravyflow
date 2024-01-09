@@ -169,7 +169,7 @@ def calculate_far_scores(
         logger,
         file_path : Path,
         num_examples_per_batch : int = 32,  
-        num_examples : int = 1E5,
+        num_seconds : float = 1E5,
         heart : gf.Heart = None
     ) -> np.ndarray:
     
@@ -197,7 +197,7 @@ def calculate_far_scores(
     dataset_args = deepcopy(dataset_args)
         
     # Integer arguments are integers:
-    num_examples = int(num_examples)
+    num_examples = int(num_seconds/dataset_args["onsource_duration_seconds"])
     num_examples_per_batch = int(num_examples_per_batch)
     
     # Calculate number of batches required given batch size:
@@ -976,11 +976,12 @@ def generate_far_curves(
         far_scores = np.sort(far_scores)[::-1]
         total_num_seconds = len(far_scores) * validator.input_duration_seconds
         far_axis = (
-                np.arange(total_num_seconds, dtype=float) + 1
+                np.arange(0, total_num_seconds, step=validator.input_duration_seconds, dtype=float) + 1
             ) / total_num_seconds
-
-        downsampled_far_scores, downsampled_far_axis = \
-            downsample_data(far_scores, far_axis, max_num_points)
+        
+        downsampled_far_scores, downsampled_far_axis = downsample_data(
+            far_scores, far_axis, max_num_points
+        )
         
         source = ColumnDataSource(
             data=dict(
@@ -1242,11 +1243,11 @@ class Validator:
         },
         far_config : dict = \
         {
-            "num_exammples" : 1.0E5
+            "num_seconds" : 1.0E5
         },
         roc_config : dict = \
         {
-            "num_exammples" : 1.0E5,
+            "num_examples" : 1.0E5,
             "scaling_ranges" :  [
                 (8.0, 20),
                 8.0,
@@ -1377,8 +1378,7 @@ class Validator:
 
         if (validator.far_scores is None):
             validator.logger.info(f"Calculating FAR scores for {validator.name}...")
-            validator.far_scores = \
-                calculate_far_scores(
+            validator.far_scores = calculate_far_scores(
                     model, 
                     dataset_args, 
                     validator.logger,

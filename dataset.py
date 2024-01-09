@@ -504,20 +504,28 @@ def Dataset(
     
     num_detectors = 1
     if isinstance(injection_generators, list): 
-        if injection_generators[0].network is not None:
-            num_detectors = injection_generators[0].network.num_detectors 
-        elif noise_obtainer is not None:
-            num_detectors = len(noise_obtainer.ifos)
-        else:
-            num_detectors = 1
-    elif isinstance(injection_generators, dict):
-        for generator in injection_generators.values():
-            if generator["generator"].network is not None:
-                num_detectors = generator["generator"].network.num_detectors 
+        if len(injection_generators):
+            if injection_generators[0].network is not None:
+                num_detectors = injection_generators[0].network.num_detectors 
             elif noise_obtainer is not None:
                 num_detectors = len(noise_obtainer.ifos)
             else:
                 num_detectors = 1
+        elif noise_obtainer is not None:
+            num_detectors = len(noise_obtainer.ifos)
+    
+    elif isinstance(injection_generators, dict):
+        if len(injection_generators):
+            for generator in injection_generators.values():
+                if generator["generator"].network is not None:
+                    num_detectors = generator["generator"].network.num_detectors 
+                elif noise_obtainer is not None:
+                    num_detectors = len(noise_obtainer.ifos)
+                else:
+                    num_detectors = 1
+        elif noise_obtainer is not None:
+            num_detectors = len(noise_obtainer.ifos)
+    
     elif noise_obtainer is not None:
         num_detectors = len(noise_obtainer.ifos)
     
