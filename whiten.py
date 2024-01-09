@@ -466,7 +466,7 @@ def whiten(
 
     return out * tf.sqrt(2.0 * dt)
 
-class WhitenP(Layer):
+class WhitenPass(Layer):
     def __init__(
             self, 
             sample_rate_hertz = None,
@@ -502,7 +502,7 @@ class WhitenP(Layer):
 
     @tf.function
     def call(self, inputs):
-        timeseries, _ = inputs
+        timeseries = inputs
 
         cropped = gf.crop_samples(timeseries, self.onsource_duration_seconds, self.sample_rate_hertz)
 
@@ -525,7 +525,7 @@ class WhitenP(Layer):
     def compute_output_shape(self, input_shape):
         # Assuming input_shape is [(None, Y, A), (None, Y, B)]
         # and your layer returns a shape of (None, Y, B)
-        timeseries_shape, _ = input_shape
+        timeseries_shape = input_shape
         return (timeseries_shape[0], timeseries_shape[1], self.onsource_duration_seconds*self.sample_rate_hertz) 
 
 class Whiten(Layer):

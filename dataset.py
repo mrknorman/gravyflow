@@ -71,11 +71,19 @@ def get_max_arrival_time_difference(
     max_arival_time_difference_seconds : float = 0.01
     
     max_arrival_time_differences = []
-    for config in injection_generators: 
-        if (config is not None) and (config.network is not None):
-            max_arrival_time_differences.append(
-                config.network.max_arrival_time_difference_seconds
-            )        
+
+    if isinstance(injection_generators, list):
+        for config in injection_generators: 
+            if (config is not None) and (config.network is not None):
+                max_arrival_time_differences.append(
+                    config.network.max_arrival_time_difference_seconds
+                )     
+    elif isinstance(injection_generators, dict):
+        for config in injection_generators.values(): 
+            if (config is not None) and (config["generator"].network is not None):
+                max_arrival_time_differences.append(
+                    config["generator"].network.max_arrival_time_difference_seconds
+                )     
     
     if len(max_arrival_time_differences):
         max_arrival_time_differences = tf.stack(max_arrival_time_differences)
@@ -144,12 +152,20 @@ def data(
     if injection_generators is None:
         injection_generators = []
                 
-    if not isinstance(injection_generators, list):
+    if not isinstance(injection_generators, list) and not isinstance(injection_generators, dict):
         injection_generators = [injection_generators]
 
-    for config in injection_generators:
-        if config.network is None: 
-            config.network = gf.Network(noise_obtainer.ifos)
+    # If no interferometers are input for injection generator
+    # assumes interferometers are the same as is used in
+    # noise generation:
+    if isinstance(injection_generators, list):
+        for config in injection_generators:
+            if config.network is None: 
+                config.network = gf.Network(noise_obtainer.ifos)
+    elif isinstance(injection_generators, dict):
+        for config in injection_generators.values():
+            if config["generator"].network is None: 
+                config["generator"].network = gf.Network(noise_obtainer.ifos)
     
     # Create set with unique elements of input and output variables so that they
     # can be calculated during loop if required:
@@ -166,16 +182,15 @@ def data(
     gf.set_random_seeds(seed)
     
     # Create Noise Generator:
-    noise : Iterator = \
-        noise_obtainer(
-            sample_rate_hertz,
-            onsource_duration_seconds,
-            crop_duration_seconds,
-            offsource_duration_seconds,
-            num_examples_per_batch,
-            scale_factor,
-            group
-        )
+    noise : Iterator = noise_obtainer(
+        sample_rate_hertz,
+        onsource_duration_seconds,
+        crop_duration_seconds,
+        offsource_duration_seconds,
+        num_examples_per_batch,
+        scale_factor,
+        group
+    )
     
     # Create Injection Generator: 
     waveform_parameters_to_return = [
@@ -184,16 +199,15 @@ def data(
         )
     ]
     
-    injection_generator : gf.InjectionGenerator = \
-        gf.InjectionGenerator(
-            injection_generators,
-            sample_rate_hertz,
-            onsource_duration_seconds,
-            crop_duration_seconds,
-            num_examples_per_generation_batch,
-            num_examples_per_batch,
-            variables_to_return=waveform_parameters_to_return
-        )
+    injection_generator : gf.InjectionGenerator = gf.InjectionGenerator(
+        injection_generators,
+        sample_rate_hertz,
+        onsource_duration_seconds,
+        crop_duration_seconds,
+        num_examples_per_generation_batch,
+        num_examples_per_batch,
+        variables_to_return=waveform_parameters_to_return
+    )
     
     injections : Iterator = injection_generator.generate()
     
@@ -216,16 +230,17 @@ def data(
                         
             # Add injections to waveform scaled by inputted SNR config values:
             try:
-                onsource, scaled_injections, scaling_parameters = \
-                    injection_generator.add_injections_to_onsource(
-                        injections_,
-                        mask,
-                        onsource,
-                        variables_to_return=variables_to_return
-                    )
+                onsource, scaled_injections, scaling_parameters = injection_generator.add_injections_to_onsource(
+                    injections_,
+                    mask,
+                    onsource,
+                    variables_to_return=variables_to_return
+                )
                 
             except Exception as e:
-                logging.error(f"Couldn't add injections to onsource because {e}\nTraceback: {traceback.format_exc()}")
+                logging.error(
+                    f"Couldn't add injections to onsource because {e}\nTraceback: {traceback.format_exc()}"
+                )
                 continue
             
             if onsource is None:
@@ -412,9 +427,7 @@ def Dataset(
         scale_factor: float = None,
         noise_obtainer: gf.NoiseObtainer = None,
         group : str = "train",
-        injection_generators: List[
-            Union[gf.cuPhenomDGenerator, gf.WNBGenerator]
-        ] = None,
+        injection_generators: Union[List[gf.WaveformGenerator], Dict[str, gf.WaveformGenerator]] = None,
         num_examples_per_generation_batch: int = None,
         num_examples_per_batch: int = None,
         input_variables: List = None,
@@ -481,7 +494,7 @@ def Dataset(
     # Set gf.Defaults here as if initilised as default arguments objects are global
     if injection_generators is None:
         injection_generators = []
-    elif not isinstance(injection_generators, list):
+    elif not isinstance(injection_generators, list) and not isinstance(injection_generators, dict):
         injection_generators = [injection_generators]
 
     num_cropped_samples = int(onsource_duration_seconds * sample_rate_hertz)
@@ -490,13 +503,21 @@ def Dataset(
     num_injection_configs = len(injection_generators)
     
     num_detectors = 1
-    if injection_generators: 
+    if isinstance(injection_generators, list): 
         if injection_generators[0].network is not None:
             num_detectors = injection_generators[0].network.num_detectors 
         elif noise_obtainer is not None:
             num_detectors = len(noise_obtainer.ifos)
         else:
             num_detectors = 1
+    elif isinstance(injection_generators, dict):
+        for generator in injection_generators.values():
+            if generator["generator"].network is not None:
+                num_detectors = generator["generator"].network.num_detectors 
+            elif noise_obtainer is not None:
+                num_detectors = len(noise_obtainer.ifos)
+            else:
+                num_detectors = 1
     elif noise_obtainer is not None:
         num_detectors = len(noise_obtainer.ifos)
     

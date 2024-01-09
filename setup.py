@@ -8,6 +8,7 @@ from typing import Union, List
 
 import numpy as np
 import tensorflow as tf
+from filelock import Timeout, FileLock
 
 from scipy.stats import truncnorm
 from tensorflow.python.distribute.distribute_lib import Strategy
@@ -203,21 +204,22 @@ def find_available_GPUs(
 def get_element_shape(dataset):
     for element in dataset.take(1):
         return element[0].shape
-    
+
 def open_hdf5_file(
-        file_path : Union[str, Path], 
+        file_path: Union[str, Path], 
         logger = None,
-        mode : str ='r+'
+        mode: str ='r+'
     ) -> h5py.File:
     
     file_path = Path(file_path)
+
     try:
         # Try to open the HDF5 file in the specified mode
         f = h5py.File(file_path, mode)
         f.close()
-    except OSError:
+    except OSError as e:
         # The file does not exist, so create it in write mode
-        f = h5py.File(file_path, 'w') #swmr=True)
+        f = h5py.File(file_path, 'w')  # You can add swmr=True if needed
         f.close()
 
         if logger is not None:
@@ -225,7 +227,44 @@ def open_hdf5_file(
     else:
         if logger is not None:
             logger.info(f'The file {file_path} was opened in {mode} mode.')
+
     return h5py.File(file_path, mode)
+    
+def open_hdf5_file_locking(
+        file_path: Union[str, Path], 
+        logger = None,
+        mode: str ='r+',
+        lock_timeout: int = 120,  # Time in seconds to wait for the file to become free
+        poll_interval: float = 0.01  # Time in seconds between checks for file availability
+    ) -> h5py.File:
+    
+    file_path = Path(file_path)
+    lockfile_path = str(file_path) + ".lock"
+    lock = FileLock(lockfile_path, timeout=lock_timeout)
+
+    try:
+        with lock.acquire(poll_interval=poll_interval):
+            try:
+                # Try to open the HDF5 file in the specified mode
+                f = h5py.File(file_path, mode)
+                f.close()
+            except OSError as e:
+                # The file does not exist, so create it in write mode
+                f = h5py.File(file_path, 'w')  # You can add swmr=True if needed
+                f.close()
+
+                if logger is not None:
+                    logger.info(f'The file {file_path} was created in write mode.')
+            else:
+                if logger is not None:
+                    logger.info(f'The file {file_path} was opened in {mode} mode.')
+
+            return h5py.File(file_path, mode)
+
+    except Timeout:
+        if logger is not None:
+            logger.error(f'Timeout occurred. Could not acquire lock for {file_path}')
+        raise Exception(f"Timeout: Unable to acquire lock for {file_path}")
 
 def ensure_directory_exists(
     directory: Union[str, Path]

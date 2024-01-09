@@ -564,7 +564,7 @@ class InjectionGenerator:
             )
             
             self.num_examples_per_generation_batch = self.num_examples_per_batch
-    
+
     def generate(self):
         
         self.variables_to_return = \
@@ -574,52 +574,56 @@ class InjectionGenerator:
         if self.configs is False:
             yield None, None, None
             
-        elif not isinstance(self.configs, list):
+        elif not isinstance(self.configs, list) and not isinstance(self.configs, dict):
             self.configs = [self.configs]
-            
-        iterators = [self.generate_one(config) for config in self.configs]
-        
-        while 1: 
-            injections = []
-            mask = []
-            parameters = {key : [] for key in self.variables_to_return}
-            for iterator in iterators:
 
-                injection_, mask_, parameters_ = \
-                    next(iterator)
+        if isinstance(self.configs, list):
+            self.iterators = [self.generate_one(config) for config in self.configs]
+        elif isinstance(self.configs, dict):
+            self.iterators = [self.generate_one(config["generator"], name=key) for key, config in self.configs.items()]
 
-                injections.append(injection_)
-                mask.append(mask_)
-                                
-                for key in parameters:
-                    if key in parameters_:
-                        parameters[key].append(parameters_[key])
-                    else:
-                        parameters[key].append(
-                            tf.zeros(
-                                [key.value.shape[-1] * self.num_examples_per_batch], 
-                                dtype = tf.float64
-                            )
+            self.mask_dict = {} #this is horrible...
+
+        injections = []
+        mask = []
+        parameters = {key : [] for key in self.variables_to_return}
+        for iterator in self.iterators:
+
+            injection_, mask_, parameters_ = \
+                next(iterator)
+
+            injections.append(injection_)
+            mask.append(mask_)
+                            
+            for key in parameters:
+                if key in parameters_:
+                    parameters[key].append(parameters_[key])
+                else:
+                    parameters[key].append(
+                        tf.zeros(
+                            [key.value.shape[-1] * self.num_examples_per_batch], 
+                            dtype = tf.float64
                         )
-            
+                    )
+        try:
+            injections = tf.stack(injections)
+            mask = tf.stack(mask)
+        except Exception as e:
+            logging.error(f"Failed to stack injections or mask because {e}")
+            return None, None, None
+
+        for key, value in parameters.items():
             try:
-                injections = tf.stack(injections)
-                mask = tf.stack(mask)
+                parameters[key] = tf.stack(value)
             except Exception as e:
-                logging.error(f"Failed to stack injections or mask because {e}")
+                logging.error(f"Failed to stack injections parameters because {e}")
                 return None, None, None
 
-            for key, value in parameters.items():
-                try:
-                    parameters[key] = tf.stack(value)
-                except Exception as e:
-                    logging.error(f"Failed to stack injections parameters because {e}")
-                    return None, None, None
-            
+        while 1: 
             yield injections, mask, parameters
     
-    def generate_one(self, config):
-        
+    def generate_one(self, config, name = None):
+
         # Create default empty list for requested parameter returns:
         if self.variables_to_return is None:
             self.variables_to_return = []
@@ -645,12 +649,25 @@ class InjectionGenerator:
         num_batches : int = self.num_examples_per_generation_batch // self.num_examples_per_batch
 
         while 1:
-            mask = \
-                generate_mask(
+            
+            mask = generate_mask(
                     self.num_examples_per_generation_batch,  
                     config.injection_chance,
                     np.random.randint(1E10, size=2)
                 )
+
+            if name is not None:
+                self.mask_dict[name] = mask
+
+                if self.configs[name]["excluded"] is not None:
+
+                    excluded = self.configs[name]["excluded"]
+
+                    mask = tf.math.logical_and(
+                        mask,
+                        tf.math.logical_not(self.mask_dict[excluded])
+                    )
+
             num_waveforms = tf.reduce_sum(tf.cast(mask, tf.int32)).numpy()
             
             if num_waveforms > 0:
@@ -808,13 +825,23 @@ class InjectionGenerator:
         ):
         
         scaling_parameters = []
-        for mask, config in zip(masks, self.configs):
-            scaling_parameters.append(
-                self.generate_scaling_parameters_(
-                    mask,
-                    config
+
+        if isinstance(self.configs, dict):
+            for mask, config in zip(masks, self.configs.values()):
+                scaling_parameters.append(
+                    self.generate_scaling_parameters_(
+                        mask,
+                        config["generator"]
+                    )
                 )
-            )
+        else: 
+            for mask, config in zip(masks, self.configs):
+                scaling_parameters.append(
+                    self.generate_scaling_parameters_(
+                        mask,
+                        config
+                    )
+                )
             
         return scaling_parameters
     
@@ -843,11 +870,16 @@ class InjectionGenerator:
             logging.error("Unstacking failed for some reason")
             return None, None, None
 
+        if isinstance(self.configs, dict):
+            configs = [config["generator"] for config in self.configs.values()]
+        else:
+            configs = self.configs
+
         for injections_, mask_, scaling_parameters_, config in zip(
                 injections_list, 
                 mask_list, 
                 scaling_parameters, 
-                self.configs
+                configs
             ):
             
             network = config.network
