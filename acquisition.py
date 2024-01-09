@@ -561,7 +561,7 @@ class IFODataObtainer:
     ) -> List:
                 
         # Ensure parameters are lists for consistency:
-        if not isinstance(ifos, list):
+        if not isinstance(ifos, list) and not isinstance(ifos, tuple):
             ifos = [ifos]
                 
         # If no segment_order requested use class atribute as default, defaults
@@ -1013,7 +1013,7 @@ class IFODataObtainer:
         # If no valid segments inputted revert to default list:
         if valid_segments is None:
             valid_segments = self.valid_segments
-            
+        
         assert valid_segments.shape[1] == len(ifos), \
             "Num ifos should equal num segment lists"
         
@@ -1277,7 +1277,7 @@ class IFODataObtainer:
             num_examples_per_batch : int = None,
             ifos : List[gf.IFO] = gf.IFO.L1,
             scale_factor : float = None
-        ) -> (tf.Tensor, tf.Tensor, tf.Tensor, int):
+        ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, int]:
 
         if num_examples_per_batch is None:
             num_examples_per_batch = gf.Defaults.num_examples_per_batch
@@ -1285,7 +1285,7 @@ class IFODataObtainer:
             scale_factor = gf.Defaults.scale_factor
         
         # Ensure ifos are list:
-        if not isinstance(ifos, list):
+        if not isinstance(ifos, list) and not isinstance(ifos, tuple):
             ifos = [ifos]
         
         # Padding is multiplied by 2 because it's two sided:
