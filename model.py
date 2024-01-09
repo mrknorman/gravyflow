@@ -4,20 +4,19 @@ from copy import deepcopy
 from pathlib import Path
 import os
 import logging
+import json
+import pickle
 
 import numpy as np
-import tensorflow as tf
-from tensorflow import keras
+from tqdm import tqdm
 import tensorflow_probability as tfp
 from keras.layers import Lambda
 from keras import backend as K
 from keras.callbacks import Callback
+import tensorflow as tf
+from tensorflow import keras
 from tensorflow.keras import losses
 from tensorflow.keras.layers import Layer
-from tqdm import tqdm
-import json
-
-import pickle
 
 import gravyflow as gf
 
@@ -106,11 +105,13 @@ class IndependentGamma(tfpl.DistributionLambda):
 class IndependentFoldedNormal(tfpl.DistributionLambda):
     """An independent folded normal Keras layer."""
 
-    def __init__(self,
-                 event_shape=(),
-                 convert_to_tensor_fn=tfd.Distribution.sample,
-                 validate_args=False,
-                 **kwargs):
+    def __init__(
+        self,
+        event_shape=(),
+        convert_to_tensor_fn=tfd.Distribution.sample,
+        validate_args=False,
+        **kwargs
+    ):
         super(IndependentFoldedNormal, self).__init__(
             lambda t: self.new(t, event_shape, validate_args),
             convert_to_tensor_fn,
@@ -429,16 +430,22 @@ class ConvLayer(BaseLayer):
     dropout_present : Union[gf.HyperParameter, bool] = None 
     dropout_value : Union[gf.HyperParameter, str] = None
     batch_normalisation_present : Union[gf.HyperParameter, bool] = None
+    pooling_present : Union[gf.HyperParameter, bool] = None
+    pooling_size : Union[gf.HyperParameter, int] = None 
+    pooling_stride : Union[gf.HyperParameter, int] = None
     
     def __init__(self, 
-        filters: gf.HyperParameter = 16, 
-        kernel_size: gf.HyperParameter = 16, 
-        activation: gf.HyperParameter = "relu", 
-        strides: gf.HyperParameter = gf.HyperParameter(1),
-        dilation: gf.HyperParameter = gf.HyperParameter(0),
-        dropout_present : Union[gf.HyperParameter, bool] = False,
-        dropout_value : Union[gf.HyperParameter, str] = 0.0,
-        batch_normalisation_present : Union[gf.HyperParameter, bool] = False
+            filters: gf.HyperParameter = 16, 
+            kernel_size: gf.HyperParameter = 16, 
+            activation: gf.HyperParameter = "relu", 
+            strides: gf.HyperParameter = gf.HyperParameter(1),
+            dilation: gf.HyperParameter = gf.HyperParameter(0),
+            dropout_present : Union[gf.HyperParameter, bool] = False,
+            dropout_value : Union[gf.HyperParameter, str] = 0.0,
+            batch_normalisation_present : Union[gf.HyperParameter, bool] = False,
+            pooling_present : Union[gf.HyperParameter, bool] = False,
+            pooling_size : Union[gf.HyperParameter, int] = 4,
+            pooling_stride : Union[gf.HyperParameter, int] = 1
         ):
         """
         Initializes a ConvLayer instance.
@@ -458,10 +465,25 @@ class ConvLayer(BaseLayer):
         self.dropout_present = gf.HyperParameter(dropout_present)
         self.dropout_value = gf.HyperParameter(dropout_value)
         self.batch_normalisation_present = gf.HyperParameter(batch_normalisation_present)
+        self.pooling_present = gf.HyperParameter(pooling_present)
+        self.pooling_size = gf.HyperParameter(pooling_size)
+        self.pooling_stride = gf.HyperParameter(pooling_stride)
 
         self.padding = gf.HyperParameter("same")
         
-        self.mutable_attributes = [self.activation, self.filters, self.kernel_size, self.strides, self.dilation, self.dropout_present, self.dropout_value, self.batch_normalisation_present]
+        self.mutable_attributes = [
+            self.activation, 
+            self.filters, 
+            self.kernel_size, 
+            self.strides, 
+            self.dilation, 
+            self.dropout_present, 
+            self.dropout_value, 
+            self.batch_normalisation_present,
+            self.pooling_present,
+            self.pooling_size,
+            self.pooling_stride
+        ]
         
 @dataclass
 class PoolLayer(BaseLayer):
@@ -586,10 +608,10 @@ class Model:
         loss: Loss function to use when training the model.
         batch_size: Batch size to use when training the model.
         """ 
-        self.train_dataset = None
+        self.training_dataset = None
 
         if dataset_args is not None:
-            self.train_dataset = gf.Dataset(**deepcopy(dataset_args)).map(adjust_features)
+            self.training_dataset = gf.Dataset(**deepcopy(dataset_args)).map(adjust_features)
 
         self.name = name
         self.path = model_path
@@ -823,6 +845,14 @@ class Model:
             if hasattr(layer_config, "batch_normalisation_present"):
                 if layer_config.batch_normalisation_present:
                     hidden_layers.append(gf.BatchNormLayer(BaseLayer))
+            if hasattr(layer_config, "pooling_present"):
+                if layer_config.pooling_present:
+                    hidden_layers.append(
+                        gf.PoolLayer(
+                            pool_size=layer_config.get("pooling_size", 16),
+                            strides=layer_config.get("pooling_stride", 16)
+                        )
+                    )
 
         model = cls(
             model_name,
@@ -1087,6 +1117,16 @@ class Model:
         if hasattr(layer, "batch_normalisation_present"):
             if layer.batch_normalisation_present.value:
                 new_layers.append(tf.keras.layers.BatchNormalization())
+
+        if hasattr(layer, "pooling_present"):
+            if layer.pooling_present:
+                new_layers.append(
+                    tf.keras.layers.MaxPool1D(
+                        (layer.pooling_size.value,),
+                        strides=(layer.pooling_stride.value,),
+                        padding = layer.padding.value
+                    )
+                )
         
         # Return new layer type:
         return new_layers
@@ -1121,8 +1161,8 @@ class Model:
         
     def train(
         self, 
-        train_dataset: tf.data.Dataset = None, 
-        validate_dataset: tf.data.Dataset = None,
+        training_dataset: tf.data.Dataset = None, 
+        validation_dataset: tf.data.Dataset = None,
         validate_args : dict = None,
         training_config: dict = None,
         force_retrain : bool = True,
@@ -1134,36 +1174,37 @@ class Model:
         Trains the model.
         
         Args:
-        train_dataset: Dataset to train on.
+        training_dataset: Dataset to train on.
         num_epochs: Number of epochs to train for.
         """ 
 
-        if validate_dataset is None and validate_args is None:
+        if validation_dataset is None and validate_args is None:
             raise ValueError("No validation dataset!")
         
-        if validate_dataset is not None and not validate_args:
+        if validation_dataset is not None and not validate_args:
             raise ValueError("Validation argument and validateion datasets")
 
         if validate_args is not None:
-            
+
             if self.genome is not None:
                 validate_args["onsource_duration_seconds"] = self.genome.onsource_duration_seconds.value
                 validate_args["offsource_duration_seconds"] = self.genome.offsource_duration_seconds.value
                 validate_args["sample_rate_hertz"] = self.genome.sample_rate_hertz.value
+                validate_args["num_examples_per_batch"] = 32
 
-                if genome.layer_genomes[0].value.layer_type == "WhitenPass":
+                if self.genome.layer_genomes[0].value.layer_type == "WhitenPass":
                     validate_args["input_variables"] = [
                         gf.ReturnVariables.ONSOURCE
                     ]
 
-            validate_dataset : tf.data.Dataset = gf.Dataset(
+            validation_dataset : tf.data.Dataset = gf.Dataset(
                 **deepcopy(validate_args),
                 group="validate"
             ).map(adjust_features)
 
-        if train_dataset is None:
-            train_dataset = self.train_dataset
-        elif self.train_dataset is not None:
+        if training_dataset is None:
+            training_dataset = self.training_dataset
+        elif self.training_dataset is not None:
             raise ValueError("Warning train dataset passed even though internal dataset it set.")
 
         if training_config is None:
@@ -1259,8 +1300,8 @@ class Model:
 
         self.metrics.append(
             self.model.fit(
-                train_dataset,
-                validation_data=validate_dataset,
+                training_dataset,
+                validation_data=validation_dataset,
                 validation_steps=num_validation_batches,
                 epochs=current_max_epoch, 
                 initial_epoch = initial_epoch,
@@ -1284,7 +1325,7 @@ class Model:
             
     def validate(
         self, 
-        dataset_arguments : dict,
+        validate_args : dict,
         efficiency_config : dict,
         far_config : dict,
         roc_config : dict,
@@ -1292,12 +1333,22 @@ class Model:
         heart : None
     ):
         validation_file_path : Path = Path(model_path) / "validation_data.h5"
+
+        if self.genome is not None:
+            validate_args["onsource_duration_seconds"] = self.genome.onsource_duration_seconds.value
+            validate_args["offsource_duration_seconds"] = self.genome.offsource_duration_seconds.value
+            validate_args["sample_rate_hertz"] = self.genome.sample_rate_hertz.value
+
+            if self.genome.layer_genomes[0].value.layer_type == "WhitenPass":
+                validate_args["input_variables"] = [
+                    gf.ReturnVariables.ONSOURCE
+                ]
         
         # Validate model:
         validator = gf.Validator.validate(
                 self.model, 
                 self.name,
-                dataset_args=deepcopy(dataset_arguments),
+                dataset_args=deepcopy(validate_args),
                 efficiency_config=efficiency_config,
                 far_config=far_config,
                 roc_config=roc_config,
@@ -1420,34 +1471,15 @@ class PopulationSector:
 class Population:
     def __init__(
         self, 
-        initial_population_size: int, 
-        max_population_size: int,
+        num_population_members: int,
         default_genome: gf.ModelGenome,
-        training_config: dict,
-        dataset_args : dict,
-        num_onsource_samples : int = None,
-        num_offsource_samples : int = None,
-        num_ifos : int = 1,
-        population_directory_path : Path = Path("./population/"),
-        metrics : List = []
+        population_directory_path : Path = Path("./population/")
     ):
         self.generation = 0
 
-        if num_onsource_samples is None:
-            self.num_onsource_samples = int((gf.Defaults.onsource_duration_seconds + 2.0*gf.Defaults.crop_duration_seconds) * gf.Defaults.sample_rate_hertz)
-        
-        if num_offsource_samples is None:
-            self.num_offsource_samples = int(gf.Defaults.offsource_duration_seconds * gf.Defaults.sample_rate_hertz)
-
-        self.initial_population_size = initial_population_size
-        self.current_population_size = initial_population_size
-        self.max_population_size = max_population_size
+        self.num_population_members = num_population_members
         self.population_directory_path = population_directory_path
-        self.metrics = metrics
         self.default_genome = default_genome
-        self.training_config = training_config
-        self.dataset_args = dataset_args
-        self.num_ifos = num_ifos
         self.current_id = 0
 
         self.orchard = PopulationSector("orchard", population_directory_path)
@@ -1496,7 +1528,7 @@ class Population:
         
     def initilize(self):
         if self.generation == 0:
-            for j in tqdm(range(self.initial_population_size)): 
+            for j in tqdm(range(self.num_population_members)): 
                 if not Path(self.population_directory_path / f"generation_{self.generation}" / f"model_{j}/genome").exists():
                     self.random_sapling()
         
@@ -1535,22 +1567,12 @@ class Population:
     def train(
         self, 
         num_generations,
-        dataset_args,
-        num_validate_examples,
-        num_examples_per_batch,
-        max_num_epochs_per_generation=1
     ):  
-
-        test_args = deepcopy(dataset_args)
-        test_args["group"] = "test"
-        test_args["seed"] = 1984
-        test_dataset = gf.Dataset(**test_args).map(adjust_features)
-
         current_dir = Path(__file__).resolve().parent.parent
 
         if self.generation == 0:
                         
-            model_names = [f"model_{i}" for i in range(self.current_population_size)]
+            model_names = [f"model_{i}" for i in range(self.num_population_members)]
             initial_processes = [
                 gf.Process(f"python train.py --path {model['path']}", model["name"], tensorflow_memory_mb=4000, cuda_overhead_mb=2000, initial_restart_count=1)
                 for model in self.nursary.models
@@ -1562,55 +1584,41 @@ class Population:
                 restart_timeout_seconds=3600.0, 
                 process_start_wait_seconds=1.0, 
                 management_tick_length_seconds=5.0,
-                max_num_concurent_processes=8,
+                max_num_concurent_processes=1,
                 log_directory_path = Path(f"{current_dir}/population/generation_{self.generation}/logs/")
             )
 
             while manager:
                 manager()
 
-            for model_index in range(self.current_population_size):
+            for model_index in range(self.num_population_members):
                 self.nursary.models[model_index].genome = gf.ModelGenome.load(self.nursary.models[model_index]["path"] / "genome")
 
             self.generation += 1
+
+        quit()
                 
         for generation_index in range(1, num_generations):
             self.nursary.fitnesses = load_and_calculate_fitness(
                 generation_index,
-                num_per_generation = self.current_population_size
+                num_per_generation = self.num_population_members
             )
 
-            for _ in range(self.current_population_size):
+            for _ in range(self.num_population_members):
                 self.orchard.transfer(self.nursary, -1)
 
-            for _ in range(self.current_population_size):
+            for _ in range(self.num_population_members):
                 if Path(f"./population/model_{self.current_id}/genome").exists():
                     self.add_model(None)
                 else:
                     self.germinate_sapling()
 
-            for _ in range(self.current_population_size):
+            for _ in range(self.num_population_members):
                 self.lumberyard.transfer(self.orchard, -1)
-
-            for i in range(self.current_population_size):
-                
-                model = self.nursary.models[i]
-                logging.info(f"Training model: {model.name}")
-
-                if not model.loaded:
-                    model.train(
-                        validate_dataset=test_dataset, 
-                        max_epochs_per_lesson=max_num_epochs_per_generation,
-                        force_retrain=True
-                    )
-                    self.nursary.fitnesses[i] = 1.0/self.nursary.models[i].metrics[-1].history['val_loss'][-1]
-
-            model.metrics = []
-            model.model = None
-
+            
             model_names = [f"model_{j}" for j in range(
-                    (self.current_population_size  * generation_index),
-                    (self.current_population_size * (generation_index + 1))
+                    (self.num_population_members  * generation_index),
+                    (self.num_population_members * (generation_index + 1))
                 )
             ]
             initial_processes = [

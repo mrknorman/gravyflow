@@ -74,15 +74,14 @@ def calculate_efficiency_scores(
     # Calculate number of batches reuanuired given batch size:
     num_examples = num_examples_per_scaling_step*num_scaling_steps
     num_batches = num_examples // num_examples_per_batch
-    
+
     # Generate array of scaling values used in dataset generation:
     efficiency_scalings = np.linspace(0.0, max_scaling, num_scaling_steps)
     
-    scaling_values = \
-        np.repeat(
-            efficiency_scalings,
-            num_examples_per_scaling_step
-        )
+    scaling_values = np.repeat(
+        efficiency_scalings,
+        num_examples_per_scaling_step
+    )
     
     #Ensure injection generators is list for subsequent logic:
     if not isinstance(dataset_args["injection_generators"], list):
@@ -97,8 +96,8 @@ def calculate_efficiency_scores(
     
     # Initlize generator:
     dataset : tf.data.Dataset = gf.Dataset(
-            **dataset_args
-        ).take(num_batches)
+        **dataset_args
+    ).take(num_batches)
 
     callbacks = []
     if heart is not None:
@@ -111,7 +110,7 @@ def calculate_efficiency_scores(
                 dataset, 
                 steps=num_batches, 
                 callbacks=callbacks,
-                verbose=2
+                verbose=1
             )
 
             try:
@@ -1579,26 +1578,26 @@ class Validator:
         validators = comparison_validators + [self]
         
         efficiency_curves, slider = generate_efficiency_curves(
-                validators, 
-                fars,
-                colors=colors,
-                width=width,
-                height=height
-            )
+            validators, 
+            fars,
+            colors=colors,
+            width=width,
+            height=height
+        )
         
         far_curves = generate_far_curves(
-                validators,
-                colors=colors,
-                width=width,
-                height=height
-            )
+            validators,
+            colors=colors,
+            width=width,
+            height=height
+        )
 
         roc_curves, dropdown = generate_roc_curves(
-                validators,
-                colors=colors,
-                width=width,
-                height=height
-            )
+            validators,
+            colors=colors,
+            width=width,
+            height=height
+        )
         
         layout = [
             [dropdown, slider],

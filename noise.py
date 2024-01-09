@@ -199,8 +199,12 @@ def colored_noise_generator(
             ifo.value.optimal_psd_path, delimiter=","
         ).T
 
-        frequencies = tf.convert_to_tensor(frequencies, dtype=tf.float32)
-        psd = tf.convert_to_tensor(psd, dtype=tf.float32)
+        frequencies = tf.convert_to_tensor(
+           frequencies, dtype=tf.float32
+        )
+        psd = tf.convert_to_tensor(
+            psd, dtype=tf.float32
+        )
         
         psd *= scale_factor
         
@@ -208,8 +212,7 @@ def colored_noise_generator(
             int(duration * sample_rate_hertz) for duration in durations_seconds
         ]
 
-        interpolated_psd_onsource, interpolated_psd_offsource = \
-            interpolate_onsource_offsource_psd(
+        interpolated_psd_onsource, interpolated_psd_offsource = interpolate_onsource_offsource_psd(
                 num_samples_list,
                 frequencies,
                 psd
