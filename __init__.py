@@ -1,5 +1,9 @@
 from dataclasses import dataclass
 
+#Supress LAL warning when running in ipython kernel:
+import warnings
+warnings.filterwarnings("ignore", "Wswiglal-redir-stdio")
+
 class Defaults:
     seed : int = 1000
     num_examples_per_generation_batch: int = 2048
