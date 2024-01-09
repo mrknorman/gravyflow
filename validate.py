@@ -1378,8 +1378,7 @@ class Validator:
 
         if (validator.far_scores is None):
             validator.logger.info(f"Calculating FAR scores for {validator.name}...")
-            validator.far_scores = \
-                calculate_far_scores(
+            validator.far_scores = calculate_far_scores(
                     model, 
                     dataset_args, 
                     validator.logger,

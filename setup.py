@@ -1,11 +1,10 @@
 import os
 import logging
-import json
 import sys
 import h5py
 import subprocess
 from pathlib import Path
-from typing import Union
+from typing import Union, List
 
 import numpy as np
 import tensorflow as tf
@@ -160,7 +159,7 @@ def get_gpu_utilization_array():
 
 def find_available_GPUs(
     min_memory_MB : int = None, 
-    max_utilization_percent : float = 50,
+    max_utilization_percentage : float = 50,
     max_needed : int = -1
     ):
     """
@@ -187,8 +186,14 @@ def find_available_GPUs(
         return "-1"
     
     # Find the indices of GPUs which have available memory more than 
-    # min_memory_MB
-    available_gpus = list(set(np.where(memory_array > min_memory_MB)[0].tolist()).intersection(np.where(utilization_array < max_utilization_percent)[0].tolist()))
+    # min_memory_MB and utalization less than max_utilization_percentage:
+    available_gpus = list(
+        set(
+            np.where(memory_array > min_memory_MB)[0].tolist()
+        ).intersection(
+            np.where(utilization_array < max_utilization_percentage)[0].tolist()
+        )
+    )
     
     if (max_needed != -1) and (max_needed < len(available_gpus)):
         available_gpus = available_gpus[:-max_needed-1:-1]
@@ -277,12 +282,12 @@ def replace_placeholders(
     return input
                 
 def env(
-    min_gpu_memory_mb: int = 4000,
-    num_gpus_to_request: int = 1,
-    memory_to_allocate_tf: int = 2000,
-    gpus: Union[int, str] = None,
-    max_needed=1
-) -> tf.distribute.Strategy:
+        min_gpu_memory_mb : int = 4000,
+        max_gpu_utilization_percentage : float = 80,
+        num_gpus_to_request : int = 1,
+        memory_to_allocate_tf : int = 2000,
+        gpus : Union[str, int, List[Union[int, str]], None]= None
+    ) -> tf.distribute.Strategy:
     
     # Check if there's already a strategy in scope:
     current_strategy = tf.distribute.get_strategy()
@@ -293,24 +298,28 @@ def env(
     if not is_default_strategy(current_strategy):
         logging.info("A TensorFlow distributed strategy is already in place.")
         return current_strategy.scope()
-    
-    # Setup CUDA
 
-    if gpus is None:
+    if gpus is not None:
+        # Verify type of gpus:
+        if isinstance(gpus, int):
+            gpus = str(int)
+        elif isinstance(gpus, list) or isinstance(gpus, tuple):
+            gpus = [str(gpu) for gpu in gpus].join(",")    
+        else:
+            raise ValueError("gpus should be int, str, or list of int or str")
+    elif gpus is None:
+        # Setup CUDA:
         gpus = find_available_GPUs(
-            min_gpu_memory_mb, 
-            num_gpus_to_request,
-            max_needed=max_needed
+            min_memory_MB=min_gpu_memory_mb, 
+            max_utilization_percentage=max_gpu_utilization_percentage,
+            max_needed=num_gpus_to_request
         )
 
     strategy = setup_cuda(
         gpus, 
         max_memory_limit=memory_to_allocate_tf, 
         logging_level=logging.WARNING
-    )    
-    
-    # Set logging level:
-    logging.basicConfig(level=logging.INFO)
+    )
     
     return strategy.scope()
     
