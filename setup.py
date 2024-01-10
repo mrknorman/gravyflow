@@ -160,7 +160,7 @@ def get_gpu_utilization_array():
 
 def find_available_GPUs(
     min_memory_MB : int = None, 
-    max_utilization_percentage : float = 50,
+    max_utilization_percentage : float = 80,
     max_needed : int = -1
     ):
     """
@@ -344,7 +344,7 @@ def env(
             gpus = str(int)
         elif isinstance(gpus, list) or isinstance(gpus, tuple):
             gpus = [str(gpu) for gpu in gpus].join(",")    
-        else:
+        elif not isinstance(gpus, str):
             raise ValueError("gpus should be int, str, or list of int or str")
     elif gpus is None:
         # Setup CUDA:

@@ -285,7 +285,7 @@ class IFODataObtainer:
     ) -> None:
         for key, value in overrides.items():    
             if hasattr(self, key):
-                setattr(self, key, value)
+                setattr(self, key, [value])
             else:
                 raise ValueError(
                     f"Invalide override value {key} not attribute of "
@@ -572,8 +572,7 @@ class IFODataObtainer:
         # If not groups dictionary input, resort to default test, train,
         # validate split: 
         if not groups:
-            groups = \
-                {
+            groups = {
                     "train" : 0.98,
                     "validate" : 0.01,
                     "test" : 0.01
@@ -586,7 +585,7 @@ class IFODataObtainer:
                  "input."
             )
 
-        if self.valid_segments is None:
+        if self.valid_segments is None or len(self.valid_segments) != len(ifos):
                 
             self.valid_segments = []
             
@@ -1172,39 +1171,41 @@ class IFODataObtainer:
         segment = None
         expected_duration_seconds : float = \
                 segment_end_gps_time - segment_start_gps_time - 2*epsilon
-                
-        with closing(
-            gf.open_hdf5_file(
-                self.file_path, 
-                self.logger,
-                mode = "r"
-            )
-        ) as segment_file:    
+        
+        if Path(self.file_path).exists() or self.cache_segments:
+            with closing(
+                gf.open_hdf5_file(
+                    self.file_path, 
+                    self.logger,
+                    mode = "r"
+                )
+            ) as segment_file:    
 
-            # Check if segment_key is present in segment file, and load if it
-            # else acquire segment from database
-            if (segment_key in segment_file) and not self.force_acquisition:
-                self.logger.info(
-                    f"Reading segments of duration "
-                    f"{expected_duration_seconds}..."
-                )
-                segment = segment_file[segment_key][()]
-                
-                segment : tf.Tensor = tf.convert_to_tensor(
-                    segment, 
-                    dtype=tf.float32
-                )
-                
-                if gf.check_tensor_integrity(segment, 1, 10):
-                    self.logger.info("Complete!")
-                    return segment
-                
-                else:
-                    self.logger.error("Segment integrity comprimised, skipping")
-                    return None
-                
-            else: 
-                segment = None
+                # Check if segment_key is present in segment file, and load if it
+                # else acquire segment from database
+
+                if (segment_key in segment_file) and not self.force_acquisition:
+                    self.logger.info(
+                        f"Reading segments of duration "
+                        f"{expected_duration_seconds}..."
+                    )
+                    segment = segment_file[segment_key][()]
+                    
+                    segment : tf.Tensor = tf.convert_to_tensor(
+                        segment, 
+                        dtype=tf.float32
+                    )
+                    
+                    if gf.check_tensor_integrity(segment, 1, 10):
+                        self.logger.info("Complete!")
+                        return segment
+                    
+                    else:
+                        self.logger.error("Segment integrity comprimised, skipping")
+                        return None
+                    
+                else: 
+                    segment = None
         
         if segment is None: 
             self.logger.info(

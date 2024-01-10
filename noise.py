@@ -250,17 +250,16 @@ class NoiseObtainer:
     ifo_data_obtainer : Union[None, gf.IFODataObtainer] = None
     ifos : List[gf.IFO] = gf.IFO.L1
     noise_type : NoiseType = NoiseType.REAL
-    groups : dict = None
+    groups : Union[dict, None] = None
     
     def __post_init__(self):
         
-        if not isinstance(self.ifos, list):
+        if not isinstance(self.ifos, list) and not isinstance(self.ifos, tuple):
             self.ifos = [self.ifos]
         
         # Set default groups here as dataclass will not allow mutable defaults:
         if not self.groups:
-            self.groups = \
-            {
+            self.groups = {
                 "train" : 0.98,
                 "validate" : 0.01,
                 "test" : 0.01
