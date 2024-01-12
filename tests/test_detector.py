@@ -285,17 +285,15 @@ def test_project_wave(
 
         generator : Iterator = injection_generator.generate
 
-        injections, mask, parameters = next(generator())
+        injections, _, _ = next(generator())
 
         network = gf.Network([gf.IFO.L1, gf.IFO.H1, gf.IFO.V1])
 
-        projected_injections = \
-            network.project_wave(injections[0], sample_rate_hertz)
+        projected_injections = network.project_wave(
+            injections[0], sample_rate_hertz
+        )
 
         injection_one = projected_injections.numpy()[0]
-
-        total_onsource_duration_seconds : float = \
-            onsource_duration_seconds + crop_duration_seconds
 
         layout = [
             [gf.generate_strain_plot(

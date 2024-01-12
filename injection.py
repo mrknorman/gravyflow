@@ -200,9 +200,17 @@ class WaveformGenerator:
     back_padding_duration_seconds : float = 0.0
     scale_factor : float = None
     network : Union[List[IFO], gf.Network, Path] = None
+
+    distributed_attributes : Tuple = None
         
     def __post_init__(self):
         self.network = self.init_network(self.network)
+
+        if self.scale_factor is None:
+            self.scale_factor=gf.Defaults.scale_factor
+        
+        # Convert all waveform attributes to gf.Distribution if not already:
+        self.convert_all_distributions()
     
     @classmethod
     def init_network(cls, network):
@@ -232,18 +240,11 @@ class WaveformGenerator:
     def load(
         cls,
         config_path: Path, 
-        sample_rate_hertz: float = None, 
-        onsource_duration_seconds: float = None, 
         scaling_method: ScalingMethod = None,
         scale_factor : float = None,
         network : Union[List[IFO], gf.Network, Path] = None
     ) -> Type[cls]:
 
-        if sample_rate_hertz is None:
-            sample_rate_hertz = gf.Defaults.sample_rate_hertz
-        if onsource_duration_seconds is None:
-            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
-        
         # Define replacement mapping
         replacements = {
             "pi": np.pi,
@@ -315,6 +316,43 @@ class WaveformGenerator:
 
         return generator
 
+    def convert_to_distribution(
+        self, 
+        attribute : Union[int, float, str, gf.Distribution]
+    ):
+        if not isinstance(attribute, gf.Distribution):
+            return gf.Distribution(value=attribute, type_=gf.DistributionType.CONSTANT)
+        else:
+            return attribute
+
+    def convert_all_distributions(self):
+        for attribute in self.distributed_attributes:
+            converted = self.convert_to_distribution(
+                getattr(self, attribute)
+            )
+            setattr(self, attribute, converted)
+
+    def ensure_float(
+        self,
+        name : str,
+        value : Union[int, float, gf.Distribution],
+    ):
+        if not isinstance(value, gf.Distribution):
+            if isinstance(value, int):
+                logging.warn(f"{name} should be float not int, automatically adjusting.")
+                return float(value)
+            elif isinstance(value, float):
+                return value
+            else:
+                raise ValueError(f"{name} should be float or gf.Distribution object.")    
+        else:
+            if value.dtype == int:
+                logging.warn("duration_seconds should not have dtype = int, automatically adjusting.")
+                value.dtype = float
+                return value
+            else:
+                return value
+
 @dataclass 
 class WaveformParameter:
     index : str
@@ -354,13 +392,30 @@ class WaveformParameters(Enum):
 
 @dataclass
 class WNBGenerator(WaveformGenerator):
-    duration_seconds : gf.Distribution = \
-        gf.Distribution(min_=0.1, max_=1.0, type_=gf.DistributionType.UNIFORM)
-    min_frequency_hertz: gf.Distribution = \
-        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
-    max_frequency_hertz: gf.Distribution = \
-        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
+    duration_seconds : Union[float, gf.Distribution] = gf.Distribution(
+        min_=0.1, max_=1.0, type_=gf.DistributionType.UNIFORM
+    )
+    min_frequency_hertz: Union[float, gf.Distribution] = gf.Distribution(
+        min_=20.0, max_=1024.0, type_=gf.DistributionType.UNIFORM
+    )
+    max_frequency_hertz: Union[float, gf.Distribution] = gf.Distribution(
+        min_=20.0, max_=1024.0, type_=gf.DistributionType.UNIFORM
+    )
 
+    distributed_attributes : Tuple[str] = (
+        "duration_seconds",
+        "min_frequency_hertz",
+        "max_frequency_hertz"
+    )
+
+    def __post_init__(self):
+        
+        self.duration_seconds = self.ensure_float("duration_seconds", self.duration_seconds)
+        self.min_frequency_hertz = self.ensure_float("min_frequency_hertz", self.min_frequency_hertz)
+        self.max_frequency_hertz = self.ensure_float("max_frequency_hertz", self.max_frequency_hertz)
+
+        super().__post_init__()
+    
     def generate(
         self,
         num_waveforms: int,
@@ -424,26 +479,49 @@ class WNBGenerator(WaveformGenerator):
 
 @dataclass
 class cuPhenomDGenerator(WaveformGenerator):
-    mass_1_msun : gf.Distribution = \
-        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
-    mass_2_msun : gf.Distribution = \
-        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
-    inclination_radians : gf.Distribution = \
-        gf.Distribution(min_=0.0, max_=np.pi, type_=gf.DistributionType.UNIFORM)
-    distance_mpc : gf.Distribution = \
-        gf.Distribution(value=1000.0, type_=gf.DistributionType.CONSTANT)
-    reference_orbital_phase_in : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
-    ascending_node_longitude : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
-    eccentricity : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
-    mean_periastron_anomaly : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
-    spin_1_in : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
-    spin_2_in : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
+    mass_1_msun : Union[float, gf.Distribution] = gf.Distribution(
+        min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM
+    )
+    mass_2_msun : Union[float, gf.Distribution] = gf.Distribution(
+        min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM
+    )
+    inclination_radians : Union[float, gf.Distribution] = gf.Distribution(
+        min_=0.0, max_=np.pi, type_=gf.DistributionType.UNIFORM
+    )
+    distance_mpc : Union[float, gf.Distribution] = 50.0
+    reference_orbital_phase_in : Union[float, gf.Distribution] = 0.0
+    ascending_node_longitude : Union[float, gf.Distribution] = 0.0
+    eccentricity : Union[float, gf.Distribution] = 0.0
+    mean_periastron_anomaly : Union[float, gf.Distribution] = 0.0
+    spin_1_in : Union[float, gf.Distribution] = 0.0
+    spin_2_in : Union[float, gf.Distribution] = 0.0
+    
+    distributed_attributes : Tuple[str] = (
+        "mass_1_msun",
+        "mass_2_msun",
+        "inclination_radians",
+        "distance_mpc",
+        "reference_orbital_phase_in",
+        "ascending_node_longitude",
+        "eccentricity",
+        "mean_periastron_anomaly",
+        "spin_1_in",
+        "spin_2_in"
+    )
+
+    def __post_init__(self):
+        self.mass_1_msun = self.ensure_float("mass_1_msun", self.mass_1_msun)
+        self.mass_2_msun = self.ensure_float("mass_2_msun", self.mass_2_msun)
+        self.inclination_radians = self.ensure_float("inclination_radians", self.inclination_radians)
+        self.distance_mpc = self.ensure_float("distance_mpc", self.distance_mpc)
+        self.reference_orbital_phase_in = self.ensure_float("reference_orbital_phase_in", self.reference_orbital_phase_in)
+        self.ascending_node_longitude = self.ensure_float("ascending_node_longitude", self.ascending_node_longitude)
+        self.eccentricity = self.ensure_float("eccentricity", self.eccentricity)
+        self.mean_periastron_anomaly = self.ensure_float("mean_periastron_anomaly", self.mean_periastron_anomaly)
+        self.spin_1_in = self.ensure_float("spin_1_in", self.spin_1_in)
+        self.spin_2_in = self.ensure_float("spin_2_in", self.spin_2_in)
+
+        super().__post_init__()
     
     def generate(
             self,
@@ -502,7 +580,7 @@ class IncoherentGenerator(WaveformGenerator):
         self.back_padding_duration_seconds = component_generators[0].back_padding_duration_seconds
         self.scale_factor = component_generators[0].scale_factor
         self.network = component_generators[0].network
-            
+    
     def generate(
         self,
         num_waveforms: int,
@@ -536,16 +614,28 @@ class IncoherentGenerator(WaveformGenerator):
 @dataclass
 class InjectionGenerator:
     configs : Union[List[Union[cuPhenomDGenerator, WNBGenerator]], List[List[Union[cuPhenomDGenerator, WNBGenerator]]]]
-    sample_rate_hertz : float = None
-    onsource_duration_seconds : float = None
-    crop_duration_seconds : float = None
-    num_examples_per_generation_batch : int = None
-    num_examples_per_batch : int = None
-    variables_to_return : List[WaveformParameters] = None
+    parameters_to_return : Union[List[WaveformParameters], None] = None
     index : int = 0
 
     def __post_init__(self):
-        
+        if self.parameters_to_return is None: 
+            self.parameters_to_return = []
+
+    def __call__(
+            self,
+            sample_rate_hertz : float = None,
+            onsource_duration_seconds : float = None,
+            crop_duration_seconds : float = None,
+            num_examples_per_generation_batch : int = None,
+            num_examples_per_batch : int = None,
+        ):
+
+        self.sample_rate_hertz = sample_rate_hertz
+        self.onsource_duration_seconds = onsource_duration_seconds
+        self.crop_duration_seconds = crop_duration_seconds
+        self.num_examples_per_generation_batch = num_examples_per_generation_batch
+        self.num_examples_per_batch = num_examples_per_batch
+
         if self.sample_rate_hertz is None:
             self.sample_rate_hertz = gf.Defaults.sample_rate_hertz
         if self.onsource_duration_seconds is None:
@@ -564,11 +654,9 @@ class InjectionGenerator:
             )
             
             self.num_examples_per_generation_batch = self.num_examples_per_batch
-
-    def generate(self):
         
-        self.variables_to_return = \
-            [item for item in self.variables_to_return if \
+        self.parameters_to_return = \
+            [item for item in self.parameters_to_return if \
              isinstance(item.value, WaveformParameter)]
         
         if self.configs is False:
@@ -586,7 +674,7 @@ class InjectionGenerator:
 
         injections = []
         mask = []
-        parameters = {key : [] for key in self.variables_to_return}
+        parameters = {key : [] for key in self.parameters_to_return}
         for iterator in self.iterators:
 
             injection_, mask_, parameters_ = \
@@ -625,8 +713,8 @@ class InjectionGenerator:
     def generate_one(self, config, name = None):
 
         # Create default empty list for requested parameter returns:
-        if self.variables_to_return is None:
-            self.variables_to_return = []
+        if self.parameters_to_return is None:
+            self.parameters_to_return = []
         
         total_duration_seconds : float = \
             self.onsource_duration_seconds + (self.crop_duration_seconds * 2.0)
@@ -700,14 +788,14 @@ class InjectionGenerator:
 
             # If no parameters requested, skip parameter processing and return
             # empty dict:
-            if self.variables_to_return:
+            if self.parameters_to_return:
 
                 # Retrive parameters that are requested to reduce unneccisary
                 # post processing:
                 reduced_parameters = {
                     WaveformParameters.get(key) : value 
                         for key, value in parameters.items() 
-                        if WaveformParameters.get(key) in self.variables_to_return
+                        if WaveformParameters.get(key) in self.parameters_to_return
                 }
 
                 # Conver to tensor and expand parameter dims for remaining 
@@ -850,7 +938,7 @@ class InjectionGenerator:
             injections : tf.Tensor,
             mask : tf.Tensor,
             onsource : tf.Tensor,
-            variables_to_return : List,
+            parameters_to_return : List,
         ) -> Tuple[tf.Tensor, Union[tf.Tesnor, None], Dict]:
         
         # Generate SNR or HRSS values for injections based on inputed config 
@@ -858,7 +946,7 @@ class InjectionGenerator:
         scaling_parameters : List = self.generate_scaling_parameters(mask)
         
         return_variables = {
-            key : [] for key in ScalingTypes if key in variables_to_return
+            key : [] for key in ScalingTypes if key in parameters_to_return
         }
         cropped_injections = []    
 
@@ -900,7 +988,7 @@ class InjectionGenerator:
 
                     try:
                         scaled_injections = network.project_wave(
-                            scaled_injections, self.sample_rate_hertz
+                            scaled_injections, sample_rate_hertz=self.sample_rate_hertz
                         )
                     except Exception as e:
                         logger.error(f+-"Failed to project injections because {e}")
@@ -914,7 +1002,7 @@ class InjectionGenerator:
                     try:
                         if network.num_detectors > 1:
                             injections_ = network.project_wave(
-                                injections_, self.sample_rate_hertz
+                                injections_, sample_rate_hertz=self.sample_rate_hertz
                             )
                         else:
                             injections_ = tf.reduce_sum(injections_, axis=1, keepdims = True)
@@ -957,7 +1045,7 @@ class InjectionGenerator:
                 print(onsouce)
                 print(scaled_injections)
 
-            if ScalingTypes.HPEAK in variables_to_return:
+            if ScalingTypes.HPEAK in parameters_to_return:
                 # Calculate hpeak of scaled injections:
                 
                 if config.scaling_method.type_ is not ScalingTypes.HPEAK:
@@ -965,7 +1053,7 @@ class InjectionGenerator:
                         calculate_hpeak(injections_)
                     )
                     
-            if ScalingTypes.SNR in variables_to_return:
+            if ScalingTypes.SNR in parameters_to_return:
                 # Calculate snr of scaled injections:
                 
                 if config.scaling_method.type_ is not ScalingTypes.SNR:
@@ -979,7 +1067,7 @@ class InjectionGenerator:
                         ) 
                     )
                     
-            if ScalingTypes.HRSS in variables_to_return:
+            if ScalingTypes.HRSS in parameters_to_return:
                 # Calculate hrss of scaled injections:
                 
                 if config.scaling_method.type_ is not ScalingTypes.HRSS:
@@ -987,8 +1075,8 @@ class InjectionGenerator:
                         calculate_hrss(injections_) 
                     )
             
-            if (ReturnVariables.INJECTIONS in variables_to_return) or \
-                (ReturnVariables.WHITENED_INJECTIONS in variables_to_return):
+            if (ReturnVariables.INJECTIONS in parameters_to_return) or \
+                (ReturnVariables.WHITENED_INJECTIONS in parameters_to_return):
                 # Crop injections so that they appear the same size as output 
                 # onsource:
                 cropped_injections.append(
@@ -999,8 +1087,8 @@ class InjectionGenerator:
                     )
                 )
                                 
-        if (ReturnVariables.INJECTIONS in variables_to_return) or \
-            (ReturnVariables.WHITENED_INJECTIONS in variables_to_return):
+        if (ReturnVariables.INJECTIONS in parameters_to_return) or \
+            (ReturnVariables.WHITENED_INJECTIONS in parameters_to_return):
             try:
                 cropped_injections = tf.stack(cropped_injections)
             except:
@@ -1011,7 +1099,7 @@ class InjectionGenerator:
             
         # Add scaling parameters to return dictionary
         for scaling_type in ScalingTypes:
-            if scaling_type in variables_to_return:
+            if scaling_type in parameters_to_return:
                 if config.scaling_method.type_ is not scaling_type:
                     try:
                         return_variables[scaling_type] = tf.stack(return_variables[scaling_type])

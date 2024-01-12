@@ -1,27 +1,26 @@
-# Standard library imports
+# Standard library imports:
+import hashlib
+import logging
+import sys
+
 from itertools import cycle
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
-import hashlib
-import random
+from contextlib import closing
 from typing import List, Tuple, Union, Dict, Any
 from pathlib import Path
-import logging
-import sys
-from contextlib import closing
-import gc
 
-# Third-party imports
+# Third-party imports:
 import numpy as np
 import tensorflow as tf
-from tensorflow.data.experimental import AutoShardPolicy
+
 from gwdatafind import find_urls
 from gwpy.segments import DataQualityDict
 from gwpy.table import EventTable
 from gwpy.timeseries import TimeSeries
 
+# Local imports:
 import gravyflow as gf
 
 # Enums
@@ -105,7 +104,7 @@ def random_subsection_(
     num_offsource_samples : int,
     time_interval_seconds : float,
     start_gps_time : float,
-    seed
+    seed : int
 ):
     # Ensure the seed is of the correct shape [2] and dtype int32
     seed_tensor = tf.cast(seed, tf.int32)
@@ -139,9 +138,9 @@ def random_subsection_(
 
 @dataclass
 class IFOData:
-    data               : Union[List[TimeSeries], tf.Tensor, np.ndarray]
-    sample_rate_hertz  : float
-    start_gps_time     : List[float]
+    data              : Union[List[TimeSeries], tf.Tensor, np.ndarray]
+    sample_rate_hertz : float
+    start_gps_time    : List[float]
 
     def __post_init__(self):
                 
@@ -191,11 +190,17 @@ class IFOData:
                 maxval = N.numpy() - num_onsource_samples - 16
                 
                 if len(tensor_data.shape) != 1:
-                    raise ValueError(f"Input tensor must be 1D, got shape {tensor_data.shape}")
+                    raise ValueError(
+                        f"Input tensor must be 1D, got shape {tensor_data.shape}."
+                    )
                 if N.numpy() < min_tensor_size:
-                    raise ValueError(f"Input tensor too small ({N}) for the number of requested samples and buffer {min_tensor_size}.")
+                    raise ValueError(
+                        f"Input tensor too small ({N}) for the number of requested samples and buffer {min_tensor_size}."
+                    )
                 if maxval <= minval:
-                    raise ValueError(f"Invalid combination of onsource/offsource samples and buffer for the given data. {maxval} <= {minval}!")
+                    raise ValueError(
+                        f"Invalid combination of onsource/offsource samples and buffer for the given data. {maxval} <= {minval}!"
+                    )
                 
                 time_interval_seconds : float = self.time_interval_seconds
 

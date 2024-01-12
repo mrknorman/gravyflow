@@ -6,6 +6,8 @@ import random
 import numpy as np
 import tensorflow as tf
 
+from scipy.stats import truncnorm
+
 class DistributionType(Enum):
     CONSTANT = auto()         
     UNIFORM = auto()
@@ -72,13 +74,13 @@ class Distribution:
                         
                     if self.min_ is None:
                         self.min_ = float("-inf")
-                    elif self.max_ is None:
+                    if self.max_ is None:
                         self.max_ = float("inf")
                     
                     samples = truncnorm.rvs(
                             (self.min_ - self.mean) / self.std,
                             (self.max_ - self.mean) / self.std,
-                            loc=self.mean_value,
+                            loc=self.mean,
                             scale=self.std,
                             size=num_samples
                         )

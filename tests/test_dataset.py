@@ -34,8 +34,9 @@ def test_iteration(
         
         # Define injection directory path:
         current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        injection_directory_path : Path = \
-            Path(current_dir / "example_injection_parameters")
+        injection_directory_path : Path = Path(
+            current_dir / "example_injection_parameters"
+        )
 
         # Intilise Scaling Method:
         scaling_method = \
@@ -49,8 +50,7 @@ def test_iteration(
             )
 
         # Load injection config:
-        phenom_d_generator : gf.cuPhenomDGenerator = \
-            gf.WaveformGenerator.load(
+        phenom_d_generator : gf.cuPhenomDGenerator = gf.WaveformGenerator.load(
                 injection_directory_path / "phenom_d_parameters.json", 
                 sample_rate_hertz, 
                 onsource_duration_seconds,

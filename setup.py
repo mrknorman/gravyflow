@@ -8,7 +8,7 @@ from typing import Union, List
 
 import numpy as np
 import tensorflow as tf
-from filelock import Timeout, FileLock
+#from filelock import Timeout, FileLock
 
 from scipy.stats import truncnorm
 from tensorflow.python.distribute.distribute_lib import Strategy
@@ -230,6 +230,7 @@ def open_hdf5_file(
 
     return h5py.File(file_path, mode)
     
+"""
 def open_hdf5_file_locking(
         file_path: Union[str, Path], 
         logger = None,
@@ -265,6 +266,7 @@ def open_hdf5_file_locking(
         if logger is not None:
             logger.error(f'Timeout occurred. Could not acquire lock for {file_path}')
         raise Exception(f"Timeout: Unable to acquire lock for {file_path}")
+"""
 
 def ensure_directory_exists(
     directory: Union[str, Path]
@@ -273,7 +275,7 @@ def ensure_directory_exists(
     directory = Path(directory)  # Convert to Path if not already
     if not directory.exists():
         directory.mkdir(parents=True, exist_ok=True)
-        
+       
 def get_tf_memory_usage() -> int:
     """Get TensorFlow's current GPU memory usage for a specific device.
     

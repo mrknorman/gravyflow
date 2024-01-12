@@ -1,9 +1,10 @@
 from pathlib import Path
-from typing import Union, List, Dict
+from typing import Union, List, Dict, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import json
 import os
+import logging
 
 import tensorflow as tf
 import numpy as np
@@ -143,7 +144,7 @@ def get_antenna_pattern_(
 def project_wave_(
     seed,
     strain : tf.Tensor,
-    sample_frequency_hertz : float,
+    sample_rate_hertz : float,
     x_vector: tf.Tensor,
     y_vector: tf.Tensor,
     x_length_meters: tf.Tensor,
@@ -218,7 +219,7 @@ def project_wave_(
     
     shifted_waveoform = shift_waveform(
         injection, 
-        sample_frequency_hertz, 
+        sample_rate_hertz, 
         time_shift_seconds
     )
 
@@ -507,10 +508,17 @@ class Network:
         # Replace placeholders
         for value in config.values():
             gf.replace_placeholders(value, replacements)
+
+        arguments = {}
+        if "num_detectors" in config:
+            arguments.update(
+                {"num_detectors" : config.pop("num_detectors")}
+            ) 
         
-        num_detectors = config.pop("num_detectors")        
-        arguments = {k: gf.Distribution(**v) for k, v in config.items()}
-        arguments["num_detectors"] = num_detectors
+        for key, value in config.items():
+            if isinstance(value, dict):
+                value = gf.Distribution(**value)
+            arguments.update({key: value})
         
         return Network(arguments)
     
@@ -525,20 +533,84 @@ class Network:
             declination,
             self.location
         )
+
+    def check_and_convert(
+            self, 
+            input : Union[tf.Tensor, Tuple, List, float, int, None], 
+            name : Union[tf.Tensor, Tuple, List, float, int, None], 
+            tensor_length : int
+        ):
+
+        match input:
+            case tf.Tensor() as tensor:
+                if tensor.shape[0] != N:
+                    raise ValueError(f"Tensor, {name}, must be equal to num injections, {tensor_length}.")
+                if tensor.dtype != tf.float32:
+                    try:
+                        return tf.cast(tensor, tf.float32)
+                    except Exception as e:
+                        raise ValueError(
+                            f"Failed to convert tensor, {name}, to float32"
+                        ) from e
+
+            case (list() | tuple()) as lst:
+                if len(lst) != N:
+                    raise ValueError(f"List/tuple, {name}, must be equal to num injections, {tensor_length}.")
+                if any(isinstance(x, int) for x in lst):
+                    logging.warn(
+                        f"List or tuple, {name}, contains integers, which will be converted to floats."
+                    )
+                try:
+                    return tf.constant(lst, dtype=tf.float32)
+                except Exception as e:
+                    raise ValueError(
+                        f"Failed to convert list/tuple, {name}, to float32 tensor"
+                    ) from e
+
+            case (float() | int()):
+                if isinstance(input, int):
+                    logging.warn(
+                        f"Input, {name}, is an integer and will be converted to float."
+                    )
+                return tf.fill([tensor_length], float(input))
+
+            case None:
+                return None
+
+            case _:
+                raise TypeError(
+                    f"Input, {name}, must be a float, list, tuple, or tensor."
+                )
+
+        return input
     
     def project_wave(
         self,
         strain : tf.Tensor,
-        sample_frequency_hertz : float,
-        right_ascension: tf.Tensor = None,
-        declination: tf.Tensor = None,
-        polarization: tf.Tensor = None
+        sample_rate_hertz : float = None,
+        right_ascension: Union[tf.Tensor, List[float], float] = None,
+        declination: Union[tf.Tensor, List[float], float]  = None,
+        polarization: Union[tf.Tensor, List[float], float]  = None
     ):
+        
+        if sample_rate_hertz is None:
+            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+
+        strain_length : int = tf.shape(strain)[0]
+        right_ascension = self.check_and_convert(
+            right_ascension, "right_ascension", tensor_length=strain_length
+        )
+        declination = self.check_and_convert(
+            declination, "declination", tensor_length=strain_length
+        )
+        polarization = self.check_and_convert(
+            polarization, "polarization", tensor_length=strain_length
+        )
         
         return project_wave_(
             np.random.randint(1E10, size=2),
             strain,
-            sample_frequency_hertz,
+            sample_rate_hertz,
             self.x_vector,
             self.y_vector,
             self.x_length_meters,
@@ -580,13 +652,13 @@ class Network:
 @tf.function(jit_compile=True)
 def shift_waveform(
         strain : tf.Tensor, 
-        sample_frequency_hertz : float, 
+        sample_rate_hertz : float, 
         time_shift_seconds : tf.Tensor
     ):
     
     frequency_axis = gf.rfftfreq(
         tf.shape(strain)[-1],
-        1.0/sample_frequency_hertz
+        1.0/sample_rate_hertz
     )
     
     frequency_axis = tf.expand_dims(

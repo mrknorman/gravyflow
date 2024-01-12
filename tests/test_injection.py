@@ -44,8 +44,10 @@ def test_iteration(
             crop_duration_seconds,
             num_examples_per_generation_batch,
             num_examples_per_batch,
-            variables_to_return = \
-                [gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN]
+            parameters_to_return = [
+                gf.WaveformParameters.MASS_1_MSUN, 
+                gf.WaveformParameters.MASS_2_MSUN
+            ]
         )
     
     logging.info("Start iteration tests...")
@@ -97,7 +99,7 @@ def test_phenom_d_injection(
             crop_duration_seconds,
             num_examples_per_generation_batch,
             num_examples_per_batch,
-            variables_to_return = \
+            parameters_to_return = \
                 [gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN]
         )
         
@@ -181,7 +183,7 @@ def test_wnb_injection(
             crop_duration_seconds,
             num_examples_per_generation_batch,
             num_examples_per_batch,
-            variables_to_return = \
+            parameters_to_return = \
                 [
                     gf.WaveformParameters.DURATION_SECONDS,
                     gf.WaveformParameters.MIN_FREQUENCY_HERTZ, 

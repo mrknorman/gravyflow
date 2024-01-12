@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union, Dict, Any
+from typing import List, Tuple, Union, Dict, Any, Iterator
 from enum import Enum, auto
 from pathlib import Path
 from dataclasses import dataclass
@@ -73,7 +73,7 @@ def get_max_arrival_time_difference(
     max_arrival_time_differences = []
 
     if isinstance(injection_generators, list):
-        for config in injection_generators: 
+        for config in injection_generators:
             if (config is not None) and (config.network is not None):
                 max_arrival_time_differences.append(
                     config.network.max_arrival_time_difference_seconds
@@ -183,13 +183,13 @@ def data(
     
     # Create Noise Generator:
     noise : Iterator = noise_obtainer(
-        sample_rate_hertz,
-        onsource_duration_seconds,
-        crop_duration_seconds,
-        offsource_duration_seconds,
-        num_examples_per_batch,
-        scale_factor,
-        group
+        sample_rate_hertz=sample_rate_hertz,
+        onsource_duration_seconds=onsource_duration_seconds,
+        crop_duration_seconds=crop_duration_seconds,
+        offsource_duration_seconds=offsource_duration_seconds,
+        num_examples_per_batch=num_examples_per_batch,
+        scale_factor=scale_factor,
+        group=group
     )
     
     # Create Injection Generator: 
@@ -198,18 +198,17 @@ def data(
             item.value, gf.WaveformParameter
         )
     ]
-    
     injection_generator : gf.InjectionGenerator = gf.InjectionGenerator(
-        injection_generators,
-        sample_rate_hertz,
-        onsource_duration_seconds,
-        crop_duration_seconds,
-        num_examples_per_generation_batch,
-        num_examples_per_batch,
-        variables_to_return=waveform_parameters_to_return
+        configs=injection_generators,
+        parameters_to_return=waveform_parameters_to_return
     )
-    
-    injections : Iterator = injection_generator.generate()
+    injections : Iterator = injection_generator(
+        sample_rate_hertz=sample_rate_hertz,
+        onsource_duration_seconds=onsource_duration_seconds,
+        crop_duration_seconds=crop_duration_seconds,
+        num_examples_per_generation_batch=num_examples_per_generation_batch,
+        num_examples_per_batch=num_examples_per_batch,
+    )
     
     whitened_injections = None
 
@@ -234,7 +233,7 @@ def data(
                     injections_,
                     mask,
                     onsource,
-                    variables_to_return=variables_to_return
+                    parameters_to_return=variables_to_return
                 )
                 
             except Exception as e:
