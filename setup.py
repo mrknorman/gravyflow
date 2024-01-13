@@ -144,9 +144,10 @@ def get_gpu_utilization_array():
             universal_newlines=True
         )
     except subprocess.CalledProcessError as e:
-        print(
-            f"Unable to run NVIDIA-SMI. Please check your environment. Exiting! Error: {e.output}"
-        )
+        print((
+            "Unable to run NVIDIA-SMI. Please check your environment. Exiting!",
+            f" Error: {e.output}"
+        ))
         return None
 
     # Split the output into lines

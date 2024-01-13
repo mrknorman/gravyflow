@@ -194,14 +194,14 @@ class ReturnVariables(Enum):
 
 @dataclass
 class WaveformGenerator:
-    scaling_method : ScalingMethod = None
+    scaling_method : Union[ScalingMethod, None] = None
     injection_chance : float = 1.0
     front_padding_duration_seconds : float = 0.3
     back_padding_duration_seconds : float = 0.0
-    scale_factor : float = None
-    network : Union[List[IFO], gf.Network, Path] = None
+    scale_factor : Union[float, None] = None
+    network : Union[List[IFO], gf.Network, Path, None] = None
 
-    distributed_attributes : Tuple = None
+    distributed_attributes : Union[Tuple, None] = None
         
     def __post_init__(self):
         self.network = self.init_network(self.network)
