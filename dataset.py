@@ -179,6 +179,8 @@ def data(
     # Set random seeds for Tensorflow and Numpy to ensure deterministic results
     # with the same seed. This means that if the seed is the concerved the
     # dataset produced will be identical:
+
+    # To Do: remove as replaced with more robust generators:
     gf.set_random_seeds(seed)
     
     # Create Noise Generator:
@@ -189,7 +191,8 @@ def data(
         offsource_duration_seconds=offsource_duration_seconds,
         num_examples_per_batch=num_examples_per_batch,
         scale_factor=scale_factor,
-        group=group
+        group=group,
+        seed=seed
     )
     
     # Create Injection Generator: 

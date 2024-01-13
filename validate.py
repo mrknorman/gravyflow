@@ -971,7 +971,6 @@ def generate_far_curves(
         else:
             title = f"default_{index}"
             name = index
-
                 
         far_scores = np.sort(far_scores)[::-1]
         total_num_seconds = len(far_scores) * validator.input_duration_seconds
@@ -991,7 +990,7 @@ def generate_far_curves(
             )
         )
         
-        line = p.line(
+        p.line(
             "x", 
             "y", 
             source=source, 

@@ -13,6 +13,7 @@ from pathlib import Path
 
 # Third-party imports:
 import numpy as np
+from numpy.random import default_rng  
 import tensorflow as tf
 
 from gwdatafind import find_urls
@@ -262,9 +263,12 @@ class IFOData:
         num_onsource_samples: int, 
         num_offsource_samples: int, 
         num_examples_per_batch: int,
-        seed : int = None
+        seed : int
     ):
-        
+        # Create random number generator from seed:
+        # Create a random number generator with the provided seed
+        rng = default_rng(seed)
+
         # Calculate parameters for random subsection extraction
         minval = num_offsource_samples
         min_tensor_size = num_onsource_samples + num_offsource_samples + 16
@@ -288,6 +292,7 @@ class IFOData:
                 
                 # Extract random subsections
                 time_interval_seconds = self.time_interval_seconds
+                generated_seed = rng.integers(1E10, size=2)
                 batch_subarrays, batch_background_chunks, subsections_start_gps_time = (
                     random_subsection_(
                         tensor_data,
@@ -296,7 +301,7 @@ class IFOData:
                         num_offsource_samples,
                         time_interval_seconds,
                         start_gps_time,
-                        np.random.randint(1E10, size=2)
+                        generated_seed
                     )
                 )
 
@@ -355,7 +360,7 @@ class IFOData:
             raise ValueError(
                 f"Input tensor must be 1D, got shape {tensor_data.shape}."
             )
-        if num_samples.numpy() < min_tensor_size:
+        if num_samples < min_tensor_size:
             raise ValueError(
                 (f"Input tensor too small ({num_samples}) for the requested samples"
                  f" and buffer {min_tensor_size}.")
@@ -725,9 +730,10 @@ class IFODataObtainer:
     def get_valid_segments(
         self,
         ifos : List[gf.IFO],
+        seed : int,
         groups : Dict[str, float] = None,
         group_name : str = "train",
-        segment_order : SegmentOrder = None
+        segment_order : SegmentOrder = None,
     ) -> List:
                 
         # Ensure parameters are lists for consistency:
@@ -824,7 +830,8 @@ class IFODataObtainer:
                         
                         self.feature_segments = self.order_segments(
                             feature_segments,
-                            segment_order
+                            segment_order,
+                            seed
                         )
                 
                 # If there are no valid segments raise and error:
@@ -847,7 +854,8 @@ class IFODataObtainer:
             # Order segments by requested order:
             self.valid_segments = self.order_segments(
                 self.valid_segments, 
-                segment_order
+                segment_order,
+                seed
             )
         
         return self.valid_segments
@@ -1029,7 +1037,7 @@ class IFODataObtainer:
         bins_to_groups = np.repeat(group_names, np.diff(np.pad(group_thresholds, (1, 0), constant_values=0))).astype(str)
 
         # Shuffle bins deterministically
-        rng = np.random.default_rng(0)  # Seed for reproducibility
+        rng = default_rng(0)  # Seed for reproducibility
         rng.shuffle(bins_to_groups)
 
         # Calculate the bin indices for each segment
@@ -1043,13 +1051,18 @@ class IFODataObtainer:
     def order_segments(
         self,
         valid_segments : np.ndarray,
-        segment_order : SegmentOrder
+        segment_order : SegmentOrder,
+        seed : int
     ):
+        # Create random number generator from seed:
+        # Create a random number generator with the provided seed
+        rng = default_rng(seed)
+
         # Order segments by requested order:
         match segment_order:
             case SegmentOrder.RANDOM:
                 # Shuffle data sements randomly.
-                np.random.shuffle(valid_segments)
+                rng.shuffle(valid_segments)
 
             case SegmentOrder.SHORTEST_FIRST:
                 # Sort by shortest first (usefull for debugging).
@@ -1447,13 +1460,16 @@ class IFODataObtainer:
             offsource_duration_seconds : float,
             num_examples_per_batch : int = None,
             ifos : List[gf.IFO] = gf.IFO.L1,
-            scale_factor : float = None
+            scale_factor : float = None,
+            seed : int = None
         ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, int]:
 
         if num_examples_per_batch is None:
             num_examples_per_batch = gf.Defaults.num_examples_per_batch
         if scale_factor is None:
             scale_factor = gf.Defaults.scale_factor
+        if seed is None:
+            seed = gf.Defaults.seed
         
         # Ensure ifos are list:
         if not isinstance(ifos, list) and not isinstance(ifos, tuple):
@@ -1525,7 +1541,8 @@ class IFODataObtainer:
                 subarrays, background_chunks, start_gps_times = segment.random_subsection(
                         num_onsource_samples, 
                         num_offsource_samples, 
-                        num_examples_per_batch
+                        num_examples_per_batch,
+                        seed
                     )
 
                 if subarrays is None or background_chunks is None or start_gps_times is None:
