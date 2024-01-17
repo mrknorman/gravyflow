@@ -5,8 +5,10 @@ import random
 
 import numpy as np
 import tensorflow as tf
+from numpy.random import default_rng  
 
 from scipy.stats import truncnorm
+import gravyflow as gf
 
 class DistributionType(Enum):
     CONSTANT = auto()         
@@ -26,6 +28,19 @@ class Distribution:
     std : float = None
     possible_values : List = None
     type_ : DistributionType = DistributionType.CONSTANT
+    seed : int = None
+
+    def __post_init__(self):
+
+        if self.seed is None:
+            self.rng = default_rng(gf.Defaults.seed)
+        else:
+            self.rng = default_rng(self.seed)
+
+    def reseed(self, seed):
+
+        self.seed = seed
+        self.rng = default_rng(self.seed)
 
     def sample(
         self, 
@@ -54,7 +69,7 @@ class Distribution:
                         "No maximum value given in uniform distribution."
                     )
                 else:                
-                    samples = np.random.uniform(
+                    samples = self.rng.uniform(
                             self.min_, 
                             self.max_, 
                             num_samples
@@ -82,14 +97,18 @@ class Distribution:
                             (self.max_ - self.mean) / self.std,
                             loc=self.mean,
                             scale=self.std,
-                            size=num_samples
+                            size=num_samples,
+                            random_state=self.rng.integers(2**32 - 1)
                         )
             case DistributionType.CHOICE:
                 if self.possible_values is None:
                     raise ValueError(
                         "No possible values given in choice distribution."
                     )
-                samples = np.random.choice(self.possible_values, size=num_samples)
+                samples = self.rng.choice(
+                    self.possible_values,
+                    size=num_samples
+                )
             case DistributionType.LOG:
                 if self.min_ is None:
                     raise ValueError(
@@ -99,7 +118,7 @@ class Distribution:
                     raise ValueError(
                         "No maximum value given in log distribution."
                     )
-                samples = np.random.uniform(
+                samples =self.rng.uniform(
                             self.min_, 
                             self.max_, 
                             num_samples
@@ -108,7 +127,7 @@ class Distribution:
 
             case DistributionType.POW_TWO:
                 power_low, power_high = map(int, np.log2((self.min_, self.max_)))
-                power = np.random.randint(power_low, power_high + 1, size=num_samples)
+                power = self.rng.integers(power_low, high=power_high + 1, size=num_samples)
                 samples = 2**power
             
             case _:

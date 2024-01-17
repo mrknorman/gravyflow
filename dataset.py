@@ -65,24 +65,24 @@ def validate_noise_settings(
             )
             
 def get_max_arrival_time_difference(
-    injection_generators : List
+    waveform_generators : List
     ) -> float:
     
     max_arival_time_difference_seconds : float = 0.01
     
     max_arrival_time_differences = []
 
-    if isinstance(injection_generators, list):
-        for config in injection_generators:
-            if (config is not None) and (config.network is not None):
+    if isinstance(waveform_generators, list):
+        for generator in waveform_generators:
+            if (generator is not None) and (generator.network is not None):
                 max_arrival_time_differences.append(
-                    config.network.max_arrival_time_difference_seconds
+                    generator.network.max_arrival_time_difference_seconds
                 )     
-    elif isinstance(injection_generators, dict):
-        for config in injection_generators.values(): 
-            if (config is not None) and (config["generator"].network is not None):
+    elif isinstance(waveform_generators, dict):
+        for generator in waveform_generators.values(): 
+            if (generator is not None) and (generator["generator"].network is not None):
                 max_arrival_time_differences.append(
-                    config["generator"].network.max_arrival_time_difference_seconds
+                    generator["generator"].network.max_arrival_time_difference_seconds
                 )     
     
     if len(max_arrival_time_differences):
@@ -107,7 +107,7 @@ def data(
         noise_obtainer : gf.NoiseObtainer = None,
         group : str = "train",
         # Injections:
-        injection_generators: List[
+        waveform_generators: List[
             Union[gf.cuPhenomDGenerator, gf.WNBGenerator]
         ] = None, 
         num_examples_per_generation_batch : int = None,
@@ -149,23 +149,23 @@ def data(
     if output_variables is None:
         output_variables = []
         
-    if injection_generators is None:
-        injection_generators = []
+    if waveform_generators is None:
+        waveform_generators = []
                 
-    if not isinstance(injection_generators, list) and not isinstance(injection_generators, dict):
-        injection_generators = [injection_generators]
+    if not isinstance(waveform_generators, list) and not isinstance(waveform_generators, dict):
+        waveform_generators = [waveform_generators]
 
     # If no interferometers are input for injection generator
     # assumes interferometers are the same as is used in
     # noise generation:
-    if isinstance(injection_generators, list):
-        for config in injection_generators:
-            if config.network is None: 
-                config.network = gf.Network(noise_obtainer.ifos)
-    elif isinstance(injection_generators, dict):
-        for config in injection_generators.values():
-            if config["generator"].network is None: 
-                config["generator"].network = gf.Network(noise_obtainer.ifos)
+    if isinstance(waveform_generators, list):
+        for generator in waveform_generators:
+            if generator.network is None: 
+                generator.network = gf.Network(noise_obtainer.ifos)
+    elif isinstance(waveform_generators, dict):
+        for generator in waveform_generators.values():
+            if generator["generator"].network is None: 
+                generator["generator"].network = gf.Network(noise_obtainer.ifos)
     
     # Create set with unique elements of input and output variables so that they
     # can be calculated during loop if required:
@@ -202,8 +202,9 @@ def data(
         )
     ]
     injection_generator : gf.InjectionGenerator = gf.InjectionGenerator(
-        configs=injection_generators,
-        parameters_to_return=waveform_parameters_to_return
+        waveform_generators=waveform_generators,
+        parameters_to_return=waveform_parameters_to_return,
+        seed=seed
     )
     injections : Iterator = injection_generator(
         sample_rate_hertz=sample_rate_hertz,
@@ -228,9 +229,9 @@ def data(
             logging.info(f"Injections failed because {e}\nTraceback: {traceback.format_exc()}")
             raise Exception(f"Noise failed because {e}\nTraceback: {traceback.format_exc()}")
 
-        if len(injection_generators):
+        if len(waveform_generators):
                         
-            # Add injections to waveform scaled by inputted SNR config values:
+            # Add injections to waveform scaled by inputted SNR values:
             try:
                 onsource, scaled_injections, scaling_parameters = injection_generator.add_injections_to_onsource(
                     injections_,
@@ -311,7 +312,7 @@ def data(
                 in variables_to_return
             ):
                 max_arival_time_difference_seconds: float = \
-                    get_max_arrival_time_difference(injection_generators)
+                    get_max_arrival_time_difference(waveform_generators)
                 
                 rolling_pearson_onsource = gf.rolling_pearson(
                     whitened_onsource,
@@ -429,7 +430,7 @@ def Dataset(
         scale_factor: float = None,
         noise_obtainer: gf.NoiseObtainer = None,
         group : str = "train",
-        injection_generators: Union[List[gf.WaveformGenerator], Dict[str, gf.WaveformGenerator]] = None,
+        waveform_generators: Union[List[gf.WaveformGenerator], Dict[str, gf.WaveformGenerator]] = None,
         num_examples_per_generation_batch: int = None,
         num_examples_per_batch: int = None,
         input_variables: List = None,
@@ -455,7 +456,7 @@ def Dataset(
             Scale factor.
         noise_obtainer (gf.NoiseObtainer): 
             Object to obtain noise.
-        injection_generators (list):
+        waveform_generators (list):
             List of injection generators.
         num_examples_per_generation_batch (int):
             Number of examples per generation batch.
@@ -494,21 +495,21 @@ def Dataset(
         output_variables = []
     
     # Set gf.Defaults here as if initilised as default arguments objects are global
-    if injection_generators is None:
-        injection_generators = []
-    elif not isinstance(injection_generators, list) and not isinstance(injection_generators, dict):
-        injection_generators = [injection_generators]
+    if waveform_generators is None:
+        waveform_generators = []
+    elif not isinstance(waveform_generators, list) and not isinstance(waveform_generators, dict):
+        waveform_generators = [waveform_generators]
 
     num_cropped_samples = int(onsource_duration_seconds * sample_rate_hertz)
     num_onsource_samples = int((onsource_duration_seconds + 2*crop_duration_seconds) * sample_rate_hertz)
     num_offsource_samples = int(offsource_duration_seconds * sample_rate_hertz)
-    num_injection_configs = len(injection_generators)
+    num_waveform_generators = len(waveform_generators)
     
     num_detectors = 1
-    if isinstance(injection_generators, list): 
-        if len(injection_generators):
-            if injection_generators[0].network is not None:
-                num_detectors = injection_generators[0].network.num_detectors 
+    if isinstance(waveform_generators, list): 
+        if len(waveform_generators):
+            if waveform_generators[0].network is not None:
+                num_detectors = waveform_generators[0].network.num_detectors 
             elif noise_obtainer is not None:
                 num_detectors = len(noise_obtainer.ifos)
             else:
@@ -516,9 +517,9 @@ def Dataset(
         elif noise_obtainer is not None:
             num_detectors = len(noise_obtainer.ifos)
     
-    elif isinstance(injection_generators, dict):
-        if len(injection_generators):
-            for generator in injection_generators.values():
+    elif isinstance(waveform_generators, dict):
+        if len(waveform_generators):
+            for generator in waveform_generators.values():
                 if generator["generator"].network is not None:
                     num_detectors = generator["generator"].network.num_detectors 
                 elif noise_obtainer is not None:
@@ -535,7 +536,7 @@ def Dataset(
         num_detectors = 1
         
     max_arival_time_difference_seconds: float = \
-        get_max_arrival_time_difference(injection_generators)
+        get_max_arrival_time_difference(waveform_generators)
 
     max_arival_time_difference_samples : float = \
         int(max_arival_time_difference_seconds * sample_rate_hertz)
@@ -553,13 +554,13 @@ def Dataset(
         num_examples_per_batch, num_detectors
     )
     injections_shape = (
-            num_injection_configs, 
+            num_waveform_generators, 
             num_examples_per_batch,
             num_detectors,
             num_cropped_samples
         )
     per_injection_shape = (
-        num_injection_configs, num_examples_per_batch
+        num_waveform_generators, num_examples_per_batch
     )        
     pearson_shape = (
         num_examples_per_batch, 
@@ -624,7 +625,7 @@ def Dataset(
         )
     }
     
-    if not injection_generators:
+    if not waveform_generators:
         keys_to_remove = {
             gf.ReturnVariables.INJECTION_MASKS, 
             gf.ReturnVariables.INJECTIONS, 
@@ -642,7 +643,7 @@ def Dataset(
     output_signature_dict.update({
         item.name: tf.TensorSpec(
             shape=(
-                num_injection_configs, 
+                num_waveform_generators, 
                 num_examples_per_batch * item.value.shape[-1]
             ),
             dtype=tf.float32
@@ -663,7 +664,7 @@ def Dataset(
         scale_factor=scale_factor,
         noise_obtainer=noise_obtainer,
         group=group,
-        injection_generators=injection_generators,
+        waveform_generators=waveform_generators,
         num_examples_per_generation_batch=num_examples_per_generation_batch,
         num_examples_per_batch=num_examples_per_batch,
         input_variables=input_variables,

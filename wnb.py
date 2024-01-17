@@ -45,7 +45,8 @@ def wnb(
     max_duration_seconds: float,
     duration_seconds: tf.Tensor,
     min_frequency_hertz: tf.Tensor,
-    max_frequency_hertz: tf.Tensor
+    max_frequency_hertz: tf.Tensor,
+    seed : int
 ) -> tf.Tensor:
     """
     Generates white noise bursts with user-defined frequency range and duration.
@@ -97,7 +98,10 @@ def wnb(
     )
 
     # Generate Gaussian noise:
-    gaussian_noise = tf.random.normal([num_waveforms, 2, max_num_samples])
+    gaussian_noise = tf.random.normal(
+        [num_waveforms, 2, max_num_samples], 
+        seed=seed
+    )
     
     # Create time mask for valid duration:
     mask = tf.sequence_mask(
