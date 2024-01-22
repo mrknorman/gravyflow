@@ -183,10 +183,10 @@ def find_available_GPUs(
     utilization_array = get_gpu_utilization_array()
 
     if memory_array is None:
-        return "-1"
+        raise MemoryError("No GPUs with requested memory avalible!")
     if utilization_array is None:
-        return "-1"
-    
+        raise MemoryError("No GPUs with requested utilization avalible!")
+
     # Find the indices of GPUs which have available memory more than 
     # min_memory_MB and utalization less than max_utilization_percentage:
     available_gpus = list(
@@ -199,7 +199,7 @@ def find_available_GPUs(
     
     if (max_needed != -1) and (max_needed < len(available_gpus)):
         available_gpus = available_gpus[:-max_needed-1:-1]
-
+    
     return ",".join(str(gpu) for gpu in available_gpus)
 
 def get_element_shape(dataset):
@@ -356,7 +356,7 @@ def env(
             max_utilization_percentage=max_gpu_utilization_percentage,
             max_needed=num_gpus_to_request
         )
-
+    
     strategy = setup_cuda(
         gpus, 
         max_memory_limit=memory_to_allocate_tf, 

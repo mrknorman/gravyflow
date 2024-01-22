@@ -6,6 +6,7 @@ import os
 import logging
 
 import numpy as np
+from numpy.random import default_rng  
 import tensorflow as tf
 from tensorflow import keras
 import tensorflow_probability as tfp
@@ -16,6 +17,7 @@ from tensorflow.keras import losses
 from tensorflow.keras.layers import Layer
 import json
 import pickle
+
 
 import gravyflow as gf
 
@@ -30,21 +32,36 @@ def mutate_value(value, A, B, std_dev_fraction):
     mutated_value = max(min(mutated_value, B), A)
 
     return mutated_value
+    
 
 @dataclass
 class HyperParameter:
     distribution: gf.Distribution
+    seed : int = None
     value: Union[int, float, str] = None
     
     def __post_init__(self):
+
+        if self.seed is None:
+            self.seed = gf.Defaults.seed
+
+        self.rng = default_rng(self.seed)
         
         if isinstance(self.distribution, HyperParameter):
             self.distribution = self.distribution.distribution
             self.value = self.distribution.value
         elif not isinstance(self.distribution, gf.Distribution):
             self.distribution = gf.Distribution(value=self.distribution, type_=gf.DistributionType.CONSTANT)
+
+        self.distribution.reseed(
+            self.rng.integers(1E10)
+        )
         
         self.randomize()
+
+    def reseed(self, seed):
+        self.seed = seed
+        self.rng = default_rng(self.seed)
 
     def randomize(self):
         """
@@ -62,7 +79,7 @@ class HyperParameter:
         Returns:
         mutated_param: New HyperParameter instance with potentially mutated value.
         """
-        if np.random.random() < mutation_rate:
+        if self.rng.random() < mutation_rate:
             match self.distribution.type_:
                 case gf.DistributionType.CONSTANT:      
                     pass     
@@ -102,7 +119,7 @@ class HyperParameter:
                 self.value = int(self.value)
 
     def crossover(self, other, crossover_rate = 0.5):
-        if (np.random.random() < crossover_rate):
+        if (np.rng.random() < crossover_rate):
             self.distribution = other.distribution
             self.value = other.value
 
@@ -136,6 +153,13 @@ class HyperInjectionGenerator:
             self.chance,
             self.generator
         ]
+
+    def reseed(self, seed):
+        self.seed = seed
+        self.rng = default_rng(seed)
+        
+        for gene in self.genes:
+            gene.reseed(self.rng.integers(1E10))
 
     def randomize(self):
         """
@@ -178,7 +202,8 @@ class ModelGenome:
         offsource_duration_seconds : HyperParameter,
         sample_rate_hertz : HyperParameter,
         num_layers : HyperParameter,
-        layer_genomes : List
+        layer_genomes : List,
+        seed : int = None
     ):
         # Training genes:
         self.optimizer = optimizer
@@ -200,6 +225,13 @@ class ModelGenome:
         self.num_layers = num_layers
         self.layer_genomes = layer_genomes
 
+        if seed is None:
+            seed = gf.Defaults.seed
+
+        # Randomisation:
+        self.seed = seed
+        self.rng = default_rng(self.seed)
+        
         # Gene list:
         self.genes = [
             self.optimizer,
@@ -212,10 +244,13 @@ class ModelGenome:
             self.sample_rate_hertz,
             self.num_layers
          ] + self.layer_genomes + [gen["hp"] for gen in self.injection_generators.values()]
+
+        for gene in self.genes:
+            gene.reseed(self.rng.integers(1E10))
     
     def randomize(self):
         for gene in self.genes:
-            gene.randomize()    
+            gene.randomize()
 
         for layer_genome in self.layer_genomes:
             for possibility in layer_genome.distribution.possible_values:

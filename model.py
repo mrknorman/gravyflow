@@ -18,6 +18,8 @@ from tensorflow import keras
 from tensorflow.keras import losses
 from tensorflow.keras.layers import Layer
 
+from numpy.random import default_rng  
+
 import gravyflow as gf
 
 def negative_loglikelihood(targets, estimated_distribution):
@@ -305,6 +307,7 @@ def adjust_features(features, labels):
 @dataclass
 class BaseLayer:
     layer_type: str = "Base"
+    seed : int = None
     activation: Union[gf.HyperParameter, str] = None
     mutable_attributes: List = None
     
@@ -392,14 +395,32 @@ class DenseLayer(BaseLayer):
         activation : Union[gf.HyperParameter, int]
             gf.HyperParameter specifying the activation function for this layer.
         """
-        
+
+        self.rng = default_rng(self.seed)
+
         self.layer_type = "Dense"
-        self.activation = gf.HyperParameter(activation)
-        self.units = gf.HyperParameter(units)
-        self.dropout_present = gf.HyperParameter(dropout_present)
-        self.dropout_value = gf.HyperParameter(dropout_value)
-        self.batch_normalisation_present = gf.HyperParameter(batch_normalisation_present)
-        self.mutable_attributes = [self.activation, self.units, self.dropout_present, self.dropout_value, self.batch_normalisation_present]
+        self.activation = gf.HyperParameter(
+            activation, seed=self.rng.integers(1E10)
+        )
+        self.units = gf.HyperParameter(
+            units, seed=self.rng.integers(1E10)
+        )
+        self.dropout_present = gf.HyperParameter(
+            dropout_present, seed=self.rng.integers(1E10)
+        )
+        self.dropout_value = gf.HyperParameter(
+            dropout_value, seed=self.rng.integers(1E10)
+        )
+        self.batch_normalisation_present = gf.HyperParameter(
+            batch_normalisation_present, seed=self.rng.integers(1E10)
+        )
+        self.mutable_attributes = [
+            self.activation, 
+            self.units, 
+            self.dropout_present, 
+            self.dropout_value, 
+            self.batch_normalisation_present
+        ]
 
 @dataclass
 class FlattenLayer(BaseLayer):
@@ -417,7 +438,7 @@ class FlattenLayer(BaseLayer):
         activation : Union[gf.HyperParameter, int]
             gf.HyperParameter specifying the activation function for this layer.
         """
-        
+        self.rng = default_rng(self.seed)
         self.layer_type = "Flatten"
         self.mutable_attributes = []
 
@@ -438,8 +459,8 @@ class ConvLayer(BaseLayer):
             filters: gf.HyperParameter = 16, 
             kernel_size: gf.HyperParameter = 16, 
             activation: gf.HyperParameter = "relu", 
-            strides: gf.HyperParameter = gf.HyperParameter(1),
-            dilation: gf.HyperParameter = gf.HyperParameter(0),
+            strides: gf.HyperParameter = 1,
+            dilation: gf.HyperParameter = 0,
             dropout_present : Union[gf.HyperParameter, bool] = False,
             dropout_value : Union[gf.HyperParameter, str] = 0.0,
             batch_normalisation_present : Union[gf.HyperParameter, bool] = False,
@@ -456,20 +477,43 @@ class ConvLayer(BaseLayer):
         activation: gf.HyperParameter specifying the activation function for this layer.
         strides: gf.HyperParameter specifying the stride length for this layer.
         """
+        self.rng = default_rng(self.seed)
         self.layer_type = "Convolutional"
-        self.activation = gf.HyperParameter(activation)
-        self.filters = gf.HyperParameter(filters)
-        self.kernel_size = gf.HyperParameter(kernel_size)
-        self.strides = gf.HyperParameter(strides)
-        self.dilation = gf.HyperParameter(dilation)
-        self.dropout_present = gf.HyperParameter(dropout_present)
-        self.dropout_value = gf.HyperParameter(dropout_value)
-        self.batch_normalisation_present = gf.HyperParameter(batch_normalisation_present)
-        self.pooling_present = gf.HyperParameter(pooling_present)
-        self.pooling_size = gf.HyperParameter(pooling_size)
-        self.pooling_stride = gf.HyperParameter(pooling_stride)
+        self.activation = gf.HyperParameter(
+            activation, seed=self.rng.integers(1E10)
+        )
+        self.filters = gf.HyperParameter(
+            filters, seed=self.rng.integers(1E10)
+        )
+        self.kernel_size = gf.HyperParameter(
+            kernel_size, seed=self.rng.integers(1E10)
+        )
+        self.strides = gf.HyperParameter(
+            strides, seed=self.rng.integers(1E10)
+        )
+        self.dilation = gf.HyperParameter(
+            dilation, seed=self.rng.integers(1E10)
+        )
+        self.dropout_present = gf.HyperParameter(
+            dropout_present, seed=self.rng.integers(1E10)
+        )
+        self.dropout_value = gf.HyperParameter(
+            dropout_value, seed=self.rng.integers(1E10)
+        )
+        self.batch_normalisation_present = gf.HyperParameter(
+            batch_normalisation_present, seed=self.rng.integers(1E10)
+        )
+        self.pooling_present = gf.HyperParameter(
+            pooling_present, seed=self.rng.integers(1E10)
+        )
+        self.pooling_size = gf.HyperParameter(
+            pooling_size, seed=self.rng.integers(1E10)
+        )
+        self.pooling_stride = gf.HyperParameter(
+            pooling_stride, seed=self.rng.integers(1E10)
+        )
 
-        self.padding = gf.HyperParameter("same")
+        self.padding = gf.HyperParameter("same", seed=self.rng.integers(1E10))
         
         self.mutable_attributes = [
             self.activation, 
@@ -501,15 +545,16 @@ class PoolLayer(BaseLayer):
         pool_size: gf.HyperParameter specifying the size of the pooling window.
         strides: gf.HyperParameter specifying the stride length for moving the pooling window.
         """
+        self.rng = default_rng(self.seed)
         self.layer_type = "Pooling"
-        self.pool_size = gf.HyperParameter(pool_size)
+        self.pool_size = gf.HyperParameter(pool_size, seed=self.rng.integers(1E10))
         
         if strides is None:
             self.strides = self.pool_size
         else:
-            self.strides = gf.HyperParameter(strides)
+            self.strides = gf.HyperParameter(strides, seed=self.rng.integers(1E10))
         
-        self.padding = gf.HyperParameter("same")
+        self.padding = gf.HyperParameter("same", seed=self.rng.integers(1E10))
         self.mutable_attributes = [self.pool_size, self.strides]
         
 class DropLayer(BaseLayer):
@@ -522,8 +567,9 @@ class DropLayer(BaseLayer):
         Args:
         rate: gf.HyperParameter specifying the dropout rate for this layer.
         """
+        self.rng = default_rng(self.seed)
         self.layer_type = "Dropout"
-        self.rate = gf.HyperParameter(rate)
+        self.rate = gf.HyperParameter(rate, seed=self.rng.integers(1E10))
         self.mutable_attributes = [self.rate]
 
 class BatchNormLayer(BaseLayer):
@@ -535,6 +581,7 @@ class BatchNormLayer(BaseLayer):
         Args:
         rate: gf.HyperParameter specifying the dropout rate for this layer.
         """
+        self.rng = default_rng(self.seed)
         self.layer_type = "BatchNorm"
 
 class WhitenLayer(BaseLayer):
@@ -546,6 +593,7 @@ class WhitenLayer(BaseLayer):
         Args:
         rate: gf.HyperParameter specifying the whitening for this layer.
         """
+        self.rng = default_rng(self.seed)
         self.layer_type = "Whiten"
         self.mutable_attributes = []
 
@@ -558,6 +606,7 @@ class WhitenPassLayer(BaseLayer):
         Args:
         rate: gf.HyperParameter specifying the whitening for this layer.
         """
+        self.rng = default_rng(self.seed)
         self.layer_type = "WhitenPass"
         self.mutable_attributes = []
 
@@ -627,9 +676,9 @@ class Model:
             loss = losses.BinaryCrossentropy()
         
         self.layers = layers
-        self.batch_size = gf.HyperParameter(batch_size)
-        self.optimizer = gf.HyperParameter(optimizer)
-        self.loss = gf.HyperParameter(loss)
+        self.batch_size = gf.HyperParameter(batch_size, seed=self.rng.integers(1E10))
+        self.optimizer = gf.HyperParameter(optimizer, seed=self.rng.integers(1E10))
+        self.loss = gf.HyperParameter(loss, seed=self.rng.integers(1E10))
         self.training_config = training_config
         self.loaded = False
         
@@ -729,7 +778,7 @@ class Model:
             name=name,
             layers=layers, 
             optimizer=genome.optimizer.value, 
-            loss=gf.HyperParameter(losses.BinaryCrossentropy()), 
+            loss=gf.HyperParameter(losses.BinaryCrossentropy(), seed=100), 
             input_configs=input_configs, 
             output_config=output_config,
             training_config=training_config,
@@ -1169,7 +1218,7 @@ class Model:
         max_epochs_per_lesson = None,
         callbacks = None,
         heart = None
-        ):
+    ):
         """
         Trains the model.
         
@@ -1473,7 +1522,8 @@ class Population:
         self, 
         num_population_members: int,
         default_genome: gf.ModelGenome,
-        population_directory_path : Path = Path("./population/")
+        population_directory_path : Path = Path("./population/"),
+        seed : int = None
     ):
         self.generation = 0
 
@@ -1485,6 +1535,11 @@ class Population:
         self.orchard = PopulationSector("orchard", population_directory_path)
         self.nursary = PopulationSector("nursary", population_directory_path)
         self.lumberyard = PopulationSector("lumberyard", population_directory_path)
+
+        if seed == None:
+            seed = gf.Defaults.seed
+
+        self.rng = default_rng(seed)
 
         self.initilize()
         self.save()
@@ -1507,13 +1562,33 @@ class Population:
         else:
             return None
 
-    def add_model(self, genome):
-
+    def load_model(self):
         model_number = self.current_id
         self.current_id += 1
 
         model_name = f"model_{model_number}"
-        model_path = self.population_directory_path / f"generation_{self.generation}" / f"{model_name}"
+        model_path = self.population_directory_path / f"generation_{self.generation}/{model_name}"
+        
+        try:
+            genome = gf.ModelGenome.load(model_path / "genome")
+        except:
+            raise FileNotFoundError(f"Model genome {self.generation}/{model_name} does not exist.")
+        
+        model = {
+            "name" : model_name,
+            "number" : model_number,
+            "path" : model_path,
+            "genome" : genome
+        }
+
+        self.nursary.add(model)
+
+    def add_model(self, genome):
+
+        model_number = self.current_id
+
+        model_name = f"model_{model_number}"
+        model_path = self.population_directory_path / f"generation_{self.generation}/{model_name}"
 
         gf.ensure_directory_exists(model_path)
         model = {
@@ -1525,13 +1600,15 @@ class Population:
         genome.save(model_path / "genome")
 
         self.nursary.add(model)
-        
+        self.current_id += 1
+
     def initilize(self):
         if self.generation == 0:
             for j in tqdm(range(self.num_population_members)): 
-                if not Path(self.population_directory_path / f"generation_{self.generation}" / f"model_{j}/genome").exists():
+                if not Path(self.population_directory_path / f"generation_{self.generation}/model_{j}/genome").exists():
                     self.random_sapling()
-        
+                else:
+                    self.load_model()
                 
     def roulette_wheel_selection(self, fitnesses):
         """
@@ -1563,45 +1640,59 @@ class Population:
         # If we've gotten here, just return the last individual in the population.
         # This should only happen due to rounding errors, and should be very rare.
         return 0
-    
-    def train(
-        self, 
-        num_generations,
-    ):  
-        current_dir = Path(__file__).resolve().parent.parent
 
-        if self.generation == 0:
-                        
-            model_names = [f"model_{i}" for i in range(self.num_population_members)]
-            initial_processes = [
-                gf.Process(f"python train.py --path {model['path']}", model["name"], tensorflow_memory_mb=4000, cuda_overhead_mb=2000, initial_restart_count=1)
-                for model in self.nursary.models
-            ]
+    def train_generation(self):
 
+        initial_processes = []
+        for model in self.nursary.models:    
+            if not Path(model["path"] / "validation_plots.html").exists():
+                initial_processes.append(gf.Process(
+                    f"python train.py --path {model['path']}", model["name"], 
+                    tensorflow_memory_mb=4000, 
+                    cuda_overhead_mb=2000, 
+                    initial_restart_count=1
+                ))
+            else:
+                logging.info(
+                    f"Model {model['path']} has already completed validation, skipping."
+                )
+
+        if initial_processes:
             manager = gf.Manager(
                 initial_processes,
                 max_restarts=20,
-                restart_timeout_seconds=3600.0, 
+                restart_timeout_seconds=3600.0,
                 process_start_wait_seconds=1.0, 
                 management_tick_length_seconds=5.0,
-                max_num_concurent_processes=1,
-                log_directory_path = Path(f"{current_dir}/population/generation_{self.generation}/logs/")
+                max_num_concurent_processes=10,
+                log_directory_path = self.population_directory_path / f"population/generation_{self.generation}/logs/"
             )
 
             while manager:
                 manager()
+        else:
+            logging.info(f"Generation {self.generation} empty or completed. Skipping.")
 
-            for model_index in range(self.num_population_members):
-                self.nursary.models[model_index].genome = gf.ModelGenome.load(self.nursary.models[model_index]["path"] / "genome")
+        self.generation += 1
 
-            self.generation += 1
+    def train(
+        self, 
+        num_generations
+    ):  
+        current_dir = Path(__file__).resolve().parent.parent
 
-        quit()
-                
-        for generation_index in range(1, num_generations):
+        for generation_index in range(self.generation, num_generations):
+            logging.info(f"Training Generation: {self.generation}")
+            self.train_generation()
+
             self.nursary.fitnesses = load_and_calculate_fitness(
                 generation_index,
                 num_per_generation = self.num_population_members
+            )
+
+            logging.info(
+                "Current Fitnesses:", 
+                self.nursary.fitnesses
             )
 
             for _ in range(self.num_population_members):
@@ -1609,35 +1700,12 @@ class Population:
 
             for _ in range(self.num_population_members):
                 if Path(f"./population/model_{self.current_id}/genome").exists():
-                    self.add_model(None)
+                    self.load_model()
                 else:
                     self.germinate_sapling()
 
             for _ in range(self.num_population_members):
                 self.lumberyard.transfer(self.orchard, -1)
-            
-            model_names = [f"model_{j}" for j in range(
-                    (self.num_population_members  * generation_index),
-                    (self.num_population_members * (generation_index + 1))
-                )
-            ]
-            initial_processes = [
-                gf.Process(f"python train.py", name, tensorflow_memory_mb=4000, cuda_overhead_mb=2000, initial_restart_count=1)
-                for name in model_names
-            ]
-
-            manager = gf.Manager(
-                initial_processes,
-                max_restarts=20,
-                restart_timeout_seconds=3600.0, 
-                process_start_wait_seconds=1.0, 
-                management_tick_length_seconds=5.0,
-                max_num_concurent_processes=8,
-                log_directory_path = Path(f"{current_dir}/population/genertation_{self.generation}/logs/")
-            )
-
-            while manager:
-                manager()
 
     def germinate_sapling(self):
 
@@ -1648,8 +1716,8 @@ class Population:
         parent_b = self.orchard.models[parent_b_index]
 
         #Crossover
-        new_genome = deepcopy(parent_a.genome)
-        new_genome.crossover(deepcopy(parent_b.genome))
+        new_genome = deepcopy(parent_a["genome"])
+        new_genome.crossover(deepcopy(parent_b["genome"]))
 
         #Mutate
         new_genome.mutate(0.05)
@@ -1684,18 +1752,18 @@ def transform_string(s):
 
     return snake_case_to_capitalised_first_with_spaces(name)
 
-def load_and_calculate_fitness(generation, num_per_generation = 100, scaling_threshold = 8):
+def load_and_calculate_fitness(
+        generation, 
+        num_per_generation = 100, 
+        scaling_threshold = 8
+    ):
 
     fitnesses = []
 
-    directory_path = Path(f'./population/')
+    directory_path = Path(f'./population/generation_{generation}/')
     for entry in directory_path.iterdir():
         if entry.name.startswith(f"model_"):
             name = transform_string(entry.name)
-
-            number = int(entry.name.split('_')[-1])
-            if (number < (generation-1) * num_per_generation) or (number >= (generation) * num_per_generation):
-                continue
 
             history = gf.load_history(entry)
             validator = gf.validate.Validator.load(entry / "validation_data.h5")

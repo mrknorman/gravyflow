@@ -636,6 +636,7 @@ class Manager:
         self.max_num_concurent_processes = max_num_concurent_processes
         self.process_start_wait_seconds = process_start_wait_seconds
         self.management_tick_length_seconds = management_tick_length_seconds
+        self.total_processes = 0
 
     def __bool__(self):
         
