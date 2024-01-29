@@ -737,17 +737,35 @@ class InjectionGenerator:
         elif not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
             self.waveform_generators = [self.waveform_generators]
 
+        # Process waveform generators based on their type
         if isinstance(self.waveform_generators, list):
-            self.iterators = [self.generate_one(generator, seed=self.generator_rng.integers(1E10)) for generator in self.waveform_generators]
-        elif isinstance(self.waveform_generators, dict):
-            self.iterators = [self.generate_one(config["generator"], seed=self.generator_rng.integers(1E10), name=key) for key, config in self.waveform_generators.items()]
+            # Reseeding generators for list type
+            for generator in self.waveform_generators:
+                generator.reseed(self.parameter_rng.integers(1E10))
 
-            self.mask_dict = {} #this is horrible...
+            # Creating iterators for each generator in list
+            self.iterators = [
+                self.generate_one(generator, seed=self.generator_rng.integers(1E10))
+                for generator in self.waveform_generators
+            ]
+
+        elif isinstance(self.waveform_generators, dict):
+            # Reseeding generators for dictionary type
+            for generator in self.waveform_generators.values():
+                generator["generator"].reseed(self.parameter_rng.integers(1E10))
+
+            # Creating iterators with additional 'name' parameter for each generator in dictionary
+            self.iterators = [
+                self.generate_one(config["generator"], seed=self.generator_rng.integers(1E10), name=key)
+                for key, config in self.waveform_generators.items()
+            ]
+
+            # Initializing an empty mask dictionary
+            self.mask_dict = {}
+
         else:
-            raise TypeError("Waveform generators is not a dictionary or a list!")
-        
-        for generator in self.waveform_generators:
-            generator.reseed(self.parameter_rng.integers(1E10))
+            # Handling invalid waveform generator types
+            raise TypeError("Waveform generators must be a dictionary or a list!")
 
         injections = []
         mask = []

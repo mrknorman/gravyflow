@@ -430,7 +430,9 @@ def Dataset(
         scale_factor: float = None,
         noise_obtainer: gf.NoiseObtainer = None,
         group : str = "train",
-        waveform_generators: Union[List[gf.WaveformGenerator], Dict[str, gf.WaveformGenerator]] = None,
+        waveform_generators: Union[
+            List[gf.WaveformGenerator], Dict[str, gf.WaveformGenerator]
+        ] = None,
         num_examples_per_generation_batch: int = None,
         num_examples_per_batch: int = None,
         input_variables: List = None,

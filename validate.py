@@ -84,15 +84,15 @@ def calculate_efficiency_scores(
     )
     
     #Ensure injection generators is list for subsequent logic:
-    if not isinstance(dataset_args["injection_generators"], list):
-        dataset_args["injection_generators"] = \
-            [dataset_args["injection_generators"]]
+    if not isinstance(dataset_args["waveform_generators"], list):
+        dataset_args["waveform_generators"] = \
+            [dataset_args["waveform_generators"]]
     
     # Ensure dataset is full of injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
     dataset_args["output_variables"] = [gf.ReturnVariables.INJECTION_MASKS]
-    dataset_args["injection_generators"][0].injection_chance = 1.0
-    dataset_args["injection_generators"][0].scaling_method.value = scaling_values
+    dataset_args["waveform_generators"][0].injection_chance = 1.0
+    dataset_args["waveform_generators"][0].scaling_method.value = scaling_values
     
     # Initlize generator:
     dataset : tf.data.Dataset = gf.Dataset(
@@ -205,7 +205,7 @@ def calculate_far_scores(
 
     # Ensure dataset has no injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
-    dataset_args["injection_generators"] = []
+    dataset_args["waveform_generators"] = []
     dataset_args["output_variables"] = []
 
     # Initlize generator:
@@ -441,14 +441,14 @@ def calculate_roc(
     num_batches = num_examples // num_examples_per_batch
     
     #Ensure injection generators is list for subsequent logic:
-    if not isinstance(dataset_args["injection_generators"], list):
-        dataset_args["injection_generators"] = \
-            [dataset_args["injection_generators"]]
+    if not isinstance(dataset_args["waveform_generators"], list):
+        dataset_args["waveform_generators"] = \
+            [dataset_args["waveform_generators"]]
     
     # Ensure dataset has balanced injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
     dataset_args["output_variables"] = [gf.ReturnVariables.INJECTION_MASKS]
-    dataset_args["injection_generators"][0].injection_chance = 0.5
+    dataset_args["waveform_generators"][0].injection_chance = 0.5
     
     mask_history = []
     # Initlize generators (this is horrendous need to rewrite)
@@ -579,12 +579,12 @@ def calculate_multi_rocs(
                 type_=gf.DistributionType.CONSTANT
             )
         #Ensure injection generators is list for subsequent logic:
-        if not isinstance(dataset_args["injection_generators"], list):
-            dataset_args["injection_generators"] = \
-                [dataset_args["injection_generators"]]
+        if not isinstance(dataset_args["waveform_generators"], list):
+            dataset_args["waveform_generators"] = \
+                [dataset_args["waveform_generators"]]
             
         # Set desired injection scalings:
-        dataset_args["injection_generators"][0].scaling_method.value = scaling_disribution
+        dataset_args["waveform_generators"][0].scaling_method.value = scaling_disribution
         
         roc_results[range_name] = \
             calculate_roc(    
@@ -668,15 +668,15 @@ def calculate_tar_scores(
     num_batches = num_examples // num_examples_per_batch
     
     #Ensure injection generators is list for subsequent logic:
-    if not isinstance(dataset_args["injection_generators"], list):
-        dataset_args["injection_generators"] = \
-            [dataset_args["injection_generators"]]
+    if not isinstance(dataset_args["waveform_generators"], list):
+        dataset_args["waveform_generators"] = \
+            [dataset_args["waveform_generators"]]
     
     # Ensure dataset is full of injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
     dataset_args["output_variables"] = []
-    dataset_args["injection_generators"][0].injection_chance = 1.0
-    dataset_args["injection_generators"][0].scaling_method.value = \
+    dataset_args["waveform_generators"][0].injection_chance = 1.0
+    dataset_args["waveform_generators"][0].scaling_method.value = \
         gf.Distribution(value=scaling, type_=gf.DistributionType.CONSTANT)
     
     # Initlize generator:

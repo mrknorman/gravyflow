@@ -37,16 +37,24 @@ class Distribution:
         else:
             self.rng = default_rng(self.seed)
 
+        # Check and adjust min and max values
+        if self.min_ is not None or self.max_ is not None:
+            if self.min_ is None or self.max_ is None:
+                raise ValueError("Both min and max must be provided if one is provided.")
+            
+            if self.min_ > self.max_:
+                self.min_, self.max_ = self.max_, self.min_  # Swap values
+
     def reseed(self, seed):
 
         self.seed = seed
-        self.rng = default_rng(self.seed)
+        self.rng = default_rng(self.seed)            
 
     def sample(
         self, 
         num_samples : int = 1
         ) -> Union[List[Union[int, float]], Union[int, float]]:
-        
+
         match self.type_:
             
             case DistributionType.CONSTANT:

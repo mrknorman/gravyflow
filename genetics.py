@@ -119,7 +119,7 @@ class HyperParameter:
                 self.value = int(self.value)
 
     def crossover(self, other, crossover_rate = 0.5):
-        if (np.rng.random() < crossover_rate):
+        if (self.rng.random() < crossover_rate):
             self.distribution = other.distribution
             self.value = other.value
 
@@ -205,6 +205,7 @@ class ModelGenome:
         layer_genomes : List,
         seed : int = None
     ):
+        
         # Training genes:
         self.optimizer = optimizer
         self.batch_size = batch_size

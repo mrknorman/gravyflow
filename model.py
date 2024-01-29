@@ -646,7 +646,8 @@ class Model:
         batch_size: int = None,
         model_path : Path = None,
         metrics : list = [],
-        genome : gf.ModelGenome = None
+        genome : gf.ModelGenome = None,
+        seed : int = None
     ):
         """
         Initializes a Model instance.
@@ -656,15 +657,22 @@ class Model:
         optimizer: Optimizer to use when training the model.
         loss: Loss function to use when training the model.
         batch_size: Batch size to use when training the model.
-        """ 
+        """
+
         self.training_dataset = None
 
         if dataset_args is not None:
-            self.training_dataset = gf.Dataset(**deepcopy(dataset_args)).map(adjust_features)
+            self.training_dataset = gf.Dataset(
+                **deepcopy(dataset_args)
+            ).map(adjust_features)
+
+        if seed is None:
+            seed = gf.Defaults.seed
 
         self.name = name
         self.path = model_path
         self.genome = genome
+        self.rng = default_rng(seed)
 
         if batch_size is None:
             batch_size = gf.Defaults.num_examples_per_batch
@@ -676,9 +684,18 @@ class Model:
             loss = losses.BinaryCrossentropy()
         
         self.layers = layers
-        self.batch_size = gf.HyperParameter(batch_size, seed=self.rng.integers(1E10))
-        self.optimizer = gf.HyperParameter(optimizer, seed=self.rng.integers(1E10))
-        self.loss = gf.HyperParameter(loss, seed=self.rng.integers(1E10))
+        self.batch_size = gf.HyperParameter(
+            batch_size, 
+            seed=self.rng.integers(1E10)
+        )
+        self.optimizer = gf.HyperParameter(
+            optimizer, 
+            seed=self.rng.integers(1E10)
+        )
+        self.loss = gf.HyperParameter(
+            loss, 
+            seed=self.rng.integers(1E10)
+        )
         self.training_config = training_config
         self.loaded = False
         
@@ -702,8 +719,11 @@ class Model:
         training_config : dict,
         dataset_args : dict,
         model_path : Path,
-        metrics : List 
+        metrics : List,
+        seed : int = None
     ):
+        if seed is None:
+            seed = gf.Defaults.seed
 
         layers = []            
         for i in range(genome.num_layers.value):
@@ -762,7 +782,7 @@ class Model:
         }
 
         # This is currently quite specific:
-        dataset_args["injection_generators"] = {
+        dataset_args["waveform_generators"] = {
             name : { 
                 "generator" : generator["hp"].return_generator(),
                 "excluded" : generator["excluded"],
@@ -786,7 +806,8 @@ class Model:
             batch_size=genome.batch_size.value,
             model_path=model_path,
             metrics=metrics,
-            genome=genome
+            genome=genome,
+            seed=seed
         )
 
         return model
@@ -801,7 +822,8 @@ class Model:
         loss,
         num_onsource_samples : int = None, 
         num_offsource_samples : int = None,
-        model_path : Path = Path("./models")
+        model_path : Path = Path("./models"),
+        seed : int = None
     ):
         """
         Loads a model configuration from a file and sets up the model according to the configuration.
@@ -816,6 +838,9 @@ class Model:
         Returns:
         - tuple: A tuple containing input configurations, output configuration, and hidden layers.
         """
+
+        if seed is None:
+            seed = gf.Defaults.seed
 
         if num_onsource_samples is None:
             num_onsource_samples = int(
@@ -910,7 +935,8 @@ class Model:
             output_config=output_config,
             optimizer=optimizer, 
             loss=loss,
-            model_path=model_path
+            model_path=model_path, 
+            seed=seed
         )
 
         return model
@@ -931,10 +957,11 @@ class Model:
             num_onsource_samples : int = None, 
             num_offsource_samples : int = None,
             model_path : Path = None,
-            force_overwrite = False,
-            load_genome = False, 
-            dataset_args= None,
-            genome=None
+            force_overwrite : bool = False,
+            load_genome : bool = False, 
+            dataset_args : Union[Dict, None]  = None,
+            genome : None = None,
+            seed : int = None
         ):
         
         if num_onsource_samples is None:
@@ -964,7 +991,8 @@ class Model:
                 training_config=training_config,
                 optimizer=optimizer, 
                 loss=loss,
-                model_path=model_path
+                model_path=model_path,
+                seed=seed
             )
         elif model_config_path is not None:
             model = cls.from_config(
@@ -975,7 +1003,8 @@ class Model:
                 loss=loss,
                 num_onsource_samples=num_onsource_samples, 
                 num_offsource_samples=num_offsource_samples,
-                model_path=model_path
+                model_path=model_path,
+                seed=seed
             )
         elif genome is not None:
             model = cls.from_genome(
@@ -986,7 +1015,8 @@ class Model:
                 training_config=training_config,
                 dataset_args=dataset_args, 
                 model_path=model_path,
-                metrics=[]
+                metrics=[],
+                seed=seed
             )
         else:  
             blueprint_exists = False
@@ -999,6 +1029,7 @@ class Model:
                 loss=loss,
                 model_path=model_path,
                 training_config=training_config,
+                seed=seed
             )
         
         # Check if the model file exists
@@ -1594,7 +1625,8 @@ class Population:
         model = {
             "name" : model_name,
             "number" : model_number,
-            "path" : model_path
+            "path" : model_path,
+            "genome" : genome
         }
 
         genome.save(model_path / "genome")
@@ -1605,7 +1637,9 @@ class Population:
     def initilize(self):
         if self.generation == 0:
             for j in tqdm(range(self.num_population_members)): 
-                if not Path(self.population_directory_path / f"generation_{self.generation}/model_{j}/genome").exists():
+                if not Path(
+                    self.population_directory_path / f"generation_{self.generation}/model_{j}/genome"
+                ).exists():
                     self.random_sapling()
                 else:
                     self.load_model()
@@ -1648,8 +1682,8 @@ class Population:
             if not Path(model["path"] / "validation_plots.html").exists():
                 initial_processes.append(gf.Process(
                     f"python train.py --path {model['path']}", model["name"], 
-                    tensorflow_memory_mb=4000, 
-                    cuda_overhead_mb=2000, 
+                    tensorflow_memory_mb=10000, 
+                    cuda_overhead_mb=6000, 
                     initial_restart_count=1
                 ))
             else:
@@ -1664,14 +1698,16 @@ class Population:
                 restart_timeout_seconds=3600.0,
                 process_start_wait_seconds=1.0, 
                 management_tick_length_seconds=5.0,
-                max_num_concurent_processes=10,
-                log_directory_path = self.population_directory_path / f"population/generation_{self.generation}/logs/"
+                max_num_concurent_processes=1,
+                log_directory_path = self.population_directory_path / f"generation_{self.generation}/logs/"
             )
 
             while manager:
                 manager()
         else:
-            logging.info(f"Generation {self.generation} empty or completed. Skipping.")
+            logging.info(
+                f"Generation {self.generation} empty or completed. Skipping."
+            )
 
         self.generation += 1
 
@@ -1714,6 +1750,8 @@ class Population:
 
         parent_a = self.orchard.models[parent_a_index]
         parent_b = self.orchard.models[parent_b_index]
+
+        print(parent_a)
 
         #Crossover
         new_genome = deepcopy(parent_a["genome"])
@@ -1784,7 +1822,9 @@ def load_and_calculate_fitness(
             num_valid_scores_above = len(valid_scores[valid_scores > score_threshold])
 
             if (num_valid_scores_above > 0):
-                fitnesses.append(num_valid_scores_above/ len(valid_scores))
+                fitnesses.append(
+                    1.0 / (1.0 - (num_valid_scores_above/ len(valid_scores)) + np.min(history["val_loss"]) + 1E-8)
+                )
             else:
                 fitnesses.append(0)
     
