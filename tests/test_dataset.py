@@ -34,8 +34,9 @@ def test_iteration(
         
         # Define injection directory path:
         current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        injection_directory_path : Path = \
-            Path(current_dir / "example_injection_parameters")
+        injection_directory_path : Path = Path(
+            current_dir / "example_injection_parameters"
+        )
 
         # Intilise Scaling Method:
         scaling_method = \
@@ -49,8 +50,7 @@ def test_iteration(
             )
 
         # Load injection config:
-        phenom_d_generator : gf.cuPhenomDGenerator = \
-            gf.WaveformGenerator.load(
+        phenom_d_generator : gf.cuPhenomDGenerator = gf.WaveformGenerator.load(
                 injection_directory_path / "phenom_d_parameters.json", 
                 sample_rate_hertz, 
                 onsource_duration_seconds,
@@ -68,7 +68,8 @@ def test_iteration(
                 ],
                 gf.SegmentOrder.RANDOM,
                 force_acquisition = True,
-                cache_segments = False
+                cache_segments = False,
+                logging_level = logging.INFO
             )
 
         # Initilise noise generator wrapper:
@@ -192,7 +193,7 @@ def test_dataset(
                 noise_type=gf.NoiseType.REAL,
                 ifos=gf.IFO.L1
             )
-
+        
         dataset : tf.data.Dataset = gf.Dataset(
             # Random Seed:
             seed= 1000,
@@ -242,7 +243,7 @@ def test_dataset(
                 scale_factor=scale_factor
             ), 
             gf.generate_spectrogram(
-                onsource_, 
+                onsource_[0], 
                 sample_rate_hertz
             )]
             for onsource_, whitened_injection, injection, m1, m2 in zip(
@@ -303,6 +304,8 @@ def test_dataset_multi(
                 scaling_method=scaling_method,
                 network=ifos
             )
+
+        phenom_d_generator.injection_chance = 1.0
 
         # Setup ifo data acquisition object:
         ifo_data_obtainer : gf.IFODataObtainer = \
@@ -657,4 +660,5 @@ if __name__ == "__main__":
     test_dataset_multi()
     test_dataset_incoherent()
     test_iteration()
+
     

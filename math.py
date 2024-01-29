@@ -5,11 +5,18 @@ import random
 
 import numpy as np
 import tensorflow as tf
+from numpy.random import default_rng  
+
+from scipy.stats import truncnorm
+import gravyflow as gf
 
 class DistributionType(Enum):
     CONSTANT = auto()         
     UNIFORM = auto()
     NORMAL = auto()
+    CHOICE = auto()
+    LOG = auto()
+    POW_TWO = auto()
 
 @dataclass
 class Distribution:
@@ -19,13 +26,35 @@ class Distribution:
     max_ : Union[int, float] = None
     mean : float = None
     std : float = None
+    possible_values : List = None
     type_ : DistributionType = DistributionType.CONSTANT
+    seed : int = None
+
+    def __post_init__(self):
+
+        if self.seed is None:
+            self.rng = default_rng(gf.Defaults.seed)
+        else:
+            self.rng = default_rng(self.seed)
+
+        # Check and adjust min and max values
+        if self.min_ is not None or self.max_ is not None:
+            if self.min_ is None or self.max_ is None:
+                raise ValueError("Both min and max must be provided if one is provided.")
+            
+            if self.min_ > self.max_:
+                self.min_, self.max_ = self.max_, self.min_  # Swap values
+
+    def reseed(self, seed):
+
+        self.seed = seed
+        self.rng = default_rng(self.seed)            
 
     def sample(
         self, 
         num_samples : int = 1
         ) -> Union[List[Union[int, float]], Union[int, float]]:
-        
+
         match self.type_:
             
             case DistributionType.CONSTANT:
@@ -48,8 +77,7 @@ class Distribution:
                         "No maximum value given in uniform distribution."
                     )
                 else:                
-                    samples = \
-                        np.random.uniform(
+                    samples = self.rng.uniform(
                             self.min_, 
                             self.max_, 
                             num_samples
@@ -69,22 +97,61 @@ class Distribution:
                         
                     if self.min_ is None:
                         self.min_ = float("-inf")
-                    elif self.max_ is None:
+                    if self.max_ is None:
                         self.max_ = float("inf")
                     
-                    samples = \
-                        truncnorm.rvs(
+                    samples = truncnorm.rvs(
                             (self.min_ - self.mean) / self.std,
                             (self.max_ - self.mean) / self.std,
-                            loc=self.mean_value,
+                            loc=self.mean,
                             scale=self.std,
-                            size=num_samples
+                            size=num_samples,
+                            random_state=self.rng.integers(2**32 - 1)
                         )
+            case DistributionType.CHOICE:
+                if self.possible_values is None:
+                    raise ValueError(
+                        "No possible values given in choice distribution."
+                    )
+                samples = self.rng.choice(
+                    self.possible_values,
+                    size=num_samples
+                )
+            case DistributionType.LOG:
+                if self.min_ is None:
+                    raise ValueError(
+                        "No minumum value given in log distribution."
+                    )
+                elif self.max_ is None:
+                    raise ValueError(
+                        "No maximum value given in log distribution."
+                    )
+                samples =self.rng.uniform(
+                            self.min_, 
+                            self.max_, 
+                            num_samples
+                        )
+                samples = 10 ** samples
+
+            case DistributionType.POW_TWO:
+                power_low, power_high = map(int, np.log2((self.min_, self.max_)))
+                power = self.rng.integers(power_low, high=power_high + 1, size=num_samples)
+                samples = 2**power
             
             case _:
                 raise ValueError(f'Unsupported distribution type {self.type_}')
 
         if self.dtype == int:
+
+            if self.type_ == DistributionType.LOG:
+                raise ValueError(
+                    "Cannot convert log values to ints."
+                )
+            elif self.type_ == DistributionType.CHOICE:
+                raise ValueError(
+                    "Cannot convert choice values to ints."
+                )
+
             samples = [int(sample) for sample in samples]
         
         return samples
@@ -386,3 +453,125 @@ def rfftfreq(
 def get_element_shape(dataset):
     for element in dataset.take(1):
         return element[0].shape
+
+def print_active_gpu_memory_info():
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            # Currently active GPU is usually at index 0 when there's only one
+            memory_info = tf.config.experimental.get_memory_info('GPU:0')
+            print(f"Active GPU memory info: {memory_info}")
+        except RuntimeError as e:
+            print(e)
+    else:
+        print("No GPU devices found.")
+
+@tf.function(jit_compile=True)
+def pad_if_odd(tensor):
+    # Compute whether the size is odd using TensorFlow operations
+    size_is_odd = tf.equal(tf.size(tensor) % 2, 1)
+    
+    # Use tf.cond to conditionally pad the tensor
+    tensor = tf.cond(
+        size_is_odd,
+        lambda: tf.concat([tensor, [0]], 0),  # Pad with one zero if size is odd
+        lambda: tensor  # Return the tensor as-is if size is even
+    )
+    return tensor
+
+@tf.function(jit_compile=True)
+def round_to_even(tensor):
+    # Assuming tensor is of integer type and 1-D
+    # Check if each element is odd by looking at the least significant bit
+    is_odd = tf.math.mod(tensor, 2) == 1
+    
+    # Subtract 1 from all odd elements to make them even
+    nearest_even = tensor - tf.cast(is_odd, tensor.dtype)
+    return nearest_even    
+
+@tf.function(jit_compile=True)
+def pad_to_power_of_two(tensor):
+    # Get the current size of the tensor
+    current_size = tf.size(tensor)
+
+    # Calculate the next power of two
+    next_power_of_two = 2**tf.math.ceil(tf.math.log(tf.cast(current_size, tf.float32)) / tf.math.log(2.0))
+
+    # Calculate how much padding is needed
+    padding_size = tf.cast(next_power_of_two, tf.int32) - current_size
+
+    # Pad the tensor to the next power of two
+    tensor_padded = tf.pad(tensor, [[0, padding_size]], mode='CONSTANT')
+
+    return tensor_padded
+
+@tf.function(jit_compile=True)
+def resample(x, original_size, original_sample_rate_hertz, new_sample_rate_hertz):
+    """
+    Resample `x` to `num` samples using the Fourier method in TensorFlow, then cut to original size.
+
+    Parameters
+    ----------
+    x : 1D-Tensor
+        The data to be resampled.
+    original_size : int
+        The original size of the tensor before padding.
+    original_sample_rate_hertz : float
+        The sample rate of the original signal.
+    new_sample_rate_hertz : float
+        The desired sample rate after resampling.
+
+    Returns
+    -------
+    resampled_x : Tensor
+        The resampled tensor, cut to the original size.
+    """
+
+    fraction = original_sample_rate_hertz / new_sample_rate_hertz
+
+    new_num_samples = tf.math.floordiv(original_size, tf.cast(tf.round(fraction), tf.int32))
+
+    # Round to even for FFT
+    new_num_samples = round_to_even(new_num_samples)
+
+    # Perform the FFT
+    X = tf.signal.rfft(x)
+    
+    # Create the new frequency space
+    new_X = tf.signal.fftshift(X)
+    
+    # Slice out the central part of the spectrum to the new size
+    new_X = new_X[(original_size - new_num_samples) // 2:(original_size + new_num_samples) // 2]
+    
+    # Shift back the zero frequency to the beginning
+    new_X = tf.signal.ifftshift(new_X)
+    
+    # Perform the inverse FFT
+    resampled_x = tf.signal.irfft(new_X)
+    
+    # Normalize the amplitude
+    resampled_x *= float(new_num_samples) / float(original_size)
+
+    # Cut the resampled tensor back to the original size
+    resampled_x_cut = resampled_x[:original_size]
+    
+    return resampled_x_cut
+
+def check_tensor_integrity(tensor, ndims, min_size):
+    # Check if the tensor is 1D
+    if tensor.ndim != ndims:
+        return False
+
+    # Check if the size of the tensor is greater than 1
+    if tensor.shape[0] <= min_size:
+        return False
+
+    # Check if the datatype of the tensor is float32
+    if tensor.dtype != tf.float32:
+        return False
+
+    # Check if the tensor contains any NaN or inf values
+    if tf.reduce_any(tf.math.is_nan(tensor)) or tf.reduce_any(tf.math.is_inf(tensor)):
+        return False
+
+    return True

@@ -14,4 +14,6 @@ class Defaults:
             if hasattr(cls, key):
                 setattr(cls, key, value)
             else:
-                raise AttributeError(f"{cls.__name__} has no attribute named '{key}'")
+                raise AttributeError(
+                    f"{cls.__name__} has no attribute named '{key}'"
+                )

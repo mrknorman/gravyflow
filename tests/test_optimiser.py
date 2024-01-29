@@ -14,8 +14,7 @@ from tensorflow.data.experimental import AutoShardPolicy
 import gravyflow as gf
 
 def test_model(
-        num_tests : int = 32,
-        output_diretory_path : Path = Path("./py_ml_data/tests/")
+        num_tests : int = 32
     ):
     
     # Test Parameters:
@@ -48,7 +47,7 @@ def test_model(
     # Load injection config:
     phenom_d_generator_high_mass : gf.cuPhenomDGenerator = \
         gf.WaveformGenerator.load(
-            injection_directory_path / "injection_parameters.json", 
+            injection_directory_path / "phenom_d_parameters.json", 
             sample_rate_hertz, 
             onsource_duration_seconds,
             scaling_method=scaling_method
@@ -95,8 +94,8 @@ def test_model(
             gf.ReturnVariables.INJECTION_MASKS, 
             gf.ReturnVariables.INJECTIONS,
             gf.ReturnVariables.WHITENED_INJECTIONS,
-            gf.WaveformGenerator.MASS_1_MSUN, 
-            gf.WaveformGenerator.MASS_2_MSUN
+            gf.WaveformParameters.MASS_1_MSUN, 
+            gf.WaveformParameters.MASS_2_MSUN
         ],
     )
         

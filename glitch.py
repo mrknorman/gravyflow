@@ -1,10 +1,96 @@
 from enum import Enum, auto
 from typing import Union, List
+import time
+#import threading
+import queue
 
 import numpy as np
 from gwpy.table import GravitySpyTable
 
 import gravyflow as gf
+"""
+def fetch_event_times_(selection, max_retries=10):
+    def data_fetcher(selection, q, stop_signal):
+
+        attempts = 0
+        while True:
+
+            if stop_signal.is_set():
+                return 0
+
+            try:
+                # Attempt to fetch the data
+                data = GravitySpyTable.fetch(
+                    "gravityspy",
+                    "glitches",
+                    columns=["event_time"],  # Assuming we're only interested in the event times.
+                    selection=selection
+                ).to_pandas().to_numpy()[:, 0]
+
+                # Put the data into the queue for the main thread
+                q.put(data)
+                return 0
+
+            except Exception as e:
+                print(f"Failed to acquire gravity spy data because: {e} retrying...")
+                attempts += 1
+                if attempts >= max_retries:
+                    # Put the exception into the queue to indicate failure
+                    q.put(e)
+                    break
+
+                time.sleep(30)
+        
+        return attempts
+    
+    # Create a queue for thread communication
+    q = queue.Queue()
+    stop_signal = threading.Event()  # Thread-safe stop signal
+
+    # Start the data fetching in a separate thread
+    fetch_thread = threading.Thread(target=data_fetcher, args=(selection, q, stop_signal))
+    fetch_thread.start()
+
+    # Wait for the data or exception from the data-fetching thread
+    result = q.get()
+
+    # Join the thread (wait for it to complete)
+    fetch_thread.join()
+    stop_signal.set()  # This signals the thread to stop
+
+    # Check if the result is an exception and raise it if so
+    if isinstance(result, Exception):
+        raise result
+
+    return result
+"""
+def fetch_event_times(selection, max_retries=10):
+        
+    attempts = 0
+    while True:
+        try:
+            # Attempt to fetch the data
+            data = GravitySpyTable.fetch(
+                "gravityspy",
+                "glitches",
+                columns=["event_time", "duration"],  # Assuming we're only interested in the event times.
+                selection=selection
+            ).to_pandas()
+
+            return data
+
+        except Exception as e:
+            print(f"Failed to acquire gravity spy data because: {e} retrying...")
+            # If an exception occurs, increment the attempts counter
+            attempts += 1
+            # Check if the maximum number of retries has been reached
+            if attempts >= max_retries:
+                raise Exception(f"Max retries reached: {max_retries}") from e
+            
+            # Wait for 10 seconds before retrying
+            time.sleep(30)
+    
+    return -1  # If successful, return the data
 
 class GlitchType(Enum):
     AIR_COMPRESSOR = 'Air_Compressor'
@@ -57,12 +143,7 @@ def get_glitch_times(
             glitch_name = glitch_type.value
             selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && ml_label={glitch_name} && No_Glitch<0.1"
             
-            data = GravitySpyTable.fetch(
-                "gravityspy",
-                "glitches",
-                columns=["event_time"],  # Assuming we're only interested in the event times.
-                selection=selection
-            ).to_pandas().to_numpy()[:, 0]
+            data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
             
             # Append the results to the all_data list.
             all_data.append(data)
@@ -73,12 +154,7 @@ def get_glitch_times(
         # If glitch_types is None or an empty list, it selects all glitch types.
         selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && No_Glitch<0.1"
 
-        data = GravitySpyTable.fetch(
-            "gravityspy",
-            "glitches",
-            columns=["event_time"],  # Added "ml_label" to the columns to be fetched.
-            selection=selection
-        ).to_pandas().to_numpy()[:, 0]
+        data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
 
         return data
     
@@ -88,8 +164,6 @@ def get_glitch_segments(
     glitch_types: Union[List[GlitchType], GlitchType] = None,
     start_gps_time : float = None,
     end_gps_time : float = None,
-    start_padding_seconds : float = 0.5,
-    end_padding_seconds: float = 0.5
     ): 
     
     if start_gps_time is None:
@@ -113,16 +187,11 @@ def get_glitch_segments(
             glitch_name = glitch_type.value
             selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && ml_label={glitch_name} && No_Glitch<0.1"
             
-            data = GravitySpyTable.fetch(
-                "gravityspy",
-                "glitches",
-                columns=["start_time", "duration"],  # Assuming we're only interested in the event times.
-                selection=selection
-            ).to_pandas()
+            data = fetch_event_times(selection, max_retries=10)
             
             # Calculate 'end_time' by adding 'duration' to 'start_time'
-            data['end_time'] = data['start_time'] + data['duration'] + end_padding_seconds
-            data['start_time'] = data['start_time'] - start_padding_seconds
+            data['end_time'] = data['event_time'] + data['duration'] 
+            data['start_time'] = data['event_time']
 
             # Select the 'start_time' and 'end_time' and convert to a NumPy array
             data = data[['start_time', 'end_time']].to_numpy()
@@ -136,16 +205,12 @@ def get_glitch_segments(
         # If glitch_types is None or an empty list, it selects all glitch types.
         selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && No_Glitch<0.1"
 
-        data = GravitySpyTable.fetch(
-            "gravityspy",
-            "glitches",
-            columns=["start_time", "duration"],  # Assuming we're only interested in the event times.
-            selection=selection
-        ).to_pandas()
+        data = fetch_event_times(selection, max_retries=10)
         
         # Calculate 'end_time' by adding 'duration' to 'start_time'
-        data['end_time'] = data['start_time'] + data['duration'] + end_padding_seconds
-        data['start_time'] = data['start_time'] - start_padding_seconds
+        
+        data['end_time'] = data['event_time'] + data['duration']
+        data['start_time'] = data['event_time']
 
         # Select the 'start_time' and 'end_time' and convert to a NumPy array
         data = data[['start_time', 'end_time']].to_numpy()

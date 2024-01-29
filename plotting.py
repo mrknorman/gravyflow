@@ -1,15 +1,15 @@
-from typing import Dict, Union
+from typing import Dict, Union, List
 
 import numpy as np
 import tensorflow as tf
-import scipy as sp
 from scipy.constants import golden
 from bokeh.io import save, output_file
 from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, Legend, ColorBar, LogTicker, LinearColorMapper
+from bokeh.models import (ColumnDataSource, ColorBar, LogTicker, LinearColorMapper, 
+                          HoverTool)
 from bokeh.palettes import Bright
 from bokeh.models import Div
-from bokeh.layouts import grid, column
+from bokeh.layouts import column
 
 import gravyflow as gf
 
@@ -40,7 +40,10 @@ def create_info_panel(params: dict, height = 200) -> Div:
             }
         </style>
     """
-    html_content = "<div class='centered-content'><ul>" + "".join([f"<li><strong>{key}:</strong> {value}</li>" for key, value in params.items()]) + "</ul></div>"
+    html_content = "<div class='centered-content'><ul>" + "".join(
+        [f"<li><strong>{key}:</strong> {value}</li>" for key, value in params.items()]
+    ) + "</ul></div>"
+
     return Div(text=style + html_content, width=190, height=height)
 
 def check_ndarrays_same_length(
@@ -89,19 +92,17 @@ def check_ndarrays_same_length(
 
 def generate_strain_plot(
         strain : Dict[str, np.ndarray],
-        sample_rate_hertz : float = None,
-        title : str = "",
-        colors : list = None,
+        sample_rate_hertz : Union[float, None] = None,
+        title : Union[str, List[str]] = "",
+        colors : Union[List, None] = None,
         has_legend : bool = True,
-        scale_factor : float = None,
+        scale_factor : Union[float, None] = None,
         height : int = 400,
-        width : int = None
+        width : Union[int, None] = None
     ):
 
     if sample_rate_hertz is None:
         sample_rate_hertz = gf.Defaults.sample_rate_hertz
-    if scale_factor is None:
-        scale_factor = gf.Defaults.scale_factor
 
     duration_seconds = next(
             iter(strain.values()), 'default'
@@ -122,8 +123,21 @@ def generate_strain_plot(
         height = height//N
         strains = [{key: strain[key][i] for key in strain} for i in range(N)]
 
+    if not isinstance(title, list):
+        title = [title] * len(strains)
+
+    y_axis_label = f"Strain"
+    if scale_factor is not None and scale_factor != 1:
+        y_axis_label += f" (scaled by {scale_factor})"
+
+    tooltips = [
+        ("Name", "@name"),
+        ("Time (seconds)", "@x"),
+        (y_axis_label, "@y"),
+    ]
+
     plots = []
-    for curr_strain in strains:
+    for curr_title, curr_strain in zip(title, strains):
         # If inputs are tensors, convert to numpy array:
         for key, value in curr_strain.items():
             if isinstance(value, tf.Tensor):
@@ -134,41 +148,45 @@ def generate_strain_plot(
 
         # Generate time axis for plotting:
         time_axis = np.linspace(0.0, duration_seconds, num_samples)
-    
-        # Create data dictionary to use as source:
-        data = { "time" : time_axis }
-        for key, value in curr_strain.items():
-            data[key] = value
 
-        source = ColumnDataSource(data)
-    
-        y_axis_label = f"Strain"
-        if scale_factor is not None and scale_factor != 1:
-            y_axis_label += f" (scaled by {scale_factor})"
-    
         p = figure(
             x_axis_label="Time (seconds)", 
             y_axis_label=y_axis_label,
-            title=title,
+            title=curr_title,
             width=width,
             height=height
         )
 
         for index, (key, value) in enumerate(curr_strain.items()):
+
+            source = ColumnDataSource(
+                {
+                    "x" : time_axis,
+                    "y" : value,
+                    "name" : [key] * len(time_axis)
+                }
+            )
+
             p.line(
-                "time", 
-                key, 
+                "x", 
+                "y", 
                 source=source, 
                 line_width=2, 
-                line_color=colors[index % len(colors)],  # Cycle through colors if there are more lines than colors
+                line_color=colors[index % len(colors)],
                 legend_label=key
             )
-    
-        p.legend.location = "top_left"
-        p.legend.click_policy = "hide"
-        p.legend.visible = has_legend
-        p.xgrid.visible = False
-        p.ygrid.visible = False
+
+        # Configure legend based on the number of lines
+        if len(curr_strain) > 1 and has_legend:
+            p.legend.location = "top_left"
+            p.legend.click_policy = "hide"
+            p.legend.visible = True
+        else:
+            p.legend.visible = False
+
+        hover = HoverTool()
+        hover.tooltips = tooltips
+        p.add_tools(hover)
 
         plots.append(p)
 
@@ -209,8 +227,7 @@ def generate_psd_plot(
     y_axis_label = f"PSD"
     
     # Create a new plot with a title and axis labels
-    p = \
-        figure(
+    p = figure(
             title=title, 
             x_axis_label="Frequency (hertz)", 
             y_axis_label=y_axis_label,

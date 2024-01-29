@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # Built-In imports:
 from dataclasses import dataclass
+from typing import Tuple
 import logging
 from pathlib import Path
 from enum import Enum, auto
@@ -14,6 +15,7 @@ from warnings import warn
 # Library imports:
 import numpy as np
 import tensorflow as tf
+from numpy.random import default_rng  
 
 # Local imports:
 import gravyflow as gf
@@ -60,6 +62,7 @@ class ScalingMethod:
         match self.type_:
             
             case ScalingTypes.SNR:
+                
                 scaled_injections = gf.scale_to_snr(
                     injections, 
                     onsource,
@@ -82,7 +85,7 @@ class ScalingMethod:
                 )
 
             case _:
-                raise ValueError(f"Scaling type {method.type_} not recognised.")
+                raise ValueError(f"Scaling type {self.type_} not recognised.")
         
         if scaled_injections is not None:
             scaled_injections = gf.replace_nan_and_inf_with_zero(
@@ -160,7 +163,7 @@ def scale_to_hpeak(
     )
     
     # Calculate factor required to scale injection to desired HRSS:
-    scale_factor = desired_hrss/(current_hrss + epsilon)
+    scale_factor = desired_hrss/(current_hpeak + epsilon)
     
     # Reshape tensor to allow for compatible shapes in the multiplication
     # operation:
@@ -192,16 +195,21 @@ class ReturnVariables(Enum):
 
 @dataclass
 class WaveformGenerator:
-    scaling_method : ScalingMethod = None
+    scaling_method : Union[ScalingMethod, None] = None
     injection_chance : float = 1.0
     front_padding_duration_seconds : float = 0.3
     back_padding_duration_seconds : float = 0.0
-    scale_factor : float = None
-    network : Union[List[IFOs], gf.Network, Path] = None
+    scale_factor : Union[float, None] = None
+    network : Union[List[IFO], gf.Network, Path, None] = None
+
+    distributed_attributes : Union[Tuple, None] = None
         
     def __post_init__(self):
         self.network = self.init_network(self.network)
-    
+        
+        # Convert all waveform attributes to gf.Distribution if not already:
+        self.convert_all_distributions()
+
     @classmethod
     def init_network(cls, network):
         
@@ -216,7 +224,7 @@ class WaveformGenerator:
                 pass
             
             case _:
-                raise ValueError(
+                raise TypeError(
                     ("Unable to initiate network with this type: "
                     f"{type(network)}.")
                 )
@@ -229,19 +237,12 @@ class WaveformGenerator:
     @classmethod
     def load(
         cls,
-        config_path: Path, 
-        sample_rate_hertz: float = None, 
-        onsource_duration_seconds: float = None, 
+        path: Path, 
         scaling_method: ScalingMethod = None,
         scale_factor : float = None,
-        network : Union[List[IFOs], gf.Network, Path] = None
+        network : Union[List[IFO], gf.Network, Path] = None
     ) -> Type[cls]:
 
-        if sample_rate_hertz is None:
-            sample_rate_hertz = gf.Defaults.sample_rate_hertz
-        if onsource_duration_seconds is None:
-            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
-        
         # Define replacement mapping
         replacements = {
             "pi": np.pi,
@@ -255,12 +256,14 @@ class WaveformGenerator:
         }
 
         # Load injection config
-        with config_path.open("r") as file:
+        with path.open("r") as file:
             config = json.load(file)
 
         # Replace placeholders
-        for value in config.values():
-            gf.replace_placeholders(value, replacements)
+        gf.replace_placeholders(
+            config, 
+            replacements
+        )
             
         if scaling_method is not None:
             config["scaling_method"] = scaling_method
@@ -311,6 +314,93 @@ class WaveformGenerator:
 
         return generator
 
+    def convert_to_distribution(
+        self, 
+        attribute : Union[int, float, str, gf.Distribution]
+    ):
+        if not isinstance(attribute, gf.Distribution):
+            if isinstance(attribute, list) or isinstance(attribute, tuple): 
+                value = []
+                for element in attribute:
+                    value.append(
+                        gf.Distribution(value=element, type_=gf.DistributionType.CONSTANT)
+                    )
+                return value
+            else:
+                return gf.Distribution(value=attribute, type_=gf.DistributionType.CONSTANT)
+        else:
+            return attribute
+
+    def convert_all_distributions(self):
+        for attribute in self.distributed_attributes:
+            converted = self.convert_to_distribution(
+                getattr(self, attribute)
+            )
+            setattr(self, attribute, converted)
+    
+    def reseed(self, seed):
+
+        rng = default_rng(seed)
+        for attribute in self.distributed_attributes:
+            distribution = getattr(self, attribute)
+
+            # Placing this outside the loop ensures that
+            # seed will be the same for each parameter 
+            # independent of which are set to distributions
+            seed = rng.integers(1E10)
+            if isinstance(distribution, gf.Distribution):
+                distribution.reseed(seed)
+                setattr(self, attribute, distribution)
+
+    def ensure_list_of_floats(
+        self,
+        name : str,
+        value : Union[int, float, gf.Distribution],
+    ):
+        if not isinstance(value, gf.Distribution):
+            if isinstance(value, list) or isinstance(value, tuple):
+                if (len(value) == 3):
+                    new_value = []
+                    for element, label in zip(value, ("x", "y", "z")):
+                        new_value.append(self.ensure_float(
+                            f"{name}_{label}",
+                            element
+                        ))
+                    return tuple(new_value)
+                else:
+                    raise ValueError(f"{name} should contain three elements, x, y, and z.")
+            else:
+                raise TypeError(f"{name} should be list or tuple.")
+        else:
+            if value.dtype == int:
+                logging.warn(f"{name} should not have dtype = int, automatically adjusting.")
+                value.dtype = float
+                return value
+            else:
+                return value
+
+
+    def ensure_float(
+        self,
+        name : str,
+        value : Union[int, float, gf.Distribution],
+    ):
+        if not isinstance(value, gf.Distribution):
+            if isinstance(value, int):
+                logging.warn(f"{name} should be float not int, automatically adjusting.")
+                return float(value)
+            elif isinstance(value, float):
+                return value
+            else:
+                raise TypeError(f"{name} should be float or gf.Distribution object.")    
+        else:
+            if value.dtype == int:
+                logging.warn(f"{name} should not have dtype = int, automatically adjusting.")
+                value.dtype = float
+                return value
+            else:
+                return value
+
 @dataclass 
 class WaveformParameter:
     index : str
@@ -350,18 +440,33 @@ class WaveformParameters(Enum):
 
 @dataclass
 class WNBGenerator(WaveformGenerator):
-    duration_seconds : gf.Distribution = \
-        gf.Distribution(min_=0.1, max_=1.0, type_=gf.DistributionType.UNIFORM)
-    min_frequency_hertz: gf.Distribution = \
-        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
-    max_frequency_hertz: gf.Distribution = \
-        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
+    duration_seconds : Union[float, gf.Distribution] = 0.5
+    min_frequency_hertz: Union[float, gf.Distribution] = 16.0
+    max_frequency_hertz: Union[float, gf.Distribution] = 1024.0
 
+    distributed_attributes : Tuple[str] = (
+        "duration_seconds",
+        "min_frequency_hertz",
+        "max_frequency_hertz"
+    )
+
+    def __post_init__(self):
+        
+        self.duration_seconds = self.ensure_float("duration_seconds", self.duration_seconds)
+        self.min_frequency_hertz = self.ensure_float("min_frequency_hertz", self.min_frequency_hertz)
+        self.max_frequency_hertz = self.ensure_float("max_frequency_hertz", self.max_frequency_hertz)
+
+        if self.scale_factor is None:
+            self.scale_factor=1.0
+
+        super().__post_init__()
+    
     def generate(
         self,
         num_waveforms: int,
         sample_rate_hertz: float,
-        max_duration_seconds: float
+        max_duration_seconds: float,
+        seed : int
     ):
         
         if (num_waveforms > 0):
@@ -372,8 +477,7 @@ class WNBGenerator(WaveformGenerator):
                          "injection duration. Adjusting", UserWarning)
                     self.duration_seconds.max_ = max_duration_seconds
 
-                if self.duration_seconds.min_ < 0.0 and \
-                    self.duration_seconds.type_ is not gf.DistributionType.CONSTANT:
+                if self.duration_seconds.min_ < 0.0 and self.duration_seconds.type_ is not gf.DistributionType.CONSTANT:
 
                     warn("Min duration distibution is less than zero "
                          "injection duration. Adjusting", UserWarning)
@@ -410,7 +514,8 @@ class WNBGenerator(WaveformGenerator):
                 num_waveforms,
                 sample_rate_hertz, 
                 max_duration_seconds, 
-                **parameters
+                **parameters,
+                seed=int(seed)
             )
             
             # Scale by arbitrary factor to reduce chance of precision errors:
@@ -420,32 +525,55 @@ class WNBGenerator(WaveformGenerator):
 
 @dataclass
 class cuPhenomDGenerator(WaveformGenerator):
-    mass_1_msun : gf.Distribution = \
-        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
-    mass_2_msun : gf.Distribution = \
-        gf.Distribution(min_=5.0, max_=95.0, type_=gf.DistributionType.UNIFORM)
-    inclination_radians : gf.Distribution = \
-        gf.Distribution(min_=0.0, max_=np.pi, type_=gf.DistributionType.UNIFORM)
-    distance_mpc : gf.Distribution = \
-        gf.Distribution(value=1000.0, type_=gf.DistributionType.CONSTANT)
-    reference_orbital_phase_in : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
-    ascending_node_longitude : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
-    eccentricity : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
-    mean_periastron_anomaly : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
-    spin_1_in : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
-    spin_2_in : gf.Distribution = \
-        gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
+    mass_1_msun : Union[float, gf.Distribution] = 30.0
+    mass_2_msun : Union[float, gf.Distribution] = 30.0
+    inclination_radians : Union[float, gf.Distribution] = 0.0
+    distance_mpc : Union[float, gf.Distribution] = 50.0
+    reference_orbital_phase_in : Union[float, gf.Distribution] = 0.0
+    ascending_node_longitude : Union[float, gf.Distribution] = 0.0
+    eccentricity : Union[float, gf.Distribution] = 0.0
+    mean_periastron_anomaly : Union[float, gf.Distribution] = 0.0
+    spin_1_in : Union[Tuple[float], gf.Distribution] = (0.0, 0.0, 0.0,)
+    spin_2_in : Union[Tuple[float], gf.Distribution] = (0.0, 0.0, 0.0,)
+    
+    distributed_attributes : Tuple[str] = (
+        "mass_1_msun",
+        "mass_2_msun",
+        "inclination_radians",
+        "distance_mpc",
+        "reference_orbital_phase_in",
+        "ascending_node_longitude",
+        "eccentricity",
+        "mean_periastron_anomaly",
+        "spin_1_in",
+        "spin_2_in"
+    )
+
+    def __post_init__(self):
+        self.mass_1_msun = self.ensure_float("mass_1_msun", self.mass_1_msun)
+        self.mass_2_msun = self.ensure_float("mass_2_msun", self.mass_2_msun)
+
+        self.inclination_radians = self.ensure_float("inclination_radians", self.inclination_radians)
+        self.distance_mpc = self.ensure_float("distance_mpc", self.distance_mpc)
+        self.reference_orbital_phase_in = self.ensure_float("reference_orbital_phase_in", self.reference_orbital_phase_in)
+        self.ascending_node_longitude = self.ensure_float("ascending_node_longitude", self.ascending_node_longitude)
+        self.eccentricity = self.ensure_float("eccentricity", self.eccentricity)
+        self.mean_periastron_anomaly = self.ensure_float("mean_periastron_anomaly", self.mean_periastron_anomaly)
+
+        self.spin_1_in = self.ensure_list_of_floats("spin_1_in", self.spin_1_in)
+        self.spin_2_in = self.ensure_list_of_floats("spin_2_in", self.spin_2_in)
+
+        if self.scale_factor is None:
+            self.scale_factor=gf.Defaults.scale_factor
+
+        super().__post_init__()
     
     def generate(
             self,
             num_waveforms : int,
             sample_rate_hertz : float,
-            duration_seconds : float
+            duration_seconds : float,
+            _ : int
         ):
         
         if (num_waveforms > 0):
@@ -461,16 +589,40 @@ class cuPhenomDGenerator(WaveformGenerator):
                     except:
                         parameter = ScalingTypes.get(attribute) 
                     
-                    shape = parameter.value.shape[-1]                
-                    parameters[attribute] = value.sample(num_waveforms * shape)
+                    shape = parameter.value.shape[-1]         
+                    
+                    if not isinstance(value, tuple) and  not isinstance(value, list): 
+                        parameters[attribute] = value.sample(num_waveforms * shape)
+                    else:
+                        combined_array = []
+                        for element in value:
+                            combined_array += element.sample(num_waveforms)
+                        parameters[attribute] = combined_array
 
             # Generate phenom_d waveform:
-            waveforms = gf.imrphenomd(
-                    num_waveforms, 
-                    sample_rate_hertz, 
-                    duration_seconds,
-                    **parameters
-                )
+            waveforms = None
+            while waveforms is None:
+                
+                mass_1 = parameters["mass_1_msun"]
+                mass_2 = parameters["mass_2_msun"]
+                
+                parameters["mass_1_msun"] = np.maximum(mass_1, mass_2)
+                parameters["mass_2_msun"] = np.minimum(mass_1, mass_2)
+
+                try:
+                    waveforms = gf.imrphenomd(
+                            num_waveforms, 
+                            sample_rate_hertz, 
+                            duration_seconds,
+                            **parameters
+                        )
+                except Exception as e:
+                    # If an exception occurs, increment the attempts counter
+                    attempts += 1
+                    # Check if the maximum number of retries has been reached
+                    waveforms = None
+                    if attempts >= max_retries:
+                        raise Exception(f"Max waveform generation retries reached: {max_retries}") from e
             
             waveforms *= self.scale_factor
         
@@ -487,12 +639,13 @@ class IncoherentGenerator(WaveformGenerator):
         self.back_padding_duration_seconds = component_generators[0].back_padding_duration_seconds
         self.scale_factor = component_generators[0].scale_factor
         self.network = component_generators[0].network
-            
+    
     def generate(
         self,
         num_waveforms: int,
         sample_rate_hertz: float,
-        duration_seconds : float
+        duration_seconds : float,
+        seed : int
     ):
                     
         if len(self.component_generators) > 0:
@@ -502,30 +655,55 @@ class IncoherentGenerator(WaveformGenerator):
                 waveforms_, parameters_ = generator.generate(
                     num_waveforms,
                     sample_rate_hertz, 
-                    duration_seconds
+                    duration_seconds,
+                    seed
                 )
                 
                 waveforms.append(waveforms_)
                 parameters.append(parameters_)
         
-        waveforms = tf.stack(waveforms, axis = 1)
+        try:
+            waveforms = tf.stack(waveforms, axis = 1)
+        except: 
+            logging.error("Failed to stack waveforms!")
+            return None, None
+        
         parameters = parameters[0]
 
         return waveforms, parameters
     
 @dataclass
 class InjectionGenerator:
-    configs : Union[List[Union[cuPhenomDGenerator, WNBGenerator]], List[List[Union[cuPhenomDGenerator, WNBGenerator]]]]
-    sample_rate_hertz : float = None
-    onsource_duration_seconds : float = None
-    crop_duration_seconds : float = None
-    num_examples_per_generation_batch : int = None
-    num_examples_per_batch : int = None
-    variables_to_return : List[WaveformParameters] = None
+    waveform_generators : Union[
+        List[gf.WaveformGenerator], 
+        Dict[str, gf.WaveformGenerator]
+    ]
+    parameters_to_return : Union[List[WaveformParameters], None] = None
+    seed : int = None
     index : int = 0
-    
+
     def __post_init__(self):
-        
+        if self.parameters_to_return is None: 
+            self.parameters_to_return = []
+        if self.seed is None:
+            self.seed = gf.Defaults.seed
+
+    def __call__(
+            self,
+            sample_rate_hertz : float = None,
+            onsource_duration_seconds : float = None,
+            crop_duration_seconds : float = None,
+            num_examples_per_generation_batch : int = None,
+            num_examples_per_batch : int = None,
+        ):
+
+        self.sample_rate_hertz = sample_rate_hertz
+        self.onsource_duration_seconds = onsource_duration_seconds
+        self.crop_duration_seconds = crop_duration_seconds
+        self.num_examples_per_generation_batch = num_examples_per_generation_batch
+        self.num_examples_per_batch = num_examples_per_batch
+
+
         if self.sample_rate_hertz is None:
             self.sample_rate_hertz = gf.Defaults.sample_rate_hertz
         if self.onsource_duration_seconds is None:
@@ -536,7 +714,11 @@ class InjectionGenerator:
             self.num_examples_per_generation_batch = gf.Defaults.num_examples_per_generation_batch
         if self.num_examples_per_batch is None:
             self.num_examples_per_batch = gf.Defaults.num_examples_per_batch
-        
+
+        rng = default_rng(self.seed)
+        self.generator_rng = default_rng(rng.integers(1E10))
+        self.parameter_rng = default_rng(rng.integers(1E10))
+
         if (self.num_examples_per_batch > self.num_examples_per_generation_batch):
             logging.warning(
                 ("num_injections_per_batch must be less than "
@@ -544,107 +726,157 @@ class InjectionGenerator:
             )
             
             self.num_examples_per_generation_batch = self.num_examples_per_batch
-    
-    def generate(self):
         
-        self.variables_to_return = \
-            [item for item in self.variables_to_return if \
-             isinstance(item.value, WaveformParameter)]
+        self.parameters_to_return = [
+            item for item in self.parameters_to_return if isinstance(item.value, WaveformParameter)
+        ]
         
-        if self.configs is False:
+        if self.waveform_generators is False:
             yield None, None, None
             
-        elif not isinstance(self.configs, list):
-            self.configs = [self.configs]
-            
-        iterators = [self.generate_one(config) for config in self.configs]
-        
-        while 1: 
-            injections = []
-            mask = []
-            parameters = {key : [] for key in self.variables_to_return}
-            for iterator in iterators:
+        elif not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
+            self.waveform_generators = [self.waveform_generators]
 
-                injection_, mask_, parameters_ = \
-                    next(iterator)
+        # Process waveform generators based on their type
+        if isinstance(self.waveform_generators, list):
+            # Reseeding generators for list type
+            for generator in self.waveform_generators:
+                generator.reseed(self.parameter_rng.integers(1E10))
 
-                injections.append(injection_)
-                mask.append(mask_)
-                                
-                for key in parameters:
-                    if key in parameters_:
-                        parameters[key].append(parameters_[key])
-                    else:
-                        parameters[key].append(
-                            tf.zeros(
-                                [key.value.shape[-1] * self.num_examples_per_batch], 
-                                dtype = tf.float64
-                            )
+            # Creating iterators for each generator in list
+            self.iterators = [
+                self.generate_one(generator, seed=self.generator_rng.integers(1E10))
+                for generator in self.waveform_generators
+            ]
+
+        elif isinstance(self.waveform_generators, dict):
+            # Reseeding generators for dictionary type
+            for generator in self.waveform_generators.values():
+                generator["generator"].reseed(self.parameter_rng.integers(1E10))
+
+            # Creating iterators with additional 'name' parameter for each generator in dictionary
+            self.iterators = [
+                self.generate_one(config["generator"], seed=self.generator_rng.integers(1E10), name=key)
+                for key, config in self.waveform_generators.items()
+            ]
+
+            # Initializing an empty mask dictionary
+            self.mask_dict = {}
+
+        else:
+            # Handling invalid waveform generator types
+            raise TypeError("Waveform generators must be a dictionary or a list!")
+
+        injections = []
+        mask = []
+        parameters = {key : [] for key in self.parameters_to_return}
+        for iterator in self.iterators:
+
+            injection_, mask_, parameters_ = \
+                next(iterator)
+
+            injections.append(injection_)
+            mask.append(mask_)
+                            
+            for key in parameters:
+                if key in parameters_:
+                    parameters[key].append(parameters_[key])
+                else:
+                    parameters[key].append(
+                        tf.zeros(
+                            [key.value.shape[-1] * self.num_examples_per_batch], 
+                            dtype = tf.float64
                         )
-            
+                    )
+        try:
             injections = tf.stack(injections)
             mask = tf.stack(mask)
+        except Exception as e:
+            logging.error(f"Failed to stack injections or mask because {e}")
+            return None, None, None
 
-            for key, value in parameters.items():
+        for key, value in parameters.items():
+            try:
                 parameters[key] = tf.stack(value)
+            except Exception as e:
+                logging.error(f"Failed to stack injections parameters because {e}")
+                return None, None, None
 
+        while 1: 
             yield injections, mask, parameters
     
-    def generate_one(self, config):
-        
+    def generate_one(
+            self, 
+            generator : gf.WaveformGenerator, 
+            seed : int,
+            name : str = None
+        ):
+
         # Create default empty list for requested parameter returns:
-        if self.variables_to_return is None:
-            self.variables_to_return = []
+        if self.parameters_to_return is None:
+            self.parameters_to_return = []
         
-        total_duration_seconds : float = \
-            self.onsource_duration_seconds + (self.crop_duration_seconds * 2.0)
-        total_duration_num_samples : int = \
-            int(total_duration_seconds * self.sample_rate_hertz)
+        total_duration_seconds : float = self.onsource_duration_seconds + (self.crop_duration_seconds * 2.0)
+        total_duration_num_samples : int = int(
+            total_duration_seconds * self.sample_rate_hertz
+        )
+
+        rng = default_rng(seed)
+        position_rng = default_rng(rng.integers(1E10))
+        waveform_rng = default_rng(rng.integers(1E10))
+        mask_rng = default_rng(rng.integers(1E10))
         
         # Calculate roll boundaries:
-        min_roll_num_samples = \
-            int(
-                (config.back_padding_duration_seconds + self.crop_duration_seconds)
+        min_roll_num_samples = int(
+                (generator.back_padding_duration_seconds + self.crop_duration_seconds)
                 * self.sample_rate_hertz
             ) 
 
-        max_roll_num_samples = \
-              total_duration_num_samples \
-            - int(
-                (self.crop_duration_seconds + config.front_padding_duration_seconds)
+        max_roll_num_samples = total_duration_num_samples - int(
+                (self.crop_duration_seconds + generator.front_padding_duration_seconds)
                 * self.sample_rate_hertz
             )
         
-        num_batches : int = \
-            self.num_examples_per_generation_batch // self.num_examples_per_batch
-                
+        num_batches : int = self.num_examples_per_generation_batch // self.num_examples_per_batch
+
         while 1:
-            mask = \
-                generate_mask(
+            mask = generate_mask(
                     self.num_examples_per_generation_batch,  
-                    config.injection_chance
+                    generator.injection_chance,
+                    mask_rng.integers(1E10, size=2)
                 )
+
+            if name is not None:
+                self.mask_dict[name] = mask
+
+                if self.waveform_generators[name]["excluded"] is not None:
+
+                    excluded = self.waveform_generators[name]["excluded"]
+
+                    mask = tf.math.logical_and(
+                        mask,
+                        tf.math.logical_not(self.mask_dict[excluded])
+                    )
+
             num_waveforms = tf.reduce_sum(tf.cast(mask, tf.int32)).numpy()
             
             if num_waveforms > 0:
                 
-                waveforms, parameters = \
-                    config.generate(
+                waveforms, parameters = generator.generate(
                         num_waveforms, 
                         self.sample_rate_hertz,
-                        total_duration_seconds
+                        total_duration_seconds,
+                        waveform_rng.integers(1E10)
                     )
                 
                 # Convert to tensorflow tensor:
-                waveforms = \
-                    tf.convert_to_tensor(waveforms, dtype = tf.float32)
-
+                waveforms = tf.convert_to_tensor(waveforms, dtype = tf.float32)
                 #Roll Tensor to randomise start time:
-                waveforms = \
-                    roll_vector_zero_padding( 
+                waveforms = roll_vector_zero_padding( 
                         waveforms, 
                         min_roll_num_samples, 
-                        max_roll_num_samples
+                        max_roll_num_samples, 
+                        mask_rng.integers(1E10, size=2)
                     )
                 
                 # Create zero filled injections to fill spots where injection 
@@ -658,14 +890,14 @@ class InjectionGenerator:
 
             # If no parameters requested, skip parameter processing and return
             # empty dict:
-            if self.variables_to_return:
+            if self.parameters_to_return:
 
                 # Retrive parameters that are requested to reduce unneccisary
                 # post processing:
                 reduced_parameters = {
                     WaveformParameters.get(key) : value 
                         for key, value in parameters.items() 
-                        if WaveformParameters.get(key) in self.variables_to_return
+                        if WaveformParameters.get(key) in self.parameters_to_return
                 }
 
                 # Conver to tensor and expand parameter dims for remaining 
@@ -696,16 +928,29 @@ class InjectionGenerator:
             injections = gf.batch_tensor(injections, self.num_examples_per_batch)
             mask = gf.batch_tensor(mask, self.num_examples_per_batch)
 
-            for injections_, mask_, parameters_ in zip(
-                injections, mask, parameters
-                ):
-                
-                yield injections_, mask_, parameters_
-                
+            # Split into list to avoid iterating over tensors, which TensorFlow seems 
+            # to dislike:
+
+            try:
+                injections_list = tf.unstack(injections, axis=0)
+                mask_list = tf.unstack(mask, axis=0)
+            except Exception as e:
+                logging.error(f"Failed to unstack because: {e}")
+                continue
+
+            # Now you can zip them together and iterate over them
+            for injection_, mask_, parameter_ in zip(injections_list, mask_list, parameters):
+                try:
+                    # Your processing logic here
+                    yield injection_, mask_, parameter_
+                except Exception as e:
+                    logging.error(f"Failed to yeild because: {e}")
+                    continue
+    
     def generate_scaling_parameters_(
         self,
         mask: tf.Tensor,
-        config : WaveformGenerator
+        generator : WaveformGenerator
     ) -> tf.Tensor:
     
         """
@@ -727,30 +972,30 @@ class InjectionGenerator:
 
         num_injections = np.sum(mask)
         
-        match config.scaling_method.value:
+        match generator.scaling_method.value:
             case np.ndarray():
 
                 scaling_parameters = []
                 for index in range(self.index, self.index + num_injections):
-                    if index < len(config.scaling_method.value):
+                    if index < len(generator.scaling_method.value):
                         scaling_parameters.append(
-                            config.scaling_method.value[index]
+                            generator.scaling_method.value[index]
                         )
                     else:
                         scaling_parameters.append(
-                            config.scaling_method.value[-1]
+                            generator.scaling_method.value[-1]
                         )
                         
                     self.index += 1
 
             case gf.Distribution():
-                scaling_parameters = config.scaling_method.value.sample(
+                scaling_parameters = generator.scaling_method.value.sample(
                     num_injections
                 )
 
             case _:
-                raise ValueError("Unsupported scaling method value type: "
-                                 f"{type(config.scaling_method.value)}!") 
+                raise TypeError("Unsupported scaling method value type: "
+                                 f"{type(generator.scaling_method.value)}!") 
 
         scaling_parameters = tf.convert_to_tensor(
             scaling_parameters, 
@@ -770,97 +1015,148 @@ class InjectionGenerator:
         ):
         
         scaling_parameters = []
-        for mask, config in zip(masks, self.configs):
-            scaling_parameters.append(
-                self.generate_scaling_parameters_(
-                    mask,
-                    config
+
+        if isinstance(self.waveform_generators, dict):
+            for mask, config in zip(masks, self.waveform_generators.values()):
+                scaling_parameters.append(
+                    self.generate_scaling_parameters_(
+                        mask,
+                        config["generator"]
+                    )
                 )
-            )
+        else: 
+            for mask, generator in zip(masks, self.waveform_generators):
+                scaling_parameters.append(
+                    self.generate_scaling_parameters_(
+                        mask,
+                        generator
+                    )
+                )
             
-        return tf.stack(scaling_parameters)
+        return scaling_parameters
     
     def add_injections_to_onsource(
             self,
             injections : tf.Tensor,
             mask : tf.Tensor,
             onsource : tf.Tensor,
-            variables_to_return : List,
+            parameters_to_return : List,
         ) -> Tuple[tf.Tensor, Union[tf.Tesnor, None], Dict]:
         
-        # Generate SNR or HRSS values for injections based on inputed config 
+        # Generate SNR or HRSS values for injections based on inputed mask 
         # values:
-        scaling_parameters = self.generate_scaling_parameters(mask)
+        scaling_parameters : List = self.generate_scaling_parameters(mask)
         
         return_variables = {
-            key : [] for key in ScalingTypes if key in variables_to_return
+            key : [] for key in ScalingTypes if key in parameters_to_return
         }
         cropped_injections = []    
-        for injections_, mask_, scaling_parameters_, config in \
-            zip(injections, mask, scaling_parameters, self.configs):
+
+        # Unstack because TensorFlow hates tensor iteration: 
+        try:
+            injections_list = tf.unstack(injections, axis=0)
+            mask_list = tf.unstack(mask, axis=0)
+        except:
+            logging.error("Unstacking failed for some reason")
+            return None, None, None
+
+        if isinstance(self.waveform_generators, dict):
+            waveform_generators = [config["generator"] for config in self.waveform_generators.values()]
+        else:
+            waveform_generators = self.waveform_generators
+
+        for injections_, _, scaling_parameters_, waveform_generator in zip(
+                injections_list, 
+                mask_list, 
+                scaling_parameters, 
+                waveform_generators
+            ):
             
-            network = config.network
+            network = waveform_generator.network
             
-            match config.scaling_method.type_.value.ordinality:
+            match waveform_generator.scaling_method.type_.value.ordinality:
                 
                 case ScalingOrdinality.BEFORE_PROJECTION:
-                
-                    scaled_injections = \
-                        config.scaling_method.scale(
-                            injections_,
-                            onsource,
-                            scaling_parameters_,
-                            self.sample_rate_hertz
-                        )
 
-                    if network is not None:
+                    try:
+                        scaled_injections = waveform_generator.scaling_method.scale(
+                                injections_,
+                                onsource,
+                                scaling_parameters_,
+                                self.sample_rate_hertz
+                            )
+                    except Exception as e:
+                        logger.error(f+-"Failed to scale injections because {e}")
+
+                    try:
                         scaled_injections = network.project_wave(
-                            scaled_injections, self.sample_rate_hertz
+                            scaled_injections, sample_rate_hertz=self.sample_rate_hertz
                         )
-                    else:
-                        scaled_injections = scaled_injections[:, 0, :]
+                    except Exception as e:
+                        logger.error(f+-"Failed to project injections because {e}")
+
+                    if scaled_injections is None:
+                        logging.error("Error scaling injections before projection!")
+                        return None, None, None
             
                 case ScalingOrdinality.AFTER_PROJECTION:
-                                        
-                    if network is not None:
-                        injections_ = network.project_wave(
-                            injections_, self.sample_rate_hertz
-                        )
-                    else:
-                        injections_ = injections_[:, 0, :]
                     
-                    # Scale injections with selected scaling method:
-                    scaled_injections = \
-                        config.scaling_method.scale(
-                            injections_,
-                            onsource,
-                            scaling_parameters_,
-                            self.sample_rate_hertz
-                        )
+                    try:
+                        if network.num_detectors > 1:
+                            injections_ = network.project_wave(
+                                injections_, sample_rate_hertz=self.sample_rate_hertz
+                            )
+                        else:
+                            injections_ = tf.reduce_sum(injections_, axis=1, keepdims = True)
+                    except Exception as e:
+                        logging.error(f"Failed to project injections because {e}")
+
+                    if injections_ is not None:
+                        if injections_.shape != onsource.shape:
+                            logging.error(f"Shape mismatch {injections_.shape} {onsource.shape}")
+                            return None, None, None
+
+                        try:
+                            # Scale injections with selected scaling method:
+                            scaled_injections = waveform_generator.scaling_method.scale(
+                                    injections_,
+                                    onsource,
+                                    scaling_parameters_,
+                                    self.sample_rate_hertz
+                                )
+                        except Exception as e:
+                            logger.error(f+-"Failed to scale injections because {e}")
+
+                    else:
+                        logging.error("Error scaling injections after projection!")
+                        return None, None, None
                 
                 case _:
                     
                     raise ValueError(
                         ("Scaling ordinality "
-                        f"{config.scaling_method.type_.value.order} not "
+                        f"{waveform_generator.scaling_method.type_.value.order} not "
                          " recognised.")
                     )
 
             # Add scaled injections to onsource:
-            onsource += scaled_injections
-                        
-            if ScalingTypes.HPEAK in variables_to_return:
+            try:
+                onsource += scaled_injections
+            except Exception as e:
+                logger.error(f+-"Failed to add injections because {e}")
+
+            if ScalingTypes.HPEAK in parameters_to_return:
                 # Calculate hpeak of scaled injections:
                 
-                if config.scaling_method.type_ is not ScalingTypes.HPEAK:
+                if waveform_generator.scaling_method.type_ is not ScalingTypes.HPEAK:
                     return_variables[ScalingTypes.HPEAK].append(
                         calculate_hpeak(injections_)
                     )
                     
-            if ScalingTypes.SNR in variables_to_return:
+            if ScalingTypes.SNR in parameters_to_return:
                 # Calculate snr of scaled injections:
                 
-                if config.scaling_method.type_ is not ScalingTypes.SNR:
+                if waveform_generator.scaling_method.type_ is not ScalingTypes.SNR:
                     return_variables[ScalingTypes.SNR].append(
                         gf.snr(
                             scaled_injections, 
@@ -871,16 +1167,16 @@ class InjectionGenerator:
                         ) 
                     )
                     
-            if ScalingTypes.HRSS in variables_to_return:
+            if ScalingTypes.HRSS in parameters_to_return:
                 # Calculate hrss of scaled injections:
                 
-                if config.scaling_method.type_ is not ScalingTypes.HRSS:
+                if waveform_generator.scaling_method.type_ is not ScalingTypes.HRSS:
                     return_variables[ScalingTypes.HRSS].append(
                         calculate_hrss(injections_) 
                     )
             
-            if (ReturnVariables.INJECTIONS in variables_to_return) or \
-                (ReturnVariables.WHITENED_INJECTIONS in variables_to_return):
+            if (ReturnVariables.INJECTIONS in parameters_to_return) or \
+                (ReturnVariables.WHITENED_INJECTIONS in parameters_to_return):
                 # Crop injections so that they appear the same size as output 
                 # onsource:
                 cropped_injections.append(
@@ -891,24 +1187,31 @@ class InjectionGenerator:
                     )
                 )
                                 
-        if (ReturnVariables.INJECTIONS in variables_to_return) or \
-            (ReturnVariables.WHITENED_INJECTIONS in variables_to_return):
-            cropped_injections = tf.stack(cropped_injections)
+        if (ReturnVariables.INJECTIONS in parameters_to_return) or \
+            (ReturnVariables.WHITENED_INJECTIONS in parameters_to_return):
+            try:
+                cropped_injections = tf.stack(cropped_injections)
+            except:
+                logging.error("Failed to stack injections!")
+                return None, None, None
         else:
             cropped_injections = None
             
         # Add scaling parameters to return dictionary
         for scaling_type in ScalingTypes:
-            if scaling_type in variables_to_return:
-                if config.scaling_method.type_ is not scaling_type:
-                    return_variables[scaling_type] = \
-                        tf.stack(return_variables[scaling_type])
+            if scaling_type in parameters_to_return:
+                if waveform_generator.scaling_method.type_ is not scaling_type:
+                    try:
+                        return_variables[scaling_type] = tf.stack(return_variables[scaling_type])
+                    except:
+                        logging.error("Failed to stack return variables")
+                        return None, None, None
                 else:
                     return_variables[scaling_type] = scaling_parameters
-        
+                
         return onsource, cropped_injections, return_variables
 
-@tf.function(jit_compile=True)
+@tf.function
 def roll_vector_zero_padding_(vector, roll_amount):
     # Create zeros tensor with the same shape as vector
     zeros = tf.zeros_like(vector)
@@ -919,10 +1222,14 @@ def roll_vector_zero_padding_(vector, roll_amount):
     return rolled_vector
 
 @tf.function
-def roll_vector_zero_padding(tensor, min_roll, max_roll):
+def roll_vector_zero_padding(tensor, min_roll, max_roll, seed):
+
+    # Ensure the seed is of the correct shape [2] and dtype int32
+    seed_tensor = tf.cast(seed, tf.int32)
+
     # Generate an array of roll amounts
-    roll_amounts = tf.random.uniform(
-        shape=[tensor.shape[0]], minval=min_roll, maxval=max_roll, dtype=tf.int32
+    roll_amounts = tf.random.stateless_uniform(
+        shape=[tensor.shape[0]], seed=seed_tensor, minval=min_roll, maxval=max_roll, dtype=tf.int32
     )
 
     # Define a function to apply rolling to each sub_tensor with corresponding roll_amount
@@ -942,7 +1249,8 @@ def roll_vector_zero_padding(tensor, min_roll, max_roll):
 @tf.function
 def generate_mask(
     num_injections: int, 
-    injection_chance: float
+    injection_chance: float,
+    seed
     ) -> tf.Tensor:
 
     """
@@ -960,11 +1268,16 @@ def generate_mask(
     tf.Tensor
         A tensor of shape (num_injections,) containing the injection masks.
     """
+
+    # Ensure the seed is of the correct shape [2] and dtype int32
+    seed_tensor = tf.cast(seed, tf.int32)
+
     # Logits for [False, True] categories
     logits = tf.math.log([1.0 - injection_chance, injection_chance])
 
     # Generate categorical random variables based on logits
-    sampled_indices = tf.random.categorical(
+    sampled_indices = tf.random.stateless_categorical(
+        seed=seed_tensor,
         logits=tf.reshape(logits, [1, -1]), 
         num_samples=num_injections
     )

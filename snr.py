@@ -70,7 +70,7 @@ def snr(
     ) * df
 
     # Get rid of DC
-    inj_fft_no_dc  = inj_fft[:,1:]
+    inj_fft_no_dc  = inj_fft[...,1:]
     fsamples_no_dc = fsamples[1:]
 
     # Calculate PSD of the background noise
@@ -95,8 +95,8 @@ def snr(
         find_closest(fsamples_no_dc, upper_frequency_cutoff)
     
     # Compute the SNR numerator in the frequency window
-    inj_fft_squared = tf.abs(inj_fft_no_dc*tf.math.conj(inj_fft_no_dc))    
-        
+    inj_fft_squared = tf.abs(inj_fft_no_dc*tf.math.conj(inj_fft_no_dc))   
+
     if len(injection.shape) == 2:
         # Use the interpolated ASD in the frequency window for SNR calculation
         snr_numerator = inj_fft_squared[
@@ -113,13 +113,12 @@ def snr(
         snr_denominator = psd_interp[
             :, :, start_freq_num_samples:end_freq_num_samples
         ]
-        
+
     # Calculate the SNR
     SNR = tf.math.sqrt(
         (4.0 / injection_duration_seconds) 
         * tf.reduce_sum(snr_numerator / snr_denominator, axis = -1)
-    )
-    
+    )    
     SNR = tf.where(tf.math.is_inf(SNR), 0.0, SNR)
     
     # If input was 1D, return 1D
@@ -127,6 +126,7 @@ def snr(
         SNR = SNR[0]
     elif len(injection.shape) == 3:
         # Calculate network SNR: 
+        #print(SNR)
         SNR = tf.sqrt(tf.reduce_sum(SNR**2, axis = -1))
 
     return SNR
@@ -155,7 +155,7 @@ def scale_to_snr(
         overlap_duration_seconds = overlap_duration_seconds,
         lower_frequency_cutoff = lower_frequency_cutoff
     )
-    
+
     # Calculate factor required to scale injection to desired SNR:
     scale_factor : tf.Tensor = desired_snr/(current_snr + epsilon)
         
@@ -165,7 +165,7 @@ def scale_to_snr(
         scale_factor = tf.reshape(scale_factor, (-1, 1))
     elif len(injection.shape) == 3:
         scale_factor = tf.reshape(scale_factor, (-1, 1, 1)) 
-        
+
     # Scale by scale factor:
     return injection*scale_factor
     

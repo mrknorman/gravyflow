@@ -7,6 +7,11 @@ analysis. This makes it an ideal resource for data scientists and researchers fo
 providing an efficient and powerful tool for their computational needs.
 """
 
+#Supress LAL warning when running in ipython kernel:
+import warnings
+warnings.filterwarnings("ignore", "Wswiglal-redir-stdio")
+
+# Imports from GravyFlow
 from .config import Defaults
 from .math import (DistributionType, Distribution, 
                    randomise_arguments, replace_nan_and_inf_with_zero,
@@ -15,13 +20,20 @@ from .math import (DistributionType, Distribution,
 from .environment import (setup_cuda, find_available_GPUs, get_tf_memory_usage, 
                           env)
 from .io import (open_hdf5_file, ensure_directory_exists, replace_placeholders)
+from .processes import *
 from .psd import psd
 from .snr import snr, scale_to_snr
 from .wnb import wnb
 from .conditioning import spectrogram, spectrogram_shape
+from .genetics import *
 from .model import (HyperParameter, hp, ensure_hp, BaseLayer, DenseLayer, ConvLayer, PoolLayer, DropLayer, randomizeLayer, )
-from .cuphenom.python.cuphenom import imrphenomd
-from .whiten import whiten
+
+try:
+    from .cuphenom.python.cuphenom import imrphenomd
+except Exception as e:
+    print(f"Failed to import cuphenom because {e}.")
+
+from .whiten import whiten, Whiten, WhitenPass
 from .pearson import rolling_pearson
 from .detector import *
 from .acquisition import *

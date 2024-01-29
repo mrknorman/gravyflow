@@ -9,7 +9,73 @@ from bokeh.layouts import gridplot
 from tqdm import tqdm
 
 # Local imports:
-import gravyflow as gw
+import gravyflow as gf
+
+def test_shape(
+    num_tests : int = int(1.0E7)
+    ):
+    
+    # Test parameters:
+    sample_rate_hertz : float = 2048.0
+    onsource_duration_seconds : float = 1.0    
+    crop_duration_seconds : float = 0.5
+    offsource_duration_seconds : float = 16.0
+    num_examples_per_batch : int = 32
+    scale_factor : float = 1.0E20
+    
+    # Setup ifo data acquisition object:
+    ifo_data_obtainer : gf.IFODataObtainer = \
+        gf.IFODataObtainer(
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
+            [
+                gf.DataLabel.NOISE, 
+                gf.DataLabel.GLITCHES
+            ],
+            gf.SegmentOrder.RANDOM,
+            force_acquisition=True,
+            cache_segments=False,
+            logging_level=logging.INFO
+        )
+    
+    # Initilise noise generator wrapper:
+    noise : gf.NoiseObtainer = \
+        gf.NoiseObtainer(
+            ifo_data_obtainer = ifo_data_obtainer,
+            noise_type = gf.NoiseType.REAL,
+            ifos = gf.IFO.L1
+        )
+    
+    # Create generator:
+    generator : Iterator = noise(
+            sample_rate_hertz,
+            onsource_duration_seconds,
+            crop_duration_seconds,
+            offsource_duration_seconds,
+            num_examples_per_batch,
+            scale_factor
+        )
+    
+    onsource, offsource, _ = next(iter(generator))
+
+    onsource_shape = onsource.shape
+    offsource_shape = offsource.shape
+
+    print(onsource.shape)
+    print(offsource.shape)
+
+    logging.info("Start shape tests...")
+    for index, (onsource, offsource, _) in tqdm(enumerate(islice(generator, num_tests))):
+        if (onsource.shape != onsource_shape):
+            raise ValueError(f"Shape missmatch, excpecting {onsource_shape}, recieved {onsource.shape}")
+        if (offsource.shape != offsource_shape):
+            raise ValueError(f"Shape missmatch, excpecting {offsource_shape}, recieved {offsource.shape}")
+    
+    assert index == num_tests - 1, \
+        "Warning! Noise generator does not iterate the required number of batches"
+    
+    logging.info("Complete")
+
 
 def test_iteration(
     num_tests : int = int(1.0E2)
@@ -47,8 +113,7 @@ def test_iteration(
         )
     
     # Create generator:
-    generator : Iterator = \
-        noise.init_generator(
+    generator : Iterator = noise(
             sample_rate_hertz,
             onsource_duration_seconds,
             crop_duration_seconds,
@@ -109,10 +174,6 @@ def test_real_noise(
             scale_factor
         )
     
-    # Calculate total onsource length including padding
-    total_onsource_duration_seconds : float = \
-        onsource_duration_seconds + (crop_duration_seconds * 2.0)
-        
     # Iterate through num_tests batches to check correct operation:
     onsource, offsource, gps_times  = next(generator)
         
@@ -123,7 +184,6 @@ def test_real_noise(
             gf.generate_strain_plot(
                 {"Onsource Noise" : onsource_},
                 sample_rate_hertz,
-                total_onsource_duration_seconds,
                 title = f"Onsource Background noise at {gps_time}",
                 scale_factor = scale_factor
             )
@@ -132,7 +192,6 @@ def test_real_noise(
             gf.generate_strain_plot(
                 {"Offsource Noise" : offsource_},
                 sample_rate_hertz,
-                offsource_duration_seconds,
                 title = f"Offsource Background noise at {gps_time}",
                 scale_factor = scale_factor
             )
@@ -186,8 +245,7 @@ def test_multi_noise(
         )
     
     # Create generator:
-    generator : Iterator = \
-        noise.init_generator(
+    generator : Iterator = noise(
             sample_rate_hertz,
             onsource_duration_seconds,
             crop_duration_seconds,
@@ -195,16 +253,12 @@ def test_multi_noise(
             num_examples_per_batch,
             scale_factor
         )
-    
-    # Calculate total onsource length including padding
-    total_onsource_duration_seconds : float = \
-        onsource_duration_seconds + (crop_duration_seconds * 2.0)
         
     # Iterate through num_tests batches to check correct operation:
-    onsource, offsource, gps_times  = next(generator)
+    onsource, _, gps_times  = next(generator)
         
     layout = []
-    for onsource_, offsource_, gps_time in zip(onsource, offsource, gps_times):
+    for onsource_, gps_time in zip(onsource, gps_times):
         
         list_of_onsource = []
         for onsource_ifo in onsource_: 
@@ -212,7 +266,6 @@ def test_multi_noise(
                 gf.generate_strain_plot(
                     {"Onsource Noise" : onsource_ifo},
                     sample_rate_hertz,
-                    total_onsource_duration_seconds,
                     title = f"Onsource Background noise at {gps_time}",
                     scale_factor = scale_factor
                 )
@@ -233,26 +286,12 @@ def test_multi_noise(
 
 if __name__ == "__main__":
     
-    # ---- User parameters ---- #
-    
-    # GPU setup:
-    min_gpu_memory_mb : int = 4000
-    num_gpus_to_request : int = 1
-    memory_to_allocate_tf : int = 2000
-    
-    # Setup CUDA
-    gpus = gf.find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    strategy = gf.setup_cuda(
-        gpus, 
-        max_memory_limit = memory_to_allocate_tf, 
-        logging_level=logging.WARNING
-    )    
-    
     # Set logging level:
     logging.basicConfig(level=logging.INFO)
     
     # Test gf.IFO noise generator:
-    with strategy.scope():
+    with gf.env():
+        test_shape()
         test_multi_noise()
         test_real_noise()
         test_iteration()

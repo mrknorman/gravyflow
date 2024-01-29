@@ -1,8 +1,10 @@
-from typing import List, Tuple, Union, Dict, Any
+from typing import List, Tuple, Union, Dict, Any, Iterator
 from enum import Enum, auto
 from pathlib import Path
 from dataclasses import dataclass
 from warnings import warn
+import logging
+import traceback
 
 import tensorflow as tf
 from tensorflow.data.experimental import AutoShardPolicy
@@ -63,17 +65,25 @@ def validate_noise_settings(
             )
             
 def get_max_arrival_time_difference(
-    injection_generators : List
+    waveform_generators : List
     ) -> float:
     
     max_arival_time_difference_seconds : float = 0.01
     
     max_arrival_time_differences = []
-    for config in injection_generators: 
-        if (config is not None) and (config.network is not None):
-            max_arrival_time_differences.append(
-                config.network.max_arrival_time_difference_seconds
-            )        
+
+    if isinstance(waveform_generators, list):
+        for generator in waveform_generators:
+            if (generator is not None) and (generator.network is not None):
+                max_arrival_time_differences.append(
+                    generator.network.max_arrival_time_difference_seconds
+                )     
+    elif isinstance(waveform_generators, dict):
+        for generator in waveform_generators.values(): 
+            if (generator is not None) and (generator["generator"].network is not None):
+                max_arrival_time_differences.append(
+                    generator["generator"].network.max_arrival_time_difference_seconds
+                )     
     
     if len(max_arrival_time_differences):
         max_arrival_time_differences = tf.stack(max_arrival_time_differences)
@@ -97,7 +107,7 @@ def data(
         noise_obtainer : gf.NoiseObtainer = None,
         group : str = "train",
         # Injections:
-        injection_generators: List[
+        waveform_generators: List[
             Union[gf.cuPhenomDGenerator, gf.WNBGenerator]
         ] = None, 
         num_examples_per_generation_batch : int = None,
@@ -108,7 +118,8 @@ def data(
         ] = None,
         output_variables : List[
             Union[gf.gf.WaveformParameters, gf.ReturnVariables]
-        ] = None
+        ] = None,
+        mask_history = None
     ):
 
     if seed is None:
@@ -138,11 +149,23 @@ def data(
     if output_variables is None:
         output_variables = []
         
-    if injection_generators is None:
-        injection_generators = []
+    if waveform_generators is None:
+        waveform_generators = []
                 
-    if not isinstance(injection_generators, list):
-        injection_generators = [injection_generators]
+    if not isinstance(waveform_generators, list) and not isinstance(waveform_generators, dict):
+        waveform_generators = [waveform_generators]
+
+    # If no interferometers are input for injection generator
+    # assumes interferometers are the same as is used in
+    # noise generation:
+    if isinstance(waveform_generators, list):
+        for generator in waveform_generators:
+            if generator.network is None: 
+                generator.network = gf.Network(noise_obtainer.ifos)
+    elif isinstance(waveform_generators, dict):
+        for generator in waveform_generators.values():
+            if generator["generator"].network is None: 
+                generator["generator"].network = gf.Network(noise_obtainer.ifos)
     
     # Create set with unique elements of input and output variables so that they
     # can be calculated during loop if required:
@@ -156,19 +179,21 @@ def data(
     # Set random seeds for Tensorflow and Numpy to ensure deterministic results
     # with the same seed. This means that if the seed is the concerved the
     # dataset produced will be identical:
+
+    # To Do: remove as replaced with more robust generators:
     gf.set_random_seeds(seed)
     
     # Create Noise Generator:
-    noise : Iterator = \
-        noise_obtainer(
-            sample_rate_hertz,
-            onsource_duration_seconds,
-            crop_duration_seconds,
-            offsource_duration_seconds,
-            num_examples_per_batch,
-            scale_factor,
-            group
-        )
+    noise : Iterator = noise_obtainer(
+        sample_rate_hertz=sample_rate_hertz,
+        onsource_duration_seconds=onsource_duration_seconds,
+        crop_duration_seconds=crop_duration_seconds,
+        offsource_duration_seconds=offsource_duration_seconds,
+        num_examples_per_batch=num_examples_per_batch,
+        scale_factor=scale_factor,
+        group=group,
+        seed=seed
+    )
     
     # Create Injection Generator: 
     waveform_parameters_to_return = [
@@ -176,39 +201,59 @@ def data(
             item.value, gf.WaveformParameter
         )
     ]
-    
-    injection_generator : gf.InjectionGenerator = \
-        gf.InjectionGenerator(
-            injection_generators,
-            sample_rate_hertz,
-            onsource_duration_seconds,
-            crop_duration_seconds,
-            num_examples_per_generation_batch,
-            num_examples_per_batch,
-            variables_to_return=waveform_parameters_to_return
-        )
-    
-    injections : Iterator = injection_generator.generate()
+    injection_generator : gf.InjectionGenerator = gf.InjectionGenerator(
+        waveform_generators=waveform_generators,
+        parameters_to_return=waveform_parameters_to_return,
+        seed=seed
+    )
+    injections : Iterator = injection_generator(
+        sample_rate_hertz=sample_rate_hertz,
+        onsource_duration_seconds=onsource_duration_seconds,
+        crop_duration_seconds=crop_duration_seconds,
+        num_examples_per_generation_batch=num_examples_per_generation_batch,
+        num_examples_per_batch=num_examples_per_batch,
+    )
     
     whitened_injections = None
-    for (onsource, offsource, gps_times), (injections_, mask, parameters) \
-        in zip(noise, injections):
-                
-        if len(injection_generators):
+
+    while True:
+        try:
+            onsource, offsource, gps_times = next(noise)
+        except Exception as e:
+            logging.info(f"Noise failed because {e}\nTraceback: {traceback.format_exc()}")
+            raise Exception(f"Noise failed because {e}\nTraceback: {traceback.format_exc()}")
+        
+        try:
+            injections_, mask, parameters = next(injections)
+        except Exception as e:
+            logging.info(f"Injections failed because {e}\nTraceback: {traceback.format_exc()}")
+            raise Exception(f"Noise failed because {e}\nTraceback: {traceback.format_exc()}")
+
+        if len(waveform_generators):
                         
-            # Add injections to waveform scaled by inputted SNR config values:
-            onsource, scaled_injections, scaling_parameters = \
-                injection_generator.add_injections_to_onsource(
+            # Add injections to waveform scaled by inputted SNR values:
+            try:
+                onsource, scaled_injections, scaling_parameters = injection_generator.add_injections_to_onsource(
                     injections_,
                     mask,
                     onsource,
-                    variables_to_return=variables_to_return
-                ) 
+                    parameters_to_return=variables_to_return
+                )
+                
+            except Exception as e:
+                logging.error(
+                    f"Couldn't add injections to onsource because {e}\nTraceback: {traceback.format_exc()}"
+                )
+                continue
             
+            if onsource is None:
+                logging.error("Onsource is None!")
+                continue
+
             for key, value in scaling_parameters.items():
                 if key in variables_to_return:
                     parameters[key] = value
-            
+
             if gf.ReturnVariables.WHITENED_INJECTIONS in variables_to_return:
                                 
                 whitened_injections = tf.stack([
@@ -221,9 +266,15 @@ def data(
                             filter_duration_seconds=1.0
                         ) for scaled_injection_ in scaled_injections
                     ])
-                                
+                
                 whitened_injections = gf.replace_nan_and_inf_with_zero(
                     whitened_injections
+                )
+
+            if gf.ReturnVariables.INJECTIONS in variables_to_return:
+
+                scaled_injections = gf.replace_nan_and_inf_with_zero(
+                    scaled_injections
                 )
 
         else:
@@ -233,7 +284,7 @@ def data(
         if (gf.ReturnVariables.WHITENED_ONSOURCE in variables_to_return) or \
         (gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in variables_to_return) \
         or (gf.ReturnVariables.SPECTROGRAM_ONSOURCE in variables_to_return):
-            
+
             whitened_onsource = gf.whiten(
                 onsource, 
                 offsource, 
@@ -261,7 +312,7 @@ def data(
                 in variables_to_return
             ):
                 max_arival_time_difference_seconds: float = \
-                    get_max_arrival_time_difference(injection_generators)
+                    get_max_arrival_time_difference(waveform_generators)
                 
                 rolling_pearson_onsource = gf.rolling_pearson(
                     whitened_onsource,
@@ -272,11 +323,10 @@ def data(
                 rolling_pearson_onsource = None
                 
             if (gf.ReturnVariables.SPECTROGRAM_ONSOURCE in variables_to_return):
-
                 spectrogram_onsource = gf.spectrogram(whitened_onsource)
             else:
                 spectrogram_onsource = None
-                
+            
             whitened_onsource = tf.cast(whitened_onsource, tf.float16)
             whitened_onsource = gf.replace_nan_and_inf_with_zero(
                 whitened_onsource
@@ -288,23 +338,30 @@ def data(
             spectrogram_onsource = None
         
         if gf.ReturnVariables.ONSOURCE in variables_to_return:
-            # Crop to remove edge effects, crop with or without whitening to
-            # ensure same data is retrieve in both cases
-            onsource = gf.crop_samples(
+            onsource = tf.cast(onsource, tf.float32)
+            onsource = gf.replace_nan_and_inf_with_zero(onsource)
+
+            tf.debugging.check_numerics(
                 onsource, 
-                onsource_duration_seconds, 
-                sample_rate_hertz
+                f"NaN detected in onsource after cast."
             )
-            onsource = tf.cast(onsource, tf.float16)
             
         if gf.ReturnVariables.OFFSOURCE in variables_to_return:
-            offsource = tf.cast(offsource, tf.float16)
+            offsource = tf.cast(offsource, tf.float32)
+            offsource = gf.replace_nan_and_inf_with_zero(offsource)
+
+            tf.debugging.check_numerics(
+                offsource, 
+                f"NaN detected in offsource after cast."
+            )
             
         if gf.ReturnVariables.GPS_TIME in variables_to_return:
             gps_times = tf.cast(gps_times, tf.float64)
             
         if gf.ReturnVariables.INJECTION_MASKS in variables_to_return:
             mask = tf.cast(mask, tf.float32)
+            if mask_history is not None:
+                mask_history.append(mask)
                 
         # Construct dictionary:
         input_dict, output_dict = [
@@ -373,13 +430,14 @@ def Dataset(
         scale_factor: float = None,
         noise_obtainer: gf.NoiseObtainer = None,
         group : str = "train",
-        injection_generators: List[
-            Union[gf.cuPhenomDGenerator, gf.WNBGenerator]
+        waveform_generators: Union[
+            List[gf.WaveformGenerator], Dict[str, gf.WaveformGenerator]
         ] = None,
         num_examples_per_generation_batch: int = None,
         num_examples_per_batch: int = None,
         input_variables: List = None,
-        output_variables: List = None
+        output_variables: List = None,
+        mask_history = None
     ) -> tf.data.Dataset:
     
     """
@@ -400,7 +458,7 @@ def Dataset(
             Scale factor.
         noise_obtainer (gf.NoiseObtainer): 
             Object to obtain noise.
-        injection_generators (list):
+        waveform_generators (list):
             List of injection generators.
         num_examples_per_generation_batch (int):
             Number of examples per generation batch.
@@ -439,21 +497,40 @@ def Dataset(
         output_variables = []
     
     # Set gf.Defaults here as if initilised as default arguments objects are global
-    if injection_generators is None:
-        injection_generators = []
-    elif not isinstance(injection_generators, list):
-        injection_generators = [injection_generators]
+    if waveform_generators is None:
+        waveform_generators = []
+    elif not isinstance(waveform_generators, list) and not isinstance(waveform_generators, dict):
+        waveform_generators = [waveform_generators]
 
-    num_onsource_samples = int(onsource_duration_seconds * sample_rate_hertz)
+    num_cropped_samples = int(onsource_duration_seconds * sample_rate_hertz)
+    num_onsource_samples = int((onsource_duration_seconds + 2*crop_duration_seconds) * sample_rate_hertz)
     num_offsource_samples = int(offsource_duration_seconds * sample_rate_hertz)
-    num_injection_configs = len(injection_generators)
+    num_waveform_generators = len(waveform_generators)
     
     num_detectors = 1
-    if injection_generators: 
-        if injection_generators[0].network is not None:
-            num_detectors = injection_generators[0].network.num_detectors 
-        else:
-            num_detectors = 1
+    if isinstance(waveform_generators, list): 
+        if len(waveform_generators):
+            if waveform_generators[0].network is not None:
+                num_detectors = waveform_generators[0].network.num_detectors 
+            elif noise_obtainer is not None:
+                num_detectors = len(noise_obtainer.ifos)
+            else:
+                num_detectors = 1
+        elif noise_obtainer is not None:
+            num_detectors = len(noise_obtainer.ifos)
+    
+    elif isinstance(waveform_generators, dict):
+        if len(waveform_generators):
+            for generator in waveform_generators.values():
+                if generator["generator"].network is not None:
+                    num_detectors = generator["generator"].network.num_detectors 
+                elif noise_obtainer is not None:
+                    num_detectors = len(noise_obtainer.ifos)
+                else:
+                    num_detectors = 1
+        elif noise_obtainer is not None:
+            num_detectors = len(noise_obtainer.ifos)
+    
     elif noise_obtainer is not None:
         num_detectors = len(noise_obtainer.ifos)
     
@@ -461,68 +538,55 @@ def Dataset(
         num_detectors = 1
         
     max_arival_time_difference_seconds: float = \
-        get_max_arrival_time_difference(injection_generators)
+        get_max_arrival_time_difference(waveform_generators)
 
     max_arival_time_difference_samples : float = \
         int(max_arival_time_difference_seconds * sample_rate_hertz)
-    
-    if num_detectors == 1:
-        onsource_shape = (num_examples_per_batch, num_onsource_samples)
-        offsource_shape = (num_examples_per_batch, num_offsource_samples)
-        detectors_shape = (num_examples_per_batch,)
-        injections_shape = (
-                num_injection_configs, 
-                num_examples_per_batch, 
-                num_onsource_samples
-            )
-        per_injection_shape = (num_injection_configs, num_examples_per_batch)
+
+    onsource_shape = (
+        num_examples_per_batch, num_detectors, num_onsource_samples
+    )
+    cropped_shape = (
+        num_examples_per_batch, num_detectors, num_cropped_samples
+    )
+    offsource_shape = (
+        num_examples_per_batch, num_detectors, num_offsource_samples
+    )
+    detectors_shape = (
+        num_examples_per_batch, num_detectors
+    )
+    injections_shape = (
+            num_waveform_generators, 
+            num_examples_per_batch,
+            num_detectors,
+            num_cropped_samples
+        )
+    per_injection_shape = (
+        num_waveform_generators, num_examples_per_batch
+    )        
+    pearson_shape = (
+        num_examples_per_batch, 
+        num_detectors * (num_detectors - 1) // 2,
+        2*max_arival_time_difference_samples
+    )
         
-        pearson_shape = (
-            num_examples_per_batch, 
-            max_arival_time_difference_samples
-        )
-    else:
-        onsource_shape = (
-            num_examples_per_batch, num_detectors, num_onsource_samples
-        )
-        offsource_shape = (
-            num_examples_per_batch, num_detectors, num_offsource_samples
-        )
-        detectors_shape = (
-            num_examples_per_batch, num_detectors
-        )
-        injections_shape = (
-                num_injection_configs, 
-                num_examples_per_batch,
-                num_detectors,
-                num_onsource_samples
-            )
-        per_injection_shape = (
-            num_injection_configs, num_examples_per_batch
-        )        
-        pearson_shape = (
-            num_examples_per_batch, 
-            num_detectors * (num_detectors - 1) // 2,
-            2*max_arival_time_difference_samples
-        )
-        
-    spectrogram_shape = gf.spectrogram_shape(onsource_shape)
-    
+    spectrogram_shape = gf.spectrogram_shape(cropped_shape)
+
     output_signature_dict = {
         gf.ReturnVariables.ONSOURCE.name:
             tf.TensorSpec(
                 shape=onsource_shape, 
-                dtype=tf.float16
+                dtype=tf.float32
             ),
         gf.ReturnVariables.WHITENED_ONSOURCE.name: 
             tf.TensorSpec(
-                shape=onsource_shape,
+                shape=cropped_shape,
                 dtype=tf.float16
             ),
         gf.ReturnVariables.OFFSOURCE.name: 
             tf.TensorSpec(
                 shape=offsource_shape, 
-                dtype=tf.float16
+                dtype=tf.float32
             ),
         gf.ReturnVariables.GPS_TIME.name: 
             tf.TensorSpec(
@@ -563,7 +627,7 @@ def Dataset(
         )
     }
     
-    if not injection_generators:
+    if not waveform_generators:
         keys_to_remove = {
             gf.ReturnVariables.INJECTION_MASKS, 
             gf.ReturnVariables.INJECTIONS, 
@@ -581,7 +645,7 @@ def Dataset(
     output_signature_dict.update({
         item.name: tf.TensorSpec(
             shape=(
-                num_injection_configs, 
+                num_waveform_generators, 
                 num_examples_per_batch * item.value.shape[-1]
             ),
             dtype=tf.float32
@@ -602,11 +666,12 @@ def Dataset(
         scale_factor=scale_factor,
         noise_obtainer=noise_obtainer,
         group=group,
-        injection_generators=injection_generators,
+        waveform_generators=waveform_generators,
         num_examples_per_generation_batch=num_examples_per_generation_batch,
         num_examples_per_batch=num_examples_per_batch,
         input_variables=input_variables,
-        output_variables=output_variables
+        output_variables=output_variables,
+        mask_history=mask_history
     )
 
     options = tf.data.Options()
@@ -615,7 +680,7 @@ def Dataset(
     return tf.data.Dataset.from_generator(
         generator=generator,
         output_signature=output_signature
-    ).with_options(options)
+    ).with_options(options).prefetch(tf.data.AUTOTUNE)
 
 def extract_data_from_indicies(
         dataset : tf.data.Dataset,

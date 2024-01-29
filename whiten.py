@@ -293,45 +293,72 @@ def convolve(
     ], axis=-1)
 
     conv = tf.zeros_like(timeseries_new)
-    if nfft >= timeseries_new.shape[-1]/2:
-        conv = fftconvolve(timeseries_new, fir, mode='same')
+    #if nfft >= timeseries_new.shape[-1]/2:
+    conv = fftconvolve(timeseries_new, fir, mode='same')
+    
+    """
     else:
         # Initialize
         nstep = nfft - 2 * pad
-        num_samples, num_timesteps = timeseries_new.shape
+        num_samples = timeseries_new.shape[:-1]  # Get all dimensions except the last one
+        last_dim = timeseries_new.shape[-1]  # Last dimension size
         k = tf.convert_to_tensor(nfft - pad, dtype=tf.int32)
-        final_k = num_timesteps - nfft + pad
+        final_k = last_dim - nfft + pad
         accumulated_middle_parts = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
 
         # First part
         first_part = fftconvolve(timeseries_new[..., :nfft], fir, mode="same")[..., :nfft - pad]
 
+       # Calculate the number of iterations for the loop
+        num_iterations = tf.math.ceil((final_k - k) / nstep)
+
+        num_iterations = tf.cast(num_iterations, tf.int32)
+
+        # Preallocate the TensorArray with fixed size
+        accumulated_middle_parts = tf.TensorArray(dtype=tf.float32, size=num_iterations, dynamic_size=False)
+
         # Define the loop body for tf.while_loop
-        def loop_body(k, accumulated_middle_parts):
+        def loop_body(i, k, accumulated_middle_parts):
             yk = fftconvolve(
                 timeseries_new[..., k - pad: k + nstep + pad], fir, mode="same"
             )
-            updated_parts = accumulated_middle_parts.write(k, yk[..., pad: -pad])
+            # Use 'i' as the index for writing to the TensorArray
+            updated_parts = accumulated_middle_parts.write(i, yk[..., pad: -pad])
             k = k + nstep
-            return k, updated_parts
+            return i + 1, k, updated_parts
+
+        # Initialize loop variables
+        i = 0
 
         # Run the loop
-        _, final_middle_parts = tf.while_loop(
-            cond=lambda k, *_: k < final_k,
+        _, _, final_middle_parts = tf.while_loop(
+            cond=lambda i, k, *_: k < final_k,
             body=loop_body,
-            loop_vars=[k, accumulated_middle_parts]
+            loop_vars=[i, k, accumulated_middle_parts]
         )
 
         # Stack all middle parts
         middle_parts = final_middle_parts.stack()
-        
-        middle_parts = tf.reshape(middle_parts, [num_samples, -1])
+
+        # Calculate the total length of the concatenated middle parts
+        total_middle_length = (final_k - nfft + pad) // nstep * (nstep - 2 * pad)
+
+        # Determine the dynamic shape of middle_parts
+        dynamic_middle_parts_shape = tf.shape(middle_parts)
+
+        # Create the new shape for middle parts
+        # Since total_middle_length is a scalar, we can use tf.concat to construct the shape
+        middle_parts_shape = tf.concat([num_samples, [total_middle_length]], axis=0)
+
+        # Reshape middle parts
+        middle_parts = tf.reshape(middle_parts, middle_parts_shape)
 
         # Last part
         last_part = fftconvolve(timeseries_new[..., -nfft:], fir, mode="same")[..., -nfft + pad:]
 
-        # Combine all
+        # Combine all parts along the last axis
         conv = tf.concat([first_part, middle_parts, last_part], axis=-1)
+    """
 
     return conv
 
@@ -439,6 +466,68 @@ def whiten(
 
     return out * tf.sqrt(2.0 * dt)
 
+class WhitenPass(Layer):
+    def __init__(
+            self, 
+            sample_rate_hertz = None,
+            onsource_duration_seconds = None,
+            fft_duration_seconds=4, 
+            overlap_duration_seconds=2,
+            highpass_hertz=None, 
+            detrend='constant', 
+            filter_duration_seconds=2.0, 
+            window="hann", 
+            **kwargs
+        ):
+        super().__init__(**kwargs)
+
+        if sample_rate_hertz is None:
+            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+        if onsource_duration_seconds is None:
+            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+
+        self.onsource_duration_seconds = onsource_duration_seconds
+        self.sample_rate_hertz = sample_rate_hertz
+        self.fft_duration_seconds = fft_duration_seconds
+        self.overlap_duration_seconds = overlap_duration_seconds
+        self.highpass_hertz = highpass_hertz
+        self.detrend = detrend
+        self.filter_duration_seconds = filter_duration_seconds
+        self.window = window
+        self.num_output_samples = int(self.onsource_duration_seconds*self.sample_rate_hertz)
+
+    def build(self, input_shape):
+        # This layer doesn't have any trainable weights, but you could set up weights here if necessary.
+        super().build(input_shape)
+
+    @tf.function
+    def call(self, inputs):
+        timeseries = inputs
+
+        cropped = gf.crop_samples(timeseries, self.onsource_duration_seconds, self.sample_rate_hertz)
+
+        dynamic_shape = tf.shape(timeseries)
+        return tf.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            'sample_rate_hertz': self.sample_rate_hertz,
+            'fft_duration_seconds': self.fft_duration_seconds,
+            'overlap_duration_seconds': self.overlap_duration_seconds,
+            'highpass_hertz': self.highpass_hertz,
+            'detrend': self.detrend,
+            'filter_duration_seconds': self.filter_duration_seconds,
+            'window': self.window,
+        })
+        return config
+
+    def compute_output_shape(self, input_shape):
+        # Assuming input_shape is [(None, Y, A), (None, Y, B)]
+        # and your layer returns a shape of (None, Y, B)
+        timeseries_shape = input_shape
+        return (timeseries_shape[0], timeseries_shape[1], self.onsource_duration_seconds*self.sample_rate_hertz) 
+
 class Whiten(Layer):
     def __init__(
             self, 
@@ -467,19 +556,21 @@ class Whiten(Layer):
         self.detrend = detrend
         self.filter_duration_seconds = filter_duration_seconds
         self.window = window
+        self.num_output_samples = int(self.onsource_duration_seconds*self.sample_rate_hertz)
 
     def build(self, input_shape):
         # This layer doesn't have any trainable weights, but you could set up weights here if necessary.
         super().build(input_shape)
 
-    @tf.function(jit_compile=True)
+    @tf.function
     def call(self, inputs):
         timeseries, background = inputs
 
         whitened = whiten(timeseries, background, self.sample_rate_hertz)
         cropped = gf.crop_samples(whitened, self.onsource_duration_seconds, self.sample_rate_hertz)
 
-        return cropped
+        dynamic_shape = tf.shape(timeseries)
+        return tf.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))
 
     def get_config(self):
         config = super().get_config().copy()
@@ -493,3 +584,9 @@ class Whiten(Layer):
             'window': self.window,
         })
         return config
+
+    def compute_output_shape(self, input_shape):
+        # Assuming input_shape is [(None, Y, A), (None, Y, B)]
+        # and your layer returns a shape of (None, Y, B)
+        timeseries_shape, _ = input_shape
+        return (timeseries_shape[0], timeseries_shape[1], self.onsource_duration_seconds*self.sample_rate_hertz) 
