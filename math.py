@@ -382,3 +382,7 @@ def rfftfreq(
     frequency_tensor = tf.cast(results, dtype=tf.float32) * val
     
     return frequency_tensor
+
+def get_element_shape(dataset):
+    for element in dataset.take(1):
+        return element[0].shape
