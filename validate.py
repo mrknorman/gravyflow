@@ -754,9 +754,6 @@ def check_equal_duration(
                 "All validators do not have the same input_duration_seconds "
                 "property value."
             )
-            
-def snake_to_capitalized_spaces(snake_str: str) -> str:
-    return ' '.join(word.capitalize() for word in snake_str.split('_'))
 
 def generate_efficiency_curves(
         validators : list,
@@ -806,7 +803,7 @@ def generate_efficiency_curves(
         name = validator.name
 
         if name is not None:
-            title = snake_to_capitalized_spaces(name)
+            title = gf.snake_to_capitalized_spaces(name)
         else:
             name = index
             title = f"default_{index}"
@@ -967,7 +964,7 @@ def generate_far_curves(
         name = validator.name
 
         if name is not None:
-            title = snake_to_capitalized_spaces(name)
+            title = gf.snake_to_capitalized_spaces(name)
         else:
             title = f"default_{index}"
             name = index
@@ -1047,7 +1044,7 @@ def generate_roc_curves(
         name = validator.name
                 
         if name is not None:
-            title = snake_to_capitalized_spaces(name)
+            title = gf.snake_to_capitalized_spaces(name)
         else:
             title = f"default_{index}"
             name = index

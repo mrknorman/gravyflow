@@ -261,7 +261,7 @@ def generate_psd_plot(
 # Define the spectrogram visualization function using Bokeh
 def generate_spectrogram(
     strain: np.ndarray, 
-    sample_rate_hertz: float,
+    sample_rate_hertz: float = None,
     num_fft_samples: int = 256, 
     height : int = 400,
     width : int = None,
@@ -271,6 +271,9 @@ def generate_spectrogram(
     """
     Plot a spectrogram using Bokeh and return the figure.
     """
+
+    if sample_rate_hertz is None:
+        sample_rate_hertz = gf.Defaults.sample_rate_hertz
         
     if width is None:
         width = int(height * golden)

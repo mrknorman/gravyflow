@@ -82,9 +82,7 @@ def white_noise_generator(
     num_onsource_samples : int = int(total_onsource_duration_seconds * sample_rate_hertz)
     
     num_offsource_samples : int = int(offsource_duration_seconds * sample_rate_hertz)
-
-    print("seed", rng.integers(1E10))
-
+    
     while True:
         yield _generate_white_noise(
             num_examples_per_batch, 

@@ -610,25 +610,6 @@ class WhitenPassLayer(BaseLayer):
         self.layer_type = "WhitenPass"
         self.mutable_attributes = []
 
-"""
-class TruncatedNormal(tf.keras.layers.Layer):
-    def __init__(self, event_shape=1, **kwargs):
-        super(TruncatedNormal, self).__init__(**kwargs)
-        self.event_shape = event_shape
-
-    def build(self, input_shape):
-        # Input should be of shape (batch_size, 2) 
-        # with the first column as the mean and the second column as the standard deviation
-        assert input_shape[-1] == 2
-
-    def call(self, inputs):
-        loc, scale = tf.unstack(inputs, axis=-1)
-        return loc, scale
-
-    def get_config(self):
-        return {'event_shape': self.event_shape}
-"""
-
 def cap_value(x):
     return K.clip(x, 1.0e-5, 1000)  # values will be constrained to [-1, 1]
 
@@ -1783,12 +1764,6 @@ def snake_case_to_capitalised_first_with_spaces(text):
     
     # Capitalise the first letter of each word and join them with spaces
     return ' '.join(word.capitalize() for word in words)
-
-def transform_string(s):
-    # Remove the 'perceptron_' prefix and split by underscore
-    name = s.replace('model_', '')
-
-    return snake_case_to_capitalised_first_with_spaces(name)
 
 def load_and_calculate_fitness(
         generation, 

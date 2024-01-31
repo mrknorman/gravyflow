@@ -1,45 +1,61 @@
 """
-GravyFlow is a Python library designed for gravitational wave data analysis, leveraging TensorFlow's 
-GPU capabilities for enhanced performance. It offers GPU-based implementations of essential functions 
-commonly used in this field. GravyFlow's toolkit includes features for creating dataset classes, which 
-are crucial for the real-time training of machine learning models specifically in gravitational wave 
-analysis. This makes it an ideal resource for data scientists and researchers focusing on gravitational wave studies, 
-providing an efficient and powerful tool for their computational needs.
+This module initializes the GravyFlow library, setting up necessary imports and configurations.
 """
 
-#Supress LAL warning when running in ipython kernel:
+# Standard library imports
 import warnings
-warnings.filterwarnings("ignore", "Wswiglal-redir-stdio")
 
-# Imports from GravyFlow
+# Suppress specific LAL warning when running in an ipython kernel
+warnings.filterwarnings("ignore", category=UserWarning, message="Wswiglal-redir-stdio")
+
+# Conditional import with specific exception handling
+try:
+    from .cuphenom.python.cuphenom import imrphenomd
+except ImportError as e:
+    print(f"Failed to import cuphenom because: {e}.")
+
+# Local application/library specific imports
 from .config import Defaults
-from .math import (DistributionType, Distribution, 
-                   randomise_arguments, replace_nan_and_inf_with_zero,
-                   expand_tensor, batch_tensor, crop_samples,
-                   rfftfreq, get_element_shape)
-from .environment import (setup_cuda, find_available_GPUs, get_tf_memory_usage, 
-                          env)
-from .io import (open_hdf5_file, ensure_directory_exists, replace_placeholders)
-from .processes import *
+from .math import (
+    DistributionType, Distribution, randomise_arguments,
+    replace_nan_and_inf_with_zero, expand_tensor, batch_tensor,
+    crop_samples, rfftfreq, get_element_shape, check_tensor_integrity,
+    set_random_seeds
+)
+from .environment import setup_cuda, find_available_GPUs, get_tf_memory_usage, env
+from .io import (
+    open_hdf5_file, ensure_directory_exists, replace_placeholders,
+    transform_string, snake_to_capitalized_spaces
+)
+from .processes import Heart, HeartbeatCallback, Process, Manager
 from .psd import psd
 from .snr import snr, scale_to_snr
 from .wnb import wnb
 from .conditioning import spectrogram, spectrogram_shape
-from .genetics import *
-from .model import (HyperParameter, hp, ensure_hp, BaseLayer, DenseLayer, ConvLayer, PoolLayer, DropLayer, randomizeLayer, )
-
-try:
-    from .cuphenom.python.cuphenom import imrphenomd
-except Exception as e:
-    print(f"Failed to import cuphenom because {e}.")
-
+from .genetics import HyperParameter, HyperInjectionGenerator, ModelGenome
+from .model import (
+    BaseLayer, Reshape, DenseLayer, FlattenLayer, ConvLayer,
+    PoolLayer, DropLayer, BatchNormLayer, WhitenLayer, WhitenPassLayer,
+    Model, PopulationSector, Population, load_and_calculate_fitness
+)
 from .whiten import whiten, Whiten, WhitenPass
 from .pearson import rolling_pearson
-from .detector import *
-from .acquisition import *
-from .noise import *
-from .injection import *
-from .dataset import *
-from .plotting import *
-from .validate import *
+from .detector import IFO, Network
+from .acquisition import (
+    DataQuality, DataLabel, SegmentOrder, AcquisitionMode, ObservingRun,
+    IFOData, IFODataObtainer
+)
+from .noise import NoiseType, NoiseObtainer
+from .injection import (
+    ScalingOrdinality, ScalingType, ScalingTypes, ScalingMethod, ReturnVariables,
+    WaveformGenerator, WaveformParameter, WaveformParameters, WNBGenerator, 
+    cuPhenomDGenerator, IncoherentGenerator, InjectionGenerator, 
+    roll_vector_zero_padding, generate_mask, is_not_inherited, 
+    batch_injection_parameters
+)
+from .dataset import data, Dataset
+from .plotting import (
+    generate_strain_plot, generate_psd_plot, generate_spectrogram, generate_correlation_plot
+)
+from .validate import Validator
 from .glitch import GlitchType, get_glitch_times, get_glitch_segments

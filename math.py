@@ -338,7 +338,7 @@ def batch_tensor(
     return batched_tensor
 
 def set_random_seeds(
-    seed : int = 100
+    seed : int = 1000
     ):
     
     """

@@ -16,7 +16,7 @@ def validate_noise_settings(
         noise_obtainer: gf.NoiseObtainer, 
         variables_to_return: List[
             Union[
-                gf.gf.WaveformParameters, 
+                gf.WaveformParameters, 
                 gf.ReturnVariables
             ]
         ]
@@ -114,10 +114,10 @@ def data(
         # Output configuration:
         num_examples_per_batch: int = None,
         input_variables : List[
-            Union[gf.gf.WaveformParameters, gf.ReturnVariables]
+            Union[gf.WaveformParameters, gf.ReturnVariables]
         ] = None,
         output_variables : List[
-            Union[gf.gf.WaveformParameters, gf.ReturnVariables]
+            Union[gf.WaveformParameters, gf.ReturnVariables]
         ] = None,
         mask_history = None
     ):
@@ -383,7 +383,7 @@ def data(
         yield (input_dict, output_dict)
 
 def create_variable_dictionary(
-    return_variables: List[Union[gf.ReturnVariables, gf.gf.WaveformParameters]],
+    return_variables: List[Union[gf.ReturnVariables, gf.WaveformParameters]],
     onsource : tf.Tensor,
     whitened_onsource : tf.Tensor,
     offsource : tf.Tensor,

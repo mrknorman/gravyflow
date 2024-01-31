@@ -101,3 +101,13 @@ def ensure_directory_exists(
     directory = Path(directory)  # Convert to Path if not already
     if not directory.exists():
         directory.mkdir(parents=True, exist_ok=True)
+
+def snake_to_capitalized_spaces(snake_str: str) -> str:
+    return ' '.join(word.capitalize() for word in snake_str.split('_'))
+
+def transform_string(s):
+    # Remove the 'perceptron_' prefix and split by underscore
+    name = s.replace('model_', '')
+
+    return snake_to_capitalized_spaces(name)
+

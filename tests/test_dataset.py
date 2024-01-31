@@ -4,7 +4,7 @@ from pathlib import Path
 from itertools import islice
 from copy import deepcopy
 import os
-from typing import Iterator
+from typing import Iterator, List
 
 # Library imports:
 import numpy as np
@@ -16,70 +16,287 @@ from tqdm import tqdm
 # Local imports:
 import gravyflow as gf
 
+def test_dataset(
+        num_tests : int = 32,
+        output_diretory_path : Path = Path("./gravyflow_data/tests/")
+    ):
+    
+    # Setup GPU environment:
+    with gf.env():
+        
+        # Define injection directory path:
+        current_dir : Path = Path(os.path.dirname(os.path.abspath(__file__)))
+        injection_directory_path : Path = current_dir / "example_injection_parameters"
+
+        # Intilise Scaling Method:
+        scaling_method : gf.ScalingMethod = gf.ScalingMethod(
+            value=gf.Distribution(
+                min_=8.0,
+                max_=15.0,
+                type_=gf.DistributionType.UNIFORM
+            ),
+            type_=gf.ScalingTypes.SNR
+        )
+
+        # Load injection config:
+        phenom_d_generator : gf.cuPhenomDGenerator = gf.WaveformGenerator.load(
+            path=injection_directory_path / "phenom_d_parameters.json", 
+            scaling_method=scaling_method
+        )
+
+        # Ensure injection in all test cases:
+        phenom_d_generator.injection_chance = 1.0
+
+        # Setup ifo data acquisition object:
+        ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
+            observing_runs=gf.ObservingRun.O3, 
+            data_quality=gf.DataQuality.BEST, 
+            data_labels=[
+                gf.DataLabel.NOISE
+            ],
+            force_acquisition = True,
+            cache_segments = False
+        )
+
+        # Initilise noise generator wrapper:
+        noise_obtainer: gf.NoiseObtainer = gf.NoiseObtainer(
+            ifo_data_obtainer=ifo_data_obtainer,
+            noise_type=gf.NoiseType.REAL,
+            ifos=gf.IFO.L1
+        )
+        
+        # Variable to return
+        variables_to_return : List[gf.ReturnVariables] = [
+            gf.ReturnVariables.WHITENED_ONSOURCE,
+            gf.ReturnVariables.INJECTIONS,
+            gf.ReturnVariables.WHITENED_INJECTIONS,
+            gf.ReturnVariables.INJECTION_MASKS,
+            gf.WaveformParameters.MASS_1_MSUN,
+            gf.WaveformParameters.MASS_2_MSUN
+        ]
+
+        dataset : tf.data.Dataset = gf.Dataset(
+            noise_obtainer=noise_obtainer,
+            waveform_generators=phenom_d_generator, 
+            num_examples_per_batch=num_tests,
+            input_variables=variables_to_return
+        )
+
+        # Get one iteration from iterator, ignore outputs dict:
+        input_dict, _ = next(iter(dataset))
+
+        def extract_parameters(input_dict, variables):
+            return [input_dict[var.name].numpy() for var in variables]
+
+        # Usage in your main function
+        onsource, injections, whitened_injections, masks, mass_1_msun, mass_2_msun = extract_parameters(
+            input_dict,
+            variables_to_return
+        )
+
+        # Create plots
+        layout = [
+            [gf.generate_strain_plot(
+                {
+                    "Whitened Onsouce + Injection": onsource_,
+                    "Whitened Injection" : whitened_injection,
+                    "Injection": injection
+                },
+                title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 "
+                       f"{m2} msun")
+            ), 
+            gf.generate_spectrogram(
+                onsource_[0]
+            )]
+            for onsource_, whitened_injection, injection, m1, m2 in zip(
+                onsource,
+                whitened_injections[0],
+                injections[0], 
+                mass_1_msun[0], 
+                mass_2_msun[0]
+            )
+        ]
+
+        # Ensure output directory exists
+        gf.ensure_directory_exists(output_diretory_path)
+
+        # Define an output path for the dashboard
+        output_file(output_diretory_path / "dataset_plots.html")
+
+        # Arrange the plots in a grid. 
+        grid = gridplot(layout)
+
+        save(grid)
+
+def test_dataset_multi(
+        num_tests : int = 32,
+        output_diretory_path : Path = Path("./gravyflow_data/tests/"),
+        ifos : List[gf.IFO] = [gf.IFO.L1, gf.IFO.H1]
+    ):
+    
+    # Setup GPU environment
+    with gf.env():
+        
+        # Define injection directory path:
+        current_dir : Path = Path(os.path.dirname(os.path.abspath(__file__)))
+        injection_directory_path : Path = current_dir / "example_injection_parameters"
+
+        # Intilise Scaling Method:
+        scaling_method = gf.ScalingMethod(
+            value=gf.Distribution(
+                min_=8.0,
+                max_=15.0,
+                type_=gf.DistributionType.UNIFORM
+            ),
+            type_=gf.ScalingTypes.SNR
+        )
+
+        # Load injection config:
+        phenom_d_generator : gf.cuPhenomDGenerator = gf.WaveformGenerator.load(
+            path=injection_directory_path / "phenom_d_parameters.json", 
+            scaling_method=scaling_method,
+            network=ifos
+        )
+
+        # Ensure injection in all test cases:
+        phenom_d_generator.injection_chance = 1.0
+
+        # Setup ifo data acquisition object:
+        ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
+            observing_runs=gf.ObservingRun.O3, 
+            data_quality=gf.DataQuality.BEST, 
+            data_labels=[
+                gf.DataLabel.NOISE
+            ],
+            force_acquisition = True,
+            cache_segments = False
+        )
+
+        # Initilise noise generator wrapper:
+        noise_obtainer: gf.NoiseObtainer = gf.NoiseObtainer(
+            ifo_data_obtainer=ifo_data_obtainer,
+            noise_type=gf.NoiseType.REAL,
+            ifos=ifos
+        )
+        
+        dataset : tf.data.Dataset = gf.Dataset(
+            # Noise: 
+            noise_obtainer=noise_obtainer,
+            # Injections:
+            waveform_generators=phenom_d_generator, 
+            # Output configuration:
+            num_examples_per_batch=num_tests,
+            input_variables = [
+                gf.ReturnVariables.WHITENED_ONSOURCE, 
+                gf.ReturnVariables.INJECTION_MASKS, 
+                gf.ReturnVariables.INJECTIONS,
+                gf.ReturnVariables.WHITENED_INJECTIONS,
+                gf.WaveformParameters.MASS_1_MSUN, 
+                gf.WaveformParameters.MASS_2_MSUN
+            ],
+        )
+
+        # Get one iteration from iterator, ignore outputs dict
+        input_dict, _ = next(iter(dataset))
+
+        # Extract parameters:
+        onsource = input_dict[
+            gf.ReturnVariables.WHITENED_ONSOURCE.name
+        ].numpy()
+        injections = input_dict[
+            gf.ReturnVariables.INJECTIONS.name
+        ].numpy()
+        whitened_injections = input_dict[
+            gf.ReturnVariables.WHITENED_INJECTIONS.name
+        ].numpy()
+        masks = input_dict[
+            gf.ReturnVariables.INJECTION_MASKS.name
+        ].numpy()
+        mass_1_msun = input_dict[
+            gf.WaveformParameters.MASS_1_MSUN.name
+        ].numpy()
+        mass_2_msun = input_dict[
+            gf.WaveformParameters.MASS_2_MSUN.name
+        ].numpy()
+
+        # Generate plots:
+        layout = [
+            [gf.generate_strain_plot(
+                {
+                    "Whitened Onsouce + Injection": onsource_,
+                    "Whitened Injection" : whitened_injection,
+                    "Injection": injection
+                },
+                title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2}"
+                       " msun")
+            )]
+            for onsource_, whitened_injection, injection, m1, m2 in zip(
+                onsource,
+                whitened_injections[0],
+                injections[0], 
+                mass_1_msun[0], 
+                mass_2_msun[0]
+            )
+        ]
+
+        # Ensure output directory exists
+        gf.ensure_directory_exists(output_diretory_path)
+
+        # Define an output path for the dashboard
+        output_file(output_diretory_path / "dataset_plots_multi.html")
+
+        # Arrange the plots in a grid. 
+        grid = gridplot(layout)
+
+        save(grid)
+
 def test_iteration(
     num_tests : int = int(1.0E2)
     ):
     
-    with gf.env():
-
-        # Test Parameters:
-        num_examples_per_generation_batch : int = 2048
-        num_examples_per_batch : int = 32
-        sample_rate_hertz : float = 2048.0
-        onsource_duration_seconds : float = 1.0
-        offsource_duration_seconds : float = 16.0
-        crop_duration_seconds : float = 0.5
-        scale_factor : float = 1.0E21
-        ifos = [gf.IFO.L1]
-        
+    with gf.env():        
         # Define injection directory path:
-        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        injection_directory_path : Path = Path(
-            current_dir / "example_injection_parameters"
-        )
+        current_dir : Path = Path(os.path.dirname(os.path.abspath(__file__)))
+        injection_directory_path : Path = current_dir / "example_injection_parameters"
 
         # Intilise Scaling Method:
-        scaling_method = \
-            gf.ScalingMethod(
-                gf.Distribution(
-                    min_=8.0,
-                    max_=15.0,
-                    type_=gf.DistributionType.UNIFORM
-                ),
-                gf.ScalingTypes.SNR
-            )
+        scaling_method : gf.ScalingMethod = gf.ScalingMethod(
+            value=gf.Distribution(
+                min_=8.0,
+                max_=15.0,
+                type_=gf.DistributionType.UNIFORM
+            ),
+            type_=gf.ScalingTypes.SNR
+        )
 
         # Load injection config:
         phenom_d_generator : gf.cuPhenomDGenerator = gf.WaveformGenerator.load(
-                injection_directory_path / "phenom_d_parameters.json", 
-                sample_rate_hertz, 
-                onsource_duration_seconds,
-                scaling_method=scaling_method,    
-                network = None # ifos
-            )
+            path=injection_directory_path / "phenom_d_parameters.json", 
+            scaling_method=scaling_method
+        )
+
+        # Ensure injection in all test cases:
+        phenom_d_generator.injection_chance = 1.0
 
         # Setup ifo data acquisition object:
-        ifo_data_obtainer : gf.IFODataObtainer = \
-            gf.IFODataObtainer(
-                gf.ObservingRun.O3, 
-                gf.DataQuality.BEST, 
-                [
-                    gf.DataLabel.NOISE,
-                ],
-                gf.SegmentOrder.RANDOM,
-                force_acquisition = True,
-                cache_segments = False,
-                logging_level = logging.INFO
-            )
+        ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
+            observing_runs=gf.ObservingRun.O3, 
+            data_quality=gf.DataQuality.BEST, 
+            data_labels=[
+                gf.DataLabel.NOISE
+            ],
+            force_acquisition = True,
+            cache_segments = False
+        )
 
         # Initilise noise generator wrapper:
-        noise_obtainer: gf.NoiseObtainer = \
-            gf.NoiseObtainer(
-                ifo_data_obtainer = ifo_data_obtainer,
-                noise_type = gf.NoiseType.REAL,
-                ifos = ifos
-            )
+        noise_obtainer: gf.NoiseObtainer = gf.NoiseObtainer(
+            ifo_data_obtainer=ifo_data_obtainer,
+            noise_type=gf.NoiseType.REAL,
+            ifos=ifos
+        )
 
+        # Extract parameters:
         input_variables = [
             gf.ReturnVariables.WHITENED_ONSOURCE, 
             gf.ReturnVariables.INJECTION_MASKS, 
@@ -101,7 +318,7 @@ def test_iteration(
             "noise_obtainer" : noise_obtainer,
             "scale_factor" : scale_factor,
             # Injections:
-            "injection_generators" : phenom_d_generator, 
+            "waveform_generators" : phenom_d_generator, 
             # Output configuration:
             "num_examples_per_batch" : num_examples_per_batch,
             "input_variables" : input_variables
@@ -119,8 +336,7 @@ def test_iteration(
             pass
         logging.info("Complete.")
 
-        assert index == num_tests - 1, \
-            "Warning! Data does not iterate the required number of batches"
+        assert index == num_tests - 1, "Warning! Data does not iterate the required number of batches"
 
         dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
@@ -129,271 +345,7 @@ def test_iteration(
         for index, _ in tqdm(enumerate(islice(dataset, num_tests))):
             pass
 
-        assert index == num_tests - 1, \
-            "Warning! Dataset does not iterate the required number of batches"
-    
-def test_dataset(
-    num_tests : int = 32,
-    output_diretory_path : Path = Path("./gravyflow_data/tests/")
-    ):
-    
-    with gf.env():
-    
-        # Test Parameters:
-        num_examples_per_generation_batch : int = 2048
-        num_examples_per_batch : int = num_tests
-        sample_rate_hertz : float = 2048.0
-        onsource_duration_seconds : float = 1.0
-        offsource_duration_seconds : float = 16.0
-        crop_duration_seconds : float = 0.5
-        scale_factor : float = 1.0E21
-
-        # Define injection directory path:
-        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        injection_directory_path : Path = \
-            Path(current_dir / "example_injection_parameters")
-
-        # Intilise Scaling Method:
-        scaling_method = \
-            gf.ScalingMethod(
-                gf.Distribution(
-                    min_=8.0,
-                    max_=15.0,
-                    type_=gf.DistributionType.UNIFORM
-                ),
-                gf.ScalingTypes.SNR
-            )
-
-        # Load injection config:
-        phenom_d_generator : gf.cuPhenomDGenerator = \
-            gf.WaveformGenerator.load(
-                injection_directory_path / "phenom_d_parameters.json", 
-                sample_rate_hertz, 
-                onsource_duration_seconds,
-                scaling_method=scaling_method
-            )
-
-        # Setup ifo data acquisition object:
-        ifo_data_obtainer : gf.IFODataObtainer = \
-            gf.IFODataObtainer(
-                gf.ObservingRun.O3, 
-                gf.DataQuality.BEST, 
-                [
-                    gf.DataLabel.NOISE
-                ],
-                gf.SegmentOrder.RANDOM,
-                force_acquisition = True,
-                cache_segments = False
-            )
-
-        # Initilise noise generator wrapper:
-        noise_obtainer: gf.NoiseObtainer = \
-            gf.NoiseObtainer(
-                ifo_data_obtainer=ifo_data_obtainer,
-                noise_type=gf.NoiseType.REAL,
-                ifos=gf.IFO.L1
-            )
-        
-        dataset : tf.data.Dataset = gf.Dataset(
-            # Random Seed:
-            seed= 1000,
-            # Temporal components:
-            sample_rate_hertz=sample_rate_hertz,   
-            onsource_duration_seconds=onsource_duration_seconds,
-            offsource_duration_seconds=offsource_duration_seconds,
-            crop_duration_seconds=crop_duration_seconds,
-            # Noise: 
-            noise_obtainer=noise_obtainer,
-            # Injections:
-            injection_generators=phenom_d_generator, 
-            # Output configuration:
-            num_examples_per_batch=num_examples_per_batch,
-            input_variables = [
-                gf.ReturnVariables.WHITENED_ONSOURCE, 
-                gf.ReturnVariables.INJECTION_MASKS, 
-                gf.ReturnVariables.INJECTIONS,
-                gf.ReturnVariables.WHITENED_INJECTIONS,
-                gf.ReturnVariables.SPECTROGRAM_ONSOURCE,
-                gf.WaveformParameters.MASS_1_MSUN, 
-                gf.WaveformParameters.MASS_2_MSUN,
-            ],
-        )
-
-        input_dict, _ = next(iter(dataset))
-
-        onsource = input_dict[gf.ReturnVariables.WHITENED_ONSOURCE.name].numpy()
-        injections = input_dict[gf.ReturnVariables.INJECTIONS.name].numpy()
-        whitened_injections = input_dict[
-            gf.ReturnVariables.WHITENED_INJECTIONS.name
-        ].numpy()
-        masks = input_dict[gf.ReturnVariables.INJECTION_MASKS.name].numpy()
-        mass_1_msun = input_dict[gf.WaveformParameters.MASS_1_MSUN.name].numpy()
-        mass_2_msun = input_dict[gf.WaveformParameters.MASS_2_MSUN.name].numpy()
-
-        layout = [
-            [gf.generate_strain_plot(
-                {
-                    "Whitened Onsouce + Injection": onsource_,
-                    "Whitened Injection" : whitened_injection,
-                    "Injection": injection
-                },
-                sample_rate_hertz,
-                title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 "
-                       f"{m2} msun"),
-                scale_factor=scale_factor
-            ), 
-            gf.generate_spectrogram(
-                onsource_[0], 
-                sample_rate_hertz
-            )]
-            for onsource_, whitened_injection, injection, m1, m2 in zip(
-                onsource,
-                whitened_injections[0],
-                injections[0], 
-                mass_1_msun[0], 
-                mass_2_msun[0]
-            )
-        ]
-
-        # Ensure output directory exists
-        gf.ensure_directory_exists(output_diretory_path)
-
-        # Define an output path for the dashboard
-        output_file(output_diretory_path / "dataset_plots.html")
-
-        # Arrange the plots in a grid. 
-        grid = gridplot(layout)
-
-        save(grid)
-    
-def test_dataset_multi(
-    num_tests : int = 32,
-    output_diretory_path : Path = Path("./gravyflow_data/tests/")
-    ):
-    
-    with gf.env():
-    
-        # Test Parameters:
-        num_examples_per_generation_batch : int = 2048
-        num_examples_per_batch : int = num_tests
-        sample_rate_hertz : float = 2048.0
-        onsource_duration_seconds : float = 1.0
-        offsource_duration_seconds : float = 16.0
-        crop_duration_seconds : float = 0.5
-        scale_factor : float = 1.0E21
-        ifos = [gf.IFO.L1, gf.IFO.H1]
-
-        # Define injection directory path:
-        current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        injection_directory_path : Path = \
-            Path(current_dir / "example_injection_parameters")
-
-        # Intilise Scaling Method:
-        scaling_method = \
-            gf.ScalingMethod(
-                gf.Distribution(min_=8.0,max_=15.0,type_=gf.DistributionType.UNIFORM),
-                gf.ScalingTypes.SNR
-            )
-
-        # Load injection config:
-        phenom_d_generator : gf.cuPhenomDGenerator = \
-            gf.WaveformGenerator.load(
-                injection_directory_path / "phenom_d_parameters.json", 
-                sample_rate_hertz, 
-                onsource_duration_seconds,
-                scaling_method=scaling_method,
-                network=ifos
-            )
-
-        phenom_d_generator.injection_chance = 1.0
-
-        # Setup ifo data acquisition object:
-        ifo_data_obtainer : gf.IFODataObtainer = \
-            gf.IFODataObtainer(
-                gf.ObservingRun.O3, 
-                gf.DataQuality.BEST, 
-                [
-                    gf.DataLabel.NOISE
-                ],
-                gf.SegmentOrder.RANDOM,
-                force_acquisition = True,
-                cache_segments = False
-            )
-
-        # Initilise noise generator wrapper:
-        noise_obtainer: gf.NoiseObtainer = \
-            gf.NoiseObtainer(
-                ifo_data_obtainer=ifo_data_obtainer,
-                noise_type=gf.NoiseType.REAL,
-                ifos=ifos
-            )
-
-        dataset : tf.data.Dataset = gf.Dataset(
-            # Random Seed:
-            seed= 1000,
-            # Temporal components:
-            sample_rate_hertz=sample_rate_hertz,   
-            onsource_duration_seconds=onsource_duration_seconds,
-            offsource_duration_seconds=offsource_duration_seconds,
-            crop_duration_seconds=crop_duration_seconds,
-            # Noise: 
-            noise_obtainer=noise_obtainer,
-            # Injections:
-            injection_generators=phenom_d_generator, 
-            # Output configuration:
-            num_examples_per_batch=num_examples_per_batch,
-            input_variables = [
-                gf.ReturnVariables.WHITENED_ONSOURCE, 
-                gf.ReturnVariables.INJECTION_MASKS, 
-                gf.ReturnVariables.INJECTIONS,
-                gf.ReturnVariables.WHITENED_INJECTIONS,
-                gf.WaveformParameters.MASS_1_MSUN, 
-                gf.WaveformParameters.MASS_2_MSUN
-            ],
-        )
-
-        input_dict, _ = next(iter(dataset))
-
-        onsource = input_dict[gf.ReturnVariables.WHITENED_ONSOURCE.name].numpy()
-        injections = input_dict[gf.ReturnVariables.INJECTIONS.name].numpy()
-        whitened_injections = input_dict[
-            gf.ReturnVariables.WHITENED_INJECTIONS.name
-        ].numpy()
-        masks = input_dict[gf.ReturnVariables.INJECTION_MASKS.name].numpy()
-        mass_1_msun = input_dict[gf.WaveformParameters.MASS_1_MSUN.name].numpy()
-        mass_2_msun = input_dict[gf.WaveformParameters.MASS_2_MSUN.name].numpy()
-
-        layout = [
-            [gf.generate_strain_plot(
-                {
-                    "Whitened Onsouce + Injection": onsource_,
-                    "Whitened Injection" : whitened_injection,
-                    "Injection": injection
-                },
-                sample_rate_hertz,
-                title=(f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2}"
-                       " msun"),
-                scale_factor=scale_factor
-            )]
-            for onsource_, whitened_injection, injection, m1, m2 in zip(
-                onsource,
-                whitened_injections[0],
-                injections[0], 
-                mass_1_msun[0], 
-                mass_2_msun[0]
-            )
-        ]
-
-        # Ensure output directory exists
-        gf.ensure_directory_exists(output_diretory_path)
-
-        # Define an output path for the dashboard
-        output_file(output_diretory_path / "dataset_plots_multi.html")
-
-        # Arrange the plots in a grid. 
-        grid = gridplot(layout)
-
-        save(grid)
+        assert index == num_tests - 1, "Warning! Dataset does not iterate the required number of batches"
     
 def test_dataset_incoherent(
     num_tests : int = 32,
@@ -418,8 +370,7 @@ def test_dataset_incoherent(
             Path(current_dir / "example_injection_parameters")
 
         # Intilise Scaling Method:
-        scaling_method = \
-            gf.ScalingMethod(
+        scaling_method = gf.ScalingMethod(
                 gf.Distribution(min_=8.0,max_=15.0,type_=gf.DistributionType.UNIFORM),
                 gf.ScalingTypes.SNR
             )
@@ -477,7 +428,7 @@ def test_dataset_incoherent(
             # Noise: 
             noise_obtainer=noise_obtainer,
             # Injections:
-            injection_generators=incoherent_generator, 
+            waveform_generators=incoherent_generator, 
             # Output configuration:
             num_examples_per_batch=num_examples_per_batch,
             input_variables = [
@@ -607,7 +558,7 @@ def test_feature_dataset(
             # Noise: 
             noise_obtainer=noise_obtainer,
             # Injections:
-            injection_generators=phenom_d_generator, 
+            waveform_generators=phenom_d_generator, 
             # Output configuration:
             num_examples_per_batch=num_examples_per_batch,
             input_variables = [
