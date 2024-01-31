@@ -8,6 +8,9 @@
 cuphenom_outputs*
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
+*email_config.json*
+*nohup.out*
+
 
 # IPython
 profile_default/

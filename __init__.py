@@ -16,13 +16,14 @@ except ImportError as e:
 
 # Local application/library specific imports
 from .config import Defaults
-from .math import (
+from .tensor_tools import (
     DistributionType, Distribution, randomise_arguments,
     replace_nan_and_inf_with_zero, expand_tensor, batch_tensor,
     crop_samples, rfftfreq, get_element_shape, check_tensor_integrity,
     set_random_seeds
 )
-from .environment import setup_cuda, find_available_GPUs, get_tf_memory_usage, env
+from .environment import (setup_cuda, find_available_GPUs, get_tf_memory_usage, env, 
+    get_memory_array, get_gpu_utilization_array)
 from .io import (
     open_hdf5_file, ensure_directory_exists, replace_placeholders,
     transform_string, snake_to_capitalized_spaces
@@ -59,3 +60,4 @@ from .plotting import (
 )
 from .validate import Validator
 from .glitch import GlitchType, get_glitch_times, get_glitch_segments
+from .alert import send_email
