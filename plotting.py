@@ -258,18 +258,16 @@ def generate_psd_plot(
 
     return p
 
-# Define the spectrogram visualization function using Bokeh
 def generate_spectrogram(
     strain: np.ndarray, 
     sample_rate_hertz: float = None,
     num_fft_samples: int = 256, 
-    height : int = 400,
-    width : int = None,
+    height: int = 400,
+    width: int = None,
     num_overlap_samples: int = 200
-) -> figure:
-    
+):
     """
-    Plot a spectrogram using Bokeh and return the figure.
+    Plot a spectrogram using Bokeh and return the figure or figures.
     """
 
     if sample_rate_hertz is None:
@@ -278,59 +276,62 @@ def generate_spectrogram(
     if width is None:
         width = int(height * golden)
     
-    # Compute the spectrogram using TensorFlow
-    tensor_strain = tf.convert_to_tensor(strain, dtype=tf.float32)
+    # Check if strain has an additional dimension
+    if len(strain.shape) == 1:
+        strains = [strain]
+    else:
+        N = strain.shape[0]
+        height = height // N
+        strains = [strain[i] for i in range(N)]
     
-    num_step_samples = num_fft_samples - num_overlap_samples
-    spectrogram = gf.spectrogram(
-        tensor_strain, 
-        num_frame_samples=num_fft_samples, 
-        num_step_samples=num_step_samples, 
-        num_fft_samples=num_fft_samples
-    )
-    
-    # Convert the TF output to NumPy arrays for visualization
-    Sxx = spectrogram.numpy().T
+    plots = []
+    for curr_strain in strains:
+        # Compute the spectrogram using TensorFlow
+        tensor_strain = tf.convert_to_tensor(curr_strain, dtype=tf.float32)
+        
+        num_step_samples = num_fft_samples - num_overlap_samples
+        spectrogram = gf.spectrogram(
+            tensor_strain, 
+            num_frame_samples=num_fft_samples, 
+            num_step_samples=num_step_samples, 
+            num_fft_samples=num_fft_samples
+        )
+        
+        # Convert the TF output to NumPy arrays for visualization
+        Sxx = spectrogram.numpy().T
+        f = np.linspace(0, sample_rate_hertz / 2, num_fft_samples // 2 + 1)
+        t = np.arange(0, Sxx.shape[1]) * (num_step_samples / sample_rate_hertz)
+        Sxx_dB = Sxx[1:]  # Adjusted for dB if needed
 
-    # Frequency (since TensorFlow computes only half the FFT output, we need to 
-    # adapt the frequency axis accordingly)
-    f = np.linspace(0, sample_rate_hertz / 2, num_fft_samples // 2 + 1)
+        # Create Bokeh figure
+        p = figure(
+            x_axis_label='Time (seconds)',
+            y_axis_label='Frequency (Hz)',
+            y_axis_type="log",
+            height=height,
+            width=width
+        )
+        
+        # Create color mapper
+        mapper = LinearColorMapper(
+            palette="Plasma256", 
+            low=np.min(Sxx_dB), 
+            high=np.max(Sxx_dB)
+        )
 
-    # Time
-    t = np.arange(0, Sxx.shape[1]) * (num_step_samples / sample_rate_hertz)
+        # Plotting the spectrogram
+        p.image(image=[Sxx_dB], x=0, y=f[1], dw=t[-1], dh=f[-1], color_mapper=mapper)
 
-    # Convert to dB
-    #Sxx_dB = 10 * np.log10(Sxx + 1e-10)  # Adding a small number to avoid log of
-    # zero
-    Sxx_dB = Sxx
-    
-    f = f[1:]
-    Sxx_dB = Sxx_dB[1:]
-    
-    # Create Bokeh figure
-    p = figure(
-        x_axis_label='Time (seconds)',
-        y_axis_label='Frequency (Hz)',
-        y_axis_type="log",
-        height=height,
-        width=width
-    )
-    
-    # Create color mapper
-    mapper = LinearColorMapper(
-        palette="Plasma256", 
-        low=np.min(Sxx_dB), 
-        high=np.max(Sxx_dB)
-    )
+        # Add color bar
+        color_bar = ColorBar(color_mapper=mapper, location=(0, 0), ticker=LogTicker())
+        p.add_layout(color_bar, 'right')
 
-    # Plotting the spectrogram
-    p.image(image=[Sxx_dB], x=0, y=f[0], dw=t[-1], dh=f[-1], color_mapper=mapper)
+        plots.append(p)
 
-    # Add color bar
-    color_bar = ColorBar(color_mapper=mapper, location=(0, 0), ticker=LogTicker())
-    p.add_layout(color_bar, 'right')
-
-    return p
+    if len(plots) == 1:
+        return plots[0]
+    else:
+        return column(*plots)
 
 def generate_correlation_plot(
     correlation: np.ndarray,

@@ -629,7 +629,7 @@ class cuPhenomDGenerator(WaveformGenerator):
             return waveforms, parameters
     
 class IncoherentGenerator(WaveformGenerator):
-    component_generators : List(WaveformGenerator)
+    component_generators : List[WaveformGenerator]
     
     def __init__(self, component_generators):
         self.component_generators = component_generators
@@ -639,6 +639,15 @@ class IncoherentGenerator(WaveformGenerator):
         self.back_padding_duration_seconds = component_generators[0].back_padding_duration_seconds
         self.scale_factor = component_generators[0].scale_factor
         self.network = component_generators[0].network
+
+        if self.network.num_detectors != len(self.component_generators):
+            raise ValueError("When using component generators num ifos must equal num generators!")
+
+    def reseed(self, seed):
+        rng = default_rng(seed)
+        for generator in self.component_generators:
+            seed = rng.integers(1E10)
+            generator.reseed(seed)
     
     def generate(
         self,
