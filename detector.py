@@ -109,14 +109,21 @@ def get_antenna_pattern_(
     # Calculate dx and dy via tensordot, and immediately remove singleton 
     # dimensions and transpose them
     tensor_product_dx = tf.tensordot(response, x, axes=[[2], [2]])
-    dx = tf.transpose(tensor_product_dx[0, :, :, 0], perm=[2, 0, 1])
+    # Remove the first and last singleton dimensions
+    tensor_product_dx_squeezed = tf.squeeze(tensor_product_dx, axis=[0, -1])
+    # Apply transpose to get the shape (100000, 1, 3)
+    dx = tf.transpose(tensor_product_dx_squeezed, perm=[2, 0, 1])
 
     tensor_product_dy = tf.tensordot(response, y, axes=[[2], [2]])
-    dy = tf.transpose(tensor_product_dy[0, :, :, 0], perm=[2, 0, 1])
+     # Remove the first and last singleton dimensions
+    tensor_product_dy_squeezed = tf.squeeze(tensor_product_dy, axis=[0, -1])
+    # Apply transpose to get the shape (100000, 1, 3)
+    dy = tf.transpose(tensor_product_dy_squeezed, perm=[2, 0, 1])
 
     # Expand dimensions for x, y, dx, dy along axis 0
     x = tf.expand_dims(x, axis=0)
     y = tf.expand_dims(y, axis=0)
+
     dx = tf.expand_dims(dx, axis=0)
     dy = tf.expand_dims(dy, axis=0)
     

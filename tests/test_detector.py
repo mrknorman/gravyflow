@@ -1,13 +1,16 @@
 import os
 from typing import Optional, Dict
 from pathlib import Path
+import logging
 
 import pytest
+import h5py
 import numpy as np
 import tensorflow as tf
 from pycbc.detector import add_detector_on_earth, _ground_detectors, Detector
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
+from timeit import Timer
 
 import gravyflow as gf
 
@@ -34,14 +37,14 @@ def zombie_antenna_pattern(
 
         x = np.array([x0, x1, x2], dtype=object)
         dx = resp.dot(x)
-                
+
         y0 =  sinpsi * singha - cospsi * cosgha * sindec
         y1 =  sinpsi * cosgha + cospsi * singha * sindec
         y2 =  cospsi * cosdec
 
         y = np.array([y0, y1, y2], dtype=object)
         dy = resp.dot(y)
-        
+
         if hasattr(dx, 'shape'):
             fplus = (x * dx - y * dy).sum(axis=0).astype(ttype)
             fcross = (x * dy + y * dx).sum(axis=0).astype(ttype)
@@ -80,6 +83,42 @@ def test_detector():
             equal_nan=True, 
             err_msg="Tensorflow gf.Network construction does not equal pycbc method.", 
             verbose=True
+        )
+
+def test_response():
+
+    with gf.env():
+
+        test_detectors = [gf.IFO.L1, gf.IFO.H1, gf.IFO.V1]
+        # Create from Enum:
+        network = gf.Network(
+            test_detectors
+        )
+
+        tolerance : float = 0.01
+
+        l1 = Detector("L1")
+        np.testing.assert_allclose(
+            l1.response, 
+            network.response.numpy()[0], 
+            atol=tolerance, 
+            err_msg="L1 response check failed."
+        )
+
+        h1 = Detector("H1")
+        np.testing.assert_allclose(
+            h1.response, 
+            network.response.numpy()[1], 
+            atol=tolerance, 
+            err_msg="H1 response check failed."
+        )
+
+        v1 = Detector("V1")
+        np.testing.assert_allclose(
+            v1.response, 
+            network.response.numpy()[2], 
+            atol=tolerance, 
+            err_msg="V1 response check failed."
         )
 
 # Test for Antenna Pattern
@@ -134,7 +173,37 @@ def test_time_delay(
         np.testing.assert_allclose(delay[:, 0], delay[:, 1], atol=0.011)
         np.testing.assert_allclose(delay[:, 0], delay[:, 2], atol=0.032)
 
-def generate_and_save_plots(
+def save_and_compare_projected_injections(
+    projected_injections: np.ndarray, 
+    injections_file_path: Path,
+    tolerance: float = 1e-6
+):
+    """
+    Save and compare projected injections with previously saved injections.
+
+    Args:
+        projected_injections (np.ndarray): The projected injections data.
+        injections_file_path (Path): Path to the file where injections are saved.
+        tolerance (float): Tolerance level for comparison.
+    """
+
+    gf.ensure_directory_exists(injections_file_path.parent)
+
+    if injections_file_path.exists():
+        with h5py.File(injections_file_path, 'r') as hf:
+            previous_injections = hf['projected_injections'][:]
+            np.testing.assert_allclose(
+                previous_injections, 
+                projected_injections, 
+                atol=tolerance, 
+                err_msg="Projected injections consistency check failed."
+            )
+    else:
+        with h5py.File(injections_file_path, 'w') as hf:
+            hf.create_dataset('projected_injections', data=projected_injections)
+
+def _test_projection(
+        name : str,
         network : gf.Network, 
         output_directory_path : Path, 
         plot_file_name : str, 
@@ -159,6 +228,14 @@ def generate_and_save_plots(
         network = gf.Network([gf.IFO.L1])  # Adjust for single IFO
 
     projected_injections = network.project_wave(injections[0])
+
+    injections_file_path : Path = current_dir.parent / f"res/tests/projected_injections_{name}"
+
+    save_and_compare_projected_injections(
+        projected_injections.numpy(),
+        injections_file_path
+    )
+
     injection_one = projected_injections.numpy()[0]
 
     layout = [[gf.generate_strain_plot(
@@ -179,7 +256,8 @@ def test_project_wave(
     ):
 
     with gf.env():
-        generate_and_save_plots(
+        _test_projection(
+            "multi",
             network, 
             output_directory_path, 
             "projection_plots.html", 
@@ -194,7 +272,8 @@ def test_project_wave_single(
     ):
 
     with gf.env():
-        generate_and_save_plots(
+        _test_projection(
+            "single",
             network, 
             output_directory_path, 
             "projection_plots_single.html", 
@@ -202,11 +281,7 @@ def test_project_wave_single(
             should_plot=pytestconfig.getoption("plot")
         )
 
-
-
-
-
-def test_antenna_pattern(
+def _test_antenna_pattern(
     num_tests : int = int(1.0E5)
     ):
     
@@ -215,12 +290,12 @@ def test_antenna_pattern(
     
     with gf.env():
     
-        test_detectors = [gf.IFO.L1, gf.IFO.H1]
+        test_detectors = [gf.IFO.L1]
         # Create from Enum:
         network = gf.Network(
             test_detectors
         )
-        
+
         # Generating random values for our function
         right_ascension = tf.constant(
             np.random.uniform(0, 2 * np.pi, size=(num_tests,)), 
@@ -235,19 +310,21 @@ def test_antenna_pattern(
             dtype=tf.float32
         )
 
+        gps_reference = 0
+        d = Detector("L1")
+
         # Compute the output
         antenna_pattern = network.get_antenna_pattern(
-            right_ascension, 
+            d.gmst_estimate(gps_reference) - right_ascension.numpy(), 
             declination, 
             polarization
         )
 
-        f_plus = antenna_pattern[:,0]
-        f_cross = antenna_pattern[:,1]
+        f_plus = tf.squeeze(antenna_pattern[...,0])
+        f_cross = tf.squeeze(antenna_pattern[...,1])
 
-        d = Detector("L1") 
         f_plus_zomb, f_cross_zomb = zombie_antenna_pattern(
-            right_ascension.numpy(),
+            d.gmst_estimate(gps_reference) - right_ascension.numpy(),
             declination.numpy(), 
             polarization.numpy()
         )
@@ -256,9 +333,88 @@ def test_antenna_pattern(
             right_ascension.numpy(),
             declination.numpy(), 
             polarization.numpy(),
-            630763213
+            gps_reference
         )
         
+        np.testing.assert_allclose(
+            f_plus, 
+            f_plus_zomb,
+            atol=0.001, 
+            equal_nan=True, 
+            err_msg="Tensorflow antenna pattern does not equal zombie method.", 
+            verbose=True
+        )
+
+        np.testing.assert_allclose(
+            f_cross, 
+            f_cross_zomb,
+            atol=0.001, 
+            equal_nan=True, 
+            err_msg="Tensorflow antenna pattern does not equal zombie method.", 
+            verbose=True
+        )
+
+        np.testing.assert_allclose(
+            f_cross, 
+            f_cross_pycbc,
+            atol=0.001, 
+            equal_nan=True, 
+            err_msg="Tensorflow antenna pattern does not equal pycbc method.", 
+            verbose=True
+        )
+
+        np.testing.assert_allclose(
+            f_plus,
+            f_plus_pycbc,
+            atol=0.001, 
+            equal_nan=True, 
+            err_msg="Tensorflow antenna pattern does not equal pycbc method.", 
+            verbose=True
+        )
+
+def test_antenna_pattern(pytestconfig):
+
+    match pytestconfig.getoption("runsize"):
+        case "small":
+            num_tests = int(1E2)
+        case "normal":
+            num_tests = int(1E3)
+        case "large":
+            num_tests = int(1E4)
+        case _:
+            raise ValueError(f"Runsize {pytestconfig.runsize} not recognised!")
+    
+    _test_antenna_pattern(
+        num_tests
+    )
+
+def profile_atennnna_pattern():
+
+    with gf.env():
+    
+        test_detectors = [gf.IFO.L1]
+        # Create from Enum:
+        network = gf.Network(
+            test_detectors
+        )
+
+        # Generating random values for our function
+        right_ascension = tf.constant(
+            np.random.uniform(0, 2 * np.pi, size=(num_tests,)), 
+            dtype=tf.float32
+        )
+        declination = tf.constant(
+            np.random.uniform(-np.pi / 2, np.pi / 2, size=(num_tests,)), 
+            dtype=tf.float32
+        )
+        polarization = tf.constant(
+            np.random.uniform(0, 2 * np.pi, size=(num_tests,)), 
+            dtype=tf.float32
+        )
+
+        gps_reference = 0
+        d = Detector("L1")
+                
         # Measure the time for network.get_antenna_pattern
         timer = Timer(
             lambda: network.get_antenna_pattern(

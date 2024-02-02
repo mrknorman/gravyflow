@@ -618,28 +618,28 @@ def iterate_data(dataset_function, dataset_args: Dict, num_tests: int):
 
 def test_dataset_consistency_single_ifo_noise(pytestconfig : Dict):
     _test_dataset(
-        name="dataset_consistency_single",
+        name="consistency_single",
         waveform_type="noise",
         plot_examples=pytestconfig.getoption("plot")
     )
 
 def test_dataset_consistency_single_ifo_phenom(pytestconfig : Dict):
     _test_dataset(
-        name="dataset_consistency_single",
+        name="consistency_single",
         waveform_type="phenomd",
         plot_examples=pytestconfig.getoption("plot")
     )
 
 def test_dataset_consistency_single_ifo_wnb(pytestconfig : Dict):
     _test_dataset(
-        name="dataset_consistency_single",
+        name="consistency_single",
         waveform_type="wnb",
         plot_examples=pytestconfig.getoption("plot")
     )
 
 def test_dataset_consistency_multi_ifo_noise(pytestconfig : Dict):
     _test_dataset(
-        name="dataset_consistency_multi", 
+        name="consistency_multi", 
         waveform_type="noise",
         plot_examples=pytestconfig.getoption("plot"),
         ifos=[gf.IFO.L1, gf.IFO.H1]
@@ -647,14 +647,14 @@ def test_dataset_consistency_multi_ifo_noise(pytestconfig : Dict):
 
 def test_dataset_consistency_multi_ifo_phenom(pytestconfig : Dict):
     _test_dataset(
-        name="dataset_consistency_multi", 
+        name="consistency_multi", 
         waveform_type="phenomd",
         ifos=[gf.IFO.L1, gf.IFO.H1]
     )
 
 def test_dataset_consistency_multi_ifo_wnb(pytestconfig : Dict):
     _test_dataset(
-        name="dataset_consistency_multi", 
+        name="consistency_multi", 
         waveform_type="wnb",
         plot_examples=pytestconfig.getoption("plot"),
         ifos=[gf.IFO.L1, gf.IFO.H1]
@@ -662,7 +662,7 @@ def test_dataset_consistency_multi_ifo_wnb(pytestconfig : Dict):
 
 def test_dataset_consistency_multi_ifo_incoherent(pytestconfig : Dict):
     _test_dataset(
-        name="dataset_consistency_multi", 
+        name="consistency_multi", 
         waveform_type="incoherent",
         plot_examples=pytestconfig.getoption("plot"),
         ifos=[gf.IFO.L1, gf.IFO.H1]
@@ -684,63 +684,56 @@ def num_tests_from_config(pytestconfig : Dict):
 def test_dataset_iteration_single_ifo_noise(pytestconfig : Dict):
 
     _test_dataset_iteration(
-        name="dataset_iteration_single_ifo",
+        name="iteration_single_ifo",
         waveform_type="noise",
         num_tests=num_tests_from_config(pytestconfig),
-        plot_examples=pytestconfig.getoption("plot"),
         ifos=[gf.IFO.L1]
     )
 
 def test_dataset_iteration_single_ifo_phenomd(pytestconfig : Dict):
     _test_dataset_iteration(
-        name="dataset_iteration_single_ifo",
+        name="iteration_single_ifo",
         waveform_type="phenomd",
         num_tests=num_tests_from_config(pytestconfig),
-        plot_examples=pytestconfig.getoption("plot"),
         ifos=[gf.IFO.L1]
     )
 
 def test_dataset_iteration_single_ifo_wnb(pytestconfig : Dict):
     _test_dataset_iteration(
-        name="dataset_iteration_single_ifo",
+        name="iteration_single_ifo",
         waveform_type="wnb",
         num_tests=num_tests_from_config(pytestconfig),
-        plot_examples=pytestconfig.getoption("plot"),
         ifos=[gf.IFO.L1]
     )
 
 def test_dataset_iteration_multi_ifo_noise(pytestconfig : Dict):
     _test_dataset_iteration(
-        name="dataset_iteration_multi_ifo",
+        name="iteration_multi_ifo",
         waveform_type="noise",
         num_tests=num_tests_from_config(pytestconfig),
-        plot_examples=pytestconfig.getoption("plot"),
         ifos=[gf.IFO.L1, gf.IFO.H1]
     )
 
 def test_dataset_iteration_multi_ifo_phenomd(pytestconfig : Dict):
     _test_dataset_iteration(
-        name="dataset_iteration_multi_ifo",
+        name="iteration_multi_ifo",
         waveform_type="phenomd",
         num_tests=num_tests_from_config(pytestconfig),
-        plot_examples=pytestconfig.getoption("plot"),
         ifos=[gf.IFO.L1, gf.IFO.H1]
     )
 
 def test_dataset_iteration_multi_ifo_wnb(pytestconfig : Dict):
     _test_dataset_iteration(
-        name="dataset_iteration_multi_ifo",
+        name="iteration_multi_ifo",
         waveform_type="wnb",
         num_tests=num_tests_from_config(pytestconfig),
-        plot_examples=pytestconfig.getoption("plot"),
         ifos=[gf.IFO.L1, gf.IFO.H1]
     )
 
 def test_dataset_iteration_multi_ifo_incoherent(pytestconfig : Dict):
     _test_dataset_iteration(
-        name="dataset_iteration_multi_ifo",
+        name="iteration_multi_ifo",
         waveform_type="incoherent",
         num_tests=num_tests_from_config(pytestconfig),
-        plot_examples=pytestconfig.getoption("plot"),
         ifos=[gf.IFO.L1, gf.IFO.H1]
     )
