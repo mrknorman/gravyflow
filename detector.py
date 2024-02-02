@@ -347,8 +347,7 @@ class Network:
                 
                 for attribute in attributes:
                     attribute_list = [
-                        getattr(ifo.value, attribute) for ifo in parameters \
-                        if isinstance(ifo, IFO)]
+                        getattr(ifo.value, attribute) for ifo in parameters if isinstance(ifo, IFO)]
                     if len(attribute_list) != len(parameters):
                         raise ValueError(
                             "When initializing a network from a list, all "
@@ -400,8 +399,7 @@ class Network:
 
         for angle in [y_angle_radians, x_angle_radians]:
             a, b = tf.cos(2 * angle), tf.sin(2 * angle)
-
-            batch_size = tf.shape(a)[0]
+            
             response = tf.stack([
                 tf.stack([-a, b, tf.zeros_like(a)], axis=-1), 
                 tf.stack([b, a, tf.zeros_like(a)], axis=-1), 
@@ -506,8 +504,7 @@ class Network:
             config = json.load(file)
         
         # Replace placeholders
-        for value in config.values():
-            gf.replace_placeholders(value, replacements)
+        gf.replace_placeholders(config, replacements)
 
         arguments = {}
         if "num_detectors" in config:

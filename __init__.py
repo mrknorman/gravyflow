@@ -24,7 +24,7 @@ from .tensor_tools import (
 )
 from .environment import (setup_cuda, find_available_GPUs, get_tf_memory_usage, env, 
     get_memory_array, get_gpu_utilization_array)
-from .io import (
+from .io_tools import (
     open_hdf5_file, ensure_directory_exists, replace_placeholders,
     transform_string, snake_to_capitalized_spaces
 )
@@ -50,7 +50,7 @@ from .noise import NoiseType, NoiseObtainer
 from .injection import (
     ScalingOrdinality, ScalingType, ScalingTypes, ScalingMethod, ReturnVariables,
     WaveformGenerator, WaveformParameter, WaveformParameters, WNBGenerator, 
-    cuPhenomDGenerator, IncoherentGenerator, InjectionGenerator, 
+    cuPhenomDGenerator, IncoherentGenerator, InjectionGenerator,
     roll_vector_zero_padding, generate_mask, is_not_inherited, 
     batch_injection_parameters
 )

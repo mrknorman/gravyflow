@@ -2,7 +2,6 @@ from typing import Union
 from pathlib import Path
 
 import h5py
-import logging
 
 def replace_placeholders(
         input: dict, 
@@ -10,9 +9,7 @@ def replace_placeholders(
     ) -> None:
         
     """Replace placeholders in the config dictionary with actual values."""
-
-    element = None
-
+    
     if isinstance(input, dict):
         for key, value in input.items():
             if isinstance(value, list) or isinstance(value, dict):

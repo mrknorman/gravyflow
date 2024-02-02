@@ -112,12 +112,11 @@ def get_memory_array():
             universal_newlines=True
         )
     except subprocess.CalledProcessError as e:
-        print(
+        raise CalledProcessError(
             f"Unable to run NVIDIA-SMI. Please check your environment. Exiting!"
             " Error: {e.output}"
         )
-        return None
-
+    
     # Split the output into lines
     memory_array = output.split("\n")
     # Remove the last empty line if it exists
@@ -160,10 +159,10 @@ def get_gpu_utilization_array():
     return np.array(utilization_array, dtype=int)
 
 def find_available_GPUs(
-    min_memory_MB : int = None, 
-    max_utilization_percentage : float = 80,
-    max_needed : int = -1
-    ):
+    min_memory_MB: int = None, 
+    max_utilization_percentage: float = 80.0,
+    max_needed: int = -1
+):
     """
     Finds the available GPUs that have memory available more than min_memory.
 
@@ -171,36 +170,40 @@ def find_available_GPUs(
     ----------
     min_memory_MB : int
         The minimum free memory required.
+    max_utilization_percentage : float
+        The maximum utilization percentage allowed.
+    max_needed : int
+        The maximum number of GPUs needed.
 
     Returns
     -------
     available_gpus : str
-        The list of indices of available GPUs ins string form for easy digestion
-        by setup_cuda above.
+        The list of indices of available GPUs in string form for easy digestion
+        by setup_cuda above, sorted by most free memory to least.
     """
-    
-    memory_array = get_memory_array()
-    utilization_array = get_gpu_utilization_array()
+    memory_array = get_memory_array()  # Assume this function exists and returns GPU memory array
+    utilization_array = get_gpu_utilization_array()  # Assume this function exists and returns GPU utilization array
 
     if memory_array is None:
-        raise MemoryError("No GPUs with requested memory avalible!")
+        raise MemoryError("No GPUs with requested memory available!")
     if utilization_array is None:
-        raise MemoryError("No GPUs with requested utilization avalible!")
+        raise MemoryError("No GPUs with requested utilization available!")
 
-    # Find the indices of GPUs which have available memory more than 
-    # min_memory_MB and utalization less than max_utilization_percentage:
-    available_gpus = list(
-        set(
-            np.where(memory_array > min_memory_MB)[0].tolist()
-        ).intersection(
-            np.where(utilization_array < max_utilization_percentage)[0].tolist()
-        )
-    )
-    
-    if (max_needed != -1) and (max_needed < len(available_gpus)):
-        available_gpus = available_gpus[:-max_needed-1:-1]
-    
-    return ",".join(str(gpu) for gpu in available_gpus)
+    # Filter GPUs based on memory and utilization criteria
+    gpu_indices = np.arange(len(memory_array))
+    filtered_indices = [
+        i for i in gpu_indices
+        if memory_array[i] > min_memory_MB and utilization_array[i] < max_utilization_percentage
+    ]
+
+    # Sort filtered GPUs by available memory in descending order
+    sorted_gpus = sorted(filtered_indices, key=lambda i: memory_array[i], reverse=True)
+
+    # Limit the number of GPUs if max_needed is specified
+    if max_needed != -1:
+        sorted_gpus = sorted_gpus[:max_needed]
+
+    return ",".join(str(gpu) for gpu in sorted_gpus)
 
 def get_tf_memory_usage() -> int:
     """Get TensorFlow's current GPU memory usage for a specific device.
