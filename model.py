@@ -1701,7 +1701,7 @@ class Population:
                 restart_timeout_seconds=3600.0,
                 process_start_wait_seconds=1.0, 
                 management_tick_length_seconds=5.0,
-                max_num_concurent_processes=1,
+                max_num_concurent_processes=5,
                 log_directory_path = self.population_directory_path / f"generation_{self.generation}/logs/"
             )
 
@@ -1769,6 +1769,7 @@ class Population:
 
     def random_sapling(self):
         new_genome = deepcopy(self.default_genome)  
+        new_genome.reseed(self.rng.integers(1E10))
         new_genome.randomize()
 
         logging.info('Randomised new model.')

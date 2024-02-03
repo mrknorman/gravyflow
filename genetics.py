@@ -233,10 +233,6 @@ class ModelGenome:
         if seed is None:
             seed = gf.Defaults.seed
 
-        # Randomisation:
-        self.seed = seed
-        self.rng = default_rng(self.seed)
-        
         # Gene list:
         self.genes = [
             self.optimizer,
@@ -248,7 +244,15 @@ class ModelGenome:
             self.offsource_duration_seconds,
             self.sample_rate_hertz,
             self.num_layers
-         ] + self.layer_genomes + [gen["hp"] for gen in self.injection_generators.values()]
+        ] + self.layer_genomes + [gen["hp"] for gen in self.injection_generators.values()]
+
+        self.reseed(seed)
+
+    def reseed(self, seed): 
+
+        # Randomisation:
+        self.seed = seed
+        self.rng = default_rng(self.seed)
 
         for gene in self.genes:
             gene.reseed(self.rng.integers(1E10))
