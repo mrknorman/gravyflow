@@ -999,6 +999,20 @@ class Model:
                 metrics=[],
                 seed=seed
             )
+        elif load_genome:
+            genome = gf.ModelGenome.load(model_path / "genome")
+
+            model = cls.from_genome(
+                genome=genome, 
+                name=name,
+                input_configs=input_configs, 
+                output_config=output_config,
+                training_config=training_config,
+                dataset_args=dataset_args, 
+                model_path=model_path,
+                metrics=[],
+                seed=seed
+            )
         else:  
             blueprint_exists = False
             model = cls(
@@ -1020,9 +1034,6 @@ class Model:
                 logging.info(f"Loading model from {model_load_path}")
                 model.model = tf.keras.models.load_model(model_load_path)
                 model.loaded=True
-
-                if load_genome:
-                    model.genome = gf.ModelGenome.load(model_path / "genome")
 
                 return model
 
@@ -1534,9 +1545,16 @@ class Population:
         self, 
         num_population_members: int,
         default_genome: gf.ModelGenome,
-        population_directory_path : Path = Path("./population/"),
+        population_directory_path : Path = None,
         seed : int = None
     ):
+
+        if population_directory_path is None:
+            current_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            population_directory_path = "./population_{current_timestamp}"
+
+        self.repo = gf.get_current_repo()
+
         self.generation = 0
 
         self.num_population_members = num_population_members
@@ -1564,10 +1582,7 @@ class Population:
             pickle.dump(self, file)
 
     @classmethod
-    def load(cls, path = None):
-        if path is None:
-            path = Path("./population/") / "checkpoint.pkl"
-
+    def load(cls, path):
         if path.exists():
             with open(path, 'rb') as file:
                 return pickle.load(file)
@@ -1702,9 +1717,8 @@ class Population:
             logging.info(f"Training Generation: {self.generation}")
             self.train_generation()
 
-            self.nursary.fitnesses = load_and_calculate_fitness(
-                generation_index,
-                num_per_generation = self.num_population_members
+            self.nursary.fitnesses = self.load_and_calculate_fitness(
+                generation_index
             )
 
             logging.info(
@@ -1716,7 +1730,7 @@ class Population:
                 self.orchard.transfer(self.nursary, -1)
 
             for _ in range(self.num_population_members):
-                if Path(f"./population/model_{self.current_id}/genome").exists():
+                if self.population_directory_path / f"model_{self.current_id}/genome").exists():
                     self.load_model()
                 else:
                     self.germinate_sapling()
@@ -1753,6 +1767,46 @@ class Population:
 
         self.add_model(new_genome)    
 
+    def load_and_calculate_fitness(
+            self,
+            generation, 
+            scaling_threshold = 8
+        ):
+
+        fitnesses = []
+
+        directory_path = self.population_directory_path / f"/generation_{generation}/"
+        for entry in directory_path.iterdir():
+            if entry.name.startswith(f"model_"):
+                name = transform_string(entry.name)
+
+                try:
+                    history = gf.load_history(entry)
+                    validator = gf.validate.Validator.load(entry / "validation_data.h5")
+
+                    score_threshold = list(gf.validate.calculate_far_score_thresholds(
+                        validator.far_scores, 
+                        gf.Defaults.onsource_duration_seconds,
+                        [10E-4]
+                    ).values())[0][1]
+
+                    efficiency_data = validator.efficiency_data
+
+                    valid_scores = np.array([])
+                    for scaling, scores in zip(efficiency_data["scalings"], efficiency_data["scores"]):
+                        if scaling > scaling_threshold:
+                            valid_scores = np.append(valid_scores, scores.flatten())
+                    
+                    num_valid_scores_above = len(valid_scores[valid_scores > score_threshold])
+
+                    fitnesses.append(
+                        1.0 / (1.0 - (num_valid_scores_above/ len(valid_scores)) + np.min(history["val_loss"]) + 1E-8)
+                    )
+                except:
+                    fitnesses.append(0)
+        
+        return fitnesses
+
 def snake_case_to_capitalised_first_with_spaces(text):
     """
     Convert a string from snake_case to Capitalised First With Spaces format.
@@ -1764,44 +1818,4 @@ def snake_case_to_capitalised_first_with_spaces(text):
     
     # Capitalise the first letter of each word and join them with spaces
     return ' '.join(word.capitalize() for word in words)
-
-def load_and_calculate_fitness(
-        generation, 
-        num_per_generation = 100, 
-        scaling_threshold = 8
-    ):
-
-    fitnesses = []
-
-    directory_path = Path(f'./population/generation_{generation}/')
-    for entry in directory_path.iterdir():
-        if entry.name.startswith(f"model_"):
-            name = transform_string(entry.name)
-
-            history = gf.load_history(entry)
-            validator = gf.validate.Validator.load(entry / "validation_data.h5")
-
-            score_threshold = list(gf.validate.calculate_far_score_thresholds(
-                validator.far_scores, 
-                gf.Defaults.onsource_duration_seconds,
-                [10E-4]
-            ).values())[0][1]
-
-            efficiency_data = validator.efficiency_data
-
-            valid_scores = np.array([])
-            for scaling, scores in zip(efficiency_data["scalings"], efficiency_data["scores"]):
-                if scaling > scaling_threshold:
-                    valid_scores = np.append(valid_scores, scores.flatten())
-            
-            num_valid_scores_above = len(valid_scores[valid_scores > score_threshold])
-
-            if (num_valid_scores_above > 0):
-                fitnesses.append(
-                    1.0 / (1.0 - (num_valid_scores_above/ len(valid_scores)) + np.min(history["val_loss"]) + 1E-8)
-                )
-            else:
-                fitnesses.append(0)
-    
-    return fitnesses
 

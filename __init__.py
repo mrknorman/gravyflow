@@ -34,6 +34,7 @@ from .snr import snr, scale_to_snr
 from .wnb import wnb
 from .conditioning import spectrogram, spectrogram_shape
 from .genetics import HyperParameter, HyperInjectionGenerator, ModelGenome
+from .git import get_current_repo
 from .model import (
     BaseLayer, Reshape, DenseLayer, FlattenLayer, ConvLayer,
     PoolLayer, DropLayer, BatchNormLayer, WhitenLayer, WhitenPassLayer,
