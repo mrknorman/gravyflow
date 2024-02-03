@@ -26,7 +26,7 @@ from .environment import (setup_cuda, find_available_GPUs, get_tf_memory_usage, 
     get_memory_array, get_gpu_utilization_array)
 from .io_tools import (
     open_hdf5_file, ensure_directory_exists, replace_placeholders,
-    transform_string, snake_to_capitalized_spaces
+    transform_string, snake_to_capitalized_spaces, is_redirected
 )
 from .processes import Heart, HeartbeatCallback, Process, Manager
 from .psd import psd
@@ -38,7 +38,7 @@ from .git import get_current_repo
 from .model import (
     BaseLayer, Reshape, DenseLayer, FlattenLayer, ConvLayer,
     PoolLayer, DropLayer, BatchNormLayer, WhitenLayer, WhitenPassLayer,
-    Model, PopulationSector, Population, load_and_calculate_fitness
+    Model, PopulationSector, Population
 )
 from .whiten import whiten, Whiten, WhitenPass
 from .pearson import rolling_pearson

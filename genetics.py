@@ -63,6 +63,10 @@ class HyperParameter:
         self.seed = seed
         self.rng = default_rng(self.seed)
 
+        self.distribution.reseed(
+            self.rng.integers(1E10)
+        )
+
     def randomize(self):
         """
         Randomizes this hyperparameter based on its possible_values.
@@ -248,6 +252,10 @@ class ModelGenome:
 
         for gene in self.genes:
             gene.reseed(self.rng.integers(1E10))
+
+        for layer_genome in self.layer_genomes:
+            for possibility in layer_genome.distribution.possible_values:
+                possibility.reseed(self.rng.integers(1E10))
     
     def randomize(self):
         for gene in self.genes:

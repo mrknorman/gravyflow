@@ -264,13 +264,6 @@ def env(
     )
     
     return strategy.scope()
-    
-def is_redirected():
-    return (
-        not sys.stdin.isatty() or
-        not sys.stdout.isatty() or
-        not sys.stderr.isatty()
-    )
 
 def save_dict_to_hdf5(data_dict, filepath, force_overwrite=False):
 

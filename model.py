@@ -6,6 +6,7 @@ import os
 import logging
 import json
 import pickle
+import datetime
 
 import numpy as np
 from tqdm import tqdm
@@ -310,6 +311,12 @@ class BaseLayer:
     seed : int = None
     activation: Union[gf.HyperParameter, str] = None
     mutable_attributes: List = None
+
+    def reseed(self, seed):
+        
+        rng = default_rng(seed)
+        for attribute in self.mutable_attributes:
+            attribute.reseed(rng.integers(1E10))
     
     def randomize(self):
         """
@@ -1551,7 +1558,7 @@ class Population:
 
         if population_directory_path is None:
             current_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            population_directory_path = "./population_{current_timestamp}"
+            population_directory_path = Path(f"./population_{current_timestamp}")
 
         self.repo = gf.get_current_repo()
 
@@ -1730,7 +1737,7 @@ class Population:
                 self.orchard.transfer(self.nursary, -1)
 
             for _ in range(self.num_population_members):
-                if self.population_directory_path / f"model_{self.current_id}/genome").exists():
+                if self.population_directory_path / f"model_{self.current_id}/genome".exists():
                     self.load_model()
                 else:
                     self.germinate_sapling()

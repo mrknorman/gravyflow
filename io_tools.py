@@ -1,7 +1,15 @@
 from typing import Union
 from pathlib import Path
+import sys
 
 import h5py
+
+def is_redirected():
+    return (
+        not sys.stdin.isatty() or
+        not sys.stdout.isatty() or
+        not sys.stderr.isatty()
+    )
 
 def replace_placeholders(
         input: dict, 
