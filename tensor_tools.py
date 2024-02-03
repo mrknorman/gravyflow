@@ -67,7 +67,16 @@ class Distribution:
                     samples = [self.value] * num_samples
             
             case DistributionType.UNIFORM:
-                
+
+                # Check and adjust min and max values
+                if self.min_ is not None or self.max_ is not None:
+                    if self.min_ is None or self.max_ is None:
+                        raise ValueError("Both min and max must be provided if one is provided.")
+                    
+                    if self.min_ > self.max_:
+                        self.min_ = self.max_
+
+                                        
                 if self.min_ is None:
                      raise ValueError(
                         "No minumum value given in uniform distribution."
@@ -76,6 +85,8 @@ class Distribution:
                     raise ValueError(
                         "No maximum value given in uniform distribution."
                     )
+                elif self.min_ == self.max_:
+                    samples = [self.min_] * num_samples
                 else:                
                     samples = self.rng.uniform(
                             self.min_, 
@@ -84,7 +95,7 @@ class Distribution:
                         )
                     
             case DistributionType.NORMAL:
-                
+
                 if self.mean is None:
                     raise ValueError(
                         "No mean value given in normal distribution."
@@ -99,15 +110,26 @@ class Distribution:
                         self.min_ = float("-inf")
                     if self.max_ is None:
                         self.max_ = float("inf")
-                    
-                    samples = truncnorm.rvs(
-                            (self.min_ - self.mean) / self.std,
-                            (self.max_ - self.mean) / self.std,
-                            loc=self.mean,
-                            scale=self.std,
-                            size=num_samples,
-                            random_state=self.rng.integers(2**32 - 1)
-                        )
+                       
+                    # Check and adjust min and max values
+                    if self.min_ is not None or self.max_ is not None:
+                        if self.min_ is None or self.max_ is None:
+                            raise ValueError("Both min and max must be provided if one is provided.")
+                        
+                        if self.min_ > self.max_:
+                            self.min_ = self.max_
+
+                    if self.min_ == self.max_:
+                        samples = [self.min_] * num_samples
+                    else:
+                        samples = truncnorm.rvs(
+                                (self.min_ - self.mean) / self.std,
+                                (self.max_ - self.mean) / self.std,
+                                loc=self.mean,
+                                scale=self.std,
+                                size=num_samples,
+                                random_state=self.rng.integers(2**32 - 1)
+                            )
             case DistributionType.CHOICE:
                 if self.possible_values is None:
                     raise ValueError(

@@ -720,7 +720,7 @@ class Manager:
                         logging.error((
                             f"Process {process.name} at {process.id} "
                             f"failed with return code {retcode} : "
-                            f"{gf.explain_exit_code(retcode)}. "
+                            f"{explain_exit_code(retcode)}. "
                              "Attempting requeue."
                         ))
                         process.requeue()
@@ -728,7 +728,7 @@ class Manager:
                         logging.info((
                             f"Process {process.name} at {process.id} "
                             f"completed sucessfully with return code {retcode}: "
-                            f"{gf.explain_exit_code(retcode)}."
+                            f"{explain_exit_code(retcode)}."
                         ))
                         process.complete()
 

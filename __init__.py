@@ -26,9 +26,11 @@ from .environment import (setup_cuda, find_available_GPUs, get_tf_memory_usage, 
     get_memory_array, get_gpu_utilization_array)
 from .io_tools import (
     open_hdf5_file, ensure_directory_exists, replace_placeholders,
-    transform_string, snake_to_capitalized_spaces, is_redirected
+    transform_string, snake_to_capitalized_spaces, is_redirected, load_history,
+    CustomHistorySaver, EarlyStoppingWithLoad, PrintWaitCallback
 )
-from .processes import Heart, HeartbeatCallback, Process, Manager
+from .processes import (Heart, HeartbeatCallback, Process, Manager, 
+    explain_exit_code)
 from .psd import psd
 from .snr import snr, scale_to_snr
 from .wnb import wnb

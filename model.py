@@ -1685,8 +1685,8 @@ class Population:
             if not Path(model["path"] / "validation_plots.html").exists():
                 initial_processes.append(gf.Process(
                     f"python train.py --path {model['path']}", model["name"], 
-                    tensorflow_memory_mb=10000, 
-                    cuda_overhead_mb=6000, 
+                    tensorflow_memory_mb=6000, 
+                    cuda_overhead_mb=3000, 
                     initial_restart_count=1
                 ))
             else:
@@ -1707,6 +1707,7 @@ class Population:
 
             while manager:
                 manager()
+                manager.tabulate()
         else:
             logging.info(
                 f"Generation {self.generation} empty or completed. Skipping."
