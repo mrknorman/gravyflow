@@ -106,11 +106,15 @@ def calculate_efficiency_scores(
     combined_scores = None
     while combined_scores is None:
         try:
+            verbose : int= 1
+            if gf.is_redirected():
+                verbose : int = 2
+
             combined_scores = model.predict(
                 dataset, 
                 steps=num_batches, 
                 callbacks=callbacks,
-                verbose=1
+                verbose=verbose
             )
 
             try:
@@ -222,11 +226,15 @@ def calculate_far_scores(
     far_scores = None
     while far_scores is None:
         try:
+            verbose : int= 1
+            if gf.is_redirected():
+                verbose : int = 2
+
             far_scores = model.predict(
                 dataset, 
                 steps=num_batches, 
                 callbacks=callbacks,
-                verbose=2
+                verbose=verbose
             )
 
             try:
@@ -468,11 +476,15 @@ def calculate_roc(
     y_scores = None
     while y_scores is None:
         try:
+            verbose : int= 1
+            if gf.is_redirected():
+                verbose : int = 2
+
             y_scores = model.predict(
                 x_dataset, 
                 steps=num_batches, 
                 callbacks=callbacks,
-                verbose=2
+                verbose=verbose
             )
 
             try:
@@ -693,12 +705,16 @@ def calculate_tar_scores(
     tar_scores = None
     while tar_scores is None:
         try:
+            verbose : int= 1
+            if gf.is_redirected():
+                verbose : int = 2
+            
             tar_scores = model.predict(
                 dataset, 
                 batch_size=num_examples_per_batch,
                 callbacks=callbacks,
                 steps=num_batches, 
-                verbose=2
+                verbose=verbose
             )
 
             try:

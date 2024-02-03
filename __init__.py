@@ -27,7 +27,7 @@ from .environment import (setup_cuda, find_available_GPUs, get_tf_memory_usage, 
 from .io_tools import (
     open_hdf5_file, ensure_directory_exists, replace_placeholders,
     transform_string, snake_to_capitalized_spaces, is_redirected, load_history,
-    CustomHistorySaver, EarlyStoppingWithLoad, PrintWaitCallback
+    CustomHistorySaver, EarlyStoppingWithLoad, PrintWaitCallback, save_dict_to_hdf5
 )
 from .processes import (Heart, HeartbeatCallback, Process, Manager, 
     explain_exit_code)

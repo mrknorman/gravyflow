@@ -1565,7 +1565,7 @@ class Population:
         self.generation = 0
 
         self.num_population_members = num_population_members
-        self.population_directory_path = population_directory_path
+        self.population_directory_path = Path(population_directory_path)
         self.default_genome = default_genome
         self.current_id = 0
 
@@ -1702,12 +1702,13 @@ class Population:
                 process_start_wait_seconds=1.0, 
                 management_tick_length_seconds=5.0,
                 max_num_concurent_processes=5,
-                log_directory_path = self.population_directory_path / f"generation_{self.generation}/logs/"
+                log_directory_path = (
+                    self.population_directory_path / f"generation_{self.generation}/logs/"
+                )
             )
 
             while manager:
                 manager()
-                manager.tabulate()
         else:
             logging.info(
                 f"Generation {self.generation} empty or completed. Skipping."
@@ -1715,11 +1716,34 @@ class Population:
 
         self.generation += 1
 
+    def load_config(
+        self,
+        path : Path
+    ):
+        """Loads configuration parameters from a JSON file."""
+        try:
+            with open(path, 'r') as file:
+                return json.load(file)
+        except Exception as e:
+            logging.error(f"Failed to load configuration: {e}")
+            raise
+
     def train(
         self, 
         num_generations
     ):  
         current_dir = Path(__file__).resolve().parent.parent
+
+        email_config_path = Path("./gravyflow/alert_settings.json")
+        email_config = self.load_config(email_config_path)
+
+        gf.send_email(
+            f"Started optimising {self.population_directory_path}..", 
+            (f"Started optimization of {self.num_population_members} population members over {num_generations}"
+            " generations"), 
+            email_config['recipient_email'], 
+            Path(email_config['email_config_path'])
+        )
 
         for generation_index in range(self.generation, num_generations):
             logging.info(f"Training Generation: {self.generation}")
@@ -1734,11 +1758,18 @@ class Population:
                 self.nursary.fitnesses
             )
 
+            gf.send_email(
+                f"Generation {self.generation} completed.", 
+                f"Completed generation, current fitnesses {self.nursary.fitnesses}", 
+                email_config['recipient_email'], 
+                Path(email_config['email_config_path'])
+            )
+
             for _ in range(self.num_population_members):
                 self.orchard.transfer(self.nursary, -1)
 
             for _ in range(self.num_population_members):
-                if self.population_directory_path / f"model_{self.current_id}/genome".exists():
+                if (self.population_directory_path / f"model_{self.current_id}/genome").exists():
                     self.load_model()
                 else:
                     self.germinate_sapling()
@@ -1754,10 +1785,9 @@ class Population:
         parent_a = self.orchard.models[parent_a_index]
         parent_b = self.orchard.models[parent_b_index]
 
-        print(parent_a)
-
         #Crossover
         new_genome = deepcopy(parent_a["genome"])
+        new_genome.reseed(self.rng(1E10))
         new_genome.crossover(deepcopy(parent_b["genome"]))
 
         #Mutate
@@ -1784,10 +1814,12 @@ class Population:
 
         fitnesses = []
 
-        directory_path = self.population_directory_path / f"/generation_{generation}/"
+        self.population_directory_path = Path(self.population_directory_path)
+
+        directory_path = self.population_directory_path / f"generation_{generation}/"
         for entry in directory_path.iterdir():
             if entry.name.startswith(f"model_"):
-                name = transform_string(entry.name)
+                name = gf.transform_string(entry.name)
 
                 try:
                     history = gf.load_history(entry)
