@@ -263,58 +263,69 @@ def calculate_far_scores(
 
     return far_scores
 
+import numpy as np
+from typing import Dict, Tuple
+
 def calculate_far_score_thresholds(
-    far_scores: np.ndarray, 
+    true_negative_scores: np.ndarray, 
     onsource_duration_seconds: float,
     fars: np.ndarray
 ) -> Dict[float, Tuple[float, float]]:
-
     """
-    Calculate the score thresholds for False Alarm Rate (FAR).
+    Calculate the score thresholds for False Alarm Rate (FAR) using interpolation.
 
     Parameters
     ----------
-    far_scores : np.ndarray
-        The FAR scores calculated previously.
+    true_negative_scores : np.ndarray
+        The scores of the model when fed examples of noise only.
     onsource_duration_seconds : float
         The duration of onsource in seconds.
-    model_data : np.ndarray
-        The data used to train the model.
     fars : np.ndarray
         Array of false alarm rates.
 
     Returns
     -------
     score_thresholds : Dict[float, Tuple[float, float]]
-        Dictionary of false alarm rates and their corresponding score 
-        thresholds.
-
+        Dictionary of false alarm rates and their corresponding interpolated 
+        score thresholds.
     """
-    # Sorting the FAR scores in descending order
-    far_scores = np.sort(far_scores)[::-1]
+    # If all scores are 1 (worst case scenario)
+    if np.all(true_negative_scores == 1.0):
+        return {far: (far, 1.1) for far in fars}
 
-    # Calculating the total number of seconds
-    total_num_seconds = len(far_scores) * onsource_duration_seconds
+    # Sorting the scores in descending order
+    sorted_scores = np.sort(true_negative_scores)
 
-    # Creating the far axis
-    far_axis = (np.arange(total_num_seconds) + 1) / total_num_seconds
-    
-    # Find the indexes of the closest FAR values in the far_axis
-    idxs = np.abs(np.subtract.outer(far_axis, fars)).argmin(axis=0)
-    # Find the indexes of the closest scores in the far_scores
-    idxs = np.abs(
-        np.subtract.outer(far_scores, far_scores[idxs])
-    ).argmin(axis=0)
+    # Calculate the FAR for each threshold
+    n_scores = len(sorted_scores)
+    cumulative_far = 1 - np.arange(1, n_scores + 1) / (n_scores * onsource_duration_seconds)
 
-    # Build the score thresholds dictionary
-    score_thresholds = {
-        far: (far, far_scores[idx]) for far, idx in zip(fars, idxs)
-    }
-    
-    # If any score is 1, set the corresponding threshold to 1.1
-    for far, (_, score) in score_thresholds.items():
-        if score == 1:
+    # Minimum and maximum achievable FAR
+    min_far = cumulative_far[0]
+    max_far = cumulative_far[-1]
+
+    # Build the score thresholds dictionary with interpolation
+    score_thresholds = {}
+    for far in fars:
+        if far < min_far:
+            # Set to 1.1 if the desired FAR is lower than the minimum achievable FAR
             score_thresholds[far] = (far, 1.1)
+        elif far > max_far:
+            # Set to 1.1 if the desired FAR is higher than the maximum achievable FAR
+            score_thresholds[far] = (far, sorted_scores[-1])
+        else:
+            # Interpolating the score threshold for the given FAR
+            idx = np.searchsorted(cumulative_far, far, side="left")
+            if idx == 0:
+                interpolated_score = sorted_scores[0]
+            else:
+                # Linear interpolation
+                interpolated_score = np.interp(
+                    far, 
+                    cumulative_far, 
+                    sorted_scores
+                )
+            score_thresholds[far] = (far, interpolated_score)
 
     return score_thresholds
 
@@ -987,13 +998,12 @@ def generate_far_curves(
                 
         far_scores = np.sort(far_scores)[::-1]
         total_num_seconds = len(far_scores) * validator.input_duration_seconds
-        far_axis = (
-                np.arange(0, total_num_seconds, step=validator.input_duration_seconds, dtype=float) + 1
-            ) / total_num_seconds
+        far_axis = np.arange(1, len(far_scores) + 1, dtype=float) / total_num_seconds
         
-        downsampled_far_scores, downsampled_far_axis = downsample_data(
-            far_scores, far_axis, max_num_points
-        )
+        downsampled_far_scores, downsampled_far_axis = far_scores, far_axis
+        # downsample_data(
+        #    far_scores, far_axis, max_num_points
+        #)
         
         source = ColumnDataSource(
             data=dict(
@@ -1110,12 +1120,11 @@ def generate_roc_curves(
     
     # Dropdown to select the test population
     populations = list(validators[0].roc_data.keys())
-    select = \
-        Select(
-            title="Test Population:", 
-            value=initial_population_key, 
-            options=populations
-        )
+    select = Select(
+        title="Test Population:", 
+        value=initial_population_key, 
+        options=populations
+    )
     select.background = 'white'
 
     # JS code to update the curves when the test population changes
