@@ -4,6 +4,7 @@ import sys
 import os
 
 import numpy as np
+import tensorflow as tf
 from tensorflow.python.framework.ops import EagerTensor
 from tensorflow.keras.callbacks import Callback
 
@@ -189,7 +190,7 @@ class EarlyStoppingWithLoad(Callback):
         verbose=0,
         mode="auto",
         baseline=None,
-        restore_best_weights=False,
+        restore_best_weights=True,
         start_from_epoch=0,
     ):
         super().__init__()

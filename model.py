@@ -1685,8 +1685,8 @@ class Population:
             if not Path(model["path"] / "validation_plots.html").exists():
                 initial_processes.append(gf.Process(
                     f"python train.py --path {model['path']}", model["name"], 
-                    tensorflow_memory_mb=6000, 
-                    cuda_overhead_mb=3000, 
+                    tensorflow_memory_mb=5000, 
+                    cuda_overhead_mb=2000, 
                     initial_restart_count=1
                 ))
             else:
@@ -1699,9 +1699,9 @@ class Population:
                 initial_processes,
                 max_restarts=20,
                 restart_timeout_seconds=3600.0,
-                process_start_wait_seconds=1.0, 
+                process_start_wait_seconds=1.0,
                 management_tick_length_seconds=5.0,
-                max_num_concurent_processes=5,
+                max_num_concurent_processes=10,
                 log_directory_path = (
                     self.population_directory_path / f"generation_{self.generation}/logs/"
                 )
