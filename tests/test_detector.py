@@ -211,9 +211,8 @@ def _test_projection(
         should_plot : bool = False
     ):
 
-    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
     injection_directory_path = Path(
-        current_dir / "example_injection_parameters"
+        gf.tests.PATH / "example_injection_parameters"
     )
 
     phenom_d_generator = gf.WaveformGenerator.load(
@@ -229,7 +228,9 @@ def _test_projection(
 
     projected_injections = network.project_wave(injections[0])
 
-    injections_file_path : Path = current_dir.parent / f"res/tests/projected_injections_{name}"
+    injections_file_path : Path = (
+        gf.PATH / f"res/tests/projected_injections_{name}.hdf5"
+    )
 
     save_and_compare_projected_injections(
         projected_injections.numpy(),
@@ -374,18 +375,8 @@ def _test_antenna_pattern(
 
 def test_antenna_pattern(pytestconfig):
 
-    match pytestconfig.getoption("runsize"):
-        case "small":
-            num_tests = int(1E2)
-        case "normal":
-            num_tests = int(1E3)
-        case "large":
-            num_tests = int(1E4)
-        case _:
-            raise ValueError(f"Runsize {pytestconfig.runsize} not recognised!")
-    
     _test_antenna_pattern(
-        num_tests
+        num_tests=gf.tests.num_tests_from_config(pytestconfig)
     )
 
 def profile_atennnna_pattern():

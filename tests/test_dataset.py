@@ -41,25 +41,39 @@ def validate_dataset_arguments(
         TypeError: If any argument does not match its expected type.
     """
     if not isinstance(name, str) and name is not None:
-        raise TypeError(f"Expected 'name' to be of type 'str', got {type(name)}")
+        raise TypeError(
+            f"Expected 'name' to be of type 'str', got {type(name)}"
+        )
 
     if not isinstance(waveform_type, str) and name is not None:
-        raise TypeError(f"Expected 'signal_tyoe' to be of type 'str', got {type(name)}")
+        raise TypeError(
+            f"Expected 'signal_tyoe' to be of type 'str', got {type(name)}"
+        )
 
     if not isinstance(plot_examples, bool) and plot_examples is not None:
-        raise TypeError(f"Expected 'plot_examples' to be of type 'bool', got {type(plot_examples)}")
+        raise TypeError(
+            f"Expected 'plot_examples' to be of type 'bool', got {type(plot_examples)}"
+        )
 
     if not isinstance(num_tests, int) and num_tests is not None:
-        raise TypeError(f"Expected 'num_tests' to be of type 'int', got {type(num_tests)}")
+        raise TypeError(
+            f"Expected 'num_tests' to be of type 'int', got {type(num_tests)}"
+        )
 
     if not isinstance(output_directory_path, Path) and output_directory_path is not None:
-        raise TypeError(f"Expected 'output_directory_path' to be of type 'Path', got {type(output_directory_path)}")
+        raise TypeError(
+            f"Expected 'output_directory_path' to be of type 'Path', got {type(output_directory_path)}"
+        )
 
     if ifos is not None:
         if not isinstance(ifos, list):
-            raise TypeError(f"Expected 'ifos' to be of type 'list', got {type(ifos)}")
+            raise TypeError(
+                f"Expected 'ifos' to be of type 'list', got {type(ifos)}"
+            )
         if not all(isinstance(ifo, gf.IFO) for ifo in ifos):
-            raise TypeError("All elements in 'ifos' should be of type 'gf.IFO'")
+            raise TypeError(
+                "All elements in 'ifos' should be of type 'gf.IFO'"
+            )
 
 def _test_dataset(
         name: str,
@@ -98,7 +112,7 @@ def _test_dataset(
 
     logging.info(f"Running test: {name}")
     with gf.env():
-        current_dir, injection_directory_path, parameters_file_path = setup_paths(name)
+        injection_directory_path, parameters_file_path = setup_paths(name)
         scaling_method = initialize_scaling_method()
         waveform_generator = get_waveform_generator(
             waveform_type,
@@ -112,7 +126,7 @@ def _test_dataset(
         )
         input_dict, _ = next(iter(dataset))
         current_parameters = extract_parameters(waveform_type, input_dict)
-        compare_and_save_parameters(
+        gf.tests.compare_and_save_parameters(
             current_parameters, parameters_file_path
         )
         if plot_examples:
@@ -129,12 +143,11 @@ def setup_paths(name: str) -> Tuple[Path, Path, Path]:
         Tuple[Path, Path, Path]: Current directory, injection directory, and 
         parameters file path.
     """
-    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-    injection_directory_path = current_dir / "example_injection_parameters"
-    parameters_file_path = current_dir.parent / f"res/tests/dataset_{name}.hdf5"
+    injection_directory_path = gf.tests.PATH / "example_injection_parameters"
+    parameters_file_path = gf.PATH / f"res/tests/dataset_{name}.hdf5"
     gf.ensure_directory_exists(parameters_file_path.parent)
     gf.ensure_directory_exists(injection_directory_path)
-    return current_dir, injection_directory_path, parameters_file_path
+    return injection_directory_path, parameters_file_path
 
 def initialize_scaling_method() -> gf.ScalingMethod:
 
@@ -432,33 +445,6 @@ def extract_parameters(
 
     return return_dict
 
-def compare_and_save_parameters(
-    current_parameters: Dict[str, np.ndarray], 
-    parameters_file_path: Path
-):
-    """
-    Compare current parameters with previously saved parameters and save them if not present.
-
-    Args:
-        current_parameters (Dict[str, np.ndarray]): The current parameters.
-        parameters_file_path (Path): Path to the parameters file.
-    """
-    tolerance : float = 1e-6  # Set an appropriate tolerance level
-    if parameters_file_path.exists():
-        with h5py.File(parameters_file_path, 'r') as hf:
-            for key in current_parameters:
-                previous_data = hf[key][:]
-                np.testing.assert_allclose(
-                    previous_data, 
-                    current_parameters[key], 
-                    atol=tolerance, 
-                    err_msg=f"Parameter consistency check failed for {key}."
-                )
-    else:
-        with h5py.File(parameters_file_path, 'w') as hf:
-            for key, data in current_parameters.items():
-                hf.create_dataset(key, data=data)
-
 def plot_dataset_examples(
     waveform_type: str,
     current_parameters: Dict[str, np.ndarray],
@@ -557,7 +543,7 @@ def _test_dataset_iteration(
     
     logging.info(f"Running test: {name}")
     with gf.env():
-        current_dir, injection_directory_path, parameters_file_path = setup_paths(name)
+        injection_directory_path, parameters_file_path = setup_paths(name)
         scaling_method = initialize_scaling_method()
         waveform_generator = get_waveform_generator(
             waveform_type, injection_directory_path, scaling_method, ifos
@@ -668,25 +654,12 @@ def test_dataset_consistency_multi_ifo_incoherent(pytestconfig : Dict):
         ifos=[gf.IFO.L1, gf.IFO.H1]
     )
 
-def num_tests_from_config(pytestconfig : Dict):
-    match pytestconfig.getoption("runsize"):
-        case "small":
-            num_tests = int(1E2)
-        case "normal":
-            num_tests = int(1E3)
-        case "large":
-            num_tests = int(1E4)
-        case _:
-            raise ValueError(f"Runsize {pytestconfig.runsize} not recognised!")
-
-    return num_tests
-
 def test_dataset_iteration_single_ifo_noise(pytestconfig : Dict):
 
     _test_dataset_iteration(
         name="iteration_single_ifo",
         waveform_type="noise",
-        num_tests=num_tests_from_config(pytestconfig),
+        num_tests=gf.tests.num_tests_from_config(pytestconfig),
         ifos=[gf.IFO.L1]
     )
 
@@ -694,7 +667,7 @@ def test_dataset_iteration_single_ifo_phenomd(pytestconfig : Dict):
     _test_dataset_iteration(
         name="iteration_single_ifo",
         waveform_type="phenomd",
-        num_tests=num_tests_from_config(pytestconfig),
+        num_tests=gf.tests.num_tests_from_config(pytestconfig),
         ifos=[gf.IFO.L1]
     )
 
@@ -702,7 +675,7 @@ def test_dataset_iteration_single_ifo_wnb(pytestconfig : Dict):
     _test_dataset_iteration(
         name="iteration_single_ifo",
         waveform_type="wnb",
-        num_tests=num_tests_from_config(pytestconfig),
+        num_tests=gf.tests.num_tests_from_config(pytestconfig),
         ifos=[gf.IFO.L1]
     )
 
@@ -710,7 +683,7 @@ def test_dataset_iteration_multi_ifo_noise(pytestconfig : Dict):
     _test_dataset_iteration(
         name="iteration_multi_ifo",
         waveform_type="noise",
-        num_tests=num_tests_from_config(pytestconfig),
+        num_tests=gf.tests.num_tests_from_config(pytestconfig),
         ifos=[gf.IFO.L1, gf.IFO.H1]
     )
 
@@ -718,7 +691,7 @@ def test_dataset_iteration_multi_ifo_phenomd(pytestconfig : Dict):
     _test_dataset_iteration(
         name="iteration_multi_ifo",
         waveform_type="phenomd",
-        num_tests=num_tests_from_config(pytestconfig),
+        num_tests=gf.tests.num_tests_from_config(pytestconfig),
         ifos=[gf.IFO.L1, gf.IFO.H1]
     )
 
@@ -726,7 +699,7 @@ def test_dataset_iteration_multi_ifo_wnb(pytestconfig : Dict):
     _test_dataset_iteration(
         name="iteration_multi_ifo",
         waveform_type="wnb",
-        num_tests=num_tests_from_config(pytestconfig),
+        num_tests=gf.tests.num_tests_from_config(pytestconfig),
         ifos=[gf.IFO.L1, gf.IFO.H1]
     )
 
@@ -734,6 +707,6 @@ def test_dataset_iteration_multi_ifo_incoherent(pytestconfig : Dict):
     _test_dataset_iteration(
         name="iteration_multi_ifo",
         waveform_type="incoherent",
-        num_tests=num_tests_from_config(pytestconfig),
+        num_tests=gf.tests.num_tests_from_config(pytestconfig),
         ifos=[gf.IFO.L1, gf.IFO.H1]
     )

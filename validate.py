@@ -312,7 +312,7 @@ def calculate_far_score_thresholds(
             score_thresholds[far] = (far, 1.1)
         elif far > max_far:
             # Set to 1.1 if the desired FAR is higher than the maximum achievable FAR
-            score_thresholds[far] = (far, sorted_scores[-1])
+            score_thresholds[far] = (far, sorted_scores[0])
         else:
             # Interpolating the score threshold for the given FAR
             idx = np.searchsorted(cumulative_far, far, side="left")

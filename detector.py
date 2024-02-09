@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Union, List, Dict, Tuple
+from typing import Union, List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from enum import Enum
 import json
@@ -9,6 +9,7 @@ import logging
 import tensorflow as tf
 import numpy as np
 from astropy import coordinates, units
+from numpy.random import default_rng  
 
 import gravyflow as gf
 
@@ -148,6 +149,58 @@ def get_antenna_pattern_(
     return antenna_pattern
 
 @tf.function(jit_compile=True)
+def generate_direction_vectors(
+        num_injections: int, 
+        seed_tensor: Tuple[int, int],
+        right_ascension: Optional[tf.Tensor] = None,
+        declination: Optional[tf.Tensor] = None
+    ) -> Tuple[tf.Tensor, tf.Tensor]:
+    """
+    Generate random direction vectors uniformly distributed over the sphere.
+
+    Parameters
+    ----------
+    num_injections : int
+        The number of direction vectors to generate.
+    seed : Tuple[int, int]
+        A tuple used for random number generation to ensure reproducibility.
+    right_ascension : Optional[tf.Tensor]
+        Pre-defined right ascension values or None.
+    declination : Optional[tf.Tensor]
+        Pre-defined declination values or None.
+
+    Returns
+    -------
+    Tuple[tf.Tensor, tf.Tensor]
+        The right ascension and declination tensors.
+
+    """
+    PI = tf.constant(3.14159, dtype=tf.float32)
+
+    # Right Ascension
+    if right_ascension is None:
+        right_ascension = tf.random.stateless_uniform(
+            seed=seed_tensor,
+            shape=[num_injections], 
+            minval=0.0, 
+            maxval=2.0 * PI, 
+            dtype=tf.float32
+        )
+
+    # Declination
+    if declination is None:
+        sin_declination = tf.random.stateless_uniform(
+            seed=seed_tensor+1,
+            shape=[num_injections], 
+            minval=-1.0, 
+            maxval=1.0, 
+            dtype=tf.float32
+        )
+        declination = tf.asin(sin_declination)
+
+    return right_ascension, declination
+
+@tf.function(jit_compile=True)
 def project_wave_(
     seed,
     strain : tf.Tensor,
@@ -160,9 +213,9 @@ def project_wave_(
     y_response : tf.Tensor,
     response : tf.Tensor,
     location : tf.Tensor,
-    right_ascension: tf.Tensor = None,
-    declination: tf.Tensor = None,
-    polarization: tf.Tensor = None, 
+    right_ascension: Optional[tf.Tensor] = None,
+    declination: Optional[tf.Tensor] = None,
+    polarization: Optional[tf.Tensor] = None
 ):
 
     # Ensure the seed is of the correct shape [2] and dtype int32
@@ -171,23 +224,12 @@ def project_wave_(
     num_injections = tf.shape(strain)[0]
     PI = tf.constant(3.14159, dtype=tf.float32)
     
-    if right_ascension is None:
-        right_ascension = tf.random.stateless_uniform(
-            seed=seed_tensor,
-            shape=[num_injections], 
-            minval=0.0, 
-            maxval=2.0 * PI, 
-            dtype=tf.float32
-        )
-
-    if declination is None:
-        declination = tf.random.stateless_uniform(
-            seed=seed_tensor+1,
-            shape=[num_injections], 
-            minval=-PI / 2.0, 
-            maxval=PI / 2.0, 
-            dtype=tf.float32
-        )
+    right_ascension, declination = generate_direction_vectors(
+        num_injections, 
+        seed_tensor,
+        right_ascension,
+        declination
+    )
 
     if polarization is None:
         polarization = tf.random.stateless_uniform(
@@ -292,9 +334,15 @@ class IFO(Enum):
 
 class Network:
     def __init__ (
-        self,
-        parameters : Union[List[IFO], Dict]
+            self,
+            parameters : Union[List[IFO], Dict],
+            seed : Optional[int] = None
         ):
+
+        if seed is None:
+            seed = gf.Defaults.seed
+
+        self.rng = default_rng(seed)
         
         arguments = {}
         match parameters:
@@ -592,11 +640,10 @@ class Network:
         self,
         strain : tf.Tensor,
         sample_rate_hertz : float = None,
-        right_ascension: Union[tf.Tensor, List[float], float] = None,
-        declination: Union[tf.Tensor, List[float], float]  = None,
-        polarization: Union[tf.Tensor, List[float], float]  = None
+        right_ascension: Optional[Union[tf.Tensor, List[float], float]] = None,
+        declination: Optional[Union[tf.Tensor, List[float], float]]  = None,
+        polarization: Optional[Union[tf.Tensor, List[float], float]]  = None
     ):
-        
         if sample_rate_hertz is None:
             sample_rate_hertz = gf.Defaults.sample_rate_hertz
 
@@ -612,7 +659,7 @@ class Network:
         )
         
         return project_wave_(
-            np.random.randint(1E10, size=2),
+            self.rng.integers(1E10, size=2),
             strain,
             sample_rate_hertz,
             self.x_vector,
