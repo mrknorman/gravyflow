@@ -272,7 +272,8 @@ def calculate_far_score_thresholds(
     fars: np.ndarray
 ) -> Dict[float, Tuple[float, float]]:
     """
-    Calculate the score thresholds for False Alarm Rate (FAR) using interpolation.
+    Calculate the score thresholds for False Alarm Rate (FAR) using interpolation,
+    with true_negative_scores sorted in ascending order for compatibility with np.searchsorted.
 
     Parameters
     ----------
@@ -289,42 +290,29 @@ def calculate_far_score_thresholds(
         Dictionary of false alarm rates and their corresponding interpolated 
         score thresholds.
     """
-    # If all scores are 1 (worst case scenario)
-    if np.all(true_negative_scores == 1.0):
-        return {far: (far, 1.1) for far in fars}
+    # Ensure true_negative_scores is in ascending order for correct interpolation
+    sorted_scores = np.sort(true_negative_scores)[::-1]
 
-    # Sorting the scores in descending order
-    sorted_scores = np.sort(true_negative_scores)
-
-    # Calculate the FAR for each threshold
+    # Calculate the FAR for each threshold, directly reflecting the sorted order
     n_scores = len(sorted_scores)
-    cumulative_far = 1 - np.arange(1, n_scores + 1) / (n_scores * onsource_duration_seconds)
+    cumulative_far = np.arange(1, n_scores + 1) / (n_scores * onsource_duration_seconds)
 
-    # Minimum and maximum achievable FAR
-    min_far = cumulative_far[0]
-    max_far = cumulative_far[-1]
+    # Adjusting min_far and max_far based on the sorted order of scores and FAR calculation
+    min_far = cumulative_far[0]  # Corresponds to the highest score due to ascending order
+    max_far = cumulative_far[-1]  # Corresponds to the lowest score
 
     # Build the score thresholds dictionary with interpolation
     score_thresholds = {}
     for far in fars:
-        if far < min_far:
-            # Set to 1.1 if the desired FAR is lower than the minimum achievable FAR
-            score_thresholds[far] = (far, 1.1)
-        elif far > max_far:
+        if far > max_far:
             # Set to 1.1 if the desired FAR is higher than the maximum achievable FAR
-            score_thresholds[far] = (far, sorted_scores[0])
+            score_thresholds[far] = (far, cumulative_far[-1])
+        elif far < min_far:
+            # Also set to 1.1 if the desired FAR is lower than the minimum achievable FAR
+            score_thresholds[far] = (far, 1.1)
         else:
             # Interpolating the score threshold for the given FAR
-            idx = np.searchsorted(cumulative_far, far, side="left")
-            if idx == 0:
-                interpolated_score = sorted_scores[0]
-            else:
-                # Linear interpolation
-                interpolated_score = np.interp(
-                    far, 
-                    cumulative_far, 
-                    sorted_scores
-                )
+            interpolated_score = np.interp(far, cumulative_far, sorted_scores, right=1.1)
             score_thresholds[far] = (far, interpolated_score)
 
     return score_thresholds
