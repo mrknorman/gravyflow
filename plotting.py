@@ -103,7 +103,7 @@ def generate_strain_plot(
 
     if sample_rate_hertz is None:
         sample_rate_hertz = gf.Defaults.sample_rate_hertz
-
+    
     duration_seconds = next(
             iter(strain.values()), 'default'
         ).shape[-1] / sample_rate_hertz

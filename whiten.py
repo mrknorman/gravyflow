@@ -367,8 +367,8 @@ def whiten(
     timeseries: tf.Tensor, 
     background: tf.Tensor,
     sample_rate_hertz: float, 
-    fft_duration_seconds: int = 4, 
-    overlap_duration_seconds: int = 2,
+    fft_duration_seconds: float = 2.0, 
+    overlap_duration_seconds: float = 1.0,
     highpass_hertz: float = None,
     detrend: str ='constant',
     filter_duration_seconds: float = 2.0,
@@ -441,8 +441,7 @@ def whiten(
     fsamples = tf.range(0, timeseries.shape[-1]//2+1, dtype=tf.float32) * df
     freqs = tf.cast(freqs, tf.float32)
     
-    asd = \
-        tfp.math.interp_regular_1d_grid(
+    asd = tfp.math.interp_regular_1d_grid(
             fsamples, 
             freqs[0], 
             freqs[-1], 

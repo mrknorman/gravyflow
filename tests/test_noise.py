@@ -200,7 +200,6 @@ def _test_noise_shape(
                 onsource_shape,
                 err_msg="Onsource shape missmatch!"
             )
-
             np.testing.assert_equal(
                 offsource.shape,
                 offsource_shape,

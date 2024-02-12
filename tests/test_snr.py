@@ -1,11 +1,13 @@
 #Built-in imports
 from pathlib import Path
+from typing import Dict
 import logging
 
 #Library imports
 import tensorflow as tf
 import numpy as np
 from scipy.signal import welch
+from gwpy.frequencyseries import FrequencySeries
 from gwpy.timeseries import TimeSeries
 from bokeh.plotting import figure, output_file, save, show
 from bokeh.palettes import Bright
@@ -14,6 +16,51 @@ from bokeh.models import ColumnDataSource, HoverTool, Legend
 
 # Local imports:
 import gravyflow as gf
+
+def plot_whitened_strain_examples(
+        whitening_results : Dict,
+        output_directory_path : Path
+    ):
+
+    layout = [
+        [
+            gf.generate_strain_plot(
+                {
+                    "Whitened (tf) Onsouce + Injection": whitening_results["onsource_plus_injection"]["tensorflow"],
+                    "Whitened (tf) Injection" : whitening_results["scaled_injection"]["tensorflow"],
+                    "Injection": scaled_injection
+                },
+                title="cuPhenomD injection example tf whitening",
+            ), 
+            gf.generate_spectrogram(
+                whitening_results["onsource_plus_injection"]["tensorflow"]
+            )
+        ],
+        [
+            gf.generate_strain_plot(
+                {
+                    "Whitened (gwpy) Onsouce + Injection": whitening_results["onsource_plus_injection"]["gwpy"],
+                    "Whitened (gwpy) Injection" : whitening_results["scaled_injection"]["gwpy"],
+                    "Injection": scaled_injection
+                },
+                title=f"cuPhenomD injection example gwpy whitening",
+            ), 
+            gf.generate_spectrogram(
+                whitening_results["onsource_plus_injection"]["gwpy"]
+            )
+        ]
+    ]
+
+    # Ensure output directory exists
+    gf.ensure_directory_exists(output_directory_path)
+    
+    # Define an output path for the dashboard
+    output_file(output_directory_path / "whitening_test_plots.html")
+
+    # Arrange the plots in a grid. 
+    grid = gridplot(layout)
+        
+    save(grid)
     
 def plot_psd(
         frequencies, 
@@ -71,46 +118,51 @@ def plot_psd(
     
 def compare_whitening(
     strain : tf.Tensor,
+    background: tf.Tensor,
     sample_rate_hertz : float,
-    duration_seconds : float,
-    fft_duration_seconds : float = 4.0, 
-    overlap_duration_seconds : float = 2.0
+    fft_duration_seconds : float = 2.0, 
+    overlap_duration_seconds : float = 1.0
     ):
     
     # Tensorflow whitening:
-    whitened_tensorflow = \
-        gf.whiten(
-            strain, 
-            strain, 
-            sample_rate_hertz, 
-            fft_duration_seconds=4.0, 
-            overlap_duration_seconds=2.0
-        )
+    whitened_tensorflow = gf.whiten(
+        strain, 
+        background, 
+        sample_rate_hertz, 
+        fft_duration_seconds=fft_duration_seconds, 
+        overlap_duration_seconds=overlap_duration_seconds
+    )
+
+    _, psd = welch(
+        background, 
+        sample_rate_hertz, 
+        nperseg=int(sample_rate_hertz*fft_duration_seconds), 
+        noverlap=int(sample_rate_hertz*overlap_duration_seconds), 
+    )
     
     # GWPy whitening:
     ts = TimeSeries(
-        strain,
+        strain[0],
         sample_rate=sample_rate_hertz
     )
-    whitened_gwpy = \
-        ts.whiten(
-            fftlength=fft_duration_seconds, 
-            overlap=overlap_duration_seconds
-        ).value
-    
-    whitened_tensorflow = \
-        gf.crop_samples(
-            whitened_tensorflow,
-            duration_seconds,
-            sample_rate_hertz
-        )
+    whitened_gwpy = ts.whiten(
+        fftlength=fft_duration_seconds, 
+        overlap=overlap_duration_seconds,
+        asd=FrequencySeries(np.sqrt(psd[0]))
+    ).value
+    whitened_gwpy = np.expand_dims(whitened_gwpy, axis=0)
 
+    whitened_tensorflow = gf.crop_samples(
+        batched_onsource=whitened_tensorflow,
+        onsource_duration_seconds=gf.Defaults.onsource_duration_seconds,
+        sample_rate_hertz=sample_rate_hertz
+    )
     whitened_gwpy = gf.crop_samples(
-        whitened_gwpy,
-        duration_seconds,
-        sample_rate_hertz
-        )
-    
+        batched_onsource=tf.convert_to_tensor(whitened_gwpy),
+        onsource_duration_seconds=gf.Defaults.onsource_duration_seconds,
+        sample_rate_hertz=sample_rate_hertz
+    ).numpy()
+
     return whitened_tensorflow, whitened_gwpy
 
 def compare_psd_methods(
@@ -121,97 +173,82 @@ def compare_psd_methods(
     
     strain = tf.cast(strain, dtype=tf.float32)
     
-    frequencies_scipy, strain_psd_scipy = \
-        welch(
-            strain, 
-            sample_rate_hertz, 
-            nperseg=nperseg
-        )
+    frequencies_scipy, strain_psd_scipy = welch(
+        strain, 
+        sample_rate_hertz, 
+        nperseg=nperseg
+    )
+
+    frequencies_tensorflow, strain_psd_tensorflow = gf.psd(
+        strain, 
+        sample_rate_hertz = sample_rate_hertz, 
+        nperseg=nperseg
+    )
     
-    frequencies_tensorflow, strain_psd_tensorflow = \
-        gf.psd(
-            strain, 
-            sample_rate_hertz = sample_rate_hertz, 
-            nperseg=nperseg
-        )
-    
-    assert all(frequencies_scipy == frequencies_tensorflow), \
-        "Frequencies not equal."
+    assert all(frequencies_scipy == frequencies_tensorflow), "Frequencies not equal."
     
     return frequencies_tensorflow, strain_psd_tensorflow, strain_psd_scipy
 
-def test_snr(
-    output_diretory_path : Path = Path("./py_ml_data/tests/")
+def _test_snr( 
+        plot_results : bool
     ):
 
-    # Test Parameters:
-    num_examples_per_generation_batch : int = 2048
-    num_examples_per_batch : int = 1
-    sample_rate_hertz : float = 2048.0
-    onsource_duration_seconds : float = 16.0
-    offsource_duration_seconds : float = 16.0
-    crop_duration_seconds : float = 0.5
-    scale_factor : float = 1.0E21
-    
+    output_directory_path : Path = gf.PATH.parent / "gravyflow_data/tests/"
+
+    gf.Defaults.onsource_duration_seconds = 16.0
+
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : gf.IFODataObtainer = \
-        gf.IFODataObtainer(
-            gf.ObservingRun.O3, 
-            gf.DataQuality.BEST, 
-            [
-                gf.DataLabel.NOISE, 
-                gf.DataLabel.GLITCHES
-            ],
-            gf.SegmentOrder.RANDOM,
-            force_acquisition = True,
-            cache_segments = False
-        )
+    ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
+        gf.ObservingRun.O3, 
+        gf.DataQuality.BEST, 
+        [
+            gf.DataLabel.NOISE, 
+            gf.DataLabel.GLITCHES
+        ],
+        gf.SegmentOrder.RANDOM,
+        force_acquisition = True,
+        cache_segments = False
+    )
     
     # Initilise noise generator wrapper:
-    noise_obtainer: gf.NoiseObtainer = \
-        gf.NoiseObtainer(
-            ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = gf.NoiseType.REAL,
-            ifos = gf.IFO.L1
-        )
+    noise_obtainer: gf.NoiseObtainer = gf.NoiseObtainer(
+        ifo_data_obtainer = ifo_data_obtainer,
+        noise_type = gf.NoiseType.REAL,
+        ifos = gf.IFO.L1
+    )
     
     dataset : tf.data.Dataset = gf.Dataset(
-            # Random Seed:
-            seed= 1000,
-            # Temporal components:
-            sample_rate_hertz=sample_rate_hertz,   
-            onsource_duration_seconds=onsource_duration_seconds,
-            offsource_duration_seconds=offsource_duration_seconds,
-            crop_duration_seconds=crop_duration_seconds,
-            # Noise: 
-            noise_obtainer=noise_obtainer,
-            # Output configuration:
-            num_examples_per_batch=1,
-            input_variables = [
-                gf.ReturnVariables.ONSOURCE, 
-                gf.ReturnVariables.OFFSOURCE
-            ]
-        )
+        # Noise: 
+        noise_obtainer=noise_obtainer,
+        # Output configuration:
+        num_examples_per_batch=1,
+        input_variables = [
+            gf.ReturnVariables.ONSOURCE
+        ]
+    )
     
     background, _ = next(iter(dataset))
-            
+
+    sample_rate_hertz : float = gf.Defaults.sample_rate_hertz
+    onsource_duration_seconds : float = gf.Defaults.onsource_duration_seconds
+    crop_duration_seconds : float = gf.Defaults.crop_duration_seconds
+
     # Generate phenom injection:
-    injection = \
-        gf.imrphenomd(
-            num_waveforms = num_examples_per_batch, 
-            mass_1_msun = 30, 
-            mass_2_msun = 30,
-            sample_rate_hertz = sample_rate_hertz,
-            duration_seconds = onsource_duration_seconds,
-            inclination_radians = 1.0,
-            distance_mpc = 100,
-            reference_orbital_phase_in = 0.0,
-            ascending_node_longitude = 100.0,
-            eccentricity = 0.0,
-            mean_periastron_anomaly = 0.0, 
-            spin_1_in = [0.0, 0.0, 0.0],
-            spin_2_in = [0.0, 0.0, 0.0]
-        )
+    injection = gf.imrphenomd(
+        num_waveforms=1, 
+        mass_1_msun=30, 
+        mass_2_msun=30,
+        sample_rate_hertz=sample_rate_hertz,
+        duration_seconds=onsource_duration_seconds + (2.0*crop_duration_seconds),
+        inclination_radians=1.0,
+        distance_mpc=100,
+        reference_orbital_phase_in=0.0,
+        ascending_node_longitude=100.0,
+        eccentricity=0.0,
+        mean_periastron_anomaly=0.0, 
+        spin_1_in=[0.0, 0.0, 0.0],
+        spin_2_in=[0.0, 0.0, 0.0]
+    )
 
     # Scale injection to avoid precision error when converting to 32 bit 
     # float for tensorflow compatability:
@@ -222,37 +259,47 @@ def test_snr(
     
     min_roll : int = int(crop_duration_seconds * sample_rate_hertz)
     max_roll : int = int(
-        (onsource_duration_seconds/2 + crop_duration_seconds) * sample_rate_hertz
+        (onsource_duration_seconds/2.0 + crop_duration_seconds) * sample_rate_hertz
     )
-        
+
+    rng = np.random.default_rng(gf.Defaults.seed)
     injection = gf.roll_vector_zero_padding(
-        injection, 
-        min_roll, 
-        max_roll
+        tensor=injection, 
+        min_roll=min_roll, 
+        max_roll=max_roll,
+        seed=rng.integers(1E10, size=2)
     )
     
     # Get first elements, and return to float 32 to tf functions:
     injection = injection[0]
-    offsource = tf.cast(
-        background[gf.ReturnVariables.OFFSOURCE.name][0], tf.float32
-    )
     onsource = tf.cast(
-        background[gf.ReturnVariables.ONSOURCE.name][0], tf.float32
+        background[gf.ReturnVariables.ONSOURCE.name][0], 
+        tf.float32
     )
     
     # Scale to SNR 30:
     snr : float = 30.0
-    scaled_injection = \
-        gf.scale_to_snr(
-            injection, 
-            onsource,
-            snr,
-            sample_rate_hertz = sample_rate_hertz, 
-            fft_duration_seconds = 4.0, 
-            overlap_duration_seconds = 0.5,
-        )        
-                
+    scaled_injection = gf.scale_to_snr(
+        injection, 
+        onsource,
+        snr,
+        sample_rate_hertz=sample_rate_hertz,
+        fft_duration_seconds = 4.0, 
+        overlap_duration_seconds = 0.5
+    )        
+    
     onsource_plus_injection = onsource + scaled_injection
+
+    scaled_injection = gf.crop_samples(
+        scaled_injection,
+        gf.Defaults.onsource_duration_seconds,
+        gf.Defaults.sample_rate_hertz
+    )
+    injection = gf.crop_samples(
+        injection,
+        gf.Defaults.onsource_duration_seconds,
+        gf.Defaults.sample_rate_hertz
+    )
     
     for_whitening_comparison = {
         "onsource" : onsource,
@@ -263,67 +310,21 @@ def test_snr(
     
     whitening_results = {}
     for key, strain in for_whitening_comparison.items():
-        whitened_tf, whitened_gwpy = \
-            compare_whitening(
-                strain,
-                sample_rate_hertz,
-                onsource_duration_seconds,
-                fft_duration_seconds=4.0,
-                overlap_duration_seconds=2.0
-            )
+        whitened_tf, whitened_gwpy = compare_whitening(
+            strain,
+            onsource,
+            sample_rate_hertz,
+            fft_duration_seconds=2.0,
+            overlap_duration_seconds=1.0
+        )
         
         whitening_results[key] = {
             "tensorflow" : whitened_tf,
             "gwpy" : whitened_gwpy
         }
-        
-    layout = [
-        [gf.generate_strain_plot(
-            {
-                "Whitened (tf) Onsouce + Injection": \
-                    whitening_results["onsource_plus_injection"]["tensorflow"],
-                "Whitened (tf) Injection" : \
-                    whitening_results["injection"]["tensorflow"],
-                "Injection": injection
-            },
-            sample_rate_hertz,
-            onsource_duration_seconds,
-            title=f"cuPhenomD injection example tf whitening",
-            scale_factor=scale_factor
-        ), 
-        gf.generate_spectrogram(
-            whitening_results["onsource_plus_injection"]["tensorflow"], 
-            sample_rate_hertz,
-        )],
-        [gf.generate_strain_plot(
-            {
-                "Whitened (gwpy) Onsouce + Injection": \
-                    whitening_results["onsource_plus_injection"]["gwpy"],
-                "Whitened (gwpy) Injection" : \
-                    whitening_results["injection"]["gwpy"],
-                "Injection": injection
-            },
-            sample_rate_hertz,
-            onsource_duration_seconds,
-            title=f"cuPhenomD injection example gwpy whitening",
-            scale_factor=scale_factor
-        ), 
-        gf.generate_spectrogram(
-            whitening_results["onsource_plus_injection"]["gwpy"], 
-            sample_rate_hertz,
-        )]
-    ]
-    
-    # Ensure output directory exists
-    gf.ensure_directory_exists(output_diretory_path)
-    
-    # Define an output path for the dashboard
-    output_file(output_diretory_path / "whitening_test_plots.html")
 
-    # Arrange the plots in a grid. 
-    grid = gridplot(layout)
-        
-    save(grid)
+    if plot_results:
+        plot_whitened_strain_examples(whitening_results, output_directory_path)
     
     nperseg : int = int((1.0/32.0)*sample_rate_hertz)
     
@@ -344,21 +345,42 @@ def test_snr(
                 'tensorflow': psd_tensorflow.numpy(), 
                 'scipy': psd_scipy
             }
-
-    plot_psd(
-        frequencies.numpy(), 
-        psd_results["onsource_plus_injection_tensorflow"]["tensorflow"],
-        psd_results["onsource_tensorflow"]["scipy"],
-        psd_results["onsource_tensorflow"]["tensorflow"],
-        psd_results["onsource_gwpy"]["scipy"],
-        Path("./py_ml_data/tests/whitening_psds.html")
+    
+    np.testing.assert_allclose(
+        psd_results["onsource_tensorflow"]["scipy"][0][2:],
+        psd_results["onsource_tensorflow"]["tensorflow"][0][2:],
+        atol=1e-07, 
+        err_msg="GravyFlow Whiten SciPy PSD does not equal GravyFlow Whiten GravyFlow PSD.", 
+        verbose=True
     )
 
-if __name__ == "__main__":    
-    # ---- User parameters ---- #
-    # Set logging level:
-    logging.basicConfig(level=logging.INFO)
-    
-    # Test SNR:
-    with gf.env():
-        test_snr()
+    np.testing.assert_allclose(
+        psd_results["onsource_gwpy"]["scipy"][0][2:],
+        psd_results["onsource_tensorflow"]["tensorflow"][0][2:],
+        atol=1e-05, 
+        err_msg="GwPy Whiten SciPy PSD does not equal GravyFlow Whiten GravyFlow PSD.", 
+        verbose=True
+    )
+
+    np.testing.assert_allclose(
+        psd_results["onsource_gwpy"]["scipy"][0],
+        psd_results["onsource_tensorflow"]["scipy"][0],
+        atol=1e-05, 
+        err_msg="GwPy Whiten SciPy PSD does not equal GravyFlow Whiten Scipy PSD.", 
+        verbose=True
+    )
+
+    if plot_results:
+        plot_psd(
+            frequencies.numpy(), 
+            psd_results["onsource_plus_injection_tensorflow"]["tensorflow"][0],
+            psd_results["onsource_tensorflow"]["scipy"][0],
+            psd_results["onsource_tensorflow"]["tensorflow"][0],
+            psd_results["onsource_gwpy"]["scipy"][0],
+            output_directory_path / "whitening_psd_test_plots.html"
+        )
+
+def test_snr(pytestconfig : Dict):
+    _test_snr(
+        plot_results=pytestconfig.getoption("plot")
+    )

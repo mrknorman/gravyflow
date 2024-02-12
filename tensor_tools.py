@@ -387,9 +387,9 @@ def set_random_seeds(
     
 @tf.function(jit_compile=True)
 def crop_samples(
-    batched_onsource: tf.Tensor, 
-    onsource_duration_seconds: float, 
-    sample_rate_hertz: float
+        batched_onsource: tf.Tensor, 
+        onsource_duration_seconds: float, 
+        sample_rate_hertz: float
     ) -> tf.Tensor:
     """
     Crop to remove edge effects and ensure same data is retrieved in all cases.
