@@ -47,10 +47,11 @@ def _test_injection_iteration(
     
 def _test_phenom_d_injection(
         num_tests : int = 10,
-        output_diretory_path : Path = Path("./gravyflow_data/tests/"),
         plot_results : bool = False
     ):
     
+    output_diretory_path : Path = gf.PATH.parent / "gravyflow_data/tests/"
+
     with gf.env():
 
         # Define injection directory path:
@@ -110,9 +111,9 @@ def _test_phenom_d_injection(
                     title=f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2} msun"
                 )
                 for injection, m1, m2 in zip(
-                    return_dict["high_mass_injections"], 
-                    return_dict["mass_1_msun_high_mass"], 
-                    return_dict["mass_2_msun_high_mass"]
+                    current_parameters["high_mass_injections"], 
+                    current_parameters["mass_1_msun_high_mass"], 
+                    current_parameters["mass_2_msun_high_mass"]
                 )
             ]
 
@@ -122,9 +123,9 @@ def _test_phenom_d_injection(
                     title=f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2} msun"
                 )
                 for injection, m1, m2 in zip(
-                    return_dict["high_mass_injections"], 
-                    return_dict["mass_1_msun_low_mass"], 
-                    return_dict["mass_2_msun_low_mass"]
+                    current_parameters["high_mass_injections"], 
+                    current_parameters["mass_1_msun_low_mass"], 
+                    current_parameters["mass_2_msun_low_mass"]
                 )
             ]
                 
@@ -143,9 +144,10 @@ def _test_phenom_d_injection(
 
 def _test_wnb_injection(
         num_tests : int = 10,
-        output_diretory_path : Path = Path("./gravyflow_data/tests/"),
         plot_results : bool = False
     ):
+
+    output_diretory_path : Path = gf.PATH.parent / "gravyflow_data/tests/"
     
     with gf.env():
         # Define injection directory path:
