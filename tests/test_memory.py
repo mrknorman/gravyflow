@@ -11,11 +11,14 @@ import tensorflow as tf
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
 from tqdm import tqdm
+from _pytest.config import Config
 
 # Local imports:
 import gravyflow as gf
 
-def _test_memory_noise(num_tests):
+def _test_memory_noise(
+        num_tests : int
+    ) -> None:
 
     with gf.env():
         # Setup ifo data acquisition object:
@@ -69,7 +72,10 @@ def _test_memory_noise(num_tests):
             logger.info(f"Memory after loop: {memory_after_loop_mb} MB")
             logger.info(f"Memory consumed by loop: {memory_difference_mb} MB")
 
-def test_memory_noise(pytestconfig : Dict):
+def test_memory_noise(
+        pytestconfig : Config
+    ) -> None:
+    
     _test_memory_noise(
         num_tests=gf.tests.num_tests_from_config(pytestconfig)
     )

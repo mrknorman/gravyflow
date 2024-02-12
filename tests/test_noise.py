@@ -10,15 +10,15 @@ import numpy as np
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
 from tqdm import tqdm
+from _pytest.config import Config
 
 # Local imports:
 import gravyflow as gf
 
 def _test_real_noise_single(
-        num_tests : int = 8, 
         output_diretory_path : Path = Path("./gravyflow_data/tests/"),
         plot_results : bool = False
-    ):
+    ) -> None:
 
     with gf.env():
 
@@ -88,10 +88,9 @@ def _test_real_noise_single(
             save(grid)
     
 def _test_real_noise_multi(
-        num_tests : int = 8, 
         output_diretory_path : Path = Path("./gravyflow_data/tests/"),
         plot_results : bool = False 
-    ):
+    ) -> None:
 
     with gf.env():
         
@@ -160,7 +159,7 @@ def _test_real_noise_multi(
 
 def _test_noise_shape(
         num_tests : int = int(1.0E3)
-    ):
+    ) -> None:
     
     with gf.env():
         
@@ -218,8 +217,8 @@ def _test_noise_shape(
         logging.info("Complete")
 
 def _test_noise_iteration(
-    num_tests : int = int(1.0E2)
-):
+        num_tests : int = int(1.0E2)
+    ) -> None:
 
     with gf.env():
 
@@ -259,22 +258,34 @@ def _test_noise_iteration(
 
         logging.info("Complete")
 
-def test_real_noise_single(pytestconfig : Dict):
+def test_real_noise_single(
+        pytestconfig : Config
+    ) -> None:
+
     _test_real_noise_single(
         plot_results=pytestconfig.getoption("plot")
     )
 
-def test_real_noise_multi(pytestconfig : Dict):
+def test_real_noise_multi(
+        pytestconfig : Config
+    ) -> None:
+
     _test_real_noise_multi(
         plot_results=pytestconfig.getoption("plot")
     )
     
-def test_noise_shape(pytestconfig : Dict):
+def test_noise_shape(
+        pytestconfig : Config
+    ) -> None:
+
     _test_noise_shape(
         num_tests=gf.tests.num_tests_from_config(pytestconfig)
     )
 
-def test_noise_iteration(pytestconfig : Dict):
+def test_noise_iteration(
+        pytestconfig : Config
+    ) -> None:
+    
     _test_noise_iteration(
         num_tests=gf.tests.num_tests_from_config(pytestconfig)
     )

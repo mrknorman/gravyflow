@@ -8,6 +8,7 @@ import numpy as np
 import tensorflow as tf
 from bokeh.plotting import figure, output_file, save
 from scipy.signal import welch
+from _pytest.config import Config
 
 # Local application imports
 import gravyflow as gf
@@ -97,7 +98,10 @@ def _test_welch_method(
             output_file(output_path)
             save(plot)
 
-def test_welch_method(pytestconfig : Dict):
+def test_welch_method(
+        pytestconfig : Config
+    ) -> None:
+    
     _test_welch_method(
         plot_results=pytestconfig.getoption("plot")
     )

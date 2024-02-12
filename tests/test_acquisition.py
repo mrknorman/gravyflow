@@ -7,7 +7,7 @@ def test_valid_data_segments_acquisition(
         data_obtainer : gf.IFODataObtainer, 
         seed : int, 
         ifo : gf.IFO
-    ):
+    ) -> None:
     
     """
     Test to ensure the acquisition of valid data segments meets expected criteria.

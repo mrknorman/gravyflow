@@ -10,13 +10,14 @@ import numpy as np
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
 from tqdm import tqdm
+from _pytest.config import Config
 
 # Local imports:
 import gravyflow as gf
 
 def _test_injection_iteration(
         num_tests : int = int(1.0E2)
-    ):
+    ) -> None:
 
     with gf.env():
 
@@ -48,7 +49,7 @@ def _test_injection_iteration(
 def _test_phenom_d_injection(
         num_tests : int = 10,
         plot_results : bool = False
-    ):
+    ) -> None:
     
     output_diretory_path : Path = gf.PATH.parent / "gravyflow_data/tests/"
 
@@ -145,7 +146,7 @@ def _test_phenom_d_injection(
 def _test_wnb_injection(
         num_tests : int = 10,
         plot_results : bool = False
-    ):
+    ) -> None:
 
     output_diretory_path : Path = gf.PATH.parent / "gravyflow_data/tests/"
     
@@ -220,17 +221,26 @@ def _test_wnb_injection(
                 
             save(grid)
 
-def test_phenom_d_injection(pytestconfig : Dict):
+def test_phenom_d_injection(
+        pytestconfig : Config
+    ) -> None:
+
     _test_phenom_d_injection(
         plot_results=pytestconfig.getoption("plot")
     )
 
-def test_wnb_injection(pytestconfig : Dict):
+def test_wnb_injection(
+        pytestconfig : Config
+    ) -> None:
+
     _test_wnb_injection(
         plot_results=pytestconfig.getoption("plot")
     )
 
-def test_injection_iteration(pytestconfig : Dict):
+def test_injection_iteration(
+        pytestconfig : Config
+    ) -> None:
+    
     _test_injection_iteration(
         num_tests=gf.tests.num_tests_from_config(pytestconfig)
     )

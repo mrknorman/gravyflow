@@ -3,8 +3,12 @@ from pathlib import Path
 
 import numpy as np
 import h5py
+from _pytest.config import Config
 
-def num_tests_from_config(pytestconfig : Dict):
+def num_tests_from_config(
+        pytestconfig : Config
+    ) -> int:
+
     match pytestconfig.getoption("runsize"):
         case "small":
             num_tests = int(1E2)
@@ -18,9 +22,10 @@ def num_tests_from_config(pytestconfig : Dict):
     return num_tests
 
 def compare_and_save_parameters(
-    current_parameters: Dict[str, np.ndarray], 
-    parameters_file_path: Path
-):
+        current_parameters: Dict[str, np.ndarray], 
+        parameters_file_path: Path
+    ) -> None:
+
     """
     Compare current parameters with previously saved parameters and save them 
     if not present.
