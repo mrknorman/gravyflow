@@ -78,7 +78,7 @@ def _test_dataset(
         waveform_type : str,
         plot_examples: Optional[bool] = True,
         num_tests: Optional[int] = 32,
-        output_directory_path: Optional[Path] = Path("./gravyflow_data/tests/"),
+        output_directory_path : Optional[Path] = None,
         ifos: Optional[List[gf.IFO]] = [gf.IFO.L1],
     ) -> None:
 
@@ -92,7 +92,10 @@ def _test_dataset(
         output_directory_path (Path, optional): Path to save output. Defaults to './gravyflow_data/tests/'.
         ifos (Optional[List[gf.IFO]], optional): IFOs to use. Defaults to gf.IFO.L1.
     """
-
+    
+    if output_directory_path is None:
+        output_directory_path : Path = gf.PATH.parent / "/gravyflow_data/tests/"
+    
     # Validate input arguments:
     validate_dataset_arguments(
         name,
