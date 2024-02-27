@@ -769,6 +769,8 @@ class Model:
             "type" : "binary"
         }
 
+        dataset_args = deepcopy(dataset_args)
+
         # This is currently quite specific:
         dataset_args["waveform_generators"] = {
             name : { 
@@ -778,8 +780,14 @@ class Model:
             } for name, generator in genome.injection_generators.items()
         }
         dataset_args["noise_obtainer"].noise_type = genome.noise_type.value
+        
+        # Log training_config
+        for key, value in training_config.items():
+            logging.info(f"Training config: {key} = {value}")
 
-        dataset_args = deepcopy(dataset_args)
+        # Log dataset_args
+        for key, value in dataset_args.items():
+            logging.info(f"Dataset args: {key} = {value}")
 
         # Create an instance of DenseModel with num_neurons list
         model = cls(
@@ -1035,11 +1043,12 @@ class Model:
             )
         
         # Check if the model file exists
-        if os.path.exists(model_load_path) and not force_overwrite:
+        if os.path.exists(model_path) and not force_overwrite:
             try:
                 # Try to load the model
-                logging.info(f"Loading model from {model_load_path}")
-                model.model = tf.keras.models.load_model(model_load_path)
+                logging.info(f"Loading model from {model_path}")
+                loaded_model = tf.keras.models.load_model(model_path)
+                model.model = loaded_model
                 model.loaded=True
 
                 return model
@@ -1050,7 +1059,7 @@ class Model:
                     logging.info("Using new model...")
                     return model
                 elif load_genome is True:
-                    genome_path = Path(f"{model_load_path}/genome")
+                    genome_path = Path(f"{model_path}/genome")
                     if genome_path.exists():
                         genome = gf.ModelGenome.load(genome_path)
                         
@@ -1062,7 +1071,8 @@ class Model:
                             training_config=training_config,
                             dataset_args=dataset_args, 
                             model_path=model_path,
-                            metrics=[]
+                            metrics=[],
+                            seed=seed
                         )
                     else: 
                         raise ValueError("No genome exists!")

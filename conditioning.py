@@ -84,9 +84,15 @@ def spectrogram_shape(
     
     # Extract the last dimension of the input shape which is num_samples
     num_samples = input_shape[-1]
+
+    if (num_frame_samples > num_samples):
+        num_frame_samples = num_samples
     
     # Calculate the number of time frames (T)
     num_time_frames = 1 + (num_samples - num_frame_samples) // num_step_samples
+
+    if (num_time_frames < 1):
+        num_time_frames = 1
     
     # Calculate the number of frequency bins (F)
     num_frequency_bins = num_fft_samples // 2 + 1
