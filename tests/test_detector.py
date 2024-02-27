@@ -1,5 +1,4 @@
-import os
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 from pathlib import Path
 import logging
 
@@ -11,6 +10,7 @@ from pycbc.detector import add_detector_on_earth, _ground_detectors, Detector
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
 from timeit import Timer
+from _pytest.config import Config
 
 import gravyflow as gf
 
@@ -18,7 +18,8 @@ def zombie_antenna_pattern(
         right_ascension : float, 
         declination : float, 
         polarization : float
-    ):        
+    ) -> Tuple[np.ndarray, np.ndarray]:
+
         d = Detector("L1")
         
         cosgha = np.cos(right_ascension)
@@ -55,11 +56,12 @@ def zombie_antenna_pattern(
 
 # Network Fixture
 @pytest.fixture
-def network():
+def network() -> gf.Network:
     return gf.Network([gf.IFO.L1, gf.IFO.H1, gf.IFO.V1])
 
 # Test for Detector
-def test_detector():
+def test_detector() -> None:
+
     with gf.env():
         latitude = 0.3
         longitude = 0.5
@@ -85,7 +87,7 @@ def test_detector():
             verbose=True
         )
 
-def test_response():
+def test_response() -> None:
 
     with gf.env():
 
@@ -123,7 +125,11 @@ def test_response():
 
 # Test for Antenna Pattern
 @pytest.mark.parametrize("num_tests", [int(1.0E5)])
-def test_antenna_pattern(network : gf.Network, num_tests : int):
+def test_antenna_pattern(
+        network : gf.Network, 
+        num_tests : int
+    ) -> None:
+
     with gf.env():
         right_ascension = tf.constant(
             np.random.uniform(0, 2 * np.pi, size=(num_tests,)), 
@@ -159,7 +165,7 @@ def test_antenna_pattern(network : gf.Network, num_tests : int):
 def test_time_delay(
         network : gf.Network, 
         num_tests : Optional[int] = int(1.0E5)
-    ):
+    ) -> None:
 
     with gf.env():
         right_ascension = tf.constant(
@@ -174,10 +180,11 @@ def test_time_delay(
         np.testing.assert_allclose(delay[:, 0], delay[:, 2], atol=0.032)
 
 def save_and_compare_projected_injections(
-    projected_injections: np.ndarray, 
-    injections_file_path: Path,
-    tolerance: float = 1e-6
-):
+        projected_injections: np.ndarray, 
+        injections_file_path: Path,
+        tolerance: float = 1e-6
+    ) -> None:
+
     """
     Save and compare projected injections with previously saved injections.
 
@@ -209,11 +216,10 @@ def _test_projection(
         plot_file_name : str, 
         single_ifo : bool = False, 
         should_plot : bool = False
-    ):
+    ) -> None:
 
-    current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
     injection_directory_path = Path(
-        current_dir / "example_injection_parameters"
+        gf.tests.PATH / "example_injection_parameters"
     )
 
     phenom_d_generator = gf.WaveformGenerator.load(
@@ -229,7 +235,9 @@ def _test_projection(
 
     projected_injections = network.project_wave(injections[0])
 
-    injections_file_path : Path = current_dir.parent / f"res/tests/projected_injections_{name}"
+    injections_file_path : Path = (
+        gf.PATH / f"res/tests/projected_injections_{name}.hdf5"
+    )
 
     save_and_compare_projected_injections(
         projected_injections.numpy(),
@@ -252,8 +260,8 @@ def _test_projection(
 def test_project_wave(
         network : gf.Network, 
         output_directory_path : Path, 
-        pytestconfig : Dict
-    ):
+        pytestconfig : Config
+    ) -> None:
 
     with gf.env():
         _test_projection(
@@ -268,8 +276,8 @@ def test_project_wave(
 def test_project_wave_single(
         network : gf.Network, 
         output_directory_path : Path, 
-        pytestconfig : Dict
-    ):
+        pytestconfig : Config
+    ) -> None:
 
     with gf.env():
         _test_projection(
@@ -282,8 +290,8 @@ def test_project_wave_single(
         )
 
 def _test_antenna_pattern(
-    num_tests : int = int(1.0E5)
-    ):
+        num_tests : int = int(1.0E5)
+    ) -> None:
     
     # Set logging level:
     logging.basicConfig(level=logging.INFO)
@@ -372,23 +380,15 @@ def _test_antenna_pattern(
             verbose=True
         )
 
-def test_antenna_pattern(pytestconfig):
+def test_antenna_pattern(
+        pytestconfig : Config
+    ) -> None:
 
-    match pytestconfig.getoption("runsize"):
-        case "small":
-            num_tests = int(1E2)
-        case "normal":
-            num_tests = int(1E3)
-        case "large":
-            num_tests = int(1E4)
-        case _:
-            raise ValueError(f"Runsize {pytestconfig.runsize} not recognised!")
-    
     _test_antenna_pattern(
-        num_tests
+        num_tests=gf.tests.num_tests_from_config(pytestconfig)
     )
 
-def profile_atennnna_pattern():
+def profile_atennnna_pattern() -> None:
 
     with gf.env():
     

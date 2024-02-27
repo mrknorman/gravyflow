@@ -306,7 +306,7 @@ def calculate_far_score_thresholds(
     for far in fars:
         if far > max_far:
             # Set to 1.1 if the desired FAR is higher than the maximum achievable FAR
-            score_thresholds[far] = cumulative_far[-1]
+            score_thresholds[far] = (far, cumulative_far[-1])
         elif far < min_far:
             # Also set to 1.1 if the desired FAR is lower than the minimum achievable FAR
             score_thresholds[far] = (far, 1.1)

@@ -1,5 +1,5 @@
 #Built-in imports
-from typing import Tuple
+from typing import Tuple, Dict
 from pathlib import Path
 import logging
 
@@ -8,28 +8,23 @@ import tensorflow as tf
 import numpy as np
 import scipy
 from gwpy.timeseries import TimeSeries
-from bokeh.plotting import figure, output_file, save, show
-from bokeh.palettes import Bright
+from bokeh.plotting import output_file, save
 from bokeh.layouts import gridplot
-from bokeh.models import ColumnDataSource, HoverTool, Legend
+from _pytest.config import Config
 
 # Local imports:
-import gravyflow as gw
+import gravyflow as gf
     
 def plot_whiten_functions(
-    sample_rate_hertz : float = 8192, 
-    duration_seconds : float = 16.0, 
-    fft_duration_seconds : float = 1.0, 
-    overlap_duration_seconds : float = 0.5,
-    output_diretory_path : Path = Path("./py_ml_data/tests/")
-    ):
+        fft_duration_seconds : float = 1.0, 
+        overlap_duration_seconds : float = 0.5
+    ) -> None:
+
+    output_diretory_path : Path = gf.PATH.parent / "gravyflow_data/tests"
     
     # Constants
     sample_rate_hertz: int = 8192
     duration_seconds: int = 16
-    fftlength: int = 1
-    overlap: float = 0.5
-    threshold: float = 1.0E-3
     
     """
     Plot whitening functions for gravitational wave time-series data.
@@ -47,34 +42,38 @@ def plot_whiten_functions(
     """
     
     # Generate random time-series data
-    time_axis = \
-        np.linspace(
-            0, 
-            duration_seconds, 
-            int(duration_seconds * sample_rate_hertz), 
-            endpoint=False
-        )
+    time_axis = np.linspace(
+        0, 
+        duration_seconds, 
+        int(duration_seconds * sample_rate_hertz), 
+        endpoint=False
+    )
     
-    peak_1_frequency : float = 543
+    peak_1_frequency : float = 543.0
     peak_1_amplitude : float = 3.0
     
-    peak_2_frequency : float = 210
+    peak_2_frequency : float = 210.0
     peak_2_amplitude : float = 5.0
     
     np.random.seed(42)
-    data = peak_1_amplitude * np.sin(2 * np.pi * peak_1_frequency * time_axis) \
-        + peak_2_amplitude * np.sin(2 * np.pi * peak_2_frequency * time_axis) \
+    data = ( 
+        peak_1_amplitude * np.sin(2 * np.pi * peak_1_frequency * time_axis)
+        + peak_2_amplitude * np.sin(2 * np.pi * peak_2_frequency * time_axis)
         + np.random.normal(size=time_axis.shape)
+    )
     data = data.astype(np.float32)
     
-      # Resample using GWpy
+    # Resample using GWpy
     ts = TimeSeries(data, sample_rate=sample_rate_hertz).resample(4096)
     sample_rate_hertz = 4096.0
     data = ts.value.astype(np.float32)
     data = tf.convert_to_tensor(data)
     
     # Calculate Power Spectral Density
-    def calc_psd(series: np.ndarray) -> np.ndarray:
+    def calc_psd(
+            series: np.ndarray
+        ) -> np.ndarray:
+
         return scipy.signal.csd(
             series, 
             series, 
@@ -90,7 +89,7 @@ def plot_whiten_functions(
     _, gwpy_whitened_noise_psd = calc_psd(whitened_gwpy)
     
     # TensorFlow whitening
-    whitened_tensorflow = gw.whiten(
+    whitened_tensorflow : tf.Tensor = gf.whiten(
         data, 
         data, 
         sample_rate_hertz, 
@@ -110,15 +109,16 @@ def plot_whiten_functions(
         "Data Whitened with GWPy": whitened_gwpy, 
         "Residuals": residuals
     }
-    
+
     layout = [
-        [gw.generate_strain_plot(
-            {key : value},
-            sample_rate_hertz,
-            duration_seconds,
-            title=key,
-            scale_factor=1.0
-        )] for key, value in time_results.items()
+        [
+            gf.generate_strain_plot(
+                strain={key : value},
+                sample_rate_hertz=sample_rate_hertz,
+                title=key,
+                scale_factor=1.0
+            )
+        ] for key, value in time_results.items()
     ]
     
     # Specify the output file and save the plot
@@ -135,11 +135,13 @@ def plot_whiten_functions(
     }
     
     layout = [
-        [gw.generate_psd_plot(
-            {key : value},
-            frequencies,
-            title=key
-        )] for key, value in psd_results.items()
+        [
+            gf.generate_psd_plot(
+                psd={key : value},
+                frequencies=frequencies,
+                title=key
+            )
+        ] for key, value in psd_results.items()
     ]
     
     # Specify the output file and save the plot
@@ -186,7 +188,7 @@ def test_whiten_functions() -> None:
     
     # Whitening using TensorFlow
     timeseries = tf.convert_to_tensor(data, dtype=tf.float32)
-    whitened_tensorflow = gw.whiten(
+    whitened_tensorflow = gf.whiten(
         timeseries, 
         timeseries,
         sample_rate_hertz, 
@@ -196,7 +198,10 @@ def test_whiten_functions() -> None:
     whitened_tensorflow = whitened_tensorflow.numpy()
     
     # Calculate PSD using Scipy
-    def psd_scipy(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def psd_scipy(
+            data: np.ndarray
+        ) -> Tuple[np.ndarray, np.ndarray]:
+
         return scipy.signal.csd(
             data, data, fs=sample_rate_hertz, window='hann',
             nperseg=int(sample_rate_hertz * fft_duration_seconds),
@@ -209,7 +214,10 @@ def test_whiten_functions() -> None:
     _, tensorflow_whitened_noise_psd = psd_scipy(whitened_tensorflow)
     
     # Find peaks in PSD
-    def find_peaks(psd: np.ndarray) -> np.ndarray:
+    def find_peaks(
+            psd: np.ndarray
+        ) -> np.ndarray:
+
         peaks, _ = scipy.signal.find_peaks(np.abs(psd), threshold=threshold)
         return peaks
     
@@ -223,12 +231,11 @@ def test_whiten_functions() -> None:
     assert len(tensorflow_peaks) == 0, \
         "Peaks found in the PSD of the TensorFlow whitened data"
     
-def real_noise_test(
-    output_diretory_path : Path = Path("./py_ml_data/tests/")
-    ):
+def real_noise_test() -> None:
+
+    output_diretory_path : Path = gf.PATH.parent / "gravyflow_data/tests"
     
     # Test Parameters:
-    num_examples_per_generation_batch : int = 2048
     num_examples_per_batch : int = 1
     sample_rate_hertz : float = 2048.0
     onsource_duration_seconds : float = 16.0
@@ -239,30 +246,26 @@ def real_noise_test(
     scale_factor : float = 1.0E21
     
     # Setup ifo data acquisition object:
-    ifo_data_obtainer : gw.IFODataObtainer = \
-        gw.IFODataObtainer(
-            gw.ObservingRun.O3, 
-            gw.DataQuality.BEST, 
+    ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
             [
-                gw.DataLabel.NOISE, 
-                gw.DataLabel.GLITCHES
+                gf.DataLabel.NOISE, 
+                gf.DataLabel.GLITCHES
             ],
-            gw.SegmentOrder.RANDOM,
+            gf.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
     
     # Initilise noise generator wrapper:
-    noise_obtainer: gw.NoiseObtainer = \
-        gw.NoiseObtainer(
+    noise_obtainer: gf.NoiseObtainer = gf.NoiseObtainer(
             ifo_data_obtainer=ifo_data_obtainer,
-            noise_type=gw.NoiseType.REAL,
-            ifos=gw.IFO.L1
+            noise_type=gf.NoiseType.REAL,
+            ifos=gf.IFO.L1
         )
     
-    generator  : tf.data.Dataset = gw.Dataset(
-            # Random Seed:
-            seed=1000,
+    generator  : tf.data.Dataset = gf.Dataset(
             # Temporal components:
             sample_rate_hertz=sample_rate_hertz,   
             onsource_duration_seconds=onsource_duration_seconds,
@@ -273,30 +276,40 @@ def real_noise_test(
             # Output configuration:
             num_examples_per_batch=num_examples_per_batch,
             input_variables = [
-                gw.ReturnVariables.ONSOURCE, 
-                gw.ReturnVariables.WHITENED_ONSOURCE
+                gf.ReturnVariables.ONSOURCE, 
+                gf.ReturnVariables.WHITENED_ONSOURCE
             ]
         )
     
     background, _ = next(iter(generator))
             
-    raw_noise : tf.Tensor = \
-        background[gw.ReturnVariables.ONSOURCE.name].numpy()[0]
-    whitened_noise : tf.Tensor = \
-        background[gw.ReturnVariables.WHITENED_ONSOURCE.name].numpy()[0]
-    
+    raw_noise : np.ndarray = (
+        background[
+            gf.ReturnVariables.ONSOURCE.name
+        ].numpy()[0]
+    )
+    whitened_noise : np.ndarray = (
+        background[
+            gf.ReturnVariables.WHITENED_ONSOURCE.name
+        ].numpy()[0]
+    )
+
     # Create a GWpy TimeSeries object
-    ts = TimeSeries(raw_noise, sample_rate=sample_rate_hertz)
-    noise_whitened_gwpy = \
-        ts.whiten(
-            fftlength=fft_duration_seconds, 
-            overlap=overlap_duration_seconds, 
-            fduration = 1.0
-        ).value
+    ts = TimeSeries(
+        raw_noise[0], 
+        sample_rate=sample_rate_hertz
+    )
+    noise_whitened_gwpy = ts.whiten(
+        fftlength=fft_duration_seconds, 
+        overlap=overlap_duration_seconds, 
+        fduration=1.0
+    ).value
         
     # Whitening using tensorflow-based function
-    timeseries  = tf.convert_to_tensor(raw_noise, dtype = tf.float32)
-    noise_whitened_tensorflow = gw.whiten(
+    timeseries  = tf.convert_to_tensor(
+        raw_noise, dtype = tf.float32
+    )
+    noise_whitened_tensorflow = gf.whiten(
         timeseries, 
         timeseries, 
         sample_rate_hertz, 
@@ -306,37 +319,33 @@ def real_noise_test(
     noise_whitened_tensorflow = noise_whitened_tensorflow.numpy()
 
     # Calculate power spectral densities
-    frequencies, raw_noise_psd = \
-        scipy.signal.csd(
-            raw_noise, 
-            raw_noise, 
-            fs=sample_rate_hertz,
-            window='hann', 
-            nperseg=int(sample_rate_hertz*fft_duration_seconds),
-            noverlap=int(sample_rate_hertz*overlap_duration_seconds), 
-            average='median'
-        )
-    _, gwpy_whitened_noise_psd = \
-        scipy.signal.csd(
-            noise_whitened_gwpy, 
-            noise_whitened_gwpy, 
-            fs=sample_rate_hertz,
-            window='hann', 
-            nperseg=int(sample_rate_hertz*fft_duration_seconds), 
-            noverlap=int(sample_rate_hertz*overlap_duration_seconds), 
-            average='median'
-        )
-        
-    _, tensorflow_whitened_noise_psd = \
-        scipy.signal.csd(
-            noise_whitened_tensorflow, 
-            noise_whitened_tensorflow, 
-            fs=sample_rate_hertz,
-            window='hann', 
-            nperseg=int(sample_rate_hertz*fft_duration_seconds), 
-            noverlap=int(sample_rate_hertz*overlap_duration_seconds), 
-            average='median'
-        )
+    frequencies, raw_noise_psd = scipy.signal.csd(
+        raw_noise, 
+        raw_noise, 
+        fs=sample_rate_hertz,
+        window='hann', 
+        nperseg=int(sample_rate_hertz*fft_duration_seconds),
+        noverlap=int(sample_rate_hertz*overlap_duration_seconds), 
+        average='median'
+    )
+    _, gwpy_whitened_noise_psd = scipy.signal.csd(
+        noise_whitened_gwpy, 
+        noise_whitened_gwpy, 
+        fs=sample_rate_hertz,
+        window='hann', 
+        nperseg=int(sample_rate_hertz*fft_duration_seconds), 
+        noverlap=int(sample_rate_hertz*overlap_duration_seconds), 
+        average='median'
+    ) 
+    _, tensorflow_whitened_noise_psd = scipy.signal.csd(
+        noise_whitened_tensorflow, 
+        noise_whitened_tensorflow, 
+        fs=sample_rate_hertz,
+        window='hann', 
+        nperseg=int(sample_rate_hertz*fft_duration_seconds), 
+        noverlap=int(sample_rate_hertz*overlap_duration_seconds), 
+        average='median'
+    )
 
     residuals = np.abs(noise_whitened_tensorflow - noise_whitened_gwpy)
 
@@ -349,13 +358,14 @@ def real_noise_test(
     }
     
     layout = [
-        [gw.generate_strain_plot(
-            {key : value},
-            sample_rate_hertz,
-            onsource_duration_seconds,
-            title=key,
-            scale_factor=scale_factor
-        )] for key, value in time_results.items()
+        [
+            gf.generate_strain_plot(
+                strain={key : value},
+                sample_rate_hertz=sample_rate_hertz,
+                title=key,
+                scale_factor=scale_factor
+            )
+        ] for key, value in time_results.items()
     ]
     
     # Specify the output file and save the plot
@@ -372,9 +382,9 @@ def real_noise_test(
     }
     
     layout = [
-        [gw.generate_psd_plot(
-            {key : value},
-            frequencies,
+        [gf.generate_psd_plot(
+            psd={key : value},
+            frequencies=frequencies,
             title=key
         )] for key, value in psd_results.items()
     ]
@@ -396,8 +406,8 @@ if __name__ == "__main__":
     memory_to_allocate_tf : int = 2000
     
     # Setup CUDA
-    gpus = gw.find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
-    strategy = gw.setup_cuda(
+    gpus = gf.find_available_GPUs(min_gpu_memory_mb, num_gpus_to_request)
+    strategy = gf.setup_cuda(
         gpus, 
         max_memory_limit=memory_to_allocate_tf, 
         logging_level=logging.WARNING

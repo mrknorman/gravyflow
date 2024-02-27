@@ -1,5 +1,6 @@
-from typing import Union
+from typing import Union, Optional
 from pathlib import Path
+import inspect
 import sys
 import os
 
@@ -9,6 +10,33 @@ from tensorflow.python.framework.ops import EagerTensor
 from tensorflow.keras.callbacks import Callback
 
 import h5py
+
+def get_file_parent_path() -> Optional[Path]:
+    """
+    Returns the absolute path of the script/file that calls this function, with added error checking.
+
+    Returns:
+        Optional[Path]: The absolute path of the directory containing the caller file, or None if not found.
+    """
+    try:
+        # Get the frame of the caller
+        caller_frame = inspect.stack()[1]
+        # Extract the file path from the frame
+        caller_path = caller_frame.filename
+        # Return the absolute path of the directory containing the file
+        return Path(caller_path).parent.resolve()
+    except IndexError:
+        # This may occur if the call stack isn't accessible
+        print("Error: Could not access the call stack.")
+    except AttributeError:
+        # This may occur if the caller frame does not have a 'filename' attribute
+        print("Error: Caller frame does not have a 'filename' attribute.")
+    except Exception as e:
+        # Catch-all for any other unforeseen errors
+        print(f"An unexpected error occurred: {e}")
+
+    # Return None if we couldn't get the caller path
+    return None
 
 def is_redirected():
     return (

@@ -4,6 +4,7 @@ This module initializes the GravyFlow library, setting up necessary imports and 
 
 # Standard library imports
 import warnings
+from pathlib import Path
 
 # Suppress specific LAL warning when running in an ipython kernel
 warnings.filterwarnings("ignore", category=UserWarning, message="Wswiglal-redir-stdio")
@@ -27,7 +28,8 @@ from .environment import (setup_cuda, find_available_GPUs, get_tf_memory_usage, 
 from .io_tools import (
     open_hdf5_file, ensure_directory_exists, replace_placeholders,
     transform_string, snake_to_capitalized_spaces, is_redirected, load_history,
-    CustomHistorySaver, EarlyStoppingWithLoad, PrintWaitCallback, save_dict_to_hdf5
+    CustomHistorySaver, EarlyStoppingWithLoad, PrintWaitCallback, save_dict_to_hdf5,
+    get_file_parent_path
 )
 from .processes import (Heart, HeartbeatCallback, Process, Manager, 
     explain_exit_code)
@@ -64,3 +66,5 @@ from .plotting import (
 from .validate import Validator
 from .glitch import GlitchType, get_glitch_times, get_glitch_segments
 from .alert import send_email
+
+PATH = get_file_parent_path()
