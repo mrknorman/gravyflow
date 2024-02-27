@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
 from contextlib import closing
-from typing import List, Tuple, Union, Dict, Any
+from typing import List, Tuple, Union, Dict, Any, Optional
 from pathlib import Path
 
 # Third-party imports:
@@ -497,8 +497,11 @@ class IFODataObtainer:
         self,
         sample_rate_hertz : float,
         group : str,
-        data_directory_path : Path = Path("./")
+        data_directory_path : Optional[Path] = None
         ) -> Path:
+
+        if data_directory_path is None:
+            data_directory_path = gf.PATH.parent
         
         # Generate unique segment filename from list of independent 
         # segment parameters:
@@ -520,12 +523,8 @@ class IFODataObtainer:
         # Generate the hash for the segment parameters:
         segment_hash = generate_hash_from_list(segment_parameters)
         
-        # Ensure parent directory exists 
-        gf.ensure_directory_exists(data_directory_path)
-        
         # Construct the segment filename using the hash
-        self.file_path = \
-            Path(data_directory_path) / f"segment_data_{segment_hash}.hdf5"
+        self.file_path = Path(data_directory_path) / f"segment_data_{segment_hash}.hdf5"
         
         return self.file_path
     
@@ -1191,6 +1190,10 @@ class IFODataObtainer:
             Segment file path not initulised. Ensure to run generate_file_path
             before attempting to load
             """)
+
+        if self.cache_segments:
+            # Ensure parent directory exists 
+            gf.ensure_directory_exists(self.file_path)
         
         # If no valid segments inputted revert to default list:
         if valid_segments is None:
