@@ -1,0 +1,10 @@
+# pyproject.toml
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::DeprecationWarning:tensorflow_probability.*",  # Ignore DeprecationWarnings from tensorflow_probability
+    "ignore::DeprecationWarning:scitokens.*",  # Ignore DeprecationWarnings from scitokens
+    "ignore::DeprecationWarning:pkg_resources.*",  # Ignore DeprecationWarnings from pkg_resources
+    "ignore:distutils Version classes are deprecated. Use packaging.version instead.:DeprecationWarning",  # Ignore specific distutils warning
+    "ignore:pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html:DeprecationWarning",  # Ignore specific pkg_resources deprecation warning
+    "ignore:Deprecated call to `pkg_resources.declare_namespace('ligo')`. Implementing implicit namespace packages is preferred:DeprecationWarning",  # Ignore specific namespace declaration warning
+]
