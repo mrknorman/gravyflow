@@ -11,6 +11,7 @@ cuphenom_outputs*
 *email_config.json*
 *nohup.out*
 *gravyflow_data*
+*.egg-info
 
 # IPython
 profile_default/

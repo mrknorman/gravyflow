@@ -256,12 +256,12 @@ def _test_projection(
         grid = gridplot(layout)
         save(grid)
 
-@pytest.mark.parametrize("output_directory_path", [Path("./gravyflow_data/tests/")])
 def test_project_wave(
         network : gf.Network, 
-        output_directory_path : Path, 
         pytestconfig : Config
     ) -> None:
+
+    output_directory_path : Path = gf.PATH.parent / "gravyflow_data/tests"
 
     with gf.env():
         _test_projection(
@@ -272,13 +272,13 @@ def test_project_wave(
             should_plot=pytestconfig.getoption("plot")
         )
 
-@pytest.mark.parametrize("output_directory_path", [Path("./gravyflow_data/tests/")])
 def test_project_wave_single(
         network : gf.Network, 
-        output_directory_path : Path, 
         pytestconfig : Config
     ) -> None:
-
+    
+    output_directory_path : Path = gf.PATH.parent / "gravyflow_data/tests"
+    
     with gf.env():
         _test_projection(
             "single",
