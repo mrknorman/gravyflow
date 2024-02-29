@@ -258,7 +258,7 @@ def project_wave_(
     # Deal with non-incoherent case:
     if (len(tf.shape(strain)) == 3):
         strain = tf.expand_dims(strain, axis=1)
-    injection = tf.reduce_sum(strain*antenna_patern, axis = 2)
+    injection = tf.reduce_sum(strain*antenna_patern, axis = -2)
 
     time_shift_seconds = get_time_delay_(
         right_ascension, 
@@ -288,9 +288,7 @@ class IFO_:
     x_length_meters : float
     y_length_meters : float
 
-current_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-NOISE_PROFILE_DIRECTORY_PATH : Path = Path(f"{current_dir}/res/noise_profiles/")
-
+NOISE_PROFILE_DIRECTORY_PATH : Path = gf.PATH / "res/noise_profiles/"
 ifo_data : Dict = {
     "livingston" : {
         "name": "Livingston",

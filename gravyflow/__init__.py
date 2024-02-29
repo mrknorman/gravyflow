@@ -30,6 +30,7 @@ from .src.utils.io import (
     CustomHistorySaver, EarlyStoppingWithLoad, PrintWaitCallback, save_dict_to_hdf5,
     get_file_parent_path
 )
+PATH = get_file_parent_path()
 from .src.utils.processes import (Heart, HeartbeatCallback, Process, Manager, 
     explain_exit_code)
 from .src.dataset.tools.psd import psd
@@ -65,5 +66,3 @@ from .src.utils.plotting import (
 from .src.model.validate import Validator
 from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_segments
 from .src.utils.alert import send_email
-
-PATH = get_file_parent_path()

@@ -639,9 +639,10 @@ class IncoherentGenerator(WaveformGenerator):
         self.back_padding_duration_seconds = component_generators[0].back_padding_duration_seconds
         self.scale_factor = component_generators[0].scale_factor
         self.network = component_generators[0].network
-
-        if self.network.num_detectors != len(self.component_generators):
-            raise ValueError("When using component generators num ifos must equal num generators!")
+        
+        if self.network is not None:
+            if self.network.num_detectors != len(self.component_generators):
+                raise ValueError("When using component generators num ifos must equal num generators!")
 
     def reseed(self, seed):
         rng = default_rng(seed)
