@@ -18,10 +18,11 @@ C = 299792458.0
 
 @tf.function(jit_compile=True)
 def get_time_delay_(
-    right_ascension: tf.Tensor, 
-    declination: tf.Tensor,
-    location : tf.Tensor
-) -> tf.Tensor:
+        right_ascension: tf.Tensor, 
+        declination: tf.Tensor,
+        location : tf.Tensor
+    ) -> tf.Tensor:
+
     """
     Calculate the time delay for various combinations of right ascension,
     declination, and detector locations.
@@ -64,17 +65,17 @@ def get_time_delay_(
     
 @tf.function(jit_compile=True)
 def get_antenna_pattern_(
-    right_ascension: tf.Tensor, 
-    declination: tf.Tensor, 
-    polarization: tf.Tensor,
-    x_vector: tf.Tensor,
-    y_vector: tf.Tensor,
-    x_length_meters: tf.Tensor,
-    y_length_meters: tf.Tensor,
-    x_response : tf.Tensor,
-    y_response : tf.Tensor,
-    response : tf.Tensor
-) -> (tf.Tensor, tf.Tensor):
+        right_ascension: tf.Tensor, 
+        declination: tf.Tensor, 
+        polarization: tf.Tensor,
+        x_vector: tf.Tensor,
+        y_vector: tf.Tensor,
+        x_length_meters: tf.Tensor,
+        y_length_meters: tf.Tensor,
+        x_response : tf.Tensor,
+        y_response : tf.Tensor,
+        response : tf.Tensor
+    ) -> (tf.Tensor, tf.Tensor):
     
     right_ascension = tf.expand_dims(right_ascension, 1)
     declination = tf.expand_dims(declination, 1)
@@ -202,21 +203,21 @@ def generate_direction_vectors(
 
 @tf.function(jit_compile=True)
 def project_wave_(
-    seed,
-    strain : tf.Tensor,
-    sample_rate_hertz : float,
-    x_vector: tf.Tensor,
-    y_vector: tf.Tensor,
-    x_length_meters: tf.Tensor,
-    y_length_meters: tf.Tensor,
-    x_response : tf.Tensor,
-    y_response : tf.Tensor,
-    response : tf.Tensor,
-    location : tf.Tensor,
-    right_ascension: Optional[tf.Tensor] = None,
-    declination: Optional[tf.Tensor] = None,
-    polarization: Optional[tf.Tensor] = None
-):
+        seed,
+        strain : tf.Tensor,
+        sample_rate_hertz : float,
+        x_vector: tf.Tensor,
+        y_vector: tf.Tensor,
+        x_length_meters: tf.Tensor,
+        y_length_meters: tf.Tensor,
+        x_response : tf.Tensor,
+        y_response : tf.Tensor,
+        response : tf.Tensor,
+        location : tf.Tensor,
+        right_ascension: Optional[tf.Tensor] = None,
+        declination: Optional[tf.Tensor] = None,
+        polarization: Optional[tf.Tensor] = None
+    ) -> tf.Tensor:
 
     # Ensure the seed is of the correct shape [2] and dtype int32
     seed_tensor = tf.cast(seed, dtype=tf.int32)
@@ -426,13 +427,13 @@ class Network:
     
     def init_parameters(
         self,
-        longitude_radians: tf.Tensor = None,  # Batched tensor
-        latitude_radians: tf.Tensor = None,   # Batched tensor
-        y_angle_radians: tf.Tensor = None,  # Batched tensor
-        x_angle_radians: tf.Tensor = None,  # Batched tensor or None
-        height_meters: tf.Tensor = None,  # Batched tensor
-        x_length_meters: tf.Tensor = None,  # Batched tensor
-        y_length_meters: tf.Tensor = None   # Batched tensor
+        longitude_radians: Optional[tf.Tensor] = None,  # Batched tensor
+        latitude_radians: Optional[tf.Tensor] = None,   # Batched tensor
+        y_angle_radians: Optional[tf.Tensor] = None,  # Batched tensor
+        x_angle_radians: Optional[tf.Tensor] = None,  # Batched tensor or None
+        height_meters: Optional[tf.Tensor] = None,  # Batched tensor
+        x_length_meters: Optional[tf.Tensor] = None,  # Batched tensor
+        y_length_meters: Optional[tf.Tensor] = None   # Batched tensor
     ):
         
         PI = tf.constant(np.pi, dtype=tf.float32)
@@ -521,7 +522,7 @@ class Network:
             right_ascension: tf.Tensor, 
             declination: tf.Tensor, 
             polarization: tf.Tensor
-        ):
+        ) -> tf.Tensor:
         
         return get_antenna_pattern_(
             right_ascension, 
@@ -540,7 +541,7 @@ class Network:
     def load(
         cls,
         config_path: Path, 
-        ):   
+        ) -> "Network":   
         
         # Define replacement mapping
         replacements = {
@@ -589,12 +590,14 @@ class Network:
             input : Union[tf.Tensor, Tuple, List, float, int, None], 
             name : Union[tf.Tensor, Tuple, List, float, int, None], 
             tensor_length : int
-        ):
+        ) -> Optional[tf.Tensor]:
 
         match input:
             case tf.Tensor() as tensor:
                 if tensor.shape[0] != N:
-                    raise ValueError(f"Tensor, {name}, must be equal to num injections, {tensor_length}.")
+                    raise ValueError(
+                        f"Tensor, {name}, must be equal to num injections, {tensor_length}."
+                    )
                 if tensor.dtype != tf.float32:
                     try:
                         return tf.cast(tensor, tf.float32)
@@ -605,7 +608,9 @@ class Network:
 
             case (list() | tuple()) as lst:
                 if len(lst) != N:
-                    raise ValueError(f"List/tuple, {name}, must be equal to num injections, {tensor_length}.")
+                    raise ValueError(
+                        f"List/tuple, {name}, must be equal to num injections, {tensor_length}."
+                    )
                 if any(isinstance(x, int) for x in lst):
                     logging.warn(
                         f"List or tuple, {name}, contains integers, which will be converted to floats."
@@ -637,11 +642,12 @@ class Network:
     def project_wave(
         self,
         strain : tf.Tensor,
-        sample_rate_hertz : float = None,
+        sample_rate_hertz : Optional[float] = None,
         right_ascension: Optional[Union[tf.Tensor, List[float], float]] = None,
         declination: Optional[Union[tf.Tensor, List[float], float]]  = None,
         polarization: Optional[Union[tf.Tensor, List[float], float]]  = None
-    ):
+    ) -> tf.Tensor:
+
         if sample_rate_hertz is None:
             sample_rate_hertz = gf.Defaults.sample_rate_hertz
 
@@ -703,7 +709,7 @@ def shift_waveform(
         strain : tf.Tensor, 
         sample_rate_hertz : float, 
         time_shift_seconds : tf.Tensor
-    ):
+    ) -> tf.Tensor:
     
     frequency_axis = gf.rfftfreq(
         tf.shape(strain)[-1],

@@ -1,0 +1,9 @@
+{
+    "longitude_radians" : [1, 2],
+    "latitude_radians" : [1, -1],
+    "y_angle_radians" : [1, 0],
+    "x_angle_radians" : [0, 1],
+    "height_meters" : [0, -100],
+    "x_length_meters" : [1000, 3000],
+    "y_length_meters" : [1000, 2000]
+}

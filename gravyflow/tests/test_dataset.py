@@ -757,12 +757,3 @@ def test_dataset_iteration_multi_ifo_incoherent(
         num_tests=gf.tests.num_tests_from_config(pytestconfig),
         ifos=[gf.IFO.L1, gf.IFO.H1]
     )
-
-"""
-_test_dataset(
-    name="consistency_multi", 
-    waveform_type="incoherent",
-    plot_examples=False,
-    ifos=[gf.IFO.L1, gf.IFO.H1]
-)
-"""
