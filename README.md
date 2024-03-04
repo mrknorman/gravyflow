@@ -2,7 +2,7 @@
 
 TensorFlow tools to facilitate machine learning for gravitational-wave data analysis. 
 
-# Instalation Guide
+# Installation Guide
 
 ## 1. Clone the Repository
 GravyFlow can be installed by cloning the Git repository. Execute the following command to clone GravyFlow along with its submodules:
