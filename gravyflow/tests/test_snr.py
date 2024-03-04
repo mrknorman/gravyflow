@@ -196,7 +196,7 @@ def _test_snr(
     
     with gf.env():
         
-        output_directory_path : Path = gf.PATH.parent / "gravyflow_data/tests/"
+        output_directory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests/"
 
         gf.Defaults.onsource_duration_seconds = 16.0
 

@@ -51,7 +51,7 @@ def _test_phenom_d_injection(
         plot_results : bool = False
     ) -> None:
     
-    output_diretory_path : Path = gf.PATH.parent / "gravyflow_data/tests/"
+    output_diretory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests/"
 
     with gf.env():
 
@@ -148,7 +148,7 @@ def _test_wnb_injection(
         plot_results : bool = False
     ) -> None:
 
-    output_diretory_path : Path = gf.PATH.parent / "gravyflow_data/tests/"
+    output_diretory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests/"
     
     with gf.env():
         # Define injection directory path:

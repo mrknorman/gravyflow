@@ -20,7 +20,7 @@ def plot_whiten_functions(
         overlap_duration_seconds : float = 0.5
     ) -> None:
 
-    output_diretory_path : Path = gf.PATH.parent / "gravyflow_data/tests"
+    output_diretory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests"
     
     # Constants
     sample_rate_hertz: int = 8192
@@ -246,7 +246,7 @@ def _test_whitening_real_noise(
     sample_rate_hertz : float = gf.Defaults.sample_rate_hertz
     fft_duration_seconds : float = 1.0
     overlap_duration_seconds : float = 0.5
-    output_diretory_path : Path = gf.PATH.parent / "gravyflow_data/tests"
+    output_diretory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests"
     
     # Setup ifo data acquisition object:
     ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(

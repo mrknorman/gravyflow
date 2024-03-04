@@ -223,10 +223,10 @@ def get_tf_memory_usage() -> int:
     return memory_info["current"] // (1024 * 1024)
          
 def env(
-        min_gpu_memory_mb : int = 4000,
+        min_gpu_memory_mb : int = 5000,
         max_gpu_utilization_percentage : float = 80,
         num_gpus_to_request : int = 1,
-        memory_to_allocate_tf : int = 2000,
+        memory_to_allocate_tf : int = 3000,
         gpus : Union[str, int, List[Union[int, str]], None]= None
     ) -> tf.distribute.Strategy:
     

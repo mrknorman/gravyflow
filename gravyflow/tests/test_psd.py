@@ -93,7 +93,7 @@ def _test_welch_method(
             )
 
             # Specify output file and save the plot
-            output_path : Path = gf.PATH.parent() / "gravyflow_data/tests/psd_plots.html"
+            output_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests/psd_plots.html"
             gf.ensure_directory_exists(output_path)
             output_file(output_path)
             save(plot)

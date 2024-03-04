@@ -2,6 +2,7 @@
 import hashlib
 import logging
 import sys
+import gc
 
 from itertools import cycle
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from pathlib import Path
 import numpy as np
 from numpy.random import default_rng  
 import tensorflow as tf
+import tensorflow_io as tfio
 
 from gwdatafind import find_urls
 from gwpy.segments import DataQualityDict
@@ -1408,10 +1410,8 @@ class IFODataObtainer:
                     self.frame_types[0], 
                     self.channels[0]
                 )
-
-                original_sample_rate_hertz : float = float(segment.sample_rate.value)
-
-                segment : TimeSeries = segment.resample(sample_rate_hertz)
+                
+                segment.resample(sample_rate_hertz)
 
             except Exception as e:
                 # If any exception raised, skip segment
@@ -1435,20 +1435,7 @@ class IFODataObtainer:
                 else:
                     self.logger.error("Segment integrity comprimised, skipping")
                     return None
-                
-                """
-                original_size = tf.size(segment)
-                segment_power_2 : tf.Tensor = gf.pad_to_power_of_two(segment)
-                segment : tf.Tensor = gf.resample(segment_power_2, original_size, original_sample_rate_hertz, sample_rate_hertz)
-
-                For some reason that is beyond me this causes a massive memory leak.
-                del original_segment
-                del segment_power_2
-                
-                del resample_segment
-                gc.collect()
-                """
-
+            
             else:
                 self.logger.error(
                     f"Segment is none for some reason, skipping."

@@ -79,6 +79,7 @@ setup(
         "GitPython",
         "sqlalchemy",
         "bokeh",
+        "psycopg2",
         "ipykernel",
         "tensorflow[and-cuda]",
         "tensorflow-probability",
