@@ -27,7 +27,13 @@ Ensure the CUDA C++ compiler (`nvcc`) is accessible by updating your PATH variab
 export PATH=/usr/local/cuda/bin${PATH:+:${PATH}}$
 ```
 
-Adjust the path if your CUDA installation is in a non-default location. Afterward, return to the previous directory to continue the installation process:
+Adjust the path if your CUDA installation is in a non-default location. Compile cuPhenom by running:
+
+```bash
+make shared
+```
+
+Afterward, return to the previous directory to continue the installation process:
 
 ```bash
 cd -
