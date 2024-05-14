@@ -24,6 +24,11 @@ from gwpy.timeseries import TimeSeries
 # Local imports:
 import gravyflow as gf
 
+def ensure_even(number):
+    if number % 2 != 0:
+        number -= 1
+    return number
+
 # Enums
 class DataQuality(Enum):
     RAW = auto()
@@ -1501,10 +1506,8 @@ class IFODataObtainer:
         
         # Calculate number of samples required to fullfill onsource and 
         # offsource durations:
-        num_onsource_samples : int = \
-            int(total_onsource_duration_seconds * sample_rate_hertz)
-        num_offsource_samples : int = \
-            int(offsource_duration_seconds * sample_rate_hertz)
+        num_onsource_samples : int = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
+        num_offsource_samples : int = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
         
         for segment in self.acquire(
                 sample_rate_hertz, 

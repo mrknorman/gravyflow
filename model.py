@@ -5,6 +5,7 @@ from pathlib import Path
 import os
 import logging
 import json
+import time
 import pickle
 import datetime
 
@@ -620,6 +621,11 @@ class WhitenPassLayer(BaseLayer):
 def cap_value(x):
     return K.clip(x, 1.0e-5, 1000)  # values will be constrained to [-1, 1]
 
+def ensure_even(number):
+    if number % 2 != 0:
+        number -= 1
+    return number
+
 class Model:
     def __init__(
         self, 
@@ -731,8 +737,12 @@ class Model:
         dataset_args["offsource_duration_seconds"] = genome.offsource_duration_seconds.value
         dataset_args["sample_rate_hertz"] = genome.sample_rate_hertz.value
 
-        num_onsource_samples = int((genome.onsource_duration_seconds.value + 2.0*gf.Defaults.crop_duration_seconds) * genome.sample_rate_hertz.value)
-        num_offsource_samples = int(genome.offsource_duration_seconds.value * genome.sample_rate_hertz.value)
+        num_onsource_samples = ensure_even(
+            int((genome.onsource_duration_seconds.value + 2.0*gf.Defaults.crop_duration_seconds) * genome.sample_rate_hertz.value)
+        )
+        num_offsource_samples = ensure_even(
+            int(genome.offsource_duration_seconds.value * genome.sample_rate_hertz.value)
+        )
 
         if genome.layer_genomes[0].value.layer_type == "WhitenPass":
             dataset_args["input_variables"] = [
@@ -1538,16 +1548,8 @@ class PopulationSector:
     def transfer(self, population, index):
         self.models.append(population.models.pop(index))
         self.fitnesses.append(population.fitnesses.pop(index))
-        self.accuracies.append(population.accuracies.pop(index))
-        self.losses.append(population.losses.pop(index))
         self.num_models += 1
-
-    def tick(self):
-        self.mean_accuracy_history.append(np.mean(self.accuracies))
-        self.mean_loss_history.append(np.mean(self.losses))
-        self.mean_fitness_history.append(np.mean(self.fitnesses))
-        self.num_models = len(self.models)
-
+    
     def save(self):
         np.save(self.save_directory / f"{self.name}_fitnesses", self.fitnesses)
         np.save(self.save_directory / f"{self.name}_accuracies", self.fitnesses)
@@ -1695,8 +1697,8 @@ class Population:
             if not Path(model["path"] / "validation_plots.html").exists():
                 initial_processes.append(gf.Process(
                     f"python train.py --path {model['path']}", model["name"], 
-                    tensorflow_memory_mb=5000, 
-                    cuda_overhead_mb=2000, 
+                    tensorflow_memory_mb=1000, 
+                    cuda_overhead_mb=500, 
                     initial_restart_count=1
                 ))
             else:
@@ -1707,24 +1709,26 @@ class Population:
         if initial_processes:
             manager = gf.Manager(
                 initial_processes,
-                max_restarts=20,
+                max_restarts=8,
                 restart_timeout_seconds=3600.0,
-                process_start_wait_seconds=1.0,
+                process_start_wait_seconds=3.0,
                 management_tick_length_seconds=5.0,
-                max_num_concurent_processes=10,
+                max_num_concurent_processes=60,
                 log_directory_path = (
                     self.population_directory_path / f"generation_{self.generation}/logs/"
                 )
             )
 
+            interval_seconds : float = 60.0
+            last_save_time = time.time()  # Tracks the last save time.
+
             while manager:
-                manager()
+                manager()  # Call the manager function.
+        
         else:
             logging.info(
                 f"Generation {self.generation} empty or completed. Skipping."
             )
-
-        self.generation += 1
 
     def load_config(
         self,
@@ -1742,10 +1746,13 @@ class Population:
         self, 
         num_generations
     ):  
+
         current_dir = Path(__file__).resolve().parent.parent
 
         email_config_path = Path("./gravyflow/alert_settings.json")
         email_config = self.load_config(email_config_path)
+
+        logging.info("Sending email...")
 
         gf.send_email(
             f"Started optimising {self.population_directory_path}..", 
@@ -1755,10 +1762,27 @@ class Population:
             Path(email_config['email_config_path'])
         )
 
+        logging.info("Starting training...")
+
+        """
+        self.generation = 5
+        self.current_id = 5000
+
+        self.nursary = PopulationSector("nursary", self.population_directory_path)
+        for _ in range(self.num_population_members):
+            if (self.population_directory_path / f"generation_{self.generation}/model_{self.current_id}/genome").exists():
+                self.load_model()
+            else:
+                print("Can't find file!")
+        """
+
         for generation_index in range(self.generation, num_generations):
             logging.info(f"Training Generation: {self.generation}")
+            
             self.train_generation()
+            self.generation += 1
 
+            self.nursary.models=sorted(self.nursary.models, key=lambda x: x['number'])
             self.nursary.fitnesses = self.load_and_calculate_fitness(
                 generation_index
             )
@@ -1775,18 +1799,20 @@ class Population:
                 Path(email_config['email_config_path'])
             )
 
-            for _ in range(self.num_population_members):
+            while self.nursary.models:
                 self.orchard.transfer(self.nursary, -1)
-
+                        
             for _ in range(self.num_population_members):
-                if (self.population_directory_path / f"model_{self.current_id}/genome").exists():
+                if (self.population_directory_path / f"/generation_{self.generation}/model_{self.current_id}/genome").exists():
                     self.load_model()
                 else:
                     self.germinate_sapling()
 
-            for _ in range(self.num_population_members):
+            while self.orchard.models:
                 self.lumberyard.transfer(self.orchard, -1)
 
+            self.save()
+    
     def germinate_sapling(self):
 
         parent_a_index = self.roulette_wheel_selection(self.orchard.fitnesses)
@@ -1797,7 +1823,7 @@ class Population:
 
         #Crossover
         new_genome = deepcopy(parent_a["genome"])
-        new_genome.reseed(self.rng(1E10))
+        new_genome.reseed(self.rng.integers(1E10))
         new_genome.crossover(deepcopy(parent_b["genome"]))
 
         #Mutate
@@ -1822,22 +1848,29 @@ class Population:
             scaling_threshold = 8
         ):
 
-        fitnesses = []
-
         self.population_directory_path = Path(self.population_directory_path)
 
         directory_path = self.population_directory_path / f"generation_{generation}/"
+
+        model_indices = []
         for entry in directory_path.iterdir():
             if entry.name.startswith(f"model_"):
-                name = gf.transform_string(entry.name)
+                model_indices.append(int(entry.name.split("_")[-1]))
 
+        fitnesses = np.zeros(self.num_population_members)
+
+        for entry in directory_path.iterdir():
+            if entry.name.startswith(f"model_"):
+                
+                model_index = int(entry.name.split("_")[-1]) - self.num_population_members*generation
                 try:
                     history = gf.load_history(entry)
                     validator = gf.validate.Validator.load(entry / "validation_data.h5")
-
+                    genome = gf.ModelGenome.load(entry / "genome")
+                    
                     score_threshold = list(gf.validate.calculate_far_score_thresholds(
                         validator.far_scores, 
-                        gf.Defaults.onsource_duration_seconds,
+                        genome.onsource_duration_seconds.value,
                         [10E-4]
                     ).values())[0][1]
 
@@ -1848,15 +1881,53 @@ class Population:
                         if scaling > scaling_threshold:
                             valid_scores = np.append(valid_scores, scores.flatten())
                     
-                    num_valid_scores_above = len(valid_scores[valid_scores > score_threshold])
+                    fitnesses[model_index] = calculate_fitness(valid_scores, score_threshold, history)
+                except Exception as e:
+                    logging.error(e)
+                    pass
 
-                    fitnesses.append(
-                        1.0 / (1.0 - (num_valid_scores_above/ len(valid_scores)) + np.min(history["val_loss"]) + 1E-8)
-                    )
-                except:
-                    fitnesses.append(0)
-        
-        return fitnesses
+        return list(fitnesses)
+
+def calculate_fitness(valid_scores: List[float], score_threshold : float, history: Dict[str, List[float]]) -> float:
+    """
+    Calculate the fitness based on the number of valid scores above a threshold,
+    the list of valid scores, and the history of validation losses. Sets fitness to
+    0 if any term is NaN or infinite.
+
+    Parameters
+    ----------
+    num_valid_scores_above : int
+        Number of valid scores above the threshold.
+    valid_scores : List[float]
+        List of valid scores.
+    history : Dict[str, List[float]]
+        History dictionary containing validation loss under the key "val_loss".
+
+    Returns
+    -------
+    float
+        The calculated fitness value or 0 if any term is NaN or infinite.
+
+    """
+    num_valid_scores_above = len(valid_scores[valid_scores > score_threshold])
+
+    len_valid_scores = len(valid_scores)
+    min_val_loss = np.min(history["val_loss"])
+    
+    # Pre-calculation checks for NaN or inf
+    terms = [num_valid_scores_above, len_valid_scores, min_val_loss]
+    if np.any(np.isnan(terms)) or np.any(np.isinf(terms)):
+        logging.info("One or more terms are NaN or infinite. Setting fitness to 0.")
+        return 0.0
+    
+    fitness = 1.0 / (1.0 - (num_valid_scores_above / len_valid_scores) + min_val_loss + 1E-8)
+    
+    # Post-calculation check for NaN or inf in the fitness result
+    if np.isnan(fitness) or np.isinf(fitness):
+        logging.info("Calculated fitness is NaN or infinite. Setting fitness to 0.")
+        return 0.0
+
+    return fitness
 
 def snake_case_to_capitalised_first_with_spaces(text):
     """

@@ -5,6 +5,7 @@ import h5py
 import logging
 from copy import deepcopy
 from itertools import cycle
+import math
 
 import numpy as np
 from scipy.interpolate import interp1d
@@ -22,6 +23,28 @@ from bokeh.resources import INLINE, Resources
 from bokeh.palettes import Bright
 
 import gravyflow as gf
+
+def pad_with_random_values(scores):
+    # Determine the maximum length among all numpy arrays of 2-element arrays in scores
+    max_length = max(len(score) for score in scores)
+    
+    def pad_array(arr, max_length):
+        current_length = len(arr)
+        if current_length < max_length:
+            # Calculate the number of 2-element arrays needed
+            num_arrays_needed = max_length - current_length
+            # Randomly sample indices from the array
+            sampled_indices = np.random.randint(0, current_length, size=num_arrays_needed)
+            # Use the indices to select 2-element arrays to duplicate
+            sampled_arrays = arr[sampled_indices]
+            # Concatenate the original array with the sampled ones to pad it
+            arr = np.concatenate([arr, sampled_arrays], axis=0)
+        return arr
+    
+    # Apply padding to each numpy array in scores
+    padded_scores = np.array([pad_array(score, max_length) for score in scores])
+    
+    return padded_scores
 
 def calculate_efficiency_scores(
         model : tf.keras.Model, 
@@ -73,7 +96,7 @@ def calculate_efficiency_scores(
     
     # Calculate number of batches reuanuired given batch size:
     num_examples = num_examples_per_scaling_step*num_scaling_steps
-    num_batches = num_examples // num_examples_per_batch
+    num_batches = math.ceil(num_examples / num_examples_per_batch)
 
     # Generate array of scaling values used in dataset generation:
     efficiency_scalings = np.linspace(0.0, max_scaling, num_scaling_steps)
@@ -125,6 +148,9 @@ def calculate_efficiency_scores(
                         (index + 1) * num_examples_per_scaling_step
                     ] for index in range(num_scaling_steps)
                 ]
+
+                scores = pad_with_random_values(scores)
+
             except Exception as e:
                 raise Exception(f"Error splitting efficiency scores: {e}.")
 
@@ -142,10 +168,9 @@ def calculate_efficiency_scores(
         
             # Unpack:
             scalings = efficiency_scalings
-            efficiency_scores =  np.array(scores)
 
             # Save efficiency scores:
-            if efficiency_scores is not None:
+            if scores is not None:
                 if 'efficiency_data' not in validation_file:
                     eff_group = validation_file.create_group('efficiency_data')
                 else:
@@ -157,7 +182,7 @@ def calculate_efficiency_scores(
                     del eff_group['scalings']
                     eff_group.create_dataset(f'scalings', data=scalings)
                 
-                for i, score in enumerate(efficiency_scores):
+                for i, score in enumerate(scores):
 
                     if f'score_{i}' not in eff_group:
                         eff_group.create_dataset(f'score_{i}', data=score)
@@ -165,7 +190,7 @@ def calculate_efficiency_scores(
                         del eff_group[f'score_{i}']
                         eff_group.create_dataset(f'score_{i}', data=score)
     
-    return {"scalings" : efficiency_scalings, "scores": np.array(scores)}
+    return {"scalings" : efficiency_scalings, "scores": scores}
 
 def calculate_far_scores(
         model : tf.keras.Model, 
@@ -205,7 +230,7 @@ def calculate_far_scores(
     num_examples_per_batch = int(num_examples_per_batch)
     
     # Calculate number of batches required given batch size:
-    num_batches = num_examples // num_examples_per_batch
+    num_batches = math.ceil(num_examples / num_examples_per_batch)
 
     # Ensure dataset has no injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
@@ -445,7 +470,7 @@ def calculate_roc(
     num_examples_per_batch = int(num_examples_per_batch)
     
     # Calculate number of batches required given batch size:
-    num_batches = num_examples // num_examples_per_batch
+    num_batches = math.ceil(num_examples / num_examples_per_batch)
     
     #Ensure injection generators is list for subsequent logic:
     if not isinstance(dataset_args["waveform_generators"], list):
@@ -676,12 +701,11 @@ def calculate_tar_scores(
     num_examples_per_batch = int(num_examples_per_batch)
     
     # Calculate number of batches required given batch size:
-    num_batches = num_examples // num_examples_per_batch
+    num_batches = math.ceil(num_examples / num_examples_per_batch)
     
     #Ensure injection generators is list for subsequent logic:
     if not isinstance(dataset_args["waveform_generators"], list):
-        dataset_args["waveform_generators"] = \
-            [dataset_args["waveform_generators"]]
+        dataset_args["waveform_generators"] = [dataset_args["waveform_generators"]]
     
     # Ensure dataset is full of injections:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch

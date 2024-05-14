@@ -39,6 +39,20 @@ def generate_envelopes(
     return envelopes
 
 @tf.function
+def adjust_envelopes_shape(filtered_noise, envelopes):
+    # Determine the condition: whether envelopes have one extra sample compared to filtered_noise
+    condition = tf.equal(tf.shape(envelopes)[2], tf.shape(filtered_noise)[2] + 1)
+
+    # Use tf.cond to perform the conditional operation
+    envelopes_adjusted = tf.cond(
+        condition,
+        lambda: envelopes[:, :, :-1],  # True branch: Trim the last sample
+        lambda: envelopes               # False branch: Return envelopes as is
+    )
+
+    return envelopes_adjusted
+
+@tf.function
 def wnb(
     num_waveforms: int,
     sample_rate_hertz: float,
@@ -92,9 +106,11 @@ def wnb(
     max_frequency_hertz = tf.cast(max_frequency_hertz, tf.float32)
 
     # Convert duration to number of samples:
-    num_samples_array = tf.cast(sample_rate_hertz * duration_seconds, tf.int32)
+    num_samples_array = tf.cast(
+        tf.floor(sample_rate_hertz * duration_seconds), tf.int32
+    )
     max_num_samples = tf.cast(
-        max_duration_seconds * sample_rate_hertz, tf.int32
+        tf.floor(max_duration_seconds * sample_rate_hertz), tf.int32
     )
 
     # Generate Gaussian noise:
@@ -151,7 +167,9 @@ def wnb(
     # Generate envolopes:
     envelopes = generate_envelopes(num_samples_array, max_num_samples)
     envelopes = tf.expand_dims(envelopes, axis=1)
-    
+
+    envelopes = adjust_envelopes_shape(filtered_noise, envelopes)
+
     # Apply envolope:
     filtered_noise = filtered_noise * envelopes
 

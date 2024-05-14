@@ -520,8 +520,27 @@ class WNBGenerator(WaveformGenerator):
             
             # Scale by arbitrary factor to reduce chance of precision errors:
             waveforms *= self.scale_factor
+            waveforms = ensure_last_dim_even(waveforms)
             
             return waveforms, parameters
+
+@tf.function
+def ensure_last_dim_even(tensor):
+    # Get the shape of the tensor
+    shape = tf.shape(tensor)
+    last_dim = shape[-1]
+    
+    # Determine if the last dimension is even
+    is_even = tf.equal(last_dim % 2, 0)
+    
+    # Pad the tensor with zeros in the last dimension if needed
+    result = tf.cond(
+        is_even,
+        lambda: tensor,
+        lambda: tensor[...,:-1]
+    )
+    
+    return result
 
 @dataclass
 class cuPhenomDGenerator(WaveformGenerator):
@@ -616,6 +635,7 @@ class cuPhenomDGenerator(WaveformGenerator):
                             duration_seconds,
                             **parameters
                         )
+
                 except Exception as e:
                     # If an exception occurs, increment the attempts counter
                     attempts += 1
@@ -625,6 +645,8 @@ class cuPhenomDGenerator(WaveformGenerator):
                         raise Exception(f"Max waveform generation retries reached: {max_retries}") from e
             
             waveforms *= self.scale_factor
+
+            waveforms = ensure_last_dim_even(waveforms)
         
             return waveforms, parameters
     
@@ -667,7 +689,7 @@ class IncoherentGenerator(WaveformGenerator):
                     duration_seconds,
                     seed
                 )
-                
+
                 waveforms.append(waveforms_)
                 parameters.append(parameters_)
         
@@ -680,7 +702,7 @@ class IncoherentGenerator(WaveformGenerator):
         parameters = parameters[0]
 
         return waveforms, parameters
-    
+
 @dataclass
 class InjectionGenerator:
     waveform_generators : Union[
@@ -711,8 +733,7 @@ class InjectionGenerator:
         self.crop_duration_seconds = crop_duration_seconds
         self.num_examples_per_generation_batch = num_examples_per_generation_batch
         self.num_examples_per_batch = num_examples_per_batch
-
-
+        
         if self.sample_rate_hertz is None:
             self.sample_rate_hertz = gf.Defaults.sample_rate_hertz
         if self.onsource_duration_seconds is None:
@@ -799,16 +820,20 @@ class InjectionGenerator:
                     )
         try:
             injections = tf.stack(injections)
+        except Exception as e:
+            raise Exception(f"Failed to stack injections because {e}.")
+
+        try:
             mask = tf.stack(mask)
         except Exception as e:
-            logging.error(f"Failed to stack injections or mask because {e}")
-            return None, None, None
+            raise Exception(f"Failed to stack mask because {e}.")
 
         for key, value in parameters.items():
             try:
                 parameters[key] = tf.stack(value)
             except Exception as e:
                 logging.error(f"Failed to stack injections parameters because {e}")
+
                 return None, None, None
 
         while 1: 
@@ -1059,7 +1084,9 @@ class InjectionGenerator:
         return_variables = {
             key : [] for key in ScalingTypes if key in parameters_to_return
         }
-        cropped_injections = []    
+        cropped_injections = []
+        
+        onsource = ensure_last_dim_even(onsource)
 
         # Unstack because TensorFlow hates tensor iteration: 
         try:
@@ -1080,6 +1107,8 @@ class InjectionGenerator:
                 scaling_parameters, 
                 waveform_generators
             ):
+
+            injections_ = ensure_last_dim_even(injections_)
             
             network = waveform_generator.network
             
@@ -1117,12 +1146,13 @@ class InjectionGenerator:
                             )
                         else:
                             injections_ = tf.reduce_sum(injections_, axis=1, keepdims = True)
+
                     except Exception as e:
                         logging.error(f"Failed to project injections because {e}")
 
                     if injections_ is not None:
                         if injections_.shape != onsource.shape:
-                            logging.error(f"Shape mismatch {injections_.shape} {onsource.shape}")
+                            logging.error(f"Shape mismatch injections {injections_.shape} onsource {onsource.shape}")
                             return None, None, None
 
                         try:

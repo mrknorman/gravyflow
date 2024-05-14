@@ -14,8 +14,15 @@ from pathlib import Path
 
 from tensorflow.keras.callbacks import Callback
 import numpy as np
+import pytz
 
 import gravyflow as gf
+
+def get_current_datetime():
+    """Returns the current datetime in UK timezone as a formatted string."""
+    uk_timezone = pytz.timezone('Europe/London')
+    uk_time = datetime.now(uk_timezone)
+    return uk_time.strftime("%Y-%m-%d %H:%M:%S")
 
 def explain_exit_code(exit_code):
     """
@@ -209,7 +216,7 @@ def acquire_heartbeat(
 def monitor_heartbeat(
         command, 
         flags,
-        missed_heartbeat_threshold=1200,
+        missed_heartbeat_threshold=300,
         acquisition_timeout_seconds=60
     ):
 
@@ -227,11 +234,12 @@ def monitor_heartbeat(
             acquisition_timeout_seconds=acquisition_timeout_seconds
         )
         if last_heartbeat_timestamp is None or last_heartbeat_timestamp == 0:
-            logging.warning("Failed to acquire heartbeat! Assumed dead!")
+            logging.warning(f"Failed to acquire heartbeat! Assumed dead at {get_current_datetime()}!")
             flags["has_died"].set()
             return -1
         else:
-            logging.info(f"{command.name} at {command.id} heartbeat acquired at: {last_heartbeat_timestamp} s.")
+            logging.info(f"{command.name} at {command.id} heartbeat acquired at {get_current_datetime()}.")
+            flags["heartbeat_acquired"].set()
     else:
         return -1
 
@@ -249,7 +257,7 @@ def monitor_heartbeat(
             return -1
 
         if timestamp == -1:
-            logging.info(f"{command.name} has succesfully completed. Enforcing shutdown.")
+            logging.info(f"{command.name} has succesfully completed at {get_current_datetime()}. Enforcing shutdown.")
             time.sleep(30)
             flags["has_completed"].set()
             return 0
@@ -263,7 +271,10 @@ def monitor_heartbeat(
             continue
         
         if time_since_last_beat >= missed_heartbeat_threshold:
-            logging.warning(f"It has been {time_since_last_beat} seconds since last heartbeat detected from {command.name}.")
+            logging.warning(
+                (f"{get_current_datetime()}: It has been {time_since_last_beat} "
+                f"seconds since last heartbeat detected from {command.name}.")
+            )
             flags["has_died"].set()
             return -1
 
@@ -277,7 +288,10 @@ def start_monitoring_thread(command, flags):
 
     :param command: The command object representing the subprocess.
     """
-    monitor_thread = threading.Thread(target=monitor_heartbeat, args=(command, flags))
+    monitor_thread = threading.Thread(
+        target=monitor_heartbeat, 
+        args=(command, flags)
+    )
     monitor_thread.start()
 
     return monitor_thread
@@ -285,7 +299,7 @@ def start_monitoring_thread(command, flags):
 def kill_process(pid):
     try:
         if pid is not None and pid > 0:
-            os.kill(pid, signal.SIGKILL)  # or signal.SIGKILL for a forceful kill
+            os.kill(pid, signal.SIGKILL)
             logging.info(f"Process with PID {pid} has been terminated.")
     except OSError as e:
         return
@@ -345,6 +359,7 @@ class Process:
 
         self.process = None
         self.id = -1
+        self.last_retcode = None
         self.restart_count = initial_restart_count
         self.total_restart_count = initial_restart_count
         self.restart_counter = time.time()
@@ -383,7 +398,7 @@ class Process:
     # Modify the start_process function to track first-time start:
     def start(self):
         try:
-            process_gap_seconds = 3
+            process_gap_seconds = 10
             logging.info((
                 f"Waiting {process_gap_seconds} s"
                 " to space out process activations."
@@ -418,6 +433,7 @@ class Process:
                 create_named_pipe(self.pipe_name)
 
                 self.flags = {
+                    "heartbeat_acquired" : threading.Event(),
                     "has_died" : threading.Event(), 
                     "should_exit" : threading.Event(), 
                     "has_completed": threading.Event()
@@ -465,6 +481,17 @@ class Process:
         else:
             logging.warning(
                 "Allocated memory is None when removing process. Concerning?"
+            )
+
+        if self.manager.allocated_memory[
+                self.current_gpu
+            ] < 0:
+
+            self.manager.allocated_memory[
+                self.current_gpu
+            ] = 0
+            logging.warning(
+                "Allocated memory has fallen below zero. Concerning?"
             )
         
         self.process = None
@@ -523,7 +550,9 @@ class Process:
         return False      
 
     def get_retcode(self):
-        return self.process.poll()
+        retcode = self.process.poll()
+        self.last_retcode = retcode
+        return retcode
 
     def print_stderr(self):
         stdout, stderr = self.process.communicate()
@@ -543,7 +572,11 @@ class Process:
         self.has_completed = True
         self.manager.completed.append(self)
 
-    def requeue(self):
+    def requeue(
+            self,
+            memory_increase_mb : int = 1000, 
+            max_memory_mb : int = 8000
+        ):
 
         self.restart_count += 1
         self.total_restart_count += 1
@@ -551,6 +584,40 @@ class Process:
             self.manager.queued.insert(0, self)
             self.manager.num_restarts += 1
             self.kill()
+
+        match self.last_retcode:
+            case -6:
+                if self.manager.max_num_concurent_processes > 20:
+                    logging.info(
+                        (
+                            f"Process {self.name} was killed. Reducing max number of processes from "
+                            f"{self.manager.max_num_concurent_processes} to {self.manager.max_num_concurent_processes - 1}."
+                        )
+                    )
+                    self.manager.max_num_concurent_processes -= 1
+            case 1:
+                logging.info(
+                    (
+                        f"Process {self.name} ended with general error, assuming OOM error. Increasing job memory requriment from "
+                         f"{self.tensorflow_memory_mb} to {self.tensorflow_memory_mb + memory_increase_mb}."
+                    )
+                )
+            case _:
+                pass
+        
+        self.tensorflow_memory_mb += memory_increase_mb
+        self.cuda_overhead_mb += memory_increase_mb // 2
+
+        if self.tensorflow_memory_mb > max_memory_mb:
+            logging.info(
+                (
+                    f"Process {self.name} has reached max memory requirement {max_memory_mb} "
+                    f"it will fail if this is not enough."
+                )
+            )
+            self.tensorflow_memory_mb = max_memory_mb
+        
+        self.memory_assigned = self.tensorflow_memory_mb + self.cuda_overhead_mb
 
 class Manager:
 
@@ -582,7 +649,12 @@ class Manager:
             print("\033[F\033[K", end="")
         
         # Print table headers
-        header = f"| {'ID':<7} | {'Name':<15} | {'GPU':<6} | {'Restart Timeout': <15} | {'Total Restarts': <15} | {'Assigned Mem':<15} | {'TF Mem':<10} | {'CUDA Overhead':<15} | {'Status':<8} |"
+        header = (
+            f"| {'ID':<7} | {'Name':<15} | {'GPU':<6} | {'Restart Timeout': <15} "
+            f"| {'Total Restarts': <15} | {'Assigned Mem':<15} | {'TF Mem':<10} "
+            f"| {'CUDA Overhead':<15} | {'Status':<8} |"
+        )
+
         print(self)
         print(header)
 
@@ -687,8 +759,9 @@ class Manager:
     def manage_running_processes(self):
 
         for process in self.running[:]:
+            
             if process.process is not None:
-
+                
                 if process.check_if_failed():
                     logging.warning((
                         "Failed process found in running jobs "
@@ -732,6 +805,13 @@ class Manager:
                         ))
                         process.complete()
 
+                # Check if monitor thread has marked process as dead:
+                elif process.flags["heartbeat_acquired"].is_set():
+                    logging.info((
+                        f"Monitoring thread for {process.id} communication check sucessfull."
+                    ))
+                    process.flags["heartbeat_acquired"].clear()
+
                 # Check if monitor thread has spotted completion signal:
                 elif process.flags["has_completed"].is_set():
                     logging.error((
@@ -744,9 +824,10 @@ class Manager:
                 elif process.flags["has_died"].is_set():
                     logging.error((
                         f"Process {process.name} at "
-                        "{process.id} heartbeat lost. "
+                        f"{process.id} heartbeat lost. "
                         "Terminating."
                     ))
+                    process.last_retcode = 1
                     process.requeue()
 
     def update_memory_array(self):
@@ -762,39 +843,60 @@ class Manager:
                 f"Failed to update free memory array because {e}."
             )
 
-    def assign_gpus(self):
+    def assign_gpus(
+        self, 
+        max_gpu_memory_mb: int = 14000,
+        max_allocations: int = 1
+    ) -> None:
 
         self.update_memory_array()
 
         if self.free_memory is None:
             raise ValueError("Free memory array is None, for some reason!")
 
-        process_index = 0
-        for gpu_index, gpu_memory in enumerate(self.free_memory):
-            
-            while process_index < len(self.queued):
+        unallocated_processes = set(range(len(self.queued)))
+        allocations_count = 0  # Initialize count of successful allocations
 
-                total_memory_required_mb = self.queued[process_index].tensorflow_memory_mb + self.queued[process_index].cuda_overhead_mb 
+        while unallocated_processes:
+            initial_unallocated_count = len(unallocated_processes)
 
-                if (gpu_memory >= total_memory_required_mb):
+            # Sort GPUs by their available memory in descending order
+            sorted_gpus = sorted(enumerate(self.free_memory), key=lambda x: x[1], reverse=True)
 
-                    gpu_memory -= total_memory_required_mb
+            for process_index in unallocated_processes.copy():
+                process = self.queued[process_index]
+                total_memory_required_mb = process.tensorflow_memory_mb + process.cuda_overhead_mb
 
-                    self.queued[process_index].current_gpu = gpu_index
-                    self.queued[process_index].memory_assigned = total_memory_required_mb
-                    self.allocated_memory[gpu_index] += total_memory_required_mb
+                for gpu_index, _ in sorted_gpus:
+                    gpu_memory = self.free_memory[gpu_index]  # Local variable to track memory during allocation
 
-                    process_index += 1
-                else:
+                    # Check if adding this process would exceed the GPU's memory limit or the maximum allowed memory
+                    if gpu_memory >= total_memory_required_mb and (max_allocations is None or allocations_count < max_allocations):
+                        gpu_memory -= total_memory_required_mb
+                        process.current_gpu = gpu_index
+                        process.memory_assigned = total_memory_required_mb
+                        self.allocated_memory[gpu_index] += total_memory_required_mb
+                        unallocated_processes.remove(process_index)
+                        allocations_count += 1  # Increment successful allocations
+                        break
+
+                    # Break out of the allocation process if the max allocations limit has been reached
+                    if max_allocations is not None and allocations_count >= max_allocations:
+                        break
+
+                # Additional break to exit the outer loop when max allocations reached
+                if max_allocations is not None and allocations_count >= max_allocations:
                     break
+
+            if len(unallocated_processes) == initial_unallocated_count:
+                break  # Break if no allocations were made in this pass
     
     def start_processes(self):
 
         self.assign_gpus()
 
         for command in self.queued:
-            if command.current_gpu > -1 and self.queued \
-                and len(self.running) < self.max_num_concurent_processes:
+            if command.current_gpu > -1 and self.queued and len(self.running) < self.max_num_concurent_processes:
 
                 self.queued.remove(command)
 

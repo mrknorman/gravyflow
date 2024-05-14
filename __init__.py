@@ -42,7 +42,7 @@ from .git import get_current_repo
 from .model import (
     BaseLayer, Reshape, DenseLayer, FlattenLayer, ConvLayer,
     PoolLayer, DropLayer, BatchNormLayer, WhitenLayer, WhitenPassLayer,
-    Model, PopulationSector, Population
+    Model, PopulationSector, Population, calculate_fitness
 )
 from .whiten import whiten, Whiten, WhitenPass
 from .pearson import rolling_pearson

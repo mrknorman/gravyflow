@@ -227,7 +227,7 @@ def data(
             injections_, mask, parameters = next(injections)
         except Exception as e:
             logging.info(f"Injections failed because {e}\nTraceback: {traceback.format_exc()}")
-            raise Exception(f"Noise failed because {e}\nTraceback: {traceback.format_exc()}")
+            raise Exception(f"Injections failed because {e}\nTraceback: {traceback.format_exc()}")
 
         if len(waveform_generators):
                         
@@ -421,6 +421,11 @@ def create_variable_dictionary(
         if key in operations
     }
 
+def ensure_even(number):
+    if number % 2 != 0:
+        number -= 1
+    return number
+
 def Dataset(
         seed: int = None,
         sample_rate_hertz: float = None,
@@ -506,6 +511,10 @@ def Dataset(
     num_onsource_samples = int((onsource_duration_seconds + 2*crop_duration_seconds) * sample_rate_hertz)
     num_offsource_samples = int(offsource_duration_seconds * sample_rate_hertz)
     num_waveform_generators = len(waveform_generators)
+
+    num_cropped_samples = ensure_even(num_cropped_samples)
+    num_onsource_samples = ensure_even(num_onsource_samples)
+    num_offsource_samples = ensure_even(num_offsource_samples)
     
     num_detectors = 1
     if isinstance(waveform_generators, list): 
