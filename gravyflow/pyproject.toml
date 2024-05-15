@@ -1,0 +1,10 @@
+# pyproject.toml
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::DeprecationWarning:tensorflow_probability.*",
+    "ignore::DeprecationWarning:scitokens.*",
+    "ignore::DeprecationWarning:pkg_resources.*",
+    "ignore:distutils Version classes are deprecated. Use packaging.version instead.:DeprecationWarning",
+    "ignore:pkg_resources is deprecated:DeprecationWarning",
+    "ignore:Deprecated call to `pkg_resources.declare_namespace`:DeprecationWarning",
+]

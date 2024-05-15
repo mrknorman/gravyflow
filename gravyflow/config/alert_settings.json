@@ -1,0 +1,10 @@
+{
+    "check_interval_seconds": 600,
+    "alert_interval_seconds": 3600,
+    "min_alert_threshold": 2,
+    "empty_cluster_threshold": 7,
+    "max_utilization_percentage": 60,
+    "min_memory_mb": 6000,
+    "email_config_path": "./gravyflow/email_config.json",
+    "recipient_email": "mrknorman@protonmail.com"
+}
