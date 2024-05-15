@@ -1,7 +1,7 @@
 # GravyFlow
 TensorFlow tools to facilitate machine learning for gravitational-wave data analysis. 
 
-# Install guide:
+# Instalation Guide
 
 1. Clone the git repo, ensuring you recurse submodules:
 ```
@@ -50,3 +50,14 @@ to get the username and password for Gravity Spy and enter them as follows:
 
 export GRAVITYSPY_DATABASE_USER=<user>
 export GRAVITYSPY_DATABASE_PASSWD=<password>
+```
+
+## 6. Test Gravyflow (optional)
+
+GravyFlow includes PyTest for testing its functionality. To run tests:
+
+```bash
+pytest gravyflow
+```
+
+Note: Tests may fail due to unavailable GPU memory if GPUs are currently under heavy use.
