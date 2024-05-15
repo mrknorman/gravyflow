@@ -1,0 +1,28 @@
+{
+    "type": "WNB",
+    "scaling_type" : "snr",
+    "scaling_distribution": {
+        "min_": 8.0,
+        "max_": 20.0,
+        "type_": "uniform"
+    },
+    "scale_factor" : 1.0,
+    "injection_chance": 1.0,
+    "front_padding_duration_seconds": 0.3,
+    "back_padding_duration_seconds": 0.0,
+    "duration_seconds" : {
+        "min_": 0.1,
+        "max_": 1.0,
+        "type_": "uniform"
+    },
+    "min_frequency_hertz" : {
+        "min_": 20.0,
+        "max_": 500.0,
+        "type_": "uniform"
+    },
+    "max_frequency_hertz" : {
+        "min_": 20.0,
+        "max_": 500.0,
+        "type_": "uniform"
+    }
+}
