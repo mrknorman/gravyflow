@@ -47,8 +47,7 @@ def is_redirected():
 
 def load_history(filepath):
     history_path = filepath / "history.hdf5"
-
-    print("path", history_path)
+    
     if os.path.exists(history_path):
         with h5py.File(history_path, 'r') as hfile:
             return {k: list(v) for k, v in hfile.items()}
@@ -90,11 +89,11 @@ def open_hdf5_file(
 
     try:
         # Try to open the HDF5 file in the specified mode
-        f = h5py.File(file_path, mode)
+        f = h5py.File(file_path, mode, swmr=True)
         f.close()
     except OSError as e:
         # The file does not exist, so create it in write mode
-        f = h5py.File(file_path, 'w')  # You can add swmr=True if needed
+        f = h5py.File(file_path, 'w', swmr=True)  # You can add swmr=True if needed
         f.close()
 
         if logger is not None:

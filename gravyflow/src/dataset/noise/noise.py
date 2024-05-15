@@ -15,6 +15,11 @@ class NoiseType(Enum):
     COLORED = auto()
     PSEUDO_REAL = auto()
     REAL = auto()
+
+def ensure_even(number):
+    if number % 2 != 0:
+        number -= 1
+    return number
     
 @tf.function
 def _generate_white_noise(
@@ -79,9 +84,8 @@ def white_noise_generator(
 
     total_onsource_duration_seconds : float = onsource_duration_seconds + (crop_duration_seconds * 2.0)
     
-    num_onsource_samples : int = int(total_onsource_duration_seconds * sample_rate_hertz)
-    
-    num_offsource_samples : int = int(offsource_duration_seconds * sample_rate_hertz)
+    num_onsource_samples : int = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
+    num_offsource_samples : int = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
     
     while True:
         yield _generate_white_noise(
@@ -213,8 +217,7 @@ def colored_noise_generator(
     # Create a random number generator with the provided seed
     rng = default_rng(seed)
     
-    total_onsource_duration_seconds : float = \
-        onsource_duration_seconds + (crop_duration_seconds * 2.0)
+    total_onsource_duration_seconds : float = onsource_duration_seconds + (crop_duration_seconds * 2.0)
     
     durations_seconds = [
         total_onsource_duration_seconds, 
@@ -238,7 +241,7 @@ def colored_noise_generator(
         asd *= scale_factor
         
         num_samples_list = [
-            int(duration * sample_rate_hertz) for duration in durations_seconds
+            ensure_even(int(duration * sample_rate_hertz)) for duration in durations_seconds
         ]
 
         interpolated_asd_onsource, interpolated_asd_offsource = interpolate_onsource_offsource_psd(
