@@ -48,6 +48,12 @@ conda env create --name gravyflow
 conda activate gravyflow
 ```
 
+Next, ensure pip is installed by running:
+
+```bash
+conda install pip 
+```
+
 Then, install GravyFlow and its requirements into your conda environment:
 
 ```bash
