@@ -21,9 +21,10 @@ To compile the cuPhenom library, navigate to the cuPhenom submodule directory:
 cd gravyflow/cuphenom
 ```
 
-Ensure the CUDA C++ compiler (`nvcc`) is accessible by updating your PATH variable:
+Ensure the CUDA C++ compiler (`nvcc`) and associated CUDA libraries are accessible by updating your PATH variable:
 
 ```bash
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 export PATH=/usr/local/cuda/bin${PATH:+:${PATH}}$
 ```
 
