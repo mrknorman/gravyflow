@@ -18,7 +18,7 @@ The `--recurse-submodules` option ensures that the cuPhenom submodule and its su
 To compile the cuPhenom library, navigate to the cuPhenom submodule directory:
 
 ```bash
-cd gravyflow/cuphenom
+cd gravyflow/gravyflow/cuphenom
 ```
 
 Ensure the CUDA C++ compiler (`nvcc`) and associated CUDA libraries are accessible by updating your PATH variable:
