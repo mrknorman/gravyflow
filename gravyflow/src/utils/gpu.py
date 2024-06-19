@@ -255,6 +255,11 @@ def env(
             max_utilization_percentage=max_gpu_utilization_percentage,
             max_needed=num_gpus_to_request
         )
+
+    if not gpus:
+        raise Exception("No GPUs avalible as they were too busy or not existant.")
+    elif len(gpus) != num_gpus_to_request:
+        logging.warning(f"Could not allocate requested number of GPUs ({num_gpus_to_request}) as they were too busy or not existant. Allocated {len(gpus) } instead.")
     
     strategy = setup_cuda(
         gpus, 

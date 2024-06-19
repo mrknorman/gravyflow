@@ -83,6 +83,7 @@ setup(
         "ipykernel",
         "tensorflow[and-cuda]",
         "tensorflow-probability",
+        "tf-keras"
     ],
     cmdclass={
         'install': CustomInstall,
