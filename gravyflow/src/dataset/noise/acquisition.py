@@ -16,7 +16,6 @@ from pathlib import Path
 import numpy as np
 from numpy.random import default_rng  
 import tensorflow as tf
-import tensorflow_io as tfio
 
 from gwdatafind import find_urls
 from gwpy.segments import DataQualityDict
