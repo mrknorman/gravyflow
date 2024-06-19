@@ -225,12 +225,18 @@ def project_wave_(
     num_injections = tf.shape(strain)[0]
     PI = tf.constant(3.14159, dtype=tf.float32)
     
-    right_ascension, declination = generate_direction_vectors(
+    random_right_ascension, random_declination = generate_direction_vectors(
         num_injections, 
         seed_tensor,
         right_ascension,
         declination
     )
+
+    if right_ascension is None:
+        right_ascension = random_right_ascension
+    
+    if declination is None:
+        declination = random_declination
 
     if polarization is None:
         polarization = tf.random.stateless_uniform(

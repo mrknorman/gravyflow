@@ -67,8 +67,10 @@ def detrend(data, axis=-1, type='linear', bp=0, overwrite_data=False):
             ], 
             axis=0
         )
-        newdata = tf.reshape(tf.transpose(data, perm=newdims),
-                             [N, tf.math.reduce_prod(tf.shape(data)) // N])
+        newdata = tf.reshape(
+            tf.transpose(data, perm=newdims),
+            [N, tf.math.reduce_prod(tf.shape(data)) // N]
+        )
         if not overwrite_data:
             newdata = tf.identity(newdata)
         newdata = tf.cast(newdata, dtype)
@@ -114,8 +116,8 @@ def psd(
     # Step 3: Compute the periodogram (scaled, absolute value of FFT) for each 
     # segment
     periodograms = tf.abs(
-            tf.signal.rfft(windowed_frames)
-        )**2 / tf.reduce_sum(window**2)
+        tf.signal.rfft(windowed_frames)
+    )**2 / tf.reduce_sum(window**2)
     
     # Step 4: Compute the median or mean of the periodograms based on the 
     #median_mode
@@ -129,16 +131,15 @@ def psd(
     # Step 5: Compute the frequencies corresponding to the power spectrum values
     freqs = fftfreq(nperseg, d=1.0/sample_rate_hertz)
     
-    #Create mask to multiply all but the 0 and nyquist frequency by 2
+    # Step 6: Create mask to multiply all but the 0 and nyquist frequency by 2
     X = pxx.shape[-1]
-    mask = \
-        tf.concat(
-            [
-                tf.constant([1.]), 
-                tf.ones([X-2], dtype=tf.float32) * 2.0, 
-                tf.constant([1.])
-            ], 
-            axis=0
-        )
+    mask = tf.concat(
+        [
+            tf.constant([1.]), 
+            tf.ones([X-2], dtype=tf.float32) * 2.0, 
+            tf.constant([1.])
+        ], 
+        axis=0
+    )
         
     return freqs, (mask*pxx / sample_rate_hertz)

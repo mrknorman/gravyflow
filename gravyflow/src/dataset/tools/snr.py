@@ -17,12 +17,12 @@ def find_closest(tensor, scalar):
 
 @tf.function(jit_compile=True)
 def snr(
-    injection: tf.Tensor, 
-    background: tf.Tensor,
-    sample_rate_hertz: float, 
-    fft_duration_seconds: float = 4.0, 
-    overlap_duration_seconds: float = 2.0,
-    lower_frequency_cutoff: float = 20.0,
+        injection: tf.Tensor, 
+        background: tf.Tensor,
+        sample_rate_hertz: float, 
+        fft_duration_seconds: float = 4.0, 
+        overlap_duration_seconds: float = 2.0,
+        lower_frequency_cutoff: float = 20.0
     ) -> tf.Tensor:
     """
     Calculate the signal-to-noise ratio (SNR) of a given signal.
@@ -89,13 +89,19 @@ def snr(
     )
         
     # Compute the frequency window for SNR calculation
-    start_freq_num_samples = \
-        find_closest(fsamples_no_dc, lower_frequency_cutoff)
-    end_freq_num_samples = \
-        find_closest(fsamples_no_dc, upper_frequency_cutoff)
+    start_freq_num_samples = find_closest(
+        fsamples_no_dc, 
+        lower_frequency_cutoff
+    )
+    end_freq_num_samples = find_closest(
+        fsamples_no_dc, 
+        upper_frequency_cutoff
+    )
     
     # Compute the SNR numerator in the frequency window
-    inj_fft_squared = tf.abs(inj_fft_no_dc*tf.math.conj(inj_fft_no_dc))   
+    inj_fft_squared = tf.abs(
+        inj_fft_no_dc*tf.math.conj(inj_fft_no_dc)
+    )   
 
     if len(injection.shape) == 2:
         # Use the interpolated ASD in the frequency window for SNR calculation
