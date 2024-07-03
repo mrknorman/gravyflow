@@ -78,26 +78,24 @@ def white_noise_generator(
         A tensor containing white Gaussian noise.
     """
 
-    # Create random number generator from seed:
-    # Create a random number generator with the provided seed
-    rng = default_rng(seed)
-
     total_onsource_duration_seconds : float = onsource_duration_seconds + (crop_duration_seconds * 2.0)
     
     num_onsource_samples : int = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
     num_offsource_samples : int = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
-    
+
+    tf.random.set_seed(seed)
+
     while True:
         yield _generate_white_noise(
             num_examples_per_batch, 
             len(ifos),
             num_onsource_samples,
-            seed=int(rng.integers(1E10))
+            seed=int(seed)
         ), _generate_white_noise(
             num_examples_per_batch, 
             len(ifos),
             num_offsource_samples,
-            seed=int(rng.integers(1E10))
+            seed=int(seed+1)
         ), tf.fill([num_examples_per_batch], -1.0)
         
 @tf.function
@@ -212,18 +210,13 @@ def colored_noise_generator(
     tf.Tensor
         A tensor containing colored Gaussian noise.
     """
-
-    # Create random number generator from seed:
-    # Create a random number generator with the provided seed
-    rng = default_rng(seed)
-    
     total_onsource_duration_seconds : float = onsource_duration_seconds + (crop_duration_seconds * 2.0)
     
     durations_seconds = [
         total_onsource_duration_seconds, 
         offsource_duration_seconds
     ]
-    
+
     interpolated_onsource_asds = []
     interpolated_offsource_asds = []
     for ifo in ifos:
@@ -259,7 +252,9 @@ def colored_noise_generator(
         )
     
     interpolated_onsource_asds = tf.concat(interpolated_onsource_asds, axis=1)
-    interpolated_offsource_asds = tf.concat(interpolated_offsource_asds, axis=1)        
+    interpolated_offsource_asds = tf.concat(interpolated_offsource_asds, axis=1)    
+
+    tf.random.set_seed(seed)
     
     while True:
         yield _generate_colored_noise(
@@ -267,13 +262,13 @@ def colored_noise_generator(
                 len(ifos),
                 num_samples_list[0], 
                 interpolated_onsource_asds,
-                seed=int(rng.integers(1E10))
+                seed=int(seed)
             ), _generate_colored_noise(
                 num_examples_per_batch, 
                 len(ifos),
                 num_samples_list[1], 
                 interpolated_offsource_asds,
-                seed=int(rng.integers(1E10))
+                seed=int(seed+1)
             ), tf.fill([num_examples_per_batch], -1.0)
     
 
@@ -297,6 +292,8 @@ class NoiseObtainer:
                 "validate" : 0.01,
                 "test" : 0.01
             }
+
+        self.rng = None
     
     def __call__(
             self,
@@ -325,21 +322,27 @@ class NoiseObtainer:
             num_examples_per_batch = gf.Defaults.num_examples_per_batch
         if seed is None:
             seed = gf.Defaults.seed
-        
+        if self.rng is None:
+            self.rng = default_rng(seed)
+
         # Configure noise based on type
         self.generator = None
+
+        seed_ = self.rng.integers(1E10)
+
+        print(seed_)
         
         match self.noise_type:
             case NoiseType.WHITE:
                 self.generator = white_noise_generator(
-                        num_examples_per_batch,
-                        self.ifos,
-                        onsource_duration_seconds,
-                        crop_duration_seconds,
-                        offsource_duration_seconds,
-                        sample_rate_hertz,
-                        seed=seed
-                    )
+                    num_examples_per_batch,
+                    self.ifos,
+                    onsource_duration_seconds,
+                    crop_duration_seconds,
+                    offsource_duration_seconds,
+                    sample_rate_hertz,
+                    seed=seed_
+                )
                 
             case NoiseType.COLORED:
                 self.generator = colored_noise_generator(
@@ -350,7 +353,7 @@ class NoiseObtainer:
                     self.ifos,
                     sample_rate_hertz,
                     scale_factor,
-                    seed=seed
+                    seed=seed_
                 )
             
             case NoiseType.PSEUDO_REAL:
@@ -362,7 +365,7 @@ class NoiseObtainer:
                     sample_rate_hertz,
                     group,
                     scale_factor,
-                    seed=seed
+                    seed=seed_
                 )
             
             case NoiseType.REAL:
@@ -381,22 +384,21 @@ class NoiseObtainer:
                         either during initlisation or through setting
                         NoiseObtainer.ifo_data_obtainer
                     """)
-                else:
+                elif self.ifo_data_obtainer.valid_segments is None:
+                        self.ifo_data_obtainer.get_valid_segments(
+                            self.ifos,
+                            seed,
+                            self.groups,
+                            group,
+                        )
                     
-                    self.ifo_data_obtainer.get_valid_segments(
-                        self.ifos,
-                        seed,
-                        self.groups,
-                        group,
-                    )
-                    
-                    # Setup noise_file_path, file path is created from
-                    # hash of unique parameters
-                    self.ifo_data_obtainer.generate_file_path(
-                        sample_rate_hertz,
-                        group,
-                        self.data_directory_path
-                    )
+                        # Setup noise_file_path, file path is created from
+                        # hash of unique parameters
+                        self.ifo_data_obtainer.generate_file_path(
+                            sample_rate_hertz,
+                            group,
+                            self.data_directory_path
+                        )
                 
                 # Initilise generator function:
                 self.generator = self.ifo_data_obtainer.get_onsource_offsource_chunks(
@@ -407,11 +409,11 @@ class NoiseObtainer:
                         num_examples_per_batch,
                         self.ifos,
                         scale_factor,
-                        seed
+                        seed=seed_
                     )
                 
             case _:
-                # Raise error if noisetyp not recognised.
+                # Raise error if noisetype not recognised.
                 raise ValueError(
                     f"NoiseType {self.noise_type} not recognised, please choose"
                     "from NoiseType.WHITE, NoiseType.COLORED, "
@@ -420,7 +422,7 @@ class NoiseObtainer:
                 
         if self.generator is None:
             raise ValueError(
-                "Noise generator failed to initilise.."
+                "Noise generator failed to initilise..."
             )
                 
         return self.generator
@@ -461,8 +463,8 @@ class NoiseObtainer:
                 either during initlisation or through setting
                 NoiseObtainer.ifo_data_obtainer
             """)
-        else:
-
+        elif self.ifo_data_obtainer.valid_segments is None:
+            
             valid_segments = self.ifo_data_obtainer.get_valid_segments(
                 self.ifos,
                 seed,
@@ -538,3 +540,12 @@ class NoiseObtainer:
                         tf.sqrt(interpolated_offsource_psds),
                         seed=int(rng.integers(1E10))
                     ), tf.fill([num_examples_per_batch], -1) #segment.start_gps_time)        
+                
+
+class FeatureObtainer(NoiseObtainer):
+    data_directory_path : Path = Path("./generator_data")
+    ifo_data_obtainer : Union[None, gf.IFODataObtainer] = None
+    ifos : List[gf.IFO] = gf.IFO.L1
+    noise_type : NoiseType = NoiseType.REAL
+    groups : Union[dict, None] = None
+    

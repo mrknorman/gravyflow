@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union, Dict, Any, Iterator
+from typing import List, Tuple, Union, Dict, Any, Iterator, Optional, Set
 from enum import Enum, auto
 from pathlib import Path
 from dataclasses import dataclass
@@ -93,294 +93,352 @@ def get_max_arrival_time_difference(
     
     return max_arival_time_difference_seconds
 
-def data(    
-        # Random Seed:
-        seed: int = None,
-        # Temporal components:
-        sample_rate_hertz: float = None,   
-        onsource_duration_seconds: float = None,
-        offsource_duration_seconds: float = None,
-        crop_duration_seconds: float = None,
-        # Scale factor:
-        scale_factor : float = None,
-        # Noise: 
-        noise_obtainer : gf.NoiseObtainer = None,
-        group : str = "train",
-        # Injections:
-        waveform_generators: List[
-            Union[gf.cuPhenomDGenerator, gf.WNBGenerator]
-        ] = None, 
-        num_examples_per_generation_batch : int = None,
-        # Output configuration:
-        num_examples_per_batch: int = None,
-        input_variables : List[
-            Union[gf.WaveformParameters, gf.ReturnVariables]
-        ] = None,
-        output_variables : List[
-            Union[gf.WaveformParameters, gf.ReturnVariables]
-        ] = None,
-        mask_history = None
+class data:
+    """
+    A class to generate data for gravitational wave detection training.
+
+    This generator produces batches of data, combining noise and simulated
+    gravitational wave signals, along with various processed forms of this data.
+    """
+
+    def __init__(
+        self,
+        seed: Optional[int] = None,
+        sample_rate_hertz: Optional[float] = None,
+        onsource_duration_seconds: Optional[float] = None,
+        offsource_duration_seconds: Optional[float] = None,
+        crop_duration_seconds: Optional[float] = None,
+        scale_factor: Optional[float] = None,
+        noise_obtainer: Optional[gf.NoiseObtainer] = None,
+        group: str = "train",
+        waveform_generators: Optional[List[Union[gf.cuPhenomDGenerator, gf.WNBGenerator]]] = None,
+        num_examples_per_generation_batch: Optional[int] = None,
+        num_examples_per_batch: Optional[int] = None,
+        input_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
+        output_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
+        mask_history: Optional[List] = None
     ):
+        """
+        Initialize the DataGenerator with the given parameters.
 
-    if seed is None:
-        seed = gf.Defaults.seed
-    if sample_rate_hertz is None:
-        sample_rate_hertz = gf.Defaults.sample_rate_hertz
-    if onsource_duration_seconds is None:
-        onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
-    if offsource_duration_seconds is None:
-        offsource_duration_seconds = gf.Defaults.offsource_duration_seconds
-    if crop_duration_seconds is None:
-        crop_duration_seconds = gf.Defaults.crop_duration_seconds
-    if scale_factor is None:
-        scale_factor = gf.Defaults.scale_factor
-    if num_examples_per_generation_batch is None:
-        num_examples_per_generation_batch = gf.Defaults.num_examples_per_generation_batch
-    if num_examples_per_batch is None:
-        num_examples_per_batch = gf.Defaults.num_examples_per_batch
-    
-    # Set gf.Defaults here as if initilised as default arguments objects are global
-    if noise_obtainer is None:
-        noise_obtainer = gf.NoiseObtainer()
+        :param seed: Random seed for reproducibility
+        :param sample_rate_hertz: Sampling rate of the data
+        :param onsource_duration_seconds: Duration of the on-source data
+        :param offsource_duration_seconds: Duration of the off-source data
+        :param crop_duration_seconds: Duration to crop the data
+        :param scale_factor: Scaling factor for the data
+        :param noise_obtainer: Object to obtain noise data
+        :param group: Group identifier (e.g., "train", "test")
+        :param waveform_generators: List of waveform generators
+        :param num_examples_per_generation_batch: Number of examples per generation batch
+        :param num_examples_per_batch: Number of examples per output batch
+        :param input_variables: List of input variables to return
+        :param output_variables: List of output variables to return
+        :param mask_history: List to store injection masks
+        """
+        # Set default values
+        self.seed = seed if seed is not None else gf.Defaults.seed
+        self.sample_rate_hertz = sample_rate_hertz if sample_rate_hertz is not None else gf.Defaults.sample_rate_hertz
+        self.onsource_duration_seconds = onsource_duration_seconds if onsource_duration_seconds is not None else gf.Defaults.onsource_duration_seconds
+        self.offsource_duration_seconds = offsource_duration_seconds if offsource_duration_seconds is not None else gf.Defaults.offsource_duration_seconds
+        self.crop_duration_seconds = crop_duration_seconds if crop_duration_seconds is not None else gf.Defaults.crop_duration_seconds
+        self.scale_factor = scale_factor if scale_factor is not None else gf.Defaults.scale_factor
+        self.num_examples_per_generation_batch = num_examples_per_generation_batch if num_examples_per_generation_batch is not None else gf.Defaults.num_examples_per_generation_batch
+        self.num_examples_per_batch = num_examples_per_batch if num_examples_per_batch is not None else gf.Defaults.num_examples_per_batch
         
-    if input_variables is None:
-        input_variables = []
+        self.noise_obtainer = noise_obtainer if noise_obtainer is not None else gf.NoiseObtainer()
+        self.group = group
+        self.input_variables = input_variables if input_variables is not None else []
+        self.output_variables = output_variables if output_variables is not None else []
+        self.mask_history = mask_history
         
-    if output_variables is None:
-        output_variables = []
-        
-    if waveform_generators is None:
-        waveform_generators = []
-                
-    if not isinstance(waveform_generators, list) and not isinstance(waveform_generators, dict):
-        waveform_generators = [waveform_generators]
+        # Initialize waveform generators
+        self.waveform_generators = waveform_generators if waveform_generators is not None else []
+        if not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
+            self.waveform_generators = [self.waveform_generators]
 
-    # If no interferometers are input for injection generator
-    # assumes interferometers are the same as is used in
-    # noise generation:
-    if isinstance(waveform_generators, list):
-        for generator in waveform_generators:
-            if generator.network is None: 
-                generator.network = gf.Network(noise_obtainer.ifos)
-    elif isinstance(waveform_generators, dict):
-        for generator in waveform_generators.values():
-            if generator["generator"].network is None: 
-                generator["generator"].network = gf.Network(noise_obtainer.ifos)
-    
-    # Create set with unique elements of input and output variables so that they
-    # can be calculated during loop if required:
-    variables_to_return = set(input_variables + output_variables)
-    
-    if not variables_to_return:
-        raise ValueError("No return variables requested. What's the point?")
+        # Set network for waveform generators if not provided
+        self._set_generator_networks()
 
-    validate_noise_settings(noise_obtainer, variables_to_return)
-    
-    # Set random seeds for Tensorflow and Numpy to ensure deterministic results
-    # with the same seed. This means that if the seed is the concerved the
-    # dataset produced will be identical:
+        # Validate settings
+        self._validate_settings()
 
-    # To Do: remove as replaced with more robust generators:
-    gf.set_random_seeds(seed)
-    
-    # Create Noise Generator:
-    noise : Iterator = noise_obtainer(
-        sample_rate_hertz=sample_rate_hertz,
-        onsource_duration_seconds=onsource_duration_seconds,
-        crop_duration_seconds=crop_duration_seconds,
-        offsource_duration_seconds=offsource_duration_seconds,
-        num_examples_per_batch=num_examples_per_batch,
-        scale_factor=scale_factor,
-        group=group,
-        seed=seed
-    )
-    
-    # Create Injection Generator: 
-    waveform_parameters_to_return = [
-        item for item in variables_to_return if isinstance(
-            item.value, gf.WaveformParameter
+        # Set random seeds
+        gf.set_random_seeds(self.seed)
+
+        # Create noise and injection generators
+        self._create_generators()
+
+    def _set_generator_networks(self):
+        """Set the network for waveform generators if not provided."""
+        if isinstance(self.waveform_generators, list):
+            for generator in self.waveform_generators:
+                if generator.network is None: 
+                    generator.network = gf.Network(self.noise_obtainer.ifos)
+        elif isinstance(self.waveform_generators, dict):
+            for generator in self.waveform_generators.values():
+                if generator["generator"].network is None: 
+                    generator["generator"].network = gf.Network(self.noise_obtainer.ifos)
+
+    def _validate_settings(self):
+        """Validate the generator settings."""
+        self.variables_to_return = set(self.input_variables + self.output_variables)
+        if not self.variables_to_return:
+            raise ValueError("No return variables requested. What's the point?")
+        validate_noise_settings(self.noise_obtainer, self.variables_to_return)
+
+    def _create_generators(self):
+        """Create noise and injection generators."""
+        self.noise = self.noise_obtainer(
+            sample_rate_hertz=self.sample_rate_hertz,
+            onsource_duration_seconds=self.onsource_duration_seconds,
+            crop_duration_seconds=self.crop_duration_seconds,
+            offsource_duration_seconds=self.offsource_duration_seconds,
+            num_examples_per_batch=self.num_examples_per_batch,
+            scale_factor=self.scale_factor,
+            group=self.group,
+            seed=self.seed
         )
-    ]
-    injection_generator : gf.InjectionGenerator = gf.InjectionGenerator(
-        waveform_generators=waveform_generators,
-        parameters_to_return=waveform_parameters_to_return,
-        seed=seed
-    )
-    injections : Iterator = injection_generator(
-        sample_rate_hertz=sample_rate_hertz,
-        onsource_duration_seconds=onsource_duration_seconds,
-        crop_duration_seconds=crop_duration_seconds,
-        num_examples_per_generation_batch=num_examples_per_generation_batch,
-        num_examples_per_batch=num_examples_per_batch,
-    )
-    
-    whitened_injections = None
 
-    while True:
-        try:
-            onsource, offsource, gps_times = next(noise)
-        except Exception as e:
-            logging.info(f"Noise failed because {e}\nTraceback: {traceback.format_exc()}")
-            raise Exception(f"Noise failed because {e}\nTraceback: {traceback.format_exc()}")
-        
-        try:
-            injections_, mask, parameters = next(injections)
-        except Exception as e:
-            logging.info(f"Injections failed because {e}\nTraceback: {traceback.format_exc()}")
-            raise Exception(f"Injections failed because {e}\nTraceback: {traceback.format_exc()}")
+        waveform_parameters_to_return = [
+            item for item in self.variables_to_return if isinstance(
+                item.value, gf.WaveformParameter
+            )
+        ]
+        self.injection_generator = gf.InjectionGenerator(
+            waveform_generators=self.waveform_generators,
+            parameters_to_return=waveform_parameters_to_return,
+            seed=self.seed
+        )
+        self.injections = self.injection_generator(
+            sample_rate_hertz=self.sample_rate_hertz,
+            onsource_duration_seconds=self.onsource_duration_seconds,
+            crop_duration_seconds=self.crop_duration_seconds,
+            num_examples_per_generation_batch=self.num_examples_per_generation_batch,
+            num_examples_per_batch=self.num_examples_per_batch,
+        )
 
-        if len(waveform_generators):
-                        
-            # Add injections to waveform scaled by inputted SNR values:
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Generate the next batch of data.
+
+        :return: A tuple containing two dictionaries:
+                 1. Input dictionary with requested input variables
+                 2. Output dictionary with requested output variables
+        """
+        while True:
             try:
-                onsource, scaled_injections, scaling_parameters = injection_generator.add_injections_to_onsource(
-                    injections_,
-                    mask,
-                    onsource,
-                    parameters_to_return=variables_to_return
-                )
-                
+                onsource, offsource, gps_times = next(self.noise)
             except Exception as e:
-                logging.error(
-                    f"Couldn't add injections to onsource because {e}\nTraceback: {traceback.format_exc()}"
-                )
-                continue
-            
-            if onsource is None:
-                logging.error("Onsource is None!")
-                continue
+                logging.info(f"Noise generation failed: {e}\nTraceback: {traceback.format_exc()}")
+                raise
 
-            for key, value in scaling_parameters.items():
-                if key in variables_to_return:
-                    parameters[key] = value
+            try:
+                injections_, mask, parameters = next(self.injections)
+            except Exception as e:
+                logging.info(f"Injection generation failed: {e}\nTraceback: {traceback.format_exc()}")
+                raise
 
-            if gf.ReturnVariables.WHITENED_INJECTIONS in variables_to_return:
-                                
-                whitened_injections = tf.stack([
-                        gf.whiten(
-                            scaled_injection_, 
-                            offsource, 
-                            sample_rate_hertz, 
-                            fft_duration_seconds=1.0,
-                            overlap_duration_seconds=0.5,
-                            filter_duration_seconds=1.0
-                        ) for scaled_injection_ in scaled_injections
-                    ])
-                
-                whitened_injections = gf.replace_nan_and_inf_with_zero(
-                    whitened_injections
-                )
+            if self.waveform_generators:
+                try:
+                    onsource, scaled_injections, scaling_parameters = self.injection_generator.add_injections_to_onsource(
+                        injections_,
+                        mask,
+                        onsource,
+                        parameters_to_return=self.variables_to_return
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")
+                    continue
 
-            if gf.ReturnVariables.INJECTIONS in variables_to_return:
+                if onsource is None:
+                    logging.error("Onsource is None!")
+                    continue
 
-                scaled_injections = gf.replace_nan_and_inf_with_zero(
-                    scaled_injections
-                )
+                for key, value in scaling_parameters.items():
+                    if key in self.variables_to_return:
+                        parameters[key] = value
 
-        else:
-            scaled_injections = None
-                
-        # Whiten data: 
-        if (gf.ReturnVariables.WHITENED_ONSOURCE in variables_to_return) or \
-        (gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in variables_to_return) \
-        or (gf.ReturnVariables.SPECTROGRAM_ONSOURCE in variables_to_return):
+                whitened_injections = self._process_whitened_injections(scaled_injections, offsource)
+                scaled_injections = gf.replace_nan_and_inf_with_zero(scaled_injections)
+            else:
+                scaled_injections = None
+                whitened_injections = None
+
+            whitened_onsource, rolling_pearson_onsource, spectrogram_onsource = self._process_onsource(onsource, offsource)
+
+            onsource = self._process_raw_onsource(onsource)
+            offsource = self._process_offsource(offsource)
+            gps_times = self._process_gps_times(gps_times)
+            mask = self._process_mask(mask)
+
+            input_dict, output_dict = self._create_output_dictionaries(
+                onsource, whitened_onsource, offsource, gps_times, scaled_injections,
+                whitened_injections, mask, rolling_pearson_onsource, spectrogram_onsource, parameters
+            )
+
+            return input_dict, output_dict
+
+    def _process_whitened_injections(self, scaled_injections: tf.Tensor, offsource: tf.Tensor) -> Optional[tf.Tensor]:
+        """Process whitened injections if required."""
+        if gf.ReturnVariables.WHITENED_INJECTIONS in self.variables_to_return:
+            whitened_injections = tf.stack([
+                gf.whiten(
+                    scaled_injection_, 
+                    offsource, 
+                    self.sample_rate_hertz, 
+                    fft_duration_seconds=1.0,
+                    overlap_duration_seconds=0.5,
+                    filter_duration_seconds=1.0
+                ) for scaled_injection_ in scaled_injections
+            ])
+            return gf.replace_nan_and_inf_with_zero(whitened_injections)
+        return None
+
+    def _process_onsource(self, onsource: tf.Tensor, offsource: tf.Tensor) -> Tuple[Optional[tf.Tensor], Optional[tf.Tensor], Optional[tf.Tensor]]:
+        """Process onsource data, including whitening, rolling Pearson, and spectrogram generation."""
+        if (gf.ReturnVariables.WHITENED_ONSOURCE in self.variables_to_return) or \
+           (gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in self.variables_to_return) or \
+           (gf.ReturnVariables.SPECTROGRAM_ONSOURCE in self.variables_to_return):
 
             whitened_onsource = gf.whiten(
                 onsource, 
                 offsource, 
-                sample_rate_hertz, 
+                self.sample_rate_hertz, 
                 fft_duration_seconds=1.0,
                 overlap_duration_seconds=0.5,
                 filter_duration_seconds=1.0
             )
             
-            # Crop to remove edge effects, crop with or without whitening to
-            # ensure same data is retrieve in both cases
             whitened_onsource = gf.crop_samples(
                 whitened_onsource, 
-                onsource_duration_seconds, 
-                sample_rate_hertz
+                self.onsource_duration_seconds, 
+                self.sample_rate_hertz
             )
             
-            tf.debugging.check_numerics(
-                whitened_onsource, 
-                f"NaN detected in whitened_onsource after cast."
-            )
+            tf.debugging.check_numerics(whitened_onsource, "NaN detected in whitened_onsource after cast.")
             
-            if (
-                gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE \
-                in variables_to_return
-            ):
-                max_arival_time_difference_seconds: float = \
-                    get_max_arrival_time_difference(waveform_generators)
-                
-                rolling_pearson_onsource = gf.rolling_pearson(
-                    whitened_onsource,
-                    max_arival_time_difference_seconds,
-                    sample_rate_hertz
-                )
-            else:
-                rolling_pearson_onsource = None
-                
-            if (gf.ReturnVariables.SPECTROGRAM_ONSOURCE in variables_to_return):
-                spectrogram_onsource = gf.spectrogram(whitened_onsource)
-            else:
-                spectrogram_onsource = None
+            rolling_pearson_onsource = self._calculate_rolling_pearson(whitened_onsource)
+            spectrogram_onsource = self._calculate_spectrogram(whitened_onsource)
             
             whitened_onsource = tf.cast(whitened_onsource, tf.float16)
-            whitened_onsource = gf.replace_nan_and_inf_with_zero(
-                whitened_onsource
-            )
+            whitened_onsource = gf.replace_nan_and_inf_with_zero(whitened_onsource)
 
-        else:
-            whitened_onsource = None
-            rolling_pearson_onsource = None
-            spectrogram_onsource = None
-        
-        if gf.ReturnVariables.ONSOURCE in variables_to_return:
+            return whitened_onsource, rolling_pearson_onsource, spectrogram_onsource
+        return None, None, None
+
+    def _calculate_rolling_pearson(self, whitened_onsource: tf.Tensor) -> Optional[tf.Tensor]:
+        """Calculate rolling Pearson correlation if required."""
+        if gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in self.variables_to_return:
+            max_arrival_time_difference_seconds = get_max_arrival_time_difference(self.waveform_generators)
+            return gf.rolling_pearson(
+                whitened_onsource,
+                max_arrival_time_difference_seconds,
+                self.sample_rate_hertz
+            )
+        return None
+
+    def _calculate_spectrogram(self, whitened_onsource: tf.Tensor) -> Optional[tf.Tensor]:
+        """Calculate spectrogram if required."""
+        if gf.ReturnVariables.SPECTROGRAM_ONSOURCE in self.variables_to_return:
+            return gf.spectrogram(whitened_onsource)
+        return None
+
+    def _process_raw_onsource(self, onsource: tf.Tensor) -> Optional[tf.Tensor]:
+        """Process raw onsource data if required."""
+        if gf.ReturnVariables.ONSOURCE in self.variables_to_return:
             onsource = tf.cast(onsource, tf.float32)
             onsource = gf.replace_nan_and_inf_with_zero(onsource)
+            tf.debugging.check_numerics(onsource, "NaN detected in onsource after cast.")
+            return onsource
+        return None
 
-            tf.debugging.check_numerics(
-                onsource, 
-                f"NaN detected in onsource after cast."
-            )
-            
-        if gf.ReturnVariables.OFFSOURCE in variables_to_return:
+    def _process_offsource(self, offsource: tf.Tensor) -> Optional[tf.Tensor]:
+        """Process offsource data if required."""
+        if gf.ReturnVariables.OFFSOURCE in self.variables_to_return:
             offsource = tf.cast(offsource, tf.float32)
             offsource = gf.replace_nan_and_inf_with_zero(offsource)
+            tf.debugging.check_numerics(offsource, "NaN detected in offsource after cast.")
+            return offsource
+        return None
 
-            tf.debugging.check_numerics(
-                offsource, 
-                f"NaN detected in offsource after cast."
-            )
-            
-        if gf.ReturnVariables.GPS_TIME in variables_to_return:
-            gps_times = tf.cast(gps_times, tf.float64)
-            
-        if gf.ReturnVariables.INJECTION_MASKS in variables_to_return:
+    def _process_gps_times(self, gps_times: tf.Tensor) -> Optional[tf.Tensor]:
+        """Process GPS times if required."""
+        if gf.ReturnVariables.GPS_TIME in self.variables_to_return:
+            return tf.cast(gps_times, tf.float64)
+        return None
+
+    def _process_mask(self, mask: tf.Tensor) -> Optional[tf.Tensor]:
+        """Process injection masks if required."""
+        if gf.ReturnVariables.INJECTION_MASKS in self.variables_to_return:
             mask = tf.cast(mask, tf.float32)
-            if mask_history is not None:
-                mask_history.append(mask)
-                
-        # Construct dictionary:
-        input_dict, output_dict = [
-            create_variable_dictionary(
-                var_list,
-                onsource,
-                whitened_onsource,
-                offsource,
-                gps_times,
-                scaled_injections,
-                whitened_injections,
-                mask,
-                rolling_pearson_onsource,
-                spectrogram_onsource,
-                parameters
-            ) for var_list in [input_variables, output_variables]
+            if self.mask_history is not None:
+                self.mask_history.append(mask)
+            return mask
+        return None
+
+    def _create_output_dictionaries(self, *args) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Create input and output dictionaries based on requested variables."""
+        return [
+            create_variable_dictionary(var_list, *args)
+            for var_list in [self.input_variables, self.output_variables]
         ]
-                
-        yield (input_dict, output_dict)
+
+def create_variable_dictionary(
+    var_list: List[Union[gf.WaveformParameters, gf.ReturnVariables]],
+    onsource: tf.Tensor,
+    whitened_onsource: tf.Tensor,
+    offsource: tf.Tensor,
+    gps_times: tf.Tensor,
+    scaled_injections: tf.Tensor,
+    whitened_injections: tf.Tensor,
+    mask: tf.Tensor,
+    rolling_pearson_onsource: tf.Tensor,
+    spectrogram_onsource: tf.Tensor,
+    parameters: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Create a dictionary of variables based on the requested variable list.
+
+    :param var_list: List of variables to include in the dictionary
+    :param onsource: On-source data
+    :param whitened_onsource: Whitened on-source data
+    :param offsource: Off-source data
+    :param gps_times: GPS times
+    :param scaled_injections: Scaled injection data
+    :param whitened_injections: Whitened injection data
+    :param mask: Injection mask
+    :param rolling_pearson_onsource: Rolling Pearson correlation of on-source data
+    :param spectrogram_onsource: Spectrogram of on-source data
+    :param parameters: Dictionary of additional parameters
+    :return: Dictionary of requested variables
+    """
+    result = {}
+    for var in var_list:
+        if var == gf.ReturnVariables.ONSOURCE:
+            result[var.name] = onsource
+        elif var == gf.ReturnVariables.WHITENED_ONSOURCE:
+            result[var.name] = whitened_onsource
+        elif var == gf.ReturnVariables.OFFSOURCE:
+            result[var.name] = offsource
+        elif var == gf.ReturnVariables.GPS_TIME:
+            result[var.name] = gps_times
+        elif var == gf.ReturnVariables.INJECTIONS:
+            result[var.name] = scaled_injections
+        elif var == gf.ReturnVariables.WHITENED_INJECTIONS:
+            result[var.name] = whitened_injections
+        elif var == gf.ReturnVariables.INJECTION_MASKS:
+            result[var.name] = mask
+        elif var == gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE:
+            result[var.name] = rolling_pearson_onsource
+        elif var == gf.ReturnVariables.SPECTROGRAM_ONSOURCE:
+            result[var.name] = spectrogram_onsource
+        elif isinstance(var.value, gf.WaveformParameter):
+            result[var.name] = parameters.get(var.name)
+    return result
 
 def create_variable_dictionary(
     return_variables: List[Union[gf.ReturnVariables, gf.WaveformParameters]],

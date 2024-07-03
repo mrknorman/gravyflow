@@ -164,7 +164,7 @@ def get_glitch_segments(
     glitch_types: Union[List[GlitchType], GlitchType] = None,
     start_gps_time : float = None,
     end_gps_time : float = None,
-    ): 
+    ) -> np.ndarray:
     
     if start_gps_time is None:
         start_gps_time = observing_run.value.start_gps_time
