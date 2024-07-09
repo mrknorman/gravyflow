@@ -2,9 +2,6 @@
 import hashlib
 import logging
 import sys
-import gc
-
-import time
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -105,14 +102,14 @@ class ObservingRun(Enum):
     O3 = ObservingRunData(*observing_run_data["O3"])
 
 @tf.function(jit_compile=True)
-def random_subsection_(
+def _random_subsection(
         tensor_data: tf.Tensor,
         num_examples_per_batch: int,
         num_onsource_samples: int,
         num_offsource_samples: int,
-        time_interval_seconds: float,
-        start_gps_time: float,
-        seed: int
+        time_interval_seconds: tf.Tensor,
+        start_gps_times : float,
+        seed: tf.Tensor
     ):
 
     """
@@ -170,9 +167,7 @@ def random_subsection_(
     """
 
     # Cast input parameters to appropriate TensorFlow data types.
-    seed_tensor = tf.cast(seed, tf.int32)
-    time_interval_seconds = tf.cast(time_interval_seconds, tf.float32)
-    start_gps_time = tf.cast(start_gps_time, tf.float32)
+    start_gps_times = tf.cast(start_gps_times, tf.float32)
 
     # Determine the size of the input tensor.
     num_samples = tf.shape(tensor_data)[0]
@@ -185,7 +180,7 @@ def random_subsection_(
     random_starts_shape = (num_examples_per_batch,)
     random_starts = tf.random.stateless_uniform(
         shape=random_starts_shape,
-        seed=seed_tensor,
+        seed=seed,
         minval=minval,
         maxval=maxval,
         dtype=tf.int32
@@ -224,9 +219,145 @@ def random_subsection_(
 
     # Calculate the start times for each subsection.
     start_times = tf.cast(random_starts, tf.float32) * time_interval_seconds
-    subsections_start_gps_time = start_gps_time + start_times
 
-    return batch_subarrays, batch_background_chunks, subsections_start_gps_time
+    start_times += start_gps_times
+
+    return batch_subarrays, batch_background_chunks, start_times
+
+@tf.function(jit_compile=True)
+def concatenate_batches(subarrays, background_chunks, start_times):
+    """
+    Concatenates batches of subarrays, background chunks, and start times.
+
+    Parameters
+    ----------
+    subarrays : List[tf.Tensor]
+        List of batch subarrays.
+    background_chunks : List[tf.Tensor]
+        List of batch background chunks.
+    start_times : List[tf.Tensor]
+        List of start times for each batch.
+
+    Returns
+    -------
+    tuple
+        Concatenated batches of subarrays, background chunks, and start times.
+
+    Raises
+    ------
+    ValueError
+        If concatenation fails.
+    """
+    stacked_subarrays = tf.concat(subarrays, axis=1)
+    stacked_background_chunks = tf.concat(background_chunks, axis=1)
+    stacked_start_times = tf.concat(start_times, axis=1)
+    
+    return stacked_subarrays, stacked_background_chunks, stacked_start_times
+
+@tf.function(jit_compile=True)
+def _validate_tensor_data(
+        tensor_data : tf.Tensor, 
+        num_samples : int, 
+        maxval : int, 
+        minval : int, 
+        min_tensor_size : int
+    ):
+    """
+    Validates the tensor data for suitability in random subsection extraction.
+
+    Parameters
+    ----------
+    tensor_data : tf.Tensor
+        The tensor data to be validated.
+    N : int
+        The size of the tensor data.
+    maxval : int
+        The maximum value for random start index generation.
+    minval : int
+        The minimum value for random start index generation.
+    min_tensor_size : int
+        The minimum required size of the tensor data.
+
+    Raises
+    ------
+    ValueError
+        If tensor data does not meet the requirements for processing.
+    """
+    if len(tensor_data.shape) != 1:
+        raise ValueError(
+            f"Input tensor must be 1D, got shape {tensor_data.shape}."
+        )
+    if num_samples < min_tensor_size:
+        raise ValueError(
+            (f"Input tensor too small ({num_samples}) for the requested samples"
+                f" and buffer {min_tensor_size}.")
+        )
+    if maxval <= minval:
+        raise ValueError(
+            (f"Invalid combination of onsource/offsource samples and buffer"
+                f" for the given data. {maxval} <= {minval}!")
+        )
+
+@tf.function(jit_compile=True)
+def random_subsection(
+        data,
+        start_gps_time,
+        time_interval_seconds,
+        num_onsource_samples: int, 
+        num_offsource_samples: int, 
+        num_examples_per_batch: int,
+        seed : int
+    ):
+        # Calculate parameters for random subsection extraction
+        minval = num_offsource_samples
+        min_tensor_size = num_onsource_samples + num_offsource_samples + 16
+
+        all_batch_subarrays, all_batch_background_chunks, all_subsections_start_gps_time = (
+            [], [], []
+        )
+
+        for tensor_data, start_gps_time in zip(data, start_gps_time):
+            # Verify tensor dimensions and size
+            num_samples =  tensor_data.shape[0]
+            maxval = num_samples - num_onsource_samples - 16
+            _validate_tensor_data(
+                tensor_data, 
+                num_samples, 
+                maxval, 
+                minval, 
+                min_tensor_size
+            )
+
+            batch_subarrays, batch_background_chunks, subsections_start_gps_time = (
+                _random_subsection(
+                    tensor_data,
+                    num_examples_per_batch,
+                    num_onsource_samples,
+                    num_offsource_samples,
+                    time_interval_seconds,
+                    start_gps_time,
+                    seed
+                )
+            )
+
+            # Append expanded results
+            all_batch_subarrays.append(
+                tf.expand_dims(batch_subarrays, 1)
+            )
+            all_batch_background_chunks.append(
+                tf.expand_dims(batch_background_chunks, 1)
+            )
+            all_subsections_start_gps_time.append(
+                tf.expand_dims(subsections_start_gps_time, 1)
+            )
+
+        # Concatenate the batches
+        return concatenate_batches(
+            all_batch_subarrays, 
+            all_batch_background_chunks, 
+            all_subsections_start_gps_time
+        )
+    
 
 @dataclass
 class IFOData:
@@ -250,6 +381,7 @@ class IFOData:
 
         # Set the time interval between samples
         self.time_interval_seconds = 1.0 / self.sample_rate_hertz
+        self.time_interval_seconds = tf.cast(self.time_interval_seconds, tf.float32)
 
     def downsample(self, new_sample_rate_hertz: Union[int, float]):
         # To implement
@@ -276,9 +408,22 @@ class IFOData:
         # Create a random number generator with the provided seed
         rng = default_rng(seed)
 
+        generated_seed = tf.cast(rng.integers(1E10, size=2), tf.int32)
+
+        return random_subsection(
+            self.data,
+            self.start_gps_time,
+            self.time_interval_seconds,
+            num_onsource_samples, 
+            num_offsource_samples, 
+            num_examples_per_batch,
+            generated_seed   
+        )
+
         # Calculate parameters for random subsection extraction
         minval = num_offsource_samples
         min_tensor_size = num_onsource_samples + num_offsource_samples + 16
+        generated_seed = tf.cast(rng.integers(1E10, size=2), tf.int32)
 
         try:
             all_batch_subarrays, all_batch_background_chunks, all_subsections_start_gps_time = (
@@ -296,17 +441,14 @@ class IFOData:
                     minval, 
                     min_tensor_size
                 )
-                
-                # Extract random subsections
-                time_interval_seconds = self.time_interval_seconds
-                generated_seed = rng.integers(1E10, size=2)
+
                 batch_subarrays, batch_background_chunks, subsections_start_gps_time = (
-                    random_subsection_(
+                    _random_subsection(
                         tensor_data,
                         num_examples_per_batch,
                         num_onsource_samples,
                         num_offsource_samples,
-                        time_interval_seconds,
+                        self.time_interval_seconds,
                         start_gps_time,
                         generated_seed
                     )
@@ -315,7 +457,7 @@ class IFOData:
                 # Append expanded results
                 all_batch_subarrays.append(
                     tf.expand_dims(batch_subarrays, 1)
-                    )
+                )
                 all_batch_background_chunks.append(
                     tf.expand_dims(batch_background_chunks, 1)
                 )
@@ -333,82 +475,6 @@ class IFOData:
         except Exception as e:
             print("Failed to get data because:", e)
             return None, None, None
-
-    def _validate_tensor_data(
-            self, 
-            tensor_data : tf.Tensor, 
-            num_samples : int, 
-            maxval : int, 
-            minval : int, 
-            min_tensor_size : int
-        ):
-        """
-        Validates the tensor data for suitability in random subsection extraction.
-
-        Parameters
-        ----------
-        tensor_data : tf.Tensor
-            The tensor data to be validated.
-        N : int
-            The size of the tensor data.
-        maxval : int
-            The maximum value for random start index generation.
-        minval : int
-            The minimum value for random start index generation.
-        min_tensor_size : int
-            The minimum required size of the tensor data.
-
-        Raises
-        ------
-        ValueError
-            If tensor data does not meet the requirements for processing.
-        """
-        if len(tensor_data.shape) != 1:
-            raise ValueError(
-                f"Input tensor must be 1D, got shape {tensor_data.shape}."
-            )
-        if num_samples < min_tensor_size:
-            raise ValueError(
-                (f"Input tensor too small ({num_samples}) for the requested samples"
-                 f" and buffer {min_tensor_size}.")
-            )
-        if maxval <= minval:
-            raise ValueError(
-                (f"Invalid combination of onsource/offsource samples and buffer"
-                 f" for the given data. {maxval} <= {minval}!")
-            )
-
-    def _concatenate_batches(self, subarrays, background_chunks, start_times):
-        """
-        Concatenates batches of subarrays, background chunks, and start times.
-
-        Parameters
-        ----------
-        subarrays : List[tf.Tensor]
-            List of batch subarrays.
-        background_chunks : List[tf.Tensor]
-            List of batch background chunks.
-        start_times : List[tf.Tensor]
-            List of start times for each batch.
-
-        Returns
-        -------
-        tuple
-            Concatenated batches of subarrays, background chunks, and start times.
-
-        Raises
-        ------
-        ValueError
-            If concatenation fails.
-        """
-        try:
-            stacked_subarrays = tf.concat(subarrays, axis=1)
-            stacked_background_chunks = tf.concat(background_chunks, axis=1)
-            stacked_start_times = tf.concat(start_times, axis=1)
-            return stacked_subarrays, stacked_background_chunks, stacked_start_times
-        except:
-            raise ValueError("Failed to stack arrays!")
-
     
 @dataclass
 class IFODataObtainer:

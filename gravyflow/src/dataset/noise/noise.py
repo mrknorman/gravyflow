@@ -329,9 +329,7 @@ class NoiseObtainer:
         self.generator = None
 
         seed_ = self.rng.integers(1E10)
-
-        print(seed_)
-        
+                
         match self.noise_type:
             case NoiseType.WHITE:
                 self.generator = white_noise_generator(

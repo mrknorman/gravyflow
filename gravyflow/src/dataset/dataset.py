@@ -258,12 +258,15 @@ class data:
                     logging.error("Onsource is None!")
                     continue
 
+                if offsource is None:
+                    logging.error("Offsource is None!")
+                    continue
+
                 for key, value in scaling_parameters.items():
                     if key in self.variables_to_return:
                         parameters[key] = value
 
                 whitened_injections = self._process_whitened_injections(scaled_injections, offsource)
-                scaled_injections = gf.replace_nan_and_inf_with_zero(scaled_injections)
             else:
                 scaled_injections = None
                 whitened_injections = None

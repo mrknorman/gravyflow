@@ -720,52 +720,15 @@ class InjectionGenerator:
         if self.seed is None:
             self.seed = gf.Defaults.seed
 
-    def __call__(
-            self,
-            sample_rate_hertz : float = None,
-            onsource_duration_seconds : float = None,
-            crop_duration_seconds : float = None,
-            num_examples_per_generation_batch : int = None,
-            num_examples_per_batch : int = None,
-        ):
-
-        self.sample_rate_hertz = sample_rate_hertz
-        self.onsource_duration_seconds = onsource_duration_seconds
-        self.crop_duration_seconds = crop_duration_seconds
-        self.num_examples_per_generation_batch = num_examples_per_generation_batch
-        self.num_examples_per_batch = num_examples_per_batch
-        
-        if self.sample_rate_hertz is None:
-            self.sample_rate_hertz = gf.Defaults.sample_rate_hertz
-        if self.onsource_duration_seconds is None:
-            self.onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
-        if self.crop_duration_seconds is None:
-            self.crop_duration_seconds = gf.Defaults.crop_duration_seconds
-        if self.num_examples_per_generation_batch is None:
-            self.num_examples_per_generation_batch = gf.Defaults.num_examples_per_generation_batch
-        if self.num_examples_per_batch is None:
-            self.num_examples_per_batch = gf.Defaults.num_examples_per_batch
-
         rng = default_rng(self.seed)
         self.generator_rng = default_rng(rng.integers(1E10))
         self.parameter_rng = default_rng(rng.integers(1E10))
 
-        if (self.num_examples_per_batch > self.num_examples_per_generation_batch):
-            logging.warning(
-                ("num_injections_per_batch must be less than "
-                 "num_examples_per_generation_batch adjusting to compensate")
-            )
-            
-            self.num_examples_per_generation_batch = self.num_examples_per_batch
-        
         self.parameters_to_return = [
             item for item in self.parameters_to_return if isinstance(item.value, WaveformParameter)
         ]
-        
-        if self.waveform_generators is False:
-            yield None, None, None
-            
-        elif not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
+
+        if not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
             self.waveform_generators = [self.waveform_generators]
 
         # Process waveform generators based on their type
@@ -798,6 +761,43 @@ class InjectionGenerator:
             # Handling invalid waveform generator types
             raise TypeError("Waveform generators must be a dictionary or a list!")
 
+    def __call__(
+            self,
+            sample_rate_hertz : float = None,
+            onsource_duration_seconds : float = None,
+            crop_duration_seconds : float = None,
+            num_examples_per_generation_batch : int = None,
+            num_examples_per_batch : int = None,
+        ):
+
+        self.sample_rate_hertz = sample_rate_hertz
+        self.onsource_duration_seconds = onsource_duration_seconds
+        self.crop_duration_seconds = crop_duration_seconds
+        self.num_examples_per_generation_batch = num_examples_per_generation_batch
+        self.num_examples_per_batch = num_examples_per_batch
+        
+        if self.sample_rate_hertz is None:
+            self.sample_rate_hertz = gf.Defaults.sample_rate_hertz
+        if self.onsource_duration_seconds is None:
+            self.onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+        if self.crop_duration_seconds is None:
+            self.crop_duration_seconds = gf.Defaults.crop_duration_seconds
+        if self.num_examples_per_generation_batch is None:
+            self.num_examples_per_generation_batch = gf.Defaults.num_examples_per_generation_batch
+        if self.num_examples_per_batch is None:
+            self.num_examples_per_batch = gf.Defaults.num_examples_per_batch
+
+        if (self.num_examples_per_batch > self.num_examples_per_generation_batch):
+            logging.warning(
+                ("num_injections_per_batch must be less than "
+                 "num_examples_per_generation_batch adjusting to compensate")
+            )
+            
+            self.num_examples_per_generation_batch = self.num_examples_per_batch
+        
+        if not self.waveform_generators:
+            yield None, None, None
+
         injections = []
         mask = []
         parameters = {key : [] for key in self.parameters_to_return}
@@ -823,12 +823,10 @@ class InjectionGenerator:
             injections = tf.stack(injections)
         except Exception as e:
             raise Exception(f"Failed to stack injections because {e}.")
-
         try:
             mask = tf.stack(mask)
         except Exception as e:
             raise Exception(f"Failed to stack mask because {e}.")
-
         for key, value in parameters.items():
             try:
                 parameters[key] = tf.stack(value)
@@ -836,9 +834,8 @@ class InjectionGenerator:
                 logging.error(f"Failed to stack injections parameters because {e}")
 
                 return None, None, None
-
-        while 1: 
-            yield injections, mask, parameters
+        
+        yield injections, mask, parameters
     
     def generate_one(
             self, 
@@ -1125,14 +1122,14 @@ class InjectionGenerator:
                                 self.sample_rate_hertz
                             )
                     except Exception as e:
-                        logger.error(f+-"Failed to scale injections because {e}")
+                        logging.error(f+-"Failed to scale injections because {e}")
 
                     try:
                         scaled_injections = network.project_wave(
                             scaled_injections, sample_rate_hertz=self.sample_rate_hertz
                         )
                     except Exception as e:
-                        logger.error(f+-"Failed to project injections because {e}")
+                        logging.error(f+-"Failed to project injections because {e}")
 
                     if scaled_injections is None:
                         logging.error("Error scaling injections before projection!")
@@ -1165,7 +1162,7 @@ class InjectionGenerator:
                                     self.sample_rate_hertz
                                 )
                         except Exception as e:
-                            logger.error(f+-"Failed to scale injections because {e}")
+                            logging.error(f+-"Failed to scale injections because {e}")
 
                     else:
                         logging.error("Error scaling injections after projection!")
@@ -1183,7 +1180,7 @@ class InjectionGenerator:
             try:
                 onsource += scaled_injections
             except Exception as e:
-                logger.error(f+-"Failed to add injections because {e}")
+                logging.error(f+-"Failed to add injections because {e}")
 
             if ScalingTypes.HPEAK in parameters_to_return:
                 # Calculate hpeak of scaled injections:
@@ -1231,6 +1228,9 @@ class InjectionGenerator:
             (ReturnVariables.WHITENED_INJECTIONS in parameters_to_return):
             try:
                 cropped_injections = tf.stack(cropped_injections)
+                cropped_injections = gf.replace_nan_and_inf_with_zero(
+                    cropped_injections
+                )
             except:
                 logging.error("Failed to stack injections!")
                 return None, None, None
