@@ -720,9 +720,12 @@ class InjectionGenerator:
         if self.seed is None:
             self.seed = gf.Defaults.seed
 
-        rng = default_rng(self.seed)
-        self.generator_rng = default_rng(rng.integers(1E10))
-        self.parameter_rng = default_rng(rng.integers(1E10))
+        self.rng = default_rng(self.seed)
+        self.generator_rng = default_rng(self.rng.integers(1E10))
+        self.parameter_rng = default_rng(self.rng.integers(1E10))
+        self.position_rng = default_rng(self.rng.integers(1E10))
+        self.waveform_rng = default_rng(self.rng.integers(1E10))
+        self.mask_rng = default_rng(self.rng.integers(1E10))
 
         self.parameters_to_return = [
             item for item in self.parameters_to_return if isinstance(item.value, WaveformParameter)
@@ -853,10 +856,11 @@ class InjectionGenerator:
             total_duration_seconds * self.sample_rate_hertz
         )
 
-        rng = default_rng(seed)
-        position_rng = default_rng(rng.integers(1E10))
-        waveform_rng = default_rng(rng.integers(1E10))
-        mask_rng = default_rng(rng.integers(1E10))
+        if self.rng == None:
+            self.rng = default_rng(seed)
+            self.position_rng = default_rng(self.rng.integers(1E10))
+            self.waveform_rng = default_rng(self.rng.integers(1E10))
+            self.mask_rng = default_rng(self.rng.integers(1E10))
         
         # Calculate roll boundaries:
         min_roll_num_samples = int(
@@ -875,7 +879,7 @@ class InjectionGenerator:
             mask = generate_mask(
                     self.num_examples_per_generation_batch,  
                     generator.injection_chance,
-                    mask_rng.integers(1E10, size=2)
+                    self.mask_rng.integers(1E10, size=2)
                 )
 
             if name is not None:
@@ -898,7 +902,7 @@ class InjectionGenerator:
                         num_waveforms, 
                         self.sample_rate_hertz,
                         total_duration_seconds,
-                        waveform_rng.integers(1E10)
+                        self.waveform_rng.integers(1E10)
                     )
                 
                 # Convert to tensorflow tensor:
@@ -908,7 +912,7 @@ class InjectionGenerator:
                         waveforms, 
                         min_roll_num_samples, 
                         max_roll_num_samples, 
-                        mask_rng.integers(1E10, size=2)
+                        self.position_rng.integers(1E10, size=2)
                     )
                 
                 # Create zero filled injections to fill spots where injection 

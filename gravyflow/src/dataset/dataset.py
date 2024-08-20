@@ -234,18 +234,24 @@ class data:
                 onsource, offsource, gps_times = next(self.noise)
             except Exception as e:
                 logging.info(f"Noise generation failed: {e}\nTraceback: {traceback.format_exc()}")
-                raise
+                raise Exception()
 
             try:
-                injections_, mask, parameters = next(self.injections)
+                injections, mask, parameters = next(self.injection_generator(
+                    sample_rate_hertz=self.sample_rate_hertz,
+                    onsource_duration_seconds=self.onsource_duration_seconds,
+                    crop_duration_seconds=self.crop_duration_seconds,
+                    num_examples_per_generation_batch=self.num_examples_per_generation_batch,
+                    num_examples_per_batch=self.num_examples_per_batch,
+                ))
             except Exception as e:
                 logging.info(f"Injection generation failed: {e}\nTraceback: {traceback.format_exc()}")
-                raise
+                raise Exception()
 
             if self.waveform_generators:
                 try:
                     onsource, scaled_injections, scaling_parameters = self.injection_generator.add_injections_to_onsource(
-                        injections_,
+                        injections,
                         mask,
                         onsource,
                         parameters_to_return=self.variables_to_return

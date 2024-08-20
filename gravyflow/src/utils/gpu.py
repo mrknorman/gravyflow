@@ -257,9 +257,9 @@ def env(
         )
 
     if not gpus:
-        raise Exception("No GPUs avalible as they were too busy or not existant.")
-    elif len(gpus) != num_gpus_to_request:
-        logging.warning(f"Could not allocate requested number of GPUs ({num_gpus_to_request}) as they were too busy or not existant. Allocated {len(gpus) } instead.")
+        raise Exception("No GPUs avalible as they were too busy or non-existant.")
+    elif len(gpus) < num_gpus_to_request:
+        logging.warning(f"Could not allocate requested number of GPUs ({num_gpus_to_request}) as they were too busy or non-existant. Allocated {len(gpus)} instead.")
     
     strategy = setup_cuda(
         gpus, 
