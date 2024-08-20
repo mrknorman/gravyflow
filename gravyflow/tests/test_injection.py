@@ -26,7 +26,7 @@ def _test_injection_iteration(
             gf.tests.PATH / "example_injection_parameters"
         )
         
-        phenom_d_generator : cuPhenomDGenerator = gf.WaveformGenerator.load(
+        phenom_d_generator : gf.cuPhenomDGenerator = gf.WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters.json"
         )
         
@@ -40,6 +40,7 @@ def _test_injection_iteration(
         
         logging.info("Start iteration tests...")
         for index, _ in tqdm(enumerate(islice(injection_generator(), num_tests))):
+            print(index)
             pass
         
         assert index == num_tests - 1, "Warning! Injection generator does not iterate the required number of batches"
@@ -60,11 +61,11 @@ def _test_phenom_d_injection(
             gf.tests.PATH / "example_injection_parameters"
         )
         
-        phenom_d_generator_high_mass : cuPhenomDGenerator = gf.WaveformGenerator.load(
+        phenom_d_generator_high_mass : gf.cuPhenomDGenerator = gf.WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters_high_mass.json"
         )
         
-        phenom_d_generator_low_mass : cuPhenomDGenerator = gf.WaveformGenerator.load(
+        phenom_d_generator_low_mass : gf.cuPhenomDGenerator = gf.WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters_low_mass.json"
         )
         

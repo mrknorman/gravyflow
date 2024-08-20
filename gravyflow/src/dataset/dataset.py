@@ -460,7 +460,7 @@ def create_variable_dictionary(
     mask : tf.Tensor,
     rolling_pearson_onsource : tf.Tensor,
     spectrogram_onsource : tf.Tensor,
-    injection_parameters : Dict
+    injection_parameters : Optional[Dict]
     ) -> Dict:
 
     operations = {
@@ -476,12 +476,13 @@ def create_variable_dictionary(
     }
 
     # Extend operations with any relevant keys from injection_parameters
-    operations.update(
-        {
-            key: value for key, value in injection_parameters.items() \
-            if key in return_variables
-        }
-    )
+    if injection_parameters:
+        operations.update(
+            {
+                key: value for key, value in injection_parameters.items() \
+                if key in return_variables
+            }
+        )
 
     return {
         key.name: operations[key] for key in return_variables \
