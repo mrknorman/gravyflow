@@ -588,4 +588,4 @@ class Whiten(Layer):
         # Assuming input_shape is [(None, Y, A), (None, Y, B)]
         # and your layer returns a shape of (None, Y, B)
         timeseries_shape, _ = input_shape
-        return (timeseries_shape[0], timeseries_shape[1], self.onsource_duration_seconds*self.sample_rate_hertz) 
+        return (timeseries_shape[0], timeseries_shape[1], int(self.onsource_duration_seconds*self.sample_rate_hertz))

@@ -1285,9 +1285,11 @@ class IFODataObtainer:
 
         assert valid_segments.shape[1] == len(ifos), "Num ifos should equal num segment lists"
 
-        while self._current_segment_index < len(valid_segments):            
+        while 1:            
             segment_times = valid_segments[self._current_segment_index]
             self._current_segment_index += 1
+            self._current_segment_index %= len(valid_segments)
+            valid_segments = self.rng.shuffle(valid_segments)
 
             segments = []
             gps_start_times = []

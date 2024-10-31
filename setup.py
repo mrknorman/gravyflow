@@ -70,7 +70,7 @@ setup(
         "License :: OSI Approved :: Apache License",
         "Operating System :: Linux",
     ],
-    python_requires='>=3.10',
+    python_requires='==3.11',
     install_requires=[
         "gwdatafind",
         "gwpy",
@@ -79,7 +79,7 @@ setup(
         "GitPython",
         "sqlalchemy",
         "bokeh",
-        "psycopg2",
+        "psycopg2-binary",
         "ipykernel",
         "tensorflow[and-cuda]",
         "tensorflow-probability",

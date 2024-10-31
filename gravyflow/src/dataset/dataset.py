@@ -256,6 +256,8 @@ class data:
                         onsource,
                         parameters_to_return=self.variables_to_return
                     )
+
+                    assert onsource != None
                 except Exception as e:
                     logging.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")
                     continue
@@ -775,21 +777,18 @@ def extract_data_from_indicies(
         end_index = (batch_index + 1) * num_examples_per_batch
         
         # Find the worst examples in the current batch:
-        while current_index < len(indicies) and \
-            indicies[current_index] < end_index:
+        while current_index < len(indicies) and indicies[current_index] < end_index:
                         
             # Calculate in-batch index:
             in_batch_index = indicies[current_index] % num_examples_per_batch  
                                     
             # Extract the corresponding data from in_dict and out_dict using 
             # in_batch_index:
-            example_element = \
-            {
+            example_element = {
                 key: value[in_batch_index[0]] for key, value in in_dict.items()
             }
                         
-            out_element = \
-            {
+            out_element = {
                 key: value[0][
                     in_batch_index[0]
                 ] for key, value in out_dict.items()
