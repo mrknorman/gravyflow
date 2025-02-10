@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # Built-In imports:
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Optional
 import logging
 from pathlib import Path
 from enum import Enum, auto
@@ -99,6 +99,49 @@ class ScalingMethod:
         return scaled_injections
 
 @tf.function(jit_compile=True)
+def scale(
+        injections: tf.Tensor,
+        onsource: tf.Tensor,
+        scaling_parameters: tf.Tensor,
+        sample_rate_hertz: float,
+        scaling_type: str
+    ) -> tf.Tensor:
+    
+    """
+    TensorFlow function to scale injections based on different scaling types.
+    
+    Args:
+        injections: Input tensor of injections to be scaled
+        onsource: Tensor containing onsource data
+        scaling_parameters: Tensor of parameters used for scaling
+        sample_rate_hertz: Sampling rate in Hz
+        scaling_type: String indicating the type of scaling ('SNR', 'HRSS', or 'HPEAK')
+    
+    Returns:
+        tf.Tensor: Scaled injections
+    """
+    
+    if scaling_type == "SNR":
+        return gf.scale_to_snr(
+            injections,
+            onsource,
+            scaling_parameters,
+            sample_rate_hertz,
+            fft_duration_seconds=1.0,
+            overlap_duration_seconds=0.5
+        )
+    elif scaling_type == "HRSS":
+        return scale_to_hrss(
+            injections,
+            scaling_parameters,
+        )
+    elif scaling_type == "HPEAK":
+        return scale_to_hpeak(
+            injections,
+            scaling_parameters,
+        )
+
+@tf.function(jit_compile=True)
 def calculate_hrss(
     injection: tf.Tensor
     ):
@@ -150,7 +193,7 @@ def scale_to_hrss(
 @tf.function(jit_compile=True)
 def scale_to_hpeak(
     injection: tf.Tensor, 
-    desired_hrss: float
+    desired_hpeak: float
     ) -> tf.Tensor:
     
     # Small value to prevent divide by zero errors:
@@ -158,12 +201,12 @@ def scale_to_hpeak(
     
     # Calculate the current HRSS of the injection in the background, so that
     # it can be scaled to the desired value:
-    current_hpeak = calculate_hrss(
+    current_hpeak = calculate_hpeak(
         injection
     )
     
     # Calculate factor required to scale injection to desired HRSS:
-    scale_factor = desired_hrss/(current_hpeak + epsilon)
+    scale_factor = desired_hpeak/(current_hpeak + epsilon)
     
     # Reshape tensor to allow for compatible shapes in the multiplication
     # operation:
@@ -524,11 +567,10 @@ class WNBGenerator(WaveformGenerator):
             
             return waveforms, parameters
 
-@tf.function
+@tf.function(jit_compile=True)
 def ensure_last_dim_even(tensor):
     # Get the shape of the tensor
-    shape = tf.shape(tensor)
-    last_dim = shape[-1]
+    last_dim = tensor.shape[-1]
     
     # Determine if the last dimension is even
     is_even = tf.equal(last_dim % 2, 0)
@@ -703,6 +745,235 @@ class IncoherentGenerator(WaveformGenerator):
         parameters = parameters[0]
 
         return waveforms, parameters
+
+@tf.function(jit_compile=True)
+def handle_before_projection(
+        injection,
+        onsource, 
+        scaling_parameters,
+        sample_rate_hertz,
+        scaling_type,
+        seed,
+        x_vector,
+        y_vector,
+        x_length_meters,
+        y_length_meters,
+        x_response,
+        y_response,
+        response,
+        location
+    ):
+
+    scaled = scale(
+        injection,
+        onsource,
+        scaling_parameters,
+        sample_rate_hertz,
+        scaling_type
+    )
+    return gf.project_wave(
+        seed,
+        scaled,
+        sample_rate_hertz,
+        x_vector,
+        y_vector,
+        x_length_meters,
+        y_length_meters,
+        x_response,
+        y_response,
+        response,
+        location
+    )
+
+@tf.function(jit_compile=True)
+def handle_after_projection(
+        injection,
+        onsource, 
+        scaling_parameters,
+        sample_rate_hertz,
+        scaling_type,
+        seed,
+        x_vector,
+        y_vector,
+        x_length_meters,
+        y_length_meters,
+        x_response,
+        y_response,
+        response,
+        location,
+        num_detectors
+    ):
+
+    projected = tf.cond(
+        tf.greater(num_detectors, 1),
+        lambda: gf.project_wave(
+            seed,
+            injection,
+            sample_rate_hertz,
+            x_vector,
+            y_vector,
+            x_length_meters,
+            y_length_meters,
+            x_response,
+            y_response,
+            response,
+            location
+        ),
+        lambda: tf.reduce_sum(injection, axis=1, keepdims=True)
+    )
+    
+    return scale(
+        projected,
+        onsource,
+        scaling_parameters,
+        sample_rate_hertz,
+        scaling_type
+    )
+
+@tf.function(jit_compile=True)
+def add_to_onsource(
+        injection,
+        onsource, 
+        scaling_parameters,
+        sample_rate_hertz,
+        scaling_type,
+        seed,
+        x_vector,
+        y_vector,
+        x_length_meters,
+        y_length_meters,
+        x_response,
+        y_response,
+        response,
+        location,
+        num_detectors, 
+        scaling_ordinality
+    ):
+
+    if scaling_ordinality == "BEFORE_PROJECTION":
+        scaled_injection = handle_before_projection(
+            injection,
+            onsource, 
+            scaling_parameters,
+            sample_rate_hertz,
+            scaling_type,
+            seed,
+            x_vector,
+            y_vector,
+            x_length_meters,
+            y_length_meters,
+            x_response,
+            y_response,
+            response,
+            location
+        )
+    else: 
+        scaled_injection = handle_after_projection(
+            injection,
+            onsource, 
+            scaling_parameters,
+            sample_rate_hertz,
+            scaling_type,
+            seed,
+            x_vector,
+            y_vector,
+            x_length_meters,
+            y_length_meters,
+            x_response,
+            y_response,
+            response,
+            location,
+            num_detectors
+        )
+    
+    # Add scaled injection to onsource
+    return onsource + scaled_injection, scaled_injection
+
+
+#@tf.function
+def process_single_injection(
+    injection: tf.Tensor,
+    onsource: tf.Tensor,
+    scaling_parameters: tf.Tensor,
+    scaling_ordinality,
+    scaling_type,
+    num_detectors,
+    network,
+    sample_rate_hertz: float,
+    parameters_to_return: list,
+    onsource_duration_seconds: float
+) -> Tuple[tf.Tensor, Optional[tf.Tensor], Dict[str, tf.Tensor]]:
+
+    injection = ensure_last_dim_even(injection)
+    return_variables = {}
+
+    onsource, scaled_injection = add_to_onsource(
+        injection,
+        onsource, 
+        scaling_parameters,
+        sample_rate_hertz,
+        scaling_type,
+        network.rng.integers(1E10, size=2),
+        network.x_vector,
+        network.y_vector,
+        network.x_length_meters,
+        network.y_length_meters,
+        network.x_response,
+        network.y_response,
+        network.response,
+        network.location,
+        num_detectors,
+        scaling_ordinality
+    )
+
+    if 'HPEAK' in parameters_to_return:
+        hpeak_type_value = ScalingTypes.HPEAK.name
+        return_variables['HPEAK'] = tf.cond(
+            tf.not_equal(
+                scaling_type,
+                hpeak_type_value
+            ),
+            lambda: calculate_hpeak(injection),
+            lambda: tf.constant(0.0)
+        )
+    
+    if 'SNR' in parameters_to_return:
+        snr_type_value = ScalingTypes.SNR.name
+        return_variables['SNR'] = tf.cond(
+            tf.not_equal(
+                tf.constant(scaling_type, dtype=tf.int32),
+                tf.constant(snr_type_value, dtype=tf.int32)
+            ),
+            lambda: gf.snr(
+                scaled_injection,
+                onsource,
+                sample_rate_hertz,
+                fft_duration_seconds=1.0,
+                overlap_duration_seconds=0.5
+            ),
+            lambda: tf.constant(0.0)
+        )
+    
+    if 'HRSS' in parameters_to_return:
+        hrss_type_value = ScalingTypes.HRSS.name
+        return_variables['HRSS'] = tf.cond(
+            tf.not_equal(
+                tf.constant(scaling_type, dtype=tf.int32),
+                tf.constant(hrss_type_value, dtype=tf.int32)
+            ),
+            lambda: calculate_hrss(injection),
+            lambda: tf.constant(0.0)
+        )
+    
+    cropped_injection = None
+    if ('INJECTIONS' in parameters_to_return) or ('WHITENED_INJECTIONS' in parameters_to_return):
+        cropped_injection = gf.crop_samples(
+            scaled_injection,
+            onsource_duration_seconds,
+            sample_rate_hertz
+        )
+    
+    return onsource, cropped_injection, return_variables
 
 @dataclass
 class InjectionGenerator:
@@ -894,7 +1165,15 @@ class InjectionGenerator:
                         tf.math.logical_not(self.mask_dict[excluded])
                     )
 
-            num_waveforms = tf.reduce_sum(tf.cast(mask, tf.int32)).numpy()
+            try:
+                # Attempt to compute num_waveforms
+                num_waveforms = tf.reduce_sum(tf.cast(mask, tf.int32)).numpy()
+            except tf.errors.InvalidArgumentError as e:
+                # Print debugging information only when the error occurs
+                print("Error during reduction: Invalid reduction arguments. Axes might contain duplicates.")
+                print("mask shape:", mask.shape)
+                print("Exception details:", e)
+                raise  # Re-raise the exception after printing
             
             if num_waveforms > 0:
                 
@@ -919,8 +1198,12 @@ class InjectionGenerator:
                 # did not generate due to injection masks:
                 injections = gf.expand_tensor(waveforms, mask)
             else:
+
+                shape = (num_batches, 2, total_duration_num_samples)
+                assert isinstance(shape, tuple), f"Shape should be a tuple {shape}"
+                assert all(isinstance(dim, int) for dim in shape), f"All dimensions in shape should be integers {shape}"
                 injections = tf.zeros(
-                    shape=(num_batches, 2, total_duration_num_samples)
+                    shape=shape
                 )
                 parameters = { }
 
@@ -943,8 +1226,7 @@ class InjectionGenerator:
 
                     parameter = tf.convert_to_tensor(parameter)
 
-                    expanded_parameters[key] = \
-                        gf.expand_tensor(
+                    expanded_parameters[key] = gf.expand_tensor(
                             parameter, 
                             mask,
                             group_size=key.value.shape[-1] 
@@ -1110,6 +1392,8 @@ class InjectionGenerator:
                 waveform_generators
             ):
 
+            """
+
             injections_ = ensure_last_dim_even(injections_)
             
             network = waveform_generator.network
@@ -1144,10 +1428,23 @@ class InjectionGenerator:
                     try:
                         if network.num_detectors > 1:
                             injections_ = network.project_wave(
-                                injections_, sample_rate_hertz=self.sample_rate_hertz
+                                injections_, 
+                                sample_rate_hertz=self.sample_rate_hertz
                             )
                         else:
-                            injections_ = tf.reduce_sum(injections_, axis=1, keepdims = True)
+
+                            before_shape = injections_.shape
+                            injections_ = tf.reduce_sum(
+                                injections_, 
+                                axis=1, 
+                                keepdims = True
+                            )
+                            
+                            if injections_.shape != onsource.shape:
+                                print(f"Reduce_sum failed to reduce injections"
+                                      "reduced from {before_shape} to"
+                                      "{injections_.shape}, when onsource was"
+                                      "{onsource.shape}")
 
                     except Exception as e:
                         logging.error(f"Failed to project injections because {e}")
@@ -1227,7 +1524,22 @@ class InjectionGenerator:
                         self.sample_rate_hertz
                     )
                 )
-                                
+
+            """
+
+            onsource, cropped_injections, return_variables = process_single_injection(
+                injections_,
+                onsource,
+                scaling_parameters_,
+                waveform_generator.scaling_method.type_.value.ordinality.name,
+                waveform_generator.scaling_method.type_.name,
+                waveform_generator.network.num_detectors,
+                waveform_generator.network,
+                self.sample_rate_hertz,
+                [param.name for param in parameters_to_return],
+                self.onsource_duration_seconds
+            )
+                                        
         if (ReturnVariables.INJECTIONS in parameters_to_return) or \
             (ReturnVariables.WHITENED_INJECTIONS in parameters_to_return):
             try:

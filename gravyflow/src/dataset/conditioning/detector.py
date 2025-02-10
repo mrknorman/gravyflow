@@ -202,7 +202,7 @@ def generate_direction_vectors(
     return right_ascension, declination
 
 @tf.function(jit_compile=True)
-def project_wave_(
+def project_wave(
         seed,
         strain : tf.Tensor,
         sample_rate_hertz : float,
@@ -645,6 +645,7 @@ class Network:
 
         return input
     
+    @tf.function(jit_compile=True)
     def project_wave(
         self,
         strain : tf.Tensor,
@@ -668,7 +669,7 @@ class Network:
             polarization, "polarization", tensor_length=strain_length
         )
         
-        return project_wave_(
+        return project_wave(
             self.rng.integers(1E10, size=2),
             strain,
             sample_rate_hertz,

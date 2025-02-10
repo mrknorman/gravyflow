@@ -1,8 +1,13 @@
+from typing import Optional, Tuple
+
 import tensorflow as tf
 import tensorflow_probability as tfp
 
 @tf.function(jit_compile=True)
-def fftfreq(n, d=1.0):
+def fftfreq(
+        n : int, 
+        d : float = 1.0
+    ) -> tf.Tensor:
     val = 1.0 / (n * d)
     results = tf.range(0, n // 2 + 1, dtype=tf.float32)  # Note the +1 here
     return results * val
@@ -94,9 +99,9 @@ def psd(
         signal : tf.Tensor, 
         nperseg : int, 
         sample_rate_hertz : float, 
-        noverlap : int = None, 
+        noverlap : Optional[int] = None, 
         mode : str ="mean"
-    ) -> (tf.Tensor, tf.Tensor):
+    ) -> Tuple[tf.Tensor, tf.Tensor]:
     
     if noverlap is None:
         noverlap = nperseg // 2

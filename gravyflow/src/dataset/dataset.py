@@ -250,6 +250,7 @@ class data:
 
             if self.waveform_generators:
                 try:
+
                     onsource, scaled_injections, scaling_parameters = self.injection_generator.add_injections_to_onsource(
                         injections,
                         mask,
@@ -257,7 +258,6 @@ class data:
                         parameters_to_return=self.variables_to_return
                     )
 
-                    assert onsource != None
                 except Exception as e:
                     logging.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")
                     continue
@@ -386,8 +386,8 @@ class data:
         """Process injection masks if required."""
         if gf.ReturnVariables.INJECTION_MASKS in self.variables_to_return:
             mask = tf.cast(mask, tf.float32)
-            if self.mask_history is not None:
-                self.mask_history.append(mask)
+            #if self.mask_history is not None:
+                #self.mask_history.append(mask)
             return mask
         return None
 

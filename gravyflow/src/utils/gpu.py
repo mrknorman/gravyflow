@@ -73,8 +73,8 @@ def setup_cuda(
                 gpu,
                 [
                     tf.config.experimental.VirtualDeviceConfiguration(
-                        memory_limit=max_memory_limit
-                    )
+                       memory_limit=max_memory_limit
+                    ),
                 ]
             )
         

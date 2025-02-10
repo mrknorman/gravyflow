@@ -46,7 +46,7 @@ from .src.model.model import (
 )
 from .src.dataset.conditioning.whiten import whiten, Whiten, WhitenPass
 from .src.dataset.conditioning.pearson import rolling_pearson
-from .src.dataset.conditioning.detector import IFO, Network
+from .src.dataset.conditioning.detector import IFO, Network, project_wave
 from .src.dataset.noise.acquisition import (
     DataQuality, DataLabel, SegmentOrder, AcquisitionMode, ObservingRun,
     IFOData, IFODataObtainer

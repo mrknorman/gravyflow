@@ -6,7 +6,11 @@ import numpy as np
 import gravyflow as gf
 
 @tf.function(jit_compile=True)
-def find_closest(tensor, scalar):
+def find_closest(
+        tensor : tf.Tensor, 
+        scalar : float
+    ) -> int:
+    
     # Calculate the absolute differences between the tensor and the scalar
     diffs = tf.abs(tensor - scalar)
     
@@ -48,14 +52,7 @@ def snr(
     
     injection_num_samples = injection.shape[-1]
     injection_duration_seconds = injection_num_samples / sample_rate_hertz
-        
-    # Check if input is 1D or 2D
-    is_1d = len(injection.shape) == 1
-    if is_1d:
-        # If 1D, add an extra dimension
-        injection = tf.expand_dims(injection, axis=0)
-        background = tf.expand_dims(background, axis=0)
-        
+    
     overlap_num_samples = int(sample_rate_hertz*overlap_duration_seconds)
     fft_num_samples = int(sample_rate_hertz*fft_duration_seconds)
     
@@ -103,22 +100,12 @@ def snr(
         inj_fft_no_dc*tf.math.conj(inj_fft_no_dc)
     )   
 
-    if len(injection.shape) == 2:
-        # Use the interpolated ASD in the frequency window for SNR calculation
-        snr_numerator = inj_fft_squared[
-            :,start_freq_num_samples:end_freq_num_samples
-        ]
-        snr_denominator = psd_interp[
-            :,start_freq_num_samples:end_freq_num_samples
-        ]
-
-    elif len(injection.shape) == 3: 
-        snr_numerator = inj_fft_squared[
-            :, :, start_freq_num_samples:end_freq_num_samples
-        ]
-        snr_denominator = psd_interp[
-            :, :, start_freq_num_samples:end_freq_num_samples
-        ]
+    snr_numerator = inj_fft_squared[
+        ..., start_freq_num_samples:end_freq_num_samples
+    ]
+    snr_denominator = psd_interp[
+        ..., start_freq_num_samples:end_freq_num_samples
+    ]
 
     # Calculate the SNR
     SNR = tf.math.sqrt(
@@ -127,52 +114,46 @@ def snr(
     )    
     SNR = tf.where(tf.math.is_inf(SNR), 0.0, SNR)
     
-    # If input was 1D, return 1D
-    if is_1d:
-        SNR = SNR[0]
-    elif len(injection.shape) == 3:
-        # Calculate network SNR: 
-        #print(SNR)
-        SNR = tf.sqrt(tf.reduce_sum(SNR**2, axis = -1))
+    SNR = tf.sqrt(tf.reduce_sum(SNR**2, axis = -1))
 
     return SNR
 
 @tf.function(jit_compile=True)
 def scale_to_snr(
-    injection: tf.Tensor, 
-    background: tf.Tensor,
-    desired_snr: float,
-    sample_rate_hertz: float, 
-    fft_duration_seconds: float = 4.0, 
-    overlap_duration_seconds: float = 2.0,
-    lower_frequency_cutoff: float = 20.0
+        injection: tf.Tensor, 
+        background: tf.Tensor,
+        desired_snr: tf.Tensor,
+        sample_rate_hertz: float, 
+        fft_duration_seconds: float = 4.0, 
+        overlap_duration_seconds: float = 2.0,
+        lower_frequency_cutoff: float = 20.0
     ) -> tf.Tensor:
-        
-    # Small value to prevent divide by zero errors:
-    epsilon : float = 1.0E-7
     
-    # Calculate the current SNR of the injection in the background, so that
-    # it can be scaled to the desired value:
+    epsilon = 1.0E-7
+    
+    # Calculate the current SNR
     current_snr = snr(
         injection, 
         background,
         sample_rate_hertz, 
-        fft_duration_seconds = fft_duration_seconds, 
-        overlap_duration_seconds = overlap_duration_seconds,
-        lower_frequency_cutoff = lower_frequency_cutoff
+        fft_duration_seconds=fft_duration_seconds, 
+        overlap_duration_seconds=overlap_duration_seconds,
+        lower_frequency_cutoff=lower_frequency_cutoff
     )
-
-    # Calculate factor required to scale injection to desired SNR:
-    scale_factor : tf.Tensor = desired_snr/(current_snr + epsilon)
-        
-    # Reshape tensor to allow for compatible shapes in the multiplication
-    # operation:
-    if len(injection.shape) == 2: 
-        scale_factor = tf.reshape(scale_factor, (-1, 1))
-    elif len(injection.shape) == 3:
-        scale_factor = tf.reshape(scale_factor, (-1, 1, 1)) 
-
-    # Scale by scale factor:
-    return injection*scale_factor
+    
+    # Ensure `desired_snr` and `current_snr` have compatible shapes
+    desired_snr = tf.reshape(desired_snr, [-1])  # Shape: [batch_size]
+    current_snr = tf.reshape(current_snr, [-1])  # Shape: [batch_size]
+    
+    # Calculate scale factor
+    scale_factor = desired_snr / (current_snr + epsilon)  # Shape: [batch_size]
+    
+    # Reshape scale_factor to [batch_size, 1, 1]
+    scale_factor = tf.reshape(scale_factor, [-1, 1, 1])  # Shape: [32, 1, 1]
+    
+    # Multiply using broadcasting
+    scaled_injection = injection * scale_factor  # Shape: [32, 1, 4096]
+    
+    return scaled_injection
     
     
