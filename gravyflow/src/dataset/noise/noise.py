@@ -382,7 +382,7 @@ class NoiseObtainer:
                         either during initlisation or through setting
                         NoiseObtainer.ifo_data_obtainer
                     """)
-                elif self.ifo_data_obtainer.valid_segments is None:
+                elif self.ifo_data_obtainer.valid_segments is None or self.ifos != self.ifo_data_obtainer.ifos:
                         self.ifo_data_obtainer.get_valid_segments(
                             self.ifos,
                             seed,

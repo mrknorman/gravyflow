@@ -504,6 +504,7 @@ class IFODataObtainer:
         self._segment_exausted = True
         self._num_batches_in_current_segment = 0
         self.rng = None
+        self.ifos = None
         
         # Ensure parameters are lists for consistency:
         if not isinstance(observing_runs, list):
@@ -532,7 +533,6 @@ class IFODataObtainer:
         self.file_path = None
 
         self.valid_segments = None
-        self.valid_segments_adjusted = None
                 
     def override_attributes(
         self,
@@ -849,7 +849,9 @@ class IFODataObtainer:
                 "input."
             )
 
-        if self.valid_segments is None or len(self.valid_segments) != len(ifos):
+        if self.valid_segments is None or len(self.valid_segments) != len(ifos) or ifos != self.ifos:
+
+            self.ifos = ifos
             self.valid_segments = []
 
             # Check to see if noise with no features is desired data product, if
@@ -1492,7 +1494,7 @@ class IFODataObtainer:
             # Multiply by 2 for saftey odd things were happening
             min_segment_duration_seconds *= 2.0
             
-            self.valid_segments_adjusted = self.remove_short_segments(
+            valid_segments_adjusted = self.remove_short_segments(
                     self.valid_segments, 
                     min_segment_duration_seconds
                 )
@@ -1505,7 +1507,7 @@ class IFODataObtainer:
         while self._segment_exausted:
             self.current_segment = next(self.acquire(
                     sample_rate_hertz, 
-                    self.valid_segments_adjusted, 
+                    valid_segments_adjusted, 
                     ifos,
                     scale_factor
                 ))
