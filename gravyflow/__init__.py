@@ -23,7 +23,7 @@ from .src.utils.tensor import (
     set_random_seeds
 )
 from .src.utils.gpu import (setup_cuda, find_available_GPUs, get_tf_memory_usage, env, 
-    get_memory_array, get_gpu_utilization_array)
+    get_gpu_memory_info)
 from .src.utils.io import (
     open_hdf5_file, ensure_directory_exists, replace_placeholders,
     transform_string, snake_to_capitalized_spaces, is_redirected, load_history,

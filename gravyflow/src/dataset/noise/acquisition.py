@@ -419,62 +419,6 @@ class IFOData:
             num_examples_per_batch,
             generated_seed   
         )
-
-        # Calculate parameters for random subsection extraction
-        minval = num_offsource_samples
-        min_tensor_size = num_onsource_samples + num_offsource_samples + 16
-        generated_seed = tf.cast(rng.integers(1E10, size=2), tf.int32)
-
-        try:
-            all_batch_subarrays, all_batch_background_chunks, all_subsections_start_gps_time = (
-                [], [], []
-            )
-
-            for tensor_data, start_gps_time in zip(self.data, self.start_gps_time):
-                # Verify tensor dimensions and size
-                num_samples = tf.shape(tensor_data)[0].numpy()
-                maxval = num_samples - num_onsource_samples - 16
-                self._validate_tensor_data(
-                    tensor_data, 
-                    num_samples, 
-                    maxval, 
-                    minval, 
-                    min_tensor_size
-                )
-
-                batch_subarrays, batch_background_chunks, subsections_start_gps_time = (
-                    _random_subsection(
-                        tensor_data,
-                        num_examples_per_batch,
-                        num_onsource_samples,
-                        num_offsource_samples,
-                        self.time_interval_seconds,
-                        start_gps_time,
-                        generated_seed
-                    )
-                )
-
-                # Append expanded results
-                all_batch_subarrays.append(
-                    tf.expand_dims(batch_subarrays, 1)
-                )
-                all_batch_background_chunks.append(
-                    tf.expand_dims(batch_background_chunks, 1)
-                )
-                all_subsections_start_gps_time.append(
-                    tf.expand_dims(subsections_start_gps_time, 1)
-                )
-
-            # Concatenate the batches
-            return self._concatenate_batches(
-                all_batch_subarrays, 
-                all_batch_background_chunks, 
-                all_subsections_start_gps_time
-            )
-
-        except Exception as e:
-            print("Failed to get data because:", e)
-            return None, None, None
     
 @dataclass
 class IFODataObtainer:

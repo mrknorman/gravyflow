@@ -1,270 +1,279 @@
 import os
-import logging
-import sys
 import subprocess
 from pathlib import Path
-from typing import Union, List
+import logging
+from typing import Union, List, Optional
 
 import numpy as np
 import tensorflow as tf
-#from filelock import Timeout, FileLock
-
-from scipy.stats import truncnorm
 from tensorflow.python.distribute.distribute_lib import Strategy
 
+# === Constants and Configuration ===
 
-logging.basicConfig(level=logging.INFO)
+# Path to nvidia-smi (adjust if needed)
+NVIDIA_SMI_PATH = Path("/usr/bin/nvidia-smi")
 
-def setup_cuda(
-        device_num: str, 
-        max_memory_limit: int, 
-        logging_level: int = logging.WARNING
-    ) -> tf.distribute.Strategy:
+# ANSI color codes for terminal output.
+ANSI_RED = "\033[31m"
+ANSI_YELLOW = "\033[33m"
+ANSI_GREEN = "\033[32m"
+ANSI_RESET = "\033[0m"
 
+# Default thresholds.
+DEFAULT_MIN_MEMORY_MB = 5000
+DEFAULT_MAX_UTILIZATION_PERCENTAGE = 80
+
+# Configure logging once.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+
+# === GPU Query and Status Functions ===
+
+def get_gpu_memory_info() -> Optional[List[dict]]:
     """
-    Sets up CUDA for TensorFlow. Configures memory growth, logging verbosity, 
-    and returns the strategy for distributed computing.
-
-    Args:
-        device_num (str): 
-            The GPU device number to be made visible for TensorFlow.
-        max_memory_limit (int): 
-            The maximum GPU memory limit in MB.
-        logging_level (int, optional): 
-            Sets the logging level. Defaults to logging.WARNING.
+    Queries nvidia-smi to obtain GPU information.
 
     Returns:
-        tf.distribute.MirroredStrategy: 
-            The TensorFlow MirroredStrategy instance.
+        A list of dictionaries with keys: 'index', 'total', 'used', 'free', 'utilization'.
+        Returns None if nvidia-smi is not available or fails.
     """
+    if not NVIDIA_SMI_PATH.exists():
+        logging.error("nvidia-smi not found at %s", NVIDIA_SMI_PATH)
+        return None
 
-    # Set up logging to file - this is beneficial in debugging scenarios and for 
-    # traceability.
-    logging.basicConfig(filename='tensorflow_setup.log', level=logging_level)
+    try:
+        output = subprocess.check_output(
+            [str(NVIDIA_SMI_PATH),
+             "--query-gpu=index,memory.total,memory.used,memory.free,utilization.gpu",
+             "--format=csv,noheader,nounits"],
+            stderr=subprocess.STDOUT,
+            universal_newlines=True
+        )
+    except subprocess.CalledProcessError as e:
+        logging.error("Error running nvidia-smi: %s", e.output)
+        return None
+
+    gpu_info_list = []
+    for line in output.strip().split("\n"):
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 5:
+            continue
+        gpu_info_list.append({
+            "index": parts[0],
+            "total": int(parts[1]),
+            "used": int(parts[2]),
+            "free": int(parts[3]),
+            "utilization": int(parts[4])
+        })
+    return gpu_info_list
+
+
+def color_for_percentage(percentage: float) -> str:
+    """
+    Returns an ANSI color code based on memory usage percentage.
     
-    # Set the device number for CUDA to recognize.
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(device_num)
-    # Set the TF_GPU_THREAD_MODE environment variable
+    Args:
+        percentage (float): Memory usage percentage.
+
+    Returns:
+        str: ANSI color code.
+    """
+    if percentage >= 80:
+        return ANSI_RED
+    elif percentage >= 50:
+        return ANSI_YELLOW
+    else:
+        return ANSI_GREEN
+
+
+def print_gpu_status(min_required_memory: Optional[int] = None) -> None:
+    """
+    Prints a slimmed-down, color-coded table of GPU status.
+
+    Args:
+        min_required_memory (Optional[int]): If provided, GPUs with free memory lower than
+            this value will have their free memory printed in red.
+    """
+    gpu_info_list = get_gpu_memory_info()
+    if gpu_info_list is None:
+        print("nvidia-smi not available; cannot display GPU status.")
+        return
+
+    header = f"{'GPU':<5} {'Total (MB)':<12} {'Used (MB)':<12} {'Free (MB)':<12} {'Util (%)':<10}"
+    print(header)
+    print("-" * len(header))
+
+    for gpu_info in gpu_info_list:
+        usage_pct = (gpu_info["used"] / gpu_info["total"]) * 100 if gpu_info["total"] > 0 else 0
+        usage_color = color_for_percentage(usage_pct)
+        if min_required_memory is not None:
+            free_color = ANSI_RED if gpu_info["free"] < min_required_memory else ANSI_GREEN
+        else:
+            free_color = ANSI_GREEN  # default to green if no threshold is given
+
+        row = (
+            f"{gpu_info['index']:<5} "
+            f"{gpu_info['total']:<12} "
+            f"{gpu_info['used']:<12} "
+            f"{free_color}{gpu_info['free']:<12}{ANSI_RESET} "
+            f"{usage_color}{usage_pct:>8.1f}%{ANSI_RESET}"
+        )
+        print(row)
+
+
+# === TensorFlow Environment Setup ===
+
+def setup_cuda(device_num: str, max_memory_limit: int, logging_level: int = logging.WARNING) -> tf.distribute.Strategy:
+    """
+    Configures CUDA for TensorFlow by setting visible devices, memory limits, and thread options.
+    
+    Args:
+        device_num (str): A comma-separated list of GPU indices (e.g. "0" or "0,1").
+        max_memory_limit (int): Maximum memory (in MB) per GPU.
+        logging_level (int): Logging level for TensorFlow logs.
+        
+    Returns:
+        tf.distribute.MirroredStrategy: The strategy for multi-GPU training.
+    """
+    # Set CUDA environment variables.
+    os.environ["CUDA_VISIBLE_DEVICES"] = device_num
     os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
 
-    # Confirm TensorFlow and CUDA version compatibility.
+    # Log TensorFlow and CUDA version information.
     tf_version = tf.__version__
+    build_info = tf.sysconfig.get_build_info()
+    cuda_version = build_info.get('cuda_version', 'N/A')
+    logging.info("TensorFlow version: %s, CUDA version: %s", tf_version, cuda_version)
 
-    if "cuda_version" in tf.sysconfig.get_build_info():
-        cuda_version = tf.sysconfig.get_build_info()['cuda_version']
-        logging.info(
-            f"TensorFlow version: {tf_version}, CUDA version: {cuda_version}"
-        )
-    else:
-        logging.info("Running in CPU mode...")
-    
-    # Step 1: Set the mixed precision policy
-    #tf.keras.mixed_precision.set_global_policy('mixed_float16')
-
-    # List all the physical GPUs.
+    # Configure GPUs if available.
     gpus = tf.config.list_physical_devices('GPU')
-    
-    # If any GPU is present.
     if gpus:
-        # Currently, memory growth needs to be the same across GPUs.
-        # Enable memory growth for each GPU and set memory limit.
         for gpu in gpus:
             tf.config.experimental.set_virtual_device_configuration(
                 gpu,
-                [
-                    tf.config.experimental.VirtualDeviceConfiguration(
-                       memory_limit=max_memory_limit
-                    ),
-                ]
+                [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=max_memory_limit)]
             )
-        
-    # Set the logging level to ERROR to reduce logging noise.
+    else:
+        logging.warning("No physical GPUs detected; running on CPU.")
+
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
     tf.config.threading.set_intra_op_parallelism_threads(1)
     tf.config.threading.set_inter_op_parallelism_threads(1)
 
-    # MirroredStrategy performs synchronous distributed training on multiple 
-    # GPUs on one machine. It creates one replica of the model on each GPU 
-    # available:
     strategy = tf.distribute.MirroredStrategy()
-
-    # If verbose, print the list of GPUs.
-    logging.info(tf.config.list_physical_devices("GPU"))
-
-    # Return the MirroredStrategy instance.
+    logging.info("Visible GPUs: %s", tf.config.list_physical_devices('GPU'))
     return strategy
 
-def get_memory_array():
-    # Run the NVIDIA-SMI command
-
-    if not Path("/usr/bin/nvidia-smi").exists():
-        return None
-    
-    try:
-        output = subprocess.check_output(
-            [
-                "/usr/bin/nvidia-smi", 
-                 "--query-gpu=memory.free", 
-                 "--format=csv,noheader,nounits"
-            ], 
-            stderr=subprocess.STDOUT, 
-            universal_newlines=True
-        )
-    except subprocess.CalledProcessError as e:
-        raise CalledProcessError(
-            f"Unable to run NVIDIA-SMI. Please check your environment. Exiting!"
-            " Error: {e.output}"
-        )
-    
-    # Split the output into lines
-    memory_array = output.split("\n")
-    # Remove the last empty line if it exists
-    if memory_array[-1] == "":
-        memory_array = memory_array[:-1]
-
-    # Convert to integers
-    return np.array(memory_array, dtype=int)
-
-def get_gpu_utilization_array():
-    # Run the NVIDIA-SMI command
-
-    if not Path("/usr/bin/nvidia-smi").exists():
-        return None
-
-    try:
-        output = subprocess.check_output(
-            [
-                "/usr/bin/nvidia-smi", 
-                "--query-gpu=utilization.gpu",  # Querying GPU utilization
-                "--format=csv,noheader,nounits"  # Formatting the output
-            ], 
-            stderr=subprocess.STDOUT, 
-            universal_newlines=True
-        )
-    except subprocess.CalledProcessError as e:
-        print((
-            "Unable to run NVIDIA-SMI. Please check your environment. Exiting!",
-            f" Error: {e.output}"
-        ))
-        return None
-
-    # Split the output into lines
-    utilization_array = output.split("\n")
-    # Remove the last empty line if it exists
-    if utilization_array[-1] == "":
-        utilization_array = utilization_array[:-1]
-
-    # Convert to integers
-    return np.array(utilization_array, dtype=int)
-
-def find_available_GPUs(
-    min_memory_MB: int = None, 
-    max_utilization_percentage: float = 80.0,
-    max_needed: int = -1
-):
-    """
-    Finds the available GPUs that have memory available more than min_memory.
-
-    Parameters
-    ----------
-    min_memory_MB : int
-        The minimum free memory required.
-    max_utilization_percentage : float
-        The maximum utilization percentage allowed.
-    max_needed : int
-        The maximum number of GPUs needed.
-
-    Returns
-    -------
-    available_gpus : str
-        The list of indices of available GPUs in string form for easy digestion
-        by setup_cuda above, sorted by most free memory to least.
-    """
-    memory_array = get_memory_array()  # Assume this function exists and returns GPU memory array
-    utilization_array = get_gpu_utilization_array()  # Assume this function exists and returns GPU utilization array
-
-    if memory_array is None:
-        raise MemoryError("No GPUs with requested memory available!")
-    if utilization_array is None:
-        raise MemoryError("No GPUs with requested utilization available!")
-
-    # Filter GPUs based on memory and utilization criteria
-    gpu_indices = np.arange(len(memory_array))
-    filtered_indices = [
-        i for i in gpu_indices
-        if memory_array[i] > min_memory_MB and utilization_array[i] < max_utilization_percentage
-    ]
-
-    # Sort filtered GPUs by available memory in descending order
-    sorted_gpus = sorted(filtered_indices, key=lambda i: memory_array[i], reverse=True)
-
-    # Limit the number of GPUs if max_needed is specified
-    if max_needed != -1:
-        sorted_gpus = sorted_gpus[:max_needed]
-
-    return ",".join(str(gpu) for gpu in sorted_gpus)
 
 def get_tf_memory_usage() -> int:
-    """Get TensorFlow's current GPU memory usage for a specific device.
-    
-    Returns
-    -------
-    int
-        The current memory usage in megabytes.
     """
+    Returns the current GPU memory usage (in MB) for the first visible GPU.
     
-    # Extract device index
-    device_index = int(
-        tf.config.list_physical_devices("GPU")[0].name.split(":")[-1]
-    )
-    
+    Returns:
+        int: Current GPU memory usage.
+    """
+    gpus = tf.config.list_physical_devices("GPU")
+    if not gpus:
+        return 0
+    device_index = int(gpus[0].name.split(":")[-1])
     device_name = f"GPU:{device_index}"
     memory_info = tf.config.experimental.get_memory_info(device_name)
     return memory_info["current"] // (1024 * 1024)
-         
-def env(
-        min_gpu_memory_mb : int = 5000,
-        max_gpu_utilization_percentage : float = 80,
-        num_gpus_to_request : int = 1,
-        memory_to_allocate_tf : int = 3000,
-        gpus : Union[str, int, List[Union[int, str]], None]= None
-    ) -> tf.distribute.Strategy:
-    
-    # Check if there's already a strategy in scope:
-    current_strategy = tf.distribute.get_strategy()
-            
-    def is_default_strategy(strategy):
-        return "DefaultDistributionStrategy" in str(strategy)
 
-    if not is_default_strategy(current_strategy):
+
+def find_available_GPUs(
+    min_memory_MB: Optional[int] = None,
+    max_utilization_percentage: float = DEFAULT_MAX_UTILIZATION_PERCENTAGE,
+    max_needed: int = -1
+) -> str:
+    """
+    Selects available GPUs based on free memory and utilization criteria.
+    
+    Args:
+        min_memory_MB (Optional[int]): Minimum free memory required (in MB).
+        max_utilization_percentage (float): Maximum allowed GPU utilization (%).
+        max_needed (int): Maximum number of GPUs to return (-1 for no limit).
+        
+    Returns:
+        str: A comma-separated string of GPU indices.
+        
+    Raises:
+        RuntimeError: If no GPUs are found or if none meet the criteria.
+    """
+    physical_gpus = tf.config.list_physical_devices('GPU')
+    if not physical_gpus:
+        raise RuntimeError("No GPUs found on the system.")
+
+    gpu_info_list = get_gpu_memory_info()
+    if gpu_info_list is None:
+        raise RuntimeError("Failed to retrieve GPU info; ensure nvidia-smi is installed.")
+
+    available = []
+    for gpu_info in gpu_info_list:
+        if (min_memory_MB is None or gpu_info["free"] > min_memory_MB) and \
+           (gpu_info["utilization"] < max_utilization_percentage):
+            available.append(gpu_info["index"])
+
+    if not available:
+        print("\nAll GPUs are currently busy or do not meet the memory requirements:")
+        print_gpu_status(min_required_memory=min_memory_MB)
+        raise RuntimeError("All GPUs are busy or insufficient memory is available.")
+
+    if max_needed != -1:
+        available = available[:max_needed]
+
+    logging.info("Available GPUs: %s", available)
+    return ",".join(available)
+
+
+def env(
+    min_gpu_memory_mb: int = DEFAULT_MIN_MEMORY_MB,
+    max_gpu_utilization_percentage: float = DEFAULT_MAX_UTILIZATION_PERCENTAGE,
+    num_gpus_to_request: int = 1,
+    memory_to_allocate_tf: int = 3000,
+    gpus: Union[str, int, List[Union[int, str]], None] = None
+) -> tf.distribute.Strategy:
+    """
+    Sets up the TensorFlow environment with the requested GPU(s).
+
+    If a distribution strategy is already in place, returns that strategy's scope.
+    Otherwise, selects GPUs based on the provided specification or automatically
+    based on free memory and utilization criteria.
+    
+    Args:
+        min_gpu_memory_mb (int): Minimum free memory per GPU (MB).
+        max_gpu_utilization_percentage (float): Maximum allowed GPU utilization (%).
+        num_gpus_to_request (int): Number of GPUs requested.
+        memory_to_allocate_tf (int): Memory limit per GPU for TensorFlow (MB).
+        gpus (Union[int, str, List[int]]): Optional GPU specification.
+        
+    Returns:
+        tf.distribute.Strategy: The distribution strategy scope.
+    """
+    current_strategy = tf.distribute.get_strategy()
+    if "DefaultDistributionStrategy" not in str(current_strategy):
         logging.info("A TensorFlow distributed strategy is already in place.")
         return current_strategy.scope()
 
     if gpus is not None:
-        # Verify type of gpus:
         if isinstance(gpus, int):
-            gpus = str(int)
-        elif isinstance(gpus, list) or isinstance(gpus, tuple):
-            gpus = [str(gpu) for gpu in gpus].join(",")    
+            gpus = str(gpus)
+        elif isinstance(gpus, (list, tuple)):
+            gpus = ",".join([str(gpu) for gpu in gpus])
         elif not isinstance(gpus, str):
-            raise ValueError("gpus should be int, str, or list of int or str")
-    elif gpus is None:
-        # Setup CUDA:
+            raise ValueError("gpus should be int, str, or list/tuple of int or str")
+    else:
         gpus = find_available_GPUs(
-            min_memory_MB=min_gpu_memory_mb, 
+            min_memory_MB=min_gpu_memory_mb,
             max_utilization_percentage=max_gpu_utilization_percentage,
             max_needed=num_gpus_to_request
         )
 
-    if not gpus:
-        raise Exception("No GPUs avalible as they were too busy or non-existant.")
-    elif len(gpus) < num_gpus_to_request:
-        logging.warning(f"Could not allocate requested number of GPUs ({num_gpus_to_request}) as they were too busy or non-existant. Allocated {len(gpus)} instead.")
-    
-    strategy = setup_cuda(
-        gpus, 
-        max_memory_limit=memory_to_allocate_tf, 
-        logging_level=logging.WARNING
-    )
-    
+    available_gpu_list = gpus.split(",") if gpus else []
+    if not available_gpu_list:
+        raise RuntimeError("No GPUs available (they may be busy or not present).")
+    elif len(available_gpu_list) < num_gpus_to_request:
+        logging.warning("Requested %d GPUs, but only %d are available.", num_gpus_to_request, len(available_gpu_list))
+
+    strategy = setup_cuda(device_num=gpus, max_memory_limit=memory_to_allocate_tf, logging_level=logging.WARNING)
     return strategy.scope()
