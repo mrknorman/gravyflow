@@ -101,7 +101,7 @@ class ObservingRun(Enum):
     O2 = ObservingRunData(*observing_run_data["O2"])
     O3 = ObservingRunData(*observing_run_data["O3"])
 
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def _random_subsection(
         tensor_data: tf.Tensor,
         num_examples_per_batch: int,
@@ -224,7 +224,7 @@ def _random_subsection(
 
     return batch_subarrays, batch_background_chunks, start_times
 
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def concatenate_batches(subarrays, background_chunks, start_times):
     """
     Concatenates batches of subarrays, background chunks, and start times.
@@ -254,51 +254,7 @@ def concatenate_batches(subarrays, background_chunks, start_times):
     
     return stacked_subarrays, stacked_background_chunks, stacked_start_times
 
-@tf.function(jit_compile=True)
-def _validate_tensor_data(
-        tensor_data : tf.Tensor, 
-        num_samples : int, 
-        maxval : int, 
-        minval : int, 
-        min_tensor_size : int
-    ):
-    """
-    Validates the tensor data for suitability in random subsection extraction.
-
-    Parameters
-    ----------
-    tensor_data : tf.Tensor
-        The tensor data to be validated.
-    N : int
-        The size of the tensor data.
-    maxval : int
-        The maximum value for random start index generation.
-    minval : int
-        The minimum value for random start index generation.
-    min_tensor_size : int
-        The minimum required size of the tensor data.
-
-    Raises
-    ------
-    ValueError
-        If tensor data does not meet the requirements for processing.
-    """
-    if len(tensor_data.shape) != 1:
-        raise ValueError(
-            f"Input tensor must be 1D, got shape {tensor_data.shape}."
-        )
-    if num_samples < min_tensor_size:
-        raise ValueError(
-            (f"Input tensor too small ({num_samples}) for the requested samples"
-                f" and buffer {min_tensor_size}.")
-        )
-    if maxval <= minval:
-        raise ValueError(
-            (f"Invalid combination of onsource/offsource samples and buffer"
-                f" for the given data. {maxval} <= {minval}!")
-        )
-
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def random_subsection(
         data,
         start_gps_time,
@@ -308,26 +264,11 @@ def random_subsection(
         num_examples_per_batch: int,
         seed : int
     ):
-        # Calculate parameters for random subsection extraction
-        minval = num_offsource_samples
-        min_tensor_size = num_onsource_samples + num_offsource_samples + 16
-
         all_batch_subarrays, all_batch_background_chunks, all_subsections_start_gps_time = (
             [], [], []
         )
 
         for tensor_data, start_gps_time in zip(data, start_gps_time):
-            # Verify tensor dimensions and size
-            num_samples =  tensor_data.shape[0]
-            maxval = num_samples - num_onsource_samples - 16
-            _validate_tensor_data(
-                tensor_data, 
-                num_samples, 
-                maxval, 
-                minval, 
-                min_tensor_size
-            )
-
             batch_subarrays, batch_background_chunks, subsections_start_gps_time = (
                 _random_subsection(
                     tensor_data,
@@ -477,6 +418,7 @@ class IFODataObtainer:
         self.file_path = None
 
         self.valid_segments = None
+        self.valid_segments_adjusted = None
                 
     def override_attributes(
         self,
@@ -758,6 +700,15 @@ class IFODataObtainer:
             )
         
         return valid_segments, feature_times
+
+    def clear_valid_segments(self) -> None:
+        """Clears the cached valid segments and IFOS, and resets internal state."""
+        self.valid_segments = None
+        self.valid_segments_adjusted = None
+        self.ifos = None
+        self._current_segment_index = 0
+        self._current_batch_index = 0
+        self._segment_exausted = True
         
     def get_valid_segments(
             self,
@@ -771,6 +722,9 @@ class IFODataObtainer:
         # Ensure parameters are lists for consistency:
         if not isinstance(ifos, list) and not isinstance(ifos, tuple):
             ifos = [ifos]
+
+        # Convert ifos to a canonical sorted tuple (using ifo.name as identifier).
+        cannonical_ifos = tuple(sorted(ifo.name for ifo in ifos))
 
         # If no segment_order requested use class attribute as default, defaults
         # to SegmentOrder.RANDOM:
@@ -793,9 +747,11 @@ class IFODataObtainer:
                 "input."
             )
 
-        if self.valid_segments is None or len(self.valid_segments) != len(ifos) or ifos != self.ifos:
+        if self.valid_segments is None or len(self.valid_segments) != len(ifos) or cannonical_ifos != self.ifos:
 
-            self.ifos = ifos
+            self.clear_valid_segments()
+            logging.info("Recomputing valid segments!")
+            self.ifos = cannonical_ifos
             self.valid_segments = []
 
             # Check to see if noise with no features is desired data product, if
@@ -1235,7 +1191,7 @@ class IFODataObtainer:
             segment_times = valid_segments[self._current_segment_index]
             self._current_segment_index += 1
             self._current_segment_index %= len(valid_segments)
-            valid_segments = self.rng.shuffle(valid_segments)
+            self.rng.shuffle(valid_segments)
 
             segments = []
             gps_start_times = []
@@ -1438,7 +1394,7 @@ class IFODataObtainer:
             # Multiply by 2 for saftey odd things were happening
             min_segment_duration_seconds *= 2.0
             
-            valid_segments_adjusted = self.remove_short_segments(
+            self.valid_segments_adjusted = self.remove_short_segments(
                     self.valid_segments, 
                     min_segment_duration_seconds
                 )
@@ -1450,11 +1406,11 @@ class IFODataObtainer:
 
         while self._segment_exausted:
             self.current_segment = next(self.acquire(
-                    sample_rate_hertz, 
-                    valid_segments_adjusted, 
-                    ifos,
-                    scale_factor
-                ))
+                sample_rate_hertz, 
+                self.valid_segments_adjusted, 
+                ifos,
+                scale_factor
+            ))
         
             min_num_samples = min([tf.shape(tensor)[0] for tensor in self.current_segment.data])
 
@@ -1484,11 +1440,11 @@ class IFODataObtainer:
         while self._current_batch_index < self._num_batches_in_current_segment:
 
             subarrays, background_chunks, start_gps_times = self.current_segment.random_subsection(
-                    num_onsource_samples, 
-                    num_offsource_samples, 
-                    num_examples_per_batch,
-                    self.rng.integers(1E10)
-                )
+                num_onsource_samples, 
+                num_offsource_samples, 
+                num_examples_per_batch,
+                self.rng.integers(1E10)
+            )
 
             if subarrays is None or background_chunks is None or start_gps_times is None:
                 if subarrays is None:

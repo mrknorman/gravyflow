@@ -21,7 +21,7 @@ def ensure_even(number):
         number -= 1
     return number
     
-@tf.function
+@tf.function(reduce_retracing=True)
 def _generate_white_noise(
     num_examples_per_batch: int,
     num_ifos : int,
@@ -98,7 +98,7 @@ def white_noise_generator(
             seed=int(seed+1)
         ), tf.fill([num_examples_per_batch], -1.0)
         
-@tf.function
+@tf.function(reduce_retracing=True)
 def _generate_colored_noise(
     num_examples_per_batch: int,
     num_ifos : int,
@@ -217,21 +217,18 @@ def colored_noise_generator(
         offsource_duration_seconds
     ]
 
-    interpolated_onsource_asds = []
-    interpolated_offsource_asds = []
-    for ifo in ifos:
+    def load_psd(ifo, scale_factor):
         frequencies, asd = np.loadtxt(
             ifo.value.optimal_psd_path, delimiter=","
         ).T
-        
-        frequencies = tf.convert_to_tensor(
-           frequencies, dtype=tf.float32
-        )
-        asd = tf.convert_to_tensor(
-            asd, dtype=tf.float32
-        )
-        
-        asd *= scale_factor
+        frequencies = tf.convert_to_tensor(frequencies, dtype=tf.float32)
+        asd = tf.convert_to_tensor(asd, dtype=tf.float32)
+        return frequencies, asd * scale_factor
+
+    interpolated_onsource_asds = []
+    interpolated_offsource_asds = []
+    for ifo in ifos:
+        frequencies, asd = load_psd(ifo, scale_factor)
         
         num_samples_list = [
             ensure_even(int(duration * sample_rate_hertz)) for duration in durations_seconds
@@ -372,7 +369,10 @@ class NoiseObtainer:
                 # If noise type is real, get real noise time segments that fit 
                 # criteria, segments will be stored as a 2D numpy array as pairs 
                 # of start and end times:
-                
+
+                 # Canonicalize the ifos in the noise obtainer.
+                canonical_ifos = tuple(sorted(ifo.name for ifo in self.ifos))
+
                 if not self.ifo_data_obtainer:
                     # Check to see if obtatainer object has been set up, raise
                     # error if not
@@ -382,7 +382,7 @@ class NoiseObtainer:
                         either during initlisation or through setting
                         NoiseObtainer.ifo_data_obtainer
                     """)
-                elif self.ifo_data_obtainer.valid_segments is None or self.ifos != self.ifo_data_obtainer.ifos:
+                elif self.ifo_data_obtainer.valid_segments is None or canonical_ifos != self.ifo_data_obtainer.ifos:
                         self.ifo_data_obtainer.get_valid_segments(
                             self.ifos,
                             seed,
@@ -452,6 +452,9 @@ class NoiseObtainer:
             int(duration * sample_rate_hertz) for duration in durations_seconds
         ]
 
+        # Canonicalize the ifos in the noise obtainer.
+        canonical_ifos = tuple(sorted(ifo.name for ifo in self.ifos))
+
         if not self.ifo_data_obtainer:
             # Check to see if obtatainer object has been set up, raise
             # error if not
@@ -461,7 +464,7 @@ class NoiseObtainer:
                 either during initlisation or through setting
                 NoiseObtainer.ifo_data_obtainer
             """)
-        elif self.ifo_data_obtainer.valid_segments is None:
+        elif self.ifo_data_obtainer.valid_segments is None or canonical_ifos != self.ifo_data_obtainer.ifos:
             
             valid_segments = self.ifo_data_obtainer.get_valid_segments(
                 self.ifos,

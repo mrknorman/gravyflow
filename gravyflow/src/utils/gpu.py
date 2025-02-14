@@ -125,43 +125,50 @@ def print_gpu_status(min_required_memory: Optional[int] = None) -> None:
 
 def setup_cuda(device_num: str, max_memory_limit: int, logging_level: int = logging.WARNING) -> tf.distribute.Strategy:
     """
-    Configures CUDA for TensorFlow by setting visible devices, memory limits, and thread options.
+    Configures CUDA for TensorFlow by restricting visible GPUs to only the ones specified,
+    setting a memory limit per GPU, and configuring thread options.
     
     Args:
-        device_num (str): A comma-separated list of GPU indices (e.g. "0" or "0,1").
+        device_num (str): A comma-separated list of GPU indices to be used (e.g. "0" or "0,2").
         max_memory_limit (int): Maximum memory (in MB) per GPU.
         logging_level (int): Logging level for TensorFlow logs.
         
     Returns:
-        tf.distribute.MirroredStrategy: The strategy for multi-GPU training.
+        tf.distribute.MirroredStrategy: The distribution strategy for multi-GPU training.
     """
-    # Set CUDA environment variables.
-    os.environ["CUDA_VISIBLE_DEVICES"] = device_num
-    os.environ['TF_GPU_THREAD_MODE'] = 'gpu_private'
-
-    # Log TensorFlow and CUDA version information.
-    tf_version = tf.__version__
-    build_info = tf.sysconfig.get_build_info()
-    cuda_version = build_info.get('cuda_version', 'N/A')
-    logging.info("TensorFlow version: %s, CUDA version: %s", tf_version, cuda_version)
-
-    # Configure GPUs if available.
-    gpus = tf.config.list_physical_devices('GPU')
-    if gpus:
-        for gpu in gpus:
+    # Log to file.
+    logging.basicConfig(filename='tensorflow_setup.log', level=logging_level)
+    
+    # Get all physical GPUs.
+    all_gpus = tf.config.list_physical_devices('GPU')
+    if not all_gpus:
+        logging.warning("No physical GPUs detected; running on CPU.")
+    else:
+        try:
+            # Parse allowed GPU indices from the comma-separated string.
+            allowed_indices = [int(idx.strip()) for idx in device_num.split(",")]
+        except ValueError:
+            raise ValueError("device_num should be a comma-separated string of integers")
+        
+        # Restrict visible GPUs to only those specified.
+        visible_gpus = [all_gpus[i] for i in allowed_indices if i < len(all_gpus)]
+        tf.config.set_visible_devices(visible_gpus, 'GPU')
+        
+        # Configure each visible GPU with the desired memory limit.
+        for gpu in visible_gpus:
             tf.config.experimental.set_virtual_device_configuration(
                 gpu,
                 [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=max_memory_limit)]
             )
-    else:
-        logging.warning("No physical GPUs detected; running on CPU.")
-
+    
+    # Set threading options and reduce verbosity.
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
     tf.config.threading.set_intra_op_parallelism_threads(1)
     tf.config.threading.set_inter_op_parallelism_threads(1)
-
+    
+    # Create a MirroredStrategy. Now only the restricted GPUs are visible.
     strategy = tf.distribute.MirroredStrategy()
-    logging.info("Visible GPUs: %s", tf.config.list_physical_devices('GPU'))
+    logging.info(f"Visible GPUs after restriction: {tf.config.list_physical_devices('GPU')}")
     return strategy
 
 
@@ -226,9 +233,12 @@ def find_available_GPUs(
     return ",".join(available)
 
 
+# Module-level variable to cache the strategy.
+_global_strategy = None
+
 def env(
-    min_gpu_memory_mb: int = DEFAULT_MIN_MEMORY_MB,
-    max_gpu_utilization_percentage: float = DEFAULT_MAX_UTILIZATION_PERCENTAGE,
+    min_gpu_memory_mb: int = 5000,
+    max_gpu_utilization_percentage: float = 80,
     num_gpus_to_request: int = 1,
     memory_to_allocate_tf: int = 3000,
     gpus: Union[str, int, List[Union[int, str]], None] = None
@@ -236,25 +246,27 @@ def env(
     """
     Sets up the TensorFlow environment with the requested GPU(s).
 
-    If a distribution strategy is already in place, returns that strategy's scope.
-    Otherwise, selects GPUs based on the provided specification or automatically
-    based on free memory and utilization criteria.
-    
+    If a distribution strategy has already been created, its scope is returned.
+    Otherwise, the function automatically selects GPUs based on the provided
+    criteria and creates a new MirroredStrategy.
+
     Args:
         min_gpu_memory_mb (int): Minimum free memory per GPU (MB).
         max_gpu_utilization_percentage (float): Maximum allowed GPU utilization (%).
         num_gpus_to_request (int): Number of GPUs requested.
         memory_to_allocate_tf (int): Memory limit per GPU for TensorFlow (MB).
-        gpus (Union[int, str, List[int]]): Optional GPU specification.
-        
-    Returns:
-        tf.distribute.Strategy: The distribution strategy scope.
-    """
-    current_strategy = tf.distribute.get_strategy()
-    if "DefaultDistributionStrategy" not in str(current_strategy):
-        logging.info("A TensorFlow distributed strategy is already in place.")
-        return current_strategy.scope()
+        gpus (Union[int, str, List[int]]): Optional specification of GPU(s) to use.
 
+    Returns:
+        tf.distribute.Strategy: A TensorFlow distribution strategy scope.
+    """
+    global _global_strategy
+
+    if _global_strategy is not None:
+        logging.info("Using previously created distribution strategy.")
+        return _global_strategy.scope()
+
+    # Process the 'gpus' parameter.
     if gpus is not None:
         if isinstance(gpus, int):
             gpus = str(gpus)
@@ -264,7 +276,7 @@ def env(
             raise ValueError("gpus should be int, str, or list/tuple of int or str")
     else:
         gpus = find_available_GPUs(
-            min_memory_MB=min_gpu_memory_mb,
+            min_memory_MB=min_gpu_memory_mb, 
             max_utilization_percentage=max_gpu_utilization_percentage,
             max_needed=num_gpus_to_request
         )
@@ -273,7 +285,15 @@ def env(
     if not available_gpu_list:
         raise RuntimeError("No GPUs available (they may be busy or not present).")
     elif len(available_gpu_list) < num_gpus_to_request:
-        logging.warning("Requested %d GPUs, but only %d are available.", num_gpus_to_request, len(available_gpu_list))
+        logging.warning(
+            f"Requested {num_gpus_to_request} GPUs, but only {len(available_gpu_list)} are available."
+        )
 
-    strategy = setup_cuda(device_num=gpus, max_memory_limit=memory_to_allocate_tf, logging_level=logging.WARNING)
-    return strategy.scope()
+    # Create the strategy with the chosen GPUs.
+    _global_strategy = setup_cuda(
+        device_num=gpus, 
+        max_memory_limit=memory_to_allocate_tf, 
+        logging_level=logging.WARNING
+    )
+    
+    return _global_strategy.scope()

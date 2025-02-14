@@ -98,7 +98,7 @@ class ScalingMethod:
         
         return scaled_injections
 
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def scale(
         injections: tf.Tensor,
         onsource: tf.Tensor,
@@ -141,7 +141,7 @@ def scale(
             scaling_parameters,
         )
 
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def calculate_hrss(
     injection: tf.Tensor
     ):
@@ -154,7 +154,7 @@ def calculate_hrss(
         )
     )
 
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def calculate_hpeak(
     injection: tf.Tensor
     ):
@@ -162,7 +162,7 @@ def calculate_hpeak(
     # Return the root sum sqaure of the inputted injections:
     return tf.reduce_max(tf.abs(injection), axis=-1)
 
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def scale_to_hrss(
     injection: tf.Tensor, 
     desired_hrss: float
@@ -190,7 +190,7 @@ def scale_to_hrss(
     # Return injection scaled by scale factor:
     return injection*scale_factor
 
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def scale_to_hpeak(
     injection: tf.Tensor, 
     desired_hpeak: float
@@ -567,7 +567,7 @@ class WNBGenerator(WaveformGenerator):
             
             return waveforms, parameters
 
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def ensure_last_dim_even(tensor):
     # Get the shape of the tensor
     last_dim = tensor.shape[-1]
@@ -746,7 +746,7 @@ class IncoherentGenerator(WaveformGenerator):
 
         return waveforms, parameters
 
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def handle_before_projection(
         injection,
         onsource, 
@@ -785,7 +785,7 @@ def handle_before_projection(
         location
     )
 
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def handle_after_projection(
         injection,
         onsource, 
@@ -830,7 +830,7 @@ def handle_after_projection(
         scaling_type
     )
 
-@tf.function(jit_compile=True)
+@tf.function(jit_compile=True, reduce_retracing=True)
 def add_to_onsource(
         injection,
         onsource, 
@@ -977,139 +977,119 @@ def process_single_injection(
 
 @dataclass
 class InjectionGenerator:
-    waveform_generators : Union[
+    waveform_generators: Union[
         List[gf.WaveformGenerator], 
         Dict[str, gf.WaveformGenerator]
     ]
-    parameters_to_return : Union[List[WaveformParameters], None] = None
-    seed : int = None
-    index : int = 0
+    parameters_to_return: Optional[List[WaveformParameters]] = None
+    seed: Optional[int] = None
+    index: int = 0
 
     def __post_init__(self):
-        if self.parameters_to_return is None: 
-            self.parameters_to_return = []
+        # Set default seed if not provided.
         if self.seed is None:
             self.seed = gf.Defaults.seed
 
+        # Use a single RNG to derive all necessary seeds.
         self.rng = default_rng(self.seed)
-        self.generator_rng = default_rng(self.rng.integers(1E10))
-        self.parameter_rng = default_rng(self.rng.integers(1E10))
-        self.position_rng = default_rng(self.rng.integers(1E10))
-        self.waveform_rng = default_rng(self.rng.integers(1E10))
-        self.mask_rng = default_rng(self.rng.integers(1E10))
+        seeds = self.rng.integers(0, 1E10, size=5)
+        self.generator_rng = default_rng(seeds[0])
+        self.parameter_rng = default_rng(seeds[1])
+        self.position_rng = default_rng(seeds[2])
+        self.waveform_rng = default_rng(seeds[3])
+        self.mask_rng = default_rng(seeds[4])
 
+        # Ensure parameters_to_return is a list of waveform parameters.
+        if self.parameters_to_return is None:
+            self.parameters_to_return = []
         self.parameters_to_return = [
-            item for item in self.parameters_to_return if isinstance(item.value, WaveformParameter)
+            item for item in self.parameters_to_return 
+            if isinstance(item.value, WaveformParameter)
         ]
 
+        # Normalize waveform_generators to a list.
         if not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
             self.waveform_generators = [self.waveform_generators]
 
-        # Process waveform generators based on their type
+        # Reseed each waveform generator once.
         if isinstance(self.waveform_generators, list):
-            # Reseeding generators for list type
             for generator in self.waveform_generators:
                 generator.reseed(self.parameter_rng.integers(1E10))
-
-            # Creating iterators for each generator in list
+            # Create and store iterators once.
             self.iterators = [
                 self.generate_one(generator, seed=self.generator_rng.integers(1E10))
                 for generator in self.waveform_generators
             ]
-
         elif isinstance(self.waveform_generators, dict):
-            # Reseeding generators for dictionary type
-            for generator in self.waveform_generators.values():
-                generator["generator"].reseed(self.parameter_rng.integers(1E10))
-
-            # Creating iterators with additional 'name' parameter for each generator in dictionary
+            for config in self.waveform_generators.values():
+                config["generator"].reseed(self.parameter_rng.integers(1E10))
             self.iterators = [
                 self.generate_one(config["generator"], seed=self.generator_rng.integers(1E10), name=key)
                 for key, config in self.waveform_generators.items()
             ]
-
-            # Initializing an empty mask dictionary
             self.mask_dict = {}
-
         else:
-            # Handling invalid waveform generator types
             raise TypeError("Waveform generators must be a dictionary or a list!")
-
+        
     def __call__(
-            self,
-            sample_rate_hertz : float = None,
-            onsource_duration_seconds : float = None,
-            crop_duration_seconds : float = None,
-            num_examples_per_generation_batch : int = None,
-            num_examples_per_batch : int = None,
-        ):
+        self,
+        sample_rate_hertz: float = None,
+        onsource_duration_seconds: float = None,
+        crop_duration_seconds: float = None,
+        num_examples_per_generation_batch: int = None,
+        num_examples_per_batch: int = None,
+    ):
+        self.sample_rate_hertz = sample_rate_hertz or gf.Defaults.sample_rate_hertz
+        self.onsource_duration_seconds = onsource_duration_seconds or gf.Defaults.onsource_duration_seconds
+        self.crop_duration_seconds = crop_duration_seconds or gf.Defaults.crop_duration_seconds
+        self.num_examples_per_generation_batch = num_examples_per_generation_batch or gf.Defaults.num_examples_per_generation_batch
+        self.num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
 
-        self.sample_rate_hertz = sample_rate_hertz
-        self.onsource_duration_seconds = onsource_duration_seconds
-        self.crop_duration_seconds = crop_duration_seconds
-        self.num_examples_per_generation_batch = num_examples_per_generation_batch
-        self.num_examples_per_batch = num_examples_per_batch
-        
-        if self.sample_rate_hertz is None:
-            self.sample_rate_hertz = gf.Defaults.sample_rate_hertz
-        if self.onsource_duration_seconds is None:
-            self.onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
-        if self.crop_duration_seconds is None:
-            self.crop_duration_seconds = gf.Defaults.crop_duration_seconds
-        if self.num_examples_per_generation_batch is None:
-            self.num_examples_per_generation_batch = gf.Defaults.num_examples_per_generation_batch
-        if self.num_examples_per_batch is None:
-            self.num_examples_per_batch = gf.Defaults.num_examples_per_batch
-
-        if (self.num_examples_per_batch > self.num_examples_per_generation_batch):
+        if self.num_examples_per_batch > self.num_examples_per_generation_batch:
             logging.warning(
-                ("num_injections_per_batch must be less than "
-                 "num_examples_per_generation_batch adjusting to compensate")
+                "num_injections_per_batch must be less than num_examples_per_generation_batch; adjusting."
             )
-            
             self.num_examples_per_generation_batch = self.num_examples_per_batch
-        
+
+        # If no waveform generators provided, yield a single empty result.
         if not self.waveform_generators:
             yield None, None, None
 
-        injections = []
-        mask = []
-        parameters = {key : [] for key in self.parameters_to_return}
-        for iterator in self.iterators:
+        # Loop indefinitely, yielding batches continuously.
+        while True:
+            injections = []
+            mask = []
+            parameters = {key: [] for key in self.parameters_to_return}
 
-            injection_, mask_, parameters_ = \
-                next(iterator)
-
-            injections.append(injection_)
-            mask.append(mask_)
-                            
-            for key in parameters:
-                if key in parameters_:
-                    parameters[key].append(parameters_[key])
-                else:
-                    parameters[key].append(
-                        tf.zeros(
-                            [key.value.shape[-1] * self.num_examples_per_batch], 
-                            dtype = tf.float64
+            # Get one batch from each iterator.
+            for iterator in self.iterators:
+                injection_, mask_, parameters_ = next(iterator)
+                injections.append(injection_)
+                mask.append(mask_)
+                for key in parameters:
+                    if key in parameters_:
+                        parameters[key].append(parameters_[key])
+                    else:
+                        parameters[key].append(
+                            tf.zeros([key.value.shape[-1] * self.num_examples_per_batch], dtype=tf.float64)
                         )
-                    )
-        try:
-            injections = tf.stack(injections)
-        except Exception as e:
-            raise Exception(f"Failed to stack injections because {e}.")
-        try:
-            mask = tf.stack(mask)
-        except Exception as e:
-            raise Exception(f"Failed to stack mask because {e}.")
-        for key, value in parameters.items():
-            try:
-                parameters[key] = tf.stack(value)
-            except Exception as e:
-                logging.error(f"Failed to stack injections parameters because {e}")
 
-                return None, None, None
-        
-        yield injections, mask, parameters
+            try:
+                injections = tf.stack(injections)
+            except Exception as e:
+                raise Exception(f"Failed to stack injections because {e}.")
+            try:
+                mask = tf.stack(mask)
+            except Exception as e:
+                raise Exception(f"Failed to stack mask because {e}.")
+            for key, value in parameters.items():
+                try:
+                    parameters[key] = tf.stack(value)
+                except Exception as e:
+                    logging.error(f"Failed to stack injection parameters because {e}")
+                    return  # or yield None, None, None as appropriate
+
+            yield injections, mask, parameters
     
     def generate_one(
             self, 
@@ -1165,24 +1145,50 @@ class InjectionGenerator:
                         tf.math.logical_not(self.mask_dict[excluded])
                     )
 
-            try:
-                # Attempt to compute num_waveforms
-                num_waveforms = tf.reduce_sum(tf.cast(mask, tf.int32)).numpy()
-            except tf.errors.InvalidArgumentError as e:
-                # Print debugging information only when the error occurs
-                print("Error during reduction: Invalid reduction arguments. Axes might contain duplicates.")
-                print("mask shape:", mask.shape)
-                print("Exception details:", e)
-                raise  # Re-raise the exception after printing
-            
+            # Convert mask to integer type.
+            mask_int = tf.cast(mask, tf.int32)
+
+            # Determine the rank of the mask.
+            if mask.shape.ndims is None:
+                # If static rank is not available, compute it dynamically.
+                mask_rank = tf.rank(mask_int).numpy()
+            else:
+                mask_rank = mask.shape.ndims
+
+            # Compute num_waveforms depending on the rank.
+            if mask_rank == 0:
+                # If mask is a scalar, use it directly.
+                num_waveforms_val = mask_int.numpy()
+            else:
+                try:
+                    # When mask is non-scalar, sum all entries.
+                    num_waveforms_val = tf.reduce_sum(mask_int).numpy()
+                except Exception as e:
+                    raise ValueError(
+                        f"Error reducing mask with shape {mask.shape}: {e}"
+                    ) from e
+
+            # Ensure that the reduced result is a scalar.
+            if not np.isscalar(num_waveforms_val):
+                try:
+                    num_waveforms_val = num_waveforms_val.item()
+                except Exception as e:
+                    raise ValueError(
+                        f"Expected scalar from reduction but got array with shape {np.shape(num_waveforms_val)}"
+                    ) from e
+
+            # Convert to an integer.
+            num_waveforms = int(num_waveforms_val)
+
+            # Convert to an int explicitly (if it isn't already) and check the condition.
+            num_waveforms = int(num_waveforms)
             if num_waveforms > 0:
-                
                 waveforms, parameters = generator.generate(
-                        num_waveforms, 
-                        self.sample_rate_hertz,
-                        total_duration_seconds,
-                        self.waveform_rng.integers(1E10)
-                    )
+                    num_waveforms, 
+                    self.sample_rate_hertz,
+                    total_duration_seconds,
+                    self.waveform_rng.integers(1E10)
+                )
                 
                 # Convert to tensorflow tensor:
                 waveforms = tf.convert_to_tensor(waveforms, dtype = tf.float32)
@@ -1198,7 +1204,6 @@ class InjectionGenerator:
                 # did not generate due to injection masks:
                 injections = gf.expand_tensor(waveforms, mask)
             else:
-
                 shape = (num_batches, 2, total_duration_num_samples)
                 assert isinstance(shape, tuple), f"Shape should be a tuple {shape}"
                 assert all(isinstance(dim, int) for dim in shape), f"All dimensions in shape should be integers {shape}"
@@ -1246,15 +1251,17 @@ class InjectionGenerator:
             injections = gf.batch_tensor(injections, self.num_examples_per_batch)
             mask = gf.batch_tensor(mask, self.num_examples_per_batch)
 
-            # Split into list to avoid iterating over tensors, which TensorFlow seems 
-            # to dislike:
+           # Unstack the batched tensors to get a list of smaller tensors (one per batch)
+            injections_list = tf.unstack(injections, axis=0)
+            mask_list = tf.unstack(mask, axis=0)
 
-            try:
-                injections_list = tf.unstack(injections, axis=0)
-                mask_list = tf.unstack(mask, axis=0)
-            except Exception as e:
-                logging.error(f"Failed to unstack because: {e}")
-                continue
+            # Iterate over the resulting list of tensors.
+            for injection_, mask_, parameter_ in zip(injections_list, mask_list, parameters):
+                try:
+                    yield injection_, mask_, parameter_
+                except Exception as e:
+                    logging.error(f"Failed to yield because: {e}")
+                    continue
 
             # Now you can zip them together and iterate over them
             for injection_, mask_, parameter_ in zip(injections_list, mask_list, parameters):
@@ -1286,45 +1293,27 @@ class InjectionGenerator:
             A tensor representing generated scaling parameters.
         """
 
-        mask = mask.numpy()
-
+        mask = mask.numpy()  # Converts to NumPy (can be memory intensive for large tensors)
         num_injections = np.sum(mask)
         
         match generator.scaling_method.value:
             case np.ndarray():
-
                 scaling_parameters = []
                 for index in range(self.index, self.index + num_injections):
                     if index < len(generator.scaling_method.value):
-                        scaling_parameters.append(
-                            generator.scaling_method.value[index]
-                        )
+                        scaling_parameters.append(generator.scaling_method.value[index])
                     else:
-                        scaling_parameters.append(
-                            generator.scaling_method.value[-1]
-                        )
-                        
+                        scaling_parameters.append(generator.scaling_method.value[-1])
                     self.index += 1
-
             case gf.Distribution():
-                scaling_parameters = generator.scaling_method.value.sample(
-                    num_injections
-                )
-
+                scaling_parameters = generator.scaling_method.value.sample(num_injections)
             case _:
-                raise TypeError("Unsupported scaling method value type: "
-                                 f"{type(generator.scaling_method.value)}!") 
-
-        scaling_parameters = tf.convert_to_tensor(
-            scaling_parameters, 
-            dtype = tf.float32
-        )
-                
-        scaling_parameters = gf.expand_tensor(
-            scaling_parameters,
-            mask
-        )
-
+                raise TypeError("Unsupported scaling method value type: " 
+                                f"{type(generator.scaling_method.value)}!")
+        
+        scaling_parameters = tf.convert_to_tensor(scaling_parameters, dtype=tf.float32)
+        scaling_parameters = gf.expand_tensor(scaling_parameters, mask)
+        
         return scaling_parameters
     
     def generate_scaling_parameters(
@@ -1338,7 +1327,7 @@ class InjectionGenerator:
             for mask, config in zip(masks, self.waveform_generators.values()):
                 scaling_parameters.append(
                     self.generate_scaling_parameters_(
-                        mask,
+                        tf.squeeze(mask),
                         config["generator"]
                     )
                 )
@@ -1346,7 +1335,7 @@ class InjectionGenerator:
             for mask, generator in zip(masks, self.waveform_generators):
                 scaling_parameters.append(
                     self.generate_scaling_parameters_(
-                        mask,
+                        tf.squeeze(mask),
                         generator
                     )
                 )
@@ -1372,12 +1361,12 @@ class InjectionGenerator:
         
         onsource = ensure_last_dim_even(onsource)
 
-        # Unstack because TensorFlow hates tensor iteration: 
         try:
+            # Unstack the batched tensors to get a list of smaller tensors (one per batch)
             injections_list = tf.unstack(injections, axis=0)
             mask_list = tf.unstack(mask, axis=0)
-        except:
-            logging.error("Unstacking failed for some reason")
+        except Exception as e:
+            logging.error("Splitting failed for some reason: %s", e)
             return None, None, None
 
         if isinstance(self.waveform_generators, dict):
@@ -1391,141 +1380,6 @@ class InjectionGenerator:
                 scaling_parameters, 
                 waveform_generators
             ):
-
-            """
-
-            injections_ = ensure_last_dim_even(injections_)
-            
-            network = waveform_generator.network
-            
-            match waveform_generator.scaling_method.type_.value.ordinality:
-                
-                case ScalingOrdinality.BEFORE_PROJECTION:
-
-                    try:
-                        scaled_injections = waveform_generator.scaling_method.scale(
-                                injections_,
-                                onsource,
-                                scaling_parameters_,
-                                self.sample_rate_hertz
-                            )
-                    except Exception as e:
-                        logging.error(f+-"Failed to scale injections because {e}")
-
-                    try:
-                        scaled_injections = network.project_wave(
-                            scaled_injections, sample_rate_hertz=self.sample_rate_hertz
-                        )
-                    except Exception as e:
-                        logging.error(f+-"Failed to project injections because {e}")
-
-                    if scaled_injections is None:
-                        logging.error("Error scaling injections before projection!")
-                        return None, None, None
-            
-                case ScalingOrdinality.AFTER_PROJECTION:
-                    
-                    try:
-                        if network.num_detectors > 1:
-                            injections_ = network.project_wave(
-                                injections_, 
-                                sample_rate_hertz=self.sample_rate_hertz
-                            )
-                        else:
-
-                            before_shape = injections_.shape
-                            injections_ = tf.reduce_sum(
-                                injections_, 
-                                axis=1, 
-                                keepdims = True
-                            )
-                            
-                            if injections_.shape != onsource.shape:
-                                print(f"Reduce_sum failed to reduce injections"
-                                      "reduced from {before_shape} to"
-                                      "{injections_.shape}, when onsource was"
-                                      "{onsource.shape}")
-
-                    except Exception as e:
-                        logging.error(f"Failed to project injections because {e}")
-
-                    if injections_ is not None:
-                        if injections_.shape != onsource.shape:
-                            logging.error(f"Shape mismatch injections {injections_.shape} onsource {onsource.shape}")
-                            return None, None, None
-
-                        try:
-                            # Scale injections with selected scaling method:
-                            scaled_injections = waveform_generator.scaling_method.scale(
-                                    injections_,
-                                    onsource,
-                                    scaling_parameters_,
-                                    self.sample_rate_hertz
-                                )
-                        except Exception as e:
-                            logging.error(f+-"Failed to scale injections because {e}")
-
-                    else:
-                        logging.error("Error scaling injections after projection!")
-                        return None, None, None
-                
-                case _:
-                    
-                    raise ValueError(
-                        ("Scaling ordinality "
-                        f"{waveform_generator.scaling_method.type_.value.order} not "
-                         " recognised.")
-                    )
-
-            # Add scaled injections to onsource:
-            try:
-                onsource += scaled_injections
-            except Exception as e:
-                logging.error(f+-"Failed to add injections because {e}")
-
-            if ScalingTypes.HPEAK in parameters_to_return:
-                # Calculate hpeak of scaled injections:
-                
-                if waveform_generator.scaling_method.type_ is not ScalingTypes.HPEAK:
-                    return_variables[ScalingTypes.HPEAK].append(
-                        calculate_hpeak(injections_)
-                    )
-                    
-            if ScalingTypes.SNR in parameters_to_return:
-                # Calculate snr of scaled injections:
-                
-                if waveform_generator.scaling_method.type_ is not ScalingTypes.SNR:
-                    return_variables[ScalingTypes.SNR].append(
-                        gf.snr(
-                            scaled_injections, 
-                            onsource,
-                            self.sample_rate_hertz, 
-                            fft_duration_seconds=1.0,
-                            overlap_duration_seconds=0.5
-                        ) 
-                    )
-                    
-            if ScalingTypes.HRSS in parameters_to_return:
-                # Calculate hrss of scaled injections:
-                
-                if waveform_generator.scaling_method.type_ is not ScalingTypes.HRSS:
-                    return_variables[ScalingTypes.HRSS].append(
-                        calculate_hrss(injections_) 
-                    )
-            
-            if (ReturnVariables.INJECTIONS in parameters_to_return) or \
-                (ReturnVariables.WHITENED_INJECTIONS in parameters_to_return):
-                # Crop injections so that they appear the same size as output 
-                # onsource:
-                cropped_injections.append(
-                    gf.crop_samples(
-                        scaled_injections, 
-                        self.onsource_duration_seconds, 
-                        self.sample_rate_hertz
-                    )
-                )
-
-            """
 
             onsource, cropped_injections, return_variables = process_single_injection(
                 injections_,
@@ -1602,48 +1456,45 @@ def roll_vector_zero_padding(tensor, min_roll, max_roll, seed):
 
     return result
 
-@tf.function
-def generate_mask(
-    num_injections: int, 
-    injection_chance: float,
-    seed
-    ) -> tf.Tensor:
 
+@tf.function(
+    input_signature=[
+        # Expect num_injections as a scalar int32.
+        tf.TensorSpec(shape=[], dtype=tf.int32, name="num_injections"),
+        # Expect injection_chance as a scalar float32.
+        tf.TensorSpec(shape=[], dtype=tf.float32, name="injection_chance"),
+        # Expect seed as a vector of length 2 of type int32.
+        tf.TensorSpec(shape=[2], dtype=tf.int32, name="seed")
+    ],
+    reduce_retracing=True
+)
+def generate_mask(num_injections, injection_chance, seed) -> tf.Tensor:
     """
     Generate injection masks using TensorFlow.
 
-    Parameters
-    ----------
-    num_injections : int
-        The number of injection masks to generate.
-    injection_chance : float
-        The probability of an injection being True.
+    Parameters:
+      num_injections: A scalar int32 tensor representing the number of masks to generate.
+      injection_chance: A scalar float32 tensor giving the probability an injection is True.
+      seed: A 1-D int32 tensor of shape [2] used for the stateless random op.
 
-    Returns
-    -------
-    tf.Tensor
-        A tensor of shape (num_injections,) containing the injection masks.
+    Returns:
+      A boolean tensor of shape (num_injections,) containing the injection masks.
     """
-
-    # Ensure the seed is of the correct shape [2] and dtype int32
-    seed_tensor = tf.cast(seed, tf.int32)
-
-    # Logits for [False, True] categories
+    # Compute logits for [False, True] categories.
     logits = tf.math.log([1.0 - injection_chance, injection_chance])
-
-    # Generate categorical random variables based on logits
+    
+    # Generate categorical random variables.
+    # tf.random.stateless_categorical returns a tensor of shape [batch_size, num_samples]
     sampled_indices = tf.random.stateless_categorical(
-        seed=seed_tensor,
-        logits=tf.reshape(logits, [1, -1]), 
+        seed=seed,
+        logits=tf.reshape(logits, [1, -1]),
         num_samples=num_injections
     )
-
-    # Reshape to match the desired output shape
+    
+    # Reshape the output to [num_injections] and convert to booleans.
     injection_masks = tf.reshape(sampled_indices, [num_injections])
-
-    # Convert indices to boolean: False if 0, True if 1
     injection_masks = tf.cast(injection_masks, tf.bool)
-
+    
     return injection_masks
             
 def is_not_inherited(instance, attr: str) -> bool:
