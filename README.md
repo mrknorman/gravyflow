@@ -66,7 +66,7 @@ Note that GravyFlow is under active development, and you may encounter issues du
 
 Follow these guides for setting up permissions to access real data:
 
-https://computing.docs.ligo.org/guide/auth/x509/
+https://computing.docs.ligo.org/guide/auth/scitokens/
 https://computing.docs.ligo.org/guide/auth/kerberos/
 
 ## 5. Setup Gravity Spy Permissions:

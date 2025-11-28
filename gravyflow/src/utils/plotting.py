@@ -100,13 +100,19 @@ def generate_strain_plot(
         height : int = 400,
         width : Union[int, None] = None
     ):
-
+    
     if sample_rate_hertz is None:
         sample_rate_hertz = gf.Defaults.sample_rate_hertz
     
-    duration_seconds = next(
-            iter(strain.values()), 'default'
-        ).shape[-1] / sample_rate_hertz
+    # Safely get duration
+    first_val = next(iter(strain.values()))
+    # Handle case where input is list/tensor before checking shape
+    if hasattr(first_val, 'shape'):
+        dim = first_val.shape[-1]
+    else:
+        dim = len(first_val) # Fallback for lists
+        
+    duration_seconds = dim / sample_rate_hertz
     
     if colors is None:
         colors = Bright[7] 
@@ -115,12 +121,16 @@ def generate_strain_plot(
         width = int(height * golden)
     
     # Detect if the data has an additional dimension
+    # Convert first key to array to check shape safely
     first_key = next(iter(strain))
-    if len(strain[first_key].shape) == 1:
+    first_val_arr = np.array(strain[first_key])
+    
+    if len(first_val_arr.shape) == 1:
         strains = [strain]
     else:
-        N = strain[first_key].shape[0]
-        height = height//N
+        N = first_val_arr.shape[0]
+        # Adjust height for subplots
+        height = height // N if N > 0 else height
         strains = [{key: strain[key][i] for key in strain} for i in range(N)]
 
     if not isinstance(title, list):
@@ -138,10 +148,20 @@ def generate_strain_plot(
 
     plots = []
     for curr_title, curr_strain in zip(title, strains):
-        # If inputs are tensors, convert to numpy array:
+        
+        # --- FIX STARTS HERE ---
+        # Robustly convert inputs to numpy arrays
         for key, value in curr_strain.items():
-            if isinstance(value, tf.Tensor):
-                curr_strain[key] = value.numpy()
+            # 1. Handle TensorFlow Tensors
+            if hasattr(value, 'numpy'):
+                value = value.numpy()
+            
+            # 2. Handle Python Lists/Tuples
+            if not isinstance(value, np.ndarray):
+                value = np.array(value)
+                
+            curr_strain[key] = value
+        # --- FIX ENDS HERE ---
                 
         # Get num samples and check dictionaries:
         num_samples = check_ndarrays_same_length(curr_strain)

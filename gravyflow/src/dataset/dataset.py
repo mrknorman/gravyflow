@@ -291,20 +291,13 @@ class data:
         """Process whitened injections if required."""
         if gf.ReturnVariables.WHITENED_INJECTIONS in self.variables_to_return:
             # Define a function that whitens a single injection.
-            def whiten_single(scaled_injection):
-                return gf.whiten(
-                    scaled_injection, 
-                    offsource, 
-                    self.sample_rate_hertz, 
-                    fft_duration_seconds=1.0,
-                    overlap_duration_seconds=0.5,
-                    filter_duration_seconds=1.0
-                )
-            # Use tf.map_fn to apply the whitening operation across the first dimension
-            whitened_injections = tf.map_fn(
-                whiten_single, 
-                scaled_injections,
-                fn_output_signature=scaled_injections.dtype
+            whitened_injections = gf.whiten(
+                scaled_injections, 
+                offsource, 
+                self.sample_rate_hertz, 
+                fft_duration_seconds=1.0,
+                overlap_duration_seconds=0.5,
+                filter_duration_seconds=1.0
             )
             # Replace NaN and Inf values in the resulting tensor before returning
             return gf.replace_nan_and_inf_with_zero(whitened_injections)
