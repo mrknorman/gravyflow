@@ -111,7 +111,7 @@ class data:
         scale_factor: Optional[float] = None,
         noise_obtainer: Optional[gf.NoiseObtainer] = None,
         group: str = "train",
-        waveform_generators: Optional[List[Union[gf.cuPhenomDGenerator, gf.WNBGenerator]]] = None,
+        waveform_generators: Optional[List[Union[gf.RippleGenerator, gf.WNBGenerator]]] = None,
         num_examples_per_generation_batch: Optional[int] = None,
         num_examples_per_batch: Optional[int] = None,
         input_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
