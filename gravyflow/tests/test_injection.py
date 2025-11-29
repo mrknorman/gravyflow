@@ -26,7 +26,7 @@ def _test_injection_iteration(
             gf.tests.PATH / "example_injection_parameters"
         )
         
-        phenom_d_generator : gf.cuPhenomDGenerator = gf.WaveformGenerator.load(
+        phenom_d_generator : gf.RippleGenerator = gf.WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters.json"
         )
         
@@ -61,11 +61,11 @@ def _test_phenom_d_injection(
             gf.tests.PATH / "example_injection_parameters"
         )
         
-        phenom_d_generator_high_mass : gf.cuPhenomDGenerator = gf.WaveformGenerator.load(
+        phenom_d_generator_high_mass : gf.RippleGenerator = gf.WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters_high_mass.json"
         )
         
-        phenom_d_generator_low_mass : gf.cuPhenomDGenerator = gf.WaveformGenerator.load(
+        phenom_d_generator_low_mass : gf.RippleGenerator = gf.WaveformGenerator.load(
             injection_directory_path / "phenom_d_parameters_low_mass.json"
         )
         
@@ -110,7 +110,7 @@ def _test_phenom_d_injection(
             high_mass = [
                 gf.generate_strain_plot(
                     {"Plus": injection[0], "Cross": injection[1]},
-                    title=f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2} msun"
+                    title=f"PhenomD injection example: mass_1 {m1} msun; mass_2 {m2} msun"
                 )
                 for injection, m1, m2 in zip(
                     current_parameters["high_mass_injections"], 
@@ -122,7 +122,7 @@ def _test_phenom_d_injection(
             low_mass = [
                 gf.generate_strain_plot(
                     {"Plus": injection[0], "Cross": injection[1]},
-                    title=f"cuPhenomD injection example: mass_1 {m1} msun; mass_2 {m2} msun"
+                    title=f"PhenomD injection example: mass_1 {m1} msun; mass_2 {m2} msun"
                 )
                 for injection, m1, m2 in zip(
                     current_parameters["high_mass_injections"], 

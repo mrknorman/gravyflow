@@ -8,6 +8,10 @@ import warnings
 # Suppress specific LAL warning when running in an ipython kernel
 warnings.filterwarnings("ignore", category=UserWarning, message="Wswiglal-redir-stdio")
 
+# Disable JAX memory preallocation to avoid conflicts with TensorFlow
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 
 
 # Local application/library specific imports
@@ -50,10 +54,10 @@ from .src.dataset.noise.acquisition import (
 from .src.dataset.noise.noise import NoiseType, NoiseObtainer
 from .src.dataset.features.injection import (
     ScalingOrdinality, ScalingType, ScalingTypes, ScalingMethod, ReturnVariables,
-    WaveformGenerator, WaveformParameter, WaveformParameters, WNBGenerator, 
-    PhenomDGenerator, cuPhenomDGenerator, IncoherentGenerator, InjectionGenerator,
-    roll_vector_zero_padding, generate_mask, is_not_inherited, 
-    batch_injection_parameters
+    WaveformGenerator, WaveformParameter, WaveformParameters, WNBGenerator,
+    IncoherentGenerator, InjectionGenerator,
+    roll_vector_zero_padding, generate_mask, is_not_inherited,
+    batch_injection_parameters, RippleGenerator
 )
 from .src.dataset.dataset import data, Dataset
 from .src.utils.plotting import (

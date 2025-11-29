@@ -31,7 +31,7 @@ def plot_whitened_strain_examples(
                     "Whitened (tf) Injection" : whitening_results["scaled_injection"]["tensorflow"],
                     "Injection": scaled_injection
                 },
-                title="cuPhenomD injection example tf whitening",
+                title="PhenomD injection example tf whitening",
             ), 
             gf.generate_spectrogram(
                 whitening_results["onsource_plus_injection"]["tensorflow"]
@@ -44,7 +44,7 @@ def plot_whitened_strain_examples(
                     "Whitened (gwpy) Injection" : whitening_results["scaled_injection"]["gwpy"],
                     "Injection": scaled_injection
                 },
-                title=f"cuPhenomD injection example gwpy whitening",
+                title=f"PhenomD injection example gwpy whitening",
             ), 
             gf.generate_spectrogram(
                 whitening_results["onsource_plus_injection"]["gwpy"]

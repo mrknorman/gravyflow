@@ -195,7 +195,7 @@ def get_phenom_generator(
         injection_directory_path: Path, 
         scaling_method: gf.ScalingMethod, 
         ifos: List[gf.IFO]
-    ) -> gf.cuPhenomDGenerator:
+    ) -> gf.RippleGenerator:
 
     """Load the injection configuration.
 
@@ -205,7 +205,7 @@ def get_phenom_generator(
         ifos (List[gf.IFO]): The interferometers to use.
 
     Returns:
-        gf.cuPhenomDGenerator: The waveform generator object.
+        gf.RippleGenerator: The waveform generator object.
     """
     phenom_d_generator = gf.WaveformGenerator.load(
         path=injection_directory_path / "phenom_d_parameters.json", 
@@ -243,7 +243,7 @@ def get_incoherent_generator(
         injection_directory_path: Path, 
         scaling_method: gf.ScalingMethod,
         _ : Any
-    ) -> Tuple[gf.cuPhenomDGenerator, gf.WNBGenerator]:
+    ) -> Tuple[gf.RippleGenerator, gf.WNBGenerator]:
 
     """Load the waveform generators.
 
@@ -481,7 +481,7 @@ def plot_dataset_examples(
             mass_1_msun = current_parameters['mass_1_msun']
             mass_2_msun = current_parameters['mass_2_msun']
             plot_data = zip(onsource, whitened_injections, injections, mass_1_msun, mass_2_msun)
-            title = "cuPhenomD injection example" if waveform_type == "phenomd" else "Incoherent injection example"
+            title = "PhenomD injection example" if waveform_type == "phenomd" else "Incoherent injection example"
             plot_func = lambda data: [
                 gf.generate_strain_plot(
                     {"Whitened Onsource + Injection": data[0], "Whitened Injection": data[1], "Injection": data[2]},
@@ -566,7 +566,7 @@ def _test_dataset_iteration(
 def setup_dataset_arguments(
         waveform_type : str,
         noise_obtainer: gf.NoiseObtainer, 
-        phenom_d_generator: gf.cuPhenomDGenerator
+        phenom_d_generator: gf.RippleGenerator
     ) -> Dict:
 
     """Set up arguments for the dataset.
@@ -574,7 +574,7 @@ def setup_dataset_arguments(
     Args:
         waveform_type (str): Type of waveform being returned by dataset.
         noise_obtainer (gf.NoiseObtainer): Noise obtainer object.
-        phenom_d_generator (gf.cuPhenomDGenerator): Waveform generator object.
+        phenom_d_generator (gf.RippleGenerator): Waveform generator object.
 
     Returns:
         Dict: Arguments for creating the dataset.

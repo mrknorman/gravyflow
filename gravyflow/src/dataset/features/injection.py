@@ -336,7 +336,7 @@ class WaveformGenerator:
         waveform_cls = None
         match config.pop("type"):
             case 'PhenomD': 
-                waveform_cls = PhenomDGenerator
+                waveform_cls = RippleGenerator
             case 'WNB':
                 waveform_cls = WNBGenerator
             case _:
@@ -463,6 +463,8 @@ class WaveformParameters(Enum):
     MEAN_PERIASTRON_ANOMALY = WaveformParameter(107)
     SPIN_1_IN = WaveformParameter(108, (3,))
     SPIN_2_IN = WaveformParameter(109, (3,))
+    LAMBDA_1 = WaveformParameter(110)
+    LAMBDA_2 = WaveformParameter(111)
     
     # WNB paramters:
     DURATION_SECONDS = WaveformParameter(201)
@@ -586,7 +588,7 @@ def ensure_last_dim_even(tensor):
     return result
 
 @dataclass
-class PhenomDGenerator(WaveformGenerator):
+class RippleGenerator(WaveformGenerator):
     mass_1_msun : Union[float, gf.Distribution] = 30.0
     mass_2_msun : Union[float, gf.Distribution] = 30.0
     inclination_radians : Union[float, gf.Distribution] = 0.0
@@ -597,6 +599,9 @@ class PhenomDGenerator(WaveformGenerator):
     mean_periastron_anomaly : Union[float, gf.Distribution] = 0.0
     spin_1_in : Union[Tuple[float], gf.Distribution] = (0.0, 0.0, 0.0,)
     spin_2_in : Union[Tuple[float], gf.Distribution] = (0.0, 0.0, 0.0,)
+    lambda_1 : Union[float, gf.Distribution] = 0.0
+    lambda_2 : Union[float, gf.Distribution] = 0.0
+    approximant : str = "IMRPhenomD"
     
     distributed_attributes : Tuple[str] = (
         "mass_1_msun",
@@ -608,7 +613,9 @@ class PhenomDGenerator(WaveformGenerator):
         "eccentricity",
         "mean_periastron_anomaly",
         "spin_1_in",
-        "spin_2_in"
+        "spin_2_in",
+        "lambda_1",
+        "lambda_2"
     )
 
     def __post_init__(self):
@@ -621,6 +628,8 @@ class PhenomDGenerator(WaveformGenerator):
         self.ascending_node_longitude = self.ensure_float("ascending_node_longitude", self.ascending_node_longitude)
         self.eccentricity = self.ensure_float("eccentricity", self.eccentricity)
         self.mean_periastron_anomaly = self.ensure_float("mean_periastron_anomaly", self.mean_periastron_anomaly)
+        self.lambda_1 = self.ensure_float("lambda_1", self.lambda_1)
+        self.lambda_2 = self.ensure_float("lambda_2", self.lambda_2)
 
         self.spin_1_in = self.ensure_list_of_floats("spin_1_in", self.spin_1_in)
         self.spin_2_in = self.ensure_list_of_floats("spin_2_in", self.spin_2_in)
@@ -642,7 +651,9 @@ class PhenomDGenerator(WaveformGenerator):
             
             # Draw parameter samples from distributions:
             parameters = {}
-            for attribute, value in self.__dict__.items():    
+            for attribute, value in self.__dict__.items():
+                if attribute == "approximant":
+                    continue    
                 if is_not_inherited(self, attribute):
                     
                     parameter = None
@@ -661,7 +672,7 @@ class PhenomDGenerator(WaveformGenerator):
                             combined_array += element.sample(num_waveforms)
                         parameters[attribute] = combined_array
 
-            # Generate phenom_d waveform using ripple:
+            # Generate waveform using ripple:
             waveforms = None
             
             mass_1 = parameters["mass_1_msun"]
@@ -674,6 +685,7 @@ class PhenomDGenerator(WaveformGenerator):
                     num_waveforms=num_waveforms, 
                     sample_rate_hertz=sample_rate_hertz, 
                     duration_seconds=duration_seconds,
+                    approximant=self.approximant,
                     **parameters
                 )
             
@@ -683,9 +695,7 @@ class PhenomDGenerator(WaveformGenerator):
         
             return waveforms, parameters
 
-# Alias for backward compatibility
-cuPhenomDGenerator = PhenomDGenerator
-    
+
 class IncoherentGenerator(WaveformGenerator):
     component_generators : List[WaveformGenerator]
     

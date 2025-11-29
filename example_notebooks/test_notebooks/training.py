@@ -179,7 +179,7 @@ with gf.env(memory_to_allocate_tf=8000):
 
     # Initialize a PhenomD waveform generator with the defined distributions.
     # This generator will produce waveforms with randomly varied masses and inclination angles.
-    phenom_d_generator : gf.WaveformGenerator = gf.cuPhenomDGenerator(
+    phenom_d_generator : gf.WaveformGenerator = gf.RippleGenerator(
         mass_1_msun=mass_1_distribution_msun,
         mass_2_msun=mass_2_distribution_msun,
         inclination_radians=inclination_distribution_radians,
