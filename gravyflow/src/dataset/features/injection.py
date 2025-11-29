@@ -19,6 +19,7 @@ from numpy.random import default_rng
 
 # Local imports:
 import gravyflow as gf
+from gravyflow.src.dataset.features.waveforms.ripple import generate_ripple_waveform
 
 class ScalingOrdinality(Enum):
     BEFORE_PROJECTION = auto()
@@ -335,7 +336,7 @@ class WaveformGenerator:
         waveform_cls = None
         match config.pop("type"):
             case 'PhenomD': 
-                waveform_cls = cuPhenomDGenerator
+                waveform_cls = PhenomDGenerator
             case 'WNB':
                 waveform_cls = WNBGenerator
             case _:
@@ -585,7 +586,7 @@ def ensure_last_dim_even(tensor):
     return result
 
 @dataclass
-class cuPhenomDGenerator(WaveformGenerator):
+class PhenomDGenerator(WaveformGenerator):
     mass_1_msun : Union[float, gf.Distribution] = 30.0
     mass_2_msun : Union[float, gf.Distribution] = 30.0
     inclination_radians : Union[float, gf.Distribution] = 0.0
@@ -660,37 +661,30 @@ class cuPhenomDGenerator(WaveformGenerator):
                             combined_array += element.sample(num_waveforms)
                         parameters[attribute] = combined_array
 
-            # Generate phenom_d waveform:
+            # Generate phenom_d waveform using ripple:
             waveforms = None
-            while waveforms is None:
-                
-                mass_1 = parameters["mass_1_msun"]
-                mass_2 = parameters["mass_2_msun"]
-                
-                parameters["mass_1_msun"] = np.maximum(mass_1, mass_2)
-                parameters["mass_2_msun"] = np.minimum(mass_1, mass_2)
+            
+            mass_1 = parameters["mass_1_msun"]
+            mass_2 = parameters["mass_2_msun"]
+            
+            parameters["mass_1_msun"] = np.maximum(mass_1, mass_2)
+            parameters["mass_2_msun"] = np.minimum(mass_1, mass_2)
 
-                try:
-                    waveforms = gf.imrphenomd(
-                            num_waveforms, 
-                            sample_rate_hertz, 
-                            duration_seconds,
-                            **parameters
-                        )
-
-                except Exception as e:
-                    # If an exception occurs, increment the attempts counter
-                    attempts += 1
-                    # Check if the maximum number of retries has been reached
-                    waveforms = None
-                    if attempts >= max_retries:
-                        raise Exception(f"Max waveform generation retries reached: {max_retries}") from e
+            waveforms = generate_ripple_waveform(
+                    num_waveforms=num_waveforms, 
+                    sample_rate_hertz=sample_rate_hertz, 
+                    duration_seconds=duration_seconds,
+                    **parameters
+                )
             
             waveforms *= self.scale_factor
 
             waveforms = ensure_last_dim_even(waveforms)
         
             return waveforms, parameters
+
+# Alias for backward compatibility
+cuPhenomDGenerator = PhenomDGenerator
     
 class IncoherentGenerator(WaveformGenerator):
     component_generators : List[WaveformGenerator]

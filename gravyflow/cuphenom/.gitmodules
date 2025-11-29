@@ -1,9 +1,0 @@
-[submodule "py_tools"]
-	path = py_tools
-	url = https://github.com/mrknorman/py_tools.git
-[submodule "io_tools"]
-	path = io_tools
-	url = https://github.com/mrknorman/io_tools
-[submodule "cuda_tools"]
-	path = cuda_tools
-	url = https://github.com/mrknorman/cuda_tools.git

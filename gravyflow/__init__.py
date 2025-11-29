@@ -8,11 +8,7 @@ import warnings
 # Suppress specific LAL warning when running in an ipython kernel
 warnings.filterwarnings("ignore", category=UserWarning, message="Wswiglal-redir-stdio")
 
-# Conditional import with specific exception handling
-try:
-    from .cuphenom.python.cuphenom import imrphenomd
-except ImportError as e:
-    print(f"Failed to import cuphenom because: {e}.")
+
 
 # Local application/library specific imports
 from .src.dataset.config import Defaults
@@ -55,7 +51,7 @@ from .src.dataset.noise.noise import NoiseType, NoiseObtainer
 from .src.dataset.features.injection import (
     ScalingOrdinality, ScalingType, ScalingTypes, ScalingMethod, ReturnVariables,
     WaveformGenerator, WaveformParameter, WaveformParameters, WNBGenerator, 
-    cuPhenomDGenerator, IncoherentGenerator, InjectionGenerator,
+    PhenomDGenerator, cuPhenomDGenerator, IncoherentGenerator, InjectionGenerator,
     roll_vector_zero_padding, generate_mask, is_not_inherited, 
     batch_injection_parameters
 )
