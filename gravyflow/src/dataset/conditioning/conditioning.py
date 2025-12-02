@@ -1,7 +1,10 @@
 from dataclasses import dataclass
 from enum import Enum, auto
 
-import tensorflow as tf
+import keras
+from keras import ops
+import jax.numpy as jnp
+import numpy as np
 
 @dataclass 
 class ConditioningMethod:
@@ -33,7 +36,7 @@ class CreateSpectrogram(DataConditioner):
     num_step_samples : int = 128
     num_fft_samples : int = 256
     
-    def apply(self, timeseries : tf.Tensor):
+    def apply(self, timeseries):
         
         return spectrogram(
             timeseries,
@@ -42,9 +45,8 @@ class CreateSpectrogram(DataConditioner):
             self.num_fft_samples
         )
     
-@tf.function(jit_compile=True)
 def spectrogram(
-        timeseries : tf.Tensor, 
+        timeseries, 
         num_frame_samples : int = 256, 
         num_step_samples : int = 128, 
         num_fft_samples : int = 256
@@ -52,26 +54,58 @@ def spectrogram(
     
     """
     Compute the spectrogram for a given time-series tensor.
-    
-    Parameters:
-    - timeseries: A 1D tensor containing the time-series data.
-    - num_frame_samples: The length of each frame for STFT.
-    - num_step_samples: The step size (stride) between frames.
-    - num_fft_samples: The number of FFT bins to use.
-    
-    Returns:
-    - A 2D tensor representing the spectrogram.
     """
-    # Compute the short-time fourier transform (STFT)
-    stfts = tf.signal.stft(
-        timeseries, 
-        frame_length=num_frame_samples, 
-        frame_step=num_step_samples, 
-        fft_length=num_fft_samples
-    )
+    timeseries = ops.convert_to_tensor(timeseries)
+    
+    # STFT implementation using JAX/Keras Ops
+    # 1. Frame the signal
+    signal_len = ops.shape(timeseries)[-1]
+    num_frames = (signal_len - num_frame_samples) // num_step_samples + 1
+    
+    # Indices: (num_frames, num_frame_samples)
+    indices = ops.arange(num_frame_samples)[None, :] + ops.arange(num_frames)[:, None] * num_step_samples
+    
+    # Handle batch dimensions
+    # If timeseries is (Batch, T)
+    # Flatten to (Batch, T)
+    original_shape = ops.shape(timeseries)
+    if len(original_shape) > 1:
+        flat_signal = ops.reshape(timeseries, (-1, signal_len))
+    else:
+        flat_signal = ops.reshape(timeseries, (1, signal_len))
+        
+    frames = ops.take(flat_signal, indices, axis=-1)
+    # frames: (Batch, NumFrames, FrameLen)
+    
+    # 2. Apply window (Hann)
+    window = jnp.hanning(num_frame_samples)
+    window = ops.convert_to_tensor(window, dtype="float32")
+    
+    windowed_frames = frames * window
+    
+    # 3. FFT
+    # tf.signal.stft uses rfft
+    # fft_length defaults to smallest power of 2 >= frame_length if not provided, 
+    # but here num_fft_samples is provided.
+    
+    # Use jnp.fft.rfft directly
+    stfts = jnp.fft.rfft(windowed_frames, n=num_fft_samples)
     
     # Compute the magnitude squared (power) spectrogram
-    spectrograms = tf.abs(stfts) ** 2
+    spectrograms = ops.abs(stfts) ** 2
+    
+    # Reshape back if needed
+    # If original was (Batch, T), output is (Batch, NumFrames, Freqs)
+    # If original was 1D (T,), output is (1, NumFrames, Freqs) -> maybe squeeze?
+    # tf.signal.stft returns [..., frames, fft_unique_bins]
+    
+    if len(original_shape) == 1:
+        spectrograms = ops.squeeze(spectrograms, axis=0)
+    else:
+        # Reshape batch dims
+        batch_dims = original_shape[:-1]
+        spectrogram_shape = tuple(batch_dims) + (num_frames, num_fft_samples // 2 + 1)
+        spectrograms = ops.reshape(spectrograms, spectrogram_shape)
     
     return spectrograms
 

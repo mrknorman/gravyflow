@@ -72,9 +72,13 @@ def check_ndarrays_same_length(
     first_length = None
 
     for key, value in my_dict.items():
-        # Check if the value is an np.ndarray:
-        if not (isinstance(value, np.ndarray) or isinstance(value, tf.Tensor)):
-            raise ValueError(f"The value for key '{key}' is not an np.ndarray.")
+        # Check if the value is an np.ndarray or can be converted to one:
+        if not hasattr(value, '__array__') and not isinstance(value, (list, tuple, np.ndarray)):
+             # Try converting to numpy to see if it works (e.g. for Keras tensors)
+            try:
+                value = np.array(value)
+            except:
+                raise ValueError(f"The value for key '{key}' is not an np.ndarray or array-like.")
 
         # Check the length of the ndarray:
         current_length = len(value)
@@ -152,13 +156,16 @@ def generate_strain_plot(
         # --- FIX STARTS HERE ---
         # Robustly convert inputs to numpy arrays
         for key, value in curr_strain.items():
-            # 1. Handle TensorFlow Tensors
-            if hasattr(value, 'numpy'):
-                value = value.numpy()
-            
-            # 2. Handle Python Lists/Tuples
+            # Handle JAX/Keras/TF tensors by converting to numpy
             if not isinstance(value, np.ndarray):
-                value = np.array(value)
+                try:
+                    value = np.array(value)
+                except Exception as e:
+                    # Fallback for some tensor types if np.array() fails directly
+                    if hasattr(value, 'numpy'):
+                        value = value.numpy()
+                    else:
+                        raise ValueError(f"Could not convert {key} to numpy array: {e}")
                 
             curr_strain[key] = value
         # --- FIX ENDS HERE ---
@@ -232,8 +239,8 @@ def generate_psd_plot(
     
     # If inputs are tensors, convert to numpy array:
     for key, value in psd.items():
-        if isinstance(value, tf.Tensor):
-            psd[key] = value.numpy()
+        if not isinstance(value, np.ndarray):
+             psd[key] = np.array(value)
     
     # Create data dictionary to use as source:
     data : Dict = { "frequency" : frequencies }
@@ -306,8 +313,9 @@ def generate_spectrogram(
     
     plots = []
     for curr_strain in strains:
-        # Compute the spectrogram using TensorFlow
-        tensor_strain = tf.convert_to_tensor(curr_strain, dtype=tf.float32)
+        # Compute the spectrogram using Keras Ops or TensorFlow
+        # Ensure input is a tensor
+        tensor_strain = ops.convert_to_tensor(curr_strain, dtype="float32")
         
         num_step_samples = num_fft_samples - num_overlap_samples
         spectrogram = gf.spectrogram(
@@ -317,8 +325,12 @@ def generate_spectrogram(
             num_fft_samples=num_fft_samples
         )
         
-        # Convert the TF output to NumPy arrays for visualization
-        Sxx = spectrogram.numpy().T
+        # Convert the output to NumPy arrays for visualization
+        # Handle JAX/TF output
+        if hasattr(spectrogram, 'numpy'):
+             Sxx = spectrogram.numpy().T
+        else:
+             Sxx = np.array(spectrogram).T
         f = np.linspace(0, sample_rate_hertz / 2, num_fft_samples // 2 + 1)
         t = np.arange(0, Sxx.shape[1]) * (num_step_samples / sample_rate_hertz)
         Sxx_dB = Sxx[1:]  # Adjusted for dB if needed
@@ -373,8 +385,8 @@ def generate_correlation_plot(
     num_pairs, num_samples = correlation.shape
 
     # Convert tensor to numpy array if needed
-    if isinstance(correlation, tf.Tensor):
-        correlation = correlation.numpy()
+    if not isinstance(correlation, np.ndarray):
+        correlation = np.array(correlation)
         
     duration_seconds : float = num_samples*(1/sample_rate_hertz)
 

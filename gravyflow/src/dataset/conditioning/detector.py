@@ -6,7 +6,10 @@ import json
 import os
 import logging
 
-import tensorflow as tf
+import keras
+from keras import ops
+import jax.numpy as jnp
+import jax
 import numpy as np
 from astropy import coordinates, units
 from numpy.random import default_rng  
@@ -16,130 +19,137 @@ import gravyflow as gf
 # Define the speed of light constant (in m/s)
 C = 299792458.0
 
-@tf.function(jit_compile=True)
+@jax.jit
 def get_time_delay_(
-        right_ascension: tf.Tensor, 
-        declination: tf.Tensor,
-        location : tf.Tensor
-    ) -> tf.Tensor:
+        right_ascension, 
+        declination,
+        location
+    ):
 
     """
     Calculate the time delay for various combinations of right ascension,
     declination, and detector locations.
-
-    Parameters
-    ----------
-    right_ascension : tf.Tensor, shape (N,)
-        The right ascension (in rad) of the signal.
-    declination : tf.Tensor, shape (N,)
-        The declination (in rad) of the signal.
-    location : tf.Tensor, shape (X, 3)
-        Array of detector location coordinates.
-
-    Returns
-    -------
-    tf.Tensor, shape (X, N)
-        The arrival time difference for each combination of detector 
-        location and sky signal.
     """
+    right_ascension = ops.convert_to_tensor(right_ascension)
+    declination = ops.convert_to_tensor(declination)
+    location = ops.convert_to_tensor(location)
 
-    cos_declination = tf.math.cos(declination)
-    sin_declination = tf.math.sin(declination)
-    cos_ra_angle = tf.math.cos(right_ascension)
-    sin_ra_angle = tf.math.sin(right_ascension)
+    cos_declination = ops.cos(declination)
+    sin_declination = ops.sin(declination)
+    cos_ra_angle = ops.cos(right_ascension)
+    sin_ra_angle = ops.sin(right_ascension)
 
     e0 = cos_declination * cos_ra_angle
     e1 = cos_declination * -sin_ra_angle
     e2 = sin_declination
 
-    ehat = tf.stack([e0, e1, e2], axis=0)  # Shape (3, N)
-    ehat = tf.expand_dims(ehat, 1)  # Shape (3, 1, N) to allow broadcasting
+    ehat = ops.stack([e0, e1, e2], axis=0)  # Shape (3, N)
+    ehat = ops.expand_dims(ehat, 1)  # Shape (3, 1, N) to allow broadcasting
 
     # Compute the dot product using tensordot
-    time_delay = tf.tensordot(location, ehat, axes=[[1], [0]]) 
+    # location: (X, 3)
+    # ehat: (3, 1, N)
+    # axes=[[1], [0]] -> sum over axis 1 of location (3) and axis 0 of ehat (3)
+    # Result: (X, 1, N)
+    time_delay = ops.tensordot(location, ehat, axes=[[1], [0]]) 
     time_delay = time_delay / C  # Normalize by speed of light
     
-    time_delay = tf.transpose(tf.squeeze(time_delay, axis = 1))
+    # squeeze axis 1 -> (X, N)
+    time_delay = ops.squeeze(time_delay, axis=1)
+    # transpose -> (N, X)
+    time_delay = ops.transpose(time_delay)
     
-    return tf.cast(time_delay, dtype=tf.float32)
+    return ops.cast(time_delay, dtype="float32")
     
-@tf.function(jit_compile=True)
+@jax.jit
 def get_antenna_pattern_(
-        right_ascension: tf.Tensor, 
-        declination: tf.Tensor, 
-        polarization: tf.Tensor,
-        x_vector: tf.Tensor,
-        y_vector: tf.Tensor,
-        x_length_meters: tf.Tensor,
-        y_length_meters: tf.Tensor,
-        x_response : tf.Tensor,
-        y_response : tf.Tensor,
-        response : tf.Tensor
-    ) -> (tf.Tensor, tf.Tensor):
+        right_ascension, 
+        declination, 
+        polarization,
+        x_vector,
+        y_vector,
+        x_length_meters,
+        y_length_meters,
+        x_response,
+        y_response,
+        response
+    ):
     
-    right_ascension = tf.expand_dims(right_ascension, 1)
-    declination = tf.expand_dims(declination, 1)
-    polarization = tf.expand_dims(polarization, 1)
+    right_ascension = ops.expand_dims(right_ascension, 1)
+    declination = ops.expand_dims(declination, 1)
+    polarization = ops.expand_dims(polarization, 1)
     
-    x_vector = tf.expand_dims(x_vector, 0)   
-    y_vector = tf.expand_dims(y_vector, 0)   
-    x_length_meters = tf.expand_dims(x_length_meters, 0)  
-    y_length_meters = tf.expand_dims(y_length_meters, 0)  
-    x_response = tf.expand_dims(x_response, 0)  
-    y_response = tf.expand_dims(y_response, 0)  
-    response = tf.expand_dims(response, 0)
+    x_vector = ops.expand_dims(x_vector, 0)   
+    y_vector = ops.expand_dims(y_vector, 0)   
+    x_length_meters = ops.expand_dims(x_length_meters, 0)  
+    y_length_meters = ops.expand_dims(y_length_meters, 0)  
+    x_response = ops.expand_dims(x_response, 0)  
+    y_response = ops.expand_dims(y_response, 0)  
+    response = ops.expand_dims(response, 0)
 
-    cos_ra = tf.math.cos(right_ascension)
-    sin_ra = tf.math.sin(right_ascension)
-    cos_dec = tf.math.cos(declination)
-    sin_dec = tf.math.sin(declination)
-    cos_psi = tf.math.cos(polarization)
-    sin_psi = tf.math.sin(polarization)
+    cos_ra = ops.cos(right_ascension)
+    sin_ra = ops.sin(right_ascension)
+    cos_dec = ops.cos(declination)
+    sin_dec = ops.sin(declination)
+    cos_psi = ops.cos(polarization)
+    sin_psi = ops.sin(polarization)
     
-    x = tf.stack([
+    x = ops.stack([
         -cos_psi * sin_ra - sin_psi * cos_ra * sin_dec,
         -cos_psi * cos_ra + sin_psi * sin_ra * sin_dec,
         sin_psi * cos_dec
     ], axis=-1)
 
-    y = tf.stack([
+    y = ops.stack([
         sin_psi * sin_ra - cos_psi * cos_ra * sin_dec,
         sin_psi * cos_ra + cos_psi * sin_ra * sin_dec,
         cos_psi * cos_dec
     ], axis=-1)
     
-    # Calculate dx and dy via tensordot, and immediately remove singleton 
-    # dimensions and transpose them
-    tensor_product_dx = tf.tensordot(response, x, axes=[[2], [2]])
+    # Calculate dx and dy via tensordot
+    # response: (1, 3, 3) (from Network init, it seems response is 3x3 matrix per detector?)
+    # Wait, in Network.init_parameters:
+    # response is (3, 3).
+    # Here response is expanded to (1, 3, 3).
+    # x is (N, 1, 3).
+    
+    # tf.tensordot(response, x, axes=[[2], [2]])
+    # response: (1, 3, 3)
+    # x: (N, 1, 3)
+    # Sum over last axis of response and last axis of x.
+    # Result: (1, 3, N, 1)
+    
+    tensor_product_dx = ops.tensordot(response, x, axes=[[2], [2]])
+    
     # Remove the first and last singleton dimensions
-    tensor_product_dx_squeezed = tf.squeeze(tensor_product_dx, axis=[0, -1])
-    # Apply transpose to get the shape (100000, 1, 3)
-    dx = tf.transpose(tensor_product_dx_squeezed, perm=[2, 0, 1])
-
-    tensor_product_dy = tf.tensordot(response, y, axes=[[2], [2]])
-     # Remove the first and last singleton dimensions
-    tensor_product_dy_squeezed = tf.squeeze(tensor_product_dy, axis=[0, -1])
-    # Apply transpose to get the shape (100000, 1, 3)
-    dy = tf.transpose(tensor_product_dy_squeezed, perm=[2, 0, 1])
+    # Result: (D, 3, N)
+    tensor_product_dx_squeezed = ops.squeeze(tensor_product_dx, axis=[0, 4]) 
+    
+    # Apply transpose to get the shape (N, D, 3)
+    dx = ops.transpose(tensor_product_dx_squeezed, (2, 0, 1))
+    
+    tensor_product_dy = ops.tensordot(response, y, axes=[[2], [2]])
+    tensor_product_dy_squeezed = ops.squeeze(tensor_product_dy, axis=[0, 4])
+    dy = ops.transpose(tensor_product_dy_squeezed, (2, 0, 1))
 
     # Expand dimensions for x, y, dx, dy along axis 0
-    x = tf.expand_dims(x, axis=0)
-    y = tf.expand_dims(y, axis=0)
+    x = ops.expand_dims(x, axis=0) # (1, N, 1, 3)
+    y = ops.expand_dims(y, axis=0)
 
-    dx = tf.expand_dims(dx, axis=0)
-    dy = tf.expand_dims(dy, axis=0)
+    dx = ops.expand_dims(dx, axis=0) # (1, N, D, 3)
+    dy = ops.expand_dims(dy, axis=0)
     
     # Function to compute final response
     def compute_response(
-            dx: tf.Tensor, 
-            dy: tf.Tensor, 
-            a: tf.Tensor, 
-            b: tf.Tensor
-        ) -> tf.Tensor:
+            dx, 
+            dy, 
+            a, 
+            b
+        ):
         
-        return tf.squeeze(tf.reduce_sum(a * dx + b * dy, axis=-1), axis=0)
+        return ops.squeeze(ops.sum(a * dx + b * dy, axis=-1), axis=0)
     
-    antenna_pattern = tf.stack(
+    antenna_pattern = ops.stack(
         [
             compute_response(dx, -dy, x, y), 
             compute_response(dy, dx, x, y)
@@ -149,85 +159,115 @@ def get_antenna_pattern_(
 
     return antenna_pattern
 
-@tf.function(jit_compile=True)
+@jax.jit(static_argnames=["num_injections"])
 def generate_direction_vectors(
         num_injections: int, 
         seed_tensor: Tuple[int, int],
-        right_ascension: Optional[tf.Tensor] = None,
-        declination: Optional[tf.Tensor] = None
-    ) -> Tuple[tf.Tensor, tf.Tensor]:
+        right_ascension = None,
+        declination = None
+    ):
     """
     Generate random direction vectors uniformly distributed over the sphere.
-
-    Parameters
-    ----------
-    num_injections : int
-        The number of direction vectors to generate.
-    seed : Tuple[int, int]
-        A tuple used for random number generation to ensure reproducibility.
-    right_ascension : Optional[tf.Tensor]
-        Pre-defined right ascension values or None.
-    declination : Optional[tf.Tensor]
-        Pre-defined declination values or None.
-
-    Returns
-    -------
-    Tuple[tf.Tensor, tf.Tensor]
-        The right ascension and declination tensors.
-
     """
-    PI = tf.constant(3.14159, dtype=tf.float32)
+    PI = 3.14159
 
     # Right Ascension
     if right_ascension is None:
-        right_ascension = tf.random.stateless_uniform(
-            seed=seed_tensor,
+        # JAX random
+        key = jax.random.PRNGKey(seed_tensor[0]) # Use first seed
+        right_ascension = jax.random.uniform(
+            key,
             shape=[num_injections], 
             minval=0.0, 
             maxval=2.0 * PI, 
-            dtype=tf.float32
+            dtype="float32"
         )
 
     # Declination
     if declination is None:
-        sin_declination = tf.random.stateless_uniform(
-            seed=seed_tensor+1,
+        key = jax.random.PRNGKey(seed_tensor[1]) # Use second seed (or seed+1)
+        sin_declination = jax.random.uniform(
+            key,
             shape=[num_injections], 
             minval=-1.0, 
             maxval=1.0, 
-            dtype=tf.float32
+            dtype="float32"
         )
-        declination = tf.asin(sin_declination)
+        declination = ops.arcsin(sin_declination)
 
     return right_ascension, declination
 
-@tf.function(jit_compile=True)
+@jax.jit(static_argnames=["sample_rate_hertz"])
+def shift_waveform(
+        strain, 
+        sample_rate_hertz : float, 
+        time_shift_seconds
+    ):
+    
+    frequency_axis = gf.rfftfreq(
+        strain.shape[-1],
+        1.0/sample_rate_hertz
+    )
+    
+    frequency_axis = ops.expand_dims(
+        ops.expand_dims(frequency_axis, axis=0), 
+        axis=0
+    )
+    time_shift_seconds = ops.expand_dims(time_shift_seconds, axis=-1)
+    
+    PI = 3.14159
+
+    # Use jnp.fft.rfft directly
+    strain_fft = jnp.fft.rfft(strain) 
+
+    imaj_part = -2.0*PI*frequency_axis*time_shift_seconds
+    
+    # tf.complex(real, imag) -> jax.lax.complex(real, imag) or real + 1j * imag
+    phase_factor = ops.exp(
+        1j * imaj_part
+    )
+    
+    # jnp.fft.irfft
+    shitfted_strain = jnp.fft.irfft(phase_factor * strain_fft)
+    
+    return ops.real(shitfted_strain)
+
+@jax.jit(static_argnames=["sample_rate_hertz"])
 def project_wave(
         seed,
-        strain : tf.Tensor,
+        strain,
         sample_rate_hertz : float,
-        x_vector: tf.Tensor,
-        y_vector: tf.Tensor,
-        x_length_meters: tf.Tensor,
-        y_length_meters: tf.Tensor,
-        x_response : tf.Tensor,
-        y_response : tf.Tensor,
-        response : tf.Tensor,
-        location : tf.Tensor,
-        right_ascension: Optional[tf.Tensor] = None,
-        declination: Optional[tf.Tensor] = None,
-        polarization: Optional[tf.Tensor] = None
-    ) -> tf.Tensor:
+        x_vector,
+        y_vector,
+        x_length_meters,
+        y_length_meters,
+        x_response,
+        y_response,
+        response,
+        location,
+        right_ascension = None,
+        declination = None,
+        polarization = None
+    ):
 
     # Ensure the seed is of the correct shape [2] and dtype int32
-    seed_tensor = tf.cast(seed, dtype=tf.int32)
+    seed_tensor = ops.cast(seed, dtype="int32")
     
-    num_injections = tf.shape(strain)[0]
-    PI = tf.constant(3.14159, dtype=tf.float32)
+    num_injections = strain.shape[0]
+    PI = 3.14159
+    
+    # We need to handle seed carefully. 
+    # generate_direction_vectors expects a tuple or something usable as PRNGKey.
+    # seed_tensor is a tensor.
+    # We can convert to numpy/python int for PRNGKey if eager.
+    # If compiled, we need jax.random.split.
+    
+    # Assuming eager execution for now or JAX handling.
+    # seed_tensor[0] might be a tracer.
     
     random_right_ascension, random_declination = generate_direction_vectors(
         num_injections, 
-        seed_tensor,
+        seed_tensor, # Pass tensor, handle inside?
         right_ascension,
         declination
     )
@@ -239,12 +279,13 @@ def project_wave(
         declination = random_declination
 
     if polarization is None:
-        polarization = tf.random.stateless_uniform(
-            seed=seed_tensor+2,
+        key = jax.random.PRNGKey(seed_tensor[0] + 2) # Offset seed
+        polarization = jax.random.uniform(
+            key,
             shape=[num_injections], 
             minval=0.0, 
             maxval=2 * PI, 
-            dtype=tf.float32
+            dtype="float32"
         )
     
     antenna_patern = get_antenna_pattern_(
@@ -260,12 +301,13 @@ def project_wave(
         response
     ) 
     
-    antenna_patern = tf.expand_dims(antenna_patern, axis=-1)
+    antenna_patern = ops.expand_dims(antenna_patern, axis=-1)
     
     # Deal with non-incoherent case:
-    if (len(tf.shape(strain)) == 3):
-        strain = tf.expand_dims(strain, axis=1)
-    injection = tf.reduce_sum(strain*antenna_patern, axis = -2)
+    if (len(ops.shape(strain)) == 3):
+        strain = ops.expand_dims(strain, axis=1)
+    
+    injection = ops.sum(strain*antenna_patern, axis = -2)
 
     time_shift_seconds = get_time_delay_(
         right_ascension, 
@@ -280,6 +322,45 @@ def project_wave(
     )
 
     return shifted_waveoform
+
+def rotation_matrix_x(angle):
+    c = ops.cos(angle)
+    s = ops.sin(angle)
+
+    ones = ops.ones_like(c)
+    zeros = ops.zeros_like(c)
+
+    row1 = ops.stack([ones, zeros, zeros], axis=-1)
+    row2 = ops.stack([zeros, c, -s], axis=-1)
+    row3 = ops.stack([zeros, s, c], axis=-1)
+    
+    return ops.stack([row1, row2, row3], axis=-2)
+
+def rotation_matrix_y(angle):
+    c = ops.cos(angle)
+    s = ops.sin(angle)
+
+    ones = ops.ones_like(c)
+    zeros = ops.zeros_like(c)
+
+    row1 = ops.stack([c, zeros, -s], axis=-1)
+    row2 = ops.stack([zeros, ones, zeros], axis=-1)
+    row3 = ops.stack([s, zeros, c], axis=-1)
+
+    return ops.stack([row1, row2, row3], axis=-2)
+
+def rotation_matrix_z(angle):
+    c = ops.cos(angle)
+    s = ops.sin(angle)
+
+    ones = ops.ones_like(c)
+    zeros = ops.zeros_like(c)
+
+    row1 = ops.stack([c, -s, zeros], axis=-1)
+    row2 = ops.stack([s, c, zeros], axis=-1)
+    row3 = ops.stack([zeros, zeros, ones], axis=-1)
+
+    return ops.stack([row1, row2, row3], axis=-2)
 
 @dataclass
 class IFO_:
@@ -350,80 +431,64 @@ class Network:
         self.rng = default_rng(seed)
         
         arguments = {}
-        match parameters:
-            
-            case dict():
-                                
-                if "num_detectors" in parameters:
-                    num_detectors = parameters.pop("num_detectors")
-                    
-                    if isinstance(num_detectors, gf.Distribution):
-                        num_detectors = num_detectors.sample(1)
-                    
-                else:
-                    num_detectors = None
-                    
-                for key, value in parameters.items():
-                                        
-                    match value:
+        # ... (Parameter parsing logic mostly unchanged, just ops.convert_to_tensor)
+        
+        if isinstance(parameters, dict):
+            if "num_detectors" in parameters:
+                num_detectors = parameters.pop("num_detectors")
+                if isinstance(num_detectors, gf.Distribution):
+                    num_detectors = num_detectors.sample(1)
+            else:
+                num_detectors = None
+                
+            for key, value in parameters.items():
+                if isinstance(value, (float, int)):
+                    arguments[key] = ops.convert_to_tensor([value], dtype="float32")
+                elif isinstance(value, (list, np.ndarray)):
+                    arguments[key] = ops.convert_to_tensor(value, dtype="float32")
+                elif ops.is_tensor(value):
+                     arguments[key] = ops.cast(value, "float32")
+                elif isinstance(value, gf.Distribution):
+                    if num_detectors is None:
+                        raise ValueError("Num detectors not specified")
+                    else:
+                        arguments[key] = ops.convert_to_tensor(
+                            value.sample(num_detectors), 
+                            dtype="float32"
+                        )
                         
-                        case float() | int():
-                            arguments[key] = tf.convert_to_tensor(
-                                [value], dtype=tf.float32
-                            )
-                            
-                        case list() | np.ndarray():
-                            arguments[key] = tf.convert_to_tensor(
-                                value, dtype=tf.float32
-                            )
-                            
-                        case tf.Tensor():
-                            arguments[key] = tf.case(
-                                value, dtype=tf.float32
-                            )
-                            
-                        case gf.Distribution():
-                            if num_detectors is None:
-                                raise ValueError("Num detectors not specified")
-                            else:
-                                arguments[key] =  tf.convert_to_tensor(
-                                    value.sample(num_detectors), 
-                                    dtype=tf.float32
-                                )
-                    
-            case list():
-                
-                attributes = [
-                    "latitude_radians", 
-                    "longitude_radians", 
-                    "x_angle_radians", 
-                    "y_angle_radians", 
-                    "x_length_meters", 
-                    "y_length_meters", 
-                    "height_meters"
-                ]
-                
-                num_detectors = len(parameters)
-                
-                for attribute in attributes:
-                    attribute_list = [
-                        getattr(ifo.value, attribute) for ifo in parameters if isinstance(ifo, IFO)]
-                    if len(attribute_list) != len(parameters):
-                        raise ValueError(
-                            "When initializing a network from a list, all "
-                            "elements must be IFO Enums.")
+        elif isinstance(parameters, list):
+            attributes = [
+                "latitude_radians", 
+                "longitude_radians", 
+                "x_angle_radians", 
+                "y_angle_radians", 
+                "x_length_meters", 
+                "y_length_meters", 
+                "height_meters"
+            ]
+            
+            num_detectors = len(parameters)
+            
+            for attribute in attributes:
+                attribute_list = [
+                    getattr(ifo.value, attribute) for ifo in parameters if isinstance(ifo, IFO)]
+                if len(attribute_list) != len(parameters):
+                    raise ValueError(
+                        "When initializing a network from a list, all "
+                        "elements must be IFO Enums.")
 
-                    tensor = tf.convert_to_tensor(
-                        attribute_list, 
-                        dtype=tf.float32
-                    )
-                    arguments[attribute] = tensor
-
-            case _:
-                raise ValueError(
-                    f"Unsuported type {type(parameters)} for Network "
-                    "initilisation."
+                tensor = ops.convert_to_tensor(
+                    attribute_list, 
+                    dtype="float32"
                 )
+                arguments[attribute] = tensor
+                
+        else:
+             raise ValueError(
+                f"Unsuported type {type(parameters)} for Network "
+                "initilisation."
+            )
                 
         self.num_detectors = num_detectors
                 
@@ -433,79 +498,84 @@ class Network:
     
     def init_parameters(
         self,
-        longitude_radians: Optional[tf.Tensor] = None,  # Batched tensor
-        latitude_radians: Optional[tf.Tensor] = None,   # Batched tensor
-        y_angle_radians: Optional[tf.Tensor] = None,  # Batched tensor
-        x_angle_radians: Optional[tf.Tensor] = None,  # Batched tensor or None
-        height_meters: Optional[tf.Tensor] = None,  # Batched tensor
-        x_length_meters: Optional[tf.Tensor] = None,  # Batched tensor
-        y_length_meters: Optional[tf.Tensor] = None   # Batched tensor
+        longitude_radians = None,  # Batched tensor
+        latitude_radians = None,   # Batched tensor
+        y_angle_radians = None,  # Batched tensor
+        x_angle_radians = None,  # Batched tensor or None
+        height_meters = None,  # Batched tensor
+        x_length_meters = None,  # Batched tensor
+        y_length_meters = None   # Batched tensor
     ):
         
-        PI = tf.constant(np.pi, dtype=tf.float32)
+        PI = np.pi
     
         if x_angle_radians is None:
             x_angle_radians = \
-                y_angle_radians + tf.constant(PI / 2.0, dtype=tf.float32)
+                y_angle_radians + ops.convert_to_tensor(PI / 2.0, dtype="float32")
 
         # Rotation matrices using the provided functions
         rm1 = rotation_matrix_z(longitude_radians)
         rm2 = rotation_matrix_y(PI / 2.0 - latitude_radians)    
-        rm = tf.matmul(rm2, rm1)
+        rm = ops.matmul(rm2, rm1)
 
         # Calculate response in earth centered coordinates
         responses = []
         vecs = []
 
         for angle in [y_angle_radians, x_angle_radians]:
-            a, b = tf.cos(2 * angle), tf.sin(2 * angle)
+            a, b = ops.cos(2 * angle), ops.sin(2 * angle)
             
-            response = tf.stack([
-                tf.stack([-a, b, tf.zeros_like(a)], axis=-1), 
-                tf.stack([b, a, tf.zeros_like(a)], axis=-1), 
-                tf.stack(
+            response = ops.stack([
+                ops.stack([-a, b, ops.zeros_like(a)], axis=-1), 
+                ops.stack([b, a, ops.zeros_like(a)], axis=-1), 
+                ops.stack(
                     [
-                        tf.zeros_like(a), 
-                        tf.zeros_like(a), 
-                        tf.zeros_like(a)
+                        ops.zeros_like(a), 
+                        ops.zeros_like(a), 
+                        ops.zeros_like(a)
                     ], 
                     axis=-1
                 )
             ], axis=1)
 
-            response = tf.matmul(response, rm)
-            response = tf.matmul(
-                tf.transpose(rm, perm=[0, 2, 1]), 
+            response = ops.matmul(response, rm)
+            response = ops.matmul(
+                ops.transpose(rm, axes=[0, 2, 1]), 
                 response
             ) / 4.0
             
             responses.append(response)
             
-            angle_vector = tf.stack([
-                -tf.cos(angle),
-                tf.sin(angle),
-                tf.zeros_like(angle)
+            angle_vector = ops.stack([
+                -ops.cos(angle),
+                ops.sin(angle),
+                ops.zeros_like(angle)
             ], axis=1)
 
-            angle_vector = tf.reshape(angle_vector, [-1, 3, 1])
+            angle_vector = ops.reshape(angle_vector, [-1, 3, 1])
             
-            vec = tf.matmul(tf.transpose(rm, perm=[0, 2, 1]), angle_vector)
-            vec = tf.squeeze(vec, axis=-1)
+            vec = ops.matmul(ops.transpose(rm, axes=[0, 2, 1]), angle_vector)
+            vec = ops.squeeze(vec, axis=-1)
             vecs.append(vec)
 
         full_response = responses[0] - responses[1]
 
         # Handling the coordinates.EarthLocation method
+        # This part requires numpy/cpu execution as astropy is not differentiable/JAX-native
+        # We can use jax.pure_callback if needed, or just run it eagerly since init is usually once.
+        
+        # Convert tensors to numpy for astropy
+        long_np = np.array(longitude_radians)
+        lat_np = np.array(latitude_radians)
+        h_np = np.array(height_meters)
+        
         locations = []
-        for long, lat, h in zip(
-                longitude_radians, latitude_radians, height_meters
-            ):
-            
+        for long, lat, h in zip(long_np, lat_np, h_np):
             loc = coordinates.EarthLocation.from_geodetic(
                 long * units.rad, lat * units.rad, h*units.meter
             )
             locations.append([loc.x.value, loc.y.value, loc.z.value])
-        loc = tf.constant(locations, dtype=tf.float32)
+        loc = ops.convert_to_tensor(locations, dtype="float32")
 
         self.location = loc
         self.response = full_response
@@ -516,8 +586,8 @@ class Network:
         self.y_angle_radians = y_angle_radians
         self.x_angle_radians = x_angle_radians
         self.height_meters = height_meters
-        self.x_altitude_meters = tf.zeros_like(height_meters)
-        self.y_altitude_meters = tf.zeros_like(height_meters)
+        self.x_altitude_meters = ops.zeros_like(height_meters)
+        self.y_altitude_meters = ops.zeros_like(height_meters)
         self.y_length_meters = y_length_meters
         self.x_length_meters = x_length_meters
         
@@ -525,10 +595,10 @@ class Network:
     
     def get_antenna_pattern(
             self,
-            right_ascension: tf.Tensor, 
-            declination: tf.Tensor, 
-            polarization: tf.Tensor
-        ) -> tf.Tensor:
+            right_ascension, 
+            declination, 
+            polarization
+        ):
         
         return get_antenna_pattern_(
             right_ascension, 
@@ -581,9 +651,9 @@ class Network:
     
     def get_time_delay(
         self,
-        right_ascension: tf.Tensor, 
-        declination: tf.Tensor
-    ) -> tf.Tensor:
+        right_ascension, 
+        declination
+    ):
         
         return get_time_delay_(
             right_ascension, 
@@ -593,72 +663,54 @@ class Network:
 
     def check_and_convert(
             self, 
-            input : Union[tf.Tensor, Tuple, List, float, int, None], 
-            name : Union[tf.Tensor, Tuple, List, float, int, None], 
+            input, 
+            name, 
             tensor_length : int
-        ) -> Optional[tf.Tensor]:
+        ):
 
-        match input:
-            case tf.Tensor() as tensor:
-                if tensor.shape[0] != N:
-                    raise ValueError(
-                        f"Tensor, {name}, must be equal to num injections, {tensor_length}."
-                    )
-                if tensor.dtype != tf.float32:
-                    try:
-                        return tf.cast(tensor, tf.float32)
-                    except Exception as e:
-                        raise ValueError(
-                            f"Failed to convert tensor, {name}, to float32"
-                        ) from e
-
-            case (list() | tuple()) as lst:
-                if len(lst) != N:
-                    raise ValueError(
-                        f"List/tuple, {name}, must be equal to num injections, {tensor_length}."
-                    )
-                if any(isinstance(x, int) for x in lst):
-                    logging.warn(
-                        f"List or tuple, {name}, contains integers, which will be converted to floats."
-                    )
-                try:
-                    return tf.constant(lst, dtype=tf.float32)
-                except Exception as e:
-                    raise ValueError(
-                        f"Failed to convert list/tuple, {name}, to float32 tensor"
-                    ) from e
-
-            case (float() | int()):
-                if isinstance(input, int):
-                    logging.warn(
-                        f"Input, {name}, is an integer and will be converted to float."
-                    )
-                return tf.fill([tensor_length], float(input))
-
-            case None:
-                return None
-
-            case _:
-                raise TypeError(
-                    f"Input, {name}, must be a float, list, tuple, or tensor."
+        if ops.is_tensor(input):
+            if ops.shape(input)[0] != tensor_length:
+                 raise ValueError(
+                    f"Tensor, {name}, must be equal to num injections, {tensor_length}."
                 )
+            if input.dtype != "float32":
+                return ops.cast(input, "float32")
+            return input
+            
+        elif isinstance(input, (list, tuple)):
+            if len(input) != tensor_length:
+                raise ValueError(
+                    f"List/tuple, {name}, must be equal to num injections, {tensor_length}."
+                )
+            return ops.convert_to_tensor(input, dtype="float32")
+            
+        elif isinstance(input, (float, int)):
+            # ops.full not always available? ops.ones * val
+            return ops.ones((tensor_length,), dtype="float32") * float(input)
+            
+        elif input is None:
+            return None
+            
+        else:
+            raise TypeError(
+                f"Input, {name}, must be a float, list, tuple, or tensor."
+            )
 
         return input
     
-    @tf.function(jit_compile=True)
     def project_wave(
         self,
-        strain : tf.Tensor,
-        sample_rate_hertz : Optional[float] = None,
-        right_ascension: Optional[Union[tf.Tensor, List[float], float]] = None,
-        declination: Optional[Union[tf.Tensor, List[float], float]]  = None,
-        polarization: Optional[Union[tf.Tensor, List[float], float]]  = None
-    ) -> tf.Tensor:
+        strain,
+        sample_rate_hertz = None,
+        right_ascension = None,
+        declination  = None,
+        polarization  = None
+    ):
 
         if sample_rate_hertz is None:
             sample_rate_hertz = gf.Defaults.sample_rate_hertz
 
-        strain_length : int = tf.shape(strain)[0]
+        strain_length = ops.shape(strain)[0]
         right_ascension = self.check_and_convert(
             right_ascension, "right_ascension", tensor_length=strain_length
         )
@@ -669,8 +721,11 @@ class Network:
             polarization, "polarization", tensor_length=strain_length
         )
         
+        # rng.integers(1E10, size=2)
+        seed = self.rng.integers(1000000000, size=2)
+        
         return project_wave(
-            self.rng.integers(1E10, size=2),
+            seed,
             strain,
             sample_rate_hertz,
             self.x_vector,
@@ -689,169 +744,20 @@ class Network:
     def calculate_max_arrival_time_difference(self):
         """
         Compute pairwise distances between each points.
-
-        Args:
-        - points: A tensor of shape [N, 3] representing N 3D points.
-
-        Returns:
-        - A tensor of shape [N, N] where entry (i, j) is the Euclidean distance
-          between points[i] and points[j].
         """
         # Expand dimensions to compute pairwise distances
-        p1 = tf.expand_dims(self.location, 1)  # Shape: [N, 1, 3]
-        p2 = tf.expand_dims(self.location, 0)  # Shape: [1, N, 3]
+        p1 = ops.expand_dims(self.location, 1)  # Shape: [N, 1, 3]
+        p2 = ops.expand_dims(self.location, 0)  # Shape: [1, N, 3]
 
         # Compute pairwise differences
         diff = p1 - p2  # Shape: [N, N, 3]
 
         # Compute pairwise Euclidean distances
-        self.distances = tf.norm(diff, axis=2)  # Shape: [N, N]
+        # ops.norm(diff, axis=2)
+        # Keras 3 ops.norm might not exist or be different.
+        # ops.sqrt(ops.sum(ops.square(diff), axis=2))
+        self.distances = ops.sqrt(ops.sum(ops.square(diff), axis=2))
         
-        max_distance = tf.reduce_max(self.distances)
+        max_distance = ops.max(self.distances)
         
         self.max_arrival_time_difference_seconds = max_distance/C
-        
-@tf.function(jit_compile=True)
-def shift_waveform(
-        strain : tf.Tensor, 
-        sample_rate_hertz : float, 
-        time_shift_seconds : tf.Tensor
-    ) -> tf.Tensor:
-    
-    frequency_axis = gf.rfftfreq(
-        tf.shape(strain)[-1],
-        1.0/sample_rate_hertz
-    )
-    
-    frequency_axis = tf.expand_dims(
-        tf.expand_dims(frequency_axis, axis=0), 
-        axis=0
-    )
-    time_shift_seconds = tf.expand_dims(time_shift_seconds, axis=-1)
-    
-    PI = tf.constant(3.14159, dtype=tf.float32)
-
-    strain_fft = tf.signal.rfft(strain) 
-
-    imaj_part = -2.0*PI*frequency_axis*time_shift_seconds
-    phase_factor = tf.exp(
-        tf.complex(
-            tf.zeros_like(imaj_part),
-            imaj_part
-        )
-    )
-    shitfted_strain = tf.signal.irfft(phase_factor * strain_fft)
-    
-    return tf.math.real(shitfted_strain)
-
-@tf.function(jit_compile=True)
-def rotation_matrix_x(angle: tf.Tensor) -> tf.Tensor:
-    """
-    Generate a 3D rotation matrix around the X-axis using 
-    TensorFlow operations.
-    
-    Parameters:
-    - angle: Rotation angle in radians, shape [...].
-    
-    Returns:
-    - 3x3 rotation matrix, shape [..., 3, 3].
-    """
-    c = tf.cos(angle)
-    s = tf.sin(angle)
-
-    ones = tf.ones_like(c)
-    zeros = tf.zeros_like(c)
-
-    row1 = tf.stack([ones, zeros, zeros], axis=-1)
-    row2 = tf.stack([zeros, c, -s], axis=-1)
-    row3 = tf.stack([zeros, s, c], axis=-1)
-    
-    return tf.stack([row1, row2, row3], axis=-2)
-
-@tf.function(jit_compile=True)
-def rotation_matrix_y(angle: tf.Tensor) -> tf.Tensor:
-    """
-    Generate a 3D rotation matrix around the Y-axis using 
-    TensorFlow operations.
-    
-    Parameters:
-    - angle: Rotation angle in radians, shape [...].
-    
-    Returns:
-    - 3x3 rotation matrix, shape [..., 3, 3].
-    """
-    c = tf.cos(angle)
-    s = tf.sin(angle)
-
-    ones = tf.ones_like(c)
-    zeros = tf.zeros_like(c)
-
-    row1 = tf.stack([c, zeros, -s], axis=-1)
-    row2 = tf.stack([zeros, ones, zeros], axis=-1)
-    row3 = tf.stack([s, zeros, c], axis=-1)
-
-    return tf.stack([row1, row2, row3], axis=-2)
-
-
-@tf.function(jit_compile=True)
-def rotation_matrix_z(angle: tf.Tensor) -> tf.Tensor:
-    """
-    Generate a 3D rotation matrix around the Z-axis using 
-    TensorFlow operations.
-    
-    Parameters:
-    - angle: Rotation angle in radians, shape [...].
-    
-    Returns:
-    - 3x3 rotation matrix, shape [..., 3, 3].
-    """
-    c = tf.cos(angle)
-    s = tf.sin(angle)
-
-    ones = tf.ones_like(c)
-    zeros = tf.zeros_like(c)
-
-    row1 = tf.stack([c, s, zeros], axis=-1)
-    row2 = tf.stack([-s, c, zeros], axis=-1)
-    row3 = tf.stack([zeros, zeros, ones], axis=-1)
-
-    return tf.stack([row1, row2, row3], axis=-2)
-
-@tf.function(jit_compile=True)
-def single_arm_frequency_response(
-        frequency: tf.Tensor, 
-        n: tf.Tensor, 
-        arm_length_meters: tf.Tensor
-    ) -> tf.Tensor:
-    
-    """
-    Compute the relative amplitude factor of the arm response due to signal 
-    delay.
-    """
-    
-    # Cast inputs to complex128 for compatibility
-    frequency = tf.cast(frequency, dtype=tf.complex64)
-    arm_length_meters = tf.cast(arm_length_meters, dtype=tf.complex64)
-        
-    # Calculate the complex phase term
-    phase = 2.0j * tf.constant(np.pi, dtype=tf.complex64) * \
-        (arm_length_meters / C) * frequency
-    
-    # Manually clip the real and imaginary parts
-    n_real = tf.math.real(n)
-    n_imag = tf.math.imag(n)
-    lower_bound = tf.constant(-0.999, dtype=tf.float32)
-    upper_bound = tf.constant(0.999, dtype=tf.float32)
-    n_real = tf.maximum(lower_bound, tf.minimum(n_real, upper_bound))
-    n_imag = tf.maximum(lower_bound, tf.minimum(n_imag, upper_bound))
-    
-    # Reassemble into a complex tensor
-    n = tf.complex(n_real, n_imag)
-            
-    # Compute components a, b, and c
-    a = 1.0 / (4.0 * phase)
-    b = (1 - tf.exp(-phase * (1 - n))) / (1 - n)
-    c = tf.exp(-2.0 * phase) * (1 - tf.exp(phase * (1 + n))) / (1 + n)
-    
-    # Compute and return the single arm frequency response
-    return tf.math.real(a * (b - c) * 2.0)

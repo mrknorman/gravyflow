@@ -1,67 +1,42 @@
-import tensorflow as tf
-import tensorflow_probability  as tfp
-from tensorflow.keras.layers import Layer
-import tensorflow.signal as tfs
-
+import keras
+from keras import ops, Layer
+import jax.numpy as jnp
+import numpy as np
 import gravyflow as gf
 
-@tf.function(jit_compile=True)
-def planck(N: int, nleft: int, nright: int) -> tf.Tensor:
+import jax
+
+@jax.jit(static_argnames=["N", "nleft", "nright"])
+def planck(N: int, nleft: int, nright: int):
     """
     Create a Planck-taper window.
-    
-    Parameters
-    ----------
-    N : int
-        The total number of samples in the window.
-    nleft : int
-        The number of samples in the left taper segment.
-    nright : int
-        The number of samples in the right taper segment.
-        
-    Returns
-    -------
-    window : tf.Tensor
-        A window of length `N` with a Planck taper applied.
     """
     # Creating left and right ranges
-    left = tf.range(nleft, dtype=tf.float32)
-    right = tf.range(nright, dtype=tf.float32) - nright + 1
+    left = ops.arange(nleft, dtype="float32")
+    right = ops.arange(nright, dtype="float32") - nright + 1
     
     # Apply the Planck-taper function to left and right ranges
-    taper_left = 1 / (tf.exp(-left/(nleft-1)) + 1)
-    taper_right = 1 / (tf.exp(-right/(nright-1)) + 1)
+    taper_left = 1.0 / (ops.exp(-left/(nleft-1)) + 1)
+    taper_right = 1.0 / (ops.exp(-right/(nright-1)) + 1)
     
     # Combine the left taper, a flat middle segment, and the right taper
-    window = tf.concat([
+    window = ops.concatenate([
         taper_left, 
-        tf.ones(N-nleft-nright), 
-        tf.reverse(taper_right, axis=[0])
+        ops.ones((N-nleft-nright,), dtype="float32"), 
+        ops.flip(taper_right, axis=0) # tf.reverse -> ops.flip
     ], axis=0)
     
     return window
 
-@tf.function(jit_compile=True)
+@jax.jit(static_argnames=["ncorner"])
 def truncate_transfer(
-    transfer: tf.Tensor,
-    ncorner: int = None
-    ) -> tf.Tensor:
+    transfer,
+    ncorner: int = 0
+    ):
     """
     Smoothly zero the edges of a frequency domain transfer function.
-    
-    Parameters
-    ----------
-    transfer : tf.Tensor
-        The transfer function to truncate.
-    ncorner : int, optional
-        The number of extra samples to zero off at low frequency.
-        
-    Returns
-    -------
-    transfer : tf.Tensor
-        The truncated transfer function.
     """
-    nsamp = transfer.shape[-1]
+    nsamp = ops.shape(transfer)[-1]
     ncorner = ncorner if ncorner else 0
     
     # Validate that ncorner is within the range of the array size
@@ -72,34 +47,20 @@ def truncate_transfer(
         
     plank = planck(nsamp-ncorner, nleft=5, nright=5)
     
-    transfer_zeros = tf.zeros_like(transfer[...,:ncorner])
-    transfer_mod = tf.multiply(transfer[...,ncorner:nsamp], plank)
-    new_transfer = tf.concat([transfer_zeros, transfer_mod], axis=-1)
+    transfer_zeros = ops.zeros_like(transfer[...,:ncorner])
+    transfer_mod = transfer[...,ncorner:nsamp] * plank
+    new_transfer = ops.concatenate([transfer_zeros, transfer_mod], axis=-1)
     
     return new_transfer
 
-@tf.function(jit_compile=True) 
+@jax.jit(static_argnames=["ntaps", "window"])
 def truncate_impulse(
-    impulse: tf.Tensor, 
+    impulse, 
     ntaps: int, 
     window: str = 'hann'
-    ) -> tf.Tensor:
+    ):
     """
     Smoothly truncate a time domain impulse response.
-    
-    Parameters
-    ----------
-    impulse : tf.Tensor
-        The impulse response to truncate.
-    ntaps : int
-        Number of taps in the final filter, must be an even number.
-    window : str, optional
-        Window function to truncate with, default is 'hann'.
-        
-    Returns
-    -------
-    impulse: tf.Tensor
-        The truncated impulse response.
     """
     
     # Ensure ntaps does not exceed the size of the impulse response
@@ -107,133 +68,81 @@ def truncate_impulse(
         raise ValueError("ntaps must be an even number")
     
     trunc_start = int(ntaps / 2)
-    trunc_stop = impulse.shape[-1] - trunc_start
+    trunc_stop = ops.shape(impulse)[-1] - trunc_start
         
     if window == 'hann':
-        window = tfs.hann_window(ntaps)
-    # Extend this section with more cases if more window functions are required.
+        # jnp.hanning
+        win = jnp.hanning(ntaps)
+        win = ops.convert_to_tensor(win, dtype="float32")
     else:
         raise ValueError(f"Window function {window} not supported")
     
-    impulse_start = impulse[...,:trunc_start] * window[trunc_start:ntaps]
-    impulse_stop = impulse[...,trunc_stop:] * window[:trunc_start]
-    impulse_middle = tf.zeros_like(impulse[...,trunc_start:trunc_stop])
+    impulse_start = impulse[...,:trunc_start] * win[trunc_start:ntaps]
+    impulse_stop = impulse[...,trunc_stop:] * win[:trunc_start]
+    impulse_middle = ops.zeros_like(impulse[...,trunc_start:trunc_stop])
     
-    new_impulse = tf.concat([impulse_start, impulse_middle, impulse_stop], axis=-1)
+    new_impulse = ops.concatenate([impulse_start, impulse_middle, impulse_stop], axis=-1)
 
     return new_impulse
 
-
-@tf.function(jit_compile=True)
+@jax.jit(static_argnames=["ntaps", "window", "ncorner"])
 def fir_from_transfer(
-    transfer: tf.Tensor, 
+    transfer, 
     ntaps: int, 
     window: str = 'hann', 
     ncorner: int = 0
-    ) -> tf.Tensor:
+    ):
     """
     Design a Type II FIR filter given an arbitrary transfer function
-
-    Parameters
-    ----------
-    transfer : tf.Tensor
-        transfer function to start from, must have at least ten samples
-    ntaps : int
-        number of taps in the final filter, must be an even number
-    window : str, tf.Tensor, optional
-        window function to truncate with, default: 'hann'
-    ncorner : int, optional
-        number of extra samples to zero off at low frequency, default: 0
-
-    Returns
-    -------
-    impulse : tf.Tensor
-        A time domain FIR filter of length ntaps
     """
 
     if ntaps % 2 != 0:
         raise ValueError("ntaps must be an even number")
     
     transfer = truncate_transfer(transfer, ncorner=ncorner)
-    impulse = tf.signal.irfft(tf.cast(transfer, dtype=tf.complex64))
+    
+    # irfft
+    # transfer is real? tf.cast(transfer, dtype=tf.complex64) implies it might be real but treated as complex spectrum?
+    # Usually transfer function is magnitude?
+    # If it's magnitude, irfft assumes zero phase?
+    # tf.signal.irfft expects complex input.
+    # If transfer is real, casting to complex makes imaginary part 0.
+    
+    transfer_complex = ops.cast(transfer, "complex64")
+    impulse = jnp.fft.irfft(transfer_complex)
+    
     impulse = truncate_impulse(impulse, ntaps=ntaps, window=window)
     
-    impulse = tf.roll(impulse, shift=int(ntaps/2 - 1), axis=-1)[...,: ntaps]
+    # roll
+    shift = int(ntaps/2 - 1)
+    impulse = ops.roll(impulse, shift=shift, axis=-1)[...,: ntaps]
     return impulse
 
-@tf.function(jit_compile=True)
-def fftconvolve_(in1, in2, mode="full"):
-    """Convolve two N-dimensional arrays using FFT.
-
-    This function works similarly to the fftconvolve function you provided,
-    but uses TensorFlow's signal processing API.
-    """
-
-    in1 = tf.constant(in1)
-    in2 = tf.constant(in2)
-
-    if in1.shape.ndims != in2.shape.ndims:
-        raise ValueError("in1 and in2 should have the same dimensionality")
-    elif tf.size(in1) == 0 or tf.size(in2) == 0:  # empty arrays
-        return tf.constant([])
-
-    s1 = tf.shape(in1)
-    s2 = tf.shape(in2)
-
-    complex_result = (tf.dtypes.as_dtype(in1.dtype).is_complex or
-                      tf.dtypes.as_dtype(in2.dtype).is_complex)
-    shape = tf.maximum(s1, s2)
-    shape = s1 + s2 - 1
-
-    # Check that input sizes are compatible with 'valid' mode
-    if mode == 'valid' and tf.reduce_any(s1 < s2):
-        # Convolution is commutative; order doesn't have any effect on output
-        in1, s1, in2, s2 = in2, s2, in1, s1
-
-    if not complex_result:
-        sp1 = tf.signal.rfft(in1)
-        sp2 = tf.signal.rfft(in2)
-        ret = tf.signal.irfft(sp1 * sp2)
-    else:
-        sp1 = tf.signal.fft(in1)
-        sp2 = tf.signal.fft(in2)
-        ret = tf.signal.ifft(sp1 * sp2)
-
-    if mode == "full":
-        return ret
-    elif mode == "same":
-        start = s1 // 2
-        return tf.slice(ret, [start], [s1])
-    elif mode == "valid":
-        start = s2 - 1
-        return tf.slice(ret, [start], [s1 - s2 + 1])
-    else:
-        raise ValueError(
-            "acceptable mode flags are 'valid', 'same', or 'full'"
-        )
-
-@tf.function(jit_compile=True)
 def _centered(arr, newsize):
     # Ensure correct dimensionality
-    if len(arr.shape) == 1:
-        arr = tf.expand_dims(arr, 0)
-    # Calculate start and end indices
-    arr_shape = tf.shape(arr)
+    # if len(arr.shape) == 1: ...
+    # Keras ops.shape returns tensor or tuple?
+    
+    arr_shape = ops.shape(arr)
+    # If 1D, expand dims?
+    # ops.expand_dims
+    
     start_ind = (arr_shape[-1] - newsize) // 2
     end_ind = start_ind + newsize
     return arr[..., start_ind:end_ind]
 
-@tf.function(jit_compile=True)
+@jax.jit(static_argnames=["mode"])
 def fftconvolve(in1, in2, mode="full"):
     # Extract shapes
-    s1 = tf.shape(in1)[-1]
-    s2 = tf.shape(in2)[-1]
+    s1 = ops.shape(in1)[-1]
+    s2 = ops.shape(in2)[-1]
     shape = s1 + s2 - 1
 
     # Compute convolution in Fourier space
-    sp1 = tf.signal.rfft(in1, [shape])
-    sp2 = tf.signal.rfft(in2, [shape])
-    ret = tf.signal.irfft(sp1 * sp2, [shape])
+    # jnp.fft.rfft(a, n=shape)
+    sp1 = jnp.fft.rfft(in1, n=shape)
+    sp2 = jnp.fft.rfft(in2, n=shape)
+    ret = jnp.fft.irfft(sp1 * sp2, n=shape)
 
     # Crop according to mode
     if mode == "full":
@@ -247,125 +156,47 @@ def fftconvolve(in1, in2, mode="full"):
     
     return cropped
 
-@tf.function(jit_compile=True)
+@jax.jit(static_argnames=["window"])
 def convolve(
-    timeseries: tf.Tensor, 
-    fir: tf.Tensor, 
+    timeseries, 
+    fir, 
     window: str = 'hann'
-    ) -> tf.Tensor:
+    ):
     """
     Perform convolution between the timeseries and the finite impulse response 
     filter.
-    
-    Parameters
-    ----------
-    timeseries : tf.Tensor
-        The time series data to convolve.
-    fir : tf.Tensor
-        The finite impulse response filter.
-    window : str, optional
-        Window function to use, default is 'hann'.
-        
-    Returns
-    -------
-    conv : tf.Tensor
-        The convolved time series.
     """
-    pad = int(tf.math.ceil(fir.shape[-1]/2))
+    pad = int(np.ceil(ops.shape(fir)[-1]/2))
     
     # Optimizing FFT size to power of 2 for efficiency
-    nfft = min(8*fir.shape[-1], timeseries.shape[-1])
-
+    # nfft = min(8*fir.shape[-1], timeseries.shape[-1])
+    # Not used in 'same' mode logic below?
+    
     if window == 'hann':
-        window = tf.signal.hann_window(fir.shape[-1])
-    # Extend this section with more cases if more window functions are required.
+        win = jnp.hanning(ops.shape(fir)[-1])
+        win = ops.convert_to_tensor(win, dtype="float32")
     else:
         raise ValueError(f"Window function {window} not supported")
 
-    timeseries_new_front = timeseries[..., :pad] * window[:pad]
-    timeseries_new_back = timeseries[..., -pad:] * window[-pad:]
+    timeseries_new_front = timeseries[..., :pad] * win[:pad]
+    timeseries_new_back = timeseries[..., -pad:] * win[-pad:]
     timeseries_new_middle = timeseries[..., pad:-pad]
 
-    timeseries_new = tf.concat([
+    timeseries_new = ops.concatenate([
         timeseries_new_front, 
         timeseries_new_middle, 
         timeseries_new_back
     ], axis=-1)
 
-    conv = tf.zeros_like(timeseries_new)
-    #if nfft >= timeseries_new.shape[-1]/2:
+    conv = ops.zeros_like(timeseries_new)
     conv = fftconvolve(timeseries_new, fir, mode='same')
     
-    """
-    else:
-        # Initialize
-        nstep = nfft - 2 * pad
-        num_samples = timeseries_new.shape[:-1]  # Get all dimensions except the last one
-        last_dim = timeseries_new.shape[-1]  # Last dimension size
-        k = tf.convert_to_tensor(nfft - pad, dtype=tf.int32)
-        final_k = last_dim - nfft + pad
-        accumulated_middle_parts = tf.TensorArray(dtype=tf.float32, size=0, dynamic_size=True)
-
-        # First part
-        first_part = fftconvolve(timeseries_new[..., :nfft], fir, mode="same")[..., :nfft - pad]
-
-       # Calculate the number of iterations for the loop
-        num_iterations = tf.math.ceil((final_k - k) / nstep)
-
-        num_iterations = tf.cast(num_iterations, tf.int32)
-
-        # Preallocate the TensorArray with fixed size
-        accumulated_middle_parts = tf.TensorArray(dtype=tf.float32, size=num_iterations, dynamic_size=False)
-
-        # Define the loop body for tf.while_loop
-        def loop_body(i, k, accumulated_middle_parts):
-            yk = fftconvolve(
-                timeseries_new[..., k - pad: k + nstep + pad], fir, mode="same"
-            )
-            # Use 'i' as the index for writing to the TensorArray
-            updated_parts = accumulated_middle_parts.write(i, yk[..., pad: -pad])
-            k = k + nstep
-            return i + 1, k, updated_parts
-
-        # Initialize loop variables
-        i = 0
-
-        # Run the loop
-        _, _, final_middle_parts = tf.while_loop(
-            cond=lambda i, k, *_: k < final_k,
-            body=loop_body,
-            loop_vars=[i, k, accumulated_middle_parts]
-        )
-
-        # Stack all middle parts
-        middle_parts = final_middle_parts.stack()
-
-        # Calculate the total length of the concatenated middle parts
-        total_middle_length = (final_k - nfft + pad) // nstep * (nstep - 2 * pad)
-
-        # Determine the dynamic shape of middle_parts
-        dynamic_middle_parts_shape = tf.shape(middle_parts)
-
-        # Create the new shape for middle parts
-        # Since total_middle_length is a scalar, we can use tf.concat to construct the shape
-        middle_parts_shape = tf.concat([num_samples, [total_middle_length]], axis=0)
-
-        # Reshape middle parts
-        middle_parts = tf.reshape(middle_parts, middle_parts_shape)
-
-        # Last part
-        last_part = fftconvolve(timeseries_new[..., -nfft:], fir, mode="same")[..., -nfft + pad:]
-
-        # Combine all parts along the last axis
-        conv = tf.concat([first_part, middle_parts, last_part], axis=-1)
-    """
-
     return conv
 
-@tf.function(jit_compile=True)
+@jax.jit(static_argnames=["sample_rate_hertz", "fft_duration_seconds", "overlap_duration_seconds", "highpass_hertz", "detrend", "filter_duration_seconds", "window"])
 def whiten(
-    timeseries: tf.Tensor, 
-    background: tf.Tensor,
+    timeseries, 
+    background,
     sample_rate_hertz: float, 
     fft_duration_seconds: float = 2.0, 
     overlap_duration_seconds: float = 1.0,
@@ -373,33 +204,9 @@ def whiten(
     detrend: str ='constant',
     filter_duration_seconds: float = 2.0,
     window: str = "hann"
-    ) -> tf.Tensor:
+    ):
     """
     Whiten a timeseries using the given parameters.
-    
-    Parameters
-    ----------
-    timeseries : tf.Tensor
-        The time series data to whiten.
-    background : tf.Tensor
-        The time series to use to calculate the asd.
-    sample_rate_hertz : float
-        The sample rate of the time series data.
-    fft_duration_seconds : int, optional
-        Length of the FFT window, default is 4.
-    overlap_duration_seconds : int, optional
-        overlap_duration_seconds of the FFT windows, default is 2.
-    highpass_hertz : float, optional
-        highpass_hertz frequency, default is None.
-    filter_duration_seconds : float, optional
-        Duration of the filter in seconds, default is 2.
-    window : str, optional
-        Window function to use, default is 'hann'.
-        
-    Returns
-    -------
-    out : tf.Tensor
-        The whitened time series.
     """
     
     # Validate highpass frequency, if applicable
@@ -417,14 +224,17 @@ def whiten(
     
     epsilon = 1e-8  # Small constant to avoid division by zero
 
+    timeseries = ops.convert_to_tensor(timeseries)
+    background = ops.convert_to_tensor(background)
+
     # Check if input is 1D or 2D
-    is_1d = len(timeseries.shape) == 1
+    is_1d = len(ops.shape(timeseries)) == 1
     if is_1d:
         # If 1D, add an extra dimension
-        timeseries = tf.expand_dims(timeseries, axis=0)
-        background = tf.expand_dims(background, axis=0)
+        timeseries = ops.expand_dims(timeseries, axis=0)
+        background = ops.expand_dims(background, axis=0)
 
-    dt = 1 / sample_rate_hertz
+    dt = 1.0 / sample_rate_hertz
     
     freqs, psd = gf.psd(
         background, 
@@ -434,26 +244,36 @@ def whiten(
     )
     
     # Ensure psd doesn't contain negative values
-    psd = tf.math.maximum(psd, 0)
-    asd = tf.sqrt(psd)
+    psd = ops.maximum(psd, 0.0)
+    asd = ops.sqrt(psd)
     
-    df = 1.0 / (timeseries.shape[-1] / sample_rate_hertz)
-    fsamples = tf.range(0, timeseries.shape[-1]//2+1, dtype=tf.float32) * df
-    freqs = tf.cast(freqs, tf.float32)
+    df = 1.0 / (ops.cast(ops.shape(timeseries)[-1], "float32") / sample_rate_hertz)
     
-    asd = tfp.math.interp_regular_1d_grid(
-            fsamples, 
-            freqs[0], 
-            freqs[-1], 
-            asd, 
-            axis=-1
-        )
+    num_freqs = ops.shape(timeseries)[-1]//2 + 1
+    fsamples = ops.arange(0, num_freqs, dtype="float32") * df
+    freqs = ops.cast(freqs, "float32")
+    
+    # Interpolation
+    # asd is (Batch, Freqs).
+    # fsamples is (TargetFreqs,).
+    
+    def interp_fn(p):
+        return jnp.interp(fsamples, freqs, p)
+        
+    rank = len(ops.shape(asd))
+    if rank > 1:
+        asd_flat = ops.reshape(asd, (-1, ops.shape(asd)[-1]))
+        asd_interp = jnp.vectorize(interp_fn, signature='(n)->(m)')(asd_flat)
+        target_len = ops.shape(fsamples)[0]
+        asd = ops.reshape(asd_interp, (*ops.shape(asd)[:-1], target_len))
+    else:
+        asd = jnp.interp(fsamples, freqs, asd)
 
     ncorner = int(highpass_hertz / df) if highpass_hertz else 0
     ntaps = int(filter_duration_seconds * sample_rate_hertz)
     
     # Ensure asd doesn't contain zeros to avoid division by zero
-    asd = tf.math.maximum(asd, epsilon)
+    asd = ops.maximum(asd, epsilon)
     transfer = 1.0 / asd
 
     tdw = fir_from_transfer(transfer, ntaps, window=window, ncorner=ncorner)
@@ -463,7 +283,7 @@ def whiten(
     if is_1d:
         out = out[0]
 
-    return out * tf.sqrt(2.0 * dt)
+    return out * ops.sqrt(2.0 * dt)
 
 class WhitenPass(Layer):
     def __init__(
@@ -496,17 +316,15 @@ class WhitenPass(Layer):
         self.num_output_samples = int(self.onsource_duration_seconds*self.sample_rate_hertz)
 
     def build(self, input_shape):
-        # This layer doesn't have any trainable weights, but you could set up weights here if necessary.
         super().build(input_shape)
 
-    @tf.function
     def call(self, inputs):
         timeseries = inputs
 
         cropped = gf.crop_samples(timeseries, self.onsource_duration_seconds, self.sample_rate_hertz)
 
-        dynamic_shape = tf.shape(timeseries)
-        return tf.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))
+        dynamic_shape = ops.shape(timeseries)
+        return ops.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))
 
     def get_config(self):
         config = super().get_config().copy()
@@ -522,8 +340,6 @@ class WhitenPass(Layer):
         return config
 
     def compute_output_shape(self, input_shape):
-        # Assuming input_shape is [(None, Y, A), (None, Y, B)]
-        # and your layer returns a shape of (None, Y, B)
         timeseries_shape = input_shape
         return (timeseries_shape[0], timeseries_shape[1], self.onsource_duration_seconds*self.sample_rate_hertz) 
 
@@ -558,18 +374,16 @@ class Whiten(Layer):
         self.num_output_samples = int(self.onsource_duration_seconds*self.sample_rate_hertz)
 
     def build(self, input_shape):
-        # This layer doesn't have any trainable weights, but you could set up weights here if necessary.
         super().build(input_shape)
 
-    @tf.function
     def call(self, inputs):
         timeseries, background = inputs
 
         whitened = whiten(timeseries, background, self.sample_rate_hertz)
         cropped = gf.crop_samples(whitened, self.onsource_duration_seconds, self.sample_rate_hertz)
 
-        dynamic_shape = tf.shape(timeseries)
-        return tf.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))
+        dynamic_shape = ops.shape(timeseries)
+        return ops.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))
 
     def get_config(self):
         config = super().get_config().copy()
@@ -585,7 +399,5 @@ class Whiten(Layer):
         return config
 
     def compute_output_shape(self, input_shape):
-        # Assuming input_shape is [(None, Y, A), (None, Y, B)]
-        # and your layer returns a shape of (None, Y, B)
         timeseries_shape, _ = input_shape
         return (timeseries_shape[0], timeseries_shape[1], int(self.onsource_duration_seconds*self.sample_rate_hertz))
