@@ -1,107 +1,108 @@
 from typing import Optional, Tuple
 
-import tensorflow as tf
-import tensorflow_probability as tfp
+import keras
+from keras import ops
+import jax.numpy as jnp
+import jax
 
-@tf.function(jit_compile=True)
+@jax.jit(static_argnames=["n"])
 def fftfreq(
         n : int, 
         d : float = 1.0
-    ) -> tf.Tensor:
+    ):
     val = 1.0 / (n * d)
-    results = tf.range(0, n // 2 + 1, dtype=tf.float32)  # Note the +1 here
+    # ops.arange returns tensor
+    results = ops.arange(0, n // 2 + 1, dtype="float32") 
     return results * val
 
+@jax.jit(static_argnames=["axis", "type", "bp", "overwrite_data"])
 def detrend(data, axis=-1, type='linear', bp=0, overwrite_data=False):
     """
-    Remove linear trend along axis from data using TensorFlow.
-
-    Parameters
-    ----------
-    data : Tensor
-        The input data.
-    axis : int, optional
-        The axis along which to detrend the data. By default this is the
-        last axis (-1).
-    type : {'linear', 'constant'}, optional
-        The type of detrending. If ``type == 'linear'`` (default),
-        the result of a linear least-squares fit to `data` is subtracted
-        from `data`.
-        If ``type == 'constant'``, only the mean of `data` is subtracted.
-    bp : int, optional
-        A break point. If given, an individual linear fit is
-        performed for each part of `data` between two break points.
-        This parameter only has an effect when ``type == 'linear'``.
-    overwrite_data : bool, optional
-        If True, perform in place detrending and avoid a copy. Default is False
-
-    Returns
-    -------
-    ret : Tensor
-        The detrended input data.
-
-    Examples
-    --------
-    >>> import numpy as np
-    >>> import tensorflow as tf
-    >>> npoints = 1000
-    >>> noise = np.random.standard_normal(npoints)
-    >>> x = 3 + 2*np.linspace(0, 1, npoints) + noise
-    >>> x_tf = tf.convert_to_tensor(x)
-    >>> (detrend(x_tf) - noise).numpy().max()
-    0.06  # random
-
+    Remove linear trend along axis from data using Keras Ops / JAX.
     """
+    data = ops.convert_to_tensor(data)
+    dtype = data.dtype
+    
     if type not in ['linear', 'l', 'constant', 'c']:
         raise ValueError("Trend type must be 'linear' or 'constant'.")
-    dtype = data.dtype
-    if type in ['constant', 'c']:
-        ret = data - tf.math.reduce_mean(data, axis, keepdims=True)
-        return ret
-    else:
-        N = data.shape[axis]
-        bp = tf.sort(tf.unique(tf.concat([0, bp, N], axis=0)).y)
-        if tf.math.reduce_any(bp > N):
-            raise ValueError("Breakpoints must be less than length "
-                             "of data along given axis.")
-        Nreg = tf.shape(bp)[0] - 1
-        newdims = tf.concat(
-            [
-                axis,
-                tf.range(0, axis), tf.range(axis + 1, tf.rank(data))
-            ], 
-            axis=0
-        )
-        newdata = tf.reshape(
-            tf.transpose(data, perm=newdims),
-            [N, tf.math.reduce_prod(tf.shape(data)) // N]
-        )
-        if not overwrite_data:
-            newdata = tf.identity(newdata)
-        newdata = tf.cast(newdata, dtype)
-        for m in range(Nreg):
-            Npts = bp[m + 1] - bp[m]
-            A = tf.ones((Npts, 2), dtype)
-            A[:, 0] = tf.cast(tf.range(1, Npts + 1) * 1.0 / Npts, dtype)
-            sl = slice(bp[m], bp[m + 1])
-            coef = tf.linalg.lstsq(A, newdata[sl])
-            newdata = newdata[sl] - tf.linalg.matvec(A, coef)
-        tdshape = tf.gather(tf.shape(data), newdims)
-        ret = tf.reshape(newdata, tdshape)
-        olddims = list(
-            range(1, tf.rank(data)))[:axis] \
-            + [0] + list(range(1, tf.rank(data)))[axis:]
-        ret = tf.transpose(ret, perm=olddims)
-        return ret
 
-@tf.function(jit_compile=True)
+    if type in ['constant', 'c']:
+        # ops.mean with keepdims
+        mean = ops.mean(data, axis=axis, keepdims=True)
+        return data - mean
+    else:
+        # Linear detrending using JAX lstsq
+        # This is a bit complex to port 1:1 with the exact TF logic if it uses dynamic shapes heavily.
+        # However, typically we just want to fit a line y = mx + c to the data along axis.
+        
+        # Simplified linear detrend implementation for common case (no breakpoints)
+        if bp != 0:
+             raise NotImplementedError("Breakpoints not yet supported in JAX port of detrend.")
+        
+        N = ops.shape(data)[axis]
+        
+        # Create design matrix A = [1, t]
+        # t is 0 to N-1
+        t = ops.arange(N, dtype=dtype)
+        # A needs to be (N, 2)
+        ones = ops.ones((N,), dtype=dtype)
+        A = ops.stack([ones, t], axis=-1) # (N, 2)
+        
+        # We need to solve A * x = y for each signal.
+        # y is the data along axis.
+        # If data is (Batch, N), we want to solve for each batch.
+        
+        # Move axis to end
+        if axis != -1 and axis != len(ops.shape(data)) - 1:
+            data_transposed = ops.moveaxis(data, axis, -1)
+        else:
+            data_transposed = data
+            
+        # Reshape to (Batch, N)
+        original_shape = ops.shape(data_transposed)
+        data_reshaped = ops.reshape(data_transposed, (-1, N))
+        
+        # JAX lstsq: jnp.linalg.lstsq(a, b) solves ax = b
+        # a is (N, 2), b is (N, Batch) or (Batch, N)?
+        # numpy.linalg.lstsq expects b to be (N, K)
+        
+        # Transpose data to (N, Batch)
+        b = ops.transpose(data_reshaped, (1, 0))
+        
+        # Solve
+        # A is (N, 2), b is (N, Batch)
+        # x will be (2, Batch)
+        coeffs, _, _, _ = jnp.linalg.lstsq(A, b, rcond=None)
+        
+        # Reconstruct trend
+        # trend = A @ coeffs -> (N, 2) @ (2, Batch) -> (N, Batch)
+        trend = ops.matmul(A, coeffs)
+        
+        # Transpose back to (Batch, N)
+        trend = ops.transpose(trend, (1, 0))
+        
+        # Subtract trend
+        detrended = data_reshaped - trend
+        
+        # Reshape back to original
+        detrended = ops.reshape(detrended, original_shape)
+        
+        # Move axis back if needed
+        if axis != -1 and axis != len(ops.shape(data)) - 1:
+            detrended = ops.moveaxis(detrended, -1, axis)
+            
+        return detrended
+
+@jax.jit(static_argnames=["nperseg", "sample_rate_hertz", "noverlap", "mode"])
 def psd(
-        signal : tf.Tensor, 
+        signal, 
         nperseg : int, 
         sample_rate_hertz : float, 
         noverlap : Optional[int] = None, 
         mode : str ="mean"
-    ) -> Tuple[tf.Tensor, tf.Tensor]:
+    ):
+    
+    signal = ops.convert_to_tensor(signal)
     
     if noverlap is None:
         noverlap = nperseg // 2
@@ -109,42 +110,88 @@ def psd(
     signal = detrend(signal, axis=-1, type='constant')
     
     # Step 1: Split the signal into overlapping segments
-    signal_shape = tf.shape(signal)
+    # JAX/Keras doesn't have tf.signal.frame.
+    # We can use jax.numpy stride tricks or manual extraction.
+    # Or simply reshape if noverlap is 0, but it usually isn't.
+    
+    # Implementing frame using slicing
     step = nperseg - noverlap
-    frames = tf.signal.frame(signal, frame_length=nperseg, frame_step=step)
+    signal_len = ops.shape(signal)[-1]
+    num_frames = (signal_len - nperseg) // step + 1
+    
+    # Indices: (num_frames, nperseg)
+    # 0, 1, ..., nperseg-1
+    # step, step+1, ...
+    
+    indices = ops.arange(nperseg)[None, :] + ops.arange(num_frames)[:, None] * step
+    
+    # If signal is (Batch, Time), we want (Batch, Frames, nperseg)
+    # ops.take might work but indices need to be right.
+    
+    # Using jax.lax.gather or simply a loop if num_frames is small? No, loop is bad.
+    # jnp.lib.stride_tricks.sliding_window_view is available in newer numpy/jax?
+    # jnp doesn't have sliding_window_view yet in all versions.
+    
+    # Let's use indices gathering.
+    # signal: (..., T)
+    # indices: (F, W)
+    # We want output: (..., F, W)
+    
+    # Flatten signal to 2D (Batch, T)
+    original_shape = ops.shape(signal)
+    if len(original_shape) > 1:
+        flat_signal = ops.reshape(signal, (-1, signal_len))
+    else:
+        flat_signal = ops.reshape(signal, (1, signal_len))
+
         
+    # Gather
+    frames = ops.take(flat_signal, indices, axis=-1)
+    
     # Step 2: Apply a window function to each segment
-    # Hanning window is used here, but other windows can be applied as well
-    window = tf.signal.hann_window(nperseg, dtype = tf.float32)
+    window = jnp.hanning(nperseg) 
+    window = ops.convert_to_tensor(window, dtype="float32")
+    
     windowed_frames = frames * window
     
-    # Step 3: Compute the periodogram (scaled, absolute value of FFT) for each 
-    # segment
-    periodograms = tf.abs(
-        tf.signal.rfft(windowed_frames)
-    )**2 / tf.reduce_sum(window**2)
+    # Step 3: Compute the periodogram
+    # Use jnp.fft.rfft directly
+    fft_vals = jnp.fft.rfft(windowed_frames)
     
-    # Step 4: Compute the median or mean of the periodograms based on the 
-    #median_mode
+    periodograms = ops.abs(fft_vals)**2 / ops.sum(window**2)
+    
+    # Step 4: Compute median or mean
     if mode == "median":
-        pxx = tfp.stats.percentile(periodograms, 50.0, axis=-2)
+        # jnp.percentile
+        pxx = jnp.percentile(periodograms, 50.0, axis=-2)
     elif mode == "mean":
-        pxx = tf.reduce_mean(periodograms, axis=-2)
+        pxx = ops.mean(periodograms, axis=-2)
     else:
-        raise "Mode not supported"
+        raise ValueError("Mode not supported")
     
-    # Step 5: Compute the frequencies corresponding to the power spectrum values
+    # Step 5: Frequencies
     freqs = fftfreq(nperseg, d=1.0/sample_rate_hertz)
     
-    # Step 6: Create mask to multiply all but the 0 and nyquist frequency by 2
-    X = pxx.shape[-1]
-    mask = tf.concat(
+    # Step 6: Mask
+    # pxx shape: (Batch, Freqs)
+    X = ops.shape(pxx)[-1]
+    
+    # Construct mask
+    # [1, 2, 2, ..., 2, 1]
+    mask = ops.concatenate(
         [
-            tf.constant([1.]), 
-            tf.ones([X-2], dtype=tf.float32) * 2.0, 
-            tf.constant([1.])
+            ops.convert_to_tensor([1.], dtype="float32"), 
+            ops.ones((X-2,), dtype="float32") * 2.0, 
+            ops.convert_to_tensor([1.], dtype="float32")
         ], 
         axis=0
     )
+    
+    pxx = mask * pxx / sample_rate_hertz
+    
+    # Reshape back to original dimensions
+    if len(original_shape) > 1:
+        new_shape = tuple(original_shape[:-1]) + (X,)
+        pxx = ops.reshape(pxx, new_shape)
         
-    return freqs, (mask*pxx / sample_rate_hertz)
+    return freqs, pxx

@@ -3,9 +3,11 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Union, Iterator, List
 
-import tensorflow as tf
-import tensorflow_probability as tfp
 import numpy as np
+import keras
+from keras import ops
+import jax.numpy as jnp
+import jax
 from numpy.random import default_rng  
 
 import gravyflow as gf
@@ -21,34 +23,22 @@ def ensure_even(number):
         number -= 1
     return number
     
-@tf.function(reduce_retracing=True)
 def _generate_white_noise(
     num_examples_per_batch: int,
     num_ifos : int,
     num_samples: int,
     seed : int
-) -> tf.Tensor:
+):
     """
     Optimized function to generate white Gaussian noise.
-
-    Parameters:
-    ----------
-    num_examples_per_batch : int
-        Number of examples per batch.
-    num_samples : int
-        Number of samples per example.
-        
-    Returns:
-    -------
-    tf.Tensor
-        A tensor containing white Gaussian noise.
     """
-    return tf.random.normal(
-        shape=[num_examples_per_batch, num_ifos, num_samples],
-        mean=0.0,
-        stddev=1.0,
-        dtype=tf.float32,
-        seed=seed
+    # Use jax.random directly for efficiency and correctness with JAX backend
+    key = jax.random.PRNGKey(seed)
+    
+    return jax.random.normal(
+        key,
+        shape=(num_examples_per_batch, num_ifos, num_samples),
+        dtype=jnp.float32
     )
 
 def white_noise_generator(
@@ -59,23 +49,9 @@ def white_noise_generator(
     offsource_duration_seconds: float,
     sample_rate_hertz: float,
     seed : int
-) -> Iterator[tf.Tensor]:
+) -> Iterator:
     """
     Generator function that yields white Gaussian noise.
-
-    Parameters:
-    ----------
-    num_examples_per_batch : int
-        Number of examples per batch.
-    onsource_duration_seconds : float
-        Duration of the onsource segment in seconds.
-    sample_rate_hertz : float
-        Sample rate in Hz.
-
-    Yields:
-    -------
-    tf.Tensor
-        A tensor containing white Gaussian noise.
     """
 
     total_onsource_duration_seconds : float = onsource_duration_seconds + (crop_duration_seconds * 2.0)
@@ -83,101 +59,89 @@ def white_noise_generator(
     num_onsource_samples : int = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
     num_offsource_samples : int = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
 
-    tf.random.set_seed(seed)
+    rng = default_rng(seed)
 
     while True:
+        # Generate new seeds for each batch
+        s1 = rng.integers(1000000000)
+        s2 = rng.integers(1000000000)
+        
         yield _generate_white_noise(
             num_examples_per_batch, 
             len(ifos),
             num_onsource_samples,
-            seed=int(seed)
+            seed=s1
         ), _generate_white_noise(
             num_examples_per_batch, 
             len(ifos),
             num_offsource_samples,
-            seed=int(seed+1)
-        ), tf.fill([num_examples_per_batch], -1.0)
+            seed=s2
+        ), ops.full((num_examples_per_batch,), -1.0)
         
-@tf.function(reduce_retracing=True)
 def _generate_colored_noise(
     num_examples_per_batch: int,
     num_ifos : int,
     num_samples: int,
-    interpolated_asd: tf.Tensor,
+    interpolated_asd: jnp.ndarray, # JAX array
     seed : int
-) -> tf.Tensor:
+):
     """
     Function to generate colored Gaussian noise.
-
-    Parameters:
-    ----------
-    num_examples_per_batch : int
-        Number of examples per batch.
-    num_samples : int
-        Number of samples per example.
-    interpolated_asd : tf.Tensor
-        Interpolated power spectral density.
-
-    Returns:
-    -------
-    tf.Tensor
-        A tensor containing colored Gaussian noise.
     """
-    white_noise = tf.random.normal(
-        shape=[num_examples_per_batch, num_ifos, num_samples],
-        mean=0.0,
-        stddev=1.0,
-        dtype=tf.float32,
-        seed=seed
+    key = jax.random.PRNGKey(seed)
+    
+    white_noise = jax.random.normal(
+        key,
+        shape=(num_examples_per_batch, num_ifos, num_samples),
+        dtype=jnp.float32
     )
 
-    white_noise_fft = tf.signal.rfft(white_noise)
+    # FFT
+    white_noise_fft = jnp.fft.rfft(white_noise)
+    
+    # Apply ASD
+    # interpolated_asd shape: (1, IFOs, Freqs) or similar?
+    # white_noise_fft shape: (Batch, IFOs, Freqs)
+    
     colored_noise_fft = interpolated_asd * white_noise_fft
-    colored_noise = tf.signal.irfft(colored_noise_fft)
+    
+    # IFFT
+    colored_noise = jnp.fft.irfft(colored_noise_fft, n=num_samples)
     
     return colored_noise
 
 def interpolate_onsource_offsource_psd(
     num_samples_list: List[int],
     sample_rate_hertz: float,
-    psd_freq: tf.Tensor,
-    psd_val: tf.Tensor
-) -> List[tf.Tensor]:
+    psd_freq: jnp.ndarray,
+    psd_val: jnp.ndarray
+) -> List[jnp.ndarray]:
     """
-    Interpolates onsource and offsource PSDs to a new frequency axis based on the sample rate and number of samples.
-
-    Parameters:
-    num_samples_list (List[int]): List containing the number of samples for onsource and offsource.
-    sample_rate_hertz (float): The sample rate in Hz.
-    psd_freq (tf.Tensor): Original frequency axis of the PSD.
-    psd_val (tf.Tensor): PSD values corresponding to the original frequency axis.
-
-    Returns:
-    List[tf.Tensor]: Interpolated PSDs for onsource and offsource.
+    Interpolates onsource and offsource PSDs to a new frequency axis.
     """
 
-    interpolated_psd_onsource, interpolated_psd_offsource = [
-        tf.cast(
-            tfp.math.interp_regular_1d_grid(
-                tf.cast(
-                    tf.linspace(
-                        0.0, 
-                        min(psd_freq[-1], sample_rate_hertz / 2),  # Nyquist frequency
-                        num // 2 + 1,
-                    ), tf.float32
-                ), 
-                psd_freq[0], 
-                psd_freq[-1], 
-                psd_val, 
-                axis=-1,
-                fill_value="extrapolate"
-            ), 
-            tf.complex64
-        )
-        for num in num_samples_list
-    ]
+    interpolated_psds = []
     
-    return interpolated_psd_onsource, interpolated_psd_offsource
+    for num in num_samples_list:
+        # New frequency grid
+        new_freqs = jnp.linspace(
+            0.0, 
+            min(psd_freq[-1], sample_rate_hertz / 2),  # Nyquist frequency
+            num // 2 + 1,
+        )
+        
+        # Interpolate
+        # jnp.interp(x, xp, fp)
+        interp_val = jnp.interp(new_freqs, psd_freq, psd_val)
+        
+        # Cast to complex64 for FFT multiplication? 
+        # Usually ASD is real, but we multiply with complex FFT.
+        # Original code cast to complex64.
+        interp_val = ops.cast(interp_val, "complex64")
+        
+        interpolated_psds.append(interp_val)
+    
+    return interpolated_psds[0], interpolated_psds[1]
 
 def colored_noise_generator(
     num_examples_per_batch: int,
@@ -188,27 +152,9 @@ def colored_noise_generator(
     sample_rate_hertz: float,
     scale_factor : float,
     seed : int
-) -> Iterator[tf.Tensor]:
+) -> Iterator:
     """
     Generator function that yields colored Gaussian noise.
-
-    Parameters:
-    ----------
-    num_examples_per_batch : int
-        Number of examples per batch.
-    onsource_duration_seconds : float
-        Duration of the onsource segment in seconds.
-    sample_rate_hertz : float
-        Sample rate in Hz.
-    psd_freq : tf.Tensor
-        Frequencies for the power spectral density.
-    psd_val : tf.Tensor
-        Power spectral density values.
-
-    Yields:
-    -------
-    tf.Tensor
-        A tensor containing colored Gaussian noise.
     """
     total_onsource_duration_seconds : float = onsource_duration_seconds + (crop_duration_seconds * 2.0)
     
@@ -221,8 +167,8 @@ def colored_noise_generator(
         frequencies, asd = np.loadtxt(
             ifo.value.optimal_psd_path, delimiter=","
         ).T
-        frequencies = tf.convert_to_tensor(frequencies, dtype=tf.float32)
-        asd = tf.convert_to_tensor(asd, dtype=tf.float32)
+        frequencies = jnp.array(frequencies, dtype=jnp.float32)
+        asd = jnp.array(asd, dtype=jnp.float32)
         return frequencies, asd * scale_factor
 
     interpolated_onsource_asds = []
@@ -248,25 +194,55 @@ def colored_noise_generator(
             interpolated_asd_offsource
         )
     
-    interpolated_onsource_asds = tf.concat(interpolated_onsource_asds, axis=1)
-    interpolated_offsource_asds = tf.concat(interpolated_offsource_asds, axis=1)    
+    # Stack or Concat?
+    # Original: tf.concat(..., axis=1) -> (1, IFOs*Freqs) ??
+    # Wait, original code:
+    # interpolated_onsource_asds.append(interpolated_asd_onsource)
+    # interpolated_onsource_asds = tf.concat(interpolated_onsource_asds, axis=1)
+    
+    # interpolated_asd_onsource shape from interpolate is (Freqs,).
+    # If we append to list, we have [ (Freqs,), (Freqs,) ].
+    # tf.concat(..., axis=1) would require rank 2?
+    # Original interpolate returned shape?
+    # tfp.math.interp_regular_1d_grid returns shape of query points.
+    # If query points is (Freqs,), output is (Freqs,).
+    # tf.concat([ (Freqs,), (Freqs,) ], axis=1) fails.
+    # Maybe original code had expand_dims?
+    # "interpolated_psd_onsource ... for num in num_samples_list"
+    # It returns a list of tensors.
+    
+    # Let's assume we want (IFOs, Freqs) or (1, IFOs, Freqs) for broadcasting.
+    # _generate_colored_noise expects `interpolated_asd * white_noise_fft`.
+    # white_noise_fft is (Batch, IFOs, Freqs).
+    # So interpolated_asd should be (1, IFOs, Freqs) or (IFOs, Freqs).
+    
+    # Let's stack them.
+    interpolated_onsource_asds = ops.stack(interpolated_onsource_asds, axis=0) # (IFOs, Freqs)
+    interpolated_offsource_asds = ops.stack(interpolated_offsource_asds, axis=0)
+    
+    # Expand dims for batch broadcasting
+    interpolated_onsource_asds = ops.expand_dims(interpolated_onsource_asds, 0) # (1, IFOs, Freqs)
+    interpolated_offsource_asds = ops.expand_dims(interpolated_offsource_asds, 0)
 
-    tf.random.set_seed(seed)
+    rng = default_rng(seed)
     
     while True:
+        s1 = rng.integers(1000000000)
+        s2 = rng.integers(1000000000)
+        
         yield _generate_colored_noise(
                 num_examples_per_batch, 
                 len(ifos),
                 num_samples_list[0], 
                 interpolated_onsource_asds,
-                seed=int(seed)
+                seed=s1
             ), _generate_colored_noise(
                 num_examples_per_batch, 
                 len(ifos),
                 num_samples_list[1], 
                 interpolated_offsource_asds,
-                seed=int(seed+1)
-            ), tf.fill([num_examples_per_batch], -1.0)
+                seed=s2
+            ), ops.full((num_examples_per_batch,), -1.0)
     
 
 @dataclass
@@ -282,7 +258,6 @@ class NoiseObtainer:
         if not isinstance(self.ifos, list) and not isinstance(self.ifos, tuple):
             self.ifos = [self.ifos]
         
-        # Set default groups here as dataclass will not allow mutable defaults:
         if not self.groups:
             self.groups = {
                 "train" : 0.98,
@@ -304,7 +279,6 @@ class NoiseObtainer:
             seed : int = None
         ) -> Iterator:
 
-        # Set to defaults if values are None:
         if sample_rate_hertz is None:
             sample_rate_hertz = gf.Defaults.sample_rate_hertz
         if onsource_duration_seconds is None:
@@ -322,10 +296,9 @@ class NoiseObtainer:
         if self.rng is None:
             self.rng = default_rng(seed)
 
-        # Configure noise based on type
         self.generator = None
 
-        seed_ = self.rng.integers(1E10)
+        seed_ = self.rng.integers(1000000000)
                 
         match self.noise_type:
             case NoiseType.WHITE:
@@ -364,18 +337,9 @@ class NoiseObtainer:
                 )
             
             case NoiseType.REAL:
-                # Get real ifo data
-                
-                # If noise type is real, get real noise time segments that fit 
-                # criteria, segments will be stored as a 2D numpy array as pairs 
-                # of start and end times:
-
-                 # Canonicalize the ifos in the noise obtainer.
                 canonical_ifos = tuple(sorted(ifo.name for ifo in self.ifos))
 
                 if not self.ifo_data_obtainer:
-                    # Check to see if obtatainer object has been set up, raise
-                    # error if not
                     raise ValueError("""
                         No IFO obtainer object present. In order to acquire real 
                         noise please parse a IFOObtainer object to NoiseObtainer
@@ -390,15 +354,12 @@ class NoiseObtainer:
                             group,
                         )
                     
-                        # Setup noise_file_path, file path is created from
-                        # hash of unique parameters
                         self.ifo_data_obtainer.generate_file_path(
                             sample_rate_hertz,
                             group,
                             self.data_directory_path
                         )
                 
-                # Initilise generator function:
                 self.generator = self.ifo_data_obtainer.get_onsource_offsource_chunks(
                         sample_rate_hertz,
                         onsource_duration_seconds,
@@ -411,7 +372,6 @@ class NoiseObtainer:
                     )
                 
             case _:
-                # Raise error if noisetype not recognised.
                 raise ValueError(
                     f"NoiseType {self.noise_type} not recognised, please choose"
                     "from NoiseType.WHITE, NoiseType.COLORED, "
@@ -437,8 +397,6 @@ class NoiseObtainer:
         seed : int
     ):
 
-        # Create random number generator from seed:
-        # Create a random number generator with the provided seed
         rng = default_rng(seed)
         
         total_onsource_duration_seconds : float = onsource_duration_seconds + (crop_duration_seconds * 2.0)  
@@ -452,12 +410,9 @@ class NoiseObtainer:
             int(duration * sample_rate_hertz) for duration in durations_seconds
         ]
 
-        # Canonicalize the ifos in the noise obtainer.
         canonical_ifos = tuple(sorted(ifo.name for ifo in self.ifos))
 
         if not self.ifo_data_obtainer:
-            # Check to see if obtatainer object has been set up, raise
-            # error if not
             raise ValueError("""
                 No IFO obtainer object present. In order to acquire real 
                 noise please parse a IFOObtainer object to NoiseObtainer
@@ -473,8 +428,6 @@ class NoiseObtainer:
                 group_name=group
             ) 
 
-            # Setup noise_file_path, file path is created from
-            # hash of unique parameters:
             self.ifo_data_obtainer.generate_file_path(
                 sample_rate_hertz,
                 group,
@@ -513,11 +466,12 @@ class NoiseObtainer:
                     interpolated_psd_offsource
                 )
 
-            interpolated_onsource_psds = tf.concat(interpolated_onsource_psds, axis=1)
-            interpolated_offsource_psds = tf.concat(interpolated_offsource_psds, axis=1)     
+            interpolated_onsource_psds = ops.stack(interpolated_onsource_psds, axis=0)
+            interpolated_offsource_psds = ops.stack(interpolated_offsource_psds, axis=0)
             
-            # Calculate number of batches current segment can produce, this
-            # is dependant on the segment duration and the onsource duration:
+            interpolated_onsource_psds = ops.expand_dims(interpolated_onsource_psds, 0)
+            interpolated_offsource_psds = ops.expand_dims(interpolated_offsource_psds, 0)
+            
             num_batches_in_segment : int = \
                 int(
                       self.ifo_data_obtainer.max_segment_duration_seconds
@@ -528,19 +482,22 @@ class NoiseObtainer:
                 )
                         
             for _ in range(num_batches_in_segment):
+                s1 = rng.integers(1000000000)
+                s2 = rng.integers(1000000000)
+                
                 yield _generate_colored_noise(
                         num_examples_per_batch, 
                         len(self.ifos),
                         num_samples_list[0], 
-                        tf.sqrt(interpolated_onsource_psds),
-                        seed=int(rng.integers(1E10))
+                        ops.sqrt(interpolated_onsource_psds),
+                        seed=s1
                     ), _generate_colored_noise(
                         num_examples_per_batch, 
                         len(self.ifos),
                         num_samples_list[1], 
-                        tf.sqrt(interpolated_offsource_psds),
-                        seed=int(rng.integers(1E10))
-                    ), tf.fill([num_examples_per_batch], -1) #segment.start_gps_time)        
+                        ops.sqrt(interpolated_offsource_psds),
+                        seed=s2
+                    ), ops.full((num_examples_per_batch,), -1.0)
                 
 
 class FeatureObtainer(NoiseObtainer):
@@ -549,4 +506,3 @@ class FeatureObtainer(NoiseObtainer):
     ifos : List[gf.IFO] = gf.IFO.L1
     noise_type : NoiseType = NoiseType.REAL
     groups : Union[dict, None] = None
-    

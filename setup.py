@@ -1,3 +1,5 @@
+from setuptools import setup, find_packages
+
 setup(
     name="gravyflow",
     version="1.0.0",
@@ -13,7 +15,7 @@ setup(
         "License :: OSI Approved :: Apache License",
         "Operating System :: Linux",
     ],
-    python_requires='==3.11',
+    python_requires='>=3.11',
     install_requires=[
         "gwdatafind",
         "gwpy",
@@ -27,6 +29,8 @@ setup(
         "tensorflow[and-cuda]",
         "tensorflow-probability",
         "tf-keras",
-        "ripplegw"
+        "ripplegw",
+        "jax[cuda12]",
+        "keras>=3.0"
     ],
 )

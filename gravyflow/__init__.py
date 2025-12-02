@@ -59,7 +59,7 @@ from .src.dataset.features.injection import (
     roll_vector_zero_padding, generate_mask, is_not_inherited,
     batch_injection_parameters, RippleGenerator
 )
-from .src.dataset.dataset import data, Dataset
+from .src.dataset.dataset import data, Dataset, GravyflowDataset
 from .src.utils.plotting import (
     generate_strain_plot, generate_psd_plot, generate_spectrogram, generate_correlation_plot
 )

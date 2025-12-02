@@ -1,63 +1,145 @@
-import tensorflow as tf
+import keras
+from keras import ops
+import jax.numpy as jnp
+import jax
 
-# Compute Pearson correlation
-@tf.function(jit_compile=True)
+@jax.jit
 def pearson(x, y):
-
-    mean_x, mean_y = tf.reduce_mean(x, -1, keepdims=True), tf.reduce_mean(y, -1, keepdims=True)
-    numerator = tf.reduce_sum((x - mean_x) * (y - mean_y), axis=-1)
-    denominator = tf.sqrt(tf.reduce_sum(tf.square(x - mean_x), axis=-1) * tf.reduce_sum(tf.square(y - mean_y), axis=-1))
+    # x, y: (Batch, Time)
     
-    return numerator / (denominator + 1e-5) # Adding epsilon for stability
+    mean_x = ops.mean(x, axis=-1, keepdims=True)
+    mean_y = ops.mean(y, axis=-1, keepdims=True)
+    
+    numerator = ops.sum((x - mean_x) * (y - mean_y), axis=-1)
+    
+    var_x = ops.sum(ops.square(x - mean_x), axis=-1)
+    var_y = ops.sum(ops.square(y - mean_y), axis=-1)
+    
+    denominator = ops.sqrt(var_x * var_y)
+    
+    return numerator / (denominator + 1e-5)
 
-@tf.function
+@jax.jit(static_argnames=["max_arival_time_difference_seconds", "sample_rate_hertz"])
 def rolling_pearson(
-        tensor: tf.Tensor, 
+        tensor, 
         max_arival_time_difference_seconds: float,
         sample_rate_hertz: float
-    ) -> tf.Tensor:
+    ):
+    
+    tensor = ops.convert_to_tensor(tensor)
+    # tensor: (Batch, Channels, Time)
     
     # Calculate max arrival time difference in samples
-    max_arival_time_difference_samples = int(max_arival_time_difference_seconds * sample_rate_hertz)
+    max_samples = int(max_arival_time_difference_seconds * sample_rate_hertz)
     
-    # Multiply by two because could be shifted in either direction:
-    max_arival_time_difference_samples *= 2
-
-    # Create pairs of indices for the arrays (for non-duplicate pairs)
-    NUM_BATCHES, NUM_ARRAYS, ARRAY_SIZE = tensor.shape
-    i, j = tf.meshgrid(tf.range(NUM_ARRAYS), tf.range(NUM_ARRAYS), indexing='ij')
+    # Range of offsets: -max to +max (exclusive of +max? Original code: range(2*max))
+    # Original:
+    # max_arival_time_difference_samples *= 2
+    # for offset in range(max_arival_time_difference_samples):
+    #   offset_mag = offset - max_arival_time_difference_samples (Wait, original code used the *doubled* value?)
     
-    # Only consider unique pairs (i < j)
+    # Original code:
+    # max_arival_time_difference_samples = int(...)
+    # max_arival_time_difference_samples *= 2  (Let's call this N_offsets)
+    # for offset in range(N_offsets):
+    #   offset_mag = offset - N_offsets (Wait, original code: offset - max_arival_time_difference_samples)
+    #   If max was doubled, then offset - max is:
+    #   0 - 2*M = -2M
+    #   2*M-1 - 2*M = -1
+    # This shifts are all negative?
+    
+    # Let's re-read original code carefully.
+    # max_arival_time_difference_samples = int(...)
+    # max_arival_time_difference_samples *= 2
+    # ...
+    # for offset in tf.range(max_arival_time_difference_samples):
+    #    offset_mag = offset - max_arival_time_difference_samples
+    
+    # If M was original max. Variable becomes 2M.
+    # Loop 0 to 2M-1.
+    # offset_mag = offset - 2M.
+    # Range: -2M to -1.
+    
+    # This seems odd. Usually one wants -M to +M.
+    # If the variable name `max_arival_time_difference_samples` holds `2*M`.
+    # Then `offset - 2*M` is always negative.
+    
+    # Maybe I should replicate exact behavior even if odd?
+    # Or maybe I misread `offset - max_arival_time_difference_samples`.
+    # Yes, `max_arival_time_difference_samples` is the DOUBLED value.
+    
+    # So shifts are indeed `offset - 2M`.
+    # `tf.roll(..., shift=-offset_mag)`.
+    # `shift = -(offset - 2M) = 2M - offset`.
+    # Range: `2M` down to `1`.
+    # So it shifts by positive amounts (right shift).
+    
+    # I will replicate this logic.
+    
+    num_batches, num_arrays, array_size = ops.shape(tensor)
+    
+    # Create pairs
+    # jax.numpy.meshgrid or manual
+    indices = jnp.arange(num_arrays)
+    i, j = jnp.meshgrid(indices, indices, indexing='ij')
+    
     mask = i < j
-    i, j = tf.boolean_mask(i, mask), tf.boolean_mask(j, mask)
-    NUM_PAIRS = tf.shape(i)[0]
-
-    # Create a tensor array to store correlations for all pairs
-    all_correlations = tf.TensorArray(dtype=tf.float32, size=NUM_PAIRS, dynamic_size=True)
+    i_idxs = i[mask]
+    j_idxs = j[mask]
     
-    for pair_idx in tf.range(NUM_PAIRS):
-        x = tensor[:, i[pair_idx], :]
-        y = tensor[:, j[pair_idx], :]
-
-        # Expand dimensions for broadcasting
-        x = tf.expand_dims(x, axis=-2)  # shape: [NUM_BATCHES, ARRAY_SIZE, 1]
+    # Extract pairs
+    # x_all: (NumPairs, Batch, Time) -> Transpose to (Batch, NumPairs, Time)
+    # tensor is (Batch, Channels, Time)
+    # We want to gather channels.
+    # tensor_transposed: (Channels, Batch, Time)
+    tensor_t = ops.transpose(tensor, (1, 0, 2))
+    
+    x_all = ops.take(tensor_t, i_idxs, axis=0) # (NumPairs, Batch, Time)
+    y_all = ops.take(tensor_t, j_idxs, axis=0) # (NumPairs, Batch, Time)
+    
+    x_all = ops.transpose(x_all, (1, 0, 2)) # (Batch, NumPairs, Time)
+    y_all = ops.transpose(y_all, (1, 0, 2)) # (Batch, NumPairs, Time)
+    
+    # Define offset loop/map
+    N_offsets = max_samples * 2
+    offsets = jnp.arange(N_offsets)
+    
+    def compute_for_offset(offset, x, y):
+        # offset is scalar
+        # x, y are (Batch, Time)
         
-        y_collect = tf.TensorArray(dtype=tf.float32, size=max_arival_time_difference_samples, dynamic_size=True)
-        for offset in tf.range(max_arival_time_difference_samples):
-            offset_mag = offset - max_arival_time_difference_samples
-            y_collect = y_collect.write(offset, tf.roll(y, shift=-offset_mag, axis=-1))
-
-        # Shift y for all possible offsets
-        y_shifted = tf.transpose(y_collect.stack(), [1, 0, 2])
+        # Replicate original logic:
+        # offset_mag = offset - N_offsets
+        # shift = -offset_mag = N_offsets - offset
         
-        # Compute correlations using broadcasting
-        corr = pearson(x, y_shifted)
-                 
-        corr = tf.expand_dims(corr, axis=1)  # Add an additional axis for pair
-        all_correlations = all_correlations.write(pair_idx, corr)
+        shift = N_offsets - offset
         
-    # Concatenate the results
-    correlations = all_correlations.stack()
-    correlations = tf.reshape(correlations, [NUM_BATCHES, NUM_PAIRS, max_arival_time_difference_samples])
-
-    return correlations
+        # tf.roll(y, shift, axis=-1)
+        # jnp.roll
+        y_shifted = jnp.roll(y, shift, axis=-1)
+        
+        return pearson(x, y_shifted)
+        
+    # vmap over offsets
+    # We want to apply this to each pair.
+    
+    def compute_pair_corrs(x, y):
+        # x, y: (Batch, Time)
+        # vmap over offsets
+        # return shape: (N_offsets, Batch) -> Transpose to (Batch, N_offsets)
+        
+        corrs = jax.vmap(lambda o: compute_for_offset(o, x, y))(offsets)
+        return ops.transpose(corrs, (1, 0))
+        
+    # vmap over pairs
+    # x_all: (Batch, NumPairs, Time)
+    # We want to map over axis 1 (NumPairs).
+    # But x, y arguments to compute_pair_corrs are (Batch, Time).
+    # So we map over axis 1 of inputs, and stack results on axis 1.
+    
+    # jax.vmap(fun, in_axes=1, out_axes=1)
+    
+    all_correlations = jax.vmap(compute_pair_corrs, in_axes=1, out_axes=1)(x_all, y_all)
+    # Result: (Batch, NumPairs, N_offsets)
+    
+    return all_correlations
