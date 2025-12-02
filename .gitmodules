@@ -1,3 +1,6 @@
 [submodule "cuphenom"]
 	path = cuphenom
 	url = https://github.com/mrknorman/cuphenom.git
+[submodule "ripple"]
+	path = ripple
+	url = https://github.com/mrknorman/ripple.git
