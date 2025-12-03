@@ -32,49 +32,10 @@ def rolling_pearson(
     # Calculate max arrival time difference in samples
     max_samples = int(max_arival_time_difference_seconds * sample_rate_hertz)
     
-    # Range of offsets: -max to +max (exclusive of +max? Original code: range(2*max))
-    # Original:
-    # max_arival_time_difference_samples *= 2
-    # for offset in range(max_arival_time_difference_samples):
-    #   offset_mag = offset - max_arival_time_difference_samples (Wait, original code used the *doubled* value?)
-    
-    # Original code:
-    # max_arival_time_difference_samples = int(...)
-    # max_arival_time_difference_samples *= 2  (Let's call this N_offsets)
-    # for offset in range(N_offsets):
-    #   offset_mag = offset - N_offsets (Wait, original code: offset - max_arival_time_difference_samples)
-    #   If max was doubled, then offset - max is:
-    #   0 - 2*M = -2M
-    #   2*M-1 - 2*M = -1
-    # This shifts are all negative?
-    
-    # Let's re-read original code carefully.
-    # max_arival_time_difference_samples = int(...)
-    # max_arival_time_difference_samples *= 2
-    # ...
-    # for offset in tf.range(max_arival_time_difference_samples):
-    #    offset_mag = offset - max_arival_time_difference_samples
-    
-    # If M was original max. Variable becomes 2M.
-    # Loop 0 to 2M-1.
-    # offset_mag = offset - 2M.
-    # Range: -2M to -1.
-    
-    # This seems odd. Usually one wants -M to +M.
-    # If the variable name `max_arival_time_difference_samples` holds `2*M`.
-    # Then `offset - 2*M` is always negative.
-    
-    # Maybe I should replicate exact behavior even if odd?
-    # Or maybe I misread `offset - max_arival_time_difference_samples`.
-    # Yes, `max_arival_time_difference_samples` is the DOUBLED value.
-    
-    # So shifts are indeed `offset - 2M`.
-    # `tf.roll(..., shift=-offset_mag)`.
-    # `shift = -(offset - 2M) = 2M - offset`.
-    # Range: `2M` down to `1`.
-    # So it shifts by positive amounts (right shift).
-    
-    # I will replicate this logic.
+    # The original code uses a doubled max_arrival_time_difference_samples value.
+    # The shift logic is: shift = 2M - offset.
+    # Since offset ranges from 0 to 2M-1, the shift ranges from 2M down to 1.
+    # This results in positive (right) shifts.
     
     num_batches, num_arrays, array_size = ops.shape(tensor)
     
@@ -109,8 +70,7 @@ def rolling_pearson(
         # x, y are (Batch, Time)
         
         # Replicate original logic:
-        # offset_mag = offset - N_offsets
-        # shift = -offset_mag = N_offsets - offset
+        # shift = N_offsets - offset
         
         shift = N_offsets - offset
         

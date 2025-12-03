@@ -94,7 +94,7 @@ def calculate_efficiency_scores(
     num_examples_per_batch = int(num_examples_per_batch)
     num_scaling_steps = int(num_scaling_steps)
     
-    # Calculate number of batches reuanuired given batch size:
+    # Calculate number of batches required given batch size:
     num_examples = num_examples_per_scaling_step*num_scaling_steps
     num_batches = math.ceil(num_examples / num_examples_per_batch)
 
@@ -117,7 +117,7 @@ def calculate_efficiency_scores(
     dataset_args["waveform_generators"][0].injection_chance = 1.0
     dataset_args["waveform_generators"][0].scaling_method.value = scaling_values
     
-    # Initlize generator:
+    # Initialize generator:
     dataset : tf.data.Dataset = gf.Dataset(
         **dataset_args
     ).take(num_batches)
@@ -237,7 +237,7 @@ def calculate_far_scores(
     dataset_args["waveform_generators"] = []
     dataset_args["output_variables"] = []
 
-    # Initlize generator:
+    # Initialize generator:
     dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
         ).take(num_batches)
@@ -268,7 +268,7 @@ def calculate_far_scores(
                 raise Exception(f"Error slicing FAR scores: {e}")
 
         except Exception as e:
-            logging.error("Error calculatin FAR scores because {e}. Retrying.")
+            logging.error("Error calculating FAR scores because {e}. Retrying.")
             far_scores = None
             continue
 
@@ -483,7 +483,7 @@ def calculate_roc(
     dataset_args["waveform_generators"][0].injection_chance = 0.5
     
     mask_history = []
-    # Initlize generators (this is horrendous need to rewrite)
+    # Initialize generators
     dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args,
             mask_history=mask_history
@@ -674,7 +674,7 @@ def calculate_tar_scores(
     ) -> np.ndarray:
     
     """
-    Calculate the True Alarm Rate (FAR) scores for a given model.
+    Calculate the True Alarm Rate (TAR) scores for a given model.
 
     Parameters
     ----------
@@ -714,7 +714,7 @@ def calculate_tar_scores(
     dataset_args["waveform_generators"][0].scaling_method.value = \
         gf.Distribution(value=scaling, type_=gf.DistributionType.CONSTANT)
     
-    # Initlize generator:
+    # Initialize generator:
     dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
         ).take(num_batches)
@@ -743,7 +743,7 @@ def calculate_tar_scores(
             try:
                 tar_scores = tar_scores[:,0]
             except Exception as e:
-                raise Execption(f"Failed to slice Tar Scores because {e}.")
+                raise Exception(f"Failed to slice Tar Scores because {e}.")
 
         except Exception as e:
             logging.error(f"Error calculating TAR score because {e}. Retrying.")
@@ -758,7 +758,7 @@ def calculate_tar_scores(
             gf.WaveformParameters.MASS_2_MSUN
         ]
         
-    # Initlize generator:
+    # Initialize generator:
     dataset : tf.data.Dataset = gf.Dataset(
             **dataset_args
         ).take(num_batches)

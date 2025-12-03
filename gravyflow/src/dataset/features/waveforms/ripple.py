@@ -12,14 +12,9 @@ ripple_src_path = os.path.join(gravyflow_root, "ripple", "src")
 if ripple_src_path not in sys.path:
     sys.path.insert(0, ripple_src_path)
 
-print(f"DEBUG: ripple_src_path: {ripple_src_path}")
-print(f"DEBUG: sys.path[0]: {sys.path[0]}")
-print(f"DEBUG: 'ripplegw' in sys.modules: {'ripplegw' in sys.modules}")
-
 import ripplegw
 # Alias ripplegw to ripple so existing imports work
 sys.modules["ripple"] = ripplegw
-print(f"DEBUG: ripple aliased to: {ripplegw.__file__}")
 
 import jax
 import jax.numpy as jnp
@@ -190,12 +185,9 @@ def generate_ripple_waveform(
     # This prevents the waveform from starting before the buffer and wrapping around.
     f_mins = calc_minimum_frequency(m1_jax, m2_jax, tc_jax)
     
-    # DEBUG: Check f_mins
-    jax.debug.print("DEBUG: f_mins: {}", f_mins)
-    
-    # We need f_l for frequency grid, but ripple generates on custom grid or we pass grid?
+    # We need f_l for frequency grid.
     # ripple gen_func takes `fs`.
-    # We usually define fs based on duration and sample rate.
+    # We define fs based on duration and sample rate.
     
     f_u = sample_rate_hertz / 2.0
     num_samples = int(sample_rate_hertz * duration_seconds)
@@ -206,7 +198,7 @@ def generate_ripple_waveform(
     # Mc, eta calculation
     # ms_to_Mc_eta takes (m1, m2) in solar masses
     # Vectorize it
-    # ms_to_Mc_eta is JAX-jit compatible? Yes, it's in ripple.
+    # ms_to_Mc_eta is JAX-jit compatible.
     
     Mc, eta = jax.vmap(ms_to_Mc_eta)(jnp.stack([m1_jax, m2_jax], axis=1))
     
@@ -279,6 +271,30 @@ def generate_ripple_waveform(
     
     hp_time = hp_time * sample_rate_hertz
     hc_time = hc_time * sample_rate_hertz
+    
+    # Zero out signal after merger + ringdown buffer to prevent wrapping artifacts
+    # tc_jax is time to merger.
+    # We add a generous buffer for ringdown.
+    ringdown_buffer = 0.2 # seconds
+    
+    # Create time array
+    # shape (num_samples,)
+    times = jnp.linspace(0, duration_seconds, num_samples, endpoint=False)
+    # Expand to (num_waveforms, num_samples)
+    times = jnp.expand_dims(times, 0)
+    
+    # tc_jax is (num_waveforms,)
+    # Expand to (num_waveforms, 1)
+    tc_expanded = jnp.expand_dims(tc_jax, 1)
+    
+    # Mask: Keep signal where t < tc + buffer
+    # This assumes the signal is physically zero after ringdown.
+    # Any non-zero value there is likely noise or wrapping from generation.
+    mask_post_merger = times < (tc_expanded + ringdown_buffer)
+    mask_post_merger = mask_post_merger.astype(jnp.float32)
+    
+    hp_time = hp_time * mask_post_merger
+    hc_time = hc_time * mask_post_merger
     
     waveforms = jnp.stack([hp_time, hc_time], axis=1)
     

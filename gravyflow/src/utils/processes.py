@@ -199,7 +199,7 @@ def acquire_heartbeat(
                     if (name is not None) and (timestamp is not None):
                         return timestamp
                     else:
-                        logging.warning(f"Malformed received from {command.name}.")
+                        logging.warning(f"Malformed heartbeat received from {command.name}.")
                         return 0
                 else:
                     return 0
@@ -267,7 +267,7 @@ def monitor_heartbeat(
         try:
             time_since_last_beat = time.time() - last_heartbeat_timestamp
         except:
-            logging.warning("Malformed timestamp crept through somehow...")
+            logging.warning("Malformed timestamp detected.")
             continue
         
         if time_since_last_beat >= missed_heartbeat_threshold:
@@ -480,7 +480,7 @@ class Process:
             ] -= self.memory_assigned
         else:
             logging.warning(
-                "Allocated memory is None when removing process. Concerning?"
+                "Allocated memory is None when removing process."
             )
 
         if self.manager.allocated_memory[
@@ -491,7 +491,7 @@ class Process:
                 self.current_gpu
             ] = 0
             logging.warning(
-                "Allocated memory has fallen below zero. Concerning?"
+                "Allocated memory has fallen below zero."
             )
         
         self.process = None
@@ -764,8 +764,7 @@ class Manager:
                 
                 if process.check_if_failed():
                     logging.warning((
-                        "Failed process found in running jobs "
-                        "for some reason! This is concerning..."
+                        "Failed process found in running jobs."
                     ))
                     
                     if process in self.queued:
@@ -773,8 +772,7 @@ class Manager:
                     continue
                 if process.check_if_completed():
                     logging.warning((
-                        "Completed process found in running jobs "
-                        "for some reason! This is concerning..."
+                        "Completed process found in running jobs."
                     ))
 
                     if process in self.queued:

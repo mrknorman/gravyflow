@@ -397,7 +397,7 @@ def set_random_seeds(
     # Set Numpy random seed:
     np.random.seed(seed)
     
-    # Set core Python.random seed just in case, I don't think its used:
+    # Set core Python.random seed:
     random.seed(10)
     
 def crop_samples(

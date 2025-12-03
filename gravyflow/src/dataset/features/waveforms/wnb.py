@@ -15,21 +15,7 @@ def generate_envelopes(
     # num_samples_array: (N,)
     
     def create_envelope(num_samples):
-        # num_samples is a scalar tensor
-        # jnp.hanning requires static integer size if jit-compiled?
-        # Or we can use dynamic slice/pad.
-        
-        # Since max_num_samples is fixed for the batch, we can generate a large window and slice?
-        # Or generate window of size num_samples?
-        # JAX dynamic shapes are tricky.
-        
-        # Alternative: Generate full window of max_num_samples, but that's not right.
-        # We need a window of length `num_samples`, padded to `max_num_samples`.
-        
-        # If we use jnp.hanning(N), N must be static for JIT.
-        # But num_samples varies per waveform.
-        
-        # We can implement a functional Hann window:
+        # Implement a functional Hann window:
         # w(n) = 0.5 * (1 - cos(2*pi*n / (N-1)))
         
         n = ops.arange(max_num_samples, dtype="float32")
@@ -41,8 +27,8 @@ def generate_envelopes(
         # Avoid division by zero if num_samples=1 (though unlikely for WNB)
         N_minus_1 = ops.maximum(num_samples - 1.0, 1.0)
         
-        # Only compute for valid n, but we can compute for all and mask.
-        # However, for n >= num_samples, we want 0.
+        # Only compute for valid n.
+        # For n >= num_samples, we want 0.
         # For valid n, we want Hann formula.
         
         val = 0.5 * (1.0 - ops.cos(2.0 * np.pi * n / N_minus_1))
@@ -56,8 +42,7 @@ def generate_envelopes(
 
 def adjust_envelopes_shape(filtered_noise, envelopes):
     # Determine the condition: whether envelopes have one extra sample compared to filtered_noise
-    # filtered_noise: (Batch, 2, Time) ? Or (Batch, Time)?
-    # wnb returns (Batch, 2, Time).
+    # filtered_noise: (Batch, 2, Time)
     # envelopes: (Batch, Time) -> expand to (Batch, 1, Time)
     
     env_shape = ops.shape(envelopes)
@@ -111,25 +96,8 @@ def wnb(
     # mask: (num_waveforms, max_num_samples)
     mask = indices[None, :] < num_samples_array[:, None]
     
-    # tf.reverse(mask, axis=[-1]) ? 
-    # Original code: mask = tf.reverse(mask, axis=[-1])
-    # Why reverse? Maybe to align with some padding convention?
-    # Usually sequence mask is [1, 1, ..., 0, 0].
-    # If reversed: [0, 0, ..., 1, 1].
-    # This implies the burst is at the END of the buffer?
-    # Let's check injection.py usage.
-    # WNBGenerator has front/back padding.
-    # But wnb function itself...
-    # "The function first generates Gaussian noise... A frequency mask... An envelope function..."
-    
-    # If I reverse the mask, I keep the END of the noise?
-    # Gaussian noise is random, so start vs end doesn't matter much distribution-wise.
-    # But envelope application matters.
-    # generate_envelopes uses Hann window padded.
-    # tf.pad(hann_win, [[max - num, 0]]) -> Pads at the BEGINNING (left).
-    # So the window is at the END.
-    # So the mask should also be at the END.
-    # Yes, tf.reverse makes [0, 0, 1, 1].
+    # Reverse the mask to align with the end of the buffer.
+    # This matches the envelope generation logic which produces end-aligned windows.
     
     mask = ops.flip(mask, axis=-1)
     mask = ops.cast(mask, "float32")
@@ -139,11 +107,7 @@ def wnb(
     white_noise_burst = gaussian_noise * mask
 
     # Window function:
-    # tf.signal.hann_window(max_num_samples)
-    # This is a single window for the whole buffer?
-    # Original code: window = tf.signal.hann_window(max_num_samples)
-    # windowed_noise = white_noise_burst * window
-    # This applies a global Hann window over the entire max_duration.
+    # Apply a global Hann window over the entire max_duration.
     
     window = jnp.hanning(max_num_samples)
     window = ops.convert_to_tensor(window, dtype="float32")
@@ -192,25 +156,6 @@ def wnb(
     # Envelopes are per-waveform based on duration.
     # And they are padded to match the "end-aligned" convention (pad left).
     envelopes = generate_envelopes(num_samples_array, max_num_samples)
-    
-    # generate_envelopes logic I wrote above:
-    # n < num_samples -> [1, 1, 0, 0] (start aligned)
-    # But original code: tf.pad(hann, [[max-num, 0]]) -> [0, 0, 1, 1] (end aligned).
-    
-    # My generate_envelopes implementation:
-    # n = arange(max)
-    # mask = n < num_samples -> [1, 1, 0, 0]
-    # val = ...
-    # So my implementation produces START aligned envelopes.
-    # I need to reverse/flip them to match END alignment?
-    # Or change the logic to produce end-aligned.
-    
-    # Let's fix generate_envelopes logic to be end-aligned.
-    # We want valid values for indices [max-num, max).
-    # i.e. n >= max_num_samples - num_samples.
-    
-    # Let's rewrite generate_envelopes logic inside wnb or update the function.
-    # I will update the function in the file content below.
     
     # envelopes shape: (Batch, Time)
     envelopes = ops.expand_dims(envelopes, axis=1) # (Batch, 1, Time)
