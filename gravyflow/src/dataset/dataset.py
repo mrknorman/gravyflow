@@ -251,6 +251,13 @@ class GravyflowDataset(keras.utils.PyDataset):
             scaled_injections = None
             whitened_injections = None
 
+        if scaled_injections is not None:
+             scaled_injections = gf.crop_samples(
+                scaled_injections, 
+                self.onsource_duration_seconds, 
+                self.sample_rate_hertz
+            )
+
         whitened_onsource, rolling_pearson_onsource, spectrogram_onsource = self._process_onsource(onsource, offsource)
 
         onsource = self._process_raw_onsource(onsource)
@@ -276,6 +283,13 @@ class GravyflowDataset(keras.utils.PyDataset):
                 overlap_duration_seconds=0.5,
                 filter_duration_seconds=1.0
             )
+            
+            whitened_injections = gf.crop_samples(
+                whitened_injections, 
+                self.onsource_duration_seconds, 
+                self.sample_rate_hertz
+            )
+            
             return gf.replace_nan_and_inf_with_zero(whitened_injections)
         return None
 

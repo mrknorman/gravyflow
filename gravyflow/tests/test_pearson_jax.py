@@ -89,5 +89,4 @@ def test_rolling_pearson():
     # 2 = 4 - offset -> offset = 2.
     # So index 2 should be high.
     
-    print(f"DEBUG: corrs: {corrs}")
     assert corrs[0, 0, 2] > 0.9

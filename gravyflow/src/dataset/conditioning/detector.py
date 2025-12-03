@@ -107,11 +107,8 @@ def get_antenna_pattern_(
     ], axis=-1)
     
     # Calculate dx and dy via tensordot
-    # response: (1, 3, 3) (from Network init, it seems response is 3x3 matrix per detector?)
-    # Wait, in Network.init_parameters:
-    # response is (3, 3).
-    # Here response is expanded to (1, 3, 3).
-    # x is (N, 1, 3).
+    # response is (3, 3) but expanded to (1, 3, 3)
+    # x is (N, 1, 3)
     
     # tf.tensordot(response, x, axes=[[2], [2]])
     # response: (1, 3, 3)
@@ -230,7 +227,55 @@ def shift_waveform(
     # jnp.fft.irfft
     shitfted_strain = jnp.fft.irfft(phase_factor * strain_fft)
     
-    return ops.real(shitfted_strain)
+    # Masking to prevent wrapping
+    # shift_waveform expects time_shift_seconds to be (Batch, D, 1) here
+    # time_shift_seconds was expanded in line 216.
+    
+    shift_samples = time_shift_seconds * sample_rate_hertz # (Batch, D, 1)
+    
+    num_samples = strain.shape[-1]
+    indices = ops.arange(num_samples)
+    # Expand indices to (1, 1, Time)
+    indices = ops.expand_dims(ops.expand_dims(indices, 0), 0)
+    
+    # Mask logic: Keep if (indices >= shift) AND (indices < N + shift)
+    # Use ceil/floor to be conservative and avoid fractional boundary artifacts
+    lower_bound = ops.ceil(shift_samples)
+    upper_bound = ops.floor(num_samples + shift_samples)
+    
+    # Create a soft mask (taper) to avoid harsh cutoffs
+    # We want a transition from 0 to 1 at lower_bound and 1 to 0 at upper_bound.
+    # Taper width in samples
+    taper_width = 16.0 
+    
+    # Sigmoid-like or linear taper? Sine-squared is standard.
+    # We can define a continuous mask function based on indices.
+    
+    # distance from lower bound (positive = inside)
+    dist_lower = indices - lower_bound
+    # distance from upper bound (positive = inside)
+    dist_upper = upper_bound - indices
+    
+    # We want min(dist_lower, dist_upper) to determine the taper
+    # If dist < 0: 0
+    # If dist > width: 1
+    # If 0 < dist < width: taper
+    
+    min_dist = ops.minimum(dist_lower, dist_upper)
+    
+    # Clamp to [0, width]
+    clamped_dist = ops.clip(min_dist, 0.0, taper_width)
+    
+    # Normalize to [0, 1]
+    x = clamped_dist / taper_width
+    
+    # Sine-squared taper: sin^2(pi/2 * x)
+    taper = ops.sin(3.14159 / 2.0 * x) ** 2
+    
+    mask = taper
+    mask = ops.cast(mask, "float32")
+    
+    return ops.real(shitfted_strain) * mask
 
 @jax.jit(static_argnames=["sample_rate_hertz"])
 def project_wave(
@@ -259,11 +304,6 @@ def project_wave(
     # We need to handle seed carefully. 
     # generate_direction_vectors expects a tuple or something usable as PRNGKey.
     # seed_tensor is a tensor.
-    # We can convert to numpy/python int for PRNGKey if eager.
-    # If compiled, we need jax.random.split.
-    
-    # Assuming eager execution for now or JAX handling.
-    # seed_tensor[0] might be a tracer.
     
     random_right_ascension, random_declination = generate_direction_vectors(
         num_injections, 

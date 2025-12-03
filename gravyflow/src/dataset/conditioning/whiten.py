@@ -102,9 +102,6 @@ def fir_from_transfer(
     transfer = truncate_transfer(transfer, ncorner=ncorner)
     
     # irfft
-    # transfer is real? tf.cast(transfer, dtype=tf.complex64) implies it might be real but treated as complex spectrum?
-    # Usually transfer function is magnitude?
-    # If it's magnitude, irfft assumes zero phase?
     # tf.signal.irfft expects complex input.
     # If transfer is real, casting to complex makes imaginary part 0.
     

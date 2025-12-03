@@ -793,7 +793,7 @@ class IFODataObtainer:
                 rng.shuffle(valid_segments)
 
             case SegmentOrder.SHORTEST_FIRST:
-                # Sort by shortest first (usefull for debugging).
+                # Sort by shortest first (useful for debugging).
                 sort_by_duration = lambda segments: segments[
                     np.argsort(segments[0][:, 1] - segments[0][:, 0])
                 ]

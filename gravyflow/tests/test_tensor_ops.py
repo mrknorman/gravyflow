@@ -4,7 +4,6 @@ os.environ["KERAS_BACKEND"] = "jax"
 import pytest
 import numpy as np
 import keras
-print(f"DEBUG: Keras backend: {keras.backend.backend()}")
 from keras import ops
 from gravyflow.src.utils import tensor as gf_tensor
 
