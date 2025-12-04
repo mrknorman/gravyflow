@@ -93,18 +93,27 @@ def wnb(
     )
     
     # Create time mask for valid duration:
-    # tf.sequence_mask(lengths, maxlen)
-    # JAX equivalent:
+    # We want to center the burst in the window.
     indices = ops.arange(max_num_samples)
     # indices: (max_num_samples,)
     # num_samples_array: (num_waveforms,)
-    # mask: (num_waveforms, max_num_samples)
-    mask = indices[None, :] < num_samples_array[:, None]
     
-    # Reverse the mask to align with the end of the buffer.
-    # This matches the envelope generation logic which produces end-aligned windows.
+    # Calculate start index for centering
+    # (max - num) // 2
+    start_indices = (max_num_samples - num_samples_array) // 2
     
-    mask = ops.flip(mask, axis=-1)
+    # Expand for broadcasting
+    # indices: (1, max_num_samples)
+    # start_indices: (num_waveforms, 1)
+    # num_samples_array: (num_waveforms, 1)
+    
+    indices_expanded = indices[None, :]
+    start_indices_expanded = start_indices[:, None]
+    num_samples_expanded = num_samples_array[:, None]
+    
+    # Mask: start <= index < start + num
+    mask = (indices_expanded >= start_indices_expanded) & (indices_expanded < (start_indices_expanded + num_samples_expanded))
+    
     mask = ops.cast(mask, "float32")
     mask = ops.expand_dims(mask, axis=1) # (Batch, 1, Time)
     
@@ -170,21 +179,24 @@ def wnb(
 
     return filtered_noise
 
-# Redefine generate_envelopes to be end-aligned
 def generate_envelopes(
     num_samples_array, 
     max_num_samples
     ):
+    """
+    Generate envelopes using Hann windows, centered to match the mask in wnb().
+    """
     
     def create_envelope(num_samples):
         n = ops.arange(max_num_samples, dtype="float32")
         
-        # End aligned: valid when n >= max - num
-        start_idx = max_num_samples - num_samples
-        mask = n >= start_idx
+        # Centered alignment
+        start_idx = (max_num_samples - num_samples) // 2
         
-        # We want the Hann window to be computed over 0..num-1, then mapped to start..max-1
-        # effective_n = n - start_idx
+        # Mask: start <= n < start + num
+        mask = (n >= start_idx) & (n < (start_idx + num_samples))
+        
+        # Effective n for Hann window calculation (0 to num-1)
         effective_n = n - start_idx
         
         N_minus_1 = ops.maximum(num_samples - 1.0, 1.0)

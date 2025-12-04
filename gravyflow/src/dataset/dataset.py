@@ -234,7 +234,9 @@ class GravyflowDataset(keras.utils.PyDataset):
                     injections,
                     mask,
                     onsource,
-                    parameters_to_return=self.variables_to_return
+                    offsource,
+                    parameters_to_return=self.variables_to_return,
+                    onsource_duration_seconds=self.onsource_duration_seconds
                 )
             except Exception as e:
                 logging.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")

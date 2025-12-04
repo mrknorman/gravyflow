@@ -61,7 +61,8 @@ class ScalingMethod:
         injections, 
         onsource,
         scaling_parameters,
-        sample_rate_hertz : float
+        sample_rate_hertz : float,
+        onsource_duration_seconds: float = None
         ):
         
         scaled_injections = None
@@ -76,7 +77,8 @@ class ScalingMethod:
                     scaling_parameters,
                     sample_rate_hertz,
                     fft_duration_seconds=1.0,
-                    overlap_duration_seconds=0.5
+                    overlap_duration_seconds=0.5,
+                    onsource_duration_seconds=onsource_duration_seconds
                 )
 
             case ScalingTypes.HRSS:
@@ -1109,7 +1111,9 @@ class InjectionGenerator:
         injections,
         mask,
         onsource,
-        parameters_to_return
+        offsource,
+        parameters_to_return,
+        onsource_duration_seconds: float = None
     ):
         scaled_injections_list = []
         scaling_params_list = []
@@ -1130,12 +1134,16 @@ class InjectionGenerator:
             
             sample_rate = self.sample_rate_hertz
             
+            # Use offsource for scaling if available, otherwise fallback to onsource
+            scaling_background = offsource if offsource is not None else onsource
+            
             if scaling_method.type_.value.ordinality == ScalingOrdinality.BEFORE_PROJECTION:
                 scaled_raw = scaling_method.scale(
                     raw_waveforms,
-                    onsource, 
+                    scaling_background, 
                     target_val,
-                    sample_rate
+                    sample_rate,
+                    onsource_duration_seconds=onsource_duration_seconds
                 )
                 
                 projected = network.project_wave(
@@ -1151,9 +1159,10 @@ class InjectionGenerator:
                 
                 scaled_raw = scaling_method.scale(
                     projected,
-                    onsource,
+                    scaling_background,
                     target_val,
-                    sample_rate
+                    sample_rate,
+                    onsource_duration_seconds=onsource_duration_seconds
                 )
                 projected = scaled_raw
             
