@@ -46,10 +46,11 @@ def calc_minimum_frequency(
     """
     Calculates minimum frequency based on inputted masses and duration.
     """
-    # Ensure inputs are floats or arrays
-    # If they are tensors, we might need to cast or use ops
-    
-    # We can use ops for compatibility
+    # Ensure inputs are tensors
+    mass_1_msun = ops.convert_to_tensor(mass_1_msun)
+    mass_2_msun = ops.convert_to_tensor(mass_2_msun)
+    duration_seconds = ops.convert_to_tensor(duration_seconds)
+
     m1_kg = mass_1_msun * M_SOLAR_SI
     m2_kg = mass_2_msun * M_SOLAR_SI
     
@@ -59,10 +60,14 @@ def calc_minimum_frequency(
     term2 = 1.0 / (8.0 * np.pi)
     term3 = (G_SI * mc_kg / (C_SI**3))**(-5.0/8.0)
     
+    # Ensure term2 is compatible dtype (float32 if inputs are float32)
+    dtype = mass_1_msun.dtype
+    if dtype == "float32":
+        term2 = ops.cast(term2, "float32")
+    
     f_min = term1 * term2 * term3
     
     # Clamp to be at least 1.0 Hz
-    # Use ops.maximum for tensor compatibility
     f_min = ops.maximum(f_min, 1.0)
         
     return f_min
@@ -75,6 +80,10 @@ def calc_duration_from_f_min(
     """
     Calculates duration based on inputted masses and minimum frequency.
     """
+    mass_1_msun = ops.convert_to_tensor(mass_1_msun)
+    mass_2_msun = ops.convert_to_tensor(mass_2_msun)
+    f_min = ops.convert_to_tensor(f_min)
+
     m1_kg = mass_1_msun * M_SOLAR_SI
     m2_kg = mass_2_msun * M_SOLAR_SI
     
@@ -83,10 +92,16 @@ def calc_duration_from_f_min(
     term2 = 1.0 / (8.0 * np.pi)
     term3 = (G_SI * mc_kg / (C_SI**3))**(-5.0/8.0)
     
-    # f_min = (duration / 5.0)^(-3/8) * term2 * term3
-    # (f_min / (term2 * term3)) = (duration / 5.0)^(-3/8)
-    # (f_min / (term2 * term3))^(-8/3) = duration / 5.0
+    # Ensure term2 and term3 are compatible dtype
+    dtype = mass_1_msun.dtype
+    if dtype == "float32":
+        term2 = ops.cast(term2, "float32")
+        term3 = ops.cast(term3, "float32")
     
+    # Also ensure f_min matches
+    if f_min.dtype != dtype:
+        f_min = ops.cast(f_min, dtype)
+
     duration = 5.0 * (f_min / (term2 * term3))**(-8.0/3.0)
     
     return duration
@@ -100,7 +115,7 @@ APPROXIMANTS = {
 }
 
 @jax.jit(static_argnames=["num_waveforms", "sample_rate_hertz", "duration_seconds", "approximant"])
-def generate_ripple_waveform(
+def _generate_ripple_waveform_jit(
     num_waveforms: int = 1,
     sample_rate_hertz: float = 4096.0,
     duration_seconds: float = 2.0,
@@ -120,6 +135,34 @@ def generate_ripple_waveform(
     f_ref: float = 20.0,
     coalescence_time: float = None
 ):
+    """
+    JIT-compiled core of generate_ripple_waveform.
+    """
+    # ... (rest of the function body is unchanged, just indented? No, replace_file_content replaces the block)
+    # Wait, I need to provide the body if I replace the definition.
+    # But the body is long.
+    # I can just rename the decorator and function name, then add the wrapper below.
+    # But the wrapper needs to call the JIT function.
+    
+    # Let's try to rename the function in place, and add the wrapper.
+    # But I can't easily insert the wrapper *after* the function without reading the whole file or guessing line numbers.
+    # Actually, I can rename the function definition line.
+    # And then add the wrapper at the end of the file?
+    # Or rename it, and add the wrapper *before* it? No, wrapper calls it.
+    
+    # I'll rename the function to `_generate_ripple_waveform_jit`.
+    # And then I'll append the wrapper `generate_ripple_waveform` at the end of the file.
+    
+    pass
+
+# Actually, I'll use multi_replace to do it cleanly.
+# 1. Rename the function definition.
+# 2. Add the wrapper at the end of the file.
+
+# Wait, `replace_file_content` replaces a block.
+# I will replace lines 102-122 with the renamed function definition.
+# And I will append the wrapper at the end of the file.
+
     """
     Generates time-domain waveforms using gwripple.
     Returns array of shape (num_waveforms, 2, num_samples).
@@ -300,3 +343,67 @@ def generate_ripple_waveform(
     
     # Return JAX array (which Keras 3 can handle as Tensor)
     return waveforms
+
+def generate_ripple_waveform(
+    num_waveforms: int = 1,
+    sample_rate_hertz: float = 4096.0,
+    duration_seconds: float = 2.0,
+    mass_1_msun = 30.0,
+    mass_2_msun = 30.0,
+    inclination_radians = 0.0,
+    distance_mpc = 1000.0,
+    reference_orbital_phase_in = 0.0,
+    ascending_node_longitude = 0.0,
+    eccentricity = 0.0,
+    mean_periastron_anomaly = 0.0,
+    spin_1_in = [0.0, 0.0, 0.0],
+    spin_2_in = [0.0, 0.0, 0.0],
+    lambda_1 = 0.0,
+    lambda_2 = 0.0,
+    approximant: str = "IMRPhenomD",
+    f_ref: float = 20.0,
+    coalescence_time: float = None
+):
+    """
+    Wrapper for _generate_ripple_waveform_jit that ensures inputs are JAX-compatible.
+    """
+    # Convert inputs to numpy/jax arrays if they are TF tensors or other types
+    def convert(val):
+        if hasattr(val, "numpy"):
+            return val.numpy()
+        return val
+
+    mass_1_msun = convert(mass_1_msun)
+    mass_2_msun = convert(mass_2_msun)
+    inclination_radians = convert(inclination_radians)
+    distance_mpc = convert(distance_mpc)
+    reference_orbital_phase_in = convert(reference_orbital_phase_in)
+    ascending_node_longitude = convert(ascending_node_longitude)
+    eccentricity = convert(eccentricity)
+    mean_periastron_anomaly = convert(mean_periastron_anomaly)
+    spin_1_in = convert(spin_1_in)
+    spin_2_in = convert(spin_2_in)
+    lambda_1 = convert(lambda_1)
+    lambda_2 = convert(lambda_2)
+    coalescence_time = convert(coalescence_time)
+
+    return _generate_ripple_waveform_jit(
+        num_waveforms=num_waveforms,
+        sample_rate_hertz=sample_rate_hertz,
+        duration_seconds=duration_seconds,
+        mass_1_msun=mass_1_msun,
+        mass_2_msun=mass_2_msun,
+        inclination_radians=inclination_radians,
+        distance_mpc=distance_mpc,
+        reference_orbital_phase_in=reference_orbital_phase_in,
+        ascending_node_longitude=ascending_node_longitude,
+        eccentricity=eccentricity,
+        mean_periastron_anomaly=mean_periastron_anomaly,
+        spin_1_in=spin_1_in,
+        spin_2_in=spin_2_in,
+        lambda_1=lambda_1,
+        lambda_2=lambda_2,
+        approximant=approximant,
+        f_ref=f_ref,
+        coalescence_time=coalescence_time
+    )

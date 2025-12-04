@@ -12,6 +12,7 @@ from bokeh.models import Div
 from bokeh.layouts import column
 
 import gravyflow as gf
+from keras import ops
 
 def create_info_panel(params: dict, height = 200) -> Div:
     style = """

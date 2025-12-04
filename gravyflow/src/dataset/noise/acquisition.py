@@ -175,7 +175,7 @@ def _random_subsection(
     )
 
     # Calculate the start times for each subsection.
-    start_times = ops.cast(random_starts, "float64") * time_interval_seconds
+    start_times = ops.cast(random_starts, "float64") * ops.cast(time_interval_seconds, "float64")
 
     start_times += start_gps_times
 
@@ -642,7 +642,7 @@ class IFODataObtainer:
         less than the specified minimum duration.
 
         Parameters:
-        segments (np.ndarray): Input array of shape [X, N, 2].
+        segments (np.ndarray): Input array of shape [N, X, 2].
         minimum_duration_seconds (float): Minimum allowed duration.
 
         Returns:
@@ -795,7 +795,7 @@ class IFODataObtainer:
             case SegmentOrder.SHORTEST_FIRST:
                 # Sort by shortest first (useful for debugging).
                 sort_by_duration = lambda segments: segments[
-                    np.argsort(segments[0][:, 1] - segments[0][:, 0])
+                    np.argsort(segments[:, 0, 1] - segments[:, 0, 0])
                 ]
                 valid_segments = sort_by_duration(valid_segments)
             case SegmentOrder.CHRONOLOGICAL:

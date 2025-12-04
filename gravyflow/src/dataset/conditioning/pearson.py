@@ -19,10 +19,10 @@ def pearson(x, y):
     
     return numerator / (denominator + 1e-5)
 
-@jax.jit(static_argnames=["max_arival_time_difference_seconds", "sample_rate_hertz"])
+@jax.jit(static_argnames=["max_arrival_time_difference_seconds", "sample_rate_hertz"])
 def rolling_pearson(
         tensor, 
-        max_arival_time_difference_seconds: float,
+        max_arrival_time_difference_seconds: float,
         sample_rate_hertz: float
     ):
     
@@ -30,7 +30,7 @@ def rolling_pearson(
     # tensor: (Batch, Channels, Time)
     
     # Calculate max arrival time difference in samples
-    max_samples = int(max_arival_time_difference_seconds * sample_rate_hertz)
+    max_samples = int(max_arrival_time_difference_seconds * sample_rate_hertz)
     
     # The original code uses a doubled max_arrival_time_difference_samples value.
     # The shift logic is: shift = 2M - offset.
@@ -40,13 +40,8 @@ def rolling_pearson(
     num_batches, num_arrays, array_size = ops.shape(tensor)
     
     # Create pairs
-    # jax.numpy.meshgrid or manual
-    indices = jnp.arange(num_arrays)
-    i, j = jnp.meshgrid(indices, indices, indexing='ij')
-    
-    mask = i < j
-    i_idxs = i[mask]
-    j_idxs = j[mask]
+    # Use triu_indices for upper triangle (k=1 excludes diagonal)
+    i_idxs, j_idxs = jnp.triu_indices(num_arrays, k=1)
     
     # Extract pairs
     # x_all: (NumPairs, Batch, Time) -> Transpose to (Batch, NumPairs, Time)
@@ -72,7 +67,7 @@ def rolling_pearson(
         # Replicate original logic:
         # shift = N_offsets - offset
         
-        shift = N_offsets - offset
+        shift = max_samples - offset
         
         # tf.roll(y, shift, axis=-1)
         # jnp.roll

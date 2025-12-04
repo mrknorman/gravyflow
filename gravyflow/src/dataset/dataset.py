@@ -10,6 +10,11 @@ import numpy as np
 import keras
 from keras import ops
 import gravyflow as gf
+from gravyflow.src.dataset.conditioning.whiten import whiten
+from gravyflow.src.utils.tensor import crop_samples, replace_nan_and_inf_with_zero, set_random_seeds
+from gravyflow.src.dataset.config import Defaults
+from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
+from gravyflow.src.dataset.conditioning.conditioning import spectrogram
 
 def validate_noise_settings(
         noise_obtainer: gf.NoiseObtainer, 
@@ -247,16 +252,13 @@ class GravyflowDataset(keras.utils.PyDataset):
                     parameters[key] = value
 
             whitened_injections = self._process_whitened_injections(scaled_injections, offsource)
+            injections = self._process_injections(scaled_injections)
         else:
             scaled_injections = None
             whitened_injections = None
+            injections = None
 
-        if scaled_injections is not None:
-             scaled_injections = gf.crop_samples(
-                scaled_injections, 
-                self.onsource_duration_seconds, 
-                self.sample_rate_hertz
-            )
+
 
         whitened_onsource, rolling_pearson_onsource, spectrogram_onsource = self._process_onsource(onsource, offsource)
 
@@ -266,7 +268,7 @@ class GravyflowDataset(keras.utils.PyDataset):
         mask = self._process_mask(mask)
 
         input_dict, output_dict = self._create_output_dictionaries(
-            onsource, whitened_onsource, offsource, gps_times, scaled_injections,
+            onsource, whitened_onsource, offsource, gps_times, injections,
             whitened_injections, mask, rolling_pearson_onsource, spectrogram_onsource, parameters
         )
 
@@ -275,7 +277,7 @@ class GravyflowDataset(keras.utils.PyDataset):
     def _process_whitened_injections(self, scaled_injections, offsource):
         """Process whitened injections if required."""
         if gf.ReturnVariables.WHITENED_INJECTIONS in self.variables_to_return:
-            whitened_injections = gf.whiten(
+            whitened_injections = whiten(
                 scaled_injections, 
                 offsource, 
                 self.sample_rate_hertz, 
@@ -293,13 +295,25 @@ class GravyflowDataset(keras.utils.PyDataset):
             return gf.replace_nan_and_inf_with_zero(whitened_injections)
         return None
 
+    def _process_injections(self, scaled_injections):
+        """Process raw injections if required."""
+        if gf.ReturnVariables.INJECTIONS in self.variables_to_return:
+            # Crop raw injections to match onsource duration
+            injections = gf.crop_samples(
+                scaled_injections, 
+                self.onsource_duration_seconds, 
+                self.sample_rate_hertz
+            )
+            return gf.replace_nan_and_inf_with_zero(injections)
+        return None
+
     def _process_onsource(self, onsource, offsource):
         """Process onsource data, including whitening, rolling Pearson, and spectrogram generation."""
         if (gf.ReturnVariables.WHITENED_ONSOURCE in self.variables_to_return) or \
            (gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in self.variables_to_return) or \
            (gf.ReturnVariables.SPECTROGRAM_ONSOURCE in self.variables_to_return):
 
-            whitened_onsource = gf.whiten(
+            whitened_onsource = whiten(
                 onsource, 
                 offsource, 
                 self.sample_rate_hertz, 

@@ -396,8 +396,8 @@ def rotation_matrix_z(angle):
     ones = ops.ones_like(c)
     zeros = ops.zeros_like(c)
 
-    row1 = ops.stack([c, -s, zeros], axis=-1)
-    row2 = ops.stack([s, c, zeros], axis=-1)
+    row1 = ops.stack([c, s, zeros], axis=-1)
+    row2 = ops.stack([-s, c, zeros], axis=-1)
     row3 = ops.stack([zeros, zeros, ones], axis=-1)
 
     return ops.stack([row1, row2, row3], axis=-2)
