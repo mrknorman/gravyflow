@@ -1,7 +1,10 @@
 # pyproject.toml
 [tool.pytest.ini_options]
+env = [
+    "KERAS_BACKEND=jax",
+]
+
 filterwarnings = [
-    "ignore::DeprecationWarning:tensorflow_probability.*",
     "ignore::DeprecationWarning:scitokens.*",
     "ignore::DeprecationWarning:pkg_resources.*",
     "ignore:distutils Version classes are deprecated. Use packaging.version instead.:DeprecationWarning",

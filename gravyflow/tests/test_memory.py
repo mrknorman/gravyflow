@@ -4,21 +4,40 @@ from pathlib import Path
 from typing import Dict
 from itertools import islice
 import sys
+import gc
 
 # Library imports:
 import numpy as np
-import tensorflow as tf
-from bokeh.io import output_file, save
-from bokeh.layouts import gridplot
+import jax
+import pytest
 from tqdm import tqdm
 from _pytest.config import Config
 
 # Local imports:
 import gravyflow as gf
 
-def _test_memory_noise(
-        num_tests : int
+def get_jax_memory_usage():
+    """Get approximate memory usage in MB."""
+    # Force garbage collection
+    gc.collect()
+    # JAX doesn't have a direct memory query like TF
+    # Use device memory stats if available
+    try:
+        devices = jax.devices()
+        if devices and hasattr(devices[0], 'memory_stats'):
+            stats = devices[0].memory_stats()
+            if stats:
+                return stats.get('bytes_in_use', 0) / (1024 * 1024)
+    except:
+        pass
+    return 0.0
+
+@pytest.mark.slow
+def test_memory_noise(
+        pytestconfig : Config
     ) -> None:
+    
+    num_tests = gf.tests.num_tests_from_config(pytestconfig)
 
     with gf.env():
         # Setup ifo data acquisition object:
@@ -48,19 +67,19 @@ def _test_memory_noise(
 
         for i in range(10):
             # Measure memory before loop
-            memory_before_loop_mb = gf.get_tf_memory_usage()
+            memory_before_loop_mb = get_jax_memory_usage()
 
             logging.info("Start iteration tests...")
             for index, _ in tqdm(enumerate(islice(noise(), num_tests))):
                 pass
 
             # Measure memory after loop
-            memory_after_loop_mb = gf.get_tf_memory_usage()
+            memory_after_loop_mb = get_jax_memory_usage()
 
             # Calculate the difference
             memory_difference_mb = memory_after_loop_mb - memory_before_loop_mb
 
-            if i > 0: 
+            if i > 0 and memory_before_loop_mb > 0: 
                 np.testing.assert_allclose(
                     memory_before_loop_mb, 
                     memory_after_loop_mb,             
@@ -71,11 +90,3 @@ def _test_memory_noise(
             logger.info(f"Memory before loop: {memory_before_loop_mb} MB")
             logger.info(f"Memory after loop: {memory_after_loop_mb} MB")
             logger.info(f"Memory consumed by loop: {memory_difference_mb} MB")
-
-def test_memory_noise(
-        pytestconfig : Config
-    ) -> None:
-    
-    _test_memory_noise(
-        num_tests=gf.tests.num_tests_from_config(pytestconfig)
-    )

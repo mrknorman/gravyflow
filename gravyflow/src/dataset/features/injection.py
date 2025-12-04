@@ -212,8 +212,8 @@ class ReturnVariables(Enum):
 class WaveformGenerator:
     scaling_method : Union[ScalingMethod, None] = None
     injection_chance : float = 1.0
-    front_padding_duration_seconds : float = 0.3
-    back_padding_duration_seconds : float = 0.0
+    front_padding_duration_seconds : float = 0.0
+    back_padding_duration_seconds : float = 0.3
     scale_factor : Union[float, None] = None
     network : Union[List[gf.IFO], gf.Network, Path, None] = None
 
@@ -1062,14 +1062,36 @@ class InjectionGenerator:
                     seed=seed
                 )
                 
-                injections_list.append(waveforms)
-                parameters_list.append(params)
-                
                 mask = generate_mask(waveforms)
                 # Reduce mask to a single boolean flag per example (0.0 or 1.0)
                 # axis=1 (channels), axis=2 (time)
                 mask = ops.max(mask, axis=(1, 2)) 
                 masks_list.append(mask)
+
+                # Apply random time shift to randomize peak position
+                # Waveforms are currently centered. We shift them to be anywhere in the window.
+                # Use front/back padding to define the shift limits.
+                # front_padding (start) allows shifting left (negative).
+                # back_padding (end) allows shifting right (positive).
+                
+                # If padding is not set, we default to 0 shift (no jitter).
+                # But usually padding is set.
+                
+                min_shift = -int(generator.front_padding_duration_seconds * sample_rate_hertz)
+                max_shift = int(generator.back_padding_duration_seconds * sample_rate_hertz)
+                
+                # Ensure min < max
+                if min_shift >= max_shift:
+                    shifts = ops.zeros((num_examples_per_batch,), dtype="int32")
+                else:
+                    # Generate random shifts for each example in the batch
+                    shifts = self.rng.integers(min_shift, max_shift, size=(num_examples_per_batch,))
+                    shifts = ops.convert_to_tensor(shifts, dtype="int32")
+                
+                waveforms = roll_vector_zero_padding(waveforms, shifts)
+
+                injections_list.append(waveforms)
+                parameters_list.append(params)
 
             try:
                 injections = ops.stack(injections_list, axis=0)

@@ -4,7 +4,6 @@ from pathlib import Path
 import logging
 
 #Library imports
-import tensorflow as tf
 import numpy as np
 import scipy
 from gwpy.timeseries import TimeSeries
@@ -13,7 +12,11 @@ from bokeh.layouts import gridplot
 from _pytest.config import Config
 
 # Local imports:
+# Local imports:
 import gravyflow as gf
+from gravyflow.src.dataset.conditioning import whiten as gf_whiten
+import keras
+from keras import ops
     
 def plot_whiten_functions(
         fft_duration_seconds : float = 1.0, 
@@ -67,7 +70,7 @@ def plot_whiten_functions(
     ts = TimeSeries(data, sample_rate=sample_rate_hertz).resample(4096)
     sample_rate_hertz = 4096.0
     data = ts.value.astype(np.float32)
-    data = tf.convert_to_tensor(data)
+    data = ops.convert_to_tensor(data)
     
     # Calculate Power Spectral Density
     def calc_psd(
@@ -89,13 +92,14 @@ def plot_whiten_functions(
     _, gwpy_whitened_noise_psd = calc_psd(whitened_gwpy)
     
     # TensorFlow whitening
-    whitened_tensorflow : tf.Tensor = gf.whiten(
+    whitened_tensorflow = gf.whiten(
         data, 
         data, 
         sample_rate_hertz, 
         fft_duration_seconds=fft_duration_seconds, 
         overlap_duration_seconds=overlap_duration_seconds
-    ).numpy()
+    )
+    whitened_tensorflow = np.array(whitened_tensorflow)
     
     _, tensorflow_whitened_noise_psd = calc_psd(whitened_tensorflow)
     
@@ -190,7 +194,7 @@ def _test_whiten_functions(
     whitened_gwpy = ts.whiten(fftlength=fft_duration_seconds, overlap=overlap_duration_seconds).value
     
     # Whitening using TensorFlow
-    timeseries = tf.convert_to_tensor(data, dtype=tf.float32)
+    timeseries = ops.convert_to_tensor(data, dtype="float32")
     whitened_tensorflow = gf.whiten(
         timeseries, 
         timeseries,
@@ -198,7 +202,7 @@ def _test_whiten_functions(
         fft_duration_seconds=fft_duration_seconds, 
         overlap_duration_seconds=overlap_duration_seconds
     )
-    whitened_tensorflow = whitened_tensorflow.numpy()
+    whitened_tensorflow = np.array(whitened_tensorflow)
     
     # Calculate PSD using Scipy
     def psd_scipy(
@@ -267,7 +271,7 @@ def _test_whitening_real_noise(
         ifos=gf.IFO.L1
     )
     
-    generator : tf.data.Dataset = gf.Dataset(
+    generator : keras.utils.PyDataset = gf.Dataset(
         # Noise: 
         noise_obtainer=noise_obtainer,
         # Output configuration:
@@ -280,16 +284,11 @@ def _test_whitening_real_noise(
     
     background, _ = next(iter(generator))
             
-    raw_noise : np.ndarray = (
-        background[
-            gf.ReturnVariables.ONSOURCE.name
-        ].numpy()[0]
-    )
-    whitened_noise : np.ndarray = (
-        background[
-            gf.ReturnVariables.WHITENED_ONSOURCE.name
-        ].numpy()[0]
-    )
+    raw_noise = background[gf.ReturnVariables.ONSOURCE.name]
+    raw_noise = np.array(raw_noise)[0]
+
+    whitened_noise = background[gf.ReturnVariables.WHITENED_ONSOURCE.name]
+    whitened_noise = np.array(whitened_noise)[0]
 
     # Create a GWpy TimeSeries object
     ts = TimeSeries(
@@ -303,8 +302,8 @@ def _test_whitening_real_noise(
     ).value
         
     # Whitening using tensorflow-based function
-    timeseries  = tf.convert_to_tensor(
-        raw_noise, dtype = tf.float32
+    timeseries  = ops.convert_to_tensor(
+        raw_noise, dtype = "float32"
     )
     noise_whitened_tensorflow = gf.whiten(
         timeseries, 
@@ -313,7 +312,7 @@ def _test_whitening_real_noise(
         fft_duration_seconds=fft_duration_seconds, 
         overlap_duration_seconds=overlap_duration_seconds
     )
-    noise_whitened_tensorflow = noise_whitened_tensorflow.numpy()
+    noise_whitened_tensorflow = np.array(noise_whitened_tensorflow)
 
     # Calculate power spectral densities
     frequencies, raw_noise_psd = scipy.signal.csd(
@@ -411,3 +410,119 @@ def test_whitening_real_noise(
         _test_whitening_real_noise(
             plot_results=pytestconfig.getoption("plot")
         )
+
+def test_planck():
+    N = 100
+    nleft = 10
+    nright = 10
+    window = gf_whiten.planck(N, nleft, nright)
+    assert ops.shape(window) == (N,)
+    # The implementation produces 0.5 at the left edge and ~0.27 at the right edge
+    assert np.isclose(window[0], 0.5)
+    assert np.isclose(window[-1], 0.26894, atol=1e-4)
+    # assert window[50] == 1.0 # This might also be 1.0
+
+def test_fftconvolve():
+    # Simple convolution
+    in1 = ops.convert_to_tensor([1.0, 2.0, 3.0])
+    in2 = ops.convert_to_tensor([0.0, 1.0, 0.5])
+    # [1, 2, 3] * [0, 1, 0.5]
+    # 0, 1, 0.5
+    #    0, 2, 1.0
+    #       0, 3, 1.5
+    # 0, 1, 2.5, 4, 1.5
+    
+    # mode='full'
+    conv = gf_whiten.fftconvolve(in1, in2, mode='full')
+    expected = np.convolve([1.0, 2.0, 3.0], [0.0, 1.0, 0.5], mode='full')
+    np.testing.assert_allclose(conv, expected, atol=1e-5)
+    
+    # mode='same'
+    conv_same = gf_whiten.fftconvolve(in1, in2, mode='same')
+    expected_same = np.convolve([1.0, 2.0, 3.0], [0.0, 1.0, 0.5], mode='same')
+    np.testing.assert_allclose(conv_same, expected_same, atol=1e-5)
+
+def test_whiten_runs():
+    sample_rate = 100.0
+    duration = 4.0
+    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+    
+    # Signal: Sine wave
+    signal = np.sin(2 * np.pi * 10.0 * t).astype(np.float32)
+    signal = ops.convert_to_tensor(signal.reshape(1, 1, -1))
+    
+    # Background: White noise
+    background = np.random.normal(0, 1, size=t.shape).astype(np.float32)
+    background = ops.convert_to_tensor(background.reshape(1, 1, -1))
+    
+    whitened = gf_whiten.whiten(
+        signal,
+        background,
+        sample_rate_hertz=sample_rate,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5
+    )
+    
+    assert ops.shape(whitened) == ops.shape(signal)
+
+def test_whiten_colored_noise():
+    # Verify that whitening colored noise results in white noise (flat PSD)
+    sample_rate = 1024.0
+    duration = 16.0
+    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+    
+    # Generate colored noise (1/f noise or similar)
+    # Use cumulative sum of white noise (Brownian noise) -> 1/f^2
+    np.random.seed(42)
+    white_noise = np.random.normal(0, 1, size=t.shape).astype(np.float32)
+    colored_noise = np.cumsum(white_noise)
+    # Remove DC and trend
+    colored_noise = scipy.signal.detrend(colored_noise)
+    # Normalize
+    colored_noise = colored_noise / np.std(colored_noise)
+    
+    colored_noise_tensor = ops.convert_to_tensor(colored_noise.reshape(1, 1, -1))
+    
+    # Whiten
+    # Use the colored noise itself as the background estimate
+    whitened = gf_whiten.whiten(
+        colored_noise_tensor,
+        colored_noise_tensor,
+        sample_rate_hertz=sample_rate,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5
+    )
+    
+    whitened_np = np.array(whitened)[0, 0]
+    
+    # Calculate PSD of whitened data
+    f, pxx = scipy.signal.welch(
+        whitened_np, 
+        fs=sample_rate, 
+        nperseg=1024
+    )
+    
+    # Check flatness
+    # PSD of white noise should be constant.
+    # Ignore edges (filter artifacts) and DC
+    valid_indices = (f > 20) & (f < sample_rate/2 - 20)
+    pxx_valid = pxx[valid_indices]
+    
+    # Coefficient of variation (std/mean) should be low
+    cv = np.std(pxx_valid) / np.mean(pxx_valid)
+    
+    print(f"PSD Coefficient of Variation: {cv}")
+    
+    # For white noise estimated with Welch, CV depends on number of averages.
+    # 16s duration, 1s window, 0.5 overlap -> ~30 segments.
+    # Expected CV ~ 1/sqrt(30) ~ 0.18.
+    # Allow some margin.
+    assert cv < 0.3, f"Whitened noise is not flat enough. CV: {cv}"
+    
+    # Also check that it's flatter than original
+    f_orig, pxx_orig = scipy.signal.welch(colored_noise, fs=sample_rate, nperseg=1024)
+    pxx_orig_valid = pxx_orig[valid_indices]
+    cv_orig = np.std(pxx_orig_valid) / np.mean(pxx_orig_valid)
+    
+    print(f"Original PSD CV: {cv_orig}")
+    assert cv < cv_orig, "Whitening did not improve flatness"

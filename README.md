@@ -15,7 +15,7 @@ git clone https://github.com/mrknorman/gravyflow
 It is recommended to install GravyFlow within a new conda environment. GravyFlow requires Python 3.11:
 
 ```bash
-conda create --name gravyflow python=3.11
+conda create --name gravyflow python=3.13
 conda activate gravyflow
 ```
 

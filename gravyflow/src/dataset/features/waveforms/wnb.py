@@ -9,7 +9,7 @@ def generate_envelopes(
     max_num_samples
     ):
     """
-    Generate envelopes using Hann windows.
+    Generate envelopes using Hann windows, end-aligned to match the mask in wnb().
     """
     
     # num_samples_array: (N,)
@@ -33,7 +33,12 @@ def generate_envelopes(
         
         val = 0.5 * (1.0 - ops.cos(2.0 * np.pi * n / N_minus_1))
         
-        return val * ops.cast(mask, "float32")
+        envelope = val * ops.cast(mask, "float32")
+        
+        # Flip to end-align the envelope to match the mask flip in wnb()
+        envelope = ops.flip(envelope, axis=-1)
+        
+        return envelope
 
     # Vectorize over num_samples_array
     envelopes = jax.vmap(create_envelope)(num_samples_array)
@@ -106,13 +111,11 @@ def wnb(
     # Mask the noise:
     white_noise_burst = gaussian_noise * mask
 
-    # Window function:
-    # Apply a global Hann window over the entire max_duration.
-    
-    window = jnp.hanning(max_num_samples)
-    window = ops.convert_to_tensor(window, dtype="float32")
-    # Expand for broadcasting (1, 1, Time) or just (Time,)
-    windowed_noise = white_noise_burst * window
+    # Note: We do NOT apply a global Hann window here because:
+    # 1. The signal is end-aligned (after mask flip)
+    # 2. A global window would taper the signal to zero at the end
+    # 3. Individual envelopes applied later provide proper windowing
+    windowed_noise = white_noise_burst
 
     # Fourier transform:
     # rfft over last axis

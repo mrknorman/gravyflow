@@ -2,7 +2,9 @@ import keras
 from keras import ops, Layer
 import jax.numpy as jnp
 import numpy as np
-import gravyflow as gf
+from gravyflow.src.dataset.tools.psd import psd
+from gravyflow.src.dataset.config import Defaults
+from gravyflow.src.utils.tensor import crop_samples
 
 import jax
 
@@ -233,7 +235,7 @@ def whiten(
 
     dt = 1.0 / sample_rate_hertz
     
-    freqs, psd = gf.psd(
+    freqs, psd_val = psd(
         background, 
         nperseg=int(sample_rate_hertz*fft_duration_seconds), 
         noverlap=int(sample_rate_hertz*overlap_duration_seconds), 
@@ -241,8 +243,8 @@ def whiten(
     )
     
     # Ensure psd doesn't contain negative values
-    psd = ops.maximum(psd, 0.0)
-    asd = ops.sqrt(psd)
+    psd_val = ops.maximum(psd_val, 0.0)
+    asd = ops.sqrt(psd_val)
     
     df = 1.0 / (ops.cast(ops.shape(timeseries)[-1], "float32") / sample_rate_hertz)
     
@@ -298,9 +300,9 @@ class WhitenPass(Layer):
         super().__init__(**kwargs)
 
         if sample_rate_hertz is None:
-            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+            sample_rate_hertz = Defaults.sample_rate_hertz
         if onsource_duration_seconds is None:
-            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+            onsource_duration_seconds = Defaults.onsource_duration_seconds
 
         self.onsource_duration_seconds = onsource_duration_seconds
         self.sample_rate_hertz = sample_rate_hertz
@@ -318,7 +320,7 @@ class WhitenPass(Layer):
     def call(self, inputs):
         timeseries = inputs
 
-        cropped = gf.crop_samples(timeseries, self.onsource_duration_seconds, self.sample_rate_hertz)
+        cropped = crop_samples(timeseries, self.onsource_duration_seconds, self.sample_rate_hertz)
 
         dynamic_shape = ops.shape(timeseries)
         return ops.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))
@@ -356,9 +358,9 @@ class Whiten(Layer):
         super().__init__(**kwargs)
 
         if sample_rate_hertz is None:
-            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+            sample_rate_hertz = Defaults.sample_rate_hertz
         if onsource_duration_seconds is None:
-            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+            onsource_duration_seconds = Defaults.onsource_duration_seconds
 
         self.onsource_duration_seconds = onsource_duration_seconds
         self.sample_rate_hertz = sample_rate_hertz
@@ -377,7 +379,7 @@ class Whiten(Layer):
         timeseries, background = inputs
 
         whitened = whiten(timeseries, background, self.sample_rate_hertz)
-        cropped = gf.crop_samples(whitened, self.onsource_duration_seconds, self.sample_rate_hertz)
+        cropped = crop_samples(whitened, self.onsource_duration_seconds, self.sample_rate_hertz)
 
         dynamic_shape = ops.shape(timeseries)
         return ops.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))

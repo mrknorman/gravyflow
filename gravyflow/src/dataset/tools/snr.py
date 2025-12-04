@@ -3,7 +3,7 @@ from keras import ops
 import jax.numpy as jnp
 import numpy as np
 
-import gravyflow as gf
+from gravyflow.src.dataset.tools.psd import psd
 
 import jax
 
@@ -62,7 +62,7 @@ def snr(
     fsamples_no_dc = fsamples[1:]
 
     # Calculate PSD of the background noise
-    freqs, psd = gf.psd(
+    freqs, psd_val = psd(
         background, 
         sample_rate_hertz = sample_rate_hertz, 
         nperseg           = fft_num_samples, 
@@ -80,18 +80,18 @@ def snr(
         
     # If psd has batch dim, map over it.
     # Check rank
-    rank = len(ops.shape(psd))
+    rank = len(ops.shape(psd_val))
 
     if rank > 1:
         # Assuming batch is first dim(s). Flatten to (Batch, Freqs)
-        psd_flat = ops.reshape(psd, (-1, ops.shape(psd)[-1]))
+        psd_flat = ops.reshape(psd_val, (-1, ops.shape(psd_val)[-1]))
         # vmap
         psd_interp = jnp.vectorize(interp_fn, signature='(n)->(m)')(psd_flat)
         # Reshape back
         target_len = ops.shape(fsamples_no_dc)[0]
-        psd_interp = ops.reshape(psd_interp, (*ops.shape(psd)[:-1], target_len))
+        psd_interp = ops.reshape(psd_interp, (*ops.shape(psd_val)[:-1], target_len))
     else:
-        psd_interp = jnp.interp(fsamples_no_dc, freqs, psd)
+        psd_interp = jnp.interp(fsamples_no_dc, freqs, psd_val)
         
     # Compute the frequency window for SNR calculation
     start_freq_num_samples = find_closest(

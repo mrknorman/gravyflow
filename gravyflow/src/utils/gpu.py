@@ -152,19 +152,28 @@ def setup_cuda(device_num: str, max_memory_limit: int, logging_level: int = logg
         
         # Restrict visible GPUs to only those specified.
         visible_gpus = [all_gpus[i] for i in allowed_indices if i < len(all_gpus)]
-        tf.config.set_visible_devices(visible_gpus, 'GPU')
+        try:
+            tf.config.set_visible_devices(visible_gpus, 'GPU')
+        except RuntimeError as e:
+            logging.warning(f"Could not set visible devices (likely already initialized): {e}")
         
         # Configure each visible GPU with the desired memory limit.
         for gpu in visible_gpus:
-            tf.config.experimental.set_virtual_device_configuration(
-                gpu,
-                [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=max_memory_limit)]
-            )
+            try:
+                tf.config.experimental.set_virtual_device_configuration(
+                    gpu,
+                    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=max_memory_limit)]
+                )
+            except RuntimeError as e:
+                logging.warning(f"Could not set virtual device configuration (likely already initialized): {e}")
     
     # Set threading options and reduce verbosity.
     tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
-    tf.config.threading.set_intra_op_parallelism_threads(1)
-    tf.config.threading.set_inter_op_parallelism_threads(1)
+    try:
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+    except RuntimeError as e:
+        logging.warning(f"Could not set threading options (likely already initialized): {e}")
     
     # Create a MirroredStrategy. Now only the restricted GPUs are visible.
     strategy = tf.distribute.MirroredStrategy()

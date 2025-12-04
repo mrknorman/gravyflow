@@ -9,9 +9,16 @@ import math
 
 import numpy as np
 from scipy.interpolate import interp1d
-import tensorflow as tf
-from tensorflow.data.experimental import AutoShardPolicy
-from tensorflow.keras.callbacks import Callback
+try:
+    import tensorflow as tf
+    from tensorflow.data.experimental import AutoShardPolicy
+    TF_AVAILABLE = True
+except ImportError:
+    TF_AVAILABLE = False
+    AutoShardPolicy = object
+
+import keras
+from keras.callbacks import Callback
 from bokeh.embed import components, file_html
 from bokeh.io import export_png, output_file, save
 from bokeh.layouts import column, gridplot
@@ -47,7 +54,7 @@ def pad_with_random_values(scores):
     return padded_scores
 
 def calculate_efficiency_scores(
-        model : tf.keras.Model, 
+        model : keras.Model, 
         dataset_args : Dict[str, Union[float, List, int]],
         logger,
         file_path : Path = None,
@@ -193,7 +200,7 @@ def calculate_efficiency_scores(
     return {"scalings" : efficiency_scalings, "scores": scores}
 
 def calculate_far_scores(
-        model : tf.keras.Model, 
+        model : keras.Model, 
         dataset_args : dict, 
         logger,
         file_path : Path,
@@ -342,7 +349,7 @@ def calculate_far_score_thresholds(
 
     return score_thresholds
 
-@tf.function(jit_compile=True)
+# @tf.function(jit_compile=True)
 def roc_curve_and_auc(
         y_true, 
         y_scores, 
@@ -427,7 +434,7 @@ class CaptureWorstPredictions(Callback):
         self.worst_scores = np.array(self.all_scores)[sorted_indices]
 
 def calculate_roc(    
-        model: tf.keras.Model,
+        model: keras.Model,
         dataset_args : dict,
         num_examples_per_batch: int = 32,
         num_examples: int = 1.0E5,
@@ -541,7 +548,7 @@ def calculate_roc(
     return {'fpr': fpr.numpy(), 'tpr': tpr.numpy(), 'roc_auc': roc_auc.numpy()}
 
 def calculate_multi_rocs(    
-    model: tf.keras.Model,
+    model: keras.Model,
     dataset_args : dict,
     logger, 
     file_path : Path = None,
@@ -665,7 +672,7 @@ def calculate_multi_rocs(
     return roc_results
 
 def calculate_tar_scores(
-        model : tf.keras.Model, 
+        model : keras.Model, 
         dataset_args : dict, 
         num_examples_per_batch : int = 32,  
         scaling : int = 20.0,
