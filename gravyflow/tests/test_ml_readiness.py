@@ -189,7 +189,6 @@ def test_peak_jitter(basic_noise_obtainer):
     assert std_dev > 100, f"Peak indices variance is too low: {std_dev}. Signals might be too clustered."
 
 
-@pytest.mark.skip(reason="WNB SNR calculation needs investigation - signal present but SNR calc returns low values")
 def test_snr_bounds(basic_noise_obtainer):
     """Verify WNB injections are scaled within specified SNR range."""
     min_snr = 10.0
@@ -257,9 +256,68 @@ def test_snr_bounds(basic_noise_obtainer):
     
     # Check bounds
     # Allow small tolerance for numerical differences in PSD estimation etc.
-    tolerance = 3.0 
+    tolerance = 0.1
     assert np.all(calculated_snrs >= (min_snr - tolerance)), f"Found SNR below {min_snr}: {calculated_snrs.min()}"
     assert np.all(calculated_snrs <= (max_snr + tolerance)), f"Found SNR above {max_snr}: {calculated_snrs.max()}"
+
+def test_produced_snr(basic_noise_obtainer):
+    """
+    Verify that the produced SNR matches the expected SNR with high precision.
+    This ensures that the scaling logic correctly accounts for cropping.
+    """
+    target_snr = 15.0
+    tolerance = 0.1
+    
+    # Create dataset with fixed SNR scaling
+    dataset = gf.Dataset(
+        seed=42,
+        sample_rate_hertz=4096.0,
+        onsource_duration_seconds=8.0,
+        crop_duration_seconds=0.5,
+        offsource_duration_seconds=8.0, # Match onsource to avoid shape mismatch issues in test
+        noise_obtainer=basic_noise_obtainer,
+        waveform_generators=[
+            gf.WNBGenerator(
+                duration_seconds=0.5,
+                min_frequency_hertz=16.0,
+                max_frequency_hertz=1024.0,
+                scaling_method=gf.ScalingMethod(
+                    gf.Distribution(target_snr, gf.DistributionType.CONSTANT), 
+                    gf.ScalingTypes.SNR
+                )
+            )
+        ],
+        input_variables=[gf.ReturnVariables.INJECTIONS, gf.ReturnVariables.OFFSOURCE],
+        output_variables=[gf.ReturnVariables.INJECTIONS], # Dummy
+        num_examples_per_batch=20
+    )
+    
+    batch = next(iter(dataset))
+    inputs = batch[0]
+    injections = inputs[gf.ReturnVariables.INJECTIONS.name]
+    offsource = inputs[gf.ReturnVariables.OFFSOURCE.name]
+    
+    # injections: (NumGenerators, Batch, IFO, Time) -> (Batch, IFO, Time)
+    injections = injections[0]
+    
+    # Calculate actual SNR of the produced (cropped) injections
+    calculated_snrs = gf.snr(
+        injections,
+        offsource,
+        sample_rate_hertz=4096.0,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5
+    )
+    
+    calculated_snrs = np.array(calculated_snrs).flatten()
+    print(f"Target SNR: {target_snr}")
+    print(f"Calculated SNRs: {calculated_snrs}")
+    
+    # Check that calculated SNRs are close to target SNR
+    diff = np.abs(calculated_snrs - target_snr)
+    max_diff = np.max(diff)
+    
+    assert max_diff < tolerance, f"Max SNR difference {max_diff} exceeds tolerance {tolerance}"
 
 def test_snr_bounds_cbc(basic_noise_obtainer):
     """Verify CBC (PhenomD) injections are scaled within specified SNR range.

@@ -166,7 +166,9 @@ def snr(
 
     return SNR
 
-@jax.jit(static_argnames=["sample_rate_hertz", "fft_duration_seconds", "overlap_duration_seconds", "lower_frequency_cutoff"])
+from gravyflow.src.utils.tensor import crop_samples
+
+@jax.jit(static_argnames=["sample_rate_hertz", "fft_duration_seconds", "overlap_duration_seconds", "lower_frequency_cutoff", "onsource_duration_seconds"])
 def scale_to_snr(
         injection, 
         background,
@@ -174,7 +176,8 @@ def scale_to_snr(
         sample_rate_hertz: float, 
         fft_duration_seconds: float = 4.0, 
         overlap_duration_seconds: float = 2.0,
-        lower_frequency_cutoff: float = 20.0
+        lower_frequency_cutoff: float = 20.0,
+        onsource_duration_seconds: float = None
     ):
     
     injection = ops.convert_to_tensor(injection)
@@ -183,10 +186,19 @@ def scale_to_snr(
     
     epsilon = 1.0E-7
     
+    # If onsource_duration_seconds is provided, crop the signals to that duration
+    # to calculate SNR on the "visible" part.
+    if onsource_duration_seconds is not None:
+        snr_injection = crop_samples(injection, onsource_duration_seconds, sample_rate_hertz)
+        snr_background = crop_samples(background, onsource_duration_seconds, sample_rate_hertz)
+    else:
+        snr_injection = injection
+        snr_background = background
+
     # Calculate the current SNR
     current_snr = snr(
-        injection, 
-        background,
+        snr_injection, 
+        snr_background,
         sample_rate_hertz, 
         fft_duration_seconds=fft_duration_seconds, 
         overlap_duration_seconds=overlap_duration_seconds,
