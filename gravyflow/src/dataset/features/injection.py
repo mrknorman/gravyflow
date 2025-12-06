@@ -1136,23 +1136,27 @@ class InjectionGenerator:
             for generator in self.waveform_generators:
                 seed = self.rng.integers(1000000000)
                 
+                min_shift = -int(generator.front_padding_duration_seconds * sample_rate_hertz)
+                max_shift = int(generator.back_padding_duration_seconds * sample_rate_hertz)
+                
+                # Calculate required extended duration to allow centering the merger
+                # We need enough room on both sides to shift the window.
+                # extended_duration = total_duration + 2 * max(|min_shift|, |max_shift|)
+                max_abs_shift = max(abs(min_shift), abs(max_shift))
+                extended_duration = max(total_duration, max_signal_duration) + extra_duration + 2.0 * max_abs_shift / sample_rate_hertz
+                
                 waveforms, params = generator.generate(
                     num_waveforms=num_examples_per_batch,
                     sample_rate_hertz=sample_rate_hertz,
-                    duration_seconds=gen_duration,
+                    duration_seconds=extended_duration,
                     seed=seed
                 )
-                
-
                 
                 mask = generate_mask(waveforms)
                 # Reduce mask to a single boolean flag per example (0.0 or 1.0)
                 mask = ops.max(mask, axis=(1, 2))
                 masks_list.append(mask)
 
-                min_shift = -int(generator.front_padding_duration_seconds * sample_rate_hertz)
-                max_shift = int(generator.back_padding_duration_seconds * sample_rate_hertz)
-                
                 # Ensure min < max
                 if min_shift >= max_shift:
                     shifts = jnp.zeros((num_examples_per_batch,), dtype="int32")
@@ -1161,8 +1165,47 @@ class InjectionGenerator:
                     shifts = self.rng.integers(min_shift, max_shift, size=(num_examples_per_batch,))
                     shifts = jnp.array(shifts, dtype="int32")
                 
-                waveforms = roll_vector_zero_padding(waveforms, shifts)
+                # Apply shift by slicing
+                # We generated a waveform of length `extended_duration`.
+                # The merger is centered in this waveform (at extended_duration / 2).
+                # We want to slice a window of length `total_duration` such that the merger ends up at `total_duration / 2 + shift`.
+                # Let `start` be the slice start index.
+                # `tc_sliced = tc_gen - start`.
+                # `tc_gen = extended_duration / 2`.
+                # `tc_sliced = total_duration / 2 + shift`.
+                # `extended_duration / 2 - start = total_duration / 2 + shift`.
+                # `start = extended_duration / 2 - total_duration / 2 - shift`.
+                # `start = (extended_duration - total_duration) / 2 - shift`.
                 
+                extended_samples = waveforms.shape[-1]
+                target_length = int(total_duration * sample_rate_hertz)
+                
+                # Center offset
+                center_offset = (extended_samples - target_length) // 2
+                
+                slice_starts = center_offset - shifts
+                
+                def slice_one(w, s):
+                    # w: (Channels, Time)
+                    # s: scalar int
+                    # We slice along axis 1
+                    start_indices = (jnp.array(0, dtype="int32"), s.astype("int32"))
+                    return jax.lax.dynamic_slice(w, start_indices, (w.shape[0], target_length))
+
+                waveforms = jax.vmap(slice_one)(waveforms, slice_starts)
+                
+                # Update coalescence time
+                # The merger time in the generated waveform is `coalescence_time`.
+                # In the sliced waveform, the time axis is shifted.
+                # `t_sliced = t_gen - slice_start`.
+                # So `tc_sliced = tc_gen - slice_start`.
+                # slice_start is in samples. Convert to seconds.
+                if "coalescence_time" in params:
+                    # params["coalescence_time"] is (Batch,)
+                    # slice_starts is (Batch,)
+                    params["coalescence_time"] -= slice_starts / sample_rate_hertz
+                
+                params["shift"] = shifts
                 injections_list.append(waveforms)
                 parameters_list.append(params)
 
