@@ -235,6 +235,9 @@ class WaveformGenerator:
         # Ensure attributes are decorrelated by default
         self.reseed(gf.Defaults.seed)
 
+    def get_max_generated_duration(self):
+        return 0.0
+
     @classmethod
     def init_network(cls, network):
         
@@ -509,6 +512,13 @@ class WNBGenerator(WaveformGenerator):
 
         super().__post_init__()
     
+    def get_max_generated_duration(self):
+        if isinstance(self.duration_seconds, gf.Distribution):
+            if self.duration_seconds.type_ == gf.DistributionType.CONSTANT:
+                return self.duration_seconds.value
+            return self.duration_seconds.max_
+        return self.duration_seconds
+    
     def generate(
         self,
         num_waveforms: int,
@@ -656,6 +666,33 @@ class RippleGenerator(WaveformGenerator):
             self.scale_factor=gf.Defaults.scale_factor
 
         super().__post_init__()
+    
+    def get_max_generated_duration(self):
+        # Calculate max duration based on min frequency and min masses
+        
+        def get_min(val):
+            if isinstance(val, gf.Distribution):
+                if val.type_ == gf.DistributionType.CONSTANT:
+                    return val.value
+                return val.min_
+            return val
+            
+        m1 = get_min(self.mass_1_msun)
+        m2 = get_min(self.mass_2_msun)
+        f_min = get_min(self.min_frequency_hertz)
+        
+        # calc_duration_from_f_min expects tensors or floats
+        # It returns a tensor if inputs are tensors, or float if floats (if using numpy/python math, but it uses ops)
+        # We need a float return.
+        
+        # Create dummy tensors for calculation
+        m1_t = ops.convert_to_tensor(m1, dtype="float32")
+        m2_t = ops.convert_to_tensor(m2, dtype="float32")
+        f_min_t = ops.convert_to_tensor(f_min, dtype="float32")
+        
+        duration = calc_duration_from_f_min(m1_t, m2_t, f_min_t)
+        
+        return float(duration)
     
     def generate(
             self,
@@ -935,16 +972,19 @@ def roll_vector_zero_padding(vector, shift):
     shift: (Batch,) or int
     """
     def roll_one(vec, s):
-        s = ops.cast(s, "int32")
-        length = ops.shape(vec)[-1]
-        indices = ops.arange(length)
+        s = s.astype("int32")
+        length = vec.shape[-1]
+        indices = jnp.arange(length)
         shifted_indices = indices - s
         valid = (shifted_indices >= 0) & (shifted_indices < length)
-        clamped_indices = ops.clip(shifted_indices, 0, length - 1)
-        val = ops.take(vec, clamped_indices, axis=-1)
-        if len(ops.shape(vec)) > 1:
-            valid = ops.expand_dims(valid, 0)
-        return val * ops.cast(valid, vec.dtype)
+        clamped_indices = jnp.clip(shifted_indices, 0, length - 1)
+        # jnp.take is slightly different from ops.take?
+        # ops.take(vec, indices, axis=-1)
+        # jnp.take(vec, indices, axis=-1)
+        val = jnp.take(vec, clamped_indices, axis=-1)
+        if len(vec.shape) > 1:
+            valid = jnp.expand_dims(valid, 0)
+        return val * valid.astype(vec.dtype)
 
     return jax.vmap(roll_one)(vector, shift)
 
@@ -952,7 +992,13 @@ def generate_mask(vector):
     """
     Generates a mask where vector is non-zero.
     """
-    return ops.cast(ops.not_equal(vector, 0.0), "float32")
+    return ops.cast(
+        ops.logical_and(
+            ops.not_equal(vector, 0.0),
+            ops.logical_not(ops.isnan(vector))
+        ),
+        "float32"
+    )
 
 def batch_injection_parameters(parameters_list):
     """
@@ -1054,44 +1100,69 @@ class InjectionGenerator:
             
             total_duration = onsource_duration_seconds + 2 * crop_duration_seconds
             
+            # Calculate max padding and delay across generators
+            max_front_padding = 0.0
+            max_back_padding = 0.0
+            max_delay = 0.0
+            
+            for generator in self.waveform_generators:
+                max_front_padding = max(max_front_padding, generator.front_padding_duration_seconds)
+                max_back_padding = max(max_back_padding, generator.back_padding_duration_seconds)
+                if generator.network is not None:
+                     max_delay = max(max_delay, float(generator.network.max_arrival_time_difference_seconds))
+            
+            # Add safety buffer
+            # We need enough extra duration to cover the random shifts (padding) and detector delays
+            # The shift can be up to max_back_padding (or max_front_padding in negative direction).
+            # To be safe, we need the valid signal to be larger than the crop window by at least 2 * max_shift.
+            # extra_duration = 2.0 * (max(max_front_padding, max_back_padding) + max_delay) + 1.0
+            
+            max_shift = max(max_front_padding, max_back_padding)
+            extra_duration = 2.0 * (max_shift + max_delay) + 1.0
+            
+            # Calculate max signal duration required by generators
+            max_signal_duration = 0.0
+            for generator in self.waveform_generators:
+                max_signal_duration = max(max_signal_duration, generator.get_max_generated_duration())
+            
+            # We need to generate at least enough to cover the signal + extra buffer
+            # But we also need to cover the requested total_duration (analysis window)
+            # Actually, total_duration is the analysis window + crop buffers.
+            # If the signal is longer than total_duration, we need to generate the full signal length
+            # to avoid cropping the start.
+            
+            gen_duration = max(total_duration, max_signal_duration) + extra_duration
+            
             for generator in self.waveform_generators:
                 seed = self.rng.integers(1000000000)
                 
                 waveforms, params = generator.generate(
                     num_waveforms=num_examples_per_batch,
                     sample_rate_hertz=sample_rate_hertz,
-                    duration_seconds=total_duration,
+                    duration_seconds=gen_duration,
                     seed=seed
                 )
                 
+
+                
                 mask = generate_mask(waveforms)
                 # Reduce mask to a single boolean flag per example (0.0 or 1.0)
-                # axis=1 (channels), axis=2 (time)
-                mask = ops.max(mask, axis=(1, 2)) 
+                mask = ops.max(mask, axis=(1, 2))
                 masks_list.append(mask)
 
-                # Apply random time shift to randomize peak position
-                # Waveforms are currently centered. We shift them to be anywhere in the window.
-                # Use front/back padding to define the shift limits.
-                # front_padding (start) allows shifting left (negative).
-                # back_padding (end) allows shifting right (positive).
-                
-                # If padding is not set, we default to 0 shift (no jitter).
-                # But usually padding is set.
-                
                 min_shift = -int(generator.front_padding_duration_seconds * sample_rate_hertz)
                 max_shift = int(generator.back_padding_duration_seconds * sample_rate_hertz)
                 
                 # Ensure min < max
                 if min_shift >= max_shift:
-                    shifts = ops.zeros((num_examples_per_batch,), dtype="int32")
+                    shifts = jnp.zeros((num_examples_per_batch,), dtype="int32")
                 else:
                     # Generate random shifts for each example in the batch
                     shifts = self.rng.integers(min_shift, max_shift, size=(num_examples_per_batch,))
-                    shifts = ops.convert_to_tensor(shifts, dtype="int32")
+                    shifts = jnp.array(shifts, dtype="int32")
                 
                 waveforms = roll_vector_zero_padding(waveforms, shifts)
-
+                
                 injections_list.append(waveforms)
                 parameters_list.append(params)
 
@@ -1137,13 +1208,16 @@ class InjectionGenerator:
             # Use offsource for scaling if available, otherwise fallback to onsource
             scaling_background = offsource if offsource is not None else onsource
             
+            # Determine target length from onsource
+            target_num_samples = ops.shape(onsource)[-1]
+            
             if scaling_method.type_.value.ordinality == ScalingOrdinality.BEFORE_PROJECTION:
                 scaled_raw = scaling_method.scale(
                     raw_waveforms,
                     scaling_background, 
                     target_val,
                     sample_rate,
-                    onsource_duration_seconds=onsource_duration_seconds
+                    onsource_duration_seconds=None # Do not crop
                 )
                 
                 projected = network.project_wave(
@@ -1151,11 +1225,21 @@ class InjectionGenerator:
                     sample_rate_hertz=sample_rate
                 )
                 
+                # Crop to target length
+                start = (ops.shape(projected)[-1] - target_num_samples) // 2
+                end = start + target_num_samples
+                projected = projected[..., start:end]
+                
             else:
                 projected = network.project_wave(
                     raw_waveforms,
                     sample_rate_hertz=sample_rate
                 )
+                
+                # Crop to target length
+                start = (ops.shape(projected)[-1] - target_num_samples) // 2
+                end = start + target_num_samples
+                projected = projected[..., start:end]
                 
                 scaled_raw = scaling_method.scale(
                     projected,
