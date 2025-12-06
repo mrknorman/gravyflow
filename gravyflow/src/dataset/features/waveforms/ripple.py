@@ -47,9 +47,9 @@ def calc_minimum_frequency(
     Calculates minimum frequency based on inputted masses and duration.
     """
     # Ensure inputs are tensors
-    mass_1_msun = ops.convert_to_tensor(mass_1_msun)
-    mass_2_msun = ops.convert_to_tensor(mass_2_msun)
-    duration_seconds = ops.convert_to_tensor(duration_seconds)
+    mass_1_msun = jnp.array(mass_1_msun)
+    mass_2_msun = jnp.array(mass_2_msun)
+    duration_seconds = jnp.array(duration_seconds)
 
     m1_kg = mass_1_msun * M_SOLAR_SI
     m2_kg = mass_2_msun * M_SOLAR_SI
@@ -60,15 +60,15 @@ def calc_minimum_frequency(
     term2 = 1.0 / (8.0 * np.pi)
     term3 = (G_SI * mc_kg / (C_SI**3))**(-5.0/8.0)
     
-    # Ensure term2 is compatible dtype (float32 if inputs are float32)
+    # Ensure term2 is compatible dtype
     dtype = mass_1_msun.dtype
-    if dtype == "float32":
-        term2 = ops.cast(term2, "float32")
+    if dtype == jnp.float32:
+        term2 = jnp.array(term2, dtype=jnp.float32)
     
     f_min = term1 * term2 * term3
     
     # Clamp to be at least 1.0 Hz
-    f_min = ops.maximum(f_min, 1.0)
+    f_min = jnp.maximum(f_min, 1.0)
         
     return f_min
 
@@ -177,10 +177,7 @@ def _generate_ripple_waveform_jit(
     # Helper to ensure JAX array
     def ensure_jax(val, length):
         # Convert to JAX array/tensor first
-        if not hasattr(val, 'shape') and not hasattr(val, 'dtype'): # Python scalar
-             val = jnp.array(val)
-        elif not isinstance(val, (jax.Array, np.ndarray)) and not ops.is_tensor(val):
-             val = jnp.array(val)
+        val = jnp.array(val)
              
         # Now val is array-like or tensor
         # If scalar (ndim=0), broadcast to length
