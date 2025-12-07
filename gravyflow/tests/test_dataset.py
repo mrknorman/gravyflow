@@ -6,15 +6,15 @@ from typing import List, Optional, Tuple, Dict, Union, Any
 
 # Library imports:
 import numpy as np
-import numpy as np
+
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
 from tqdm import tqdm
 import pytest
 from _pytest.config import Config
 
-# Local imports:
-# Local imports:
+
+
 import gravyflow as gf
 from gravyflow.src.dataset.dataset import GravyflowDataset
 import keras
@@ -50,9 +50,9 @@ def validate_dataset_arguments(
             f"Expected 'name' to be of type 'str', got {type(name)}"
         )
 
-    if not isinstance(waveform_type, str) and name is not None:
+    if not isinstance(waveform_type, str) and waveform_type is not None:
         raise TypeError(
-            f"Expected 'signal_tyoe' to be of type 'str', got {type(name)}"
+            f"Expected 'waveform_type' to be of type 'str', got {type(waveform_type)}"
         )
 
     if not isinstance(plot_examples, bool) and plot_examples is not None:
@@ -141,9 +141,7 @@ def _test_dataset(
         for key, value in current_parameters.items():
             assert value is not None
             # Check for valid data types (numpy or jax arrays)
-            # Note: values might be lists if multi-IFO onsource?
-            # extract_parameters returns input_dict[...] which are tensors.
-            # So they should be arrays/tensors.
+            # Check for valid data types (numpy or jax arrays, or lists/tuples)
             assert hasattr(value, 'shape') or isinstance(value, (list, tuple))
             
         logging.info("Consistency check passed (basic assertions).")

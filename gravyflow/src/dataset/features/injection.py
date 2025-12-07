@@ -1196,11 +1196,16 @@ class InjectionGenerator:
                 slice_starts = center_offset - shifts
                 
                 def slice_one(w, s):
-                    # w: (Channels, Time)
+                    # w: (..., Time)
                     # s: scalar int
-                    # We slice along axis 1
-                    start_indices = (jnp.array(0, dtype="int32"), s.astype("int32"))
-                    return jax.lax.dynamic_slice(w, start_indices, (w.shape[0], target_length))
+                    # We slice along the last axis
+                    rank = len(w.shape)
+                    zeros = [jnp.array(0, dtype="int32")] * (rank - 1)
+                    start_indices = tuple(zeros + [s.astype("int32")])
+                    
+                    slice_sizes = w.shape[:-1] + (target_length,)
+                    
+                    return jax.lax.dynamic_slice(w, start_indices, slice_sizes)
 
                 waveforms = jax.vmap(slice_one)(waveforms, slice_starts)
                 

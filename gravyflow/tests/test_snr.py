@@ -15,7 +15,7 @@ from bokeh.models import ColumnDataSource, HoverTool, Legend
 from _pytest.config import Config
 
 # Local imports:
-# Local imports:
+
 import gravyflow as gf
 from gravyflow.src.dataset.tools import snr as gf_snr
 from gravyflow.src.dataset.tools import psd as gf_psd
@@ -33,7 +33,7 @@ def plot_whitened_strain_examples(
         [
             gf.generate_strain_plot(
                 {
-                    "Whitened (tf) Onsouce + Injection": whitening_results["onsource_plus_injection"]["tensorflow"],
+                    "Whitened (tf) Onsource + Injection": whitening_results["onsource_plus_injection"]["tensorflow"],
                     "Whitened (tf) Injection" : whitening_results["scaled_injection"]["tensorflow"],
                     "Injection": scaled_injection
                 },
@@ -46,7 +46,7 @@ def plot_whitened_strain_examples(
         [
             gf.generate_strain_plot(
                 {
-                    "Whitened (gwpy) Onsouce + Injection": whitening_results["onsource_plus_injection"]["gwpy"],
+                    "Whitened (gwpy) Onsource + Injection": whitening_results["onsource_plus_injection"]["gwpy"],
                     "Whitened (gwpy) Injection" : whitening_results["scaled_injection"]["gwpy"],
                     "Injection": scaled_injection
                 },
@@ -219,7 +219,7 @@ def _test_snr(
             cache_segments = False
         )
         
-        # Initilise noise generator wrapper:
+        # Initialize noise generator wrapper:
         noise_obtainer: gf.NoiseObtainer = gf.NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
             noise_type = gf.NoiseType.REAL,

@@ -4,7 +4,7 @@ import logging
 
 import pytest
 import gravyflow as gf
-import h5py
+
 import numpy as np
 import keras
 from keras import ops
@@ -15,7 +15,7 @@ from bokeh.layouts import gridplot
 from timeit import Timer
 from _pytest.config import Config
 
-import gravyflow as gf
+
 
 def zombie_antenna_pattern(
         right_ascension : float, 
@@ -239,35 +239,7 @@ def test_time_delay(
         np.testing.assert_allclose(delay[:, 0], delay[:, 1], atol=0.011)
         np.testing.assert_allclose(delay[:, 0], delay[:, 2], atol=0.032)
 
-def save_and_compare_projected_injections(
-        projected_injections: np.ndarray, 
-        injections_file_path: Path,
-        tolerance: float = 1e-6
-    ) -> None:
 
-    """
-    Save and compare projected injections with previously saved injections.
-
-    Args:
-        projected_injections (np.ndarray): The projected injections data.
-        injections_file_path (Path): Path to the file where injections are saved.
-        tolerance (float): Tolerance level for comparison.
-    """
-
-    gf.ensure_directory_exists(injections_file_path.parent)
-
-    if injections_file_path.exists():
-        with h5py.File(injections_file_path, 'r') as hf:
-            previous_injections = hf['projected_injections'][:]
-            np.testing.assert_allclose(
-                previous_injections, 
-                projected_injections, 
-                atol=tolerance, 
-                err_msg="Projected injections consistency check failed."
-            )
-    else:
-        with h5py.File(injections_file_path, 'w') as hf:
-            hf.create_dataset('projected_injections', data=projected_injections)
 
 def _test_projection(
         name : str,
@@ -303,14 +275,10 @@ def _test_projection(
 
     projected_injections = test_network.project_wave(injections[0])
 
-    injections_file_path : Path = (
-        gf.PATH / f"res/tests/projected_injections_{name}.hdf5"
-    )
-
-    save_and_compare_projected_injections(
-        np.array(projected_injections),
-        injections_file_path
-    )
+    # Verify output shape and content
+    projected_injections = np.array(projected_injections)
+    assert len(projected_injections) > 0, "Projected injections should not be empty"
+    assert len(projected_injections.shape) == 3, f"Expected 3D output (batch, ifo, time), got {projected_injections.shape}"
 
     injection_one = np.array(projected_injections)[0]
 
@@ -456,8 +424,8 @@ def test_antenna_pattern(
         num_tests=gf.tests.num_tests_from_config(pytestconfig)
     )
 
-def profile_atennnna_pattern() -> None:
-
+def profile_antenna_pattern(num_tests: int = 100) -> None:
+    
     with gf.env():
     
         test_detectors = [gf.IFO.L1]

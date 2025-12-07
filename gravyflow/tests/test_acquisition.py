@@ -2026,7 +2026,7 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
     plot_results = pytestconfig.getoption("plot")
     output_directory_path = Path("gravyflow_data/tests/")
     
-    # 1. Setup IFODataObtainer for O3
+    # Setup IFODataObtainer for O3
     obtainer = gf.IFODataObtainer(
         [gf.ObservingRun.O3],
         data_quality=gf.DataQuality.BEST,
@@ -2034,7 +2034,7 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
     )
     
     try:
-        # 2. Get Valid Segments (Real Data)
+        # Get Valid Segments (Real Data)
         # Use a fixed seed for reproducibility
         segments_list = obtainer.get_valid_segments(
             ifos=[gf.IFO.L1, gf.IFO.H1],
@@ -2042,17 +2042,15 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
             group_name="train"
         )
         
-        # segments_list is actually an ndarray of shape (num_segments, num_ifos, 2)
-        # We need to convert it to a dictionary mapping IFO -> segments array of shape (num_segments, 2)
+        # Convert segments ndarray (num_segments, num_ifos, 2) to dictionary mapping IFO -> segments array
         segments_array = segments_list
         segments_dict = {}
         requested_ifos = [gf.IFO.L1, gf.IFO.H1]
         
         for i, ifo in enumerate(requested_ifos):
-            # Extract segments for this IFO: shape (N, 2)
             segments_dict[ifo] = segments_array[:, i, :]
         
-        # 3. Extract Chunks (Simulate Data Loading)
+        # Extract Chunks
         gen = obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=2048.0,
             onsource_duration_seconds=1.0,
@@ -2066,12 +2064,9 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
         
         # Get one batch to find extraction points
         subarrays, backgrounds, gps_times = next(gen)
-        
-        # gps_times shape: (batch_size, num_ifos) or (batch_size,) depending on implementation.
-        # Usually (batch_size,).
         extraction_points = gps_times
         
-        # 4. Generate Plots
+        # Generate Plots
         
         # Timeline Plot (All Segments)
         p1 = gf.generate_segment_timeline_plot(
@@ -2081,8 +2076,8 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
         )
         
         # Extraction Plot (Zoomed in on first few examples)
-        # Find the segment containing the first extraction point for each IFO
-        first_gps_per_ifo = extraction_points[0] # Shape (num_ifos,) or scalar
+        # Find the segment containing the first extraction point for each IFO to set the plot context
+        first_gps_per_ifo = extraction_points[0]
         
         relevant_segments = {}
         for ifo, segs in segments_dict.items():
@@ -2090,23 +2085,20 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
             if extraction_points.ndim == 1:
                 t = first_gps_per_ifo
             else:
-                # Assuming requested_ifos order matches columns
-                # requested_ifos = [L1, H1]
                 try:
                     idx = requested_ifos.index(ifo)
                     t = first_gps_per_ifo[idx]
                 except ValueError:
-                    continue # Should not happen
+                    continue
             
-            # Find segment containing t
-            # segs is (N, 2)
+            # Find segment containing the extraction time
             mask = (segs[:, 0] <= t) & (segs[:, 1] >= t)
             if np.any(mask):
-                relevant_segments[ifo] = segs[mask][0] # Take the first match (should be only one)
+                relevant_segments[ifo] = segs[mask][0]
         
         p2 = gf.generate_example_extraction_plot(
             relevant_segments,
-            extraction_points, # Plot all points from the batch
+            extraction_points,
             onsource_duration_seconds=1.0,
             offsource_duration_seconds=16.0,
             padding_duration_seconds=0.5,

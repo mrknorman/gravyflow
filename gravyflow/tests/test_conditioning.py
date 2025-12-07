@@ -7,6 +7,7 @@ import numpy as np
 import keras
 from keras import ops
 from gravyflow.src.dataset.conditioning import conditioning as gf_cond
+from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 
 def test_spectrogram_shape():
     input_shape = (1, 1000)
@@ -53,7 +54,7 @@ def test_spectrogram_calculation():
     
     assert peak_bin == 10
 
-from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
+
 
 def test_whiten_invalid_input():
     """Verify behavior with NaN/Inf input (should handle or raise)."""
@@ -71,8 +72,7 @@ def test_whiten_invalid_input():
     offsource = np.random.randn(1, 1, num_samples).astype(np.float32)
     offsource = ops.convert_to_tensor(offsource)
     
-    # Expectation: It might run but return NaNs, OR raise an error.
-    # Both are acceptable for garbage input.
+    # Expectation: It should either return NaNs or raise an error.
     
     try:
         whitened = gf_cond.whiten(
