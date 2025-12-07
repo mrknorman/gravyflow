@@ -10,6 +10,34 @@ warnings.filterwarnings("ignore", category=UserWarning, message="Wswiglal-redir-
 
 # Disable JAX memory preallocation to avoid conflicts with TensorFlow
 import os
+import site
+import glob
+import sys
+
+# Set Keras backend to JAX
+os.environ["KERAS_BACKEND"] = "jax"
+
+# Attempt to find nvidia libraries and set LD_LIBRARY_PATH
+try:
+    site_packages = site.getsitepackages()[0]
+    nvidia_dir = os.path.join(site_packages, 'nvidia')
+    
+    if os.path.exists(nvidia_dir):
+        libs = glob.glob(os.path.join(nvidia_dir, '*/lib'))
+        path_to_add = ":".join(libs)
+        
+        current_ld = os.environ.get('LD_LIBRARY_PATH', '')
+        
+        # Filter out conflicting system CUDA paths
+        ld_paths = current_ld.split(':') if current_ld else []
+        clean_ld_paths = [p for p in ld_paths if '/usr/local/cuda' not in p]
+        
+        # Prepend nvidia paths
+        new_ld_path = f"{path_to_add}:{':'.join(clean_ld_paths)}"
+        os.environ['LD_LIBRARY_PATH'] = new_ld_path
+except Exception as e:
+    pass
+
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
@@ -57,11 +85,12 @@ from .src.dataset.features.injection import (
     WaveformGenerator, WaveformParameter, WaveformParameters, WNBGenerator,
     IncoherentGenerator, InjectionGenerator,
     roll_vector_zero_padding, generate_mask, is_not_inherited,
-    batch_injection_parameters, RippleGenerator
+    batch_injection_parameters, CBCGenerator, Approximant
 )
 from .src.dataset.dataset import data, Dataset, GravyflowDataset
 from .src.utils.plotting import (
-    generate_strain_plot, generate_psd_plot, generate_spectrogram, generate_correlation_plot
+    generate_strain_plot, generate_psd_plot, generate_spectrogram, generate_correlation_plot,
+    generate_segment_timeline_plot, generate_example_extraction_plot
 )
 from .src.model.validate import Validator
 from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_segments
