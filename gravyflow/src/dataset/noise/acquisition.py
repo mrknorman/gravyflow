@@ -499,6 +499,8 @@ class IFODataObtainer:
             events = EventTable.fetch_open_data(catalogue)
             gps_times = np.append(gps_times, events["GPS"].data.compressed())
         
+        # Ensure parent directory exists before saving
+        cache_file_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(cache_file_path, gps_times)
         return gps_times
     
@@ -1149,7 +1151,10 @@ class IFODataObtainer:
                         scale_factor
                     ))
             except StopIteration:
-                return
+                # Reset segment index to loop infinitely through segments
+                self._current_segment_index = 0
+                self._segment_exausted = True
+                continue
         
             min_num_samples = min([ops.shape(tensor)[0] for tensor in self.current_segment.data])
 
