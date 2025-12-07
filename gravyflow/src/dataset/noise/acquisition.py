@@ -26,6 +26,8 @@ from gwpy.timeseries import TimeSeries
 
 # Local imports:
 import gravyflow as gf
+from gravyflow.src.utils.tensor import resample_fft
+
 
 def ensure_even(number):
     if number % 2 != 0:
@@ -105,6 +107,7 @@ class ObservingRun(Enum):
     O2 = ObservingRunData(*observing_run_data["O2"])
     O3 = ObservingRunData(*observing_run_data["O3"])
 
+@jax.jit(static_argnames=["num_examples_per_batch", "num_onsource_samples", "num_offsource_samples"])
 def _random_subsection(
         tensor_data,
         num_examples_per_batch: int,
@@ -116,7 +119,7 @@ def _random_subsection(
     ):
 
     """
-    Generate random subsections from a tensor.
+    Generate random subsections from a tensor. JIT compiled for efficiency.
     """
     # Cast input parameters
     start_gps_times = ops.cast(start_gps_times, "float64")
@@ -1005,7 +1008,7 @@ class IFODataObtainer:
         
         if segment is None: 
             try:
-                segment = self.get_segment_data(
+                raw_segment = self.get_segment_data(
                     segment_start_gps_time + epsilon,
                     segment_end_gps_time - epsilon, 
                     ifo, 
@@ -1013,14 +1016,43 @@ class IFODataObtainer:
                     self.channels[0]
                 )
                 
-                segment = segment.resample(sample_rate_hertz)
+                # Get original sample rate from GwPy TimeSeries
+                original_sample_rate = float(raw_segment.sample_rate.value)
+                
+                # Convert to JAX tensor
+                segment_data = jnp.array(raw_segment.value, dtype=jnp.float32)
+                
+                # Truncate BEFORE resample for efficiency - FFT operates on less data
+                # Calculate equivalent standard sizes at original sample rate
+                downsample_ratio = original_sample_rate / sample_rate_hertz
+                # Scale standard sizes to original sample rate
+                std_sizes_at_original = [int(s * downsample_ratio) for s in gf.Defaults.STANDARD_SEGMENT_SAMPLES]
+                num_samples = segment_data.shape[0]
+                
+                # Find largest standard size that fits
+                std_size = None
+                for s in reversed(std_sizes_at_original):
+                    if s <= num_samples:
+                        std_size = s
+                        break
+                
+                if std_size is not None:
+                    segment_data = segment_data[:std_size]
+                else:
+                    logging.warning(f"Segment too small ({num_samples}) for standardization")
+                
+                segment = resample_fft(
+                    segment_data, 
+                    original_sample_rate, 
+                    sample_rate_hertz
+                )
 
             except Exception as e:
                 logging.error(f"Error acquiring segment: {type(e).__name__}, {str(e)}")
                 return None
             
             if segment is not None:
-                segment = ops.convert_to_tensor(segment.value, dtype="float32")
+                segment = ops.convert_to_tensor(segment, dtype="float32")
                 
                 if gf.check_tensor_integrity(segment, 1, 10):
                     # Add to in-memory cache
