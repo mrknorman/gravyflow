@@ -55,3 +55,33 @@ class Defaults:
         if abs(closest - sample_rate) > 1.0:
             logging.debug(f"Sample rate {sample_rate} rounded to standard {closest}")
         return closest
+    
+    # Standard segment sizes (in samples) for reducing JIT recompilations
+    # These correspond to powers of 2 in sample counts
+    # At 2048 Hz: 128s, 256s, 512s, 1024s, 2048s durations
+    STANDARD_SEGMENT_SAMPLES = [2**18, 2**19, 2**20, 2**21, 2**22]  # 262K to 4M samples
+    
+    @staticmethod
+    def truncate_to_standard_segment_size(num_samples: int, min_required: int = 0) -> int:
+        """
+        Find the largest standard segment size that fits within num_samples.
+        
+        Returns the standard size to truncate to, or None if segment is too small.
+        This ensures only a fixed number of segment sizes exist, reducing JIT compilations.
+        
+        Parameters
+        ----------
+        num_samples : int
+            Actual number of samples in segment.
+        min_required : int
+            Minimum samples required (e.g., for batch extraction).
+            
+        Returns
+        -------
+        int or None
+            Standard size to truncate to, or None if too small.
+        """
+        for std_size in reversed(Defaults.STANDARD_SEGMENT_SAMPLES):
+            if std_size <= num_samples and std_size >= min_required:
+                return std_size
+        return None
