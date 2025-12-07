@@ -14,7 +14,7 @@ from tqdm import tqdm
 from _pytest.config import Config
 
 # Local imports:
-# Local imports:
+
 import gravyflow as gf
 from gravyflow.src.dataset.noise import noise as gf_noise
 import keras
@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 
 def _test_real_noise_single(
-        output_diretory_path : Path = Path("./gravyflow_data/tests/"),
+        output_directory_path : Path = Path("./gravyflow_data/tests/"),
         plot_results : bool = False
     ) -> None:
 
@@ -42,7 +42,7 @@ def _test_real_noise_single(
             cache_segments = False
         )
         
-        # Initilise noise generator wrapper:
+        # Initialize noise generator wrapper:
         noise : gf.NoiseObtainer = gf.NoiseObtainer(
             ifo_data_obtainer = ifo_data_obtainer,
             noise_type = gf.NoiseType.REAL,
@@ -59,7 +59,7 @@ def _test_real_noise_single(
         }
 
         parameters_file_path : Path = (
-            gf.PATH / f"res/tests/real_noise_consistancy_single.hdf5"
+            gf.PATH / f"res/tests/real_noise_consistency_single.hdf5"
         )
         gf.tests.compare_and_save_parameters(
             parameters_dict, parameters_file_path
@@ -84,10 +84,10 @@ def _test_real_noise_single(
                 )
             
             # Ensure output directory exists
-            gf.ensure_directory_exists(output_diretory_path)
+            gf.ensure_directory_exists(output_directory_path)
             
             # Define an output path for the dashboard
-            output_file(output_diretory_path / "noise_plots.html")
+            output_file(output_directory_path / "noise_plots.html")
 
             # Arrange the plots in a grid. 
             grid = gridplot(layout)
@@ -95,7 +95,7 @@ def _test_real_noise_single(
             save(grid)
     
 def _test_real_noise_multi(
-        output_diretory_path : Path = Path("./gravyflow_data/tests/"),
+        output_directory_path : Path = Path("./gravyflow_data/tests/"),
         plot_results : bool = False 
     ) -> None:
 

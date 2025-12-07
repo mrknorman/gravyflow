@@ -12,7 +12,7 @@ from bokeh.layouts import gridplot
 from _pytest.config import Config
 
 # Local imports:
-# Local imports:
+
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning import whiten as gf_whiten
 import keras
@@ -23,7 +23,7 @@ def plot_whiten_functions(
         overlap_duration_seconds : float = 0.5
     ) -> None:
 
-    output_diretory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests"
+    output_directory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests"
     
     # Constants
     sample_rate_hertz: int = 8192
@@ -126,7 +126,7 @@ def plot_whiten_functions(
     ]
     
     # Specify the output file and save the plot
-    output_file(output_diretory_path / "noise_whitening_tests_time.html")
+    output_file(output_directory_path / "noise_whitening_tests_time.html")
     
     grid = gridplot(layout)
     
@@ -149,7 +149,7 @@ def plot_whiten_functions(
     ]
     
     # Specify the output file and save the plot
-    output_file(output_diretory_path / "noise_whitening_tests_psd.html")
+    output_file(output_directory_path / "noise_whitening_tests_psd.html")
     
     grid = gridplot(layout)
     
@@ -250,7 +250,7 @@ def _test_whitening_real_noise(
     sample_rate_hertz : float = gf.Defaults.sample_rate_hertz
     fft_duration_seconds : float = 1.0
     overlap_duration_seconds : float = 0.5
-    output_diretory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests"
+    output_directory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests"
     
     # Setup ifo data acquisition object:
     ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
@@ -264,7 +264,7 @@ def _test_whitening_real_noise(
         cache_segments=False
     )
     
-    # Initilise noise generator wrapper:
+    # Initialize noise generator wrapper:
     noise_obtainer: gf.NoiseObtainer = gf.NoiseObtainer(
         ifo_data_obtainer=ifo_data_obtainer,
         noise_type=gf.NoiseType.REAL,
@@ -365,7 +365,7 @@ def _test_whitening_real_noise(
     if plot_results:
 
         # Specify the output file and save the plot
-        output_file(output_diretory_path / "real_noise_whitening_tests_time.html")
+        output_file(output_directory_path / "real_noise_whitening_tests_time.html")
         
         grid = gridplot(layout)
         
@@ -386,7 +386,7 @@ def _test_whitening_real_noise(
         ]
         
         # Specify the output file and save the plot
-        output_file(output_diretory_path / "real_noise_whitening_tests_psd.html")
+        output_file(output_directory_path / "real_noise_whitening_tests_psd.html")
         
         grid = gridplot(layout)
         

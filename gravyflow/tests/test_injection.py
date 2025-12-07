@@ -52,7 +52,7 @@ def _test_injection_iteration(
         
         assert index == num_tests - 1, "Warning! Injection generator does not iterate the required number of batches"
         
-        logging.info("Compete!")
+        logging.info("Complete!")
     
 def _test_phenom_d_injection(
         num_tests : int = 10,
@@ -1570,6 +1570,59 @@ def test_cbc_generator_accepts_distributions():
     assert mass_dist.min_ == 10.0
     assert mass_dist.max_ == 30.0
     assert mass_dist.type_ == gf.DistributionType.UNIFORM
+
+
+def test_incoherent_injection_slicing_regression():
+    """Test regression for IncoherentGenerator slicing issue.
+    
+    IncoherentGenerator produces waveforms with shape (Batch, Components, Channels, Time).
+    InjectionGenerator's slicing logic previously assumed (Batch, Channels, Time), causing a ValueError.
+    This test ensures that the slicing logic handles the extra dimension correctly.
+    """
+    # Setup generators similar to the reported issue
+    wnb_generator = gf_inj.WNBGenerator(
+        duration_seconds=gf.Distribution(value=0.7, type_=gf.DistributionType.CONSTANT),
+        min_frequency_hertz=gf.Distribution(value=50.0, type_=gf.DistributionType.CONSTANT),
+        max_frequency_hertz=gf.Distribution(value=100.0, type_=gf.DistributionType.CONSTANT)
+    )
+    phenom_d_generator = gf_inj.CBCGenerator(
+        mass_1_msun=gf.Distribution(value=50.0, type_=gf.DistributionType.CONSTANT),
+        mass_2_msun=gf.Distribution(value=50.0, type_=gf.DistributionType.CONSTANT),
+        inclination_radians=gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
+    )
+
+    # Create IncoherentGenerator with 2 components
+    incoherent_generator = gf_inj.IncoherentGenerator(
+        [wnb_generator, phenom_d_generator]
+    )
+
+    # Wrap in InjectionGenerator
+    injection_generator = gf_inj.InjectionGenerator(incoherent_generator)
+    
+    # Generate a batch
+    # This should not raise ValueError
+    injections, masks, parameters = next(
+        injection_generator(
+            num_examples_per_batch=2,
+            sample_rate_hertz=1024.0,
+            onsource_duration_seconds=1.0,
+            crop_duration_seconds=0.5
+        )
+    )
+    
+    # Verify shape
+    # Expected: (NumGenerators, Batch, Components, Channels, Time)
+    # NumGenerators=1 (we passed one IncoherentGenerator)
+    # Batch=2
+    # Components=2
+    # Channels=2 (default)
+    # Time = (onsource + 2*crop) * sample_rate = (1.0 + 1.0) * 1024 = 2048
+    assert ops.shape(injections) == (1, 2, 2, 2, 2048)
+    # Mask reduction on (Batch, Components, Channels, Time) with axis=(1,2) leaves (Batch, Time)
+    # Stacked -> (NumGenerators, Batch, Time)
+    # Note: Masks are currently returned for the *extended* duration (unsliced), so we only check rank.
+    assert len(ops.shape(masks)) == 3
+
 
 
 

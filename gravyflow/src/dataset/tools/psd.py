@@ -1,11 +1,12 @@
 from typing import Optional, Tuple
+from functools import partial
 
 import keras
 from keras import ops
 import jax.numpy as jnp
 import jax
 
-@jax.jit(static_argnames=["n"])
+@partial(jax.jit, static_argnames=["n"])
 def fftfreq(
         n : int, 
         d : float = 1.0
@@ -15,7 +16,7 @@ def fftfreq(
     results = ops.arange(0, n // 2 + 1, dtype="float32") 
     return results * val
 
-@jax.jit(static_argnames=["axis", "type", "bp", "overwrite_data"])
+@partial(jax.jit, static_argnames=["axis", "type", "bp", "overwrite_data"])
 def detrend(data, axis=-1, type='linear', bp=0, overwrite_data=False):
     """
     Remove linear trend along axis from data using Keras Ops / JAX.

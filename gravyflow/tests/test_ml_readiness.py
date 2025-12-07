@@ -126,19 +126,12 @@ def test_shape_and_format(basic_dataset_config):
     assert gf.ReturnVariables.WHITENED_ONSOURCE.name in X
     data = X[gf.ReturnVariables.WHITENED_ONSOURCE.name]
     
-    # Check X shape: (Batch, Channels, Time) or (Batch, Time) depending on config
-    # With 1 IFO and WHITE noise, it returns (Batch, IFOs, Time) usually?
-    # Let's inspect and assert reasonable dimensions
+    # Check X shape: (Batch, Channels, Time) or (Batch, Time)
     shape = ops.shape(data)
     assert shape[0] == BATCH_SIZE, f"Batch size mismatch. Expected {BATCH_SIZE}, got {shape[0]}"
     
-    # Assuming last dim is time
-    # The actual length depends on whether WHITENED_ONSOURCE is cropped or not.
-    # Given crop_duration_seconds is 0.5, the effective duration for WHITENED_ONSOURCE
-    # would be DURATION - 2 * crop_duration_seconds = 4.0 - 2 * 0.5 = 3.0 seconds.
-    # So, expected samples would be 3.0 * SAMPLE_RATE = 6144.
-    # We will not assert a specific time dimension here to avoid fragility,
-    # as the exact cropping behavior might be internal to GravyflowDataset.
+    # Note: Effective duration is DURATION - 2 * crop_duration_seconds.
+    # We do not assert a specific time dimension here to avoid fragility regarding internal cropping details.
 
 def test_peak_jitter(basic_noise_obtainer):
     """
@@ -261,10 +254,8 @@ def test_snr_bounds(basic_noise_obtainer):
         overlap_duration_seconds=0.5
     )
     
-    # If (Batch, IFO), we might want network SNR or individual?
     # WNBGenerator with 1 IFO -> 1 SNR per example.
-    # gf.snr combines channels if present?
-    # Let's check shape
+    # gf.snr combines channels if present.
     print(f"Calculated SNR shape: {calculated_snrs.shape}")
     
     calculated_snrs = np.array(calculated_snrs).flatten()
@@ -416,14 +407,11 @@ def test_micro_training(basic_dataset_config):
     # Setup a denoising task: Input = WHITENED_ONSOURCE, Target = WHITENED_INJECTIONS
     # This ensures distinct keys for input and output, allowing Keras to map them correctly.
     
-    # We need injections for this to work well, but even with zeros it proves the plumbing.
-    # Let's use the basic config but add WHITENED_INJECTIONS to output.
-    
     config = basic_dataset_config.copy()
     config["input_variables"] = [gf.ReturnVariables.WHITENED_ONSOURCE]
     config["output_variables"] = [gf.ReturnVariables.WHITENED_INJECTIONS]
     
-    # We need to ensure injections are generated so WHITENED_INJECTIONS isn't None
+    # Ensure injections are generated so WHITENED_INJECTIONS isn't None
     # Add a dummy waveform generator
     injection_directory_path = gf.tests.PATH / "example_injection_parameters"
     scaling_method = gf.ScalingMethod(
@@ -443,7 +431,6 @@ def test_micro_training(basic_dataset_config):
     # Get input shape
     batch = next(iter(dataset))
 
-    print(batch)
     input_data = batch[0][gf.ReturnVariables.WHITENED_ONSOURCE.name]
     input_shape = ops.shape(input_data)[1:] # Exclude batch dim
     
@@ -649,30 +636,13 @@ def test_padding_adherence(basic_noise_obtainer):
         back_padding_duration_seconds=back_pad
     )
     
-    # We need to be careful about "onsource" vs "total" duration.
-    # InjectionGenerator generates for (onsource + 2*crop).
-    # But GravyflowDataset crops it before returning.
-    # Wait, GravyflowDataset returns the CROPPED onsource window.
-    # If the signal is shifted in the larger window, we need to know where it ends up in the cropped window.
-    
-    # Let's look at InjectionGenerator again.
-    # It generates `total_duration = onsource + 2*crop`.
-    # It shifts within that `total_duration`.
-    # Then `GravyflowDataset` (or `NoiseObtainer`?) crops it?
-    # Actually `GravyflowDataset` calls `noise_obtainer.get_data`.
-    # `NoiseObtainer` calls `injection_generator`.
-    # `InjectionGenerator` yields `injections` of shape `total_duration`.
-    # Then `NoiseObtainer` adds them to noise.
-    # Then `GravyflowDataset` crops: `gf.crop_samples(..., crop_duration_seconds)`.
-    
-    # So:
-    # 1. Generation Window: [0, T_total]
+    # Logic:
+    # 1. Generation Window: [0, T_total] where T_total = onsource + 2*crop
     # 2. Center: T_total / 2
     # 3. Shifted Peak: T_total / 2 + shift
     # 4. Crop: Removes `crop_samples` from start and end.
-    # 5. Final Peak Index: (T_total / 2 + shift) - crop_samples
+    # 5. Final Peak Index in Output: (T_total / 2 + shift) - crop_samples
     #    = (onsource + 2*crop)/2 + shift - crop
-    #    = onsource/2 + crop + shift - crop
     #    = onsource/2 + shift
     
     # So the peak in the output window (onsource) should be at `onsource_samples / 2 + shift`.
@@ -720,10 +690,6 @@ def test_padding_adherence(basic_noise_obtainer):
     # Check bounds
     # Note: If shift is large enough, signal might be cropped out, resulting in 0 signal -> peak at 0.
     # But with 1.0s padding and 4.0s duration, it should stay in.
-    
-    # Filter out empty signals if any (though shouldn't be with this config)
-    # But wait, if peak is 0 it might be valid (left edge).
-    # Let's check if any are outside.
     
     out_of_bounds = (peak_indices < min_valid_index) | (peak_indices > max_valid_index)
     num_out_of_bounds = np.sum(out_of_bounds)
