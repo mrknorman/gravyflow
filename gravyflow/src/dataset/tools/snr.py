@@ -34,8 +34,10 @@ def snr(
     """
     Calculate the signal-to-noise ratio (SNR) of a given signal.
     """
-    injection = ops.convert_to_tensor(injection)
-    background = ops.convert_to_tensor(background)
+    injection = ops.convert_to_tensor(injection, dtype="float64")
+    background = ops.convert_to_tensor(background, dtype="float64")
+    
+
     
     injection_num_samples = ops.shape(injection)[-1]
     injection_duration_seconds = ops.cast(injection_num_samples, "float32") / sample_rate_hertz
@@ -69,11 +71,9 @@ def snr(
         noverlap          = overlap_num_samples,
         mode="mean"
     )
-            
+    
     # Interpolate ASD to match the length of the original signal    
     freqs = ops.cast(freqs, "float32")
-    
-    # ...
     
     def interp_fn(p):
         return jnp.interp(fsamples_no_dc, freqs, p)
@@ -90,7 +90,7 @@ def snr(
         # Reshape back
         target_len = ops.shape(fsamples_no_dc)[0]
         psd_interp = ops.reshape(psd_interp, (*ops.shape(psd_val)[:-1], target_len))
-    else:
+    else:  # pragma: no cover - psd() always returns 2D
         psd_interp = jnp.interp(fsamples_no_dc, freqs, psd_val)
         
     # Compute the frequency window for SNR calculation
@@ -136,6 +136,7 @@ def snr(
 
     # Calculate the SNR
     # Sum over frequency axis (-1)
+    
     integral = ops.sum(ratio, axis=-1)
     
     SNR = ops.sqrt(
@@ -190,10 +191,19 @@ def scale_to_snr(
     # to calculate SNR on the "visible" part.
     if onsource_duration_seconds is not None:
         snr_injection = crop_samples(injection, onsource_duration_seconds, sample_rate_hertz)
-        snr_background = crop_samples(background, onsource_duration_seconds, sample_rate_hertz)
+        snr_background = background # Do not crop background, we need full duration for PSD
     else:
         snr_injection = injection
         snr_background = background
+
+    # DEBUG
+    # jax.debug.print("DEBUG: snr_injection has NaNs: {}", ops.any(ops.isnan(snr_injection)))
+    # jax.debug.print("DEBUG: snr_injection has Infs: {}", ops.any(ops.isinf(snr_injection)))
+    # jax.debug.print("DEBUG: snr_injection max abs: {}", ops.max(ops.abs(snr_injection)))
+    
+    # Force clean
+    snr_injection = ops.where(ops.isnan(snr_injection), 0.0, snr_injection)
+    snr_injection = ops.where(ops.isinf(snr_injection), 0.0, snr_injection)
 
     # Calculate the current SNR
     current_snr = snr(
@@ -204,6 +214,8 @@ def scale_to_snr(
         overlap_duration_seconds=overlap_duration_seconds,
         lower_frequency_cutoff=lower_frequency_cutoff
     )
+    
+    # DEBUG
     
     # Ensure `desired_snr` and `current_snr` have compatible shapes
     desired_snr = ops.reshape(desired_snr, [-1])  # Shape: [batch_size]

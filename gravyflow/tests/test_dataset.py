@@ -212,7 +212,7 @@ def get_phenom_generator(
         injection_directory_path: Path, 
         scaling_method: gf.ScalingMethod, 
         ifos: List[gf.IFO]
-    ) -> gf.RippleGenerator:
+    ) -> gf.CBCGenerator:
 
     """Load the injection configuration.
 
@@ -222,7 +222,7 @@ def get_phenom_generator(
         ifos (List[gf.IFO]): The interferometers to use.
 
     Returns:
-        gf.RippleGenerator: The waveform generator object.
+        gf.CBCGenerator: The waveform generator object.
     """
     phenom_d_generator = gf.WaveformGenerator.load(
         path=injection_directory_path / "phenom_d_parameters.json", 
@@ -260,7 +260,7 @@ def get_incoherent_generator(
         injection_directory_path: Path, 
         scaling_method: gf.ScalingMethod,
         _ : Any
-    ) -> Tuple[gf.RippleGenerator, gf.WNBGenerator]:
+    ) -> Tuple[gf.CBCGenerator, gf.WNBGenerator]:
 
     """Load the waveform generators.
 
@@ -583,7 +583,7 @@ def _test_dataset_iteration(
 def setup_dataset_arguments(
         waveform_type : str,
         noise_obtainer: gf.NoiseObtainer, 
-        phenom_d_generator: gf.RippleGenerator
+        phenom_d_generator: gf.CBCGenerator
     ) -> Dict:
 
     """Set up arguments for the dataset.
@@ -591,7 +591,7 @@ def setup_dataset_arguments(
     Args:
         waveform_type (str): Type of waveform being returned by dataset.
         noise_obtainer (gf.NoiseObtainer): Noise obtainer object.
-        phenom_d_generator (gf.RippleGenerator): Waveform generator object.
+        phenom_d_generator (gf.CBCGenerator): Waveform generator object.
 
     Returns:
         Dict: Arguments for creating the dataset.

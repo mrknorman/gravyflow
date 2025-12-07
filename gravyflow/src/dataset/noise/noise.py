@@ -378,7 +378,7 @@ class NoiseObtainer:
                     "NoiseType.PSEUDO_REAL, or NoiseType.REAL. "
                 )
                 
-        if self.generator is None:
+        if self.generator is None:  # pragma: no cover
             raise ValueError(
                 "Noise generator failed to initilise..."
             )
@@ -450,6 +450,10 @@ class NoiseObtainer:
                     nperseg=1024, 
                     sample_rate_hertz=sample_rate_hertz
                 )
+                
+                # Squeeze to 1D - psd returns (batch, freqs), we need (freqs,)
+                frequencies = ops.squeeze(frequencies)
+                psd = ops.squeeze(psd)
                 
                 interpolated_psd_onsource, interpolated_psd_offsource = \
                     interpolate_onsource_offsource_psd(

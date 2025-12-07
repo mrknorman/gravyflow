@@ -22,9 +22,10 @@ from numpy.random import default_rng
 
 # Local imports:
 import gravyflow as gf
-from gravyflow.src.dataset.features.waveforms.ripple import (
-    generate_ripple_waveform, 
-    calc_duration_from_f_min
+from gravyflow.src.dataset.features.waveforms.cbc import (
+    generate_cbc_waveform, 
+    calc_duration_from_f_min,
+    Approximant
 )
 
 class ScalingOrdinality(Enum):
@@ -227,10 +228,13 @@ class WaveformGenerator:
         
         # Deep copy all distributed attributes to ensure they are independent instances
         # This prevents shared state if the same Distribution object was passed to multiple arguments
-        for attribute in self.distributed_attributes:
-            val = getattr(self, attribute)
-            if isinstance(val, gf.Distribution):
-                setattr(self, attribute, deepcopy(val))
+        # Deep copy all distributed attributes to ensure they are independent instances
+        # This prevents shared state if the same Distribution object was passed to multiple arguments
+        if self.distributed_attributes is not None:
+            for attribute in self.distributed_attributes:
+                val = getattr(self, attribute)
+                if isinstance(val, gf.Distribution):
+                    setattr(self, attribute, deepcopy(val))
                 
         # Ensure attributes are decorrelated by default
         self.reseed(gf.Defaults.seed)
@@ -298,7 +302,7 @@ class WaveformGenerator:
             if "scaling_type" in config:
                 config.pop("scaling_type")
             
-        elif "scaling_type" and "scaling_distribution" in config:
+        elif "scaling_type" in config and "scaling_distribution" in config:
             config["scaling_method"] = ScalingMethod(
                 gf.Distribution(
                     **config.pop("scaling_distribution"),
@@ -315,7 +319,7 @@ class WaveformGenerator:
         waveform_cls = None
         match config.pop("type"):
             case 'PhenomD': 
-                waveform_cls = RippleGenerator
+                waveform_cls = CBCGenerator
             case 'WNB':
                 waveform_cls = WNBGenerator
             case _:
@@ -323,7 +327,7 @@ class WaveformGenerator:
                 
         generator = waveform_cls(
             scaling_method=config.pop("scaling_method"),
-            scale_factor=config.pop("scale_factor"),
+            scale_factor=config.pop("scale_factor", None),
             network=cls.init_network(network),
             injection_chance=config.pop("injection_chance"),
             front_padding_duration_seconds=config.pop(
@@ -355,21 +359,23 @@ class WaveformGenerator:
             return attribute
 
     def convert_all_distributions(self):
-        for attribute in self.distributed_attributes:
-            converted = self.convert_to_distribution(
-                getattr(self, attribute)
-            )
-            setattr(self, attribute, converted)
+        if self.distributed_attributes is not None:
+            for attribute in self.distributed_attributes:
+                converted = self.convert_to_distribution(
+                    getattr(self, attribute)
+                )
+                setattr(self, attribute, converted)
     
     def reseed(self, seed):
 
         rng = default_rng(seed)
-        for attribute in self.distributed_attributes:
-            distribution = getattr(self, attribute)
-            seed = rng.integers(1000000000)
-            if isinstance(distribution, gf.Distribution):
-                distribution.reseed(seed)
-                setattr(self, attribute, distribution)
+        if self.distributed_attributes is not None:
+            for attribute in self.distributed_attributes:
+                distribution = getattr(self, attribute)
+                seed = rng.integers(1000000000)
+                if isinstance(distribution, gf.Distribution):
+                    distribution.reseed(seed)
+                    setattr(self, attribute, distribution)
                 
     def apply_injection_chance(self, waveforms, seed):
         """
@@ -613,7 +619,7 @@ def ensure_last_dim_even(tensor):
         return tensor[..., :-1]
 
 @dataclass
-class RippleGenerator(WaveformGenerator):
+class CBCGenerator(WaveformGenerator):
     mass_1_msun : Union[float, gf.Distribution] = 30.0
     mass_2_msun : Union[float, gf.Distribution] = 30.0
     inclination_radians : Union[float, gf.Distribution] = 0.0
@@ -626,7 +632,7 @@ class RippleGenerator(WaveformGenerator):
     spin_2_in : Union[Tuple[float], gf.Distribution] = (0.0, 0.0, 0.0,)
     lambda_1 : Union[float, gf.Distribution] = 0.0
     lambda_2 : Union[float, gf.Distribution] = 0.0
-    approximant : str = "IMRPhenomD"
+    approximant : Approximant = Approximant.IMRPhenomD
     min_frequency_hertz : Union[float, gf.Distribution] = 20.0
     
     distributed_attributes : Tuple[str] = (
@@ -738,7 +744,7 @@ class RippleGenerator(WaveformGenerator):
             parameters["mass_1_msun"] = ops.maximum(mass_1, mass_2)
             parameters["mass_2_msun"] = ops.minimum(mass_1, mass_2)
             
-            # Wrap inclination to [0, pi] to avoid LAL/Ripple issues with values like 20.0
+            # Wrap inclination to [0, pi] to avoid LAL waveform issues with values like 20.0
             if "inclination_radians" in parameters:
                 inc = parameters["inclination_radians"]
                 inc = ops.convert_to_tensor(inc, dtype="float32")
@@ -789,20 +795,20 @@ class RippleGenerator(WaveformGenerator):
             
             coalescence_time = gen_duration - (duration_seconds / 2.0)
             
-            # Create kwargs for ripple, removing parameters it doesn't accept
-            ripple_kwargs = parameters.copy()
-            if "min_frequency_hertz" in ripple_kwargs:
-                ripple_kwargs.pop("min_frequency_hertz")
-            if "duration_seconds" in ripple_kwargs:
-                ripple_kwargs.pop("duration_seconds")
+            # Create kwargs for CBC generator, removing parameters it doesn't accept
+            cbc_kwargs = parameters.copy()
+            if "min_frequency_hertz" in cbc_kwargs:
+                cbc_kwargs.pop("min_frequency_hertz")
+            if "duration_seconds" in cbc_kwargs:
+                cbc_kwargs.pop("duration_seconds")
 
-            waveforms = generate_ripple_waveform(
+            waveforms = generate_cbc_waveform(
                     num_waveforms=num_waveforms, 
                     sample_rate_hertz=sample_rate_hertz, 
                     duration_seconds=gen_duration,
                     approximant=self.approximant,
                     coalescence_time=coalescence_time,
-                    **ripple_kwargs
+                    **cbc_kwargs
             )
             
             # Crop to the last `duration_seconds`
@@ -1068,6 +1074,10 @@ class InjectionGenerator:
             self.parameters_to_return = []
         else:
             self.parameters_to_return = parameters_to_return
+        
+        # Use gf.Defaults.seed if no seed provided for determinism
+        if seed is None:
+            seed = gf.Defaults.seed
         self.seed = seed
         self.rng = default_rng(seed)
         self.sample_rate_hertz = gf.Defaults.sample_rate_hertz # Default

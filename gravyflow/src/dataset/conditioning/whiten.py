@@ -192,7 +192,7 @@ def convolve(
     
     return conv
 
-@jax.jit(static_argnames=["sample_rate_hertz", "fft_duration_seconds", "overlap_duration_seconds", "highpass_hertz", "detrend", "filter_duration_seconds", "window"])
+@jax.jit(static_argnames=["sample_rate_hertz", "fft_duration_seconds", "overlap_duration_seconds", "highpass_hertz", "detrend", "filter_duration_seconds", "window", "num_samples"])
 def whiten(
     timeseries, 
     background,
@@ -202,7 +202,8 @@ def whiten(
     highpass_hertz: float = None,
     detrend: str ='constant',
     filter_duration_seconds: float = 2.0,
-    window: str = "hann"
+    window: str = "hann",
+    num_samples: int = None
     ):
     """
     Whiten a timeseries using the given parameters.
@@ -235,6 +236,11 @@ def whiten(
 
     dt = 1.0 / sample_rate_hertz
     
+    # Get num_samples - if not provided, extract from timeseries shape
+    # When num_samples is passed as static arg, all derived values are concrete
+    if num_samples is None:
+        num_samples = int(timeseries.shape[-1])
+    
     freqs, psd_val = psd(
         background, 
         nperseg=int(sample_rate_hertz*fft_duration_seconds), 
@@ -246,9 +252,10 @@ def whiten(
     psd_val = ops.maximum(psd_val, 0.0)
     asd = ops.sqrt(psd_val)
     
-    df = 1.0 / (ops.cast(ops.shape(timeseries)[-1], "float32") / sample_rate_hertz)
+    # Use static num_samples for df calculation to avoid JIT concretization errors
+    df = sample_rate_hertz / float(num_samples)
     
-    num_freqs = ops.shape(timeseries)[-1]//2 + 1
+    num_freqs = num_samples // 2 + 1
     fsamples = ops.arange(0, num_freqs, dtype="float32") * df
     freqs = ops.cast(freqs, "float32")
     
@@ -258,15 +265,12 @@ def whiten(
     
     def interp_fn(p):
         return jnp.interp(fsamples, freqs, p)
-        
-    rank = len(ops.shape(asd))
-    if rank > 1:
-        asd_flat = ops.reshape(asd, (-1, ops.shape(asd)[-1]))
-        asd_interp = jnp.vectorize(interp_fn, signature='(n)->(m)')(asd_flat)
-        target_len = ops.shape(fsamples)[0]
-        asd = ops.reshape(asd_interp, (*ops.shape(asd)[:-1], target_len))
-    else:
-        asd = jnp.interp(fsamples, freqs, asd)
+    
+    # asd always has rank > 1 since input is always expanded to 2D before PSD
+    asd_flat = ops.reshape(asd, (-1, ops.shape(asd)[-1]))
+    asd_interp = jnp.vectorize(interp_fn, signature='(n)->(m)')(asd_flat)
+    target_len = ops.shape(fsamples)[0]
+    asd = ops.reshape(asd_interp, (*ops.shape(asd)[:-1], target_len))
 
     ncorner = int(highpass_hertz / df) if highpass_hertz else 0
     ntaps = int(filter_duration_seconds * sample_rate_hertz)

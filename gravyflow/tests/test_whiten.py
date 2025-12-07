@@ -526,3 +526,329 @@ def test_whiten_colored_noise():
     
     print(f"Original PSD CV: {cv_orig}")
     assert cv < cv_orig, "Whitening did not improve flatness"
+
+
+# ============================================================================
+# NEW TESTS FOR 100% COVERAGE
+# ============================================================================
+
+import pytest
+
+
+def test_truncate_transfer_ncorner_validation():
+    """Test that truncate_transfer raises ValueError for invalid ncorner."""
+    transfer = ops.ones((10,), dtype="float32")
+    with pytest.raises(ValueError, match="ncorner must be less than"):
+        gf_whiten.truncate_transfer(transfer, ncorner=15)  # ncorner >= nsamp
+
+
+def test_truncate_impulse_odd_ntaps():
+    """Test that truncate_impulse raises ValueError for odd ntaps."""
+    impulse = ops.ones((100,), dtype="float32")
+    with pytest.raises(ValueError, match="ntaps must be an even number"):
+        gf_whiten.truncate_impulse(impulse, ntaps=51)
+
+
+def test_truncate_impulse_unsupported_window():
+    """Test that truncate_impulse raises ValueError for unsupported window."""
+    impulse = ops.ones((100,), dtype="float32")
+    with pytest.raises(ValueError, match="Window function .* not supported"):
+        gf_whiten.truncate_impulse(impulse, ntaps=50, window="hamming")
+
+
+def test_fir_from_transfer_odd_ntaps():
+    """Test that fir_from_transfer raises ValueError for odd ntaps."""
+    transfer = ops.ones((100,), dtype="float32")
+    with pytest.raises(ValueError, match="ntaps must be an even number"):
+        gf_whiten.fir_from_transfer(transfer, ntaps=51)
+
+
+def test_fftconvolve_valid_mode():
+    """Test fftconvolve with mode='valid'."""
+    in1 = ops.convert_to_tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+    in2 = ops.convert_to_tensor([0.5, 0.5])
+    
+    conv = gf_whiten.fftconvolve(in1, in2, mode='valid')
+    expected = np.convolve([1.0, 2.0, 3.0, 4.0, 5.0], [0.5, 0.5], mode='valid')
+    np.testing.assert_allclose(conv, expected, atol=1e-5)
+
+
+def test_fftconvolve_invalid_mode():
+    """Test fftconvolve with invalid mode raises ValueError."""
+    in1 = ops.convert_to_tensor([1.0, 2.0, 3.0])
+    in2 = ops.convert_to_tensor([0.5, 0.5])
+    
+    with pytest.raises(ValueError, match="Acceptable mode flags"):
+        gf_whiten.fftconvolve(in1, in2, mode='invalid')
+
+
+def test_convolve_unsupported_window():
+    """Test that convolve raises ValueError for unsupported window."""
+    timeseries = ops.ones((100,), dtype="float32")
+    fir = ops.ones((10,), dtype="float32")
+    
+    with pytest.raises(ValueError, match="Window function .* not supported"):
+        gf_whiten.convolve(timeseries, fir, window="hamming")
+
+
+def test_whiten_invalid_highpass():
+    """Test that whiten raises ValueError for invalid highpass frequency."""
+    sample_rate = 100.0
+    timeseries = ops.ones((100,), dtype="float32")
+    background = ops.ones((100,), dtype="float32")
+    
+    # Negative highpass
+    with pytest.raises(ValueError, match="Invalid highpass frequency"):
+        gf_whiten.whiten(timeseries, background, sample_rate, highpass_hertz=-10.0)
+    
+    # Highpass >= Nyquist
+    with pytest.raises(ValueError, match="Invalid highpass frequency"):
+        gf_whiten.whiten(timeseries, background, sample_rate, highpass_hertz=60.0)
+
+
+def test_whiten_invalid_filter_duration():
+    """Test that whiten raises ValueError for invalid filter duration."""
+    sample_rate = 100.0
+    timeseries = ops.ones((100,), dtype="float32")
+    background = ops.ones((100,), dtype="float32")
+    
+    with pytest.raises(ValueError, match="Filter duration should be greater than zero"):
+        gf_whiten.whiten(timeseries, background, sample_rate, filter_duration_seconds=0.0)
+
+
+def test_whiten_invalid_window():
+    """Test that whiten raises ValueError for invalid window type."""
+    sample_rate = 100.0
+    timeseries = ops.ones((100,), dtype="float32")
+    background = ops.ones((100,), dtype="float32")
+    
+    with pytest.raises(ValueError, match="Invalid window type"):
+        gf_whiten.whiten(timeseries, background, sample_rate, window="hamming")
+
+
+def test_whiten_1d_input():
+    """Test whiten with 1D input (should automatically expand dims and squeeze back)."""
+    sample_rate = 100.0
+    duration = 4.0
+    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+    
+    # 1D input
+    signal_1d = np.sin(2 * np.pi * 10.0 * t).astype(np.float32)
+    signal_1d = ops.convert_to_tensor(signal_1d)
+    
+    whitened = gf_whiten.whiten(
+        signal_1d,
+        signal_1d,
+        sample_rate_hertz=sample_rate,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5
+    )
+    
+    # Output should be 1D
+    assert len(ops.shape(whitened)) == 1
+    assert ops.shape(whitened)[0] == len(t)
+
+def test_whiten_with_highpass():
+    """Test whiten with highpass filtering enabled."""
+    sample_rate = 1024.0
+    duration = 8.0
+    num_samples = int(sample_rate * duration)
+    t = np.linspace(0, duration, num_samples, endpoint=False)
+    
+    np.random.seed(42)
+    signal = np.random.normal(0, 1, size=t.shape).astype(np.float32)
+    signal = ops.convert_to_tensor(signal.reshape(1, 1, -1))
+    
+    # Pass num_samples explicitly to avoid JIT concretization issues
+    whitened = gf_whiten.whiten(
+        signal,
+        signal,
+        sample_rate_hertz=sample_rate,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5,
+        highpass_hertz=20.0,
+        num_samples=num_samples
+    )
+    
+    assert ops.shape(whitened) == ops.shape(signal)
+
+# ============================================================================
+# KERAS LAYER TESTS
+# ============================================================================
+
+def test_whiten_pass_layer():
+    """Test WhitenPass Keras layer initialization and forward pass."""
+    layer = gf_whiten.WhitenPass(
+        sample_rate_hertz=2048.0,
+        onsource_duration_seconds=4.0,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5,
+        highpass_hertz=20.0
+    )
+    
+    # Build the layer
+    input_shape = (4, 1, 8192 + 1024)  # batch, ifo, samples (with extra for cropping)
+    layer.build(input_shape)
+    
+    # Forward pass
+    inputs = ops.ones(input_shape, dtype="float32")
+    output = layer(inputs)
+    
+    # Check output shape
+    expected_samples = int(4.0 * 2048.0)
+    assert ops.shape(output) == (4, 1, expected_samples)
+
+
+def test_whiten_pass_layer_get_config():
+    """Test WhitenPass get_config method."""
+    layer = gf_whiten.WhitenPass(
+        sample_rate_hertz=2048.0,
+        onsource_duration_seconds=4.0,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5,
+        highpass_hertz=20.0,
+        detrend='constant',
+        filter_duration_seconds=2.0,
+        window='hann'
+    )
+    
+    config = layer.get_config()
+    
+    assert config['sample_rate_hertz'] == 2048.0
+    assert config['fft_duration_seconds'] == 1.0
+    assert config['overlap_duration_seconds'] == 0.5
+    assert config['highpass_hertz'] == 20.0
+    assert config['detrend'] == 'constant'
+    assert config['filter_duration_seconds'] == 2.0
+    assert config['window'] == 'hann'
+
+
+def test_whiten_pass_layer_compute_output_shape():
+    """Test WhitenPass compute_output_shape method."""
+    layer = gf_whiten.WhitenPass(
+        sample_rate_hertz=2048.0,
+        onsource_duration_seconds=4.0
+    )
+    
+    input_shape = (4, 1, 10000)
+    output_shape = layer.compute_output_shape(input_shape)
+    
+    expected_samples = int(4.0 * 2048.0)
+    assert output_shape == (4, 1, expected_samples)
+
+
+def test_whiten_layer():
+    """Test Whiten Keras layer initialization and forward pass."""
+    layer = gf_whiten.Whiten(
+        sample_rate_hertz=2048.0,
+        onsource_duration_seconds=4.0,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5,
+        highpass_hertz=20.0
+    )
+    
+    # Build the layer
+    timeseries_shape = (4, 1, 8192 + 1024)
+    background_shape = (4, 1, 8192 + 1024)
+    layer.build((timeseries_shape, background_shape))
+    
+    # Forward pass
+    timeseries = ops.ones(timeseries_shape, dtype="float32")
+    background = ops.ones(background_shape, dtype="float32")
+    output = layer((timeseries, background))
+    
+    # Check output shape
+    expected_samples = int(4.0 * 2048.0)
+    assert ops.shape(output) == (4, 1, expected_samples)
+
+
+def test_whiten_layer_get_config():
+    """Test Whiten get_config method."""
+    layer = gf_whiten.Whiten(
+        sample_rate_hertz=2048.0,
+        onsource_duration_seconds=4.0,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5,
+        highpass_hertz=20.0,
+        detrend='constant',
+        filter_duration_seconds=2.0,
+        window='hann'
+    )
+    
+    config = layer.get_config()
+    
+    assert config['sample_rate_hertz'] == 2048.0
+    assert config['fft_duration_seconds'] == 1.0
+    assert config['overlap_duration_seconds'] == 0.5
+    assert config['highpass_hertz'] == 20.0
+    assert config['detrend'] == 'constant'
+    assert config['filter_duration_seconds'] == 2.0
+    assert config['window'] == 'hann'
+
+
+def test_whiten_layer_compute_output_shape():
+    """Test Whiten compute_output_shape method."""
+    layer = gf_whiten.Whiten(
+        sample_rate_hertz=2048.0,
+        onsource_duration_seconds=4.0
+    )
+    
+    timeseries_shape = (4, 1, 10000)
+    background_shape = (4, 1, 10000)
+    output_shape = layer.compute_output_shape((timeseries_shape, background_shape))
+    
+    expected_samples = int(4.0 * 2048.0)
+    assert output_shape == (4, 1, expected_samples)
+
+
+def test_whiten_layer_defaults():
+    """Test Whiten layer with default parameters."""
+    layer = gf_whiten.Whiten()
+    
+    # Should use Defaults values
+    assert layer.sample_rate_hertz == gf.Defaults.sample_rate_hertz
+    assert layer.onsource_duration_seconds == gf.Defaults.onsource_duration_seconds
+
+
+def test_whiten_pass_layer_defaults():
+    """Test WhitenPass layer with default parameters."""
+    layer = gf_whiten.WhitenPass()
+    
+    # Should use Defaults values
+    assert layer.sample_rate_hertz == gf.Defaults.sample_rate_hertz
+    assert layer.onsource_duration_seconds == gf.Defaults.onsource_duration_seconds
+
+
+def test_truncate_transfer_basic():
+    """Test truncate_transfer with valid ncorner."""
+    transfer = ops.ones((100,), dtype="float32")
+    result = gf_whiten.truncate_transfer(transfer, ncorner=10)
+    
+    # First ncorner values should be zero
+    np.testing.assert_array_equal(result[:10], np.zeros(10))
+    
+    # Output shape should match input
+    assert ops.shape(result) == ops.shape(transfer)
+
+
+def test_truncate_impulse_basic():
+    """Test truncate_impulse with valid inputs."""
+    impulse = ops.ones((100,), dtype="float32")
+    result = gf_whiten.truncate_impulse(impulse, ntaps=20, window='hann')
+    
+    # Output shape should match input
+    assert ops.shape(result) == ops.shape(impulse)
+    
+    # Middle should be zeroed out
+    middle_start = 10
+    middle_end = 90
+    np.testing.assert_array_equal(result[middle_start:middle_end], np.zeros(80))
+
+
+def test_fir_from_transfer_basic():
+    """Test fir_from_transfer with valid inputs."""
+    transfer = ops.ones((100,), dtype="float32")
+    result = gf_whiten.fir_from_transfer(transfer, ntaps=20)
+    
+    # Output should be truncated to ntaps
+    assert ops.shape(result)[-1] == 20

@@ -3,6 +3,7 @@ from pathlib import Path
 import logging
 
 import pytest
+import gravyflow as gf
 import h5py
 import numpy as np
 import keras
@@ -65,18 +66,28 @@ def test_rotation_matrices():
     angle = ops.convert_to_tensor([0.0, np.pi/2.0])
     
     # Z-rotation
-    # 0 -> Identity
-    # pi/2 -> [[0, -1, 0], [1, 0, 0], [0, 0, 1]]
     rm_z = gf.src.dataset.conditioning.detector.rotation_matrix_z(angle)
-    
     assert ops.shape(rm_z) == (2, 3, 3)
-    
-    # Check identity
     np.testing.assert_allclose(rm_z[0], np.eye(3), atol=1e-6)
-    
-    # Check pi/2
+    # At pi/2: c=0, s=1 -> [[0,1,0],[-1,0,0],[0,0,1]]
     expected_z = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]])
     np.testing.assert_allclose(rm_z[1], expected_z, atol=1e-6)
+    
+    # X-rotation: row1=[1,0,0], row2=[0,c,-s], row3=[0,s,c]
+    # At pi/2: c=0, s=1 -> [[1,0,0],[0,0,-1],[0,1,0]]
+    rm_x = gf.src.dataset.conditioning.detector.rotation_matrix_x(angle)
+    assert ops.shape(rm_x) == (2, 3, 3)
+    np.testing.assert_allclose(rm_x[0], np.eye(3), atol=1e-6)
+    expected_x = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+    np.testing.assert_allclose(rm_x[1], expected_x, atol=1e-6)
+    
+    # Y-rotation: row1=[c,0,-s], row2=[0,1,0], row3=[s,0,c]
+    # At pi/2: c=0, s=1 -> [[0,0,-1],[0,1,0],[1,0,0]]
+    rm_y = gf.src.dataset.conditioning.detector.rotation_matrix_y(angle)
+    assert ops.shape(rm_y) == (2, 3, 3)
+    np.testing.assert_allclose(rm_y[0], np.eye(3), atol=1e-6)
+    expected_y = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])
+    np.testing.assert_allclose(rm_y[1], expected_y, atol=1e-6)
 
 def test_network_init():
     # Initialize a simple network (L1)
@@ -271,18 +282,26 @@ def _test_projection(
         gf.tests.PATH / "example_injection_parameters"
     )
 
+    # Use gf.Defaults.seed for deterministic test
+    seed = gf.Defaults.seed
+    gf.set_random_seeds(seed)
+    
+    # Create fresh Network with default seed (don't use fixture - its RNG was already consumed)
+    if single_ifo:
+        test_network = gf.Network([gf.IFO.L1], seed=seed)
+    else:
+        test_network = gf.Network([gf.IFO.L1, gf.IFO.H1, gf.IFO.V1], seed=seed)
+
     phenom_d_generator = gf.WaveformGenerator.load(
         injection_directory_path / "phenom_d_parameters.json"
     )
     phenom_d_generator.injection_chance = 1.0
 
+    # InjectionGenerator now defaults to gf.Defaults.seed
     injection_generator = gf.InjectionGenerator([phenom_d_generator])
     injections, _, _ = next(injection_generator())
 
-    if single_ifo:
-        network = gf.Network([gf.IFO.L1])  # Adjust for single IFO
-
-    projected_injections = network.project_wave(injections[0])
+    projected_injections = test_network.project_wave(injections[0])
 
     injections_file_path : Path = (
         gf.PATH / f"res/tests/projected_injections_{name}.hdf5"
@@ -305,7 +324,6 @@ def _test_projection(
         grid = gridplot(layout)
         save(grid)
 
-@pytest.mark.slow
 def test_project_wave(
         network : gf.Network, 
         pytestconfig : Config
@@ -322,7 +340,6 @@ def test_project_wave(
             should_plot=pytestconfig.getoption("plot")
         )
 
-@pytest.mark.slow
 def test_project_wave_single(
         network : gf.Network, 
         pytestconfig : Config
@@ -502,3 +519,110 @@ def profile_atennnna_pattern() -> None:
             (f"Time for PyCBC's d.antenna_pattern: {timer.timeit(number=1)} "
              " seconds")
         )
+
+def test_network_load(tmp_path):
+    """Test Network.load() from JSON config file."""
+    # Create a test config file
+    config = {
+        "num_detectors": 1,
+        "latitude_radians": 0.5,
+        "longitude_radians": 0.3,
+        "x_angle_radians": 0.1,
+        "y_angle_radians": 0.2,
+        "x_length_meters": 4000.0,
+        "y_length_meters": 4000.0,
+        "height_meters": 0.0
+    }
+    
+    config_path = tmp_path / "network_config.json"
+    import json
+    with open(config_path, 'w') as f:
+        json.dump(config, f)
+    
+    # Load network from config
+    network = gf.Network.load(config_path)
+    
+    assert network.num_detectors == 1
+    assert ops.shape(network.location) == (1, 3)
+
+def test_check_and_convert_list_input():
+    """Test check_and_convert with list input (covers lines 720-725)."""
+    network = gf.Network([gf.IFO.L1])
+    
+    # Test with list input
+    result = network.check_and_convert([1.0, 2.0], "test_param", tensor_length=2)
+    assert ops.shape(result) == (2,)
+    np.testing.assert_allclose(result, [1.0, 2.0])
+
+def test_check_and_convert_tensor_dtype_cast():
+    """Test check_and_convert with non-float32 tensor (covers lines 716-717)."""
+    network = gf.Network([gf.IFO.L1])
+    
+    # Test with float64 tensor - should be cast to float32
+    tensor_f64 = ops.convert_to_tensor([1.0, 2.0], dtype="float64")
+    result = network.check_and_convert(tensor_f64, "test_param", tensor_length=2)
+    assert result.dtype == "float32"
+    
+    # Test with float32 tensor - should pass through unchanged (covers line 718)
+    tensor_f32 = ops.convert_to_tensor([1.0, 2.0], dtype="float32")
+    result = network.check_and_convert(tensor_f32, "test_param", tensor_length=2)
+    assert result.dtype == "float32"
+    assert result is tensor_f32  # Should be the same object
+
+def test_network_load_distribution(tmp_path):
+    """Test Network.load() with distribution parameters (covers line 687)."""
+    config = {
+        "num_detectors": 1,
+        "latitude_radians": {
+            "type_": "uniform",
+            "min_": 0.0,
+            "max_": 1.0
+        },
+        # Minimal other required params
+        "longitude_radians": 0.0,
+        "x_angle_radians": 0.0,
+        "y_angle_radians": 0.0,
+        "x_length_meters": 4000.0,
+        "y_length_meters": 4000.0,
+        "height_meters": 0.0
+    }
+    
+    config_path = tmp_path / "network_dist_config.json"
+    import json
+    with open(config_path, 'w') as f:
+        json.dump(config, f)
+    
+    network = gf.Network.load(config_path)
+    # Just check it loaded without error and has valid location
+    assert network.num_detectors == 1
+    assert ops.shape(network.location) == (1, 3)
+
+def test_check_and_convert_errors():
+    """Test error conditions in check_and_convert."""
+    network = gf.Network([gf.IFO.L1])
+    
+    # Tensor shape mismatch
+    tensor = ops.convert_to_tensor([1.0, 2.0, 3.0], dtype="float32")
+    with pytest.raises(ValueError, match="must be equal to num injections"):
+        network.check_and_convert(tensor, "test", tensor_length=2)
+        
+    # List length mismatch
+    with pytest.raises(ValueError, match="must be equal to num injections"):
+        network.check_and_convert([1.0, 2.0, 3.0], "test", tensor_length=2)
+        
+    # Invalid type
+    with pytest.raises(TypeError, match="must be a float, list, tuple, or tensor"):
+        network.check_and_convert("invalid", "test", tensor_length=2)
+
+def test_check_and_convert_scalar_none():
+    """Test check_and_convert with scalar and None inputs."""
+    network = gf.Network([gf.IFO.L1])
+    
+    # Scalar input
+    result = network.check_and_convert(5.0, "test", tensor_length=3)
+    assert ops.shape(result) == (3,)
+    np.testing.assert_allclose(result, [5.0, 5.0, 5.0])
+    
+    # None input
+    result = network.check_and_convert(None, "test", tensor_length=3)
+    assert result is None

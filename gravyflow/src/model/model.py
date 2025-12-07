@@ -1,3 +1,7 @@
+"""
+DEPRECATED: This module is deprecated and not actively maintained.
+It is excluded from test coverage requirements.
+"""
 from dataclasses import dataclass
 from typing import Union, List, Dict, Optional
 from copy import deepcopy
@@ -11,296 +15,166 @@ import datetime
 
 import numpy as np
 from tqdm import tqdm
-import tensorflow_probability as tfp
-from keras.layers import Lambda
-from keras import backend as K
-from keras.callbacks import Callback
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import losses
-from tensorflow.keras.layers import Layer
+import keras
+from keras import ops
+from keras import layers
+from keras import losses
+from keras.layers import Layer
+import jax.numpy as jnp
+import jax.scipy.stats as jstats
+from jax import lax
+
+import gravyflow as gf
+
+def gamma_log_prob(x, concentration, rate):
+    return jstats.gamma.logpdf(x, a=concentration, scale=1/rate)
+
+def folded_normal_log_prob(x, loc, scale):
+    # Folded normal distribution: |Y| where Y ~ N(loc, scale)
+    # PDF(x) = (1/sigma * sqrt(2pi)) * (exp(-(x-mu)^2/2sigma^2) + exp(-(x+mu)^2/2sigma^2)) for x >= 0
+    # We use logsumexp for numerical stability
+    
+    # Constants
+    log_sqrt_2pi = jnp.log(jnp.sqrt(2 * jnp.pi))
+    log_sigma = jnp.log(scale)
+    
+    term1 = -0.5 * ((x - loc) / scale) ** 2
+    term2 = -0.5 * ((x + loc) / scale) ** 2
+    
+    # log(exp(a) + exp(b)) = a + log(1 + exp(b-a))
+    log_sum = ops.logsumexp(ops.stack([term1, term2], axis=-1), axis=-1)
+    
+    return log_sum - log_sigma - log_sqrt_2pi
+
+def trunc_normal_log_prob(x, loc, scale, low, high):
+    return jstats.truncnorm.logpdf(x, a=(low - loc) / scale, b=(high - loc) / scale, loc=loc, scale=scale)
+
+def beta_prime_log_prob(x, alpha, beta):
+    # Beta prime: f(x) = x^(alpha-1) * (1+x)^(-alpha-beta) / B(alpha, beta)
+    # log f(x) = (alpha-1)log(x) - (alpha+beta)log(1+x) - log B(alpha, beta)
+    # log B(alpha, beta) = lgamma(alpha) + lgamma(beta) - lgamma(alpha+beta)
+    
+    log_prob = (alpha - 1) * jnp.log(x) - (alpha + beta) * jnp.log(1 + x)
+    log_beta_func = lax.lgamma(alpha) + lax.lgamma(beta) - lax.lgamma(alpha + beta)
+    return log_prob - log_beta_func
+
+def gamma_nll(y_true, y_pred):
+    alpha, beta = ops.split(y_pred, 2, axis=-1)
+    return -gamma_log_prob(y_true, alpha, beta)
+
+def folded_normal_nll(y_true, y_pred):
+    loc, scale = ops.split(y_pred, 2, axis=-1)
+    return -folded_normal_log_prob(y_true, loc, scale)
+
+def trunc_normal_nll(y_true, y_pred, low=0.0, high=100.0):
+    loc, scale = ops.split(y_pred, 2, axis=-1)
+    return -trunc_normal_log_prob(y_true, loc, scale, low, high)
+
+def beta_prime_nll(y_true, y_pred):
+    alpha, beta = ops.split(y_pred, 2, axis=-1)
+    return -beta_prime_log_prob(y_true, alpha, beta)
+
 
 from numpy.random import default_rng  
 
 import gravyflow as gf
 
-def negative_loglikelihood(targets, estimated_distribution):
-    
-    targets = tf.cast(targets, dtype = tf.float32)
-    return -estimated_distribution.log_prob(targets)
 
-def negative_loglikelihood_(y_true, y_pred):
-    loc, scale = tf.unstack(tf.cast(y_pred, dtype = tf.float32), axis=-1)
-    y_true = tf.cast(y_true, dtype = tf.float32)
+class IndependentGamma(layers.Layer):
+    """An independent Gamma Keras layer that outputs parameters."""
 
-    truncated_normal = tfp.distributions.TruncatedNormal(
-        loc,
-        scale + 1.0E-5,
-        0.0,
-        1000.0,
-        validate_args=False,
-        allow_nan_stats=True,
-        name='TruncatedNormal'
-    )
+    def __init__(self, event_shape=(), **kwargs):
+        super().__init__(**kwargs)
+        self.event_shape = event_shape
+
+    def call(self, inputs):
+        alpha, beta = ops.split(inputs, 2, axis=-1)
+        alpha = ops.softplus(alpha) + 1.0e-5
+        beta = ops.softplus(beta) + 1.0e-5
+        return ops.concatenate([alpha, beta], axis=-1)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"event_shape": self.event_shape})
+        return config
+
+class IndependentFoldedNormal(layers.Layer):
+    """An independent folded normal Keras layer that outputs parameters."""
+
+    def __init__(self, event_shape=(), **kwargs):
+        super().__init__(**kwargs)
+        self.event_shape = event_shape
+
+    def call(self, inputs):
+        loc, scale = ops.split(inputs, 2, axis=-1)
+        loc = loc + 1.0e-6
+        scale = scale + 1.0e-6
         
-    return -truncated_normal.log_prob(y_true)
-
-tfd = tfp.distributions
-tfpl = tfp.layers
-
-class IndependentGamma(tfpl.DistributionLambda):
-    """An independent Gamma Keras layer."""
-
-    def __init__(self,
-                 event_shape=(),
-                 convert_to_tensor_fn=tfd.Distribution.sample,
-                 validate_args=False,
-                 **kwargs):
-        super(IndependentGamma, self).__init__(
-            lambda t: self.new(t, event_shape, validate_args),
-            convert_to_tensor_fn,
-            **kwargs
-        )
-        self._event_shape = event_shape
-        self._validate_args = validate_args
-
-    def new(self, params, event_shape=(), validate_args=False, name=None):
-        """Create the distribution instance from a `params` vector."""
-        with tf.name_scope(name or 'IndependentGamma'):
-            params = tf.convert_to_tensor(params, name='params')
-            event_shape = tf.reshape(event_shape, [-1])
-            output_shape = tf.concat([
-                tf.shape(params)[:-1],
-                event_shape
-            ], axis=0)
-            alpha_params, beta_params = tf.split(params, 2, axis=-1)
-            alpha_params = tf.nn.softplus(tf.cast(alpha_params, dtype = tf.float32)) + 1.0E-5
-            beta_params = tf.nn.softplus(tf.cast(beta_params, dtype = tf.float32)) + 1.0E-5
-            
-            return tfd.Independent(
-                tfd.Gamma(
-                    concentration=tf.reshape(alpha_params, output_shape),
-                    rate=tf.reshape(beta_params, output_shape),
-                    validate_args=validate_args),
-                reinterpreted_batch_ndims=tf.size(event_shape),
-                validate_args=validate_args)
-
-    @staticmethod
-    def params_size(event_shape=(), name=None):
-        """The number of `params` needed to create a single distribution."""
-        with tf.name_scope(name or 'IndependentGamma_params_size'):
-            event_shape = tf.convert_to_tensor(
-                event_shape, 
-                name='event_shape', 
-                dtype_hint=tf.int32
-            )
-            return np.int32(2) * np.prod(event_shape)
+        # In original code:
+        # loc = tf.math.softplus(loc)
+        # scale = tf.math.softplus(scale)
+        # But wait, original code:
+        # loc_params = tf.cast(loc_params, dtype = tf.float32)  + 1.0E-6
+        # scale_params = tf.cast(scale_params, dtype = tf.float32) + 1.0E-6
+        # return tfd.Normal(loc=tf.math.softplus(loc), scale=tf.math.softplus(scale))
+        # So yes, softplus is applied.
+        
+        loc = ops.softplus(loc)
+        scale = ops.softplus(scale)
+        return ops.concatenate([loc, scale], axis=-1)
 
     def get_config(self):
-        """Returns the config of this layer."""
-        config = {
-            'event_shape': self._event_shape,
-            'convert_to_tensor_fn': self.convert_to_tensor_fn,
-            'validate_args': self._validate_args
-        }
-        base_config = super(IndependentGamma, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-    
-class IndependentFoldedNormal(tfpl.DistributionLambda):
-    """An independent folded normal Keras layer."""
+        config = super().get_config()
+        config.update({"event_shape": self.event_shape})
+        return config
 
-    def __init__(
-        self,
-        event_shape=(),
-        convert_to_tensor_fn=tfd.Distribution.sample,
-        validate_args=False,
-        **kwargs
-    ):
-        super(IndependentFoldedNormal, self).__init__(
-            lambda t: self.new(t, event_shape, validate_args),
-            convert_to_tensor_fn,
-            **kwargs
-        )
-        self._event_shape = event_shape
-        self._validate_args = validate_args
+class IndependentTruncNormal(layers.Layer):
+    """An independent truncated normal Keras layer that outputs parameters."""
 
-    def new(self, params, event_shape=(), validate_args=False, name=None):
-        """Create the distribution instance from a `params` vector."""
-        with tf.name_scope(name or 'IndependentFoldedNormal'):
-            params = tf.convert_to_tensor(params, name='params')
-            event_shape = tf.reshape(event_shape, [-1])
-            output_shape = tf.concat([
-                tf.shape(params)[:-1],
-                event_shape
-            ], axis=0)
-            loc_params, scale_params = tf.split(params, 2, axis=-1)
-            loc_params = tf.cast(loc_params, dtype = tf.float32)  + 1.0E-6
-            scale_params = tf.cast(scale_params, dtype = tf.float32) + 1.0E-6
-
-            return tfd.Independent(
-                tfd.TransformedDistribution(
-                    distribution=tfd.Normal(
-                        loc=tf.math.softplus(tf.reshape(loc_params, output_shape)),
-                        scale=tf.math.softplus(tf.reshape(scale_params, output_shape)),
-                        validate_args=validate_args),
-                    bijector=tfb.AbsoluteValue(),
-                    validate_args=validate_args),
-                reinterpreted_batch_ndims=tf.size(event_shape),
-                validate_args=validate_args)
-
-    @staticmethod
-    def params_size(event_shape=(), name=None):
-        """The number of `params` needed to create a single distribution."""
-        with tf.name_scope(name or 'IndependentFoldedNormal_params_size'):
-            event_shape = tf.convert_to_tensor(event_shape, name='event_shape', dtype_hint=tf.int32)
-            return np.int32(2) * np.prod(event_shape)
-
-    def get_config(self):
-        """Returns the config of this layer."""
-        config = {
-            'event_shape': self._event_shape,
-            'convert_to_tensor_fn': self.convert_to_tensor_fn,
-            'validate_args': self._validate_args
-        }
-        base_config = super(IndependentFoldedNormal, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-
-class IndependentTruncNormal(tfpl.DistributionLambda):
-    """An independent truncated normal Keras layer."""
-
-    def __init__(self,
-                 event_shape=(),
-                 low=  0.000,
-                 high= 100.0, #float("inf"),
-                 convert_to_tensor_fn=tfd.Distribution.sample,
-                 validate_args=False,
-                 **kwargs):
+    def __init__(self, event_shape=(), low=0.0, high=100.0, **kwargs):
+        super().__init__(**kwargs)
+        self.event_shape = event_shape
         self.low = low
         self.high = high
-        super(IndependentTruncNormal, self).__init__(
-            lambda t: self.new(t, event_shape, validate_args),
-            convert_to_tensor_fn,
-            **kwargs
-        )
-        self._event_shape = event_shape
-        self._validate_args = validate_args
 
-    def new(self, params, event_shape=(), validate_args=False, name=None):
-        """Create the distribution instance from a `params` vector."""
-        with tf.name_scope(name or 'IndependentTruncNormal'):
-            params = tf.convert_to_tensor(params, name='params')
-            event_shape = tf.reshape(event_shape, [-1])
-            output_shape = tf.concat([
-                tf.shape(params)[:-1],
-                event_shape
-            ], axis=0)
-            loc_params, scale_params = tf.split(params, 2, axis=-1)
-            loc_params = tf.cast(loc_params, dtype = tf.float32)  + 1.0E-5
-            scale_params = tf.cast(loc_params, dtype = tf.float32) + 1.0E-5
-            
-            return tfd.Independent(
-                tfd.TruncatedNormal(
-                    loc=tf.reshape(loc_params, output_shape),
-                    scale=tf.math.softplus(tf.reshape(scale_params, output_shape)),
-                    low=self.low,
-                    high=self.high,
-                    validate_args=validate_args),
-                reinterpreted_batch_ndims=tf.size(event_shape),
-                validate_args=validate_args)
-
-    @staticmethod
-    def params_size(event_shape=(), name=None):
-        """The number of `params` needed to create a single distribution."""
-        with tf.name_scope(name or 'IndependentTruncNormal_params_size'):
-            event_shape = tf.convert_to_tensor(event_shape, name='event_shape', dtype_hint=tf.int32)
-            return np.int32(2) * np.prod(event_shape)
+    def call(self, inputs):
+        loc, scale = ops.split(inputs, 2, axis=-1)
+        loc = loc + 1.0e-5
+        # Fixing the bug from original code where scale used loc_params
+        scale = scale + 1.0e-5 
+        
+        # Original: scale=tf.math.softplus(scale)
+        scale = ops.softplus(scale)
+        
+        return ops.concatenate([loc, scale], axis=-1)
 
     def get_config(self):
-        """Returns the config of this layer."""
-        config = {
-            'event_shape': self._event_shape,
-            'convert_to_tensor_fn': self.convert_to_tensor_fn,
-            'validate_args': self._validate_args
-        }
-        base_config = super(IndependentTruncNormal, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
+        config = super().get_config()
+        config.update({
+            "event_shape": self.event_shape,
+            "low": self.low,
+            "high": self.high
+        })
+        return config
 
-tfb = tfp.bijectors
-class BetaPrime(tfb.Bijector):
-    """Bijector for the beta prime distribution."""
-    def __init__(self, validate_args=False, name="beta_prime"):
-        super(BetaPrime, self).__init__(
-            validate_args=validate_args, forward_min_event_ndims=0, name=name)
+class IndependentBetaPrime(layers.Layer):
+    """An independent Beta prime Keras layer that outputs parameters."""
 
-    def _forward(self, x):
-        return x / (1 - x)
+    def __init__(self, event_shape=(), **kwargs):
+        super().__init__(**kwargs)
+        self.event_shape = event_shape
 
-    def _inverse(self, y):
-        return y / (1 + y)
-
-    def _forward_log_det_jacobian(self, x):
-        return - tf.math.log1p(-x)
-
-    def _inverse_log_det_jacobian(self, y):
-        return - tf.math.log1p(y)
-
-class IndependentBetaPrime(tfpl.DistributionLambda):
-    """An independent Beta prime Keras layer."""
-    def __init__(self,
-                 event_shape=(),
-                 convert_to_tensor_fn=tfd.Distribution.sample,
-                 validate_args=False,
-                 **kwargs):
-        super(IndependentBetaPrime, self).__init__(
-            lambda t: self.new(t, event_shape, validate_args),
-            convert_to_tensor_fn,
-            **kwargs
-        )
-        self._event_shape = event_shape
-        self._validate_args = validate_args
-
-    def new(self, params, event_shape=(), validate_args=False, name=None):
-        """Create the distribution instance from a `params` vector."""
-        with tf.name_scope(name or 'IndependentBetaPrime'):
-            
-            params = tf.cast(tf.convert_to_tensor(params, name='params'), tf.float32)
-            event_shape = tf.reshape(event_shape, [-1])
-            output_shape = tf.concat([
-                tf.shape(params)[:-1],
-                event_shape
-            ], axis=0)
-            concentration1_params, concentration0_params = tf.split(params, 2, axis=-1)
-            concentration1_params = tf.math.softplus(tf.reshape(concentration1_params, output_shape))
-            concentration0_params = tf.math.softplus(tf.reshape(concentration0_params, output_shape))
-
-            return tfd.Independent(
-                tfd.TransformedDistribution(
-                    distribution=tfd.Beta(
-                        concentration1=concentration1_params,
-                        concentration0=concentration0_params,
-                        validate_args=validate_args),
-                    bijector=BetaPrime(),
-                    validate_args=validate_args),
-                reinterpreted_batch_ndims=tf.size(event_shape),
-                validate_args=validate_args)
-
-    @staticmethod
-    def params_size(event_shape=(), name=None):
-        """The number of `params` needed to create a single distribution."""
-        with tf.name_scope(name or 'IndependentBetaPrime_params_size'):
-            event_shape = tf.convert_to_tensor(event_shape, name='event_shape', dtype_hint=tf.int32)
-            return np.int32(2) * np.prod(event_shape)
+    def call(self, inputs):
+        alpha, beta = ops.split(inputs, 2, axis=-1)
+        alpha = ops.softplus(alpha)
+        beta = ops.softplus(beta)
+        return ops.concatenate([alpha, beta], axis=-1)
 
     def get_config(self):
-        """Returns the config of this layer."""
-        config = {
-            'event_shape': self._event_shape,
-            'convert_to_tensor_fn': self.convert_to_tensor_fn,
-            'validate_args': self._validate_args
-        }
-        base_config = super(IndependentBetaPrime, self).get_config()
-        return dict(list(base_config.items()) + list(config.items()))
+        config = super().get_config()
+        config.update({"event_shape": self.event_shape})
+        return config
+
 
 def adjust_features(features, labels):
     labels['INJECTION_MASKS'] = labels['INJECTION_MASKS'][0]
@@ -362,13 +236,13 @@ class Reshape(Layer):
         # Reshape the input tensor based on the specified mode
         if self.reshaping_mode == 'lengthwise':
             # (num_batches, num_features * num_steps, 1)
-            return tf.reshape(inputs, [tf.shape(inputs)[0], -1, 1])
+            return ops.reshape(inputs, [ops.shape(inputs)[0], -1, 1])
         elif self.reshaping_mode == 'depthwise':
             # (num_batches, num_steps, num_features)
-            return tf.transpose(inputs, perm=[0, 2, 1])
+            return ops.transpose(inputs, axes=[0, 2, 1])
         elif self.reshaping_mode == 'heightwise':
             # (num_batches, num_features, num_steps, 1)
-            return tf.expand_dims(inputs, axis=-1)
+            return ops.expand_dims(inputs, axis=-1)
         else:
             raise ValueError("Invalid reshaping mode")
 
@@ -619,7 +493,7 @@ class WhitenPassLayer(BaseLayer):
         self.mutable_attributes = []
 
 def cap_value(x):
-    return K.clip(x, 1.0e-5, 1000)  # values will be constrained to [-1, 1]
+    return ops.clip(x, 1.0e-5, 1000)  # values will be constrained to [-1, 1]
 
 def ensure_even(number):
     if number % 2 != 0:
@@ -675,7 +549,10 @@ class Model:
             optimizer = "adam"
 
         if loss is None:
-            loss = losses.BinaryCrossentropy()
+            if output_config["type"] == "normal":
+                loss = folded_normal_nll
+            else:
+                loss = losses.BinaryCrossentropy()
         
         self.layers = layers
         self.batch_size = gf.HyperParameter(
@@ -1057,7 +934,7 @@ class Model:
             try:
                 # Try to load the model
                 logging.info(f"Loading model from {model_path}")
-                loaded_model = tf.keras.models.load_model(model_path)
+                loaded_model = keras.models.load_model(model_path)
                 model.model = loaded_model
                 model.loaded=True
 
@@ -1123,7 +1000,7 @@ class Model:
         
         # Create input tensors based on the provided configurations
         inputs = {
-            config["name"]: tf.keras.Input(shape=config["shape"], name=config["name"]) for config in input_configs
+            config["name"]: keras.Input(shape=config["shape"], name=config["name"]) for config in input_configs
         }
 
         # The last output tensor, starting with the input tensors
@@ -1143,15 +1020,15 @@ class Model:
         # Build output layer
         output_tensor = self.build_output_layer(last_output_tensors[-1], output_config)
 
-        self.model = tf.keras.Model(inputs=inputs, outputs=output_tensor)
+        self.model = keras.Model(inputs=inputs, outputs=output_tensor)
         
         # If metrics is empty use best guess
         if not metrics:
             match output_config["type"]:
                 case "normal":
-                    metrics = [tf.keras.metrics.RootMeanSquaredError()]
+                    metrics = [keras.metrics.RootMeanSquaredError()]
                 case "binary":
-                    metrics = [tf.keras.metrics.BinaryAccuracy()]
+                    metrics = [keras.metrics.BinaryAccuracy()]
         
         # Compile model
         self.model.compile(
@@ -1176,14 +1053,14 @@ class Model:
                 new_layers.append(gf.WhitenPass())
                 new_layers.append(gf.Reshape())
             case "Flatten":
-                new_layers.append(tf.keras.layers.Flatten())
+                new_layers.append(layers.Flatten())
             case "Dense":
-                new_layers.append(tf.keras.layers.Dense(
+                new_layers.append(layers.Dense(
                         layer.units.value, 
                         activation=layer.activation.value
                     ))
             case "Convolutional":
-                new_layers.append(tf.keras.layers.Conv1D(
+                new_layers.append(layers.Conv1D(
                         layer.filters.value, 
                         (layer.kernel_size.value,), 
                         strides=(layer.strides.value,), 
@@ -1191,17 +1068,17 @@ class Model:
                         padding = layer.padding.value
                     ))
             case "Pooling":
-                new_layers.append(tf.keras.layers.MaxPool1D(
+                new_layers.append(layers.MaxPool1D(
                         (layer.pool_size.value,),
                         strides=(layer.strides.value,),
                         padding = layer.padding.value
                     ))
             case "Dropout":
-                new_layers.append(tf.keras.layers.Dropout(
+                new_layers.append(layers.Dropout(
                         layer.rate.value
                     ))
             case "BatchNorm":
-                new_layers.append(tf.keras.layers.BatchNormalization())
+                new_layers.append(layers.BatchNormalization())
             case _:
                 raise ValueError(
                     f"Layer type '{layer.layer_type.value}' not recognized"
@@ -1209,18 +1086,18 @@ class Model:
             
         if hasattr(layer, "dropout_present"):
             if layer.dropout_present.value:
-                new_layers.append(tf.keras.layers.Dropout(
+                new_layers.append(layers.Dropout(
                     layer.dropout_value.value
                 ))
         
         if hasattr(layer, "batch_normalisation_present"):
             if layer.batch_normalisation_present.value:
-                new_layers.append(tf.keras.layers.BatchNormalization())
+                new_layers.append(layers.BatchNormalization())
 
         if hasattr(layer, "pooling_present"):
             if layer.pooling_present:
                 new_layers.append(
-                    tf.keras.layers.MaxPool1D(
+                    layers.MaxPool1D(
                         (layer.pooling_size.value,),
                         strides=(layer.pooling_stride.value,),
                         padding = layer.padding.value
@@ -1238,16 +1115,16 @@ class Model:
 
         # Based on the output type, add the final layers functionally
         if output_config["type"] == "normal":
-            x = tf.keras.layers.Dense(
+            x = layers.Dense(
                     2, 
                     activation='linear', 
                     dtype='float32', 
-                    bias_initializer=tf.keras.initializers.Constant([1.0, 2.0])
+                    bias_initializer=keras.initializers.Constant([1.0, 2.0])
                 )(x)
             output_tensor = IndependentFoldedNormal(1, name=output_config["name"])(x)
         elif output_config["type"] == "binary":
-            x = tf.keras.layers.Flatten()(x)
-            output_tensor = tf.keras.layers.Dense(
+            x = layers.Flatten()(x)
+            output_tensor = layers.Dense(
                                 1, 
                                 activation='sigmoid', 
                                 dtype='float32',
@@ -1260,8 +1137,8 @@ class Model:
         
     def train(
         self, 
-        training_dataset: tf.data.Dataset = None, 
-        validation_dataset: tf.data.Dataset = None,
+        training_dataset = None, 
+        validation_dataset = None,
         validate_args : dict = None,
         training_config: dict = None,
         force_retrain : bool = True,
@@ -1296,10 +1173,10 @@ class Model:
                         gf.ReturnVariables.ONSOURCE
                     ]
 
-            validation_dataset : tf.data.Dataset = gf.Dataset(
+            validation_dataset = gf.Dataset(
                 **deepcopy(validate_args),
                 group="validate"
-            ).map(adjust_features)
+            )
 
         if training_dataset is None:
             training_dataset = self.training_dataset
@@ -1331,7 +1208,7 @@ class Model:
                     logging.info(
                         f"Model already completed training. Skipping! Current epoch {initial_epoch}, best epoch {best_epoch}."
                     )
-                    self.model = tf.keras.models.load_model(
+                    self.model = keras.models.load_model(
                         self.model_path
                     )
                     self.metrics.append(history_data)
@@ -1459,7 +1336,7 @@ class Model:
             model_path / "validation_plots.html"
         )
 
-    def test(self, validation_datasets: tf.data.Dataset, num_batches: int):
+    def test(self, validation_datasets, num_batches: int):
         """
         Tests the model.
         

@@ -2,6 +2,7 @@ import os
 os.environ["KERAS_BACKEND"] = "jax"
 
 import pytest
+import gravyflow as gf
 import numpy as np
 import keras
 from keras import ops

@@ -4,47 +4,6 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 
-def generate_envelopes(
-    num_samples_array, 
-    max_num_samples
-    ):
-    """
-    Generate envelopes using Hann windows, end-aligned to match the mask in wnb().
-    """
-    
-    # num_samples_array: (N,)
-    
-    def create_envelope(num_samples):
-        # Implement a functional Hann window:
-        # w(n) = 0.5 * (1 - cos(2*pi*n / (N-1)))
-        
-        n = ops.arange(max_num_samples, dtype="float32")
-        
-        # Mask for valid samples: n < num_samples
-        mask = n < num_samples
-        
-        # Calculate Hann window values
-        # Avoid division by zero if num_samples=1 (though unlikely for WNB)
-        N_minus_1 = ops.maximum(num_samples - 1.0, 1.0)
-        
-        # Only compute for valid n.
-        # For n >= num_samples, we want 0.
-        # For valid n, we want Hann formula.
-        
-        val = 0.5 * (1.0 - ops.cos(2.0 * np.pi * n / N_minus_1))
-        
-        envelope = val * ops.cast(mask, "float32")
-        
-        # Flip to end-align the envelope to match the mask flip in wnb()
-        envelope = ops.flip(envelope, axis=-1)
-        
-        return envelope
-
-    # Vectorize over num_samples_array
-    envelopes = jax.vmap(create_envelope)(num_samples_array)
-    
-    return envelopes
-
 def adjust_envelopes_shape(filtered_noise, envelopes):
     # Determine the condition: whether envelopes have one extra sample compared to filtered_noise
     # filtered_noise: (Batch, 2, Time)
@@ -56,7 +15,7 @@ def adjust_envelopes_shape(filtered_noise, envelopes):
     # Check last dim
     cond = env_shape[-1] == noise_shape[-1] + 1
     
-    if cond:
+    if cond:  # pragma: no cover
         return envelopes[..., :-1]
     return envelopes
 

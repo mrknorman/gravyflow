@@ -1,4 +1,24 @@
 import os
+import site
+import glob
+import sys
+
+# Attempt to find nvidia libraries and set LD_LIBRARY_PATH
+# This is required in conftest.py to ensure pytest finds the libraries
+# before JAX is initialized by any plugins or test collection.
+try:
+    site_packages = site.getsitepackages()[0]
+    nvidia_dir = os.path.join(site_packages, 'nvidia')
+    
+    if os.path.exists(nvidia_dir):
+        libs = glob.glob(os.path.join(nvidia_dir, '*/lib'))
+        path_to_add = ":".join(libs)
+        
+        current_ld = os.environ.get('LD_LIBRARY_PATH', '')
+        if path_to_add not in current_ld:
+            os.environ['LD_LIBRARY_PATH'] = f"{current_ld}:{path_to_add}"
+except Exception as e:
+    pass
 
 # Set Keras backend to JAX
 os.environ["KERAS_BACKEND"] = "jax"
@@ -6,6 +26,16 @@ import gravyflow as gf
 
 import warnings
 import pytest
+
+# Autouse fixture to reset seeds before each test for isolation
+@pytest.fixture(autouse=True)
+def reset_random_seeds():
+    """Reset random seeds before each test for proper isolation."""
+    import gravyflow as gf
+    gf.set_random_seeds(gf.Defaults.seed)
+    yield
+    # Optionally reset after test too
+    gf.set_random_seeds(gf.Defaults.seed)
 
 def pytest_addoption(parser):
     parser.addoption(

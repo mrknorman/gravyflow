@@ -1,11 +1,28 @@
 
 import pytest
+import gravyflow as gf
 import numpy as np
+import jax
 import jax.numpy as jnp
 import keras
 from keras import ops
-import gravyflow as gf
 from gravyflow.src.dataset.dataset import GravyflowDataset
+
+
+def test_jax_accelerator_available():
+    """Verify that JAX has access to a hardware accelerator (GPU or TPU), not just CPU."""
+    devices = jax.devices()
+    backend = jax.default_backend()
+    
+    # Check that we have at least one device
+    assert len(devices) > 0, "No JAX devices found"
+    
+    # Check that the backend is not CPU
+    assert backend in ("gpu", "tpu"), (
+        f"JAX is using '{backend}' backend. Expected 'gpu' or 'tpu'. "
+        f"Devices: {devices}. "
+        "Ensure CUDA libraries are correctly installed and LD_LIBRARY_PATH is configured."
+    )
 
 # Constants for testing
 SAMPLE_RATE = 2048.0
@@ -468,9 +485,9 @@ def test_parameter_independence(basic_noise_obtainer):
         type_=gf.ScalingTypes.SNR
     )
     
-    # Use RippleGenerator (PhenomD) which has many parameters
+    # Use CBCGenerator (PhenomD) which has many parameters
     # We'll use distributions for inclination and distance
-    ripple_generator = gf.RippleGenerator(
+    cbc_generator = gf.CBCGenerator(
         scaling_method=scaling_method,
         network=[gf.IFO.L1],
         mass_1_msun=gf.Distribution(min_=10.0, max_=50.0, type_=gf.DistributionType.UNIFORM),
@@ -487,7 +504,7 @@ def test_parameter_independence(basic_noise_obtainer):
         "offsource_duration_seconds": 2.0,
         "crop_duration_seconds": 0.5,
         "num_examples_per_batch": 100, # Need enough samples for correlation check
-        "waveform_generators": [ripple_generator],
+        "waveform_generators": [cbc_generator],
         "input_variables": [
             gf.WaveformParameters.INCLINATION_RADIANS,
             gf.WaveformParameters.DISTANCE_MPC
@@ -524,7 +541,7 @@ def test_parameter_variation(basic_noise_obtainer):
         type_=gf.ScalingTypes.SNR
     )
     
-    ripple_generator = gf.RippleGenerator(
+    cbc_generator = gf.CBCGenerator(
         scaling_method=scaling_method,
         network=[gf.IFO.L1],
         mass_1_msun=gf.Distribution(min_=10.0, max_=50.0, type_=gf.DistributionType.UNIFORM)
@@ -537,7 +554,7 @@ def test_parameter_variation(basic_noise_obtainer):
         "offsource_duration_seconds": 2.0,
         "crop_duration_seconds": 0.5,
         "num_examples_per_batch": 10,
-        "waveform_generators": [ripple_generator],
+        "waveform_generators": [cbc_generator],
         "input_variables": [gf.WaveformParameters.MASS_1_MSUN]
     }
     
@@ -607,7 +624,7 @@ def test_padding_adherence(basic_noise_obtainer):
     Verify that signal peaks remain within the bounds defined by front/back padding.
     
     Logic:
-    - RippleGenerator centers signals at total_duration / 2.
+    - CBCGenerator centers signals at total_duration / 2.
     - InjectionGenerator shifts signals by random amount in [-front_padding, back_padding).
     - Therefore, peak index should be in [center - front, center + back).
     """
@@ -622,8 +639,8 @@ def test_padding_adherence(basic_noise_obtainer):
     front_pad = 1.0
     back_pad = 1.0
     
-    # Use RippleGenerator (PhenomD) which centers the merger
-    ripple_generator = gf.RippleGenerator(
+    # Use CBCGenerator (PhenomD) which centers the merger
+    cbc_generator = gf.CBCGenerator(
         scaling_method=scaling_method,
         network=[gf.IFO.L1],
         mass_1_msun=gf.Distribution(min_=30.0, max_=30.0, type_=gf.DistributionType.UNIFORM),
@@ -672,7 +689,7 @@ def test_padding_adherence(basic_noise_obtainer):
         "offsource_duration_seconds": 2.0,
         "crop_duration_seconds": crop_duration,
         "num_examples_per_batch": 100,
-        "waveform_generators": [ripple_generator],
+        "waveform_generators": [cbc_generator],
         "input_variables": [gf.ReturnVariables.WHITENED_INJECTIONS]
     }
     
@@ -770,3 +787,67 @@ def test_injection_shape_consistency(basic_noise_obtainer):
     
     assert time_dim_onsource == time_dim_injections, \
         f"Shape mismatch! WHITENED_ONSOURCE time dim: {time_dim_onsource}, INJECTIONS time dim: {time_dim_injections}"
+
+def test_injection_mask_consistency(basic_noise_obtainer):
+    """
+    Regression Test for "Missing CBC Signal" issue.
+    Verifies that if INJECTION_MASKS indicates an injection (value 1.0),
+    the corresponding INJECTIONS data is not all zeros.
+    
+    This guards against the bug where NaNs in generated waveforms were treated 
+    as valid injections by the mask generation logic (NaN != 0 is True), 
+    but were subsequently cleaned to 0.0 by the dataset pipeline.
+    """
+    # Setup CBCGenerator with IMRPhenomPv2 (problematic waveform)
+    scaling_method = gf.ScalingMethod(
+        value=gf.Distribution(min_=10.0, max_=20.0, type_=gf.DistributionType.UNIFORM),
+        type_=gf.ScalingTypes.SNR
+    )
+    
+    # Use a specific seed that might have triggered issues, or just random
+    cbc_generator = gf.CBCGenerator(
+        scaling_method=scaling_method,
+        network=[gf.IFO.L1],
+        approximant="IMRPhenomPv2",
+        mass_1_msun=gf.Distribution(min_=10.0, max_=60.0, type_=gf.DistributionType.UNIFORM),
+        mass_2_msun=gf.Distribution(min_=10.0, max_=60.0, type_=gf.DistributionType.UNIFORM),
+        distance_mpc=gf.Distribution(min_=100.0, max_=2000.0, type_=gf.DistributionType.UNIFORM),
+        inclination_radians=gf.Distribution(min_=0.0, max_=3.14, type_=gf.DistributionType.UNIFORM),
+    )
+    
+    config = {
+        "noise_obtainer": basic_noise_obtainer,
+        "sample_rate_hertz": 2048.0,
+        "onsource_duration_seconds": 4.0,
+        "offsource_duration_seconds": 4.0,
+        "crop_duration_seconds": 0.5,
+        "num_examples_per_batch": 16,
+        "waveform_generators": [cbc_generator],
+        "input_variables": [
+            gf.ReturnVariables.INJECTIONS,
+            gf.ReturnVariables.INJECTION_MASKS
+        ],
+        "output_variables": [gf.ReturnVariables.INJECTION_MASKS] # Dummy
+    }
+    
+    # Run for a few batches to ensure coverage
+    dataset = GravyflowDataset(**config, seed=0)
+    iterator = iter(dataset)
+    
+    for _ in range(5):
+        batch = next(iterator)
+        inputs = batch[0]
+        
+        # injections: (NumGenerators, Batch, IFO, Time)
+        injections = inputs[gf.ReturnVariables.INJECTIONS.name][0]
+        # masks: (Batch,)
+        masks = inputs[gf.ReturnVariables.INJECTION_MASKS.name][0]
+        
+        # Check consistency
+        batch_size = injections.shape[0]
+        for i in range(batch_size):
+            mask_val = masks[i]
+            injection_sum = np.sum(np.abs(injections[i]))
+            
+            if mask_val > 0.5: # Injection present
+                assert injection_sum > 0, f"Found Mask=1.0 but Injection is all zeros at batch index {i}!"

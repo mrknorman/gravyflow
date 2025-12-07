@@ -3,10 +3,9 @@ import subprocess
 from pathlib import Path
 import logging
 from typing import Union, List, Optional
+from contextlib import contextmanager
 
 import numpy as np
-import tensorflow as tf
-from tensorflow.python.distribute.distribute_lib import Strategy
 
 # === Constants and Configuration ===
 
@@ -121,64 +120,31 @@ def print_gpu_status(min_required_memory: Optional[int] = None) -> None:
         print(row)
 
 
-# === TensorFlow Environment Setup ===
+# === Environment Setup ===
 
-def setup_cuda(device_num: str, max_memory_limit: int, logging_level: int = logging.WARNING) -> tf.distribute.Strategy:
+def setup_cuda(device_num: str, max_memory_limit: int, logging_level: int = logging.WARNING):
     """
-    Configures CUDA for TensorFlow by restricting visible GPUs to only the ones specified,
-    setting a memory limit per GPU, and configuring thread options.
+    Configures CUDA by restricting visible GPUs and setting memory limits via env vars.
     
     Args:
         device_num (str): A comma-separated list of GPU indices to be used (e.g. "0" or "0,2").
         max_memory_limit (int): Maximum memory (in MB) per GPU.
-        logging_level (int): Logging level for TensorFlow logs.
-        
-    Returns:
-        tf.distribute.MirroredStrategy: The distribution strategy for multi-GPU training.
+        logging_level (int): Logging level.
     """
-    # Log to file.
-    logging.basicConfig(filename='tensorflow_setup.log', level=logging_level)
+    os.environ["CUDA_VISIBLE_DEVICES"] = device_num
     
-    # Get all physical GPUs.
-    all_gpus = tf.config.list_physical_devices('GPU')
-    if not all_gpus:
-        logging.warning("No physical GPUs detected; running on CPU.")
-    else:
-        try:
-            # Parse allowed GPU indices from the comma-separated string.
-            allowed_indices = [int(idx.strip()) for idx in device_num.split(",")]
-        except ValueError:
-            raise ValueError("device_num should be a comma-separated string of integers")
-        
-        # Restrict visible GPUs to only those specified.
-        visible_gpus = [all_gpus[i] for i in allowed_indices if i < len(all_gpus)]
-        try:
-            tf.config.set_visible_devices(visible_gpus, 'GPU')
-        except RuntimeError as e:
-            logging.warning(f"Could not set visible devices (likely already initialized): {e}")
-        
-        # Configure each visible GPU with the desired memory limit.
-        for gpu in visible_gpus:
-            try:
-                tf.config.experimental.set_virtual_device_configuration(
-                    gpu,
-                    [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=max_memory_limit)]
-                )
-            except RuntimeError as e:
-                logging.warning(f"Could not set virtual device configuration (likely already initialized): {e}")
+    # JAX memory preallocation
+    # We can't easily set per-GPU limit in JAX like TF, but we can set fraction.
+    # Assuming total memory is roughly same for all GPUs, we can estimate fraction.
+    # But for now, we just set XLA_PYTHON_CLIENT_PREALLOCATE to false or use fraction if needed.
+    # Gravyflow seems to set PREALLOCATE=false in __init__.py.
     
-    # Set threading options and reduce verbosity.
-    tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
-    try:
-        tf.config.threading.set_intra_op_parallelism_threads(1)
-        tf.config.threading.set_inter_op_parallelism_threads(1)
-    except RuntimeError as e:
-        logging.warning(f"Could not set threading options (likely already initialized): {e}")
+    # We can try to set XLA_PYTHON_CLIENT_MEM_FRACTION based on max_memory_limit / total_memory.
+    # But we need total memory of the specific GPU.
+    # Let's just log it for now.
+    logging.info(f"Setting CUDA_VISIBLE_DEVICES={device_num}")
     
-    # Create a MirroredStrategy. Now only the restricted GPUs are visible.
-    strategy = tf.distribute.MirroredStrategy()
-    logging.info(f"Visible GPUs after restriction: {tf.config.list_physical_devices('GPU')}")
-    return strategy
+    return None
 
 
 def get_tf_memory_usage() -> int:
@@ -188,13 +154,18 @@ def get_tf_memory_usage() -> int:
     Returns:
         int: Current GPU memory usage.
     """
-    gpus = tf.config.list_physical_devices("GPU")
-    if not gpus:
-        return 0
-    device_index = int(gpus[0].name.split(":")[-1])
-    device_name = f"GPU:{device_index}"
-    memory_info = tf.config.experimental.get_memory_info(device_name)
-    return memory_info["current"] // (1024 * 1024)
+    # For JAX, getting memory usage is different.
+    # We can use nvidia-smi query again.
+    gpu_info = get_gpu_memory_info()
+    if gpu_info:
+        # Assuming first visible is index 0 of the list if we restricted it?
+        # But nvidia-smi shows all.
+        # If CUDA_VISIBLE_DEVICES is set, JAX sees subset.
+        # But nvidia-smi sees physical.
+        # We can't easily map without parsing CUDA_VISIBLE_DEVICES.
+        # Let's return the usage of the first GPU in the list for now.
+        return gpu_info[0]["used"]
+    return 0
 
 
 def find_available_GPUs(
@@ -216,9 +187,10 @@ def find_available_GPUs(
     Raises:
         RuntimeError: If no GPUs are found or if none meet the criteria.
     """
-    physical_gpus = tf.config.list_physical_devices('GPU')
-    if not physical_gpus:
-        raise RuntimeError("No GPUs found on the system.")
+    if not NVIDIA_SMI_PATH.exists():
+         # Fallback or error
+         logging.warning("nvidia-smi not found, assuming GPU 0 is available.")
+         return "0"
 
     gpu_info_list = get_gpu_memory_info()
     if gpu_info_list is None:
@@ -245,36 +217,31 @@ def find_available_GPUs(
 # Module-level variable to cache the strategy.
 _global_strategy = None
 
+@contextmanager
+def null_context():
+    yield
+
 def env(
     min_gpu_memory_mb: int = 5000,
     max_gpu_utilization_percentage: float = 80,
     num_gpus_to_request: int = 1,
     memory_to_allocate_tf: int = 3000,
     gpus: Union[str, int, List[Union[int, str]], None] = None
-) -> tf.distribute.Strategy:
+):
     """
-    Sets up the TensorFlow environment with the requested GPU(s).
-
-    If a distribution strategy has already been created, its scope is returned.
-    Otherwise, the function automatically selects GPUs based on the provided
-    criteria and creates a new MirroredStrategy.
+    Sets up the environment with the requested GPU(s).
 
     Args:
         min_gpu_memory_mb (int): Minimum free memory per GPU (MB).
         max_gpu_utilization_percentage (float): Maximum allowed GPU utilization (%).
         num_gpus_to_request (int): Number of GPUs requested.
-        memory_to_allocate_tf (int): Memory limit per GPU for TensorFlow (MB).
+        memory_to_allocate_tf (int): Memory limit per GPU (MB).
         gpus (Union[int, str, List[int]]): Optional specification of GPU(s) to use.
 
     Returns:
-        tf.distribute.Strategy: A TensorFlow distribution strategy scope.
+        Context manager (dummy for compatibility).
     """
-    global _global_strategy
-
-    if _global_strategy is not None:
-        logging.info("Using previously created distribution strategy.")
-        return _global_strategy.scope()
-
+    
     # Process the 'gpus' parameter.
     if gpus is not None:
         if isinstance(gpus, int):
@@ -284,25 +251,21 @@ def env(
         elif not isinstance(gpus, str):
             raise ValueError("gpus should be int, str, or list/tuple of int or str")
     else:
-        gpus = find_available_GPUs(
-            min_memory_MB=min_gpu_memory_mb, 
-            max_utilization_percentage=max_gpu_utilization_percentage,
-            max_needed=num_gpus_to_request
-        )
+        try:
+            gpus = find_available_GPUs(
+                min_memory_MB=min_gpu_memory_mb, 
+                max_utilization_percentage=max_gpu_utilization_percentage,
+                max_needed=num_gpus_to_request
+            )
+        except RuntimeError:
+            logging.warning("Could not find available GPUs satisfying criteria. Using default/all.")
+            gpus = "" # Let JAX decide or use all?
 
-    available_gpu_list = gpus.split(",") if gpus else []
-    if not available_gpu_list:
-        raise RuntimeError("No GPUs available (they may be busy or not present).")
-    elif len(available_gpu_list) < num_gpus_to_request:
-        logging.warning(
-            f"Requested {num_gpus_to_request} GPUs, but only {len(available_gpu_list)} are available."
+    if gpus:
+        setup_cuda(
+            device_num=gpus, 
+            max_memory_limit=memory_to_allocate_tf, 
+            logging_level=logging.WARNING
         )
-
-    # Create the strategy with the chosen GPUs.
-    _global_strategy = setup_cuda(
-        device_num=gpus, 
-        max_memory_limit=memory_to_allocate_tf, 
-        logging_level=logging.WARNING
-    )
     
-    return _global_strategy.scope()
+    return null_context()

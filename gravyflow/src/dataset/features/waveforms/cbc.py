@@ -3,7 +3,7 @@ import os
 
 # Add local ripple submodule to path
 # Assuming gravyflow root is 3 levels up from this file
-# .../gravyflow/src/dataset/features/waveforms/ripple.py
+# .../gravyflow/src/dataset/features/waveforms/cbc.py
 # We want .../gravyflow/ripple/src
 current_dir = os.path.dirname(os.path.abspath(__file__))
 gravyflow_root = os.path.abspath(os.path.join(current_dir, "../../../../../"))
@@ -80,9 +80,13 @@ def calc_duration_from_f_min(
     """
     Calculates duration based on inputted masses and minimum frequency.
     """
-    mass_1_msun = ops.convert_to_tensor(mass_1_msun)
-    mass_2_msun = ops.convert_to_tensor(mass_2_msun)
-    f_min = ops.convert_to_tensor(f_min)
+    # Store original dtype for output
+    original_dtype = getattr(mass_1_msun, 'dtype', None)
+    
+    # Convert to float64 for precision in intermediate calculations
+    mass_1_msun = ops.cast(ops.convert_to_tensor(mass_1_msun), "float64")
+    mass_2_msun = ops.cast(ops.convert_to_tensor(mass_2_msun), "float64")
+    f_min = ops.cast(ops.convert_to_tensor(f_min), "float64")
 
     m1_kg = mass_1_msun * M_SOLAR_SI
     m2_kg = mass_2_msun * M_SOLAR_SI
@@ -91,31 +95,35 @@ def calc_duration_from_f_min(
     
     term2 = 1.0 / (8.0 * np.pi)
     term3 = (G_SI * mc_kg / (C_SI**3))**(-5.0/8.0)
-    
-    # Ensure term2 and term3 are compatible dtype
-    dtype = mass_1_msun.dtype
-    if dtype == "float32":
-        term2 = ops.cast(term2, "float32")
-        term3 = ops.cast(term3, "float32")
-    
-    # Also ensure f_min matches
-    if f_min.dtype != dtype:
-        f_min = ops.cast(f_min, dtype)
 
     duration = 5.0 * (f_min / (term2 * term3))**(-8.0/3.0)
     
+    # Cast back to original dtype if it was float32
+    if original_dtype == jnp.float32:
+        duration = ops.cast(duration, "float32")
+    
     return duration
 
-APPROXIMANTS = {
-    "IMRPhenomD": IMRPhenomD,
-    "IMRPhenomXAS": IMRPhenomXAS,
-    "IMRPhenomPv2": IMRPhenomPv2,
-    "TaylorF2": TaylorF2,
-    "IMRPhenomD_NRTidalv2": IMRPhenomD_NRTidalv2
+from enum import Enum
+
+class Approximant(Enum):
+    """Enum for supported gravitational waveform approximants."""
+    IMRPhenomD = "IMRPhenomD"
+    IMRPhenomXAS = "IMRPhenomXAS"
+    IMRPhenomPv2 = "IMRPhenomPv2"
+    TaylorF2 = "TaylorF2"
+    IMRPhenomD_NRTidalv2 = "IMRPhenomD_NRTidalv2"
+
+APPROXIMANT_MODULES = {
+    Approximant.IMRPhenomD: IMRPhenomD,
+    Approximant.IMRPhenomXAS: IMRPhenomXAS,
+    Approximant.IMRPhenomPv2: IMRPhenomPv2,
+    Approximant.TaylorF2: TaylorF2,
+    Approximant.IMRPhenomD_NRTidalv2: IMRPhenomD_NRTidalv2
 }
 
 @jax.jit(static_argnames=["num_waveforms", "sample_rate_hertz", "duration_seconds", "approximant"])
-def _generate_ripple_waveform_jit(
+def _generate_cbc_waveform_jit(
     num_waveforms: int = 1,
     sample_rate_hertz: float = 4096.0,
     duration_seconds: float = 2.0,
@@ -131,12 +139,12 @@ def _generate_ripple_waveform_jit(
     spin_2_in = [0.0, 0.0, 0.0],
     lambda_1 = 0.0,
     lambda_2 = 0.0,
-    approximant: str = "IMRPhenomD",
+    approximant: Approximant = Approximant.IMRPhenomD,
     f_ref: float = 20.0,
     coalescence_time: float = None
 ):
     """
-    JIT-compiled core of generate_ripple_waveform.
+    JIT-compiled core of generate_cbc_waveform.
     """
     # ... (rest of the function body is unchanged, just indented? No, replace_file_content replaces the block)
     # Wait, I need to provide the body if I replace the definition.
@@ -150,8 +158,8 @@ def _generate_ripple_waveform_jit(
     # And then add the wrapper at the end of the file?
     # Or rename it, and add the wrapper *before* it? No, wrapper calls it.
     
-    # I'll rename the function to `_generate_ripple_waveform_jit`.
-    # And then I'll append the wrapper `generate_ripple_waveform` at the end of the file.
+    # I'll rename the function to `_generate_cbc_waveform_jit`.
+    # And then I'll append the wrapper `generate_cbc_waveform` at the end of the file.
     
     pass
 
@@ -164,15 +172,22 @@ def _generate_ripple_waveform_jit(
 # And I will append the wrapper at the end of the file.
 
     """
-    Generates time-domain waveforms using gwripple.
+    Generates time-domain waveforms using ripplegw.
     Returns array of shape (num_waveforms, 2, num_samples).
     """
     
-    if approximant not in APPROXIMANTS:
-        raise ValueError(f"Approximant {approximant} not supported. Available: {list(APPROXIMANTS.keys())}")
+    # Handle string input for backward compatibility
+    if isinstance(approximant, str):
+        try:
+            approximant = Approximant(approximant)
+        except ValueError:
+            raise ValueError(f"Approximant '{approximant}' not supported. Available: {[a.value for a in Approximant]}")
+    
+    if approximant not in APPROXIMANT_MODULES:
+        raise ValueError(f"Approximant {approximant} not supported. Available: {list(APPROXIMANT_MODULES.keys())}")  # pragma: no cover
         
-    waveform_module = APPROXIMANTS[approximant]
-    gen_func = getattr(waveform_module, f"gen_{approximant}_hphc")
+    waveform_module = APPROXIMANT_MODULES[approximant]
+    gen_func = getattr(waveform_module, f"gen_{approximant.value}_hphc")
 
     # Helper to ensure JAX array
     def ensure_jax(val, length):
@@ -243,13 +258,13 @@ def _generate_ripple_waveform_jit(
     Mc, eta = jax.vmap(ms_to_Mc_eta)(jnp.stack([m1_jax, m2_jax], axis=1))
     
     # Construct theta
-    if approximant in ["IMRPhenomD", "IMRPhenomXAS"]:
+    if approximant in [Approximant.IMRPhenomD, Approximant.IMRPhenomXAS]:
         chi1 = spin_1_in[:, 2]
         chi2 = spin_2_in[:, 2]
         theta = jnp.stack([Mc, eta, chi1, chi2, dist_jax, tc_jax, phi_jax, inc_jax], axis=1)
         theta = theta.astype(jnp.float64)
         
-    elif approximant == "IMRPhenomPv2":
+    elif approximant == Approximant.IMRPhenomPv2:
         chi1x = spin_1_in[:, 0]
         chi1y = spin_1_in[:, 1]
         chi1z = spin_1_in[:, 2]
@@ -263,7 +278,7 @@ def _generate_ripple_waveform_jit(
             dist_jax, tc_jax, phi_jax, inc_jax
         ], axis=1)
         
-    elif approximant in ["TaylorF2", "IMRPhenomD_NRTidalv2"]:
+    elif approximant in [Approximant.TaylorF2, Approximant.IMRPhenomD_NRTidalv2]:
         chi1 = spin_1_in[:, 2]
         chi2 = spin_2_in[:, 2]
         theta = jnp.stack([
@@ -273,7 +288,7 @@ def _generate_ripple_waveform_jit(
             dist_jax, tc_jax, phi_jax, inc_jax
         ], axis=1)
     else:
-        raise ValueError(f"Parameter packing for {approximant} not implemented.")
+        raise ValueError(f"Parameter packing for {approximant} not implemented.")  # pragma: no cover
 
     # Generate batch
     # We use jax.vmap directly.
@@ -338,10 +353,15 @@ def _generate_ripple_waveform_jit(
     
     waveforms = jnp.stack([hp_time, hc_time], axis=1)
     
+    # Cast to float32 for downstream compatibility
+    # (project_wave JIT is compiled for float32, and some GPU configurations
+    # fail graph capture with float64)
+    waveforms = waveforms.astype(jnp.float32)
+    
     # Return JAX array (which Keras 3 can handle as Tensor)
     return waveforms
 
-def generate_ripple_waveform(
+def generate_cbc_waveform(
     num_waveforms: int = 1,
     sample_rate_hertz: float = 4096.0,
     duration_seconds: float = 2.0,
@@ -357,34 +377,14 @@ def generate_ripple_waveform(
     spin_2_in = [0.0, 0.0, 0.0],
     lambda_1 = 0.0,
     lambda_2 = 0.0,
-    approximant: str = "IMRPhenomD",
+    approximant: Approximant = Approximant.IMRPhenomD,
     f_ref: float = 20.0,
     coalescence_time: float = None
 ):
     """
-    Wrapper for _generate_ripple_waveform_jit that ensures inputs are JAX-compatible.
+    Generate CBC waveforms using ripplegw.
     """
-    # Convert inputs to numpy/jax arrays if they are TF tensors or other types
-    def convert(val):
-        if hasattr(val, "numpy"):
-            return val.numpy()
-        return val
-
-    mass_1_msun = convert(mass_1_msun)
-    mass_2_msun = convert(mass_2_msun)
-    inclination_radians = convert(inclination_radians)
-    distance_mpc = convert(distance_mpc)
-    reference_orbital_phase_in = convert(reference_orbital_phase_in)
-    ascending_node_longitude = convert(ascending_node_longitude)
-    eccentricity = convert(eccentricity)
-    mean_periastron_anomaly = convert(mean_periastron_anomaly)
-    spin_1_in = convert(spin_1_in)
-    spin_2_in = convert(spin_2_in)
-    lambda_1 = convert(lambda_1)
-    lambda_2 = convert(lambda_2)
-    coalescence_time = convert(coalescence_time)
-
-    return _generate_ripple_waveform_jit(
+    return _generate_cbc_waveform_jit(
         num_waveforms=num_waveforms,
         sample_rate_hertz=sample_rate_hertz,
         duration_seconds=duration_seconds,
