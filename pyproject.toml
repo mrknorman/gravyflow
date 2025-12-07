@@ -28,7 +28,7 @@ dependencies = [
     "pycbc",
     "GitPython",
     "sqlalchemy",
-    "bokeh",
+    "bokeh==3.6.3",
     "psycopg2-binary",
     "ipykernel",
 ]
@@ -46,7 +46,8 @@ cuda = [
     "nvidia-cufft-cu12==11.2.3.61",
     "nvidia-cusolver-cu12==11.6.3.83",
     "nvidia-nvjitlink-cu12==12.5.82",
-    "nvidia-cudnn-cu12>=9.0",
+    # JAX 0.8.1 was compiled with cuDNN 9.8.0 - pinned to prevent incompatibility
+    "nvidia-cudnn-cu12==9.8.0.87",
     "nvidia-nccl-cu12>=2.0",
 ]
 dev = [
