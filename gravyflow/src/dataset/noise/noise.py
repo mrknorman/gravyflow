@@ -2,6 +2,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Union, Iterator, List
+from copy import deepcopy
 
 import numpy as np
 import keras
@@ -346,21 +347,25 @@ class NoiseObtainer:
                         either during initlisation or through setting
                         NoiseObtainer.ifo_data_obtainer
                     """)
-                elif self.ifo_data_obtainer.valid_segments is None or canonical_ifos != self.ifo_data_obtainer.ifos:
-                        self.ifo_data_obtainer.get_valid_segments(
+                
+                # Deepcopy to ensure each generator has independent state
+                ifo_data_obtainer_copy = deepcopy(self.ifo_data_obtainer)
+                
+                if ifo_data_obtainer_copy.valid_segments is None or canonical_ifos != ifo_data_obtainer_copy.ifos:
+                        ifo_data_obtainer_copy.get_valid_segments(
                             self.ifos,
                             seed,
                             self.groups,
                             group,
                         )
                     
-                        self.ifo_data_obtainer.generate_file_path(
+                        ifo_data_obtainer_copy.generate_file_path(
                             sample_rate_hertz,
                             group,
                             self.data_directory_path
                         )
                 
-                self.generator = self.ifo_data_obtainer.get_onsource_offsource_chunks(
+                self.generator = ifo_data_obtainer_copy.get_onsource_offsource_chunks(
                         sample_rate_hertz,
                         onsource_duration_seconds,
                         crop_duration_seconds,
