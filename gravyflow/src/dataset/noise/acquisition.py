@@ -1151,7 +1151,10 @@ class IFODataObtainer:
                         scale_factor
                     ))
             except StopIteration:
-                return
+                # Reset segment index to loop infinitely through segments
+                self._current_segment_index = 0
+                self._segment_exausted = True
+                continue
         
             min_num_samples = min([ops.shape(tensor)[0] for tensor in self.current_segment.data])
 
