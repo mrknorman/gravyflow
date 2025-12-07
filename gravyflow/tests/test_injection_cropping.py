@@ -1,9 +1,9 @@
 
 import pytest
+import gravyflow as gf
 import numpy as np
 from keras import ops
-import gravyflow as gf
-from gravyflow.src.dataset.features.injection import InjectionGenerator, RippleGenerator, ScalingMethod, ScalingTypes, ScalingOrdinality
+from gravyflow.src.dataset.features.injection import InjectionGenerator, CBCGenerator, ScalingMethod, ScalingTypes, ScalingOrdinality
 
 class TestInjectionCropping:
     
@@ -22,7 +22,7 @@ class TestInjectionCropping:
         # or use a mock. But here we will verify the end-to-end flow produces 
         # the correct shape and runs without error.
         
-        generator = RippleGenerator(
+        generator = CBCGenerator(
             mass_1_msun=10.0,
             mass_2_msun=10.0,
             distance_mpc=100.0,

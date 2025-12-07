@@ -101,7 +101,7 @@ class GravyflowDataset(keras.utils.PyDataset):
         scale_factor: Optional[float] = None,
         noise_obtainer: Optional[gf.NoiseObtainer] = None,
         group: str = "train",
-        waveform_generators: Optional[List[Union[gf.RippleGenerator, gf.WNBGenerator]]] = None,
+        waveform_generators: Optional[List[Union[gf.CBCGenerator, gf.WNBGenerator]]] = None,
         num_examples_per_generation_batch: Optional[int] = None,
         num_examples_per_batch: Optional[int] = None,
         input_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
@@ -167,6 +167,33 @@ class GravyflowDataset(keras.utils.PyDataset):
         if not self.variables_to_return:
             raise ValueError("No return variables requested. What's the point?")
         validate_noise_settings(self.noise_obtainer, self.variables_to_return)
+        self._validate_padding_settings()
+
+    def _validate_padding_settings(self):
+        """Validate that padding does not exceed half of onsource duration."""
+        if self.waveform_generators:
+            generators = []
+            if isinstance(self.waveform_generators, list):
+                generators = self.waveform_generators
+            elif isinstance(self.waveform_generators, dict):
+                generators = [g["generator"] for g in self.waveform_generators.values()]
+            
+            for generator in generators:
+                front = generator.front_padding_duration_seconds
+                back = generator.back_padding_duration_seconds
+                
+                # Condition: padding <= onsource / 2
+                # If padding is larger, the signal center (placed at center of window)
+                # could be shifted outside the cropped onsource window.
+                max_padding = max(front, back)
+                limit = self.onsource_duration_seconds / 2.0
+                
+                if max_padding > limit:
+                    warn(
+                        f"Padding ({max_padding}s) exceeds half of onsource duration ({limit}s). "
+                        "This may cause the signal center to be shifted outside the cropped view.",
+                        UserWarning
+                    )
 
     def _create_generators(self):
         """Create noise and injection generators."""

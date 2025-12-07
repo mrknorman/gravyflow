@@ -9,13 +9,10 @@ import math
 
 import numpy as np
 from scipy.interpolate import interp1d
-try:
-    import tensorflow as tf
-    from tensorflow.data.experimental import AutoShardPolicy
-    TF_AVAILABLE = True
-except ImportError:
-    TF_AVAILABLE = False
-    AutoShardPolicy = object
+import keras
+from keras import ops
+import jax.numpy as jnp
+from jax import jit
 
 import keras
 from keras.callbacks import Callback
@@ -125,10 +122,9 @@ def calculate_efficiency_scores(
     dataset_args["waveform_generators"][0].scaling_method.value = scaling_values
     
     # Initialize generator:
-    dataset : tf.data.Dataset = gf.Dataset(
+    dataset = gf.Dataset(
         **dataset_args
-    ).take(num_batches)
-
+    )
     callbacks = []
     if heart is not None:
         callbacks += [gf.HeartbeatCallback(heart)]
@@ -245,9 +241,9 @@ def calculate_far_scores(
     dataset_args["output_variables"] = []
 
     # Initialize generator:
-    dataset : tf.data.Dataset = gf.Dataset(
+    dataset = gf.Dataset(
             **dataset_args
-        ).take(num_batches)
+        )
 
     callbacks = []
     if heart is not None:
@@ -349,7 +345,7 @@ def calculate_far_score_thresholds(
 
     return score_thresholds
 
-# @tf.function(jit_compile=True)
+@jit
 def roc_curve_and_auc(
         y_true, 
         y_scores, 
@@ -359,79 +355,80 @@ def roc_curve_and_auc(
     num_thresholds = 512
     # Use logspace with a range between 0 and 6, which corresponds to values 
     # between 1 and 1e-6:
-    log_thresholds = tf.exp(tf.linspace(0, -6, num_thresholds))
+    log_thresholds = jnp.exp(jnp.linspace(0, -6, num_thresholds))
     # Generate thresholds focusing on values close to 1
     thresholds = 1 - log_thresholds
     
-    thresholds = tf.cast(thresholds, tf.float32)
-    y_true = tf.cast(y_true, tf.float32)
+    thresholds = jnp.array(thresholds, dtype=jnp.float32)
+    y_true = jnp.array(y_true, dtype=jnp.float32)
 
     num_samples = y_true.shape[0]
     num_chunks = num_samples // chunk_size 
+    
+    # Handle case where num_samples < chunk_size
+    if num_chunks == 0:
+        num_chunks = 1
 
     # Initialize accumulators for true positives, false positives, true 
     # negatives, and false negatives
-    tp_acc = tf.zeros(num_thresholds, dtype=tf.float32)
-    fp_acc = tf.zeros(num_thresholds, dtype=tf.float32)
-    fn_acc = tf.zeros(num_thresholds, dtype=tf.float32)
-    tn_acc = tf.zeros(num_thresholds, dtype=tf.float32)
+    tp_acc = jnp.zeros(num_thresholds, dtype=jnp.float32)
+    fp_acc = jnp.zeros(num_thresholds, dtype=jnp.float32)
+    fn_acc = jnp.zeros(num_thresholds, dtype=jnp.float32)
+    tn_acc = jnp.zeros(num_thresholds, dtype=jnp.float32)
 
     # Process data in chunks
-    for chunk_idx in range(num_chunks):        
-        start_idx = chunk_idx * chunk_size
-        end_idx = min((chunk_idx + 1) * chunk_size, num_samples)
+    # Note: JAX loops are different, but for simplicity in this script we use python loop
+    # or we can use lax.scan if performance is critical. 
+    # Given this is validation, python loop over chunks might be acceptable if not too slow.
+    # But strictly, JAX arrays are immutable. In-place update += won't work as expected if not careful.
+    # We should use a loop that updates state.
+    
+    def body_fun(i, val):
+        tp_acc, fp_acc, fn_acc, tn_acc = val
+        start_idx = i * chunk_size
+        end_idx = jnp.minimum((i + 1) * chunk_size, num_samples)
 
         y_true_chunk = y_true[start_idx:end_idx]
         y_scores_chunk = y_scores[start_idx:end_idx]
 
-        y_pred = tf.expand_dims(y_scores_chunk, 1) >= thresholds
-        y_pred = tf.cast(y_pred, tf.float32)
+        y_pred = jnp.expand_dims(y_scores_chunk, 1) >= thresholds
+        y_pred = jnp.array(y_pred, dtype=jnp.float32)
 
-        y_true_chunk = tf.expand_dims(y_true_chunk, axis=-1)
-        tp = tf.reduce_sum(y_true_chunk * y_pred, axis=0)
-        fp = tf.reduce_sum((1 - y_true_chunk) * y_pred, axis=0)
-        fn = tf.reduce_sum(y_true_chunk * (1 - y_pred), axis=0)
-        tn = tf.reduce_sum((1 - y_true_chunk) * (1 - y_pred), axis=0)
+        y_true_chunk = jnp.expand_dims(y_true_chunk, axis=-1)
+        tp = jnp.sum(y_true_chunk * y_pred, axis=0)
+        fp = jnp.sum((1 - y_true_chunk) * y_pred, axis=0)
+        fn = jnp.sum(y_true_chunk * (1 - y_pred), axis=0)
+        tn = jnp.sum((1 - y_true_chunk) * (1 - y_pred), axis=0)
         
-        # Update accumulators
-        tp_acc += tp
-        fp_acc += fp
-        fn_acc += fn
-        tn_acc += tn
+        return (tp_acc + tp, fp_acc + fp, fn_acc + fn, tn_acc + tn)
+
+    # We need to handle the loop. Since num_chunks is dynamic (python int), we can use python range.
+    # But for JIT, we might want lax.fori_loop.
+    # However, num_chunks depends on input shape.
+    
+    # Let's just do vectorized op if memory allows, or python loop.
+    # If chunk_size is small, python loop is slow.
+    # If we assume memory is sufficient, we can do it all at once?
+    # 1e5 samples * 512 thresholds * 4 bytes = 200MB. It fits in memory.
+    # So we can remove chunking for JAX implementation to simplify and speed up.
+    
+    y_pred = jnp.expand_dims(y_scores, 1) >= thresholds
+    y_pred = jnp.array(y_pred, dtype=jnp.float32)
+    y_true_expanded = jnp.expand_dims(y_true, axis=-1)
+    
+    tp_acc = jnp.sum(y_true_expanded * y_pred, axis=0)
+    fp_acc = jnp.sum((1 - y_true_expanded) * y_pred, axis=0)
+    fn_acc = jnp.sum(y_true_expanded * (1 - y_pred), axis=0)
+    tn_acc = jnp.sum((1 - y_true_expanded) * (1 - y_pred), axis=0)
     
     tpr = tp_acc / (tp_acc + fn_acc)
     fpr = fp_acc / (fp_acc + tn_acc)
 
-    auc = tf.reduce_sum((fpr[:-1] - fpr[1:]) * (tpr[:-1] + tpr[1:])) / 2
+    auc = jnp.sum((fpr[:-1] - fpr[1:]) * (tpr[:-1] + tpr[1:])) / 2
 
     return fpr, tpr, auc
 
-class CaptureWorstPredictions(Callback):
-    def __init__(self, n_worst=10):
-        super().__init__()
-        self.n_worst = n_worst
-        self.all_scores = []
-        self.all_indices = []
 
-    def on_predict_batch_end(self, batch, logs=None):
-        logs = logs or {}
-        batch_predictions = logs.get('outputs')
-        
-        if batch_predictions is not None:
-            # Add scores and indices to the global list
-            scores = batch_predictions.tolist()
-            indices = list(range(batch * len(scores), (batch + 1) * len(scores)))
-
-            self.all_scores.extend(scores)
-            self.all_indices.extend(indices)
-        else:
-            self.logger.warning("Warning: 'outputs' not found in logs for batch", batch)
-
-    def on_predict_end(self, logs=None):
-        # Sort the global list based on scores to get the worst predictions
-        sorted_indices = np.argsort(self.all_scores)[:self.n_worst]
-        self.worst_global_indices = np.array(self.all_indices)[sorted_indices]
-        self.worst_scores = np.array(self.all_scores)[sorted_indices]
 
 def calculate_roc(    
         model: keras.Model,
@@ -491,56 +488,52 @@ def calculate_roc(
     
     mask_history = []
     # Initialize generators
-    dataset : tf.data.Dataset = gf.Dataset(
+    dataset = gf.Dataset(
             **dataset_args,
             mask_history=mask_history
-        ).take(num_batches)
+        )
     
-    # Use .map() to extract the true labels and model inputs
-    x_dataset = dataset.map(lambda x, y: x)
-
     callbacks = []
     if heart is not None:
         callbacks += [gf.HeartbeatCallback(heart)]
 
-    # Get the model predictions
-    y_scores = None
-    while y_scores is None:
-        try:
-            verbose : int= 1
-            if gf.is_redirected():
-                verbose : int = 2
-
-            y_scores = model.predict(
-                x_dataset, 
-                steps=num_batches, 
-                callbacks=callbacks,
-                verbose=verbose
-            )
-
-            try:
-                y_scores = y_scores[:,0]
-
-            except Exception as e:
-                raise Exception(f"Error slicing y_scores {e}.")
-            
-        except Exception as e:
-            y_scores = None
-            logging.error(f"Error calculating ROC scores because {e}! Retrying.")
-            continue
+    # Get the model predictions and true labels via manual iteration
+    y_scores_list = []
+    y_true_list = []
     
-    y_true = tf.reshape(tf.concat(mask_history, axis=0), [-1]) 
+    try:
+        verbose = 1
+        if gf.is_redirected():
+            verbose = 2
+            
+        # Manual iteration to capture y_true
+        for _ in range(num_batches):
+            x, y = dataset[0] # Get a batch
+            scores = model.predict_on_batch(x)
+            y_scores_list.append(scores)
+            y_true_list.append(y[gf.ReturnVariables.INJECTION_MASKS.name])
+            
+            if heart is not None:
+                heart.beat()
+                
+    except Exception as e:
+        logging.error(f"Error calculating ROC scores because {e}!")
+        return {'fpr': np.array([]), 'tpr': np.array([]), 'roc_auc': 0.0}
 
-    # Calculate size difference
-    size_a = tf.size(y_true)
-    size_b = tf.size(y_scores)
+    y_scores = np.concatenate(y_scores_list)
+    y_true = np.concatenate(y_true_list).flatten()
+    
+    if len(y_scores.shape) > 1:
+        y_scores = y_scores[:, 0]
+
+    # Calculate size difference (should be zero if logic is correct)
+    size_a = y_true.size
+    size_b = y_scores.size
     size_difference = size_a - size_b
 
     # Resize tensor_a
     if size_difference > 0:
         y_true = y_true[:size_a - size_difference]
-    else:
-        y_true = y_true
     
     # Calculate the ROC curve and AUC
     fpr, tpr, roc_auc = roc_curve_and_auc(y_true, y_scores)
@@ -722,65 +715,85 @@ def calculate_tar_scores(
         gf.Distribution(value=scaling, type_=gf.DistributionType.CONSTANT)
     
     # Initialize generator:
-    dataset : tf.data.Dataset = gf.Dataset(
+    dataset = gf.Dataset(
             **dataset_args
-        ).take(num_batches)
+        )
         
-    callbacks = [CaptureWorstPredictions(n_worst=10)]
+    callbacks = []
     if heart is not None:
         callbacks += [gf.HeartbeatCallback(heart)]
     
     # Predict the scores and get the second column ([:, 1]):
 
-    tar_scores = None
-    while tar_scores is None:
-        try:
-            verbose : int= 1
-            if gf.is_redirected():
-                verbose : int = 2
-            
-            tar_scores = model.predict(
-                dataset, 
-                batch_size=num_examples_per_batch,
-                callbacks=callbacks,
-                steps=num_batches, 
-                verbose=verbose
-            )
-
-            try:
-                tar_scores = tar_scores[:,0]
-            except Exception as e:
-                raise Exception(f"Failed to slice Tar Scores because {e}.")
-
-        except Exception as e:
-            logging.error(f"Error calculating TAR score because {e}. Retrying.")
-            tar_scores = None
-            continue
-            
-    dataset_args["output_variables"] = \
-        [
-            gf.ReturnVariables.WHITENED_INJECTIONS,
-            gf.ReturnVariables.INJECTIONS,
-            gf.WaveformParameters.MASS_1_MSUN,
-            gf.WaveformParameters.MASS_2_MSUN
-        ]
+    tar_scores_list = []
+    data_batches = []
+    
+    try:
+        verbose = 1
+        if gf.is_redirected():
+            verbose = 2
         
-    # Initialize generator:
-    dataset : tf.data.Dataset = gf.Dataset(
-            **dataset_args
-        ).take(num_batches)
+        for _ in range(num_batches):
+            x, y = dataset[0]
+            scores = model.predict_on_batch(x)
+            tar_scores_list.append(scores)
             
-    worst_performers = \
-        gf.extract_data_from_indicies(
-            dataset,
-            callbacks[0].worst_global_indices,
-            num_examples_per_batch
-        )
+            # Store data for worst performers extraction
+            # We need to reconstruct the batch structure expected by extract_data_from_indicies?
+            # Or we can just extract here.
+            # But we don't know which are worst yet.
+            # So we store x and y.
+            #
+            # Note: storing all data in memory might be expensive if num_examples is large (1E5).
+            # 1E5 examples * 4096 floats * 4 bytes ~ 1.6 GB. It fits.
+            data_batches.append((x, y))
+            
+            if heart is not None:
+                heart.beat()
+
+    except Exception as e:
+        logging.error(f"Error calculating TAR score because {e}.")
+        return np.array([]), []
+            
+    tar_scores = np.concatenate(tar_scores_list)
+    if len(tar_scores.shape) > 1:
+        tar_scores = tar_scores[:, 0]
+
+    # Find worst performers
+    # Sort indices by score (ascending)
+    sorted_indices = np.argsort(tar_scores)
+    worst_indices = sorted_indices[:10]
+    worst_scores = tar_scores[worst_indices]
+    
+    worst_performers = []
+    for i, idx in enumerate(worst_indices):
+        batch_idx = idx // num_examples_per_batch
+        sample_idx = idx % num_examples_per_batch
         
-    for index, element in enumerate(worst_performers):
-        for key in element:
-            element[key] = element[key].numpy()
-        element["score"] = callbacks[0].worst_scores[index]
+        if batch_idx < len(data_batches):
+            x_batch, y_batch = data_batches[batch_idx]
+            
+            # We need to construct the element dict.
+            # y_batch contains return variables like INJECTIONS, etc.
+            # x_batch contains input variables.
+            # We combine them.
+            element = {}
+            # Add inputs
+            for k, v in x_batch.items():
+                element[k] = v[sample_idx]
+            # Add outputs
+            for k, v in y_batch.items():
+                element[k] = v[sample_idx]
+                
+            # Convert to numpy if needed (already numpy/jax array)
+            for key in element:
+                if hasattr(element[key], 'numpy'):
+                    element[key] = element[key].numpy()
+                elif hasattr(element[key], '__array__'):
+                     element[key] = np.array(element[key])
+
+            element["score"] = worst_scores[i]
+            worst_performers.append(element)
         
     return tar_scores, worst_performers
 
@@ -1271,7 +1284,7 @@ class Validator:
     @classmethod
     def validate(
         cls, 
-        model : tf.keras.Model, 
+        model : keras.Model, 
         name : str,
         dataset_args : dict,
         num_examples_per_batch : int = None,

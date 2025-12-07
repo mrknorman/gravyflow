@@ -20,7 +20,7 @@ import gravyflow as gf
 from gravyflow.src.dataset.tools import snr as gf_snr
 from gravyflow.src.dataset.tools import psd as gf_psd
 from gravyflow.src.dataset.conditioning.whiten import whiten
-from gravyflow.src.dataset.features.waveforms.ripple import generate_ripple_waveform
+from gravyflow.src.dataset.features.waveforms.cbc import generate_cbc_waveform
 import keras
 from keras import ops
 
@@ -243,7 +243,7 @@ def _test_snr(
         crop_duration_seconds : float = gf.Defaults.crop_duration_seconds
 
         # Generate phenom injection:
-        injection = generate_ripple_waveform(
+        injection = generate_cbc_waveform(
             num_waveforms=1, 
             mass_1_msun=30, 
             mass_2_msun=30,
@@ -548,3 +548,119 @@ def test_scale_to_snr_chirp():
         
     # Allow 5% tolerance
     assert np.isclose(new_snr[0], desired_snr, rtol=0.02)
+
+
+# ============================================================================
+# EDGE CASE TESTS FOR COVERAGE
+# ============================================================================
+
+def test_snr_1d_psd_branch():
+    """Test SNR calculation with 1D background that produces 1D PSD (covers line 96)."""
+    sample_rate = 256.0
+    duration = 4.0
+    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+    
+    # 1D injection (no batch, no channel)
+    injection = np.sin(2 * np.pi * 30.0 * t).astype(np.float32)
+    injection = ops.convert_to_tensor(injection)
+    
+    # 1D background 
+    np.random.seed(42)
+    background = np.random.normal(0, 1, size=t.shape).astype(np.float32)
+    background = ops.convert_to_tensor(background)
+    
+    # This should use 1D interpolation path (line 96)
+    snr_val = gf_snr.snr(
+        injection, 
+        background, 
+        sample_rate_hertz=sample_rate,
+        fft_duration_seconds=1.0, 
+        overlap_duration_seconds=0.5,
+        lower_frequency_cutoff=10.0
+    )
+    
+    # Should return a scalar or 0D/1D tensor
+    assert float(snr_val) > 0.0
+
+
+def test_scale_to_snr_2d_input():
+    """Test scale_to_snr with 2D injection input (batch, time) - covers line 238."""
+    sample_rate = 256.0
+    duration = 4.0
+    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+    
+    # 2D injection: (batch=2, time)
+    injection = np.sin(2 * np.pi * 50.0 * t).astype(np.float32)
+    injection = ops.convert_to_tensor(np.stack([injection, injection * 0.5], axis=0))  # (2, time)
+    
+    # 2D background: (batch=2, time)
+    np.random.seed(42)
+    background = np.random.normal(0, 1, size=(2, len(t))).astype(np.float32)
+    background = ops.convert_to_tensor(background)
+    
+    desired_snr = ops.convert_to_tensor([10.0, 15.0])
+    
+    # This triggers rank==2 branch at line 238
+    scaled = gf_snr.scale_to_snr(
+        injection,
+        background,
+        desired_snr,
+        sample_rate_hertz=sample_rate,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5,
+        lower_frequency_cutoff=10.0
+    )
+    
+    # Shape should be preserved
+    assert ops.shape(scaled) == (2, int(sample_rate * duration))
+
+
+def test_scale_to_snr_with_cropping():
+    """Test scale_to_snr with onsource_duration_seconds parameter (line 197-202)."""
+    sample_rate = 256.0
+    duration = 4.0
+    onsource_duration = 2.0  # Crop to half
+    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+    
+    # 3D injection: (batch=1, channel=1, time)
+    injection = np.sin(2 * np.pi * 50.0 * t).astype(np.float32)
+    injection = ops.convert_to_tensor(injection.reshape(1, 1, -1))
+    
+    # 3D background
+    np.random.seed(42)
+    background = np.random.normal(0, 1, size=t.shape).astype(np.float32)
+    background = ops.convert_to_tensor(background.reshape(1, 1, -1))
+    
+    desired_snr = ops.convert_to_tensor([10.0])
+    
+    # This uses the cropping logic at lines 197-202
+    scaled = gf_snr.scale_to_snr(
+        injection,
+        background,
+        desired_snr,
+        sample_rate_hertz=sample_rate,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5,
+        lower_frequency_cutoff=10.0,
+        onsource_duration_seconds=onsource_duration
+    )
+    
+    # Shape should be preserved (not cropped output, just cropped for SNR calc)
+    assert ops.shape(scaled) == ops.shape(injection)
+
+
+def test_find_closest_edge_cases():
+    """Test find_closest with various edge cases."""
+    # Exact match
+    tensor = ops.convert_to_tensor([1.0, 5.0, 10.0])
+    assert int(gf_snr.find_closest(tensor, 5.0)) == 1
+    
+    # First element closest
+    assert int(gf_snr.find_closest(tensor, 0.5)) == 0
+    
+    # Last element closest
+    assert int(gf_snr.find_closest(tensor, 12.0)) == 2
+    
+    # Midpoint between elements - should return one of them
+    idx = int(gf_snr.find_closest(tensor, 3.0))
+    assert idx in [0, 1]  # Could be either depending on tie-breaking

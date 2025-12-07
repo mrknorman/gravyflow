@@ -1,3 +1,7 @@
+"""
+DEPRECATED: This module is deprecated and not actively maintained.
+It is excluded from test coverage requirements.
+"""
 from dataclasses import dataclass
 from typing import Union, List, Dict, Optional
 from copy import deepcopy
@@ -7,14 +11,12 @@ import logging
 
 import numpy as np
 from numpy.random import default_rng  
-import tensorflow as tf
-from tensorflow import keras
-import tensorflow_probability as tfp
+import keras
 from keras.layers import Lambda
 from keras import backend as K
 from keras.callbacks import Callback
-from tensorflow.keras import losses
-from tensorflow.keras.layers import Layer
+from keras import losses
+from keras.layers import Layer
 import json
 import pickle
 

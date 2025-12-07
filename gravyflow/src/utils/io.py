@@ -3,11 +3,11 @@ from pathlib import Path
 import inspect
 import sys
 import os
+import logging
 
 import numpy as np
-import tensorflow as tf
-from tensorflow.python.framework.ops import EagerTensor
-from tensorflow.keras.callbacks import Callback
+import keras
+from keras.callbacks import Callback
 
 import h5py
 
@@ -104,44 +104,6 @@ def open_hdf5_file(
 
     return h5py.File(file_path, mode)
     
-"""
-def open_hdf5_file_locking(
-        file_path: Union[str, Path], 
-        logger = None,
-        mode: str ='r+',
-        lock_timeout: int = 120,  # Time in seconds to wait for the file to become free
-        poll_interval: float = 0.01  # Time in seconds between checks for file availability
-    ) -> h5py.File:
-    
-    file_path = Path(file_path)
-    lockfile_path = str(file_path) + ".lock"
-    lock = FileLock(lockfile_path, timeout=lock_timeout)
-
-    try:
-        with lock.acquire(poll_interval=poll_interval):
-            try:
-                # Try to open the HDF5 file in the specified mode
-                f = h5py.File(file_path, mode)
-                f.close()
-            except OSError as e:
-                # The file does not exist, so create it in write mode
-                f = h5py.File(file_path, 'w')  # You can add swmr=True if needed
-                f.close()
-
-                if logger is not None:
-                    logger.info(f'The file {file_path} was created in write mode.')
-            else:
-                if logger is not None:
-                    logger.info(f'The file {file_path} was opened in {mode} mode.')
-
-            return h5py.File(file_path, mode)
-
-    except Timeout:
-        if logger is not None:
-            logger.error(f'Timeout occurred. Could not acquire lock for {file_path}')
-        raise Exception(f"Timeout: Unable to acquire lock for {file_path}")
-"""
-
 def ensure_directory_exists(
     directory: Union[str, Path]
     ):
@@ -284,7 +246,8 @@ class EarlyStoppingWithLoad(Callback):
                     self.wait = initial_epoch - best_epoch
                     self.stopped_epoch = 0
                     self.best = best
-                    self.best_weights = tf.keras.models.load_model(self.model_path).get_weights()
+                    # Use keras.models.load_model instead of tf.keras.models.load_model
+                    self.best_weights = keras.models.load_model(self.model_path).get_weights()
                     self.best_epoch = best_epoch
 
                 else:
@@ -333,7 +296,7 @@ class EarlyStoppingWithLoad(Callback):
             self.model.stop_training = True
             if self.restore_best_weights and self.best_weights is not None:
                 if self.verbose > 0:
-                    io_utils.print_msg(
+                    print(
                         "Restoring model weights from "
                         "the end of the best epoch: "
                         f"{self.best_epoch + 1}."
@@ -342,7 +305,7 @@ class EarlyStoppingWithLoad(Callback):
 
     def on_train_end(self, logs=None):
         if self.stopped_epoch > 0 and self.verbose > 0:
-            io_utils.print_msg(
+            print(
                 f"Epoch {self.stopped_epoch + 1}: early stopping"
             )
 

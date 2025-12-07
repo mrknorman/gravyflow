@@ -398,7 +398,7 @@ def set_random_seeds(
     np.random.seed(seed)
     
     # Set core Python.random seed:
-    random.seed(10)
+    random.seed(seed)
     
 def crop_samples(
         batched_onsource, 

@@ -7,6 +7,7 @@ import sys
 import gc
 
 # Library imports:
+import gravyflow as gf
 import numpy as np
 import jax
 import pytest
