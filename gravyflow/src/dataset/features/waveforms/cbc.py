@@ -383,11 +383,20 @@ def generate_cbc_waveform(
 ):
     """
     Generate CBC waveforms using ripplegw.
+    
+    This wrapper quantizes duration to standard tiers to minimize JAX recompilations.
+    The waveform is generated at the quantized duration, then sliced to the requested size.
     """
-    return _generate_cbc_waveform_jit(
+    from gravyflow.src.dataset.config import Defaults
+    
+    # Quantize duration to reduce JAX graph variants
+    quantized_duration = Defaults.quantize_duration(duration_seconds)
+    
+    # Generate at quantized duration
+    waveforms = _generate_cbc_waveform_jit(
         num_waveforms=num_waveforms,
         sample_rate_hertz=sample_rate_hertz,
-        duration_seconds=duration_seconds,
+        duration_seconds=quantized_duration,
         mass_1_msun=mass_1_msun,
         mass_2_msun=mass_2_msun,
         inclination_radians=inclination_radians,
@@ -404,3 +413,12 @@ def generate_cbc_waveform(
         f_ref=f_ref,
         coalescence_time=coalescence_time
     )
+    
+    # If we generated at a larger duration, slice to requested size
+    if quantized_duration > duration_seconds:
+        requested_samples = int(sample_rate_hertz * duration_seconds)
+        # Take the last N samples (merger is near the end of the waveform)
+        waveforms = waveforms[:, :, -requested_samples:]
+    
+    return waveforms
+

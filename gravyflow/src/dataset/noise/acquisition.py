@@ -9,6 +9,7 @@ from enum import Enum, auto
 from contextlib import closing
 from typing import List, Tuple, Union, Dict, Any, Optional, Generator
 from pathlib import Path
+from collections import OrderedDict
 
 # Third-party imports:
 import numpy as np
@@ -363,6 +364,10 @@ class IFODataObtainer:
 
         self.valid_segments = None
         self.valid_segments_adjusted = None
+        
+        # In-memory LRU cache for segments to reduce HDF5 disk reads
+        self._segment_cache = OrderedDict()
+        self._segment_cache_maxsize = 8  # Keep up to 8 segments in memory
                 
     def override_attributes(
         self,
@@ -958,6 +963,15 @@ class IFODataObtainer:
         epsilon = 0.1         
         segment = None
         
+        # Create a unique cache key for this segment
+        cache_key = f"{segment_key}_{ifo.name}_{sample_rate_hertz}"
+        
+        # Check in-memory LRU cache first (fastest path)
+        if cache_key in self._segment_cache:
+            # Move to end (most recently used) and return
+            self._segment_cache.move_to_end(cache_key)
+            return self._segment_cache[cache_key]
+        
         if (self.file_path is not None and Path(self.file_path).exists()) or self.cache_segments:
             # Ensure file path is generated if caching is on
             if self.file_path is None:
@@ -976,6 +990,8 @@ class IFODataObtainer:
                         segment = ops.convert_to_tensor(segment, dtype="float32")
                         
                         if gf.check_tensor_integrity(segment, 1, 10):
+                            # Add to in-memory cache
+                            self._add_to_segment_cache(cache_key, segment)
                             return segment
                         else:
                             logging.error(
@@ -1007,6 +1023,8 @@ class IFODataObtainer:
                 segment = ops.convert_to_tensor(segment.value, dtype="float32")
                 
                 if gf.check_tensor_integrity(segment, 1, 10):
+                    # Add to in-memory cache
+                    self._add_to_segment_cache(cache_key, segment)
                     return segment
                 else:
                     logging.error("Segment integrity compromised, skipping")
@@ -1014,6 +1032,14 @@ class IFODataObtainer:
             else:
                 logging.error("Segment is None for some reason, skipping")
                 return None
+    
+    def _add_to_segment_cache(self, cache_key: str, segment):
+        """Add segment to in-memory LRU cache, evicting oldest if needed."""
+        self._segment_cache[cache_key] = segment
+        
+        # Evict oldest entries if cache exceeds max size
+        while len(self._segment_cache) > self._segment_cache_maxsize:
+            self._segment_cache.popitem(last=False)
 
     def acquire(
         self, 
