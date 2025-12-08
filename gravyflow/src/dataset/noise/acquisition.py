@@ -10,8 +10,6 @@ from contextlib import closing
 from typing import List, Tuple, Union, Dict, Any, Optional, Generator
 from pathlib import Path
 from collections import OrderedDict
-import queue
-import threading
 
 # Third-party imports:
 import numpy as np
@@ -373,13 +371,6 @@ class IFODataObtainer:
         # In-memory LRU cache for segments to reduce HDF5 disk reads
         self._segment_cache = OrderedDict()
         self._segment_cache_maxsize = 8  # Keep up to 8 segments in memory
-        
-        # Prefetch infrastructure for background segment loading
-        self._prefetch_queue: Optional[queue.Queue] = None
-        self._prefetch_thread: Optional[threading.Thread] = None
-        self._prefetch_stop_event: Optional[threading.Event] = None
-        self._prefetch_enabled = True
-        self._prefetch_params = None  # Store params for prefetch thread
                 
     def override_attributes(
         self,
@@ -393,150 +384,6 @@ class IFODataObtainer:
                     f"Invalide override value {key} not attribute of "
                     "IFODataObtainer"
                 )
-
-    def _start_prefetch_thread(
-        self,
-        sample_rate_hertz: float,
-        valid_segments,
-        ifos: List,
-        scale_factor: float,
-        seed: int = None
-    ) -> None:
-        """Start background thread to prefetch next segment.
-        
-        Uses independent segment index tracking to avoid race conditions
-        with the main thread's acquire() method.
-        """
-        if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
-            return  # Already running
-        
-        self._prefetch_queue = queue.Queue(maxsize=1)
-        self._prefetch_stop_event = threading.Event()
-        
-        # Create thread-safe copy of parameters
-        params = {
-            'sample_rate_hertz': sample_rate_hertz,
-            'valid_segments': valid_segments.copy() if valid_segments is not None else None,
-            'ifos': list(ifos) if ifos else [],
-            'scale_factor': scale_factor,
-            'seed': seed
-        }
-        
-        # Use a separate RNG for the prefetch thread to ensure reproducibility
-        prefetch_seed = seed + 12345 if seed else 12345
-        
-        def prefetch_worker():
-            """Background worker that prefetches segments with independent state."""
-            from numpy.random import default_rng
-            
-            # Thread-local RNG and segment index
-            local_rng = default_rng(prefetch_seed)
-            local_segment_index = 0
-            
-            sr = params['sample_rate_hertz']
-            segs = params['valid_segments']
-            ifos_ = params['ifos']
-            sf = params['scale_factor']
-            
-            if segs is None or len(segs) == 0:
-                logging.warning("Prefetch worker: no valid segments")
-                return
-            
-            while not self._prefetch_stop_event.is_set():
-                try:
-                    # Use thread-local segment index for iteration
-                    segment_idx = local_segment_index % len(segs)
-                    local_segment_index += 1
-                    
-                    # Get segment directly using the index
-                    segment_data = self._prefetch_get_segment(
-                        segs[segment_idx],
-                        sr, ifos_, sf
-                    )
-                    
-                    if segment_data is None:
-                        continue
-                    
-                    # Block until queue has space (maxsize=1)
-                    while not self._prefetch_stop_event.is_set():
-                        try:
-                            self._prefetch_queue.put(segment_data, timeout=0.5)
-                            break
-                        except queue.Full:
-                            continue
-                            
-                except Exception as e:
-                    logging.error(f"Prefetch worker error: {e}")
-                    continue
-        
-        self._prefetch_thread = threading.Thread(target=prefetch_worker, daemon=True)
-        self._prefetch_thread.start()
-        logging.info("Started segment prefetch thread with independent RNG")
-    
-    def _stop_prefetch_thread(self) -> None:
-        """Stop the prefetch background thread."""
-        if self._prefetch_stop_event:
-            self._prefetch_stop_event.set()
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=2.0)
-        self._prefetch_thread = None
-        self._prefetch_queue = None
-        self._prefetch_stop_event = None
-    
-    def _get_next_segment_prefetched(self, timeout: float = 30.0):
-        """Get next segment from prefetch queue or fall back to sync."""
-        if self._prefetch_queue is not None:
-            try:
-                return self._prefetch_queue.get(timeout=timeout)
-            except queue.Empty:
-                logging.warning("Prefetch queue empty, falling back to sync fetch")
-        return None  # Caller should handle fallback
-    
-    def _prefetch_get_segment(
-        self, 
-        segment_times, 
-        sample_rate_hertz: float, 
-        ifos: List, 
-        scale_factor: float
-    ):
-        """
-        Thread-safe segment fetching for prefetch worker.
-        
-        This method fetches a single segment without modifying shared state.
-        """
-        try:
-            segments = []
-            gps_start_times = []
-            
-            for ifo in ifos:
-                segment_start_gps_time = float(segment_times[0])
-                segment_end_gps_time = float(segment_times[1])
-                gps_start_times.append(segment_start_gps_time)
-                
-                segment = self.get_segment(
-                    segment_start_gps_time,
-                    segment_end_gps_time,
-                    ifo,
-                    sample_rate_hertz=sample_rate_hertz
-                )
-                
-                if segment is None:
-                    return None
-                segments.append(segment)
-            
-            if not segments:
-                return None
-                
-            multi_segment = IFOData(segments, sample_rate_hertz, gps_start_times)
-            
-            if not multi_segment.data:
-                return None
-            
-            return multi_segment.scale(scale_factor)
-            
-        except Exception as e:
-            logging.debug(f"Prefetch segment error: {e}")
-            return None
 
     def unpack_observing_runs(
         self,
@@ -557,14 +404,10 @@ class IFODataObtainer:
             [run.state_flags[data_quality] for run in observing_runs]
         
     def __del__(self):
-        # Stop prefetch thread on cleanup
-        self._stop_prefetch_thread()
         if self.segment_file is not None:
             self.segment_file.close()
             
     def close(self):
-        # Stop prefetch thread when closing
-        self._stop_prefetch_thread()
         if self.segment_file is not None:
             self.segment_file.close()
         
@@ -1357,35 +1200,19 @@ class IFODataObtainer:
         num_onsource_samples : int = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
         num_offsource_samples : int = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
 
-        # Start prefetch thread on first call if enabled
-        if self._prefetch_enabled and self._prefetch_thread is None:
-            self._start_prefetch_thread(
-                sample_rate_hertz, 
-                self.valid_segments_adjusted, 
-                ifos, 
-                scale_factor,
-                seed=seed
-            )
-
         while self._segment_exausted:
-            # Try to get prefetched segment first
-            prefetched = self._get_next_segment_prefetched(timeout=5.0)
-            if prefetched is not None:
-                self.current_segment = prefetched
-            else:
-                # Fallback to synchronous fetch
-                try:
-                    self.current_segment = next(self.acquire(
-                            sample_rate_hertz, 
-                            self.valid_segments_adjusted, 
-                            ifos,
-                            scale_factor
-                        ))
-                except StopIteration:
-                    # Reset segment index to loop infinitely through segments
-                    self._current_segment_index = 0
-                    self._segment_exausted = True
-                    continue
+            try:
+                self.current_segment = next(self.acquire(
+                        sample_rate_hertz, 
+                        self.valid_segments_adjusted, 
+                        ifos,
+                        scale_factor
+                    ))
+            except StopIteration:
+                # Reset segment index to loop infinitely through segments
+                self._current_segment_index = 0
+                self._segment_exausted = True
+                continue
         
             min_num_samples = min([ops.shape(tensor)[0] for tensor in self.current_segment.data])
 
