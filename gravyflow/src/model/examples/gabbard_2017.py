@@ -319,7 +319,7 @@ class Gabbard2017(ExampleModel):
     def compile_model(
         cls,
         model: keras.Model,
-        learning_rate: float = 0.002
+        learning_rate: float = 1e-5
     ) -> keras.Model:
         """
         Compile model with training configuration from paper.
@@ -340,11 +340,13 @@ class Gabbard2017(ExampleModel):
         # Paper: "adaptive moment estimation with incorporated Nesterov 
         # momentum with a learning rate of 0.002, β1 = 0.9, β2 = 0.999, 
         # ε = 10−8"
-        optimizer = keras.optimizers.Nadam(
+        # Added gradient clipping to prevent exploding gradients
+        optimizer = keras.optimizers.Adam(
             learning_rate=learning_rate,
             beta_1=0.9,
             beta_2=0.999,
-            epsilon=1e-8
+            epsilon=1e-8,
+            clipnorm=1.0  # Clip gradients to prevent explosion
         )
         
         # Paper uses binary cross-entropy (Eq. 2) but with 2-class softmax

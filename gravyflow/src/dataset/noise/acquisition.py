@@ -1092,7 +1092,7 @@ class IFODataObtainer:
              pass
 
         if self.file_path is not None and self.cache_segments:
-            gf.ensure_directory_exists(self.file_path)
+            gf.ensure_directory_exists(self.file_path.parent)
 
         if valid_segments is None:
             valid_segments = self.valid_segments

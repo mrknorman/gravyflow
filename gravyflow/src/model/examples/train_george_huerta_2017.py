@@ -155,6 +155,10 @@ Examples:
         help='Path to pretrained regression weights (for classification with transfer)'
     )
     parser.add_argument(
+        '--load-regression', action='store_true',
+        help='Load existing regression model instead of training (for pretrain task)'
+    )
+    parser.add_argument(
         '--verbose', type=int, default=1, choices=[0, 1, 2],
         help='Keras verbosity: 0=silent, 1=progress bar, 2=one line per epoch'
     )
@@ -235,7 +239,7 @@ def train_regression(ModelClass, model_name: str, args, config, noise_type, outp
     
     early_stop = keras.callbacks.EarlyStopping(
         monitor='val_loss',
-        patience=5,
+        patience=10,
         restore_best_weights=True,
         verbose=1,
         start_from_epoch=80
@@ -254,7 +258,7 @@ def train_regression(ModelClass, model_name: str, args, config, noise_type, outp
     
     # Final evaluation
     print("\nFinal regression evaluation:")
-    val_loss, val_mae = model.evaluate(val_dataset)
+    val_loss, val_mae = model.evaluate(val_dataset, verbose=args.verbose)
     print(f"Validation MAE: {val_mae:.4f} M☉")
     
     print(f"\n✓ Regression model saved to: {output_path}")
@@ -380,8 +384,9 @@ def train_classification(ModelClass, model_name: str, args, config, noise_type,
     
     early_stop = keras.callbacks.EarlyStopping(
         monitor='val_loss',
-        patience=5,
+        patience=10,
         restore_best_weights=True,
+        start_from_epoch=80,
         verbose=1
     )
     callbacks.append(early_stop)
@@ -398,7 +403,7 @@ def train_classification(ModelClass, model_name: str, args, config, noise_type,
     
     # Final evaluation
     print("\nFinal classification evaluation:")
-    val_loss, val_acc = model.evaluate(val_dataset)
+    val_loss, val_acc = model.evaluate(val_dataset, verbose=args.verbose)
     print(f"Validation Accuracy: {val_acc:.4f}")
     
     print(f"\n✓ Classification model saved to: {output_path}")
@@ -466,10 +471,25 @@ def main():
         print("   Phase 1: Regression (mass prediction)")
         print("   Phase 2: Transfer → Classification (detection)")
         
-        # Phase 1: Regression
-        regression_model, input_shape_on, input_shape_off = train_regression(
-            ModelClass, model_name, args, config, noise_type, paths['regression']
-        )
+        # Phase 1: Regression - load if exists and --load-regression, else train
+        if args.load_regression and paths['regression'].exists():
+            print(f"\n📂 Loading existing regression model from: {paths['regression']}")
+            regression_model = keras.models.load_model(paths['regression'])
+            regression_model.summary()
+            
+            # Get input shapes from loaded model
+            onsource_input = regression_model.get_layer('ONSOURCE')
+            offsource_input = regression_model.get_layer('OFFSOURCE')
+            input_shape_on = onsource_input.output.shape[1:]
+            input_shape_off = offsource_input.output.shape[1:]
+            print(f"ONSOURCE shape: {input_shape_on}")
+            print(f"OFFSOURCE shape: {input_shape_off}")
+        else:
+            if args.load_regression:
+                print(f"\n⚠️  Regression model not found at {paths['regression']}, training from scratch...")
+            regression_model, input_shape_on, input_shape_off = train_regression(
+                ModelClass, model_name, args, config, noise_type, paths['regression']
+            )
         
         # Phase 2: Classification with transfer (use in-memory model)
         train_classification(
