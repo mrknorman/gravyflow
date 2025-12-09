@@ -54,7 +54,7 @@ class ScalingTypes(Enum):
 
 @dataclass
 class ScalingMethod:
-    value : Union[gf.Distribution, np.ndarray]
+    value : Union['gf.Distribution', 'gf.Curriculum', np.ndarray]
     type_ : ScalingTypes
     
     def scale(
@@ -479,6 +479,17 @@ class WaveformParameters(Enum):
     DURATION_SECONDS = WaveformParameter(201)
     MIN_FREQUENCY_HERTZ = WaveformParameter(202)
     MAX_FREQUENCY_HERTZ = WaveformParameter(203)
+    
+    # Simple waveform parameters:
+    FREQUENCY_HERTZ = WaveformParameter(301)
+    AMPLITUDE = WaveformParameter(302)
+    PHASE_RADIANS = WaveformParameter(303)
+    QUALITY_FACTOR = WaveformParameter(304)
+    TAU_SECONDS = WaveformParameter(305)
+    START_FREQUENCY_HERTZ = WaveformParameter(306)
+    END_FREQUENCY_HERTZ = WaveformParameter(307)
+    CHIRP_RATE = WaveformParameter(308)
+    DAMPING_TIME_SECONDS = WaveformParameter(309)
     
     @classmethod
     def get(cls, key):
@@ -1312,7 +1323,7 @@ class InjectionGenerator:
             
             scaled_injections_list.append(projected)
             
-            key = scaling_method.type_.name 
+            key = scaling_method.type_ 
             scaling_params_list.append({key: target_val})
 
         try:

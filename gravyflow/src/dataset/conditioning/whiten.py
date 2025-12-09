@@ -288,6 +288,7 @@ def whiten(
 
     return out * ops.sqrt(2.0 * dt)
 
+@keras.saving.register_keras_serializable(package="gravyflow")
 class WhitenPass(Layer):
     def __init__(
             self, 
@@ -346,6 +347,7 @@ class WhitenPass(Layer):
         timeseries_shape = input_shape
         return (timeseries_shape[0], timeseries_shape[1], self.onsource_duration_seconds*self.sample_rate_hertz) 
 
+@keras.saving.register_keras_serializable(package="gravyflow")
 class Whiten(Layer):
     def __init__(
             self, 

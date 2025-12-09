@@ -664,3 +664,185 @@ def test_find_closest_edge_cases():
     # Midpoint between elements - should return one of them
     idx = int(gf_snr.find_closest(tensor, 3.0))
     assert idx in [0, 1]  # Could be either depending on tie-breaking
+
+
+# ============================================================================
+# TESTS USING SIMPLE WAVEFORM GENERATORS
+# ============================================================================
+
+def test_snr_with_sine_gaussian():
+    """Test SNR calculation using SineGaussianGenerator."""
+    gen = gf.SineGaussianGenerator(
+        frequency_hertz=gf.Distribution(value=100.0, type_=gf.DistributionType.CONSTANT),
+        quality_factor=gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT),
+        amplitude=gf.Distribution(value=1.0, type_=gf.DistributionType.CONSTANT),
+        network=[gf.IFO.L1],
+    )
+    
+    sample_rate = 1024.0
+    duration = 4.0
+    
+    waveforms, params = gen.generate(
+        num_waveforms=1,
+        sample_rate_hertz=sample_rate,
+        duration_seconds=duration,
+        seed=42
+    )
+    
+    # Extract h+ component: (batch, 2, time) -> (batch, 1, time)
+    injection = waveforms[:, 0:1, :]
+    
+    # Generate white noise background
+    np.random.seed(42)
+    background = np.random.normal(0, 1, size=(1, 1, int(sample_rate * duration))).astype(np.float32)
+    background = ops.convert_to_tensor(background)
+    
+    snr_val = gf_snr.snr(
+        injection, 
+        background, 
+        sample_rate_hertz=sample_rate,
+        fft_duration_seconds=1.0, 
+        overlap_duration_seconds=0.5,
+        lower_frequency_cutoff=10.0
+    )
+    
+    # SNR should be positive
+    assert snr_val[0] > 0.0
+
+
+def test_scale_to_snr_with_chirplet():
+    """Test scale_to_snr using ChirpletGenerator."""
+    gen = gf.ChirpletGenerator(
+        start_frequency_hertz=gf.Distribution(value=50.0, type_=gf.DistributionType.CONSTANT),
+        end_frequency_hertz=gf.Distribution(value=200.0, type_=gf.DistributionType.CONSTANT),
+        duration_seconds=gf.Distribution(value=2.0, type_=gf.DistributionType.CONSTANT),
+        amplitude=gf.Distribution(value=1.0, type_=gf.DistributionType.CONSTANT),
+        network=[gf.IFO.L1],
+    )
+    
+    sample_rate = 1024.0
+    duration = 4.0
+    
+    waveforms, _ = gen.generate(
+        num_waveforms=1,
+        sample_rate_hertz=sample_rate,
+        duration_seconds=duration,
+        seed=42
+    )
+    
+    # Extract h+ component
+    injection = waveforms[:, 0:1, :]
+    
+    # Generate white noise background
+    np.random.seed(42)
+    background = np.random.normal(0, 1, size=(1, 1, int(sample_rate * duration))).astype(np.float32)
+    background = ops.convert_to_tensor(background)
+    
+    desired_snr = 20.0
+    
+    scaled_injection = gf_snr.scale_to_snr(
+        injection,
+        background,
+        desired_snr,
+        sample_rate_hertz=sample_rate,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5,
+        lower_frequency_cutoff=15.0
+    )
+    
+    # Verify new SNR is close to desired
+    new_snr = gf_snr.snr(
+        scaled_injection,
+        background,
+        sample_rate_hertz=sample_rate,
+        fft_duration_seconds=1.0,
+        overlap_duration_seconds=0.5,
+        lower_frequency_cutoff=15.0
+    )
+    
+    # Allow 5% tolerance
+    np.testing.assert_allclose(new_snr[0], desired_snr, rtol=0.05)
+
+
+def test_snr_with_ringdown():
+    """Test SNR calculation using RingdownGenerator."""
+    gen = gf.RingdownGenerator(
+        frequency_hertz=gf.Distribution(value=150.0, type_=gf.DistributionType.CONSTANT),
+        damping_time_seconds=gf.Distribution(value=0.05, type_=gf.DistributionType.CONSTANT),
+        amplitude=gf.Distribution(value=1.0, type_=gf.DistributionType.CONSTANT),
+        network=[gf.IFO.L1],
+    )
+    
+    sample_rate = 1024.0
+    duration = 2.0
+    
+    waveforms, params = gen.generate(
+        num_waveforms=2,  # Batch of 2
+        sample_rate_hertz=sample_rate,
+        duration_seconds=duration,
+        seed=42
+    )
+    
+    # Extract h+ component
+    injection = waveforms[:, 0:1, :]
+    
+    # Generate white noise background
+    np.random.seed(42)
+    background = np.random.normal(0, 1, size=(2, 1, int(sample_rate * duration))).astype(np.float32)
+    background = ops.convert_to_tensor(background)
+    
+    snr_val = gf_snr.snr(
+        injection, 
+        background, 
+        sample_rate_hertz=sample_rate,
+        fft_duration_seconds=1.0, 
+        overlap_duration_seconds=0.5,
+        lower_frequency_cutoff=50.0
+    )
+    
+    # Both batch elements should have positive SNR
+    assert ops.shape(snr_val) == (2,)
+    assert snr_val[0] > 0.0
+    assert snr_val[1] > 0.0
+
+
+def test_snr_with_periodic_wave():
+    """Test SNR calculation using PeriodicWaveGenerator with different shapes."""
+    for wave_shape in [gf.WaveShape.SINE, gf.WaveShape.SQUARE, gf.WaveShape.TRIANGLE]:
+        gen = gf.PeriodicWaveGenerator(
+            wave_shape=wave_shape,
+            frequency_hertz=gf.Distribution(value=50.0, type_=gf.DistributionType.CONSTANT),
+            duration_seconds=gf.Distribution(value=2.0, type_=gf.DistributionType.CONSTANT),
+            amplitude=gf.Distribution(value=1.0, type_=gf.DistributionType.CONSTANT),
+            network=[gf.IFO.L1],
+        )
+        
+        sample_rate = 512.0
+        duration = 4.0
+        
+        waveforms, _ = gen.generate(
+            num_waveforms=1,
+            sample_rate_hertz=sample_rate,
+            duration_seconds=duration,
+            seed=42
+        )
+        
+        # Extract h+ component
+        injection = waveforms[:, 0:1, :]
+        
+        # White noise
+        np.random.seed(42)
+        background = np.random.normal(0, 1, size=(1, 1, int(sample_rate * duration))).astype(np.float32)
+        background = ops.convert_to_tensor(background)
+        
+        snr_val = gf_snr.snr(
+            injection, 
+            background, 
+            sample_rate_hertz=sample_rate,
+            fft_duration_seconds=1.0, 
+            overlap_duration_seconds=0.5,
+            lower_frequency_cutoff=10.0
+        )
+        
+        # SNR should be positive for all wave shapes
+        assert snr_val[0] > 0.0, f"{wave_shape.name} wave should have positive SNR"
