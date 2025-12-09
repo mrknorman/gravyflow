@@ -80,12 +80,17 @@ from .src.dataset.noise.acquisition import (
     IFOData, IFODataObtainer
 )
 from .src.dataset.noise.noise import NoiseType, NoiseObtainer
+from .src.dataset.curriculum import Curriculum, CurriculumSchedule, CurriculumProgressCallback
 from .src.dataset.features.injection import (
     ScalingOrdinality, ScalingType, ScalingTypes, ScalingMethod, ReturnVariables,
     WaveformGenerator, WaveformParameter, WaveformParameters, WNBGenerator,
     IncoherentGenerator, InjectionGenerator,
     roll_vector_zero_padding, generate_mask, is_not_inherited,
     batch_injection_parameters, CBCGenerator, Approximant
+)
+from .src.dataset.features.waveforms.simple import (
+    WaveShape, PeriodicWaveGenerator, SineGaussianGenerator,
+    ChirpletGenerator, RingdownGenerator
 )
 from .src.dataset.dataset import data, Dataset, GravyflowDataset
 from .src.utils.plotting import (
@@ -95,3 +100,7 @@ from .src.utils.plotting import (
 from .src.model.validate import Validator
 from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_segments
 from .src.utils.alert import send_email
+from .src.model.examples.gabbard_2017 import Gabbard2017
+from .src.model.examples.matched_filter_baseline import MatchedFilterBaseline, MatchedFilterBaselineConfig
+from .src.detection import MatchedFilter, MatchedFilterLayer, TemplateGrid, matched_filter_fft, optimal_snr
+

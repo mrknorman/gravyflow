@@ -150,6 +150,24 @@ class GravyflowDataset(keras.utils.PyDataset):
         # Create noise and injection generators
         self._create_generators()
 
+        # Configure any Curriculum objects in waveform generators
+        self._configure_curricula()
+
+    def _configure_curricula(self):
+        """Auto-configure any Curriculum objects in waveform generators."""
+        generators = []
+        if isinstance(self.waveform_generators, list):
+            generators = self.waveform_generators
+        elif isinstance(self.waveform_generators, dict):
+            generators = [g["generator"] for g in self.waveform_generators.values()]
+        
+        for generator in generators:
+            if hasattr(generator, 'scaling_method') and generator.scaling_method is not None:
+                value = generator.scaling_method.value
+                # Duck-type check for Curriculum (has configure method)
+                if hasattr(value, 'configure'):
+                    value.configure(steps_per_epoch=self.steps_per_epoch)
+
     def _set_generator_networks(self):
         """Set the network for waveform generators if not provided."""
         if isinstance(self.waveform_generators, list):
