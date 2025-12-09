@@ -14,6 +14,8 @@ from keras import ops
 import jax.numpy as jnp
 from jax import jit
 
+
+
 import keras
 from keras.callbacks import Callback
 from bokeh.embed import components, file_html
@@ -32,8 +34,19 @@ def pad_with_random_values(scores):
     # Determine the maximum length among all numpy arrays of 2-element arrays in scores
     max_length = max(len(score) for score in scores)
     
+    # If all arrays are empty, return empty array
+    if max_length == 0:
+        return np.array(scores)
+    
     def pad_array(arr, max_length):
         current_length = len(arr)
+        if current_length == 0:
+            # Cannot pad an empty array by sampling from it.
+            # Return an array of NaNs with the target shape to indicate missing data.
+            if hasattr(arr, 'shape') and len(arr.shape) > 1:
+                return np.full((max_length,) + arr.shape[1:], np.nan)
+            else:
+                return np.full((max_length,), np.nan)
         if current_length < max_length:
             # Calculate the number of 2-element arrays needed
             num_arrays_needed = max_length - current_length
@@ -121,6 +134,9 @@ def calculate_efficiency_scores(
     dataset_args["waveform_generators"][0].injection_chance = 1.0
     dataset_args["waveform_generators"][0].scaling_method.value = scaling_values
     
+    # Set steps_per_epoch to match num_batches to prevent data exhaustion
+    dataset_args["steps_per_epoch"] = num_batches
+    
     # Initialize generator:
     dataset = gf.Dataset(
         **dataset_args
@@ -158,9 +174,11 @@ def calculate_efficiency_scores(
                 raise Exception(f"Error splitting efficiency scores: {e}.")
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             logging.error(f"Error {e} calculating efficiency scores! Retrying.")
             combined_scores = None
-            continue    
+            continue
 
     if file_path is not None:
         with gf.open_hdf5_file(
@@ -239,6 +257,7 @@ def calculate_far_scores(
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
     dataset_args["waveform_generators"] = []
     dataset_args["output_variables"] = []
+    dataset_args["steps_per_epoch"] = num_batches
 
     # Initialize generator:
     dataset = gf.Dataset(
@@ -485,6 +504,7 @@ def calculate_roc(
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
     dataset_args["output_variables"] = [gf.ReturnVariables.INJECTION_MASKS]
     dataset_args["waveform_generators"][0].injection_chance = 0.5
+    dataset_args["steps_per_epoch"] = num_batches
     
     mask_history = []
     # Initialize generators
@@ -538,7 +558,7 @@ def calculate_roc(
     # Calculate the ROC curve and AUC
     fpr, tpr, roc_auc = roc_curve_and_auc(y_true, y_scores)
     
-    return {'fpr': fpr.numpy(), 'tpr': tpr.numpy(), 'roc_auc': roc_auc.numpy()}
+    return {'fpr': np.asarray(fpr), 'tpr': np.asarray(tpr), 'roc_auc': np.asarray(roc_auc)}
 
 def calculate_multi_rocs(    
     model: keras.Model,
@@ -713,6 +733,7 @@ def calculate_tar_scores(
     dataset_args["waveform_generators"][0].injection_chance = 1.0
     dataset_args["waveform_generators"][0].scaling_method.value = \
         gf.Distribution(value=scaling, type_=gf.DistributionType.CONSTANT)
+    dataset_args["steps_per_epoch"] = num_batches
     
     # Initialize generator:
     dataset = gf.Dataset(

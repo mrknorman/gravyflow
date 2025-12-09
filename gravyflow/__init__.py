@@ -13,6 +13,12 @@ import os
 import site
 import glob
 import sys
+import logging
+
+# Suppress JAX/CUDA warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF info/warnings
+os.environ['JAX_PLATFORMS'] = 'cuda'  # Skip TPU initialization attempt
+logging.getLogger('jax._src.xla_bridge').setLevel(logging.ERROR)
 
 # Set Keras backend to JAX
 os.environ["KERAS_BACKEND"] = "jax"

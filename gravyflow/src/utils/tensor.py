@@ -151,12 +151,16 @@ class Distribution:
                     raise ValueError(
                         "No maximum value given in log distribution."
                     )
-                samples =self.rng.uniform(
-                            self.min_, 
-                            self.max_, 
-                            num_samples
-                        )
-                samples = 10 ** samples
+                elif self.min_ <= 0:
+                    raise ValueError(
+                        "LOG distribution requires min_ > 0."
+                    )
+                # Sample uniformly in log-space, then exponentiate to get
+                # values log-uniformly distributed between min_ and max_
+                log_min = np.log10(self.min_)
+                log_max = np.log10(self.max_)
+                log_samples = self.rng.uniform(log_min, log_max, num_samples)
+                samples = 10 ** log_samples
 
             case DistributionType.POW_TWO:
                 power_low, power_high = map(int, np.log2((self.min_, self.max_)))

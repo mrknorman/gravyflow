@@ -679,10 +679,75 @@ class CBCGenerator(WaveformGenerator):
         self.spin_1_in = self.ensure_list_of_floats("spin_1_in", self.spin_1_in)
         self.spin_2_in = self.ensure_list_of_floats("spin_2_in", self.spin_2_in)
 
+        # Parameter validation warnings
+        self._validate_parameters()
+
         if self.scale_factor is None:
             self.scale_factor=gf.Defaults.scale_factor
 
         super().__post_init__()
+    
+    def _validate_parameters(self):
+        """Validate CBC parameters and warn if outside sensible ranges."""
+        def get_range(val):
+            """Get min/max from a value or distribution."""
+            if isinstance(val, gf.Distribution):
+                if val.type_ == gf.DistributionType.CONSTANT:
+                    return val.value, val.value
+                return val.min_, val.max_
+            return val, val
+        
+        # Mass validation (sensible range: 1-200 Msun for CBC)
+        m1_min, m1_max = get_range(self.mass_1_msun)
+        m2_min, m2_max = get_range(self.mass_2_msun)
+        
+        if m1_max > 200 or m2_max > 200:
+            warn(
+                f"CBCGenerator: Mass values >200 Msun may produce NaN waveforms. "
+                f"mass_1 range: [{m1_min}, {m1_max}], mass_2 range: [{m2_min}, {m2_max}]"
+            )
+        if m1_min < 1 or m2_min < 1:
+            warn(
+                f"CBCGenerator: Mass values <1 Msun may produce invalid waveforms. "
+                f"mass_1 range: [{m1_min}, {m1_max}], mass_2 range: [{m2_min}, {m2_max}]"
+            )
+        
+        # Distance validation (sensible range: 1-10000 Mpc)
+        d_min, d_max = get_range(self.distance_mpc)
+        if d_max > 10000:
+            warn(
+                f"CBCGenerator: Distance >10000 Mpc may produce very weak signals. "
+                f"distance range: [{d_min}, {d_max}] Mpc"
+            )
+        if d_min < 1:
+            warn(
+                f"CBCGenerator: Distance <1 Mpc is unrealistically close. "
+                f"distance range: [{d_min}, {d_max}] Mpc"
+            )
+        
+        # Inclination validation (sensible range: 0 to pi)
+        inc_min, inc_max = get_range(self.inclination_radians)
+        if inc_max > 3.15 or inc_min < 0:
+            warn(
+                f"CBCGenerator: Inclination should be in [0, pi] radians. "
+                f"inclination range: [{inc_min}, {inc_max}]"
+            )
+        
+        # Eccentricity validation (sensible range: 0 to 1)
+        ecc_min, ecc_max = get_range(self.eccentricity)
+        if ecc_max >= 1 or ecc_min < 0:
+            warn(
+                f"CBCGenerator: Eccentricity should be in [0, 1). "
+                f"eccentricity range: [{ecc_min}, {ecc_max}]"
+            )
+        
+        # Minimum frequency validation (sensible range: 5-100 Hz)
+        f_min, f_max = get_range(self.min_frequency_hertz)
+        if f_min < 5:
+            warn(
+                f"CBCGenerator: min_frequency <5 Hz may require very long waveforms. "
+                f"min_frequency range: [{f_min}, {f_max}] Hz"
+            )
     
     def get_max_generated_duration(self):
         # Calculate max duration based on min frequency and min masses
@@ -1174,6 +1239,16 @@ class InjectionGenerator:
                 )
                 
                 mask = generate_mask(waveforms)
+                
+                # Check for NaN injections that silently zero the mask
+                num_nan_injections = int(ops.sum(ops.any(ops.isnan(waveforms), axis=(1, 2))))
+                if num_nan_injections > 0:
+                    logging.warning(
+                        f"InjectionGenerator: {num_nan_injections}/{num_examples_per_batch} "
+                        f"waveforms contain NaN values and will have mask=0. "
+                        f"This may indicate an issue with waveform parameters."
+                    )
+                
                 # Reduce mask to a single boolean flag per example (0.0 or 1.0)
                 mask = ops.max(mask, axis=(1, 2))
                 masks_list.append(mask)
@@ -1269,7 +1344,24 @@ class InjectionGenerator:
             num_examples = ops.shape(raw_waveforms)[0]
             
             scaling_dist = scaling_method.value
-            target_val = scaling_dist.sample(num_examples)
+
+            if not hasattr(self, "_scaling_indices"):
+                self._scaling_indices = [0] * len(self.waveform_generators)
+
+            if isinstance(scaling_dist, (np.ndarray, list)):
+                current_idx = self._scaling_indices[i]
+                end_idx = current_idx + num_examples
+                
+                if end_idx > len(scaling_dist):
+                     # Wrap around
+                     current_idx = 0
+                     end_idx = num_examples
+                     self._scaling_indices[i] = 0
+                
+                target_val = scaling_dist[current_idx : end_idx]
+                self._scaling_indices[i] = end_idx
+            else:
+                target_val = scaling_dist.sample(num_examples)
             target_val = ops.convert_to_tensor(target_val, dtype="float32")
             
             sample_rate = self.sample_rate_hertz

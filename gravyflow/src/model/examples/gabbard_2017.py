@@ -157,22 +157,22 @@ class Gabbard2017(ExampleModel):
         onsource_input = Input(shape=input_shape_onsource, name="ONSOURCE")
         offsource_input = Input(shape=input_shape_offsource, name="OFFSOURCE")
         
-        # Whitening layer
-        # Paper: "whitened simulated gravitational-wave timeseries"
+        # Whitening layer (before Permute - matching GeorgeHuerta2017)
+        # Whiten expects input shape (batch, samples, channels)
         x = gf.Whiten(
             sample_rate_hertz=cfg.sample_rate_hertz,
             onsource_duration_seconds=cfg.onsource_duration_seconds
         )([onsource_input, offsource_input])
         
-        # Permute to (batch, channels, samples) for Conv1D
-        x = Permute((2, 1))(x)
+        # Permute to (batch, channels, samples) for Conv1D with channels_last
+        x = Permute((2, 1), name="permute")(x)
         
         # 6 Convolutional blocks from Table I
         for i, (filters, kernel_size, pool_size) in enumerate(cfg.conv_configs):
             layer_num = i + 1
             
-            # Convolution with 'same' padding to preserve dimensions
-            x = Conv1D(filters, kernel_size, padding='valid', 
+            # Convolution (default channels_last after Permute puts samples in last dim)
+            x = Conv1D(filters, kernel_size, padding='valid',
                        name=f"Conv1D_{layer_num}")(x)
             x = ELU(name=f"ELU_{layer_num}")(x)
             
@@ -369,11 +369,7 @@ class Gabbard2017(ExampleModel):
         
         Raises:
             FileNotFoundError: If weights file not found.
-        """
-        model = cls.model()
+        """        
+        model_path = Path(__file__).parent.parent.parent.parent / "res" / "model" / "gabbard_2017.keras"
         
-        model_path = Path(__file__).parent.parent.parent.parent / "res" / "model" / "gabbard_2017.h5"
-        
-        
-        keras.models.load_model(str(model_path))
-        return model
+        return keras.models.load_model(str(model_path))
