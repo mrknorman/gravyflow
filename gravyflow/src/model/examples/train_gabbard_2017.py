@@ -21,6 +21,12 @@ Usage:
 """
 
 import os
+
+# Suppress JAX/CUDA warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF info/warnings
+os.environ['JAX_PLATFORMS'] = 'cuda'  # Skip TPU initialization
+os.environ['XLA_FLAGS'] = '--xla_gpu_cuda_data_dir=/usr/local/cuda'
+
 os.environ['KERAS_BACKEND'] = 'jax'
 
 import argparse
@@ -90,8 +96,8 @@ def parse_args():
     # Gabbard thesis used ~30k epochs with 20k samples/epoch for CVAE
     # For CNN, 20 epochs with ~25k samples/epoch is reasonable
     parser.add_argument(
-        '--epochs', type=int, default=20,
-        help='Number of training epochs (default: 20, paper: until convergence)'
+        '--epochs', type=int, default=1000,
+        help='Number of training epochs (default: 1000, paper: until convergence)'
     )
     parser.add_argument(
         '--noise-type', choices=['colored', 'real'], default='colored',

@@ -89,11 +89,15 @@ def open_hdf5_file(
 
     try:
         # Try to open the HDF5 file in the specified mode
-        f = h5py.File(file_path, mode, swmr=True)
+        # Only use swmr=True for read mode ('r')
+        if mode == 'r':
+            f = h5py.File(file_path, mode, swmr=True)
+        else:
+            f = h5py.File(file_path, mode)
         f.close()
     except OSError as e:
         # The file does not exist, so create it in write mode
-        f = h5py.File(file_path, 'w', swmr=True)  # You can add swmr=True if needed
+        f = h5py.File(file_path, 'w')
         f.close()
 
         if logger is not None:
@@ -102,7 +106,11 @@ def open_hdf5_file(
         if logger is not None:
             logger.info(f'The file {file_path} was opened in {mode} mode.')
 
-    return h5py.File(file_path, mode)
+    # For the final open, also apply swmr only for read mode
+    if mode == 'r':
+        return h5py.File(file_path, mode, swmr=True)
+    else:
+        return h5py.File(file_path, mode)
     
 def ensure_directory_exists(
     directory: Union[str, Path]

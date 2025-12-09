@@ -144,3 +144,144 @@ class ExampleModel(ABC):
             )
         
         return keras.models.load_model(str(weights_path))
+
+
+from dataclasses import dataclass
+import numpy as np
+
+
+@dataclass
+class ValidationConfig:
+    """
+    Universal configuration for model validation datasets.
+    
+    This config is used across all models to ensure consistent
+    validation benchmarks.
+    """
+    # Sampling parameters
+    sample_rate_hertz: float = 2048.0
+    onsource_duration_seconds: float = 1.0
+    offsource_duration_seconds: float = 16.0
+    
+    # Detector configuration
+    ifos: list = None  # Defaults to [gf.IFO.H1, gf.IFO.L1] if None
+    
+    # Mass distributions (broad BBH range)
+    mass_1_min_msun: float = 5.0
+    mass_1_max_msun: float = 95.0
+    mass_2_min_msun: float = 5.0
+    mass_2_max_msun: float = 95.0
+    
+    # SNR range for validation
+    snr_min: float = 8.0
+    snr_max: float = 20.0
+    
+    # Batch size
+    batch_size: int = 32
+    
+    def __post_init__(self):
+        if self.ifos is None:
+            self.ifos = gf.IFO.L1  # Default to single detector
+
+
+
+def validation_dataset_args(
+    noise_type: gf.NoiseType = gf.NoiseType.COLORED,
+    config: Optional[ValidationConfig] = None,
+    seed: Optional[int] = None,
+    **kwargs
+) -> dict:
+    """
+    Create universal dataset arguments for model validation.
+    
+    This provides a consistent dataset configuration for validating
+    all models, ensuring fair comparisons across architectures.
+    
+    Args:
+        noise_type: Type of noise to use.
+        config: Validation configuration. Uses defaults if None.
+        seed: Random seed for reproducibility.
+        **kwargs: Additional arguments passed to dataset.
+    
+    Returns:
+        Dictionary of dataset arguments compatible with GravyflowDataset
+        and Validator.validate().
+    """
+    cfg = config or ValidationConfig()
+    
+    # Mass distributions
+    mass_1_distribution = gf.Distribution(
+        min_=cfg.mass_1_min_msun,
+        max_=cfg.mass_1_max_msun,
+        type_=gf.DistributionType.LOG
+    )
+    
+    mass_2_distribution = gf.Distribution(
+        min_=cfg.mass_2_min_msun,
+        max_=cfg.mass_2_max_msun,
+        type_=gf.DistributionType.LOG
+    )
+    
+    # Inclination distribution
+    inclination_distribution = gf.Distribution(
+        min_=0.0,
+        max_=np.pi,
+        type_=gf.DistributionType.UNIFORM
+    )
+    
+    # SNR scaling
+    scaling_method = gf.ScalingMethod(
+        value=gf.Distribution(
+            min_=cfg.snr_min,
+            max_=cfg.snr_max,
+            type_=gf.DistributionType.UNIFORM
+        ),
+        type_=gf.ScalingTypes.SNR
+    )
+    
+    # Waveform generator
+    waveform_generator = gf.CBCGenerator(
+        mass_1_msun=mass_1_distribution,
+        mass_2_msun=mass_2_distribution,
+        inclination_radians=inclination_distribution,
+        scaling_method=scaling_method,
+        injection_chance=0.5,
+        spin_1_in=(0.0, 0.0, 0.0),
+        spin_2_in=(0.0, 0.0, 0.0),
+    )
+    
+    # Noise configuration
+    ifo_data_obtainer = None
+    if noise_type == gf.NoiseType.REAL:
+        ifo_data_obtainer = gf.IFODataObtainer(
+            observing_runs=[gf.ObservingRun.O3],
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[gf.DataLabel.NOISE]
+        )
+
+    noise_obtainer = gf.NoiseObtainer(
+        noise_type=noise_type,
+        ifos=cfg.ifos,
+        ifo_data_obtainer=ifo_data_obtainer
+    )
+    
+    # Build dataset args dict
+    dataset_args = {
+        "sample_rate_hertz": cfg.sample_rate_hertz,
+        "onsource_duration_seconds": cfg.onsource_duration_seconds,
+        "offsource_duration_seconds": cfg.offsource_duration_seconds,
+        "noise_obtainer": noise_obtainer,
+        "waveform_generators": waveform_generator,
+        "num_examples_per_batch": cfg.batch_size,
+        "seed": seed,
+        "input_variables": [
+            gf.ReturnVariables.ONSOURCE,
+            gf.ReturnVariables.OFFSOURCE
+        ],
+        "output_variables": [
+            gf.ReturnVariables.INJECTION_MASKS
+        ],
+        **kwargs
+    }
+    
+    return dataset_args
