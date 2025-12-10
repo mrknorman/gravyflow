@@ -309,6 +309,9 @@ class GravyflowDataset(keras.utils.PyDataset):
 
         whitened_onsource, rolling_pearson_onsource, spectrogram_onsource = self._process_onsource(onsource, offsource)
 
+        # Save raw offsource before processing for ScalingTypes calculation
+        raw_offsource = offsource
+
         onsource = self._process_raw_onsource(onsource)
         offsource = self._process_offsource(offsource)
         gps_times = self._process_gps_times(gps_times)
@@ -316,7 +319,10 @@ class GravyflowDataset(keras.utils.PyDataset):
 
         input_dict, output_dict = self._create_output_dictionaries(
             onsource, whitened_onsource, offsource, gps_times, injections,
-            whitened_injections, mask, rolling_pearson_onsource, spectrogram_onsource, parameters
+            whitened_injections, mask, rolling_pearson_onsource, spectrogram_onsource, parameters,
+            scaled_injections=scaled_injections, 
+            raw_offsource=raw_offsource,
+            sample_rate_hertz=self.sample_rate_hertz
         )
 
         return input_dict, output_dict
@@ -430,9 +436,19 @@ class GravyflowDataset(keras.utils.PyDataset):
             return mask
         return None
 
-    def _create_output_dictionaries(self, *args) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        input_dict = create_variable_dictionary(self.input_variables, *args)
-        output_dict = create_variable_dictionary(self.output_variables, *args)
+    def _create_output_dictionaries(self, *args, scaled_injections=None, raw_offsource=None, sample_rate_hertz=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        input_dict = create_variable_dictionary(
+            self.input_variables, *args, 
+            scaled_injections=scaled_injections, 
+            sample_rate_hertz=sample_rate_hertz,
+            raw_offsource=raw_offsource
+        )
+        output_dict = create_variable_dictionary(
+            self.output_variables, *args,
+            scaled_injections=scaled_injections,
+            sample_rate_hertz=sample_rate_hertz,
+            raw_offsource=raw_offsource
+        )
         
         # Remove keys with None values
         input_dict = {k: v for k, v in input_dict.items() if v is not None}
@@ -447,7 +463,7 @@ class GravyflowDataset(keras.utils.PyDataset):
         return self.__getitem__(0)
 
 def create_variable_dictionary(
-    return_variables: List[Union[gf.ReturnVariables, gf.WaveformParameters]],
+    return_variables: List[Union[gf.ReturnVariables, gf.WaveformParameters, gf.ScalingTypes]],
     onsource,
     whitened_onsource,
     offsource,
@@ -457,9 +473,23 @@ def create_variable_dictionary(
     mask,
     rolling_pearson_onsource,
     spectrogram_onsource,
-    injection_parameters : Optional[Dict]
+    injection_parameters : Optional[Dict],
+    scaled_injections = None,
+    sample_rate_hertz: float = None,
+    raw_offsource = None
     ) -> Dict:
-
+    """
+    Create dictionary of requested return variables.
+    
+    Supports ReturnVariables, WaveformParameters, and ScalingTypes.
+    ScalingTypes (SNR, HPEAK, HRSS) are calculated on-demand from scaled_injections.
+    
+    Args:
+        raw_offsource: Unprocessed offsource data used for SNR calculation.
+                       If None, uses the processed offsource.
+    """
+    from keras import ops
+    
     operations = {
         gf.ReturnVariables.ONSOURCE: onsource,
         gf.ReturnVariables.WHITENED_ONSOURCE: whitened_onsource,
@@ -472,6 +502,7 @@ def create_variable_dictionary(
         gf.ReturnVariables.SPECTROGRAM_ONSOURCE: spectrogram_onsource
     }
 
+    # Add WaveformParameters from injection_parameters
     if injection_parameters:
         operations.update(
             {
@@ -479,6 +510,33 @@ def create_variable_dictionary(
                 if key in return_variables
             }
         )
+    
+    # Calculate ScalingTypes on-demand if requested
+    # Use raw_offsource for SNR if available, otherwise fall back to processed offsource
+    background_for_snr = raw_offsource if raw_offsource is not None else offsource
+    
+    if scaled_injections is not None:
+        for var in return_variables:
+            if isinstance(var, gf.ScalingTypes):
+                if var == gf.ScalingTypes.SNR:
+                    # SNR requires background (offsource) and sample_rate
+                    if background_for_snr is not None and sample_rate_hertz is not None:
+                        # Take first generator's injections if stacked
+                        inj = scaled_injections[0] if len(ops.shape(scaled_injections)) == 4 else scaled_injections
+                        snr_val = gf.snr(
+                            inj, 
+                            background_for_snr, 
+                            sample_rate_hertz,
+                            fft_duration_seconds=1.0,
+                            overlap_duration_seconds=0.5
+                        )
+                        operations[gf.ScalingTypes.SNR] = snr_val
+                elif var == gf.ScalingTypes.HRSS:
+                    inj = scaled_injections[0] if len(ops.shape(scaled_injections)) == 4 else scaled_injections
+                    operations[gf.ScalingTypes.HRSS] = gf.calculate_hrss(inj)
+                elif var == gf.ScalingTypes.HPEAK:
+                    inj = scaled_injections[0] if len(ops.shape(scaled_injections)) == 4 else scaled_injections
+                    operations[gf.ScalingTypes.HPEAK] = gf.calculate_hpeak(inj)
 
     return {
         key.name: operations[key] for key in return_variables \
