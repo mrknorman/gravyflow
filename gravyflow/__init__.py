@@ -92,7 +92,8 @@ from .src.dataset.features.injection import (
     WaveformGenerator, WaveformParameter, WaveformParameters, WNBGenerator,
     IncoherentGenerator, InjectionGenerator,
     roll_vector_zero_padding, generate_mask, is_not_inherited,
-    batch_injection_parameters, CBCGenerator, Approximant
+    batch_injection_parameters, CBCGenerator, Approximant,
+    calculate_hrss, calculate_hpeak
 )
 from .src.dataset.features.waveforms.simple import (
     WaveShape, PeriodicWaveGenerator, SineGaussianGenerator,
@@ -103,7 +104,7 @@ from .src.utils.plotting import (
     generate_strain_plot, generate_psd_plot, generate_spectrogram, generate_correlation_plot,
     generate_segment_timeline_plot, generate_example_extraction_plot
 )
-from .src.model.validate import Validator
+from .src.model.validate import Validator, ValidationConfig, UnifiedValidationBank
 from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_segments
 from .src.utils.alert import send_email
 from .src.model.examples.gabbard_2017 import Gabbard2017

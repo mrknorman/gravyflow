@@ -831,3 +831,67 @@ def test_pseudo_real_noise_generation():
     # Check shapes
     assert len(ops.shape(onsource)) == 3
     assert ops.shape(onsource)[0] == 1  # batch size
+
+
+def test_gps_time_uniqueness_across_batches():
+    """
+    Test that GPS times are unique across multiple batches.
+    
+    This guards against the bug where deepcopied IFODataObtainer 
+    carries over rng state, causing identical random positions.
+    """
+    with gf.env():
+        # Setup ifo data acquisition
+        ifo_data_obtainer = gf.IFODataObtainer(
+            gf.ObservingRun.O3, 
+            gf.DataQuality.BEST, 
+            [gf.DataLabel.NOISE, gf.DataLabel.GLITCHES],
+            gf.SegmentOrder.RANDOM,
+            force_acquisition=True,
+            cache_segments=False
+        )
+        
+        noise = gf.NoiseObtainer(
+            ifo_data_obtainer=ifo_data_obtainer,
+            noise_type=gf.NoiseType.REAL,
+            ifos=gf.IFO.L1
+        )
+        
+        # Collect GPS times from multiple batches
+        all_gps_times = []
+        num_batches = 5
+        batch_size = 4
+        
+        gen = noise(
+            num_examples_per_batch=batch_size,
+            seed=42
+        )
+        
+        for _ in range(num_batches):
+            onsource, offsource, gps_times = next(gen)
+            gps_array = ops.convert_to_numpy(gps_times)
+            all_gps_times.extend(gps_array.flatten())
+        
+        all_gps_times = np.array(all_gps_times)
+        
+        # Check uniqueness - no two GPS times should be identical
+        unique_gps = np.unique(all_gps_times)
+        total_samples = num_batches * batch_size
+        
+        # Allow for some tolerance in case segments are reused,
+        # but require at least 80% unique times
+        uniqueness_ratio = len(unique_gps) / total_samples
+        assert uniqueness_ratio >= 0.8, (
+            f"Only {uniqueness_ratio*100:.1f}% of GPS times are unique. "
+            f"Expected at least 80%. This indicates repeated noise segments."
+        )
+        
+        # Additionally check within each batch - all should be unique
+        for batch_idx in range(num_batches):
+            start = batch_idx * batch_size
+            end = start + batch_size
+            batch_gps = all_gps_times[start:end]
+            batch_unique = np.unique(batch_gps)
+            assert len(batch_unique) == batch_size, (
+                f"Batch {batch_idx} has duplicate GPS times within the batch"
+            )

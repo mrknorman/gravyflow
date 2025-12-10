@@ -261,8 +261,8 @@ class NoiseObtainer:
         
         if not self.groups:
             self.groups = {
-                "train" : 0.98,
-                "validate" : 0.01,
+                "train" : 0.89,
+                "validate" : 0.1,
                 "test" : 0.01
             }
 
@@ -350,6 +350,8 @@ class NoiseObtainer:
                 
                 # Deepcopy to ensure each generator has independent state
                 ifo_data_obtainer_copy = deepcopy(self.ifo_data_obtainer)
+                # Reset rng to ensure fresh random state (deepcopy carries over rng state)
+                ifo_data_obtainer_copy.rng = None
                 
                 if ifo_data_obtainer_copy.valid_segments is None or canonical_ifos != ifo_data_obtainer_copy.ifos:
                         ifo_data_obtainer_copy.get_valid_segments(

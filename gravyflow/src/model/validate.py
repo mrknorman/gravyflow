@@ -14,23 +14,339 @@ from keras import ops
 import jax.numpy as jnp
 from jax import jit
 
-
-
 import keras
 from keras.callbacks import Callback
+
+# Panel for dashboard layout and HTML export
+import panel as pn
+pn.extension('bokeh')
+
+# Bokeh for plotting
 from bokeh.embed import components, file_html
-from bokeh.io import export_png, output_file, save
+from bokeh.io import output_file, save
 from bokeh.layouts import column, gridplot
-from bokeh.models import (ColumnDataSource, CustomJS, Dropdown, HoverTool, 
-                          Legend, LogAxis, LogTicker, Range1d, Slider, Select,
-                         Div)
-from bokeh.plotting import figure, show
-from bokeh.resources import INLINE, Resources
-from bokeh.palettes import Bright
+from bokeh.models import (ColumnDataSource, CustomJS, HoverTool,
+                          Legend, Slider, Select, Div)
+from bokeh.plotting import figure
+from bokeh.resources import INLINE
+from bokeh.palettes import Bright, Category10
 
 import gravyflow as gf
+from dataclasses import dataclass, field
+from scipy.optimize import curve_fit
+import heapq
+
+
+@dataclass
+class ValidationConfig:
+    """Configuration for unified validation pipeline."""
+    snr_range: Tuple[float, float] = (0.0, 20.0)
+    num_examples: int = 100_000
+    batch_size: int = 512
+    snr_bin_width: float = 5.0
+    num_worst_per_bin: int = 10
+    far_thresholds: List[float] = field(default_factory=lambda: [1e-1, 1e-2, 1e-3, 1e-4])
+    
+
+class UnifiedValidationBank:
+    """
+    Unified data bank for validation metrics.
+    
+    Generates a single dataset with uniform SNR distribution and computes
+    all validation metrics (efficiency, TAR, worst performers) from the same data.
+    """
+    
+    def __init__(
+        self,
+        model: keras.Model,
+        dataset_args: dict,
+        config: ValidationConfig = None,
+        heart: gf.Heart = None,
+        logger: logging.Logger = None
+    ):
+        self.model = model
+        self.dataset_args = deepcopy(dataset_args)
+        self.config = config or ValidationConfig()
+        self.heart = heart
+        self.logger = logger or logging.getLogger("validation_bank")
+        
+        # Results storage
+        self.snrs = None
+        self.scores = None  
+        self.injection_masks = None
+        self.sample_data = {}  # For worst performers
+        
+        # Computed metrics
+        self._efficiency_data = None
+        self._tar_data = None
+        self._worst_per_bin = None
+        
+    def generate(self) -> None:
+        """Generate all validation data in a single pass."""
+        config = self.config
+        dataset_args = deepcopy(self.dataset_args)
+        
+        # Configure for uniform SNR sampling
+        min_snr, max_snr = config.snr_range
+        
+        # Ensure injection generators use uniform SNR
+        if "waveform_generators" not in dataset_args:
+            raise ValueError("dataset_args must contain waveform_generators")
+            
+        if not isinstance(dataset_args["waveform_generators"], list):
+            dataset_args["waveform_generators"] = [dataset_args["waveform_generators"]]
+        
+        # Set uniform SNR distribution for all generators
+        for gen in dataset_args["waveform_generators"]:
+            gen.scaling_method.value = gf.Distribution(
+                min_=min_snr,
+                max_=max_snr,
+                type_=gf.DistributionType.UNIFORM
+            )
+            gen.injection_chance = 1.0  # Always inject for efficiency/TAR
+        
+        # Configure output variables to get SNR values
+        dataset_args["num_examples_per_batch"] = config.batch_size
+        dataset_args["output_variables"] = [
+            gf.ReturnVariables.WHITENED_ONSOURCE,
+            gf.ReturnVariables.WHITENED_INJECTIONS,
+            gf.ReturnVariables.INJECTION_MASKS,
+            gf.ReturnVariables.GPS_TIME,
+            gf.ScalingTypes.SNR,
+            gf.WaveformParameters.MASS_1_MSUN,
+            gf.WaveformParameters.MASS_2_MSUN
+        ]
+        
+        num_batches = math.ceil(config.num_examples / config.batch_size)
+        dataset_args["steps_per_epoch"] = num_batches
+        dataset_args["group"] = "test"  # Use test data split for validation
+        
+        dataset = gf.Dataset(**dataset_args)
+        
+        # Preallocate arrays
+        all_snrs = []
+        all_scores = []
+        all_masks = []
+        
+        # Per-bin worst performers using min-heaps (store negative score for max-heap behavior)
+        num_bins = int((max_snr - min_snr) / config.snr_bin_width)
+        worst_heaps = [[] for _ in range(num_bins)]
+        
+        self.logger.info(f"Generating {config.num_examples} examples across SNR range {config.snr_range}")
+        
+        for batch_idx in range(num_batches):
+            if self.heart:
+                self.heart.beat()
+                
+            x_batch, y_batch = dataset[batch_idx]
+            
+            # Get model predictions
+            predictions = self.model.predict(x_batch, verbose=0)
+            
+            # Handle different output formats
+            if len(predictions.shape) == 2:
+                if predictions.shape[1] == 2:
+                    batch_scores = predictions[:, 1]  # Binary: signal probability
+                else:
+                    batch_scores = predictions[:, 0]
+            else:
+                batch_scores = predictions.flatten()
+            
+            # Extract SNRs and masks
+            batch_snrs = np.array(y_batch.get("SNR", np.zeros(len(batch_scores))))
+            batch_masks = np.array(y_batch.get(gf.ReturnVariables.INJECTION_MASKS.name, 
+                                                np.ones(len(batch_scores))))
+            
+            # Handle mask shape (may be (gen, batch, time))
+            if len(batch_masks.shape) == 3:
+                batch_masks = np.max(batch_masks[0], axis=-1)
+            elif len(batch_masks.shape) == 2:
+                batch_masks = np.max(batch_masks, axis=-1)
+            
+            all_snrs.extend(batch_snrs)
+            all_scores.extend(batch_scores)
+            all_masks.extend(batch_masks)
+            
+            # Track worst performers per bin
+            for i in range(len(batch_scores)):
+                snr_val = float(batch_snrs[i])
+                score_val = float(batch_scores[i])
+                
+                bin_idx = min(int((snr_val - min_snr) / config.snr_bin_width), num_bins - 1)
+                bin_idx = max(0, bin_idx)  # Clamp to valid range
+                
+                # Use min-heap with negative score for max-heap behavior (keep lowest scores)
+                if len(worst_heaps[bin_idx]) < config.num_worst_per_bin:
+                    # Extract sample data for worst performer
+                    sample_data = _extract_sample_data(x_batch, y_batch, i, score_val)
+                    heapq.heappush(worst_heaps[bin_idx], (-score_val, batch_idx * config.batch_size + i, sample_data))
+                elif score_val < -worst_heaps[bin_idx][0][0]:
+                    # This score is worse (lower) than the best (highest) in heap
+                    sample_data = _extract_sample_data(x_batch, y_batch, i, score_val)
+                    heapq.heapreplace(worst_heaps[bin_idx], (-score_val, batch_idx * config.batch_size + i, sample_data))
+            
+            if (batch_idx + 1) % 50 == 0:
+                self.logger.info(f"Progress: {batch_idx + 1}/{num_batches} batches")
+        
+        # Store results
+        self.snrs = np.array(all_snrs)
+        self.scores = np.array(all_scores)
+        self.injection_masks = np.array(all_masks)
+        
+        # Extract worst performers from heaps
+        self._worst_per_bin = {}
+        for bin_idx, heap in enumerate(worst_heaps):
+            bin_start = min_snr + bin_idx * config.snr_bin_width
+            bin_end = bin_start + config.snr_bin_width
+            bin_key = f"{bin_start:.0f}-{bin_end:.0f}"
+            
+            # Sort by score (ascending - worst first)
+            sorted_worst = sorted(heap, key=lambda x: -x[0])  # Undo negative
+            self._worst_per_bin[bin_key] = [item[2] for item in sorted_worst]
+        
+        self.logger.info(f"Generated {len(self.snrs)} samples. SNR range: [{self.snrs.min():.1f}, {self.snrs.max():.1f}]")
+    
+    def get_efficiency_data(self) -> Dict:
+        """
+        Get efficiency scatter data and fitted curve.
+        
+        Returns dict with:
+        - snrs: array of SNR values
+        - scores: array of model scores
+        - fit_snrs: x values for fitted curve
+        - fit_efficiency: y values (efficiency) for fitted curve
+        - fit_lower: lower confidence bound
+        - fit_upper: upper confidence bound
+        """
+        if self.snrs is None:
+            raise ValueError("Must call generate() first")
+        
+        # Filter to injection samples only
+        mask = self.injection_masks > 0.5
+        snrs = self.snrs[mask]
+        scores = self.scores[mask]
+        
+        # Bin statistics for confidence bands
+        config = self.config
+        min_snr, max_snr = config.snr_range
+        num_bins = int((max_snr - min_snr) / config.snr_bin_width)
+        
+        bin_centers = []
+        bin_means = []
+        bin_stds = []
+        
+        for i in range(num_bins):
+            bin_start = min_snr + i * config.snr_bin_width
+            bin_end = bin_start + config.snr_bin_width
+            bin_mask = (snrs >= bin_start) & (snrs < bin_end)
+            
+            if np.sum(bin_mask) > 10:
+                bin_centers.append((bin_start + bin_end) / 2)
+                bin_means.append(np.mean(scores[bin_mask]))
+                bin_stds.append(np.std(scores[bin_mask]))
+        
+        bin_centers = np.array(bin_centers)
+        bin_means = np.array(bin_means)
+        bin_stds = np.array(bin_stds)
+        
+        # Fit sigmoid curve: efficiency = 1 / (1 + exp(-k*(x - x0)))
+        def sigmoid(x, x0, k, L, b):
+            return L / (1 + np.exp(-k * (x - x0))) + b
+        
+        try:
+            popt, _ = curve_fit(
+                sigmoid, bin_centers, bin_means,
+                p0=[10.0, 0.5, 0.8, 0.1],  # Initial guess
+                bounds=([0, 0.01, 0, 0], [30, 5, 1, 0.5]),
+                maxfev=5000
+            )
+            
+            fit_snrs = np.linspace(min_snr, max_snr, 100)
+            fit_efficiency = sigmoid(fit_snrs, *popt)
+        except:
+            # Fallback to interpolation if fit fails
+            fit_snrs = bin_centers
+            fit_efficiency = bin_means
+        
+        return {
+            "snrs": snrs,
+            "scores": scores,
+            "fit_snrs": fit_snrs,
+            "fit_efficiency": fit_efficiency,
+            "bin_centers": bin_centers,
+            "bin_means": bin_means,
+            "bin_stds": bin_stds
+        }
+    
+    def get_tar_at_far(self, far_thresholds: List[float] = None) -> Dict:
+        """
+        Compute True Acceptance Rate at given False Alarm Rates.
+        
+        Uses noise-only samples (injection_mask = 0) to estimate FAR thresholds,
+        then computes TAR on injection samples.
+        """
+        if self.snrs is None:
+            raise ValueError("Must call generate() first")
+        
+        far_thresholds = far_thresholds or self.config.far_thresholds
+        
+        # For this unified bank, we need noise-only samples for FAR
+        # If all samples have injections, we can't compute FAR properly
+        # This is a limitation - suggest adding noise-only samples
+        
+        # For now, use a threshold approach based on score distribution
+        injection_mask = self.injection_masks > 0.5
+        
+        if not np.any(~injection_mask):
+            self.logger.warning("No noise-only samples in bank. TAR@FAR requires noise-only samples.")
+            return {}
+        
+        noise_scores = self.scores[~injection_mask]
+        signal_scores = self.scores[injection_mask]
+        signal_snrs = self.snrs[injection_mask]
+        
+        results = {}
+        for far in far_thresholds:
+            # Find threshold that gives this FAR on noise
+            threshold_percentile = (1 - far) * 100
+            threshold = np.percentile(noise_scores, threshold_percentile)
+            
+            # Compute TAR per SNR bin
+            config = self.config
+            min_snr, max_snr = config.snr_range
+            num_bins = int((max_snr - min_snr) / config.snr_bin_width)
+            
+            tar_per_bin = []
+            bin_centers = []
+            
+            for i in range(num_bins):
+                bin_start = min_snr + i * config.snr_bin_width
+                bin_end = bin_start + config.snr_bin_width
+                bin_mask = (signal_snrs >= bin_start) & (signal_snrs < bin_end)
+                
+                if np.sum(bin_mask) > 0:
+                    tar = np.mean(signal_scores[bin_mask] > threshold)
+                    tar_per_bin.append(tar)
+                    bin_centers.append((bin_start + bin_end) / 2)
+            
+            results[far] = {
+                "threshold": threshold,
+                "bin_centers": np.array(bin_centers),
+                "tar_per_bin": np.array(tar_per_bin)
+            }
+        
+        return results
+    
+    def get_worst_performers(self) -> Dict[str, List[dict]]:
+        """Get worst performing samples per SNR bin."""
+        if self._worst_per_bin is None:
+            raise ValueError("Must call generate() first")
+        return self._worst_per_bin
+
+
 
 def pad_with_random_values(scores):
+    """Pad score arrays to uniform length with random values."""
     # Determine the maximum length among all numpy arrays of 2-element arrays in scores
     max_length = max(len(score) for score in scores)
     
@@ -136,6 +452,7 @@ def calculate_efficiency_scores(
     
     # Set steps_per_epoch to match num_batches to prevent data exhaustion
     dataset_args["steps_per_epoch"] = num_batches
+    dataset_args["group"] = "test"  # Use test data split for validation
     
     # Initialize generator:
     dataset = gf.Dataset(
@@ -210,6 +527,20 @@ def calculate_efficiency_scores(
                     else: 
                         del eff_group[f'score_{i}']
                         eff_group.create_dataset(f'score_{i}', data=score)
+    # Warn if efficiency is suspiciously low at high SNR
+    if scores is not None and len(scores) > 0:
+        # Check efficiency at highest SNR
+        high_snr_scores = scores[-1]  # Last scaling step (highest SNR)
+        if high_snr_scores is not None and len(high_snr_scores) > 0:
+            # Get mean prediction at highest SNR
+            mean_score = np.nanmean(high_snr_scores[:, 1] if len(high_snr_scores.shape) > 1 else high_snr_scores)
+            if mean_score < 0.5:
+                logging.warning(
+                    f"LOW EFFICIENCY WARNING: Mean detection probability at SNR={efficiency_scalings[-1]:.1f} "
+                    f"is only {mean_score:.2f}. Expected > 0.5 for a working model. "
+                    "Check: 1) Model trained correctly? 2) Input preprocessing matches training? "
+                    "3) Noise type compatible with training data?"
+                )
     
     return {"scalings" : efficiency_scalings, "scores": scores}
 
@@ -258,6 +589,7 @@ def calculate_far_scores(
     dataset_args["waveform_generators"] = []
     dataset_args["output_variables"] = []
     dataset_args["steps_per_epoch"] = num_batches
+    dataset_args["group"] = "test"  # Use test data split for validation
 
     # Initialize generator:
     dataset = gf.Dataset(
@@ -285,9 +617,9 @@ def calculate_far_scores(
             )
 
             try:
-                far_scores = far_scores[:,0]
+                far_scores = far_scores[:,1]  # Use signal+noise probability (column 1)
             except:
-                raise Exception(f"Error slicing FAR scores: {e}")
+                raise Exception(f"Error slicing FAR scores: shape={far_scores.shape}")
 
         except Exception as e:
             logging.error("Error calculating FAR scores because {e}. Retrying.")
@@ -505,6 +837,7 @@ def calculate_roc(
     dataset_args["output_variables"] = [gf.ReturnVariables.INJECTION_MASKS]
     dataset_args["waveform_generators"][0].injection_chance = 0.5
     dataset_args["steps_per_epoch"] = num_batches
+    dataset_args["group"] = "test"  # Use test data split for validation
     
     mask_history = []
     # Initialize generators
@@ -544,7 +877,7 @@ def calculate_roc(
     y_true = np.concatenate(y_true_list).flatten()
     
     if len(y_scores.shape) > 1:
-        y_scores = y_scores[:, 0]
+        y_scores = y_scores[:, 1]  # Use signal+noise probability (column 1)
 
     # Calculate size difference (should be zero if logic is correct)
     size_a = y_true.size
@@ -557,6 +890,16 @@ def calculate_roc(
     
     # Calculate the ROC curve and AUC
     fpr, tpr, roc_auc = roc_curve_and_auc(y_true, y_scores)
+    
+    # Warn if ROC AUC is suspiciously low
+    roc_auc_val = float(roc_auc)
+    if roc_auc_val < 0.6:
+        logging.warning(
+            f"LOW ROC AUC WARNING: AUC = {roc_auc_val:.3f} (expected > 0.6 for a working model). "
+            "An AUC near 0.5 indicates random-chance performance. "
+            "Check: 1) Model trained correctly? 2) Input preprocessing matches training? "
+            "3) Noise type compatible with training data?"
+        )
     
     return {'fpr': np.asarray(fpr), 'tpr': np.asarray(tpr), 'roc_auc': np.asarray(roc_auc)}
 
@@ -688,135 +1031,157 @@ def calculate_tar_scores(
         model : keras.Model, 
         dataset_args : dict, 
         num_examples_per_batch : int = 32,  
-        scaling : int = 20.0,
+        scaling_range : tuple = (8.0, 15.0),
         num_examples : int = 1E5,
+        num_worst : int = 10,
         heart : gf.Heart = None
     ) -> np.ndarray:
     
     """
     Calculate the True Alarm Rate (TAR) scores for a given model.
+    Uses streaming approach to avoid storing all data in memory.
 
     Parameters
     ----------
-    model : tf.keras.Model
-        The model used to predict FAR scores.
+    model : keras.Model
+        The model used to predict scores.
     dataset_args : dict
         Dictionary containing options for dataset generator.
-    num_examples_per_batch : int, optional
-        The number of examples per batch, default is 32.
-    num_examples : float, optional
-        The total number of examples to be used, default is 1E5.
+    scaling_range : tuple
+        (min_snr, max_snr) for injection SNR distribution.
+    num_examples : int
+        The total number of examples to evaluate.
+    num_worst : int
+        Number of worst performers to return.
     
     Returns
     -------
-    far_scores : np.ndarray
-        The calculated FAR scores.
+    tar_scores : np.ndarray
+        The calculated TAR scores.
+    worst_performers : list
+        List of dicts containing data for worst performing samples.
     """
+    import heapq
     
     # Make copy of generator args so original is not affected:
     dataset_args = deepcopy(dataset_args)
     
-    # Integer arguments are integers:
+    # Integer arguments:
     num_examples = int(num_examples)
     num_examples_per_batch = int(num_examples_per_batch)
-    
-    # Calculate number of batches required given batch size:
     num_batches = math.ceil(num_examples / num_examples_per_batch)
     
-    #Ensure injection generators is list for subsequent logic:
+    # Ensure injection generators is list:
     if not isinstance(dataset_args["waveform_generators"], list):
         dataset_args["waveform_generators"] = [dataset_args["waveform_generators"]]
     
-    # Ensure dataset is full of injections:
+    # Configure dataset for worst performers extraction:
     dataset_args["num_examples_per_batch"] = num_examples_per_batch
-    dataset_args["output_variables"] = []
+    dataset_args["output_variables"] = [
+        gf.ReturnVariables.WHITENED_ONSOURCE,
+        gf.ReturnVariables.WHITENED_INJECTIONS,
+        gf.ReturnVariables.GPS_TIME,
+        gf.ScalingTypes.SNR,
+        gf.WaveformParameters.MASS_1_MSUN,
+        gf.WaveformParameters.MASS_2_MSUN
+    ]
     dataset_args["waveform_generators"][0].injection_chance = 1.0
+    
+    # Use a range of SNRs - lower SNR samples are more challenging
+    min_snr, max_snr = scaling_range
     dataset_args["waveform_generators"][0].scaling_method.value = \
-        gf.Distribution(value=scaling, type_=gf.DistributionType.CONSTANT)
-    dataset_args["steps_per_epoch"] = num_batches
-    
-    # Initialize generator:
-    dataset = gf.Dataset(
-            **dataset_args
+        gf.Distribution(
+            min_=min_snr,
+            max_=max_snr,
+            type_=gf.DistributionType.UNIFORM
         )
-        
-    callbacks = []
-    if heart is not None:
-        callbacks += [gf.HeartbeatCallback(heart)]
+    dataset_args["steps_per_epoch"] = num_batches
+    dataset_args["group"] = "test"  # Use test data split for validation
     
-    # Predict the scores and get the second column ([:, 1]):
-
-    tar_scores_list = []
-    data_batches = []
+    # Initialize dataset:
+    dataset = gf.Dataset(**dataset_args)
+    
+    # Use a max-heap to keep track of worst performers (lowest scores)
+    # We use negative scores because heapq is a min-heap
+    # Heap entries: (-score, counter, data_dict) - counter prevents dict comparison
+    worst_heap = []
+    all_scores = []
+    counter = 0  # Unique counter to break ties in heap comparison
     
     try:
-        verbose = 1
-        if gf.is_redirected():
-            verbose = 2
-        
-        for _ in range(num_batches):
-            x, y = dataset[0]
+        for batch_idx in range(num_batches):
+            x, y = dataset[batch_idx]
             scores = model.predict_on_batch(x)
-            tar_scores_list.append(scores)
             
-            # Store data for worst performers extraction
-            # We need to reconstruct the batch structure expected by extract_data_from_indicies?
-            # Or we can just extract here.
-            # But we don't know which are worst yet.
-            # So we store x and y.
-            #
-            # Note: storing all data in memory might be expensive if num_examples is large (1E5).
-            # 1E5 examples * 4096 floats * 4 bytes ~ 1.6 GB. It fits.
-            data_batches.append((x, y))
+            # Extract signal probability
+            if len(scores.shape) > 1:
+                batch_scores = scores[:, 1]
+            else:
+                batch_scores = scores
+            
+            all_scores.append(batch_scores)
+            
+            # Process each sample in batch
+            for sample_idx in range(len(batch_scores)):
+                score = float(batch_scores[sample_idx])
+                
+                # Check if this is a candidate for worst performers
+                if len(worst_heap) < num_worst:
+                    # Still building up the heap, add this sample
+                    element = _extract_sample_data(x, y, sample_idx, score)
+                    heapq.heappush(worst_heap, (-score, counter, element))
+                    counter += 1
+                elif score < -worst_heap[0][0]:  # score < current max in heap
+                    # This is worse than the best of our current worst
+                    element = _extract_sample_data(x, y, sample_idx, score)
+                    heapq.heapreplace(worst_heap, (-score, counter, element))
+                    counter += 1
             
             if heart is not None:
                 heart.beat()
 
     except Exception as e:
-        logging.error(f"Error calculating TAR score because {e}.")
+        logging.error(f"Error calculating TAR score: {e}")
         return np.array([]), []
             
-    tar_scores = np.concatenate(tar_scores_list)
-    if len(tar_scores.shape) > 1:
-        tar_scores = tar_scores[:, 0]
-
-    # Find worst performers
-    # Sort indices by score (ascending)
-    sorted_indices = np.argsort(tar_scores)
-    worst_indices = sorted_indices[:10]
-    worst_scores = tar_scores[worst_indices]
+    tar_scores = np.concatenate(all_scores)
     
+    # Extract worst performers from heap (sorted by score ascending)
     worst_performers = []
-    for i, idx in enumerate(worst_indices):
-        batch_idx = idx // num_examples_per_batch
-        sample_idx = idx % num_examples_per_batch
-        
-        if batch_idx < len(data_batches):
-            x_batch, y_batch = data_batches[batch_idx]
-            
-            # We need to construct the element dict.
-            # y_batch contains return variables like INJECTIONS, etc.
-            # x_batch contains input variables.
-            # We combine them.
-            element = {}
-            # Add inputs
-            for k, v in x_batch.items():
-                element[k] = v[sample_idx]
-            # Add outputs
-            for k, v in y_batch.items():
-                element[k] = v[sample_idx]
-                
-            # Convert to numpy if needed (already numpy/jax array)
-            for key in element:
-                if hasattr(element[key], 'numpy'):
-                    element[key] = element[key].numpy()
-                elif hasattr(element[key], '__array__'):
-                     element[key] = np.array(element[key])
-
-            element["score"] = worst_scores[i]
-            worst_performers.append(element)
+    sorted_worst = sorted(worst_heap, key=lambda x: x[0], reverse=True)  # Most negative first = lowest score
+    for neg_score, counter, element in sorted_worst:
+        worst_performers.append(element)
         
     return tar_scores, worst_performers
+
+
+def _extract_sample_data(x_batch, y_batch, sample_idx, score):
+    """Extract data for a single sample from batch for worst performers."""
+    element = {}
+    
+    # Add inputs - shape is typically (batch, detectors, samples)
+    for k, v in x_batch.items():
+        if hasattr(v, 'shape') and len(v.shape) >= 1:
+            element[k] = np.array(v[sample_idx])
+        else:
+            element[k] = v
+    
+    # Add outputs - handle different shapes
+    for k, v in y_batch.items():
+        if hasattr(v, 'shape'):
+            if len(v.shape) == 4:  # (generators, batch, det, samples)
+                element[k] = np.array(v[0, sample_idx])
+            elif len(v.shape) >= 2:
+                element[k] = np.array(v[sample_idx])
+            elif len(v.shape) == 1:
+                element[k] = np.array(v[sample_idx])
+            else:
+                element[k] = v
+        else:
+            element[k] = v
+
+    element["score"] = score
+    return element
 
 def check_equal_duration(
     validators : list
@@ -834,6 +1199,101 @@ def check_equal_duration(
                 "All validators do not have the same input_duration_seconds "
                 "property value."
             )
+
+def generate_efficiency_scatter_plot(
+    bank: UnifiedValidationBank,
+    colors: List[str] = Bright[7],
+    width: int = 800,
+    height: int = 500,
+    downsample_points: int = 5000
+):
+    """
+    Generate efficiency scatter plot with fitted curve and confidence bands.
+    
+    Shows all (SNR, score) points as scatter, with sigmoid fit and ±1σ bands.
+    
+    Args:
+        bank: UnifiedValidationBank with generated data
+        colors: Color palette
+        downsample_points: Max scatter points to render (for performance)
+    """
+    efficiency_data = bank.get_efficiency_data()
+    
+    snrs = efficiency_data["snrs"]
+    scores = efficiency_data["scores"]
+    fit_snrs = efficiency_data["fit_snrs"]
+    fit_efficiency = efficiency_data["fit_efficiency"]
+    bin_centers = efficiency_data["bin_centers"]
+    bin_means = efficiency_data["bin_means"]
+    bin_stds = efficiency_data["bin_stds"]
+    
+    p = figure(
+        title="Detection Efficiency vs SNR",
+        x_axis_label="Signal-to-Noise Ratio (SNR)",
+        y_axis_label="Detection Score",
+        width=width,
+        height=height,
+        tools="pan,box_zoom,wheel_zoom,reset,hover"
+    )
+    
+    # Downsample scatter points for performance
+    if len(snrs) > downsample_points:
+        idx = np.random.choice(len(snrs), downsample_points, replace=False)
+        plot_snrs = snrs[idx]
+        plot_scores = scores[idx]
+    else:
+        plot_snrs = snrs
+        plot_scores = scores
+    
+    # Scatter plot of all points (semi-transparent)
+    scatter_source = ColumnDataSource(data=dict(x=plot_snrs, y=plot_scores))
+    p.circle(
+        x="x", y="y", source=scatter_source,
+        size=3, alpha=0.1, color=colors[0],
+        legend_label="Samples"
+    )
+    
+    # Confidence band (±1σ)
+    if len(bin_centers) > 1:
+        upper = bin_means + bin_stds
+        lower = np.maximum(bin_means - bin_stds, 0)
+        
+        band_x = np.concatenate([bin_centers, bin_centers[::-1]])
+        band_y = np.concatenate([upper, lower[::-1]])
+        
+        p.patch(
+            band_x, band_y,
+            fill_alpha=0.2, fill_color=colors[1],
+            line_alpha=0, legend_label="±1σ Band"
+        )
+    
+    # Bin means as points
+    if len(bin_centers) > 0:
+        means_source = ColumnDataSource(data=dict(x=bin_centers, y=bin_means))
+        p.circle(
+            x="x", y="y", source=means_source,
+            size=10, color=colors[1], alpha=0.8,
+            legend_label="Bin Means"
+        )
+    
+    # Fitted curve
+    if len(fit_snrs) > 0:
+        fit_source = ColumnDataSource(data=dict(x=fit_snrs, y=fit_efficiency))
+        p.line(
+            x="x", y="y", source=fit_source,
+            line_width=3, color=colors[2],
+            legend_label="Sigmoid Fit"
+        )
+    
+    p.legend.location = "bottom_right"
+    p.legend.click_policy = "hide"
+    
+    # Add hover tool info
+    hover = p.select_one(HoverTool)
+    hover.tooltips = [("SNR", "@x{0.1f}"), ("Score", "@y{0.3f}")]
+    
+    return p
+
 
 def generate_efficiency_curves(
         validators : list,
@@ -898,7 +1358,7 @@ def generate_efficiency_curves(
             acc = []
 
             for score in scores:
-                score = score[:, 0]
+                score = score[:, 1]  # Use signal+noise probability (column 1)
                 if threshold != 0:
                     total = np.sum(score >= threshold)
                 else:
@@ -982,14 +1442,14 @@ def generate_efficiency_curves(
                 const far_value = far_keys[far_index];
                 slider.title = 'False Alarm Rate (FAR): ' + far_value;
             """
-        )
+    )
     slider.js_on_change('value', slider_title_callback)
     
     return p, slider
     
 def downsample_data(x, y, num_points):
     """
-    Downsample x, y data to a specific number of points using logarithmic 
+    Downsample x, y data to a specific number of points using linear 
     interpolation.
     
     Parameters:
@@ -1000,12 +1460,42 @@ def downsample_data(x, y, num_points):
     Returns:
         - downsampled_x, downsampled_y: Downsampled data.
     """
+    x = np.asarray(x)
+    y = np.asarray(y)
     
+    # Handle empty arrays
+    if len(x) == 0 or len(y) == 0:
+        return x, y
+    
+    # No downsampling needed if already small enough
     if len(x) <= num_points:
         return x, y
-
-    interpolator = interp1d(x, y)
-    downsampled_x = np.linspace(min(x), max(x), num_points)
+    
+    # Remove NaN and Inf values
+    valid_mask = np.isfinite(x) & np.isfinite(y)
+    if not np.any(valid_mask):
+        return x, y  # All values invalid, return as-is
+    
+    x_valid = x[valid_mask]
+    y_valid = y[valid_mask]
+    
+    # Handle case where all x values are the same (would cause divide by zero)
+    if np.all(x_valid == x_valid[0]):
+        # Return single point repeated
+        return np.full(num_points, x_valid[0]), np.full(num_points, np.mean(y_valid))
+    
+    # Remove duplicate x values (keep first occurrence) to avoid interpolation issues
+    _, unique_indices = np.unique(x_valid, return_index=True)
+    unique_indices = np.sort(unique_indices)  # Preserve original order
+    x_unique = x_valid[unique_indices]
+    y_unique = y_valid[unique_indices]
+    
+    # Need at least 2 points for interpolation
+    if len(x_unique) < 2:
+        return x, y
+    
+    interpolator = interp1d(x_unique, y_unique, bounds_error=False, fill_value='extrapolate')
+    downsampled_x = np.linspace(np.min(x_unique), np.max(x_unique), num_points)
     downsampled_y = interpolator(downsampled_x)
         
     return downsampled_x, downsampled_y
@@ -1225,26 +1715,127 @@ def generate_waveform_plot(
     colors : list = Bright[7]
     ):
 
-    colors = cycle(colors)
+    from datetime import datetime, timedelta
+    from bokeh.layouts import column, row
+    
+    # Don't use cycle - we index directly into colors list
+    if not isinstance(colors, (list, tuple)):
+        colors = list(colors)
+    
+    # Extract and flatten data for plotting
+    # Data may have shape (detectors, samples) or just (samples,)
+    onsource_data = np.array(data[gf.ReturnVariables.WHITENED_ONSOURCE.name])
+    injection_data = np.array(data[gf.ReturnVariables.WHITENED_INJECTIONS.name])
+    
+    # Flatten multi-detector data - take first detector if multi-dimensional
+    if onsource_data.ndim > 1:
+        onsource_data = onsource_data.flatten() if onsource_data.shape[0] == 1 else onsource_data[0]
+    if injection_data.ndim > 1:
+        injection_data = injection_data.flatten() if injection_data.shape[0] == 1 else injection_data[0]
+    
+    # Helper to extract scalar value from data
+    def get_scalar(key, default=None):
+        val = data.get(key, default)
+        if val is None:
+            return default
+        try:
+            # Convert to numpy array first for consistent handling
+            arr = np.asarray(val)
+            if arr.ndim == 0:
+                return float(arr)
+            elif arr.size > 0:
+                return float(arr.flatten()[0])
+            else:
+                return default
+        except (TypeError, ValueError, IndexError):
+            # Fallback for non-numeric types
+            try:
+                return float(val)
+            except:
+                return default
+    
+    # Extract parameters
+    mass1 = get_scalar(gf.WaveformParameters.MASS_1_MSUN.name, 0)
+    mass2 = get_scalar(gf.WaveformParameters.MASS_2_MSUN.name, 0)
+    score = get_scalar('score', 0)
+    snr = get_scalar(gf.ScalingTypes.SNR.name)
+    gps_time = get_scalar(gf.ReturnVariables.GPS_TIME.name)
+    
+    # Convert GPS to human readable (approximate - ignores leap seconds)
+    human_time = "N/A"
+    if gps_time is not None and gps_time > 0:
+        # GPS epoch: Jan 6, 1980. GPS is ~18s ahead of UTC due to leap seconds
+        gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
+        try:
+            dt = gps_epoch + timedelta(seconds=float(gps_time) - 18)  # Approximate UTC
+            human_time = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        except:
+            human_time = "Error"
+    
+    # Build info panel HTML
+    info_items = []
+    info_items.append(f"<b>Score:</b> {score:.3f}")
+    if snr is not None:
+        info_items.append(f"<b>SNR:</b> {snr:.1f}")
+    if gps_time is not None:
+        info_items.append(f"<b>GPS:</b> {gps_time:.1f}")
+        info_items.append(f"<b>Time:</b> {human_time}")
+    if mass1 > 0:
+        info_items.append(f"<b>M₁:</b> {mass1:.1f} M☉")
+    if mass2 > 0:
+        info_items.append(f"<b>M₂:</b> {mass2:.1f} M☉")
+    if mass1 > 0 and mass2 > 0:
+        chirp_mass = ((mass1 * mass2) ** 0.6) / ((mass1 + mass2) ** 0.2)
+        info_items.append(f"<b>Mchirp:</b> {chirp_mass:.1f} M☉")
+    
+    # Add any other WaveformParameters found in data
+    extra_params = [
+        (gf.WaveformParameters.INCLINATION_RADIANS.name, "Inclination", "rad"),
+        (gf.WaveformParameters.DISTANCE_MPC.name, "Distance", "Mpc"),
+    ]
+    for param_name, label, unit in extra_params:
+        val = get_scalar(param_name)
+        if val is not None:
+            info_items.append(f"<b>{label}:</b> {val:.2f} {unit}")
+    
+    info_html = "<br>".join(info_items)
+    info_panel = Div(
+        text=f"""
+        <div style="
+            background: #f8f9fa; 
+            padding: 12px; 
+            border-radius: 6px; 
+            border: 1px solid #dee2e6;
+            font-size: 11px;
+            line-height: 1.6;
+            min-width: 150px;
+            max-width: 200px;
+        ">
+            <div style="font-weight: bold; margin-bottom: 8px; border-bottom: 1px solid #dee2e6; padding-bottom: 4px;">
+                Injection Parameters
+            </div>
+            {info_html}
+        </div>
+        """,
+        width=200
+    )
     
     p = figure(
-        title=f"Worst Performing Input Score: {data['score']}, "
-        f"{data[gf.WaveformParameters.MASS_1_MSUN.name]}, "
-        f"{data[gf.WaveformParameters.MASS_2_MSUN.name]}.",
-        x_axis_label='Time Seconds',
-        y_axis_label='Strain',
-        width=800, 
+        title="Worst Performing Input",
+        x_axis_label='Time (seconds)',
+        y_axis_label='Whitened Strain',
+        width=600, 
         height=300
     )
     
+    # Create time axis
+    num_samples = len(onsource_data)
+    time = np.linspace(0, onsource_duration_seconds, num_samples)
+    
     source = ColumnDataSource(
         data=dict(
-            x=np.linspace(
-                0,
-                onsource_duration_seconds, 
-                len(data[gf.ReturnVariables.WHITENED_ONSOURCE.name])
-            ), 
-            y=data[gf.ReturnVariables.WHITENED_ONSOURCE.name]
+            x=time, 
+            y=onsource_data
         )
     )
     line = p.line(
@@ -1253,13 +1844,13 @@ def generate_waveform_plot(
         source=source,
         color=colors[0], 
         width=2, 
-        legend_label=f'Whitened Strain + Injection'
+        legend_label='Whitened Strain + Injection'
     )
         
     source = ColumnDataSource(
         data=dict(
-            x= np.linspace(0,onsource_duration_seconds, len(data[gf.ReturnVariables.WHITENED_ONSOURCE.name])),
-            y= data[gf.ReturnVariables.WHITENED_INJECTIONS.name]
+            x=time,
+            y=injection_data
         )
     )
     line = p.line(
@@ -1268,37 +1859,63 @@ def generate_waveform_plot(
         source=source,
         color=colors[1], 
         width=2, 
-        legend_label=f'Whitened Injection'
+        legend_label='Whitened Injection'
     )
     
-    source = ColumnDataSource(
+    # Add scaled injection with interactive slider
+    scaled_source = ColumnDataSource(
         data=dict(
-            x=np.linspace(0,onsource_duration_seconds, len(data[gf.ReturnVariables.WHITENED_ONSOURCE.name])), 
-            y=data[gf.ReturnVariables.WHITENED_INJECTIONS.name]*20.0
+            x=time, 
+            y=injection_data,  # Store unscaled, scale via JS
+            y_original=injection_data.copy()  # Keep original for scaling
         )
     )
-    line = p.line(
+    scaled_line = p.line(
         x='x', 
         y='y', 
-        source=source,
+        source=scaled_source,
         color=colors[2], 
         width=2, 
-        legend_label=f'Scaled Raw Injections'
+        legend_label='Scaled Injection'
     )
+    
+    # Create slider for injection scale
+    scale_slider = Slider(
+        start=1, 
+        end=50, 
+        value=20, 
+        step=1, 
+        title="Injection Scale"
+    )
+    
+    # JavaScript callback to update scaled injection
+    scale_callback = CustomJS(
+        args=dict(source=scaled_source, slider=scale_slider),
+        code="""
+            const data = source.data;
+            const scale = slider.value;
+            const y_orig = data['y_original'];
+            const y = data['y'];
+            for (let i = 0; i < y_orig.length; i++) {
+                y[i] = y_orig[i] * scale;
+            }
+            source.change.emit();
+        """
+    )
+    scale_slider.js_on_change('value', scale_callback)
     
     p.legend.location = "bottom_right"
     p.legend.click_policy = "hide"
-    p.legend.click_policy = "hide"
-    p.legend.label_text_font_size = "12pt"
+    p.legend.label_text_font_size = "10pt"
 
     # Increase font sizes
-    p.axis.axis_label_text_font_size = "14pt"  # Increase axis label font size
-    p.axis.major_label_text_font_size = "12pt"  # Increase tick label font size
-
-    # If you have titles
-    p.title.text_font_size = '16pt'
+    p.axis.axis_label_text_font_size = "12pt"
+    p.axis.major_label_text_font_size = "10pt"
+    p.title.text_font_size = '14pt'
     
-    return p
+    # Return plot with slider and info panel in a row layout
+    plot_column = column(scale_slider, p)
+    return row(plot_column, info_panel)
 
 class Validator:
     
@@ -1328,6 +1945,12 @@ class Validator:
                 10.0,
                 12.0
             ]    
+        },
+        tar_config : dict = \
+        {
+            "scaling_range" : (4.5, 15.0),  # SNR range for finding challenging samples
+            "num_examples" : 1.0E5,
+            "num_worst" : 10
         },
         checkpoint_file_path : Path = None,
         logging_level : int = logging.INFO,
@@ -1416,22 +2039,37 @@ class Validator:
 
         validator.heart = heart
         
+        # Calculate worst performing inputs (useful for debugging)
         validator.worst_performers = None
-        """
-        validator.logger.info(f"Worst performing inputs for {validator.name}...")
-        tar_scores, worst_performers = \
-            calculate_tar_scores(
-                model, 
-                dataset_args, 
-                num_examples_per_batch,
-                scaling=20.0,
-                num_examples=1.0E3,
-                heart=validator.heart
-            )
-        validator.worst_performers = worst_performers
-        validator.logger.info(f"Done")
-        """
-        validator.worst_performmers = None
+        if tar_config is not None:
+            validator.logger.info(f"Finding worst performing inputs for {validator.name}...")
+            tar_scores, worst_performers = \
+                calculate_tar_scores(
+                    model, 
+                    dataset_args, 
+                    num_examples_per_batch,
+                    heart=validator.heart,
+                    **tar_config
+                )
+            validator.worst_performers = worst_performers
+            validator.logger.info(f"Found {len(worst_performers)} worst performers")
+            
+            # Save worst performers to checkpoint file
+            if checkpoint_file_path is not None and len(worst_performers) > 0:
+                with gf.open_hdf5_file(
+                    checkpoint_file_path, 
+                    validator.logger, 
+                    mode = "a"
+                ) as validation_file:
+                    for idx, entry in enumerate(worst_performers):
+                        group_name = f'worst_performers_{idx}'
+                        if group_name not in validation_file:
+                            group = validation_file.create_group(group_name)
+                            for key, value in entry.items():
+                                if hasattr(value, '__array__'):
+                                    group.create_dataset(key, data=np.array(value))
+                                else:
+                                    group.create_dataset(key, data=value)
 
         if validator.efficiency_data is None:   
             validator.logger.info(f"Calculating efficiency scores for {validator.name}...")
@@ -1478,6 +2116,135 @@ class Validator:
         validator.logger.info(f"Done")
                 
         return validator
+
+    @classmethod
+    def validate_unified(
+        cls,
+        model: keras.Model,
+        name: str,
+        dataset_args: dict,
+        config: ValidationConfig = None,
+        checkpoint_file_path: Path = None,
+        logging_level: int = logging.INFO,
+        heart: gf.Heart = None
+    ):
+        """
+        Unified validation using single data bank.
+        
+        More efficient than validate() as it generates all data in one pass
+        and computes efficiency, TAR, and worst performers from the same data.
+        
+        Args:
+            model: Trained Keras model
+            name: Model name for display
+            dataset_args: Dataset configuration
+            config: ValidationConfig instance (uses defaults if None)
+            checkpoint_file_path: Path to save/load validation data
+            logging_level: Logging verbosity
+            heart: Heartbeat callback for progress monitoring
+        """
+        validator = cls()
+        
+        # Setup logging
+        validator.logger = logging.getLogger("validator")
+        stream_handler = logging.StreamHandler(sys.stdout)
+        validator.logger.addHandler(stream_handler)
+        validator.logger.setLevel(logging_level)
+        
+        validator.name = name if isinstance(name, str) else str(name)
+        validator.config = config or ValidationConfig()
+        
+        # Extract duration from dataset_args
+        validator.input_duration_seconds = dataset_args.get(
+            "onsource_duration_seconds", 
+            gf.Defaults.onsource_duration_seconds
+        )
+        
+        # Create and generate unified bank
+        validator.logger.info(f"=== Unified Validation for {validator.name} ===")
+        
+        bank = UnifiedValidationBank(
+            model=model,
+            dataset_args=dataset_args,
+            config=validator.config,
+            heart=heart,
+            logger=validator.logger
+        )
+        bank.generate()
+        
+        # Store bank and extracted data
+        validator.bank = bank
+        validator.efficiency_data = bank.get_efficiency_data()
+        validator.worst_per_bin = bank.get_worst_performers()
+        
+        # Note: TAR@FAR requires noise-only samples which we don't have
+        # in the unified bank (injection_chance=1.0). For proper TAR,
+        # use separate calculate_far_scores + calculate_tar_scores.
+        validator.tar_data = None
+        
+        validator.logger.info("Unified validation complete!")
+        
+        return validator
+    
+    def plot_unified(
+        self,
+        output_path: Path = None,
+        include_roc: bool = True, 
+        include_worst: bool = True
+    ):
+        """
+        Generate plots from unified validation results.
+        
+        Creates:
+        - Efficiency scatter plot with fitted curve
+        - Worst performers per SNR bin (in tabs)
+        - ROC curve (if available)
+        """
+        if not hasattr(self, 'bank'):
+            raise ValueError("Must run validate_unified() first")
+        
+        tabs = []
+        
+        # Efficiency scatter plot
+        efficiency_plot = generate_efficiency_scatter_plot(self.bank)
+        tabs.append(("Efficiency", pn.pane.Bokeh(efficiency_plot)))
+        
+        # Worst performers per SNR bin
+        if include_worst and self.worst_per_bin:
+            worst_tabs = []
+            for bin_key, samples in self.worst_per_bin.items():
+                if samples:
+                    bin_plots = []
+                    for sample in samples[:5]:  # Limit to 5 per bin for display
+                        try:
+                            plot = generate_waveform_plot(
+                                sample,
+                                self.input_duration_seconds
+                            )
+                            bin_plots.append(pn.pane.Bokeh(plot))
+                        except Exception as e:
+                            self.logger.warning(f"Failed to plot sample: {e}")
+                    
+                    if bin_plots:
+                        worst_tabs.append((
+                            f"SNR {bin_key}",
+                            pn.Column(*bin_plots)
+                        ))
+            
+            if worst_tabs:
+                worst_panel = pn.Tabs(*worst_tabs)
+                tabs.append(("Worst Performers", worst_panel))
+        
+        # Build final dashboard
+        dashboard = pn.Tabs(*tabs)
+        
+        if output_path:
+            output_path = Path(output_path)
+            gf.ensure_directory_exists(output_path.parent)
+            dashboard.save(output_path)
+            self.logger.info(f"Saved unified validation report to {output_path}")
+        
+        return dashboard
 
     def save(
         self,
@@ -1544,13 +2311,13 @@ class Validator:
                         f'{key}_roc_auc', data=np.array([value['roc_auc']])
                     )
 
-            if self.worst_perfomers is not None:         
+            if self.worst_performers is not None:         
                 worst_performers = self.worst_performers
                 
                 for idx, entry in enumerate(worst_performers):
-                    group = validation_file.create_group(f'worst_perfomers_{idx}')
+                    group = validation_file.create_group(f'worst_performers_{idx}')
                     for key, value in entry.items():
-                        group.create_dataset(key, data=value, dtype=np.float16)
+                        group.create_dataset(key, data=value)
         
             self.logger.info("Done.")
         
@@ -1633,7 +2400,6 @@ class Validator:
                     worst_performers.append(group_data)
                 
             validator.worst_performers = worst_performers if worst_performers else None
-                                    
             validator.logger.info("Done.")
 
         return validator
@@ -1647,10 +2413,12 @@ class Validator:
         width : int = 800,
         height : int = 600
     ):
+        """Generate validation dashboard using Panel Tabs."""
         gf.ensure_directory_exists(file_path.parent)
 
         validators = comparison_validators + [self]
         
+        # Generate individual plots (Bokeh figures)
         efficiency_curves, slider = generate_efficiency_curves(
             validators, 
             fars,
@@ -1673,40 +2441,34 @@ class Validator:
             height=height
         )
         
-        layout = [
-            [dropdown, slider],
-            [roc_curves, efficiency_curves], 
-            [far_curves, None]
-        ]
-        
-        if self.worst_performers is not None:
-            for waveform in self.worst_performers:
-
-                pass
-                """
-                waveform_plot = generate_waveform_plot(
-                    waveform,
-                    self.input_duration_seconds
-                )
-                layout.append([waveform_plot, None])
-                """
-            
-        # Define an output path for the dashboard
-        output_file(file_path)
-
-        # Arrange the plots in a grid. 
-        grid = gridplot(layout)
-        
-        # Define CSS to make background white
-        div = Div(
-            text="""
-                <style>
-                    body {
-                        background-color: white !important;
-                    }
-                </style>
-                """
+        # Create Panel tabs for each section
+        # Wrap Bokeh models with pn.pane.Bokeh for proper embedding
+        tabs = pn.Tabs(
+            ('ROC Curves', pn.Column(
+                pn.pane.Bokeh(dropdown),
+                pn.pane.Bokeh(roc_curves)
+            )),
+            ('Efficiency', pn.Column(
+                pn.pane.Bokeh(slider),
+                pn.pane.Bokeh(efficiency_curves)
+            )),
+            ('FAR Curves', pn.pane.Bokeh(far_curves)),
         )
-
-        # Save the combined dashboard
-        save(column(div, grid))
+        
+        # Add worst performers tab if available
+        if self.worst_performers is not None and len(self.worst_performers) > 0:
+            waveform_plots = []
+            for waveform in self.worst_performers:
+                if gf.ReturnVariables.WHITENED_ONSOURCE.name in waveform and \
+                   gf.ReturnVariables.WHITENED_INJECTIONS.name in waveform:
+                    waveform_plot = generate_waveform_plot(
+                        waveform,
+                        self.input_duration_seconds
+                    )
+                    waveform_plots.append(waveform_plot)
+            
+            if waveform_plots:
+                tabs.append(('Worst Performers', pn.Column(*waveform_plots)))
+        
+        # Save tabs directly as static HTML (Templates don't support embed)
+        tabs.save(str(file_path), embed=True, resources='inline')

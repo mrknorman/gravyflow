@@ -28,7 +28,7 @@ conda install pip
 Then, install GravyFlow and its requirements into your conda environment:
 
 ```bash
-pip install -e .
+pip install -e .[cuda]
 ```
 
 Note that GravyFlow is under active development, and you may encounter issues during installation. Ensure TensorFlow can recognize GPUs in your environment, as GravyFlow is optimized for GPU use and relies on vectorized GPU functions.

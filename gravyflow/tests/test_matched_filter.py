@@ -496,7 +496,9 @@ class TestMatchedFilterValidation:
         onsource = inputs[gf.ReturnVariables.ONSOURCE.name]
         offsource = inputs[gf.ReturnVariables.OFFSOURCE.name]
         injections = inputs[gf.ReturnVariables.INJECTIONS.name]
-        injected_snrs = outputs["SNR"][0]  # Shape: (batch,)
+        injected_snrs = np.array(outputs["SNR"])  # Shape: (batch,) - calculated SNR
+        if len(injected_snrs.shape) > 1:
+            injected_snrs = injected_snrs[0]  # Handle if (generators, batch) shape
         
         print("\nSNR Recovery Validation (using exact injections as templates):")
         
@@ -511,7 +513,7 @@ class TestMatchedFilterValidation:
             data = np.array(onsource[i, 0, :])
             bg = np.array(offsource[i, 0, :])
             injection = np.squeeze(injections[i, 0, :])
-            target_snr = float(np.array(injected_snrs[i]).flatten()[0])
+            target_snr = float(injected_snrs[i])
             
             # Compute PSD from offsource using gf_psd with same settings as dataset
             freqs, psd_val = gf_psd(bg, sample_rate_hertz=8192.0, 
@@ -618,7 +620,9 @@ class TestMatchedFilterValidation:
         
         onsource = inputs[gf.ReturnVariables.ONSOURCE.name]
         offsource = inputs[gf.ReturnVariables.OFFSOURCE.name]
-        injected_snrs = outputs["SNR"][0]
+        injected_snrs = np.array(outputs["SNR"])  # Shape: (batch,)
+        if len(injected_snrs.shape) > 1:
+            injected_snrs = injected_snrs[0]
         
         print("\nSNR Recovery with Template Grid (realistic mismatch):")
         print(f"  Template grid: {mf.num_templates} templates")
@@ -632,7 +636,7 @@ class TestMatchedFilterValidation:
         for i in range(4):
             data = np.array(onsource[i, 0, :])
             bg = np.array(offsource[i, 0, :])
-            target_snr = float(np.array(injected_snrs[i]).flatten()[0])
+            target_snr = float(injected_snrs[i])
             
             # Compute PSD
             freqs, psd_val = gf_psd(bg, sample_rate_hertz=8192.0, 

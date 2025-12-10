@@ -1184,8 +1184,7 @@ class IFODataObtainer:
             # This ensures that at least one batch with enough room for offsource
             # can be gathered:
             min_segment_duration_seconds : int = \
-                (total_onsource_duration_seconds) \
-                * num_examples_per_batch + offsource_duration_seconds
+                total_onsource_duration_seconds + offsource_duration_seconds
             
             # Multiply by 2 for saftey odd things were happening
             min_segment_duration_seconds *= 2.0
@@ -1229,13 +1228,13 @@ class IFODataObtainer:
 
             segment_duration : float = min_num_samples / sample_rate_hertz
 
-            self._num_batches_in_current_segment : int = int(
+            self._num_batches_in_current_segment : int = max(1, int(
                       segment_duration 
                     / (
                         self.saturation * 
                         num_examples_per_batch * onsource_duration_seconds
                     )
-                )
+                ))
             
         # Yield offsource, onsource, and gps_times for unique batches untill
         # current segment is exausted:
