@@ -35,6 +35,9 @@ import gravyflow as gf
 from dataclasses import dataclass, field
 from scipy.optimize import curve_fit
 import heapq
+import holoviews as hv
+from holoviews.operation.datashader import datashade
+import pandas as pd
 
 
 @dataclass
@@ -44,16 +47,19 @@ class ValidationConfig:
     num_examples: int = 100_000
     batch_size: int = 512
     snr_bin_width: float = 5.0
-    num_worst_per_bin: int = 10
-    far_thresholds: List[float] = field(default_factory=lambda: [1e-1, 1e-2, 1e-3, 1e-4])
+    num_worst_per_bin: int = 5
+    far_thresholds: List[float] = field(
+        default_factory=lambda: np.logspace(-1, -4.5, 50).tolist()
+    )
     
 
-class UnifiedValidationBank:
+class ValidationBank:
     """
-    Unified data bank for validation metrics.
+    Validation Bank for managing noise and injection data generation.
     
-    Generates a single dataset with uniform SNR distribution and computes
-    all validation metrics (efficiency, TAR, worst performers) from the same data.
+    Supports two-pass validation:
+    1. generate_noise(): Calculates scores on noise-only data for FAR.
+    2. generate(): Calculates scores on injection data for Efficiency/TAR.
     """
     
     def __init__(
@@ -71,41 +77,91 @@ class UnifiedValidationBank:
         self.logger = logger or logging.getLogger("validation_bank")
         
         # Results storage
-        self.snrs = None
-        self.scores = None  
-        self.injection_masks = None
-        self.sample_data = {}  # For worst performers
+        self.far_scores = None        # From generate_noise()
+        self.snrs = None              # From generate()
+        self.scores = None            # From generate()
+        self.injection_masks = None   # From generate()
+        self._worst_per_bin = None    # From generate()
         
-        # Computed metrics
-        self._efficiency_data = None
-        self._tar_data = None
-        self._worst_per_bin = None
-        
-    def generate(self) -> None:
-        """Generate all validation data in a single pass."""
+    def generate_noise(self) -> None:
+        """
+        Generate noise-only scores for False Alarm Rate (FAR) calculation.
+        Sets injection_chance = 0.0.
+        """
         config = self.config
         dataset_args = deepcopy(self.dataset_args)
         
-        # Configure for uniform SNR sampling
+        # Configure for noise-only (no injections)
+        dataset_args["waveform_generators"] = []
+        dataset_args["output_variables"] = []  # No injection masks/params needed
+        
+        # Calculate number of batches for desired duration
+        num_examples = int(config.num_examples) # Use num_examples or calculate from duration?
+        # Legacy used num_seconds = 1E5. Let's use config.num_examples or derived.
+        # If config doesn't have num_seconds, we stick to num_examples.
+        # But FAR usually needs stats over TIME. 
+        # config.num_examples is 100,000. 
+        
+        num_batches = math.ceil(config.num_examples / config.batch_size)
+        dataset_args["num_examples_per_batch"] = config.batch_size
+        dataset_args["steps_per_epoch"] = num_batches
+        dataset_args["group"] = "test"
+        
+        dataset = gf.Dataset(**dataset_args)
+        
+        self.logger.info(f"Generating noise data: {num_batches} batches ({config.num_examples} examples)")
+        
+        all_scores = []
+        
+        for batch_idx in range(num_batches):
+            if self.heart:
+                self.heart.beat()
+            
+            x_batch, _ = dataset[batch_idx]
+            
+            # Predict
+            predictions = self.model.predict_on_batch(x_batch)
+            
+            # Handle output shape
+            if len(predictions.shape) == 2:
+                if predictions.shape[1] == 2:
+                    batch_scores = predictions[:, 1]
+                else:
+                    batch_scores = predictions[:, 0]
+            else:
+                batch_scores = predictions.flatten()
+            
+            all_scores.append(batch_scores)
+            
+            if (batch_idx + 1) % 50 == 0:
+                self.logger.info(f"Noise Progress: {batch_idx + 1}/{num_batches} batches")
+        
+        self.far_scores = np.concatenate([np.array(s) for s in all_scores])
+        self.logger.info(f"Generated {len(self.far_scores)} noise scores")
+
+    def generate(self) -> None:
+        """
+        Generate injection scores for Efficiency calculation.
+        Sets injection_chance = 1.0 and samples Uniform SNR.
+        """
+        config = self.config
+        dataset_args = deepcopy(self.dataset_args)
+        
         min_snr, max_snr = config.snr_range
         
-        # Ensure injection generators use uniform SNR
         if "waveform_generators" not in dataset_args:
             raise ValueError("dataset_args must contain waveform_generators")
-            
         if not isinstance(dataset_args["waveform_generators"], list):
             dataset_args["waveform_generators"] = [dataset_args["waveform_generators"]]
-        
-        # Set uniform SNR distribution for all generators
+            
         for gen in dataset_args["waveform_generators"]:
             gen.scaling_method.value = gf.Distribution(
                 min_=min_snr,
                 max_=max_snr,
                 type_=gf.DistributionType.UNIFORM
             )
-            gen.injection_chance = 1.0  # Always inject for efficiency/TAR
-        
-        # Configure output variables to get SNR values
+            gen.injection_chance = 1.0
+            
         dataset_args["num_examples_per_batch"] = config.batch_size
         dataset_args["output_variables"] = [
             gf.ReturnVariables.WHITENED_ONSOURCE,
@@ -119,20 +175,19 @@ class UnifiedValidationBank:
         
         num_batches = math.ceil(config.num_examples / config.batch_size)
         dataset_args["steps_per_epoch"] = num_batches
-        dataset_args["group"] = "test"  # Use test data split for validation
+        dataset_args["group"] = "test"
         
         dataset = gf.Dataset(**dataset_args)
         
-        # Preallocate arrays
         all_snrs = []
         all_scores = []
         all_masks = []
         
-        # Per-bin worst performers using min-heaps (store negative score for max-heap behavior)
+        # Worst performer tracking
         num_bins = int((max_snr - min_snr) / config.snr_bin_width)
         worst_heaps = [[] for _ in range(num_bins)]
         
-        self.logger.info(f"Generating {config.num_examples} examples across SNR range {config.snr_range}")
+        self.logger.info(f"Generating injection data: {num_batches} batches")
         
         for batch_idx in range(num_batches):
             if self.heart:
@@ -140,72 +195,54 @@ class UnifiedValidationBank:
                 
             x_batch, y_batch = dataset[batch_idx]
             
-            # Get model predictions
-            predictions = self.model.predict(x_batch, verbose=0)
+            predictions = self.model.predict_on_batch(x_batch)
             
-            # Handle different output formats
             if len(predictions.shape) == 2:
                 if predictions.shape[1] == 2:
-                    batch_scores = predictions[:, 1]  # Binary: signal probability
+                    batch_scores = predictions[:, 1]
                 else:
                     batch_scores = predictions[:, 0]
             else:
                 batch_scores = predictions.flatten()
-            
-            # Extract SNRs and masks
+                
             batch_snrs = np.array(y_batch.get("SNR", np.zeros(len(batch_scores))))
-            batch_masks = np.array(y_batch.get(gf.ReturnVariables.INJECTION_MASKS.name, 
-                                                np.ones(len(batch_scores))))
-            
-            # Handle mask shape (may be (gen, batch, time))
-            if len(batch_masks.shape) == 3:
-                batch_masks = np.max(batch_masks[0], axis=-1)
-            elif len(batch_masks.shape) == 2:
-                batch_masks = np.max(batch_masks, axis=-1)
+            # Injections are 100%, so marks are arguably all 1, but let's read if available
+            batch_masks = np.ones(len(batch_scores)) 
             
             all_snrs.extend(batch_snrs)
             all_scores.extend(batch_scores)
             all_masks.extend(batch_masks)
             
-            # Track worst performers per bin
+            # Worst performers
             for i in range(len(batch_scores)):
                 snr_val = float(batch_snrs[i])
                 score_val = float(batch_scores[i])
                 
                 bin_idx = min(int((snr_val - min_snr) / config.snr_bin_width), num_bins - 1)
-                bin_idx = max(0, bin_idx)  # Clamp to valid range
+                bin_idx = max(0, bin_idx)
                 
-                # Use min-heap with negative score for max-heap behavior (keep lowest scores)
                 if len(worst_heaps[bin_idx]) < config.num_worst_per_bin:
-                    # Extract sample data for worst performer
                     sample_data = _extract_sample_data(x_batch, y_batch, i, score_val)
                     heapq.heappush(worst_heaps[bin_idx], (-score_val, batch_idx * config.batch_size + i, sample_data))
                 elif score_val < -worst_heaps[bin_idx][0][0]:
-                    # This score is worse (lower) than the best (highest) in heap
                     sample_data = _extract_sample_data(x_batch, y_batch, i, score_val)
                     heapq.heapreplace(worst_heaps[bin_idx], (-score_val, batch_idx * config.batch_size + i, sample_data))
             
             if (batch_idx + 1) % 50 == 0:
-                self.logger.info(f"Progress: {batch_idx + 1}/{num_batches} batches")
-        
-        # Store results
+                self.logger.info(f"Injection Progress: {batch_idx + 1}/{num_batches} batches")
+                
         self.snrs = np.array(all_snrs)
         self.scores = np.array(all_scores)
         self.injection_masks = np.array(all_masks)
         
-        # Extract worst performers from heaps
         self._worst_per_bin = {}
         for bin_idx, heap in enumerate(worst_heaps):
             bin_start = min_snr + bin_idx * config.snr_bin_width
             bin_end = bin_start + config.snr_bin_width
             bin_key = f"{bin_start:.0f}-{bin_end:.0f}"
-            
-            # Sort by score (ascending - worst first)
-            sorted_worst = sorted(heap, key=lambda x: -x[0])  # Undo negative
+            sorted_worst = sorted(heap, key=lambda x: -x[0])
             self._worst_per_bin[bin_key] = [item[2] for item in sorted_worst]
-        
-        self.logger.info(f"Generated {len(self.snrs)} samples. SNR range: [{self.snrs.min():.1f}, {self.snrs.max():.1f}]")
-    
+            
     def get_efficiency_data(self) -> Dict:
         """
         Get efficiency scatter data and fitted curve.
@@ -214,22 +251,20 @@ class UnifiedValidationBank:
         - snrs: array of SNR values
         - scores: array of model scores
         - fit_snrs: x values for fitted curve
-        - fit_efficiency: y values (efficiency) for fitted curve
-        - fit_lower: lower confidence bound
-        - fit_upper: upper confidence bound
+        - fit_efficiency: y values for fitted curve
+        - bin_centers, bin_means, bin_stds: binned statistics
         """
         if self.snrs is None:
             raise ValueError("Must call generate() first")
         
-        # Filter to injection samples only
-        mask = self.injection_masks > 0.5
-        snrs = self.snrs[mask]
-        scores = self.scores[mask]
+        # All samples are injections (injection_chance=1.0)
+        snrs = self.snrs
+        scores = self.scores
         
         # Bin statistics for confidence bands
         config = self.config
         min_snr, max_snr = config.snr_range
-        num_bins = int((max_snr - min_snr) / config.snr_bin_width)
+        num_bins = max(1, int((max_snr - min_snr) / config.snr_bin_width))
         
         bin_centers = []
         bin_means = []
@@ -249,14 +284,14 @@ class UnifiedValidationBank:
         bin_means = np.array(bin_means)
         bin_stds = np.array(bin_stds)
         
-        # Fit sigmoid curve: efficiency = 1 / (1 + exp(-k*(x - x0)))
+        # Fit sigmoid curve
         def sigmoid(x, x0, k, L, b):
             return L / (1 + np.exp(-k * (x - x0))) + b
         
         try:
             popt, _ = curve_fit(
                 sigmoid, bin_centers, bin_means,
-                p0=[10.0, 0.5, 0.8, 0.1],  # Initial guess
+                p0=[10.0, 0.5, 0.8, 0.1],
                 bounds=([0, 0.01, 0, 0], [30, 5, 1, 0.5]),
                 maxfev=5000
             )
@@ -264,7 +299,6 @@ class UnifiedValidationBank:
             fit_snrs = np.linspace(min_snr, max_snr, 100)
             fit_efficiency = sigmoid(fit_snrs, *popt)
         except:
-            # Fallback to interpolation if fit fails
             fit_snrs = bin_centers
             fit_efficiency = bin_means
         
@@ -278,70 +312,73 @@ class UnifiedValidationBank:
             "bin_stds": bin_stds
         }
     
-    def get_tar_at_far(self, far_thresholds: List[float] = None) -> Dict:
-        """
-        Compute True Acceptance Rate at given False Alarm Rates.
-        
-        Uses noise-only samples (injection_mask = 0) to estimate FAR thresholds,
-        then computes TAR on injection samples.
-        """
-        if self.snrs is None:
-            raise ValueError("Must call generate() first")
-        
-        far_thresholds = far_thresholds or self.config.far_thresholds
-        
-        # For this unified bank, we need noise-only samples for FAR
-        # If all samples have injections, we can't compute FAR properly
-        # This is a limitation - suggest adding noise-only samples
-        
-        # For now, use a threshold approach based on score distribution
-        injection_mask = self.injection_masks > 0.5
-        
-        if not np.any(~injection_mask):
-            self.logger.warning("No noise-only samples in bank. TAR@FAR requires noise-only samples.")
-            return {}
-        
-        noise_scores = self.scores[~injection_mask]
-        signal_scores = self.scores[injection_mask]
-        signal_snrs = self.snrs[injection_mask]
-        
-        results = {}
-        for far in far_thresholds:
-            # Find threshold that gives this FAR on noise
-            threshold_percentile = (1 - far) * 100
-            threshold = np.percentile(noise_scores, threshold_percentile)
-            
-            # Compute TAR per SNR bin
-            config = self.config
-            min_snr, max_snr = config.snr_range
-            num_bins = int((max_snr - min_snr) / config.snr_bin_width)
-            
-            tar_per_bin = []
-            bin_centers = []
-            
-            for i in range(num_bins):
-                bin_start = min_snr + i * config.snr_bin_width
-                bin_end = bin_start + config.snr_bin_width
-                bin_mask = (signal_snrs >= bin_start) & (signal_snrs < bin_end)
-                
-                if np.sum(bin_mask) > 0:
-                    tar = np.mean(signal_scores[bin_mask] > threshold)
-                    tar_per_bin.append(tar)
-                    bin_centers.append((bin_start + bin_end) / 2)
-            
-            results[far] = {
-                "threshold": threshold,
-                "bin_centers": np.array(bin_centers),
-                "tar_per_bin": np.array(tar_per_bin)
-            }
-        
-        return results
-    
     def get_worst_performers(self) -> Dict[str, List[dict]]:
         """Get worst performing samples per SNR bin."""
         if self._worst_per_bin is None:
             raise ValueError("Must call generate() first")
         return self._worst_per_bin
+
+    def get_roc_curves(self, scaling_ranges: List[Union[Tuple[float, float], float]] = None) -> Dict:
+        """
+        Calculate ROC curves for different SNR ranges/values using generated data.
+        Reuses far_scores (negatives) and filters injection scores (positives) by SNR.
+        """
+        if self.far_scores is None or self.scores is None:
+            raise ValueError("Must call generate_noise() and generate() first")
+            
+        if scaling_ranges is None:
+            # Default ranges if none provided
+            scaling_ranges = [
+                (8.0, 20.0),
+                8.0,
+                10.0,
+                12.0
+            ]
+            
+        results = {}
+        noise_scores = self.far_scores
+        
+        # Ensure we have noise scores
+        if len(noise_scores) == 0:
+            self.logger.warning("No noise scores found. ROC calculation requires noise data.")
+            return {}
+        
+        for scaling in scaling_ranges:
+            # Determine SNR mask
+            if isinstance(scaling, (tuple, list)):
+                min_s, max_s = scaling
+                mask = (self.snrs >= min_s) & (self.snrs < max_s)
+                # Filter injection mask too (ensure they are injections)
+                mask &= (self.injection_masks > 0.5)
+                key = str(scaling)
+            else:
+                # Point estimate: use small bin
+                center = float(scaling)
+                width = 0.5 # +/- 0.5 width
+                mask = (self.snrs >= center - width) & (self.snrs < center + width)
+                mask &= (self.injection_masks > 0.5)
+                key = str(center)
+            
+            signal_scores = self.scores[mask]
+            
+            if len(signal_scores) == 0:
+                self.logger.warning(f"No signal samples found for SNR range {key}")
+                continue
+            
+            # Combine for ROC
+            y_scores = np.concatenate([noise_scores, signal_scores])
+            y_true = np.concatenate([np.zeros(len(noise_scores)), np.ones(len(signal_scores))])
+            
+            # Use JAX helper function defined globally
+            fpr, tpr, auc = roc_curve_and_auc(y_true, y_scores)
+            
+            results[key] = {
+                "fpr": np.array(fpr),
+                "tpr": np.array(tpr),
+                "roc_auc": float(auc)
+            }
+            
+        return results
 
 
 
@@ -378,269 +415,6 @@ def pad_with_random_values(scores):
     padded_scores = np.array([pad_array(score, max_length) for score in scores])
     
     return padded_scores
-
-def calculate_efficiency_scores(
-        model : keras.Model, 
-        dataset_args : Dict[str, Union[float, List, int]],
-        logger,
-        file_path : Path = None,
-        num_examples_per_batch : int = 32,
-        max_scaling : float = 20.0,
-        num_scaling_steps : int = 21,
-        num_examples_per_scaling_step : int = 2048,
-        heart : gf.Heart = None
-    ) -> Dict:
-    
-    """
-    Calculate the Efficiency scores for a given model.
-
-    Parameters
-    ----------
-    model : tf.keras.Model
-        The model used to predict FAR scores.
-    dataset_args : dict
-        Dictionary containing options for dataset generator.
-    num_examples_per_batch : int, optional
-        The number of examples per batch, default is 32.
-    max_scaling: float, optional
-        The max scaling value to generate an efficiency score for, default is 20.0.
-    num_scaling_steps: int, optional 
-        The number of scaling values at which to generate and efficiency score,
-        default is 21.
-    num_examples_per_scaling_step : float, optional
-        The number of examples to be used for each efficiency score calculation, 
-        default is 2048.
-    
-    Returns
-    -------
-    scaling_array : np.ndarray
-        Array of scalings ar which the efficieny is calculated
-    efficiency_scores : np.ndarray
-        The calculated efficiency scores.
-    """
-    
-    # Make copy of generator args so original is not affected:
-    dataset_args = deepcopy(dataset_args)
-        
-    # Integer arguments are integers:
-    num_examples_per_scaling_step = int(num_examples_per_scaling_step)
-    num_examples_per_batch = int(num_examples_per_batch)
-    num_scaling_steps = int(num_scaling_steps)
-    
-    # Calculate number of batches required given batch size:
-    num_examples = num_examples_per_scaling_step*num_scaling_steps
-    num_batches = math.ceil(num_examples / num_examples_per_batch)
-
-    # Generate array of scaling values used in dataset generation:
-    efficiency_scalings = np.linspace(0.0, max_scaling, num_scaling_steps)
-    
-    scaling_values = np.repeat(
-        efficiency_scalings,
-        num_examples_per_scaling_step
-    )
-    
-    #Ensure injection generators is list for subsequent logic:
-    if not isinstance(dataset_args["waveform_generators"], list):
-        dataset_args["waveform_generators"] = \
-            [dataset_args["waveform_generators"]]
-    
-    # Ensure dataset is full of injections:
-    dataset_args["num_examples_per_batch"] = num_examples_per_batch
-    dataset_args["output_variables"] = [gf.ReturnVariables.INJECTION_MASKS]
-    dataset_args["waveform_generators"][0].injection_chance = 1.0
-    dataset_args["waveform_generators"][0].scaling_method.value = scaling_values
-    
-    # Set steps_per_epoch to match num_batches to prevent data exhaustion
-    dataset_args["steps_per_epoch"] = num_batches
-    dataset_args["group"] = "test"  # Use test data split for validation
-    
-    # Initialize generator:
-    dataset = gf.Dataset(
-        **dataset_args
-    )
-    callbacks = []
-    if heart is not None:
-        callbacks += [gf.HeartbeatCallback(heart)]
-
-    combined_scores = None
-    while combined_scores is None:
-        try:
-            verbose : int= 1
-            if gf.is_redirected():
-                verbose : int = 2
-
-            combined_scores = model.predict(
-                dataset, 
-                steps=num_batches, 
-                callbacks=callbacks,
-                verbose=verbose
-            )
-
-            try:
-                # Split predictions back into separate arrays for each scaling level:
-                scores = [ 
-                    combined_scores[
-                        index * num_examples_per_scaling_step : 
-                        (index + 1) * num_examples_per_scaling_step
-                    ] for index in range(num_scaling_steps)
-                ]
-
-                scores = pad_with_random_values(scores)
-
-            except Exception as e:
-                raise Exception(f"Error splitting efficiency scores: {e}.")
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            logging.error(f"Error {e} calculating efficiency scores! Retrying.")
-            combined_scores = None
-            continue
-
-    if file_path is not None:
-        with gf.open_hdf5_file(
-            file_path, 
-            logger, 
-            mode = "a"
-        ) as validation_file:
-        
-            # Unpack:
-            scalings = efficiency_scalings
-
-            # Save efficiency scores:
-            if scores is not None:
-                if 'efficiency_data' not in validation_file:
-                    eff_group = validation_file.create_group('efficiency_data')
-                else:
-                    eff_group = validation_file['efficiency_data']
-
-                if 'scalings' not in eff_group:
-                    eff_group.create_dataset(f'scalings', data=scalings)
-                else:
-                    del eff_group['scalings']
-                    eff_group.create_dataset(f'scalings', data=scalings)
-                
-                for i, score in enumerate(scores):
-
-                    if f'score_{i}' not in eff_group:
-                        eff_group.create_dataset(f'score_{i}', data=score)
-                    else: 
-                        del eff_group[f'score_{i}']
-                        eff_group.create_dataset(f'score_{i}', data=score)
-    # Warn if efficiency is suspiciously low at high SNR
-    if scores is not None and len(scores) > 0:
-        # Check efficiency at highest SNR
-        high_snr_scores = scores[-1]  # Last scaling step (highest SNR)
-        if high_snr_scores is not None and len(high_snr_scores) > 0:
-            # Get mean prediction at highest SNR
-            mean_score = np.nanmean(high_snr_scores[:, 1] if len(high_snr_scores.shape) > 1 else high_snr_scores)
-            if mean_score < 0.5:
-                logging.warning(
-                    f"LOW EFFICIENCY WARNING: Mean detection probability at SNR={efficiency_scalings[-1]:.1f} "
-                    f"is only {mean_score:.2f}. Expected > 0.5 for a working model. "
-                    "Check: 1) Model trained correctly? 2) Input preprocessing matches training? "
-                    "3) Noise type compatible with training data?"
-                )
-    
-    return {"scalings" : efficiency_scalings, "scores": scores}
-
-def calculate_far_scores(
-        model : keras.Model, 
-        dataset_args : dict, 
-        logger,
-        file_path : Path,
-        num_examples_per_batch : int = 32,  
-        num_seconds : float = 1E5,
-        heart : gf.Heart = None
-    ) -> np.ndarray:
-    
-    """
-    Calculate the False Alarm Rate (FAR) scores for a given model.
-
-    Parameters
-    ----------
-    model : tf.keras.Model
-        The model used to predict FAR scores.
-    dataset_args : dict
-        Dictionary containing options for dataset generator.
-    num_examples_per_batch : int, optional
-        The number of examples per batch, default is 32.
-    num_examples : float, optional
-        The total number of examples to be used, default is 1E5.
-    
-    Returns
-    -------
-    far_scores : np.ndarray
-        The calculated FAR scores.
-    """
-        
-    # Make copy of generator args so original is not affected:
-    dataset_args = deepcopy(dataset_args)
-        
-    # Integer arguments are integers:
-    num_examples = int(num_seconds/dataset_args["onsource_duration_seconds"])
-    num_examples_per_batch = int(num_examples_per_batch)
-    
-    # Calculate number of batches required given batch size:
-    num_batches = math.ceil(num_examples / num_examples_per_batch)
-
-    # Ensure dataset has no injections:
-    dataset_args["num_examples_per_batch"] = num_examples_per_batch
-    dataset_args["waveform_generators"] = []
-    dataset_args["output_variables"] = []
-    dataset_args["steps_per_epoch"] = num_batches
-    dataset_args["group"] = "test"  # Use test data split for validation
-
-    # Initialize generator:
-    dataset = gf.Dataset(
-            **dataset_args
-        )
-
-    callbacks = []
-    if heart is not None:
-        callbacks += [gf.HeartbeatCallback(heart)]
-        
-    # Predict the scores and get the second column ([:, 1]):
-
-    far_scores = None
-    while far_scores is None:
-        try:
-            verbose : int= 1
-            if gf.is_redirected():
-                verbose : int = 2
-
-            far_scores = model.predict(
-                dataset, 
-                steps=num_batches, 
-                callbacks=callbacks,
-                verbose=verbose
-            )
-
-            try:
-                far_scores = far_scores[:,1]  # Use signal+noise probability (column 1)
-            except:
-                raise Exception(f"Error slicing FAR scores: shape={far_scores.shape}")
-
-        except Exception as e:
-            logging.error("Error calculating FAR scores because {e}. Retrying.")
-            far_scores = None
-            continue
-
-    if file_path is not None:
-        with gf.open_hdf5_file(
-            file_path, 
-            logger, 
-            mode = "a"
-        ) as validation_file:
-
-            if "far_scores" not in validation_file:
-
-                logger.info("Saving FAR Scores!")
-
-                far_group = validation_file.create_group('far_scores')
-                far_group.create_dataset('scores', data=far_scores)
-
-    return far_scores
 
 import numpy as np
 from typing import Dict, Tuple
@@ -781,379 +555,6 @@ def roc_curve_and_auc(
 
 
 
-def calculate_roc(    
-        model: keras.Model,
-        dataset_args : dict,
-        num_examples_per_batch: int = 32,
-        num_examples: int = 1.0E5,
-        heart : gf.Heart = None
-    ) -> dict:
-    
-    """
-    Calculate the ROC curve for a given model.
-
-    Parameters
-    ----------
-    model : tf.keras.Model
-        The model used to predict FAR scores.
-    dataset_args : dict
-        Dictionary containing options for dataset generator.        
-    num_examples_per_batch : int, optional
-        The number of examples per batch, default is 32.
-    num_examples : float, optional
-        The total number of examples to be used, default is 1E5.
-    
-    Returns
-    -------
-    roc_data : dict
-        Dict containing {"fpr" : fpr, "tpr" : tpr, "auc" : auc}
-    where:
-    
-    fpr : np.ndarray
-        An array of false positive rates
-    tpr : np.ndarray
-        An array of true positive rates
-    auc : float
-        The area under the roc curve
-    """
-        
-    # Make copy of generator args so original is not affected:
-    dataset_args = deepcopy(dataset_args)
-    
-    # Integer arguments are integers:
-    num_examples = int(num_examples)
-    num_examples_per_batch = int(num_examples_per_batch)
-    
-    # Calculate number of batches required given batch size:
-    num_batches = math.ceil(num_examples / num_examples_per_batch)
-    
-    #Ensure injection generators is list for subsequent logic:
-    if not isinstance(dataset_args["waveform_generators"], list):
-        dataset_args["waveform_generators"] = \
-            [dataset_args["waveform_generators"]]
-    
-    # Ensure dataset has balanced injections:
-    dataset_args["num_examples_per_batch"] = num_examples_per_batch
-    dataset_args["output_variables"] = [gf.ReturnVariables.INJECTION_MASKS]
-    dataset_args["waveform_generators"][0].injection_chance = 0.5
-    dataset_args["steps_per_epoch"] = num_batches
-    dataset_args["group"] = "test"  # Use test data split for validation
-    
-    mask_history = []
-    # Initialize generators
-    dataset = gf.Dataset(
-            **dataset_args,
-            mask_history=mask_history
-        )
-    
-    callbacks = []
-    if heart is not None:
-        callbacks += [gf.HeartbeatCallback(heart)]
-
-    # Get the model predictions and true labels via manual iteration
-    y_scores_list = []
-    y_true_list = []
-    
-    try:
-        verbose = 1
-        if gf.is_redirected():
-            verbose = 2
-            
-        # Manual iteration to capture y_true
-        for _ in range(num_batches):
-            x, y = dataset[0] # Get a batch
-            scores = model.predict_on_batch(x)
-            y_scores_list.append(scores)
-            y_true_list.append(y[gf.ReturnVariables.INJECTION_MASKS.name])
-            
-            if heart is not None:
-                heart.beat()
-                
-    except Exception as e:
-        logging.error(f"Error calculating ROC scores because {e}!")
-        return {'fpr': np.array([]), 'tpr': np.array([]), 'roc_auc': 0.0}
-
-    y_scores = np.concatenate(y_scores_list)
-    y_true = np.concatenate(y_true_list).flatten()
-    
-    if len(y_scores.shape) > 1:
-        y_scores = y_scores[:, 1]  # Use signal+noise probability (column 1)
-
-    # Calculate size difference (should be zero if logic is correct)
-    size_a = y_true.size
-    size_b = y_scores.size
-    size_difference = size_a - size_b
-
-    # Resize tensor_a
-    if size_difference > 0:
-        y_true = y_true[:size_a - size_difference]
-    
-    # Calculate the ROC curve and AUC
-    fpr, tpr, roc_auc = roc_curve_and_auc(y_true, y_scores)
-    
-    # Warn if ROC AUC is suspiciously low
-    roc_auc_val = float(roc_auc)
-    if roc_auc_val < 0.6:
-        logging.warning(
-            f"LOW ROC AUC WARNING: AUC = {roc_auc_val:.3f} (expected > 0.6 for a working model). "
-            "An AUC near 0.5 indicates random-chance performance. "
-            "Check: 1) Model trained correctly? 2) Input preprocessing matches training? "
-            "3) Noise type compatible with training data?"
-        )
-    
-    return {'fpr': np.asarray(fpr), 'tpr': np.asarray(tpr), 'roc_auc': np.asarray(roc_auc)}
-
-def calculate_multi_rocs(    
-    model: keras.Model,
-    dataset_args : dict,
-    logger, 
-    file_path : Path = None,
-    num_examples_per_batch: int = 32,
-    num_examples: int = 1.0E5,
-    scaling_ranges: list = [
-        (8.0, 20.0),
-        8.0,
-        10.0,
-        12.0
-    ],
-    heart : gf.Heart = None
-    ) -> dict:
-
-    if file_path is not None:
-        with gf.open_hdf5_file(
-            file_path, 
-            logger, 
-            mode = "a"
-        ) as validation_file:
-
-            if "roc_data" not in validation_file:
-                logger.info("Saving ROC data keys.")
-                roc_group = validation_file.create_group('roc_data')
-            
-            if "keys" not in validation_file["roc_data"]:
-                keys_array = [str(item) for item in scaling_ranges]
-                string_dt = h5py.string_dtype(encoding='utf-8')
-                keys_array = np.array(keys_array, dtype=string_dt)
-                validation_file["roc_data"]["keys"]=keys_array
-        
-    roc_results = {}
-    for scaling_range in scaling_ranges:
-
-        # Make copy of generator args so original is not affected:
-        dataset_args = deepcopy(dataset_args)
-
-        range_name = str(scaling_range)
-
-        if file_path is not None:
-            with gf.open_hdf5_file(
-                file_path, 
-                logger, 
-                mode = "r"
-            ) as validation_file:
-
-                roc_data = dict(validation_file["roc_data"])
-
-                if f"{range_name}_fpr" in roc_data and \
-                    f"{range_name}_tpr" in roc_data and \
-                    f"{range_name}_roc_auc"  in roc_data:
-
-                    logger.info(f"Range group: {range_name} already present in validation file. Skipping!")
-
-                    roc_results[range_name] = {}
-                    roc_results[range_name]["fpr"] = np.array(roc_data[f"{range_name}_fpr"])
-                    roc_results[range_name]["tpr"] = np.array(roc_data[f"{range_name}_tpr"])
-                    roc_results[range_name]["roc_auc"] = np.array(roc_data[f"{range_name}_roc_auc"])[0]
-                    
-                    continue
-        
-        if isinstance(scaling_range, tuple):
-            scaling_disribution = gf.Distribution(
-                min_=scaling_range[0], 
-                max_=scaling_range[1],
-                type_=gf.DistributionType.UNIFORM
-            )
-        else:
-            scaling_disribution = gf.Distribution(
-                value=scaling_range, 
-                type_=gf.DistributionType.CONSTANT
-            )
-        #Ensure injection generators is list for subsequent logic:
-        if not isinstance(dataset_args["waveform_generators"], list):
-            dataset_args["waveform_generators"] = \
-                [dataset_args["waveform_generators"]]
-            
-        # Set desired injection scalings:
-        dataset_args["waveform_generators"][0].scaling_method.value = scaling_disribution
-        
-        roc_results[range_name] = \
-            calculate_roc(    
-                model,
-                dataset_args,
-                num_examples_per_batch,
-                num_examples,
-                heart
-            )
-
-        if file_path is not None:
-            with gf.open_hdf5_file(
-                file_path, 
-                logger, 
-                mode = "a"
-            ) as validation_file:
-
-                value = roc_results[range_name]
-
-                logger.info(f"Save roc data {range_name}!")
-
-                if f'roc_data/{range_name}_fpr' not in validation_file:
-                    logger.info(f"Save roc data {range_name}_fpr!")
-
-                    validation_file.create_dataset(
-                        f'roc_data/{range_name}_fpr', 
-                        data=value['fpr']
-                    )
-
-                if f'roc_data/{range_name}_tpr' not in validation_file:
-                    logger.info(f"Save roc data {range_name}_tpr!")
-
-                    validation_file.create_dataset(
-                        f'roc_data/{range_name}_tpr', 
-                        data=value['tpr']
-                    )
-
-                if f'roc_data/{range_name}_roc_auc' not in validation_file:
-                    validation_file.create_dataset(f'roc_data/{range_name}_roc_auc', data=np.array([value['roc_auc']]))
-
-        
-    return roc_results
-
-def calculate_tar_scores(
-        model : keras.Model, 
-        dataset_args : dict, 
-        num_examples_per_batch : int = 32,  
-        scaling_range : tuple = (8.0, 15.0),
-        num_examples : int = 1E5,
-        num_worst : int = 10,
-        heart : gf.Heart = None
-    ) -> np.ndarray:
-    
-    """
-    Calculate the True Alarm Rate (TAR) scores for a given model.
-    Uses streaming approach to avoid storing all data in memory.
-
-    Parameters
-    ----------
-    model : keras.Model
-        The model used to predict scores.
-    dataset_args : dict
-        Dictionary containing options for dataset generator.
-    scaling_range : tuple
-        (min_snr, max_snr) for injection SNR distribution.
-    num_examples : int
-        The total number of examples to evaluate.
-    num_worst : int
-        Number of worst performers to return.
-    
-    Returns
-    -------
-    tar_scores : np.ndarray
-        The calculated TAR scores.
-    worst_performers : list
-        List of dicts containing data for worst performing samples.
-    """
-    import heapq
-    
-    # Make copy of generator args so original is not affected:
-    dataset_args = deepcopy(dataset_args)
-    
-    # Integer arguments:
-    num_examples = int(num_examples)
-    num_examples_per_batch = int(num_examples_per_batch)
-    num_batches = math.ceil(num_examples / num_examples_per_batch)
-    
-    # Ensure injection generators is list:
-    if not isinstance(dataset_args["waveform_generators"], list):
-        dataset_args["waveform_generators"] = [dataset_args["waveform_generators"]]
-    
-    # Configure dataset for worst performers extraction:
-    dataset_args["num_examples_per_batch"] = num_examples_per_batch
-    dataset_args["output_variables"] = [
-        gf.ReturnVariables.WHITENED_ONSOURCE,
-        gf.ReturnVariables.WHITENED_INJECTIONS,
-        gf.ReturnVariables.GPS_TIME,
-        gf.ScalingTypes.SNR,
-        gf.WaveformParameters.MASS_1_MSUN,
-        gf.WaveformParameters.MASS_2_MSUN
-    ]
-    dataset_args["waveform_generators"][0].injection_chance = 1.0
-    
-    # Use a range of SNRs - lower SNR samples are more challenging
-    min_snr, max_snr = scaling_range
-    dataset_args["waveform_generators"][0].scaling_method.value = \
-        gf.Distribution(
-            min_=min_snr,
-            max_=max_snr,
-            type_=gf.DistributionType.UNIFORM
-        )
-    dataset_args["steps_per_epoch"] = num_batches
-    dataset_args["group"] = "test"  # Use test data split for validation
-    
-    # Initialize dataset:
-    dataset = gf.Dataset(**dataset_args)
-    
-    # Use a max-heap to keep track of worst performers (lowest scores)
-    # We use negative scores because heapq is a min-heap
-    # Heap entries: (-score, counter, data_dict) - counter prevents dict comparison
-    worst_heap = []
-    all_scores = []
-    counter = 0  # Unique counter to break ties in heap comparison
-    
-    try:
-        for batch_idx in range(num_batches):
-            x, y = dataset[batch_idx]
-            scores = model.predict_on_batch(x)
-            
-            # Extract signal probability
-            if len(scores.shape) > 1:
-                batch_scores = scores[:, 1]
-            else:
-                batch_scores = scores
-            
-            all_scores.append(batch_scores)
-            
-            # Process each sample in batch
-            for sample_idx in range(len(batch_scores)):
-                score = float(batch_scores[sample_idx])
-                
-                # Check if this is a candidate for worst performers
-                if len(worst_heap) < num_worst:
-                    # Still building up the heap, add this sample
-                    element = _extract_sample_data(x, y, sample_idx, score)
-                    heapq.heappush(worst_heap, (-score, counter, element))
-                    counter += 1
-                elif score < -worst_heap[0][0]:  # score < current max in heap
-                    # This is worse than the best of our current worst
-                    element = _extract_sample_data(x, y, sample_idx, score)
-                    heapq.heapreplace(worst_heap, (-score, counter, element))
-                    counter += 1
-            
-            if heart is not None:
-                heart.beat()
-
-    except Exception as e:
-        logging.error(f"Error calculating TAR score: {e}")
-        return np.array([]), []
-            
-    tar_scores = np.concatenate(all_scores)
-    
-    # Extract worst performers from heap (sorted by score ascending)
-    worst_performers = []
-    sorted_worst = sorted(worst_heap, key=lambda x: x[0], reverse=True)  # Most negative first = lowest score
-    for neg_score, counter, element in sorted_worst:
-        worst_performers.append(element)
-        
-    return tar_scores, worst_performers
-
 
 def _extract_sample_data(x_batch, y_batch, sample_idx, score):
     """Extract data for a single sample from batch for worst performers."""
@@ -1183,270 +584,6 @@ def _extract_sample_data(x_batch, y_batch, sample_idx, score):
     element["score"] = score
     return element
 
-def check_equal_duration(
-    validators : list
-    ):
-    
-    if not validators:  # Check if list is empty
-        return
-
-    # Take the input_duration_seconds property of the first object as reference
-    reference_duration = validators[0].input_duration_seconds
-
-    for validator in validators[1:]:  # Start from the second object
-        if validator.input_duration_seconds != reference_duration:
-            raise ValueError(
-                "All validators do not have the same input_duration_seconds "
-                "property value."
-            )
-
-def generate_efficiency_scatter_plot(
-    bank: UnifiedValidationBank,
-    colors: List[str] = Bright[7],
-    width: int = 800,
-    height: int = 500,
-    downsample_points: int = 5000
-):
-    """
-    Generate efficiency scatter plot with fitted curve and confidence bands.
-    
-    Shows all (SNR, score) points as scatter, with sigmoid fit and ±1σ bands.
-    
-    Args:
-        bank: UnifiedValidationBank with generated data
-        colors: Color palette
-        downsample_points: Max scatter points to render (for performance)
-    """
-    efficiency_data = bank.get_efficiency_data()
-    
-    snrs = efficiency_data["snrs"]
-    scores = efficiency_data["scores"]
-    fit_snrs = efficiency_data["fit_snrs"]
-    fit_efficiency = efficiency_data["fit_efficiency"]
-    bin_centers = efficiency_data["bin_centers"]
-    bin_means = efficiency_data["bin_means"]
-    bin_stds = efficiency_data["bin_stds"]
-    
-    p = figure(
-        title="Detection Efficiency vs SNR",
-        x_axis_label="Signal-to-Noise Ratio (SNR)",
-        y_axis_label="Detection Score",
-        width=width,
-        height=height,
-        tools="pan,box_zoom,wheel_zoom,reset,hover"
-    )
-    
-    # Downsample scatter points for performance
-    if len(snrs) > downsample_points:
-        idx = np.random.choice(len(snrs), downsample_points, replace=False)
-        plot_snrs = snrs[idx]
-        plot_scores = scores[idx]
-    else:
-        plot_snrs = snrs
-        plot_scores = scores
-    
-    # Scatter plot of all points (semi-transparent)
-    scatter_source = ColumnDataSource(data=dict(x=plot_snrs, y=plot_scores))
-    p.circle(
-        x="x", y="y", source=scatter_source,
-        size=3, alpha=0.1, color=colors[0],
-        legend_label="Samples"
-    )
-    
-    # Confidence band (±1σ)
-    if len(bin_centers) > 1:
-        upper = bin_means + bin_stds
-        lower = np.maximum(bin_means - bin_stds, 0)
-        
-        band_x = np.concatenate([bin_centers, bin_centers[::-1]])
-        band_y = np.concatenate([upper, lower[::-1]])
-        
-        p.patch(
-            band_x, band_y,
-            fill_alpha=0.2, fill_color=colors[1],
-            line_alpha=0, legend_label="±1σ Band"
-        )
-    
-    # Bin means as points
-    if len(bin_centers) > 0:
-        means_source = ColumnDataSource(data=dict(x=bin_centers, y=bin_means))
-        p.circle(
-            x="x", y="y", source=means_source,
-            size=10, color=colors[1], alpha=0.8,
-            legend_label="Bin Means"
-        )
-    
-    # Fitted curve
-    if len(fit_snrs) > 0:
-        fit_source = ColumnDataSource(data=dict(x=fit_snrs, y=fit_efficiency))
-        p.line(
-            x="x", y="y", source=fit_source,
-            line_width=3, color=colors[2],
-            legend_label="Sigmoid Fit"
-        )
-    
-    p.legend.location = "bottom_right"
-    p.legend.click_policy = "hide"
-    
-    # Add hover tool info
-    hover = p.select_one(HoverTool)
-    hover.tooltips = [("SNR", "@x{0.1f}"), ("Score", "@y{0.3f}")]
-    
-    return p
-
-
-def generate_efficiency_curves(
-        validators : list,
-        fars : np.ndarray,
-        colors : List[str] = Bright[7],
-        width : int = 800,
-        height : int = 600
-    ):
-
-    colors = cycle(colors)
-    
-    # Check input durations are equal:
-    check_equal_duration(validators)
-    
-    # Unpack values:
-    input_duration_seconds = validators[0].input_duration_seconds
-
-    p = figure(
-        #title = "Efficiency Curves",
-        width=width,
-        height=height,
-        x_axis_label="SNR",
-        y_axis_label="Accuracy (Per Cent)",
-        y_range=(0.0, 100.0)  # Set y-axis bounds here
-    )
-
-    # Set the initial plot title
-    far_keys = list(fars)
-    
-    legend_items = []
-    all_sources = {}
-    acc_data = {}
-    
-    model_names = []
-    
-    for index, (validator, color) in enumerate(zip(validators, colors)):
-        
-        thresholds = calculate_far_score_thresholds(
-            validator.far_scores, 
-            input_duration_seconds, 
-            fars
-        )
-        
-        # Unpack arrays:
-        scores = validator.efficiency_data["scores"]
-        scalings = validator.efficiency_data["scalings"]
-        name = validator.name
-
-        if name is not None:
-            title = gf.snake_to_capitalized_spaces(name)
-        else:
-            name = index
-            title = f"default_{index}"
-        
-        model_names.append(title)
-        
-        acc_all_fars = []
-        
-        for far_index, far in enumerate(thresholds.keys()):
-            threshold = thresholds[far][1]
-            actual_far = thresholds[far][0]
-            acc = []
-
-            for score in scores:
-                score = score[:, 1]  # Use signal+noise probability (column 1)
-                if threshold != 0:
-                    total = np.sum(score >= threshold)
-                else:
-                    total = np.sum(score > threshold)
-                                        
-                acc.append((total / len(score)) * 100)
-            
-            acc_all_fars.append(acc)
-                
-        acc_data[name] = acc_all_fars
-        source = ColumnDataSource(
-            data=dict(x=scalings, y=acc_all_fars[0], name=[title] * len(scalings))
-        )
-        all_sources[name] = source
-        line = p.line(
-            x='x', 
-            y='y', 
-            source=source, 
-            line_width=2, 
-            line_color=color
-        )
-        legend_items.append((title, [line]))
-
-    legend = Legend(items=legend_items, location="top_left")
-    p.add_layout(legend)
-    p.legend.click_policy = "hide"
-    p.legend.label_text_font_size = "12pt"
-
-    # Increase font sizes
-    p.axis.axis_label_text_font_size = "14pt"  # Increase axis label font size
-    p.axis.major_label_text_font_size = "12pt"  # Increase tick label font size
-
-    # If you have titles
-    p.title.text_font_size = '16pt'
-
-    hover = HoverTool()
-    hover.tooltips = [("Name", "@name"), ("SNR", "@x"), ("Accuracy (Per Cent)", "@y")]
-    p.add_tools(hover)
-
-    slider = Slider(
-        start=0, 
-        end=len(fars) - 1, 
-        value=0,
-        step=1, 
-        title=f"False Alarm Rate (FAR): {far_keys[0]}"
-    )
-    slider.background = 'white'
-
-    callback = CustomJS(args=dict(
-        slider=slider, 
-        sources=all_sources, 
-        plot_title=p.title, 
-        acc_data=acc_data,
-        thresholds=thresholds,
-        model_names=model_names, 
-        far_keys=far_keys
-    ), code="""
-        const far_index = slider.value;
-        const far_value = far_keys[far_index];
-        
-        for (const key in sources) {
-            if (sources.hasOwnProperty(key)) {
-                const source = sources[key];
-                source.data.y = acc_data[key][far_index];
-                source.change.emit();
-            }
-        }
-    """)             
-    slider.js_on_change('value', callback)
-
-    # Add a separate callback to update the slider's title
-    slider_title_callback = \
-        CustomJS(
-            args=dict(
-                slider=slider, 
-                far_keys=far_keys
-            ), 
-            code = \
-            """
-                const far_index = slider.value;
-                const far_value = far_keys[far_index];
-                slider.title = 'False Alarm Rate (FAR): ' + far_value;
-            """
-    )
-    slider.js_on_change('value', slider_title_callback)
-    
-    return p, slider
-    
 def downsample_data(x, y, num_points):
     """
     Downsample x, y data to a specific number of points using linear 
@@ -1717,13 +854,13 @@ def generate_waveform_plot(
 
     from datetime import datetime, timedelta
     from bokeh.layouts import column, row
+    import pandas as pd
     
     # Don't use cycle - we index directly into colors list
     if not isinstance(colors, (list, tuple)):
         colors = list(colors)
     
     # Extract and flatten data for plotting
-    # Data may have shape (detectors, samples) or just (samples,)
     onsource_data = np.array(data[gf.ReturnVariables.WHITENED_ONSOURCE.name])
     injection_data = np.array(data[gf.ReturnVariables.WHITENED_INJECTIONS.name])
     
@@ -1733,13 +870,17 @@ def generate_waveform_plot(
     if injection_data.ndim > 1:
         injection_data = injection_data.flatten() if injection_data.shape[0] == 1 else injection_data[0]
     
+    # Cast onsource to float32 for Datashader (avoids float16 error)
+    onsource_data = onsource_data.astype(np.float32)
+    # Cast injection to float64 for Bokeh/JS compatibility (avoids serialization/browser errors)
+    injection_data = injection_data.astype(np.float64)
+    
     # Helper to extract scalar value from data
     def get_scalar(key, default=None):
         val = data.get(key, default)
         if val is None:
             return default
         try:
-            # Convert to numpy array first for consistent handling
             arr = np.asarray(val)
             if arr.ndim == 0:
                 return float(arr)
@@ -1747,19 +888,16 @@ def generate_waveform_plot(
                 return float(arr.flatten()[0])
             else:
                 return default
-        except (TypeError, ValueError, IndexError):
-            # Fallback for non-numeric types
-            try:
-                return float(val)
-            except:
-                return default
+        except:
+             return default
     
     # Extract parameters
     mass1 = get_scalar(gf.WaveformParameters.MASS_1_MSUN.name, 0)
     mass2 = get_scalar(gf.WaveformParameters.MASS_2_MSUN.name, 0)
     score = get_scalar('score', 0)
     snr = get_scalar(gf.ScalingTypes.SNR.name)
-    gps_time = get_scalar(gf.ReturnVariables.GPS_TIME.name)
+    GPS_TIME_KEY = gf.ReturnVariables.GPS_TIME.name
+    gps_time = get_scalar(GPS_TIME_KEY)
     
     # Convert GPS to human readable (approximate - ignores leap seconds)
     human_time = "N/A"
@@ -1772,53 +910,9 @@ def generate_waveform_plot(
         except:
             human_time = "Error"
     
-    # Build info panel HTML
-    info_items = []
-    info_items.append(f"<b>Score:</b> {score:.3f}")
-    if snr is not None:
-        info_items.append(f"<b>SNR:</b> {snr:.1f}")
-    if gps_time is not None:
-        info_items.append(f"<b>GPS:</b> {gps_time:.1f}")
-        info_items.append(f"<b>Time:</b> {human_time}")
-    if mass1 > 0:
-        info_items.append(f"<b>M₁:</b> {mass1:.1f} M☉")
-    if mass2 > 0:
-        info_items.append(f"<b>M₂:</b> {mass2:.1f} M☉")
-    if mass1 > 0 and mass2 > 0:
-        chirp_mass = ((mass1 * mass2) ** 0.6) / ((mass1 + mass2) ** 0.2)
-        info_items.append(f"<b>Mchirp:</b> {chirp_mass:.1f} M☉")
-    
-    # Add any other WaveformParameters found in data
-    extra_params = [
-        (gf.WaveformParameters.INCLINATION_RADIANS.name, "Inclination", "rad"),
-        (gf.WaveformParameters.DISTANCE_MPC.name, "Distance", "Mpc"),
-    ]
-    for param_name, label, unit in extra_params:
-        val = get_scalar(param_name)
-        if val is not None:
-            info_items.append(f"<b>{label}:</b> {val:.2f} {unit}")
-    
-    info_html = "<br>".join(info_items)
-    info_panel = Div(
-        text=f"""
-        <div style="
-            background: #f8f9fa; 
-            padding: 12px; 
-            border-radius: 6px; 
-            border: 1px solid #dee2e6;
-            font-size: 11px;
-            line-height: 1.6;
-            min-width: 150px;
-            max-width: 200px;
-        ">
-            <div style="font-weight: bold; margin-bottom: 8px; border-bottom: 1px solid #dee2e6; padding-bottom: 4px;">
-                Injection Parameters
-            </div>
-            {info_html}
-        </div>
-        """,
-        width=200
-    )
+    # Create time axis
+    num_samples = len(onsource_data)
+    time = np.linspace(0, onsource_duration_seconds, num_samples)
     
     p = figure(
         title="Worst Performing Input",
@@ -1827,47 +921,47 @@ def generate_waveform_plot(
         width=600, 
         height=300
     )
-    
-    # Create time axis
-    num_samples = len(onsource_data)
-    time = np.linspace(0, onsource_duration_seconds, num_samples)
-    
+
+    # Plot Onsource Noise (Full Resolution, Standard Bokeh)
     source = ColumnDataSource(
         data=dict(
             x=time, 
             y=onsource_data
         )
     )
-    line = p.line(
+    p.line(
         x='x', 
         y='y', 
         source=source,
         color=colors[0], 
-        width=2, 
+        width=1,  # Thinner line for dense noise
         legend_label='Whitened Strain + Injection'
     )
-        
-    source = ColumnDataSource(
-        data=dict(
-            x=time,
-            y=injection_data
-        )
-    )
-    line = p.line(
-        x='x', 
-        y='y', 
-        source=source,
-        color=colors[1], 
-        width=2, 
-        legend_label='Whitened Injection'
-    )
+
+    # Now add the interactive lines (Injection) using standard Bokeh
+    # These remain as vectors so they are sharp and interact fast with JS
     
-    # Add scaled injection with interactive slider
+    # Downsample injection data for client-side plotting (reduce HTML size)
+    MAX_DISPLAY_POINTS = 1500
+    if len(injection_data) > MAX_DISPLAY_POINTS:
+        # Simple decimation is sufficient for visual line inspection
+        step = int(np.ceil(len(injection_data) / MAX_DISPLAY_POINTS))
+        injection_plot = injection_data[::step]
+        time_plot = time[::step]
+    else:
+        injection_plot = injection_data
+        time_plot = time
+
+    # Injection Line (Static)
+    source_inj = ColumnDataSource(data=dict(x=time_plot, y=injection_plot))
+    p.line(x='x', y='y', source=source_inj, color=colors[1], width=2, legend_label='Whitened Injection')
+    
+    # Scaled Injection Line (Interactive)
     scaled_source = ColumnDataSource(
         data=dict(
-            x=time, 
-            y=injection_data,  # Store unscaled, scale via JS
-            y_original=injection_data.copy()  # Keep original for scaling
+            x=time_plot, 
+            y=injection_plot, 
+            y_original=injection_plot.copy()
         )
     )
     scaled_line = p.line(
@@ -1879,16 +973,13 @@ def generate_waveform_plot(
         legend_label='Scaled Injection'
     )
     
-    # Create slider for injection scale
-    scale_slider = Slider(
-        start=1, 
-        end=50, 
-        value=20, 
-        step=1, 
-        title="Injection Scale"
-    )
+    # Add hover tool for scaled injection
+    hover = HoverTool(renderers=[scaled_line], tooltips=[("Time", "@x{0.000}"), ("Strain", "@y")])
+    p.add_tools(hover)
     
-    # JavaScript callback to update scaled injection
+    # Create slider for injection scale
+    scale_slider = Slider(start=1, end=2, value=1, step=1, title="Injection Scale")
+    
     scale_callback = CustomJS(
         args=dict(source=scaled_source, slider=scale_slider),
         code="""
@@ -1913,9 +1004,214 @@ def generate_waveform_plot(
     p.axis.major_label_text_font_size = "10pt"
     p.title.text_font_size = '14pt'
     
-    # Return plot with slider and info panel in a row layout
-    plot_column = column(scale_slider, p)
-    return row(plot_column, info_panel)
+    # Info Panel
+    info_items = []
+    info_items.append(f"<b>Score:</b> {score:.3f}")
+    if snr: info_items.append(f"<b>SNR:</b> {snr:.1f}")
+    if gps_time is not None:
+        info_items.append(f"<b>GPS:</b> {gps_time:.1f}")
+        info_items.append(f"<b>Time:</b> {human_time}")
+    if mass1: info_items.append(f"<b>M₁:</b> {mass1:.1f} M☉")
+    if mass2: info_items.append(f"<b>M₂:</b> {mass2:.1f} M☉")
+    
+    info_html = "<br>".join(info_items)
+    info_panel = Div(
+        text=f"""<div style="background:#f8f9fa;padding:12px;border:1px solid #dee2e6;font-size:11px;">
+            <b>Parameters</b><br>{info_html}</div>""",
+        width=200
+    )
+    
+    return row(column(scale_slider, p), info_panel)
+
+def generate_efficiency_plot(
+    validators: list,
+    fars: List[float] = [1e-1, 1e-2, 1e-3, 1e-4],
+    colors: List[str] = Bright[7],
+    width: int = 800,
+    height: int = 600
+):
+    """
+    Generate interactive efficiency plot with slider for FAR.
+    Calculates efficiency curves (Recall vs SNR) for each FAR.
+    """
+    colors = cycle(colors)
+    
+    p = figure(
+        #title="Efficiency vs SNR",
+        x_axis_label="SNR",
+        y_axis_label="Efficiency (Recall) / Score",
+        y_range=(0, 1.05),
+        width=width,
+        height=height,
+        tools="pan,box_zoom,wheel_zoom,reset,hover"
+    )
+    
+    # Add Datashaded Scatter of Scores (Background)
+    all_snrs = []
+    all_scores = []
+    # Collect data from all validators
+    for validator in validators:
+        if validator.efficiency_data:
+             all_snrs.append(validator.efficiency_data["snrs"])
+             all_scores.append(validator.efficiency_data["scores"])
+    
+    if all_snrs:
+        combined_snrs = np.concatenate(all_snrs).astype(np.float32)
+        combined_scores = np.concatenate(all_scores).astype(np.float32)
+        
+        # Use HoloViews for datashading
+        points = hv.Points((combined_snrs, combined_scores))
+        shaded = datashade(points, cmap=["grey"]) # Grey background for scores
+        
+        # Overlay datashaded image
+        # Note: hv.render creates a new figure, but we want to put it into 'p'.
+        # Actually simplest is to render the shaded object to a figure properties, 
+        # OR use hv.render(shaded, backend='bokeh') and extract the renderer.
+        # BUT getting the renderer out is tricky.
+        # EASIER: Use hv.save scheme? No.
+        # PROPER WAY: Use hv.render to get a figure, then add our lines to THAT figure.
+        
+        # Re-create figure from HoloViews
+        p = hv.render(shaded.opts(width=width, height=height, xlim=(0, 20), ylim=(0, 1.05)), backend='bokeh')
+        p.xaxis.axis_label = "SNR"
+        p.yaxis.axis_label = "Efficiency (Recall) / Score"
+        p.tools += [HoverTool()] # Re-add hover since render might reset tools
+
+    hover = p.select_one(HoverTool)
+    if hover:
+        hover.tooltips = [("SNR", "@x{0.1f}"), ("Efficiency", "@y{0.3f}")]
+    else:
+         # Fallback if select_one failed
+         hover = HoverTool(tooltips=[("SNR", "@x{0.1f}"), ("Efficiency", "@y{0.3f}")])
+         p.add_tools(hover)
+    
+    all_data = {}
+    sources = {}
+    all_thresholds = {}
+    thresh_sources = {}
+    initial_far = fars[0]
+    
+    for i, (validator, color) in enumerate(zip(validators, colors)):
+        name = validator.name or f"Model {i}"
+        
+        if validator.efficiency_data is None or validator.far_scores is None:
+            continue
+            
+        snrs = validator.efficiency_data["snrs"]
+        scores = validator.efficiency_data["scores"]
+        far_scores = validator.far_scores
+        
+        # Calculate thresholds for requested FARs
+        thresholds = calculate_far_score_thresholds(
+            far_scores,
+            validator.input_duration_seconds,
+            np.array(fars)
+        )
+        
+        # Binning setup
+        min_snr = np.floor(snrs.min())
+        max_snr = np.ceil(snrs.max())
+        bin_width = 1.0
+        bins = np.arange(min_snr, max_snr + bin_width, bin_width)
+        bin_centers = 0.5 * (bins[:-1] + bins[1:])
+        
+        model_curves = {}
+        
+        for far in fars:
+            if far not in thresholds:
+                continue
+                
+            thresh = thresholds[far][1]
+            recalls = []
+            valid_centers = []
+            
+            for b_idx in range(len(bins)-1):
+                b_min, b_max = bins[b_idx], bins[b_idx+1]
+                mask = (snrs >= b_min) & (snrs < b_max)
+                if np.sum(mask) > 10:
+                    recall = np.mean(scores[mask] > thresh)
+                    recalls.append(recall)
+                    valid_centers.append(bin_centers[b_idx])
+            
+            try:
+                def sigmoid(x, x0, k): return 1 / (1 + np.exp(-k * (x - x0)))
+                popt, _ = curve_fit(sigmoid, valid_centers, recalls, p0=[10, 1], maxfev=5000)
+                x_fit = np.linspace(min_snr, max_snr, 100)
+                y_fit = sigmoid(x_fit, *popt)
+                model_curves[f"{far:.1e}"] = {"x": x_fit, "y": y_fit}
+            except:
+                 model_curves[f"{far:.1e}"] = {"x": valid_centers, "y": recalls}
+
+        all_data[name] = model_curves
+        
+        # Store thresholds for this validator
+        thresh_map = {}
+        for far in fars:
+            if far in thresholds:
+                thresh_map[f"{far:.1e}"] = thresholds[far][1]
+            else:
+                thresh_map[f"{far:.1e}"] = 0.0 # Should not happen if filtered
+        
+        all_thresholds[name] = thresh_map
+        
+        init_curve = model_curves.get(f"{initial_far:.1e}", {"x": [], "y": []})
+        source = ColumnDataSource(data=dict(x=init_curve["x"], y=init_curve["y"]))
+        sources[name] = source
+        
+        p.line(
+            x='x', y='y', source=source,
+            line_width=3, color=color, legend_label=name
+        )
+        
+        # Add dynamic threshold line
+        init_thresh = thresh_map.get(f"{initial_far:.1e}", 0.0)
+        thresh_source = ColumnDataSource(data=dict(x=[0, 20], y=[init_thresh, init_thresh]))
+        thresh_sources[name] = thresh_source
+        
+        p.line(
+            x='x', y='y', source=thresh_source,
+            line_width=2, color=color, line_dash='dashed', alpha=0.7,
+            legend_label=f"{name} Threshold"
+        )
+    
+    p.legend.location = "bottom_right"
+    p.legend.click_policy = "hide"
+    
+    far_options = [f"{f:.1e}" for f in fars]
+    slider = Slider(
+        start=0, 
+        end=len(far_options)-1, 
+        value=0, 
+        step=1, 
+        title=f"False Alarm Rate (FAR): {far_options[0]}"
+    )
+    
+    code = """
+        const far_index = cb_obj.value;
+        const far_val = far_options[far_index];
+        cb_obj.title = "False Alarm Rate (FAR): " + far_val;
+        
+        for (const name in sources) {
+            const source = sources[name];
+            const data = all_data[name][far_val];
+            if (data) {
+                source.data.x = data.x;
+                source.data.y = data.y;
+                source.change.emit();
+            }
+            
+            // Update threshold line
+            const thresh_source = thresh_sources[name];
+            const thresh = all_thresholds[name][far_val];
+            if (thresh_source && thresh !== undefined) {
+                thresh_source.data.y = [thresh, thresh];
+                thresh_source.change.emit();
+            }
+        }
+    """
+    slider.js_on_change('value', CustomJS(args=dict(sources=sources, all_data=all_data, far_options=far_options, thresh_sources=thresh_sources, all_thresholds=all_thresholds), code=code))
+    
+    return p, slider
 
 class Validator:
     
@@ -1925,550 +1221,197 @@ class Validator:
         model : keras.Model, 
         name : str,
         dataset_args : dict,
-        num_examples_per_batch : int = None,
-        efficiency_config : dict = \
-        {
-            "max_scaling" : 20.0, 
-            "num_scaling_steps" : 21, 
-            "num_examples_per_scaling_step" : 2048
-        },
-        far_config : dict = \
-        {
-            "num_seconds" : 1.0E5
-        },
-        roc_config : dict = \
-        {
-            "num_examples" : 1.0E5,
-            "scaling_ranges" :  [
-                (8.0, 20),
-                8.0,
-                10.0,
-                12.0
-            ]    
-        },
-        tar_config : dict = \
-        {
-            "scaling_range" : (4.5, 15.0),  # SNR range for finding challenging samples
-            "num_examples" : 1.0E5,
-            "num_worst" : 10
-        },
+        config: ValidationConfig = None,
         checkpoint_file_path : Path = None,
         logging_level : int = logging.INFO,
-        heart : gf.Heart = None
+        heart : gf.Heart = None,
+        **kwargs # Absorb legacy kwargs
     ):
-        if num_examples_per_batch is None:
-            num_examples_per_batch = gf.Defaults.num_examples_per_batch
-
-        # Save model title: 
-        if isinstance(name, Path):
-            name = name.name
-
-        if not isinstance(name, str):
-            raise ValueError("Requires model name!")
-
-        validator = cls()
-
-        # Initiate logging:
-        validator.logger = logging.getLogger("validator")
-        stream_handler = logging.StreamHandler(sys.stdout)
-        validator.logger.addHandler(stream_handler)
-        validator.logger.setLevel(logging_level)
-
-        validator.efficiency_data = None
-        validator.far_scores = None
-        validator.roc_data = None
-
-        validator.name = name
-
-        if "onsource_duration_seconds" in dataset_args:
-            if dataset_args["onsource_duration_seconds"] is None:
-                validator.input_duration_seconds = gf.Defaults.onsource_duration_seconds
-            else:
-                validator.input_duration_seconds = dataset_args["onsource_duration_seconds"]
-        else: 
-            validator.input_duration_seconds = gf.Defaults.onsource_duration_seconds
-
-        if checkpoint_file_path is not None:
-
-            if checkpoint_file_path.exists():
-
-                validator = validator.load(
-                    checkpoint_file_path,
-                    logging_level=logging_level
-                )
-
-                if validator.name is None:
-                    if name is not None:
-                        validator.name = name
-                    else:
-                        validator.name = "Default"
-
-                    with gf.open_hdf5_file(
-                        checkpoint_file_path, 
-                        validator.logger, 
-                        mode = "w"
-                    ) as validation_file:
-
-                        if "name" not in validation_file:
-                            if validator.name is not None:
-                                validation_file.create_dataset('name', data=validator.name.encode())
-                            else:
-                                validation_file.create_dataset('name', data="default".encode())
-                       
-            else:
-
-                gf.ensure_directory_exists(checkpoint_file_path.parent)
-
-                with gf.open_hdf5_file(
-                        checkpoint_file_path, 
-                        validator.logger, 
-                        mode = "w"
-                    ) as validation_file:
-
-                    if "name" not in validation_file:
-                        if validator.name is not None:
-                            validation_file.create_dataset('name', data=validator.name.encode())
-                        else:
-                            validation_file.create_dataset('name', data="default".encode())
-
-                    if "input_duration_seconds" not in validation_file:             
-                        validation_file.create_dataset(
-                            'input_duration_seconds', 
-                            data=validator.input_duration_seconds
-                        )
-
-        validator.heart = heart
-        
-        # Calculate worst performing inputs (useful for debugging)
-        validator.worst_performers = None
-        if tar_config is not None:
-            validator.logger.info(f"Finding worst performing inputs for {validator.name}...")
-            tar_scores, worst_performers = \
-                calculate_tar_scores(
-                    model, 
-                    dataset_args, 
-                    num_examples_per_batch,
-                    heart=validator.heart,
-                    **tar_config
-                )
-            validator.worst_performers = worst_performers
-            validator.logger.info(f"Found {len(worst_performers)} worst performers")
-            
-            # Save worst performers to checkpoint file
-            if checkpoint_file_path is not None and len(worst_performers) > 0:
-                with gf.open_hdf5_file(
-                    checkpoint_file_path, 
-                    validator.logger, 
-                    mode = "a"
-                ) as validation_file:
-                    for idx, entry in enumerate(worst_performers):
-                        group_name = f'worst_performers_{idx}'
-                        if group_name not in validation_file:
-                            group = validation_file.create_group(group_name)
-                            for key, value in entry.items():
-                                if hasattr(value, '__array__'):
-                                    group.create_dataset(key, data=np.array(value))
-                                else:
-                                    group.create_dataset(key, data=value)
-
-        if validator.efficiency_data is None:   
-            validator.logger.info(f"Calculating efficiency scores for {validator.name}...")
-            validator.efficiency_data = \
-                calculate_efficiency_scores(
-                    model, 
-                    dataset_args,
-                    validator.logger,
-                    file_path=checkpoint_file_path,
-                    num_examples_per_batch=num_examples_per_batch,
-                    heart=validator.heart,
-                    **efficiency_config
-                )
-
-            validator.logger.info(f"Done")
-        else:
-            validator.logger.info("Validation file already contains efficiency scores! Loading...")
-
-        if (validator.far_scores is None):
-            validator.logger.info(f"Calculating FAR scores for {validator.name}...")
-            validator.far_scores = calculate_far_scores(
-                    model, 
-                    dataset_args, 
-                    validator.logger,
-                    file_path=checkpoint_file_path,
-                    num_examples_per_batch=num_examples_per_batch,  
-                    heart=validator.heart,
-                    **far_config
-                )
-            validator.logger.info(f"Done")
-        else:
-            validator.logger.info("Validation file already contains FAR scores! Loading...")
-        
-        validator.logger.info(f"Collecting ROC data for {validator.name}...")
-        validator.roc_data = calculate_multi_rocs(    
-                model,
-                dataset_args,
-                validator.logger,
-                file_path=checkpoint_file_path,
-                num_examples_per_batch=num_examples_per_batch,
-                heart=validator.heart,
-                **roc_config
-            )
-        validator.logger.info(f"Done")
-                
-        return validator
-
-    @classmethod
-    def validate_unified(
-        cls,
-        model: keras.Model,
-        name: str,
-        dataset_args: dict,
-        config: ValidationConfig = None,
-        checkpoint_file_path: Path = None,
-        logging_level: int = logging.INFO,
-        heart: gf.Heart = None
-    ):
-        """
-        Unified validation using single data bank.
-        
-        More efficient than validate() as it generates all data in one pass
-        and computes efficiency, TAR, and worst performers from the same data.
-        
-        Args:
-            model: Trained Keras model
-            name: Model name for display
-            dataset_args: Dataset configuration
-            config: ValidationConfig instance (uses defaults if None)
-            checkpoint_file_path: Path to save/load validation data
-            logging_level: Logging verbosity
-            heart: Heartbeat callback for progress monitoring
-        """
         validator = cls()
         
-        # Setup logging
         validator.logger = logging.getLogger("validator")
-        stream_handler = logging.StreamHandler(sys.stdout)
-        validator.logger.addHandler(stream_handler)
+        if not validator.logger.handlers:
+            stream_handler = logging.StreamHandler(sys.stdout)
+            validator.logger.addHandler(stream_handler)
         validator.logger.setLevel(logging_level)
         
-        validator.name = name if isinstance(name, str) else str(name)
+        validator.name = str(name) if name else "model"
         validator.config = config or ValidationConfig()
         
-        # Extract duration from dataset_args
         validator.input_duration_seconds = dataset_args.get(
             "onsource_duration_seconds", 
             gf.Defaults.onsource_duration_seconds
         )
         
-        # Create and generate unified bank
-        validator.logger.info(f"=== Unified Validation for {validator.name} ===")
+        validator.efficiency_data = None
+        validator.far_scores = None
+        validator.roc_data = None
+        validator.worst_performers = None
         
-        bank = UnifiedValidationBank(
+        if checkpoint_file_path and checkpoint_file_path.exists():
+            try:
+                validator = validator.load(checkpoint_file_path, logging_level)
+                if validator.efficiency_data is not None and validator.far_scores is not None:
+                    validator.config = config or ValidationConfig()
+                    validator.logger.info("Loaded complete validation data from checkpoint.")
+                    return validator
+            except Exception as e:
+                validator.logger.warning(f"Failed to load checkpoint: {e}. Regenerating.")
+        
+        bank = ValidationBank(
             model=model,
             dataset_args=dataset_args,
             config=validator.config,
             heart=heart,
             logger=validator.logger
         )
-        bank.generate()
         
-        # Store bank and extracted data
+        if validator.far_scores is None:
+            bank.generate_noise()
+            validator.far_scores = bank.far_scores
+            
+        if validator.efficiency_data is None:
+            bank.generate()
+            validator.efficiency_data = bank.get_efficiency_data()
+            validator.worst_performers = bank.get_worst_performers()
+            
+        validator.roc_data = bank.get_roc_curves()
+        
+        if checkpoint_file_path:
+            validator.save(checkpoint_file_path)
+            
         validator.bank = bank
-        validator.efficiency_data = bank.get_efficiency_data()
-        validator.worst_per_bin = bank.get_worst_performers()
-        
-        # Note: TAR@FAR requires noise-only samples which we don't have
-        # in the unified bank (injection_chance=1.0). For proper TAR,
-        # use separate calculate_far_scores + calculate_tar_scores.
-        validator.tar_data = None
-        
-        validator.logger.info("Unified validation complete!")
-        
         return validator
-    
-    def plot_unified(
-        self,
-        output_path: Path = None,
-        include_roc: bool = True, 
-        include_worst: bool = True
-    ):
-        """
-        Generate plots from unified validation results.
+
+    def save(self, file_path: Path):
+        self.logger.info(f"Saving validation data to {file_path}")
+        gf.ensure_directory_exists(file_path.parent)
         
-        Creates:
-        - Efficiency scatter plot with fitted curve
-        - Worst performers per SNR bin (in tabs)
-        - ROC curve (if available)
-        """
-        if not hasattr(self, 'bank'):
-            raise ValueError("Must run validate_unified() first")
+        with gf.open_hdf5_file(file_path, self.logger, mode="w") as f:
+            f.create_dataset('name', data=self.name.encode())
+            f.create_dataset('input_duration_seconds', data=self.input_duration_seconds)
+            
+            if self.efficiency_data:
+                g = f.create_group('efficiency_data')
+                g.create_dataset('snrs', data=self.efficiency_data['snrs'])
+                g.create_dataset('scores', data=self.efficiency_data['scores'])
+                
+            if self.far_scores is not None:
+                g = f.create_group('far_scores')
+                g.create_dataset('scores', data=self.far_scores)
+                
+            if self.roc_data:
+                g = f.create_group('roc_data')
+                keys = list(self.roc_data.keys())
+                g.create_dataset('keys', data=np.array([k.encode() for k in keys], dtype=h5py.string_dtype()))
+                for k, v in self.roc_data.items():
+                    sub = g.create_group(k)
+                    sub.create_dataset('fpr', data=v['fpr'])
+                    sub.create_dataset('tpr', data=v['tpr'])
+                    sub.create_dataset('roc_auc', data=v['roc_auc'])
+            
+            if self.worst_performers:
+                g = f.create_group('worst_performers')
+                for bin_key, samples in self.worst_performers.items():
+                    bg = g.create_group(bin_key)
+                    for i, sample in enumerate(samples):
+                        sg = bg.create_group(f"sample_{i}")
+                        for k, v in sample.items():
+                            if isinstance(v, np.ndarray):
+                                sg.create_dataset(k, data=v)
+                            else:
+                                sg.create_dataset(k, data=v)
+
+    @classmethod
+    def load(cls, file_path: Path, logging_level=logging.INFO):
+        validator = cls()
+        validator.logger = logging.getLogger("validator")
+        validator.logger.setLevel(logging_level)
         
-        tabs = []
+        with h5py.File(file_path, 'r') as f:
+            validator.name = f['name'][()].decode() if 'name' in f else "Unknown"
+            validator.input_duration_seconds = float(f['input_duration_seconds'][()]) if 'input_duration_seconds' in f else 1.0
+            
+            if 'efficiency_data' in f:
+                g = f['efficiency_data']
+                validator.efficiency_data = {
+                    "snrs": g['snrs'][:],
+                    "scores": g['scores'][:]
+                }
+            
+            if 'far_scores' in f:
+                validator.far_scores = f['far_scores']['scores'][:]
+                
+            if 'roc_data' in f:
+                g = f['roc_data']
+                validator.roc_data = {}
+                keys = [k.decode() for k in g['keys'][:]]
+                for k in keys:
+                    if k in g:
+                        sub = g[k]
+                        validator.roc_data[k] = {
+                            "fpr": sub['fpr'][:],
+                            "tpr": sub['tpr'][:],
+                            "roc_auc": float(sub['roc_auc'][()])
+                        }
+            
+            if 'worst_performers' in f:
+                g = f['worst_performers']
+                validator.worst_performers = {}
+                for bin_key in g:
+                    validator.worst_performers[bin_key] = []
+                    bg = g[bin_key]
+                    for sample_key in bg:
+                        sg = bg[sample_key]
+                        sample = {}
+                        for k in sg:
+                            sample[k] = sg[k][()]
+                        validator.worst_performers[bin_key].append(sample)
+
+        return validator
+
+    def plot(self, output_path: Path = None, comparison_validators: list = []):
+        """Generate validation dashboard."""
         
-        # Efficiency scatter plot
-        efficiency_plot = generate_efficiency_scatter_plot(self.bank)
-        tabs.append(("Efficiency", pn.pane.Bokeh(efficiency_plot)))
+        all_validators = comparison_validators + [self]
         
-        # Worst performers per SNR bin
-        if include_worst and self.worst_per_bin:
+        eff_plot, eff_slider = generate_efficiency_plot(
+            all_validators, 
+            fars=self.config.far_thresholds
+        )
+        far_plot = generate_far_curves(all_validators)
+        roc_plot, roc_select = generate_roc_curves(all_validators)
+        
+        tabs = pn.Tabs(
+            ("Efficiency", pn.Column(eff_slider, eff_plot)),
+            ("ROC Curves", pn.Column(roc_select, roc_plot)),
+            ("FAR Curves", far_plot)
+        )
+        
+        if self.worst_performers:
             worst_tabs = []
-            for bin_key, samples in self.worst_per_bin.items():
-                if samples:
-                    bin_plots = []
-                    for sample in samples[:5]:  # Limit to 5 per bin for display
-                        try:
-                            plot = generate_waveform_plot(
-                                sample,
-                                self.input_duration_seconds
-                            )
-                            bin_plots.append(pn.pane.Bokeh(plot))
-                        except Exception as e:
-                            self.logger.warning(f"Failed to plot sample: {e}")
-                    
-                    if bin_plots:
-                        worst_tabs.append((
-                            f"SNR {bin_key}",
-                            pn.Column(*bin_plots)
-                        ))
+            sorted_bins = sorted(self.worst_performers.keys(), key=lambda x: float(str(x).split('-')[0]) if '-' in str(x) else 0)
+            
+            for bin_key in sorted_bins:
+                samples = self.worst_performers[bin_key]
+                if not samples: continue
+                
+                plots = []
+                for sample in samples[:10]:
+                     try:
+                         plots.append(generate_waveform_plot(sample, self.input_duration_seconds))
+                     except Exception as e:
+                         self.logger.warning(f"Error plotting sample: {e}")
+                
+                if plots:
+                    worst_tabs.append((f"SNR {bin_key}", pn.Column(*plots)))
             
             if worst_tabs:
-                worst_panel = pn.Tabs(*worst_tabs)
-                tabs.append(("Worst Performers", worst_panel))
-        
-        # Build final dashboard
-        dashboard = pn.Tabs(*tabs)
-        
+                tabs.append(("Worst Performers", pn.Tabs(*worst_tabs)))
+                
         if output_path:
-            output_path = Path(output_path)
-            gf.ensure_directory_exists(output_path.parent)
-            dashboard.save(output_path)
-            self.logger.info(f"Saved unified validation report to {output_path}")
-        
-        return dashboard
-
-    def save(
-        self,
-        file_path : Path
-        ):
-
-        self.logger.info(f"Saving validation data for {self.name}...")
-
-        gf.ensure_directory_exists(file_path.parent)
-
-        with gf.open_hdf5_file(
-                file_path, 
-                self.logger, 
-                mode = "a"
-            ) as validation_file:
+            gf.ensure_directory_exists(Path(output_path).parent)
+            tabs.save(str(output_path), embed=True, resources='inline')
+            self.logger.info(f"Saved report to {output_path}")
             
-            # Unpack:
-            scalings = self.efficiency_data['scalings']
-            efficiency_scores = self.efficiency_data['scores']
-
-            if self.name is not None:
-                validation_file.create_dataset('name', data=self.name.encode())
-            else:
-                validation_file.create_dataset('name', data="default".encode())
-            
-            validation_file.create_dataset(
-                'input_duration_seconds', 
-                data=self.input_duration_seconds
-            )
-
-            # Save efficiency scores:
-            if efficiency_scores is not None:
-                eff_group = validation_file.create_group('efficiency_data')
-                eff_group.create_dataset(f'scalings', data=scalings)
-                for i, score in enumerate(efficiency_scores):
-                    eff_group.create_dataset(f'score_{i}', data=score)
-
-            # Save FAR scores
-            if self.far_scores is not None:
-                far_group = validation_file.create_group('far_scores')
-                far_group.create_dataset('scores', data=self.far_scores)
-
-            # Save ROC data:
-            if roc_data is not None:
-                roc_group = validation_file.create_group('roc_data')
-                roc_data = self.roc_data
-                keys_array = [str(item) for item in roc_data.keys()]
-
-                string_dt = h5py.string_dtype(encoding='utf-8')
-                keys_array = np.array(keys_array, dtype=string_dt)
-
-                roc_group.create_dataset('keys', data=keys_array)
-
-                for key, value in roc_data.items():
-                    roc_group.create_dataset(
-                        f'{key}_fpr', 
-                        data=value['fpr']
-                    )
-                    roc_group.create_dataset(
-                        f'{key}_tpr', 
-                        data=value['tpr']
-                    )
-                    roc_group.create_dataset(
-                        f'{key}_roc_auc', data=np.array([value['roc_auc']])
-                    )
-
-            if self.worst_performers is not None:         
-                worst_performers = self.worst_performers
-                
-                for idx, entry in enumerate(worst_performers):
-                    group = validation_file.create_group(f'worst_performers_{idx}')
-                    for key, value in entry.items():
-                        group.create_dataset(key, data=value)
-        
-            self.logger.info("Done.")
-        
-    @classmethod
-    def load(
-        cls, 
-        file_path: Path,
-        logging_level = logging.INFO
-    ):
-        # Create a new instance without executing any logic
-        validator = cls()
-
-        with h5py.File(file_path, 'r') as h5f:
-            # Check and load title:
-            validator.name = h5f['name'][()].decode() if 'name' in h5f else None
-
-            # Check and load input_duration_seconds
-            if 'input_duration_seconds' in h5f:
-                validator.input_duration_seconds = float(h5f['input_duration_seconds'][()])
-            else:
-                validator.input_duration_seconds = gf.Defaults.onsource_duration_seconds
-            
-            validator.logger = logging.getLogger("validator")
-            validator.logger.setLevel(logging_level)
-            validator.logger.info(f"Loading validation data for {validator.name}...")
-
-            # Check and load efficiency scores:
-            if 'efficiency_data' in h5f:
-                eff_group = h5f['efficiency_data']
-                efficiency_data = {
-                    'scalings': eff_group['scalings'][:] if 'scalings' in eff_group else None,
-                    'scores': [
-                        eff_group[f'score_{i}'][:] for i in range(len(eff_group) - 1)
-                    ] if all(f'score_{i}' in eff_group for i in range(len(eff_group) - 1)) else None
-                }
-            else:
-                efficiency_data = None
-
-            # Check and load FAR scores:
-            far_scores = h5f['far_scores']['scores'][:] if 'far_scores' in h5f and 'scores' in h5f['far_scores'] else None
-            
-            roc_data = {}
-            # Check and load ROC data:
-            if 'roc_data' in h5f:
-                roc_group = dict(h5f['roc_data'])
-                keys_array = roc_group['keys'][:] if 'keys' in roc_group else []
-
-                # Check if keys_array is not empty
-                for key in keys_array:
-                    key_str = key.decode('utf-8')
-
-                    # Check if all required metrics are present for the current key
-                    metrics_present = True
-                    for metric in ['fpr', 'tpr', 'roc_auc']:
-                        if f'{key_str}_{metric}' not in roc_group:
-                            metrics_present = False
-                            break
-
-                    if metrics_present:
-                        # All metrics are present, add them to the dictionary
-                        roc_data[key_str] = {
-                            'fpr': roc_group[f'{key_str}_fpr'][:],
-                            'tpr': roc_group[f'{key_str}_tpr'][:],
-                            'roc_auc': roc_group[f'{key_str}_roc_auc'][0],
-                        }
-
-
-            # Populate the Validator object's attributes with loaded data:
-            validator.efficiency_data = efficiency_data
-            validator.far_scores = far_scores
-            validator.roc_data = roc_data
-            
-            # Check and load worst performers:
-            worst_performers = []
-            for group_name in h5f:
-                group_data = {}
-                if group_name.startswith(f"worst_performers_"): 
-                    for key in h5f[group_name]:
-                        group_data[key] = h5f[group_name][key][()] if key in h5f[group_name] else None
-                    worst_performers.append(group_data)
-                
-            validator.worst_performers = worst_performers if worst_performers else None
-            validator.logger.info("Done.")
-
-        return validator
-
-    def plot(
-        self,
-        file_path : Path,
-        comparison_validators : list = [],
-        fars : np.ndarray = np.logspace(-1, -7, 500),
-        colors = Bright[7], 
-        width : int = 800,
-        height : int = 600
-    ):
-        """Generate validation dashboard using Panel Tabs."""
-        gf.ensure_directory_exists(file_path.parent)
-
-        validators = comparison_validators + [self]
-        
-        # Generate individual plots (Bokeh figures)
-        efficiency_curves, slider = generate_efficiency_curves(
-            validators, 
-            fars,
-            colors=colors,
-            width=width,
-            height=height
-        )
-        
-        far_curves = generate_far_curves(
-            validators,
-            colors=colors,
-            width=width,
-            height=height
-        )
-
-        roc_curves, dropdown = generate_roc_curves(
-            validators,
-            colors=colors,
-            width=width,
-            height=height
-        )
-        
-        # Create Panel tabs for each section
-        # Wrap Bokeh models with pn.pane.Bokeh for proper embedding
-        tabs = pn.Tabs(
-            ('ROC Curves', pn.Column(
-                pn.pane.Bokeh(dropdown),
-                pn.pane.Bokeh(roc_curves)
-            )),
-            ('Efficiency', pn.Column(
-                pn.pane.Bokeh(slider),
-                pn.pane.Bokeh(efficiency_curves)
-            )),
-            ('FAR Curves', pn.pane.Bokeh(far_curves)),
-        )
-        
-        # Add worst performers tab if available
-        if self.worst_performers is not None and len(self.worst_performers) > 0:
-            waveform_plots = []
-            for waveform in self.worst_performers:
-                if gf.ReturnVariables.WHITENED_ONSOURCE.name in waveform and \
-                   gf.ReturnVariables.WHITENED_INJECTIONS.name in waveform:
-                    waveform_plot = generate_waveform_plot(
-                        waveform,
-                        self.input_duration_seconds
-                    )
-                    waveform_plots.append(waveform_plot)
-            
-            if waveform_plots:
-                tabs.append(('Worst Performers', pn.Column(*waveform_plots)))
-        
-        # Save tabs directly as static HTML (Templates don't support embed)
-        tabs.save(str(file_path), embed=True, resources='inline')
+        return tabs
