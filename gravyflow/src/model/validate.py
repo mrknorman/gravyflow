@@ -647,9 +647,8 @@ def generate_far_curves(
     colors = cycle(colors)
     
     tooltips = [
-        ("Name", "@name"),
-        ("Score Threshold", "@x"),
-        ("False Alarm Rate (Hz)", "@y"),
+        ("Score Threshold", "@x{0.0000}"),
+        ("False Alarm Rate (Hz)", "@y{0.0e}"),
     ]
 
     p = figure(
@@ -680,16 +679,18 @@ def generate_far_curves(
         total_num_seconds = len(far_scores) * validator.input_duration_seconds
         far_axis = np.arange(1, len(far_scores) + 1, dtype=float) / total_num_seconds
         
-        downsampled_far_scores, downsampled_far_axis = far_scores, far_axis
-        # downsample_data(
-        #    far_scores, far_axis, max_num_points
-        #)
+        downsampled_far_scores, downsampled_far_axis = downsample_data(
+            far_scores, far_axis, max_num_points
+        )
+        
+        # Round to 6 decimal places to reduce serialized size
+        downsampled_far_scores = np.around(downsampled_far_scores, decimals=6)
+        downsampled_far_axis = np.around(downsampled_far_axis, decimals=8)
         
         source = ColumnDataSource(
             data=dict(
                 x=downsampled_far_scores, 
-                y=downsampled_far_axis,
-                name=[title]*len(downsampled_far_scores)
+                y=downsampled_far_axis
             )
         )
         
@@ -922,7 +923,7 @@ def generate_waveform_plot(
         height=300
     )
 
-    # Plot Onsource Noise (Full Resolution, Standard Bokeh)
+    # Plot Onsource Noise (Full Resolution for accurate visualization)
     source = ColumnDataSource(
         data=dict(
             x=time, 
@@ -978,7 +979,7 @@ def generate_waveform_plot(
     p.add_tools(hover)
     
     # Create slider for injection scale
-    scale_slider = Slider(start=1, end=2, value=1, step=1, title="Injection Scale")
+    scale_slider = Slider(start=1, end=2, value=1, step=0.1, title="Injection Scale")
     
     scale_callback = CustomJS(
         args=dict(source=scaled_source, slider=scale_slider),
@@ -1059,29 +1060,99 @@ def generate_efficiency_plot(
         combined_snrs = np.concatenate(all_snrs).astype(np.float32)
         combined_scores = np.concatenate(all_scores).astype(np.float32)
         
-        # Use HoloViews for datashading
+        # Use HoloViews for rasterization (compute 2D histogram on server)
+        from bokeh.models import LinearColorMapper, ColorBar
+        from bokeh.models import CustomJS
+        import holoviews as hv
+        import datashader as ds
+        import holoviews.operation.datashader
+        import os
+        
+        # Define grid dimensions
+        cwd = os.getcwd() # unused
+        
+        # Points
         points = hv.Points((combined_snrs, combined_scores))
-        shaded = datashade(points, cmap=["grey"]) # Grey background for scores
         
-        # Overlay datashaded image
-        # Note: hv.render creates a new figure, but we want to put it into 'p'.
-        # Actually simplest is to render the shaded object to a figure properties, 
-        # OR use hv.render(shaded, backend='bokeh') and extract the renderer.
-        # BUT getting the renderer out is tricky.
-        # EASIER: Use hv.save scheme? No.
-        # PROPER WAY: Use hv.render to get a figure, then add our lines to THAT figure.
+        # Rasterize to get a 2D grid of counts
+        # This returns an xarray DataArray wrapped in HoloViews (hv.Image)
+        raster = hv.operation.datashader.rasterize(points, width=400, height=400, dynamic=False)
         
-        # Re-create figure from HoloViews
-        p = hv.render(shaded.opts(width=width, height=height, xlim=(0, 20), ylim=(0, 1.05)), backend='bokeh')
+        # Extract data directy from HoloViews element to avoid 'renderers' AttributeError
+        # raster.data is typically an xarray.Dataset
+        # bounds is a BoundingBox object, use .lbrt() to get (left, bottom, right, top)
+        bounds = raster.bounds.lbrt()
+        x0 = bounds[0]  # left
+        y0 = bounds[1]  # bottom
+        dw = bounds[2] - bounds[0]  # right - left
+        dh = bounds[3] - bounds[1]  # top - bottom
+        
+        # Get the main value array (counts)
+        # Using dimension_values is safer than accessing .data directly
+        # flat=False preserves 2D shape
+        try:
+            # rasterize usually returns 'count' or 'frequency' or the vdim name
+            # We assume it's the 2D array needed.
+            # dimension_values returns the array flattened by default? No, flat=False.
+            # But dimension_values(2) might refer to the 3rd dimension?
+            # Safer: access via vdims[0]
+            counts = raster.dimension_values(raster.vdims[0], flat=False)
+            
+            # Note: dimension_values returns (y, x) or (x, y)? 
+            # Bokeh Image expects (N, M) where N is height, M is width?
+            # Ideally we match shape to (rows, cols).
+        except:
+            # Fallback for safety
+            counts = np.zeros((400, 400))
+            
+        # Ensure numpy array and handle NaNs
+        counts = np.nan_to_num(np.array(counts))
+        rows, cols = counts.shape
+        
+        # Normalize counts for alpha mapping (log scale)
+        # Handle zeros to avoid log(0)
+        counts_safe = np.where(counts > 0, counts, 1) # min 1 for log
+        log_counts = np.log1p(counts) # log(1+x) is cleaner
+        max_log = np.max(log_counts)
+        norm_counts = log_counts / max_log if max_log > 0 else log_counts
+        
+        # Create empty RGBA array (flattened 1D array of uint32 for Bokeh ImageRGBA)
+        # Note: Bokeh ImageRGBA expects (N, M) array of uint32.
+        # But we can also pass a list of 2D arrays.
+        
+        # Initial RGBA (grey)
+        # We will do initial coloring in Python to have something to show
+        # BUT the JS needs to recolor it. 
+        # Simpler approach: Just pass 'counts' and let JS generate 'image' on load/change.
+        
+        # Bokeh ImageRGBA expects array of shape (H, W) of uint32
+        # We construct a source with:
+        # 'counts': Flattened or 2D counts
+        # 'image': List containing one (H, W) uint32 array
+        
+        # Let's prepare the source data
+        # x0, y0, dw, dh already extracted from raster.bounds above
+        
+        # Initialize RGBA grid (all transparent)
+        rgba = np.zeros((rows, cols), dtype=np.uint32) 
+        
+        heatmap_source = ColumnDataSource(data=dict(
+            image=[rgba], 
+            counts=[counts], # Pass raw counts grid
+            x=[x0], y=[y0], dw=[dw], dh=[dh]
+        ))
+        
+        # Create ImageRGBA glyph
+        p.image_rgba(image='image', x='x', y='y', dw='dw', dh='dh', source=heatmap_source)
+        
+        # Add HoverTool for the image ?? Difficult with ImageRGBA/Raster
+        # For now, rely on main hover lines.
+        
         p.xaxis.axis_label = "SNR"
         p.yaxis.axis_label = "Efficiency (Recall) / Score"
-        p.tools += [HoverTool()] # Re-add hover since render might reset tools
-
+        
     hover = p.select_one(HoverTool)
-    if hover:
-        hover.tooltips = [("SNR", "@x{0.1f}"), ("Efficiency", "@y{0.3f}")]
-    else:
-         # Fallback if select_one failed
+    if not hover:
          hover = HoverTool(tooltips=[("SNR", "@x{0.1f}"), ("Efficiency", "@y{0.3f}")])
          p.add_tools(hover)
     
@@ -1089,6 +1160,7 @@ def generate_efficiency_plot(
     sources = {}
     all_thresholds = {}
     thresh_sources = {}
+    thresh_labels = {}
     initial_far = fars[0]
     
     for i, (validator, color) in enumerate(zip(validators, colors)):
@@ -1134,13 +1206,15 @@ def generate_efficiency_plot(
                     valid_centers.append(bin_centers[b_idx])
             
             try:
-                def sigmoid(x, x0, k): return 1 / (1 + np.exp(-k * (x - x0)))
-                popt, _ = curve_fit(sigmoid, valid_centers, recalls, p0=[10, 1], maxfev=5000)
+                # Sigmoid with DC offset = FAR (efficiency should never be below FAR)
+                def sigmoid_offset(x, x0, k): 
+                    return far + (1 - far) / (1 + np.exp(-k * (x - x0)))
+                popt, _ = curve_fit(sigmoid_offset, valid_centers, recalls, p0=[10, 1], maxfev=5000)
                 x_fit = np.linspace(min_snr, max_snr, 100)
-                y_fit = sigmoid(x_fit, *popt)
-                model_curves[f"{far:.1e}"] = {"x": x_fit, "y": y_fit}
+                y_fit = sigmoid_offset(x_fit, *popt)
+                model_curves[f"{far:.1e}"] = {"x": x_fit.tolist(), "y": y_fit.tolist()}
             except:
-                 model_curves[f"{far:.1e}"] = {"x": valid_centers, "y": recalls}
+                 model_curves[f"{far:.1e}"] = {"x": list(valid_centers), "y": list(recalls)}
 
         all_data[name] = model_curves
         
@@ -1173,20 +1247,80 @@ def generate_efficiency_plot(
             line_width=2, color=color, line_dash='dashed', alpha=0.7,
             legend_label=f"{name} Threshold"
         )
+        
+        # Add threshold label (dynamic text)
+        from bokeh.models import Label
+        thresh_label = Label(
+            x=0.5, y=init_thresh, 
+            text=f"{init_thresh:.3f}",
+            text_font_size="10pt",
+            text_color=color,
+            x_units='screen', y_units='data',
+            x_offset=5
+        )
+        p.add_layout(thresh_label)
+        thresh_labels[name] = thresh_label
     
     p.legend.location = "bottom_right"
     p.legend.click_policy = "hide"
     
-    far_options = [f"{f:.1e}" for f in fars]
+    # Filter FAR options to only include those where threshold < 1 (sensible range)
+    # Use the first validator's thresholds as reference
+    valid_fars = []
+    if validators and all_thresholds:
+        first_model = list(all_thresholds.keys())[0]
+        for far_str, thresh_val in all_thresholds[first_model].items():
+            if thresh_val < 1.0:
+                valid_fars.append(far_str)
+    
+    # Use filtered fars if available, otherwise fall back to all
+    far_options = valid_fars if valid_fars else [f"{f:.1e}" for f in fars]
+    
+    # Power-of-10 discrete options for dropdown (filter to valid ones)
+    # Use superscript notation for better readability
+    power_of_10_display = {
+        "1.0e-01": "10⁻¹",
+        "1.0e-02": "10⁻²", 
+        "1.0e-03": "10⁻³",
+        "1.0e-04": "10⁻⁴",
+        "1.0e-05": "10⁻⁵"
+    }
+    power_of_10_options = []
+    for far_str in far_options:
+        # Check if it matches a power of 10
+        try:
+            val = float(far_str)
+            import math
+            log_val = math.log10(val)
+            if abs(log_val - round(log_val)) < 0.01:  # Close to integer power
+                exp = int(round(log_val))
+                display = f"10⁻{abs(exp)}" if exp < 0 else f"10{exp}"
+                power_of_10_options.append((far_str, display))
+        except:
+            pass
+    
+    if not power_of_10_options:
+        power_of_10_options = [(far_options[i], f"Option {i+1}") for i in range(min(4, len(far_options)))]
+    
     slider = Slider(
         start=0, 
         end=len(far_options)-1, 
         value=0, 
         step=1, 
-        title=f"False Alarm Rate (FAR): {far_options[0]}"
+        title=f"FAR (Fine): {far_options[0]}"
+    )
+    
+    from bokeh.models import Select
+    # Use (value, display) tuples for proper dropdown labels
+    select_options = [(opt[0], opt[1]) for opt in power_of_10_options]
+    select = Select(
+        title="FAR (Power of 10):",
+        value=power_of_10_options[0][0] if power_of_10_options else far_options[0],
+        options=select_options
     )
     
     code = """
+        let active_thresh = null;
         const far_index = cb_obj.value;
         const far_val = far_options[far_index];
         cb_obj.title = "False Alarm Rate (FAR): " + far_val;
@@ -1207,11 +1341,140 @@ def generate_efficiency_plot(
                 thresh_source.data.y = [thresh, thresh];
                 thresh_source.change.emit();
             }
+            
+            // Update threshold label
+            const label = thresh_labels[name];
+            if (label && thresh !== undefined) {
+                label.y = thresh;
+                label.text = thresh.toFixed(3);
+            }
+            
+            // Capture specific threshold for heatmap (use first available or primary)
+            if (name === current_model_name && thresh !== undefined) {
+                active_thresh = thresh;
+            }
+        }
+        
+        // Heatmap Update Logic
+        if (heatmap_source && active_thresh !== null) {
+            const data = heatmap_source.data;
+            const counts_flat = data['counts'][0]; // Assumed flat array from JS transform??
+            // Note: If passed as 2D array from python, Bokeh JS might see it as such or flattened.
+            // Safest: access via linear index if we know dimensions, or nested loops.
+            const image = data['image'][0]; // This is the target buffer
+            
+            // To iterate correctly, we need bounds
+            const y0 = data['y'][0];
+            const dh = data['dh'][0];
+            
+            // image is likely a flat Uint32Array if it's an ImageRGBA data source?
+            // Actually it depends on how Bokeh serializes ndarrays.
+            // Let's assume image and counts are 2D arrays (lists of lists) or flat typed arrays.
+            // For ImageRGBA, typically it's a flat Uint32Array (nrows * ncols).
+            
+            // Dimensions
+            // If image is flat, H*W = image.length. 
+            // We assume square or known aspect?
+            // We can infer rows from length if we know aspect, or just iterate linearly.
+            // BUT we need 'y' coordinate for each pixel to compare with threshold.
+            
+            // Let's assume square 400x400 as set in rasterize
+            const N = 400; // width
+            const M = 400; // height
+            
+            // We iterate linearly
+            // pixel index i corresponds to row r, col c
+            // r = floor(i / N)
+            // c = i % N
+            // The image is typically drawn from bottom-up or top-down?
+            // Bokeh images: origin is bottom-left? Usually.
+            // y_pixel = y0 + (r/M) * dh
+            
+            for (let i = 0; i < image.length; i++) {
+                const count = counts_flat[i];
+                if (count > 0) {
+                    const r = Math.floor(i / N);
+                    // y-coord of this row (center or lower edge)
+                    const y_val = y0 + (r / M) * dh;
+                    
+                    let color = 0;
+                    // Colors are 0xRRGGBBAA (little endian uint32: AABBGGRR)
+                    // Grey: 0x808080FF -> AA=FF, BB=80, GG=80, RR=80 -> 0xFF808080
+                    // Green: 0x00FF00FF -> AA=FF, BB=00, GG=FF, RR=00 -> 0xFF00FF00
+                    // Red: 0x0000FFFF -> 0xFFFF0000
+                    
+                    // Simple logic:
+                    if (y_val >= active_thresh) {
+                        // Pass -> Green (using slightly transparent green)
+                        // 0xFF00CC00 (Greenish)
+                        color = 0xFF00CC00;
+                    } else {
+                        // Fail -> Grey (or Red?)
+                        // Let's stick to Grey for "background" score
+                        // 0xFFAAAAAA (Light Grey)
+                        color = 0xFFAAAAAA;
+                    }
+                    
+                    // Alpha based on count (log scale)
+                    // Max count approximation? 
+                    // Let's just set alpha=255 for simplicity or use fixed colors.
+                    
+                    image[i] = color;
+                } else {
+                    image[i] = 0; // Transparent
+                }
+            }
+            heatmap_source.change.emit();
         }
     """
-    slider.js_on_change('value', CustomJS(args=dict(sources=sources, all_data=all_data, far_options=far_options, thresh_sources=thresh_sources, all_thresholds=all_thresholds), code=code))
     
-    return p, slider
+    # We need to pass heatmap_source to the callback
+    # And we need to know the 'primary' model name to pick the threshold.
+    # Let's pick the last one in the list (self) as primary.
+    primary_name = validators[-1].name if validators else "Model 0"
+    
+    slider_callback = CustomJS(
+        args=dict(
+            sources=sources, 
+            all_data=all_data, 
+            far_options=far_options, 
+            thresh_sources=thresh_sources, 
+            all_thresholds=all_thresholds,
+            thresh_labels=thresh_labels,
+            heatmap_source=heatmap_source,
+            current_model_name=primary_name
+        ), 
+        code=code
+    )
+    slider.js_on_change('value', slider_callback)
+    
+    # Select callback: find closest FAR option and update slider
+    select_code = """
+        const selected_far = cb_obj.value;
+        // Find the closest match in far_options
+        let best_idx = 0;
+        let best_diff = Infinity;
+        for (let i = 0; i < far_options.length; i++) {
+            const opt = parseFloat(far_options[i]);
+            const sel = parseFloat(selected_far);
+            const diff = Math.abs(Math.log10(opt) - Math.log10(sel));
+            if (diff < best_diff) {
+                best_diff = diff;
+                best_idx = i;
+            }
+        }
+        slider.value = best_idx;
+    """
+    select.js_on_change('value', CustomJS(
+        args=dict(slider=slider, far_options=far_options),
+        code=select_code
+    ))
+    
+    # Return column with both controls
+    from bokeh.layouts import column as bokeh_column
+    controls = bokeh_column(slider, select)
+    
+    return p, controls
 
 class Validator:
     
