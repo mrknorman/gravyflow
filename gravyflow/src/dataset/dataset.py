@@ -110,7 +110,8 @@ class GravyflowDataset(keras.utils.PyDataset):
         steps_per_epoch: int = 1000,
         workers: int = 1,
         use_multiprocessing: bool = False,
-        max_queue_size: int = 10
+        max_queue_size: int = 10,
+        sampling_mode: Optional["gf.SamplingMode"] = None
     ):
         # Initialize PyDataset
         super().__init__(workers=workers, use_multiprocessing=use_multiprocessing, max_queue_size=max_queue_size)
@@ -129,6 +130,9 @@ class GravyflowDataset(keras.utils.PyDataset):
         
         self.noise_obtainer = noise_obtainer if noise_obtainer is not None else gf.NoiseObtainer()
         self.group = group
+        
+        # Default to RANDOM mode if not specified
+        self.sampling_mode = sampling_mode if sampling_mode is not None else gf.SamplingMode.RANDOM
         self.input_variables = input_variables if input_variables is not None else []
         self.output_variables = output_variables if output_variables is not None else []
         self.mask_history = mask_history
@@ -223,7 +227,8 @@ class GravyflowDataset(keras.utils.PyDataset):
             num_examples_per_batch=self.num_examples_per_batch,
             scale_factor=self.scale_factor,
             group=self.group,
-            seed=self.seed
+            seed=self.seed,
+            sampling_mode=self.sampling_mode
         )
 
         waveform_parameters_to_return = [
@@ -281,7 +286,8 @@ class GravyflowDataset(keras.utils.PyDataset):
                     onsource,
                     offsource,
                     parameters_to_return=self.variables_to_return,
-                    onsource_duration_seconds=self.onsource_duration_seconds
+                    onsource_duration_seconds=self.onsource_duration_seconds,
+                    injection_parameters=parameters
                 )
             except Exception as e:
                 logging.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")

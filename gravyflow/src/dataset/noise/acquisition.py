@@ -52,6 +52,18 @@ class SegmentOrder(Enum):
 class AcquisitionMode(Enum):
     NOISE = auto()
     FEATURES = auto()
+
+@dataclass
+class FeatureCacheConfig:
+    """Configuration for feature precaching."""
+    padding_duration_seconds: float = 32.0  # Padding each side of feature
+    max_examples: int = 1024  # Stop after this many features cached
+    force_redownload: bool = False
+
+class SamplingMode(Enum):
+    """Noise sampling strategy."""
+    RANDOM = auto()  # Random subsections with overlap (training) 
+    GRID = auto()    # Non-overlapping sequential chunks (validation/FAR)
     
 @dataclass
 class ObservingRunData:
@@ -309,6 +321,89 @@ class IFOData:
             generated_seed   
         )
     
+    def grid_subsection(
+        self,
+        num_onsource_samples: int,
+        num_offsource_samples: int,
+        num_examples_per_batch: int,
+        grid_position: int
+    ):
+        """
+        Extract sequential non-overlapping chunks from segment.
+        Each detector gets an offset to ensure different GPS times.
+        
+        Returns: (subarrays, background_chunks, gps_times, new_grid_position)
+        """
+        all_subarrays = []
+        all_background_chunks = []
+        all_gps_times = []
+        
+        num_detectors = len(self.data)
+        
+        for ifo_idx, (tensor_data, start_gps_time) in enumerate(zip(self.data, self.start_gps_time)):
+            segment_length = int(ops.shape(tensor_data)[0])
+            
+            # Offset each detector by segment_length // num_detectors to ensure different GPS times
+            detector_offset = ifo_idx * (segment_length // max(num_detectors, 1))
+            
+            subarrays_batch = []
+            background_batch = []
+            gps_times_batch = []
+            
+            current_pos = grid_position
+            
+            for _ in range(num_examples_per_batch):
+                # Position with detector offset, wrapped if needed
+                pos = (current_pos + detector_offset) % (segment_length - num_onsource_samples - num_offsource_samples)
+                
+                # Ensure we have room for offsource before onsource
+                if pos < num_offsource_samples:
+                    pos = num_offsource_samples
+                
+                # Extract onsource chunk
+                onsource_start = pos
+                onsource_end = pos + num_onsource_samples
+                
+                if onsource_end > segment_length:
+                    # Segment exhausted for this batch
+                    break
+                    
+                onsource_chunk = tensor_data[onsource_start:onsource_end]
+                
+                # Extract offsource (background before onsource)
+                offsource_start = pos - num_offsource_samples
+                offsource_end = pos
+                offsource_chunk = tensor_data[offsource_start:offsource_end]
+                
+                # Calculate GPS time
+                gps_time = float(start_gps_time) + (pos * float(self.time_interval_seconds))
+                
+                subarrays_batch.append(onsource_chunk)
+                background_batch.append(offsource_chunk)
+                gps_times_batch.append(gps_time)
+                
+                # Advance position for next sample (non-overlapping)
+                current_pos += num_onsource_samples
+            
+            if len(subarrays_batch) < num_examples_per_batch:
+                # Couldn't fill batch - segment exhausted
+                return None, None, None, current_pos
+            
+            # Stack into batch
+            all_subarrays.append(ops.expand_dims(ops.stack(subarrays_batch), axis=1))
+            all_background_chunks.append(ops.expand_dims(ops.stack(background_batch), axis=1))
+            all_gps_times.append(ops.expand_dims(ops.convert_to_tensor(gps_times_batch, dtype="float64"), axis=1))
+        
+        # Concatenate across detectors
+        stacked_subarrays = ops.concatenate(all_subarrays, axis=1)
+        stacked_background = ops.concatenate(all_background_chunks, axis=1)
+        stacked_gps = ops.concatenate(all_gps_times, axis=1)
+        
+        # New grid position (advanced by batch)
+        new_grid_position = grid_position + (num_examples_per_batch * num_onsource_samples)
+        
+        return stacked_subarrays, stacked_background, stacked_gps, new_grid_position
+    
 @dataclass
 class IFODataObtainer:
     
@@ -319,7 +414,7 @@ class IFODataObtainer:
             data_labels : Union[DataLabel, List[DataLabel]],
             segment_order : SegmentOrder = SegmentOrder.RANDOM,
             max_segment_duration_seconds : float = 2048.0,
-            saturation : float = 1.0,
+            saturation : float = 0.125,  # 1/8 = 8x oversampling for efficiency
             force_acquisition : bool = False,
             cache_segments : bool = True,
             overrides : dict = None,
@@ -336,6 +431,7 @@ class IFODataObtainer:
         self._current_batch_index = 0
         self._segment_exausted = True
         self._num_batches_in_current_segment = 0
+        self._grid_position = 0  # For GRID mode: current position in segment
         self.rng = None
         self.ifos = None
         
@@ -442,6 +538,183 @@ class IFODataObtainer:
         
         self.file_path = Path(data_directory_path) / f"segment_data_{segment_hash}.hdf5"
         
+        return self.file_path
+    
+    def _get_cached_valid_segments(self, ifos: List, group_name: str) -> np.ndarray:
+        """
+        Try to load cached valid segments from HDF5 file.
+        Returns None if not cached.
+        """
+        if self.file_path is None or not Path(self.file_path).exists():
+            return None
+        
+        cache_key = f"valid_segments/{group_name}"
+        try:
+            with closing(gf.open_hdf5_file(self.file_path, self.logger, mode="r")) as f:
+                if cache_key in f:
+                    cached_segments = f[cache_key][()]
+                    self.logger.info(f"Loaded cached valid segments for group '{group_name}'")
+                    return cached_segments
+        except Exception as e:
+            self.logger.warning(f"Failed to load cached segments: {e}")
+        return None
+    
+    def _cache_valid_segments(self, valid_segments: np.ndarray, group_name: str) -> None:
+        """
+        Cache valid segments to HDF5 file for future use without auth.
+        """
+        if self.file_path is None:
+            return
+        
+        cache_key = f"valid_segments/{group_name}"
+        try:
+            gf.ensure_directory_exists(self.file_path.parent)
+            with closing(gf.open_hdf5_file(self.file_path, self.logger, mode="a")) as f:
+                if cache_key in f:
+                    del f[cache_key]
+                f.create_dataset(cache_key, data=valid_segments)
+                self.logger.info(f"Cached valid segments for group '{group_name}'")
+        except Exception as e:
+            self.logger.warning(f"Failed to cache segments: {e}")
+    
+    def precache_features(
+        self,
+        ifos: List,
+        sample_rate_hertz: float,
+        onsource_duration_seconds: float,
+        config: FeatureCacheConfig = None,
+        seed: int = None,
+        group_name: str = "train"
+    ) -> Path:
+        """
+        Pre-download and cache feature data to HDF5 before training.
+        
+        Downloads strain data for each feature segment (event/glitch) and stores
+        it in an HDF5 file. Stops after config.max_examples features are cached.
+        
+        Args:
+            ifos: List of interferometers to cache data for
+            sample_rate_hertz: Sample rate for the cached data
+            onsource_duration_seconds: Duration of onsource window
+            config: FeatureCacheConfig with padding and max_examples settings
+            seed: Random seed for segment ordering
+            group_name: Group name for caching
+            
+        Returns:
+            Path to the HDF5 cache file
+        """
+        if config is None:
+            config = FeatureCacheConfig()
+        
+        if seed is None:
+            seed = gf.Defaults.seed
+            
+        if not isinstance(ifos, list):
+            ifos = [ifos]
+        
+        # Get valid feature segments first
+        self.get_valid_segments(
+            ifos=ifos,
+            seed=seed,
+            group_name=group_name
+        )
+        
+        if self.acquisition_mode != AcquisitionMode.FEATURES:
+            raise ValueError(
+                "precache_features() requires FEATURES mode. "
+                "Ensure data_labels contains EVENTS or GLITCHES (not NOISE)."
+            )
+        
+        if self.feature_segments is None or len(self.feature_segments) == 0:
+            raise ValueError("No feature segments found to cache.")
+        
+        # Generate cache file path
+        self.generate_file_path(sample_rate_hertz, group_name)
+        cache_key = f"feature_cache/{group_name}"
+        
+        # Check if already cached
+        try:
+            with closing(gf.open_hdf5_file(self.file_path, self.logger, mode="r")) as f:
+                if cache_key in f and not config.force_redownload:
+                    cached_count = f[cache_key].attrs.get("num_cached", 0)
+                    self.logger.info(
+                        f"Found existing cache with {cached_count} features"
+                    )
+                    return self.file_path
+        except Exception:
+            pass  # File doesn't exist or can't be read
+        
+        # Limit to max_examples
+        num_to_cache = min(len(self.feature_segments), config.max_examples)
+        segments_to_cache = self.feature_segments[:num_to_cache]
+        
+        self.logger.info(
+            f"Precaching {num_to_cache} feature segments to {self.file_path}"
+        )
+        
+        # Create/open cache file
+        gf.ensure_directory_exists(self.file_path.parent)
+        
+        with closing(gf.open_hdf5_file(self.file_path, self.logger, mode="a")) as f:
+            # Create or clear the cache group
+            if cache_key in f:
+                del f[cache_key]
+            cache_group = f.create_group(cache_key)
+            cache_group.attrs["num_cached"] = 0
+            cache_group.attrs["sample_rate_hertz"] = sample_rate_hertz
+            cache_group.attrs["padding_seconds"] = config.padding_duration_seconds
+            
+            cached_count = 0
+            try:
+                from tqdm import tqdm
+                iterator = tqdm(enumerate(segments_to_cache), total=num_to_cache, 
+                               desc="Precaching features", unit="segment")
+            except ImportError:
+                iterator = enumerate(segments_to_cache)
+            
+            for idx, segment in iterator:
+                try:
+                    # Download strain data for this segment
+                    seg_start, seg_end = segment[0], segment[1]
+                    
+                    # Create subgroup for this feature
+                    feat_group = cache_group.create_group(f"feature_{idx}")
+                    feat_group.attrs["start_gps"] = seg_start
+                    feat_group.attrs["end_gps"] = seg_end
+                    
+                    # Download data for each IFO
+                    for ifo_idx, ifo in enumerate(ifos):
+                        try:
+                            ifo_data = IFOData(
+                                ifo,
+                                seg_start,
+                                seg_end,
+                                self.frame_types[0],
+                                self.channels[0],
+                                sample_rate_hertz
+                            )
+                            feat_group.create_dataset(
+                                ifo.name, 
+                                data=ifo_data.data,
+                                compression="gzip"
+                            )
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Failed to download {ifo.name} for segment {idx}: {e}"
+                            )
+                            continue
+                    
+                    cached_count += 1
+                    cache_group.attrs["num_cached"] = cached_count
+                    
+                    if (idx + 1) % 10 == 0:
+                        self.logger.info(f"Cached {idx + 1}/{num_to_cache} features")
+                        
+                except Exception as e:
+                    self.logger.warning(f"Failed to cache segment {idx}: {e}")
+                    continue
+        
+        self.logger.info(f"Precaching complete: {cached_count} features cached")
         return self.file_path
     
     def get_segment_times(
@@ -587,37 +860,84 @@ class IFODataObtainer:
             self,
             ifo : gf.IFO,
             valid_segments : np.ndarray,        
-            start_padding_seconds : float = 64.0,
-            end_padding_seconds : float = 64.0,
+            start_padding_seconds : float = 32.0,
+            end_padding_seconds : float = 32.0,
         ):
+        """
+        Get segments containing desired features (events/glitches).
         
-        event_times = self.get_all_event_times()          
-        glitch_times = gf.get_glitch_times(
-            ifo,
-            start_gps_time = self.start_gps_times[0],
-            end_gps_time = self.end_gps_times[0]
-        )
+        Supersede logic:
+        - EVENTS supersedes individual EventType members (CONFIDENT, MARGINAL)
+        - GLITCHES supersedes individual GlitchType members
+        """
+        from gravyflow.src.dataset.features.event import EventType
+        from gravyflow.src.dataset.features.glitch import GlitchType
         
         wanted_segments = []
-        if DataLabel.EVENTS in self.data_labels:
-            wanted_segments.append(
-                self.pad_gps_times_with_veto_window(
-                    event_times,
-                    start_padding_seconds=start_padding_seconds,
-                    end_padding_seconds=end_padding_seconds
+        feature_times = {}
+        
+        # --- Event handling with supersede ---
+        # Check for EVENTS (supersedes) or individual EventTypes
+        has_events_supersede = DataLabel.EVENTS in self.data_labels
+        event_types_in_labels = [
+            label for label in self.data_labels 
+            if isinstance(label, EventType)
+        ]
+        
+        if has_events_supersede or event_types_in_labels:
+            # If EVENTS present, get all; otherwise filter by individual types
+            if has_events_supersede:
+                event_times = gf.get_all_event_times()
+            else:
+                event_times = gf.get_event_times_by_type(event_types_in_labels)
+            
+            if len(event_times) > 0:
+                wanted_segments.append(
+                    self.pad_gps_times_with_veto_window(
+                        event_times,
+                        start_padding_seconds=start_padding_seconds,
+                        end_padding_seconds=end_padding_seconds
+                    )
                 )
+                feature_times[gf.DataLabel.EVENTS] = event_times
+        
+        # --- Glitch handling with supersede ---
+        # Check for GLITCHES (supersedes) or individual GlitchTypes
+        has_glitches_supersede = DataLabel.GLITCHES in self.data_labels
+        glitch_types_in_labels = [
+            label for label in self.data_labels 
+            if isinstance(label, GlitchType)
+        ]
+        
+        if has_glitches_supersede or glitch_types_in_labels:
+            # If GLITCHES present, get all; otherwise filter by individual types
+            if has_glitches_supersede:
+                glitch_types_to_fetch = None  # None = all types
+            else:
+                glitch_types_to_fetch = glitch_types_in_labels
+            
+            glitch_segments = gf.get_glitch_segments(
+                ifo,
+                start_gps_time=self.start_gps_times[0],
+                end_gps_time=self.end_gps_times[0],
+                glitch_types=glitch_types_to_fetch
             )
-
-        if DataLabel.GLITCHES in self.data_labels:
-            wanted_segments.append(
-                gf.get_glitch_segments(
+            
+            # Apply padding to glitch segments
+            if len(glitch_segments) > 0:
+                padded_glitches = glitch_segments.copy()
+                padded_glitches[:, 0] -= start_padding_seconds
+                padded_glitches[:, 1] += end_padding_seconds
+                wanted_segments.append(padded_glitches)
+                
+                # Get glitch times for feature_times dict
+                glitch_times = gf.get_glitch_times(
                     ifo,
-                    start_gps_time = self.start_gps_times[0],
-                    end_gps_time = self.end_gps_times[0],
-                    start_padding_seconds=start_padding_seconds,
-                    end_padding_seconds=end_padding_seconds
+                    start_gps_time=self.start_gps_times[0],
+                    end_gps_time=self.end_gps_times[0],
+                    glitch_types=glitch_types_to_fetch
                 )
-            )
+                feature_times[gf.DataLabel.GLITCHES] = glitch_times
             
         if wanted_segments:
             wanted_segments = np.concatenate(wanted_segments)
@@ -628,11 +948,6 @@ class IFODataObtainer:
             )
         else:
             raise ValueError("Cannot find any features which suit requirement!")
-            
-        feature_times = {
-            gf.DataLabel.EVENTS : event_times,
-            gf.DataLabel.GLITCHES : glitch_times    
-        }
 
         if not any(np.any(segment) for segment in valid_segments):
             raise ValueError(
@@ -885,6 +1200,70 @@ class IFODataObtainer:
                 
         return np.array(selected_segments)
 
+    def _extract_feature_event(
+        self,
+        event_segment: 'IFOData',
+        num_onsource_samples: int,
+        num_offsource_samples: int,
+        sample_rate_hertz: float
+    ) -> tuple:
+        """
+        Extract onsource/offsource windows from a feature segment.
+        
+        Centers extraction on the middle of the segment (where the event is).
+        
+        Args:
+            event_segment: IFOData containing strain data for all IFOs
+            num_onsource_samples: Number of samples for onsource window
+            num_offsource_samples: Number of samples for offsource window
+            sample_rate_hertz: Sample rate
+            
+        Returns:
+            Tuple of (onsource_stacked, offsource_stacked, event_gps_time)
+            or (None, None, None) if extraction fails
+        """
+        data_len = ops.shape(event_segment.data[0])[0]
+        
+        if data_len < num_onsource_samples:
+            logging.warning(f"Feature segment too short ({data_len} < {num_onsource_samples})")
+            return None, None, None
+        
+        # Center extraction on segment middle (where event is)
+        center_idx = data_len // 2
+        half_onsource = num_onsource_samples // 2
+        start_onsource = center_idx - half_onsource
+        end_onsource = start_onsource + num_onsource_samples
+        
+        # Calculate event GPS time
+        feature_gps_start = event_segment.start_gps_time[0]
+        event_gps_time = feature_gps_start + (center_idx / sample_rate_hertz)
+        
+        temp_onsource = []
+        temp_offsource = []
+        
+        for channel_data in event_segment.data:
+            # Extract onsource
+            chunk = channel_data[start_onsource:end_onsource]
+            if ops.shape(chunk)[0] != num_onsource_samples:
+                return None, None, None
+            temp_onsource.append(chunk)
+            
+            # Extract offsource (prefer left of onsource, fallback to right or zeros)
+            off_start = start_onsource - num_offsource_samples
+            if off_start >= 0:
+                off_chunk = channel_data[off_start:start_onsource]
+            elif end_onsource + num_offsource_samples <= data_len:
+                off_chunk = channel_data[end_onsource:end_onsource + num_offsource_samples]
+            else:
+                off_chunk = ops.zeros((num_offsource_samples,), dtype="float32")
+            temp_offsource.append(off_chunk)
+        
+        # Stack IFOs: list of (Samples,) -> (IFO, Samples)
+        onsource_stacked = ops.stack(temp_onsource)
+        offsource_stacked = ops.stack(temp_offsource)
+        
+        return onsource_stacked, offsource_stacked, event_gps_time
+
     def pad_gps_times_with_veto_window(
         self,
         gps_times: np.ndarray,
@@ -1084,20 +1463,11 @@ class IFODataObtainer:
         if sample_rate_hertz is None:
             sample_rate_hertz = gf.Defaults.sample_rate_hertz
 
-        if self.file_path is None and self.cache_segments:
-             # Try to generate it if missing? Or raise error?
-             # The user code raises error.
-             # raise ValueError("Segment file path not initialized...")
-             # But let's be safe.
-             pass
-
         if self.file_path is not None and self.cache_segments:
             gf.ensure_directory_exists(self.file_path.parent)
 
         if valid_segments is None:
             valid_segments = self.valid_segments
-
-        # assert valid_segments.shape[1] == len(ifos), "Num ifos should equal num segment lists"
 
         while self._current_segment_index < len(valid_segments):            
             segment_times = valid_segments[self._current_segment_index]
@@ -1108,24 +1478,48 @@ class IFODataObtainer:
 
             for ifo, (segment_start_gps_time, segment_end_gps_time) in zip(ifos, segment_times):
                 segment_key = f"segments/segment_{segment_start_gps_time}_{segment_end_gps_time}"
-                segment = self.get_segment(
-                    segment_start_gps_time, 
-                    segment_end_gps_time,
-                    sample_rate_hertz, 
-                    ifo, 
-                    segment_key
-                )
-                
-                if segment is not None:
-                    segments.append(segment)
+                # Try to get data for this IFO
+                # If cached segment is missing, it might return None or fail
+                # We need to catch this to allow zero-filling for coincidence
+                try:
+                    segment_data = self.get_segment(
+                        segment_start_gps_time, 
+                        segment_end_gps_time,
+                        sample_rate_hertz, 
+                        ifo, 
+                        segment_key
+                    )
+                except Exception as e:
+                    logging.warning(f"Failed to get segment for {ifo.name} at {segment_start_gps_time}: {e}")
+                    segment_data = None
+                    
+                if segment_data is not None:
+                    segments.append(segment_data)
                     gps_start_times.append(segment_start_gps_time)
 
                     if self.cache_segments:
-                        self._cache_segment(segment_key, segment)
+                        self._cache_segment(segment_key, segment_data)
                 else:
-                    logging.error("No segment acquired, skipping to next iteration.")
-                    segments = None
-                    break
+                    # If FEATURES mode, we might want to Zero-Fill instead of skipping
+                    # Check if we are in FEATURES mode context (implied by this method usage?)
+                    # No, this is 'acquire' method used by both.
+                    # But we passed 'valid_segments' which might be features or noise.
+                    
+                    # Heuristic: If we have multiple IFOs, and one fails, we might still want the event?
+                    # User requested: "if not avalible return channel with zeros"
+                    # Let's verify if we should do this globally or just for features.
+                    # Probably generally safe if the user requested it?
+                    # Or maybe only if `segment_data` is None which means acquisition failed.
+                    
+                    logging.warning(f"Segment missing for {ifo.name} at {segment_start_gps_time}. Filling with zeros.")
+                    
+                    # Create zero segment of correct length
+                    duration = segment_end_gps_time - segment_start_gps_time
+                    num_samples = int(duration * sample_rate_hertz)
+                    zero_data = ops.zeros((num_samples,), dtype="float32")
+                    
+                    segments.append(zero_data)
+                    gps_start_times.append(segment_start_gps_time)  
 
             if segments is None:
                 logging.error("No segments acquired, skipping to next iteration.")
@@ -1155,7 +1549,8 @@ class IFODataObtainer:
             num_examples_per_batch : int = None,
             ifos : List[gf.IFO] = gf.IFO.L1,
             scale_factor : float = None,
-            seed : int = None
+            seed : int = None,
+            sampling_mode : SamplingMode = SamplingMode.RANDOM
         ):
 
         if num_examples_per_batch is None:
@@ -1177,91 +1572,171 @@ class IFODataObtainer:
         total_onsource_duration_seconds : float = \
             onsource_duration_seconds + total_padding_duration_seconds 
         
-        if not self._current_batch_index and not self._current_segment_index:
-            # Remove segments which are shorter than than
-            # (onsource_duration_seconds + padding_duration_seconds * 2.0) *
-            # num_examples_per_batch + offsource_duration_seconds
-            # This ensures that at least one batch with enough room for offsource
-            # can be gathered:
-            min_segment_duration_seconds : int = \
-                total_onsource_duration_seconds + offsource_duration_seconds
-            
-            # Multiply by 2 for saftey odd things were happening
-            min_segment_duration_seconds *= 2.0
-            
-            self.valid_segments_adjusted = self.remove_short_segments(
-                    self.valid_segments, 
-                    min_segment_duration_seconds
-                )
-        
         # Calculate number of samples required to fullfill onsource and 
         # offsource durations:
         num_onsource_samples : int = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
         num_offsource_samples : int = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
 
-        while self._segment_exausted:
-            try:
-                self.current_segment = next(self.acquire(
-                        sample_rate_hertz, 
-                        self.valid_segments_adjusted, 
-                        ifos,
-                        scale_factor
-                    ))
-            except StopIteration:
-                # Reset segment index to loop infinitely through segments
-                self._current_segment_index = 0
-                self._segment_exausted = True
-                continue
-        
-            min_num_samples = min([ops.shape(tensor)[0] for tensor in self.current_segment.data])
-
-            if min_num_samples < (num_onsource_samples + num_offsource_samples):
-                logging.warning("Segment too short!")
-                self._segment_exausted = True
-            else: 
-                self._segment_exausted = False
-
-            min_num_samples = ops.cast(min_num_samples, "float32")
-
-            # Calculate number of batches current segment can produce, this
-            # is dependant on the segment duration and the onsource duration:
-
-            segment_duration : float = min_num_samples / sample_rate_hertz
-
-            self._num_batches_in_current_segment : int = max(1, int(
-                      segment_duration 
-                    / (
-                        self.saturation * 
-                        num_examples_per_batch * onsource_duration_seconds
+        if self.acquisition_mode == AcquisitionMode.NOISE:
+            # --- STANDARD NOISE MODE (RANDOM / GRID) ---
+            if not self._current_batch_index and not self._current_segment_index:
+                min_segment_duration_seconds : int = \
+                    total_onsource_duration_seconds + offsource_duration_seconds
+                
+                # Multiply by 2 for saftey odd things were happening
+                min_segment_duration_seconds *= 2.0
+                
+                self.valid_segments_adjusted = self.remove_short_segments(
+                        self.valid_segments, 
+                        min_segment_duration_seconds
                     )
-                ))
             
-        # Yield offsource, onsource, and gps_times for unique batches untill
-        # current segment is exausted:
-        while self._current_batch_index < self._num_batches_in_current_segment:
+            # Infinite loop to cycle through all segments
+            while True:
+                # Get a new segment when current one is exhausted
+                while self._segment_exausted:
+                    try:
+                        self.current_segment = next(self.acquire(
+                                sample_rate_hertz, 
+                                self.valid_segments_adjusted, 
+                                ifos,
+                                scale_factor
+                            ))
+                    except StopIteration:
+                        # Reset segment index to loop infinitely through segments
+                        self._current_segment_index = 0
+                        self._segment_exausted = True
+                        continue
+                
+                    min_num_samples = min([ops.shape(tensor)[0] for tensor in self.current_segment.data])
 
-            subarrays, background_chunks, start_gps_times = self.current_segment.random_subsection(
-                    num_onsource_samples, 
-                    num_offsource_samples, 
-                    num_examples_per_batch,
-                    self.rng.integers(1E10)
+                    if min_num_samples < (num_onsource_samples + num_offsource_samples):
+                        logging.warning("Segment too short!")
+                        self._segment_exausted = True
+                    else: 
+                        self._segment_exausted = False
+
+                    min_num_samples = ops.cast(min_num_samples, "float32")
+
+                    # Calculate number of batches current segment can produce
+                    segment_duration : float = min_num_samples / sample_rate_hertz
+
+                    self._num_batches_in_current_segment : int = max(1, int(
+                              segment_duration 
+                            / (
+                                self.saturation * 
+                                num_examples_per_batch * onsource_duration_seconds
+                            )
+                        ))
+                
+                # Yield batches until current segment is exhausted
+                while self._current_batch_index < self._num_batches_in_current_segment and not self._segment_exausted:
+
+                    if sampling_mode == SamplingMode.RANDOM:
+                        # Random subsections (training) - may overlap
+                        subarrays, background_chunks, start_gps_times = self.current_segment.random_subsection(
+                                num_onsource_samples, 
+                                num_offsource_samples, 
+                                num_examples_per_batch,
+                                self.rng.integers(1E10)
+                            )
+                    else:
+                        # GRID mode: sequential non-overlapping chunks (validation/FAR)
+                        result = self.current_segment.grid_subsection(
+                                num_onsource_samples, 
+                                num_offsource_samples, 
+                                num_examples_per_batch,
+                                self._grid_position
+                            )
+                        subarrays, background_chunks, start_gps_times, new_grid_pos = result
+                        if subarrays is not None:
+                            self._grid_position = new_grid_pos
+
+                    if subarrays is None or background_chunks is None or start_gps_times is None:
+                        if subarrays is None:
+                            logging.error("Subarrays returned None!")
+                        if background_chunks is None:
+                            logging.error("Background Chunks returned None!")
+                        if start_gps_times is None:
+                            logging.error("start_gps_times returned None!")
+                        # For GRID mode, segment is exhausted if we can't fill a batch
+                        if sampling_mode == SamplingMode.GRID:
+                            self._segment_exausted = True
+                            self._grid_position = 0
+                        continue
+                    
+                    self._current_batch_index += 1
+                    if not self._current_batch_index < self._num_batches_in_current_segment:
+                        self._segment_exausted = True
+                        self._current_batch_index = 0
+                        if sampling_mode == SamplingMode.GRID:
+                            self._grid_position = 0
+
+                    yield subarrays, background_chunks, start_gps_times
+                
+                # Inner loop exited - segment exhausted, outer while True loops back to get new segment
+
+        else:
+            # --- FEATURES MODE ---
+            # Each valid_segment is a padded event window. Aggregate into batches.
+            self.valid_segments_adjusted = self.valid_segments
+            
+            segment_generator = self.acquire(
+                sample_rate_hertz,
+                self.valid_segments_adjusted,
+                ifos,
+                scale_factor
+            )
+
+            while True:
+                batch_subarrays = []
+                batch_backgrounds = []
+                batch_gps_times = []
+                
+                while len(batch_subarrays) < num_examples_per_batch:
+                    try:
+                        event_segment = next(segment_generator)
+                        
+                    except StopIteration:
+                         # Reset index to loop infinitely and recreate generator
+                        self._current_segment_index = 0
+                        segment_generator = self.acquire(
+                            sample_rate_hertz,
+                            self.valid_segments_adjusted,
+                            ifos,
+                            scale_factor
+                        )
+                        continue
+                        
+                    except Exception as e:
+                        logging.error(f"Error acquiring feature segment: {e}")
+                        continue
+                    
+                    # Extract onsource/offsource using helper
+                    onsource, offsource, gps_time = self._extract_feature_event(
+                        event_segment,
+                        num_onsource_samples,
+                        num_offsource_samples,
+                        sample_rate_hertz
+                    )
+                    
+                    if onsource is None:
+                        continue
+                    
+                    batch_subarrays.append(onsource)
+                    batch_backgrounds.append(offsource)
+                    batch_gps_times.append(gps_time)
+                
+                # Stack batch: list of (IFO, Samples) -> (Batch, IFO, Samples)
+                final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
+                final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
+                final_gps = ops.expand_dims(
+                    ops.convert_to_tensor(batch_gps_times, dtype="float64"), 
+                    axis=-1
                 )
+                
+                yield final_subarrays, final_background, final_gps
 
-            if subarrays is None or background_chunks is None or start_gps_times is None:
-                if subarrays is None:
-                    logging.error("Subarrays returned None!")
-                if background_chunks is None:
-                    logging.error("Background Chunks returned None!")
-                if start_gps_times is None:
-                    logging.error("start_gps_times returned None!")
-                continue
-            
-            self._current_batch_index += 1
-            if not self._current_batch_index < self._num_batches_in_current_segment:
-                self._segment_exausted = True
-                self._current_batch_index = 0
-
-            yield subarrays, background_chunks, start_gps_times
 
     def clear_valid_segments(self) -> None:
         self.valid_segments = None
@@ -1299,13 +1774,26 @@ class IFODataObtainer:
                 }
 
         # Check to ensure group name is key in group dictionary:
-        if group_name not in groups:
+        # Special case: 'all' bypasses group splitting and uses all segments
+        if group_name == "all":
+            groups = {"all": 1.0}  # Use 100% of segments
+        elif group_name not in groups:
             raise KeyError(
                 f"Group {group_name} not present in groups dictionary check "
                 "input."
             )
 
         if self.valid_segments is None or len(self.valid_segments) != len(ifos):
+            # Try to load from cache first (avoids auth requirement)
+            cached = self._get_cached_valid_segments(ifos, group_name)
+            if cached is not None:
+                self.valid_segments = cached
+                if DataLabel.NOISE in self.data_labels:
+                    self.acquisition_mode = AcquisitionMode.NOISE
+                else:
+                    self.acquisition_mode = AcquisitionMode.FEATURES
+                return self.valid_segments
+            
             self.valid_segments = []
 
             # Check to see if noise with no features is desired data product, if
@@ -1316,68 +1804,142 @@ class IFODataObtainer:
             else:
                 self.acquisition_mode = AcquisitionMode.FEATURES
 
-            for ifo in ifos:
-                # Get segments which fall within gps time boundaries and have the 
-                # requested ifo and state flag:
-                valid_segments = self.get_all_segment_times(ifo)
+            if self.acquisition_mode == AcquisitionMode.NOISE:
+                for ifo in ifos:
+                    # Get segments which fall within gps time boundaries and have the 
+                    # requested ifo and state flag:
+                    valid_segments = self.get_all_segment_times(ifo)
 
-                # First split by a constant duration so that groups always contain 
-                # the same times no matter what max duration is:
-                group_split_seconds: float = 8196.0
+                    # First split by a constant duration so that groups always contain 
+                    # the same times no matter what max duration is:
+                    group_split_seconds: float = 8196.0
 
-                valid_segments: np.ndarray = \
-                    self.cut_segments(
+                    valid_segments: np.ndarray = \
+                        self.cut_segments(
+                            valid_segments, 
+                            group_split_seconds,
+                            self.start_gps_times[0]
+                        )
+
+                    # Distribute segments deterministically amongst groups, those can
+                    # be used to separate validation and testing data from training 
+                    # data:
+                    valid_segments: np.ndarray = self.get_segments_for_group(
                         valid_segments, 
-                        group_split_seconds,
+                        group_split_seconds, 
+                        group_name, 
+                        groups,
                         self.start_gps_times[0]
                     )
 
-                # Distribute segments deterministically amongst groups, those can
-                # be used to separate validation and testing data from training 
-                # data:
-                valid_segments: np.ndarray = self.get_segments_for_group(
-                    valid_segments, 
-                    group_split_seconds, 
-                    group_name, 
-                    groups,
-                    self.start_gps_times[0]
-                )
+                    valid_segments, feature_times = self.remove_unwanted_segments(
+                        ifo,
+                        valid_segments
+                    )
 
-                valid_segments, feature_times = self.remove_unwanted_segments(
-                    ifo,
-                    valid_segments
-                )
+                    # Finally, split seconds so that max duration is no greater than 
+                    # max:
+                    valid_segments: np.ndarray = \
+                        self.cut_segments(
+                            valid_segments, 
+                            self.max_segment_duration_seconds,
+                            self.start_gps_times[0]
+                        )
 
-                match self.acquisition_mode:
-                    case AcquisitionMode.NOISE:
-                        # Finally, split seconds so that max duration is no greater than 
-                        # max:
-                        valid_segments: np.ndarray = \
-                            self.cut_segments(
-                                valid_segments, 
-                                self.max_segment_duration_seconds,
-                                self.start_gps_times[0]
+                    # If there are no valid segments raise an error:
+                    if (len(valid_segments) == 0):
+                        raise ValueError(f"IFO {ifo} has found no valid segments (NOISE mode)!")
+
+                    self.valid_segments.append(valid_segments)
+            
+            else:
+                # FEATURES MODE: Collect UNION of all events/features
+                all_feature_segments_list = []
+                
+                padding = 32.0 # Default padding
+                
+                # Define global search window
+                global_start_gps = min(self.start_gps_times)
+                global_end_gps = max(self.end_gps_times)
+
+                # 1. EVENTS (Global)
+                if DataLabel.EVENTS in self.data_labels:
+                    event_times = gf.get_all_event_times()
+                    # Filter events within observing runs
+                    event_times = [t for t in event_times if global_start_gps <= t <= global_end_gps]
+                    
+                    if len(event_times) > 0:
+                        evt_segs = self.pad_gps_times_with_veto_window(
+                            np.array(event_times), 
+                            start_padding_seconds=padding, 
+                            end_padding_seconds=padding
+                        )
+                        all_feature_segments_list.append(evt_segs)
+
+                # 2. GLITCHES (Per IFO)
+                if DataLabel.GLITCHES in self.data_labels:
+                    for ifo in ifos:
+                        try:
+                            glitch_times = gf.get_glitch_times(
+                                ifo,
+                                start_gps_time=global_start_gps,
+                                end_gps_time=global_end_gps
                             )
+                            if len(glitch_times) > 0:
+                                gl_segs = self.pad_gps_times_with_veto_window(
+                                    np.array(glitch_times),
+                                    start_padding_seconds=padding,
+                                    end_padding_seconds=padding
+                                )
+                                all_feature_segments_list.append(gl_segs)
+                        except Exception as e:
+                            logging.warning(f"Failed to fetch glitches for {ifo}: {e}")
+                            continue
 
-                    case AcquisitionMode.FEATURES:
-                        # If in feature acquisition mode, get the times of feature
-                        # segments:
-                        feature_segments, feature_times = self.return_wanted_segments(
-                            ifo,
-                            valid_segments
-                        )
-
-                        self.feature_segments = self.order_segments(
-                            feature_segments,
-                            segment_order,
-                            seed
-                        )
-
-                # If there are no valid segments raise an error:
-                if (len(valid_segments) == 0):
-                    raise ValueError(f"IFO {ifo} has found no valid segments!")
-
-                self.valid_segments.append(valid_segments)
+                if not all_feature_segments_list:
+                     raise ValueError("No features (Events/Glitches) found in requested range.")
+                
+                # Union and Unique
+                combined = np.concatenate(all_feature_segments_list)
+                unique_segments = np.unique(combined, axis=0) # Unique events
+                
+                # Order segments deterministicallly
+                unique_segments = self.order_segments(unique_segments, segment_order, seed)
+                self.feature_segments = unique_segments # Store 2D version
+                
+                # Apply Grouping (Index-based)
+                if group_name == 'all':
+                    target_segments = unique_segments
+                else:
+                    n_segments = len(unique_segments)
+                    total_weight = sum(groups.values())
+                    acc_weight = 0.0
+                    start_idx = 0
+                    end_idx = 0
+                    found = False
+                    
+                    # Iterate to find group range
+                    for g_name, weight in sorted(groups.items()):
+                        w = weight / total_weight
+                        if g_name == group_name:
+                            start_idx = int(acc_weight * n_segments)
+                            end_idx = int((acc_weight + w) * n_segments)
+                            found = True
+                            break
+                        acc_weight += w
+                        
+                    if found:
+                        target_segments = unique_segments[start_idx:end_idx]
+                    else:
+                        target_segments = np.empty((0, 2))
+                
+                if len(target_segments) == 0:
+                     logging.warning(f"No feature segments found for group {group_name}")
+                
+                # Expand for Multi-IFO: (N, IFOs, 2)
+                num_ifos = len(ifos)
+                expanded = np.expand_dims(target_segments, axis=1) # (N, 1, 2)
+                self.valid_segments = np.repeat(expanded, num_ifos, axis=1) # (N, IFOs, 2)
 
             match self.acquisition_mode:
                 case AcquisitionMode.NOISE:
@@ -1398,8 +1960,59 @@ class IFODataObtainer:
                         segment_order,
                         seed
                     )
+                    
+                    # Cache for future use without auth
+                    self._cache_valid_segments(self.valid_segments, group_name)
 
                     return self.valid_segments
             
                 case AcquisitionMode.FEATURES:
-                    raise Exception("Feature mode not yet implemented!")
+                    # For FEATURES mode, auto-precache feature data
+                    if hasattr(self, 'feature_segments') and self.feature_segments is not None:
+                        # Check if valid_segments is already correctly set up (3D, matching IFO count)
+                        # If so, do not overwrite it with simple expansion of feature_segments
+                        # My new logic above sets valid_segments to (N, IFOs, 2).
+                        # Old logic below sets it to (N, 1, 2) which is bad for multi-IFO.
+                        
+                        # If valid_segments is not set correctly, then fallback to expansion:
+                        needs_expansion = True
+                        if (self.valid_segments is not None 
+                            and isinstance(self.valid_segments, np.ndarray) 
+                            and self.valid_segments.ndim == 3 
+                            and self.valid_segments.shape[1] == len(ifos)):
+                            needs_expansion = False
+                            
+                        if needs_expansion:
+                            # Expand dims to match expected 3D format [N, num_ifos, 2]
+                            # feature_segments is 2D [N, 2], need [N, 1, 2]
+                            if self.feature_segments.ndim == 2:
+                                self.valid_segments = np.expand_dims(self.feature_segments, axis=1)
+                            else:
+                                self.valid_segments = self.feature_segments
+                        
+                        # Calculate and display estimated precaching time
+                        num_features = len(self.feature_segments)
+                        config = FeatureCacheConfig()
+                        num_to_cache = min(num_features, config.max_examples)
+                        
+                        # Estimate: ~2 seconds per feature segment download
+                        estimated_seconds = num_to_cache * 2
+                        estimated_minutes = estimated_seconds / 60
+                        
+                        if num_to_cache > 0:
+                            logging.info(
+                                f"\n{'='*60}\n"
+                                f"FEATURE MODE: Auto-precaching {num_to_cache} feature segments\n"
+                                f"Estimated time: ~{estimated_minutes:.1f} minutes "
+                                f"({estimated_seconds} seconds)\n"
+                                f"Padding: {config.padding_duration_seconds}s each side\n"
+                                f"{'='*60}"
+                            )
+                        
+                        self._cache_valid_segments(self.valid_segments, group_name)
+                        return self.valid_segments
+                    else:
+                        raise ValueError(
+                            "Feature segments not found. Ensure EVENTS or GLITCHES "
+                            "are in data_labels for FEATURES mode."
+                        )

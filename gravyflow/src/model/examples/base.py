@@ -181,7 +181,7 @@ class ValidationConfig:
     
     def __post_init__(self):
         if self.ifos is None:
-            self.ifos = gf.IFO.L1  # Default to single detector
+            self.ifos = [gf.IFO.L1]  # Default to single detector list
 
 
 
@@ -213,13 +213,13 @@ def validation_dataset_args(
     mass_1_distribution = gf.Distribution(
         min_=cfg.mass_1_min_msun,
         max_=cfg.mass_1_max_msun,
-        type_=gf.DistributionType.LOG
+        type_=gf.DistributionType.UNIFORM
     )
     
     mass_2_distribution = gf.Distribution(
         min_=cfg.mass_2_min_msun,
         max_=cfg.mass_2_max_msun,
-        type_=gf.DistributionType.LOG
+        type_=gf.DistributionType.UNIFORM
     )
     
     # Inclination distribution
