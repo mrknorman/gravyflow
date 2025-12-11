@@ -207,6 +207,7 @@ class ReturnVariables(Enum):
     INJECTION_MASKS = ReturnVariable(6)
     ROLLING_PEARSON_ONSOURCE = ReturnVariable(7)
     SPECTROGRAM_ONSOURCE = ReturnVariable(8)
+    CENTRAL_TIME = ReturnVariable(9)
     
     def __lt__(self, other):
         return self.value.index < other.value.index
@@ -1328,13 +1329,19 @@ class InjectionGenerator:
         onsource,
         offsource,
         parameters_to_return,
-        onsource_duration_seconds: float = None
+        onsource_duration_seconds: float = None,
+        injection_parameters: Optional[Dict] = None,
     ):
         scaled_injections_list = []
         scaling_params_list = []
         
         final_onsource = onsource
         
+        # Determine if we need to return injection times
+        return_injection_times = False
+        if parameters_to_return and ReturnVariables.CENTRAL_TIME in parameters_to_return:
+            return_injection_times = True
+
         for i, generator in enumerate(self.waveform_generators):
             raw_waveforms = injections[i] 
             
@@ -1343,6 +1350,161 @@ class InjectionGenerator:
             
             num_examples = ops.shape(raw_waveforms)[0]
             
+            # Extract parameters for this batch/generator if available
+            # Note: injection_parameters usually has batched params for all generators?
+            # Or is it a list of dicts? 
+            # In generate(), batched_params is a single dict combining all.
+            # But params might be arrays of shape (Batch*NumGens)?
+            # No, generate() combines them.
+            # However, if we have multiple generators, the parameters for each might be mixed or stacked?
+            # Wait, `generate` returns `batched_params` which merges lists of params.
+            # If keys conflict (e.g. mass_1 for gen1 and gen2), `batch_injection_parameters` handles it?
+            # `batch_injection_parameters` iterates keys and stacks values if they are lists.
+            # If `InjectionGenerator` has multiple `WNBGenerator`s, `min_frequency` might be a list of tensors?
+            # Or if keys are unique? No, they share keys.
+            # If `batched_params` contains stacked tensors, we need to index `i`.
+            # BUT `shifts` (key "shift") was stacked in `generate` (line 1309: injections_list.append, parameters_list.append).
+            # `batch_injection_parameters` (line 1320) combines them.
+            # Let's verify `batch_injection_parameters` logic. 
+            # It seems it stacks if key exists in multiple params.
+            # So `injection_parameters["shift"]` should be (NumGenerators, Batch) or (Batch, NumGenerators)?
+            # `ops.stack` usually stacks on axis 0.
+            # If parameters_list is [p1, p2], stack([v1, v2]) -> (2, Batch).
+            # So we can access `injection_parameters[key][i]`.
+            
+            current_shifts = None
+            if injection_parameters and "shift" in injection_parameters:
+                shifts_all = injection_parameters["shift"]
+                # shifts_all should be (NumGenerators, Batch)
+                if len(ops.shape(shifts_all)) > 1 and ops.shape(shifts_all)[0] == len(self.waveform_generators):
+                    current_shifts = shifts_all[i]
+                else:
+                    # Fallback if only 1 generator or not stacked as expected
+                    current_shifts = shifts_all
+            
+            # Generate or Retrieve Direction Vectors
+            input_ra = None
+            input_dec = None
+            input_pol = None
+            
+            # Check if RA/Dec/Pol are in injection_parameters
+            # Keys: WaveformParameters.ASCENDING_NODE_LONGITUDE ?? No, RA/Dec are usually implicit or specific params.
+            # If they are not in params, we generate them.
+            
+            # Use seed logic consistent with project_wave or generate
+            # project_wave uses self.rng.integers to get a seed for JAX
+            # We can do the same here to ensure deterministic behavior relative to the generator state
+            proj_seed = network.rng.integers(1000000000, size=2)
+            
+            # We generate RA/Dec/Pol explicitly so we can calculate time delays
+            # Using the same logic as project_wave ensures consistency if we pass them in.
+            
+            # project_wave expects tensor inputs or None.
+            # If we pass None, it generates them inside. But then we don't know them.
+            # So we MUST generate them here and pass them.
+            
+            # Use JAX/Ops generation matching `generate_direction_vectors`
+            # But we are in python methods here. 
+            # We can use the helper function from detector.py if we import it, or just call network.project_wave with our own values.
+            # To generate them, we need to call `generate_direction_vectors` or similar?
+            # Actually, `detector.py` exposes `generate_direction_vectors`.
+            # But it uses JAX keys.
+            # Let's check if parameters have them.
+            
+            # If we are calculating injection times, we force generation here.
+            
+            # RA
+            if injection_parameters and "right_ascension" in injection_parameters:
+                 # Ensure shape
+                 input_ra = injection_parameters["right_ascension"]
+                 # Index if needed
+                 if len(ops.shape(input_ra)) > 1 and ops.shape(input_ra)[0] == len(self.waveform_generators):
+                     input_ra = input_ra[i]
+            
+            # Dec
+            if injection_parameters and "declination" in injection_parameters:
+                 input_dec = injection_parameters["declination"]
+                 if len(ops.shape(input_dec)) > 1 and ops.shape(input_dec)[0] == len(self.waveform_generators):
+                     input_dec = input_dec[i]
+
+            # Pol
+            if injection_parameters and "polarization" in injection_parameters:
+                 input_pol = injection_parameters["polarization"]
+                 if len(ops.shape(input_pol)) > 1 and ops.shape(input_pol)[0] == len(self.waveform_generators):
+                     input_pol = input_pol[i]
+
+            # If missing, generate utilizing the seed we just drew.
+            # Note: project_wave takes `seed` argument (tensor).
+            # We can use that seed to generate them using JAX functions if we want to be 100% consistent with implicit generation.
+            # `gf.generate_direction_vectors` is available? It's in detector.py.
+            # It's not imported in injection.py. 
+            # But we can import it or use `network` methods?
+            # `network` doesn't have generation methods exposed easily.
+            # Let's import it or re-implement simply since we want to pass explicit values.
+            
+            # Actually, simplest way: let's stick to randomness driven by `proj_seed`.
+            # We need to use JAX random to match `project_wave`'s internal logic?
+            # Or just generate using `network.rng` (numpy) and convert to tensor.
+            # `project_wave` uses JAX random.
+            # If we use numpy `network.rng`, it will be deterministic given the seed.
+            # And since we pass explicit values to `project_wave`, it won't re-generate.
+            # So let's use numpy generation.
+            
+            num_inj = ops.shape(raw_waveforms)[0]
+            
+            if input_ra is None or input_dec is None:
+                # Uniform sphere
+                # u, v ~ U(0, 1)
+                # ra = 2pi * u
+                # dec = arcsin(2v - 1)
+                u = network.rng.random(num_inj).astype("float32")
+                v = network.rng.random(num_inj).astype("float32")
+                
+                if input_ra is None:
+                    input_ra = ops.convert_to_tensor(2.0 * np.pi * u)
+                if input_dec is None:
+                    input_dec = ops.arcsin(2.0 * v - 1.0)
+            
+            if input_pol is None:
+                p = network.rng.random(num_inj).astype("float32")
+                input_pol = ops.convert_to_tensor(2.0 * np.pi * p)
+            
+            # Calculate Time Delays
+            # network.get_time_delay returns (Batch, NumDetectors)
+            time_delays = network.get_time_delay(input_ra, input_dec)
+            
+            # Calculate Injection Time
+            if return_injection_times and current_shifts is not None:
+                # t0_raw = target_duration / 2 + shift
+                # Final time = t0_raw + delay
+                # target_duration is `onsource_duration_seconds`? 
+                # Wait, onsource passed to this method is raw onsource data. 
+                # `onsource_duration_seconds` arg is available.
+                
+                dur = onsource_duration_seconds
+                if dur is None:
+                    # Fallback to calculating from samples
+                     dur = ops.shape(onsource)[-1] / self.sample_rate_hertz
+                
+                # Convert everything to seconds
+                # shift is in samples? Yes, `shifts = self.rng.integers(...)` in generate
+                
+                shift_seconds = ops.cast(current_shifts, "float32") / self.sample_rate_hertz
+                center_seconds = dur / 2.0
+                
+                t_geocenter = center_seconds + shift_seconds
+                
+                # Broadcast t_geocenter (Batch,) to (Batch, NumDetectors)
+                t_geocenter = ops.expand_dims(t_geocenter, -1)
+                
+                final_time = t_geocenter + time_delays
+                
+                # Normalize by duration (0 to 1)
+                normalized_time = final_time / dur
+                
+                scaling_params_list.append({ReturnVariables.CENTRAL_TIME: normalized_time})
+
+
             scaling_dist = scaling_method.value
 
             if not hasattr(self, "_scaling_indices"):
@@ -1383,7 +1545,10 @@ class InjectionGenerator:
                 
                 projected = network.project_wave(
                     scaled_raw,
-                    sample_rate_hertz=sample_rate
+                    sample_rate_hertz=sample_rate,
+                    right_ascension=input_ra,
+                    declination=input_dec,
+                    polarization=input_pol
                 )
                 
                 # Crop to target length
@@ -1394,7 +1559,10 @@ class InjectionGenerator:
             else:
                 projected = network.project_wave(
                     raw_waveforms,
-                    sample_rate_hertz=sample_rate
+                    sample_rate_hertz=sample_rate,
+                    right_ascension=input_ra,
+                    declination=input_dec,
+                    polarization=input_pol
                 )
                 
                 # Crop to target length

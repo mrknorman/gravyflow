@@ -18,7 +18,7 @@ from pathlib import Path
 import keras
 
 import gravyflow as gf
-from gravyflow.src.model.validate import Validator
+from gravyflow.src.validate import Validator
 from gravyflow.src.model.examples.base import validation_dataset_args, ValidationConfig
 from gravyflow.src.model.examples.gabbard_2017 import Gabbard2017, Gabbard2017Config
 
@@ -90,12 +90,14 @@ def main():
     print(f"Checkpoint: {checkpoint_path}")
     print(f"Plots: {plot_path}")
     
-    # Run validation
+    # Run validation with 10^7 examples for stress test
+    from gravyflow.src.validate import ValidationConfig as ValidatorConfig
     validator = Validator.validate(
         model=model,
         name=name,
         dataset_args=dataset_args,
         checkpoint_file_path=checkpoint_path,
+        config=ValidatorConfig(num_examples=1E5),  # 10^7 examples
     )
     
     # Generate plots

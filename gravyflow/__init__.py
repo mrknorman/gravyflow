@@ -82,8 +82,8 @@ from .src.dataset.conditioning.whiten import whiten, Whiten, WhitenPass
 from .src.dataset.conditioning.pearson import rolling_pearson
 from .src.dataset.conditioning.detector import IFO, Network, project_wave
 from .src.dataset.noise.acquisition import (
-    DataQuality, DataLabel, SegmentOrder, AcquisitionMode, ObservingRun,
-    IFOData, IFODataObtainer
+    DataQuality, DataLabel, SegmentOrder, AcquisitionMode, SamplingMode, ObservingRun,
+    IFOData, IFODataObtainer, FeatureCacheConfig
 )
 from .src.dataset.noise.noise import NoiseType, NoiseObtainer
 from .src.dataset.curriculum import Curriculum, CurriculumSchedule, CurriculumProgressCallback
@@ -104,8 +104,12 @@ from .src.utils.plotting import (
     generate_strain_plot, generate_psd_plot, generate_spectrogram, generate_correlation_plot,
     generate_segment_timeline_plot, generate_example_extraction_plot
 )
-from .src.model.validate import Validator, ValidationConfig, UnifiedValidationBank
+from .src.validate import Validator, ValidationConfig
 from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_segments
+from .src.dataset.features.event import (
+    EventType, get_confident_event_times, get_marginal_event_times, 
+    get_all_event_times, get_event_times_by_type, get_confident_events_with_params
+)
 from .src.utils.alert import send_email
 from .src.model.examples.gabbard_2017 import Gabbard2017
 from .src.model.examples.matched_filter_baseline import MatchedFilterBaseline, MatchedFilterBaselineConfig

@@ -277,7 +277,8 @@ class NoiseObtainer:
             num_examples_per_batch : float = None,
             scale_factor : float = 1.0,
             group : str = "train",
-            seed : int = None
+            seed : int = None,
+            sampling_mode : "gf.SamplingMode" = None
         ) -> Iterator:
 
         if sample_rate_hertz is None:
@@ -296,6 +297,10 @@ class NoiseObtainer:
             seed = gf.Defaults.seed
         if self.rng is None:
             self.rng = default_rng(seed)
+        
+        # Default to RANDOM mode if not specified
+        if sampling_mode is None:
+            sampling_mode = gf.SamplingMode.RANDOM
 
         self.generator = None
 
@@ -375,7 +380,8 @@ class NoiseObtainer:
                         num_examples_per_batch,
                         self.ifos,
                         scale_factor,
-                        seed=seed_
+                        seed=seed_,
+                        sampling_mode=sampling_mode
                     )
                 
             case _:
