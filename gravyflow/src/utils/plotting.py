@@ -815,7 +815,4 @@ def generate_example_extraction_plot(
         plots.append(p)
     
     # Set common title
-    if plots:
-        plots[0].title.text = title
-    
     return column(*plots)
