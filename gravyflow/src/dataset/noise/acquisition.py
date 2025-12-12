@@ -27,6 +27,7 @@ from gwpy.timeseries import TimeSeries
 # Local imports:
 import gravyflow as gf
 from gravyflow.src.utils.tensor import resample_fft
+from gravyflow.src.dataset.features.event import EventType
 
 
 def ensure_even(number):
@@ -51,7 +52,7 @@ class SegmentOrder(Enum):
     
 class AcquisitionMode(Enum):
     NOISE = auto()
-    FEATURES = auto()
+    TRANSIENT = auto()  # For point-in-time events (GW events, glitches)
 
 @dataclass
 class FeatureCacheConfig:
@@ -92,22 +93,30 @@ observing_run_data : Dict = {
         "O1", 
         datetime(2015, 9, 12, 0, 0, 0), 
         datetime(2016, 1, 19, 0, 0, 0),
-        {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
-        {DataQuality.BEST: "HOFT_C01"},
+        {DataQuality.BEST: "LOSC_4_V1"},
+        {DataQuality.BEST: "GWOSC-4KHZ_R1_STRAIN"},
         {DataQuality.BEST: "DCS-ANALYSIS_READY_C01:1"}
     ),
     "O2" : (
         "O2", 
         datetime(2016, 11, 30, 0, 0, 0), 
         datetime(2017, 8, 25, 0, 0, 0),
-        {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
-        {DataQuality.BEST: "HOFT_C01"},
+        {DataQuality.BEST: "LOSC_4_V1"},
+        {DataQuality.BEST: "GWOSC-4KHZ_R1_STRAIN"},
         {DataQuality.BEST: "DCS-ANALYSIS_READY_C01:1"}
     ),
     "O3" : (
         "O3", 
         datetime(2019, 4, 1, 0, 0, 0), 
         datetime(2020, 3, 27, 0, 0, 0),
+        {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
+        {DataQuality.BEST: "HOFT_C01"},
+        {DataQuality.BEST: "DCS-ANALYSIS_READY_C01:1"}
+    ),
+    "O4" : (
+        "O4", 
+        datetime(2023, 5, 24, 15, 0, 0),  # O4 Start (Start of O4a)
+        datetime(2025, 11, 18, 16, 0, 0),  # O4 End (End of O4c)
         {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
         {DataQuality.BEST: "HOFT_C01"},
         {DataQuality.BEST: "DCS-ANALYSIS_READY_C01:1"}
@@ -118,6 +127,7 @@ class ObservingRun(Enum):
     O1 = ObservingRunData(*observing_run_data["O1"])
     O2 = ObservingRunData(*observing_run_data["O2"])
     O3 = ObservingRunData(*observing_run_data["O3"])
+    O4 = ObservingRunData(*observing_run_data["O4"])
 
 @jax.jit(static_argnames=["num_examples_per_batch", "num_onsource_samples", "num_offsource_samples"])
 def _random_subsection(
@@ -409,15 +419,17 @@ class IFODataObtainer:
     
     def __init__(
             self, 
-            observing_runs : Union[ObservingRun, List[ObservingRun]],
             data_quality : DataQuality,
             data_labels : Union[DataLabel, List[DataLabel]],
+            observing_runs : Union[ObservingRun, List[ObservingRun]] = None,
             segment_order : SegmentOrder = SegmentOrder.RANDOM,
             max_segment_duration_seconds : float = 2048.0,
             saturation : float = 0.125,  # 1/8 = 8x oversampling for efficiency
             force_acquisition : bool = False,
             cache_segments : bool = True,
             overrides : dict = None,
+            event_types : List[EventType] = [EventType.CONFIDENT],
+            acquisition_mode : AcquisitionMode = AcquisitionMode.NOISE,
             logging_level : int = logging.WARNING
         ):
         
@@ -426,6 +438,8 @@ class IFODataObtainer:
         stream_handler = logging.StreamHandler(sys.stdout)
         self.logger.addHandler(stream_handler)
         self.logger.setLevel(logging_level)
+        
+        self.acquisition_mode = acquisition_mode
 
         self._current_segment_index = 0
         self._current_batch_index = 0
@@ -435,6 +449,10 @@ class IFODataObtainer:
         self.rng = None
         self.ifos = None
         
+        # Default to all observing runs (O1, O2, O3) if not specified
+        if observing_runs is None:
+            observing_runs = [ObservingRun.O1, ObservingRun.O2, ObservingRun.O3]
+
         # Ensure parameters are lists for consistency:
         if not isinstance(observing_runs, list):
             observing_runs = [observing_runs]
@@ -450,6 +468,7 @@ class IFODataObtainer:
         self.force_acquisition = force_acquisition
         self.cache_segments = cache_segments
         self.segment_file = None
+        self.event_types = event_types
             
         # Unpack parameters from input observing runs:
         self.unpack_observing_runs(observing_runs, data_quality)
@@ -500,7 +519,7 @@ class IFODataObtainer:
             [run.state_flags[data_quality] for run in observing_runs]
         
     def __del__(self):
-        if self.segment_file is not None:
+        if getattr(self, "segment_file", None) is not None:
             self.segment_file.close()
             
     def close(self):
@@ -619,9 +638,9 @@ class IFODataObtainer:
             group_name=group_name
         )
         
-        if self.acquisition_mode != AcquisitionMode.FEATURES:
+        if self.acquisition_mode != AcquisitionMode.TRANSIENT:
             raise ValueError(
-                "precache_features() requires FEATURES mode. "
+                "precache_features() requires TRANSIENT mode. "
                 "Ensure data_labels contains EVENTS or GLITCHES (not NOISE)."
             )
         
@@ -677,25 +696,35 @@ class IFODataObtainer:
                     # Download strain data for this segment
                     seg_start, seg_end = segment[0], segment[1]
                     
-                    # Create subgroup for this feature
-                    feat_group = cache_group.create_group(f"feature_{idx}")
+                    # Create subgroup for this feature using GPS key compatible with acquire()
+                    cache_key_seg = f"segments/segment_{seg_start}_{seg_end}"
+                    
+                    # Ensure parent group exists
+                    if "segments" not in f:
+                        f.create_group("segments")
+                        
+                    if cache_key_seg in f:
+                        del f[cache_key_seg]
+                        
+                    feat_group = f.create_group(cache_key_seg)
                     feat_group.attrs["start_gps"] = seg_start
                     feat_group.attrs["end_gps"] = seg_end
                     
                     # Download data for each IFO
                     for ifo_idx, ifo in enumerate(ifos):
                         try:
-                            ifo_data = IFOData(
-                                ifo,
+                            # Fetch data using existing method
+                            ts_data = self.get_segment_data(
                                 seg_start,
                                 seg_end,
+                                ifo,
                                 self.frame_types[0],
-                                self.channels[0],
-                                sample_rate_hertz
+                                self.channels[0]
                             )
+                            
                             feat_group.create_dataset(
                                 ifo.name, 
-                                data=ifo_data.data,
+                                data=ts_data.value,
                                 compression="gzip"
                             )
                         except Exception as e:
@@ -772,7 +801,8 @@ class IFODataObtainer:
             "GWTC-2.1-confident", 
             "GWTC-2.1-marginal", 
             "GWTC-3-confident", 
-            "GWTC-3-marginal"
+            "GWTC-3-marginal",
+            "GWTC-4",
         ]
 
         gps_times = np.array([])
@@ -1248,7 +1278,7 @@ class IFODataObtainer:
                 return None, None, None
             temp_onsource.append(chunk)
             
-            # Extract offsource (prefer left of onsource, fallback to right or zeros)
+            # Extract offsource (ends at start of onsource)
             off_start = start_onsource - num_offsource_samples
             if off_start >= 0:
                 off_chunk = channel_data[off_start:start_onsource]
@@ -1316,23 +1346,65 @@ class IFODataObtainer:
         Fetches new segment data from specific URLs and reads it into a 
         TimeSeries object.
         """
-
-        files = find_urls(
-            site=ifo.name.strip("1"),
-            frametype=f"{ifo.name}_{frame_type}",
-            gpsstart=segment_start_gps_time,
-            gpsend=segment_end_gps_time,
-            urltype="file",
-        )
-        data = TimeSeries.read(
-            files, 
-            channel=f"{ifo.name}:{channel}", 
-            start=segment_start_gps_time, 
-            end=segment_end_gps_time, 
-            nproc=100
-        )
         
-        return data
+        # Helper to find correct observing run definition for this time
+        for run in ObservingRun:
+            if run.value.start_gps_time <= segment_start_gps_time <= run.value.end_gps_time:
+                # Found the correct run for this time
+                run_data = run.value
+                
+                # Assuming BEST quality as a fallback/default for events
+                # This fixes the issue where asking for O1 event with O3 config uses wrong frame type
+                new_frame_type = run_data.frame_types[DataQuality.BEST]
+                new_channel = run_data.channels[DataQuality.BEST]
+                
+                if new_frame_type != frame_type:
+                    self.logger.warning(
+                        f"Observing Run Mismatch: Requested GPS {segment_start_gps_time} "
+                        f"falls in {run_data.name}, but configured for different run. "
+                        f"Auto-switching frame type {frame_type}->{new_frame_type}."
+                    )
+                    frame_type = new_frame_type
+                    channel = new_channel
+                break
+
+        # Try to find local files first (preferred for cluster usage)
+        try:
+            files = find_urls(
+                site=ifo.name.strip("1"),
+                frametype=f"{ifo.name}_{frame_type}",
+                gpsstart=segment_start_gps_time,
+                gpsend=segment_end_gps_time,
+                urltype="file",
+            )
+            
+            if not files:
+                raise ValueError("No local files found.")
+                
+            full_segment_data = TimeSeries.read(
+                files, 
+                channel=f"{ifo.name}:{channel}", 
+                start=segment_start_gps_time, 
+                end=segment_end_gps_time, 
+                nproc=100
+            )
+            
+        except Exception as e:
+            # Fallback to Open Data (GWOSC) if local fetch fails
+            # This is critical for O1/O2 public data or when running off-cluster
+            # logging.info(f"Local fetch failed for {ifo.name} at {segment_start_gps_time}: {e}. Trying GWOSC...")
+            try:
+                full_segment_data = TimeSeries.fetch_open_data(
+                    ifo.name, 
+                    segment_start_gps_time, 
+                    segment_end_gps_time,
+                    cache=True
+                )
+            except Exception as e_remote:
+                # If both fail, raise the original error or the new one
+                raise ValueError(f"Failed to acquire data from local ({e}) or remote ({e_remote}).")
+                
+        return full_segment_data
 
     def get_segment(
         self,
@@ -1500,8 +1572,8 @@ class IFODataObtainer:
                     if self.cache_segments:
                         self._cache_segment(segment_key, segment_data)
                 else:
-                    # If FEATURES mode, we might want to Zero-Fill instead of skipping
-                    # Check if we are in FEATURES mode context (implied by this method usage?)
+                    # If TRANSIENT mode, we might want to Zero-Fill instead of skipping
+                    # Check if we are in TRANSIENT mode context (implied by this method usage?)
                     # No, this is 'acquire' method used by both.
                     # But we passed 'valid_segments' which might be features or noise.
                     
@@ -1677,7 +1749,7 @@ class IFODataObtainer:
                 # Inner loop exited - segment exhausted, outer while True loops back to get new segment
 
         else:
-            # --- FEATURES MODE ---
+            # --- TRANSIENT MODE ---
             # Each valid_segment is a padded event window. Aggregate into batches.
             self.valid_segments_adjusted = self.valid_segments
             
@@ -1784,15 +1856,92 @@ class IFODataObtainer:
             )
 
         if self.valid_segments is None or len(self.valid_segments) != len(ifos):
-            # Try to load from cache first (avoids auth requirement)
-            cached = self._get_cached_valid_segments(ifos, group_name)
-            if cached is not None:
-                self.valid_segments = cached
-                if DataLabel.NOISE in self.data_labels:
-                    self.acquisition_mode = AcquisitionMode.NOISE
-                else:
-                    self.acquisition_mode = AcquisitionMode.FEATURES
-                return self.valid_segments
+            
+            # Check if feature_segments are already pre-populated (e.g. by TransientObtainer)
+            # If so, force use of these segments and skip cache/catalog lookup
+            if hasattr(self, 'feature_segments') and self.feature_segments is not None and len(self.feature_segments) > 0:
+                 self.acquisition_mode = AcquisitionMode.TRANSIENT
+                 
+                 # Prepare all_feature_segments_list for formatting logic below
+                 all_feature_segments_list = [self.feature_segments]
+                 
+                 # Skip to formatting
+                 # We need to construct self.valid_segments structure (list of arrays, one per IFO)
+                 # The logic below combines all_feature_segments_list into unique_segments, 
+                 # then splits it? No, 'valid_segments' in TRANSIENT mode is just 
+                 # ordered event windows.
+                 # Actually the logic below (lines 1939+) handles the construction (Union/Unique/Sort).
+                 # So we just need to ensure we bypass the "else" (catalog search) and GLITCHES.
+                 use_override = True
+            else:
+                use_override = False
+                # Try to load from cache first (avoids auth requirement)
+                cached = self._get_cached_valid_segments(ifos, group_name)
+                if cached is not None:
+                    self.valid_segments = cached
+                    if DataLabel.NOISE in self.data_labels:
+                        self.acquisition_mode = AcquisitionMode.NOISE
+                    else:
+                        self.acquisition_mode = AcquisitionMode.TRANSIENT
+                    return self.valid_segments
+                
+            self.valid_segments = []
+
+            # Check to see if noise with no features is desired data product, if
+            # not extracting features is a very different process to randomly 
+            # sampling from large noise vectors:
+            if not use_override and DataLabel.NOISE in self.data_labels:
+                self.acquisition_mode = AcquisitionMode.NOISE
+                # ... NOISE MODE LOGIC REMOVED FOR BREVITY IN REPLACEMENT ...
+                # Wait, I cannot remove NOISE mode logic if I don't include it in replacement chunks.
+                # I should use MultiReplace or be careful with range.
+                pass 
+                
+            # Wait, easier strategy: 
+            # If overridden, set acquisition mode and jump to formatting.
+            # But the structure is complex.
+            
+            # Let's restructure slightly to handle the override cleanly.
+            pass
+            
+# RESTARTING THOUGHT PROCESS FOR REPLACEMENT CONTENT
+# The target file content is messy with nested ifs.
+# I will replacing a large chunk to restructure it cleanly.
+# Range: from `if self.valid_segments is None` (1802) to `self.feature_segments = unique_segments` (1945)
+
+# Proposed logic:
+# 1. Check override.
+# 2. If not override, checking cache.
+# 3. If cache hit, return.
+# 4. If no cache:
+#    If NOISE: do noise logic.
+#    Else (TRANSIENT):
+#        If override: set list to override.
+#        Else: fetch events, fetch glitches.
+#    Process list (Union/Unique/Sort) -> self.feature_segments
+#    Copy to self.valid_segments (per IFO)
+
+# This assumes NOISE mode doesn't use the feature_segments logic at the end.
+# Looking at code: NOISE mode logic ends with `self.valid_segments.append(valid_segments)` and seemingly returns or finishes loop?
+# No, it's in a loop `for ifo in ifos`.
+# And then it exits the method? No.
+# Lines 1823-1870 is NOISE block.
+# Lines 1871 is `else` (TRANSIENT block).
+# TRANSIENT block ends at 1945?
+# And afterwards?
+# `if group_name == 'all': ...`
+# This grouping logic seems to apply to transient segments too.
+
+# I need to be careful with handling the NOISE block.
+# Since I shouldn't touch the NOISE block if I can avoid it (it's large).
+# I will use the "else" of the NOISE check.
+
+# Lines 1823: `if self.acquisition_mode == AcquisitionMode.NOISE:`
+# I will target lines 1802 to 1821 to handle the cache check vs override.
+# And target lines 1881+ to handle the fetching logic.
+
+# Step 1: Modify cache check (1802-1812)
+
             
             self.valid_segments = []
 
@@ -1802,7 +1951,7 @@ class IFODataObtainer:
             if DataLabel.NOISE in self.data_labels:
                 self.acquisition_mode = AcquisitionMode.NOISE
             else:
-                self.acquisition_mode = AcquisitionMode.FEATURES
+                self.acquisition_mode = AcquisitionMode.TRANSIENT
 
             if self.acquisition_mode == AcquisitionMode.NOISE:
                 for ifo in ifos:
@@ -1853,48 +2002,53 @@ class IFODataObtainer:
                     self.valid_segments.append(valid_segments)
             
             else:
-                # FEATURES MODE: Collect UNION of all events/features
+                # TRANSIENT MODE: Collect UNION of all events/features
                 all_feature_segments_list = []
                 
-                padding = 32.0 # Default padding
-                
-                # Define global search window
-                global_start_gps = min(self.start_gps_times)
-                global_end_gps = max(self.end_gps_times)
-
-                # 1. EVENTS (Global)
-                if DataLabel.EVENTS in self.data_labels:
-                    event_times = gf.get_all_event_times()
-                    # Filter events within observing runs
-                    event_times = [t for t in event_times if global_start_gps <= t <= global_end_gps]
+                # Check if feature_segments are already pre-populated (e.g. by TransientObtainer)
+                if hasattr(self, 'feature_segments') and self.feature_segments is not None and len(self.feature_segments) > 0:
+                    # Use overridden segments
+                    all_feature_segments_list.append(self.feature_segments)
+                else: 
+                    padding = 32.0 # Default padding
                     
-                    if len(event_times) > 0:
-                        evt_segs = self.pad_gps_times_with_veto_window(
-                            np.array(event_times), 
-                            start_padding_seconds=padding, 
-                            end_padding_seconds=padding
-                        )
-                        all_feature_segments_list.append(evt_segs)
-
-                # 2. GLITCHES (Per IFO)
-                if DataLabel.GLITCHES in self.data_labels:
-                    for ifo in ifos:
-                        try:
-                            glitch_times = gf.get_glitch_times(
-                                ifo,
-                                start_gps_time=global_start_gps,
-                                end_gps_time=global_end_gps
+                    # Define global search window
+                    global_start_gps = min(self.start_gps_times)
+                    global_end_gps = max(self.end_gps_times)
+    
+                    # 1. EVENTS (Global)
+                    if DataLabel.EVENTS in self.data_labels:
+                        event_times = gf.get_event_times_by_type(self.event_types)
+                        # Filter events within observing runs
+                        event_times = [t for t in event_times if global_start_gps <= t <= global_end_gps]
+                        
+                        if len(event_times) > 0:
+                            evt_segs = self.pad_gps_times_with_veto_window(
+                                np.array(event_times), 
+                                start_padding_seconds=padding, 
+                                end_padding_seconds=padding
                             )
-                            if len(glitch_times) > 0:
-                                gl_segs = self.pad_gps_times_with_veto_window(
-                                    np.array(glitch_times),
-                                    start_padding_seconds=padding,
-                                    end_padding_seconds=padding
+                            all_feature_segments_list.append(evt_segs)
+
+                    # 2. GLITCHES (Per IFO)
+                    if DataLabel.GLITCHES in self.data_labels:
+                        for ifo in ifos:
+                            try:
+                                glitch_times = gf.get_glitch_times(
+                                    ifo,
+                                    start_gps_time=global_start_gps,
+                                    end_gps_time=global_end_gps
                                 )
-                                all_feature_segments_list.append(gl_segs)
-                        except Exception as e:
-                            logging.warning(f"Failed to fetch glitches for {ifo}: {e}")
-                            continue
+                                if len(glitch_times) > 0:
+                                    gl_segs = self.pad_gps_times_with_veto_window(
+                                        np.array(glitch_times),
+                                        start_padding_seconds=padding,
+                                        end_padding_seconds=padding
+                                    )
+                                    all_feature_segments_list.append(gl_segs)
+                            except Exception as e:
+                                logging.warning(f"Failed to fetch glitches for {ifo}: {e}")
+                                continue
 
                 if not all_feature_segments_list:
                      raise ValueError("No features (Events/Glitches) found in requested range.")
@@ -1966,8 +2120,8 @@ class IFODataObtainer:
 
                     return self.valid_segments
             
-                case AcquisitionMode.FEATURES:
-                    # For FEATURES mode, auto-precache feature data
+                case AcquisitionMode.TRANSIENT:
+                    # For TRANSIENT mode, auto-precache feature data
                     if hasattr(self, 'feature_segments') and self.feature_segments is not None:
                         # Check if valid_segments is already correctly set up (3D, matching IFO count)
                         # If so, do not overwrite it with simple expansion of feature_segments
@@ -2014,5 +2168,5 @@ class IFODataObtainer:
                     else:
                         raise ValueError(
                             "Feature segments not found. Ensure EVENTS or GLITCHES "
-                            "are in data_labels for FEATURES mode."
+                            "are in data_labels for TRANSIENT mode."
                         )

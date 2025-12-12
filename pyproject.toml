@@ -84,7 +84,7 @@ filterwarnings = [
     "ignore:Whitening requested for WHITE NOISE:UserWarning",
     "ignore:The structure of `inputs` doesn't match:UserWarning",
 ]
-addopts = "--cov=gravyflow --cov-report=term-missing --cov-report=html --cov-fail-under=90"
+addopts = "--cov=gravyflow --cov-report=term-missing --cov-fail-under=90"
 
 [tool.coverage.run]
 omit = [

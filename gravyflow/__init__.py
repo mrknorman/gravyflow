@@ -85,7 +85,7 @@ from .src.dataset.noise.acquisition import (
     DataQuality, DataLabel, SegmentOrder, AcquisitionMode, SamplingMode, ObservingRun,
     IFOData, IFODataObtainer, FeatureCacheConfig
 )
-from .src.dataset.noise.noise import NoiseType, NoiseObtainer
+from .src.dataset.noise.noise import NoiseType, Obtainer, NoiseObtainer, TransientObtainer
 from .src.dataset.curriculum import Curriculum, CurriculumSchedule, CurriculumProgressCallback
 from .src.dataset.features.injection import (
     ScalingOrdinality, ScalingType, ScalingTypes, ScalingMethod, ReturnVariables,
@@ -107,11 +107,11 @@ from .src.utils.plotting import (
 from .src.validate import Validator, ValidationConfig
 from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_segments
 from .src.dataset.features.event import (
-    EventType, get_confident_event_times, get_marginal_event_times, 
-    get_all_event_times, get_event_times_by_type, get_confident_events_with_params
+    EventType, SourceType, get_confident_event_times, get_marginal_event_times, 
+    get_all_event_times, get_event_times_by_type, get_confident_events_with_params,
+    search_events
 )
 from .src.utils.alert import send_email
 from .src.model.examples.gabbard_2017 import Gabbard2017
 from .src.model.examples.matched_filter_baseline import MatchedFilterBaseline, MatchedFilterBaselineConfig
 from .src.detection import MatchedFilter, MatchedFilterLayer, TemplateGrid, matched_filter_fft, optimal_snr
-

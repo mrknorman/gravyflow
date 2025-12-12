@@ -6,7 +6,7 @@ plus functions to fetch event times from GWTC catalogs.
 """
 
 from enum import Enum, auto
-from typing import List, Optional
+from typing import List, Optional, Union
 from pathlib import Path
 import logging
 
@@ -25,6 +25,14 @@ class EventType(Enum):
     CONFIDENT = 'confident'  # GWTC *-confident catalogs (confirmed events)
     MARGINAL = 'marginal'    # GWTC *-marginal catalogs (sub-threshold triggers)
 
+
+class SourceType(Enum):
+    """
+    Type of gravitational wave source.
+    """
+    BBH = 'BBH'   # Binary Black Hole
+    BNS = 'BNS'   # Binary Neutron Star
+    NSBH = 'NSBH' # Neutron Star - Black Hole
 
 # Catalog mappings by event type
 CONFIDENT_CATALOGS = [
@@ -153,92 +161,142 @@ def get_event_times_by_type(
     return np.concatenate(times)
 
 
-def get_confident_events_with_params(
-    observing_runs: List = None
+def get_events_with_params(
+    observing_runs: List = None,
+    event_types: List[EventType] = None
 ) -> List[dict]:
     """
-    Fetch confirmed GW events with full parameter estimation data.
+    Fetch GW events with full parameter estimation data.
     
-    Returns a list of dictionaries containing event metadata and PE parameters
-    suitable for validation against model predictions.
+    Returns a list of dictionaries containing event metadata and PE parameters.
     
     Args:
         observing_runs: Optional list of ObservingRun enums to filter by.
-                       If None, returns all O1/O2/O3 events.
+                       If None, returns all O1/O2/O3/O4 events.
+        event_types: Optional list of EventType (CONFIDENT, MARGINAL).
+                    Defaults to [EventType.CONFIDENT].
     
     Returns:
-        List of dicts with keys:
-            - name: Event name (e.g., "GW150914")
-            - gps: GPS time of event
-            - mass1: Primary mass (Msun)
-            - mass2: Secondary mass (Msun)
-            - distance: Luminosity distance (Mpc)
-            - catalog: Source catalog name
-            - observing_run: O1/O2/O3
+        List of dicts with keys: name, gps, mass1, mass2, distance, catalog, observing_run...
     """
+    if event_types is None:
+        event_types = [EventType.CONFIDENT]
+    
     events = []
     
     # Map catalogs to observing runs
-    catalog_run_map = {
-        "GWTC": "O1",
-        "GWTC-1-confident": "O1",
-        "GWTC-2": "O2",
-        "GWTC-2.1-confident": "O2",
-        "GWTC-3-confident": "O3",
-    }
-    
-    # Filter catalogs by observing run if specified
-    catalogs_to_fetch = CONFIDENT_CATALOGS
-    if observing_runs:
-        run_names = set()
-        for run in observing_runs:
-            if hasattr(run, 'value'):
-                run_names.add(run.value.name if hasattr(run.value, 'name') else str(run))
-            else:
-                run_names.add(str(run))
-        
-        catalogs_to_fetch = [
-            cat for cat in CONFIDENT_CATALOGS 
-            if catalog_run_map.get(cat) in run_names
-        ]
-    
-    for catalog in catalogs_to_fetch:
-        try:
-            table = EventTable.fetch_open_data(catalog)
-            
-            for row in table:
-                try:
-                    event = {
-                        "name": str(row.get("commonName", row.get("name", "Unknown"))),
-                        "gps": float(row["GPS"]),
-                        "mass1": float(row.get("mass_1_source", row.get("m1", np.nan))),
-                        "mass2": float(row.get("mass_2_source", row.get("m2", np.nan))),
-                        "distance": float(row.get("luminosity_distance", row.get("distance", np.nan))),
-                        # Source classification probabilities
-                        "p_bbh": float(row.get("p_astro", row.get("pastro", np.nan))) if "p_astro" in row.colnames or "pastro" in row.colnames else np.nan,
-                        "p_bns": float(row.get("p_BNS", np.nan)) if "p_BNS" in row.colnames else np.nan,
-                        "p_nsbh": float(row.get("p_NSBH", np.nan)) if "p_NSBH" in row.colnames else np.nan,
-                        "catalog": catalog,
-                        "observing_run": catalog_run_map.get(catalog, "Unknown"),
-                    }
-                    
-                    # Only add if GPS is valid
-                    if not np.isnan(event["gps"]):
-                        events.append(event)
-                        
-                except (KeyError, ValueError, TypeError) as e:
-                    logging.debug(f"Skipping event row: {e}")
-                    continue
-                    
-        except Exception as e:
-            logging.warning(f"Failed to fetch catalog {catalog}: {e}")
-            continue
+    # Define observing run GPS ranges (approximate)
+    O1_START, O1_END = 1126051217, 1137254417
+    O2_START, O2_END = 1164556817, 1187733618
+    O3_START, O3_END = 1238166018, 1269363618
+    # O4: May 24 2023 - Jan 16 2024 (O4a) + ...
+    O4_START, O4_END = 1368000000, 1400000000
+
+    def get_run_from_gps(gps):
+        if O1_START <= gps <= O1_END:
+            return "O1"
+        elif O2_START <= gps <= O2_END:
+            return "O2"
+        elif O3_START <= gps <= O3_END:
+            return "O3"
+        elif O4_START <= gps <= O4_END:
+            return "O4"
+        return "Unknown"
+
+    # Determine which catalogs to fetch
+    catalogs_to_fetch = []
+    if EventType.CONFIDENT in event_types:
+        catalogs_to_fetch.extend(CONFIDENT_CATALOGS)
+    if EventType.MARGINAL in event_types:
+        catalogs_to_fetch.extend(MARGINAL_CATALOGS)
     
     # Remove duplicates by GPS time (some events appear in multiple catalogs)
     seen_gps = set()
     unique_events = []
+    
+    # Simple caching implementation to avoid repeated catalog fetching
+    import json
+    import os
+    from hashlib import md5
+    
+    # Create cache dir
+    cache_dir = Path(__file__).parent.parent.parent / "res" / "event_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    cache_key = md5(str(sorted(event_types)).encode('utf-8')).hexdigest()
+    cache_file = cache_dir / f"events_{cache_key}.json"
+    
+    if cache_file.exists():
+        try:
+            with open(cache_file, 'r') as f:
+                events = json.load(f)
+        except Exception as e:
+            logging.warning(f"Failed to load event cache: {e}. Re-fetching.")
+            events = []
+            
+    if not events: # Fetch if no cache or empty
+        for catalog in catalogs_to_fetch:
+            try:
+                table = EventTable.fetch_open_data(catalog)
+                
+                for row in table:
+                    try:
+                        run_name = get_run_from_gps(float(row["GPS"]))
+                        
+                        event = {
+                            "name": str(row.get("commonName", row.get("name", "Unknown"))),
+                            "gps": float(row["GPS"]),
+                            "mass1": float(row.get("mass_1_source", row.get("m1", np.nan))),
+                            "mass2": float(row.get("mass_2_source", row.get("m2", np.nan))),
+                            "distance": float(row.get("luminosity_distance", row.get("distance", np.nan))),
+                            # Source classification probabilities
+                            "p_bbh": float(row.get("p_astro", row.get("pastro", np.nan))),
+                            "p_bns": float(row.get("p_BNS", np.nan)),
+                            "p_nsbh": float(row.get("p_NSBH", np.nan)),
+                            "catalog": catalog,
+                            "observing_run": run_name,
+                        }
+                        
+                        # Only add if GPS is valid
+                        if not np.isnan(event["gps"]):
+                             # Convert np.nan to None for JSON serialization
+                            for k, v in event.items():
+                                if isinstance(v, float) and np.isnan(v):
+                                    event[k] = None
+                                    
+                            events.append(event)
+                            
+                    except (KeyError, ValueError, TypeError) as e:
+                        logging.debug(f"Skipping event row: {e}")
+                        continue
+                        
+            except Exception as e:
+                logging.warning(f"Failed to fetch catalog {catalog}: {e}")
+                continue
+        
+        # Save cache
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump(events, f)
+        except Exception as e:
+             logging.warning(f"Failed to save event cache: {e}")
+    
+    # Filter by observing run if requested
+    target_runs = set()
+    if observing_runs:
+        for run in observing_runs:
+            if hasattr(run, 'value'):
+                target_runs.add(run.value.name if hasattr(run.value, 'name') else str(run))
+            else:
+                target_runs.add(str(run))
+                
     for event in events:
         gps_key = round(event["gps"], 1)  # Round to 0.1s for deduplication
+        
+        # Check if event belongs to requested run
+        if target_runs and event["observing_run"] not in target_runs:
+            continue
+            
         if gps_key not in seen_gps:
             seen_gps.add(gps_key)
             unique_events.append(event)
@@ -246,5 +304,125 @@ def get_confident_events_with_params(
     # Sort by GPS time
     unique_events.sort(key=lambda x: x["gps"])
     
-    logging.info(f"Fetched {len(unique_events)} confirmed events with PE parameters")
+    logging.info(f"Fetched {len(unique_events)} events with PE parameters")
     return unique_events
+
+
+def get_confident_events_with_params(observing_runs: List = None) -> List[dict]:
+    """Wrapper for backward compatibility."""
+    return get_events_with_params(observing_runs, event_types=[EventType.CONFIDENT])
+
+
+class SourceType(Enum):
+    """Astrophysical source type based on component masses."""
+    BBH = 'BBH'   # Binary Black Hole (both > 3 Msun)
+    BNS = 'BNS'   # Binary Neutron Star (both < 3 Msun)
+    NSBH = 'NSBH' # Neutron Star - Black Hole (one < 3 Msun, one > 3 Msun)
+
+
+def search_events(
+    mass1_range: tuple = None,
+    mass2_range: tuple = None,
+    total_mass_range: tuple = None,
+    distance_range: tuple = None,
+    observing_runs: List = None,
+    event_types: List[EventType] = None,
+    source_type: Union[SourceType, str] = None,
+    name_contains: str = None,
+) -> List[str]:
+    """
+    Search for event names matching specified conditions.
+    
+    Args:
+        mass1_range: (min, max) for primary mass in solar masses
+        mass2_range: (min, max) for secondary mass in solar masses  
+        total_mass_range: (min, max) for total mass (mass1 + mass2)
+        distance_range: (min, max) for luminosity distance in Mpc
+        observing_runs: List of ObservingRun enums to filter by
+        event_types: List of EventType (CONFIDENT, MARGINAL). Default: [CONFIDENT]
+        source_type: SourceType enum or string ("BBH", "BNS", "NSBH")
+        name_contains: Substring to match in event name
+        
+    Returns:
+        List of event names matching all conditions
+        
+    Example:
+        # Find all BBH events
+        names = gf.search_events(source_type=gf.SourceType.BBH)
+        
+        # Find marginal events in O3
+        names = gf.search_events(
+            observing_runs=[gf.ObservingRun.O3],
+            event_types=[gf.EventType.MARGINAL]
+        )
+    """
+    events = get_events_with_params(observing_runs, event_types)
+    
+    def in_range(value, range_tuple):
+        if range_tuple is None:
+            return True
+        if np.isnan(value):
+            return False
+        min_val, max_val = range_tuple
+        if min_val is not None and value < min_val:
+            return False
+        if max_val is not None and value > max_val:
+            return False
+        return True
+    
+    # Handle string input for source_type for backward compatibility/ease of use
+    if isinstance(source_type, str):
+        try:
+            source_type = SourceType(source_type.upper())
+        except ValueError:
+            logging.warning(f"Unknown source type: {source_type}. Ignoring filter.")
+            source_type = None
+
+    matching_names = []
+    for event in events:
+        # Mass filters
+        if not in_range(event.get("mass1", np.nan), mass1_range):
+            continue
+        if not in_range(event.get("mass2", np.nan), mass2_range):
+            continue
+        
+        # Total mass filter
+        if total_mass_range is not None:
+            total_mass = event.get("mass1", 0) + event.get("mass2", 0)
+            if not in_range(total_mass, total_mass_range):
+                continue
+        
+        # Distance filter
+        if not in_range(event.get("distance", np.nan), distance_range):
+            continue
+        
+        # Source type filter
+        if source_type is not None:
+            m1 = event.get("mass1", np.nan)
+            m2 = event.get("mass2", np.nan)
+            if np.isnan(m1) or np.isnan(m2):
+                continue
+            # Neutron star mass threshold ~3 solar masses
+            ns_threshold = 3.0
+            is_ns1 = m1 < ns_threshold
+            is_ns2 = m2 < ns_threshold
+            
+            is_bbh = (not is_ns1) and (not is_ns2)
+            is_bns = is_ns1 and is_ns2
+            is_nsbh = is_ns1 != is_ns2
+            
+            if source_type == SourceType.BBH and not is_bbh:
+                continue
+            elif source_type == SourceType.BNS and not is_bns:
+                continue
+            elif source_type == SourceType.NSBH and not is_nsbh:
+                continue
+        
+        # Name filter
+        if name_contains is not None:
+            if name_contains.lower() not in event.get("name", "").lower():
+                continue
+        
+        matching_names.append(event["name"])
+    
+    return matching_names

@@ -247,26 +247,36 @@ def colored_noise_generator(
     
 
 @dataclass
-class NoiseObtainer:
-    data_directory_path : Path = Path("./generator_data")
-    ifo_data_obtainer : Union[None, gf.IFODataObtainer] = None
-    ifos : List[gf.IFO] = gf.IFO.L1
-    noise_type : NoiseType = NoiseType.REAL
-    groups : Union[dict, None] = None
+class Obtainer:
+    """Base class for data obtainers (noise and transient)."""
+    data_directory_path: Path = Path("./generator_data")
+    ifo_data_obtainer: Union[None, gf.IFODataObtainer] = None
+    ifos: List[gf.IFO] = None
+    groups: Union[dict, None] = None
     
     def __post_init__(self):
-        
-        if not isinstance(self.ifos, list) and not isinstance(self.ifos, tuple):
+        if self.ifos is None:
+            self.ifos = [gf.IFO.L1]
+        elif not isinstance(self.ifos, list) and not isinstance(self.ifos, tuple):
             self.ifos = [self.ifos]
         
         if not self.groups:
-            self.groups = {
-                "train" : 0.89,
-                "validate" : 0.1,
-                "test" : 0.01
-            }
-
+            self.groups = self._default_groups()
+        
         self.rng = None
+    
+    def _default_groups(self) -> dict:
+        """Override in subclasses for different default group splits."""
+        return {"train": 0.89, "validate": 0.1, "test": 0.01}
+
+
+@dataclass
+class NoiseObtainer(Obtainer):
+    """Obtainer for noise data (white, colored, pseudo-real, or real)."""
+    noise_type: NoiseType = NoiseType.REAL
+    
+    def __post_init__(self):
+        super().__post_init__()
     
     def __call__(
             self,
@@ -517,9 +527,160 @@ class NoiseObtainer:
                     ), ops.full((num_examples_per_batch,), -1.0)
                 
 
-class FeatureObtainer(NoiseObtainer):
-    data_directory_path : Path = Path("./generator_data")
-    ifo_data_obtainer : Union[None, gf.IFODataObtainer] = None
-    ifos : List[gf.IFO] = gf.IFO.L1
-    noise_type : NoiseType = NoiseType.REAL
-    groups : Union[dict, None] = None
+@dataclass
+class TransientObtainer(Obtainer):
+    """
+    Obtainer for transient events (GW mergers, glitches).
+    
+    Unlike NoiseObtainer, this requires an IFODataObtainer and operates
+    in TRANSIENT mode (acquiring data around specific event times).
+    
+    Args:
+        ifo_data_obtainer: Required. IFODataObtainer configured for transient acquisition.
+        event_names: Optional event name(s) to fetch (e.g. "GW150914" or ["GW150914", "GW170817"]).
+                    If set, supersedes default event fetching.
+        ifos: List of IFOs to acquire data from.
+        groups: Group splits (defaults to {"all": 1.0} for transients).
+        data_labels: Must NOT include DataLabel.NOISE.
+    """
+    event_names: Union[None, str, List[str]] = None
+    data_labels: List = None  # Will validate in __post_init__
+    
+    def __post_init__(self):
+        # Validate ifo_data_obtainer is provided
+        if self.ifo_data_obtainer is None:
+            raise ValueError(
+                "TransientObtainer requires an ifo_data_obtainer. "
+                "Please provide a gf.IFODataObtainer configured for transient events."
+            )
+        
+        # Validate data_labels don't include NOISE
+        if self.data_labels is not None:
+            if gf.DataLabel.NOISE in self.data_labels:
+                raise ValueError(
+                    "TransientObtainer cannot use DataLabel.NOISE. "
+                    "Use NoiseObtainer for noise acquisition."
+                )
+        else:
+            # Default to EVENTS
+            self.data_labels = [gf.DataLabel.EVENTS]
+        
+        # Normalize event_names to list
+        if isinstance(self.event_names, str):
+            self.event_names = [self.event_names]
+        
+        super().__post_init__()
+    
+    def _default_groups(self) -> dict:
+        """Transients default to 'all' group (no train/val/test split)."""
+        return {"all": 1.0}
+    
+    def __call__(
+            self,
+            sample_rate_hertz: float = None,
+            onsource_duration_seconds: float = None,
+            crop_duration_seconds: float = None,
+            offsource_duration_seconds: float = None,
+            num_examples_per_batch: int = None,
+            scale_factor: float = 1.0,
+            group: str = "all",
+            seed: int = None,
+        ) -> Iterator:
+        """
+        Create a generator that yields transient event data.
+        
+        Args:
+            sample_rate_hertz: Sample rate for data.
+            onsource_duration_seconds: Duration of onsource window.
+            crop_duration_seconds: Cropping buffer.
+            offsource_duration_seconds: Duration of offsource window.
+            num_examples_per_batch: Batch size.
+            scale_factor: Amplitude scaling.
+            group: Group name (default "all" for transients).
+            seed: Random seed.
+            
+        Yields:
+            Tuples of (onsource, offsource, gps_times) tensors.
+        """
+        from copy import deepcopy
+        from numpy.random import default_rng
+        
+        # Apply defaults
+        if sample_rate_hertz is None:
+            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+        if onsource_duration_seconds is None:
+            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+        if offsource_duration_seconds is None:
+            offsource_duration_seconds = gf.Defaults.offsource_duration_seconds
+        if crop_duration_seconds is None:
+            crop_duration_seconds = gf.Defaults.crop_duration_seconds
+        if num_examples_per_batch is None:
+            num_examples_per_batch = gf.Defaults.num_examples_per_batch
+        if seed is None:
+            seed = gf.Defaults.seed
+        if self.rng is None:
+            self.rng = default_rng(seed)
+        
+        # Deep copy to ensure independent state
+        ifo_obtainer = deepcopy(self.ifo_data_obtainer)
+        ifo_obtainer.rng = None
+        
+        # If event_names specified, filter to those events
+        if self.event_names:
+            self._filter_to_named_events(ifo_obtainer)
+        
+        # Get valid segments
+        canonical_ifos = tuple(sorted(ifo.name for ifo in self.ifos))
+        if ifo_obtainer.valid_segments is None or canonical_ifos != ifo_obtainer.ifos:
+            ifo_obtainer.get_valid_segments(
+                self.ifos,
+                seed,
+                self.groups,
+                group,
+            )
+            ifo_obtainer.generate_file_path(
+                sample_rate_hertz,
+                group,
+                self.data_directory_path
+            )
+        
+        seed_ = self.rng.integers(1000000000)
+        
+        self.generator = ifo_obtainer.get_onsource_offsource_chunks(
+            sample_rate_hertz,
+            onsource_duration_seconds,
+            crop_duration_seconds,
+            offsource_duration_seconds,
+            num_examples_per_batch,
+            self.ifos,
+            scale_factor,
+            seed=seed_,
+        )
+        
+        return self.generator
+    
+    def _filter_to_named_events(self, ifo_obtainer):
+        """Filter IFODataObtainer to only fetch specified event names."""
+        from gravyflow.src.dataset.features.event import get_confident_events_with_params
+        
+        # Get all events with their names
+        all_events = get_confident_events_with_params()
+        
+        # Filter to requested names
+        target_gps = []
+        for event in all_events:
+            if event.get("name") in self.event_names:
+                target_gps.append(event["gps"])
+        
+        if not target_gps:
+            raise ValueError(
+                f"No events found matching names: {self.event_names}. "
+                f"Available: {[e['name'] for e in all_events[:10]]}..."
+            )
+        
+        # Override the feature_segments to only include these events
+        import numpy as np
+        padding = 32.0  # seconds
+        ifo_obtainer.feature_segments = np.array([
+            [gps - padding, gps + padding] for gps in target_gps
+        ])

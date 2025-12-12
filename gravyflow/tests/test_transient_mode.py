@@ -1,6 +1,6 @@
-"""Tests for FEATURES mode data acquisition.
+"""Tests for TRANSIENT mode data acquisition.
 
-These tests verify that the FEATURES mode correctly:
+These tests verify that the TRANSIENT mode correctly:
 1. Identifies event segments from GWTC catalogs
 2. Returns multiple segments (not just 1)
 3. Returns data with correct shape for model inference
@@ -12,8 +12,8 @@ import numpy as np
 import gravyflow as gf
 
 
-class TestFeaturesModeCoreSetup:
-    """Test that FEATURES mode correctly configures IFODataObtainer."""
+class TestTransientModeCoreSetup:
+    """Test that TRANSIENT mode correctly configures IFODataObtainer."""
     
     def test_events_data_label_stored(self):
         """Verify EVENTS data_label is stored correctly."""
@@ -40,8 +40,8 @@ class TestFeaturesModeCoreSetup:
         ifo.close()
 
 
-class TestFeaturesSegmentRetrieval:
-    """Test that FEATURES mode retrieves correct number of segments."""
+class TestTransientSegmentRetrieval:
+    """Test that TRANSIENT mode retrieves correct number of segments."""
     
     def test_get_all_event_times_returns_many_events(self):
         """Verify get_all_event_times returns substantial number of events."""
@@ -62,11 +62,11 @@ class TestFeaturesSegmentRetrieval:
         assert len(o3_events) >= 50, f"Expected >=50 O3 events, got {len(o3_events)}"
 
 
-class TestFeaturesDatasetOutput:
-    """Test that Dataset in FEATURES mode returns correct data."""
+class TestTransientDatasetOutput:
+    """Test that Dataset in TRANSIENT mode returns correct data."""
     
-    def test_dataset_creation_with_features_mode(self):
-        """Verify Dataset can be created with FEATURES mode config."""
+    def test_dataset_creation_with_transient_mode(self):
+        """Verify Dataset can be created with TRANSIENT mode config."""
         ifo = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
@@ -239,7 +239,7 @@ class TestReturnWantedSegments:
         )
         
         try:
-            # First get valid segments without FEATURES mode processing
+            # First get valid segments without TRANSIENT mode processing
             # to see the raw O3 segments
             from gravyflow.src.dataset.noise.acquisition import IFODataObtainer
             
@@ -250,8 +250,8 @@ class TestReturnWantedSegments:
         finally:
             ifo.close()
             
-    def test_features_mode_batch_unique_events(self):
-        """Verify that FEATURES mode returns unique events in a batch (Batch Size > 1)."""
+    def test_transient_mode_batch_unique_events(self):
+        """Verify that TRANSIENT mode returns unique events in a batch (Batch Size > 1)."""
         
         # Setup specific request that SHOULD return distinct events
         batch_size = 4
@@ -299,7 +299,7 @@ class TestReturnWantedSegments:
         finally:
             ifo.close()
 
-    def test_features_mode_multi_ifo_alignment(self):
+    def test_transient_mode_multi_ifo_alignment(self):
         """Verify multi-IFO batch returns synchronized data."""
         ifos_list = [gf.IFO.H1, gf.IFO.L1]
         

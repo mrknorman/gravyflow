@@ -390,30 +390,30 @@ class ValidationBank:
         self.logger.info(f"Found {len(unique_events)} unique real events "
                         f"({len(confident_events)} confident, {len(marginal_events)} marginal)")
         
-        # Create fresh IFODataObtainer configured for FEATURES mode
+        # Create fresh IFODataObtainer configured for TRANSIENT mode
         # Extract config from existing noise_obtainer
         if "noise_obtainer" not in self.dataset_args:
-            self.logger.warning("No noise_obtainer in dataset_args - cannot run FEATURES mode")
+            self.logger.warning("No noise_obtainer in dataset_args - cannot run TRANSIENT mode")
             self.real_events = unique_events
             return
         
         orig_noise_obt = self.dataset_args["noise_obtainer"]
         if not hasattr(orig_noise_obt, "ifo_data_obtainer") or not orig_noise_obt.ifo_data_obtainer:
-            self.logger.warning("No ifo_data_obtainer found - cannot run FEATURES mode")
+            self.logger.warning("No ifo_data_obtainer found - cannot run TRANSIENT mode")
             self.real_events = unique_events
             return
         
         orig_ifo_obt = orig_noise_obt.ifo_data_obtainer
         
-        # Create fresh IFODataObtainer with EVENTS data_labels for FEATURES mode
-        self.logger.info("Creating fresh IFODataObtainer for FEATURES mode...")
+        # Create fresh IFODataObtainer with EVENTS data_labels for TRANSIENT mode
+        self.logger.info("Creating fresh IFODataObtainer for TRANSIENT mode...")
         
         # Use O3 only for now (most events, faster testing)
         # TODO: Support multiple observing runs
         features_ifo_obtainer = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],  # FEATURES mode!
+            data_labels=[gf.DataLabel.EVENTS],  # TRANSIENT mode!
             saturation=1.0,  # No saturation for events
         )
         
@@ -436,14 +436,14 @@ class ValidationBank:
              self.real_events = unique_events
              return
 
-        # Create fresh NoiseObtainer with the FEATURES-mode IFODataObtainer
+        # Create fresh NoiseObtainer with the TRANSIENT-mode IFODataObtainer
         features_noise_obt = gf.NoiseObtainer(
             ifo_data_obtainer=features_ifo_obtainer,
             ifos=orig_noise_obt.ifos,
             noise_type=orig_noise_obt.noise_type
         )
         
-        # Build dataset args for FEATURES mode
+        # Build dataset args for TRANSIENT mode
         dataset_args = deepcopy(self.dataset_args)
         dataset_args["noise_obtainer"] = features_noise_obt
         dataset_args["waveform_generators"] = []  # No injections
@@ -518,7 +518,7 @@ class ValidationBank:
                     self.logger.info(f"Event Progress: {i + 1}/{total_available_events}")
                     
         except Exception as e:
-            self.logger.warning(f"Failed to create FEATURES mode dataset: {e}")
+            self.logger.warning(f"Failed to create TRANSIENT mode dataset: {e}")
             self.logger.info("Events stored without scores - run model manually")
         
         # Calculate min FAR for each scored event

@@ -1019,7 +1019,7 @@ class TestDataLabels:
     def test_acquisition_mode_enum(self):
         """Test AcquisitionMode enum values."""
         assert gf_acq.AcquisitionMode.NOISE is not None
-        assert gf_acq.AcquisitionMode.FEATURES is not None
+        assert gf_acq.AcquisitionMode.TRANSIENT is not None
 
 
 class TestUnpackObservingRuns:
@@ -2224,7 +2224,7 @@ class TestFeatureMode:
         obtainer.close()
     
     def test_features_mode_triggers_without_noise(self):
-        """Test that FEATURES mode is triggered when NOISE not in labels."""
+        """Test that TRANSIENT mode is triggered when NOISE not in labels."""
         obtainer = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
@@ -2337,17 +2337,17 @@ class TestAcquisitionModeDetection:
 # =============================================================================
 
 class TestFeatureModePipeline:
-    """Integration tests for FEATURES mode pipeline with mocked data."""
+    """Integration tests for TRANSIENT mode pipeline with mocked data."""
     
     def test_features_mode_pipeline_with_mock_events(self):
         """
-        Test complete FEATURES mode pipeline with mocked event data.
+        Test complete TRANSIENT mode pipeline with mocked event data.
         
         This tests the full flow:
         1. Create obtainer with EVENTS label (no NOISE)
         2. Mock event times to avoid network calls
         3. Mock segment queries
-        4. Verify FEATURES mode is triggered
+        4. Verify TRANSIENT mode is triggered
         5. Verify auto-precaching info message is logged
         """
         # Create mock event times
@@ -2371,7 +2371,7 @@ class TestFeatureModePipeline:
             data_labels=[gf.DataLabel.EVENTS]
         )
         
-        # Verify NOISE not in labels (triggers FEATURES mode)
+        # Verify NOISE not in labels (triggers TRANSIENT mode)
         assert gf.DataLabel.NOISE not in obtainer.data_labels
         assert gf.DataLabel.EVENTS in obtainer.data_labels
         
@@ -2384,7 +2384,7 @@ class TestFeatureModePipeline:
         obtainer.close()
     
     def test_features_mode_acquisition_mode_detection(self):
-        """Test that acquisition_mode is correctly set to FEATURES when no NOISE."""
+        """Test that acquisition_mode is correctly set to TRANSIENT when no NOISE."""
         obtainer = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
@@ -2392,7 +2392,7 @@ class TestFeatureModePipeline:
         )
         
         # Before get_valid_segments, acquisition_mode might not be set
-        # But we can verify the conditions for FEATURES mode
+        # But we can verify the conditions for TRANSIENT mode
         has_noise = gf.DataLabel.NOISE in obtainer.data_labels
         has_features = (gf.DataLabel.EVENTS in obtainer.data_labels or 
                        gf.DataLabel.GLITCHES in obtainer.data_labels or
@@ -2472,14 +2472,14 @@ class TestFeatureModePipeline:
         # - Estimated time
         # - Padding info
         
-        # Create obtainer that would trigger FEATURES mode
+        # Create obtainer that would trigger TRANSIENT mode
         obtainer = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS]
         )
         
-        # Verify obtainer is configured for FEATURES mode
+        # Verify obtainer is configured for TRANSIENT mode
         assert gf.DataLabel.NOISE not in obtainer.data_labels
         
         obtainer.close()
