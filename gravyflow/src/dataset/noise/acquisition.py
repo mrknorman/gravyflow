@@ -10,6 +10,7 @@ from contextlib import closing
 from typing import List, Tuple, Union, Dict, Any, Optional, Generator
 from pathlib import Path
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, Future
 
 # Third-party imports:
 import numpy as np
@@ -433,7 +434,8 @@ class IFODataObtainer:
             logging_level : int = logging.WARNING,
             random_sign_reversal : bool = True,
             random_time_reversal : bool = True,
-            augmentation_probability : float = 0.5
+            augmentation_probability : float = 0.5,
+            prefetch_segments : int = 1
         ):
         
         # Initiate logging for ifo_data:
@@ -494,6 +496,11 @@ class IFODataObtainer:
         # In-memory LRU cache for segments to reduce HDF5 disk reads
         self._segment_cache = OrderedDict()
         self._segment_cache_maxsize = 8  # Keep up to 8 segments in memory
+        
+        # Prefetching configuration
+        self.prefetch_segments = prefetch_segments
+        self._prefetch_executor = ThreadPoolExecutor(max_workers=1) if prefetch_segments > 0 else None
+        self._prefetch_futures: Dict[int, Future] = {}  # segment_index -> Future
                 
     def override_attributes(
         self,
@@ -529,10 +536,15 @@ class IFODataObtainer:
     def __del__(self):
         if getattr(self, "segment_file", None) is not None:
             self.segment_file.close()
+        if getattr(self, "_prefetch_executor", None) is not None:
+            self._prefetch_executor.shutdown(wait=False)
             
     def close(self):
         if self.segment_file is not None:
             self.segment_file.close()
+        if self._prefetch_executor is not None:
+            self._prefetch_executor.shutdown(wait=True)
+            self._prefetch_executor = None
     
     def _apply_augmentation(self, data):
         """
@@ -571,6 +583,41 @@ class IFODataObtainer:
         if self.random_time_reversal:
             effective *= (1 + self.augmentation_probability)
         return effective
+    
+    def _prefetch_segment_for_index(
+        self,
+        segment_index: int,
+        valid_segments: np.ndarray,
+        sample_rate_hertz: float,
+        ifos: List
+    ) -> List:
+        """
+        Prefetch a segment by index - runs in background thread.
+        Returns list of (segment_data, gps_start_time) tuples for each IFO.
+        """
+        if segment_index >= len(valid_segments):
+            return None
+            
+        segment_times = valid_segments[segment_index]
+        results = []
+        
+        for ifo, (segment_start_gps_time, segment_end_gps_time) in zip(ifos, segment_times):
+            segment_key = f"segments/segment_{segment_start_gps_time}_{segment_end_gps_time}"
+            try:
+                segment_data = self.get_segment(
+                    segment_start_gps_time,
+                    segment_end_gps_time,
+                    sample_rate_hertz,
+                    ifo,
+                    segment_key
+                )
+            except Exception as e:
+                logging.warning(f"Prefetch failed for {ifo.name} at {segment_start_gps_time}: {e}")
+                segment_data = None
+            
+            results.append((segment_data, segment_start_gps_time, segment_end_gps_time, segment_key))
+        
+        return results
         
     def generate_file_path(
         self,
@@ -1587,59 +1634,70 @@ class IFODataObtainer:
         if valid_segments is None:
             valid_segments = self.valid_segments
 
-        while self._current_segment_index < len(valid_segments):            
-            segment_times = valid_segments[self._current_segment_index]
-            self._current_segment_index += 1
+        # Clear any stale prefetch futures
+        self._prefetch_futures.clear()
 
+        while self._current_segment_index < len(valid_segments):
+            current_idx = self._current_segment_index
+            self._current_segment_index += 1
+            
             segments = []
             gps_start_times = []
-
-            for ifo, (segment_start_gps_time, segment_end_gps_time) in zip(ifos, segment_times):
-                segment_key = f"segments/segment_{segment_start_gps_time}_{segment_end_gps_time}"
-                # Try to get data for this IFO
-                # If cached segment is missing, it might return None or fail
-                # We need to catch this to allow zero-filling for coincidence
+            
+            # Check if we have prefetched results for this segment
+            prefetch_result = None
+            if current_idx in self._prefetch_futures:
+                future = self._prefetch_futures.pop(current_idx)
                 try:
-                    segment_data = self.get_segment(
-                        segment_start_gps_time, 
-                        segment_end_gps_time,
-                        sample_rate_hertz, 
-                        ifo, 
-                        segment_key
-                    )
+                    prefetch_result = future.result(timeout=300)  # 5 min timeout
                 except Exception as e:
-                    logging.warning(f"Failed to get segment for {ifo.name} at {segment_start_gps_time}: {e}")
-                    segment_data = None
-                    
-                if segment_data is not None:
-                    segments.append(segment_data)
-                    gps_start_times.append(segment_start_gps_time)
+                    logging.warning(f"Prefetch result failed: {e}")
+                    prefetch_result = None
+            
+            if prefetch_result is not None:
+                # Use prefetched data
+                for segment_data, segment_start_gps_time, segment_end_gps_time, segment_key in prefetch_result:
+                    if segment_data is not None:
+                        segments.append(segment_data)
+                        gps_start_times.append(segment_start_gps_time)
+                        if self.cache_segments:
+                            self._cache_segment(segment_key, segment_data)
+                    else:
+                        logging.warning(f"Prefetched segment missing. Filling with zeros.")
+                        duration = segment_end_gps_time - segment_start_gps_time
+                        num_samples = int(duration * sample_rate_hertz)
+                        segments.append(ops.zeros((num_samples,), dtype="float32"))
+                        gps_start_times.append(segment_start_gps_time)
+            else:
+                # No prefetch, acquire synchronously
+                segment_times = valid_segments[current_idx]
+                for ifo, (segment_start_gps_time, segment_end_gps_time) in zip(ifos, segment_times):
+                    segment_key = f"segments/segment_{segment_start_gps_time}_{segment_end_gps_time}"
+                    try:
+                        segment_data = self.get_segment(
+                            segment_start_gps_time, 
+                            segment_end_gps_time,
+                            sample_rate_hertz, 
+                            ifo, 
+                            segment_key
+                        )
+                    except Exception as e:
+                        logging.warning(f"Failed to get segment for {ifo.name} at {segment_start_gps_time}: {e}")
+                        segment_data = None
+                        
+                    if segment_data is not None:
+                        segments.append(segment_data)
+                        gps_start_times.append(segment_start_gps_time)
+                        if self.cache_segments:
+                            self._cache_segment(segment_key, segment_data)
+                    else:
+                        logging.warning(f"Segment missing for {ifo.name} at {segment_start_gps_time}. Filling with zeros.")
+                        duration = segment_end_gps_time - segment_start_gps_time
+                        num_samples = int(duration * sample_rate_hertz)
+                        segments.append(ops.zeros((num_samples,), dtype="float32"))
+                        gps_start_times.append(segment_start_gps_time)
 
-                    if self.cache_segments:
-                        self._cache_segment(segment_key, segment_data)
-                else:
-                    # If TRANSIENT mode, we might want to Zero-Fill instead of skipping
-                    # Check if we are in TRANSIENT mode context (implied by this method usage?)
-                    # No, this is 'acquire' method used by both.
-                    # But we passed 'valid_segments' which might be features or noise.
-                    
-                    # Heuristic: If we have multiple IFOs, and one fails, we might still want the event?
-                    # User requested: "if not avalible return channel with zeros"
-                    # Let's verify if we should do this globally or just for features.
-                    # Probably generally safe if the user requested it?
-                    # Or maybe only if `segment_data` is None which means acquisition failed.
-                    
-                    logging.warning(f"Segment missing for {ifo.name} at {segment_start_gps_time}. Filling with zeros.")
-                    
-                    # Create zero segment of correct length
-                    duration = segment_end_gps_time - segment_start_gps_time
-                    num_samples = int(duration * sample_rate_hertz)
-                    zero_data = ops.zeros((num_samples,), dtype="float32")
-                    
-                    segments.append(zero_data)
-                    gps_start_times.append(segment_start_gps_time)  
-
-            if segments is None:
+            if not segments:
                 logging.error("No segments acquired, skipping to next iteration.")
                 continue
 
@@ -1650,6 +1708,19 @@ class IFODataObtainer:
                     raise ValueError("Input data should not be empty.")
                 
                 multi_segment = multi_segment.scale(scale_factor)
+                
+                # Start prefetching next segment before yielding
+                if self.prefetch_segments > 0 and self._prefetch_executor is not None:
+                    next_idx = self._current_segment_index
+                    if next_idx < len(valid_segments) and next_idx not in self._prefetch_futures:
+                        future = self._prefetch_executor.submit(
+                            self._prefetch_segment_for_index,
+                            next_idx,
+                            valid_segments,
+                            sample_rate_hertz,
+                            ifos
+                        )
+                        self._prefetch_futures[next_idx] = future
 
                 yield multi_segment
             except Exception as e:
@@ -1657,6 +1728,7 @@ class IFODataObtainer:
                 continue
 
         self._current_segment_index = 0
+        self._prefetch_futures.clear()
 
     def get_onsource_offsource_chunks(
             self,
