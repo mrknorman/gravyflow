@@ -197,11 +197,11 @@ def whiten(
     timeseries, 
     background,
     sample_rate_hertz: float, 
-    fft_duration_seconds: float = 2.0, 
-    overlap_duration_seconds: float = 1.0,
+    fft_duration_seconds: float = 1.0, 
+    overlap_duration_seconds: float = 0.5,
     highpass_hertz: float = None,
     detrend: str ='constant',
-    filter_duration_seconds: float = 2.0,
+    filter_duration_seconds: float = 1.0,
     window: str = "hann",
     num_samples: int = None
     ):

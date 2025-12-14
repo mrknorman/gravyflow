@@ -208,6 +208,9 @@ class ReturnVariables(Enum):
     ROLLING_PEARSON_ONSOURCE = ReturnVariable(7)
     SPECTROGRAM_ONSOURCE = ReturnVariable(8)
     CENTRAL_TIME = ReturnVariable(9)
+    GLITCH_TYPE = ReturnVariable(10)   # Integer class label (0-19) for glitch type
+    DATA_LABEL = ReturnVariable(11)    # Integer: 0=noise, 1=glitch, 2=event
+    SOURCE_TYPE = ReturnVariable(12)   # Integer for SourceType: 0=BBH, 1=BNS, 2=NSBH
     
     def __lt__(self, other):
         return self.value.index < other.value.index

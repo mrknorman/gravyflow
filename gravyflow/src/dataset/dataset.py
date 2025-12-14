@@ -339,10 +339,7 @@ class GravyflowDataset(keras.utils.PyDataset):
             whitened_injections = whiten(
                 scaled_injections, 
                 offsource, 
-                self.sample_rate_hertz, 
-                fft_duration_seconds=1.0,
-                overlap_duration_seconds=0.5,
-                filter_duration_seconds=1.0
+                self.sample_rate_hertz
             )
             
             whitened_injections = gf.crop_samples(
@@ -375,10 +372,7 @@ class GravyflowDataset(keras.utils.PyDataset):
             whitened_onsource = whiten(
                 onsource, 
                 offsource, 
-                self.sample_rate_hertz, 
-                fft_duration_seconds=1.0,
-                overlap_duration_seconds=0.5,
-                filter_duration_seconds=1.0
+                self.sample_rate_hertz
             )
             
             whitened_onsource = gf.crop_samples(

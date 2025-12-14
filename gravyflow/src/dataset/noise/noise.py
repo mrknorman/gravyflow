@@ -580,9 +580,11 @@ class TransientObtainer(Obtainer):
             crop_duration_seconds: float = None,
             offsource_duration_seconds: float = None,
             num_examples_per_batch: int = None,
-            scale_factor: float = None,
+            scale_factor: float = 1.0,
             group: str = "all",
             seed: int = None,
+            crop: bool = False,
+            whiten: bool = False,
         ) -> Iterator:
         """
         Create a generator that yields transient event data.
@@ -596,6 +598,8 @@ class TransientObtainer(Obtainer):
             scale_factor: Amplitude scaling.
             group: Group name (default "all" for transients).
             seed: Random seed.
+            crop: If True, crop onsource to remove padding (default False).
+            whiten: If True, whiten onsource using offsource PSD (default False).
             
         Yields:
             Tuples of (onsource, offsource, gps_times) tensors.
@@ -614,8 +618,6 @@ class TransientObtainer(Obtainer):
             crop_duration_seconds = gf.Defaults.crop_duration_seconds
         if num_examples_per_batch is None:
             num_examples_per_batch = gf.Defaults.num_examples_per_batch
-        if scale_factor is None:
-            scale_factor = gf.Defaults.scale_factor
         if seed is None:
             seed = gf.Defaults.seed
         if self.rng is None:
@@ -646,7 +648,7 @@ class TransientObtainer(Obtainer):
         
         seed_ = self.rng.integers(1000000000)
         
-        self.generator = ifo_obtainer.get_onsource_offsource_chunks(
+        base_generator = ifo_obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz,
             onsource_duration_seconds,
             crop_duration_seconds,
@@ -657,7 +659,61 @@ class TransientObtainer(Obtainer):
             seed=seed_,
         )
         
+        # Wrap generator with cropping/whitening if requested
+        if crop or whiten:
+            self.generator = self._postprocess_generator(
+                base_generator,
+                sample_rate_hertz,
+                crop_duration_seconds,
+                scale_factor=scale_factor,
+                crop=crop,
+                whiten=whiten
+            )
+        else:
+            self.generator = base_generator
+        
         return self.generator
+    
+    def _postprocess_generator(
+        self,
+        generator,
+        sample_rate_hertz: float,
+        crop_duration_seconds: float,
+        scale_factor: float = 1.0,
+        crop: bool = False,
+        whiten: bool = False
+    ):
+        """
+        Wrap generator to apply cropping and/or whitening.
+        
+        Whitening requires scaling up by 1E21 to avoid float precision issues.
+        Output is scaled to match scale_factor expectation.
+        """
+        WHITEN_SCALE = 1E21
+        crop_samples = int(crop_duration_seconds * sample_rate_hertz)
+        
+        for onsource, offsource, gps_times in generator:
+            # Whiten first (before cropping)
+            if whiten:
+                # Scale up to avoid float precision issues
+                onsource_scaled = onsource * WHITEN_SCALE
+                offsource_scaled = offsource * WHITEN_SCALE
+                
+                # Whiten using default settings
+                onsource = gf.whiten(
+                    onsource_scaled, 
+                    offsource_scaled, 
+                    sample_rate_hertz
+                )
+                
+                # Scale output to match expected scale_factor
+                onsource = onsource * (scale_factor / WHITEN_SCALE)
+            
+            # Crop padding from onsource
+            if crop and crop_samples > 0:
+                onsource = onsource[:, :, crop_samples:-crop_samples]
+            
+            yield onsource, offsource, gps_times
     
     def _filter_to_named_events(self, ifo_obtainer):
         """Filter IFODataObtainer to only fetch specified event names."""
