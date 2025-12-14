@@ -3,7 +3,7 @@ import hashlib
 import logging
 import sys
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 from contextlib import closing
@@ -11,6 +11,10 @@ from typing import List, Tuple, Union, Dict, Any, Optional, Generator
 from pathlib import Path
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, Future
+
+# Suppress verbose logging from external libraries (gwpy, gwosc)
+logging.getLogger('gwpy').setLevel(logging.WARNING)
+logging.getLogger('gwosc').setLevel(logging.WARNING)
 
 # Third-party imports:
 import numpy as np
@@ -434,7 +438,7 @@ class IFODataObtainer:
             random_sign_reversal : bool = True,
             random_time_reversal : bool = True,
             augmentation_probability : float = 0.5,
-            prefetch_segments : int = 1,
+            prefetch_segments : int = 16,  # Higher default for TRANSIENT (64s segments)
             # TRANSIENT/FEATURE mode augmentations
             random_shift : bool = False,  # Shift event off-center
             shift_fraction : float = 0.25,  # Max shift as fraction of onsource
@@ -509,8 +513,11 @@ class IFODataObtainer:
         self.valid_segments_adjusted = None
         
         # In-memory LRU cache for segments to reduce HDF5 disk reads
+        # Size adjusted when acquisition_mode is set:
+        #   NOISE: 8 segments (~8 GB for 30+ min segments)
+        #   TRANSIENT: 128 segments (~128 MB for 64s segments)
         self._segment_cache = OrderedDict()
-        self._segment_cache_maxsize = 8  # Keep up to 8 segments in memory
+        self._segment_cache_maxsize = 8  # Default for NOISE mode
         
         # Prefetching configuration
         self.prefetch_segments = prefetch_segments
@@ -622,6 +629,38 @@ class IFODataObtainer:
             
         return data
     
+    def _lookup_labels(self, gps_times):
+        """
+        Look up glitch type labels for given GPS times.
+        
+        Args:
+            gps_times: List of GPS times to look up
+            
+        Returns:
+            NumPy array of integer labels (glitch type indices)
+        """
+        if not hasattr(self, '_feature_labels') or not self._feature_labels:
+            # No labels available, return -1 (unknown)
+            return np.full(len(gps_times), -1, dtype=np.int32)
+        
+        labels = []
+        for gps in gps_times:
+            label = -1  # Default: unknown
+            
+            # Check glitch labels
+            if gf.DataLabel.GLITCHES in self._feature_labels:
+                times_arr, labels_arr = self._feature_labels[gf.DataLabel.GLITCHES]
+                if len(times_arr) > 0:
+                    # Find closest match within tolerance
+                    diffs = np.abs(times_arr - gps)
+                    min_idx = np.argmin(diffs)
+                    if diffs[min_idx] < 1.0:  # Within 1 second
+                        label = int(labels_arr[min_idx])
+            
+            labels.append(label)
+        
+        return np.array(labels, dtype=np.int32)
+    
     def _get_effective_saturation(self):
         """
         Calculate effective saturation accounting for augmentation.
@@ -701,7 +740,13 @@ class IFODataObtainer:
 
         segment_hash = generate_hash_from_list(segment_parameters)
         
-        self.file_path = Path(data_directory_path) / f"segment_data_{segment_hash}.hdf5"
+        # Determine prefix based on content
+        if gf.DataLabel.NOISE in self.data_labels:
+            prefix = "segment_data"
+        else:
+            prefix = "transient_data"
+            
+        self.file_path = Path(data_directory_path) / f"{prefix}_{segment_hash}.hdf5"
         
         return self.file_path
     
@@ -830,64 +875,73 @@ class IFODataObtainer:
             cache_group.attrs["padding_seconds"] = config.padding_duration_seconds
             
             cached_count = 0
-            try:
-                from tqdm import tqdm
-                iterator = tqdm(enumerate(segments_to_cache), total=num_to_cache, 
-                               desc="Precaching features", unit="segment")
-            except ImportError:
-                iterator = enumerate(segments_to_cache)
-            
-            for idx, segment in iterator:
+            # Parallel download function
+            def fetch_segment_data(segment_idx, segment_vals):
+                s_start, s_end = segment_vals[0], segment_vals[1]
+                fetched_data = {}
                 try:
-                    # Download strain data for this segment
-                    seg_start, seg_end = segment[0], segment[1]
-                    
-                    # Create subgroup for this feature using GPS key compatible with acquire()
-                    cache_key_seg = f"segments/segment_{seg_start}_{seg_end}"
-                    
-                    # Ensure parent group exists
-                    if "segments" not in f:
-                        f.create_group("segments")
-                        
-                    if cache_key_seg in f:
-                        del f[cache_key_seg]
-                        
-                    feat_group = f.create_group(cache_key_seg)
-                    feat_group.attrs["start_gps"] = seg_start
-                    feat_group.attrs["end_gps"] = seg_end
-                    
-                    # Download data for each IFO
-                    for ifo_idx, ifo in enumerate(ifos):
-                        try:
-                            # Fetch data using existing method
-                            ts_data = self.get_segment_data(
-                                seg_start,
-                                seg_end,
-                                ifo,
-                                self.frame_types[0],
-                                self.channels[0]
-                            )
-                            
-                            feat_group.create_dataset(
-                                ifo.name, 
-                                data=ts_data.value,
-                                compression="gzip"
-                            )
-                        except Exception as e:
-                            self.logger.warning(
-                                f"Failed to download {ifo.name} for segment {idx}: {e}"
-                            )
-                            continue
-                    
-                    cached_count += 1
-                    cache_group.attrs["num_cached"] = cached_count
-                    
-                    if (idx + 1) % 10 == 0:
-                        self.logger.info(f"Cached {idx + 1}/{num_to_cache} features")
-                        
+                    for ifo_obj in ifos:
+                        ts_d = self.get_segment_data(
+                            s_start, s_end, ifo_obj, 
+                            self.frame_types[0], self.channels[0]
+                        )
+                        fetched_data[ifo_obj.name] = ts_d
+                    return (segment_idx, segment_vals, fetched_data, None)
                 except Exception as e:
-                    self.logger.warning(f"Failed to cache segment {idx}: {e}")
-                    continue
+                    return (segment_idx, segment_vals, None, str(e))
+
+            # Execute parallel fetch
+            max_workers = 8
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                futures = [executor.submit(fetch_segment_data, i, seg) for i, seg in enumerate(segments_to_cache)]
+                
+                try:
+                    from tqdm import tqdm
+                    iterator = tqdm(futures, total=num_to_cache, desc="Precaching features (parallel)", unit="segment")
+                except ImportError:
+                    iterator = futures
+
+                for future in iterator:
+                    idx, segment, fetched_results, error = future.result()
+                    
+                    if error:
+                        logging.warning(f"Failed to download segment {idx}: {error}")
+                        continue
+                        
+                    try:
+                         # Write to HDF5 (serial)
+                        seg_start, seg_end = segment[0], segment[1]
+                        cache_key_seg = f"segments/segment_{seg_start}_{seg_end}"
+                        
+                        if "segments" not in f:
+                            f.create_group("segments")
+                            
+                        if cache_key_seg in f:
+                            del f[cache_key_seg]
+                            
+                        feat_group = f.create_group(cache_key_seg)
+                        feat_group.attrs["start_gps"] = seg_start
+                        feat_group.attrs["end_gps"] = seg_end
+                        
+                        for ifo_name, ts_data in fetched_results.items():
+                             # Store data
+                            if ts_data is not None:
+                                # Convert to numpy if tensor
+                                if hasattr(ts_data, 'numpy'):
+                                    ts_data = ts_data.numpy()
+                                feat_group.create_dataset(ifo_name, data=ts_data)
+                        
+                        cached_count += 1
+                        
+                    except Exception as e:
+                        logging.warning(f"Error writing segment {idx} to cache: {e}")
+        
+            # Update final count
+            if cache_key in f:
+                f[cache_key].attrs["num_cached"] = cached_count
+                
+            self.logger.info(f"Precaching complete: {cached_count} features cached")
         
         self.logger.info(f"Precaching complete: {cached_count} features cached")
         return self.file_path
@@ -1106,14 +1160,19 @@ class IFODataObtainer:
                 padded_glitches[:, 1] += end_padding_seconds
                 wanted_segments.append(padded_glitches)
                 
-                # Get glitch times for feature_times dict
-                glitch_times = gf.get_glitch_times(
+                # Get glitch times with labels for classification
+                glitch_times, glitch_labels = gf.get_glitch_times_with_labels(
                     ifo,
                     start_gps_time=self.start_gps_times[0],
                     end_gps_time=self.end_gps_times[0],
-                    glitch_types=glitch_types_to_fetch
+                    glitch_types=glitch_types_to_fetch,
+                    balanced=self.balanced_glitch_types
                 )
                 feature_times[gf.DataLabel.GLITCHES] = glitch_times
+                # Store labels for lookup during batch assembly
+                self._feature_labels = {
+                    gf.DataLabel.GLITCHES: (glitch_times, glitch_labels)
+                }
             
         if wanted_segments:
             wanted_segments = np.concatenate(wanted_segments)
@@ -1599,7 +1658,7 @@ class IFODataObtainer:
                             )
                             return None
                     else: 
-                        logging.info(
+                        logging.debug(
                             "Cached segment not found or force acquisition is set"
                         )
         
@@ -1912,7 +1971,7 @@ class IFODataObtainer:
                         if sampling_mode == SamplingMode.GRID:
                             self._grid_position = 0
 
-                    yield self._apply_augmentation(subarrays), self._apply_augmentation(background_chunks), start_gps_times
+                    yield self._apply_augmentation(subarrays), self._apply_augmentation(background_chunks), start_gps_times, None
                 
                 # Inner loop exited - segment exhausted, outer while True loops back to get new segment
 
@@ -1975,7 +2034,10 @@ class IFODataObtainer:
                     axis=-1
                 )
                 
-                yield self._apply_augmentation(final_subarrays, is_transient=True), self._apply_augmentation(final_background, is_transient=True), final_gps
+                # Look up labels for batch GPS times
+                batch_labels = self._lookup_labels(batch_gps_times)
+                
+                yield self._apply_augmentation(final_subarrays, is_transient=True), self._apply_augmentation(final_background, is_transient=True), final_gps, batch_labels
 
 
     def clear_valid_segments(self) -> None:
@@ -2029,6 +2091,8 @@ class IFODataObtainer:
             # If so, force use of these segments and skip cache/catalog lookup
             if hasattr(self, 'feature_segments') and self.feature_segments is not None and len(self.feature_segments) > 0:
                  self.acquisition_mode = AcquisitionMode.TRANSIENT
+                 # TRANSIENT mode can cache more segments (64s vs 30+ min)
+                 self._segment_cache_maxsize = 128
                  
                  # Prepare all_feature_segments_list for formatting logic below
                  all_feature_segments_list = [self.feature_segments]
@@ -2051,6 +2115,7 @@ class IFODataObtainer:
                         self.acquisition_mode = AcquisitionMode.NOISE
                     else:
                         self.acquisition_mode = AcquisitionMode.TRANSIENT
+                        self._segment_cache_maxsize = 128  # TRANSIENT uses smaller segments
                     return self.valid_segments
                 
             self.valid_segments = []
@@ -2120,6 +2185,7 @@ class IFODataObtainer:
                 self.acquisition_mode = AcquisitionMode.NOISE
             else:
                 self.acquisition_mode = AcquisitionMode.TRANSIENT
+                self._segment_cache_maxsize = 128  # TRANSIENT uses smaller segments
 
             if self.acquisition_mode == AcquisitionMode.NOISE:
                 for ifo in ifos:

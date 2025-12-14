@@ -15,6 +15,11 @@ import glob
 import sys
 import logging
 
+# Suppress verbose logging from external libraries to reduce console noise
+logging.getLogger('gwpy').setLevel(logging.WARNING)
+logging.getLogger('gwosc').setLevel(logging.WARNING)
+logging.getLogger('gwdatafind').setLevel(logging.WARNING)
+
 # Suppress JAX/CUDA warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF info/warnings
 os.environ['JAX_PLATFORMS'] = 'cuda'  # Skip TPU initialization attempt
@@ -105,7 +110,7 @@ from .src.utils.plotting import (
     generate_segment_timeline_plot, generate_example_extraction_plot
 )
 from .src.validate import Validator, ValidationConfig
-from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_segments
+from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_times_with_labels, get_glitch_segments
 from .src.dataset.features.event import (
     EventType, SourceType, get_confident_event_times, get_marginal_event_times, 
     get_all_event_times, get_event_times_by_type, get_confident_events_with_params,

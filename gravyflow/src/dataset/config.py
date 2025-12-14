@@ -58,8 +58,8 @@ class Defaults:
     
     # Standard segment sizes (in samples) for reducing JIT recompilations
     # These correspond to powers of 2 in sample counts
-    # At 2048 Hz: 128s, 256s, 512s, 1024s, 2048s durations
-    STANDARD_SEGMENT_SAMPLES = [2**18, 2**19, 2**20, 2**21, 2**22]  # 262K to 4M samples
+    # At 2048 Hz: 16s, 32s, 64s, 128s, 256s, 512s, 1024s, 2048s durations
+    STANDARD_SEGMENT_SAMPLES = [2**14, 2**15, 2**16, 2**17, 2**18, 2**19, 2**20, 2**21, 2**22]  # 32K to 4M samples
     
     @staticmethod
     def truncate_to_standard_segment_size(num_samples: int, min_required: int = 0) -> int:
