@@ -97,6 +97,7 @@ def open_hdf5_file(
         f.close()
     except OSError as e:
         # The file does not exist, so create it in write mode
+        ensure_directory_exists(file_path.parent)
         f = h5py.File(file_path, 'w')
         f.close()
 
