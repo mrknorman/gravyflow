@@ -1604,7 +1604,8 @@ def generate_real_events_table(
     far_scores: np.ndarray = None,
     input_duration_seconds: float = 1.0,
     far_thresholds: List[float] = [1e-1, 1e-2, 1e-3, 1e-4],
-    width: int = 1200
+    width: int = 1200,
+    num_waveform_plots: int = 5
 ):
     """
     Generate interactive table for real GW events with FAR-based coloring.
@@ -1665,16 +1666,27 @@ def generate_real_events_table(
         except:
             date_str = "-"
         
+        # Helper for safe formatting
+        def safe_fmt(key, fmt=".1f"):
+            val = event.get(key)
+            if val is None: 
+                return "-"
+            try:
+                if np.isnan(val): return "-"
+                return f"{val:{fmt}}"
+            except:
+                return "-"
+
         row = {
             "Name": event.get("name", "Unknown"),
             "Type": event.get("event_type", "Unknown"),
             "Run": event.get("observing_run", "?"),
             "Date": date_str,
-            "M₁ (M☉)": f"{event.get('mass1', np.nan):.1f}" if not np.isnan(event.get('mass1', np.nan)) else "-",
-            "M₂ (M☉)": f"{event.get('mass2', np.nan):.1f}" if not np.isnan(event.get('mass2', np.nan)) else "-",
-            "D (Mpc)": f"{event.get('distance', np.nan):.0f}" if not np.isnan(event.get('distance', np.nan)) else "-",
-            "p(BBH)": f"{event.get('p_bbh', np.nan):.2f}" if not np.isnan(event.get('p_bbh', np.nan)) else "-",
-            "p(BNS)": f"{event.get('p_bns', np.nan):.2f}" if not np.isnan(event.get('p_bns', np.nan)) else "-",
+            "M₁ (M☉)": safe_fmt("mass1", ".1f"),
+            "M₂ (M☉)": safe_fmt("mass2", ".1f"),
+            "D (Mpc)": safe_fmt("distance", ".0f"),
+            "p(BBH)": safe_fmt("p_bbh", ".2f"),
+            "p(BNS)": safe_fmt("p_bns", ".2f"),
             "Score": f"{score:.3f}" if score is not None else "Pending",
             "Min FAR": f"{min_far:.1e}" if min_far is not None else "-",
             "_score_num": score if score is not None else -1,
@@ -1735,4 +1747,82 @@ def generate_real_events_table(
         show_index=False
     )
     
-    return pn.Column(summary, far_select, table), far_select
+    # ---------------------------------------------------------
+    # Generate Waveform Plots for Top Events
+    # ---------------------------------------------------------
+    plot_items = []
+    
+    # Filter events with waveform data and valid score
+    events_with_wave = [e for e in events if "whitened_strain" in e and e.get("score") is not None]
+    
+    # Sort by score descending
+    events_with_wave.sort(key=lambda x: float(x["score"]), reverse=True)
+    
+    # Take top N
+    top_events = events_with_wave[:num_waveform_plots]
+    
+    if top_events:
+        plot_items.append(pn.layout.Divider())
+        plot_items.append(pn.pane.Markdown(f"### Top {len(top_events)} Detected Events (Whitened Waveforms)"))
+        
+        from bokeh.plotting import figure
+        from bokeh.models import Legend
+        
+        for i, event in enumerate(top_events):
+            strain = event["whitened_strain"] # (IFOs, T)
+            if not isinstance(strain, np.ndarray): continue
+            
+            num_ifos, num_samples = strain.shape
+            time = np.linspace(0, input_duration_seconds, num_samples)
+            
+            # Create figure
+            p_wave = figure(
+                title=f"Event: {event.get('name', 'Unknown')} (Score: {event.get('score', 0):.3f})",
+                x_axis_label="Time (s)",
+                y_axis_label="Whitened Strain",
+                width=int(width * 0.7),
+                height=300,
+                tools="pan,box_zoom,reset,save"
+            )
+            
+            colors = ["#1f77b4", "#d62728", "#2ca02c"] # Blue, Red, Green
+            legends = []
+            
+            for ch in range(num_ifos):
+                color = colors[ch % len(colors)]
+                # Attempt to guess IFO based on index (standard: H1, L1, V1)
+                lbl = ["H1", "L1", "V1"][ch] if ch < 3 else f"Ch{ch}"
+                
+                line = p_wave.line(time, strain[ch], color=color, line_width=1.5)
+                legends.append((lbl, [line]))
+                
+            legend = Legend(items=legends, location="top_right")
+            p_wave.add_layout(legend)
+            
+            # Helper for safe formatting
+            def safe_val(key, fmt=".1f"):
+                val = event.get(key)
+                if val is None: return "-"
+                try: 
+                    if np.isnan(val): return "-"
+                    return f"{val:{fmt}}"
+                except: return "-"
+
+            # Parameter Box (Dark Theme)
+            params_html = f"""
+            <div style="background-color: #2b2b2b; padding: 15px; border-left: 5px solid #007bff; border-radius: 4px; font-family: monospace; color: #e0e0e0;">
+                <h4 style="margin-top:0; color: #ffffff;">Parameters</h4>
+                <b>GPS:</b> {safe_val('gps', '.2f')}<br>
+                <b>M1:</b> {safe_val('mass1', '.1f')} M☉<br>
+                <b>M2:</b> {safe_val('mass2', '.1f')} M☉<br>
+                <b>Dist:</b> {safe_val('distance', '.0f')} Mpc<br>
+                <b>p(BBH):</b> {safe_val('p_bbh', '.2f')}<br>
+                <b>Status:</b> {event.get('event_type', 'Unknown')}
+            </div>
+            """
+            
+            row = pn.Row(p_wave, pn.pane.HTML(params_html, width=int(width * 0.25)))
+            plot_items.append(row)
+            plot_items.append(pn.layout.Divider())
+
+    return pn.Column(summary, far_select, table, *plot_items), far_select

@@ -424,13 +424,16 @@ class IFODataObtainer:
             observing_runs : Union[ObservingRun, List[ObservingRun]] = None,
             segment_order : SegmentOrder = SegmentOrder.RANDOM,
             max_segment_duration_seconds : float = 2048.0,
-            saturation : float = 0.125,  # 1/8 = 8x oversampling for efficiency
+            saturation : float = 8.0,  # Higher = more samples (8x oversampling)
             force_acquisition : bool = False,
             cache_segments : bool = True,
             overrides : dict = None,
             event_types : List[EventType] = [EventType.CONFIDENT],
             acquisition_mode : AcquisitionMode = AcquisitionMode.NOISE,
-            logging_level : int = logging.WARNING
+            logging_level : int = logging.WARNING,
+            random_sign_reversal : bool = True,
+            random_time_reversal : bool = True,
+            augmentation_probability : float = 0.5
         ):
         
         # Initiate logging for ifo_data:
@@ -469,6 +472,11 @@ class IFODataObtainer:
         self.cache_segments = cache_segments
         self.segment_file = None
         self.event_types = event_types
+        
+        # Data augmentation settings (for real noise)
+        self.random_sign_reversal = random_sign_reversal
+        self.random_time_reversal = random_time_reversal
+        self.augmentation_probability = augmentation_probability
             
         # Unpack parameters from input observing runs:
         self.unpack_observing_runs(observing_runs, data_quality)
@@ -525,6 +533,44 @@ class IFODataObtainer:
     def close(self):
         if self.segment_file is not None:
             self.segment_file.close()
+    
+    def _apply_augmentation(self, data):
+        """
+        Apply random sign/time reversal augmentation to data.
+        
+        Args:
+            data: Tensor of shape (Batch, IFOs, Samples)
+            
+        Returns:
+            Augmented tensor with same shape
+        """
+        if self.rng is None:
+            return data
+            
+        # Sign reversal (y-axis flip)
+        if self.random_sign_reversal and self.rng.random() < self.augmentation_probability:
+            data = -data
+            
+        # Time reversal (x-axis flip)
+        if self.random_time_reversal and self.rng.random() < self.augmentation_probability:
+            data = ops.flip(data, axis=-1)
+            
+        return data
+    
+    def _get_effective_saturation(self):
+        """
+        Calculate effective saturation accounting for augmentation.
+        
+        Higher saturation = more samples from same data. Since augmentation
+        increases unique samples by (1 + probability) per enabled augmentation,
+        we multiply saturation to sample more densely.
+        """
+        effective = self.saturation
+        if self.random_sign_reversal:
+            effective *= (1 + self.augmentation_probability)
+        if self.random_time_reversal:
+            effective *= (1 + self.augmentation_probability)
+        return effective
         
     def generate_file_path(
         self,
@@ -1694,11 +1740,8 @@ class IFODataObtainer:
                     segment_duration : float = min_num_samples / sample_rate_hertz
 
                     self._num_batches_in_current_segment : int = max(1, int(
-                              segment_duration 
-                            / (
-                                self.saturation * 
-                                num_examples_per_batch * onsource_duration_seconds
-                            )
+                              segment_duration * self._get_effective_saturation()
+                            / (num_examples_per_batch * onsource_duration_seconds)
                         ))
                 
                 # Yield batches until current segment is exhausted
@@ -1744,7 +1787,7 @@ class IFODataObtainer:
                         if sampling_mode == SamplingMode.GRID:
                             self._grid_position = 0
 
-                    yield subarrays, background_chunks, start_gps_times
+                    yield self._apply_augmentation(subarrays), self._apply_augmentation(background_chunks), start_gps_times
                 
                 # Inner loop exited - segment exhausted, outer while True loops back to get new segment
 
@@ -1807,7 +1850,7 @@ class IFODataObtainer:
                     axis=-1
                 )
                 
-                yield final_subarrays, final_background, final_gps
+                yield self._apply_augmentation(final_subarrays), self._apply_augmentation(final_background), final_gps
 
 
     def clear_valid_segments(self) -> None:

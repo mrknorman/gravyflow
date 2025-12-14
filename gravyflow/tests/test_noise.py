@@ -895,3 +895,69 @@ def test_gps_time_uniqueness_across_batches():
             assert len(batch_unique) == batch_size, (
                 f"Batch {batch_idx} has duplicate GPS times within the batch"
             )
+
+
+# ============================================================================
+# AUGMENTATION TESTS
+# ============================================================================
+
+def test_ifo_data_obtainer_augmentation_defaults():
+    """Test that IFODataObtainer has augmentation parameters with correct defaults."""
+    obtainer = gf.IFODataObtainer(
+        data_quality=gf.DataQuality.BEST,
+        data_labels=[gf.DataLabel.NOISE],
+        observing_runs=[gf.ObservingRun.O3]
+    )
+    
+    assert obtainer.random_sign_reversal == True
+    assert obtainer.random_time_reversal == True
+    assert obtainer.augmentation_probability == 0.5
+
+
+def test_ifo_data_obtainer_augmentation_disabled():
+    """Test that augmentation can be disabled."""
+    obtainer = gf.IFODataObtainer(
+        data_quality=gf.DataQuality.BEST,
+        data_labels=[gf.DataLabel.NOISE],
+        observing_runs=[gf.ObservingRun.O3],
+        random_sign_reversal=False,
+        random_time_reversal=False
+    )
+    
+    assert obtainer.random_sign_reversal == False
+    assert obtainer.random_time_reversal == False
+
+
+def test_effective_saturation_with_augmentation():
+    """Test that effective saturation is increased when augmentation is enabled."""
+    base_saturation = 8.0
+    prob = 0.5
+    
+    # Both augmentations enabled
+    obtainer = gf.IFODataObtainer(
+        data_quality=gf.DataQuality.BEST,
+        data_labels=[gf.DataLabel.NOISE],
+        saturation=base_saturation,
+        augmentation_probability=prob
+    )
+    
+    effective = obtainer._get_effective_saturation()
+    expected = base_saturation * ((1 + prob) ** 2)  # Multiplied twice
+    np.testing.assert_almost_equal(effective, expected)
+
+
+def test_effective_saturation_no_augmentation():
+    """Test that effective saturation equals base saturation when augmentation disabled."""
+    base_saturation = 8.0
+    
+    obtainer = gf.IFODataObtainer(
+        data_quality=gf.DataQuality.BEST,
+        data_labels=[gf.DataLabel.NOISE],
+        saturation=base_saturation,
+        random_sign_reversal=False,
+        random_time_reversal=False
+    )
+    
+    effective = obtainer._get_effective_saturation()
+    assert effective == base_saturation
+

@@ -309,74 +309,35 @@ class ValidationBank:
         """
         Generate scores for real GW events from GWTC catalogs.
         
-        Fetches confirmed and marginal events, downloads strain data,
-        runs model inference, and stores results with PE parameters.
+        Uses TransientObtainer with event_names to directly fetch and score
+        specific events, simplifying the previous manual catalog/GPS matching approach.
         
         Args:
             observing_runs: List of ObservingRun enums to include.
-                           Defaults to O1, O2, O3.
+                           Defaults to [O1, O2, O3].
         """
         from gravyflow.src.dataset.features.event import (
-            get_confident_events_with_params, 
-            MARGINAL_CATALOGS, EventType
+            get_events_with_params, EventType
         )
-        from gwpy.table import EventTable
-        from copy import deepcopy
+        from gravyflow.src.dataset.conditioning.whiten import whiten
         
         if observing_runs is None:
-            # Default to O3 only for now (faster, most events)
-            # TODO: Multi-run support
-            observing_runs = [gf.ObservingRun.O3]
+            observing_runs = [gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3]
         
         self.logger.info("Fetching real GW events from GWTC catalogs...")
         
-        # Fetch confident events with PE
-        confident_events = get_confident_events_with_params(observing_runs)
-        for event in confident_events:
-            event["event_type"] = "CONFIDENT"
+        # Fetch all events (confident + marginal) with PE parameters
+        all_events = get_events_with_params(
+            observing_runs,
+            event_types=[EventType.CONFIDENT, EventType.MARGINAL]
+        )
         
-        # Fetch marginal events
-        marginal_events = []
-        catalog_run_map = {
-            "GWTC-1-marginal": "O1",
-            "GWTC-2.1-auxiliary": "O2",
-            "GWTC-2.1-marginal": "O2",
-            "GWTC-3-marginal": "O3",
-        }
+        # Add event_type field based on catalog name
+        for event in all_events:
+            catalog = event.get("catalog", "")
+            event["event_type"] = "MARGINAL" if "marginal" in catalog.lower() else "CONFIDENT"
         
-        run_names = set()
-        for run in observing_runs:
-            if hasattr(run, 'value'):
-                run_names.add(run.value.name if hasattr(run.value, 'name') else str(run))
-        
-        for catalog in MARGINAL_CATALOGS:
-            if catalog_run_map.get(catalog) not in run_names:
-                continue
-            try:
-                table = EventTable.fetch_open_data(catalog)
-                for row in table:
-                    try:
-                        event = {
-                            "name": str(row.get("commonName", row.get("name", "Unknown"))),
-                            "gps": float(row["GPS"]),
-                            "mass1": float(row.get("mass_1_source", row.get("m1", np.nan))),
-                            "mass2": float(row.get("mass_2_source", row.get("m2", np.nan))),
-                            "distance": float(row.get("luminosity_distance", row.get("distance", np.nan))),
-                            "catalog": catalog,
-                            "observing_run": catalog_run_map.get(catalog, "Unknown"),
-                            "event_type": "MARGINAL"
-                        }
-                        if not np.isnan(event["gps"]):
-                            marginal_events.append(event)
-                    except (KeyError, ValueError, TypeError):
-                        continue
-            except Exception as e:
-                self.logger.warning(f"Failed to fetch {catalog}: {e}")
-        
-        # Combine all events
-        all_events = confident_events + marginal_events
-        
-        # Deduplicate by GPS
+        # Deduplicate by GPS (some events appear in multiple catalogs)
         seen_gps = set()
         unique_events = []
         for event in all_events:
@@ -387,141 +348,104 @@ class ValidationBank:
         
         unique_events.sort(key=lambda x: x["gps"])
         
-        self.logger.info(f"Found {len(unique_events)} unique real events "
-                        f"({len(confident_events)} confident, {len(marginal_events)} marginal)")
+        confident_count = sum(1 for e in unique_events if e["event_type"] == "CONFIDENT")
+        marginal_count = len(unique_events) - confident_count
+        self.logger.info(f"Found {len(unique_events)} unique events "
+                        f"({confident_count} confident, {marginal_count} marginal)")
         
-        # Create fresh IFODataObtainer configured for TRANSIENT mode
-        # Extract config from existing noise_obtainer
+        # Get IFO configuration from existing noise_obtainer
         if "noise_obtainer" not in self.dataset_args:
-            self.logger.warning("No noise_obtainer in dataset_args - cannot run TRANSIENT mode")
+            self.logger.warning("No noise_obtainer in dataset_args - cannot score events")
             self.real_events = unique_events
             return
         
         orig_noise_obt = self.dataset_args["noise_obtainer"]
-        if not hasattr(orig_noise_obt, "ifo_data_obtainer") or not orig_noise_obt.ifo_data_obtainer:
-            self.logger.warning("No ifo_data_obtainer found - cannot run TRANSIENT mode")
-            self.real_events = unique_events
-            return
+        ifos = getattr(orig_noise_obt, "ifos", [gf.IFO.H1, gf.IFO.L1])
         
-        orig_ifo_obt = orig_noise_obt.ifo_data_obtainer
+        # Get event names for TransientObtainer
+        event_names = [e["name"] for e in unique_events]
         
-        # Create fresh IFODataObtainer with EVENTS data_labels for TRANSIENT mode
-        self.logger.info("Creating fresh IFODataObtainer for TRANSIENT mode...")
+        self.logger.info(f"Creating TransientObtainer for {len(event_names)} events...")
         
-        # Use O3 only for now (most events, faster testing)
-        # TODO: Support multiple observing runs
-        features_ifo_obtainer = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],  # TRANSIENT mode!
-            saturation=1.0,  # No saturation for events
-        )
-        
-        # Explicitly fetch valid segments to get accurate count and ensure they are ready
-        # We use 'all' group to strictly access all available data
         try:
-            segments = features_ifo_obtainer.get_valid_segments(
-                ifos=orig_noise_obt.ifos,
-                seed=42,
-                group_name='all'
+            # Use TransientObtainer with event_names to target specific events
+            transient_obt = gf.TransientObtainer(
+                ifo_data_obtainer=gf.IFODataObtainer(
+                    observing_runs=observing_runs,
+                    data_quality=gf.DataQuality.BEST,
+                    data_labels=[gf.DataLabel.EVENTS]
+                ),
+                ifos=ifos,
+                event_names=event_names
             )
-            total_available_events = len(segments) if segments is not None else 0
-            self.logger.info(f"IFODataObtainer found {total_available_events} available feature segments")
-        except Exception as e:
-            self.logger.warning(f"Failed to initialize feature segments: {e}")
-            total_available_events = 0
-
-        if total_available_events == 0:
-             self.logger.warning("No feature segments available for scoring.")
-             self.real_events = unique_events
-             return
-
-        # Create fresh NoiseObtainer with the TRANSIENT-mode IFODataObtainer
-        features_noise_obt = gf.NoiseObtainer(
-            ifo_data_obtainer=features_ifo_obtainer,
-            ifos=orig_noise_obt.ifos,
-            noise_type=orig_noise_obt.noise_type
-        )
-        
-        # Build dataset args for TRANSIENT mode
-        dataset_args = deepcopy(self.dataset_args)
-        dataset_args["noise_obtainer"] = features_noise_obt
-        dataset_args["waveform_generators"] = []  # No injections
-        # Do not overwrite input_variables - trust compatibility with model
-        dataset_args["output_variables"] = [gf.ReturnVariables.GPS_TIME]
-        
-        # Configure iteration to cover ALL available segments
-        dataset_args["num_examples_per_batch"] = 1
-        dataset_args["steps_per_epoch"] = total_available_events
-        dataset_args["group"] = "all"
-        
-        self.logger.info(f"Running model inference on {total_available_events} segments to match {len(unique_events)} target events...")
-        
-        try:
-            dataset = gf.Dataset(**dataset_args)
-            dataset_iter = iter(dataset)  # Create iterator to properly advance
             
-            # Run model on each available segment
-            for i in range(total_available_events):
+            # Get sample/onsource durations from dataset_args
+            sample_rate = self.dataset_args.get("sample_rate_hertz", 2048.0)
+            onsource_duration = self.dataset_args.get("onsource_duration_seconds", 1.0)
+            offsource_duration = self.dataset_args.get("offsource_duration_seconds", 16.0)
+            
+            # Create generator with scale_factor for numerical stability
+            generator = transient_obt(
+                sample_rate_hertz=sample_rate,
+                onsource_duration_seconds=onsource_duration,
+                offsource_duration_seconds=offsource_duration,
+                num_examples_per_batch=1,
+                scale_factor=gf.Defaults.scale_factor  # Apply 1e21 scaling
+            )
+            
+            # Score each event
+            scored_count = 0
+            for i, (onsource, offsource, gps_times) in enumerate(generator):
+                if i >= len(event_names):
+                    break
+                
                 if self.heart:
                     self.heart.beat()
                 
                 try:
-                    x_batch, y_batch = next(dataset_iter)
+                    # Build model input
+                    x_batch = {"ONSOURCE": onsource, "OFFSOURCE": offsource}
                     
-                    # Pass input directly to model - dataset returns correct format
+                    # Run inference
                     prediction = self.model.predict_on_batch(x_batch)
+                    score = float(self._extract_scores(prediction)[0])
                     
-                    # Extract score
-                    if len(prediction.shape) == 2:
-                        if prediction.shape[1] == 2:
-                            score = float(prediction[0, 1])
-                        else:
-                            score = float(prediction[0, 0])
-                    else:
-                        score = float(prediction[0])
+                    # Get GPS time for matching
+                    batch_gps = float(gps_times[0, 0]) if len(gps_times.shape) > 1 else float(gps_times[0])
                     
-                    # Match to event by GPS time if available
-                    if y_batch and gf.ReturnVariables.GPS_TIME.name in y_batch:
-                        gps_arr = y_batch[gf.ReturnVariables.GPS_TIME.name]
-                        # Handle both (Batch,) and (Batch, 1) shapes
-                        if len(gps_arr.shape) == 2:
-                            batch_gps = float(gps_arr[0, 0])
-                        else:
-                            batch_gps = float(gps_arr[0])
-                        
-                        # Debug: log first few GPS comparisons
-                        if i < 3:
-                            target_gps = [e["gps"] for e in unique_events[:5]]
-                            self.logger.info(f"DEBUG Event {i}: segment GPS={batch_gps:.2f}, target GPS (first 5)={target_gps}")
-                        
-                        # Find matching event (20s tolerance to handle segment offset)
-                        for event in unique_events:
-                            if abs(event["gps"] - batch_gps) < 20.0:
-                                event["score"] = score
-                                event["status"] = "scored"
-                                break
-                    else:
-                        # Assign score by index order
-                        if i < len(unique_events):
-                            unique_events[i]["score"] = score
-                            unique_events[i]["status"] = "scored"
+                    # Match to event by GPS time
+                    for event in unique_events:
+                        if abs(event["gps"] - batch_gps) < 20.0:
+                            event["score"] = score
+                            event["status"] = "scored"
+                            
+                            # Whiten for plotting (store as numpy)
+                            try:                                
+                                whitened = whiten(
+                                    on_input,
+                                    off_input,
+                                    sample_rate_hertz=sample_rate
+                                )
+                                event["whitened_strain"] = np.array(whitened)[0] # (IFOs, T)
+                            except Exception as e:
+                                self.logger.warning(f"Whitening failed for event at {batch_gps}: {e}")
+                            
+                            scored_count += 1
+                            break
                     
                 except Exception as e:
-                    import traceback
-                    self.logger.warning(f"Failed to process event {i}: {type(e).__name__}: {repr(e)}")
-                    self.logger.warning(traceback.format_exc())  # Print full traceback as warning
-                    if i < len(unique_events):
-                        unique_events[i]["status"] = "error"
+                    self.logger.warning(f"Failed to score event {i}: {e}")
                 
                 if (i + 1) % 10 == 0:
-                    self.logger.info(f"Event Progress: {i + 1}/{total_available_events}")
+                    self.logger.info(f"Event Progress: {i + 1}/{len(event_names)}")
                     
+        except StopIteration:
+            pass  # Normal generator exhaustion
         except Exception as e:
-            self.logger.warning(f"Failed to create TRANSIENT mode dataset: {e}")
-            self.logger.info("Events stored without scores - run model manually")
+            self.logger.warning(f"TransientObtainer failed: {e}")
+            self.logger.info("Events stored without scores")
         
-        # Calculate min FAR for each scored event
+        # Calculate min FAR for scored events
         if self.far_scores is not None and len(self.far_scores) > 0:
             from .utils import calculate_far_score_thresholds
             thresholds = calculate_far_score_thresholds(
@@ -534,8 +458,7 @@ class ValidationBank:
                 if event.get("score") is not None:
                     score = event["score"]
                     for far in sorted(thresholds.keys()):
-                        thresh = thresholds[far][1]
-                        if score >= thresh:
+                        if score >= thresholds[far][1]:
                             event["min_far"] = far
                             break
         
