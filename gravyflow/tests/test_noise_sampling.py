@@ -103,13 +103,13 @@ class TestDefaultSaturation:
     """Test default saturation value for efficiency."""
     
     def test_default_saturation_is_one_eighth(self):
-        """Default saturation should be 0.125 (1/8) for 8x oversampling."""
+        """Default saturation should be 8.0 (higher = more samples, 8x oversampling)."""
         obtainer = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE]
         )
-        assert obtainer.saturation == 0.125
+        assert obtainer.saturation == 8.0
 
 
 class TestIFODataGridSubsection:

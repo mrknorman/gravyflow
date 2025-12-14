@@ -224,9 +224,9 @@ class TestIFODataObtainerInit:
     def test_basic_initialization(self):
         """Test basic IFODataObtainer initialization."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
             cache_segments=False
         )
@@ -237,9 +237,9 @@ class TestIFODataObtainerInit:
     def test_initialization_with_multiple_labels(self):
         """Test initialization with multiple data labels."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            [gf.DataLabel.NOISE, gf.DataLabel.GLITCHES],
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[gf.DataLabel.NOISE, gf.DataLabel.GLITCHES],
+            observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
             cache_segments=False
         )
@@ -249,9 +249,9 @@ class TestIFODataObtainerInit:
     def test_override_attributes_valid(self):
         """Test override_attributes with valid attribute (lines 371-373)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
             cache_segments=False,
             overrides={"saturation": 0.5}
@@ -263,18 +263,18 @@ class TestIFODataObtainerInit:
         """Test override_attributes with invalid attribute raises ValueError (lines 374-377)."""
         with pytest.raises(ValueError, match="Invalide override value"):
             gf.IFODataObtainer(
-                gf.ObservingRun.O3,
-                gf.DataQuality.BEST,
-                gf.DataLabel.NOISE,
+                data_quality=gf.DataQuality.BEST,
+                data_labels=gf.DataLabel.NOISE,
+                observing_runs=gf.ObservingRun.O3,
                 overrides={"nonexistent_attribute": 123}
             )
     
     def test_close_method(self):
         """Test close method handles None segment_file (lines 402-404)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -284,9 +284,9 @@ class TestIFODataObtainerInit:
     def test_generate_file_path(self):
         """Test generate_file_path creates correct path."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -304,9 +304,9 @@ class TestIFODataObtainerInit:
     def test_generate_file_path_default_directory(self):
         """Test generate_file_path uses default directory when None (line 414)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -331,9 +331,9 @@ class TestSegmentProcessing:
     def obtainer(self):
         """Create a fresh IFODataObtainer for each test."""
         return gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
             cache_segments=False
         )
@@ -476,9 +476,9 @@ class TestSegmentOrdering:
     @pytest.fixture
     def obtainer(self):
         return gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
             cache_segments=False
         )
@@ -542,9 +542,9 @@ class TestCutAndGroupSegments:
     @pytest.fixture
     def obtainer(self):
         return gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
             cache_segments=False
         )
@@ -614,9 +614,9 @@ class TestCachingMethods:
     def test_cache_segment_no_file_path(self):
         """Test _cache_segment with no file_path does nothing (lines 909-910)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -630,9 +630,9 @@ class TestClearValidSegments:
     def test_clear_valid_segments(self):
         """Test clear_valid_segments resets state (lines 1204-1210)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -734,9 +734,9 @@ def _test_segment_processing_visualization(
 ) -> None:
     """Visualize segment processing pipeline."""
     obtainer = gf.IFODataObtainer(
-        gf.ObservingRun.O3,
-        gf.DataQuality.BEST,
-        gf.DataLabel.NOISE,
+        data_quality=gf.DataQuality.BEST,
+        data_labels=gf.DataLabel.NOISE,
+        observing_runs=gf.ObservingRun.O3,
         cache_segments=False
     )
     
@@ -896,9 +896,9 @@ class TestGetOnsourceOffsourceChunks:
     def test_get_chunks_defaults_applied(self):
         """Test that defaults are applied when parameters are None (lines 1101-1111)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -950,9 +950,9 @@ class TestAcquireGenerator:
     def test_acquire_with_preset_segments(self):
         """Test acquire method with preset valid_segments."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -981,9 +981,9 @@ class TestGetValidSegmentsErrors:
     def test_get_valid_segments_invalid_group(self):
         """Test get_valid_segments with invalid group name raises KeyError (line 1241)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1028,9 +1028,9 @@ class TestUnpackObservingRuns:
     def test_unpack_single_observing_run(self):
         """Test unpacking a single observing run."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1042,9 +1042,9 @@ class TestUnpackObservingRuns:
     def test_unpack_multiple_observing_runs(self):
         """Test unpacking multiple observing runs."""
         obtainer = gf.IFODataObtainer(
-            [gf.ObservingRun.O2, gf.ObservingRun.O3],
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=[gf.ObservingRun.O2, gf.ObservingRun.O3],
             cache_segments=False
         )
         
@@ -1058,9 +1058,9 @@ class TestMergeBinsEdgeCases:
     @pytest.fixture
     def obtainer(self):
         return gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
     
@@ -1088,9 +1088,9 @@ class TestMultipleIFOSegments:
     @pytest.fixture
     def obtainer(self):
         return gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
     
@@ -1133,9 +1133,9 @@ class TestCachingWithFilePath:
     def test_cache_segment_with_valid_path(self):
         """Test _cache_segment creates file and stores data (lines 912-915)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=True
         )
         
@@ -1176,9 +1176,9 @@ class TestCloseWithOpenFile:
     def test_destructor_closes_file(self):
         """Test __del__ closes segment_file if open (lines 398-400)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1195,9 +1195,9 @@ class TestCloseWithOpenFile:
     def test_close_with_open_file(self):
         """Test close method closes segment_file (lines 402-404)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1215,9 +1215,9 @@ class TestCutSegmentsEdgeCases:
     @pytest.fixture
     def obtainer(self):
         return gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
     
@@ -1252,9 +1252,9 @@ class TestGetSegmentsForGroupEdgeCases:
     @pytest.fixture
     def obtainer(self):
         return gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
     
@@ -1288,9 +1288,9 @@ class TestVetoTimeSegmentsComplex:
     @pytest.fixture
     def obtainer(self):
         return gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
     
@@ -1337,9 +1337,9 @@ def _test_full_pipeline_visualization(
 ) -> None:
     """Visualize the full segment processing pipeline."""
     obtainer = gf.IFODataObtainer(
-        gf.ObservingRun.O3,
-        gf.DataQuality.BEST,
-        gf.DataLabel.NOISE,
+        data_quality=gf.DataQuality.BEST,
+        data_labels=gf.DataLabel.NOISE,
+        observing_runs=gf.ObservingRun.O3,
         cache_segments=False
     )
     
@@ -1435,9 +1435,9 @@ class TestGetSegmentTimes:
     def test_get_segment_times_real_data(self):
         """Test fetching real segment times from LIGO (lines 447-456)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1463,9 +1463,9 @@ class TestGetSegmentTimes:
     def test_get_all_segment_times_real_data(self):
         """Test fetching all segment times across observing run (lines 463-475)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1485,9 +1485,9 @@ class TestGetAllEventTimes:
     def test_get_all_event_times_with_cache(self):
         """Test fetching event times, uses cache if available (lines 480-503)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            [gf.DataLabel.NOISE, gf.DataLabel.EVENTS],
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[gf.DataLabel.NOISE, gf.DataLabel.EVENTS],
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1506,9 +1506,9 @@ class TestRemoveUnwantedSegments:
     def test_remove_unwanted_segments_noise_only(self):
         """Test removing event/glitch segments from noise (lines 512-555)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,  # Noise only, should veto events and glitches
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,  # Noise only, should veto events and glitches
             cache_segments=False
         )
         
@@ -1539,9 +1539,9 @@ class TestReturnWantedSegments:
     def test_return_wanted_segments_with_events(self):
         """Test returning segments that contain events (lines 584-632)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.EVENTS,  # Looking for events
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.EVENTS,
+            observing_runs=gf.ObservingRun.O3,  # Looking for events
             cache_segments=False
         )
         
@@ -1575,9 +1575,9 @@ class TestGetSegmentData:
     def test_get_segment_data_short_segment(self):
         """Test fetching a short segment of real LIGO data (lines 931-946)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1607,9 +1607,9 @@ class TestGetSegment:
     def test_get_segment_acquires_data(self):
         """Test get_segment acquires and resamples data (lines 988-1014)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False,
             force_acquisition=True  # Force fresh acquisition
         )
@@ -1636,9 +1636,9 @@ class TestGetSegment:
         """Test get_segment caches data to HDF5 file (lines 966-986)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             obtainer = gf.IFODataObtainer(
-                gf.ObservingRun.O3,
-                gf.DataQuality.BEST,
-                gf.DataLabel.NOISE,
+                data_quality=gf.DataQuality.BEST,
+                data_labels=gf.DataLabel.NOISE,
+                observing_runs=gf.ObservingRun.O3,
                 cache_segments=True
             )
             
@@ -1673,9 +1673,9 @@ class TestAcquireGenerator:
     def test_acquire_yields_ifo_data(self):
         """Test acquire generator yields IFOData objects (lines 1042-1082)."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1710,9 +1710,9 @@ class TestGetValidSegmentsReal:
     def test_get_valid_segments_basic(self):
         """Test get_valid_segments returns segments from LIGO servers."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1735,9 +1735,9 @@ class TestGetValidSegmentsReal:
     def test_get_valid_segments_with_groups(self):
         """Test get_valid_segments with train/validate/test groups."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1764,9 +1764,9 @@ class TestFindSegmentIntersections:
     def test_find_intersections_real_segments(self):
         """Test finding intersections between real segment arrays."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -1800,9 +1800,9 @@ class TestGetOnsourceOffsourceChunksReal:
     def test_get_chunks_from_real_data(self):
         """Test chunk extraction from real LIGO data."""
         obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3,
-            gf.DataQuality.BEST,
-            gf.DataLabel.NOISE,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
         
@@ -2028,9 +2028,9 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
     
     # Setup IFODataObtainer for O3
     obtainer = gf.IFODataObtainer(
-        [gf.ObservingRun.O3],
         data_quality=gf.DataQuality.BEST,
-        data_labels=[gf.DataLabel.NOISE]
+        data_labels=[gf.DataLabel.NOISE],
+        observing_runs=[gf.ObservingRun.O3]
     )
     
     try:

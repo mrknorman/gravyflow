@@ -227,6 +227,19 @@ def whiten(
     timeseries = ops.convert_to_tensor(timeseries)
     background = ops.convert_to_tensor(background)
 
+    # Warn if input appears to be unscaled GW strain (very small amplitudes)
+    max_amplitude = ops.max(ops.abs(timeseries))
+    jax.lax.cond(
+        max_amplitude < 1e-10,
+        lambda: jax.debug.print(
+            "⚠️  WARNING: Input timeseries has max amplitude {x:.2e}, which suggests "
+            "unscaled GW strain data. Consider scaling by 1e21 before whitening "
+            "to avoid float32 numerical instability.",
+            x=max_amplitude
+        ),
+        lambda: None
+    )
+
     # Check if input is 1D or 2D
     is_1d = len(ops.shape(timeseries)) == 1
     if is_1d:

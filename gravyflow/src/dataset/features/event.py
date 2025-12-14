@@ -223,7 +223,7 @@ def get_events_with_params(
     cache_dir = Path(__file__).parent.parent.parent / "res" / "event_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     
-    cache_key = md5(str(sorted(event_types)).encode('utf-8')).hexdigest()
+    cache_key = md5(str(sorted(event_types, key=lambda x: x.value)).encode('utf-8')).hexdigest()
     cache_file = cache_dir / f"events_{cache_key}.json"
     
     if cache_file.exists():

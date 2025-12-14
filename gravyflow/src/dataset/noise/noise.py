@@ -502,10 +502,8 @@ class NoiseObtainer(Obtainer):
             num_batches_in_segment : int = \
                 int(
                       self.ifo_data_obtainer.max_segment_duration_seconds
-                    / (
-                        self.ifo_data_obtainer.saturation * 
-                        num_examples_per_batch * onsource_duration_seconds
-                    )
+                    * self.ifo_data_obtainer.saturation
+                    / (num_examples_per_batch * onsource_duration_seconds)
                 )
                         
             for _ in range(num_batches_in_segment):
@@ -582,7 +580,7 @@ class TransientObtainer(Obtainer):
             crop_duration_seconds: float = None,
             offsource_duration_seconds: float = None,
             num_examples_per_batch: int = None,
-            scale_factor: float = 1.0,
+            scale_factor: float = None,
             group: str = "all",
             seed: int = None,
         ) -> Iterator:
@@ -616,6 +614,8 @@ class TransientObtainer(Obtainer):
             crop_duration_seconds = gf.Defaults.crop_duration_seconds
         if num_examples_per_batch is None:
             num_examples_per_batch = gf.Defaults.num_examples_per_batch
+        if scale_factor is None:
+            scale_factor = gf.Defaults.scale_factor
         if seed is None:
             seed = gf.Defaults.seed
         if self.rng is None:
@@ -661,10 +661,10 @@ class TransientObtainer(Obtainer):
     
     def _filter_to_named_events(self, ifo_obtainer):
         """Filter IFODataObtainer to only fetch specified event names."""
-        from gravyflow.src.dataset.features.event import get_confident_events_with_params
+        from gravyflow.src.dataset.features.event import get_events_with_params, EventType
         
         # Get all events with their names
-        all_events = get_confident_events_with_params()
+        all_events = get_events_with_params(event_types=[EventType.CONFIDENT, EventType.MARGINAL])
         
         # Filter to requested names
         target_gps = []
