@@ -430,12 +430,18 @@ class IFODataObtainer:
             cache_segments : bool = True,
             overrides : dict = None,
             event_types : List[EventType] = [EventType.CONFIDENT],
-            acquisition_mode : AcquisitionMode = AcquisitionMode.NOISE,
             logging_level : int = logging.WARNING,
             random_sign_reversal : bool = True,
             random_time_reversal : bool = True,
             augmentation_probability : float = 0.5,
-            prefetch_segments : int = 1
+            prefetch_segments : int = 1,
+            # TRANSIENT/FEATURE mode augmentations
+            random_shift : bool = False,  # Shift event off-center
+            shift_fraction : float = 0.25,  # Max shift as fraction of onsource
+            add_noise : bool = False,  # Add random noise perturbations
+            noise_amplitude : float = 0.1,  # Noise amplitude (relative to std)
+            # Class balancing for glitch classification
+            balanced_glitch_types : bool = False  # Equal sampling from each glitch type
         ):
         
         # Initiate logging for ifo_data:
@@ -444,7 +450,7 @@ class IFODataObtainer:
         self.logger.addHandler(stream_handler)
         self.logger.setLevel(logging_level)
         
-        self.acquisition_mode = acquisition_mode
+        self.acquisition_mode = None
 
         self._current_segment_index = 0
         self._current_batch_index = 0
@@ -479,6 +485,15 @@ class IFODataObtainer:
         self.random_sign_reversal = random_sign_reversal
         self.random_time_reversal = random_time_reversal
         self.augmentation_probability = augmentation_probability
+        
+        # TRANSIENT/FEATURE mode augmentations
+        self.random_shift = random_shift
+        self.shift_fraction = shift_fraction
+        self.add_noise = add_noise
+        self.noise_amplitude = noise_amplitude
+        
+        # Class balancing
+        self.balanced_glitch_types = balanced_glitch_types
             
         # Unpack parameters from input observing runs:
         self.unpack_observing_runs(observing_runs, data_quality)
@@ -532,6 +547,24 @@ class IFODataObtainer:
             [run.channels[data_quality] for run in observing_runs]
         self.state_flags = \
             [run.state_flags[data_quality] for run in observing_runs]
+    
+    def __getstate__(self):
+        """Exclude ThreadPoolExecutor from pickling (can't be serialized)."""
+        state = self.__dict__.copy()
+        # Remove unpicklable objects
+        state['_prefetch_executor'] = None
+        state['_prefetch_futures'] = {}
+        return state
+    
+    def __setstate__(self, state):
+        """Restore object and recreate ThreadPoolExecutor if needed."""
+        self.__dict__.update(state)
+        # Recreate executor if prefetching was enabled
+        if self.prefetch_segments > 0:
+            self._prefetch_executor = ThreadPoolExecutor(max_workers=1)
+        else:
+            self._prefetch_executor = None
+        self._prefetch_futures = {}
         
     def __del__(self):
         if getattr(self, "segment_file", None) is not None:
@@ -546,12 +579,13 @@ class IFODataObtainer:
             self._prefetch_executor.shutdown(wait=True)
             self._prefetch_executor = None
     
-    def _apply_augmentation(self, data):
+    def _apply_augmentation(self, data, is_transient: bool = False):
         """
-        Apply random sign/time reversal augmentation to data.
+        Apply random augmentations to data.
         
         Args:
             data: Tensor of shape (Batch, IFOs, Samples)
+            is_transient: If True, apply TRANSIENT-specific augmentations (shift, noise)
             
         Returns:
             Augmented tensor with same shape
@@ -566,6 +600,25 @@ class IFODataObtainer:
         # Time reversal (x-axis flip)
         if self.random_time_reversal and self.rng.random() < self.augmentation_probability:
             data = ops.flip(data, axis=-1)
+        
+        # TRANSIENT-specific augmentations
+        if is_transient:
+            # Random shift (move event off-center)
+            if self.random_shift and self.rng.random() < self.augmentation_probability:
+                num_samples = int(ops.shape(data)[-1])
+                max_shift = int(self.shift_fraction * num_samples)
+                shift = self.rng.integers(-max_shift, max_shift + 1)
+                data = ops.roll(data, shift, axis=-1)
+            
+            # Add noise perturbations
+            if self.add_noise and self.rng.random() < self.augmentation_probability:
+                # Calculate std per sample for proper scaling
+                data_np = ops.convert_to_numpy(data)
+                noise = self.rng.normal(0, self.noise_amplitude, data_np.shape)
+                # Scale noise by data standard deviation
+                std = np.std(data_np)
+                noise = noise * std if std > 0 else noise
+                data = ops.convert_to_tensor(data_np + noise, dtype=data.dtype)
             
         return data
     
@@ -1922,7 +1975,7 @@ class IFODataObtainer:
                     axis=-1
                 )
                 
-                yield self._apply_augmentation(final_subarrays), self._apply_augmentation(final_background), final_gps
+                yield self._apply_augmentation(final_subarrays, is_transient=True), self._apply_augmentation(final_background, is_transient=True), final_gps
 
 
     def clear_valid_segments(self) -> None:
