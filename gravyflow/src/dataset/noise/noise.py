@@ -660,8 +660,7 @@ class TransientObtainer(Obtainer):
             num_examples_per_batch,
             self.ifos,
             scale_factor,
-            seed=seed_,
-            file_path=ifo_obtainer.file_path
+            seed=seed_
         )
         
         # Wrap generator with cropping/whitening if requested
