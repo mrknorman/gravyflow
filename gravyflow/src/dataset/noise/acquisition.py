@@ -784,8 +784,8 @@ class IFODataObtainer:
     def _cluster_transients(
         self, 
         segments: np.ndarray, 
-        request_overhead_seconds: float = 2.0,
-        data_download_rate: float = 0.005
+        request_overhead_seconds: float = 8.0,
+        data_download_rate: float = 0.008
     ) -> np.ndarray:
         """
         Cluster nearby transients using a greedy cost-optimized algorithm.
