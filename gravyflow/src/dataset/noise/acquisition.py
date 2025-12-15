@@ -784,43 +784,49 @@ class IFODataObtainer:
     def _cluster_transients(
         self, 
         segments: np.ndarray, 
-        cluster_window_seconds: float = None
+        request_overhead_seconds: float = 2.0,
+        data_download_rate: float = 0.005
     ) -> np.ndarray:
         """
-        Cluster nearby transients into larger download segments.
+        Cluster nearby transients using a greedy cost-optimized algorithm.
         
-        This reduces the number of individual downloads by merging transients
-        that are close in time. Individual glitches can then be extracted
-        from the larger downloaded segments.
+        Makes per-gap decisions: merge if downloading the gap data is cheaper
+        than making a separate request. The breakeven point is:
+            gap_threshold = request_overhead / data_download_rate
+        
+        With defaults (2s overhead, 0.005s/s data rate), threshold = 400s.
         
         Args:
             segments: Array of (start, end) GPS times, shape (N, 2)
-            cluster_window_seconds: Max gap between transients to merge.
-                                   Defaults to max_segment_duration_seconds (2048.0s).
-                                   
+            request_overhead_seconds: Fixed cost per network request (seconds)
+            data_download_rate: Time to download 1 second of data (seconds)
+                               e.g., 0.005 means 100s of data takes 0.5s
+                               
         Returns:
             Merged segments array of shape (M, 2) where M <= N
         """
-        if cluster_window_seconds is None:
-            cluster_window_seconds = self.max_segment_duration_seconds
-        
         if len(segments) == 0:
             return segments
         
         if len(segments) == 1:
             return segments
+        
+        # Breakeven gap: merge if gap * data_rate < request_overhead
+        gap_threshold = request_overhead_seconds / data_download_rate
             
         # Sort by start time
         sorted_idx = np.argsort(segments[:, 0])
         sorted_segs = segments[sorted_idx]
         
-        # Merge overlapping/nearby segments within window
+        # Greedy merge: for each gap, decide whether to merge or keep separate
         merged = []
         current_start, current_end = sorted_segs[0]
         
         for start, end in sorted_segs[1:]:
-            # Merge if gap is within cluster window
-            if start <= current_end + cluster_window_seconds:
+            gap = start - current_end
+            
+            # Merge if gap is negative (overlap) or within cost threshold
+            if gap <= 0 or gap <= gap_threshold:
                 current_end = max(current_end, end)
             else:
                 merged.append([current_start, current_end])
@@ -836,8 +842,8 @@ class IFODataObtainer:
         merged_count = len(merged_array)
         if merged_count < original_count:
             logging.info(
-                f"Temporal clustering: {original_count} transients -> "
-                f"{merged_count} download segments (window: {cluster_window_seconds}s)"
+                f"Greedy clustering: {original_count} transients -> "
+                f"{merged_count} download segments (gap threshold: {gap_threshold:.0f}s)"
             )
         
         return merged_array
