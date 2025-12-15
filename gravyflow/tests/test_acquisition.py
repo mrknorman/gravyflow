@@ -2149,24 +2149,7 @@ class TestFeatureMode:
         assert gf.GlitchType.TOMTE.value == 'Tomte'
         assert gf.GlitchType.SCATTERED_LIGHT.value == 'Scattered_Light'
     
-    def test_feature_cache_config_defaults(self):
-        """Test FeatureCacheConfig default values."""
-        config = gf.FeatureCacheConfig()
-        assert config.padding_duration_seconds == 32.0
-        assert config.max_examples == 50000
-        assert config.force_redownload == False
-    
-    def test_feature_cache_config_custom(self):
-        """Test FeatureCacheConfig with custom values."""
-        config = gf.FeatureCacheConfig(
-            padding_duration_seconds=16.0,
-            max_examples=256,
-            force_redownload=True
-        )
-        assert config.padding_duration_seconds == 16.0
-        assert config.max_examples == 256
-        assert config.force_redownload == True
-    
+
     def test_data_labels_with_event_type(self):
         """Test IFODataObtainer accepts EventType in data_labels."""
         obtainer = gf.IFODataObtainer(
@@ -2240,16 +2223,6 @@ class TestFeatureMode:
         assert gf.DataLabel.EVENTS in obtainer.data_labels
         obtainer.close()
     
-    def test_precache_features_method_exists(self):
-        """Test that precache_features method exists on IFODataObtainer."""
-        obtainer = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS]
-        )
-        assert hasattr(obtainer, 'precache_features')
-        assert callable(obtainer.precache_features)
-        obtainer.close()
 
 
 class TestEventTimeFunctions:
@@ -2407,29 +2380,7 @@ class TestFeatureModePipeline:
         assert has_features
         obtainer.close()
     
-    def test_feature_cache_config_integration(self):
-        """Test FeatureCacheConfig integrates properly with obtainer."""
-        config = gf.FeatureCacheConfig(
-            padding_duration_seconds=16.0,
-            max_examples=50,
-            force_redownload=True
-        )
-        
-        obtainer = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS]
-        )
-        
-        # Verify precache_features accepts config
-        assert hasattr(obtainer, 'precache_features')
-        
-        # Verify signature accepts config parameter (without calling)
-        import inspect
-        sig = inspect.signature(obtainer.precache_features)
-        assert 'config' in sig.parameters
-        
-        obtainer.close()
+
     
     def test_supersede_logic_in_pipeline(self):
         """Test supersede logic works correctly in pipeline context."""

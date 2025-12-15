@@ -88,7 +88,7 @@ from .src.dataset.conditioning.pearson import rolling_pearson
 from .src.dataset.conditioning.detector import IFO, Network, project_wave
 from .src.dataset.noise.acquisition import (
     DataQuality, DataLabel, SegmentOrder, AcquisitionMode, SamplingMode, ObservingRun,
-    IFOData, IFODataObtainer, FeatureCacheConfig
+    IFOData, IFODataObtainer
 )
 from .src.dataset.noise.noise import NoiseType, Obtainer, NoiseObtainer, TransientObtainer
 from .src.dataset.curriculum import Curriculum, CurriculumSchedule, CurriculumProgressCallback
@@ -111,6 +111,7 @@ from .src.utils.plotting import (
 )
 from .src.validate import Validator, ValidationConfig
 from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_times_with_labels, get_glitch_segments
+from .src.dataset.features.glitch_cache import GlitchCache, generate_glitch_cache_path
 from .src.dataset.features.event import (
     EventType, SourceType, get_confident_event_times, get_marginal_event_times, 
     get_all_event_times, get_event_times_by_type, get_confident_events_with_params,
