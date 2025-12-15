@@ -646,22 +646,51 @@ class TransientObtainer(Obtainer):
                 self.data_directory_path
             )
             
-            # Explicitly trigger precaching now that file path is set & segments are known
+            # For TRANSIENT mode with glitches: use precaching to GlitchCache
             if ifo_obtainer.cache_segments and ifo_obtainer.acquisition_mode == gf.AcquisitionMode.TRANSIENT:
                  ifo_obtainer._cache_valid_segments(ifo_obtainer.valid_segments, group)
         
         seed_ = self.rng.integers(1000000000)
         
-        base_generator = ifo_obtainer.get_onsource_offsource_chunks(
-            sample_rate_hertz,
-            onsource_duration_seconds,
-            crop_duration_seconds,
-            offsource_duration_seconds,
-            num_examples_per_batch,
-            self.ifos,
-            scale_factor,
-            seed=seed_
+        # Check if we should use precached data (for glitches)
+        use_precache = (
+            ifo_obtainer.acquisition_mode == gf.AcquisitionMode.TRANSIENT and
+            gf.DataLabel.GLITCHES in ifo_obtainer.data_labels
         )
+        
+        if use_precache:
+            # Call precache_transients - this will use cache if available or download once
+            cache_path = ifo_obtainer.precache_transients(
+                ifos=self.ifos,
+                sample_rate_hertz=sample_rate_hertz,
+                onsource_duration_seconds=onsource_duration_seconds + (crop_duration_seconds * 2),
+                offsource_duration_seconds=offsource_duration_seconds,
+                group_name=group,
+                seed=seed_
+            )
+            
+            # Create generator that yields from cache
+            base_generator = self._cache_generator(
+                cache_path,
+                num_examples_per_batch,
+                sample_rate_hertz,
+                onsource_duration_seconds + (crop_duration_seconds * 2),
+                offsource_duration_seconds,
+                scale_factor,
+                seed_
+            )
+        else:
+            # Original per-batch download path (for events or non-cached)
+            base_generator = ifo_obtainer.get_onsource_offsource_chunks(
+                sample_rate_hertz,
+                onsource_duration_seconds,
+                crop_duration_seconds,
+                offsource_duration_seconds,
+                num_examples_per_batch,
+                self.ifos,
+                scale_factor,
+                seed=seed_
+            )
         
         # Wrap generator with cropping/whitening if requested
         if crop or whiten:
@@ -716,6 +745,54 @@ class TransientObtainer(Obtainer):
             # Crop padding from onsource
             if crop and crop_samples > 0:
                 onsource = onsource[:, :, crop_samples:-crop_samples]
+            
+            yield onsource, offsource, gps_times, labels
+    
+    def _cache_generator(
+        self,
+        cache_path,
+        num_examples_per_batch: int,
+        sample_rate_hertz: float,
+        onsource_duration: float,
+        offsource_duration: float,
+        scale_factor: float,
+        seed: int
+    ):
+        """
+        Generator that yields batches from a GlitchCache file.
+        
+        Loads all data into memory once and yields random batches.
+        Much faster than per-batch downloads.
+        """
+        from gravyflow.src.dataset.features.glitch_cache import GlitchCache
+        from numpy.random import default_rng
+        import numpy as np
+        
+        cache = GlitchCache(cache_path, mode='r')
+        data = cache.load_all(
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration=onsource_duration,
+            offsource_duration=offsource_duration
+        )
+        
+        onsource_all = data['onsource']  # (N, IFOs, samples)
+        offsource_all = data['offsource']
+        gps_all = data['gps_times']
+        labels_all = data['labels']
+        
+        n_glitches = len(gps_all)
+        rng = default_rng(seed)
+        
+        print(f"Loaded {n_glitches:,} glitches from cache, yielding batches of {num_examples_per_batch}")
+        
+        while True:
+            # Random batch indices
+            batch_indices = rng.choice(n_glitches, size=num_examples_per_batch, replace=True)
+            
+            onsource = onsource_all[batch_indices] * scale_factor
+            offsource = offsource_all[batch_indices] * scale_factor
+            gps_times = gps_all[batch_indices]
+            labels = labels_all[batch_indices]
             
             yield onsource, offsource, gps_times, labels
     
