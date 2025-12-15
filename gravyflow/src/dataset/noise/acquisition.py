@@ -989,15 +989,44 @@ class IFODataObtainer:
         all_gps_times = []
         all_labels = []
         
-        logging.info(f"Precaching {len(original_gps_times)} glitches from {len(clustered_segments)} download segments...")
+        total_data_hours = sum(seg[1] - seg[0] for seg in clustered_segments) / 3600
+        print(f"\n{'='*60}")
+        print(f"PRECACHING GLITCH DATA")
+        print(f"{'='*60}")
+        print(f"  Transients to cache: {len(original_gps_times):,}")
+        print(f"  Download segments:   {len(clustered_segments):,}")
+        print(f"  Total data to fetch: {total_data_hours:.1f} hours")
+        print(f"  Sample rate:         {sample_rate_hertz} Hz")
+        print(f"  Onsource duration:   {onsource_duration_seconds}s")
+        print(f"  Offsource duration:  {offsource_duration_seconds}s")
+        print(f"{'='*60}\n")
+        
+        from tqdm import tqdm
+        
+        extracted_count = 0
+        failed_downloads = 0
         
         # Download each clustered segment and extract all glitches within
-        for cluster_idx, (seg_start, seg_end) in enumerate(clustered_segments):
+        pbar = tqdm(
+            enumerate(clustered_segments), 
+            total=len(clustered_segments),
+            desc="Downloading segments",
+            unit="seg"
+        )
+        for cluster_idx, (seg_start, seg_end) in pbar:
             transients_in_segment = transient_to_cluster.get(cluster_idx, [])
             if not transients_in_segment:
                 continue
             
-            # Download this segment using gwpy directly (simpler than get_segment)
+            seg_duration = seg_end - seg_start
+            pbar.set_postfix({
+                'dur': f'{seg_duration:.0f}s',
+                'glitches': len(transients_in_segment),
+                'extracted': extracted_count,
+                'failed': failed_downloads
+            })
+            
+            # Download this segment using gwpy directly
             try:
                 from gwpy.timeseries import TimeSeries
                 segment_data = TimeSeries.fetch_open_data(
@@ -1011,7 +1040,8 @@ class IFODataObtainer:
                     segment_data = segment_data.resample(sample_rate_hertz)
                 segment_array = segment_data.value
             except Exception as e:
-                logging.warning(f"Error downloading segment {cluster_idx}: {e}")
+                failed_downloads += 1
+                logging.debug(f"Error downloading segment {cluster_idx}: {e}")
                 continue
             
             # Extract each transient from this segment
@@ -1046,6 +1076,7 @@ class IFODataObtainer:
                     all_onsource.append(onsource)
                     all_offsource.append(offsource)
                     all_gps_times.append(gps_time)
+                    extracted_count += 1
                     
                     # Get label from feature_labels if available
                     label = self._feature_labels.get(gps_time, 0) if hasattr(self, '_feature_labels') else 0
@@ -1080,7 +1111,16 @@ class IFODataObtainer:
             ifo_names=[i.name for i in ifos]
         )
         
-        logging.info(f"Precached {len(gps_array)} glitches to {cache_path}")
+        print(f"\n{'='*60}")
+        print(f"PRECACHING COMPLETE")
+        print(f"{'='*60}")
+        print(f"  Glitches cached:    {len(gps_array):,}")
+        print(f"  Failed downloads:   {failed_downloads}")
+        print(f"  Cache file:         {cache_path}")
+        print(f"  Onsource size:      {onsource_array.nbytes / 1e6:.1f} MB")
+        print(f"  Offsource size:     {offsource_array.nbytes / 1e6:.1f} MB")
+        print(f"{'='*60}\n")
+        
         return cache_path
 
     def get_segment_times(
