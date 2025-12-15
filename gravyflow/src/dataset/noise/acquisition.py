@@ -2164,9 +2164,10 @@ class IFODataObtainer:
                 if len(target_segments) == 0:
                      logging.warning(f"No feature segments found for group {group_name}")
                 
-                # Apply temporal clustering AFTER group split
-                # This merges nearby transients for efficient downloading
-                target_segments = self._cluster_transients(target_segments)
+                # NOTE: Clustering is disabled until proper caching is implemented
+                # The greedy clustering algorithm is ready but requires bulk HDF5 caching
+                # to avoid re-downloading merged segments for each batch
+                # target_segments = self._cluster_transients(target_segments)
                 
                 # Expand for Multi-IFO: (N, IFOs, 2)
                 num_ifos = len(ifos)
