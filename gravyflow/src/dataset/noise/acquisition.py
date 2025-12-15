@@ -848,6 +848,188 @@ class IFODataObtainer:
         
         return merged_array
 
+    def precache_transients(
+        self,
+        ifos: List,
+        sample_rate_hertz: float,
+        onsource_duration_seconds: float,
+        offsource_duration_seconds: float,
+        cache_path: Path = None,
+        seed: int = None,
+        group_name: str = "train",
+        force_rebuild: bool = False
+    ) -> Path:
+        """
+        Pre-download and cache all transient data using clustered downloads.
+        
+        This method:
+        1. Clusters nearby transients into larger download segments
+        2. Downloads each clustered segment once
+        3. Extracts individual glitch windows from each segment
+        4. Saves all extracted glitches to a GlitchCache HDF5 file
+        
+        Args:
+            ifos: List of IFOs to cache
+            sample_rate_hertz: Sample rate for extraction
+            onsource_duration_seconds: Onsource window duration
+            offsource_duration_seconds: Offsource window duration  
+            cache_path: Path to save cache (auto-generated if None)
+            seed: Random seed for segment ordering
+            group_name: Group name for training/validation split
+            force_rebuild: If True, rebuild cache even if it exists
+            
+        Returns:
+            Path to the cache file
+        """
+        from gravyflow.src.dataset.features.glitch_cache import GlitchCache, generate_glitch_cache_path
+        
+        if not isinstance(ifos, list):
+            ifos = [ifos]
+        if seed is None:
+            seed = gf.Defaults.seed
+            
+        # Generate cache path if not provided
+        if cache_path is None:
+            run_name = self.observing_runs[0].name if self.observing_runs else "unknown"
+            ifo_str = "_".join([i.name for i in ifos])
+            cache_path = generate_glitch_cache_path(run_name, ifo_str, self.data_directory_path)
+        
+        cache = GlitchCache(cache_path, mode='r' if not force_rebuild else 'w')
+        
+        # Check if cache exists and is valid
+        if cache.exists and not force_rebuild:
+            try:
+                cache.validate_request(sample_rate_hertz, onsource_duration_seconds, offsource_duration_seconds)
+                logging.info(f"Using existing cache: {cache_path}")
+                return cache_path
+            except ValueError as e:
+                logging.warning(f"Cache incompatible: {e}. Rebuilding...")
+        
+        # Get original transient times (before clustering)
+        self.get_valid_segments(ifos=ifos, seed=seed, group_name=group_name)
+        
+        if self.acquisition_mode != AcquisitionMode.TRANSIENT:
+            raise ValueError("precache_transients requires TRANSIENT mode")
+        
+        # feature_segments has the original 64s windows around each transient
+        # We need to extract the GPS times from these (center of each window)
+        original_segments = self.feature_segments  # Shape (N, 2)
+        original_gps_times = (original_segments[:, 0] + original_segments[:, 1]) / 2  # Center time
+        
+        # Cluster for efficient downloading
+        clustered_segments = self._cluster_transients(original_segments)
+        
+        # Build mapping: which original transients fall within each clustered segment
+        transient_to_cluster = {}  # cluster_idx -> list of (gps_time, original_segment)
+        for i, (cl_start, cl_end) in enumerate(clustered_segments):
+            transient_to_cluster[i] = []
+            for j, gps_time in enumerate(original_gps_times):
+                if cl_start <= gps_time <= cl_end:
+                    transient_to_cluster[i].append((gps_time, original_segments[j]))
+        
+        # Calculate extraction parameters
+        padding_seconds = onsource_duration_seconds  # Padding for extraction
+        num_onsource_samples = int(onsource_duration_seconds * sample_rate_hertz)
+        num_offsource_samples = int(offsource_duration_seconds * sample_rate_hertz)
+        
+        # Storage for extracted glitches
+        all_onsource = []
+        all_offsource = []
+        all_gps_times = []
+        all_labels = []
+        
+        logging.info(f"Precaching {len(original_gps_times)} glitches from {len(clustered_segments)} download segments...")
+        
+        # Download each clustered segment and extract all glitches within
+        for cluster_idx, (seg_start, seg_end) in enumerate(clustered_segments):
+            transients_in_segment = transient_to_cluster.get(cluster_idx, [])
+            if not transients_in_segment:
+                continue
+            
+            # Download this segment
+            try:
+                segment_data = self.get_segment(
+                    ifos[0],  # Primary IFO
+                    seg_start,
+                    seg_end - seg_start,
+                    sample_rate_hertz
+                )
+                if segment_data is None:
+                    logging.warning(f"Failed to download segment {cluster_idx}")
+                    continue
+            except Exception as e:
+                logging.warning(f"Error downloading segment {cluster_idx}: {e}")
+                continue
+            
+            # Extract each transient from this segment
+            for gps_time, orig_seg in transients_in_segment:
+                try:
+                    # Calculate sample indices relative to segment start
+                    time_offset = gps_time - seg_start
+                    center_sample = int(time_offset * sample_rate_hertz)
+                    
+                    # Onsource extraction
+                    half_onsource = num_onsource_samples // 2
+                    on_start = center_sample - half_onsource
+                    on_end = on_start + num_onsource_samples
+                    
+                    # Offsource extraction (before onsource)
+                    off_end = on_start
+                    off_start = off_end - num_offsource_samples
+                    
+                    # Validate bounds
+                    data_len = len(segment_data.data)
+                    if on_start < 0 or on_end > data_len or off_start < 0:
+                        continue
+                    
+                    # Extract data
+                    onsource = segment_data.data[on_start:on_end]
+                    offsource = segment_data.data[off_start:off_end]
+                    
+                    # Reshape for multi-IFO: (IFOs, samples)
+                    onsource = onsource.reshape(1, -1)  # (1, samples)
+                    offsource = offsource.reshape(1, -1)
+                    
+                    all_onsource.append(onsource)
+                    all_offsource.append(offsource)
+                    all_gps_times.append(gps_time)
+                    
+                    # Get label from feature_labels if available
+                    label = self._feature_labels.get(gps_time, 0) if hasattr(self, '_feature_labels') else 0
+                    all_labels.append(label)
+                    
+                except Exception as e:
+                    logging.debug(f"Failed to extract transient at {gps_time}: {e}")
+                    continue
+            
+            if (cluster_idx + 1) % 50 == 0:
+                logging.info(f"Processed {cluster_idx + 1}/{len(clustered_segments)} segments, extracted {len(all_gps_times)} glitches")
+        
+        if len(all_onsource) == 0:
+            raise ValueError("No glitches extracted successfully")
+        
+        # Stack into arrays
+        onsource_array = np.stack(all_onsource, axis=0)  # (N, IFOs, samples)
+        offsource_array = np.stack(all_offsource, axis=0)
+        gps_array = np.array(all_gps_times)
+        labels_array = np.array(all_labels)
+        
+        # Save to cache
+        cache = GlitchCache(cache_path, mode='w')
+        cache.save_all(
+            onsource=onsource_array,
+            offsource=offsource_array,
+            gps_times=gps_array,
+            labels=labels_array,
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration=onsource_duration_seconds,
+            offsource_duration=offsource_duration_seconds,
+            ifo_names=[i.name for i in ifos]
+        )
+        
+        logging.info(f"Precached {len(gps_array)} glitches to {cache_path}")
+        return cache_path
+
     def get_segment_times(
         self,
         start: float,
