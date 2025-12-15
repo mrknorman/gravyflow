@@ -916,11 +916,15 @@ class TestGetOnsourceOffsourceChunks:
             start_gps_time=[100.0]
         )
         
-        # Set up obtainer state
+        
+        # Set up obtainer state to prevent real data acquisition
+        obtainer.acquisition_mode = gf.AcquisitionMode.NOISE
+        obtainer.valid_segments_adjusted = obtainer.valid_segments
         obtainer._segment_exausted = False
         obtainer.current_segment = mock_segment
         obtainer._num_batches_in_current_segment = 2
         obtainer._current_batch_index = 0
+        obtainer._segment_cache_maxsize = 8
         obtainer.rng = np.random.default_rng(42)
         
         # Get first chunk
@@ -937,7 +941,7 @@ class TestGetOnsourceOffsourceChunks:
         
         # Should return generator that yields data
         try:
-            subarrays, backgrounds, gps_times = next(gen)
+            subarrays, backgrounds, gps_times, _ = next(gen)
             assert subarrays is not None
         except StopIteration:
             # Expected if segments are exhausted
@@ -2063,7 +2067,7 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
         )
         
         # Get one batch to find extraction points
-        subarrays, backgrounds, gps_times = next(gen)
+        subarrays, backgrounds, gps_times, _ = next(gen)
         extraction_points = gps_times
         
         # Generate Plots
@@ -2149,7 +2153,7 @@ class TestFeatureMode:
         """Test FeatureCacheConfig default values."""
         config = gf.FeatureCacheConfig()
         assert config.padding_duration_seconds == 32.0
-        assert config.max_examples == 1024
+        assert config.max_examples == 50000
         assert config.force_redownload == False
     
     def test_feature_cache_config_custom(self):

@@ -128,7 +128,8 @@ def compare_whitening(
     background,
     sample_rate_hertz : float,
     fft_duration_seconds : float = 2.0, 
-    overlap_duration_seconds : float = 1.0
+    overlap_duration_seconds : float = 1.0,
+    filter_duration_seconds : float = 2.0
     ) -> Tuple[Any, np.ndarray]:
     
     # Tensorflow whitening:
@@ -137,7 +138,8 @@ def compare_whitening(
         background, 
         sample_rate_hertz, 
         fft_duration_seconds=fft_duration_seconds, 
-        overlap_duration_seconds=overlap_duration_seconds
+        overlap_duration_seconds=overlap_duration_seconds,
+        filter_duration_seconds=filter_duration_seconds
     )
 
     _, psd = welch(
@@ -155,7 +157,8 @@ def compare_whitening(
     whitened_gwpy = ts.whiten(
         fftlength=fft_duration_seconds, 
         overlap=overlap_duration_seconds,
-        asd=FrequencySeries(np.sqrt(psd[0]))
+        asd=FrequencySeries(np.sqrt(psd[0])),
+        fduration=filter_duration_seconds
     ).value
     whitened_gwpy = np.expand_dims(whitened_gwpy, axis=0)
 
@@ -175,21 +178,28 @@ def compare_whitening(
 def compare_psd_methods(
     strain, 
     sample_rate_hertz : float, 
-    nperseg : int
+    nperseg : int,
+    noverlap : int = None
     ) -> Tuple[Any, Any, np.ndarray]:
     
     strain = ops.cast(strain, dtype="float32")
     
+    # Use scipy's default overlap if not specified (nperseg // 2)
+    if noverlap is None:
+        noverlap = nperseg // 2
+    
     frequencies_scipy, strain_psd_scipy = welch(
         strain, 
         sample_rate_hertz, 
-        nperseg=nperseg
+        nperseg=nperseg,
+        noverlap=noverlap
     )
 
     frequencies_tensorflow, strain_psd_tensorflow = gf.psd(
         strain, 
         sample_rate_hertz = sample_rate_hertz, 
-        nperseg=nperseg
+        nperseg=nperseg,
+        noverlap=noverlap
     )
     
     assert all(frequencies_scipy == frequencies_tensorflow), "Frequencies not equal."
@@ -208,13 +218,13 @@ def _test_snr(
 
         # Setup ifo data acquisition object:
         ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3, 
-            gf.DataQuality.BEST, 
-            [
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[
                 gf.DataLabel.NOISE, 
                 gf.DataLabel.GLITCHES
             ],
-            gf.SegmentOrder.RANDOM,
+            observing_runs=gf.ObservingRun.O3,
+            segment_order=gf.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
@@ -324,8 +334,8 @@ def _test_snr(
                 strain,
                 onsource,
                 sample_rate_hertz,
-                fft_duration_seconds=2.0,
-                overlap_duration_seconds=1.0
+                fft_duration_seconds=1.0,  # Match new whiten() defaults
+                overlap_duration_seconds=0.5  # Match new whiten() defaults
             )
             
             whitening_results[key] = {
@@ -359,7 +369,7 @@ def _test_snr(
         np.testing.assert_allclose(
             psd_results["onsource_tensorflow"]["scipy"][0][2:],
             psd_results["onsource_tensorflow"]["tensorflow"][0][2:],
-            atol=1e-05, 
+            atol=6e-06,  # Relaxed to account for numerical differences
             err_msg="GravyFlow Whiten SciPy PSD does not equal GravyFlow Whiten GravyFlow PSD.", 
             verbose=True
         )
@@ -367,7 +377,7 @@ def _test_snr(
         np.testing.assert_allclose(
             psd_results["onsource_gwpy"]["scipy"][0][2:],
             psd_results["onsource_tensorflow"]["tensorflow"][0][2:],
-            atol=1e-05, 
+            atol=1e-05,  # Should match with correct parameters
             err_msg="GwPy Whiten SciPy PSD does not equal GravyFlow Whiten GravyFlow PSD.", 
             verbose=True
         )
@@ -375,7 +385,7 @@ def _test_snr(
         np.testing.assert_allclose(
             psd_results["onsource_gwpy"]["scipy"][0],
             psd_results["onsource_tensorflow"]["scipy"][0],
-            atol=1e-05, 
+            atol=1e-05,  # Should match with correct parameters
             err_msg="GwPy Whiten SciPy PSD does not equal GravyFlow Whiten Scipy PSD.", 
             verbose=True
         )

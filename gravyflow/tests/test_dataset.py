@@ -901,22 +901,40 @@ def test_gravyflow_dataset_processing():
     
     # Spectrogram shape depends on implementation but should be tensor
     assert ops.is_tensor(spectrogram)
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 def test_dataset_empty_segment_list():
-    """Verify behavior when no segments are available."""
+    """Verify behavior when no segments are available with REAL noise.
     
-    ifo_obtainer = gf.IFODataObtainer(
+    This test creates a mock IFODataObtainer subclass that returns empty
+    segments, testing that the dataset handles this gracefully without
+    hanging or crashing.
+    """
+    
+    # Create a mock IFODataObtainer subclass that survives deepcopy
+    class EmptySegmentsObtainer(gf.IFODataObtainer):
+        """Mock IFODataObtainer that always returns empty segments."""
+        
+        def get_valid_segments(self, *args, **kwargs):
+            # Return empty 3D array with correct shape [N, IFOs, 2] where N=0
+            self.valid_segments = np.empty((0, 1, 2))
+            self.acquisition_mode = gf.AcquisitionMode.NOISE
+            return self.valid_segments
+        
+        def acquire(self, *args, **kwargs):
+            # Empty generator
+            return iter([])
+        
+        def generate_file_path(self, *args, **kwargs):
+            self.file_path = None
+    
+    ifo_obtainer = EmptySegmentsObtainer(
         observing_runs=gf.ObservingRun.O3,
         data_quality=gf.DataQuality.BEST,
         data_labels=[gf.DataLabel.NOISE],
         force_acquisition=False,
         cache_segments=False
     )
-    
-    # Mock to return empty list
-    ifo_obtainer.get_valid_segments = MagicMock(return_value=[])
-    ifo_obtainer.acquire = MagicMock(return_value=[])
     
     noise_obtainer = gf.NoiseObtainer(
         ifo_data_obtainer=ifo_obtainer,
@@ -927,24 +945,21 @@ def test_dataset_empty_segment_list():
     dataset = GravyflowDataset(
         noise_obtainer=noise_obtainer,
         input_variables=[gf.ReturnVariables.ONSOURCE],
-        output_variables=[gf.ReturnVariables.OFFSOURCE]
+        output_variables=[gf.ReturnVariables.OFFSOURCE],
+        steps_per_epoch=1
     )
     
-    # Iterating should raise StopIteration immediately if no data
-    # or RuntimeError if generator fails to yield
-    
+    # Iterating should raise StopIteration or Exception (empty generator), not hang
     try:
         next(iter(dataset))
+        # If we get here, the test failed - we expected an exception
+        pytest.fail("Expected StopIteration or Exception for empty segments, but iteration succeeded")
     except StopIteration:
-        pass # Expected
+        pass  # Expected: generator is empty
     except Exception as e:
-        # If it raises something else, that might be a bug or expected depending on implementation
-        # For now, let's assume StopIteration or similar is correct.
-        # If it hangs, that's bad.
-        print(f"Raised exception: {e}")
-        # If it's a ValueError from NoiseObtainer, that's also acceptable
-        if "No IFO obtainer" in str(e):
-            pass
+        # Any exception is acceptable as long as it doesn't hang
+        # Common: "Noise generation failed" from dataset.__getitem__
+        assert "Noise generation failed" in str(e) or "No valid segments" in str(e), f"Unexpected exception: {e}"
 
 def test_dataset_invalid_config():
     """Verify error handling for invalid config parameters."""

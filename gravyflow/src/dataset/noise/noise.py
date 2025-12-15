@@ -77,7 +77,7 @@ def white_noise_generator(
             len(ifos),
             num_offsource_samples,
             seed=s2
-        ), ops.full((num_examples_per_batch,), -1.0)
+        ), ops.full((num_examples_per_batch,), -1.0), None
         
 def _generate_colored_noise(
     num_examples_per_batch: int,
@@ -243,7 +243,7 @@ def colored_noise_generator(
                 num_samples_list[1], 
                 interpolated_offsource_asds,
                 seed=s2
-            ), ops.full((num_examples_per_batch,), -1.0)
+            ), ops.full((num_examples_per_batch,), -1.0), None
     
 
 @dataclass
@@ -522,7 +522,7 @@ class NoiseObtainer(Obtainer):
                         num_samples_list[1], 
                         ops.sqrt(interpolated_offsource_psds),
                         seed=s2
-                    ), ops.full((num_examples_per_batch,), -1.0)
+                    ), ops.full((num_examples_per_batch,), -1.0), None
                 
 
 @dataclass
@@ -570,8 +570,8 @@ class TransientObtainer(Obtainer):
         super().__post_init__()
     
     def _default_groups(self) -> dict:
-        """Transients default to 'all' group (no train/val/test split)."""
-        return {"all": 1.0}
+        """Transients include 'all' (100%) plus standard splits for classification."""
+        return {"all": 1.0, "train": 0.89, "validate": 0.1, "test": 0.01}
     
     def __call__(
             self,
@@ -645,6 +645,10 @@ class TransientObtainer(Obtainer):
                 group,
                 self.data_directory_path
             )
+            
+            # Explicitly trigger precaching now that file path is set & segments are known
+            if ifo_obtainer.cache_segments and ifo_obtainer.acquisition_mode == gf.AcquisitionMode.TRANSIENT:
+                 ifo_obtainer._cache_valid_segments(ifo_obtainer.valid_segments, group)
         
         seed_ = self.rng.integers(1000000000)
         
@@ -657,6 +661,7 @@ class TransientObtainer(Obtainer):
             self.ifos,
             scale_factor,
             seed=seed_,
+            file_path=ifo_obtainer.file_path
         )
         
         # Wrap generator with cropping/whitening if requested
@@ -692,7 +697,7 @@ class TransientObtainer(Obtainer):
         WHITEN_SCALE = 1E21
         crop_samples = int(crop_duration_seconds * sample_rate_hertz)
         
-        for onsource, offsource, gps_times in generator:
+        for onsource, offsource, gps_times, labels in generator:
             # Whiten first (before cropping)
             if whiten:
                 # Scale up to avoid float precision issues
@@ -713,7 +718,7 @@ class TransientObtainer(Obtainer):
             if crop and crop_samples > 0:
                 onsource = onsource[:, :, crop_samples:-crop_samples]
             
-            yield onsource, offsource, gps_times
+            yield onsource, offsource, gps_times, labels
     
     def _filter_to_named_events(self, ifo_obtainer):
         """Filter IFODataObtainer to only fetch specified event names."""

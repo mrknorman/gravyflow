@@ -63,7 +63,7 @@ class AcquisitionMode(Enum):
 class FeatureCacheConfig:
     """Configuration for feature precaching."""
     padding_duration_seconds: float = 32.0  # Padding each side of feature
-    max_examples: int = 1024  # Stop after this many features cached
+    max_examples: int = 50000  # Stop after this many features cached
     force_redownload: bool = False
 
 class SamplingMode(Enum):
@@ -1881,6 +1881,17 @@ class IFODataObtainer:
 
         if self.acquisition_mode == AcquisitionMode.NOISE:
             # --- STANDARD NOISE MODE (RANDOM / GRID) ---
+            
+            # Early validation: check if valid_segments exists and has correct shape
+            if self.valid_segments is None or len(self.valid_segments) == 0:
+                logging.warning("No valid segments available in NOISE mode. Generator will be empty.")
+                return
+            
+            # Check valid_segments has expected 3D shape [N, IFOs, 2]
+            if not hasattr(self.valid_segments, 'ndim') or self.valid_segments.ndim != 3:
+                logging.warning(f"valid_segments has unexpected shape: {getattr(self.valid_segments, 'shape', 'N/A')}. Expected 3D array. Generator will be empty.")
+                return
+            
             if not self._current_batch_index and not self._current_segment_index:
                 min_segment_duration_seconds : int = \
                     total_onsource_duration_seconds + offsource_duration_seconds
@@ -1893,6 +1904,14 @@ class IFODataObtainer:
                         min_segment_duration_seconds
                     )
             
+            # Check if we have any valid segments
+            if self.valid_segments_adjusted is None or len(self.valid_segments_adjusted) == 0:
+                logging.warning("No valid segments available in NOISE mode. Generator will be empty.")
+                return
+
+            # Track consecutive StopIteration to avoid infinite loop on empty segments
+            _consecutive_stop_iterations = 0
+            
             # Infinite loop to cycle through all segments
             while True:
                 # Get a new segment when current one is exhausted
@@ -1904,7 +1923,13 @@ class IFODataObtainer:
                                 ifos,
                                 scale_factor
                             ))
+                        _consecutive_stop_iterations = 0  # Reset on success
                     except StopIteration:
+                        _consecutive_stop_iterations += 1
+                        # If we've been through twice with no data, segments are truly empty
+                        if _consecutive_stop_iterations > 1:
+                            logging.warning("No valid segments available. Generator exhausted.")
+                            return
                         # Reset segment index to loop infinitely through segments
                         self._current_segment_index = 0
                         self._segment_exausted = True
@@ -2086,96 +2111,6 @@ class IFODataObtainer:
             )
 
         if self.valid_segments is None or len(self.valid_segments) != len(ifos):
-            
-            # Check if feature_segments are already pre-populated (e.g. by TransientObtainer)
-            # If so, force use of these segments and skip cache/catalog lookup
-            if hasattr(self, 'feature_segments') and self.feature_segments is not None and len(self.feature_segments) > 0:
-                 self.acquisition_mode = AcquisitionMode.TRANSIENT
-                 # TRANSIENT mode can cache more segments (64s vs 30+ min)
-                 self._segment_cache_maxsize = 128
-                 
-                 # Prepare all_feature_segments_list for formatting logic below
-                 all_feature_segments_list = [self.feature_segments]
-                 
-                 # Skip to formatting
-                 # We need to construct self.valid_segments structure (list of arrays, one per IFO)
-                 # The logic below combines all_feature_segments_list into unique_segments, 
-                 # then splits it? No, 'valid_segments' in TRANSIENT mode is just 
-                 # ordered event windows.
-                 # Actually the logic below (lines 1939+) handles the construction (Union/Unique/Sort).
-                 # So we just need to ensure we bypass the "else" (catalog search) and GLITCHES.
-                 use_override = True
-            else:
-                use_override = False
-                # Try to load from cache first (avoids auth requirement)
-                cached = self._get_cached_valid_segments(ifos, group_name)
-                if cached is not None:
-                    self.valid_segments = cached
-                    if DataLabel.NOISE in self.data_labels:
-                        self.acquisition_mode = AcquisitionMode.NOISE
-                    else:
-                        self.acquisition_mode = AcquisitionMode.TRANSIENT
-                        self._segment_cache_maxsize = 128  # TRANSIENT uses smaller segments
-                    return self.valid_segments
-                
-            self.valid_segments = []
-
-            # Check to see if noise with no features is desired data product, if
-            # not extracting features is a very different process to randomly 
-            # sampling from large noise vectors:
-            if not use_override and DataLabel.NOISE in self.data_labels:
-                self.acquisition_mode = AcquisitionMode.NOISE
-                # ... NOISE MODE LOGIC REMOVED FOR BREVITY IN REPLACEMENT ...
-                # Wait, I cannot remove NOISE mode logic if I don't include it in replacement chunks.
-                # I should use MultiReplace or be careful with range.
-                pass 
-                
-            # Wait, easier strategy: 
-            # If overridden, set acquisition mode and jump to formatting.
-            # But the structure is complex.
-            
-            # Let's restructure slightly to handle the override cleanly.
-            pass
-            
-# RESTARTING THOUGHT PROCESS FOR REPLACEMENT CONTENT
-# The target file content is messy with nested ifs.
-# I will replacing a large chunk to restructure it cleanly.
-# Range: from `if self.valid_segments is None` (1802) to `self.feature_segments = unique_segments` (1945)
-
-# Proposed logic:
-# 1. Check override.
-# 2. If not override, checking cache.
-# 3. If cache hit, return.
-# 4. If no cache:
-#    If NOISE: do noise logic.
-#    Else (TRANSIENT):
-#        If override: set list to override.
-#        Else: fetch events, fetch glitches.
-#    Process list (Union/Unique/Sort) -> self.feature_segments
-#    Copy to self.valid_segments (per IFO)
-
-# This assumes NOISE mode doesn't use the feature_segments logic at the end.
-# Looking at code: NOISE mode logic ends with `self.valid_segments.append(valid_segments)` and seemingly returns or finishes loop?
-# No, it's in a loop `for ifo in ifos`.
-# And then it exits the method? No.
-# Lines 1823-1870 is NOISE block.
-# Lines 1871 is `else` (TRANSIENT block).
-# TRANSIENT block ends at 1945?
-# And afterwards?
-# `if group_name == 'all': ...`
-# This grouping logic seems to apply to transient segments too.
-
-# I need to be careful with handling the NOISE block.
-# Since I shouldn't touch the NOISE block if I can avoid it (it's large).
-# I will use the "else" of the NOISE check.
-
-# Lines 1823: `if self.acquisition_mode == AcquisitionMode.NOISE:`
-# I will target lines 1802 to 1821 to handle the cache check vs override.
-# And target lines 1881+ to handle the fetching logic.
-
-# Step 1: Modify cache check (1802-1812)
-
-            
             self.valid_segments = []
 
             # Check to see if noise with no features is desired data product, if
