@@ -102,6 +102,87 @@ def get_glitch_times(
         data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
 
         return data
+
+
+def get_glitch_times_with_labels(
+    ifo: gf.IFO,
+    observing_run: gf.ObservingRun = gf.ObservingRun.O3,
+    glitch_types: Union[List[GlitchType], GlitchType] = None,
+    start_gps_time: float = None,
+    end_gps_time: float = None,
+    balanced: bool = False
+) -> tuple:
+    """
+    Get glitch times with type labels for classification.
+    
+    Args:
+        ifo: Detector to query
+        observing_run: Observing run for default time bounds
+        glitch_types: List of glitch types to include. If None, includes all types.
+        start_gps_time: Start GPS time (defaults to observing run start)
+        end_gps_time: End GPS time (defaults to observing run end)
+        balanced: If True, sample equally from each type
+        
+    Returns:
+        Tuple of (gps_times, type_indices) where type_indices are integers
+        corresponding to GlitchType enum order (0-19)
+    """
+    if start_gps_time is None:
+        start_gps_time = observing_run.value.start_gps_time
+    if end_gps_time is None:
+        end_gps_time = observing_run.value.end_gps_time
+    
+    # Get all GlitchType values or use provided subset
+    if glitch_types is None:
+        glitch_types = list(GlitchType)
+    elif not isinstance(glitch_types, list):
+        glitch_types = [glitch_types]
+    
+    ifo_name = ifo.name
+    all_times = []
+    all_labels = []
+    
+    for glitch_type in glitch_types:
+        glitch_name = glitch_type.value
+        # Get enum index (0-19)
+        type_index = list(GlitchType).index(glitch_type)
+        
+        selection = f"ifo={ifo_name} && event_time>{start_gps_time} & event_time<{end_gps_time} && ml_label={glitch_name} && No_Glitch<0.1"
+        
+        try:
+            data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
+            all_times.append(data)
+            all_labels.append(np.full(len(data), type_index, dtype=np.int32))
+        except Exception as e:
+            print(f"Warning: Failed to fetch {glitch_name}: {e}")
+            continue
+    
+    if not all_times:
+        return np.array([]), np.array([], dtype=np.int32)
+    
+    times = np.concatenate(all_times)
+    labels = np.concatenate(all_labels)
+    
+    # Balance classes if requested
+    if balanced and len(all_times) > 1:
+        # Find min count across types
+        min_count = min(len(t) for t in all_times)
+        balanced_times = []
+        balanced_labels = []
+        
+        for type_times, type_idx in zip(all_times, [list(GlitchType).index(gt) for gt in glitch_types]):
+            if len(type_times) > min_count:
+                # Random subsample
+                indices = np.random.choice(len(type_times), min_count, replace=False)
+                balanced_times.append(type_times[indices])
+            else:
+                balanced_times.append(type_times)
+            balanced_labels.append(np.full(min(len(type_times), min_count), type_idx, dtype=np.int32))
+        
+        times = np.concatenate(balanced_times)
+        labels = np.concatenate(balanced_labels)
+    
+    return times, labels
     
 def get_glitch_segments(
     ifo: gf.IFO,

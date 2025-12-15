@@ -31,13 +31,13 @@ def _test_real_noise_single(
 
         # Setup ifo data acquisition object:
         ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3, 
-            gf.DataQuality.BEST, 
-            [
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[
                 gf.DataLabel.NOISE, 
                 gf.DataLabel.GLITCHES
             ],
-            gf.SegmentOrder.RANDOM,
+            observing_runs=gf.ObservingRun.O3,
+            segment_order=gf.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
@@ -50,7 +50,7 @@ def _test_real_noise_single(
         )
         
         # Iterate through num_tests batches to check correct operation:
-        onsource, offsource, gps_times  = next(noise())
+        onsource, offsource, gps_times, _ = next(noise())
 
         parameters_dict = {
             "onsource" : onsource,
@@ -103,13 +103,13 @@ def _test_real_noise_multi(
         
         # Setup ifo data acquisition object:
         ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3, 
-            gf.DataQuality.BEST, 
-            [
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[
                 gf.DataLabel.NOISE, 
                 gf.DataLabel.GLITCHES
             ],
-            gf.SegmentOrder.RANDOM,
+            observing_runs=gf.ObservingRun.O3,
+            segment_order=gf.SegmentOrder.RANDOM,
             force_acquisition = True,
             cache_segments = False
         )
@@ -122,7 +122,7 @@ def _test_real_noise_multi(
         )
                 
         # Iterate through num_tests batches to check correct operation:
-        onsource, offsource, gps_times  = next(noise())
+        onsource, offsource, gps_times, _ = next(noise())
 
         parameters_dict = {
             "onsource" : onsource,
@@ -172,13 +172,13 @@ def _test_noise_shape(
         
         # Setup ifo data acquisition object:
         ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3, 
-            gf.DataQuality.BEST, 
-            [
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[
                 gf.DataLabel.NOISE, 
                 gf.DataLabel.GLITCHES
             ],
-            gf.SegmentOrder.RANDOM,
+            observing_runs=gf.ObservingRun.O3,
+            segment_order=gf.SegmentOrder.RANDOM,
             force_acquisition=True,
             cache_segments=False,
             logging_level=logging.INFO
@@ -191,13 +191,13 @@ def _test_noise_shape(
             ifos = gf.IFO.L1
         )
             
-        onsource, offsource, _ = next(iter(noise()))
+        onsource, offsource, _, _ = next(iter(noise()))
 
         onsource_shape = onsource.shape
         offsource_shape = offsource.shape
 
         logging.info("Start shape tests...")
-        for index, (onsource, offsource, _) in tqdm(
+        for index, (onsource, offsource, _, _) in tqdm(
                 enumerate(islice(noise(), num_tests))
             ):
 
@@ -231,13 +231,13 @@ def _test_noise_iteration(
 
         # Setup ifo data acquisition object:
         ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3, 
-            gf.DataQuality.BEST, 
-            [
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[
                 gf.DataLabel.NOISE, 
                 gf.DataLabel.GLITCHES
             ],
-            gf.SegmentOrder.RANDOM,
+            observing_runs=gf.ObservingRun.O3,
+            segment_order=gf.SegmentOrder.RANDOM,
             force_acquisition=True,
             cache_segments=False,
             logging_level=logging.INFO
@@ -319,7 +319,7 @@ def test_white_noise_generator():
         seed=seed
     )
     
-    onsource, offsource, gps = next(gen)
+    onsource, offsource, gps, _ = next(gen)
     
     # Check shapes
     # onsource: (Batch, IFOs, Time)
@@ -370,7 +370,7 @@ def test_colored_noise_generator():
         seed=42
     )
     
-    onsource, offsource, gps = next(gen)
+    onsource, offsource, gps, _ = next(gen)
     
     # Check shapes
     assert ops.shape(onsource) == (2, 1, 1024)
@@ -391,7 +391,7 @@ def test_noise_generation_consistency():
         sample_rate_hertz=1024.0,
         seed=seed
     )
-    onsource1, _, _ = next(gen1)
+    onsource1, _, _, _ = next(gen1)
     
     # Run 2
     gen2 = gf_noise.white_noise_generator(
@@ -403,7 +403,7 @@ def test_noise_generation_consistency():
         sample_rate_hertz=1024.0,
         seed=seed
     )
-    onsource2, _, _ = next(gen2)
+    onsource2, _, _, _ = next(gen2)
     
     # Check equality
     # Note: JAX arrays might need conversion or specific assertion
@@ -531,7 +531,7 @@ def test_noise_obtainer_defaults():
     )
     
     gen = noise()
-    onsource, offsource, gps = next(gen)
+    onsource, offsource, gps, _ = next(gen)
     
     # Should use defaults from gf.Defaults
     expected_onsource_dur = gf.Defaults.onsource_duration_seconds + 2 * gf.Defaults.crop_duration_seconds
@@ -558,7 +558,7 @@ def test_noise_obtainer_white_type():
         seed=42
     )
     
-    onsource, offsource, gps = next(gen)
+    onsource, offsource, gps, _ = next(gen)
     
     # Check shapes
     assert len(ops.shape(onsource)) == 3
@@ -579,7 +579,7 @@ def test_noise_obtainer_multiple_ifos():
         seed=42
     )
     
-    onsource, offsource, gps = next(gen)
+    onsource, offsource, gps, _ = next(gen)
     
     # Should have 2 IFOs
     assert ops.shape(onsource)[1] == 2
@@ -660,7 +660,7 @@ def test_white_noise_generator_iteration():
     
     # Iterate 5 times
     for i in range(5):
-        onsource, offsource, gps = next(gen)
+        onsource, offsource, gps, _ = next(gen)
         assert ops.shape(onsource) == (2, 1, 1024)
 
 
@@ -691,7 +691,7 @@ def test_colored_noise_generator():
         seed=seed
     )
     
-    onsource, offsource, gps = next(gen)
+    onsource, offsource, gps, _ = next(gen)
     
     # Check shapes
     expected_onsource_samples = gf_noise.ensure_even(int((onsource_dur + 2*crop_dur) * sample_rate))
@@ -718,7 +718,7 @@ def test_noise_obtainer_colored_type():
         seed=42
     )
     
-    onsource, offsource, gps = next(gen)
+    onsource, offsource, gps, _ = next(gen)
     
     # Check shapes
     assert len(ops.shape(onsource)) == 3
@@ -738,7 +738,7 @@ def test_colored_noise_generator_multi_ifo():
         seed=42
     )
     
-    onsource, offsource, gps = next(gen)
+    onsource, offsource, gps, _ = next(gen)
     
     # Should have 2 IFOs
     assert ops.shape(onsource)[1] == 2
@@ -759,7 +759,7 @@ def test_colored_noise_generator_iteration():
     
     # Iterate 3 times
     for i in range(3):
-        onsource, offsource, gps = next(gen)
+        onsource, offsource, gps, _ = next(gen)
         assert ops.shape(onsource) == (2, 1, 1024)
 
 
@@ -781,7 +781,7 @@ def test_noise_obtainer_scale_factor_none():
         seed=42
     )
     
-    onsource, offsource, gps = next(gen)
+    onsource, offsource, gps, _ = next(gen)
     assert ops.shape(onsource)[0] == 2
 
 
@@ -826,7 +826,7 @@ def test_pseudo_real_noise_generation():
     )
     
     # Get one batch from the generator
-    onsource, offsource, gps = next(gen)
+    onsource, offsource, gps, _ = next(gen)
     
     # Check shapes
     assert len(ops.shape(onsource)) == 3
@@ -843,10 +843,10 @@ def test_gps_time_uniqueness_across_batches():
     with gf.env():
         # Setup ifo data acquisition
         ifo_data_obtainer = gf.IFODataObtainer(
-            gf.ObservingRun.O3, 
-            gf.DataQuality.BEST, 
-            [gf.DataLabel.NOISE, gf.DataLabel.GLITCHES],
-            gf.SegmentOrder.RANDOM,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[gf.DataLabel.NOISE, gf.DataLabel.GLITCHES],
+            observing_runs=gf.ObservingRun.O3,
+            segment_order=gf.SegmentOrder.RANDOM,
             force_acquisition=True,
             cache_segments=False
         )
@@ -868,7 +868,7 @@ def test_gps_time_uniqueness_across_batches():
         )
         
         for _ in range(num_batches):
-            onsource, offsource, gps_times = next(gen)
+            onsource, offsource, gps_times, _ = next(gen)
             gps_array = ops.convert_to_numpy(gps_times)
             all_gps_times.extend(gps_array.flatten())
         

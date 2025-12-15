@@ -30,6 +30,10 @@ def validate_noise_settings(
     """
     
     # Validate noise type and ifo_data_obtainer
+    # Skip validation for TransientObtainer which doesn't have noise_type
+    if not hasattr(noise_obtainer, 'noise_type'):
+        return  # TransientObtainer or similar - skip validation
+    
     if noise_obtainer.noise_type in [gf.NoiseType.WHITE, gf.NoiseType.COLORED]:
         
         if noise_obtainer.ifo_data_obtainer is not None:
@@ -219,17 +223,22 @@ class GravyflowDataset(keras.utils.PyDataset):
 
     def _create_generators(self):
         """Create noise and injection generators."""
-        self.noise = self.noise_obtainer(
-            sample_rate_hertz=self.sample_rate_hertz,
-            onsource_duration_seconds=self.onsource_duration_seconds,
-            crop_duration_seconds=self.crop_duration_seconds,
-            offsource_duration_seconds=self.offsource_duration_seconds,
-            num_examples_per_batch=self.num_examples_per_batch,
-            scale_factor=self.scale_factor,
-            group=self.group,
-            seed=self.seed,
-            sampling_mode=self.sampling_mode
-        )
+        # Build base kwargs for noise obtainer
+        noise_kwargs = {
+            'sample_rate_hertz': self.sample_rate_hertz,
+            'onsource_duration_seconds': self.onsource_duration_seconds,
+            'crop_duration_seconds': self.crop_duration_seconds,
+            'offsource_duration_seconds': self.offsource_duration_seconds,
+            'num_examples_per_batch': self.num_examples_per_batch,
+            'scale_factor': self.scale_factor,
+            'group': self.group,
+            'seed': self.seed,
+        }
+        # Only pass sampling_mode to NoiseObtainer (not TransientObtainer)
+        if hasattr(self.noise_obtainer, 'noise_type'):
+            noise_kwargs['sampling_mode'] = self.sampling_mode
+        
+        self.noise = self.noise_obtainer(**noise_kwargs)
 
         waveform_parameters_to_return = [
             item for item in self.variables_to_return if isinstance(
@@ -267,7 +276,7 @@ class GravyflowDataset(keras.utils.PyDataset):
         # For full safety with workers > 1, we might need to re-instantiate generators per worker.
         
         try:
-            onsource, offsource, gps_times = next(self.noise)
+            onsource, offsource, gps_times, feature_labels = next(self.noise)
         except Exception as e:
             logging.info(f"Noise generation failed: {e}\nTraceback: {traceback.format_exc()}")
             raise Exception(f"Noise generation failed: {e}")
@@ -328,7 +337,8 @@ class GravyflowDataset(keras.utils.PyDataset):
             whitened_injections, mask, rolling_pearson_onsource, spectrogram_onsource, parameters,
             scaled_injections=scaled_injections, 
             raw_offsource=raw_offsource,
-            sample_rate_hertz=self.sample_rate_hertz
+            sample_rate_hertz=self.sample_rate_hertz,
+            feature_labels=feature_labels
         )
 
         return input_dict, output_dict
@@ -436,18 +446,20 @@ class GravyflowDataset(keras.utils.PyDataset):
             return mask
         return None
 
-    def _create_output_dictionaries(self, *args, scaled_injections=None, raw_offsource=None, sample_rate_hertz=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _create_output_dictionaries(self, *args, scaled_injections=None, raw_offsource=None, sample_rate_hertz=None, feature_labels=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         input_dict = create_variable_dictionary(
             self.input_variables, *args, 
             scaled_injections=scaled_injections, 
             sample_rate_hertz=sample_rate_hertz,
-            raw_offsource=raw_offsource
+            raw_offsource=raw_offsource,
+            feature_labels=feature_labels
         )
         output_dict = create_variable_dictionary(
             self.output_variables, *args,
             scaled_injections=scaled_injections,
             sample_rate_hertz=sample_rate_hertz,
-            raw_offsource=raw_offsource
+            raw_offsource=raw_offsource,
+            feature_labels=feature_labels
         )
         
         # Remove keys with None values
@@ -476,7 +488,8 @@ def create_variable_dictionary(
     injection_parameters : Optional[Dict],
     scaled_injections = None,
     sample_rate_hertz: float = None,
-    raw_offsource = None
+    raw_offsource = None,
+    feature_labels = None
     ) -> Dict:
     """
     Create dictionary of requested return variables.
@@ -487,6 +500,7 @@ def create_variable_dictionary(
     Args:
         raw_offsource: Unprocessed offsource data used for SNR calculation.
                        If None, uses the processed offsource.
+        feature_labels: Labels for GLITCH_TYPE classification (from TransientObtainer).
     """
     from keras import ops
     
@@ -499,7 +513,8 @@ def create_variable_dictionary(
         gf.ReturnVariables.WHITENED_INJECTIONS: whitened_injections,
         gf.ReturnVariables.INJECTION_MASKS: mask,
         gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE: rolling_pearson_onsource,
-        gf.ReturnVariables.SPECTROGRAM_ONSOURCE: spectrogram_onsource
+        gf.ReturnVariables.SPECTROGRAM_ONSOURCE: spectrogram_onsource,
+        gf.ReturnVariables.GLITCH_TYPE: feature_labels,
     }
 
     # Add WaveformParameters from injection_parameters
