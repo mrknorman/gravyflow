@@ -784,8 +784,8 @@ class IFODataObtainer:
     def _cluster_transients(
         self, 
         segments: np.ndarray, 
-        request_overhead_seconds: float = 8.0,
-        data_download_rate: float = 0.008
+        request_overhead_seconds: float = 15.0,
+        data_download_rate: float = 0.01
     ) -> np.ndarray:
         """
         Cluster nearby transients using a greedy cost-optimized algorithm.
@@ -794,7 +794,7 @@ class IFODataObtainer:
         than making a separate request. The breakeven point is:
             gap_threshold = request_overhead / data_download_rate
         
-        With defaults (2s overhead, 0.005s/s data rate), threshold = 400s.
+        Defaults based on GWOSC benchmark (15s overhead, 0.01s/s rate) -> 1500s threshold.
         
         Args:
             segments: Array of (start, end) GPS times, shape (N, 2)
