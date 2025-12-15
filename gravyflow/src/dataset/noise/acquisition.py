@@ -59,12 +59,6 @@ class AcquisitionMode(Enum):
     NOISE = auto()
     TRANSIENT = auto()  # For point-in-time events (GW events, glitches)
 
-@dataclass
-class FeatureCacheConfig:
-    """Configuration for feature precaching."""
-    padding_duration_seconds: float = 32.0  # Padding each side of feature
-    max_examples: int = 50000  # Stop after this many features cached
-    force_redownload: bool = False
 
 class SamplingMode(Enum):
     """Noise sampling strategy."""
@@ -787,165 +781,8 @@ class IFODataObtainer:
         except Exception as e:
             self.logger.warning(f"Failed to cache segments: {e}")
     
-    def precache_features(
-        self,
-        ifos: List,
-        sample_rate_hertz: float,
-        onsource_duration_seconds: float,
-        config: FeatureCacheConfig = None,
-        seed: int = None,
-        group_name: str = "train"
-    ) -> Path:
-        """
-        Pre-download and cache feature data to HDF5 before training.
-        
-        Downloads strain data for each feature segment (event/glitch) and stores
-        it in an HDF5 file. Stops after config.max_examples features are cached.
-        
-        Args:
-            ifos: List of interferometers to cache data for
-            sample_rate_hertz: Sample rate for the cached data
-            onsource_duration_seconds: Duration of onsource window
-            config: FeatureCacheConfig with padding and max_examples settings
-            seed: Random seed for segment ordering
-            group_name: Group name for caching
-            
-        Returns:
-            Path to the HDF5 cache file
-        """
-        if config is None:
-            config = FeatureCacheConfig()
-        
-        if seed is None:
-            seed = gf.Defaults.seed
-            
-        if not isinstance(ifos, list):
-            ifos = [ifos]
-        
-        # Get valid feature segments first
-        self.get_valid_segments(
-            ifos=ifos,
-            seed=seed,
-            group_name=group_name
-        )
-        
-        if self.acquisition_mode != AcquisitionMode.TRANSIENT:
-            raise ValueError(
-                "precache_features() requires TRANSIENT mode. "
-                "Ensure data_labels contains EVENTS or GLITCHES (not NOISE)."
-            )
-        
-        if self.feature_segments is None or len(self.feature_segments) == 0:
-            raise ValueError("No feature segments found to cache.")
-        
-        # Generate cache file path
-        self.generate_file_path(sample_rate_hertz, group_name)
-        cache_key = f"feature_cache/{group_name}"
-        
-        # Check if already cached
-        try:
-            with closing(gf.open_hdf5_file(self.file_path, self.logger, mode="r")) as f:
-                if cache_key in f and not config.force_redownload:
-                    cached_count = f[cache_key].attrs.get("num_cached", 0)
-                    self.logger.info(
-                        f"Found existing cache with {cached_count} features"
-                    )
-                    return self.file_path
-        except Exception:
-            pass  # File doesn't exist or can't be read
-        
-        # Limit to max_examples
-        num_to_cache = min(len(self.feature_segments), config.max_examples)
-        segments_to_cache = self.feature_segments[:num_to_cache]
-        
-        self.logger.info(
-            f"Precaching {num_to_cache} feature segments to {self.file_path}"
-        )
-        
-        # Create/open cache file
-        gf.ensure_directory_exists(self.file_path.parent)
-        
-        with closing(gf.open_hdf5_file(self.file_path, self.logger, mode="a")) as f:
-            # Create or clear the cache group
-            if cache_key in f:
-                del f[cache_key]
-            cache_group = f.create_group(cache_key)
-            cache_group.attrs["num_cached"] = 0
-            cache_group.attrs["sample_rate_hertz"] = sample_rate_hertz
-            cache_group.attrs["padding_seconds"] = config.padding_duration_seconds
-            
-            cached_count = 0
-            # Parallel download function
-            def fetch_segment_data(segment_idx, segment_vals):
-                s_start, s_end = segment_vals[0], segment_vals[1]
-                fetched_data = {}
-                try:
-                    for ifo_obj in ifos:
-                        ts_d = self.get_segment_data(
-                            s_start, s_end, ifo_obj, 
-                            self.frame_types[0], self.channels[0]
-                        )
-                        fetched_data[ifo_obj.name] = ts_d
-                    return (segment_idx, segment_vals, fetched_data, None)
-                except Exception as e:
-                    return (segment_idx, segment_vals, None, str(e))
-
-            # Execute parallel fetch
-            max_workers = 8
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all tasks
-                futures = [executor.submit(fetch_segment_data, i, seg) for i, seg in enumerate(segments_to_cache)]
-                
-                try:
-                    from tqdm import tqdm
-                    iterator = tqdm(futures, total=num_to_cache, desc="Precaching features (parallel)", unit="segment")
-                except ImportError:
-                    iterator = futures
-
-                for future in iterator:
-                    idx, segment, fetched_results, error = future.result()
-                    
-                    if error:
-                        logging.warning(f"Failed to download segment {idx}: {error}")
-                        continue
-                        
-                    try:
-                         # Write to HDF5 (serial)
-                        seg_start, seg_end = segment[0], segment[1]
-                        cache_key_seg = f"segments/segment_{seg_start}_{seg_end}"
-                        
-                        if "segments" not in f:
-                            f.create_group("segments")
-                            
-                        if cache_key_seg in f:
-                            del f[cache_key_seg]
-                            
-                        feat_group = f.create_group(cache_key_seg)
-                        feat_group.attrs["start_gps"] = seg_start
-                        feat_group.attrs["end_gps"] = seg_end
-                        
-                        for ifo_name, ts_data in fetched_results.items():
-                             # Store data
-                            if ts_data is not None:
-                                # Convert to numpy if tensor
-                                if hasattr(ts_data, 'numpy'):
-                                    ts_data = ts_data.numpy()
-                                feat_group.create_dataset(ifo_name, data=ts_data)
-                        
-                        cached_count += 1
-                        
-                    except Exception as e:
-                        logging.warning(f"Error writing segment {idx} to cache: {e}")
-        
-            # Update final count
-            if cache_key in f:
-                f[cache_key].attrs["num_cached"] = cached_count
-                
-            self.logger.info(f"Precaching complete: {cached_count} features cached")
-        
-        self.logger.info(f"Precaching complete: {cached_count} features cached")
-        return self.file_path
     
+
     def get_segment_times(
         self,
         start: float,
@@ -2290,7 +2127,7 @@ class IFODataObtainer:
                     return self.valid_segments
             
                 case AcquisitionMode.TRANSIENT:
-                    # For TRANSIENT mode, auto-precache feature data
+                    # For TRANSIENT mode, set up valid segments for iteration
                     if hasattr(self, 'feature_segments') and self.feature_segments is not None:
                         # Check if valid_segments is already correctly set up (3D, matching IFO count)
                         # If so, do not overwrite it with simple expansion of feature_segments
@@ -2313,24 +2150,9 @@ class IFODataObtainer:
                             else:
                                 self.valid_segments = self.feature_segments
                         
-                        # Calculate and display estimated precaching time
                         num_features = len(self.feature_segments)
-                        config = FeatureCacheConfig()
-                        num_to_cache = min(num_features, config.max_examples)
-                        
-                        # Estimate: ~2 seconds per feature segment download
-                        estimated_seconds = num_to_cache * 2
-                        estimated_minutes = estimated_seconds / 60
-                        
-                        if num_to_cache > 0:
-                            logging.info(
-                                f"\n{'='*60}\n"
-                                f"FEATURE MODE: Auto-precaching {num_to_cache} feature segments\n"
-                                f"Estimated time: ~{estimated_minutes:.1f} minutes "
-                                f"({estimated_seconds} seconds)\n"
-                                f"Padding: {config.padding_duration_seconds}s each side\n"
-                                f"{'='*60}"
-                            )
+                        if num_features > 0:
+                            logging.info(f"TRANSIENT MODE: {num_features} feature segments ready")
                         
                         self._cache_valid_segments(self.valid_segments, group_name)
                         return self.valid_segments
