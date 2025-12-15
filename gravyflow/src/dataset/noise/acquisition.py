@@ -921,35 +921,57 @@ class IFODataObtainer:
         valid_science_segments = self.get_all_segment_times(ifos[0])
         logging.info(f"Found {len(valid_science_segments)} valid science segments for clustering")
         
-        # Cluster transients WITHIN each valid science segment
+        # VECTORIZED: Assign each transient to its containing science segment
+        # Use binary search for O(N log M) instead of O(N*M)
+        sci_starts = valid_science_segments[:, 0]
+        sci_ends = valid_science_segments[:, 1]
+        
+        # Find which science segment each transient belongs to
+        seg_starts = original_segments[:, 0]
+        seg_ends = original_segments[:, 1]
+        
+        # For each transient, find the science segment where it fits
+        # A transient fits if: sci_start <= seg_start AND seg_end <= sci_end
+        # Use searchsorted to find candidate science segments
+        candidate_idx = np.searchsorted(sci_starts, seg_starts, side='right') - 1
+        candidate_idx = np.clip(candidate_idx, 0, len(valid_science_segments) - 1)
+        
+        # Check if transient actually fits within the candidate science segment
+        valid_mask = (seg_starts >= sci_starts[candidate_idx]) & (seg_ends <= sci_ends[candidate_idx])
+        
+        # Group transients by science segment
+        transient_by_sci = {}
+        valid_indices = np.where(valid_mask)[0]
+        for idx in valid_indices:
+            sci_idx = candidate_idx[idx]
+            if sci_idx not in transient_by_sci:
+                transient_by_sci[sci_idx] = []
+            transient_by_sci[sci_idx].append(idx)
+        
+        logging.info(f"Assigned {len(valid_indices)} transients to {len(transient_by_sci)} science segments")
+        
+        # Cluster transients within each science segment
         clustered_segments = []
         transient_to_cluster = {}
         cluster_idx = 0
         
-        for sci_start, sci_end in valid_science_segments:
-            # Find transients within this science segment
-            transients_in_sci = []
-            for j, gps_time in enumerate(original_gps_times):
-                # Check if the 64s window fits within the science segment
-                seg_start, seg_end = original_segments[j]
-                if seg_start >= sci_start and seg_end <= sci_end:
-                    transients_in_sci.append((j, gps_time, original_segments[j]))
-            
-            if not transients_in_sci:
-                continue
-            
-            # Create segment array for clustering
-            sci_transient_segs = np.array([t[2] for t in transients_in_sci])
+        for sci_idx, transient_indices in transient_by_sci.items():
+            transient_indices = np.array(transient_indices)
+            sci_transient_segs = original_segments[transient_indices]
+            sci_gps_times = original_gps_times[transient_indices]
             
             # Cluster within this science segment
             clustered_within = self._cluster_transients(sci_transient_segs)
             
-            # Build mapping for each cluster
+            # Build mapping for each cluster using vectorized operations
             for cl_start, cl_end in clustered_within:
-                transient_to_cluster[cluster_idx] = []
-                for orig_idx, gps_time, seg in transients_in_sci:
-                    if cl_start <= gps_time <= cl_end:
-                        transient_to_cluster[cluster_idx].append((gps_time, seg))
+                mask = (sci_gps_times >= cl_start) & (sci_gps_times <= cl_end)
+                matching_gps = sci_gps_times[mask]
+                matching_segs = sci_transient_segs[mask]
+                
+                transient_to_cluster[cluster_idx] = [
+                    (gps, seg) for gps, seg in zip(matching_gps, matching_segs)
+                ]
                 clustered_segments.append([cl_start, cl_end])
                 cluster_idx += 1
         
