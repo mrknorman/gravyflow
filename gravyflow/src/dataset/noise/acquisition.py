@@ -916,16 +916,45 @@ class IFODataObtainer:
         original_segments = self.feature_segments  # Shape (N, 2)
         original_gps_times = (original_segments[:, 0] + original_segments[:, 1]) / 2  # Center time
         
-        # Cluster for efficient downloading
-        clustered_segments = self._cluster_transients(original_segments)
+        # Get valid science segments (data quality) for clustering boundaries
+        # This ensures we don't cluster across data gaps
+        valid_science_segments = self.get_all_segment_times(ifos[0])
+        logging.info(f"Found {len(valid_science_segments)} valid science segments for clustering")
         
-        # Build mapping: which original transients fall within each clustered segment
-        transient_to_cluster = {}  # cluster_idx -> list of (gps_time, original_segment)
-        for i, (cl_start, cl_end) in enumerate(clustered_segments):
-            transient_to_cluster[i] = []
+        # Cluster transients WITHIN each valid science segment
+        clustered_segments = []
+        transient_to_cluster = {}
+        cluster_idx = 0
+        
+        for sci_start, sci_end in valid_science_segments:
+            # Find transients within this science segment
+            transients_in_sci = []
             for j, gps_time in enumerate(original_gps_times):
-                if cl_start <= gps_time <= cl_end:
-                    transient_to_cluster[i].append((gps_time, original_segments[j]))
+                # Check if the 64s window fits within the science segment
+                seg_start, seg_end = original_segments[j]
+                if seg_start >= sci_start and seg_end <= sci_end:
+                    transients_in_sci.append((j, gps_time, original_segments[j]))
+            
+            if not transients_in_sci:
+                continue
+            
+            # Create segment array for clustering
+            sci_transient_segs = np.array([t[2] for t in transients_in_sci])
+            
+            # Cluster within this science segment
+            clustered_within = self._cluster_transients(sci_transient_segs)
+            
+            # Build mapping for each cluster
+            for cl_start, cl_end in clustered_within:
+                transient_to_cluster[cluster_idx] = []
+                for orig_idx, gps_time, seg in transients_in_sci:
+                    if cl_start <= gps_time <= cl_end:
+                        transient_to_cluster[cluster_idx].append((gps_time, seg))
+                clustered_segments.append([cl_start, cl_end])
+                cluster_idx += 1
+        
+        clustered_segments = np.array(clustered_segments) if clustered_segments else np.empty((0, 2))
+        logging.info(f"Clustered {len(original_gps_times)} transients into {len(clustered_segments)} download segments")
         
         # Calculate extraction parameters
         padding_seconds = onsource_duration_seconds  # Padding for extraction
@@ -946,17 +975,19 @@ class IFODataObtainer:
             if not transients_in_segment:
                 continue
             
-            # Download this segment
+            # Download this segment using gwpy directly (simpler than get_segment)
             try:
-                segment_data = self.get_segment(
-                    ifos[0],  # Primary IFO
+                from gwpy.timeseries import TimeSeries
+                segment_data = TimeSeries.fetch_open_data(
+                    ifos[0].name,
                     seg_start,
-                    seg_end - seg_start,
-                    sample_rate_hertz
+                    seg_end,
+                    cache=True
                 )
-                if segment_data is None:
-                    logging.warning(f"Failed to download segment {cluster_idx}")
-                    continue
+                # Resample to target sample rate
+                if segment_data.sample_rate.value != sample_rate_hertz:
+                    segment_data = segment_data.resample(sample_rate_hertz)
+                segment_array = segment_data.value
             except Exception as e:
                 logging.warning(f"Error downloading segment {cluster_idx}: {e}")
                 continue
@@ -978,13 +1009,13 @@ class IFODataObtainer:
                     off_start = off_end - num_offsource_samples
                     
                     # Validate bounds
-                    data_len = len(segment_data.data)
+                    data_len = len(segment_array)
                     if on_start < 0 or on_end > data_len or off_start < 0:
                         continue
                     
-                    # Extract data
-                    onsource = segment_data.data[on_start:on_end]
-                    offsource = segment_data.data[off_start:off_end]
+                    # Extract data from the numpy array
+                    onsource = segment_array[on_start:on_end]
+                    offsource = segment_array[off_start:off_end]
                     
                     # Reshape for multi-IFO: (IFOs, samples)
                     onsource = onsource.reshape(1, -1)  # (1, samples)
