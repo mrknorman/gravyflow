@@ -888,11 +888,13 @@ class IFODataObtainer:
         if seed is None:
             seed = gf.Defaults.seed
             
-        # Generate cache path if not provided
+        # Generate cache path if not provided - use simplified naming without hashes
+        # Cache file is keyed by IFO only to maximize reuse across parameter configurations
         if cache_path is None:
-            run_name = self.observing_runs[0].name if self.observing_runs else "unknown"
             ifo_str = "_".join([i.name for i in ifos])
-            cache_path = generate_glitch_cache_path(run_name, ifo_str, self.data_directory_path)
+            # Use start GPS time to identify the run period
+            run_id = f"{int(self.start_gps_times[0])}" if self.start_gps_times else "unknown"
+            cache_path = generate_glitch_cache_path(run_id, ifo_str, self.data_directory_path)
         
         cache = GlitchCache(cache_path, mode='r' if not force_rebuild else 'w')
         
