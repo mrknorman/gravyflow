@@ -659,12 +659,20 @@ class TransientObtainer(Obtainer):
         )
         
         if use_precache:
-            # Call precache_transients - this will use cache if available or download once
+            # Enforce standardized cache dimensions for reusability
+            # This ensures the cache supports various window sizes without rebuilding
+            # "32s padding either way" -> we ensure at least 4.0s onsource and 32.0s offsource
+            target_onsource = onsource_duration_seconds + (crop_duration_seconds * 2)
+            cache_onsource = max(target_onsource, 4.0)
+            cache_offsource = max(offsource_duration_seconds, 32.0)
+            
+            # Call precache_transients - this will use cache if available and large enough
+            # If existing cache is smaller than these dimensions, it will be rebuilt
             cache_path = ifo_obtainer.precache_transients(
                 ifos=self.ifos,
                 sample_rate_hertz=sample_rate_hertz,
-                onsource_duration_seconds=onsource_duration_seconds + (crop_duration_seconds * 2),
-                offsource_duration_seconds=offsource_duration_seconds,
+                onsource_duration_seconds=cache_onsource,
+                offsource_duration_seconds=cache_offsource,
                 group_name=group,
                 data_directory=self.data_directory_path,
                 seed=seed_
