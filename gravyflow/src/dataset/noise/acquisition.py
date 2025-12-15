@@ -1018,114 +1018,143 @@ class IFODataObtainer:
             enumerate(clustered_segments), 
             total=len(clustered_segments),
             desc="Downloading segments",
-            unit="seg"
+        
+        # Use temporary file to ensure cache is only valid when complete
+        temp_path = cache_path.with_name(cache_path.name + ".tmp")
+        
+        # Initialize cache file for incremental saving
+        cache = GlitchCache(temp_path, mode='w')
+        num_on_samples = int(onsource_duration_seconds * sample_rate_hertz)
+        num_off_samples = int(offsource_duration_seconds * sample_rate_hertz)
+        
+        cache.initialize_file(
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration=onsource_duration_seconds,
+            offsource_duration=offsource_duration_seconds,
+            ifo_names=[i.name for i in ifos],
+            num_ifos=len(ifos),
+            onsource_samples=num_on_samples,
+            offsource_samples=num_off_samples
         )
-        for cluster_idx, (seg_start, seg_end) in pbar:
-            transients_in_segment = transient_to_cluster.get(cluster_idx, [])
-            if not transients_in_segment:
-                continue
+        
+        # Buffers for batch saving
+        batch_onsource = []
+        batch_offsource = []
+        batch_gps = []
+        batch_labels = []
+        BATCH_SIZE = 100
+        
+        extracted_count = 0
+        
+        # Re-structure clustered_segments to include transient GPS times for easier iteration
+        clustered_segments_with_transients = []
+        for cluster_idx, (seg_start, seg_end) in enumerate(clustered_segments):
+            transients_in_this_cluster = transient_to_cluster.get(cluster_idx, [])
+            if transients_in_this_cluster:
+                # Extract only GPS times from the (gps, seg) tuples
+                gps_times_for_cluster = [t[0] for t in transients_in_this_cluster]
+                clustered_segments_with_transients.append((seg_start, seg_end, gps_times_for_cluster))
+
+        pbar = tqdm(clustered_segments_with_transients, desc=f"Downloading segments (0/{len(clustered_segments_with_transients)})")
+        for seg_start, seg_end, transient_times_in_seg in pbar:
             
-            seg_duration = seg_end - seg_start
-            pbar.set_postfix({
-                'dur': f'{seg_duration:.0f}s',
-                'glitches': len(transients_in_segment),
-                'extracted': extracted_count,
-                'failed': failed_downloads
-            })
-            
-            # Download this segment using gwpy directly
+            # Download segment
             try:
                 from gwpy.timeseries import TimeSeries
                 segment_data = TimeSeries.fetch_open_data(
                     ifos[0].name,
                     seg_start,
                     seg_end,
+                    verbose=False,
                     cache=True
                 )
-                # Resample to target sample rate
+                
+                # Resample if needed
                 if segment_data.sample_rate.value != sample_rate_hertz:
                     segment_data = segment_data.resample(sample_rate_hertz)
+                    
                 segment_array = segment_data.value
+                
             except Exception as e:
-                failed_downloads += 1
-                logging.debug(f"Error downloading segment {cluster_idx}: {e}")
+                logging.warning(f"Failed to download segment {seg_start}-{seg_end}: {e}")
                 continue
             
-            # Extract each transient from this segment
-            for gps_time, orig_seg in transients_in_segment:
+            # Extract each transient in this segment
+            for gps_time in transient_times_in_seg:
                 try:
-                    # Calculate sample indices relative to segment start
-                    time_offset = gps_time - seg_start
-                    center_sample = int(time_offset * sample_rate_hertz)
+                    # Calculate indices relative to segment start
+                    center_sample = int((gps_time - seg_start) * sample_rate_hertz)
                     
-                    # Onsource extraction
-                    half_onsource = num_onsource_samples // 2
+                    # Onsource extraction (centered on gps_time)
+                    half_onsource = num_on_samples // 2
                     on_start = center_sample - half_onsource
-                    on_end = on_start + num_onsource_samples
+                    on_end = on_start + num_on_samples
                     
-                    # Offsource extraction (before onsource)
+                    # Offsource extraction (immediately preceding onsource)
                     off_end = on_start
-                    off_start = off_end - num_offsource_samples
+                    off_start = off_end - num_off_samples
                     
-                    # Validate bounds
-                    data_len = len(segment_array)
-                    if on_start < 0 or on_end > data_len or off_start < 0:
+                    # Check bounds
+                    if on_start < 0 or on_end > len(segment_array) or off_start < 0:
                         continue
-                    
-                    # Extract data from the numpy array
+                        
                     onsource = segment_array[on_start:on_end]
                     offsource = segment_array[off_start:off_end]
                     
-                    # Reshape for multi-IFO: (IFOs, samples)
-                    onsource = onsource.reshape(1, -1)  # (1, samples)
+                    if len(onsource) != num_on_samples or len(offsource) != num_off_samples:
+                        continue
+                        
+                    onsource = onsource.reshape(1, -1)
                     offsource = offsource.reshape(1, -1)
                     
-                    all_onsource.append(onsource)
-                    all_offsource.append(offsource)
-                    all_gps_times.append(gps_time)
-                    extracted_count += 1
+                    batch_onsource.append(onsource)
+                    batch_offsource.append(offsource)
+                    batch_gps.append(gps_time)
                     
-                    # Get label from feature_labels if available
                     label = self._feature_labels.get(gps_time, 0) if hasattr(self, '_feature_labels') else 0
-                    all_labels.append(label)
+                    batch_labels.append(label)
+                    
+                    extracted_count += 1
                     
                 except Exception as e:
                     logging.debug(f"Failed to extract transient at {gps_time}: {e}")
                     continue
             
-            if (cluster_idx + 1) % 50 == 0:
-                logging.info(f"Processed {cluster_idx + 1}/{len(clustered_segments)} segments, extracted {len(all_gps_times)} glitches")
+            # Checkpoint: Save batch if full
+            if len(batch_gps) >= BATCH_SIZE:
+                cache.append(
+                    onsource=np.stack(batch_onsource, axis=0),
+                    offsource=np.stack(batch_offsource, axis=0),
+                    gps_times=np.array(batch_gps),
+                    labels=np.array(batch_labels)
+                )
+                batch_onsource = []
+                batch_offsource = []
+                batch_gps = []
+                batch_labels = []
+                pbar.set_description(f"Downloading segments (Cached: {extracted_count})")
         
-        if len(all_onsource) == 0:
+        # Final flush
+        if len(batch_gps) > 0:
+            cache.append(
+                onsource=np.stack(batch_onsource, axis=0),
+                offsource=np.stack(batch_offsource, axis=0),
+                gps_times=np.array(batch_gps),
+                labels=np.array(batch_labels)
+            )
+            
+        if extracted_count == 0:
             raise ValueError("No glitches extracted successfully")
         
-        # Stack into arrays
-        onsource_array = np.stack(all_onsource, axis=0)  # (N, IFOs, samples)
-        offsource_array = np.stack(all_offsource, axis=0)
-        gps_array = np.array(all_gps_times)
-        labels_array = np.array(all_labels)
-        
-        # Save to cache
-        cache = GlitchCache(cache_path, mode='w')
-        cache.save_all(
-            onsource=onsource_array,
-            offsource=offsource_array,
-            gps_times=gps_array,
-            labels=labels_array,
-            sample_rate_hertz=sample_rate_hertz,
-            onsource_duration=onsource_duration_seconds,
-            offsource_duration=offsource_duration_seconds,
-            ifo_names=[i.name for i in ifos]
-        )
+        # Rename temp file to final cache path to mark completion
+        temp_path.rename(cache_path)
         
         print(f"\n{'='*60}")
         print(f"PRECACHING COMPLETE")
         print(f"{'='*60}")
-        print(f"  Glitches cached:    {len(gps_array):,}")
-        print(f"  Failed downloads:   {failed_downloads}")
+        print(f"  Glitches cached:    {extracted_count:,}")
         print(f"  Cache file:         {cache_path}")
-        print(f"  Onsource size:      {onsource_array.nbytes / 1e6:.1f} MB")
-        print(f"  Offsource size:     {offsource_array.nbytes / 1e6:.1f} MB")
+        print(f"  Total size:         {cache_path.stat().st_size / 1e6:.1f} MB")
         print(f"{'='*60}\n")
         
         return cache_path

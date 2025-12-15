@@ -254,6 +254,102 @@ class GlitchCache:
         # Clear cached metadata
         self._metadata = None
     
+    def initialize_file(
+        self,
+        sample_rate_hertz: float,
+        onsource_duration: float,
+        offsource_duration: float,
+        ifo_names: List[str],
+        num_ifos: int,
+        onsource_samples: int,
+        offsource_samples: int,
+        compression: str = 'gzip',
+        compression_opts: int = 4
+    ) -> None:
+        """
+        Initialize HDF5 file with empty resizable datasets for incremental saving.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with h5py.File(self.path, 'w') as f:
+            grp = f.create_group('glitches')
+            
+            # Create resizable datasets (maxshape=None on first dimension)
+            grp.create_dataset(
+                'onsource', 
+                shape=(0, num_ifos, onsource_samples),
+                maxshape=(None, num_ifos, onsource_samples),
+                dtype=np.float32,
+                chunks=(1, num_ifos, onsource_samples),
+                compression=compression,
+                compression_opts=compression_opts
+            )
+            grp.create_dataset(
+                'offsource', 
+                shape=(0, num_ifos, offsource_samples),
+                maxshape=(None, num_ifos, offsource_samples),
+                dtype=np.float32,
+                chunks=(1, num_ifos, offsource_samples),
+                compression=compression,
+                compression_opts=compression_opts
+            )
+            grp.create_dataset(
+                'gps_times', 
+                shape=(0,), 
+                maxshape=(None,), 
+                dtype=np.float64
+            )
+            grp.create_dataset(
+                'labels', 
+                shape=(0,), 
+                maxshape=(None,), 
+                dtype=np.int32
+            )
+            
+            # Store metadata
+            grp.attrs['sample_rate_hertz'] = sample_rate_hertz
+            grp.attrs['onsource_duration'] = onsource_duration
+            grp.attrs['offsource_duration'] = offsource_duration
+            grp.attrs['ifo_names'] = ifo_names
+            grp.attrs['version'] = 1
+            
+        self._metadata = None
+        
+    def append(
+        self,
+        onsource: np.ndarray,
+        offsource: np.ndarray,
+        gps_times: np.ndarray,
+        labels: np.ndarray
+    ) -> None:
+        """
+        Append a batch of glitches to the existing cache file.
+        """
+        if not self.exists:
+            raise FileNotFoundError(f"Cache file not initialized: {self.path}")
+            
+        with h5py.File(self.path, 'a') as f:
+            grp = f['glitches']
+            
+            n_new = len(gps_times)
+            n_current = grp['gps_times'].shape[0]
+            n_total = n_current + n_new
+            
+            # Resize and append
+            grp['onsource'].resize(n_total, axis=0)
+            grp['onsource'][n_current:] = onsource.astype(np.float32)
+            
+            grp['offsource'].resize(n_total, axis=0)
+            grp['offsource'][n_current:] = offsource.astype(np.float32)
+            
+            grp['gps_times'].resize(n_total, axis=0)
+            grp['gps_times'][n_current:] = gps_times.astype(np.float64)
+            
+            grp['labels'].resize(n_total, axis=0)
+            grp['labels'][n_current:] = labels.astype(np.int32)
+            
+        self._metadata = None  # Metadata (count) changed
+    
     def get_batch(
         self,
         indices: np.ndarray,
