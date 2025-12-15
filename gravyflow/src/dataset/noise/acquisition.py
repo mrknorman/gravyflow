@@ -2131,13 +2131,11 @@ class IFODataObtainer:
                 # Order segments deterministically
                 unique_segments = self.order_segments(unique_segments, segment_order, seed)
                 
-                # Apply temporal clustering to reduce download count
-                # This merges nearby transients into larger segments for efficient acquisition
-                unique_segments = self._cluster_transients(unique_segments)
-                
+                # Store original transients for reference (before clustering)
                 self.feature_segments = unique_segments # Store 2D version
                 
-                # Apply Grouping (Index-based)
+                # Apply Grouping (Index-based) - BEFORE clustering
+                # This ensures each group gets their fair share of original transients
                 if group_name == 'all':
                     target_segments = unique_segments
                 else:
@@ -2165,6 +2163,10 @@ class IFODataObtainer:
                 
                 if len(target_segments) == 0:
                      logging.warning(f"No feature segments found for group {group_name}")
+                
+                # Apply temporal clustering AFTER group split
+                # This merges nearby transients for efficient downloading
+                target_segments = self._cluster_transients(target_segments)
                 
                 # Expand for Multi-IFO: (N, IFOs, 2)
                 num_ifos = len(ifos)
