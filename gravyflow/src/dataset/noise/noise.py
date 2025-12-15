@@ -666,6 +666,7 @@ class TransientObtainer(Obtainer):
                 onsource_duration_seconds=onsource_duration_seconds + (crop_duration_seconds * 2),
                 offsource_duration_seconds=offsource_duration_seconds,
                 group_name=group,
+                data_directory=self.data_directory_path,
                 seed=seed_
             )
             

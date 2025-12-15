@@ -855,6 +855,7 @@ class IFODataObtainer:
         onsource_duration_seconds: float,
         offsource_duration_seconds: float,
         cache_path: Path = None,
+        data_directory: Path = None,
         seed: int = None,
         group_name: str = "train",
         force_rebuild: bool = False
@@ -874,6 +875,7 @@ class IFODataObtainer:
             onsource_duration_seconds: Onsource window duration
             offsource_duration_seconds: Offsource window duration  
             cache_path: Path to save cache (auto-generated if None)
+            data_directory: Directory to save cache if path not provided
             seed: Random seed for segment ordering
             group_name: Group name for training/validation split
             force_rebuild: If True, rebuild cache even if it exists
@@ -891,10 +893,13 @@ class IFODataObtainer:
         # Generate cache path if not provided - use simplified naming without hashes
         # Cache file is keyed by IFO only to maximize reuse across parameter configurations
         if cache_path is None:
+            if data_directory is None:
+                data_directory = Path("./generator_data")
+                
             ifo_str = "_".join([i.name for i in ifos])
             # Use start GPS time to identify the run period
             run_id = f"{int(self.start_gps_times[0])}" if self.start_gps_times else "unknown"
-            cache_path = generate_glitch_cache_path(run_id, ifo_str, self.data_directory_path)
+            cache_path = generate_glitch_cache_path(run_id, ifo_str, data_directory)
         
         cache = GlitchCache(cache_path, mode='r' if not force_rebuild else 'w')
         
