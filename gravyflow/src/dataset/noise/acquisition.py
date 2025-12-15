@@ -781,7 +781,66 @@ class IFODataObtainer:
         except Exception as e:
             self.logger.warning(f"Failed to cache segments: {e}")
     
-    
+    def _cluster_transients(
+        self, 
+        segments: np.ndarray, 
+        cluster_window_seconds: float = None
+    ) -> np.ndarray:
+        """
+        Cluster nearby transients into larger download segments.
+        
+        This reduces the number of individual downloads by merging transients
+        that are close in time. Individual glitches can then be extracted
+        from the larger downloaded segments.
+        
+        Args:
+            segments: Array of (start, end) GPS times, shape (N, 2)
+            cluster_window_seconds: Max gap between transients to merge.
+                                   Defaults to max_segment_duration_seconds (2048.0s).
+                                   
+        Returns:
+            Merged segments array of shape (M, 2) where M <= N
+        """
+        if cluster_window_seconds is None:
+            cluster_window_seconds = self.max_segment_duration_seconds
+        
+        if len(segments) == 0:
+            return segments
+        
+        if len(segments) == 1:
+            return segments
+            
+        # Sort by start time
+        sorted_idx = np.argsort(segments[:, 0])
+        sorted_segs = segments[sorted_idx]
+        
+        # Merge overlapping/nearby segments within window
+        merged = []
+        current_start, current_end = sorted_segs[0]
+        
+        for start, end in sorted_segs[1:]:
+            # Merge if gap is within cluster window
+            if start <= current_end + cluster_window_seconds:
+                current_end = max(current_end, end)
+            else:
+                merged.append([current_start, current_end])
+                current_start, current_end = start, end
+        
+        # Don't forget the last segment
+        merged.append([current_start, current_end])
+        
+        merged_array = np.array(merged)
+        
+        # Log the reduction
+        original_count = len(segments)
+        merged_count = len(merged_array)
+        if merged_count < original_count:
+            logging.info(
+                f"Temporal clustering: {original_count} transients -> "
+                f"{merged_count} download segments (window: {cluster_window_seconds}s)"
+            )
+        
+        return merged_array
 
     def get_segment_times(
         self,
@@ -2063,8 +2122,13 @@ class IFODataObtainer:
                 combined = np.concatenate(all_feature_segments_list)
                 unique_segments = np.unique(combined, axis=0) # Unique events
                 
-                # Order segments deterministicallly
+                # Order segments deterministically
                 unique_segments = self.order_segments(unique_segments, segment_order, seed)
+                
+                # Apply temporal clustering to reduce download count
+                # This merges nearby transients into larger segments for efficient acquisition
+                unique_segments = self._cluster_transients(unique_segments)
+                
                 self.feature_segments = unique_segments # Store 2D version
                 
                 # Apply Grouping (Index-based)
