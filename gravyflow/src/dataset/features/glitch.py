@@ -22,10 +22,19 @@ def fetch_event_times(selection, max_retries=10):
                 selection=selection
             ).to_pandas()
 
+            if attempts == 0 and "ml_label" in selection:
+                 print(f"DEBUG: Found {len(data)} events for selection='{selection}'")
+
             return data
 
         except Exception as e:
-            print(f"Failed to acquire gravity spy data because: {e} retrying...")
+            msg = str(e)
+            print(f"Failed to acquire gravity spy data because: {msg} retrying...")
+            
+            # Don't retry on syntax errors
+            if "Cannot parse filter definition" in msg or "SyntaxError" in msg or "unterminated string literal" in msg:
+                raise e
+                
             # If an exception occurs, increment the attempts counter
             attempts += 1
             # Check if the maximum number of retries has been reached
@@ -86,7 +95,7 @@ def get_glitch_times(
         # Loop over each glitch type and perform individual queries.
         for glitch_type in glitch_types:
             glitch_name = glitch_type.value
-            selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && ml_label={glitch_name} && No_Glitch<0.1"
+            selection = f"ifo = '{ifo}' AND event_time >= {start_gps_time} AND event_time <= {end_gps_time} AND ml_label = '{glitch_name}' AND No_Glitch < 0.1"
             
             data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
             
@@ -147,7 +156,7 @@ def get_glitch_times_with_labels(
         # Get enum index (0-19)
         type_index = list(GlitchType).index(glitch_type)
         
-        selection = f"ifo={ifo_name} && event_time>{start_gps_time} & event_time<{end_gps_time} && ml_label={glitch_name} && No_Glitch<0.1"
+        selection = f"ifo = '{ifo_name}' AND event_time >= {start_gps_time} AND event_time <= {end_gps_time} AND ml_label = '{glitch_name}' AND No_Glitch < 0.1"
         
         try:
             data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
@@ -155,6 +164,8 @@ def get_glitch_times_with_labels(
             all_labels.append(np.full(len(data), type_index, dtype=np.int32))
         except Exception as e:
             print(f"Warning: Failed to fetch {glitch_name}: {e}")
+            all_times.append(np.array([]))
+            all_labels.append(np.array([], dtype=np.int32))
             continue
     
     if not all_times:
@@ -165,22 +176,38 @@ def get_glitch_times_with_labels(
     
     # Balance classes if requested
     if balanced and len(all_times) > 1:
-        # Find min count across types
-        min_count = min(len(t) for t in all_times)
-        balanced_times = []
-        balanced_labels = []
+        # Filter out empty classes for balancing purposes if we have at least one non-empty
+        non_empty_indices = [i for i, t in enumerate(all_times) if len(t) > 0]
         
-        for type_times, type_idx in zip(all_times, [list(GlitchType).index(gt) for gt in glitch_types]):
-            if len(type_times) > min_count:
-                # Random subsample
-                indices = np.random.choice(len(type_times), min_count, replace=False)
-                balanced_times.append(type_times[indices])
-            else:
-                balanced_times.append(type_times)
-            balanced_labels.append(np.full(min(len(type_times), min_count), type_idx, dtype=np.int32))
-        
-        times = np.concatenate(balanced_times)
-        labels = np.concatenate(balanced_labels)
+        if non_empty_indices:
+             # Find min count across NON-EMPTY types
+            min_count = min(len(all_times[i]) for i in non_empty_indices)
+            
+            print(f"DEBUG: Non-empty indices: {non_empty_indices}")
+            print(f"DEBUG: Min count: {min_count}")
+            
+            balanced_times = []
+            balanced_labels = []
+            
+            for i, (type_times, type_idx) in enumerate(zip(all_times, [list(GlitchType).index(gt) for gt in glitch_types])):
+                if len(type_times) > 0:
+                    # Random subsample to min_count
+                    if len(type_times) > min_count:
+                        indices = np.random.choice(len(type_times), min_count, replace=False)
+                        balanced_times.append(type_times[indices])
+                    else:
+                         balanced_times.append(type_times)
+                    
+                    balanced_labels.append(np.full(min_count, type_idx, dtype=np.int32))
+            
+            times = np.concatenate(balanced_times)
+            labels = np.concatenate(balanced_labels)
+            print(f"DEBUG: Balanced total times: {len(times)}")
+        else:
+            # All empty
+            print("DEBUG: All classes empty")
+            times = np.array([])
+            labels = np.array([], dtype=np.int32)
     
     return times, labels
     
