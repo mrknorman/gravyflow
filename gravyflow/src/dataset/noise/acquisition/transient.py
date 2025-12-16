@@ -472,7 +472,9 @@ class TransientDataObtainer(BaseDataObtainer):
             if self.feature_segments is not None and len(self.feature_segments) > 0:
                 all_feature_segments_list.append(self.feature_segments)
             else: 
-                padding = 32.0
+                # Add epsilon buffer (0.2s) to account for epsilon trimming in get_segment (0.1s each end)
+                # This ensures segments remain large enough for proper standardization
+                padding = 32.0 + 0.2
                 
                 global_start_gps = min(self.start_gps_times)
                 global_end_gps = max(self.end_gps_times)

@@ -630,7 +630,8 @@ class BaseDataObtainer(ABC):
         results = []
         
         for ifo, (segment_start_gps_time, segment_end_gps_time) in zip(ifos, segment_times):
-            segment_key = f"segments/segment_{segment_start_gps_time}_{segment_end_gps_time}"
+            # Include IFO name in key to prevent cache collision for multi-IFO transient events
+            segment_key = f"segments/segment_{ifo.name}_{segment_start_gps_time}_{segment_end_gps_time}"
             try:
                 segment_data = self.get_segment(
                     segment_start_gps_time,
@@ -1027,7 +1028,11 @@ class BaseDataObtainer(ABC):
                         break
                 
                 if std_size is not None:
-                    segment_data = segment_data[:std_size]
+                    # Use center-truncation to preserve event centering (important for TRANSIENT mode)
+                    # Start-truncation would shift centered events toward the end or cut them off
+                    excess = num_samples - std_size
+                    start_offset = excess // 2
+                    segment_data = segment_data[start_offset:start_offset + std_size]
                 else:
                     logging.warning(f"Segment too small ({num_samples}) for standardization")
                 
@@ -1112,7 +1117,8 @@ class BaseDataObtainer(ABC):
             else:
                 segment_times = valid_segments[current_idx]
                 for ifo, (segment_start_gps_time, segment_end_gps_time) in zip(ifos, segment_times):
-                    segment_key = f"segments/segment_{segment_start_gps_time}_{segment_end_gps_time}"
+                    # Include IFO name in key to prevent cache collision for multi-IFO transient events
+                    segment_key = f"segments/segment_{ifo.name}_{segment_start_gps_time}_{segment_end_gps_time}"
                     try:
                         segment_data = self.get_segment(
                             segment_start_gps_time, 

@@ -906,14 +906,15 @@ from unittest.mock import MagicMock, patch
 def test_dataset_empty_segment_list():
     """Verify behavior when no segments are available with REAL noise.
     
-    This test creates a mock IFODataObtainer subclass that returns empty
+    This test creates a mock NoiseDataObtainer subclass that returns empty
     segments, testing that the dataset handles this gracefully without
     hanging or crashing.
     """
     
-    # Create a mock IFODataObtainer subclass that survives deepcopy
-    class EmptySegmentsObtainer(gf.IFODataObtainer):
-        """Mock IFODataObtainer that always returns empty segments."""
+    # Create a mock NoiseDataObtainer subclass that survives deepcopy
+    # Note: IFODataObtainer is now a factory function, so we subclass NoiseDataObtainer
+    class EmptySegmentsObtainer(gf.NoiseDataObtainer):
+        """Mock NoiseDataObtainer that always returns empty segments."""
         
         def get_valid_segments(self, *args, **kwargs):
             # Return empty 3D array with correct shape [N, IFOs, 2] where N=0

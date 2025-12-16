@@ -746,7 +746,8 @@ class TransientObtainer(Obtainer):
                 onsource = gf.whiten(
                     onsource_scaled, 
                     offsource_scaled, 
-                    sample_rate_hertz
+                    sample_rate_hertz,
+                    
                 )
                 
                 # Scale output to match expected scale_factor
@@ -898,7 +899,7 @@ class TransientObtainer(Obtainer):
         
         # Override the feature_segments to only include these events
         import numpy as np
-        padding = 32.0  # seconds
+        padding = 32.0 + 0.2  # Add 0.2s buffer to compensate for epsilon trim in get_segment
         ifo_obtainer.feature_segments = np.array([
             [gps - padding, gps + padding] for gps in target_gps
         ])
