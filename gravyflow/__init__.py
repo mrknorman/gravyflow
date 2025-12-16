@@ -19,10 +19,14 @@ import logging
 logging.getLogger('gwpy').setLevel(logging.WARNING)
 logging.getLogger('gwosc').setLevel(logging.WARNING)
 logging.getLogger('gwdatafind').setLevel(logging.WARNING)
+logging.getLogger('scitokens').setLevel(logging.WARNING)
+logging.getLogger('ligo').setLevel(logging.WARNING)
+logging.getLogger('igwn_auth_utils').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
 
 # Suppress JAX/CUDA warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF info/warnings
-os.environ['JAX_PLATFORMS'] = 'cuda'  # Skip TPU initialization attempt
+os.environ['JAX_PLATFORMS'] = 'cuda,cpu'  # CUDA for compute, CPU for callbacks
 logging.getLogger('jax._src.xla_bridge').setLevel(logging.ERROR)
 
 # Set Keras backend to JAX
@@ -110,7 +114,7 @@ from .src.utils.plotting import (
     generate_segment_timeline_plot, generate_example_extraction_plot
 )
 from .src.validate import Validator, ValidationConfig
-from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_times_with_labels, get_glitch_segments
+from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_times_with_labels, get_glitch_segments, get_glitch_type_from_index
 from .src.dataset.features.glitch_cache import GlitchCache, generate_glitch_cache_path
 from .src.dataset.features.event import (
     EventType, SourceType, get_confident_event_times, get_marginal_event_times, 
@@ -121,3 +125,4 @@ from .src.utils.alert import send_email
 from .src.model.examples.gabbard_2017 import Gabbard2017
 from .src.model.examples.matched_filter_baseline import MatchedFilterBaseline, MatchedFilterBaselineConfig
 from .src.detection import MatchedFilter, MatchedFilterLayer, TemplateGrid, matched_filter_fft, optimal_snr
+from .src.dataset.diversity import DiversityCallback, LabelTrackingDataset, compute_diversity_score

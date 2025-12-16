@@ -69,6 +69,7 @@ exclude = ["ripple*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["gravyflow/tests"]
+norecursedirs = ["example_notebooks", "scripts", ".git", "__pycache__", "*.egg-info"]
 log_cli = true
 log_cli_level = "ERROR"
 filterwarnings = [

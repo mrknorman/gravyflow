@@ -1,5 +1,5 @@
 # =============================================================================
-# Glitch Classification Training Example
+# Glitch Classification Training Example (Production Ready)
 # =============================================================================
 # Train a Keras classifier to classify glitch types using GravyflowDataset.
 # This follows the style of 07_training_a_model.ipynb.
@@ -7,6 +7,7 @@
 # Built-in imports
 from typing import List, Dict
 from pathlib import Path
+import os
 
 # Import the GravyFlow module
 import gravyflow as gf
@@ -24,11 +25,16 @@ from keras.models import Model
 
 SAMPLE_RATE = 2048.0
 ONSOURCE_DURATION = 1.0
+OFFSOURCE_DURATION = 16.0
 BATCH_SIZE = 32
-STEPS_PER_EPOCH = 5000
-VALIDATION_STEPS = 1000
+STEPS_PER_EPOCH = 5000  # ~160K samples per epoch
+VALIDATION_STEPS = 1000  # ~32K validation samples
 EPOCHS = 100
 NUM_CLASSES = len(gf.GlitchType)
+
+# Output directory for checkpoints and logs
+OUTPUT_DIR = Path("training_outputs")
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 print(f"Glitch types: {NUM_CLASSES}")
 for i, gt in enumerate(gf.GlitchType):
@@ -121,14 +127,14 @@ class GlitchAdapterDataset(keras.utils.PyDataset):
         return features, labels
 
 # =============================================================================
-# Create Data Obtainers
+# Create Data Obtainers (Separate for Train and Validation)
 # =============================================================================
 
 print("\nSetting up data obtainers...")
 
-# IFODataObtainer with augmentation and class balancing
-ifo_data_obtainer = gf.IFODataObtainer(
-    observing_runs=gf.ObservingRun.O3,
+# TRAINING: IFODataObtainer with augmentation and class balancing
+train_ifo_obtainer = gf.IFODataObtainer(
+    observing_runs=[gf.ObservingRun.O3],
     data_quality=gf.DataQuality.BEST,
     data_labels=[gf.DataLabel.GLITCHES],
     segment_order=gf.SegmentOrder.RANDOM,
@@ -143,10 +149,29 @@ ifo_data_obtainer = gf.IFODataObtainer(
     balanced_glitch_types=True,
 )
 
-# TransientObtainer for glitch acquisition
-noise_obtainer = gf.TransientObtainer(
-    ifo_data_obtainer=ifo_data_obtainer,
-    ifos=gf.IFO.L1
+train_noise_obtainer = gf.TransientObtainer(
+    ifo_data_obtainer=train_ifo_obtainer,
+    ifos=[gf.IFO.L1]
+)
+
+# VALIDATION: Separate obtainer with NO augmentation and different seed
+val_ifo_obtainer = gf.IFODataObtainer(
+    observing_runs=[gf.ObservingRun.O3],
+    data_quality=gf.DataQuality.BEST,
+    data_labels=[gf.DataLabel.GLITCHES],
+    segment_order=gf.SegmentOrder.RANDOM,
+    # NO augmentation for validation
+    random_sign_reversal=False,
+    random_time_reversal=False,
+    random_shift=False,
+    add_noise=False,
+    # Class balancing still on for fair evaluation
+    balanced_glitch_types=True,
+)
+
+val_noise_obtainer = gf.TransientObtainer(
+    ifo_data_obtainer=val_ifo_obtainer,
+    ifos=[gf.IFO.L1]
 )
 
 # =============================================================================
@@ -156,7 +181,7 @@ noise_obtainer = gf.TransientObtainer(
 print("\nCreating datasets...")
 
 training_dataset = gf.Dataset(
-    noise_obtainer=noise_obtainer,
+    noise_obtainer=train_noise_obtainer,
     input_variables=[
         gf.ReturnVariables.ONSOURCE,
         gf.ReturnVariables.OFFSOURCE,
@@ -168,7 +193,7 @@ training_dataset = gf.Dataset(
 )
 
 validation_dataset = gf.Dataset(
-    noise_obtainer=noise_obtainer,
+    noise_obtainer=val_noise_obtainer,
     seed=1001,  # Different seed for validation
     group="validate",
     input_variables=[
@@ -199,7 +224,7 @@ model.summary()
 
 # Compile model
 model.compile(
-    optimizer='adam',
+    optimizer=keras.optimizers.Adam(learning_rate=1e-3),
     loss='categorical_crossentropy',
     metrics=['accuracy']
 )
@@ -209,19 +234,64 @@ training_dataset = GlitchAdapterDataset(training_dataset, NUM_CLASSES)
 validation_dataset = GlitchAdapterDataset(validation_dataset, NUM_CLASSES)
 
 # =============================================================================
+# Setup Callbacks
+# =============================================================================
+
+callbacks = [
+    # Save best model
+    keras.callbacks.ModelCheckpoint(
+        filepath=OUTPUT_DIR / "best_model.keras",
+        monitor='val_accuracy',
+        save_best_only=True,
+        mode='max',
+        verbose=1
+    ),
+    # Save every epoch checkpoint (for resuming)
+    keras.callbacks.ModelCheckpoint(
+        filepath=OUTPUT_DIR / "checkpoint_epoch_{epoch:03d}.keras",
+        save_freq='epoch',
+        verbose=0
+    ),
+    # TensorBoard logging
+    keras.callbacks.TensorBoard(
+        log_dir=OUTPUT_DIR / "logs",
+        histogram_freq=1,
+        write_graph=True
+    ),
+    # Early stopping
+    keras.callbacks.EarlyStopping(
+        monitor='val_accuracy',
+        patience=10,
+        restore_best_weights=True,
+        verbose=1
+    ),
+    # Learning rate reduction
+    keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss',
+        patience=5,
+        factor=0.5,
+        min_lr=1e-6,
+        verbose=1
+    ),
+    # CSV logging for analysis
+    keras.callbacks.CSVLogger(
+        OUTPUT_DIR / "training_log.csv"
+    ),
+]
+
+# =============================================================================
 # Train Model
 # =============================================================================
 
 print("\nTraining model...")
+print(f"Checkpoints will be saved to: {OUTPUT_DIR}")
 
 history = model.fit(
     training_dataset,
+    verbose=2,
     validation_data=validation_dataset,
     epochs=EPOCHS,
-    callbacks=[
-        keras.callbacks.EarlyStopping(patience=3, restore_best_weights=True),
-        keras.callbacks.ReduceLROnPlateau(patience=2, factor=0.5),
-    ]
+    callbacks=callbacks
 )
 
 # =============================================================================
@@ -231,3 +301,5 @@ history = model.fit(
 print(f"\nTraining complete!")
 print(f"Final training accuracy: {history.history['accuracy'][-1]:.3f}")
 print(f"Final validation accuracy: {history.history['val_accuracy'][-1]:.3f}")
+print(f"\nBest model saved to: {OUTPUT_DIR / 'best_model.keras'}")
+print(f"Training logs saved to: {OUTPUT_DIR / 'training_log.csv'}")
