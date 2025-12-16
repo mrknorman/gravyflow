@@ -15,6 +15,12 @@ cuphenom_outputs*
 *.npy
 *.egg-info
 
+# Event cache files (may contain sensitive/secret event data)
+**/event_cache/
+*cached_event_times*
+*cached_confident_event_times*
+*cached_marginal_event_times*
+
 # IPython
 profile_default/
 ipython_config.py
@@ -193,3 +199,4 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,jupyternotebooks
 
+res/glitch_cache/

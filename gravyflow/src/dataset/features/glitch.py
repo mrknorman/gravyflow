@@ -1,16 +1,44 @@
 from enum import Enum, auto
 from typing import Union, List
+from pathlib import Path
 import time
+import hashlib
 #import threading
 import queue
 
 import numpy as np
+import pandas as pd
 from gwpy.table import GravitySpyTable
 
 import gravyflow as gf
 
-def fetch_event_times(selection, max_retries=10):
-        
+
+def _get_cache_path(selection: str) -> Path:
+    """Generate cache file path based on selection hash."""
+    cache_dir = gf.PATH / "res" / "glitch_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Hash the selection string for a unique filename
+    selection_hash = hashlib.md5(selection.encode()).hexdigest()[:16]
+    return cache_dir / f"glitch_query_{selection_hash}.csv"
+
+
+def fetch_event_times(selection, max_retries=10, use_cache=True):
+    """
+    Fetch glitch event times from GravitySpy with local caching.
+    
+    Cache files are stored in gravyflow/res/glitch_cache/ for fast reuse.
+    """
+    # Check cache first
+    if use_cache:
+        cache_path = _get_cache_path(selection)
+        if cache_path.exists():
+            try:
+                data = pd.read_csv(cache_path)
+                return data
+            except Exception as e:
+                print(f"Cache read failed: {e}, fetching from server...")
+    
     attempts = 0
     while True:
         try:
@@ -18,12 +46,20 @@ def fetch_event_times(selection, max_retries=10):
             data = GravitySpyTable.fetch(
                 "gravityspy",
                 "glitches",
-                columns=["event_time", "duration"],  # Assuming we're only interested in the event times.
+                columns=["event_time", "duration"],
                 selection=selection
             ).to_pandas()
 
             if attempts == 0 and "ml_label" in selection:
                  print(f"DEBUG: Found {len(data)} events for selection='{selection}'")
+
+            # Cache the result
+            if use_cache and len(data) > 0:
+                try:
+                    cache_path = _get_cache_path(selection)
+                    data.to_csv(cache_path, index=False)
+                except Exception as e:
+                    print(f"Cache write failed: {e}")
 
             return data
 
@@ -41,7 +77,7 @@ def fetch_event_times(selection, max_retries=10):
             if attempts >= max_retries:
                 raise Exception(f"Max retries reached: {max_retries}") from e
             
-            # Wait for 10 seconds before retrying
+            # Wait for 30 seconds before retrying
             time.sleep(30)
     
     return -1  # If successful, return the data
@@ -142,8 +178,9 @@ def get_glitch_times_with_labels(
         end_gps_time = observing_run.value.end_gps_time
     
     # Get all GlitchType values or use provided subset
+    # Exclude NO_GLITCH by default as it's a placeholder (always returns 0 results with No_Glitch < 0.1 filter)
     if glitch_types is None:
-        glitch_types = list(GlitchType)
+        glitch_types = [gt for gt in GlitchType if gt != GlitchType.NO_GLITCH]
     elif not isinstance(glitch_types, list):
         glitch_types = [glitch_types]
     
@@ -176,33 +213,29 @@ def get_glitch_times_with_labels(
     
     # Balance classes if requested
     if balanced and len(all_times) > 1:
-        # Filter out empty classes for balancing purposes if we have at least one non-empty
+        # Filter out empty classes for balancing purposes
         non_empty_indices = [i for i, t in enumerate(all_times) if len(t) > 0]
         
         if non_empty_indices:
-             # Find min count across NON-EMPTY types
-            min_count = min(len(all_times[i]) for i in non_empty_indices)
+             # Find MAX count across NON-EMPTY types for oversampling
+            max_count = max(len(all_times[i]) for i in non_empty_indices)
             
             print(f"DEBUG: Non-empty indices: {non_empty_indices}")
-            print(f"DEBUG: Min count: {min_count}")
+            print(f"DEBUG: Max count: {max_count}")
             
             balanced_times = []
             balanced_labels = []
             
             for i, (type_times, type_idx) in enumerate(zip(all_times, [list(GlitchType).index(gt) for gt in glitch_types])):
                 if len(type_times) > 0:
-                    # Random subsample to min_count
-                    if len(type_times) > min_count:
-                        indices = np.random.choice(len(type_times), min_count, replace=False)
-                        balanced_times.append(type_times[indices])
-                    else:
-                         balanced_times.append(type_times)
-                    
-                    balanced_labels.append(np.full(min_count, type_idx, dtype=np.int32))
+                    # Oversample to max_count with replacement
+                    indices = np.random.choice(len(type_times), max_count, replace=True)
+                    balanced_times.append(type_times[indices])
+                    balanced_labels.append(np.full(max_count, type_idx, dtype=np.int32))
             
             times = np.concatenate(balanced_times)
             labels = np.concatenate(balanced_labels)
-            print(f"DEBUG: Balanced total times: {len(times)}")
+            print(f"DEBUG: Balanced total times (Oversampled): {len(times)}")
         else:
             # All empty
             print("DEBUG: All classes empty")
@@ -238,7 +271,7 @@ def get_glitch_segments(
         # Loop over each glitch type and perform individual queries.
         for glitch_type in glitch_types:
             glitch_name = glitch_type.value
-            selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && ml_label={glitch_name} && No_Glitch<0.1"
+            selection = f"ifo = '{ifo}' AND event_time >= {start_gps_time} AND event_time <= {end_gps_time} AND ml_label = '{glitch_name}' AND No_Glitch < 0.1"
             
             data = fetch_event_times(selection, max_retries=10)
             
@@ -269,3 +302,23 @@ def get_glitch_segments(
         data = data[['start_time', 'end_time']].to_numpy()
 
         return data
+def get_glitch_type_from_index(index: int) -> Union[GlitchType, None]:
+    """
+    Convert integer index back to GlitchType enum.
+    
+    Args:
+        index: Integer index (0-19) or -1 for unknown.
+        
+    Returns:
+        GlitchType enum member or None if index is -1.
+        
+    Raises:
+        ValueError: If index is out of range.
+    """
+    if index == -1:
+        return None
+        
+    try:
+        return list(GlitchType)[index]
+    except IndexError:
+        raise ValueError(f"Invalid glitch type index: {index}. Must be between 0 and {len(GlitchType)-1}.")

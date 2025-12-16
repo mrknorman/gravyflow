@@ -654,6 +654,11 @@ class BaseDataObtainer(ABC):
         group : str,
         data_directory_path : Optional[Path] = None
         ) -> Path:
+        
+        # TRANSIENT mode: Skip segment file creation - glitches go to GlitchCache only
+        if self.acquisition_mode == AcquisitionMode.TRANSIENT:
+            self.file_path = None
+            return None
 
         if data_directory_path is None:
             data_directory_path = gf.PATH.parent
@@ -976,8 +981,15 @@ class BaseDataObtainer(ABC):
         if cache_key in self._segment_cache:
             self._segment_cache.move_to_end(cache_key)
             return self._segment_cache[cache_key]
+    
+        # TRANSIENT mode: Skip disk caching entirely - glitches go to GlitchCache
+        use_disk_cache = (
+            self.acquisition_mode != AcquisitionMode.TRANSIENT and
+            self.file_path is not None and 
+            Path(self.file_path).exists()
+        )
         
-        if (self.file_path is not None and Path(self.file_path).exists()) or self.cache_segments:
+        if use_disk_cache or (self.cache_segments and self.acquisition_mode != AcquisitionMode.TRANSIENT):
             if self.file_path is None:
                  pass
             else:

@@ -12,6 +12,7 @@ import jax
 from numpy.random import default_rng  
 
 import gravyflow as gf
+from gravyflow.src.dataset.features.event import get_events_with_params, EventType
 
 class NoiseType(Enum):
     WHITE = auto()
@@ -194,30 +195,7 @@ def colored_noise_generator(
         interpolated_offsource_asds.append(
             interpolated_asd_offsource
         )
-    
-    # Stack or Concat?
-    # Original: tf.concat(..., axis=1) -> (1, IFOs*Freqs) ??
-    # Wait, original code:
-    # interpolated_onsource_asds.append(interpolated_asd_onsource)
-    # interpolated_onsource_asds = tf.concat(interpolated_onsource_asds, axis=1)
-    
-    # interpolated_asd_onsource shape from interpolate is (Freqs,).
-    # If we append to list, we have [ (Freqs,), (Freqs,) ].
-    # tf.concat(..., axis=1) would require rank 2?
-    # Original interpolate returned shape?
-    # tfp.math.interp_regular_1d_grid returns shape of query points.
-    # If query points is (Freqs,), output is (Freqs,).
-    # tf.concat([ (Freqs,), (Freqs,) ], axis=1) fails.
-    # Maybe original code had expand_dims?
-    # "interpolated_psd_onsource ... for num in num_samples_list"
-    # It returns a list of tensors.
-    
-    # Let's assume we want (IFOs, Freqs) or (1, IFOs, Freqs) for broadcasting.
-    # _generate_colored_noise expects `interpolated_asd * white_noise_fft`.
-    # white_noise_fft is (Batch, IFOs, Freqs).
-    # So interpolated_asd should be (1, IFOs, Freqs) or (IFOs, Freqs).
-    
-    # Let's stack them.
+
     interpolated_onsource_asds = ops.stack(interpolated_onsource_asds, axis=0) # (IFOs, Freqs)
     interpolated_offsource_asds = ops.stack(interpolated_offsource_asds, axis=0)
     
@@ -585,6 +563,7 @@ class TransientObtainer(Obtainer):
             seed: int = None,
             crop: bool = False,
             whiten: bool = False,
+            precache_cap: int = None,  # If 0, skip precache (lazy download). If >0, limit cache size.
         ) -> Iterator:
         """
         Create a generator that yields transient event data.
@@ -600,6 +579,7 @@ class TransientObtainer(Obtainer):
             seed: Random seed.
             crop: If True, crop onsource to remove padding (default False).
             whiten: If True, whiten onsource using offsource PSD (default False).
+            precache_cap: If 0, disable precaching (lazy download). If >0, limit items cached.
             
         Yields:
             Tuples of (onsource, offsource, gps_times) tensors.
@@ -653,9 +633,11 @@ class TransientObtainer(Obtainer):
         seed_ = self.rng.integers(1000000000)
         
         # Check if we should use precached data (for glitches)
+        # precache_cap=0 forces this to False (lazy downloading)
         use_precache = (
             ifo_obtainer.acquisition_mode == gf.AcquisitionMode.TRANSIENT and
-            gf.DataLabel.GLITCHES in ifo_obtainer.data_labels
+            gf.DataLabel.GLITCHES in ifo_obtainer.data_labels and
+            (precache_cap is None or precache_cap > 0)
         )
         
         if use_precache:
@@ -675,7 +657,8 @@ class TransientObtainer(Obtainer):
                 offsource_duration_seconds=cache_offsource,
                 group_name=group,
                 data_directory=self.data_directory_path,
-                seed=seed_
+                seed=seed_,
+                cap=precache_cap
             )
             
             # Create generator that yields from cache
@@ -879,13 +862,10 @@ class TransientObtainer(Obtainer):
             yield onsource, offsource, gps_times, labels
     
     def _filter_to_named_events(self, ifo_obtainer):
-        """Filter IFODataObtainer to only fetch specified event names."""
-        from gravyflow.src.dataset.features.event import get_events_with_params, EventType
-        
-        # Get all events with their names
         all_events = get_events_with_params(event_types=[EventType.CONFIDENT, EventType.MARGINAL])
         
-        # Filter to requested names
+        ifo_obtainer.event_names = self.event_names
+        
         target_gps = []
         for event in all_events:
             if event.get("name") in self.event_names:
