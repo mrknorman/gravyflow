@@ -686,7 +686,8 @@ class TransientObtainer(Obtainer):
                 onsource_duration_seconds + (crop_duration_seconds * 2),
                 offsource_duration_seconds,
                 scale_factor,
-                seed_
+                seed_,
+                allowed_segments=ifo_obtainer.valid_segments if group != 'all' else None
             )
         else:
             # Original per-batch download path (for events or non-cached)
@@ -765,7 +766,8 @@ class TransientObtainer(Obtainer):
         onsource_duration: float,
         offsource_duration: float,
         scale_factor: float,
-        seed: int
+        seed: int,
+        allowed_segments: np.ndarray = None
     ):
         """
         Generator that yields batches from a GlitchCache file.
@@ -790,10 +792,80 @@ class TransientObtainer(Obtainer):
         labels_all = data['labels']
         
         n_glitches = len(gps_all)
+        
+        # Filter for allowed segments (train/val split)
+        if allowed_segments is not None and len(allowed_segments) > 0:
+            # allowed_segments shape: (N_allowed, IFOs, 2)
+            # We want to keep glitches whose time falls within ANY allowed segment
+            # Since glitches are short, we can check center times
+            
+            # Flatten allowed segments to just start/end of 0th IFO (assuming synchronized)
+            allowed_starts = allowed_segments[:, 0, 0]
+            allowed_ends = allowed_segments[:, 0, 1]
+            
+            # Vectorized check: find glitches inside allowed ranges
+            # This can be O(N*M), but N_glitches and M_segments are usually < 10,000
+            # For strict equality (these are original windows), we can just check proximity
+            
+            keep_indices = []
+            
+            # Sort allowed segments by start time for binary search
+            sort_idx = np.argsort(allowed_starts)
+            allowed_starts = allowed_starts[sort_idx]
+            allowed_ends = allowed_ends[sort_idx]
+            
+            # For each glitch, find insertion point
+            idx_low = np.searchsorted(allowed_ends, gps_all, side='left')
+            idx_high = np.searchsorted(allowed_starts, gps_all, side='right')
+            
+            # If a glitch belongs to segment i, then start[i] <= gps <= end[i]
+            # searchsorted(ends, gps) gives index where all previous ends < gps
+            # searchsorted(starts, gps) gives index where all previous starts <= gps
+            # We need to find if there exists an 'i' such that starts[i] <= gps <= ends[i]
+            
+        if allowed_segments is not None:
+            # Handle potential extra dimensions (e.g. from splitting)
+            if allowed_segments.ndim == 3 and allowed_segments.shape[1] == 1:
+                 allowed_segments = allowed_segments.reshape(-1, 2)
+            elif allowed_segments.ndim == 1 and allowed_segments.shape[0] == 2:
+                 allowed_segments = allowed_segments.reshape(1, 2)
+            
+            # Filter based on segment overlap
+            # allowed_segments is shape (N, 2) [start, end]
+            # We check if glitch times (gps_all) fall within ANY allowed segment
+            
+            # This can be slow if segments are many. 
+            # But usually for train/val split we have O(100) segments.
+            # Vectorized check:
+            # For each glitch, check if it falls in correct range.
+            
+            # Optimized: use searchsorted if allowed_segments is sorted?
+            # They should be sorted by time.
+            
+            # Simple approach for now:
+            keep_mask = np.zeros(len(gps_all), dtype=bool)
+            for start, end in allowed_segments:
+                # Add 4s buffer to ensure we don't catch edges? 
+                # No, allowed_segments defines the valid range center.
+                # Glitch gps is center.
+                in_segment = (gps_all >= start) & (gps_all <= end)
+                keep_mask |= in_segment
+                
+            onsource_all = onsource_all[keep_mask]
+            offsource_all = offsource_all[keep_mask]
+            gps_all = gps_all[keep_mask]
+            labels_all = labels_all[keep_mask]
+            
+            n_glitches = len(gps_all)
+            print(f"Filtered cache using allowed_segments: kept {n_glitches} glitches")
+        
         rng = default_rng(seed)
         
         print(f"Loaded {n_glitches:,} glitches from cache, yielding batches of {num_examples_per_batch}")
         
+        if n_glitches == 0:
+             raise ValueError(f"No glitches found for allowed segments after filtering! (Allowed segments: {len(allowed_segments)})")
+
         while True:
             # Random batch indices
             batch_indices = rng.choice(n_glitches, size=num_examples_per_batch, replace=True)
