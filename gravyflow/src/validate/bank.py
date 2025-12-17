@@ -73,14 +73,19 @@ class ValidationBank:
     def _extract_scores(predictions) -> np.ndarray:
         """Extract scores from model predictions, handling common output shapes."""
         p = np.asarray(predictions)
+        # Shape check: predictions = (Batch,) for 1D or (Batch, NumClasses) for 2D
         if p.ndim == 2:
-            return p[:, 1] if p.shape[1] == 2 else p[:, 0]
+            # Shape: (Batch, NumClasses) - classification output
+            # Axis 0 = Batch, Axis 1 = Classes (typically 2 for binary)
+            return p[:, 1] if p.shape[1] == 2 else p[:, 0]  # shape[1] = NumClasses
+        # Shape: (Batch,) - regression or single-class output
         return p.reshape(-1)
 
     @staticmethod
     def _as_1d(arr, n: int) -> np.ndarray:
         """Flatten to 1D and crop to length n."""
         a = np.asarray(arr)
+        # Shape: flatten any multi-dim array to 1D
         return (a.reshape(-1) if a.ndim > 1 else a)[:n]
 
     def _beat(self) -> None:
@@ -208,8 +213,10 @@ class ValidationBank:
             }
 
             ct = np.asarray(y.get(keys["ct"], np.zeros(n)))
+            # Shape check: ct could be (Batch,) or (Batch, NumGenerators)
             if ct.ndim > 1 and ct.shape[-1] > 1:
-                ct = ct.mean(axis=-1)
+                # Shape: (Batch, NumGenerators) - take mean across generators
+                ct = ct.mean(axis=-1)  # -> (Batch,)
             batch["ct"] = self._as_1d(ct, n)
             batch["scores"] = np.asarray(batch_scores).reshape(-1)
 
@@ -356,13 +363,16 @@ class ValidationBank:
                     self._beat()
 
                     onsource, offsource, gps_times = map(np.asarray, (onsource, offsource, gps_times))
-                    batch_len = onsource.shape[0] if onsource.ndim > 2 else 1
+                    # Shape: onsource = (Batch, IFO, Samples) for 3D, or (IFO, Samples) for 2D
+                    # Axis 0 = Batch (if 3D), Axis 1 = IFO, Axis 2 = Samples
+                    batch_len = onsource.shape[0] if onsource.ndim > 2 else 1  # shape[0] = Batch
 
                     for j in range(batch_len):
                         if collected >= len(names):
                             break
                         all_ons.append(np.array(onsource[j : j + 1] if batch_len > 1 else onsource))
                         all_offs.append(np.array(offsource[j : j + 1] if batch_len > 1 else offsource))
+                        # Shape: gps_times = (Batch, IFO) for 2D or (Batch,) for 1D
                         all_gps.append(float(gps_times[j, 0] if gps_times.ndim > 1 else gps_times[j]))
                         collected += 1
 

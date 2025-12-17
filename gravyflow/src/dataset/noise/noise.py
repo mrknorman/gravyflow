@@ -17,6 +17,7 @@ from numpy.random import default_rng
 import gravyflow as gf
 from gravyflow.src.dataset.features.event import get_events_with_params, EventType
 from gravyflow.src.dataset.noise.acquisition import ifo_canonical_key
+from gravyflow.src.utils.shapes import ShapeEnforcer
 
 class NoiseType(Enum):
     WHITE = auto()
@@ -69,6 +70,8 @@ def white_noise_generator(
         s1 = rng.integers(1000000000)
         s2 = rng.integers(1000000000)
         
+        # Yield: onsource (BIS), offsource (BIS), gps_times (BI), labels
+        # Shapes: onsource = (Batch, IFO, Samples), gps_times = (Batch, IFO)
         yield _generate_white_noise(
             num_examples_per_batch, 
             len(ifos),
@@ -79,7 +82,7 @@ def white_noise_generator(
             len(ifos),
             num_offsource_samples,
             seed=s2
-        ), ops.full((num_examples_per_batch,), -1.0), None
+        ), ops.full((num_examples_per_batch, len(ifos)), -1.0), None  # Shape: gps_times = (B, I)
         
 def _generate_colored_noise(
     num_examples_per_batch: int,
@@ -222,7 +225,7 @@ def colored_noise_generator(
                 num_samples_list[1], 
                 interpolated_offsource_asds,
                 seed=s2
-            ), ops.full((num_examples_per_batch,), -1.0), None
+            ), ops.full((num_examples_per_batch, len(ifos)), -1.0), None
     
 
 @dataclass
@@ -384,8 +387,9 @@ class NoiseObtainer(Obtainer):
             raise ValueError(
                 "Noise generator failed to initilise..."
             )
-                
-        return self.generator
+        
+        # Enforce shape contracts
+        return ShapeEnforcer.wrap_generator(self.generator, num_ifos=len(self.ifos))
     
     def pseudo_real_noise_generator(
         self,
@@ -501,7 +505,7 @@ class NoiseObtainer(Obtainer):
                         num_samples_list[1], 
                         ops.sqrt(interpolated_offsource_psds),
                         seed=s2
-                    ), ops.full((num_examples_per_batch,), -1.0), None
+                    ), ops.full((num_examples_per_batch, len(self.ifos)), -1.0), None
                 
 
 @dataclass

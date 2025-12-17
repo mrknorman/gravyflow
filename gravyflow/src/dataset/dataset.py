@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 import numpy as np
 import keras
 from keras import ops
+import jax
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.whiten import whiten
 from gravyflow.src.utils.tensor import crop_samples, replace_nan_and_inf_with_zero, set_random_seeds
@@ -279,7 +280,12 @@ class GravyflowDataset(keras.utils.PyDataset):
         # For full safety with workers > 1, we might need to re-instantiate generators per worker.
         
         try:
-            onsource, offsource, gps_times, feature_labels = next(self.noise)
+            batch_data = next(self.noise)
+            if len(batch_data) == 4:
+                onsource, offsource, gps_times, feature_labels = batch_data
+            else:
+                onsource, offsource, gps_times = batch_data
+                feature_labels = None
         except Exception as e:
             logger.info(f"Noise generation failed: {e}\nTraceback: {traceback.format_exc()}")
             raise Exception(f"Noise generation failed: {e}")
@@ -349,11 +355,21 @@ class GravyflowDataset(keras.utils.PyDataset):
     def _process_whitened_injections(self, scaled_injections, offsource):
         """Process whitened injections if required."""
         if gf.ReturnVariables.WHITENED_INJECTIONS in self.variables_to_return:
-            whitened_injections = whiten(
-                scaled_injections, 
-                offsource, 
-                self.sample_rate_hertz
-            )
+            if len(ops.shape(scaled_injections)) == 4:
+                 # vmap over generator axis (axis 0)
+                 # whiten(timeseries, background, ...)
+                 # map over timeseries, broadcast background
+                 whitener = jax.vmap(
+                     lambda x: whiten(x, offsource, self.sample_rate_hertz),
+                     in_axes=0, out_axes=0
+                 )
+                 whitened_injections = whitener(scaled_injections)
+            else:
+                 whitened_injections = whiten(
+                    scaled_injections, 
+                    offsource, 
+                    self.sample_rate_hertz
+                )
             
             whitened_injections = gf.crop_samples(
                 whitened_injections, 
@@ -423,6 +439,11 @@ class GravyflowDataset(keras.utils.PyDataset):
     def _process_raw_onsource(self, onsource):
         """Process raw onsource data if required."""
         if gf.ReturnVariables.ONSOURCE in self.variables_to_return:
+            onsource = gf.crop_samples(
+                onsource, 
+                self.onsource_duration_seconds, 
+                self.sample_rate_hertz
+            )
             onsource = ops.cast(onsource, "float32")
             onsource = gf.replace_nan_and_inf_with_zero(onsource)
             return onsource

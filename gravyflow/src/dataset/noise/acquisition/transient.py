@@ -23,6 +23,7 @@ from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, ensure_even
 )
+from gravyflow.src.utils.shapes import ShapeEnforcer
 
 
 class TransientDataObtainer(BaseDataObtainer):
@@ -240,14 +241,28 @@ class TransientDataObtainer(BaseDataObtainer):
         
         Returns:
             (subarrays, backgrounds, gps_tensor, labels)
+            
+        Shape contracts:
+            - subarrays: (Batch, IFO, Samples) = BIS
+            - backgrounds: (Batch, IFO, Samples) = BIS  
+            - gps_tensor: (Batch, IFO) = BI
+            - labels: (Batch, IFO) = BI
         """
         final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
         final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
-        final_gps = ops.expand_dims(
-            ops.convert_to_tensor(batch_gps_times, dtype="float64"), 
-            axis=-1
-        )
-        batch_labels = self._lookup_labels(batch_gps_times)
+        
+        # Get num_ifos from subarrays shape: (Batch, IFO, Samples)
+        num_ifos = int(ops.shape(final_subarrays)[1])  # Axis 1 = IFO
+        
+        # GPS times: (Batch,) -> (Batch, IFO) by tiling
+        # Shape: gps_times = (Batch, IFO) = BI
+        gps_1d = ops.convert_to_tensor(batch_gps_times, dtype="float64")
+        final_gps = ops.tile(ops.expand_dims(gps_1d, axis=-1), (1, num_ifos))
+        
+        # Labels: (Batch,) -> (Batch, IFO) by tiling  
+        # Shape: labels = (Batch, IFO) = BI (same label for all IFOs in this batch item)
+        batch_labels_1d = self._lookup_labels(batch_gps_times)
+        batch_labels = ops.tile(ops.expand_dims(batch_labels_1d, axis=-1), (1, num_ifos))
         
         return (
             self._apply_augmentation(final_subarrays, is_transient=True),
@@ -1023,6 +1038,41 @@ class TransientDataObtainer(BaseDataObtainer):
             yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_gps_times)
 
     def get_onsource_offsource_chunks(
+            self,
+            sample_rate_hertz: float,
+            onsource_duration_seconds: float,
+            padding_duration_seconds: float,
+            offsource_duration_seconds: float,
+            num_examples_per_batch: int = None,
+            ifos: List[gf.IFO] = None,
+            scale_factor: float = None,
+            seed: int = None,
+            sampling_mode: SamplingMode = SamplingMode.RANDOM
+        ):
+        """
+        Wrapper to enforce shape contracts on generator.
+        """
+        gen = self._yield_onsource_offsource_chunks(
+            sample_rate_hertz,
+            onsource_duration_seconds,
+            padding_duration_seconds,
+            offsource_duration_seconds,
+            num_examples_per_batch,
+            ifos,
+            scale_factor,
+            seed,
+            sampling_mode
+        )
+
+        # Ensure ifos is a list to count num_ifos
+        if ifos is None:
+            ifos = [gf.IFO.L1]
+        elif not isinstance(ifos, (list, tuple)):
+            ifos = [ifos]
+
+        return ShapeEnforcer.wrap_generator(gen, num_ifos=len(ifos))
+
+    def _yield_onsource_offsource_chunks(
             self,
             sample_rate_hertz: float,
             onsource_duration_seconds: float,

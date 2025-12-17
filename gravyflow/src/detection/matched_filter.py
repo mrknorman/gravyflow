@@ -247,7 +247,7 @@ class MatchedFilter:
         Get maximum SNR across all templates and times.
         
         Args:
-            data: Strain data
+            data: Strain data, shape (Samples,) or (Batch, Samples)
             psd: One-sided PSD
         
         Returns:
@@ -255,18 +255,21 @@ class MatchedFilter:
         """
         snr = self.filter(data, psd)
         
+        # Shape check: snr is (NumTemplates, Samples) for 2D or (Batch, NumTemplates, Samples) for 3D
         if snr.ndim == 2:
-            # (templates, samples)
+            # Shape: (NumTemplates, Samples)
+            # Axis 0 = NumTemplates, Axis 1 = Samples
             flat_idx = jnp.argmax(snr)
-            template_idx = int(flat_idx // snr.shape[1])
+            template_idx = int(flat_idx // snr.shape[1])  # shape[1] = Samples
             time_idx = int(flat_idx % snr.shape[1])
             max_val = float(snr[template_idx, time_idx])
         else:
-            # (batch, templates, samples) - take max over batch
+            # Shape: (Batch, NumTemplates, Samples)
+            # Axis 0 = Batch, Axis 1 = NumTemplates, Axis 2 = Samples
             max_val = float(jnp.max(snr))
             flat_idx = jnp.argmax(snr.reshape(-1))
-            template_idx = int((flat_idx % (snr.shape[1] * snr.shape[2])) // snr.shape[2])
-            time_idx = int(flat_idx % snr.shape[2])
+            template_idx = int((flat_idx % (snr.shape[1] * snr.shape[2])) // snr.shape[2])  # shape[1]=Templates, shape[2]=Samples
+            time_idx = int(flat_idx % snr.shape[2])  # shape[2] = Samples
         
         return max_val, template_idx, time_idx
 
@@ -349,29 +352,33 @@ class MatchedFilterLayer(keras.Layer):
         Run matched filter and convert SNR to probabilities.
         
         Args:
-            inputs: Strain data of shape (batch, samples) or (batch, channels, samples)
+            inputs: Strain data of shape (Batch, Samples) or (Batch, Channels, Samples)
             training: Unused (no training for matched filter)
         
         Returns:
-            Binary probabilities of shape (batch, 2) for [P(noise), P(signal)]
+            Binary probabilities of shape (Batch, 2) for [P(noise), P(signal)]
         """
-        # Handle multi-channel input by taking mean across channels
+        # Shape check for multi-channel input
         if len(inputs.shape) == 3:
-            # (batch, channels, samples) -> (batch, samples)
-            data = jnp.mean(inputs, axis=1)
+            # Shape: (Batch, Channels, Samples) - e.g., multi-IFO data
+            # Axis 0 = Batch, Axis 1 = Channels/IFOs, Axis 2 = Samples
+            data = jnp.mean(inputs, axis=1)  # -> (Batch, Samples)
         else:
+            # Shape: (Batch, Samples)
             data = inputs
         
         # Get SNR for each batch element
-        snr = self._matched_filter.filter(data)  # (batch, templates, samples) or (templates, samples)
+        # Shape: snr = (Batch, NumTemplates, Samples) or (NumTemplates, Samples)
+        snr = self._matched_filter.filter(data)
         
         # Get maximum SNR over templates and time for each batch element
         if snr.ndim == 3:
-            # (batch, templates, samples)
-            max_snr = jnp.max(snr, axis=(1, 2))  # (batch,)
+            # Shape: (Batch, NumTemplates, Samples)
+            # Reduce over axes 1 (templates) and 2 (samples)
+            max_snr = jnp.max(snr, axis=(1, 2))  # -> (Batch,)
         elif snr.ndim == 2:
-            # (templates, samples) - single sample
-            max_snr = jnp.array([jnp.max(snr)])  # (1,)
+            # Shape: (NumTemplates, Samples) - single sample
+            max_snr = jnp.array([jnp.max(snr)])  # -> (1,)
         else:
             max_snr = jnp.max(snr)
             max_snr = jnp.atleast_1d(max_snr)
@@ -382,7 +389,7 @@ class MatchedFilterLayer(keras.Layer):
         )
         prob_noise = 1.0 - prob_signal
         
-        # Return in same format as classification models: (batch, 2)
+        # Return: shape (Batch, 2) matching classification model output
         return jnp.stack([prob_noise, prob_signal], axis=-1)
     
     def get_config(self):

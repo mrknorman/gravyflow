@@ -59,6 +59,11 @@ from .src.utils.tensor import (
     crop_samples, rfftfreq, get_element_shape, check_tensor_integrity,
     set_random_seeds
 )
+from .src.utils.shapes import (
+    ShapeContract, ShapeEnforcer, 
+    Axis_BIS, Axis_BI, Axis_GBIS, Axis_GB,
+    Axis_BPS, Axis_GBPS
+)
 from .src.utils.gpu import (setup_cuda, find_available_GPUs, get_tf_memory_usage, env, 
     get_gpu_memory_info)
 from .src.utils.io import (
