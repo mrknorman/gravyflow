@@ -832,6 +832,85 @@ class GlitchCache:
         return onsource, offsource, gps_times, labels
 
 
+    def stream_batches(
+        self,
+        batch_size: int,
+        sample_rate_hertz: float,
+        onsource_duration: float,
+        offsource_duration: float,
+        scale_factor: float = 1.0,
+        seed: int = None,
+        allowed_segments: np.ndarray = None
+    ):
+        """
+        Generator that yields random batches from the cache.
+        
+        Streams batches directly from disk to avoid loading entire cache into memory.
+        Supports optional segment filtering for train/val/test splits.
+        
+        Args:
+            batch_size: Number of samples per batch
+            sample_rate_hertz: Target sample rate
+            onsource_duration: Target onsource duration (including any padding)
+            offsource_duration: Target offsource duration
+            scale_factor: Amplitude scaling factor
+            seed: Random seed for reproducibility
+            allowed_segments: Optional (N, 2) array of [start, end] GPS segments to filter by
+            
+        Yields:
+            Tuples of (onsource, offsource, gps_times, labels)
+        """
+        from numpy.random import default_rng
+        
+        meta = self.get_metadata()
+        n_glitches = meta['num_glitches']
+        
+        # Get GPS times for filtering
+        gps_all = self.get_all_gps_times()
+        
+        # Build index of valid glitches
+        valid_indices = np.arange(n_glitches)
+        
+        if allowed_segments is not None and len(allowed_segments) > 0:
+            # Handle potential extra dimensions
+            if allowed_segments.ndim == 3 and allowed_segments.shape[1] == 1:
+                allowed_segments = allowed_segments.reshape(-1, 2)
+            elif allowed_segments.ndim == 1 and allowed_segments.shape[0] == 2:
+                allowed_segments = allowed_segments.reshape(1, 2)
+            
+            # Filter based on segment overlap
+            keep_mask = np.zeros(len(gps_all), dtype=bool)
+            for start, end in allowed_segments:
+                in_segment = (gps_all >= start) & (gps_all <= end)
+                keep_mask |= in_segment
+                
+            valid_indices = np.where(keep_mask)[0]
+            n_glitches = len(valid_indices)
+        
+        if n_glitches == 0:
+            raise ValueError(
+                f"No glitches found after filtering! "
+                f"(Allowed segments: {len(allowed_segments) if allowed_segments is not None else 0})"
+            )
+        
+        rng = default_rng(seed)
+        
+        while True:
+            # Random batch indices from valid_indices (with replacement for infinite generator)
+            batch_idx = rng.choice(n_glitches, size=batch_size, replace=True)
+            batch_indices = valid_indices[batch_idx]
+            
+            # Stream batch from disk
+            onsource, offsource, gps_times, labels = self.get_batch(
+                batch_indices,
+                sample_rate_hertz=sample_rate_hertz,
+                onsource_duration=onsource_duration,
+                offsource_duration=offsource_duration
+            )
+            
+            yield onsource * scale_factor, offsource * scale_factor, gps_times, labels
+
+
 def generate_glitch_cache_path(
     observing_run: str,
     ifo: str,
@@ -853,3 +932,4 @@ def generate_glitch_cache_path(
     
     filename = f"glitch_cache_{observing_run}_{ifo}.h5"
     return data_directory / filename
+

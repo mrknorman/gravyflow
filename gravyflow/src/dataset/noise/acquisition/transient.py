@@ -951,53 +951,6 @@ class TransientDataObtainer(BaseDataObtainer):
 
         return self.valid_segments
 
-    def _yield_from_cache(
-        self,
-        cache: GlitchCache,
-        batch_size: int,
-        sample_rate_hertz: float,
-        onsource_duration_seconds: float,
-        offsource_duration_seconds: float,
-        crop_duration_seconds: float = 0.0,
-        seed: int = None
-    ):
-        """Yield batches directly from HDF5 cache."""
-        rng = default_rng(seed)
-        meta = cache.get_metadata()
-        num_glitches = meta['num_glitches']
-        indices = np.arange(num_glitches)
-        
-        # Calculate padded onsource duration (includes crop padding on both sides)
-        total_onsource_duration = onsource_duration_seconds + (crop_duration_seconds * 2.0)
-        
-        # Stream directly from disk - HDF5 chunked storage enables efficient random access
-        # without loading the entire cache into memory
-        
-        while True:
-            rng.shuffle(indices)
-            for i in range(0, num_glitches, batch_size):
-                batch_indices = indices[i : i + batch_size]
-                
-                if len(batch_indices) == 0:
-                    continue
-                
-                # Read batch directly from disk with padded onsource for cropping
-                ons, offs, gps, labels = cache.get_batch(
-                    batch_indices,
-                    sample_rate_hertz=sample_rate_hertz,
-                    onsource_duration=total_onsource_duration,
-                    offsource_duration=offsource_duration_seconds
-                )
-                
-                # Shuffle within batch to restore randomness (indices were sorted for HDF5, but memory doesn't need it)
-                perm = rng.permutation(len(ons))
-                ons = ons[perm]
-                offs = offs[perm]
-                gps = gps[perm]
-                labels = labels[perm]
-                
-                yield ons, offs, gps, labels
-
     def _yield_events_direct(
         self,
         sample_rate_hertz: float,
