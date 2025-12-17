@@ -11,6 +11,8 @@ import threading
 import subprocess
 import copy
 import logging
+
+logger = logging.getLogger(__name__)
 import time
 from typing import List
 from datetime import datetime
@@ -102,14 +104,14 @@ def create_named_pipe(pipe_name):
     else:
         try:
             os.mkfifo(pipe_name)
-            logging.info(f"Named pipe {pipe_name} created.")
+            logger.info(f"Named pipe {pipe_name} created.")
         except OSError as e:
-            logging.error(f"Failed to create named pipe: {e}")
+            logger.error(f"Failed to create named pipe: {e}")
 
             error = e
 
     if not check_if_pipe_exists(pipe_name):
-        logging.error(f"Failed to create named pipe: {e}")
+        logger.error(f"Failed to create named pipe: {e}")
 
 
 def write_non_blocking(pipe_name, message):
@@ -121,13 +123,13 @@ def write_non_blocking(pipe_name, message):
                 fifo_writer.write(message)
             except OSError as e:
                 if e.errno == errno.EAGAIN or e.errno == errno.EWOULDBLOCK:
-                    logging.error("Write operation would block, no reader available.")
+                    logger.error("Write operation would block, no reader available.")
                 else:
                     raise  # Re-raise the exception if it's not a 'would block' error
     except FileNotFoundError:
-        logging.error(f"Named pipe {pipe_name} does not exist.")
+        logger.error(f"Named pipe {pipe_name} does not exist.")
     except Exception as e:
-        logging.error(f"Error opening/writing to pipe: {e}")
+        logger.error(f"Error opening/writing to pipe: {e}")
 
 def parse_name_and_time(input_string):
     # Split the input string into name and timestamp
@@ -158,16 +160,16 @@ def check_heartbeat_integrity(heartbeat, expected_command_name):
     name, timestamp = parse_name_and_time(heartbeat)
 
     if not name or not timestamp:
-        logging.error("Malformed heartbeat, assumed dead.")
+        logger.error("Malformed heartbeat, assumed dead.")
         if not name:
-            logging.error("Heartbeat name is missing!")
+            logger.error("Heartbeat name is missing!")
         if not timestamp:
-            logging.error("Could not convert timestamp to float!")
+            logger.error("Could not convert timestamp to float!")
         return None, None
 
     if name != expected_command_name:
-        logging.error("Malformed heartbeat, assumed dead.")
-        logging.error("Heartbeat name does not match!")
+        logger.error("Malformed heartbeat, assumed dead.")
+        logger.error("Heartbeat name does not match!")
         return None, None
 
     return name, timestamp
@@ -178,7 +180,7 @@ def open_non_blocking(pipe_name):
     try:
         fd = os.open(pipe_name, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
-        logging.error(f"Named pipe {pipe_name} does not exist. Subprocess might have terminated.")
+        logger.error(f"Named pipe {pipe_name} does not exist. Subprocess might have terminated.")
         return None
     
     return open(fd, 'r')
@@ -204,7 +206,7 @@ def acquire_heartbeat(
                     if (name is not None) and (timestamp is not None):
                         return timestamp
                     else:
-                        logging.warning(f"Malformed heartbeat received from {command.name}.")
+                        logger.warning(f"Malformed heartbeat received from {command.name}.")
                         return 0
                 else:
                     return 0
@@ -212,10 +214,10 @@ def acquire_heartbeat(
                 return 0
 
     except FileNotFoundError:
-        logging.error(f"Named pipe {command.pipe_name} does not exist. Subprocess might have terminated.")
+        logger.error(f"Named pipe {command.pipe_name} does not exist. Subprocess might have terminated.")
         return None
     except Exception as e:
-        logging.error(f"Error reading from pipe for {command.pipe_name}: {e}")
+        logger.error(f"Error reading from pipe for {command.pipe_name}: {e}")
         return 0
  
 def monitor_heartbeat(
@@ -233,17 +235,17 @@ def monitor_heartbeat(
     """
     if not flags["should_exit"].is_set():
         
-        logging.info(f"Acquiring heartbeat {command.name}...")
+        logger.info(f"Acquiring heartbeat {command.name}...")
         last_heartbeat_timestamp = acquire_heartbeat(
             command,
             acquisition_timeout_seconds=acquisition_timeout_seconds
         )
         if last_heartbeat_timestamp is None or last_heartbeat_timestamp == 0:
-            logging.warning(f"Failed to acquire heartbeat! Assumed dead at {get_current_datetime()}!")
+            logger.warning(f"Failed to acquire heartbeat! Assumed dead at {get_current_datetime()}!")
             flags["has_died"].set()
             return -1
         else:
-            logging.info(f"{command.name} at {command.id} heartbeat acquired at {get_current_datetime()}.")
+            logger.info(f"{command.name} at {command.id} heartbeat acquired at {get_current_datetime()}.")
             flags["heartbeat_acquired"].set()
     else:
         return -1
@@ -262,7 +264,7 @@ def monitor_heartbeat(
             return -1
 
         if timestamp == -1:
-            logging.info(f"{command.name} has succesfully completed at {get_current_datetime()}. Enforcing shutdown.")
+            logger.info(f"{command.name} has succesfully completed at {get_current_datetime()}. Enforcing shutdown.")
             time.sleep(30)
             flags["has_completed"].set()
             return 0
@@ -272,11 +274,11 @@ def monitor_heartbeat(
         try:
             time_since_last_beat = time.time() - last_heartbeat_timestamp
         except:
-            logging.warning("Malformed timestamp detected.")
+            logger.warning("Malformed timestamp detected.")
             continue
         
         if time_since_last_beat >= missed_heartbeat_threshold:
-            logging.warning(
+            logger.warning(
                 (f"{get_current_datetime()}: It has been {time_since_last_beat} "
                 f"seconds since last heartbeat detected from {command.name}.")
             )
@@ -305,7 +307,7 @@ def kill_process(pid):
     try:
         if pid is not None and pid > 0:
             os.kill(pid, signal.SIGKILL)
-            logging.info(f"Process with PID {pid} has been terminated.")
+            logger.info(f"Process with PID {pid} has been terminated.")
     except OSError as e:
         return
 
@@ -404,7 +406,7 @@ class Process:
     def start(self):
         try:
             process_gap_seconds = 10
-            logging.info((
+            logger.info((
                 f"Waiting {process_gap_seconds} s"
                 " to space out process activations."
             ))
@@ -455,7 +457,7 @@ class Process:
                 )
 
                 self.id = self.process.pid
-                logging.info(
+                logger.info(
                     f"Process: {self.name} started at {self.id}"
                 )
                 
@@ -463,7 +465,7 @@ class Process:
                 self.restart_counter = time.time()
 
         except Exception as e:
-            logging.exception((
+            logger.exception((
                 f"Failed to start process {self.name}"
                 " on GPU {self.current_gpu}."
             ))
@@ -484,7 +486,7 @@ class Process:
                 self.current_gpu
             ] -= self.memory_assigned
         else:
-            logging.warning(
+            logger.warning(
                 "Allocated memory is None when removing process."
             )
 
@@ -495,7 +497,7 @@ class Process:
             self.manager.allocated_memory[
                 self.current_gpu
             ] = 0
-            logging.warning(
+            logger.warning(
                 "Allocated memory has fallen below zero."
             )
         
@@ -541,7 +543,7 @@ class Process:
 
         # Check if the process has been restarted more than N times in X seconds:
         if self.restart_count > self.manager.max_restarts:
-            logging.error((
+            logger.error((
                 f"Process {self.name} has been restarted "
                 f"{self.restart_count} times within "
                 f"{self.manager.restart_timeout_seconds} "
@@ -562,12 +564,12 @@ class Process:
     def print_stderr(self):
         stdout, stderr = self.process.communicate()
         if stdout:
-            logging.error((
+            logger.error((
                 f"Process {self.name} at {self.id}"
                 f" - STDOUT: {stdout.decode()}"
             ))
         if stderr:
-            logging.error((
+            logger.error((
                 f"Process {self.name} at {self.id}"
                 f" - STDERR: {stderr.decode()}"
             ))
@@ -593,7 +595,7 @@ class Process:
         match self.last_retcode:
             case -6:
                 if self.manager.max_num_concurent_processes > 20:
-                    logging.info(
+                    logger.info(
                         (
                             f"Process {self.name} was killed. Reducing max number of processes from "
                             f"{self.manager.max_num_concurent_processes} to {self.manager.max_num_concurent_processes - 1}."
@@ -601,7 +603,7 @@ class Process:
                     )
                     self.manager.max_num_concurent_processes -= 1
             case 1:
-                logging.info(
+                logger.info(
                     (
                         f"Process {self.name} ended with general error, assuming OOM error. Increasing job memory requriment from "
                          f"{self.tensorflow_memory_mb} to {self.tensorflow_memory_mb + memory_increase_mb}."
@@ -614,7 +616,7 @@ class Process:
         self.cuda_overhead_mb += memory_increase_mb // 2
 
         if self.tensorflow_memory_mb > max_memory_mb:
-            logging.info(
+            logger.info(
                 (
                     f"Process {self.name} has reached max memory requirement {max_memory_mb} "
                     f"it will fail if this is not enough."
@@ -720,7 +722,7 @@ class Manager:
         if (self.queued or self.running):
             return True
         else:
-            logging.info((
+            logger.info((
                 f"All processes finished. "
                 f"{len(self.completed)}/{self.total_processes}"
                 f" completed, {len(self.failed)}/{self.total_processes} failed."
@@ -743,10 +745,10 @@ class Manager:
             
             self.allocated_memory : np.ndarray = np.zeros([num_gpus], dtype = np.int64)
 
-            logging.info(
+            logger.info(
                 "Starting the process management system..."
             )
-            logging.info((
+            logger.info((
                 f"Monitoring {self.total_processes} "
                 f"processes across {num_gpus} available GPUs."
             ))
@@ -769,7 +771,7 @@ class Manager:
             if process.process is not None:
                 
                 if process.check_if_failed():
-                    logging.warning((
+                    logger.warning((
                         "Failed process found in running jobs."
                     ))
                     
@@ -777,7 +779,7 @@ class Manager:
                         self.queued.remove(process)
                     continue
                 if process.check_if_completed():
-                    logging.warning((
+                    logger.warning((
                         "Completed process found in running jobs."
                     ))
 
@@ -794,7 +796,7 @@ class Manager:
 
                     # Check if the process should be marked as failed
                     if retcode != 0:  # Process failed, log the error
-                        logging.error((
+                        logger.error((
                             f"Process {process.name} at {process.id} "
                             f"failed with return code {retcode} : "
                             f"{explain_exit_code(retcode)}. "
@@ -802,7 +804,7 @@ class Manager:
                         ))
                         process.requeue()
                     else:
-                        logging.info((
+                        logger.info((
                             f"Process {process.name} at {process.id} "
                             f"completed successfully."
                         ))

@@ -10,6 +10,8 @@ import hashlib
 from typing import List, Dict, Optional, Union, Tuple
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 import numpy as np
 from numpy.random import default_rng
 from keras import ops
@@ -268,7 +270,7 @@ class TransientDataObtainer(BaseDataObtainer):
         data_len = ops.shape(event_segment.data[0])[0]
         
         if data_len < num_onsource_samples:
-            logging.warning(f"Feature segment too short ({data_len} < {num_onsource_samples})")
+            logger.warning(f"Feature segment too short ({data_len} < {num_onsource_samples})")
             return None, None, None
         
         center_idx = data_len // 2
@@ -311,7 +313,7 @@ class TransientDataObtainer(BaseDataObtainer):
                     off_chunk = ops.pad(off_chunk, [(0, pad_needed)], mode='edge')
             
             if off_chunk is None:
-                logging.warning(
+                logger.warning(
                     f"No offsource data available for event at GPS {event_gps_time:.1f}. Skipping."
                 )
                 return None, None, None
@@ -478,7 +480,7 @@ class TransientDataObtainer(BaseDataObtainer):
         original_count = len(segments)
         merged_count = len(merged_array)
         if merged_count < original_count:
-            logging.info(
+            logger.info(
                 f"Greedy clustering: {original_count} transients -> "
                 f"{merged_count} download segments (gap threshold: {gap_threshold:.0f}s)"
             )
@@ -543,7 +545,7 @@ class TransientDataObtainer(BaseDataObtainer):
         
         # Apply cap if requested (limit number of glitches)
         if cap is not None and cap > 0:
-            logging.info(f"Applying cap to glitches: {len(original_segments)} -> {cap}")
+            logger.info(f"Applying cap to glitches: {len(original_segments)} -> {cap}")
             original_segments = original_segments[:cap]
             original_gps_times = original_gps_times[:cap]
         
@@ -593,8 +595,8 @@ class TransientDataObtainer(BaseDataObtainer):
         all_gps_times = []
         all_labels = []
         
-        logging.info(f"Precaching {len(original_gps_times)} glitches from {len(clustered_segments)} download segments...")
-        logging.info(f"Storing at {CACHE_SAMPLE_RATE_HERTZ}Hz, {CACHE_ONSOURCE_DURATION}s onsource, {CACHE_OFFSOURCE_DURATION}s offsource")
+        logger.info(f"Precaching {len(original_gps_times)} glitches from {len(clustered_segments)} download segments...")
+        logger.info(f"Storing at {CACHE_SAMPLE_RATE_HERTZ}Hz, {CACHE_ONSOURCE_DURATION}s onsource, {CACHE_OFFSOURCE_DURATION}s offsource")
         
         # Incremental Saving & Resume Logic
         start_cluster_idx = 0
@@ -613,15 +615,15 @@ class TransientDataObtainer(BaseDataObtainer):
                 last_processed_gps = cache.get_last_gps()
                 
                 if start_cluster_idx > 0 or last_processed_gps > 0:
-                    logging.info(f"Resuming precache from cluster index {start_cluster_idx}, last GPS {last_processed_gps}")
+                    logger.info(f"Resuming precache from cluster index {start_cluster_idx}, last GPS {last_processed_gps}")
                     resume_mode = True
             except (ValueError, KeyError, OSError) as e:
-                logging.warning(f"Existing partial cache incompatible or corrupt: {e}. Rebuilding...")
+                logger.warning(f"Existing partial cache incompatible or corrupt: {e}. Rebuilding...")
                 force_rebuild = True
         
         # Check if already complete
         if resume_mode and start_cluster_idx >= len(clustered_segments):
-             logging.info(f"Cache already complete ({start_cluster_idx} segments).")
+             logger.info(f"Cache already complete ({start_cluster_idx} segments).")
              return cache_path
 
         if not resume_mode or force_rebuild:
@@ -680,10 +682,10 @@ class TransientDataObtainer(BaseDataObtainer):
                     segment_key
                 )
                 if segment_data is None:
-                    logging.warning(f"Failed to download segment {cluster_idx}")
+                    logger.warning(f"Failed to download segment {cluster_idx}")
                     continue
             except Exception as e:
-                logging.warning(f"Error downloading segment {cluster_idx}: {e}")
+                logger.warning(f"Error downloading segment {cluster_idx}: {e}")
                 continue
             
             # Extract each transient from this segment
@@ -728,7 +730,7 @@ class TransientDataObtainer(BaseDataObtainer):
                     batch_labels.append(label)
                     
                 except Exception as e:
-                    logging.debug(f"Failed to extract transient at {gps_time}: {e}")
+                    logger.exception(f"Failed to extract transient at {gps_time}: {e}")
                     continue
             
             # Flush batch if threshold reached
@@ -751,7 +753,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 batch_labels = []
                 
             if (cluster_idx + 1) % 50 == 0:
-                logging.info(f"Processed {cluster_idx + 1}/{len(clustered_segments)} segments, extracted {total_extracted + len(batch_gps)} glitches")
+                logger.info(f"Processed {cluster_idx + 1}/{len(clustered_segments)} segments, extracted {total_extracted + len(batch_gps)} glitches")
         
         # Flush remaining items
         if len(batch_gps) > 0:
@@ -770,7 +772,7 @@ class TransientDataObtainer(BaseDataObtainer):
         # If purely verifying return, total_extracted might be 0 if all skipped.
         # But we return cache_path regardless.
         
-        logging.info(f"Precached {total_extracted} new glitches to {cache_path}")
+        logger.info(f"Precached {total_extracted} new glitches to {cache_path}")
         return cache_path
 
     # =========================================================================
@@ -875,7 +877,7 @@ class TransientDataObtainer(BaseDataObtainer):
                                 )
                                 all_feature_segments_list.append(gl_segs)
                         except Exception as e:
-                            logging.warning(f"Failed to fetch glitches for {ifo}: {e}")
+                            logger.warning(f"Failed to fetch glitches for {ifo}: {e}")
                             continue
                     
                     # Unified update of feature labels (single concatenation)
@@ -941,7 +943,7 @@ class TransientDataObtainer(BaseDataObtainer):
                     target_segments = np.empty((0, 2))
             
             if len(target_segments) == 0:
-                logging.warning(f"No feature segments found for group {group_name}")
+                logger.warning(f"No feature segments found for group {group_name}")
             
             # Expand for Multi-IFO: (N, IFOs, 2)
             num_ifos = len(ifos)
@@ -951,7 +953,7 @@ class TransientDataObtainer(BaseDataObtainer):
             if self.feature_segments is not None:
                 num_features = len(self.feature_segments)
                 if num_features > 0:
-                    logging.info(f"TRANSIENT MODE: {num_features} feature segments ready")
+                    logger.info(f"TRANSIENT MODE: {num_features} feature segments ready")
                 
             # Randomize/Order segments
             self.order_segments(self.valid_segments, segment_order, seed)
@@ -1110,10 +1112,10 @@ class TransientDataObtainer(BaseDataObtainer):
             try:
                 cache.validate_request(sample_rate_hertz, onsource_duration_seconds, offsource_duration_seconds)
                 meta = cache.get_metadata()
-                logging.info(f"Unified Data Path: cache has {meta['num_glitches']} glitches at {cache_path}")
+                logger.info(f"Unified Data Path: cache has {meta['num_glitches']} glitches at {cache_path}")
                 self._cache_logged = True
             except ValueError as e:
-                logging.warning(f"Cache found but incompatible: {e}")
+                logger.warning(f"Cache found but incompatible: {e}")
         
         # UNIFIED PATH: Cache-first with lazy append
         # All glitches go through the cache - either from existing cache or downloaded and appended
@@ -1134,7 +1136,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 onsource_samples=num_cache_onsource,
                 offsource_samples=num_cache_offsource
             )
-            logging.info(f"Created new cache file: {cache_path}")
+            logger.info(f"Created new cache file: {cache_path}")
             # Cache exists - use disk-based access (HDF5 chunked storage is efficient)
             # The hybrid path below uses has_gps() and get_by_gps() which read from disk
         # Build batches: cache hits served instantly, misses downloaded in parallel
@@ -1195,7 +1197,7 @@ class TransientDataObtainer(BaseDataObtainer):
                     total_samples = self._cache_hit_count + self._cache_miss_count
                     if total_samples - self._last_log_count >= 1000:
                         hit_rate = self._cache_hit_count / total_samples * 100
-                        logging.info(f"Cache stats: {self._cache_hit_count} hits, {self._cache_miss_count} misses ({hit_rate:.1f}% hit rate)")
+                        logger.info(f"Cache stats: {self._cache_hit_count} hits, {self._cache_miss_count} misses ({hit_rate:.1f}% hit rate)")
                         self._last_log_count = total_samples
                     
                     if len(batch_subarrays) >= num_examples_per_batch:
@@ -1248,18 +1250,18 @@ class TransientDataObtainer(BaseDataObtainer):
 
                         # NAN CHECK: Post-Extraction
                         if np.isnan(onsource_full).any():
-                             logging.error(f"NAN DETECTED: In onsource_full after extract! GPS: {extracted_gps}")
+                             logger.error(f"NAN DETECTED: In onsource_full after extract! GPS: {extracted_gps}")
                         
                         # ZERO CHECK
                         if np.all(onsource_full == 0):
-                             logging.error(f"ZERO SIGNAL DETECTED: onsource_full is all zeros! GPS: {extracted_gps}")
+                             logger.error(f"ZERO SIGNAL DETECTED: onsource_full is all zeros! GPS: {extracted_gps}")
 
                         # Save to cache using segment-window GPS (matches lookup calculation)
                         label = self._lookup_labels([gps_time])[0] if hasattr(self, '_feature_labels') else 0
                         try:
                             cache.append_single(np.array(onsource_full), np.array(offsource_full), gps_time, label)
                         except Exception as e:
-                            logging.warning(f"Failed to append sample to cache (GPS={gps_time:.3f}): {e}")
+                            logger.warning(f"Failed to append sample to cache (GPS={gps_time:.3f}): {e}")
                         
                         # Crop for this request
                         # Crop for this request
@@ -1278,7 +1280,7 @@ class TransientDataObtainer(BaseDataObtainer):
 
                         # NAN CHECK: Post-Crop
                         if np.isnan(onsource_cropped).any():
-                             logging.error(f"NAN DETECTED: In onsource_cropped! GPS: {extracted_gps}")
+                             logger.error(f"NAN DETECTED: In onsource_cropped! GPS: {extracted_gps}")
 
                         batch_subarrays.append(onsource_cropped * scale_factor)
                         batch_backgrounds.append(offsource_cropped * scale_factor)

@@ -13,6 +13,8 @@ import time
 import pickle
 import datetime
 
+logger = logging.getLogger(__name__)
+
 import numpy as np
 from tqdm import tqdm
 import keras
@@ -495,10 +497,7 @@ class WhitenPassLayer(BaseLayer):
 def cap_value(x):
     return ops.clip(x, 1.0e-5, 1000)  # values will be constrained to [-1, 1]
 
-def ensure_even(number):
-    if number % 2 != 0:
-        number -= 1
-    return number
+from gravyflow.src.utils.numerics import ensure_even
 
 class Model:
     def __init__(
@@ -670,11 +669,11 @@ class Model:
         
         # Log training_config
         for key, value in training_config.items():
-            logging.info(f"Training config: {key} = {value}")
+            logger.info(f"Training config: {key} = {value}")
 
         # Log dataset_args
         for key, value in dataset_args.items():
-            logging.info(f"Dataset args: {key} = {value}")
+            logger.info(f"Dataset args: {key} = {value}")
 
         # Create an instance of DenseModel with num_neurons list
         model = cls(
@@ -862,7 +861,7 @@ class Model:
             model_path = model_load_path
 
         if hidden_layers is not None and model_config_path is not None:
-            logging.warning("When attempting to load model, hidden layers and model_config_path are both not none. Using hidden layers.")
+            logger.warning("When attempting to load model, hidden layers and model_config_path are both not none. Using hidden layers.")
         
         blueprint_exists = True
         if hidden_layers is not None:
@@ -933,7 +932,7 @@ class Model:
         if os.path.exists(model_path) and not force_overwrite:
             try:
                 # Try to load the model
-                logging.info(f"Loading model from {model_path}")
+                logger.info(f"Loading model from {model_path}")
                 loaded_model = keras.models.load_model(model_path)
                 model.model = loaded_model
                 model.loaded=True
@@ -941,9 +940,9 @@ class Model:
                 return model
 
             except Exception as e:
-                logging.error(f"Error loading model: {e}")
+                logger.error(f"Error loading model: {e}")
                 if blueprint_exists:
-                    logging.info("Using new model...")
+                    logger.info("Using new model...")
                     return model
                 elif load_genome is True:
                     genome_path = Path(f"{model_path}/genome")
@@ -968,7 +967,7 @@ class Model:
         else:
             # If the model doesn't exist, build a new one
             if blueprint_exists:
-                logging.info("No saved model found. Using new model...")
+                logger.info("No saved model found. Using new model...")
                 return model
             else:
                 raise ValueError("No default model blueprint exists!")
@@ -1205,7 +1204,7 @@ class Model:
                 initial_epoch = len(history_data[checkpoint_monitor])
 
                 if initial_epoch - best_epoch > training_config["patience"]:
-                    logging.info(
+                    logger.info(
                         f"Model already completed training. Skipping! Current epoch {initial_epoch}, best epoch {best_epoch}."
                     )
                     self.model = keras.models.load_model(
@@ -1247,9 +1246,9 @@ class Model:
         )
 
         if force_retrain:
-            logging.info("Forcing retraining!")
+            logger.info("Forcing retraining!")
         else:
-            logging.info(f"Resuming from {initial_epoch}, current history : {history_data}")
+            logger.info(f"Resuming from {initial_epoch}, current history : {history_data}")
         
         history_saver = gf.CustomHistorySaver(self.model_path, force_overwrite=force_retrain)
         wait_printer = gf.PrintWaitCallback(early_stopping)
@@ -1272,7 +1271,7 @@ class Model:
             if heart is not None:
                 callbacks += [gf.HeartbeatCallback(heart, 32)]
         else:
-            print("Training... or at least trying to.")
+            logger.info("Training... or at least trying to.")
 
         self.metrics.append(
             self.model.fit(
@@ -1579,7 +1578,7 @@ class Population:
                     initial_restart_count=1
                 ))
             else:
-                logging.info(
+                logger.info(
                     f"Model {model['path']} has already completed validation, skipping."
                 )
 
@@ -1602,8 +1601,8 @@ class Population:
             while manager:
                 manager()  # Call the manager function.
         
-        else:
-            logging.info(
+        if not initial_processes:
+            logger.info(
                 f"Generation {self.generation} empty or completed. Skipping."
             )
 
@@ -1616,7 +1615,7 @@ class Population:
             with open(path, 'r') as file:
                 return json.load(file)
         except Exception as e:
-            logging.error(f"Failed to load configuration: {e}")
+            logger.error(f"Failed to load configuration: {e}")
             raise
 
     def train(
@@ -1629,8 +1628,6 @@ class Population:
         email_config_path = Path("./gravyflow/alert_settings.json")
         email_config = self.load_config(email_config_path)
 
-        logging.info("Sending email...")
-
         gf.send_email(
             f"Started optimising {self.population_directory_path}..", 
             (f"Started optimization of {self.num_population_members} population members over {num_generations}"
@@ -1639,7 +1636,7 @@ class Population:
             Path(email_config['email_config_path'])
         )
 
-        logging.info("Starting training...")
+        logger.info("Starting training...")
 
         """
         self.generation = 5
@@ -1650,11 +1647,11 @@ class Population:
             if (self.population_directory_path / f"generation_{self.generation}/model_{self.current_id}/genome").exists():
                 self.load_model()
             else:
-                print("Can't find file!")
+                logger.warning("Can't find file!")
         """
 
         for generation_index in range(self.generation, num_generations):
-            logging.info(f"Training Generation: {self.generation}")
+            logger.info(f"Training Generation: {self.generation}")
             
             self.train_generation()
             self.generation += 1
@@ -1664,9 +1661,8 @@ class Population:
                 generation_index
             )
 
-            logging.info(
-                "Current Fitnesses:", 
-                self.nursary.fitnesses
+            logger.info(
+                f"Current Fitnesses: {self.nursary.fitnesses}"
             )
 
             gf.send_email(
@@ -1706,7 +1702,7 @@ class Population:
         #Mutate
         new_genome.mutate(0.05)
 
-        logging.info('Germinated new model.')
+        logger.info('Germinated new model.')
 
         self.add_model(new_genome)
 
@@ -1715,7 +1711,7 @@ class Population:
         new_genome.reseed(self.rng.integers(1E10))
         new_genome.randomize()
 
-        logging.info('Randomised new model.')
+        logger.info('Randomised new model.')
 
         self.add_model(new_genome)    
 
@@ -1760,7 +1756,7 @@ class Population:
                     
                     fitnesses[model_index] = calculate_fitness(valid_scores, score_threshold, history)
                 except Exception as e:
-                    logging.error(e)
+                    logger.error(e)
                     pass
 
         return list(fitnesses)
@@ -1794,14 +1790,14 @@ def calculate_fitness(valid_scores: List[float], score_threshold : float, histor
     # Pre-calculation checks for NaN or inf
     terms = [num_valid_scores_above, len_valid_scores, min_val_loss]
     if np.any(np.isnan(terms)) or np.any(np.isinf(terms)):
-        logging.info("One or more terms are NaN or infinite. Setting fitness to 0.")
+        logger.info("One or more terms are NaN or infinite. Setting fitness to 0.")
         return 0.0
     
     fitness = 1.0 / (1.0 - (num_valid_scores_above / len_valid_scores) + min_val_loss + 1E-8)
     
     # Post-calculation check for NaN or inf in the fitness result
     if np.isnan(fitness) or np.isinf(fitness):
-        logging.info("Calculated fitness is NaN or infinite. Setting fitness to 0.")
+        logger.info("Calculated fitness is NaN or infinite. Setting fitness to 0.")
         return 0.0
 
     return fitness

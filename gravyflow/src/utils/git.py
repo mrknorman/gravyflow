@@ -1,6 +1,8 @@
 import os
 import logging
 
+logger = logging.getLogger(__name__)
+
 from git import Repo, InvalidGitRepositoryError
 
 def get_current_repo():
@@ -13,8 +15,8 @@ def get_current_repo():
     try:
         # Initialize the repository object based on the current working directory
         repo = Repo(cwd, search_parent_directories=True)
-        logging.info("Found working directory repository.")
+        logger.info("Found working directory repository.")
         return repo
     except InvalidGitRepositoryError:
-        logging.warning("Current working directory is not a git repository.")
+        logger.warning("Current working directory is not a git repository.")
         return None

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import random
 
 import numpy as np
+import logging
 import keras
 from keras import ops
 import jax.numpy as jnp
@@ -12,6 +13,8 @@ from numpy.random import default_rng
 from scipy.stats import truncnorm
 import gravyflow as gf
 import jax
+
+logger = logging.getLogger(__name__)
 
 class DistributionType(Enum):
     CONSTANT = auto()         
@@ -511,7 +514,7 @@ def get_element_shape(dataset):
 
 def print_active_gpu_memory_info():
     # Placeholder for JAX/Keras backend memory info
-    print("GPU memory info not available for generic Keras backend.")
+    logger.info("GPU memory info not available for generic Keras backend.")
 
 def pad_if_odd(tensor):
     tensor = ops.convert_to_tensor(tensor)

@@ -25,8 +25,6 @@ class Validator:
     # ----------------------------- construction/logging -----------------------------
 
     def __init__(self):
-        self.logger = self._setup_logger()
-
         # runtime identity/config
         self.name: str = "model"
         self.config: ValidationConfig = ValidationConfig()
@@ -46,16 +44,9 @@ class Validator:
         # runtime-only
         self.bank: Optional[ValidationBank] = None
 
-    @staticmethod
-    def _setup_logger(level: int = logging.INFO) -> logging.Logger:
-        log = logging.getLogger("validator")
-        if not log.handlers:
-            log.addHandler(logging.StreamHandler(sys.stdout))
-        log.setLevel(level)
-        return log
+
 
     def _restore_runtime(self, *, name: str, config: ValidationConfig, dataset_args: dict, level: int) -> None:
-        self.logger = self._setup_logger(level)
         self.name = str(name) if name else self.name
         self.config = config or ValidationConfig()
         self.dataset_args = dataset_args or {}
@@ -97,7 +88,7 @@ class Validator:
 
                 if v.efficiency_data is not None and v.far_scores is not None:
                     if cls._has_scored_real_events(v.real_events):
-                        v.logger.info("Loaded complete validation data (including scored real events) from checkpoint.")
+                        logger.info("Loaded complete validation data (including scored real events) from checkpoint.")
                         # still attach a live bank for downstream calls (ROC pools, etc.)
                         v.bank = ValidationBank(model=model, dataset_args=dataset_args, config=v.config, heart=heart)
                         v.bank.far_scores = v.far_scores
@@ -105,9 +96,9 @@ class Validator:
                         v.bank.scores = np.asarray(v.efficiency_data.get("scores")) if v.efficiency_data else None
                         v.bank.injection_masks = np.ones_like(v.bank.scores) if v.bank.scores is not None else None
                         return v
-                    v.logger.info("Loaded partial validation data. Real events missing scores - regenerating...")
+                    logger.info("Loaded partial validation data. Real events missing scores - regenerating...")
             except Exception as e:
-                v.logger.warning(f"Failed to load checkpoint: {e}. Regenerating.")
+                logger.warning(f"Failed to load checkpoint: {e}. Regenerating.")
 
         # Live bank (does the heavy lifting)
         bank = ValidationBank(model=model, dataset_args=dataset_args, config=v.config, heart=heart)
@@ -118,7 +109,7 @@ class Validator:
             v.far_scores, v.noise_gps_times = bank.far_scores, bank.noise_gps_times
             if checkpoint_file_path:
                 v.save(checkpoint_file_path)
-                v.logger.info("Checkpoint saved after noise generation")
+                logger.info("Checkpoint saved after noise generation")
         else:
             bank.far_scores = v.far_scores
             bank.noise_gps_times = v.noise_gps_times
@@ -130,7 +121,7 @@ class Validator:
             v.worst_performers = bank.get_worst_performers()
             if checkpoint_file_path:
                 v.save(checkpoint_file_path)
-                v.logger.info("Checkpoint saved after injection scoring")
+                logger.info("Checkpoint saved after injection scoring")
         else:
             bank.snrs = np.asarray(v.efficiency_data.get("snrs")) if v.efficiency_data else None
             bank.scores = np.asarray(v.efficiency_data.get("scores")) if v.efficiency_data else None
@@ -142,16 +133,16 @@ class Validator:
 
         # Real events (optional; network/catalog I/O inside gravyflow)
         has_scored = cls._has_scored_real_events(v.real_events)
-        v.logger.info(f"Real events check: {len(v.real_events) if v.real_events else 0} events loaded, has_scored={has_scored}")
+        logger.info(f"Real events check: {len(v.real_events) if v.real_events else 0} events loaded, has_scored={has_scored}")
         if not has_scored:
             try:
                 bank.generate_real_events()
                 v.real_events = bank.get_real_events()
                 if checkpoint_file_path:
                     v.save(checkpoint_file_path)
-                    v.logger.info("Checkpoint saved after real events scoring")
+                    logger.info("Checkpoint saved after real events scoring")
             except Exception as e:
-                v.logger.warning(f"Real events generation failed: {e}")
+                logger.warning(f"Real events generation failed: {e}")
                 v.real_events = []
 
         if checkpoint_file_path:
@@ -191,10 +182,10 @@ class Validator:
 
     def save(self, file_path: Path) -> None:
         file_path = Path(file_path)
-        self.logger.info(f"Saving validation data to {file_path}")
+        logger.info(f"Saving validation data to {file_path}")
         gf.ensure_directory_exists(file_path.parent)
 
-        with gf.open_hdf5_file(file_path, self.logger, mode="w") as f:
+        with gf.open_hdf5_file(file_path, logger, mode="w") as f:
             self._h5_write_scalar(f, "name", self.name)
             self._h5_write_scalar(f, "input_duration_seconds", float(self.input_duration_seconds))
             self._h5_write_scalar(f, "offsource_duration_seconds", float(getattr(self, "offsource_duration_seconds", 0.0)))
@@ -249,7 +240,6 @@ class Validator:
     @classmethod
     def load(cls, file_path: Path, logging_level: int = logging.INFO) -> "Validator":
         v = cls()
-        v.logger = cls._setup_logger(logging_level)
 
         # ensure attributes always exist (prevents AttributeError on older checkpoints/call paths)
         v.efficiency_data = None
@@ -334,42 +324,42 @@ class Validator:
         args = getattr(self, "dataset_args", None) or {}
         noise_obt = args.get("noise_obtainer")
         if not noise_obt or not hasattr(noise_obt, "ifo_data_obtainer"):
-            self.logger.info("GPS plot: noise_obtainer has no ifo_data_obtainer")
+            logger.info("GPS plot: noise_obtainer has no ifo_data_obtainer")
             return None
 
         obt = noise_obt.ifo_data_obtainer
         if not obt:
-            self.logger.info("GPS plot: ifo_data_obtainer is None")
+            logger.info("GPS plot: ifo_data_obtainer is None")
             return None
 
         seg = getattr(obt, "valid_segments_adjusted", None)
         if seg is not None:
-            self.logger.info(f"GPS plot: Using valid_segments_adjusted, shape={np.asarray(seg).shape}")
+            logger.info(f"GPS plot: Using valid_segments_adjusted, shape={np.asarray(seg).shape}")
             return np.asarray(seg)
 
         seg = getattr(obt, "valid_segments", None)
         if seg is not None:
-            self.logger.info(f"GPS plot: Using valid_segments, shape={np.asarray(seg).shape}")
+            logger.info(f"GPS plot: Using valid_segments, shape={np.asarray(seg).shape}")
             return np.asarray(seg)
 
-        self.logger.info("GPS plot: Reloading valid segments for distribution plot...")
+        logger.info("GPS plot: Reloading valid segments for distribution plot...")
         try:
             ifos = getattr(noise_obt, "ifos", None) or getattr(getattr(self, "config", None), "ifos", None)
             if not ifos:
-                self.logger.warning("GPS plot: noise_obtainer has no IFOs configured")
+                logger.warning("GPS plot: noise_obtainer has no IFOs configured")
                 return None
 
             seg = obt.get_valid_segments(ifos=ifos, seed=42, group_name=args.get("group", "test"))
             if seg is None:
-                self.logger.warning("GPS plot: get_valid_segments returned None")
+                logger.warning("GPS plot: get_valid_segments returned None")
                 return None
 
             seg = np.asarray(seg)
             obt.valid_segments = seg  # cache back onto object
-            self.logger.info(f"GPS plot: Successfully fetched segments, shape={seg.shape}")
+            logger.info(f"GPS plot: Successfully fetched segments, shape={seg.shape}")
             return seg
         except Exception as e:
-            self.logger.warning(f"GPS plot: Failed to fetch valid segments: {e}")
+            logger.warning(f"GPS plot: Failed to fetch valid segments: {e}")
             return None
 
     def plot(self, output_path: Path = None, comparison_validators: Optional[List["Validator"]] = None):
@@ -432,7 +422,7 @@ class Validator:
                         try:
                             plots.append(generate_waveform_plot(sample, self.input_duration_seconds))
                         except Exception as e:
-                            self.logger.warning(f"Error plotting FN sample: {e}")
+                            logger.warning(f"Error plotting FN sample: {e}")
                     if plots:
                         fn_tabs.append((f"SNR {bin_key}", pn.Column(*plots)))
                 if fn_tabs:
@@ -445,7 +435,7 @@ class Validator:
                     try:
                         plots.append(generate_waveform_plot(sample, self.input_duration_seconds))
                     except Exception as e:
-                        self.logger.warning(f"Error plotting FP sample: {e}")
+                        logger.warning(f"Error plotting FP sample: {e}")
                 if plots:
                     tabs.append(("Worst False Positives", pn.Column(*plots)))
 
@@ -460,6 +450,6 @@ class Validator:
             output_path = Path(output_path)
             gf.ensure_directory_exists(output_path.parent)
             template.save(str(output_path), resources="inline")
-            self.logger.info(f"Saved report to {output_path}")
+            logger.info(f"Saved report to {output_path}")
 
         return template

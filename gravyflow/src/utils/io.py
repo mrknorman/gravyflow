@@ -5,6 +5,8 @@ import sys
 import os
 import logging
 
+logger = logging.getLogger(__name__)
+
 import numpy as np
 import keras
 from keras.callbacks import Callback
@@ -27,13 +29,13 @@ def get_file_parent_path() -> Optional[Path]:
         return Path(caller_path).parent.resolve()
     except IndexError:
         # This may occur if the call stack isn't accessible
-        print("Error: Could not access the call stack.")
+        logger.error("Error: Could not access the call stack.")
     except AttributeError:
         # This may occur if the caller frame does not have a 'filename' attribute
-        print("Error: Caller frame does not have a 'filename' attribute.")
+        logger.error("Error: Caller frame does not have a 'filename' attribute.")
     except Exception as e:
         # Catch-all for any other unforeseen errors
-        print(f"An unexpected error occurred: {e}")
+        logger.error(f"An unexpected error occurred: {e}")
 
     # Return None if we couldn't get the caller path
     return None
@@ -144,14 +146,14 @@ def save_dict_to_hdf5(data_dict, filepath, force_overwrite=False):
                 else:
                     # Create a new dataset if the key doesn't exist
                     hdf.create_dataset(key, data=data, maxshape=(None,))
-            print(f"Data appended to {filepath}")
+            logger.info(f"Data appended to {filepath}")
     else:
         # If the file doesn't exist or force_overwrite is True, create a new file
         with h5py.File(filepath, 'w') as hdf:  # Open in write mode
             for key, data in data_dict.items():
                 # Create datasets, allowing them to grow in size (maxshape=(None,))
                 hdf.create_dataset(key, data=data, maxshape=(None,))
-            print(f"Data saved to new file {filepath}")
+            logger.info(f"Data saved to new file {filepath}")
 
 class CustomHistorySaver(Callback):
     def __init__(self, filepath, force_overwrite=False):
@@ -206,7 +208,7 @@ class EarlyStoppingWithLoad(Callback):
         self.start_from_epoch = start_from_epoch
 
         if mode not in ["auto", "min", "max"]:
-            logging.warning(
+            logger.warning(
                 "EarlyStopping mode %s is unknown, fallback to auto mode.",
                 mode,
             )
@@ -239,7 +241,7 @@ class EarlyStoppingWithLoad(Callback):
             # Assuming history_data is a dictionary containing your historical metrics
             last_epoch_metrics = {k: v for k, v in history_data.items()}
 
-            print(last_epoch_metrics)
+            logger.debug(last_epoch_metrics)
 
             if self.monitor in last_epoch_metrics:
 
@@ -260,7 +262,7 @@ class EarlyStoppingWithLoad(Callback):
                     self.best_epoch = best_epoch
 
                 else:
-                    print("Empty history!")
+                    logger.warning("Empty history!")
 
                     self.wait = 0
                     self.stopped_epoch = 0
@@ -305,7 +307,7 @@ class EarlyStoppingWithLoad(Callback):
             self.model.stop_training = True
             if self.restore_best_weights and self.best_weights is not None:
                 if self.verbose > 0:
-                    print(
+                    logger.info(
                         "Restoring model weights from "
                         "the end of the best epoch: "
                         f"{self.best_epoch + 1}."
@@ -314,7 +316,7 @@ class EarlyStoppingWithLoad(Callback):
 
     def on_train_end(self, logs=None):
         if self.stopped_epoch > 0 and self.verbose > 0:
-            print(
+            logger.info(
                 f"Epoch {self.stopped_epoch + 1}: early stopping"
             )
 
@@ -322,7 +324,7 @@ class EarlyStoppingWithLoad(Callback):
         logs = logs or {}
         monitor_value = logs.get(self.monitor)
         if monitor_value is None:
-            logging.warning(
+            logger.warning(
                 "Early stopping conditioned on metric `%s` "
                 "which is not available. Available metrics are: %s",
                 self.monitor,
@@ -343,4 +345,4 @@ class PrintWaitCallback(Callback):
         wait = self.early_stopping.wait
         best = self.early_stopping.best
         best_epoch = self.early_stopping.best_epoch
-        print(f"\nBest model so far had a value of: {best} at Epoch: {best_epoch} which was {wait} epochs ago.")
+        logger.info(f"Best model so far had a value of: {best} at Epoch: {best_epoch} which was {wait} epochs ago.")
