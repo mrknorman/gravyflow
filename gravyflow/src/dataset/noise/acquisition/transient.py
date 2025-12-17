@@ -105,6 +105,7 @@ class TransientDataObtainer(BaseDataObtainer):
         # Feature storage
         self.feature_segments = None
         self._feature_labels = {}
+        self._sorted_label_indices = None  # Cache for vectorized label lookup
 
     def _apply_augmentation(self, data, is_transient: bool = True):
         """
@@ -137,25 +138,54 @@ class TransientDataObtainer(BaseDataObtainer):
     def _lookup_labels(self, gps_times):
         """
         Look up glitch type labels for given GPS times.
+        
+        Uses vectorized binary search for O(M log N) complexity where M is the
+        number of requested GPS times and N is the number of known labels.
         """
+        gps_times = np.asarray(gps_times)
+        
         if not self._feature_labels:
             return np.full(len(gps_times), -1, dtype=np.int32)
         
-        labels = []
-        for gps in gps_times:
-            label = -1  # Default: unknown
-            
-            if gf.DataLabel.GLITCHES in self._feature_labels:
-                times_arr, labels_arr = self._feature_labels[gf.DataLabel.GLITCHES]
-                if len(times_arr) > 0:
-                    diffs = np.abs(times_arr - gps)
-                    min_idx = np.argmin(diffs)
-                    if diffs[min_idx] < 1.0:
-                        label = int(labels_arr[min_idx])
-            
-            labels.append(label)
+        if gf.DataLabel.GLITCHES not in self._feature_labels:
+            return np.full(len(gps_times), -1, dtype=np.int32)
         
-        return np.array(labels, dtype=np.int32)
+        times_arr, labels_arr = self._feature_labels[gf.DataLabel.GLITCHES]
+        
+        if len(times_arr) == 0:
+            return np.full(len(gps_times), -1, dtype=np.int32)
+        
+        # Cache sorted indices for repeated calls (lazy initialization)
+        if not hasattr(self, '_sorted_label_indices') or self._sorted_label_indices is None:
+            self._sorted_label_indices = np.argsort(times_arr)
+            self._sorted_label_times = times_arr[self._sorted_label_indices]
+            self._sorted_label_values = labels_arr[self._sorted_label_indices]
+        
+        sorted_times = self._sorted_label_times
+        sorted_labels = self._sorted_label_values
+        
+        # Vectorized binary search - O(M log N)
+        insert_indices = np.searchsorted(sorted_times, gps_times)
+        
+        # Clip to valid range
+        insert_indices = np.clip(insert_indices, 0, len(sorted_times) - 1)
+        
+        # Calculate distance to nearest cached time
+        diffs = np.abs(sorted_times[insert_indices] - gps_times)
+        
+        # Also check the previous index (searchsorted gives insertion point, not nearest)
+        prev_indices = np.clip(insert_indices - 1, 0, len(sorted_times) - 1)
+        prev_diffs = np.abs(sorted_times[prev_indices] - gps_times)
+        
+        # Use whichever is closer
+        use_prev = prev_diffs < diffs
+        final_indices = np.where(use_prev, prev_indices, insert_indices)
+        final_diffs = np.where(use_prev, prev_diffs, diffs)
+        
+        # Apply tolerance threshold (1.0 second)
+        labels = np.where(final_diffs < 1.0, sorted_labels[final_indices], -1)
+        
+        return labels.astype(np.int32)
 
     def _extract_feature_event(
         self,
@@ -302,6 +332,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 self._feature_labels = {
                     gf.DataLabel.GLITCHES: (glitch_times, glitch_labels)
                 }
+                self._sorted_label_indices = None  # Invalidate cache
             
         if wanted_segments:
             wanted_segments = np.concatenate(wanted_segments)
@@ -778,6 +809,7 @@ class TransientDataObtainer(BaseDataObtainer):
                                 new_labels = glitch_labels
                                 
                             self._feature_labels[gf.DataLabel.GLITCHES] = (new_times, new_labels)
+                            self._sorted_label_indices = None  # Invalidate cache
 
                             if len(glitch_times) > 0:
                                 gl_segs = self.pad_gps_times_with_veto_window(
