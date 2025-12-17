@@ -12,7 +12,7 @@ def check_cache(cache_path: str):
     path = Path(cache_path)
     
     if not path.exists():
-        print(f"❌ Cache file not found: {path}")
+        print(f"Cache file not found: {path}")
         return False
     
     print(f"📁 Checking: {path}")
@@ -21,7 +21,7 @@ def check_cache(cache_path: str):
     
     with h5py.File(path, 'r') as f:
         if 'glitches' not in f:
-            print("❌ Invalid cache format: 'glitches' group not found")
+            print("Invalid cache format: 'glitches' group not found")
             return False
         
         grp = f['glitches']
