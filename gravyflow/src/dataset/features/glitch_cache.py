@@ -20,6 +20,7 @@ File Format (HDF5):
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 import logging
+import bisect
 
 import numpy as np
 import h5py
@@ -69,6 +70,7 @@ class GlitchCache:
         self._mem_sample_rate: Optional[float] = None
         self._mem_ons_dur: Optional[float] = None
         self._mem_off_dur: Optional[float] = None
+        self._sorted_gps_keys: Optional[List[float]] = None
         
     @property
     def exists(self) -> bool:
@@ -155,7 +157,11 @@ class GlitchCache:
             
             gps_times = f['glitches']['gps_times'][:]
             # Use rounded GPS times as keys to handle floating point comparison
-            return {round(float(gps), 3): i for i, gps in enumerate(gps_times)}
+            gps_times = f['glitches']['gps_times'][:]
+            # Use rounded GPS times as keys to handle floating point comparison
+            index = {round(float(gps), 3): i for i, gps in enumerate(gps_times)}
+            self._sorted_gps_keys = sorted(index.keys())
+            return index
     
     def has_gps(self, gps_time: float, tolerance: float = 0.5) -> bool:
         """Check if a GPS time exists in the cache (with tolerance for slight differences)."""
@@ -170,10 +176,26 @@ class GlitchCache:
         if round(gps_time, 3) in self._gps_index:
             return True
         
-        # Try tolerance-based match
-        for cached_gps in self._gps_index.keys():
-            if abs(cached_gps - gps_time) < tolerance:
-                return True
+        # Try tolerance-based match using binary search O(log N)
+        if not hasattr(self, '_sorted_gps_keys') or self._sorted_gps_keys is None:
+             self._sorted_gps_keys = sorted(self._gps_index.keys())
+             
+        if self._sorted_gps_keys:
+            keys = self._sorted_gps_keys
+            # Find insertion point
+            idx = bisect.bisect_left(keys, gps_time)
+            
+            # Check neighbors
+            # Check index itself (right of or equal to gps_time)
+            if idx < len(keys):
+                if abs(keys[idx] - gps_time) < tolerance:
+                    return True
+            
+            # Check index-1 (left of gps_time)
+            if idx > 0:
+                if abs(keys[idx-1] - gps_time) < tolerance:
+                    return True
+                    
         return False
     
     def get_closest_gps(self, gps_time: float, tolerance: float = 0.5) -> float:
@@ -189,15 +211,32 @@ class GlitchCache:
         if rounded in self._gps_index:
             return rounded
         
-        # Find closest within tolerance
-        best_match = None
-        best_diff = tolerance
-        for cached_gps in self._gps_index.keys():
-            diff = abs(cached_gps - gps_time)
-            if diff < best_diff:
-                best_diff = diff
-                best_match = cached_gps
-        return best_match
+        # Find closest within tolerance using binary search O(log N)
+        if not hasattr(self, '_sorted_gps_keys') or self._sorted_gps_keys is None:
+             self._sorted_gps_keys = sorted(self._gps_index.keys())
+
+        if self._sorted_gps_keys:
+            keys = self._sorted_gps_keys
+            idx = bisect.bisect_left(keys, gps_time)
+            
+            candidates = []
+            if idx < len(keys):
+                candidates.append(keys[idx])
+            if idx > 0:
+                candidates.append(keys[idx-1])
+                
+            best_match = None
+            best_diff = tolerance
+            
+            for candidate in candidates:
+                diff = abs(candidate - gps_time)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_match = candidate
+            
+            return best_match
+            
+        return None
     
     def get_by_gps(
         self,
@@ -240,6 +279,103 @@ class GlitchCache:
         )
         return ons[0], offs[0], gps[0], labels[0]
     
+    def get_indices_for_gps(
+        self, 
+        gps_times: Union[List[float], np.ndarray],
+        tolerance: float = 0.5
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Bulk resolve GPS times to cache indices.
+        
+        Args:
+            gps_times: List or array of GPS times to look up.
+            tolerance: Tolerance in seconds for matching.
+            
+        Returns:
+            found_indices: Array of indices in the cache (for found items).
+            missing_mask: Boolean mask of same length as input gps_times, 
+                          True where item was NOT found.
+        """
+        if not self.exists:
+             return np.array([]), np.ones(len(gps_times), dtype=bool)
+             
+        # Ensure index exists
+        if not hasattr(self, '_gps_index') or self._gps_index is None:
+            self._gps_index = self._build_gps_index()
+            self._sorted_gps_keys = sorted(self._gps_index.keys())
+
+        # Ensure sorted keys exist (lazy rebuild check)
+        if not hasattr(self, '_sorted_gps_keys') or self._sorted_gps_keys is None:
+             self._sorted_gps_keys = sorted(self._gps_index.keys())
+             
+        gps_times = np.asarray(gps_times)
+        indices = np.full(len(gps_times), -1, dtype=np.int32)
+        missing_mask = np.ones(len(gps_times), dtype=bool)
+        
+        keys = self._sorted_gps_keys
+        if not keys:
+            return indices, missing_mask
+
+        # Vectorized search using searchsorted
+        # Find insertion points for all requested times
+        # keys is sorted, so we can use searchsorted
+        
+        # We search for (gps - tolerance) to find potential start matches
+        # but exact/closest logic is trickier with searchsorted alone if we want "closest within tolerance"
+        # However, typically glitches are discrete, so "any within tolerance" is usually 1 unique match.
+        
+        # Iterative approach using the sorted keys is still faster than random dict lookups 
+        # but let's try to be efficient.
+        # Since we have random GPS requests, we can't just iterate parallel.
+        
+        # Use bisect for each item (O(M log N) where M is batch size)
+        # This is what we optimized before, just vectorized API now.
+        
+        # Optimization: Round input times to match cache precision logic first
+        # This allows O(1) dict lookup for exact matches (fast path)
+        
+        for i, gps in enumerate(gps_times):
+            # 1. Exact match attempt (Fastest)
+            rounded = round(float(gps), 3)
+            if rounded in self._gps_index:
+                indices[i] = self._gps_index[rounded]
+                missing_mask[i] = False
+                continue
+                
+            # 2. Binary search for tolerance match
+            idx = bisect.bisect_left(keys, gps)
+            
+            # Check neighbours
+            found_idx = -1
+            
+            # Check right/curr
+            if idx < len(keys):
+                if abs(keys[idx] - gps) < tolerance:
+                    found_idx = self._gps_index[keys[idx]]
+            
+            # Check left
+            if found_idx == -1 and idx > 0:
+                 if abs(keys[idx-1] - gps) < tolerance:
+                    found_idx = self._gps_index[keys[idx-1]]
+            
+            if found_idx != -1:
+                indices[i] = found_idx
+                missing_mask[i] = False
+                
+        return indices[~missing_mask], missing_mask
+    
+        return indices[~missing_mask], missing_mask
+
+    def get_all_gps_times(self) -> np.ndarray:
+        """Return all GPS times currently in the cache."""
+        if not self.exists:
+            return np.array([])
+        
+        if not hasattr(self, '_gps_index') or self._gps_index is None:
+            self._gps_index = self._build_gps_index()
+            
+        return np.array(sorted(self._gps_index.keys()))
+    
     def append_single(
         self,
         onsource: np.ndarray,
@@ -267,8 +403,10 @@ class GlitchCache:
         # Update GPS index
         if hasattr(self, '_gps_index') and self._gps_index is not None:
             self._gps_index[round(gps_time, 3)] = len(self._gps_index)
+            self._sorted_gps_keys = None
         else:
             self._gps_index = None  # Force rebuild on next access
+            self._sorted_gps_keys = None
     
     def validate_request(
         self, 
@@ -673,15 +811,27 @@ class GlitchCache:
         off_start = (stored_off_samples - read_off_samples) // 2
         off_end = off_start + read_off_samples
         
+        # HDF5 fancy indexing requires sorted indices for efficiency and correctness
+        # Sort indices, read, then restore original order
+        indices = np.asarray(indices)
+        sort_order = np.argsort(indices)
+        sorted_indices = indices[sort_order]
+        unsort_order = np.argsort(sort_order)  # Inverse permutation
+        
         with h5py.File(self.path, 'r') as f:
             grp = f['glitches']
             
-            # Read only the slice we need: [indices, :ifos, start:end]
-            # HDF5 fancy indexing: indices for batch dim, slice for sample dim
-            onsource = grp['onsource'][indices, :, ons_start:ons_end]
-            offsource = grp['offsource'][indices, :, off_start:off_end]
-            gps_times = grp['gps_times'][indices]
-            labels = grp['labels'][indices]
+            # Read only the slice we need: [sorted_indices, :ifos, start:end]
+            onsource = grp['onsource'][sorted_indices, :, ons_start:ons_end]
+            offsource = grp['offsource'][sorted_indices, :, off_start:off_end]
+            gps_times = grp['gps_times'][sorted_indices]
+            labels = grp['labels'][sorted_indices]
+        
+        # Restore original order
+        onsource = onsource[unsort_order]
+        offsource = offsource[unsort_order]
+        gps_times = gps_times[unsort_order]
+        labels = labels[unsort_order]
         
         # Apply resampling if needed (now on much smaller arrays)
         if resample_ratio > 1:

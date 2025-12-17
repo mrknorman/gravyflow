@@ -859,6 +859,7 @@ class TransientDataObtainer(BaseDataObtainer):
         sample_rate_hertz: float,
         onsource_duration_seconds: float,
         offsource_duration_seconds: float,
+        crop_duration_seconds: float = 0.0,
         seed: int = None
     ):
         """Yield batches directly from HDF5 cache."""
@@ -867,12 +868,11 @@ class TransientDataObtainer(BaseDataObtainer):
         num_glitches = meta['num_glitches']
         indices = np.arange(num_glitches)
         
-        # Preload all data to memory for maximum speed
-        cache.preload_to_memory(
-            sample_rate_hertz=sample_rate_hertz,
-            onsource_duration=onsource_duration_seconds,
-            offsource_duration=offsource_duration_seconds
-        )
+        # Calculate padded onsource duration (includes crop padding on both sides)
+        total_onsource_duration = onsource_duration_seconds + (crop_duration_seconds * 2.0)
+        
+        # Stream directly from disk - HDF5 chunked storage enables efficient random access
+        # without loading the entire cache into memory
         
         while True:
             rng.shuffle(indices)
@@ -882,8 +882,13 @@ class TransientDataObtainer(BaseDataObtainer):
                 if len(batch_indices) == 0:
                     continue
                 
-                # Use fast in-memory access (no disk I/O)
-                ons, offs, gps, labels = cache.get_batch_from_memory(batch_indices)
+                # Read batch directly from disk with padded onsource for cropping
+                ons, offs, gps, labels = cache.get_batch(
+                    batch_indices,
+                    sample_rate_hertz=sample_rate_hertz,
+                    onsource_duration=total_onsource_duration,
+                    offsource_duration=offsource_duration_seconds
+                )
                 
                 # Shuffle within batch to restore randomness (indices were sorted for HDF5, but memory doesn't need it)
                 perm = rng.permutation(len(ons))
@@ -1094,18 +1099,9 @@ class TransientDataObtainer(BaseDataObtainer):
             )
             logging.info(f"Created new cache file: {cache_path}")
         else:
-            # HYBRID: Bulk load all existing cache to memory for fast serving
-            # New downloads will be added to disk cache but memory stays as-is
-            if not cache.in_memory:
-                try:
-                    # Use total_onsource (base + padding) so cropping has enough samples
-                    cache.preload_to_memory(
-                        sample_rate_hertz=sample_rate_hertz,
-                        onsource_duration=total_onsource_duration_seconds,
-                        offsource_duration=offsource_duration_seconds
-                    )
-                except Exception as e:
-                    logging.warning(f"Could not preload cache to memory: {e}")
+            # Cache exists - use disk-based access (HDF5 chunked storage is efficient)
+            # The hybrid path below uses has_gps() and get_by_gps() which read from disk
+            pass
         # Build batches: cache hits served instantly, misses downloaded in parallel
         rng = default_rng(seed)
         segment_indices = np.arange(len(self.valid_segments_adjusted))
@@ -1192,7 +1188,7 @@ class TransientDataObtainer(BaseDataObtainer):
                     result = cache.get_by_gps(
                         event_gps_time,
                         sample_rate_hertz=sample_rate_hertz,
-                        onsource_duration=onsource_duration_seconds,
+                        onsource_duration=total_onsource_duration_seconds,
                         offsource_duration=offsource_duration_seconds
                     )
                     if result is not None:

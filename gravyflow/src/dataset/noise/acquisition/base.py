@@ -549,6 +549,20 @@ class BaseDataObtainer(ABC):
         self.state_flags = \
             [run.state_flags[data_quality] for run in observing_runs]
     
+    def _get_frame_channel_for_gps(self, gps_time: float) -> tuple:
+        """
+        Get the correct frame_type and channel for a given GPS time.
+        
+        Returns:
+            (frame_type, channel) tuple for the observing run containing this GPS.
+            Falls back to first configured run if no match found.
+        """
+        for i, (start, end) in enumerate(zip(self.start_gps_times, self.end_gps_times)):
+            if start <= gps_time <= end:
+                return self.frame_types[i], self.channels[i]
+        # Fall back to first if no match (shouldn't happen normally)
+        return self.frame_types[0], self.channels[0]
+    
     def __getstate__(self):
         """Exclude ThreadPoolExecutor from pickling (can't be serialized)."""
         state = self.__dict__.copy()
@@ -770,7 +784,6 @@ class BaseDataObtainer(ABC):
         cache_file_path : Path = gf.PATH / "res/cached_event_times.npy"
         
         if cache_file_path.exists():
-            logging.info("Loading event times from cache.")
             return np.load(cache_file_path)
         
         logging.info("Cache not found, fetching event times.")
@@ -1017,12 +1030,14 @@ class BaseDataObtainer(ABC):
         
         if segment is None: 
             try:
+                # Get correct frame_type/channel for this GPS time's observing run
+                frame_type, channel = self._get_frame_channel_for_gps(segment_start_gps_time)
                 raw_segment = self.get_segment_data(
                     segment_start_gps_time + epsilon,
                     segment_end_gps_time - epsilon, 
                     ifo, 
-                    self.frame_types[0], 
-                    self.channels[0]
+                    frame_type, 
+                    channel
                 )
                 
                 original_sample_rate = float(raw_segment.sample_rate.value)
