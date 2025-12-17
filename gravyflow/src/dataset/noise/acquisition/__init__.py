@@ -23,6 +23,10 @@ from .base import (
     ObservingRunData,
     # Data structures
     IFOData,
+    # Constants
+    GPS_PRECISION_DECIMALS,
+    GPS_TOLERANCE_SECONDS,
+    SEGMENT_EPSILON_SECONDS,
     # Utility functions
     ensure_even,
     random_subsection,
@@ -48,6 +52,10 @@ __all__ = [
     'ObservingRunData',
     # Data structures
     'IFOData',
+    # Constants
+    'GPS_PRECISION_DECIMALS',
+    'GPS_TOLERANCE_SECONDS',
+    'SEGMENT_EPSILON_SECONDS',
     # Utility functions
     'ensure_even',
     'random_subsection',
