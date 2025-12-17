@@ -102,7 +102,6 @@ class GlitchCache:
                 'ifo_names': list(grp.attrs.get('ifo_names', [])),
                 'num_glitches': int(grp['gps_times'].shape[0]),
                 'num_ifos': int(grp['onsource'].shape[1]),
-                'num_ifos': int(grp['onsource'].shape[1]),
             }
         return self._metadata
     
@@ -122,10 +121,6 @@ class GlitchCache:
             raise FileNotFoundError(f"Cache file not initialized: {self.path}")
             
         with h5py.File(self.path, 'a') as f:
-            if 'glitches' not in f:
-                raise ValueError("Invalid cache format")
-            f['glitches'].attrs[key] = value
-    
             if 'glitches' not in f:
                 raise ValueError("Invalid cache format")
             f['glitches'].attrs[key] = value
@@ -155,8 +150,6 @@ class GlitchCache:
             if 'glitches' not in f or 'gps_times' not in f['glitches']:
                 return {}
             
-            gps_times = f['glitches']['gps_times'][:]
-            # Use rounded GPS times as keys to handle floating point comparison
             gps_times = f['glitches']['gps_times'][:]
             # Use rounded GPS times as keys to handle floating point comparison
             index = {round(float(gps), 3): i for i, gps in enumerate(gps_times)}
@@ -362,8 +355,6 @@ class GlitchCache:
                 indices[i] = found_idx
                 missing_mask[i] = False
                 
-        return indices[~missing_mask], missing_mask
-    
         return indices[~missing_mask], missing_mask
 
     def get_all_gps_times(self) -> np.ndarray:

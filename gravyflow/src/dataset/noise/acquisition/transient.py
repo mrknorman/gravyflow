@@ -625,8 +625,8 @@ class TransientDataObtainer(BaseDataObtainer):
                     batch_offsource.append(offsource)
                     batch_gps.append(gps_time)
                     
-                    # Get label from feature_labels if available
-                    label = self._feature_labels.get(gps_time, 0) if hasattr(self, '_feature_labels') else 0
+                    # Get label using vectorized lookup
+                    label = self._lookup_labels([gps_time])[0] if hasattr(self, '_feature_labels') else 0
                     batch_labels.append(label)
                     
                 except Exception as e:
@@ -1011,9 +1011,6 @@ class TransientDataObtainer(BaseDataObtainer):
         num_onsource_samples = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
         num_offsource_samples = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
 
-        num_onsource_samples = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
-        num_offsource_samples = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
-
         self.valid_segments_adjusted = self.valid_segments
         has_specific_events = hasattr(self, 'event_names') and self.event_names is not None and len(self.event_names) > 0
         
@@ -1136,14 +1133,6 @@ class TransientDataObtainer(BaseDataObtainer):
             for seg_idx in segment_indices:
                 event_gps_time = all_gps_times[seg_idx]
                 
-                # DEBUG: Log first few GPS lookups to diagnose mismatch
-                if not hasattr(self, '_debug_logged') and cache.in_memory and hasattr(cache, '_gps_index'):
-                    self._debug_logged = True
-                    sample_cache_gps = list(cache._gps_index.keys())[:5]
-                    logging.info(f"DEBUG: First requested GPS: {event_gps_time:.6f}, rounded: {round(event_gps_time, 3):.3f}")
-                    logging.info(f"DEBUG: Sample cache GPS keys: {sample_cache_gps}")
-                    logging.info(f"DEBUG: cache.in_memory={cache.in_memory}, cache size={len(cache._gps_index)}")
-                
                 # MEMORY CHECK (instant)
                 if cache.in_memory and cache.has_gps(event_gps_time):
                     closest_gps = cache.get_closest_gps(event_gps_time)
@@ -1157,11 +1146,7 @@ class TransientDataObtainer(BaseDataObtainer):
                         batch_gps_times.append(event_gps_time)
                         self._cache_hit_count += 1
                         
-                        # Log immediately on first cache hit
-                        if self._cache_hit_count == 1:
-                            logging.info(f"🎯 FIRST CACHE HIT! GPS={event_gps_time:.3f}")
-                        
-                        # Log every 1000 samples
+                        # Log periodically (every 1000 samples)
                         if self._cache_hit_count + self._cache_miss_count - self._last_log_count >= 1000:
                             hit_rate = self._cache_hit_count / (self._cache_hit_count + self._cache_miss_count) * 100
                             logging.info(f"Cache stats: {self._cache_hit_count} hits, {self._cache_miss_count} misses ({hit_rate:.1f}% hit rate)")
@@ -1312,8 +1297,8 @@ class TransientDataObtainer(BaseDataObtainer):
         target_off_dur: float
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Crop and resample data from source settings to target settings."""
-        onsource_full = np.array(onsource_full)
-        offsource_full = np.array(offsource_full)
+        onsource_full = np.asarray(onsource_full)
+        offsource_full = np.asarray(offsource_full)
         
         # Resample if needed (downsampling only - upsampling not supported)
         if target_rate != source_rate:

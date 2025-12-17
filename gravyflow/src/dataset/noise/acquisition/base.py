@@ -42,6 +42,20 @@ def ensure_even(number):
 
 
 # =============================================================================
+# CONSTANTS
+# =============================================================================
+
+# GPS time precision for cache key matching (3 decimals = millisecond precision)
+GPS_PRECISION_DECIMALS = 3
+
+# Tolerance for GPS time matching in seconds (used in cache lookups)
+GPS_TOLERANCE_SECONDS = 0.5
+
+# Epsilon buffer for segment boundary trimming (avoids edge artifacts)
+SEGMENT_EPSILON_SECONDS = 0.1
+
+
+# =============================================================================
 # ENUMS
 # =============================================================================
 
