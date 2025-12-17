@@ -187,6 +187,73 @@ class TransientDataObtainer(BaseDataObtainer):
         
         return labels.astype(np.int32)
 
+    def _get_sample_from_cache(
+        self,
+        cache,
+        gps_time: float,
+        sample_rate_hertz: float,
+        onsource_duration: float,
+        offsource_duration: float,
+        scale_factor: float = 1.0
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
+        """
+        Attempt to retrieve a sample from cache (memory first, then disk).
+        
+        Returns:
+            (onsource, offsource, source) where source is 'memory', 'disk', or 'miss'
+        """
+        # Try memory cache first (fastest)
+        if cache.in_memory and cache.has_gps(gps_time):
+            closest_gps = cache.get_closest_gps(gps_time)
+            if closest_gps is not None:
+                idx = cache._gps_index.get(closest_gps)
+                if idx is not None:
+                    onsource = cache._mem_onsource[idx] * scale_factor
+                    offsource = cache._mem_offsource[idx] * scale_factor
+                    return onsource, offsource, 'memory'
+        
+        # Try disk cache
+        if cache.has_gps(gps_time):
+            result = cache.get_by_gps(
+                gps_time,
+                sample_rate_hertz=sample_rate_hertz,
+                onsource_duration=onsource_duration,
+                offsource_duration=offsource_duration
+            )
+            if result is not None:
+                onsource, offsource, _, _ = result
+                return onsource * scale_factor, offsource * scale_factor, 'disk'
+        
+        # Cache miss
+        return None, None, 'miss'
+
+    def _prepare_batch(
+        self,
+        batch_subarrays: list,
+        batch_backgrounds: list,
+        batch_gps_times: list
+    ) -> Tuple:
+        """
+        Prepare batch tensors from accumulated lists.
+        
+        Returns:
+            (subarrays, backgrounds, gps_tensor, labels)
+        """
+        final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
+        final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
+        final_gps = ops.expand_dims(
+            ops.convert_to_tensor(batch_gps_times, dtype="float64"), 
+            axis=-1
+        )
+        batch_labels = self._lookup_labels(batch_gps_times)
+        
+        return (
+            self._apply_augmentation(final_subarrays, is_transient=True),
+            self._apply_augmentation(final_background, is_transient=True),
+            final_gps,
+            batch_labels
+        )
+
     def _extract_feature_event(
         self,
         event_segment: IFOData,
@@ -1165,69 +1232,36 @@ class TransientDataObtainer(BaseDataObtainer):
             for seg_idx in segment_indices:
                 event_gps_time = all_gps_times[seg_idx]
                 
-                # MEMORY CHECK (instant)
-                if cache.in_memory and cache.has_gps(event_gps_time):
-                    closest_gps = cache.get_closest_gps(event_gps_time)
-                    idx = cache._gps_index.get(closest_gps) if closest_gps else None
-                    if idx is not None:
-                        # Apply scale_factor when serving from memory cache (cache stores raw data)
-                        onsource = cache._mem_onsource[idx] * scale_factor
-                        offsource = cache._mem_offsource[idx] * scale_factor
-                        batch_subarrays.append(onsource)
-                        batch_backgrounds.append(offsource)
-                        batch_gps_times.append(event_gps_time)
-                        self._cache_hit_count += 1
-                        
-                        # Log periodically (every 1000 samples)
-                        if self._cache_hit_count + self._cache_miss_count - self._last_log_count >= 1000:
-                            hit_rate = self._cache_hit_count / (self._cache_hit_count + self._cache_miss_count) * 100
-                            logging.info(f"Cache stats: {self._cache_hit_count} hits, {self._cache_miss_count} misses ({hit_rate:.1f}% hit rate)")
-                            self._last_log_count = self._cache_hit_count + self._cache_miss_count
-                        
-                        if len(batch_subarrays) >= num_examples_per_batch:
-                            # Yield batch
-                            final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
-                            final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
-                            final_gps = ops.expand_dims(
-                                ops.convert_to_tensor(batch_gps_times, dtype="float64"), 
-                                axis=-1
-                            )
-                            batch_labels = self._lookup_labels(batch_gps_times)
-                            yield self._apply_augmentation(final_subarrays, is_transient=True), self._apply_augmentation(final_background, is_transient=True), final_gps, batch_labels
-                            
-                            batch_subarrays = []
-                            batch_backgrounds = []
-                            batch_gps_times = []
-                        continue
+                # Unified cache lookup (memory -> disk -> miss)
+                onsource, offsource, source = self._get_sample_from_cache(
+                    cache,
+                    event_gps_time,
+                    sample_rate_hertz,
+                    total_onsource_duration_seconds,
+                    offsource_duration_seconds,
+                    scale_factor
+                )
                 
-                # DISK CACHE CHECK
-                if cache.has_gps(event_gps_time):
-                    result = cache.get_by_gps(
-                        event_gps_time,
-                        sample_rate_hertz=sample_rate_hertz,
-                        onsource_duration=total_onsource_duration_seconds,
-                        offsource_duration=offsource_duration_seconds
-                    )
-                    if result is not None:
-                        onsource, offsource, _, _ = result
-                        batch_subarrays.append(onsource)
-                        batch_backgrounds.append(offsource)
-                        batch_gps_times.append(event_gps_time)
-                        
-                        if len(batch_subarrays) >= num_examples_per_batch:
-                            final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
-                            final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
-                            final_gps = ops.expand_dims(
-                                ops.convert_to_tensor(batch_gps_times, dtype="float64"), 
-                                axis=-1
-                            )
-                            batch_labels = self._lookup_labels(batch_gps_times)
-                            yield self._apply_augmentation(final_subarrays, is_transient=True), self._apply_augmentation(final_background, is_transient=True), final_gps, batch_labels
-                            
-                            batch_subarrays = []
-                            batch_backgrounds = []
-                            batch_gps_times = []
-                        continue
+                if source != 'miss':
+                    # Cache hit (memory or disk)
+                    batch_subarrays.append(onsource)
+                    batch_backgrounds.append(offsource)
+                    batch_gps_times.append(event_gps_time)
+                    self._cache_hit_count += 1
+                    
+                    # Log periodically (every 1000 samples)
+                    total_samples = self._cache_hit_count + self._cache_miss_count
+                    if total_samples - self._last_log_count >= 1000:
+                        hit_rate = self._cache_hit_count / total_samples * 100
+                        logging.info(f"Cache stats: {self._cache_hit_count} hits, {self._cache_miss_count} misses ({hit_rate:.1f}% hit rate)")
+                        self._last_log_count = total_samples
+                    
+                    if len(batch_subarrays) >= num_examples_per_batch:
+                        yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_gps_times)
+                        batch_subarrays = []
+                        batch_backgrounds = []
+                        batch_gps_times = []
+                    continue
                 
                 # Cache miss - need to download this one
                 miss_indices.append(seg_idx)
@@ -1302,15 +1336,7 @@ class TransientDataObtainer(BaseDataObtainer):
                         batch_gps_times.append(extracted_gps)
                         
                         if len(batch_subarrays) >= num_examples_per_batch:
-                            final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
-                            final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
-                            final_gps = ops.expand_dims(
-                                ops.convert_to_tensor(batch_gps_times, dtype="float64"), 
-                                axis=-1
-                            )
-                            batch_labels = self._lookup_labels(batch_gps_times)
-                            yield self._apply_augmentation(final_subarrays, is_transient=True), self._apply_augmentation(final_background, is_transient=True), final_gps, batch_labels
-                            
+                            yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_gps_times)
                             batch_subarrays = []
                             batch_backgrounds = []
                             batch_gps_times = []
