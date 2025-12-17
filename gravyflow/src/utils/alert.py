@@ -1,5 +1,7 @@
 import smtplib
 import logging
+
+logger = logging.getLogger(__name__)
 from pathlib import Path
 import json
 from email.mime.multipart import MIMEMultipart
@@ -36,6 +38,6 @@ def send_email(
         text = mime.as_string()
         server.sendmail(from_email, to_email, text)
         server.quit()
-        logging.info(f"Sent email to {to_email}")
+        logger.info(f"Sent email to {to_email}")
     except Exception as e:
-        print(f"Failed to send email: {e}")
+        logger.error(f"Failed to send email: {e}")

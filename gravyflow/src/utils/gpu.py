@@ -23,7 +23,7 @@ DEFAULT_MIN_MEMORY_MB = 5000
 DEFAULT_MAX_UTILIZATION_PERCENTAGE = 80
 
 # Configure logging once.
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 
 # === GPU Query and Status Functions ===
@@ -37,7 +37,7 @@ def get_gpu_memory_info() -> Optional[List[dict]]:
         Returns None if nvidia-smi is not available or fails.
     """
     if not NVIDIA_SMI_PATH.exists():
-        logging.error("nvidia-smi not found at %s", NVIDIA_SMI_PATH)
+        logger.error("nvidia-smi not found at %s", NVIDIA_SMI_PATH)
         return None
 
     try:
@@ -49,7 +49,7 @@ def get_gpu_memory_info() -> Optional[List[dict]]:
             universal_newlines=True
         )
     except subprocess.CalledProcessError as e:
-        logging.error("Error running nvidia-smi: %s", e.output)
+        logger.error("Error running nvidia-smi: %s", e.output)
         return None
 
     gpu_info_list = []
@@ -142,7 +142,7 @@ def setup_cuda(device_num: str, max_memory_limit: int, logging_level: int = logg
     # We can try to set XLA_PYTHON_CLIENT_MEM_FRACTION based on max_memory_limit / total_memory.
     # But we need total memory of the specific GPU.
     # Let's just log it for now.
-    logging.info(f"Setting CUDA_VISIBLE_DEVICES={device_num}")
+    logger.info(f"Setting CUDA_VISIBLE_DEVICES={device_num}")
     
     return None
 
@@ -189,7 +189,7 @@ def find_available_GPUs(
     """
     if not NVIDIA_SMI_PATH.exists():
          # Fallback or error
-         logging.warning("nvidia-smi not found, assuming GPU 0 is available.")
+         logger.warning("nvidia-smi not available, assuming GPU 0 is available.")
          return "0"
 
     gpu_info_list = get_gpu_memory_info()
@@ -203,14 +203,14 @@ def find_available_GPUs(
             available.append(gpu_info["index"])
 
     if not available:
-        print("\nAll GPUs are currently busy or do not meet the memory requirements:")
+        logger.warning("All GPUs are currently busy or do not meet the memory requirements.")
         print_gpu_status(min_required_memory=min_memory_MB)
         raise RuntimeError("All GPUs are busy or insufficient memory is available.")
 
     if max_needed != -1:
         available = available[:max_needed]
 
-    logging.info("Available GPUs: %s", available)
+    logger.info("Available GPUs: %s", available)
     return ",".join(available)
 
 
@@ -258,7 +258,7 @@ def env(
                 max_needed=num_gpus_to_request
             )
         except RuntimeError:
-            logging.warning("Could not find available GPUs satisfying criteria. Using default/all.")
+            logger.warning("Could not find available GPUs satisfying criteria. Using default/all.")
             gpus = "" # Let JAX decide or use all?
 
     if gpus:

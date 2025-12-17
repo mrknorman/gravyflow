@@ -17,6 +17,8 @@ from abc import ABC, abstractmethod
 logging.getLogger('gwpy').setLevel(logging.WARNING)
 logging.getLogger('gwosc').setLevel(logging.WARNING)
 
+logger = logging.getLogger(__name__)
+
 # Third-party imports:
 import numpy as np
 from numpy.random import default_rng  
@@ -35,10 +37,7 @@ import gravyflow as gf
 from gravyflow.src.utils.tensor import resample_fft
 
 
-def ensure_even(number):
-    if number % 2 != 0:
-        number -= 1
-    return number
+from gravyflow.src.utils.numerics import ensure_even
 
 
 # =============================================================================
@@ -485,10 +484,7 @@ class BaseDataObtainer(ABC):
         ):
         
         # Initiate logging for ifo_data:
-        self.logger = logging.getLogger("ifo_data_aquisition")
-        stream_handler = logging.StreamHandler(sys.stdout)
-        self.logger.addHandler(stream_handler)
-        self.logger.setLevel(logging_level)
+        # Legacy logger setup removed in favor of module-level logger
         
         self.acquisition_mode = None
 
@@ -744,13 +740,13 @@ class BaseDataObtainer(ABC):
         
         cache_key = f"valid_segments/{group_name}"
         try:
-            with closing(gf.open_hdf5_file(self.file_path, self.logger, mode="r")) as f:
+            with closing(gf.open_hdf5_file(self.file_path, logger, mode="r")) as f:
                 if cache_key in f:
                     cached_segments = f[cache_key][()]
-                    self.logger.info(f"Loaded cached valid segments for group '{group_name}'")
+                    logger.info(f"Loaded cached valid segments for group '{group_name}'")
                     return cached_segments
         except Exception as e:
-            self.logger.warning(f"Failed to load cached segments: {e}")
+            logger.warning(f"Failed to load cached segments: {e}")
         return None
     
     def _cache_valid_segments(self, valid_segments: np.ndarray, group_name: str) -> None:
@@ -763,13 +759,13 @@ class BaseDataObtainer(ABC):
         cache_key = f"valid_segments/{group_name}"
         try:
             gf.ensure_directory_exists(self.file_path.parent)
-            with closing(gf.open_hdf5_file(self.file_path, self.logger, mode="a")) as f:
+            with closing(gf.open_hdf5_file(self.file_path, logger, mode="a")) as f:
                 if cache_key in f:
                     del f[cache_key]
                 f.create_dataset(cache_key, data=valid_segments)
-                self.logger.info(f"Cached valid segments for group '{group_name}'")
+                logger.info(f"Cached valid segments for group '{group_name}'")
         except Exception as e:
-            self.logger.warning(f"Failed to cache segments: {e}")
+            logger.warning(f"Failed to cache segments: {e}")
 
     def get_segment_times(
         self,
@@ -938,7 +934,7 @@ class BaseDataObtainer(ABC):
         if self.file_path is None:
             return
             
-        with closing(gf.open_hdf5_file(self.file_path, self.logger, mode="a")) as f:
+        with closing(gf.open_hdf5_file(self.file_path, logger, mode="a")) as f:
             if key in f:
                 del f[key]
             f.create_dataset(key, data=segment)
@@ -965,7 +961,7 @@ class BaseDataObtainer(ABC):
                 new_channel = run_data.channels[DataQuality.BEST]
                 
                 if new_frame_type != frame_type:
-                    self.logger.warning(
+                    logger.warning(
                         f"Observing Run Mismatch: Requested GPS {segment_start_gps_time} "
                         f"falls in {run_data.name}, but configured for different run. "
                         f"Auto-switching frame type {frame_type}->{new_frame_type}."
@@ -1036,7 +1032,7 @@ class BaseDataObtainer(ABC):
                  pass
             else:
                 with closing(
-                        gf.open_hdf5_file(self.file_path, self.logger, mode="r")
+                        gf.open_hdf5_file(self.file_path, logger, mode="r")
                     ) as segment_file:    
 
                     if (segment_key in segment_file) and not self.force_acquisition:

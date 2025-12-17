@@ -22,6 +22,8 @@ from typing import Dict, List, Optional, Tuple, Union
 import logging
 import bisect
 
+logger = logging.getLogger(__name__)
+
 import numpy as np
 import h5py
 
@@ -491,10 +493,8 @@ class GlitchCache:
             onsource_duration: Target onsource duration 
             offsource_duration: Target offsource duration
         """
-        import logging
-        
         if self._in_memory:
-            logging.info("Cache already loaded to memory, skipping reload")
+            logger.info("Cache already loaded to memory, skipping reload")
             return
         
         self.validate_request(sample_rate_hertz, onsource_duration, offsource_duration)
@@ -502,7 +502,7 @@ class GlitchCache:
         meta = self.get_metadata()
         num_glitches = meta['num_glitches']
         
-        logging.info(f"Loading {num_glitches} glitches to memory at {sample_rate_hertz}Hz, "
+        logger.info(f"Loading {num_glitches} glitches to memory at {sample_rate_hertz}Hz, "
                      f"{onsource_duration}s/{offsource_duration}s...")
         
         # Use get_batch to load all with correct cropping/resampling
@@ -530,7 +530,7 @@ class GlitchCache:
             all_labels.append(labels)
             
             if i % 50000 == 0:
-                logging.info(f"  Loaded {end_idx}/{num_glitches} glitches...")
+                logger.info(f"  Loaded {end_idx}/{num_glitches} glitches...")
         
         self._mem_onsource = np.concatenate(all_ons, axis=0)
         self._mem_offsource = np.concatenate(all_offs, axis=0)
@@ -542,7 +542,7 @@ class GlitchCache:
         self._in_memory = True
         
         mem_size_mb = (self._mem_onsource.nbytes + self._mem_offsource.nbytes) / 1024 / 1024
-        logging.info(f"Cache loaded to memory: {mem_size_mb:.1f} MB, {num_glitches} glitches")
+        logger.info(f"Cache loaded to memory: {mem_size_mb:.1f} MB, {num_glitches} glitches")
     
     def get_batch_from_memory(
         self,
@@ -679,7 +679,7 @@ class GlitchCache:
             grp.attrs['ifo_names'] = ifo_names
             grp.attrs['version'] = 1  # For future format changes
             
-        logging.info(
+        logger.info(
             f"Saved {len(gps_times)} glitches to {self.path} "
             f"({onsource.nbytes / 1e6:.1f}MB onsource, "
             f"{offsource.nbytes / 1e6:.1f}MB offsource)"

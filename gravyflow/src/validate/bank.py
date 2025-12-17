@@ -44,10 +44,8 @@ class ValidationBank:
         self.model, self.dataset_args = model, dataset_args
         self.config, self.heart = config or ValidationConfig(), heart
 
-        self.logger = logging.getLogger("validation_bank")
-        if not self.logger.handlers:
-            self.logger.addHandler(logging.StreamHandler(sys.stdout))
-        self.logger.setLevel(logging.INFO)
+        self.model, self.dataset_args = model, dataset_args
+        self.config, self.heart = config or ValidationConfig(), heart
 
         self.__dict__.update(
             {
@@ -98,7 +96,7 @@ class ValidationBank:
         try:
             if getattr(obt, "valid_segments", None) is not None:
                 return
-            self.logger.info("Pre-fetching valid segments for cache consistency...")
+            logger.info("Pre-fetching valid segments for cache consistency...")
             ifos = getattr(noise_obt, "ifos", None)
             if ifos:
                 obt.get_valid_segments(
@@ -107,7 +105,7 @@ class ValidationBank:
                     group_name=self.dataset_args.get("group", "test"),
                 )
         except Exception as e:
-            self.logger.warning(f"Failed to pre-fetch segments: {e}")
+            logger.warning(f"Failed to pre-fetch segments: {e}")
 
     def _build_dataset(self, dataset_args: dict, num_batches: int, outputs: tuple) -> gf.Dataset:
         dataset_args.update(
@@ -256,7 +254,7 @@ class ValidationBank:
         if observing_runs is None:
             observing_runs = [gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3]
 
-        self.logger.info("Fetching real GW events from GWTC catalogs...")
+        logger.info("Fetching real GW events from GWTC catalogs...")
         events = get_events_with_params(
             observing_runs, event_types=[EventType.CONFIDENT, EventType.MARGINAL]
         )
@@ -274,13 +272,13 @@ class ValidationBank:
         unique.sort(key=lambda x: x["gps"])
 
         conf = sum(1 for e in unique if e["event_type"] == "CONFIDENT")
-        self.logger.info(
+        logger.info(
             f"Found {len(unique)} unique events ({conf} confident, {len(unique) - conf} marginal)"
         )
 
         noise_obt = self.dataset_args.get("noise_obtainer")
         if not noise_obt:
-            self.logger.warning("No noise_obtainer in dataset_args - cannot score events")
+            logger.warning("No noise_obtainer in dataset_args - cannot score events")
             self.real_events = unique
             return
 
@@ -289,7 +287,7 @@ class ValidationBank:
         # Filter events by detector availability - only keep events where requested IFOs were active
         # Network format: "HL", "HLV", "LV", etc. - single letter per detector
         ifo_letters = set(ifo.name[0] for ifo in ifos)  # e.g., {"H", "L"}
-        self.logger.info(f"Required detectors: {ifo_letters}")
+        logger.info(f"Required detectors: {ifo_letters}")
         
         filtered = []
         no_network_count = 0
@@ -298,25 +296,25 @@ class ValidationBank:
             if not network:
                 # No network info - log warning and include anyway
                 no_network_count += 1
-                self.logger.debug(f"No network info for {e['name']} (GPS={e['gps']:.1f}, run={e.get('observing_run', '?')})")
+                logger.debug(f"No network info for {e['name']} (GPS={e['gps']:.1f}, run={e.get('observing_run', '?')})")
                 filtered.append(e)
                 continue
             # Check if all requested IFOs were active for this event
             if all(letter in network for letter in ifo_letters):
                 filtered.append(e)
             else:
-                self.logger.info(f"Skipping {e['name']}: network={network}, need={ifo_letters}")
+                logger.info(f"Skipping {e['name']}: network={network}, need={ifo_letters}")
         
         if no_network_count > 0:
-            self.logger.warning(f"{no_network_count} events have no network info in catalog (will attempt fetch)")
+            logger.warning(f"{no_network_count} events have no network info in catalog (will attempt fetch)")
         
         skipped = len(unique) - len(filtered)
         if skipped > 0:
-            self.logger.info(f"Filtered out {skipped} events (detectors not in network)")
+            logger.info(f"Filtered out {skipped} events (detectors not in network)")
         unique = filtered
         
         names = [e["name"] for e in unique]
-        self.logger.info(f"Creating TransientObtainer for {len(names)} events...")
+        logger.info(f"Creating TransientObtainer for {len(names)} events...")
 
         sample_rate = self.dataset_args.get("sample_rate_hertz", 2048.0)
         on_dur = self.dataset_args.get("onsource_duration_seconds", 1.0)
@@ -341,7 +339,7 @@ class ValidationBank:
                 scale_factor=gf.Defaults.scale_factor,
             )
 
-            self.logger.info("Phase 1: Collecting event data...")
+            logger.info("Phase 1: Collecting event data...")
             all_ons, all_offs, all_gps = [], [], []
             collected = 0
             missing_segment_count = 0
@@ -369,26 +367,26 @@ class ValidationBank:
                         collected += 1
 
                     if collected and collected % 20 == 0:
-                        self.logger.info(f"Data collection: {collected}/{len(names)} events")
+                        logger.info(f"Data collection: {collected}/{len(names)} events")
                 
                 # Count missing segment warnings
                 missing_segment_count = sum(1 for w in caught_warnings if "Missing segments" in str(w.message))
             
             if missing_segment_count > 0:
-                self.logger.info(f"Note: {missing_segment_count} events had data gaps (expected for some O1/O2 events)")
+                logger.info(f"Note: {missing_segment_count} events had data gaps (expected for some O1/O2 events)")
 
-            self.logger.info(f"Collected {len(all_ons)} events for batch scoring")
+            logger.info(f"Collected {len(all_ons)} events for batch scoring")
 
             if all_ons:
-                self.logger.info("Phase 2: Running batched model inference...")
+                logger.info("Phase 2: Running batched model inference...")
                 x = {
                     "ONSOURCE": np.concatenate(all_ons, axis=0),
                     "OFFSOURCE": np.concatenate(all_offs, axis=0),
                 }
                 scores = self._extract_scores(self.model.predict(x, verbose=0))
-                self.logger.info(f"Batch inference complete: {len(scores)} scores")
+                logger.info(f"Batch inference complete: {len(scores)} scores")
 
-                self.logger.info("Phase 3: Matching scores to events...")
+                logger.info("Phase 3: Matching scores to events...")
                 for i, (gps, score) in enumerate(zip(all_gps, scores)):
                     ev = next((e for e in unique if abs(e["gps"] - gps) < 20.0), None)
                     if not ev:
@@ -404,13 +402,13 @@ class ValidationBank:
                             )
                         )[0]
                     except Exception as e:
-                        self.logger.warning(f"Whitening failed for event at {gps}: {e}")
+                        logger.warning(f"Whitening failed for event at {gps}: {e}")
 
         except StopIteration:
             pass
         except Exception as e:
-            self.logger.warning(f"TransientObtainer failed: {e}")
-            self.logger.info("Events stored without scores")
+            logger.warning(f"TransientObtainer failed: {e}")
+            logger.info("Events stored without scores")
 
         if self.far_scores is not None and len(self.far_scores) > 0:
             thresholds = calculate_far_score_thresholds(
@@ -427,7 +425,7 @@ class ValidationBank:
                         break
 
         self.real_events = unique
-        self.logger.info(
+        logger.info(
             f"Real events scoring complete: "
             f"{sum(1 for e in unique if e.get('score') is not None)}/{len(unique)} scored"
         )
@@ -512,7 +510,7 @@ class ValidationBank:
 
         noise = self.far_scores
         if len(noise) == 0:
-            self.logger.warning("No noise scores found. ROC calculation requires noise data.")
+            logger.warning("No noise scores found. ROC calculation requires noise data.")
             return {}
 
         def roc_for(signal_scores: np.ndarray) -> Dict[str, Union[np.ndarray, float]]:
@@ -545,7 +543,7 @@ class ValidationBank:
                 "tpr": np.asarray(tpr),
                 "roc_auc": float(auc),
             }
-            self.logger.info(f"Default ROC pool: {n} balanced samples (SNR≥{min_snr})")
+            logger.info(f"Default ROC pool: {n} balanced samples (SNR≥{min_snr})")
 
         # Extra ROC pools
         pools = scaling_ranges if scaling_ranges is not None else self.config.extra_roc_pools
@@ -565,7 +563,7 @@ class ValidationBank:
 
             pool_sig = self.scores[mask]
             if len(pool_sig) == 0:
-                self.logger.warning(f"No signal samples found for ROC pool {key}")
+                logger.warning(f"No signal samples found for ROC pool {key}")
                 continue
             results[key] = roc_for(pool_sig)
 

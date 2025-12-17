@@ -15,14 +15,8 @@ import glob
 import sys
 import logging
 
-# Suppress verbose logging from external libraries to reduce console noise
-logging.getLogger('gwpy').setLevel(logging.WARNING)
-logging.getLogger('gwosc').setLevel(logging.WARNING)
-logging.getLogger('gwdatafind').setLevel(logging.WARNING)
-logging.getLogger('scitokens').setLevel(logging.WARNING)
-logging.getLogger('ligo').setLevel(logging.WARNING)
-logging.getLogger('igwn_auth_utils').setLevel(logging.WARNING)
-logging.getLogger('urllib3').setLevel(logging.WARNING)
+# Set up NullHandler to prevent "No handler found" warnings
+logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 # Suppress JAX/CUDA warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF info/warnings

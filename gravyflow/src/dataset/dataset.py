@@ -6,6 +6,8 @@ from warnings import warn
 import logging
 import traceback
 
+logger = logging.getLogger(__name__)
+
 import numpy as np
 import keras
 from keras import ops
@@ -15,6 +17,7 @@ from gravyflow.src.utils.tensor import crop_samples, replace_nan_and_inf_with_ze
 from gravyflow.src.dataset.config import Defaults
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
+from gravyflow.src.utils.numerics import ensure_even
 
 def validate_noise_settings(
         noise_obtainer: gf.NoiseObtainer, 
@@ -278,13 +281,13 @@ class GravyflowDataset(keras.utils.PyDataset):
         try:
             onsource, offsource, gps_times, feature_labels = next(self.noise)
         except Exception as e:
-            logging.info(f"Noise generation failed: {e}\nTraceback: {traceback.format_exc()}")
+            logger.info(f"Noise generation failed: {e}\nTraceback: {traceback.format_exc()}")
             raise Exception(f"Noise generation failed: {e}")
 
         try:
             injections, mask, parameters = next(self.injections)
         except Exception as e:
-            logging.info(f"Injection generation failed: {e}\nTraceback: {traceback.format_exc()}")
+            logger.info(f"Injection generation failed: {e}\nTraceback: {traceback.format_exc()}")
             raise Exception(f"Injection generation failed: {e}")
 
         if self.waveform_generators:
@@ -299,7 +302,7 @@ class GravyflowDataset(keras.utils.PyDataset):
                     injection_parameters=parameters
                 )
             except Exception as e:
-                logging.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")
+                logger.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")
                 # Return empty or raise? PyDataset expects a batch.
                 raise e
 
@@ -557,13 +560,6 @@ def create_variable_dictionary(
         key.name: operations[key] for key in return_variables \
         if key in operations
     }
-
-
-
-def ensure_even(number):
-    if number % 2 != 0:
-        number -= 1
-    return number
 
 # Legacy wrapper for compatibility
 def Dataset(**kwargs):

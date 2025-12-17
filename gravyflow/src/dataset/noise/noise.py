@@ -3,6 +3,9 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Union, Iterator, List
 from copy import deepcopy
+import logging
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import keras
@@ -21,10 +24,7 @@ class NoiseType(Enum):
     PSEUDO_REAL = auto()
     REAL = auto()
 
-def ensure_even(number):
-    if number % 2 != 0:
-        number -= 1
-    return number
+from gravyflow.src.utils.numerics import ensure_even
     
 def _generate_white_noise(
     num_examples_per_batch: int,
@@ -741,15 +741,14 @@ class TransientObtainer(Obtainer):
                 import numpy as np
                 if np.isnan(onsource).any():
                      # Identify which indices are NaN
-                     import logging
                      nan_indices = np.where(np.isnan(onsource).any(axis=(1,2)))[0]
-                     logging.error(f"NAN DETECTED: After whitening in _postprocess_generator! Indices: {nan_indices}")
+                     logger.error(f"NAN DETECTED: After whitening in _postprocess_generator! Indices: {nan_indices}")
                      if len(gps_times) >= max(nan_indices):
                          # Log GPS/Type info if available (assuming gps_times matches batch)
                          for idx in nan_indices:
                              gps = gps_times[idx] if idx < len(gps_times) else "Unknown"
                              lbl = labels[idx] if idx < len(labels) else "Unknown"
-                             logging.error(f"  - Failed Index {idx}: GPS={gps}, Label={lbl}")
+                             logger.error(f"  - Failed Index {idx}: GPS={gps}, Label={lbl}")
             
             # Crop padding from onsource
             if crop and crop_samples > 0:
