@@ -29,6 +29,7 @@ from .base import (
     SEGMENT_EPSILON_SECONDS,
     # Utility functions
     ensure_even,
+    ifo_canonical_key,
     random_subsection,
     concatenate_batches,
     # Base class (for type hints)
@@ -58,6 +59,7 @@ __all__ = [
     'SEGMENT_EPSILON_SECONDS',
     # Utility functions
     'ensure_even',
+    'ifo_canonical_key',
     'random_subsection',
     'concatenate_batches',
     # Classes
