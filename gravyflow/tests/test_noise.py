@@ -326,7 +326,7 @@ def test_white_noise_generator():
     # Time = (1.0 + 2*0.5) * 1024 = 2048
     assert ops.shape(onsource) == (num_examples, 1, 2048)
     assert ops.shape(offsource) == (num_examples, 1, int(offsource_dur * sample_rate))
-    assert ops.shape(gps) == (num_examples,)
+    assert ops.shape(gps) == (num_examples, 1)  # (B, IFO) where IFO=1
     
     # Check stats (roughly)
     # Mean ~ 0, Std ~ 1

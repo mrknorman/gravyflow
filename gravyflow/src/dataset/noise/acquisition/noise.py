@@ -18,6 +18,7 @@ from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, ensure_even
 )
+from gravyflow.src.utils.shapes import ShapeEnforcer
 
 
 class NoiseDataObtainer(BaseDataObtainer):
@@ -362,6 +363,41 @@ class NoiseDataObtainer(BaseDataObtainer):
         return self.valid_segments
 
     def get_onsource_offsource_chunks(
+            self,
+            sample_rate_hertz: float,
+            onsource_duration_seconds: float,
+            padding_duration_seconds: float,
+            offsource_duration_seconds: float,
+            num_examples_per_batch: int = None,
+            ifos: List[gf.IFO] = None,
+            scale_factor: float = None,
+            seed: int = None,
+            sampling_mode: SamplingMode = SamplingMode.RANDOM
+        ):
+        """
+        Wrapper to enforce shape contracts on generator.
+        """
+        gen = self._yield_onsource_offsource_chunks(
+            sample_rate_hertz,
+            onsource_duration_seconds,
+            padding_duration_seconds,
+            offsource_duration_seconds,
+            num_examples_per_batch,
+            ifos,
+            scale_factor,
+            seed,
+            sampling_mode
+        )
+
+        # Ensure ifos is a list to count num_ifos
+        if ifos is None:
+            ifos = [gf.IFO.L1]
+        elif not isinstance(ifos, (list, tuple)):
+            ifos = [ifos]
+
+        return ShapeEnforcer.wrap_generator(gen, num_ifos=len(ifos))
+
+    def _yield_onsource_offsource_chunks(
             self,
             sample_rate_hertz: float,
             onsource_duration_seconds: float,

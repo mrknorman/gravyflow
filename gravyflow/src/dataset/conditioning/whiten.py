@@ -240,10 +240,11 @@ def whiten(
         lambda: None
     )
 
-    # Check if input is 1D or 2D
+    # Shape check: timeseries = (Samples,) for 1D or (Batch, Samples) for 2D
+    # For strain data, could also be (Batch, IFO, Samples) = BIS shape
     is_1d = len(ops.shape(timeseries)) == 1
     if is_1d:
-        # If 1D, add an extra dimension
+        # Expand: (Samples,) -> (1, Samples) for batch processing
         timeseries = ops.expand_dims(timeseries, axis=0)
         background = ops.expand_dims(background, axis=0)
 

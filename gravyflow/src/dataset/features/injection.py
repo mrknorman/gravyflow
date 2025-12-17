@@ -1317,6 +1317,16 @@ class InjectionGenerator:
             try:
                 injections = ops.stack(injections_list, axis=0)
                 masks = ops.stack(masks_list, axis=0)
+                
+                # Validate shapes: injections should be (G, B, 2, S) = GBPS
+                # where G=num_generators, 2=polarizations (h+/hx)
+                if injections is not None:
+                    expected_ndim = 4  # GBPS
+                    if len(ops.shape(injections)) != expected_ndim:
+                        logging.warning(
+                            f"Injection shape mismatch: expected {expected_ndim}D (GBPS), "
+                            f"got {len(ops.shape(injections))}D with shape {ops.shape(injections)}"
+                        )
             except:
                 injections = None
                 masks = None
@@ -1352,28 +1362,6 @@ class InjectionGenerator:
             network = generator.network
             
             num_examples = ops.shape(raw_waveforms)[0]
-            
-            # Extract parameters for this batch/generator if available
-            # Note: injection_parameters usually has batched params for all generators?
-            # Or is it a list of dicts? 
-            # In generate(), batched_params is a single dict combining all.
-            # But params might be arrays of shape (Batch*NumGens)?
-            # No, generate() combines them.
-            # However, if we have multiple generators, the parameters for each might be mixed or stacked?
-            # Wait, `generate` returns `batched_params` which merges lists of params.
-            # If keys conflict (e.g. mass_1 for gen1 and gen2), `batch_injection_parameters` handles it?
-            # `batch_injection_parameters` iterates keys and stacks values if they are lists.
-            # If `InjectionGenerator` has multiple `WNBGenerator`s, `min_frequency` might be a list of tensors?
-            # Or if keys are unique? No, they share keys.
-            # If `batched_params` contains stacked tensors, we need to index `i`.
-            # BUT `shifts` (key "shift") was stacked in `generate` (line 1309: injections_list.append, parameters_list.append).
-            # `batch_injection_parameters` (line 1320) combines them.
-            # Let's verify `batch_injection_parameters` logic. 
-            # It seems it stacks if key exists in multiple params.
-            # So `injection_parameters["shift"]` should be (NumGenerators, Batch) or (Batch, NumGenerators)?
-            # `ops.stack` usually stacks on axis 0.
-            # If parameters_list is [p1, p2], stack([v1, v2]) -> (2, Batch).
-            # So we can access `injection_parameters[key][i]`.
             
             current_shifts = None
             if injection_parameters and "shift" in injection_parameters:
@@ -1591,6 +1579,15 @@ class InjectionGenerator:
 
         try:
             scaled_injections = ops.stack(scaled_injections_list, axis=0)
+
+            
+            # Ensure shape matches final_onsource logic?
+            # final_onsource is (Batch, IFOs, Samples).
+            # scaled_injections should match.
+            if ops.shape(scaled_injections)[-1] != ops.shape(final_onsource)[-1]:
+                logging.warning(f"Shape mismatch: injections {ops.shape(scaled_injections)} vs onsource {ops.shape(final_onsource)}")
+                # Force match if needed, but better to warn/debug first.
+                
         except:
             scaled_injections = None
             

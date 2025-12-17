@@ -3,11 +3,19 @@ SNR Computation for Matched Filtering
 
 JAX-optimized functions for computing signal-to-noise ratio via 
 frequency-domain correlation.
+
+Shape Conventions:
+- Data: (Samples,) for 1D or (Batch, Samples) for batched
+- Templates: (NumTemplates, Samples)
+- SNR output: (Batch, NumTemplates, Samples) or (NumTemplates, Samples) if 1D input
 """
 
 import jax
 import jax.numpy as jnp
 from typing import Optional
+
+# Shape helpers - using explicit ndim checks for JIT compatibility
+# Note: Can't use ShapeEnforcer inside JIT, so we use raw ndim checks with comments
 
 
 @jax.jit
@@ -27,26 +35,31 @@ def matched_filter_fft(
     If no PSD is provided, assumes white noise (uniform PSD).
     
     Args:
-        data: Strain data, shape (samples,) or (batch, samples)
-        templates: Template waveforms, shape (num_templates, samples)
-        psd: One-sided PSD, shape (num_freqs,). If None, uniform weighting.
+        data: Strain data, shape (Samples,) or (Batch, Samples)
+        templates: Template waveforms, shape (NumTemplates, Samples)
+        psd: One-sided PSD, shape (NumFreqs,). If None, uniform weighting.
         sample_rate_hertz: Sample rate for frequency normalization.
     
     Returns:
-        SNR timeseries, shape (batch, num_templates, samples) or 
-        (num_templates, samples) if data is 1D
+        SNR timeseries, shape (Batch, NumTemplates, Samples) or 
+        (NumTemplates, Samples) if data is 1D
     """
-    # Handle 1D data
-    data_1d = data.ndim == 1
+    # Shape: data = (Samples,) for 1D, (Batch, Samples) for batched
+    data_1d = data.ndim == 1  # Check if input is 1D (single sample)
     if data_1d:
-        data = data[None, :]  # (1, samples)
+        # Expand: (Samples,) -> (1, Samples) for batch dimension
+        data = data[None, :]
     
-    n_samples = data.shape[-1]
+    # Shape: data = (Batch, Samples) at this point
+    n_samples = data.shape[-1]  # Axis -1 = Samples
     
     # FFT of data and templates - normalize by sample_rate to match dataset convention
     # This gives h_tilde(f) ≈ rfft(h) / sample_rate, consistent with gravyflow.src.dataset.tools.snr
-    data_fft = jnp.fft.rfft(data, axis=-1) / sample_rate_hertz  # (batch, freq)
-    template_fft = jnp.fft.rfft(templates, axis=-1) / sample_rate_hertz  # (templates, freq)
+    # Shape: data_fft = (Batch, NumFreqs)
+    data_fft = jnp.fft.rfft(data, axis=-1) / sample_rate_hertz
+    # Shape: template_fft = (NumTemplates, NumFreqs)
+    template_fft = jnp.fft.rfft(templates, axis=-1) / sample_rate_hertz
+
     
     # Duration in seconds
     duration_seconds = n_samples / sample_rate_hertz
@@ -226,8 +239,8 @@ def find_triggers(
     Find triggers (peaks) above SNR threshold.
     
     Args:
-        snr: SNR timeseries, shape (num_templates, samples) or 
-             (batch, num_templates, samples)
+        snr: SNR timeseries, shape (NumTemplates, Samples) for 2D or 
+             (Batch, NumTemplates, Samples) for 3D
         threshold: Minimum SNR for trigger
         cluster_window: Samples to cluster nearby peaks
     
@@ -237,14 +250,17 @@ def find_triggers(
         - 'time_index': Sample index of peak
         - 'template_index': Which template triggered
     """
-    # Find max over templates at each time
+    # Shape check: determine if 2D (NumTemplates, Samples) or 3D (Batch, NumTemplates, Samples)
     if snr.ndim == 2:
-        max_snr_over_templates = jnp.max(snr, axis=0)
-        best_template = jnp.argmax(snr, axis=0)
+        # Shape: (NumTemplates, Samples) - single batch
+        # Axis 0 = NumTemplates, Axis 1 = Samples
+        max_snr_over_templates = jnp.max(snr, axis=0)  # -> (Samples,)
+        best_template = jnp.argmax(snr, axis=0)        # -> (Samples,)
     else:
-        # Batch dimension
-        max_snr_over_templates = jnp.max(snr, axis=1)
-        best_template = jnp.argmax(snr, axis=1)
+        # Shape: (Batch, NumTemplates, Samples) - batched
+        # Axis 0 = Batch, Axis 1 = NumTemplates, Axis 2 = Samples
+        max_snr_over_templates = jnp.max(snr, axis=1)  # -> (Batch, Samples)
+        best_template = jnp.argmax(snr, axis=1)        # -> (Batch, Samples)
     
     triggers = []
     
@@ -254,6 +270,7 @@ def find_triggers(
     template_np = np.array(best_template)
     
     above_thresh = snr_np > threshold
+    # Shape-dependent indexing
     indices = np.where(above_thresh)[0] if snr.ndim == 2 else np.argwhere(above_thresh)
     
     # Cluster nearby peaks
