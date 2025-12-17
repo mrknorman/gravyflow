@@ -55,6 +55,21 @@ GPS_TOLERANCE_SECONDS = 0.5
 SEGMENT_EPSILON_SECONDS = 0.1
 
 
+def ifo_canonical_key(ifos) -> tuple:
+    """
+    Generate a canonical key for a list of IFOs.
+    
+    Creates a consistent, hashable representation for caching and comparison.
+    
+    Args:
+        ifos: List of IFO objects or IFO enum values
+        
+    Returns:
+        Tuple of sorted IFO names, e.g., ('H1', 'L1')
+    """
+    return tuple(sorted(ifo.name for ifo in ifos))
+
+
 # =============================================================================
 # ENUMS
 # =============================================================================

@@ -1266,11 +1266,11 @@ class TransientDataObtainer(BaseDataObtainer):
                              logging.error(f"ZERO SIGNAL DETECTED: onsource_full is all zeros! GPS: {extracted_gps}")
 
                         # Save to cache using segment-window GPS (matches lookup calculation)
-                        label = self._feature_labels.get(gps_time, 0) if hasattr(self, '_feature_labels') and isinstance(self._feature_labels, dict) else 0
+                        label = self._lookup_labels([gps_time])[0] if hasattr(self, '_feature_labels') else 0
                         try:
                             cache.append_single(np.array(onsource_full), np.array(offsource_full), gps_time, label)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.warning(f"Failed to append sample to cache (GPS={gps_time:.3f}): {e}")
                         
                         # Crop for this request
                         onsource_cropped, offsource_cropped = self._crop_resample(

@@ -13,6 +13,7 @@ from numpy.random import default_rng
 
 import gravyflow as gf
 from gravyflow.src.dataset.features.event import get_events_with_params, EventType
+from gravyflow.src.dataset.noise.acquisition import ifo_canonical_key
 
 class NoiseType(Enum):
     WHITE = auto()
@@ -331,7 +332,7 @@ class NoiseObtainer(Obtainer):
                 )
             
             case NoiseType.REAL:
-                canonical_ifos = tuple(sorted(ifo.name for ifo in self.ifos))
+                canonical_ifos = ifo_canonical_key(self.ifos)
 
                 if not self.ifo_data_obtainer:
                     raise ValueError("""
@@ -411,7 +412,7 @@ class NoiseObtainer(Obtainer):
             int(duration * sample_rate_hertz) for duration in durations_seconds
         ]
 
-        canonical_ifos = tuple(sorted(ifo.name for ifo in self.ifos))
+        canonical_ifos = ifo_canonical_key(self.ifos)
 
         if not self.ifo_data_obtainer:
             raise ValueError("""
@@ -612,7 +613,7 @@ class TransientObtainer(Obtainer):
             self._filter_to_named_events(ifo_obtainer)
         
         # Get valid segments
-        canonical_ifos = tuple(sorted(ifo.name for ifo in self.ifos))
+        canonical_ifos = ifo_canonical_key(self.ifos)
         if ifo_obtainer.valid_segments is None or canonical_ifos != ifo_obtainer.ifos:
             ifo_obtainer.get_valid_segments(
                 self.ifos,
