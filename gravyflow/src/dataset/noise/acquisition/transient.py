@@ -738,13 +738,28 @@ class TransientDataObtainer(BaseDataObtainer):
                         all_feature_segments_list.append(evt_segs)
 
                 # GLITCHES (Per IFO)
-                if DataLabel.GLITCHES in self.data_labels:
+                # Check for DataLabel.GLITCHES OR specific GlitchType enums in data_labels
+                from gravyflow.src.dataset.features.glitch import GlitchType
+                glitch_types_in_labels = [
+                    label for label in self.data_labels 
+                    if isinstance(label, GlitchType)
+                ]
+                has_glitches = DataLabel.GLITCHES in self.data_labels or len(glitch_types_in_labels) > 0
+                
+                if has_glitches:
+                    # Determine which types to fetch
+                    if DataLabel.GLITCHES in self.data_labels:
+                        glitch_types_to_fetch = None  # All types
+                    else:
+                        glitch_types_to_fetch = glitch_types_in_labels
+                    
                     for ifo in ifos:
                         try:
                             glitch_times, glitch_labels = gf.get_glitch_times_with_labels(
                                 ifo,
                                 start_gps_time=global_start_gps,
                                 end_gps_time=global_end_gps,
+                                glitch_types=glitch_types_to_fetch,
                                 balanced=self.balanced_glitch_types
                             )
                             
@@ -1210,9 +1225,13 @@ class TransientDataObtainer(BaseDataObtainer):
                     # Get segments to download
                     miss_segments = self.valid_segments_adjusted[miss_indices]
                     
+                    # Download at the higher of requested or cache sample rate
+                    # (we can downsample but not upsample)
+                    download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
+                    
                     # Use parallel acquire for bulk download
                     segment_generator = self.acquire(
-                        CACHE_SAMPLE_RATE_HERTZ,
+                        download_sample_rate,
                         miss_segments,
                         ifos,
                         1.0 # Download RAW data for cache (scale=1.0)
@@ -1222,22 +1241,30 @@ class TransientDataObtainer(BaseDataObtainer):
                         feature_gps_start = event_segment.start_gps_time[0]
                         data_len = len(event_segment.data[0])
                         center_idx = data_len // 2
-                        gps_time = feature_gps_start + (center_idx / CACHE_SAMPLE_RATE_HERTZ)
+                        gps_time = feature_gps_start + (center_idx / download_sample_rate)
                         
                         # Extract and cache
-                        num_cache_onsource = int(CACHE_ONSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
-                        num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
+                        num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
+                        num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * download_sample_rate)
                         
                         onsource_full, offsource_full, extracted_gps = self._extract_feature_event(
                             event_segment,
                             num_cache_onsource,
                             num_cache_offsource,
-                            CACHE_SAMPLE_RATE_HERTZ
+                            download_sample_rate
                         )
                         
                         if onsource_full is None:
                             continue
+
+                        # NAN CHECK: Post-Extraction
+                        if np.isnan(onsource_full).any():
+                             logging.error(f"NAN DETECTED: In onsource_full after extract! GPS: {extracted_gps}")
                         
+                        # ZERO CHECK
+                        if np.all(onsource_full == 0):
+                             logging.error(f"ZERO SIGNAL DETECTED: onsource_full is all zeros! GPS: {extracted_gps}")
+
                         # Save to cache using segment-window GPS (matches lookup calculation)
                         label = self._feature_labels.get(gps_time, 0) if hasattr(self, '_feature_labels') and isinstance(self._feature_labels, dict) else 0
                         try:
@@ -1248,11 +1275,15 @@ class TransientDataObtainer(BaseDataObtainer):
                         # Crop for this request
                         onsource_cropped, offsource_cropped = self._crop_resample(
                             onsource_full, offsource_full,
-                            CACHE_SAMPLE_RATE_HERTZ, sample_rate_hertz,
+                            download_sample_rate, sample_rate_hertz,
                             CACHE_ONSOURCE_DURATION, total_onsource_duration_seconds,
                             CACHE_OFFSOURCE_DURATION, offsource_duration_seconds
                         )
-                        
+
+                        # NAN CHECK: Post-Crop
+                        if np.isnan(onsource_cropped).any():
+                             logging.error(f"NAN DETECTED: In onsource_cropped! GPS: {extracted_gps}")
+
                         batch_subarrays.append(onsource_cropped * scale_factor)
                         batch_backgrounds.append(offsource_cropped * scale_factor)
                         batch_gps_times.append(extracted_gps)
@@ -1288,11 +1319,17 @@ class TransientDataObtainer(BaseDataObtainer):
         onsource_full = np.array(onsource_full)
         offsource_full = np.array(offsource_full)
         
-        # Resample if needed
+        # Resample if needed (downsampling only - upsampling not supported)
         if target_rate != source_rate:
+            if target_rate > source_rate:
+                raise ValueError(
+                    f"Cannot upsample from {source_rate}Hz to {target_rate}Hz. "
+                    "Upsampling is not supported."
+                )
             ratio = int(source_rate / target_rate)
-            onsource_full = onsource_full[..., ::ratio]
-            offsource_full = offsource_full[..., ::ratio]
+            if ratio > 1:
+                onsource_full = onsource_full[..., ::ratio]
+                offsource_full = offsource_full[..., ::ratio]
         
         # Crop onsource (center crop)
         if target_ons_dur < source_ons_dur:

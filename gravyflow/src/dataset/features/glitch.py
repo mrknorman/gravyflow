@@ -130,6 +130,10 @@ def get_glitch_times(
 
         # Loop over each glitch type and perform individual queries.
         for glitch_type in glitch_types:
+            # BLACKLIST: Wandering_Line is broken in GravitySpy (unterminated string literal error)
+            if glitch_type == GlitchType.WANDERING_LINE:
+                continue
+                
             glitch_name = glitch_type.value
             selection = f"ifo = '{ifo}' AND event_time >= {start_gps_time} AND event_time <= {end_gps_time} AND ml_label = '{glitch_name}' AND No_Glitch < 0.1"
             
@@ -180,7 +184,7 @@ def get_glitch_times_with_labels(
     # Get all GlitchType values or use provided subset
     # Exclude NO_GLITCH by default as it's a placeholder (always returns 0 results with No_Glitch < 0.1 filter)
     if glitch_types is None:
-        glitch_types = [gt for gt in GlitchType if gt != GlitchType.NO_GLITCH]
+        glitch_types = [gt for gt in GlitchType if gt != GlitchType.NO_GLITCH and gt != GlitchType.CHIRP]
     elif not isinstance(glitch_types, list):
         glitch_types = [glitch_types]
     
@@ -189,6 +193,10 @@ def get_glitch_times_with_labels(
     all_labels = []
     
     for glitch_type in glitch_types:
+        # BLACKLIST: Wandering_Line is broken in GravitySpy
+        if glitch_type == GlitchType.WANDERING_LINE:
+            continue
+
         glitch_name = glitch_type.value
         # Get enum index (0-19)
         type_index = list(GlitchType).index(glitch_type)
@@ -270,6 +278,10 @@ def get_glitch_segments(
 
         # Loop over each glitch type and perform individual queries.
         for glitch_type in glitch_types:
+            # BLACKLIST: Wandering_Line is broken in GravitySpy
+            if glitch_type == GlitchType.WANDERING_LINE:
+                continue
+                
             glitch_name = glitch_type.value
             selection = f"ifo = '{ifo}' AND event_time >= {start_gps_time} AND event_time <= {end_gps_time} AND ml_label = '{glitch_name}' AND No_Glitch < 0.1"
             
