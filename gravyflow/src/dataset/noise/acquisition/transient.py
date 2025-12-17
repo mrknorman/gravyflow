@@ -716,8 +716,8 @@ class TransientDataObtainer(BaseDataObtainer):
                     offsource = segment_data[off_start:off_end]
                     
                     # Reshape for multi-IFO: (IFOs, samples)
-                    onsource = np.array(onsource).reshape(1, -1)  # (1, samples)
-                    offsource = np.array(offsource).reshape(1, -1)
+                    onsource = np.asarray(onsource).reshape(1, -1)  # (1, samples)
+                    offsource = np.asarray(offsource).reshape(1, -1)
                     
                     batch_onsource.append(onsource)
                     batch_offsource.append(offsource)
@@ -1003,28 +1003,13 @@ class TransientDataObtainer(BaseDataObtainer):
             batch_gps_times.append(gps_time)
             
             if len(batch_subarrays) >= num_examples_per_batch:
-                final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
-                final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
-                final_gps = ops.expand_dims(
-                    ops.convert_to_tensor(batch_gps_times, dtype="float64"), 
-                    axis=-1
-                )
-                batch_labels = self._lookup_labels(batch_gps_times)
-                yield self._apply_augmentation(final_subarrays, is_transient=True), self._apply_augmentation(final_background, is_transient=True), final_gps, batch_labels
-                
+                yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_gps_times)
                 batch_subarrays = []
                 batch_backgrounds = []
                 batch_gps_times = []
 
         if len(batch_subarrays) > 0:
-            final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
-            final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
-            final_gps = ops.expand_dims(
-                ops.convert_to_tensor(batch_gps_times, dtype="float64"), 
-                axis=-1
-            )
-            batch_labels = self._lookup_labels(batch_gps_times)
-            yield self._apply_augmentation(final_subarrays, is_transient=True), self._apply_augmentation(final_background, is_transient=True), final_gps, batch_labels
+            yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_gps_times)
 
     def get_onsource_offsource_chunks(
             self,
@@ -1085,13 +1070,7 @@ class TransientDataObtainer(BaseDataObtainer):
         if hasattr(self, 'data_directory') and self.data_directory:
              data_dir = self.data_directory
              
-        run_id = "unknown"
-        if self.observing_runs:
-             # Just take the first one or derive roughly
-             # If multiple runs, precache might be split? 
-             # Current precache logic uses specific run logic.
-             # We try to match it.
-             pass 
+
              
         # Actually, simpler: IFODataObtainer doesn't easily know the exact filename without logic duplication.
         # But we can try the standard generate_glitch_cache_path if we exported it?
@@ -1147,10 +1126,8 @@ class TransientDataObtainer(BaseDataObtainer):
                 offsource_samples=num_cache_offsource
             )
             logging.info(f"Created new cache file: {cache_path}")
-        else:
             # Cache exists - use disk-based access (HDF5 chunked storage is efficient)
             # The hybrid path below uses has_gps() and get_by_gps() which read from disk
-            pass
         # Build batches: cache hits served instantly, misses downloaded in parallel
         rng = default_rng(seed)
         segment_indices = np.arange(len(self.valid_segments_adjusted))
