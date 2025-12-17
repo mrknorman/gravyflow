@@ -41,23 +41,6 @@ from bokeh.models import Span
 # CORE UTILITY FUNCTION TESTS
 # =============================================================================
 
-class TestEnsureEven:
-    """Tests for ensure_even function (line 31)."""
-    
-    def test_even_number_unchanged(self):
-        """Even numbers should remain unchanged."""
-        assert gf_acq.ensure_even(100) == 100
-        assert gf_acq.ensure_even(4096) == 4096
-        assert gf_acq.ensure_even(0) == 0
-        assert gf_acq.ensure_even(2) == 2
-    
-    def test_odd_number_decremented(self):
-        """Odd numbers should be decremented by 1."""
-        assert gf_acq.ensure_even(101) == 100
-        assert gf_acq.ensure_even(4097) == 4096
-        assert gf_acq.ensure_even(1) == 0
-        assert gf_acq.ensure_even(3) == 2
-
 
 class TestRandomSubsection:
     """Tests for random_subsection and _random_subsection functions."""

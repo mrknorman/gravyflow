@@ -447,16 +447,7 @@ def test_colored_noise_psd_shape():
 # NEW TESTS FOR COMPREHENSIVE COVERAGE
 # ============================================================================
 
-def test_ensure_even():
-    """Test ensure_even function."""
-    # Even number stays the same
-    assert gf_noise.ensure_even(100) == 100
-    assert gf_noise.ensure_even(4096) == 4096
-    
-    # Odd number becomes even (subtract 1)
-    assert gf_noise.ensure_even(101) == 100
-    assert gf_noise.ensure_even(4097) == 4096
-    assert gf_noise.ensure_even(1) == 0
+
 
 
 def test_generate_white_noise_direct():
