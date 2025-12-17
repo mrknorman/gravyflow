@@ -771,64 +771,25 @@ class TransientObtainer(Obtainer):
         """
         Generator that yields batches from a GlitchCache file.
         
-        Streams batches from disk to avoid loading entire cache into memory.
+        Delegates to GlitchCache.stream_batches for the actual streaming.
         """
         from gravyflow.src.dataset.features.glitch_cache import GlitchCache
-        from numpy.random import default_rng
-        import numpy as np
         
         cache = GlitchCache(cache_path, mode='r')
-        meta = cache.get_metadata()
-        n_glitches = meta['num_glitches']
         
         # Calculate padded onsource duration for cropping
         total_onsource_duration = onsource_duration + crop_duration_seconds
         
-        # Get GPS times for filtering (read once, small array)
-        with __import__('h5py').File(cache_path, 'r') as f:
-            gps_all = f['glitches']['gps_times'][:]
-        
-        # Build index of valid glitches
-        valid_indices = np.arange(n_glitches)
-        
-        if allowed_segments is not None and len(allowed_segments) > 0:
-            # Handle potential extra dimensions
-            if allowed_segments.ndim == 3 and allowed_segments.shape[1] == 1:
-                 allowed_segments = allowed_segments.reshape(-1, 2)
-            elif allowed_segments.ndim == 1 and allowed_segments.shape[0] == 2:
-                 allowed_segments = allowed_segments.reshape(1, 2)
-            
-            # Filter based on segment overlap
-            keep_mask = np.zeros(len(gps_all), dtype=bool)
-            for start, end in allowed_segments:
-                in_segment = (gps_all >= start) & (gps_all <= end)
-                keep_mask |= in_segment
-                
-            valid_indices = np.where(keep_mask)[0]
-            n_glitches = len(valid_indices)
-            print(f"Filtered cache using allowed_segments: kept {n_glitches} glitches")
-        
-        rng = default_rng(seed)
-        
-        print(f"Cache has {n_glitches:,} valid glitches, yielding batches of {num_examples_per_batch}")
-        
-        if n_glitches == 0:
-             raise ValueError(f"No glitches found for allowed segments after filtering! (Allowed segments: {len(allowed_segments) if allowed_segments is not None else 0})")
-
-        while True:
-            # Random batch indices from valid_indices
-            batch_idx = rng.choice(n_glitches, size=num_examples_per_batch, replace=True)
-            batch_indices = valid_indices[batch_idx]
-            
-            # Stream batch from disk (no full cache load)
-            onsource, offsource, gps_times, labels = cache.get_batch(
-                batch_indices,
-                sample_rate_hertz=sample_rate_hertz,
-                onsource_duration=total_onsource_duration,
-                offsource_duration=offsource_duration
-            )
-            
-            yield onsource * scale_factor, offsource * scale_factor, gps_times, labels
+        # Delegate to GlitchCache.stream_batches
+        yield from cache.stream_batches(
+            batch_size=num_examples_per_batch,
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration=total_onsource_duration,
+            offsource_duration=offsource_duration,
+            scale_factor=scale_factor,
+            seed=seed,
+            allowed_segments=allowed_segments
+        )
     
     def _filter_to_named_events(self, ifo_obtainer):
         all_events = get_events_with_params(event_types=[EventType.CONFIDENT, EventType.MARGINAL])
