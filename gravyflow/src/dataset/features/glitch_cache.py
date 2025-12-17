@@ -56,6 +56,45 @@ class GlitchCache:
         data = cache.load_all()  # Single bulk read
     """
     
+    @staticmethod
+    def crop_and_resample(
+        data: np.ndarray,
+        current_rate: float,
+        target_rate: float,
+        target_duration: float
+    ) -> np.ndarray:
+        """
+        Crop and resample data along the last axis (samples).
+        
+        Handles arbitrary leading dimensions (Batch, IFOs, etc).
+        Only supports integer downsampling.
+        """
+        if data.size == 0:
+            return data
+            
+        # 1. Resample (downsample only)
+        if target_rate != current_rate:
+            if target_rate > current_rate:
+                raise ValueError(
+                    f"Cannot upsample from {current_rate}Hz to {target_rate}Hz. "
+                    "Upsampling is not supported."
+                )
+            
+            ratio = int(current_rate / target_rate)
+            if ratio > 1:
+                data = data[..., ::ratio]
+                
+        # 2. Crop
+        target_samples = int(target_duration * target_rate)
+        current_samples = data.shape[-1]
+        
+        if current_samples > target_samples:
+            # Center crop
+            start = (current_samples - target_samples) // 2
+            data = data[..., start : start + target_samples]
+            
+        return data
+
     def __init__(self, path: Path, mode: str = 'r'):
         self.path = Path(path)
         self.mode = mode
@@ -554,31 +593,26 @@ class GlitchCache:
             gps_times = grp['gps_times'][:]
             labels = grp['labels'][:]
         
-        # Resample if needed
-        if sample_rate_hertz is not None and sample_rate_hertz != meta['sample_rate_hertz']:
-            ratio = int(meta['sample_rate_hertz'] / sample_rate_hertz)
-            onsource = onsource[:, :, ::ratio]
-            offsource = offsource[:, :, ::ratio]
+        # Use unified crop/resample logic
+        target_rate = sample_rate_hertz or meta['sample_rate_hertz']
         
-        # Crop onsource if needed
-        if onsource_duration is not None and onsource_duration < meta['onsource_duration']:
-            target_rate = sample_rate_hertz or meta['sample_rate_hertz']
-            target_samples = int(onsource_duration * target_rate)
-            current_samples = onsource.shape[2]
-            if current_samples > target_samples:
-                # Crop from center
-                start = (current_samples - target_samples) // 2
-                onsource = onsource[:, :, start:start + target_samples]
+        # Process onsource
+        target_on_dur = onsource_duration or meta['onsource_duration']
+        onsource = self.crop_and_resample(
+            onsource, 
+            meta['sample_rate_hertz'], 
+            target_rate, 
+            target_on_dur
+        )
         
-        # Crop offsource if needed
-        if offsource_duration is not None and offsource_duration < meta['offsource_duration']:
-            target_rate = sample_rate_hertz or meta['sample_rate_hertz']
-            target_samples = int(offsource_duration * target_rate)
-            current_samples = offsource.shape[2]
-            if current_samples > target_samples:
-                # Crop from center
-                start = (current_samples - target_samples) // 2
-                offsource = offsource[:, :, start:start + target_samples]
+        # Process offsource
+        target_off_dur = offsource_duration or meta['offsource_duration']
+        offsource = self.crop_and_resample(
+            offsource, 
+            meta['sample_rate_hertz'], 
+            target_rate, 
+            target_off_dur
+        )
         
         return {
             'onsource': onsource,

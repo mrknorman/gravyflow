@@ -851,6 +851,9 @@ class TransientDataObtainer(BaseDataObtainer):
                     else:
                         glitch_types_to_fetch = glitch_types_in_labels
                     
+                    new_times_list = []
+                    new_labels_list = []
+
                     for ifo in ifos:
                         try:
                             glitch_times, glitch_labels = gf.get_glitch_times_with_labels(
@@ -861,24 +864,10 @@ class TransientDataObtainer(BaseDataObtainer):
                                 balanced=self.balanced_glitch_types
                             )
                             
-                            if not hasattr(self, '_feature_labels'):
-                                self._feature_labels = {}
-                                
-                            # Store arrays directly for vectorized lookup
-                            # This matches expectation in _lookup_labels
-                            current_times, current_labels = self._feature_labels.get(gf.DataLabel.GLITCHES, (np.array([]), np.array([])))
-                            
-                            if len(current_times) > 0:
-                                new_times = np.concatenate([current_times, glitch_times])
-                                new_labels = np.concatenate([current_labels, glitch_labels])
-                            else:
-                                new_times = glitch_times
-                                new_labels = glitch_labels
-                                
-                            self._feature_labels[gf.DataLabel.GLITCHES] = (new_times, new_labels)
-                            self._sorted_label_indices = None  # Invalidate cache
-
                             if len(glitch_times) > 0:
+                                new_times_list.append(glitch_times)
+                                new_labels_list.append(glitch_labels)
+
                                 gl_segs = self.pad_gps_times_with_veto_window(
                                     np.array(glitch_times),
                                     start_padding_seconds=padding,
@@ -888,6 +877,26 @@ class TransientDataObtainer(BaseDataObtainer):
                         except Exception as e:
                             logging.warning(f"Failed to fetch glitches for {ifo}: {e}")
                             continue
+                    
+                    # Unified update of feature labels (single concatenation)
+                    if new_times_list:
+                        if not hasattr(self, '_feature_labels'):
+                            self._feature_labels = {}
+                            
+                        current_times, current_labels = self._feature_labels.get(gf.DataLabel.GLITCHES, (np.array([]), np.array([])))
+                        
+                        batch_times = np.concatenate(new_times_list)
+                        batch_labels = np.concatenate(new_labels_list)
+                        
+                        if len(current_times) > 0:
+                            final_times = np.concatenate([current_times, batch_times])
+                            final_labels = np.concatenate([current_labels, batch_labels])
+                        else:
+                            final_times = batch_times
+                            final_labels = batch_labels
+                            
+                        self._feature_labels[gf.DataLabel.GLITCHES] = (final_times, final_labels)
+                        self._sorted_label_indices = None  # Invalidate cache
 
             if not all_feature_segments_list:
                 raise ValueError("No features (Events/Glitches) found in requested range.")
@@ -1133,12 +1142,15 @@ class TransientDataObtainer(BaseDataObtainer):
         segment_indices = np.arange(len(self.valid_segments_adjusted))
         
         # Precompute GPS times for all segments
-        all_gps_times = []
-        for seg in self.valid_segments_adjusted:
-            seg_start = seg[0][0] if len(seg.shape) > 1 else seg[0]
-            seg_end = seg[0][1] if len(seg.shape) > 1 else seg[1]
-            all_gps_times.append((seg_start + seg_end) / 2)
-        all_gps_times = np.array(all_gps_times)
+        # Precompute GPS times for all segments (Vectorized)
+        if self.valid_segments_adjusted.ndim == 3:
+            # (N, IFOs, 2) -> segments are aligned across IFOs, so we can just use the first one
+            target_segments = self.valid_segments_adjusted[:, 0, :]
+        else:
+            # (N, 2)
+            target_segments = self.valid_segments_adjusted
+            
+        all_gps_times = np.mean(target_segments, axis=1)
         
         # Shuffle once with fixed seed so order is deterministic across runs
         # This ensures cache hits for previously downloaded glitches
@@ -1250,11 +1262,18 @@ class TransientDataObtainer(BaseDataObtainer):
                             logging.warning(f"Failed to append sample to cache (GPS={gps_time:.3f}): {e}")
                         
                         # Crop for this request
-                        onsource_cropped, offsource_cropped = self._crop_resample(
-                            onsource_full, offsource_full,
-                            download_sample_rate, sample_rate_hertz,
-                            CACHE_ONSOURCE_DURATION, total_onsource_duration_seconds,
-                            CACHE_OFFSOURCE_DURATION, offsource_duration_seconds
+                        # Crop for this request
+                        onsource_cropped = GlitchCache.crop_and_resample(
+                            np.asarray(onsource_full),
+                            download_sample_rate,
+                            sample_rate_hertz,
+                            total_onsource_duration_seconds
+                        )
+                        offsource_cropped = GlitchCache.crop_and_resample(
+                            np.asarray(offsource_full),
+                            download_sample_rate,
+                            sample_rate_hertz,
+                            offsource_duration_seconds
                         )
 
                         # NAN CHECK: Post-Crop
@@ -1273,45 +1292,4 @@ class TransientDataObtainer(BaseDataObtainer):
                     
                     miss_indices = []
 
-    def _crop_resample(
-        self,
-        onsource_full: np.ndarray,
-        offsource_full: np.ndarray,
-        source_rate: float,
-        target_rate: float,
-        source_ons_dur: float,
-        target_ons_dur: float,
-        source_off_dur: float,
-        target_off_dur: float
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Crop and resample data from source settings to target settings."""
-        onsource_full = np.asarray(onsource_full)
-        offsource_full = np.asarray(offsource_full)
-        
-        # Resample if needed (downsampling only - upsampling not supported)
-        if target_rate != source_rate:
-            if target_rate > source_rate:
-                raise ValueError(
-                    f"Cannot upsample from {source_rate}Hz to {target_rate}Hz. "
-                    "Upsampling is not supported."
-                )
-            ratio = int(source_rate / target_rate)
-            if ratio > 1:
-                onsource_full = onsource_full[..., ::ratio]
-                offsource_full = offsource_full[..., ::ratio]
-        
-        # Crop onsource (center crop)
-        if target_ons_dur < source_ons_dur:
-            target_samples = int(target_ons_dur * target_rate)
-            current_samples = onsource_full.shape[-1]
-            start = (current_samples - target_samples) // 2
-            onsource_full = onsource_full[..., start:start + target_samples]
-        
-        # Crop offsource (center crop)
-        if target_off_dur < source_off_dur:
-            target_samples = int(target_off_dur * target_rate)
-            current_samples = offsource_full.shape[-1]
-            start = (current_samples - target_samples) // 2
-            offsource_full = offsource_full[..., start:start + target_samples]
-        
-        return onsource_full, offsource_full
+
