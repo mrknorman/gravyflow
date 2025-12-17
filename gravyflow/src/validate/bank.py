@@ -384,60 +384,110 @@ class ValidationBank:
             onsource_duration = self.dataset_args.get("onsource_duration_seconds", 1.0)
             offsource_duration = self.dataset_args.get("offsource_duration_seconds", 16.0)
             
-            # Create generator with scale_factor for numerical stability
+            # Create generator - use larger batch size for efficiency
+            # The generator already supports batching internally
+            batch_size = min(len(event_names), 256)  # Reasonable batch for GPU memory
             generator = transient_obt(
                 sample_rate_hertz=sample_rate,
                 onsource_duration_seconds=onsource_duration,
                 offsource_duration_seconds=offsource_duration,
-                num_examples_per_batch=1,
+                num_examples_per_batch=batch_size,
                 scale_factor=gf.Defaults.scale_factor  # Apply 1e21 scaling
             )
             
-            # Score each event
-            scored_count = 0
-            for i, (onsource, offsource, gps_times) in enumerate(generator):
-                if i >= len(event_names):
+            # =================================================================
+            # PHASE 1: Collect all event data (I/O bound - can't parallelize)
+            # =================================================================
+            self.logger.info("Phase 1: Collecting event data...")
+            all_onsource = []
+            all_offsource = []
+            all_gps = []
+            event_count = 0
+            
+            for onsource, offsource, gps_times, labels in generator:
+                if event_count >= len(event_names):
                     break
                 
                 if self.heart:
                     self.heart.beat()
                 
-                try:
-                    # Build model input
-                    x_batch = {"ONSOURCE": onsource, "OFFSOURCE": offsource}
+                # Handle both single and batched returns
+                batch_len = onsource.shape[0] if len(onsource.shape) > 2 else 1
+                
+                for idx in range(batch_len):
+                    if event_count >= len(event_names):
+                        break
                     
-                    # Run inference
-                    prediction = self.model.predict_on_batch(x_batch)
-                    score = float(self._extract_scores(prediction)[0])
+                    # Extract single event from batch
+                    if batch_len > 1:
+                        ons = onsource[idx:idx+1]
+                        offs = offsource[idx:idx+1]
+                        gps = float(gps_times[idx, 0]) if len(gps_times.shape) > 1 else float(gps_times[idx])
+                    else:
+                        ons = onsource
+                        offs = offsource
+                        gps = float(gps_times[0, 0]) if len(gps_times.shape) > 1 else float(gps_times[0])
                     
-                    # Get GPS time for matching
-                    batch_gps = float(gps_times[0, 0]) if len(gps_times.shape) > 1 else float(gps_times[0])
-                    
+                    all_onsource.append(np.array(ons))
+                    all_offsource.append(np.array(offs))
+                    all_gps.append(gps)
+                    event_count += 1
+                
+                if event_count % 20 == 0:
+                    self.logger.info(f"Data collection: {event_count}/{len(event_names)} events")
+            
+            self.logger.info(f"Collected {len(all_onsource)} events for batch scoring")
+            
+            # =================================================================
+            # PHASE 2: Batch model inference (FAST - single forward pass)
+            # =================================================================
+            if len(all_onsource) > 0:
+                self.logger.info("Phase 2: Running batched model inference...")
+                
+                # Stack all events into single batch
+                stacked_ons = np.concatenate(all_onsource, axis=0)  # (N, IFOs, samples)
+                stacked_offs = np.concatenate(all_offsource, axis=0)
+                
+                # Single forward pass through model
+                x_batch = {"ONSOURCE": stacked_ons, "OFFSOURCE": stacked_offs}
+                predictions = self.model.predict(x_batch, verbose=0)
+                all_scores = self._extract_scores(predictions)
+                
+                self.logger.info(f"Batch inference complete: {len(all_scores)} scores")
+                
+                # =================================================================
+                # PHASE 3: Match scores to events and whiten for plotting
+                # =================================================================
+                self.logger.info("Phase 3: Matching scores to events...")
+                scored_count = 0
+                
+                for i, (gps, score) in enumerate(zip(all_gps, all_scores)):
                     # Match to event by GPS time
                     for event in unique_events:
-                        if abs(event["gps"] - batch_gps) < 20.0:
-                            event["score"] = score
+                        if abs(event["gps"] - gps) < 20.0:
+                            event["score"] = float(score)
                             event["status"] = "scored"
                             
                             # Whiten for plotting (store as numpy)
-                            try:                                
+                            try:
+                                ons = all_onsource[i]
+                                offs = all_offsource[i]
                                 whitened = whiten(
-                                    on_input,
-                                    off_input,
+                                    ons,
+                                    offs,
                                     sample_rate_hertz=sample_rate
                                 )
-                                event["whitened_strain"] = np.array(whitened)[0] # (IFOs, T)
+                                cropped = gf.crop_samples(
+                                    whitened,
+                                    sample_rate_hertz=sample_rate,
+                                    onsource_duration_seconds=onsource_duration
+                                )
+                                event["whitened_strain"] = np.array(cropped)[0]  # (IFOs, T)
                             except Exception as e:
-                                self.logger.warning(f"Whitening failed for event at {batch_gps}: {e}")
+                                self.logger.warning(f"Whitening failed for event at {gps}: {e}")
                             
                             scored_count += 1
                             break
-                    
-                except Exception as e:
-                    self.logger.warning(f"Failed to score event {i}: {e}")
-                
-                if (i + 1) % 10 == 0:
-                    self.logger.info(f"Event Progress: {i + 1}/{len(event_names)}")
                     
         except StopIteration:
             pass  # Normal generator exhaustion

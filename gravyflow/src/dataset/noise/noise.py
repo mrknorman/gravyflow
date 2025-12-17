@@ -730,16 +730,29 @@ class TransientObtainer(Obtainer):
                     onsource_scaled, 
                     offsource_scaled, 
                     sample_rate_hertz,
-                    
                 )
                 
                 # Scale output to match expected scale_factor
                 onsource = onsource * (scale_factor / WHITEN_SCALE)
+                
+                # Check for NaNs after whitening
+                import numpy as np
+                if np.isnan(onsource).any():
+                     # Identify which indices are NaN
+                     import logging
+                     nan_indices = np.where(np.isnan(onsource).any(axis=(1,2)))[0]
+                     logging.error(f"NAN DETECTED: After whitening in _postprocess_generator! Indices: {nan_indices}")
+                     if len(gps_times) >= max(nan_indices):
+                         # Log GPS/Type info if available (assuming gps_times matches batch)
+                         for idx in nan_indices:
+                             gps = gps_times[idx] if idx < len(gps_times) else "Unknown"
+                             lbl = labels[idx] if idx < len(labels) else "Unknown"
+                             logging.error(f"  - Failed Index {idx}: GPS={gps}, Label={lbl}")
             
             # Crop padding from onsource
             if crop and crop_samples > 0:
                 onsource = onsource[:, :, crop_samples:-crop_samples]
-            
+                
             yield onsource, offsource, gps_times, labels
     
     def _cache_generator(

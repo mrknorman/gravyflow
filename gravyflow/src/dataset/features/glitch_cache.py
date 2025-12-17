@@ -210,10 +210,23 @@ class GlitchCache:
         Get a single glitch by GPS time.
         
         Returns:
-            Tuple of (onsource, offsource, gps_time, label) or None if not found.
+            Tuple of (onsource, offsource, gps_time, label) or None if not found
+            or if the request cannot be satisfied (e.g., upsampling required).
         """
         if not self.has_gps(gps_time):
             return None
+        
+        # Validate that request can be satisfied (no upsampling)
+        if sample_rate_hertz is not None:
+            try:
+                self.validate_request(
+                    sample_rate_hertz,
+                    onsource_duration or self.get_metadata()['onsource_duration'],
+                    offsource_duration or self.get_metadata()['offsource_duration']
+                )
+            except ValueError:
+                # Cache can't satisfy this request (e.g., upsampling needed)
+                return None
         
         closest_gps = self.get_closest_gps(gps_time)
         if closest_gps is None:
