@@ -922,10 +922,18 @@ class TestGetOnsourceOffsourceChunks:
             seed=None  # Use default
         )
         
-        # Should return generator that yields data
+        # Should return generator that yields data (dict format)
         try:
-            subarrays, backgrounds, gps_times, _ = next(gen)
-            assert subarrays is not None
+            output = next(gen)
+            # Handle dict format
+            if isinstance(output, dict):
+                subarrays = output.get(gf.ReturnVariables.ONSOURCE)
+                assert subarrays is not None
+            elif len(output) >= 3:
+                subarrays, backgrounds, gps_times = output[:3]
+                assert subarrays is not None
+            else:
+                pytest.fail(f"Generator yielded unexpected output: {type(output)}")
         except StopIteration:
             # Expected if segments are exhausted
             pass
@@ -1819,9 +1827,13 @@ class TestGetOnsourceOffsourceChunksReal:
         
         # Try to get chunks
         try:
-            subarrays, backgrounds, gps_times = next(gen)
-            assert subarrays is not None
-            assert ops.shape(subarrays)[0] == 2  # num_examples_per_batch
+            output = next(gen)
+            if len(output) >= 3:
+                subarrays, backgrounds, gps_times = output[:3]
+                assert subarrays is not None
+                assert ops.shape(subarrays)[0] == 2  # num_examples_per_batch
+            else:
+                 pytest.fail(f"Generator yielded {len(output)} items, expected at least 3")
         except StopIteration:
             # May stop if data acquisition fails
             pass
@@ -2050,7 +2062,11 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
         )
         
         # Get one batch to find extraction points
-        subarrays, backgrounds, gps_times, _ = next(gen)
+        output = next(gen)
+        if len(output) >= 3:
+            subarrays, backgrounds, gps_times = output[:3]
+        else:
+            pytest.fail(f"Generator yielded {len(output)} items, expected at least 3")
         extraction_points = gps_times
         
         # Generate Plots

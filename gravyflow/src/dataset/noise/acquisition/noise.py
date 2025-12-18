@@ -18,6 +18,7 @@ from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, ensure_even
 )
+from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.utils.shapes import ShapeEnforcer
 
 
@@ -529,4 +530,15 @@ class NoiseDataObtainer(BaseDataObtainer):
                     if sampling_mode == SamplingMode.GRID:
                         self._grid_position = 0
 
-                yield self._apply_augmentation(subarrays), self._apply_augmentation(background_chunks), start_gps_times, None
+                # Yield dict for real noise
+                # Shapes: ONSOURCE/OFFSOURCE = (Batch, IFO, Samples) = BIS
+                #         START_GPS_TIME = (Batch, IFO) = BI
+                #         DATA_LABEL = (Batch, IFO) = BI (all NOISE = 0)
+                num_ifos = subarrays.shape[1]
+                batch_size = subarrays.shape[0]
+                yield {
+                    RV.ONSOURCE: self._apply_augmentation(subarrays),
+                    RV.OFFSOURCE: self._apply_augmentation(background_chunks),
+                    RV.START_GPS_TIME: start_gps_times,  # Already (B, I)
+                    RV.DATA_LABEL: ops.full((batch_size, num_ifos), 0, dtype="int32"),  # NOISE = 0
+                }

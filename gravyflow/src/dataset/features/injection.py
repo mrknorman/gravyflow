@@ -198,19 +198,27 @@ class ReturnVariable:
     shape: tuple = (1,)
 
 class ReturnVariables(Enum):
+    # Core data outputs
     ONSOURCE = ReturnVariable(0)
     WHITENED_ONSOURCE = ReturnVariable(1)
     OFFSOURCE = ReturnVariable(2)
-    GPS_TIME = ReturnVariable(3)
     INJECTIONS = ReturnVariable(4)
     WHITENED_INJECTIONS = ReturnVariable(5)
     INJECTION_MASKS = ReturnVariable(6)
     ROLLING_PEARSON_ONSOURCE = ReturnVariable(7)
     SPECTROGRAM_ONSOURCE = ReturnVariable(8)
-    CENTRAL_TIME = ReturnVariable(9)
-    GLITCH_TYPE = ReturnVariable(10)   # Integer class label (0-19) for glitch type
-    DATA_LABEL = ReturnVariable(11)    # Integer: 0=noise, 1=glitch, 2=event
-    SOURCE_TYPE = ReturnVariable(12)   # Integer for SourceType: 0=BBH, 1=BNS, 2=NSBH
+    
+    # GPS Times (disambiguated)
+    GPS_TIME = ReturnVariable(3)            # Legacy alias for START_GPS_TIME
+    START_GPS_TIME = ReturnVariable(13)     # Segment window start (real noise/transient)
+    TRANSIENT_GPS_TIME = ReturnVariable(14) # Event/glitch center (transient mode only)
+    CENTRAL_TIME = ReturnVariable(9)        # Injection peak time (normalized 0-1)
+    
+    # Labels and Types
+    DATA_LABEL = ReturnVariable(11)         # DataLabel enum: NOISE=0, GLITCHES=1, EVENTS=2
+    GLITCH_TYPE = ReturnVariable(10)        # GlitchType enum value (if glitch)
+    EVENT_TYPE = ReturnVariable(15)         # EventType enum value (if event)
+    SOURCE_TYPE = ReturnVariable(12)        # SourceType: BBH=0, BNS=1, NSBH=2
     
     def __lt__(self, other):
         return self.value.index < other.value.index

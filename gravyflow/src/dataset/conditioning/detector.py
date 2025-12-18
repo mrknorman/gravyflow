@@ -225,7 +225,7 @@ def shift_waveform(
     )
     
     # jnp.fft.irfft
-    shitfted_strain = jnp.fft.irfft(phase_factor * strain_fft)
+    shitfted_strain = jnp.fft.irfft(phase_factor * strain_fft, n=strain.shape[-1])
     
     # Masking to prevent wrapping
     # shift_waveform expects time_shift_seconds to be (Batch, D, 1) here

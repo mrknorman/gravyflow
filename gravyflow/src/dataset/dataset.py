@@ -281,7 +281,18 @@ class GravyflowDataset(keras.utils.PyDataset):
         
         try:
             batch_data = next(self.noise)
-            if len(batch_data) == 4:
+            
+            # Handle dict format (new) or tuple format (legacy)
+            if isinstance(batch_data, dict):
+                onsource = batch_data[gf.ReturnVariables.ONSOURCE]
+                offsource = batch_data[gf.ReturnVariables.OFFSOURCE]
+                # Use START_GPS_TIME if available, fall back to TRANSIENT_GPS_TIME for transient mode
+                gps_times = batch_data.get(
+                    gf.ReturnVariables.START_GPS_TIME,
+                    batch_data.get(gf.ReturnVariables.TRANSIENT_GPS_TIME)
+                )
+                feature_labels = batch_data.get(gf.ReturnVariables.GLITCH_TYPE)
+            elif len(batch_data) == 4:
                 onsource, offsource, gps_times, feature_labels = batch_data
             else:
                 onsource, offsource, gps_times = batch_data

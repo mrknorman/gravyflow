@@ -357,11 +357,17 @@ class ValidationBank:
             with warnings.catch_warnings(record=True) as caught_warnings:
                 warnings.filterwarnings("always", message="Missing segments")
                 
-                for onsource, offsource, gps_times, _labels in gen:
+                for batch in gen:
                     if collected >= len(names):
                         break
                     self._beat()
 
+                    # Handle dict format
+                    onsource = batch[gf.ReturnVariables.ONSOURCE]
+                    offsource = batch[gf.ReturnVariables.OFFSOURCE]
+                    gps_times = batch.get(gf.ReturnVariables.TRANSIENT_GPS_TIME, 
+                                         batch.get(gf.ReturnVariables.START_GPS_TIME))
+                    
                     onsource, offsource, gps_times = map(np.asarray, (onsource, offsource, gps_times))
                     # Shape: onsource = (Batch, IFO, Samples) for 3D, or (IFO, Samples) for 2D
                     # Axis 0 = Batch (if 3D), Axis 1 = IFO, Axis 2 = Samples
