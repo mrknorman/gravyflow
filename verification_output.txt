@@ -1,0 +1,16 @@
+/home/michael.norman/gravyflow/gravyflow/src/dataset/dataset.py:50: UserWarning: Cannot return GPS time from simulated Noise defaulting to -1
+  warn(
+INFO:root:DEBUG: standardize_and_check gps shape: (4, 1)
+INFO:root:DEBUG: gps_times type: <class 'jaxlib._jax.ArrayImpl'>
+INFO:root:DEBUG: gps_times shape in _process_gps_times before cast: (4, 1)
+INFO:root:DEBUG: gps_times shape in _process_gps_times after cast: (4, 1)
+INFO:root:DEBUG: standardize_and_check gps shape: (4, 1)
+INFO:root:DEBUG: gps_times type: <class 'jaxlib._jax.ArrayImpl'>
+INFO:root:DEBUG: gps_times shape in _process_gps_times before cast: (4, 1)
+INFO:root:DEBUG: gps_times shape in _process_gps_times after cast: (4, 1)
+Verifying Dataset Shapes...
+Inputs keys: dict_keys([])
+Outputs keys: dict_keys(['ONSOURCE', 'GPS_TIME', 'INJECTIONS'])
+Output ONSOURCE: shape=(4, 1, 2048)
+Output GPS_TIME: shape=(4, 1)
+Output INJECTIONS: shape=(4, 1, 2048)

@@ -833,7 +833,7 @@ def test_gravyflow_dataset_batch_generation():
     onsource = inputs[gf.ReturnVariables.ONSOURCE.name]
     offsource = outputs[gf.ReturnVariables.OFFSOURCE.name]
     
-    assert ops.shape(onsource) == (4, 1, 2048)
+    assert ops.shape(onsource) == (4, 1, 1024)
     assert ops.shape(offsource) == (4, 1, 1024)
     
     # Check types

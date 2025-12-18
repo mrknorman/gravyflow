@@ -19,11 +19,13 @@ from keras import ops
 import gravyflow as gf
 from gravyflow.src.dataset.features.event import EventType
 from gravyflow.src.dataset.features.glitch_cache import GlitchCache, generate_glitch_cache_path
+from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, ensure_even
 )
 from gravyflow.src.utils.shapes import ShapeEnforcer
+from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys
 
 
 class TransientDataObtainer(BaseDataObtainer):
@@ -108,7 +110,7 @@ class TransientDataObtainer(BaseDataObtainer):
         # Feature storage
         self.feature_segments = None
         self._feature_labels = {}
-        self._sorted_label_indices = None  # Cache for vectorized label lookup
+        self._label_key_index = None  # Cache for GPS key -> label lookup
 
     def _apply_augmentation(self, data, is_transient: bool = True):
         """
@@ -140,10 +142,9 @@ class TransientDataObtainer(BaseDataObtainer):
 
     def _lookup_labels(self, gps_times):
         """
-        Look up glitch type labels for given GPS times.
+        Look up glitch type labels for given GPS times using exact integer key matching.
         
-        Uses vectorized binary search for O(M log N) complexity where M is the
-        number of requested GPS times and N is the number of known labels.
+        Uses O(1) dict lookups with integer keys at 0.1s precision.
         """
         gps_times = np.asarray(gps_times)
         
@@ -158,37 +159,20 @@ class TransientDataObtainer(BaseDataObtainer):
         if len(times_arr) == 0:
             return np.full(len(gps_times), -1, dtype=np.int32)
         
-        # Cache sorted indices for repeated calls (lazy initialization)
-        if not hasattr(self, '_sorted_label_indices') or self._sorted_label_indices is None:
-            self._sorted_label_indices = np.argsort(times_arr)
-            self._sorted_label_times = times_arr[self._sorted_label_indices]
-            self._sorted_label_values = labels_arr[self._sorted_label_indices]
+        # Build integer key index on first call (lazy initialization)
+        if not hasattr(self, '_label_key_index') or self._label_key_index is None:
+            # Map integer key -> label value
+            self._label_key_index = {
+                gps_to_key(t): lbl for t, lbl in zip(times_arr, labels_arr)
+            }
         
-        sorted_times = self._sorted_label_times
-        sorted_labels = self._sorted_label_values
+        # Exact O(1) lookups using integer keys
+        query_keys = gps_array_to_keys(gps_times)
+        labels = np.array([
+            self._label_key_index.get(int(k), -1) for k in query_keys
+        ], dtype=np.int32)
         
-        # Vectorized binary search - O(M log N)
-        insert_indices = np.searchsorted(sorted_times, gps_times)
-        
-        # Clip to valid range
-        insert_indices = np.clip(insert_indices, 0, len(sorted_times) - 1)
-        
-        # Calculate distance to nearest cached time
-        diffs = np.abs(sorted_times[insert_indices] - gps_times)
-        
-        # Also check the previous index (searchsorted gives insertion point, not nearest)
-        prev_indices = np.clip(insert_indices - 1, 0, len(sorted_times) - 1)
-        prev_diffs = np.abs(sorted_times[prev_indices] - gps_times)
-        
-        # Use whichever is closer
-        use_prev = prev_diffs < diffs
-        final_indices = np.where(use_prev, prev_indices, insert_indices)
-        final_diffs = np.where(use_prev, prev_diffs, diffs)
-        
-        # Apply tolerance threshold (1.0 second)
-        labels = np.where(final_diffs < 1.0, sorted_labels[final_indices], -1)
-        
-        return labels.astype(np.int32)
+        return labels
 
     def _get_sample_from_cache(
         self,
@@ -207,13 +191,12 @@ class TransientDataObtainer(BaseDataObtainer):
         """
         # Try memory cache first (fastest)
         if cache.in_memory and cache.has_gps(gps_time):
-            closest_gps = cache.get_closest_gps(gps_time)
-            if closest_gps is not None:
-                idx = cache._gps_index.get(closest_gps)
-                if idx is not None:
-                    onsource = cache._mem_onsource[idx] * scale_factor
-                    offsource = cache._mem_offsource[idx] * scale_factor
-                    return onsource, offsource, 'memory'
+            key = gps_to_key(gps_time)
+            idx = cache._gps_index.get(key)
+            if idx is not None:
+                onsource = cache._mem_onsource[idx] * scale_factor
+                offsource = cache._mem_offsource[idx] * scale_factor
+                return onsource, offsource, 'memory'
         
         # Try disk cache
         if cache.has_gps(gps_time):
@@ -234,42 +217,49 @@ class TransientDataObtainer(BaseDataObtainer):
         self,
         batch_subarrays: list,
         batch_backgrounds: list,
-        batch_gps_times: list
-    ) -> Tuple:
+        batch_gps_times: list  # These are TRANSIENT GPS times (event centers)
+    ) -> dict:
         """
         Prepare batch tensors from accumulated lists.
         
         Returns:
-            (subarrays, backgrounds, gps_tensor, labels)
-            
-        Shape contracts:
-            - subarrays: (Batch, IFO, Samples) = BIS
-            - backgrounds: (Batch, IFO, Samples) = BIS  
-            - gps_tensor: (Batch, IFO) = BI
-            - labels: (Batch, IFO) = BI
+            Dict with ReturnVariables keys:
+            - ONSOURCE: (Batch, IFO, Samples) = BIS
+            - OFFSOURCE: (Batch, IFO, Samples) = BIS  
+            - TRANSIENT_GPS_TIME: (Batch, IFO) = BI (event/glitch center)
+            - DATA_LABEL: (Batch, IFO) = BI (1 for GLITCHES, 2 for EVENTS)
+            - GLITCH_TYPE: (Batch, IFO) = BI (GlitchType enum values)
         """
         final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
         final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
         
-        # Get num_ifos from subarrays shape: (Batch, IFO, Samples)
-        num_ifos = int(ops.shape(final_subarrays)[1])  # Axis 1 = IFO
+        # Get dimensions from subarrays shape: (Batch, IFO, Samples)
+        batch_size = int(ops.shape(final_subarrays)[0])
+        num_ifos = int(ops.shape(final_subarrays)[1])
         
-        # GPS times: (Batch,) -> (Batch, IFO) by tiling
-        # Shape: gps_times = (Batch, IFO) = BI
+        # Transient GPS times: (Batch,) -> (Batch, IFO) by tiling
         gps_1d = ops.convert_to_tensor(batch_gps_times, dtype="float64")
-        final_gps = ops.tile(ops.expand_dims(gps_1d, axis=-1), (1, num_ifos))
+        transient_gps = ops.tile(ops.expand_dims(gps_1d, axis=-1), (1, num_ifos))
         
         # Labels: (Batch,) -> (Batch, IFO) by tiling  
-        # Shape: labels = (Batch, IFO) = BI (same label for all IFOs in this batch item)
         batch_labels_1d = self._lookup_labels(batch_gps_times)
-        batch_labels = ops.tile(ops.expand_dims(batch_labels_1d, axis=-1), (1, num_ifos))
+        glitch_type = ops.tile(ops.expand_dims(batch_labels_1d, axis=-1), (1, num_ifos))
         
-        return (
-            self._apply_augmentation(final_subarrays, is_transient=True),
-            self._apply_augmentation(final_background, is_transient=True),
-            final_gps,
-            batch_labels
+        # Determine DATA_LABEL from what type of transient this is
+        # DataLabel.GLITCHES = 1, DataLabel.EVENTS = 2
+        # Check if this obtainer is handling glitches or events
+        has_glitches = any(
+            dl == DataLabel.GLITCHES for dl in (self.data_labels if isinstance(self.data_labels, list) else [self.data_labels])
         )
+        data_label_value = 1 if has_glitches else 2  # GLITCHES=1, EVENTS=2
+        
+        return {
+            RV.ONSOURCE: self._apply_augmentation(final_subarrays, is_transient=True),
+            RV.OFFSOURCE: self._apply_augmentation(final_background, is_transient=True),
+            RV.TRANSIENT_GPS_TIME: transient_gps,
+            RV.DATA_LABEL: ops.full((batch_size, num_ifos), data_label_value, dtype="int32"),
+            RV.GLITCH_TYPE: glitch_type,  # Will be -1 if not a glitch
+        }
 
     def _extract_feature_event(
         self,
@@ -416,7 +406,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 self._feature_labels = {
                     gf.DataLabel.GLITCHES: (glitch_times, glitch_labels)
                 }
-                self._sorted_label_indices = None  # Invalidate cache
+                self._label_key_index = None  # Invalidate cache
             
         if wanted_segments:
             wanted_segments = np.concatenate(wanted_segments)
@@ -913,7 +903,7 @@ class TransientDataObtainer(BaseDataObtainer):
                             final_labels = batch_labels
                             
                         self._feature_labels[gf.DataLabel.GLITCHES] = (final_times, final_labels)
-                        self._sorted_label_indices = None  # Invalidate cache
+                        self._label_key_index = None  # Invalidate cache
 
             if not all_feature_segments_list:
                 raise ValueError("No features (Events/Glitches) found in requested range.")

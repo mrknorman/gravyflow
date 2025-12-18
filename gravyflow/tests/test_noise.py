@@ -17,6 +17,7 @@ from _pytest.config import Config
 
 import gravyflow as gf
 from gravyflow.src.dataset.noise import noise as gf_noise
+from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 import keras
 from keras import ops
 import jax
@@ -50,7 +51,12 @@ def _test_real_noise_single(
         )
         
         # Iterate through num_tests batches to check correct operation:
-        onsource, offsource, gps_times, _ = next(noise())
+        batch = next(noise())
+        
+        # Handle dict format
+        onsource = batch[gf.ReturnVariables.ONSOURCE]
+        offsource = batch[gf.ReturnVariables.OFFSOURCE]
+        gps_times = batch.get(gf.ReturnVariables.START_GPS_TIME)
 
         parameters_dict = {
             "onsource" : onsource,
@@ -122,7 +128,10 @@ def _test_real_noise_multi(
         )
                 
         # Iterate through num_tests batches to check correct operation:
-        onsource, offsource, gps_times, _ = next(noise())
+        batch = next(noise())
+        onsource = batch[gf.ReturnVariables.ONSOURCE]
+        offsource = batch[gf.ReturnVariables.OFFSOURCE]
+        gps_times = batch.get(gf.ReturnVariables.START_GPS_TIME)
 
         parameters_dict = {
             "onsource" : onsource,
@@ -191,16 +200,20 @@ def _test_noise_shape(
             ifos = gf.IFO.L1
         )
             
-        onsource, offsource, _, _ = next(iter(noise()))
+        batch = next(iter(noise()))
+        onsource = batch[RV.ONSOURCE]
+        offsource = batch[RV.OFFSOURCE]
 
         onsource_shape = onsource.shape
         offsource_shape = offsource.shape
 
         logging.info("Start shape tests...")
-        for index, (onsource, offsource, _, _) in tqdm(
+        for index, batch in tqdm(
                 enumerate(islice(noise(), num_tests))
             ):
-
+            onsource = batch[RV.ONSOURCE]
+            offsource = batch[RV.OFFSOURCE]
+            
             np.testing.assert_equal(
                 onsource.shape,
                 onsource_shape,
@@ -299,7 +312,7 @@ def test_noise_iteration(
 
 def test_white_noise_generator():
     # Test white noise generation
-    # It yields (onsource, offsource, gps_times)
+    # It yields dict with ONSOURCE and OFFSOURCE
     
     num_examples = 2
     ifos = [gf.IFO.L1]
@@ -319,14 +332,19 @@ def test_white_noise_generator():
         seed=seed
     )
     
-    onsource, offsource, gps, _ = next(gen)
+    batch = next(gen)
+    
+    # Handle dict format
+    from gravyflow.src.dataset.features.injection import ReturnVariables as RV
+    onsource = batch[RV.ONSOURCE]
+    offsource = batch[RV.OFFSOURCE]
     
     # Check shapes
     # onsource: (Batch, IFOs, Time)
     # Time = (1.0 + 2*0.5) * 1024 = 2048
     assert ops.shape(onsource) == (num_examples, 1, 2048)
     assert ops.shape(offsource) == (num_examples, 1, int(offsource_dur * sample_rate))
-    assert ops.shape(gps) == (num_examples, 1)  # (B, IFO) where IFO=1
+    # Synthetic noise doesn't have GPS times
     
     # Check stats (roughly)
     # Mean ~ 0, Std ~ 1
@@ -370,7 +388,9 @@ def test_colored_noise_generator():
         seed=42
     )
     
-    onsource, offsource, gps, _ = next(gen)
+    batch = next(gen)
+    onsource = batch[RV.ONSOURCE]
+    offsource = batch[RV.OFFSOURCE]
     
     # Check shapes
     assert ops.shape(onsource) == (2, 1, 1024)
@@ -391,7 +411,8 @@ def test_noise_generation_consistency():
         sample_rate_hertz=1024.0,
         seed=seed
     )
-    onsource1, _, _, _ = next(gen1)
+    batch1 = next(gen1)
+    onsource1 = batch1[RV.ONSOURCE]
     
     # Run 2
     gen2 = gf_noise.white_noise_generator(
@@ -403,7 +424,8 @@ def test_noise_generation_consistency():
         sample_rate_hertz=1024.0,
         seed=seed
     )
-    onsource2, _, _, _ = next(gen2)
+    batch2 = next(gen2)
+    onsource2 = batch2[RV.ONSOURCE]
     
     # Check equality
     # Note: JAX arrays might need conversion or specific assertion
@@ -522,7 +544,9 @@ def test_noise_obtainer_defaults():
     )
     
     gen = noise()
-    onsource, offsource, gps, _ = next(gen)
+    batch = next(gen)
+    onsource = batch[RV.ONSOURCE]
+    offsource = batch[RV.OFFSOURCE]
     
     # Should use defaults from gf.Defaults
     expected_onsource_dur = gf.Defaults.onsource_duration_seconds + 2 * gf.Defaults.crop_duration_seconds
@@ -549,7 +573,8 @@ def test_noise_obtainer_white_type():
         seed=42
     )
     
-    onsource, offsource, gps, _ = next(gen)
+    batch = next(gen)
+    onsource = batch[RV.ONSOURCE]
     
     # Check shapes
     assert len(ops.shape(onsource)) == 3
@@ -570,7 +595,8 @@ def test_noise_obtainer_multiple_ifos():
         seed=42
     )
     
-    onsource, offsource, gps, _ = next(gen)
+    batch = next(gen)
+    onsource = batch[RV.ONSOURCE]
     
     # Should have 2 IFOs
     assert ops.shape(onsource)[1] == 2
@@ -651,7 +677,8 @@ def test_white_noise_generator_iteration():
     
     # Iterate 5 times
     for i in range(5):
-        onsource, offsource, gps, _ = next(gen)
+        batch = next(gen)
+        onsource = batch[RV.ONSOURCE]
         assert ops.shape(onsource) == (2, 1, 1024)
 
 
@@ -682,7 +709,9 @@ def test_colored_noise_generator():
         seed=seed
     )
     
-    onsource, offsource, gps, _ = next(gen)
+    batch = next(gen)
+    onsource = batch[RV.ONSOURCE]
+    offsource = batch[RV.OFFSOURCE]
     
     # Check shapes
     expected_onsource_samples = gf_noise.ensure_even(int((onsource_dur + 2*crop_dur) * sample_rate))
@@ -709,7 +738,8 @@ def test_noise_obtainer_colored_type():
         seed=42
     )
     
-    onsource, offsource, gps, _ = next(gen)
+    batch = next(gen)
+    onsource = batch[RV.ONSOURCE]
     
     # Check shapes
     assert len(ops.shape(onsource)) == 3
@@ -729,7 +759,8 @@ def test_colored_noise_generator_multi_ifo():
         seed=42
     )
     
-    onsource, offsource, gps, _ = next(gen)
+    batch = next(gen)
+    onsource = batch[RV.ONSOURCE]
     
     # Should have 2 IFOs
     assert ops.shape(onsource)[1] == 2
@@ -750,7 +781,8 @@ def test_colored_noise_generator_iteration():
     
     # Iterate 3 times
     for i in range(3):
-        onsource, offsource, gps, _ = next(gen)
+        batch = next(gen)
+        onsource = batch[RV.ONSOURCE]
         assert ops.shape(onsource) == (2, 1, 1024)
 
 
@@ -772,7 +804,8 @@ def test_noise_obtainer_scale_factor_none():
         seed=42
     )
     
-    onsource, offsource, gps, _ = next(gen)
+    batch = next(gen)
+    onsource = batch[RV.ONSOURCE]
     assert ops.shape(onsource)[0] == 2
 
 
@@ -817,7 +850,8 @@ def test_pseudo_real_noise_generation():
     )
     
     # Get one batch from the generator
-    onsource, offsource, gps, _ = next(gen)
+    batch = next(gen)
+    onsource = batch[RV.ONSOURCE]
     
     # Check shapes
     assert len(ops.shape(onsource)) == 3
@@ -859,7 +893,8 @@ def test_gps_time_uniqueness_across_batches():
         )
         
         for _ in range(num_batches):
-            onsource, offsource, gps_times, _ = next(gen)
+            batch = next(gen)
+            gps_times = batch.get(gf.ReturnVariables.START_GPS_TIME)
             gps_array = ops.convert_to_numpy(gps_times)
             all_gps_times.extend(gps_array.flatten())
         

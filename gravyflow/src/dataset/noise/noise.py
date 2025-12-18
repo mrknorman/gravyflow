@@ -16,6 +16,7 @@ from numpy.random import default_rng
 
 import gravyflow as gf
 from gravyflow.src.dataset.features.event import get_events_with_params, EventType
+from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.dataset.noise.acquisition import ifo_canonical_key
 from gravyflow.src.utils.shapes import ShapeEnforcer
 
@@ -56,6 +57,13 @@ def white_noise_generator(
 ) -> Iterator:
     """
     Generator function that yields white Gaussian noise.
+    
+    Yields:
+        Dict with ReturnVariables keys:
+        - ONSOURCE: (Batch, IFO, Samples) white noise
+        - OFFSOURCE: (Batch, IFO, Samples) white noise
+        
+        Note: Synthetic noise does not include START_GPS_TIME or DATA_LABEL.
     """
 
     total_onsource_duration_seconds : float = onsource_duration_seconds + (crop_duration_seconds * 2.0)
@@ -70,19 +78,23 @@ def white_noise_generator(
         s1 = rng.integers(1000000000)
         s2 = rng.integers(1000000000)
         
-        # Yield: onsource (BIS), offsource (BIS), gps_times (BI), labels
-        # Shapes: onsource = (Batch, IFO, Samples), gps_times = (Batch, IFO)
-        yield _generate_white_noise(
-            num_examples_per_batch, 
-            len(ifos),
-            num_onsource_samples,
-            seed=s1
-        ), _generate_white_noise(
-            num_examples_per_batch, 
-            len(ifos),
-            num_offsource_samples,
-            seed=s2
-        ), ops.full((num_examples_per_batch, len(ifos)), -1.0), None  # Shape: gps_times = (B, I)
+        # Yield dict with only required keys for synthetic noise
+        # Shape: ONSOURCE = (Batch, IFO, Samples) = BIS
+        # Shape: OFFSOURCE = (Batch, IFO, Samples) = BIS
+        yield {
+            RV.ONSOURCE: _generate_white_noise(
+                num_examples_per_batch, 
+                len(ifos),
+                num_onsource_samples,
+                seed=s1
+            ),
+            RV.OFFSOURCE: _generate_white_noise(
+                num_examples_per_batch, 
+                len(ifos),
+                num_offsource_samples,
+                seed=s2
+            ),
+        }
         
 def _generate_colored_noise(
     num_examples_per_batch: int,
@@ -213,19 +225,25 @@ def colored_noise_generator(
         s1 = rng.integers(1000000000)
         s2 = rng.integers(1000000000)
         
-        yield _generate_colored_noise(
+        # Yield dict with only required keys for synthetic noise
+        # Shape: ONSOURCE = (Batch, IFO, Samples) = BIS
+        # Shape: OFFSOURCE = (Batch, IFO, Samples) = BIS
+        yield {
+            RV.ONSOURCE: _generate_colored_noise(
                 num_examples_per_batch, 
                 len(ifos),
                 num_samples_list[0], 
                 interpolated_onsource_asds,
                 seed=s1
-            ), _generate_colored_noise(
+            ),
+            RV.OFFSOURCE: _generate_colored_noise(
                 num_examples_per_batch, 
                 len(ifos),
                 num_samples_list[1], 
                 interpolated_offsource_asds,
                 seed=s2
-            ), ops.full((num_examples_per_batch, len(ifos)), -1.0), None
+            ),
+        }
     
 
 @dataclass
@@ -493,19 +511,25 @@ class NoiseObtainer(Obtainer):
                 s1 = rng.integers(1000000000)
                 s2 = rng.integers(1000000000)
                 
-                yield _generate_colored_noise(
+                # Yield dict for pseudo-real noise (synthetic from real PSD)
+                # Shape: ONSOURCE = (Batch, IFO, Samples) = BIS
+                # Shape: OFFSOURCE = (Batch, IFO, Samples) = BIS
+                yield {
+                    RV.ONSOURCE: _generate_colored_noise(
                         num_examples_per_batch, 
                         len(self.ifos),
                         num_samples_list[0], 
                         ops.sqrt(interpolated_onsource_psds),
                         seed=s1
-                    ), _generate_colored_noise(
+                    ),
+                    RV.OFFSOURCE: _generate_colored_noise(
                         num_examples_per_batch, 
                         len(self.ifos),
                         num_samples_list[1], 
                         ops.sqrt(interpolated_offsource_psds),
                         seed=s2
-                    ), ops.full((num_examples_per_batch, len(self.ifos)), -1.0), None
+                    ),
+                }
                 
 
 @dataclass
@@ -720,11 +744,17 @@ class TransientObtainer(Obtainer):
         
         Whitening requires scaling up by 1E21 to avoid float precision issues.
         Output is scaled to match scale_factor expectation.
+        
+        Now handles dict format from generators.
         """
         WHITEN_SCALE = 1E21
         crop_samples = int(crop_duration_seconds * sample_rate_hertz)
         
-        for onsource, offsource, gps_times, labels in generator:
+        for batch in generator:
+            # Extract from dict format
+            onsource = batch[RV.ONSOURCE]
+            offsource = batch[RV.OFFSOURCE]
+            
             # Whiten first (before cropping)
             if whiten:
                 # Scale up to avoid float precision issues
@@ -747,18 +777,22 @@ class TransientObtainer(Obtainer):
                      # Identify which indices are NaN
                      nan_indices = np.where(np.isnan(onsource).any(axis=(1,2)))[0]
                      logger.error(f"NAN DETECTED: After whitening in _postprocess_generator! Indices: {nan_indices}")
-                     if len(gps_times) >= max(nan_indices):
-                         # Log GPS/Type info if available (assuming gps_times matches batch)
+                     gps_times = batch.get(RV.TRANSIENT_GPS_TIME, batch.get(RV.START_GPS_TIME))
+                     labels = batch.get(RV.GLITCH_TYPE, batch.get(RV.DATA_LABEL))
+                     if gps_times is not None and len(gps_times) >= max(nan_indices):
                          for idx in nan_indices:
                              gps = gps_times[idx] if idx < len(gps_times) else "Unknown"
-                             lbl = labels[idx] if idx < len(labels) else "Unknown"
+                             lbl = labels[idx] if labels is not None and idx < len(labels) else "Unknown"
                              logger.error(f"  - Failed Index {idx}: GPS={gps}, Label={lbl}")
             
             # Crop padding from onsource
             if crop and crop_samples > 0:
                 onsource = onsource[:, :, crop_samples:-crop_samples]
-                
-            yield onsource, offsource, gps_times, labels
+            
+            # Update the batch dict with processed onsource
+            batch[RV.ONSOURCE] = onsource
+            
+            yield batch
     
     def _cache_generator(
         self,
@@ -776,6 +810,7 @@ class TransientObtainer(Obtainer):
         Generator that yields batches from a GlitchCache file.
         
         Delegates to GlitchCache.stream_batches for the actual streaming.
+        Now yields dict format directly from cache.
         """
         from gravyflow.src.dataset.features.glitch_cache import GlitchCache
         
@@ -784,7 +819,7 @@ class TransientObtainer(Obtainer):
         # Calculate padded onsource duration for cropping
         total_onsource_duration = onsource_duration + crop_duration_seconds
         
-        # Delegate to GlitchCache.stream_batches
+        # Delegate to GlitchCache.stream_batches (now yields dicts)
         yield from cache.stream_batches(
             batch_size=num_examples_per_batch,
             sample_rate_hertz=sample_rate_hertz,

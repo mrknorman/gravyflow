@@ -308,13 +308,15 @@ def _test_snr(
             overlap_duration_seconds = 0.5
         )        
         
-        onsource_plus_injection = onsource + scaled_injection
-
+        # Crop injection to match onsource size before adding
+        # (onsource from dataset is already cropped, injection has crop buffer)
         scaled_injection = gf.crop_samples(
             scaled_injection,
             gf.Defaults.onsource_duration_seconds,
             gf.Defaults.sample_rate_hertz
         )
+        
+        onsource_plus_injection = onsource + scaled_injection
         injection = gf.crop_samples(
             injection,
             gf.Defaults.onsource_duration_seconds,

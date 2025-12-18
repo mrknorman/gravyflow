@@ -195,52 +195,104 @@ class ShapeEnforcer:
         """
         Wrap a generator to enforce shape contracts on yielded batches.
         
-        Replaces the old `standardize_and_check` function.
+        Supports both dict and legacy tuple formats.
         
-        Expected generator output:
-            - 3-tuple: (onsource, offsource, gps_times)
-            - 4-tuple: (onsource, offsource, gps_times, labels)
+        Dict format (new):
+            {
+                ReturnVariables.ONSOURCE: tensor,  # Required
+                ReturnVariables.OFFSOURCE: tensor, # Required
+                ReturnVariables.START_GPS_TIME: tensor,  # Optional
+                ...
+            }
+        
+        Tuple format (legacy, deprecated):
+            (onsource, offsource, gps_times, labels)
         
         Yields:
-            Validated tensors with shapes:
-            - onsource: (B, I, S)
-            - offsource: (B, I, S)
-            - gps_times: (B, I)
-            - labels: (B, I) if present
+            Validated dict with shapes enforced.
         """
+        # Import here to avoid circular dependency
+        from gravyflow.src.dataset.features.injection import ReturnVariables as RV
+        
         enforcer = ShapeEnforcer(num_ifos=num_ifos)
         
+        # Shape contracts for each ReturnVariable
+        SHAPE_CONTRACTS = {
+            RV.ONSOURCE: ShapeContract.BIS,
+            RV.OFFSOURCE: ShapeContract.BIS,
+            RV.START_GPS_TIME: ShapeContract.BI,
+            RV.GPS_TIME: ShapeContract.BI,  # Legacy alias
+            RV.TRANSIENT_GPS_TIME: ShapeContract.BI,
+            RV.DATA_LABEL: ShapeContract.BI,
+            RV.GLITCH_TYPE: ShapeContract.BI,
+            RV.EVENT_TYPE: ShapeContract.BI,
+        }
+        
+        REQUIRED_KEYS = {RV.ONSOURCE, RV.OFFSOURCE}
+        
         for item in gen:
-            # Unpack based on tuple length
-            if len(item) == 3:
-                on, off, gps = item
-                labels = None
-            elif len(item) >= 4:
-                on, off, gps, labels = item[:4]
+            # Handle dict format (new)
+            if isinstance(item, dict):
+                # Validate required keys
+                for key in REQUIRED_KEYS:
+                    if key not in item:
+                        raise ValueError(f"Generator dict missing required key: {key.name}")
+                
+                # Validate and transform each tensor
+                validated = {}
+                for key, tensor in item.items():
+                    if key in SHAPE_CONTRACTS:
+                        validated[key] = enforcer.validate(
+                            tensor, SHAPE_CONTRACTS[key], key.name
+                        )
+                    else:
+                        # Pass through unknown keys without validation
+                        validated[key] = tensor
+                
+                # Debug consistency checks
+                if debug:
+                    on_shape = validated[RV.ONSOURCE].shape
+                    off_shape = validated[RV.OFFSOURCE].shape
+                    if on_shape[0] != off_shape[0]:
+                        raise ValueError(f"Batch mismatch: on={on_shape[0]}, off={off_shape[0]}")
+                    if on_shape[1] != off_shape[1]:
+                        raise ValueError(f"IFO mismatch: on={on_shape[1]}, off={off_shape[1]}")
+                
+                yield validated
+            
+            # Handle legacy tuple format
             else:
-                raise ValueError(f"Generator yielded tuple of length {len(item)}, expected 3 or 4")
-            
-            # Validate each tensor
-            # Shape: onsource = (Batch, IFO, Samples) = BIS
-            on = enforcer.validate(on, ShapeContract.BIS, "onsource")
-            # Shape: offsource = (Batch, IFO, Samples) = BIS
-            off = enforcer.validate(off, ShapeContract.BIS, "offsource")
-            # Shape: gps_times = (Batch, IFO) = BI
-            gps = enforcer.validate(gps, ShapeContract.BI, "gps_times")
-            
-            if labels is not None:
-                # Shape: labels = (Batch, IFO) = BI (one label per IFO per batch item)
-                labels = enforcer.validate(labels, ShapeContract.BI, "labels")
-            
-            # Optional debug checks
-            if debug:
-                if on.shape[0] != off.shape[0]:
-                    raise ValueError(f"Batch size mismatch: on={on.shape[0]}, off={off.shape[0]}")
-                if on.shape[1] != off.shape[1]:
-                    raise ValueError(f"IFO mismatch: on={on.shape[1]}, off={off.shape[1]}")
-            
-            # Always yield 4-tuple for API consistency
-            yield on, off, gps, labels
+                if len(item) == 3:
+                    on, off, gps = item
+                    labels = None
+                elif len(item) >= 4:
+                    on, off, gps, labels = item[:4]
+                else:
+                    raise ValueError(f"Generator yielded tuple of length {len(item)}, expected 3 or 4")
+                
+                on = enforcer.validate(on, ShapeContract.BIS, "onsource")
+                off = enforcer.validate(off, ShapeContract.BIS, "offsource")
+                gps = enforcer.validate(gps, ShapeContract.BI, "gps_times")
+                
+                if labels is not None:
+                    labels = enforcer.validate(labels, ShapeContract.BI, "labels")
+                
+                if debug:
+                    if on.shape[0] != off.shape[0]:
+                        raise ValueError(f"Batch mismatch: on={on.shape[0]}, off={off.shape[0]}")
+                    if on.shape[1] != off.shape[1]:
+                        raise ValueError(f"IFO mismatch: on={on.shape[1]}, off={off.shape[1]}")
+                
+                # Convert to dict format for consistency
+                result = {
+                    RV.ONSOURCE: on,
+                    RV.OFFSOURCE: off,
+                    RV.START_GPS_TIME: gps,
+                }
+                if labels is not None:
+                    result[RV.DATA_LABEL] = labels
+                
+                yield result
     
     # =========================================================================
     # Static helper methods for common shape checks
