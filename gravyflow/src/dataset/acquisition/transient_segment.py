@@ -1,0 +1,137 @@
+"""
+TransientSegment - Data structure for transient event acquisition.
+
+Combines event metadata (from APIs) with acquisition parameters (boundaries)
+in a single structure. Data structure for transient events.
+"""
+from dataclasses import dataclass, field
+from typing import Optional, Union, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import gravyflow as gf
+    from gravyflow.src.dataset.features.glitch import GlitchType
+    from gravyflow.src.dataset.features.event import SourceType, EventConfidence
+    from gravyflow.src.dataset.acquisition.base import DataLabel, ObservingRun
+
+
+# IFO Bitmask Helpers
+# Bitmask encoding: bit 0=H1, bit 1=L1, bit 2=V1
+def ifos_to_bitmask(ifos: List["gf.IFO"]) -> int:
+    """
+    Convert IFO list to bitmask.
+    
+    Args:
+        ifos: List of IFO enums
+        
+    Returns:
+        Integer bitmask where bit i corresponds to IFO index
+    """
+    from gravyflow.src.dataset.conditioning.detector import IFO
+    ifo_map = {IFO.H1: 0, IFO.L1: 1, IFO.V1: 2}
+    mask = 0
+    for ifo in ifos:
+        if ifo in ifo_map:
+            mask |= (1 << ifo_map[ifo])
+    return mask
+
+
+def bitmask_to_ifos(mask: int) -> List["gf.IFO"]:
+    """
+    Convert bitmask to IFO list.
+    
+    Args:
+        mask: Integer bitmask
+        
+    Returns:
+        List of IFO enums represented by the mask
+    """
+    from gravyflow.src.dataset.conditioning.detector import IFO
+    ifo_map = {0: IFO.H1, 1: IFO.L1, 2: IFO.V1}
+    return [ifo_map[i] for i in range(3) if mask & (1 << i)]
+
+
+@dataclass
+class TransientSegment:
+    """
+    Transient event representation with metadata and acquisition parameters.
+    
+    This is the data structure for transients. All metadata
+    and acquisition boundaries are kept together in one structure.
+    
+    The GPS key is the immutable identity - it travels with this segment everywhere
+    and is used for all matching operations.
+    
+    Attributes:
+        # GPS Identity
+        gps_key: int                       # Integer GPS key at 10ms precision (PRIMARY ID)
+        transient_gps_time: float          # Center GPS time (for display/extraction)
+        
+        # Acquisition Boundaries  
+        start_gps_time: float              # Segment start (for data download)
+        end_gps_time: float                # Segment end (for data download)
+        
+        # Event Metadata (from API)
+        label: DataLabel                   # GLITCHES or EVENTS
+        kind: Union[GlitchType, SourceType]  # Specific type (WHISTLE, BBH, etc.)
+        observing_run: ObservingRun        # O1, O2, O3, O4
+        seen_in: List[IFO]                 # Detectors where transient was observed
+        confidence: Optional[EventConfidence]  # Event confidence (events only)
+        name: Optional[str]                # Event name like "GW150914" (events only)
+        weight: float                      # Sampling weight for balancing
+    """
+    # GPS Identity
+    gps_key: int
+    transient_gps_time: float
+    
+    # Acquisition Boundaries
+    start_gps_time: float
+    end_gps_time: float
+    
+    # Event Metadata
+    label: "DataLabel"
+    kind: Union["GlitchType", "SourceType"]
+    observing_run: "ObservingRun"
+    seen_in: List["gf.IFO"] = field(default_factory=list)
+    confidence: Optional["EventConfidence"] = None
+    name: Optional[str] = None
+    weight: float = 1.0
+    
+    @property
+    def is_event(self) -> bool:
+        """Check if this is an event."""
+        from gravyflow.src.dataset.acquisition.base import DataLabel
+        return self.label == DataLabel.EVENTS
+    
+    @property
+    def is_glitch(self) -> bool:
+        """Check if this is a glitch."""
+        from gravyflow.src.dataset.acquisition.base import DataLabel
+        return self.label == DataLabel.GLITCHES
+    
+    @property
+    def duration(self) -> float:
+        """Segment duration in seconds."""
+        return self.end_gps_time - self.start_gps_time
+    
+    @property
+    def boundaries(self) -> tuple[float, float]:
+        """Segment boundaries as (start, end) tuple."""
+        return (self.start_gps_time, self.end_gps_time)
+    
+    def __repr__(self) -> str:
+        kind_str = self.kind.name if hasattr(self.kind, 'name') else str(self.kind)
+        return (
+            f"TransientSegment(gps_key={self.gps_key}, "
+            f"type={kind_str}, "
+            f"center={self.transient_gps_time:.3f}s, "
+            f"duration={self.duration:.1f}s)"
+        )
+    
+    def __hash__(self):
+        """Hash by GPS key and metadata for deduplication."""
+        return hash((
+            self.gps_key,
+            self.label,
+            self.kind,
+            tuple(sorted(ifo.name for ifo in self.seen_in))  # Hashable sorted tuple
+        ))
