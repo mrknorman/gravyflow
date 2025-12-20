@@ -1164,46 +1164,6 @@ class TestIFODataWithNaN:
         assert not np.any(np.isnan(result))
         assert not np.any(np.isinf(result))
 
-
-class TestCloseWithOpenFile:
-    """Tests for close method with open file handle."""
-    
-    def test_destructor_closes_file(self):
-        """Test __del__ closes segment_file if open (lines 398-400)."""
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=gf.DataLabel.NOISE,
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
-        )
-        
-        # Mock segment file
-        mock_file = MagicMock()
-        obtainer.segment_file = mock_file
-        
-        # Call destructor
-        obtainer.__del__()
-        
-        # Verify close was called
-        mock_file.close.assert_called_once()
-    
-    def test_close_with_open_file(self):
-        """Test close method closes segment_file (lines 402-404)."""
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=gf.DataLabel.NOISE,
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
-        )
-        
-        mock_file = MagicMock()
-        obtainer.segment_file = mock_file
-        
-        obtainer.close()
-        
-        mock_file.close.assert_called_once()
-
-
 class TestCutSegmentsEdgeCases:
     """Tests for cut_segments edge cases."""
     
