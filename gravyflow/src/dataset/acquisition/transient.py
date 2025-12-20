@@ -206,6 +206,12 @@ class TransientDataObtainer(BaseDataObtainer):
         index.dedupe()
         index.sort()
         
+        # Filter by specific event names if requested
+        if self.event_names:
+            logger.info(f"Filtering to specific events: {self.event_names}")
+            index = index.filter_by_names(self.event_names)
+            logger.info(f"After filtering: {len(index)} segments")
+        
         # Assign groups
         if groups:
             index.assign_groups(groups, seed=seed)
@@ -948,9 +954,17 @@ class TransientDataObtainer(BaseDataObtainer):
         num_onsource_samples = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
         num_offsource_samples = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
 
+        # Auto-initialize segments if not already done
+        # For specific event names, use group="all" to get all matching events
+        if not self.transient_segments:
+            group_name = "all" if self.event_names else "train"
+            self.get_valid_segments(
+                ifos=ifos, 
+                seed=seed,
+                group_name=group_name
+            )
+        
         self.valid_segments_adjusted = self.valid_segments
-        # Note: Specific event filtering is handled during TransientIndex creation
-        # via the event_names parameter - no special path needed
         
         # Initialize or retrieve glitch cache (extracted to helper for clarity)
         cache, _ = self._initialize_glitch_cache(
