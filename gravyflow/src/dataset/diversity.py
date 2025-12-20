@@ -53,14 +53,14 @@ class DiversityCallback(keras.callbacks.Callback):
     - 0.0 = all samples are the same class
     
     Usage:
-        callback = DiversityCallback(dataset, label_key='GLITCH_TYPE')
+        callback = DiversityCallback(dataset, label_key='SUB_TYPE')
         model.fit(..., callbacks=[callback])
     """
     
     def __init__(
         self, 
         dataset,
-        label_key: str = 'GLITCH_TYPE',
+        label_key: str = 'SUB_TYPE',
         log_every_n_batches: int = 100,
         num_classes: int = 20
     ):
@@ -153,7 +153,7 @@ class LabelTrackingDataset(keras.utils.PyDataset):
     Wraps an existing dataset and exposes _last_labels for the DiversityCallback.
     """
     
-    def __init__(self, dataset, label_key: str = 'GLITCH_TYPE'):
+    def __init__(self, dataset, label_key: str = 'SUB_TYPE'):
         super().__init__(workers=dataset.workers, use_multiprocessing=dataset.use_multiprocessing)
         self.dataset = dataset
         self.label_key = label_key

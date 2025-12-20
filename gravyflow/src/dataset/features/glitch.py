@@ -1,21 +1,31 @@
-from enum import Enum, auto
-from typing import Union, List
+from enum import Enum, IntEnum, auto
+from typing import Union, List, TYPE_CHECKING
 from pathlib import Path
 import time
 import hashlib
 #import threading
 import queue
 
+import logging
+logger = logging.getLogger(__name__)
+
 import numpy as np
 import pandas as pd
 from gwpy.table import GravitySpyTable
 
-import gravyflow as gf
+from gravyflow.src.dataset.acquisition.base import ObservingRun
+from gravyflow.src.dataset.conditioning.detector import IFO
+
+if TYPE_CHECKING:
+    import gravyflow as gf
+
+# Import PATH directly to avoid circular import
+from gravyflow import PATH as GF_PATH
 
 
 def _get_cache_path(selection: str) -> Path:
     """Generate cache file path based on selection hash."""
-    cache_dir = gf.PATH / "res" / "glitch_cache"
+    cache_dir = GF_PATH / "res" / "glitch_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     # Hash the selection string for a unique filename
@@ -82,31 +92,61 @@ def fetch_event_times(selection, max_retries=10, use_cache=True):
     
     return -1  # If successful, return the data
 
-class GlitchType(Enum):
-    AIR_COMPRESSOR = 'Air_Compressor'
-    BLIP = 'Blip'
-    CHIRP = 'Chirp'
-    EXTREMELY_LOUD = 'Extremely_Loud'
-    HELIX = 'Helix'
-    KOI_FISH = 'Koi_Fish'
-    LIGHT_MODULATION = 'Light_Modulation'
-    LOW_FREQUENCY_BURST = 'Low_Frequency_Burst'
-    LOW_FREQUENCY_LINES = 'Low_Frequency_Lines'
-    NO_GLITCH = 'No_Glitch'
-    NONE_OF_THE_ABOVE = 'None_of_the_Above'
-    PAIRED_DOVES = 'Paired_Doves'
-    POWER_LINE = 'Power_Line'
-    REPEATING_BLIPS = 'Repeating_Blips'
-    SCATTERED_LIGHT = 'Scattered_Light'
-    SCRATCHY = 'Scratchy'
-    TOMTE = 'Tomte'
-    VIOLIN_MODE = 'Violin_Mode'
-    WANDERING_LINE = 'Wandering_Line'
-    WHISTLE = 'Whistle'
+class GlitchType(IntEnum):
+    """
+    Glitch types from GravitySpy.
+    
+    Using IntEnum allows direct .value access for integer labels,
+    eliminating the need for list(GlitchType).index() lookups.
+    """
+    AIR_COMPRESSOR = 0
+    BLIP = 1
+    CHIRP = 2
+    EXTREMELY_LOUD = 3
+    HELIX = 4
+    KOI_FISH = 5
+    LIGHT_MODULATION = 6
+    LOW_FREQUENCY_BURST = 7
+    LOW_FREQUENCY_LINES = 8
+    NO_GLITCH = 9
+    NONE_OF_THE_ABOVE = 10
+    PAIRED_DOVES = 11
+    POWER_LINE = 12
+    REPEATING_BLIPS = 13
+    SCATTERED_LIGHT = 14
+    SCRATCHY = 15
+    TOMTE = 16
+    VIOLIN_MODE = 17
+    WANDERING_LINE = 18
+    WHISTLE = 19
+
+# Mapping from GlitchType enum to GravitySpy database ml_label values
+GLITCH_TYPE_DB_NAMES = {
+    GlitchType.AIR_COMPRESSOR: "Air_Compressor",
+    GlitchType.BLIP: "Blip",
+    GlitchType.CHIRP: "Chirp",
+    GlitchType.EXTREMELY_LOUD: "Extremely_Loud",
+    GlitchType.HELIX: "Helix",
+    GlitchType.KOI_FISH: "Koi_Fish",
+    GlitchType.LIGHT_MODULATION: "Light_Modulation",
+    GlitchType.LOW_FREQUENCY_BURST: "Low_Frequency_Burst",
+    GlitchType.LOW_FREQUENCY_LINES: "Low_Frequency_Lines",
+    GlitchType.NO_GLITCH: "No_Glitch",
+    GlitchType.NONE_OF_THE_ABOVE: "None_of_the_Above",
+    GlitchType.PAIRED_DOVES: "Paired_Doves",
+    GlitchType.POWER_LINE: "Power_Line",
+    GlitchType.REPEATING_BLIPS: "Repeating_Blips",
+    GlitchType.SCATTERED_LIGHT: "Scattered_Light",
+    GlitchType.SCRATCHY: "Scratchy",
+    GlitchType.TOMTE: "Tomte",
+    GlitchType.VIOLIN_MODE: "Violin_Mode",
+    GlitchType.WANDERING_LINE: "Wandering_Line",
+    GlitchType.WHISTLE: "Whistle",
+}
 
 def get_glitch_times(
-    ifo: gf.IFO,
-    observing_run: gf.ObservingRun = gf.ObservingRun.O3,
+    ifo: IFO,
+    observing_run: ObservingRun = ObservingRun.O3,
     glitch_types: Union[List[GlitchType], GlitchType] = None,
     start_gps_time : float = None,
     end_gps_time : float = None
@@ -134,7 +174,7 @@ def get_glitch_times(
             if glitch_type == GlitchType.WANDERING_LINE:
                 continue
                 
-            glitch_name = glitch_type.value
+            glitch_name = GLITCH_TYPE_DB_NAMES[glitch_type]
             selection = f"ifo = '{ifo}' AND event_time >= {start_gps_time} AND event_time <= {end_gps_time} AND ml_label = '{glitch_name}' AND No_Glitch < 0.1"
             
             data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
@@ -154,8 +194,8 @@ def get_glitch_times(
 
 
 def get_glitch_times_with_labels(
-    ifo: gf.IFO,
-    observing_run: gf.ObservingRun = gf.ObservingRun.O3,
+    ifo: IFO,
+    observing_run: ObservingRun = ObservingRun.O3,
     glitch_types: Union[List[GlitchType], GlitchType] = None,
     start_gps_time: float = None,
     end_gps_time: float = None,
@@ -197,18 +237,21 @@ def get_glitch_times_with_labels(
         if glitch_type == GlitchType.WANDERING_LINE:
             continue
 
-        glitch_name = glitch_type.value
         # Get enum index (0-19)
-        type_index = list(GlitchType).index(glitch_type)
+        type_index = glitch_type.value
+        glitch_name = GLITCH_TYPE_DB_NAMES[glitch_type]
         
         selection = f"ifo = '{ifo_name}' AND event_time >= {start_gps_time} AND event_time <= {end_gps_time} AND ml_label = '{glitch_name}' AND No_Glitch < 0.1"
+        
+        logger.debug(f"Fetching {glitch_name} glitches: {selection}")
         
         try:
             data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
             all_times.append(data)
             all_labels.append(np.full(len(data), type_index, dtype=np.int32))
+            print(f"DEBUG: Found {len(data)} {glitch_name} glitches for {ifo_name}", flush=True)
         except Exception as e:
-            print(f"Warning: Failed to fetch {glitch_name}: {e}")
+            print(f"WARNING: Failed to fetch {glitch_name}: {e}", flush=True)
             all_times.append(np.array([]))
             all_labels.append(np.array([], dtype=np.int32))
             continue
@@ -234,7 +277,7 @@ def get_glitch_times_with_labels(
             balanced_times = []
             balanced_labels = []
             
-            for i, (type_times, type_idx) in enumerate(zip(all_times, [list(GlitchType).index(gt) for gt in glitch_types])):
+            for i, (type_times, type_idx) in enumerate(zip(all_times, [gt.value for gt in glitch_types])):
                 if len(type_times) > 0:
                     # Oversample to max_count with replacement
                     indices = np.random.choice(len(type_times), max_count, replace=True)
@@ -253,8 +296,8 @@ def get_glitch_times_with_labels(
     return times, labels
     
 def get_glitch_segments(
-    ifo: gf.IFO,
-    observing_run: gf.ObservingRun = gf.ObservingRun.O3,
+    ifo: IFO,
+    observing_run: ObservingRun = ObservingRun.O3,
     glitch_types: Union[List[GlitchType], GlitchType] = None,
     start_gps_time : float = None,
     end_gps_time : float = None,
@@ -282,7 +325,7 @@ def get_glitch_segments(
             if glitch_type == GlitchType.WANDERING_LINE:
                 continue
                 
-            glitch_name = glitch_type.value
+            glitch_name = GLITCH_TYPE_DB_NAMES[glitch_type]
             selection = f"ifo = '{ifo}' AND event_time >= {start_gps_time} AND event_time <= {end_gps_time} AND ml_label = '{glitch_name}' AND No_Glitch < 0.1"
             
             data = fetch_event_times(selection, max_retries=10)

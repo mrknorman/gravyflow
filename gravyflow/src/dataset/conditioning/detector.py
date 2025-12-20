@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Union, List, Dict, Tuple, Optional
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 import json
 import os
 import logging
@@ -457,6 +457,12 @@ class IFO(Enum):
     L1 = IFO_(**ifo_data["livingston"])
     H1 = IFO_(**ifo_data["hanford"])
     V1 = IFO_(**ifo_data["virgo"])
+    
+    @property
+    def index(self) -> int:
+        """Get integer index for this IFO (L1=0, H1=1, V1=2)."""
+        return list(IFO).index(self)
+
 
 class Network:
     def __init__ (

@@ -224,7 +224,9 @@ class ShapeEnforcer:
             RV.GPS_TIME: ShapeContract.BI,  # Legacy alias
             RV.TRANSIENT_GPS_TIME: ShapeContract.BI,
             RV.DATA_LABEL: ShapeContract.BI,
+            RV.SUB_TYPE: ShapeContract.BI,
             RV.GLITCH_TYPE: ShapeContract.BI,
+            RV.SOURCE_TYPE: ShapeContract.BI,
             RV.EVENT_TYPE: ShapeContract.BI,
         }
         

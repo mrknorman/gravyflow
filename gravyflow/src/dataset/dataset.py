@@ -291,7 +291,7 @@ class GravyflowDataset(keras.utils.PyDataset):
                     gf.ReturnVariables.START_GPS_TIME,
                     batch_data.get(gf.ReturnVariables.TRANSIENT_GPS_TIME)
                 )
-                feature_labels = batch_data.get(gf.ReturnVariables.GLITCH_TYPE)
+                feature_labels = batch_data.get(gf.ReturnVariables.SUB_TYPE)
             elif len(batch_data) == 4:
                 onsource, offsource, gps_times, feature_labels = batch_data
             else:
@@ -535,7 +535,7 @@ def create_variable_dictionary(
     Args:
         raw_offsource: Unprocessed offsource data used for SNR calculation.
                        If None, uses the processed offsource.
-        feature_labels: Labels for GLITCH_TYPE classification (from TransientObtainer).
+        feature_labels: Labels for SUB_TYPE classification (from TransientObtainer).
     """
     from keras import ops
     
@@ -549,7 +549,7 @@ def create_variable_dictionary(
         gf.ReturnVariables.INJECTION_MASKS: mask,
         gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE: rolling_pearson_onsource,
         gf.ReturnVariables.SPECTROGRAM_ONSOURCE: spectrogram_onsource,
-        gf.ReturnVariables.GLITCH_TYPE: feature_labels,
+        gf.ReturnVariables.SUB_TYPE: feature_labels,
     }
 
     # Add WaveformParameters from injection_parameters

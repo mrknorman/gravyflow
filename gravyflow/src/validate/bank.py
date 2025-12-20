@@ -255,7 +255,7 @@ class ValidationBank:
 
     def generate_real_events(self, observing_runs: List = None) -> None:
         """Score real GW events from GWTC catalogs via TransientObtainer."""
-        from gravyflow.src.dataset.features.event import EventType, get_events_with_params
+        from gravyflow.src.dataset.features.event import EventConfidence, get_events_with_params
         from gravyflow.src.dataset.conditioning.whiten import whiten
 
         if observing_runs is None:
@@ -263,7 +263,7 @@ class ValidationBank:
 
         logger.info("Fetching real GW events from GWTC catalogs...")
         events = get_events_with_params(
-            observing_runs, event_types=[EventType.CONFIDENT, EventType.MARGINAL]
+            observing_runs, event_types=[EventConfidence.CONFIDENT, EventConfidence.MARGINAL]
         )
         for e in events:
             e["event_type"] = (

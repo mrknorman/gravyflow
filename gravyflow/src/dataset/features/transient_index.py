@@ -260,7 +260,7 @@ class TransientIndex:
         
         # Filter by group
         if group is not None:
-            if not self._groups:
+            if self._groups is None:
                 raise ValueError("Groups not assigned. Call assign_groups() first.")
             filtered = [r for r in filtered if self._groups.get(r.gps_key) == group]
         
@@ -353,7 +353,7 @@ class TransientIndex:
         ], dtype=np.uint8)
         
         confidences = np.array([
-            EventConfidence(r.confidence) if r.confidence else -1
+            r.confidence.value if r.confidence else -1
             for r in self.records
         ], dtype=np.int8)
         
@@ -443,7 +443,8 @@ class TransientIndex:
         
         index = cls(records)
         
-        # Restore group assignments
+        # Restore group assignments (if they exist in the file)
+        index._groups = {}  # Always initialize
         if "group_keys" in data and len(data["group_keys"]) > 0:
             index._groups = dict(zip(
                 data["group_keys"].tolist(),

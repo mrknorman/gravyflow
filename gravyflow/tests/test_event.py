@@ -1,7 +1,7 @@
 """
 Tests for event.py module.
 
-Tests EventType enum, event time functions, and PE parameter fetching.
+Tests EventConfidence enum, event time functions, and PE parameter fetching.
 """
 
 import pytest
@@ -12,19 +12,14 @@ import gravyflow as gf
 from gravyflow.src.dataset.features import event as event_module
 
 
-class TestEventType:
-    """Tests for EventType enum."""
-    
-    def test_event_type_values(self):
-        """Test EventType enum has correct values."""
-        assert gf.EventType.CONFIDENT.value == 'confident'
-        assert gf.EventType.MARGINAL.value == 'marginal'
+class TestEventConfidence:
+    """Tests for EventConfidence enum."""
     
     def test_event_type_members(self):
-        """Test EventType has exactly two members."""
-        assert len(gf.EventType) == 2
-        assert gf.EventType.CONFIDENT in gf.EventType
-        assert gf.EventType.MARGINAL in gf.EventType
+        """Test EventConfidence has exactly two members."""
+        assert len(gf.EventConfidence) == 2
+        assert gf.EventConfidence.CONFIDENT in gf.EventConfidence
+        assert gf.EventConfidence.MARGINAL in gf.EventConfidence
 
 
 class TestEventTimeFunctions:
@@ -60,7 +55,7 @@ class TestEventTimeFunctions:
         confident = np.array([1.0, 2.0])
         
         with patch.object(event_module, 'get_confident_event_times', return_value=confident):
-            times = gf.get_event_times_by_type([gf.EventType.CONFIDENT], use_cache=False)
+            times = gf.get_event_times_by_type([gf.EventConfidence.CONFIDENT], use_cache=False)
             np.testing.assert_array_equal(times, confident)
     
     def test_get_event_times_by_type_empty_list(self):

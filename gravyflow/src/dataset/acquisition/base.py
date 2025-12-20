@@ -5,7 +5,7 @@ import sys
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum, auto
+from enum import Enum, IntEnum, auto
 from contextlib import closing
 from typing import List, Tuple, Union, Dict, Any, Optional, Generator
 from pathlib import Path
@@ -77,10 +77,11 @@ class DataQuality(Enum):
     RAW = auto()
     BEST = auto()
 
-class DataLabel(Enum):
-    NOISE = auto()
-    GLITCHES = auto()
-    EVENTS = auto()
+class DataLabel(IntEnum):
+    """Data type labels with explicit integer values for direct .value access."""
+    NOISE = 0
+    GLITCHES = 1
+    EVENTS = 2
     
 class SegmentOrder(Enum):
     RANDOM = auto()
@@ -164,6 +165,12 @@ class ObservingRun(Enum):
     O2 = ObservingRunData(*observing_run_data["O2"])
     O3 = ObservingRunData(*observing_run_data["O3"])
     O4 = ObservingRunData(*observing_run_data["O4"])
+    
+    @property
+    def index(self) -> int:
+        """Get integer index for this run (O1=0, O2=1, O3=2, O4=3)."""
+        return list(ObservingRun).index(self)
+
 
 
 # =============================================================================
@@ -456,7 +463,7 @@ class IFOData:
 # BASE DATA OBTAINER (Abstract Base Class)
 # =============================================================================
 
-@dataclass
+@dataclass(init=False)
 class BaseDataObtainer(ABC):
     """
     Abstract base class for IFO data obtainers.
@@ -490,7 +497,7 @@ class BaseDataObtainer(ABC):
 
         self._current_segment_index = 0
         self._current_batch_index = 0
-        self._segment_exausted = True
+        self._segment_exhausted = True
         self._num_batches_in_current_segment = 0
         self._grid_position = 0
         self.rng = None
@@ -1028,8 +1035,12 @@ class BaseDataObtainer(ABC):
         )
         
         if use_disk_cache or (self.cache_segments and self.acquisition_mode != AcquisitionMode.TRANSIENT):
+            # Only try to read from file if it actually exists
             if self.file_path is None:
-                 pass
+                pass
+            elif not Path(self.file_path).exists():
+                # File doesn't exist yet - skip cache read attempt
+                pass
             else:
                 with closing(
                         gf.open_hdf5_file(self.file_path, logger, mode="r")
@@ -1135,6 +1146,63 @@ class BaseDataObtainer(ABC):
         if valid_segments is None:
             valid_segments = self.valid_segments
 
+        # Auto-detect: if segments is a different array (subset), use local index
+        # This prevents state corruption when acquire() is used for one-off downloads
+        use_local_index = (
+            valid_segments is not None and 
+            valid_segments is not self.valid_segments
+        )
+        
+        if use_local_index:
+            # STATELESS MODE: One-off download (e.g., cache misses)
+            # Use local index, no prefetch, no state modification
+            for idx in range(len(valid_segments)):
+                segments = []
+                gps_start_times = []
+                
+                segment_times = valid_segments[idx]
+                for ifo, (segment_start_gps_time, segment_end_gps_time) in zip(ifos, segment_times):
+                    segment_key = f"segments/segment_{ifo.name}_{segment_start_gps_time}_{segment_end_gps_time}"
+                    try:
+                        segment_data = self.get_segment(
+                            segment_start_gps_time,
+                            segment_end_gps_time,
+                            sample_rate_hertz,
+                            ifo,
+                            segment_key
+                        )
+                    except Exception as e:
+                        logging.warning(f"Failed to get segment for {ifo.name} at {segment_start_gps_time}: {e}")
+                        segment_data = None
+                    
+                    if segment_data is not None:
+                        segments.append(segment_data)
+                        gps_start_times.append(segment_start_gps_time)
+                        if self.cache_segments:
+                            self._cache_segment(segment_key, segment_data)
+                    else:
+                        logging.warning(f"Segment missing for {ifo.name} at {segment_start_gps_time}. Filling with zeros.")
+                        duration = segment_end_gps_time - segment_start_gps_time
+                        num_samples = int(duration * sample_rate_hertz)
+                        segments.append(ops.zeros((num_samples,), dtype="float32"))
+                        gps_start_times.append(segment_start_gps_time)
+                
+                if not segments:
+                    logging.error("No segments acquired, skipping to next iteration.")
+                    continue
+                
+                try:
+                    multi_segment = IFOData(segments, sample_rate_hertz, gps_start_times)
+                    if not multi_segment.data:
+                        raise ValueError("Input data should not be empty.")
+                    multi_segment = multi_segment.scale(scale_factor)
+                    yield multi_segment
+                except Exception as e:
+                    logging.error(f"Error processing segment: {e}")
+                    continue
+            return  # Exit generator after stateless download
+
+        # STATEFUL MODE: Streaming with prefetch (existing behavior)
         self._prefetch_futures.clear()
 
         while self._current_segment_index < len(valid_segments):
@@ -1233,7 +1301,7 @@ class BaseDataObtainer(ABC):
         self.ifos = None
         self._current_segment_index = 0
         self._current_batch_index = 0
-        self._segment_exausted = True
+        self._segment_exhausted = True
 
     @abstractmethod
     def get_valid_segments(

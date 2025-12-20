@@ -67,6 +67,7 @@ class NoiseDataObtainer(BaseDataObtainer):
         
         self.acquisition_mode = AcquisitionMode.NOISE
         self._segment_cache_maxsize = 8  # NOISE mode uses larger segments
+        self._segment_generator = None  # Reusable generator (preserves prefetch)
 
     # =========================================================================
     # NOISE-SPECIFIC SEGMENT PROCESSING
@@ -461,31 +462,37 @@ class NoiseDataObtainer(BaseDataObtainer):
         _consecutive_stop_iterations = 0
         
         while True:
-            while self._segment_exausted:
-                try:
-                    self.current_segment = next(self.acquire(
-                        sample_rate_hertz, 
-                        self.valid_segments_adjusted, 
+            while self._segment_exhausted:
+                # Create generator ONCE and reuse it (preserves prefetch across batches)
+                if self._segment_generator is None:
+                    self._segment_generator = self.acquire(
+                        sample_rate_hertz,
+                        self.valid_segments_adjusted,
                         ifos,
                         scale_factor
-                    ))
+                    )
+                
+                try:
+                    self.current_segment = next(self._segment_generator)
                     _consecutive_stop_iterations = 0
                 except StopIteration:
                     _consecutive_stop_iterations += 1
                     if _consecutive_stop_iterations > 1:
                         logging.warning("No valid segments available. Generator exhausted.")
                         return
+                    # Reset generator for next epoch
+                    self._segment_generator = None
                     self._current_segment_index = 0
-                    self._segment_exausted = True
+                    self._segment_exhausted = True
                     continue
             
                 min_num_samples = min([ops.shape(tensor)[0] for tensor in self.current_segment.data])
 
                 if min_num_samples < (num_onsource_samples + num_offsource_samples):
                     logging.warning("Segment too short!")
-                    self._segment_exausted = True
+                    self._segment_exhausted = True
                 else: 
-                    self._segment_exausted = False
+                    self._segment_exhausted = False
 
                 min_num_samples = ops.cast(min_num_samples, "float32")
 
@@ -496,7 +503,7 @@ class NoiseDataObtainer(BaseDataObtainer):
                     / (num_examples_per_batch * onsource_duration_seconds)
                 ))
             
-            while self._current_batch_index < self._num_batches_in_current_segment and not self._segment_exausted:
+            while self._current_batch_index < self._num_batches_in_current_segment and not self._segment_exhausted:
 
                 if sampling_mode == SamplingMode.RANDOM:
                     subarrays, background_chunks, start_gps_times = self.current_segment.random_subsection(
@@ -519,13 +526,13 @@ class NoiseDataObtainer(BaseDataObtainer):
 
                 if subarrays is None or background_chunks is None or start_gps_times is None:
                     if sampling_mode == SamplingMode.GRID:
-                        self._segment_exausted = True
+                        self._segment_exhausted = True
                         self._grid_position = 0
                     continue
                 
                 self._current_batch_index += 1
                 if not self._current_batch_index < self._num_batches_in_current_segment:
-                    self._segment_exausted = True
+                    self._segment_exhausted = True
                     self._current_batch_index = 0
                     if sampling_mode == SamplingMode.GRID:
                         self._grid_position = 0
