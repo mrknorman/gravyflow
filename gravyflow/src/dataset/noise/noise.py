@@ -15,7 +15,7 @@ import jax
 from numpy.random import default_rng  
 
 import gravyflow as gf
-from gravyflow.src.dataset.features.event import get_events_with_params, EventConfidence
+
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.dataset.acquisition import ifo_canonical_key
 from gravyflow.src.utils.shapes import ShapeEnforcer

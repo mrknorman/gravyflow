@@ -27,7 +27,6 @@ from .base import (
 from gravyflow.src.utils.shapes import ShapeEnforcer
 from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys
 from gravyflow.src.dataset.features.transient_index import TransientIndex
-# Using TransientSegment for all transient data
 from .transient_segment import TransientSegment
 
 
