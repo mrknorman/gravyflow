@@ -169,8 +169,8 @@ class TestSegmentCyclingRegression:
         import inspect
         source = inspect.getsource(gf.NoiseDataObtainer._yield_onsource_offsource_chunks)
         
-        # The fix added "and not self._segment_exausted" to the inner while
-        assert "and not self._segment_exausted" in source
+        # The fix added "and not self._segment_exhausted" to the inner while
+        assert "and not self._segment_exhausted" in source
     
     def test_outer_while_true_wraps_segment_acquisition(self):
         """Verify outer while True loop wraps both segment acquisition and batch yielding."""
@@ -182,4 +182,4 @@ class TestSegmentCyclingRegression:
         # The fix wrapped everything in "while True"
         assert "while True:" in source
         # And the segment acquisition is inside it
-        assert "while self._segment_exausted:" in source
+        assert "while self._segment_exhausted:" in source
