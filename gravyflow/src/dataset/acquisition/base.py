@@ -549,6 +549,10 @@ class BaseDataObtainer(ABC):
         self.prefetch_segments = prefetch_segments
         self._prefetch_executor = ThreadPoolExecutor(max_workers=1) if prefetch_segments > 0 else None
         self._prefetch_futures: Dict[int, Future] = {}
+        
+        # Segment acquisition tracking (for debugging silent failures)
+        self._dropped_segments_count = 0
+        self._zero_filled_segments_count = 0
                 
     def override_attributes(
         self,
@@ -884,6 +888,40 @@ class BaseDataObtainer(ABC):
 
         return compressed[keep_segments]
     
+    def find_segment_intersections(self, arr1: np.ndarray, arr2: np.ndarray) -> np.ndarray:
+        """
+        Find intersections between two sets of segments.
+        
+        For each segment in arr1, finds the best overlapping segment in arr2
+        and returns the intersection bounds.
+        
+        Args:
+            arr1: Array of shape (N, 2) with [start, end] for each segment
+            arr2: Array of shape (M, 2) with [start, end] for each segment
+            
+        Returns:
+            Array of shape (K, 2) with intersection [start, end] bounds,
+            where K <= N (segments with no overlap are excluded)
+        """
+        if len(arr1) == 0 or len(arr2) == 0:
+            return np.empty((0, 2))
+            
+        latest_starts = np.maximum(arr1[:, None, 0], arr2[None, :, 0])
+        earliest_ends = np.minimum(arr1[:, None, 1], arr2[None, :, 1])
+
+        overlap_durations = np.clip(earliest_ends - latest_starts, 0, None)
+        overlap_mask = overlap_durations > 0
+        best_overlap_indices = np.argmax(overlap_durations, axis=-1)
+
+        starts = latest_starts[np.arange(latest_starts.shape[0]), best_overlap_indices]
+        ends = earliest_ends[np.arange(earliest_ends.shape[0]), best_overlap_indices]
+
+        valid_mask = overlap_mask[np.arange(overlap_mask.shape[0]), best_overlap_indices]
+        starts = starts[valid_mask]
+        ends = ends[valid_mask]
+
+        return np.vstack((starts, ends)).T
+
     def order_segments(
         self,
         valid_segments : np.ndarray,
@@ -1181,7 +1219,11 @@ class BaseDataObtainer(ABC):
                         if self.cache_segments:
                             self._cache_segment(segment_key, segment_data)
                     else:
-                        logging.warning(f"Segment missing for {ifo.name} at {segment_start_gps_time}. Filling with zeros.")
+                        self._zero_filled_segments_count += 1
+                        logging.warning(
+                            f"Segment missing for {ifo.name} at {segment_start_gps_time}. "
+                            f"Filling with zeros (total zero-filled: {self._zero_filled_segments_count})."
+                        )
                         duration = segment_end_gps_time - segment_start_gps_time
                         num_samples = int(duration * sample_rate_hertz)
                         segments.append(ops.zeros((num_samples,), dtype="float32"))
@@ -1229,7 +1271,11 @@ class BaseDataObtainer(ABC):
                         if self.cache_segments:
                             self._cache_segment(segment_key, segment_data)
                     else:
-                        logging.warning(f"Prefetched segment missing. Filling with zeros.")
+                        self._zero_filled_segments_count += 1
+                        logging.warning(
+                            f"Prefetched segment missing. Filling with zeros "
+                            f"(total zero-filled: {self._zero_filled_segments_count})."
+                        )
                         duration = segment_end_gps_time - segment_start_gps_time
                         num_samples = int(duration * sample_rate_hertz)
                         segments.append(ops.zeros((num_samples,), dtype="float32"))
@@ -1257,7 +1303,11 @@ class BaseDataObtainer(ABC):
                         if self.cache_segments:
                             self._cache_segment(segment_key, segment_data)
                     else:
-                        logging.warning(f"Segment missing for {ifo.name} at {segment_start_gps_time}. Filling with zeros.")
+                        self._zero_filled_segments_count += 1
+                        logging.warning(
+                            f"Segment missing for {ifo.name} at {segment_start_gps_time}. "
+                            f"Filling with zeros (total zero-filled: {self._zero_filled_segments_count})."
+                        )
                         duration = segment_end_gps_time - segment_start_gps_time
                         num_samples = int(duration * sample_rate_hertz)
                         segments.append(ops.zeros((num_samples,), dtype="float32"))
@@ -1295,6 +1345,23 @@ class BaseDataObtainer(ABC):
         self._current_segment_index = 0
         self._prefetch_futures.clear()
 
+    def get_acquisition_stats(self) -> Dict[str, int]:
+        """
+        Get statistics about segment acquisition issues.
+        
+        Returns:
+            Dict with 'dropped_segments' and 'zero_filled_segments' counts.
+        """
+        return {
+            'dropped_segments': self._dropped_segments_count,
+            'zero_filled_segments': self._zero_filled_segments_count,
+        }
+    
+    def reset_acquisition_stats(self) -> None:
+        """Reset acquisition statistics counters."""
+        self._dropped_segments_count = 0
+        self._zero_filled_segments_count = 0
+
     def clear_valid_segments(self) -> None:
         self.valid_segments = None
         self.valid_segments_adjusted = None
@@ -1302,6 +1369,7 @@ class BaseDataObtainer(ABC):
         self._current_segment_index = 0
         self._current_batch_index = 0
         self._segment_exhausted = True
+        self.reset_acquisition_stats()
 
     @abstractmethod
     def get_valid_segments(
