@@ -35,9 +35,7 @@ from gwpy.timeseries import TimeSeries
 # Local imports:
 import gravyflow as gf
 from gravyflow.src.utils.tensor import resample_fft
-
-
-from gravyflow.src.utils.numerics import ensure_even
+from gravyflow.src.utils.numerics import ensure_even, ensure_list
 
 
 # =============================================================================
@@ -504,14 +502,8 @@ class BaseDataObtainer(ABC):
         self.ifos = None
         
         # Default to all observing runs (O1, O2, O3) if not specified
-        if observing_runs is None:
-            observing_runs = [ObservingRun.O1, ObservingRun.O2, ObservingRun.O3]
-
-        # Ensure parameters are lists for consistency:
-        if not isinstance(observing_runs, list):
-            observing_runs = [observing_runs]
-        if not isinstance(data_labels, list):
-            data_labels = [data_labels]
+        observing_runs = ensure_list(observing_runs) or [ObservingRun.O1, ObservingRun.O2, ObservingRun.O3]
+        data_labels = ensure_list(data_labels)
         
         # Set class attributes with parameters:
         self.data_quality = data_quality
