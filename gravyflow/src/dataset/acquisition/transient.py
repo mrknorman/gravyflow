@@ -704,7 +704,7 @@ class TransientDataObtainer(BaseDataObtainer):
         if len(miss_indices) == 0:
             return
             
-        miss_segments = self.valid_segments_adjusted[miss_indices]
+        miss_segments = self.valid_segments[miss_indices]
         
         # Download at higher of requested or cache sample rate (can downsample but not upsample)
         download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
@@ -935,9 +935,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 ifos=ifos, 
                 seed=seed,
                 group_name=group_name
-            )
-        
-        self.valid_segments_adjusted = self.valid_segments
+        )
         
         # Initialize or retrieve glitch cache (extracted to helper for clarity)
         cache, _ = self._initialize_glitch_cache(
