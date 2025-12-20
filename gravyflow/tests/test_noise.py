@@ -682,11 +682,7 @@ def test_white_noise_generator_iteration():
         assert ops.shape(onsource) == (2, 1, 1024)
 
 
-def test_transient_obtainer_exists():
-    """Test that TransientObtainer class exists and inherits from Obtainer."""
-    # TransientObtainer is defined but empty, just verify it exists
-    assert hasattr(gf_noise, 'TransientObtainer')
-    assert issubclass(gf_noise.TransientObtainer, gf_noise.Obtainer)
+
 
 
 def test_colored_noise_generator():

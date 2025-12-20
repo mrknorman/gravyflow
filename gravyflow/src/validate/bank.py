@@ -254,7 +254,7 @@ class ValidationBank:
             self._worst_false_negatives[key] = [t[2] for t in sorted(heap, key=lambda x: -x[0])]
 
     def generate_real_events(self, observing_runs: List = None) -> None:
-        """Score real GW events from GWTC catalogs via TransientObtainer."""
+        """Score real GW events from GWTC catalogs via TransientDataObtainer."""
         from gravyflow.src.dataset.features.event import EventConfidence, get_events_with_params
         from gravyflow.src.dataset.conditioning.whiten import whiten
 
@@ -321,28 +321,27 @@ class ValidationBank:
         unique = filtered
         
         names = [e["name"] for e in unique]
-        logger.info(f"Creating TransientObtainer for {len(names)} events...")
+        logger.info(f"Creating TransientDataObtainer for {len(names)} events...")
 
         sample_rate = self.dataset_args.get("sample_rate_hertz", 2048.0)
         on_dur = self.dataset_args.get("onsource_duration_seconds", 1.0)
         off_dur = self.dataset_args.get("offsource_duration_seconds", 16.0)
 
         try:
-            obt = gf.TransientObtainer(
-                ifo_data_obtainer=gf.IFODataObtainer(
-                    observing_runs=observing_runs,
-                    data_quality=gf.DataQuality.BEST,
-                    data_labels=[gf.DataLabel.EVENTS],
-                ),
-                ifos=ifos,
-                event_names=names,
+            # Use TransientDataObtainer directly with event_names filter
+            ifo_data_obtainer = gf.TransientDataObtainer(
+                observing_runs=observing_runs,
+                data_quality=gf.DataQuality.BEST,
+                data_labels=[gf.DataLabel.EVENTS],
+                event_names=names,  # Filter to specific events
             )
 
-            gen = obt(
+            gen = ifo_data_obtainer.get_onsource_offsource_chunks(
                 sample_rate_hertz=sample_rate,
                 onsource_duration_seconds=on_dur,
                 offsource_duration_seconds=off_dur,
                 num_examples_per_batch=min(len(names), 256),
+                ifos=ifos,
                 scale_factor=gf.Defaults.scale_factor,
             )
 
@@ -423,7 +422,7 @@ class ValidationBank:
         except StopIteration:
             pass
         except Exception as e:
-            logger.warning(f"TransientObtainer failed: {e}")
+            logger.warning(f"TransientDataObtainer failed: {e}")
             logger.info("Events stored without scores")
 
         if self.far_scores is not None and len(self.far_scores) > 0:
