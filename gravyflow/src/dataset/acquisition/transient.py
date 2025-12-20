@@ -166,20 +166,16 @@ class TransientDataObtainer(BaseDataObtainer):
         
         # Check what types of data are requested
         data_labels_list = self.data_labels if isinstance(self.data_labels, list) else [self.data_labels]
-        print(f"DEBUG: build_feature_index called with data_labels={[str(l) for l in data_labels_list]}", flush=True)
         
         # Check for specific glitch types or general GLITCHES label
         has_specific_glitches = any(isinstance(label, GlitchType) for label in data_labels_list)
         has_glitches_label = DataLabel.GLITCHES in data_labels_list
         
         if has_glitches_label or has_specific_glitches:
-            print(f"DEBUG: Building glitch segments for {[ifo.name for ifo in ifos]}", flush=True)
-            
             # If specific types requested, pass them to build_glitch_segments
             glitch_types_to_fetch = None
             if has_specific_glitches:
                 glitch_types_to_fetch = [label for label in data_labels_list if isinstance(label, GlitchType)]
-                print(f"DEBUG: Requesting specific glitch types: {[gt.name for gt in glitch_types_to_fetch]}", flush=True)
             
             glitch_segments = build_glitch_segments(
                 ifos=ifos,
@@ -187,13 +183,17 @@ class TransientDataObtainer(BaseDataObtainer):
                 glitch_types=glitch_types_to_fetch  # Pass specific types if requested
             )
             all_segments.extend(glitch_segments)
-            print(f"DEBUG: Built {len(glitch_segments)} glitch segments", flush=True)
         
         
         # Fetch event segments if requested  
         data_labels_list = self.data_labels if isinstance(self.data_labels, list) else [self.data_labels]
         has_events = any(isinstance(et, EventConfidence) for et in data_labels_list)
-        if DataLabel.EVENTS in self.data_labels or has_events:
+        # Check for EVENTS label - handle both enum and integer value comparisons
+        has_events_label = any(
+            l == DataLabel.EVENTS or (hasattr(l, 'value') and l.value == DataLabel.EVENTS.value) or l == DataLabel.EVENTS.value
+            for l in data_labels_list
+        )
+        if has_events_label or has_events:
             logger.info("Building event segments")
             event_segments = build_event_segments(
                 observing_runs=self.observing_runs,
@@ -227,7 +227,8 @@ class TransientDataObtainer(BaseDataObtainer):
         onsource_duration: float,
         offsource_duration: float,
         scale_factor: float = 1.0,
-        gps_key: Optional[int] = None  # NEW: Pass key directly to avoid conversion
+        gps_key: Optional[int] = None,  # NEW: Pass key directly to avoid conversion
+        num_ifos: int = 1  # Expected number of IFOs
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
         """
         Attempt to retrieve a sample from cache (memory first, then disk).
@@ -235,6 +236,7 @@ class TransientDataObtainer(BaseDataObtainer):
         Args:
             gps_key: Optional GPS key (preferred - no conversion needed)
             gps_time: GPS time (fallback if key not provided)
+            num_ifos: Expected number of IFOs - if cache data has different count, treat as miss
             
         Returns:
             (onsource, offsource, source) where source is 'memory', 'disk', or 'miss'
@@ -248,6 +250,10 @@ class TransientDataObtainer(BaseDataObtainer):
             idx = cache._gps_index[gps_key]
             onsource = cache._mem_onsource[idx] * scale_factor
             offsource = cache._mem_offsource[idx] * scale_factor
+            # Validate IFO count
+            if len(onsource.shape) >= 1 and onsource.shape[0] != num_ifos:
+                # IFO mismatch - treat as miss for multi-IFO requests
+                return None, None, 'miss'
             return onsource, offsource, 'memory'
         
         # Try disk cache (use key-based method - no conversion!)
@@ -260,6 +266,10 @@ class TransientDataObtainer(BaseDataObtainer):
             )
             if result is not None:
                 onsource, offsource, _, _ = result
+                # Validate IFO count
+                if len(onsource.shape) >= 1 and onsource.shape[0] != num_ifos:
+                    # IFO mismatch - treat as miss for multi-IFO requests
+                    return None, None, 'miss'
                 return onsource * scale_factor, offsource * scale_factor, 'disk'
         
         # Cache miss
@@ -280,7 +290,9 @@ class TransientDataObtainer(BaseDataObtainer):
             - OFFSOURCE: (Batch, IFO, Samples) = BIS  
             - TRANSIENT_GPS_TIME: (Batch, IFO) = BI (event/glitch center)
             - DATA_LABEL: (Batch, IFO) = BI (1 for GLITCHES, 2 for EVENTS)
-            - GLITCH_TYPE: (Batch, IFO) = BI (GlitchType enum values)
+            - SUB_TYPE: (Batch, IFO) = BI (GlitchType.value or SourceType.value)
+            - GLITCH_TYPE: (Batch, IFO) = BI (GlitchType.value if glitch, -1 otherwise)
+            - SOURCE_TYPE: (Batch, IFO) = BI (SourceType.value if event, -1 otherwise)
         """
         final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
         final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
@@ -294,28 +306,43 @@ class TransientDataObtainer(BaseDataObtainer):
         gps_1d = ops.convert_to_tensor(batch_gps_times, dtype="float64")
         transient_gps = ops.tile(ops.expand_dims(gps_1d, axis=-1), (1, num_ifos))
         
-        # Extract labels directly using IntEnum.value (no lookup!)
-        batch_labels_1d = np.array([
-            seg.kind.value if seg.is_glitch or seg.is_event else -1
+        # Compute DATA_LABEL per-segment based on segment type
+        # DataLabel.GLITCHES = 1, DataLabel.EVENTS = 2
+        batch_data_labels_1d = np.array([
+            DataLabel.GLITCHES.value if seg.is_glitch else DataLabel.EVENTS.value
             for seg in batch_segments
         ], dtype=np.int32)
-        glitch_type = ops.tile(ops.expand_dims(batch_labels_1d, axis=-1), (1, num_ifos))
-
+        data_label = ops.tile(ops.expand_dims(batch_data_labels_1d, axis=-1), (1, num_ifos))
         
-        # Determine DATA_LABEL from what type of transient this is
-        # DataLabel.GLITCHES = 1, DataLabel.EVENTS = 2
-        # Check if this obtainer is handling glitches or events
-        has_glitches = any(
-            dl == DataLabel.GLITCHES for dl in (self.data_labels if isinstance(self.data_labels, list) else [self.data_labels])
-        )
-        data_label_value = 1 if has_glitches else 2  # GLITCHES=1, EVENTS=2
+        # SUB_TYPE: Generic type value (GlitchType or SourceType)
+        batch_sub_type_1d = np.array([
+            seg.kind.value if (seg.is_glitch or seg.is_event) else -1
+            for seg in batch_segments
+        ], dtype=np.int32)
+        sub_type = ops.tile(ops.expand_dims(batch_sub_type_1d, axis=-1), (1, num_ifos))
+        
+        # GLITCH_TYPE: Only filled for glitches, -1 for events
+        batch_glitch_type_1d = np.array([
+            seg.kind.value if seg.is_glitch else -1
+            for seg in batch_segments
+        ], dtype=np.int32)
+        glitch_type = ops.tile(ops.expand_dims(batch_glitch_type_1d, axis=-1), (1, num_ifos))
+        
+        # SOURCE_TYPE: Only filled for events, -1 for glitches
+        batch_source_type_1d = np.array([
+            seg.kind.value if seg.is_event else -1
+            for seg in batch_segments
+        ], dtype=np.int32)
+        source_type = ops.tile(ops.expand_dims(batch_source_type_1d, axis=-1), (1, num_ifos))
         
         return {
             RV.ONSOURCE: self._apply_augmentation(final_subarrays, is_transient=True),
             RV.OFFSOURCE: self._apply_augmentation(final_background, is_transient=True),
             RV.TRANSIENT_GPS_TIME: transient_gps,
-            RV.DATA_LABEL: ops.full((batch_size, num_ifos), data_label_value, dtype="int32"),
-            RV.GLITCH_TYPE: glitch_type,  # Will be -1 if not a glitch
+            RV.DATA_LABEL: data_label,     # Per-segment: GLITCHES=1 or EVENTS=2
+            RV.SUB_TYPE: sub_type,         # Per-segment: GlitchType.value or SourceType.value
+            RV.GLITCH_TYPE: glitch_type,   # Per-segment: GlitchType.value or -1
+            RV.SOURCE_TYPE: source_type,   # Per-segment: SourceType.value or -1
         }
 
     def _extract_feature_event(
@@ -323,11 +350,23 @@ class TransientDataObtainer(BaseDataObtainer):
         event_segment: IFOData,
         num_onsource_samples: int,
         num_offsource_samples: int,
-        sample_rate_hertz: float
+        sample_rate_hertz: float,
+        known_gps_time: float = None  # Use this as ground truth if provided
     ) -> tuple:
         """
         Extract onsource/offsource windows from a feature segment.
         Centers extraction on the middle of the segment (where the event is).
+        
+        Args:
+            event_segment: IFOData containing the downloaded segment
+            num_onsource_samples: Number of samples for onsource window
+            num_offsource_samples: Number of samples for offsource window
+            sample_rate_hertz: Sample rate
+            known_gps_time: If provided, use this as the event GPS time instead of computing
+                           from segment position. Recommended to pass TransientSegment.transient_gps_time.
+        
+        Returns:
+            Tuple of (onsource, offsource, event_gps_time) or (None, None, None) if extraction fails.
         """
         data_len = ops.shape(event_segment.data[0])[0]
         
@@ -340,8 +379,12 @@ class TransientDataObtainer(BaseDataObtainer):
         start_onsource = center_idx - half_onsource
         end_onsource = start_onsource + num_onsource_samples
         
-        feature_gps_start = event_segment.start_gps_time[0]
-        event_gps_time = feature_gps_start + (center_idx / sample_rate_hertz)
+        # Use known GPS time (ground truth) if provided, otherwise compute from segment
+        if known_gps_time is not None:
+            event_gps_time = known_gps_time
+        else:
+            feature_gps_start = event_segment.start_gps_time[0]
+            event_gps_time = feature_gps_start + (center_idx / sample_rate_hertz)
         
         temp_onsource = []
         temp_offsource = []
@@ -568,7 +611,7 @@ class TransientDataObtainer(BaseDataObtainer):
         3. Extracts individual glitch windows from each segment
         4. Saves all extracted glitches to a GlitchCache HDF5 file
         """
-        from gravyflow.src.dataset.features.glitch_cache import GlitchCache
+        from gravyflow.src.dataset.features.glitch_cache import GlitchCache, generate_glitch_cache_path
 
         if not isinstance(ifos, list):
             ifos = [ifos]
@@ -576,20 +619,8 @@ class TransientDataObtainer(BaseDataObtainer):
             seed = gf.Defaults.seed
             
         if cache_path is None:
-            if data_directory is None:
-                data_directory = Path("./generator_data")
-                
-            ifo_str = "_".join([i.name for i in ifos])
-            
-            run_identifier = str(int(self.start_gps_times[0])) if self.start_gps_times else "unknown"
-            if self.start_gps_times:
-                for run in ObservingRun:
-                    if run.value.start_gps_time <= self.start_gps_times[0] <= run.value.end_gps_time:
-                        run_identifier = run.name
-                        break
-            
-            filename = f"glitch_cache_{run_identifier}_{ifo_str}.h5"
-            cache_path = data_directory / filename
+            # Use standardized cache path generation for consistency
+            cache_path = generate_glitch_cache_path(data_directory=data_directory)
         
         
         self.get_valid_segments(ifos=ifos, seed=seed, group_name=group_name)
@@ -874,7 +905,6 @@ class TransientDataObtainer(BaseDataObtainer):
             groups = {"all": 1.0}
         
         # Build index if needed
-        print(f"DEBUG: _feature_index is None, will build index", flush=True)
         if self._feature_index is None:
             self.build_feature_index(ifos=ifos, groups=groups, seed=seed)
         
@@ -953,23 +983,30 @@ class TransientDataObtainer(BaseDataObtainer):
         event_idx = 0
         
         for event_segment in segment_generator:
-            # Extract onsource/offsource
+            # Get the corresponding TransientSegment FIRST to get ground truth GPS time
+            # (for events, we should have pre-built segments in transient_segments)
+            known_gps_time = None
+            if event_idx < len(self.transient_segments):
+                segment = self.transient_segments[event_idx]
+                known_gps_time = segment.transient_gps_time
+            else:
+                segment = None  # Will create fallback after extraction
+            
+            # Extract onsource/offsource using ground truth GPS time
             onsource, offsource, gps_time = self._extract_feature_event(
                 event_segment,
                 num_onsource_samples,
                 num_offsource_samples,
-                sample_rate_hertz
+                sample_rate_hertz,
+                known_gps_time=known_gps_time
             )
             
             if onsource is None:
+                event_idx += 1
                 continue
             
-            # Get the corresponding TransientSegment from the index
-            # (for events, we should have pre-built segments in transient_segments)
-            if event_idx < len(self.transient_segments):
-                segment = self.transient_segments[event_idx]
-            else:
-                # Fallback: create a minimal segment if not found
+            # If we didn't have a pre-built segment, create a fallback
+            if segment is None:
                 from .transient_segment import TransientSegment
                 from gravyflow.src.utils.gps import gps_to_key
                 segment = TransientSegment(
@@ -1164,6 +1201,13 @@ class TransientDataObtainer(BaseDataObtainer):
         # This ensures cache hits for previously downloaded glitches
         rng.shuffle(segment_indices)
         
+        # Guard: If no segments, raise error rather than spin forever
+        if len(segment_indices) == 0:
+            raise ValueError(
+                f"No transient segments available for iteration. "
+                f"len(transient_segments)={len(self.transient_segments)}"
+            )
+        
         while True:
             # DON'T shuffle here - keep deterministic order for cache hits
             batch_subarrays = []
@@ -1192,7 +1236,8 @@ class TransientDataObtainer(BaseDataObtainer):
                     total_onsource_duration_seconds,
                     offsource_duration_seconds,
                     scale_factor,
-                    gps_key=segment.gps_key  # Pass key - eliminates float→key conversion!
+                    gps_key=segment.gps_key,  # Pass key - eliminates float→key conversion!
+                    num_ifos=len(ifos)  # Validate IFO count
                 )
                 
                 if source != 'miss':
@@ -1311,4 +1356,90 @@ class TransientDataObtainer(BaseDataObtainer):
                     
                     miss_indices = []
 
+            # Handle remaining miss_indices after for loop ends
+            if len(miss_indices) > 0:
+                # Get segments to download
+                miss_segments = self.valid_segments_adjusted[miss_indices]
+                
+                # Download at the higher of requested or cache sample rate
+                download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
+                
+                # Use parallel acquire for bulk download
+                segment_generator = self.acquire(
+                    download_sample_rate,
+                    miss_segments,
+                    ifos,
+                    1.0  # Download RAW data for cache (scale=1.0)
+                )
+                
+                for miss_idx_position, event_segment in enumerate(segment_generator):
+                    true_seg_idx = miss_indices[miss_idx_position]
+                    segment = self.transient_segments[true_seg_idx]
+                    
+                    # Extract and cache
+                    num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
+                    num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * download_sample_rate)
+                    
+                    onsource_full, offsource_full, _ = self._extract_feature_event(
+                        event_segment,
+                        num_cache_onsource,
+                        num_cache_offsource,
+                        download_sample_rate
+                    )
+                    
+                    if onsource_full is None:
+                        continue
 
+                    # NAN CHECK: Post-Extraction
+                    if np.isnan(onsource_full).any():
+                         logger.error(f"NAN DETECTED: In onsource_full after extract! GPS: {segment.transient_gps_time}")
+                    
+                    # ZERO CHECK
+                    if np.all(onsource_full == 0):
+                         logger.error(f"ZERO SIGNAL DETECTED: onsource_full is all zeros! GPS: {segment.transient_gps_time}")
+
+                    # Direct label access from segment
+                    from gravyflow.src.dataset.features.glitch import GlitchType
+                    label = segment.kind.value if segment.is_glitch else -1
+                    
+                    try:
+                        cache.append_single(
+                            np.array(onsource_full), 
+                            np.array(offsource_full), 
+                            segment.transient_gps_time,
+                            label,
+                            gps_key=segment.gps_key
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to append sample to cache (GPS={segment.transient_gps_time:.3f}): {e}")
+                    
+                    # Crop for this request
+                    onsource_cropped = GlitchCache.crop_and_resample(
+                        np.asarray(onsource_full),
+                        download_sample_rate,
+                        sample_rate_hertz,
+                        total_onsource_duration_seconds
+                    )
+                    offsource_cropped = GlitchCache.crop_and_resample(
+                        np.asarray(offsource_full),
+                        download_sample_rate,
+                        sample_rate_hertz,
+                        offsource_duration_seconds
+                    )
+
+                    if np.isnan(onsource_cropped).any():
+                         logger.error(f"NAN DETECTED: In onsource_cropped! GPS: {segment.transient_gps_time}")
+
+                    batch_subarrays.append(onsource_cropped * scale_factor)
+                    batch_backgrounds.append(offsource_cropped * scale_factor)
+                    batch_segments.append(segment)
+                    
+                    if len(batch_subarrays) >= num_examples_per_batch:
+                        yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments)
+                        batch_subarrays = []
+                        batch_backgrounds = []
+                        batch_segments = []
+
+            # Yield any remaining partial batch at end of epoch
+            if len(batch_subarrays) > 0:
+                yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments)

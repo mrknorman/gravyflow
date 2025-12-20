@@ -32,6 +32,10 @@ from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys
 
 # Maximum supported parameters - data is stored at these settings and 
 # can be downsampled/cropped at load time (but not upsampled/extended)
+#
+# NOTE: Download padding (in segment_builders.py) must be >= onsource_half + offsource_max
+# to ensure there's enough data for offsource BEFORE onsource. With 32s onsource (±16s)
+# and 32s offsource, we need 48s padding on each side.
 CACHE_SAMPLE_RATE_HERTZ = 4096.0  # Max supported sample rate
 CACHE_ONSOURCE_DURATION = 32.0   # Max onsource window (seconds) - allows shifting augmentation
 CACHE_OFFSOURCE_DURATION = 32.0  # Max offsource window (seconds)
@@ -73,6 +77,9 @@ class GlitchCache:
         
         Handles arbitrary leading dimensions (Batch, IFOs, etc).
         Only supports integer downsampling.
+        
+        Raises:
+            ValueError: If target_rate > current_rate or rates are not integer multiples.
         """
         if data.size == 0:
             return data
@@ -83,6 +90,14 @@ class GlitchCache:
                 raise ValueError(
                     f"Cannot upsample from {current_rate}Hz to {target_rate}Hz. "
                     "Upsampling is not supported."
+                )
+            
+            # Validate integer multiple relationship
+            if current_rate % target_rate != 0:
+                raise ValueError(
+                    f"Sample rates must be integer multiples. "
+                    f"Cannot downsample from {current_rate}Hz to {target_rate}Hz. "
+                    f"Ratio {current_rate/target_rate:.4f} is not an integer."
                 )
             
             ratio = int(current_rate / target_rate)
@@ -266,6 +281,69 @@ class GlitchCache:
             offsource_duration=offsource_duration
         )
         return ons[0], offs[0], gps[0], labels[0]
+
+    def has_key(self, gps_key: int) -> bool:
+        """
+        Check if a GPS key exists in the cache (no float conversion needed).
+        
+        Args:
+            gps_key: Integer GPS key at 10ms precision
+            
+        Returns:
+            True if key exists in cache
+        """
+        if not self.exists:
+            return False
+        
+        # Build index on first call (lazy)
+        if not hasattr(self, '_gps_index') or self._gps_index is None:
+            self._gps_index = self._build_gps_index()
+        
+        return gps_key in self._gps_index
+    
+    def get_by_key(
+        self,
+        gps_key: int,
+        sample_rate_hertz: Optional[float] = None,
+        onsource_duration: Optional[float] = None,
+        offsource_duration: Optional[float] = None,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, float, int]]:
+        """
+        Get a single glitch by GPS key (optimized - no conversion needed).
+        
+        Args:
+            gps_key: Integer GPS key at 10ms precision
+            sample_rate_hertz: Desired sample rate
+            onsource_duration: Desired onsource duration  
+            offsource_duration: Desired offsource duration
+            
+        Returns:
+            Tuple of (onsource, offsource, gps_time, label) or None if not found
+        """
+        if not self.has_key(gps_key):
+            return None
+        
+        # Validate that request can be satisfied
+        if sample_rate_hertz is not None:
+            try:
+                self.validate_request(
+                    sample_rate_hertz,
+                    onsource_duration or self.get_metadata()['onsource_duration'],
+                    offsource_duration or self.get_metadata()['offsource_duration']
+                )
+            except ValueError:
+                return None
+        
+        # Direct index lookup (no conversion!)
+        idx = self._gps_index[gps_key]
+        ons, offs, gps, labels = self.get_batch(
+            np.array([idx]),
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration=onsource_duration,
+            offsource_duration=offsource_duration
+        )
+        return ons[0], offs[0], gps[0], labels[0]
+
     
     def get_indices_for_gps(
         self, 
@@ -303,21 +381,25 @@ class GlitchCache:
         return indices[~missing_mask], missing_mask
 
     def get_all_gps_times(self) -> np.ndarray:
-        """Return all GPS times currently in the cache."""
+        """Return all GPS times currently in the cache as float seconds."""
         if not self.exists:
             return np.array([])
         
         if not hasattr(self, '_gps_index') or self._gps_index is None:
             self._gps_index = self._build_gps_index()
-            
-        return np.array(sorted(self._gps_index.keys()))
+        
+        # Convert integer keys back to GPS times (floats)
+        from gravyflow.src.utils.gps import key_to_gps
+        keys = sorted(self._gps_index.keys())
+        return np.array([key_to_gps(k) for k in keys])
     
     def append_single(
         self,
         onsource: np.ndarray,
         offsource: np.ndarray,
         gps_time: float,
-        label: int
+        label: int,
+        gps_key: Optional[int] = None
     ) -> None:
         """
         Append a single glitch to the cache.
@@ -325,8 +407,9 @@ class GlitchCache:
         Args:
             onsource: Array of shape (IFOs, samples)
             offsource: Array of shape (IFOs, samples)
-            gps_time: GPS time of the glitch
+            gps_time: GPS time of the glitch (for storage and display)
             label: GlitchType integer label
+            gps_key: Optional GPS key (10ms precision). If not provided, computed from gps_time.
         """
         # Expand dims to (1, IFOs, samples) for append
         self.append(
@@ -336,9 +419,12 @@ class GlitchCache:
             labels=np.array([label])
         )
         
-        # Update GPS index
+        # Update GPS index using key directly (no conversion if provided)
+        if gps_key is None:
+            gps_key = gps_to_key(gps_time)
+        
         if hasattr(self, '_gps_index') and self._gps_index is not None:
-            self._gps_index[gps_to_key(gps_time)] = len(self._gps_index)
+            self._gps_index[gps_key] = len(self._gps_index)
         else:
             self._gps_index = None  # Force rebuild on next access
     
@@ -854,29 +940,37 @@ class GlitchCache:
                 RV.OFFSOURCE: offsource * scale_factor,
                 RV.TRANSIENT_GPS_TIME: gps_expanded,
                 RV.DATA_LABEL: ops.full((batch_size, num_ifos), 1, dtype="int32"),  # GLITCHES = 1
-                RV.GLITCH_TYPE: labels_expanded,
+                RV.SUB_TYPE: labels_expanded,
             }
 
 
 def generate_glitch_cache_path(
-    observing_run: str,
-    ifo: str,
+    observing_run: str = None,
+    ifo: str = None,
     data_directory: Optional[Path] = None
 ) -> Path:
     """
-    Generate standardized cache file path without hash.
+    Generate standardized cache file path.
+    
+    Uses a single cache for all observing runs and IFOs
+    to avoid duplicate downloads of the same GPS times.
     
     Args:
-        observing_run: e.g., "O3", "O2"
-        ifo: e.g., "L1", "H1"
+        observing_run: Ignored (kept for backward compatibility)
+        ifo: Ignored (kept for backward compatibility)
         data_directory: Base directory for cache files
         
     Returns:
-        Path like: data_directory/glitch_cache_O3_L1.h5
+        Path like: data_directory/glitch_cache.h5
+        
+    Note:
+        The cache stores glitches from all runs and IFOs together.
+        GPS keys ensure no duplicates - same event downloaded once regardless
+        of how many IFOs/runs request it.
     """
     if data_directory is None:
         data_directory = Path("./gravyflow_data")
     
-    filename = f"glitch_cache_{observing_run}_{ifo}.h5"
+    # Single cache for all data
+    filename = "glitch_cache.h5"
     return data_directory / filename
-

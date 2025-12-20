@@ -12,7 +12,7 @@ import logging
 from .base import DataLabel, DataQuality, SegmentOrder, ObservingRun, SamplingMode
 from .noise import NoiseDataObtainer
 from .transient import TransientDataObtainer
-from gravyflow.src.dataset.features.event import EventType
+from gravyflow.src.dataset.features.event import EventConfidence
 
 
 def IFODataObtainer(
@@ -25,7 +25,7 @@ def IFODataObtainer(
         force_acquisition: bool = False,
         cache_segments: bool = True,
         overrides: dict = None,
-        event_types: List[EventType] = None,
+        event_types: List[EventConfidence] = None,
         logging_level: int = logging.WARNING,
         random_sign_reversal: bool = True,
         random_time_reversal: bool = True,

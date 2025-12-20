@@ -13,8 +13,10 @@ from gravyflow.src.utils.gps import gps_to_key
 import gravyflow as gf
 
 
-# Default padding: 32s data + 0.2s epsilon
-DEFAULT_PADDING = 32.0 + 0.2
+# Default padding: must be >= onsource_half + offsource_max + epsilon
+# For 32s onsource (±16s) + 32s offsource before = 48s needed before event
+# Adding epsilon for numerical safety
+DEFAULT_PADDING = 48.0 + 0.2
 
 
 def build_glitch_segments(

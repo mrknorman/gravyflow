@@ -89,7 +89,7 @@ from .src.model.model import (
 from .src.dataset.conditioning.whiten import whiten, Whiten, WhitenPass
 from .src.dataset.conditioning.pearson import rolling_pearson
 from .src.dataset.conditioning.detector import IFO, Network, project_wave
-from .src.dataset.noise.acquisition import (
+from .src.dataset.acquisition import (
     DataQuality, DataLabel, SegmentOrder, AcquisitionMode, SamplingMode, ObservingRun,
     IFOData, IFODataObtainer, NoiseDataObtainer, TransientDataObtainer
 )
@@ -116,12 +116,15 @@ from .src.validate import Validator, ValidationConfig
 from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_times_with_labels, get_glitch_segments, get_glitch_type_from_index
 from .src.dataset.features.glitch_cache import GlitchCache, generate_glitch_cache_path
 from .src.dataset.features.event import (
-    EventType, SourceType, get_confident_event_times, get_marginal_event_times, 
+    EventConfidence, SourceType, get_confident_event_times, get_marginal_event_times, 
     get_all_event_times, get_event_times_by_type, get_confident_events_with_params,
     search_events
 )
+# record.py removed - functionality replaced by TransientSegment
+from .src.dataset.features.transient_index import TransientIndex
 from .src.utils.alert import send_email
 from .src.model.examples.gabbard_2017 import Gabbard2017
 from .src.model.examples.matched_filter_baseline import MatchedFilterBaseline, MatchedFilterBaselineConfig
 from .src.detection import MatchedFilter, MatchedFilterLayer, TemplateGrid, matched_filter_fft, optimal_snr
 from .src.dataset.diversity import DiversityCallback, LabelTrackingDataset, compute_diversity_score
+

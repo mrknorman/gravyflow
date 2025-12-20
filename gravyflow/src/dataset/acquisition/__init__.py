@@ -38,6 +38,7 @@ from .base import (
 
 from .noise import NoiseDataObtainer
 from .transient import TransientDataObtainer
+from .transient_segment import TransientSegment
 
 # Import the factory function
 from .obtainer import IFODataObtainer

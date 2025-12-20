@@ -119,7 +119,7 @@ class TestTransientDatasetOutput:
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=1,
                 steps_per_epoch=1,
-                group='test',
+                group='all',
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
                 output_variables=[gf.ReturnVariables.GPS_TIME]
             )
@@ -241,7 +241,7 @@ class TestReturnWantedSegments:
         try:
             # First get valid segments without TRANSIENT mode processing
             # to see the raw O3 segments
-            from gravyflow.src.dataset.noise.acquisition import IFODataObtainer
+            from gravyflow.src.dataset.acquisition import IFODataObtainer
             
             # Check if we can access return_wanted_segments
             assert hasattr(ifo, 'return_wanted_segments'), \
@@ -346,3 +346,123 @@ class TestReturnWantedSegments:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
+
+
+class TestSpecificEventAcquisition:
+    """Test acquisition of specific named events (direct download path)."""
+    
+    def test_specific_event_names_returns_proper_structure(self):
+        """Test that specific event names path returns proper TransientSegment objects."""
+        ifo_obtainer = gf.IFODataObtainer(
+            observing_runs=gf.ObservingRun.O1,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[gf.DataLabel.EVENTS],
+            force_acquisition=True,
+            cache_segments=False
+        )
+        
+        try:
+            transient_obtainer = gf.TransientObtainer(
+                ifo_data_obtainer=ifo_obtainer,
+                ifos=[gf.IFO.H1, gf.IFO.L1],
+                event_names=["GW150914"]  # Specific event
+            )
+            
+            # Get a batch
+            batch_gen = transient_obtainer(
+                scale_factor=1.0,
+                whiten=False,
+                crop=False
+            )
+            batch = next(batch_gen)
+            
+            # Verify batch structure
+            assert isinstance(batch, dict), "Batch should be a dictionary"
+            assert gf.ReturnVariables.ONSOURCE in batch, "Should have ONSOURCE key"
+            assert gf.ReturnVariables.OFFSOURCE in batch, "Should have OFFSOURCE key"
+            assert gf.ReturnVariables.TRANSIENT_GPS_TIME in batch, "Should have TRANSIENT_GPS_TIME key"
+            
+            # Verify shapes
+            onsource = batch[gf.ReturnVariables.ONSOURCE]
+            offsource = batch[gf.ReturnVariables.OFFSOURCE]
+            gps_times = batch[gf.ReturnVariables.TRANSIENT_GPS_TIME]
+            
+            assert onsource.ndim == 3, f"Onsource should be 3D (Batch, IFO, Samples), got {onsource.ndim}D"
+            assert onsource.shape[1] == 2, f"Should have 2 IFOs, got {onsource.shape[1]}"
+            assert offsource.shape[0] == onsource.shape[0] and offsource.shape[1] == onsource.shape[1], "Offsource batch and IFO dims should match onsource"
+            assert gps_times.ndim == 2, f"GPS times should be 2D (Batch, IFO), got {gps_times.ndim}D"
+            
+            # Verify data is not all zeros
+            assert not np.all(onsource == 0.0), "Onsource data should not be all zeros"
+            
+        finally:
+            ifo_obtainer.close()
+    
+    def test_multiple_specific_events(self):
+        """Test acquiring multiple specific events."""
+        ifo_obtainer = gf.IFODataObtainer(
+            observing_runs=gf.ObservingRun.O1,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[gf.DataLabel.EVENTS],
+            force_acquisition=True,
+            cache_segments=False
+        )
+        
+        try:
+            transient_obtainer = gf.TransientObtainer(
+                ifo_data_obtainer=ifo_obtainer,
+                ifos=[gf.IFO.L1],
+                event_names=["GW150914", "GW151012"]  # Multiple events
+            )
+            
+            # Get a batch
+            batch_gen = transient_obtainer(
+                scale_factor=1.0,
+                whiten=False,
+                crop=False
+            )
+            batch = next(batch_gen)
+            
+            # Should get a batch (even if some events might not be available)
+            assert isinstance(batch, dict), "Should return a dictionary"
+            assert gf.ReturnVariables.ONSOURCE in batch
+            
+            # Verify batch size (may be less than 2 if some events unavailable)
+            onsource = batch[gf.ReturnVariables.ONSOURCE]
+            assert onsource.shape[0] > 0, "Should have at least one event in batch"
+            
+        finally:
+            ifo_obtainer.close()
+    
+    def test_specific_events_with_whitening(self):
+        """Test that whitening works with specific events."""
+        ifo_obtainer = gf.IFODataObtainer(
+            observing_runs=gf.ObservingRun.O1,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[gf.DataLabel.EVENTS],
+            force_acquisition=True,
+            cache_segments=False
+        )
+        
+        try:
+            transient_obtainer = gf.TransientObtainer(
+                ifo_data_obtainer=ifo_obtainer,
+                ifos=[gf.IFO.H1],
+                event_names=["GW150914"]
+            )
+            
+            # Get whitened batch
+            batch_gen = transient_obtainer(
+                scale_factor=1.0,
+                whiten=True,
+                crop=False
+            )
+            batch = next(batch_gen)
+            
+            # Should successfully whiten
+            onsource = batch[gf.ReturnVariables.ONSOURCE]
+            assert not np.all(onsource == 0.0), "Whitened data should not be all zeros"
+            assert not np.isnan(onsource).any(), "Whitened data should not have NaNs"
+            
+        finally:
+            ifo_obtainer.close()

@@ -28,7 +28,7 @@ from keras import ops
 import jax.numpy as jnp
 
 import gravyflow as gf
-from gravyflow.src.dataset.noise import acquisition as gf_acq
+from gravyflow.src.dataset import acquisition as gf_acq
 
 # Bokeh imports for visualization tests
 from bokeh.io import output_file, save
@@ -625,7 +625,7 @@ class TestClearValidSegments:
         obtainer.ifos = [gf.IFO.L1]
         obtainer._current_segment_index = 5
         obtainer._current_batch_index = 3
-        obtainer._segment_exausted = False
+        obtainer._segment_exhausted = False
         
         # Clear
         obtainer.clear_valid_segments()
@@ -635,7 +635,7 @@ class TestClearValidSegments:
         assert obtainer.ifos is None
         assert obtainer._current_segment_index == 0
         assert obtainer._current_batch_index == 0
-        assert obtainer._segment_exausted == True
+        assert obtainer._segment_exhausted == True
 
 
 # =============================================================================
@@ -2134,29 +2134,36 @@ def test_segment_visualization_plots(pytestconfig: Config) -> None:
 # =============================================================================
 
 class TestFeatureMode:
-    """Tests for FEATURE acquisition mode, EventType, GlitchType, and supersede logic."""
+    """Tests for FEATURE acquisition mode, EventConfidence, GlitchType, and supersede logic."""
     
     def test_event_type_enum_values(self):
-        """Test EventType enum has correct values."""
-        assert gf.EventType.CONFIDENT.value == 'confident'
-        assert gf.EventType.MARGINAL.value == 'marginal'
+        """Verify EventConfidence enum has correct integer values."""
+        from gravyflow.src.dataset.features.event import EventConfidence
+        
+        # EventConfidence should be IntEnum with integer values
+        assert EventConfidence.CONFIDENT.value == 1
+        assert EventConfidence.MARGINAL.value == 0
+        
+        # Verify it's an IntEnum
+        from enum import IntEnum
+        assert issubclass(EventConfidence, IntEnum)
     
     def test_glitch_type_enum_exists(self):
         """Test GlitchType enum is accessible and has expected types."""
-        assert hasattr(gf, 'GlitchType')
-        assert gf.GlitchType.BLIP.value == 'Blip'
-        assert gf.GlitchType.TOMTE.value == 'Tomte'
-        assert gf.GlitchType.SCATTERED_LIGHT.value == 'Scattered_Light'
+        assert gf.GlitchType.BLIP.value == 1
+        assert gf.GlitchType.TOMTE.value == 16
+        assert gf.GlitchType.SCATTERED_LIGHT.value == 14
+        # Removed old string assertion
     
 
     def test_data_labels_with_event_type(self):
-        """Test IFODataObtainer accepts EventType in data_labels."""
+        """Test IFODataObtainer accepts EventConfidence in data_labels."""
         obtainer = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.EventType.CONFIDENT]
+            data_labels=[gf.EventConfidence.CONFIDENT]
         )
-        assert gf.EventType.CONFIDENT in obtainer.data_labels
+        assert gf.EventConfidence.CONFIDENT in obtainer.data_labels
         obtainer.close()
     
     def test_data_labels_with_glitch_type(self):
@@ -2186,15 +2193,15 @@ class TestFeatureMode:
         obtainer.close()
     
     def test_supersede_events_present(self):
-        """Test EVENTS supersede individual EventTypes when both present."""
+        """Test EVENTS supersede individual EventConfidences when both present."""
         obtainer = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS, gf.EventType.MARGINAL]
+            data_labels=[gf.DataLabel.EVENTS, gf.EventConfidence.MARGINAL]
         )
         # Both should be in labels (supersede happens at segment fetch time)
         assert gf.DataLabel.EVENTS in obtainer.data_labels
-        assert gf.EventType.MARGINAL in obtainer.data_labels
+        assert gf.EventConfidence.MARGINAL in obtainer.data_labels
         obtainer.close()
     
     def test_supersede_glitches_present(self):
@@ -2284,13 +2291,13 @@ class TestAcquisitionModeDetection:
         obtainer.close()
     
     def test_individual_event_type_only(self):
-        """Test individual EventType without EVENTS or NOISE."""
+        """Test individual EventConfidence without EVENTS or NOISE."""
         obtainer = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.EventType.CONFIDENT]
+            data_labels=[gf.EventConfidence.CONFIDENT]
         )
-        assert gf.EventType.CONFIDENT in obtainer.data_labels
+        assert gf.EventConfidence.CONFIDENT in obtainer.data_labels
         assert gf.DataLabel.EVENTS not in obtainer.data_labels
         assert gf.DataLabel.NOISE not in obtainer.data_labels
         obtainer.close()
@@ -2304,7 +2311,7 @@ class TestAcquisitionModeDetection:
         )
         assert gf.GlitchType.BLIP in obtainer.data_labels
         assert gf.GlitchType.TOMTE in obtainer.data_labels
-        assert gf.DataLabel.GLITCHES not in obtainer.data_labels
+        assert not any(isinstance(label, gf.DataLabel) and label == gf.DataLabel.GLITCHES for label in obtainer.data_labels)
         obtainer.close()
 
 
@@ -2372,7 +2379,7 @@ class TestFeatureModePipeline:
         has_noise = gf.DataLabel.NOISE in obtainer.data_labels
         has_features = (gf.DataLabel.EVENTS in obtainer.data_labels or 
                        gf.DataLabel.GLITCHES in obtainer.data_labels or
-                       any(isinstance(label, gf.EventType) for label in obtainer.data_labels) or
+                       any(isinstance(label, gf.EventConfidence) for label in obtainer.data_labels) or
                        any(isinstance(label, gf.GlitchType) for label in obtainer.data_labels))
         
         assert not has_noise
@@ -2383,11 +2390,11 @@ class TestFeatureModePipeline:
     
     def test_supersede_logic_in_pipeline(self):
         """Test supersede logic works correctly in pipeline context."""
-        # Test 1: EVENTS supersedes EventType.MARGINAL
+        # Test 1: EVENTS supersedes EventConfidence.MARGINAL
         obtainer1 = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS, gf.EventType.MARGINAL]
+            data_labels=[gf.DataLabel.EVENTS, gf.EventConfidence.MARGINAL]
         )
         # When EVENTS is present, supersede logic should use all events
         assert gf.DataLabel.EVENTS in obtainer1.data_labels
@@ -2408,7 +2415,7 @@ class TestFeatureModePipeline:
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.GlitchType.BLIP, gf.GlitchType.TOMTE]
         )
-        assert gf.DataLabel.GLITCHES not in obtainer3.data_labels
+        assert not any(isinstance(label, type(gf.DataLabel.GLITCHES)) and label == gf.DataLabel.GLITCHES for label in obtainer3.data_labels)
         assert gf.GlitchType.BLIP in obtainer3.data_labels
         assert gf.GlitchType.TOMTE in obtainer3.data_labels
         obtainer3.close()
@@ -2439,18 +2446,18 @@ class TestFeatureModePipeline:
         obtainer.close()
     
     def test_mixed_event_glitch_types(self):
-        """Test pipeline with mixed EventType and GlitchType labels."""
+        """Test pipeline with mixed EventConfidence and GlitchType labels."""
         obtainer = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
             data_labels=[
-                gf.EventType.CONFIDENT,
+                gf.EventConfidence.CONFIDENT,
                 gf.GlitchType.BLIP,
                 gf.GlitchType.SCATTERED_LIGHT
             ]
         )
         
-        assert gf.EventType.CONFIDENT in obtainer.data_labels
+        assert gf.EventConfidence.CONFIDENT in obtainer.data_labels
         assert gf.GlitchType.BLIP in obtainer.data_labels
         assert gf.GlitchType.SCATTERED_LIGHT in obtainer.data_labels
         assert gf.DataLabel.NOISE not in obtainer.data_labels

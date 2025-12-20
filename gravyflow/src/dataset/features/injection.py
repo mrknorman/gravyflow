@@ -216,9 +216,10 @@ class ReturnVariables(Enum):
     
     # Labels and Types
     DATA_LABEL = ReturnVariable(11)         # DataLabel enum: NOISE=0, GLITCHES=1, EVENTS=2
-    GLITCH_TYPE = ReturnVariable(10)        # GlitchType enum value (if glitch)
-    EVENT_TYPE = ReturnVariable(15)         # EventType enum value (if event)
-    SOURCE_TYPE = ReturnVariable(12)        # SourceType: BBH=0, BNS=1, NSBH=2
+    SUB_TYPE = ReturnVariable(10)           # GlitchType.value (if glitch) or SourceType.value (if event)
+    GLITCH_TYPE = ReturnVariable(16)        # GlitchType.value if glitch, -1 otherwise
+    SOURCE_TYPE = ReturnVariable(12)        # SourceType.value if event, -1 otherwise
+    EVENT_TYPE = ReturnVariable(15)         # EventConfidence enum value (if event)
     
     def __lt__(self, other):
         return self.value.index < other.value.index

@@ -1,11 +1,11 @@
 """
 Event acquisition for gravitational wave events from GWTC catalogs.
 
-Provides EventType enum (CONFIDENT/MARGINAL) mirroring GlitchType,
+Provides EventConfidence enum (CONFIDENT/MARGINAL) for catalog confidence level,
 plus functions to fetch event times from GWTC catalogs.
 """
 
-from enum import Enum, auto
+from enum import Enum, IntEnum, auto
 from typing import List, Optional, Union
 from pathlib import Path
 import logging
@@ -16,23 +16,24 @@ from gwpy.table import EventTable
 import gravyflow as gf
 
 
-class EventType(Enum):
+class EventConfidence(IntEnum):
     """
-    Type of gravitational wave event.
+    Confidence level of gravitational wave event detection.
     
     Mirrors GlitchType for symmetry. Use DataLabel.EVENTS to get all types.
     """
-    CONFIDENT = 'confident'  # GWTC *-confident catalogs (confirmed events)
-    MARGINAL = 'marginal'    # GWTC *-marginal catalogs (sub-threshold triggers)
+    CONFIDENT = 1  # GWTC *-confident catalogs (confirmed events)
+    MARGINAL = 0    # GWTC *-marginal catalogs (sub-threshold triggers)
 
-
-class SourceType(Enum):
+class SourceType(IntEnum):
     """
     Type of gravitational wave source.
+    
+    Using IntEnum allows direct .value access for integer labels.
     """
-    BBH = 'BBH'   # Binary Black Hole
-    BNS = 'BNS'   # Binary Neutron Star
-    NSBH = 'NSBH' # Neutron Star - Black Hole
+    BBH = 0   # Binary Black Hole
+    BNS = 1   # Binary Neutron Star
+    NSBH = 2  # Neutron Star - Black Hole
 
 # Catalog mappings by event type
 CONFIDENT_CATALOGS = [
@@ -134,14 +135,14 @@ def get_all_event_times(use_cache: bool = True) -> np.ndarray:
 
 
 def get_event_times_by_type(
-    event_types: List[EventType],
+    event_types: List[EventConfidence],
     use_cache: bool = True
 ) -> np.ndarray:
     """
     Fetch GPS times for specified event types.
     
     Args:
-        event_types: List of EventType values to fetch
+        event_types: List of EventConfidence values to fetch
         use_cache: Whether to use cache
         
     Returns:
@@ -150,9 +151,9 @@ def get_event_times_by_type(
     times = []
     
     for event_type in event_types:
-        if event_type == EventType.CONFIDENT:
+        if event_type == EventConfidence.CONFIDENT:
             times.append(get_confident_event_times(use_cache))
-        elif event_type == EventType.MARGINAL:
+        elif event_type == EventConfidence.MARGINAL:
             times.append(get_marginal_event_times(use_cache))
     
     if not times:
@@ -163,7 +164,7 @@ def get_event_times_by_type(
 
 def get_events_with_params(
     observing_runs: List = None,
-    event_types: List[EventType] = None
+    event_types: List[EventConfidence] = None
 ) -> List[dict]:
     """
     Fetch GW events with full parameter estimation data.
@@ -173,14 +174,14 @@ def get_events_with_params(
     Args:
         observing_runs: Optional list of ObservingRun enums to filter by.
                        If None, returns all O1/O2/O3/O4 events.
-        event_types: Optional list of EventType (CONFIDENT, MARGINAL).
-                    Defaults to [EventType.CONFIDENT].
+        event_types: Optional list of EventConfidence (CONFIDENT, MARGINAL).
+                    Defaults to [EventConfidence.CONFIDENT].
     
     Returns:
         List of dicts with keys: name, gps, mass1, mass2, distance, catalog, observing_run...
     """
     if event_types is None:
-        event_types = [EventType.CONFIDENT]
+        event_types = [EventConfidence.CONFIDENT]
     
     events = []
     
@@ -205,9 +206,9 @@ def get_events_with_params(
 
     # Determine which catalogs to fetch
     catalogs_to_fetch = []
-    if EventType.CONFIDENT in event_types:
+    if EventConfidence.CONFIDENT in event_types:
         catalogs_to_fetch.extend(CONFIDENT_CATALOGS)
-    if EventType.MARGINAL in event_types:
+    if EventConfidence.MARGINAL in event_types:
         catalogs_to_fetch.extend(MARGINAL_CATALOGS)
     
     # Remove duplicates by GPS time (some events appear in multiple catalogs)
@@ -310,14 +311,7 @@ def get_events_with_params(
 
 def get_confident_events_with_params(observing_runs: List = None) -> List[dict]:
     """Wrapper for backward compatibility."""
-    return get_events_with_params(observing_runs, event_types=[EventType.CONFIDENT])
-
-
-class SourceType(Enum):
-    """Astrophysical source type based on component masses."""
-    BBH = 'BBH'   # Binary Black Hole (both > 3 Msun)
-    BNS = 'BNS'   # Binary Neutron Star (both < 3 Msun)
-    NSBH = 'NSBH' # Neutron Star - Black Hole (one < 3 Msun, one > 3 Msun)
+    return get_events_with_params(observing_runs, event_types=[EventConfidence.CONFIDENT])
 
 
 def search_events(
@@ -326,7 +320,7 @@ def search_events(
     total_mass_range: tuple = None,
     distance_range: tuple = None,
     observing_runs: List = None,
-    event_types: List[EventType] = None,
+    event_types: List[EventConfidence] = None,
     source_type: Union[SourceType, str] = None,
     name_contains: str = None,
 ) -> List[str]:
@@ -339,7 +333,7 @@ def search_events(
         total_mass_range: (min, max) for total mass (mass1 + mass2)
         distance_range: (min, max) for luminosity distance in Mpc
         observing_runs: List of ObservingRun enums to filter by
-        event_types: List of EventType (CONFIDENT, MARGINAL). Default: [CONFIDENT]
+        event_types: List of EventConfidence (CONFIDENT, MARGINAL). Default: [CONFIDENT]
         source_type: SourceType enum or string ("BBH", "BNS", "NSBH")
         name_contains: Substring to match in event name
         
@@ -353,7 +347,7 @@ def search_events(
         # Find marginal events in O3
         names = gf.search_events(
             observing_runs=[gf.ObservingRun.O3],
-            event_types=[gf.EventType.MARGINAL]
+            event_types=[gf.EventConfidence.MARGINAL]
         )
     """
     events = get_events_with_params(observing_runs, event_types)

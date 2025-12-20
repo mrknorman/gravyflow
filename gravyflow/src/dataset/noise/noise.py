@@ -15,9 +15,9 @@ import jax
 from numpy.random import default_rng  
 
 import gravyflow as gf
-from gravyflow.src.dataset.features.event import get_events_with_params, EventType
+from gravyflow.src.dataset.features.event import get_events_with_params, EventConfidence
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
-from gravyflow.src.dataset.noise.acquisition import ifo_canonical_key
+from gravyflow.src.dataset.acquisition import ifo_canonical_key
 from gravyflow.src.utils.shapes import ShapeEnforcer
 
 class NoiseType(Enum):
@@ -778,7 +778,7 @@ class TransientObtainer(Obtainer):
                      nan_indices = np.where(np.isnan(onsource).any(axis=(1,2)))[0]
                      logger.error(f"NAN DETECTED: After whitening in _postprocess_generator! Indices: {nan_indices}")
                      gps_times = batch.get(RV.TRANSIENT_GPS_TIME, batch.get(RV.START_GPS_TIME))
-                     labels = batch.get(RV.GLITCH_TYPE, batch.get(RV.DATA_LABEL))
+                     labels = batch.get(RV.SUB_TYPE, batch.get(RV.DATA_LABEL))
                      if gps_times is not None and len(gps_times) >= max(nan_indices):
                          for idx in nan_indices:
                              gps = gps_times[idx] if idx < len(gps_times) else "Unknown"
@@ -831,7 +831,7 @@ class TransientObtainer(Obtainer):
         )
     
     def _filter_to_named_events(self, ifo_obtainer):
-        all_events = get_events_with_params(event_types=[EventType.CONFIDENT, EventType.MARGINAL])
+        all_events = get_events_with_params(event_types=[EventConfidence.CONFIDENT, EventConfidence.MARGINAL])
         
         ifo_obtainer.event_names = self.event_names
         
