@@ -20,6 +20,7 @@ File Format (HDF5):
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,10 @@ class GlitchCache:
         self._mem_ons_dur: Optional[float] = None
         self._mem_off_dur: Optional[float] = None
         
+        # Thread-safe GPS index access
+        self._gps_lock = threading.RLock()
+        self._gps_index: Optional[Dict[int, int]] = None
+        
     @property
     def exists(self) -> bool:
         """Check if cache file exists."""
@@ -214,27 +219,29 @@ class GlitchCache:
         if not self.exists:
             return False
         
-        # Build index on first call (lazy)
-        if not hasattr(self, '_gps_index') or self._gps_index is None:
-            self._gps_index = self._build_gps_index()
-        
-        # Exact match using integer key
-        return gps_to_key(gps_time) in self._gps_index
+        with self._gps_lock:
+            # Build index on first call (lazy)
+            if self._gps_index is None:
+                self._gps_index = self._build_gps_index()
+            
+            # Exact match using integer key
+            return gps_to_key(gps_time) in self._gps_index
     
     def get_closest_gps(self, gps_time: float) -> Optional[float]:
         """Get the cached GPS time matching the integer key, or None if not found."""
         if not self.exists:
             return None
         
-        if not hasattr(self, '_gps_index') or self._gps_index is None:
-            self._gps_index = self._build_gps_index()
-        
-        # Exact match using integer key
-        key = gps_to_key(gps_time)
-        if key in self._gps_index:
-            return gps_time  # Return the original time since key matched
+        with self._gps_lock:
+            if self._gps_index is None:
+                self._gps_index = self._build_gps_index()
             
-        return None
+            # Exact match using integer key
+            key = gps_to_key(gps_time)
+            if key in self._gps_index:
+                return gps_time  # Return the original time since key matched
+            
+            return None
     
     def get_by_gps(
         self,
@@ -291,11 +298,12 @@ class GlitchCache:
         if not self.exists:
             return False
         
-        # Build index on first call (lazy)
-        if not hasattr(self, '_gps_index') or self._gps_index is None:
-            self._gps_index = self._build_gps_index()
-        
-        return gps_key in self._gps_index
+        with self._gps_lock:
+            # Build index on first call (lazy)
+            if self._gps_index is None:
+                self._gps_index = self._build_gps_index()
+            
+            return gps_key in self._gps_index
     
     def get_by_key(
         self,
@@ -358,36 +366,38 @@ class GlitchCache:
         """
         if not self.exists:
              return np.array([]), np.ones(len(gps_times), dtype=bool)
-             
-        # Ensure index exists
-        if not hasattr(self, '_gps_index') or self._gps_index is None:
-            self._gps_index = self._build_gps_index()
-             
-        gps_times = np.asarray(gps_times)
-        indices = np.full(len(gps_times), -1, dtype=np.int32)
-        missing_mask = np.ones(len(gps_times), dtype=bool)
         
-        # Exact O(1) lookups using integer keys
-        for i, gps in enumerate(gps_times):
-            key = gps_to_key(gps)
-            if key in self._gps_index:
-                indices[i] = self._gps_index[key]
-                missing_mask[i] = False
-                
-        return indices[~missing_mask], missing_mask
+        with self._gps_lock:
+            # Ensure index exists
+            if self._gps_index is None:
+                self._gps_index = self._build_gps_index()
+                 
+            gps_times = np.asarray(gps_times)
+            indices = np.full(len(gps_times), -1, dtype=np.int32)
+            missing_mask = np.ones(len(gps_times), dtype=bool)
+            
+            # Exact O(1) lookups using integer keys
+            for i, gps in enumerate(gps_times):
+                key = gps_to_key(gps)
+                if key in self._gps_index:
+                    indices[i] = self._gps_index[key]
+                    missing_mask[i] = False
+                    
+            return indices[~missing_mask], missing_mask
 
     def get_all_gps_times(self) -> np.ndarray:
         """Return all GPS times currently in the cache as float seconds."""
         if not self.exists:
             return np.array([])
         
-        if not hasattr(self, '_gps_index') or self._gps_index is None:
-            self._gps_index = self._build_gps_index()
-        
-        # Convert integer keys back to GPS times (floats)
-        from gravyflow.src.utils.gps import key_to_gps
-        keys = sorted(self._gps_index.keys())
-        return np.array([key_to_gps(k) for k in keys])
+        with self._gps_lock:
+            if self._gps_index is None:
+                self._gps_index = self._build_gps_index()
+            
+            # Convert integer keys back to GPS times (floats)
+            from gravyflow.src.utils.gps import key_to_gps
+            keys = sorted(self._gps_index.keys())
+            return np.array([key_to_gps(k) for k in keys])
     
     def append_single(
         self,
@@ -418,7 +428,8 @@ class GlitchCache:
         # Invalidate GPS index to force rebuild on next access
         # (We cannot safely update it here because we don't know the exact
         # index position without re-reading from the HDF5 file)
-        self._gps_index = None
+        with self._gps_lock:
+            self._gps_index = None
     
     def validate_request(
         self, 
@@ -677,7 +688,8 @@ class GlitchCache:
             grp['labels'][n_current:] = labels.astype(np.int32)
             
         self._metadata = None  # Metadata (count) changed
-        self._gps_index = None  # Invalidate GPS index to force rebuild
+        with self._gps_lock:
+            self._gps_index = None  # Invalidate GPS index to force rebuild
     
     def get_batch(
         self,
