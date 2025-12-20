@@ -24,6 +24,7 @@ from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, ensure_even
 )
+from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.utils.shapes import ShapeEnforcer
 from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys
 from gravyflow.src.dataset.features.transient_index import TransientIndex
@@ -891,11 +892,8 @@ class TransientDataObtainer(BaseDataObtainer):
             sampling_mode
         )
 
-        # Ensure ifos is a list to count num_ifos
-        if ifos is None:
-            ifos = [gf.IFO.L1]
-        elif not isinstance(ifos, (list, tuple)):
-            ifos = [ifos]
+        # Normalize ifos to list
+        ifos = ensure_list(ifos) or [gf.IFO.L1]
 
         return ShapeEnforcer.wrap_generator(gen, num_ifos=len(ifos))
 
@@ -916,23 +914,16 @@ class TransientDataObtainer(BaseDataObtainer):
         
         Extracts centered windows around each event/glitch.
         """
-        if ifos is None:
-            ifos = [gf.IFO.L1]
-        if num_examples_per_batch is None:
-            num_examples_per_batch = gf.Defaults.num_examples_per_batch
-        if scale_factor is None:
-            scale_factor = gf.Defaults.scale_factor
-        if seed is None:
-            seed = gf.Defaults.seed
+        # Apply defaults
+        ifos = ensure_list(ifos) or [gf.IFO.L1]
+        num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
+        scale_factor = scale_factor or gf.Defaults.scale_factor
+        seed = seed or gf.Defaults.seed
         if self.rng is None:
             self.rng = default_rng(seed)
-        if not isinstance(ifos, list) and not isinstance(ifos, tuple):
-            ifos = [ifos]
         
-        total_padding_duration_seconds = padding_duration_seconds * 2.0
-        total_onsource_duration_seconds = \
-            onsource_duration_seconds + total_padding_duration_seconds 
-        
+        # Calculate sample counts
+        total_onsource_duration_seconds = onsource_duration_seconds + (padding_duration_seconds * 2.0)
         num_onsource_samples = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
         num_offsource_samples = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
 
