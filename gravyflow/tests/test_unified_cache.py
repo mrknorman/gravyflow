@@ -12,12 +12,13 @@ from pathlib import Path
 import tempfile
 
 import gravyflow as gf
-from gravyflow.src.dataset.features.glitch_cache import (
-    GlitchCache,
-    CACHE_SAMPLE_RATE_HERTZ,
-    CACHE_ONSOURCE_DURATION,
-    CACHE_OFFSOURCE_DURATION
-)
+from gravyflow.src.dataset.features.glitch_cache import GlitchCache
+from gravyflow.src.dataset.config import TransientDefaults
+
+# Use central config constants
+CACHE_SAMPLE_RATE_HERTZ = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
+CACHE_ONSOURCE_DURATION = TransientDefaults.CACHE_ONSOURCE_DURATION
+CACHE_OFFSOURCE_DURATION = TransientDefaults.CACHE_OFFSOURCE_DURATION
 
 
 @pytest.fixture
