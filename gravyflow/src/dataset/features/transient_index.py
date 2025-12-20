@@ -312,6 +312,73 @@ class TransientIndex:
         
         return segments
     
+    def filter_by_names(self, names: List[str]) -> "TransientIndex":
+        """
+        Filter to only segments matching event names.
+        
+        Used for named event requests (e.g., event_names=["GW150914"]).
+        This enables a single code path for all transient acquisition -
+        named events simply apply a filter to the index.
+        
+        Args:
+            names: List of event names to keep.
+            
+        Returns:
+            New TransientIndex containing only matching segments.
+        """
+        name_set = set(names)
+        filtered = [r for r in self.records if r.name in name_set]
+        
+        new_index = TransientIndex(filtered, lazy=self._lazy)
+        # Preserve group assignments for matching segments
+        new_index._groups = {k: v for k, v in self._groups.items() 
+                           if k in {r.gps_key for r in filtered}}
+        return new_index
+    
+    def to_numpy_segments(self, num_ifos: int = 1) -> np.ndarray:
+        """
+        Lazy conversion to numpy format with caching.
+        
+        Returns numpy array format compatible with valid_segments API.
+        Cached to avoid recomputation on repeated calls.
+        
+        Args:
+            num_ifos: Number of IFOs to expand to.
+            
+        Returns:
+            Array of shape (N, num_ifos, 2) with [start_gps, end_gps] bounds.
+        """
+        # Check cache
+        cache_key = f"numpy_segments_{num_ifos}"
+        if hasattr(self, '_numpy_cache') and cache_key in self._numpy_cache:
+            return self._numpy_cache[cache_key]
+        
+        # Initialize cache if needed
+        if not hasattr(self, '_numpy_cache'):
+            self._numpy_cache = {}
+        
+        # Build numpy array
+        n = len(self)
+        segments_2d = np.zeros((n, 2), dtype=np.float64)
+        
+        for i in range(n):
+            seg = self[i]
+            segments_2d[i, 0] = seg.start_gps_time
+            segments_2d[i, 1] = seg.end_gps_time
+        
+        # Expand for IFOs: (N, 2) -> (N, 1, 2) -> (N, num_ifos, 2)
+        expanded = np.expand_dims(segments_2d, axis=1)
+        result = np.repeat(expanded, num_ifos, axis=1)
+        
+        # Cache
+        self._numpy_cache[cache_key] = result
+        return result
+    
+    def invalidate_cache(self) -> None:
+        """Invalidate cached numpy representations after modifications."""
+        if hasattr(self, '_numpy_cache'):
+            self._numpy_cache.clear()
+    
     def to_gps_array(self) -> np.ndarray:
         """Get array of all GPS times."""
         return np.array([r.transient_gps_time for r in self.records], dtype=np.float64)
