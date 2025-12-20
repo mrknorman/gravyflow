@@ -1073,6 +1073,9 @@ class TransientDataObtainer(BaseDataObtainer):
             Batch dicts when batch_size is reached
         """
         from gravyflow.src.dataset.features.glitch import GlitchType
+        from gravyflow.src.dataset.features.glitch_cache import (
+            CACHE_SAMPLE_RATE_HERTZ, CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION
+        )
         
         if len(miss_indices) == 0:
             return
