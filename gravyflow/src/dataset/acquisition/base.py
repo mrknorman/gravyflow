@@ -513,7 +513,6 @@ class BaseDataObtainer(ABC):
         self.saturation = saturation
         self.force_acquisition = force_acquisition
         self.cache_segments = cache_segments
-        self.segment_file = None
             
         # Data augmentation settings
         self.random_sign_reversal = random_sign_reversal
@@ -608,14 +607,10 @@ class BaseDataObtainer(ABC):
         self._prefetch_futures = {}
         
     def __del__(self):
-        if getattr(self, "segment_file", None) is not None:
-            self.segment_file.close()
         if getattr(self, "_prefetch_executor", None) is not None:
             self._prefetch_executor.shutdown(wait=False)
             
     def close(self):
-        if self.segment_file is not None:
-            self.segment_file.close()
         if self._prefetch_executor is not None:
             self._prefetch_executor.shutdown(wait=True)
             self._prefetch_executor = None
