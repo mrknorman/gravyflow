@@ -419,14 +419,10 @@ class GlitchCache:
             labels=np.array([label])
         )
         
-        # Update GPS index using key directly (no conversion if provided)
-        if gps_key is None:
-            gps_key = gps_to_key(gps_time)
-        
-        if hasattr(self, '_gps_index') and self._gps_index is not None:
-            self._gps_index[gps_key] = len(self._gps_index)
-        else:
-            self._gps_index = None  # Force rebuild on next access
+        # Invalidate GPS index to force rebuild on next access
+        # (We cannot safely update it here because we don't know the exact
+        # index position without re-reading from the HDF5 file)
+        self._gps_index = None
     
     def validate_request(
         self, 
@@ -771,6 +767,7 @@ class GlitchCache:
             grp['labels'][n_current:] = labels.astype(np.int32)
             
         self._metadata = None  # Metadata (count) changed
+        self._gps_index = None  # Invalidate GPS index to force rebuild
     
     def get_batch(
         self,
