@@ -253,32 +253,37 @@ class TransientIndex:
             TransientSegments matching filters.
         """
         # Get all records (lazy inflation if needed)
+        # For lazy mode, use a generator to avoid materializing all at once
         if self._lazy:
-            filtered = [self[i] for i in range(len(self))]
+            def lazy_generator():
+                for i in range(len(self)):
+                    yield self[i]
+            records_iter = lazy_generator()
         else:
-            filtered = self.records
+            records_iter = iter(self.records)
         
-        # Filter by group
+        # Apply filters as generator pipeline
         if group is not None:
             if self._groups is None:
                 raise ValueError("Groups not assigned. Call assign_groups() first.")
-            filtered = [r for r in filtered if self._groups.get(r.gps_key) == group]
+            records_iter = (r for r in records_iter if self._groups.get(r.gps_key) == group)
         
         # Filter by label
         if label is not None:
-            filtered = [r for r in filtered if r.label == label]
+            records_iter = (r for r in records_iter if r.label == label)
         
         # Filter by IFO(s) - check if segment's seen_in overlaps with filter
         if ifos_filter is not None:
-            filtered = [r for r in filtered if any(ifo in r.seen_in for ifo in ifos_filter)]
+            records_iter = (r for r in records_iter if any(ifo in r.seen_in for ifo in ifos_filter))
         
-        # Shuffle if requested
+        # Shuffle if requested (must materialize for shuffling)
         if shuffle:
+            filtered = list(records_iter)
             rng = np.random.default_rng(seed)
             indices = rng.permutation(len(filtered))
-            filtered = [filtered[i] for i in indices]
-        
-        yield from filtered
+            yield from (filtered[i] for i in indices)
+        else:
+            yield from records_iter
     
     def to_segments(
         self, 
