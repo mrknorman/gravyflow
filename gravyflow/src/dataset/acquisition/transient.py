@@ -949,20 +949,8 @@ class TransientDataObtainer(BaseDataObtainer):
         num_offsource_samples = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
 
         self.valid_segments_adjusted = self.valid_segments
-        has_specific_events = hasattr(self, 'event_names') and self.event_names is not None and len(self.event_names) > 0
-        
-        if has_specific_events:
-            yield from self._yield_events_direct(
-                sample_rate_hertz=sample_rate_hertz,
-                onsource_duration_seconds=onsource_duration_seconds,
-                padding_duration_seconds=padding_duration_seconds,
-                offsource_duration_seconds=offsource_duration_seconds,
-                num_examples_per_batch=num_examples_per_batch,
-                ifos=ifos,
-                scale_factor=scale_factor,
-                seed=seed
-            )
-            return
+        # Note: Specific event filtering is handled during TransientIndex creation
+        # via the event_names parameter - no special path needed
         
         # Initialize or retrieve glitch cache (extracted to helper for clarity)
         cache, _ = self._initialize_glitch_cache(

@@ -31,9 +31,11 @@ from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys
 from gravyflow.src.dataset.config import TransientDefaults
 
-
-
-
+# Re-export from TransientDefaults for internal use and backward compatibility
+CACHE_SAMPLE_RATE_HERTZ = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
+CACHE_ONSOURCE_DURATION = TransientDefaults.CACHE_ONSOURCE_DURATION
+CACHE_OFFSOURCE_DURATION = TransientDefaults.CACHE_OFFSOURCE_DURATION
+CACHE_PADDING_DURATION = TransientDefaults.CACHE_PADDING_DURATION
 class GlitchCache:
     """
     Manages standardized glitch data cache with efficient bulk I/O.
