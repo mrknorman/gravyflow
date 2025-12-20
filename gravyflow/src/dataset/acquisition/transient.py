@@ -1036,6 +1036,130 @@ class TransientDataObtainer(BaseDataObtainer):
         if len(batch_subarrays) > 0:
             yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments)
 
+    def _process_cache_misses(
+        self,
+        miss_indices: List[int],
+        ifos: List,
+        sample_rate_hertz: float,
+        total_onsource_duration_seconds: float,
+        offsource_duration_seconds: float,
+        scale_factor: float,
+        cache,
+        batch_subarrays: List,
+        batch_backgrounds: List,
+        batch_segments: List,
+        num_examples_per_batch: int
+    ):
+        """
+        Download, extract, cache and prepare batches for cache misses.
+        
+        Consolidates duplicated logic for processing segments that weren't in cache.
+        Yields batches whenever batch_size is reached.
+        
+        Args:
+            miss_indices: List of segment indices that need downloading
+            ifos: List of IFOs to download
+            sample_rate_hertz: Target sample rate for output
+            total_onsource_duration_seconds: Onsource duration including padding
+            offsource_duration_seconds: Offsource duration
+            scale_factor: Amplitude scale factor
+            cache: GlitchCache instance for storing/retrieving
+            batch_subarrays: Accumulated onsource arrays (mutated)
+            batch_backgrounds: Accumulated offsource arrays (mutated)
+            batch_segments: Accumulated TransientSegments (mutated)
+            num_examples_per_batch: Batch size threshold
+            
+        Yields:
+            Batch dicts when batch_size is reached
+        """
+        from gravyflow.src.dataset.features.glitch import GlitchType
+        
+        if len(miss_indices) == 0:
+            return
+            
+        miss_segments = self.valid_segments_adjusted[miss_indices]
+        
+        # Download at higher of requested or cache sample rate (can downsample but not upsample)
+        download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
+        
+        # Use parallel acquire for bulk download
+        segment_generator = self.acquire(
+            download_sample_rate,
+            miss_segments,
+            ifos,
+            1.0  # Download RAW data for cache (scale=1.0)
+        )
+        
+        for miss_idx_position, event_segment in enumerate(segment_generator):
+            true_seg_idx = miss_indices[miss_idx_position]
+            segment = self.transient_segments[true_seg_idx]
+            
+            # Extract at cache parameters
+            num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
+            num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * download_sample_rate)
+            
+            onsource_full, offsource_full, _ = self._extract_feature_event(
+                event_segment,
+                num_cache_onsource,
+                num_cache_offsource,
+                download_sample_rate
+            )
+            
+            if onsource_full is None:
+                # Track dropped segment
+                if not hasattr(self, '_dropped_segments_count'):
+                    self._dropped_segments_count = 0
+                self._dropped_segments_count += 1
+                logger.warning(f"Dropped segment (extraction failed): GPS={segment.transient_gps_time:.3f}, total dropped={self._dropped_segments_count}")
+                continue
+
+            # Data quality checks
+            if np.isnan(onsource_full).any():
+                logger.error(f"NAN DETECTED: In onsource_full after extract! GPS: {segment.transient_gps_time}")
+            if np.all(onsource_full == 0):
+                logger.error(f"ZERO SIGNAL DETECTED: onsource_full is all zeros! GPS: {segment.transient_gps_time}")
+
+            # Get label from segment
+            label = segment.kind.value if segment.is_glitch else -1
+            
+            # Append to cache
+            try:
+                cache.append_single(
+                    np.array(onsource_full), 
+                    np.array(offsource_full), 
+                    segment.transient_gps_time,
+                    label,
+                    gps_key=segment.gps_key
+                )
+            except Exception as e:
+                logger.warning(f"Failed to append sample to cache (GPS={segment.transient_gps_time:.3f}): {e}")
+            
+            # Crop and resample for this request
+            onsource_cropped = GlitchCache.crop_and_resample(
+                np.asarray(onsource_full),
+                download_sample_rate,
+                sample_rate_hertz,
+                total_onsource_duration_seconds
+            )
+            offsource_cropped = GlitchCache.crop_and_resample(
+                np.asarray(offsource_full),
+                download_sample_rate,
+                sample_rate_hertz,
+                offsource_duration_seconds
+            )
+
+            if np.isnan(onsource_cropped).any():
+                logger.error(f"NAN DETECTED: In onsource_cropped! GPS: {segment.transient_gps_time}")
+
+            batch_subarrays.append(onsource_cropped * scale_factor)
+            batch_backgrounds.append(offsource_cropped * scale_factor)
+            batch_segments.append(segment)
+            
+            if len(batch_subarrays) >= num_examples_per_batch:
+                yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments)
+                batch_subarrays.clear()
+                batch_backgrounds.clear()
+                batch_segments.clear()
 
     def get_onsource_offsource_chunks(
             self,
@@ -1267,178 +1391,40 @@ class TransientDataObtainer(BaseDataObtainer):
                 
                 # Download in batches for efficiency
                 if len(miss_indices) >= num_examples_per_batch:
-                    # Get segments to download
-                    miss_segments = self.valid_segments_adjusted[miss_indices]
-                    
-                    # Download at the higher of requested or cache sample rate
-                    # (we can downsample but not upsample)
-                    download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
-                    
-                    # Use parallel acquire for bulk download
-                    segment_generator = self.acquire(
-                        download_sample_rate,
-                        miss_segments,
+                    # Use consolidated helper for download/cache/batch
+                    for batch in self._process_cache_misses(
+                        miss_indices,
                         ifos,
-                        1.0 # Download RAW data for cache (scale=1.0)
-                    )
-                    
-                    # Track which miss_idx corresponds to which segment
-                    # acquire() returns segments in order, matching miss_indices order
-                    for miss_idx_position, event_segment in enumerate(segment_generator):
-                        # Get the TransientSegment (has GPS key and times)
-                        true_seg_idx = miss_indices[miss_idx_position]
-                        segment = self.transient_segments[true_seg_idx]
-                        
-                        # Extract and cache
-                        num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
-                        num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * download_sample_rate)
-                        
-                        onsource_full, offsource_full, _ = self._extract_feature_event(
-                            event_segment,
-                            num_cache_onsource,
-                            num_cache_offsource,
-                            download_sample_rate
-                        )
-                        
-                        if onsource_full is None:
-                            continue
-
-                        # NAN CHECK: Post-Extraction
-                        if np.isnan(onsource_full).any():
-                             logger.error(f"NAN DETECTED: In onsource_full after extract! GPS: {segment.transient_gps_time}")
-                        
-                        # ZERO CHECK
-                        if np.all(onsource_full == 0):
-                             logger.error(f"ZERO SIGNAL DETECTED: onsource_full is all zeros! GPS: {segment.transient_gps_time}")
-
-                        # Direct label access from segment (no lookup needed!)
-                        from gravyflow.src.dataset.features.glitch import GlitchType
-                        label = segment.kind.value if segment.is_glitch else -1
-                        
-                        try:
-                            cache.append_single(
-                                np.array(onsource_full), 
-                                np.array(offsource_full), 
-                                segment.transient_gps_time,
-                                label,
-                                gps_key=segment.gps_key  # Pass key directly!
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to append sample to cache (GPS={segment.transient_gps_time:.3f}): {e}")
-                        
-                        # Crop for this request
-                        onsource_cropped = GlitchCache.crop_and_resample(
-                            np.asarray(onsource_full),
-                            download_sample_rate,
-                            sample_rate_hertz,
-                            total_onsource_duration_seconds
-                        )
-                        offsource_cropped = GlitchCache.crop_and_resample(
-                            np.asarray(offsource_full),
-                            download_sample_rate,
-                            sample_rate_hertz,
-                            offsource_duration_seconds
-                        )
-
-                        # NAN CHECK: Post-Crop
-                        if np.isnan(onsource_cropped).any():
-                             logger.error(f"NAN DETECTED: In onsource_cropped! GPS: {segment.transient_gps_time}")
-
-                        batch_subarrays.append(onsource_cropped * scale_factor)
-                        batch_backgrounds.append(offsource_cropped * scale_factor)
-                        batch_segments.append(segment)
-                        
-                        if len(batch_subarrays) >= num_examples_per_batch:
-                            yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments)
-                            batch_subarrays = []
-                            batch_backgrounds = []
-                            batch_segments = []
-                    
+                        sample_rate_hertz,
+                        total_onsource_duration_seconds,
+                        offsource_duration_seconds,
+                        scale_factor,
+                        cache,
+                        batch_subarrays,
+                        batch_backgrounds,
+                        batch_segments,
+                        num_examples_per_batch
+                    ):
+                        yield batch
                     miss_indices = []
 
             # Handle remaining miss_indices after for loop ends
             if len(miss_indices) > 0:
-                # Get segments to download
-                miss_segments = self.valid_segments_adjusted[miss_indices]
-                
-                # Download at the higher of requested or cache sample rate
-                download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
-                
-                # Use parallel acquire for bulk download
-                segment_generator = self.acquire(
-                    download_sample_rate,
-                    miss_segments,
+                # Use consolidated helper for remaining cache misses
+                for batch in self._process_cache_misses(
+                    miss_indices,
                     ifos,
-                    1.0  # Download RAW data for cache (scale=1.0)
-                )
-                
-                for miss_idx_position, event_segment in enumerate(segment_generator):
-                    true_seg_idx = miss_indices[miss_idx_position]
-                    segment = self.transient_segments[true_seg_idx]
-                    
-                    # Extract and cache
-                    num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
-                    num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * download_sample_rate)
-                    
-                    onsource_full, offsource_full, _ = self._extract_feature_event(
-                        event_segment,
-                        num_cache_onsource,
-                        num_cache_offsource,
-                        download_sample_rate
-                    )
-                    
-                    if onsource_full is None:
-                        continue
-
-                    # NAN CHECK: Post-Extraction
-                    if np.isnan(onsource_full).any():
-                         logger.error(f"NAN DETECTED: In onsource_full after extract! GPS: {segment.transient_gps_time}")
-                    
-                    # ZERO CHECK
-                    if np.all(onsource_full == 0):
-                         logger.error(f"ZERO SIGNAL DETECTED: onsource_full is all zeros! GPS: {segment.transient_gps_time}")
-
-                    # Direct label access from segment
-                    from gravyflow.src.dataset.features.glitch import GlitchType
-                    label = segment.kind.value if segment.is_glitch else -1
-                    
-                    try:
-                        cache.append_single(
-                            np.array(onsource_full), 
-                            np.array(offsource_full), 
-                            segment.transient_gps_time,
-                            label,
-                            gps_key=segment.gps_key
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to append sample to cache (GPS={segment.transient_gps_time:.3f}): {e}")
-                    
-                    # Crop for this request
-                    onsource_cropped = GlitchCache.crop_and_resample(
-                        np.asarray(onsource_full),
-                        download_sample_rate,
-                        sample_rate_hertz,
-                        total_onsource_duration_seconds
-                    )
-                    offsource_cropped = GlitchCache.crop_and_resample(
-                        np.asarray(offsource_full),
-                        download_sample_rate,
-                        sample_rate_hertz,
-                        offsource_duration_seconds
-                    )
-
-                    if np.isnan(onsource_cropped).any():
-                         logger.error(f"NAN DETECTED: In onsource_cropped! GPS: {segment.transient_gps_time}")
-
-                    batch_subarrays.append(onsource_cropped * scale_factor)
-                    batch_backgrounds.append(offsource_cropped * scale_factor)
-                    batch_segments.append(segment)
-                    
-                    if len(batch_subarrays) >= num_examples_per_batch:
-                        yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments)
-                        batch_subarrays = []
-                        batch_backgrounds = []
-                        batch_segments = []
+                    sample_rate_hertz,
+                    total_onsource_duration_seconds,
+                    offsource_duration_seconds,
+                    scale_factor,
+                    cache,
+                    batch_subarrays,
+                    batch_backgrounds,
+                    batch_segments,
+                    num_examples_per_batch
+                ):
+                    yield batch
 
             # Yield any remaining partial batch at end of epoch
             if len(batch_subarrays) > 0:
