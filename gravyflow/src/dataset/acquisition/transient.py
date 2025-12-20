@@ -1161,6 +1161,83 @@ class TransientDataObtainer(BaseDataObtainer):
                 batch_backgrounds.clear()
                 batch_segments.clear()
 
+    def _initialize_glitch_cache(
+        self,
+        ifos: List,
+        sample_rate_hertz: float,
+        onsource_duration_seconds: float,
+        offsource_duration_seconds: float
+    ):
+        """
+        Initialize or retrieve the glitch cache for transient data.
+        
+        Handles cache path generation, file creation, and validation.
+        
+        Args:
+            ifos: List of IFOs to cache
+            sample_rate_hertz: Requested sample rate
+            onsource_duration_seconds: Requested onsource duration
+            offsource_duration_seconds: Requested offsource duration
+            
+        Returns:
+            Tuple of (cache, cache_sample_rate) - GlitchCache instance and its sample rate
+        """
+        from gravyflow.src.dataset.features.glitch_cache import (
+            CACHE_SAMPLE_RATE_HERTZ, CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION
+        )
+        
+        # Determine data directory
+        data_dir = Path("./generator_data")
+        if hasattr(self, 'data_directory') and self.data_directory:
+            data_dir = self.data_directory
+        
+        # Get observing run for cache path
+        observing_run_name = "unknown"
+        if self.observing_runs:
+            if isinstance(self.observing_runs, list):
+                observing_run_name = self.observing_runs[0].name
+            else:
+                observing_run_name = self.observing_runs.name
+        
+        cache_path = generate_glitch_cache_path(
+            observing_run=observing_run_name,
+            ifo="_".join([i.name for i in ifos]),
+            data_directory=data_dir
+        )
+        
+        # Reuse existing cache if path matches (preserves GPS index)
+        if not hasattr(self, '_glitch_cache') or self._glitch_cache is None or self._glitch_cache.path != cache_path:
+            self._glitch_cache = GlitchCache(cache_path, mode='a')
+        
+        cache = self._glitch_cache
+        
+        # Log cache status (once)
+        if cache.exists and not hasattr(self, '_cache_logged'):
+            try:
+                cache.validate_request(sample_rate_hertz, onsource_duration_seconds, offsource_duration_seconds)
+                meta = cache.get_metadata()
+                logger.info(f"Cache: {meta['num_glitches']} glitches at {CACHE_SAMPLE_RATE_HERTZ}Hz")
+                self._cache_logged = True
+            except ValueError as e:
+                logger.warning(f"Cache incompatible: {e}")
+        
+        # Initialize cache file if needed
+        if not cache.exists:
+            num_cache_onsource = int(CACHE_ONSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
+            num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
+            cache.initialize_file(
+                sample_rate_hertz=CACHE_SAMPLE_RATE_HERTZ,
+                onsource_duration=CACHE_ONSOURCE_DURATION,
+                offsource_duration=CACHE_OFFSOURCE_DURATION,
+                ifo_names=[i.name for i in ifos],
+                num_ifos=len(ifos),
+                onsource_samples=num_cache_onsource,
+                offsource_samples=num_cache_offsource
+            )
+            logger.info(f"Created cache: {cache_path}")
+        
+        return cache, CACHE_SAMPLE_RATE_HERTZ
+
     def get_onsource_offsource_chunks(
             self,
             sample_rate_hertz: float,
@@ -1249,74 +1326,11 @@ class TransientDataObtainer(BaseDataObtainer):
             )
             return
         
-        # Default: Use cache for all transient data (glitches, unnamed events, etc.)
-        # Construct cache path
-        data_dir = Path("./generator_data") # Default used in precache
-        if hasattr(self, 'data_directory') and self.data_directory:
-             data_dir = self.data_directory
-             
-
-             
-        # Actually, simpler: IFODataObtainer doesn't easily know the exact filename without logic duplication.
-        # But we can try the standard generate_glitch_cache_path if we exported it?
-        # Yes, I imported it.
-        
-        # Simplified for production: Check the path that precache WOULD have created.
-        observing_run_name = "unknown"
-        if self.observing_runs:
-             if isinstance(self.observing_runs, list):
-                 observing_run_name = self.observing_runs[0].name
-             else:
-                 observing_run_name = self.observing_runs.name
-        
-        cache_path = generate_glitch_cache_path(
-             observing_run=observing_run_name,
-             ifo="_".join([i.name for i in ifos]),
-             data_directory=data_dir
+        # Initialize or retrieve glitch cache (extracted to helper for clarity)
+        cache, _ = self._initialize_glitch_cache(
+            ifos, sample_rate_hertz, onsource_duration_seconds, offsource_duration_seconds
         )
         
-        # Reuse existing cache if path matches (preserves GPS index)
-        if not hasattr(self, '_glitch_cache') or self._glitch_cache is None or self._glitch_cache.path != cache_path:
-            self._glitch_cache = GlitchCache(cache_path, mode='a')  # 'a' mode allows appending new glitches
-        
-        cache = self._glitch_cache
-        
-        from gravyflow.src.dataset.features.glitch_cache import (
-            CACHE_SAMPLE_RATE_HERTZ, CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION
-        )
-        cache_sample_rate = CACHE_SAMPLE_RATE_HERTZ # Define for logging
-        
-        # Log cache status (one time only)
-        if cache.exists and not hasattr(self, '_cache_logged'):
-            try:
-                cache.validate_request(sample_rate_hertz, onsource_duration_seconds, offsource_duration_seconds)
-                meta = cache.get_metadata()
-                logger.info(f"Cache Data Path: cache has {meta['num_glitches']} glitches at {cache_sample_rate}Hz")
-                self._cache_logged = True
-            except ValueError as e:
-                logger.warning(f"Cache found but incompatible: {e}")
-        
-        # UNIFIED PATH: Cache-first with lazy append
-        from gravyflow.src.dataset.features.glitch_cache import (
-            CACHE_SAMPLE_RATE_HERTZ, CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION
-        )
-        
-        # Initialize cache file if it doesn't exist
-        if not cache.exists:
-            num_cache_onsource = int(CACHE_ONSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
-            num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
-            cache.initialize_file(
-                sample_rate_hertz=CACHE_SAMPLE_RATE_HERTZ,
-                onsource_duration=CACHE_ONSOURCE_DURATION,
-                offsource_duration=CACHE_OFFSOURCE_DURATION,
-                ifo_names=[i.name for i in ifos],
-                num_ifos=len(ifos),
-                onsource_samples=num_cache_onsource,
-                offsource_samples=num_cache_offsource
-            )
-            logger.info(f"Created new cache file: {cache_path}")
-            # Cache exists - use disk-based access (HDF5 chunked storage is efficient)
-            # The hybrid path below uses has_gps() and get_by_gps() which read from disk
         # Build batches: cache hits served instantly, misses downloaded in parallel
         rng = default_rng(seed)
         segment_indices = np.arange(len(self.transient_segments))
