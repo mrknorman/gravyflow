@@ -47,67 +47,25 @@ class TransientIndex:
             print(record.transient_gps_time, record.kind)
     """
     
-    def __init__(self, records: List[TransientSegment] = None, lazy: bool = False):
+    def __init__(self, records: List[TransientSegment] = None):
         """
         Initialize index with optional records.
         
         Args:
             records: Initial list of TransientSegments. Can be added later.
-            lazy: If True, store segments in compressed numpy array format
-                  to reduce memory usage (40 bytes vs 120 bytes per segment).
-                  Segments are inflated on-demand with LRU caching.
         """
-        self._lazy = lazy
         self._groups: Dict[int, str] = {}  # gps_key → group name
-        
-        if lazy and records:
-            # Store in compressed format
-            from gravyflow.src.dataset.features.compressed_segments import segments_to_compressed_array
-            self._compressed = segments_to_compressed_array(records)
-            self._inflation_cache = {}  # LRU cache: index → TransientSegment
-            from gravyflow.src.dataset.config import TransientDefaults
-            self._cache_maxsize = TransientDefaults.LAZY_CACHE_MAXSIZE
-            self.records = None  # Not used in lazy mode
-        else:
-            # Standard mode: store full objects
-            self.records: List[TransientSegment] = list(records) if records else []
-            self._compressed = None
-            self._inflation_cache = None
+        self.records: List[TransientSegment] = list(records) if records else []
         
     def __len__(self) -> int:
-        if self._lazy:
-            return len(self._compressed)
         return len(self.records)
     
-    
     def __getitem__(self, index: int) -> TransientSegment:
-        """Get segment by index (supports lazy inflation)."""
-        if self._lazy:
-            # Check cache first
-            if index in self._inflation_cache:
-                return self._inflation_cache[index]
-            
-            # Inflate from compressed
-            from gravyflow.src.dataset.features.compressed_segments import compressed_to_segment
-            segment = compressed_to_segment(self._compressed[index])
-            
-            # Add to cache (LRU eviction)
-            if len(self._inflation_cache) >= self._cache_maxsize:
-                # Remove oldest (first inserted)
-                self._inflation_cache.pop(next(iter(self._inflation_cache)))
-            self._inflation_cache[index] = segment
-            
-            return segment
-        else:
-            return self.records[index]
+        """Get segment by index."""
+        return self.records[index]
     
     def __iter__(self) -> Iterator[TransientSegment]:
-        if self._lazy:
-            # Iterate via __getitem__ (lazy inflation)
-            for i in range(len(self)):
-                yield self[i]
-        else:
-            return iter(self.records)
+        return iter(self.records)
     
     
     def add(self, record: TransientSegment) -> None:
@@ -253,15 +211,7 @@ class TransientIndex:
         Yields:
             TransientSegments matching filters.
         """
-        # Get all records (lazy inflation if needed)
-        # For lazy mode, use a generator to avoid materializing all at once
-        if self._lazy:
-            def lazy_generator():
-                for i in range(len(self)):
-                    yield self[i]
-            records_iter = lazy_generator()
-        else:
-            records_iter = iter(self.records)
+        records_iter = iter(self.records)
         
         # Apply filters as generator pipeline
         if group is not None:
@@ -329,7 +279,7 @@ class TransientIndex:
         name_set = set(names)
         filtered = [r for r in self.records if r.name in name_set]
         
-        new_index = TransientIndex(filtered, lazy=self._lazy)
+        new_index = TransientIndex(filtered)
         # Preserve group assignments for matching segments
         new_index._groups = {k: v for k, v in self._groups.items() 
                            if k in {r.gps_key for r in filtered}}
