@@ -127,26 +127,6 @@ class NoiseDataObtainer(BaseDataObtainer):
 
         return valid_segments, feature_times
 
-    def find_segment_intersections(self, arr1, arr2):
-        """Find intersections between two sets of segments."""
-        latest_starts = np.maximum(arr1[:, None, 0], arr2[None, :, 0])
-        earliest_ends = np.minimum(arr1[:, None, 1], arr2[None, :, 1])
-
-        overlap_durations = np.clip(earliest_ends - latest_starts, 0, None)
-
-        overlap_mask = overlap_durations > 0
-
-        best_overlap_indices = np.argmax(overlap_durations, axis=-1)
-
-        starts = latest_starts[np.arange(latest_starts.shape[0]), best_overlap_indices]
-        ends = earliest_ends[np.arange(earliest_ends.shape[0]), best_overlap_indices]
-
-        valid_mask = overlap_mask[np.arange(overlap_mask.shape[0]), best_overlap_indices]
-        starts = starts[valid_mask]
-        ends = ends[valid_mask]
-
-        return np.vstack((starts, ends)).T
-
     def remove_short_segments(
             self,
             segments: np.ndarray, 
