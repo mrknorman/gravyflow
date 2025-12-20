@@ -29,17 +29,14 @@ from keras import ops
 
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys
+from gravyflow.src.dataset.config import TransientDefaults
 
-# Maximum supported parameters - data is stored at these settings and 
-# can be downsampled/cropped at load time (but not upsampled/extended)
-#
-# NOTE: Download padding (in segment_builders.py) must be >= onsource_half + offsource_max
-# to ensure there's enough data for offsource BEFORE onsource. With 32s onsource (±16s)
-# and 32s offsource, we need 48s padding on each side.
-CACHE_SAMPLE_RATE_HERTZ = 4096.0  # Max supported sample rate
-CACHE_ONSOURCE_DURATION = 32.0   # Max onsource window (seconds) - allows shifting augmentation
-CACHE_OFFSOURCE_DURATION = 32.0  # Max offsource window (seconds)
-CACHE_PADDING_DURATION = 1.0     # Extra padding for cropping
+# Re-export from TransientDefaults for backward compatibility
+# (Many modules import these directly from glitch_cache)
+CACHE_SAMPLE_RATE_HERTZ = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
+CACHE_ONSOURCE_DURATION = TransientDefaults.CACHE_ONSOURCE_DURATION
+CACHE_OFFSOURCE_DURATION = TransientDefaults.CACHE_OFFSOURCE_DURATION
+CACHE_PADDING_DURATION = TransientDefaults.CACHE_PADDING_DURATION
 
 
 class GlitchCache:

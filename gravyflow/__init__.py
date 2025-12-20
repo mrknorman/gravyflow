@@ -93,7 +93,7 @@ from .src.dataset.acquisition import (
     DataQuality, DataLabel, SegmentOrder, AcquisitionMode, SamplingMode, ObservingRun,
     IFOData, IFODataObtainer, NoiseDataObtainer, TransientDataObtainer
 )
-from .src.dataset.noise.noise import NoiseType, Obtainer, NoiseObtainer, TransientObtainer
+from .src.dataset.noise.noise import NoiseType, Obtainer, NoiseObtainer
 from .src.dataset.curriculum import Curriculum, CurriculumSchedule, CurriculumProgressCallback
 from .src.dataset.features.injection import (
     ScalingOrdinality, ScalingType, ScalingTypes, ScalingMethod, ReturnVariables,

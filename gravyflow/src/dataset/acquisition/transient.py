@@ -543,10 +543,21 @@ class TransientDataObtainer(BaseDataObtainer):
     def _cluster_transients(
         self, 
         segments: np.ndarray, 
-        request_overhead_seconds: float = 15.0,
-        data_download_rate: float = 0.01,
-        max_segment_seconds: float = 512.0  # Limit to prevent OOM
+        request_overhead_seconds: float = None,
+        data_download_rate: float = None,
+        max_segment_seconds: float = None
     ) -> np.ndarray:
+        """
+        Cluster nearby transients using a greedy cost-optimized algorithm.
+        Limits max segment size to prevent OOM errors during download.
+        """
+        from gravyflow.src.dataset.config import TransientDefaults
+        if request_overhead_seconds is None:
+            request_overhead_seconds = TransientDefaults.REQUEST_OVERHEAD_SECONDS
+        if data_download_rate is None:
+            data_download_rate = TransientDefaults.DATA_DOWNLOAD_RATE
+        if max_segment_seconds is None:
+            max_segment_seconds = TransientDefaults.MAX_SEGMENT_SECONDS
         """
         Cluster nearby transients using a greedy cost-optimized algorithm.
         Limits max segment size to prevent OOM errors during download.

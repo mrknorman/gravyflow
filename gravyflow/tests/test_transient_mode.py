@@ -353,26 +353,26 @@ class TestSpecificEventAcquisition:
     
     def test_specific_event_names_returns_proper_structure(self):
         """Test that specific event names path returns proper TransientSegment objects."""
-        ifo_obtainer = gf.IFODataObtainer(
+        # Now use TransientDataObtainer directly with event_names
+        transient_obtainer = gf.TransientDataObtainer(
             observing_runs=gf.ObservingRun.O1,
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS],
             force_acquisition=True,
-            cache_segments=False
+            cache_segments=False,
+            event_names=["GW150914"]  # Specific event
         )
         
         try:
-            transient_obtainer = gf.TransientObtainer(
-                ifo_data_obtainer=ifo_obtainer,
-                ifos=[gf.IFO.H1, gf.IFO.L1],
-                event_names=["GW150914"]  # Specific event
-            )
-            
             # Get a batch
-            batch_gen = transient_obtainer(
+            batch_gen = transient_obtainer.get_onsource_offsource_chunks(
+                sample_rate_hertz=2048.0,
+                onsource_duration_seconds=1.0,
+                padding_duration_seconds=0.5,
+                offsource_duration_seconds=16.0,
+                num_examples_per_batch=1,
+                ifos=[gf.IFO.H1, gf.IFO.L1],
                 scale_factor=1.0,
-                whiten=False,
-                crop=False
             )
             batch = next(batch_gen)
             
@@ -396,30 +396,30 @@ class TestSpecificEventAcquisition:
             assert not np.all(onsource == 0.0), "Onsource data should not be all zeros"
             
         finally:
-            ifo_obtainer.close()
+            transient_obtainer.close()
     
     def test_multiple_specific_events(self):
         """Test acquiring multiple specific events."""
-        ifo_obtainer = gf.IFODataObtainer(
+        # Now use TransientDataObtainer directly with event_names
+        transient_obtainer = gf.TransientDataObtainer(
             observing_runs=gf.ObservingRun.O1,
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS],
             force_acquisition=True,
-            cache_segments=False
+            cache_segments=False,
+            event_names=["GW150914", "GW151012"]  # Multiple events
         )
         
         try:
-            transient_obtainer = gf.TransientObtainer(
-                ifo_data_obtainer=ifo_obtainer,
-                ifos=[gf.IFO.L1],
-                event_names=["GW150914", "GW151012"]  # Multiple events
-            )
-            
             # Get a batch
-            batch_gen = transient_obtainer(
+            batch_gen = transient_obtainer.get_onsource_offsource_chunks(
+                sample_rate_hertz=2048.0,
+                onsource_duration_seconds=1.0,
+                padding_duration_seconds=0.5,
+                offsource_duration_seconds=16.0,
+                num_examples_per_batch=2,
+                ifos=[gf.IFO.L1],
                 scale_factor=1.0,
-                whiten=False,
-                crop=False
             )
             batch = next(batch_gen)
             
@@ -432,37 +432,48 @@ class TestSpecificEventAcquisition:
             assert onsource.shape[0] > 0, "Should have at least one event in batch"
             
         finally:
-            ifo_obtainer.close()
+            transient_obtainer.close()
     
     def test_specific_events_with_whitening(self):
         """Test that whitening works with specific events."""
-        ifo_obtainer = gf.IFODataObtainer(
+        # Now use TransientDataObtainer directly with event_names
+        transient_obtainer = gf.TransientDataObtainer(
             observing_runs=gf.ObservingRun.O1,
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS],
             force_acquisition=True,
-            cache_segments=False
+            cache_segments=False,
+            event_names=["GW150914"]
         )
         
         try:
-            transient_obtainer = gf.TransientObtainer(
-                ifo_data_obtainer=ifo_obtainer,
+            # Get batch with whitening applied via post-processing
+            batch_gen = transient_obtainer.get_onsource_offsource_chunks(
+                sample_rate_hertz=2048.0,
+                onsource_duration_seconds=1.0,
+                padding_duration_seconds=0.5,
+                offsource_duration_seconds=16.0,
+                num_examples_per_batch=1,
                 ifos=[gf.IFO.H1],
-                event_names=["GW150914"]
-            )
-            
-            # Get whitened batch
-            batch_gen = transient_obtainer(
                 scale_factor=1.0,
-                whiten=True,
-                crop=False
             )
             batch = next(batch_gen)
             
-            # Should successfully whiten
+            # Whiten manually (since TransientDataObtainer doesn't have whiten param)
             onsource = batch[gf.ReturnVariables.ONSOURCE]
-            assert not np.all(onsource == 0.0), "Whitened data should not be all zeros"
-            assert not np.isnan(onsource).any(), "Whitened data should not have NaNs"
+            offsource = batch[gf.ReturnVariables.OFFSOURCE]
+            
+            # Apply whitening
+            whitened = gf.whiten(
+                onsource * 1e21,  # Scale up for precision
+                offsource * 1e21,
+                sample_rate_hertz=2048.0
+            )
+            
+            # Should successfully whiten
+            assert not np.all(whitened == 0.0), "Whitened data should not be all zeros"
+            assert not np.isnan(whitened).any(), "Whitened data should not have NaNs"
             
         finally:
-            ifo_obtainer.close()
+            transient_obtainer.close()
+

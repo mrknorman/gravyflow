@@ -65,7 +65,8 @@ class TransientIndex:
             from gravyflow.src.dataset.features.compressed_segments import segments_to_compressed_array
             self._compressed = segments_to_compressed_array(records)
             self._inflation_cache = {}  # LRU cache: index → TransientSegment
-            self._cache_maxsize = 1000  # Keep 1000 inflated segments in memory
+            from gravyflow.src.dataset.config import TransientDefaults
+            self._cache_maxsize = TransientDefaults.LAZY_CACHE_MAXSIZE
             self.records = None  # Not used in lazy mode
         else:
             # Standard mode: store full objects
