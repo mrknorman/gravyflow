@@ -38,6 +38,8 @@ def IFODataObtainer(
         noise_amplitude: float = 0.1,
         # Class balancing
         balanced_glitch_types: bool = False,
+        # Specific Names
+        event_names: List[str] = None
     ):
     """
     Factory function that returns the appropriate IFO data obtainer.
@@ -72,6 +74,7 @@ def IFODataObtainer(
         add_noise: Enable noise perturbation augmentation (TRANSIENT only)
         noise_amplitude: Noise amplitude relative to std (TRANSIENT only)
         balanced_glitch_types: Enable balanced sampling of glitch types
+        event_names: Specific event names to acquire (TRANSIENT only)
         
     Returns:
         NoiseDataObtainer or TransientDataObtainer instance
@@ -81,7 +84,24 @@ def IFODataObtainer(
         data_labels = [data_labels]
     
     # Check if NOISE mode is requested
-    if DataLabel.NOISE in data_labels:
+    # Use strict type checking to avoid IntEnum value collision with GlitchType (e.g. 0 == 0)
+    is_noise = False
+    for label in data_labels:
+        # Check matching value AND that it's actually a DataLabel (or exactly NOISE)
+        # Avoids confusing GlitchType.AIR_COMPRESSOR (0) with DataLabel.NOISE (0)
+        if label == DataLabel.NOISE:
+            # If it's an enum member, check the type
+            if hasattr(label, 'value'): 
+                if isinstance(label, DataLabel):
+                    is_noise = True
+                    break
+            # Logic for raw integers (backward compat) - risky if mixing integers and enums
+            # but standard usage is Enums.
+            elif not isinstance(label, bool) and isinstance(label, int) and label == DataLabel.NOISE.value:
+                 is_noise = True 
+                 break
+                 
+    if is_noise:
         return NoiseDataObtainer(
             data_quality=data_quality,
             data_labels=data_labels,
@@ -121,4 +141,5 @@ def IFODataObtainer(
             add_noise=add_noise,
             noise_amplitude=noise_amplitude,
             balanced_glitch_types=balanced_glitch_types,
+            event_names=event_names
         )

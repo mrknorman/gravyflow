@@ -1,4 +1,122 @@
 import logging
+from dataclasses import dataclass
+from typing import Tuple
+
+
+@dataclass(frozen=True)
+class WindowSpec:
+    """
+    Immutable specification for data acquisition time windows.
+    
+    This bundles all duration-related parameters that are frequently passed
+    together, providing a single source of truth for window configuration.
+    
+    Terminology:
+        - onsource: The final output window duration (e.g., 1.0s for inference)
+        - offsource: The background/PSD estimation window (e.g., 16.0s)
+        - crop: Extra duration on EACH SIDE of onsource for edge-effect handling
+                (whitening artifacts, FFT edge effects, etc.)
+        - total_onsource: onsource + (2 * crop) - the raw acquisition window
+    
+    Example:
+        >>> spec = WindowSpec.default()  # Uses Defaults values
+        >>> spec = WindowSpec(
+        ...     sample_rate_hertz=2048.0,
+        ...     onsource_duration_seconds=1.0,
+        ...     offsource_duration_seconds=16.0,
+        ...     crop_duration_seconds=0.5
+        ... )
+        >>> spec.total_onsource_duration_seconds  # 2.0
+        >>> spec.num_onsource_samples  # 4096
+        
+        # For JAX JIT functions - use individual properties:
+        >>> num_on = spec.num_onsource_samples  # Static int for JIT
+    
+    Attributes:
+        sample_rate_hertz: Data sample rate in Hz
+        onsource_duration_seconds: Final onsource window duration in seconds
+        offsource_duration_seconds: Background window duration in seconds
+        crop_duration_seconds: Cropping duration on each side in seconds
+    
+    Note:
+        This class is frozen (immutable) to ensure it can be used as a 
+        dictionary key and to prevent accidental modification.
+    """
+    sample_rate_hertz: float
+    onsource_duration_seconds: float
+    offsource_duration_seconds: float
+    crop_duration_seconds: float
+    
+    @classmethod
+    def default(cls) -> "WindowSpec":
+        """Create WindowSpec from Defaults values."""
+        return cls(
+            sample_rate_hertz=Defaults.sample_rate_hertz,
+            onsource_duration_seconds=Defaults.onsource_duration_seconds,
+            offsource_duration_seconds=Defaults.offsource_duration_seconds,
+            crop_duration_seconds=Defaults.crop_duration_seconds,
+        )
+    
+    @classmethod
+    def from_params(
+        cls,
+        sample_rate_hertz: float = None,
+        onsource_duration_seconds: float = None,
+        offsource_duration_seconds: float = None,
+        crop_duration_seconds: float = None,
+    ) -> "WindowSpec":
+        """
+        Create WindowSpec with partial overrides of defaults.
+        
+        Any parameter not specified will use the value from Defaults.
+        """
+        return cls(
+            sample_rate_hertz=sample_rate_hertz if sample_rate_hertz is not None else Defaults.sample_rate_hertz,
+            onsource_duration_seconds=onsource_duration_seconds if onsource_duration_seconds is not None else Defaults.onsource_duration_seconds,
+            offsource_duration_seconds=offsource_duration_seconds if offsource_duration_seconds is not None else Defaults.offsource_duration_seconds,
+            crop_duration_seconds=crop_duration_seconds if crop_duration_seconds is not None else Defaults.crop_duration_seconds,
+        )
+
+    @property
+    def total_onsource_duration_seconds(self) -> float:
+        """Onsource duration including crop padding on both ends."""
+        return self.onsource_duration_seconds + (self.crop_duration_seconds * 2.0)
+    
+    @property
+    def num_onsource_samples(self) -> int:
+        """Number of onsource samples including cropping padding (ensured even)."""
+        num = int(self.total_onsource_duration_seconds * self.sample_rate_hertz)
+        return num - (num % 2)  # Ensure even
+    
+    @property
+    def num_offsource_samples(self) -> int:
+        """Number of offsource samples (ensured even)."""
+        num = int(self.offsource_duration_seconds * self.sample_rate_hertz)
+        return num - (num % 2)  # Ensure even
+    
+    @property
+    def sample_counts(self) -> Tuple[int, int]:
+        """
+        Return (num_onsource_samples, num_offsource_samples) as a tuple.
+        
+        Useful when passing to functions that need both values.
+        """
+        return (self.num_onsource_samples, self.num_offsource_samples)
+    
+    def with_overrides(self, **kwargs) -> "WindowSpec":
+        """
+        Create a new WindowSpec with some values overridden.
+        
+        Example:
+            >>> spec2 = spec.with_overrides(onsource_duration_seconds=2.0)
+        """
+        return WindowSpec(
+            sample_rate_hertz=kwargs.get('sample_rate_hertz', self.sample_rate_hertz),
+            onsource_duration_seconds=kwargs.get('onsource_duration_seconds', self.onsource_duration_seconds),
+            offsource_duration_seconds=kwargs.get('offsource_duration_seconds', self.offsource_duration_seconds),
+            crop_duration_seconds=kwargs.get('crop_duration_seconds', self.crop_duration_seconds),
+        )
+
 
 class Defaults:
     seed : int = 1000
@@ -160,3 +278,9 @@ class TransientDefaults:
     
     # Segment boundary epsilon for numerical safety
     SEGMENT_EPSILON_SECONDS: float = 0.1
+
+    # ==========================================================================
+    # UNIVERSAL CACHE DEFAULTS
+    # ==========================================================================
+    # Default IFOs to include in cache even if not requested (improves reuse)
+    UNIVERSAL_IFOS: Tuple[str] = ("H1", "L1")

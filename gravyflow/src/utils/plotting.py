@@ -632,7 +632,7 @@ def generate_example_extraction_plot(
     extraction_points: np.ndarray,
     onsource_duration_seconds: float,
     offsource_duration_seconds: float = 0.0,
-    padding_duration_seconds: float = 0.0,
+    crop_duration_seconds: float = 0.0,
     title: str = "Example Extraction from Segments",
     height: int = 400,
     width: Optional[int] = None,
@@ -655,8 +655,8 @@ def generate_example_extraction_plot(
         Duration of onsource window in seconds.
     offsource_duration_seconds : float
         Duration of offsource window in seconds.
-    padding_duration_seconds : float
-        Padding around onsource window.
+    crop_duration_seconds : float
+        Cropping duration on each side of onsource (for edge effect handling).
     title : str
         Plot title.
     height : int
@@ -693,7 +693,8 @@ def generate_example_extraction_plot(
         # Different extraction points per IFO
         extraction_dict = dict(zip(segment_times.keys(), extraction_points.T))
     
-    total_onsource = onsource_duration_seconds + 2 * padding_duration_seconds
+    # total_onsource = onsource + 2*crop (same formula as WindowSpec)
+    total_onsource = onsource_duration_seconds + 2 * crop_duration_seconds
     
     for ifo, seg in segment_times.items():
         seg = np.atleast_1d(seg)

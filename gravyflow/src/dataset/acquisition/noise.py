@@ -346,29 +346,44 @@ class NoiseDataObtainer(BaseDataObtainer):
 
     def get_onsource_offsource_chunks(
             self,
-            sample_rate_hertz: float,
-            onsource_duration_seconds: float,
-            padding_duration_seconds: float,
-            offsource_duration_seconds: float,
+            sample_rate_hertz: float = None,
+            onsource_duration_seconds: float = None,
+            crop_duration_seconds: float = None,
+            offsource_duration_seconds: float = None,
             num_examples_per_batch: int = None,
             ifos: List[gf.IFO] = None,
             scale_factor: float = None,
             seed: int = None,
-            sampling_mode: SamplingMode = SamplingMode.RANDOM
+            sampling_mode: SamplingMode = SamplingMode.RANDOM,
+            whiten: bool = False,
+            crop: bool = False
         ):
         """
         Wrapper to enforce shape contracts on generator.
+        
+        Args:
+            sample_rate_hertz: Sample rate in Hz
+            onsource_duration_seconds: Final onsource window duration
+            crop_duration_seconds: Cropping duration on each side (for edge effects)
+            offsource_duration_seconds: Background window duration
+            num_examples_per_batch: Batch size
+            ifos: List of interferometers
+            scale_factor: Amplitude scaling factor
+            seed: Random seed
+            sampling_mode: RANDOM or GRID sampling
         """
         gen = self._yield_onsource_offsource_chunks(
             sample_rate_hertz,
             onsource_duration_seconds,
-            padding_duration_seconds,
+            crop_duration_seconds,
             offsource_duration_seconds,
             num_examples_per_batch,
             ifos,
             scale_factor,
             seed,
-            sampling_mode
+            sampling_mode,
+            whiten,
+            crop
         )
 
         # Normalize ifos to list
@@ -378,31 +393,77 @@ class NoiseDataObtainer(BaseDataObtainer):
 
     def _yield_onsource_offsource_chunks(
             self,
-            sample_rate_hertz: float,
-            onsource_duration_seconds: float,
-            padding_duration_seconds: float,
-            offsource_duration_seconds: float,
+            sample_rate_hertz: float = None,
+            onsource_duration_seconds: float = None,
+            crop_duration_seconds: float = None,
+            offsource_duration_seconds: float = None,
             num_examples_per_batch: int = None,
             ifos: List[gf.IFO] = None,
             scale_factor: float = None,
             seed: int = None,
-            sampling_mode: SamplingMode = SamplingMode.RANDOM
+            sampling_mode: SamplingMode = SamplingMode.RANDOM,
+            whiten: bool = False,
+            crop: bool = False
         ):
         """
         Generate onsource/offsource chunks for NOISE mode.
         
         Uses random or grid sampling from long data segments.
+        
+        Args:
+            sample_rate_hertz: Sample rate in Hz
+            onsource_duration_seconds: Final onsource window duration
+            crop_duration_seconds: Cropping duration on each side (for edge effects)
+            offsource_duration_seconds: Background window duration
+            num_examples_per_batch: Batch size
+            ifos: List of interferometers
+            scale_factor: Amplitude scaling factor
+            seed: Random seed
+            sampling_mode: RANDOM or GRID sampling
         """
         # Apply defaults
         ifos = ensure_list(ifos) or [gf.IFO.L1]
+        sample_rate_hertz = sample_rate_hertz or gf.Defaults.sample_rate_hertz
+        onsource_duration_seconds = onsource_duration_seconds or gf.Defaults.onsource_duration_seconds
+        crop_duration_seconds = crop_duration_seconds or gf.Defaults.crop_duration_seconds
+        offsource_duration_seconds = offsource_duration_seconds or gf.Defaults.offsource_duration_seconds
         num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
         scale_factor = scale_factor or gf.Defaults.scale_factor
         seed = seed or gf.Defaults.seed
+
+        def _post_process(batch):
+            if batch is None:
+                return None
+            if whiten:
+                # Scale up before whitening to avoid numerical underflow with raw data
+                temp_scale = gf.Defaults.scale_factor
+                batch[RV.ONSOURCE] *= temp_scale
+                batch[RV.OFFSOURCE] *= temp_scale
+
+                batch[RV.ONSOURCE] = gf.whiten(
+                    batch[RV.ONSOURCE],
+                    batch[RV.OFFSOURCE],
+                    sample_rate_hertz
+                )
+                
+                # Scale back down
+                batch[RV.ONSOURCE] /= temp_scale
+                batch[RV.OFFSOURCE] /= temp_scale # Restore offsource too for consistency
+            if crop:
+                batch[RV.ONSOURCE] = gf.crop_samples(
+                    batch[RV.ONSOURCE], 
+                    onsource_duration_seconds, 
+                    sample_rate_hertz
+                )
+            batch[RV.ONSOURCE] = gf.replace_nan_and_inf_with_zero(batch[RV.ONSOURCE])
+            batch[RV.OFFSOURCE] = gf.replace_nan_and_inf_with_zero(batch[RV.OFFSOURCE])
+            return batch
+
         if self.rng is None:
             self.rng = default_rng(seed)
         
-        # Calculate sample counts
-        total_onsource_duration_seconds = onsource_duration_seconds + (padding_duration_seconds * 2.0)
+        # Calculate sample counts (total_onsource = onsource + 2*crop)
+        total_onsource_duration_seconds = onsource_duration_seconds + (crop_duration_seconds * 2.0)
         num_onsource_samples = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
         num_offsource_samples = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
 
@@ -513,9 +574,9 @@ class NoiseDataObtainer(BaseDataObtainer):
                 #         DATA_LABEL = (Batch, IFO) = BI (all NOISE = 0)
                 num_ifos = subarrays.shape[1]
                 batch_size = subarrays.shape[0]
-                yield {
+                yield _post_process({
                     RV.ONSOURCE: self._apply_augmentation(subarrays),
                     RV.OFFSOURCE: self._apply_augmentation(background_chunks),
                     RV.START_GPS_TIME: start_gps_times,  # Already (B, I)
                     RV.DATA_LABEL: ops.full((batch_size, num_ifos), 0, dtype="int32"),  # NOISE = 0
-                }
+                })
