@@ -39,6 +39,7 @@ from .base import (
 from .noise import NoiseDataObtainer
 from .transient import TransientDataObtainer
 from .transient_segment import TransientSegment
+from .segment import Segment, NoiseSegment, SegmentCollection
 
 # Import the factory function
 from .obtainer import IFODataObtainer
@@ -68,4 +69,9 @@ __all__ = [
     'NoiseDataObtainer',
     'TransientDataObtainer',
     'IFODataObtainer',
+    # Segment classes
+    'Segment',
+    'NoiseSegment',
+    'SegmentCollection',
+    'TransientSegment',
 ]
