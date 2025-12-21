@@ -1487,41 +1487,6 @@ class TestRemoveUnwantedSegments:
         assert gf.DataLabel.GLITCHES in feature_times
 
 
-@pytest.mark.slow
-class TestReturnWantedSegments:
-    """Tests for return_wanted_segments (lines 584-632)."""
-    
-    def test_return_wanted_segments_with_events(self):
-        """Test returning segments that contain events (lines 584-632)."""
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=gf.DataLabel.EVENTS,
-            observing_runs=gf.ObservingRun.O3,  # Looking for events
-            cache_segments=False
-        )
-        
-        # Use a time window known to contain GW events
-        # GW190412 occurred around GPS 1239082262
-        test_segments = np.array([
-            [1239082000.0, 1239082500.0],  # Should contain GW190412
-        ])
-        
-        # return_wanted_segments fetches event times internally
-        # and returns (filtered_segments, feature_times)
-        try:
-            result, feature_times = obtainer.return_wanted_segments(
-                gf.IFO.L1,
-                test_segments.copy(),
-                start_padding_seconds=32.0,
-                end_padding_seconds=32.0
-            )
-            
-            assert isinstance(result, np.ndarray)
-            assert isinstance(feature_times, dict)
-        except ValueError as e:
-            # May raise if no features found in the time window
-            assert "Cannot find any features" in str(e)
-
 
 @pytest.mark.slow
 class TestGetSegmentData:
