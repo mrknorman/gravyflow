@@ -517,6 +517,26 @@ class TransientDataObtainer(BaseDataObtainer):
         
         return merged_array
 
+    def _get_segment_boundaries(self, indices: List[int]) -> np.ndarray:
+        """
+        Get GPS boundaries for specified segment indices.
+        
+        Directly accesses transient_segments instead of valid_segments array,
+        providing cleaner access to segment boundaries.
+        
+        Args:
+            indices: List of segment indices
+            
+        Returns:
+            Array of shape (N, 2) with [start, end] GPS times
+        """
+        if not indices:
+            return np.empty((0, 2), dtype=np.float64)
+        return np.array([
+            [self.transient_segments[i].start_gps_time, 
+             self.transient_segments[i].end_gps_time]
+            for i in indices
+        ], dtype=np.float64)
 
     # =========================================================================
     # ABSTRACT METHOD IMPLEMENTATIONS
@@ -632,8 +652,9 @@ class TransientDataObtainer(BaseDataObtainer):
         
         if len(miss_indices) == 0:
             return
-            
-        miss_segments = self.valid_segments[miss_indices]
+        
+        # Get boundaries directly from transient_segments (cleaner than valid_segments array)
+        miss_segment_boundaries = self._get_segment_boundaries(miss_indices)
         
         # Download at higher of requested or cache sample rate (can downsample but not upsample)
         download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
@@ -641,9 +662,9 @@ class TransientDataObtainer(BaseDataObtainer):
         # =====================================================================
         # UNIVERSAL CACHE STRATEGY
         # =====================================================================
-        # Always download ALL detectors (H1, L1, V1) regardless of what the user
+        # Always download ALL detectors (H1, L1) regardless of what the user
         # requested. This ensures the cache is maximally reusable:
-        #   - A cache built with [H1, L1, V1] can serve any subset
+        #   - A cache built with [H1, L1] can serve any subset
         #   - No need to rebuild cache when switching from L1-only to H1+L1
         #   - Downloading all upfront is one network request vs N separate ones
         # 
@@ -656,7 +677,6 @@ class TransientDataObtainer(BaseDataObtainer):
         
         # Build segments array for ALL detectors (repeating the same GPS boundaries)
         num_universal_ifos = len(all_detector_ifos)
-        miss_segment_boundaries = miss_segments[:, 0, :]  # Shape (N, 2) - take first IFO's times
         universal_miss_segments = np.repeat(
             miss_segment_boundaries[:, np.newaxis, :], 
             num_universal_ifos, 
