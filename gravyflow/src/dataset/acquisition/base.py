@@ -1215,8 +1215,6 @@ class BaseDataObtainer(ABC):
             else:
                 logging.error("Segment is None for some reason, skipping")
                 return None
-    
-    # Note: _add_to_segment_cache removed - now use self._segment_cache.put() directly
 
     def acquire(
         self, 
