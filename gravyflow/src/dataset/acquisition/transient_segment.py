@@ -2,10 +2,12 @@
 TransientSegment - Data structure for transient event acquisition.
 
 Combines event metadata (from APIs) with acquisition parameters (boundaries)
-in a single structure. Data structure for transient events.
+in a single structure. Inherits from Segment base class.
 """
 from dataclasses import dataclass, field
 from typing import Optional, Union, List, TYPE_CHECKING
+
+from .segment import Segment
 
 if TYPE_CHECKING:
     import gravyflow as gf
@@ -51,26 +53,24 @@ def bitmask_to_ifos(mask: int) -> List["gf.IFO"]:
 
 
 @dataclass
-class TransientSegment:
+class TransientSegment(Segment):
     """
     Transient event representation with metadata and acquisition parameters.
     
-    This is the data structure for transients. All metadata
-    and acquisition boundaries are kept together in one structure.
+    Inherits GPS boundaries from Segment base class and adds transient-specific
+    metadata like event type, observing run, and detection confidence.
     
     The GPS key is the immutable identity - it travels with this segment everywhere
     and is used for all matching operations.
     
     Attributes:
-        # GPS Identity
-        gps_key: int                       # Integer GPS key at 10ms precision (PRIMARY ID)
-        transient_gps_time: float          # Center GPS time (for display/extraction)
-        
-        # Acquisition Boundaries  
+        # From Segment base class:
         start_gps_time: float              # Segment start (for data download)
         end_gps_time: float                # Segment end (for data download)
         
-        # Event Metadata (from API)
+        # Transient-specific:
+        gps_key: int                       # Integer GPS key at 10ms precision (PRIMARY ID)
+        transient_gps_time: float          # Center GPS time (for display/extraction)
         label: DataLabel                   # GLITCHES or EVENTS
         kind: Union[GlitchType, SourceType]  # Specific type (WHISTLE, BBH, etc.)
         observing_run: ObservingRun        # O1, O2, O3, O4
@@ -79,18 +79,16 @@ class TransientSegment:
         name: Optional[str]                # Event name like "GW150914" (events only)
         weight: float                      # Sampling weight for balancing
     """
-    # GPS Identity
-    gps_key: int
-    transient_gps_time: float
+    # Transient-specific identity (required fields first)
+    gps_key: int = None
+    transient_gps_time: float = None
     
-    # Acquisition Boundaries
-    start_gps_time: float
-    end_gps_time: float
+    # Event Metadata (required fields)
+    label: "DataLabel" = None
+    kind: Union["GlitchType", "SourceType"] = None
+    observing_run: "ObservingRun" = None
     
-    # Event Metadata
-    label: "DataLabel"
-    kind: Union["GlitchType", "SourceType"]
-    observing_run: "ObservingRun"
+    # Optional metadata
     seen_in: List["gf.IFO"] = field(default_factory=list)
     confidence: Optional["EventConfidence"] = None
     name: Optional[str] = None
@@ -107,16 +105,6 @@ class TransientSegment:
         """Check if this is a glitch."""
         from gravyflow.src.dataset.acquisition.base import DataLabel
         return self.label == DataLabel.GLITCHES
-    
-    @property
-    def duration(self) -> float:
-        """Segment duration in seconds."""
-        return self.end_gps_time - self.start_gps_time
-    
-    @property
-    def boundaries(self) -> tuple[float, float]:
-        """Segment boundaries as (start, end) tuple."""
-        return (self.start_gps_time, self.end_gps_time)
     
     def __repr__(self) -> str:
         kind_str = self.kind.name if hasattr(self.kind, 'name') else str(self.kind)
