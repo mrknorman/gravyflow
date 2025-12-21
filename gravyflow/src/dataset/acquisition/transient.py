@@ -30,7 +30,7 @@ from gravyflow.src.utils.shapes import ShapeEnforcer
 from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys
 from gravyflow.src.dataset.features.transient_index import TransientIndex
 from .transient_segment import TransientSegment
-from gravyflow.src.dataset.config import TransientDefaults
+from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
 
 
 class TransientDataObtainer(BaseDataObtainer):
@@ -916,12 +916,16 @@ class TransientDataObtainer(BaseDataObtainer):
             seed: Random seed
             sampling_mode: RANDOM or GRID sampling
         """
-        # Apply defaults
+        # Create WindowSpec for consistent parameter handling
+        window_spec = WindowSpec.from_params(
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration_seconds=onsource_duration_seconds,
+            offsource_duration_seconds=offsource_duration_seconds,
+            crop_duration_seconds=crop_duration_seconds,
+        )
+        
+        # Apply remaining defaults (not in WindowSpec)
         ifos = ensure_list(ifos) or [gf.IFO.L1]
-        sample_rate_hertz = sample_rate_hertz or gf.Defaults.sample_rate_hertz
-        onsource_duration_seconds = onsource_duration_seconds or gf.Defaults.onsource_duration_seconds
-        crop_duration_seconds = crop_duration_seconds or gf.Defaults.crop_duration_seconds
-        offsource_duration_seconds = offsource_duration_seconds or gf.Defaults.offsource_duration_seconds
         num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
         scale_factor = scale_factor or gf.Defaults.scale_factor
         seed = seed or gf.Defaults.seed
@@ -932,17 +936,20 @@ class TransientDataObtainer(BaseDataObtainer):
         def _post_process(batch):
             return self._post_process_batch(
                 batch, 
-                sample_rate_hertz, 
-                onsource_duration_seconds,
+                window_spec.sample_rate_hertz, 
+                window_spec.onsource_duration_seconds,
                 scale_factor,
                 whiten, 
                 crop
             )
         
-        # Calculate sample counts (total_onsource = onsource + 2*crop)
-        total_onsource_duration_seconds = onsource_duration_seconds + (crop_duration_seconds * 2.0)
-        num_onsource_samples = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
-        num_offsource_samples = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
+        # Use WindowSpec for sample counts (centralized calculation)
+        total_onsource_duration_seconds = window_spec.total_onsource_duration_seconds
+        sample_rate_hertz = window_spec.sample_rate_hertz
+        onsource_duration_seconds = window_spec.onsource_duration_seconds
+        offsource_duration_seconds = window_spec.offsource_duration_seconds
+        num_onsource_samples = window_spec.num_onsource_samples
+        num_offsource_samples = window_spec.num_offsource_samples
 
         # Auto-initialize segments if not already done
         # For specific event names, use group="all" to get all matching events
