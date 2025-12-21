@@ -14,6 +14,7 @@ from numpy.random import default_rng
 from keras import ops
 
 import gravyflow as gf
+from gravyflow.src.dataset.config import WindowSpec
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, ensure_even
@@ -422,12 +423,16 @@ class NoiseDataObtainer(BaseDataObtainer):
             seed: Random seed
             sampling_mode: RANDOM or GRID sampling
         """
-        # Apply defaults
+        # Create WindowSpec for consistent parameter handling
+        window_spec = WindowSpec.from_params(
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration_seconds=onsource_duration_seconds,
+            offsource_duration_seconds=offsource_duration_seconds,
+            crop_duration_seconds=crop_duration_seconds,
+        )
+        
+        # Apply remaining defaults (not in WindowSpec)
         ifos = ensure_list(ifos) or [gf.IFO.L1]
-        sample_rate_hertz = sample_rate_hertz or gf.Defaults.sample_rate_hertz
-        onsource_duration_seconds = onsource_duration_seconds or gf.Defaults.onsource_duration_seconds
-        crop_duration_seconds = crop_duration_seconds or gf.Defaults.crop_duration_seconds
-        offsource_duration_seconds = offsource_duration_seconds or gf.Defaults.offsource_duration_seconds
         num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
         scale_factor = scale_factor or gf.Defaults.scale_factor
         seed = seed or gf.Defaults.seed
@@ -436,8 +441,8 @@ class NoiseDataObtainer(BaseDataObtainer):
         def _post_process(batch):
             return self._post_process_batch(
                 batch, 
-                sample_rate_hertz, 
-                onsource_duration_seconds,
+                window_spec.sample_rate_hertz, 
+                window_spec.onsource_duration_seconds,
                 scale_factor,
                 whiten, 
                 crop
@@ -446,10 +451,9 @@ class NoiseDataObtainer(BaseDataObtainer):
         if self.rng is None:
             self.rng = default_rng(seed)
         
-        # Calculate sample counts (total_onsource = onsource + 2*crop)
-        total_onsource_duration_seconds = onsource_duration_seconds + (crop_duration_seconds * 2.0)
-        num_onsource_samples = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
-        num_offsource_samples = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
+        # Use WindowSpec for sample counts (centralized calculation)
+        num_onsource_samples = window_spec.num_onsource_samples
+        num_offsource_samples = window_spec.num_offsource_samples
 
         # Early validation
         if self.valid_segments is None or len(self.valid_segments) == 0:
@@ -462,7 +466,7 @@ class NoiseDataObtainer(BaseDataObtainer):
         
         if not self._current_batch_index and not self._current_segment_index:
             min_segment_duration_seconds = \
-                total_onsource_duration_seconds + offsource_duration_seconds
+                window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds
             min_segment_duration_seconds *= 2.0
             
             self.valid_segments_adjusted = self.remove_short_segments(
@@ -481,7 +485,7 @@ class NoiseDataObtainer(BaseDataObtainer):
                 # Create generator ONCE and reuse it (preserves prefetch across batches)
                 if self._segment_generator is None:
                     self._segment_generator = self.acquire(
-                        sample_rate_hertz,
+                        window_spec.sample_rate_hertz,
                         self.valid_segments_adjusted,
                         ifos,
                         scale_factor
