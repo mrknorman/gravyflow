@@ -516,11 +516,11 @@ class NoiseDataObtainer(BaseDataObtainer):
 
                 min_num_samples = ops.cast(min_num_samples, "float32")
 
-                segment_duration = min_num_samples / sample_rate_hertz
+                segment_duration = min_num_samples / window_spec.sample_rate_hertz
 
                 self._num_batches_in_current_segment = max(1, int(
                     segment_duration * self._get_effective_saturation()
-                    / (num_examples_per_batch * onsource_duration_seconds)
+                    / (num_examples_per_batch * window_spec.onsource_duration_seconds)
                 ))
             
             while self._current_batch_index < self._num_batches_in_current_segment and not self._segment_exhausted:
