@@ -17,7 +17,7 @@ import gravyflow as gf
 from gravyflow.src.dataset.config import WindowSpec
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
-    AcquisitionMode, SamplingMode, ObservingRun, IFOData, ensure_even
+    AcquisitionMode, SamplingMode, ObservingRun, IFOData
 )
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
