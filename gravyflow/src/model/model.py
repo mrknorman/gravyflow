@@ -613,12 +613,14 @@ class Model:
         dataset_args["offsource_duration_seconds"] = genome.offsource_duration_seconds.value
         dataset_args["sample_rate_hertz"] = genome.sample_rate_hertz.value
 
-        num_onsource_samples = ensure_even(
-            int((genome.onsource_duration_seconds.value + 2.0*gf.Defaults.crop_duration_seconds) * genome.sample_rate_hertz.value)
+        # Use WindowSpec for consistent sample count calculation
+        window_spec = gf.WindowSpec.from_params(
+            sample_rate_hertz=genome.sample_rate_hertz.value,
+            onsource_duration_seconds=genome.onsource_duration_seconds.value,
+            offsource_duration_seconds=genome.offsource_duration_seconds.value
         )
-        num_offsource_samples = ensure_even(
-            int(genome.offsource_duration_seconds.value * genome.sample_rate_hertz.value)
-        )
+        num_onsource_samples = window_spec.num_onsource_samples
+        num_offsource_samples = window_spec.num_offsource_samples
 
         if genome.layer_genomes[0].value.layer_type == "WhitenPass":
             dataset_args["input_variables"] = [
@@ -725,15 +727,10 @@ class Model:
             seed = gf.Defaults.seed
 
         if num_onsource_samples is None:
-            num_onsource_samples = int(
-                (gf.Defaults.onsource_duration_seconds + 2.0*gf.Defaults.crop_duration_seconds)*
-                gf.Defaults.sample_rate_hertz
-            )
+            # Use WindowSpec.default() for consistent calculation
+            num_onsource_samples = gf.WindowSpec.default().num_onsource_samples
         if num_offsource_samples is None:
-            num_offsource_samples = int(
-                gf.Defaults.offsource_duration_seconds*
-                gf.Defaults.sample_rate_hertz
-            )
+            num_offsource_samples = gf.WindowSpec.default().num_offsource_samples
 
         with open(model_config_path) as file:
             model_config = json.load(file)
@@ -847,15 +844,10 @@ class Model:
         ):
         
         if num_onsource_samples is None:
-            num_onsource_samples = int(
-                (gf.Defaults.onsource_duration_seconds + 2.0*gf.Defaults.crop_duration_seconds)*
-                gf.Defaults.sample_rate_hertz
-            )
+            # Use WindowSpec.default() for consistent calculation
+            num_onsource_samples = gf.WindowSpec.default().num_onsource_samples
         if num_offsource_samples is None:
-            num_offsource_samples = int(
-                gf.Defaults.offsource_duration_seconds*
-                gf.Defaults.sample_rate_hertz
-            )
+            num_offsource_samples = gf.WindowSpec.default().num_offsource_samples
 
         if model_path is None:
             model_path = model_load_path

@@ -18,6 +18,7 @@ import gravyflow as gf
 
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.dataset.acquisition import ifo_canonical_key
+from gravyflow.src.dataset.config import WindowSpec
 from gravyflow.src.utils.shapes import ShapeEnforcer
 
 class NoiseType(Enum):
@@ -66,10 +67,16 @@ def white_noise_generator(
         Note: Synthetic noise does not include START_GPS_TIME or DATA_LABEL.
     """
 
-    total_onsource_duration_seconds : float = onsource_duration_seconds + (crop_duration_seconds * 2.0)
+    # Use WindowSpec for consistent duration/sample calculations
+    window_spec = WindowSpec.from_params(
+        sample_rate_hertz=sample_rate_hertz,
+        onsource_duration_seconds=onsource_duration_seconds,
+        offsource_duration_seconds=offsource_duration_seconds,
+        crop_duration_seconds=crop_duration_seconds
+    )
     
-    num_onsource_samples : int = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
-    num_offsource_samples : int = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
+    num_onsource_samples = window_spec.num_onsource_samples
+    num_offsource_samples = window_spec.num_offsource_samples
 
     rng = default_rng(seed)
 
@@ -174,10 +181,16 @@ def colored_noise_generator(
     """
     Generator function that yields colored Gaussian noise.
     """
-    total_onsource_duration_seconds : float = onsource_duration_seconds + (crop_duration_seconds * 2.0)
+    # Use WindowSpec for consistent duration calculations
+    window_spec = WindowSpec.from_params(
+        sample_rate_hertz=sample_rate_hertz,
+        onsource_duration_seconds=onsource_duration_seconds,
+        offsource_duration_seconds=offsource_duration_seconds,
+        crop_duration_seconds=crop_duration_seconds
+    )
     
     durations_seconds = [
-        total_onsource_duration_seconds, 
+        window_spec.total_onsource_duration_seconds, 
         offsource_duration_seconds
     ]
 
@@ -423,10 +436,16 @@ class NoiseObtainer(Obtainer):
 
         rng = default_rng(seed)
         
-        total_onsource_duration_seconds : float = onsource_duration_seconds + (crop_duration_seconds * 2.0)  
+        # Use WindowSpec for consistent duration calculations
+        window_spec = WindowSpec.from_params(
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration_seconds=onsource_duration_seconds,
+            offsource_duration_seconds=offsource_duration_seconds,
+            crop_duration_seconds=crop_duration_seconds
+        )
         
         durations_seconds = [
-            total_onsource_duration_seconds, 
+            window_spec.total_onsource_duration_seconds, 
             offsource_duration_seconds
         ]
         

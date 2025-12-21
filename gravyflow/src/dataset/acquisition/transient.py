@@ -29,6 +29,7 @@ from gravyflow.src.utils.shapes import ShapeEnforcer
 from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys
 from gravyflow.src.dataset.features.transient_index import TransientIndex
 from .transient_segment import TransientSegment
+from gravyflow.src.dataset.config import TransientDefaults
 
 
 class TransientDataObtainer(BaseDataObtainer):
@@ -64,7 +65,7 @@ class TransientDataObtainer(BaseDataObtainer):
             # Class balancing
             balanced_glitch_types: bool = False,
             # Specific Names
-            event_names : List[str] = None
+            event_names: List[str] = None
         ):
         
         # Default observing runs matching BaseDataObtainer behavior
@@ -194,9 +195,16 @@ class TransientDataObtainer(BaseDataObtainer):
             for l in data_labels_list
         )
         if has_events_label or has_events:
-            logger.info("Building event segments")
+            # Determine observing runs to query: if specific event names are requested, 
+            # we should broaden the search (e.g., check all runs) to ensure they are found.
+            # Otherwise, respect the strict observing_runs filter.
+            effective_runs = self.observing_runs
+            if self.event_names:
+                effective_runs = None  # None = query all runs
+            
+            logger.info(f"Building event segments (runs={effective_runs})")
             event_segments = build_event_segments(
-                observing_runs=self.observing_runs,
+                observing_runs=effective_runs,
                 confidences=self.event_types if self.event_types else [EventConfidence.CONFIDENT]
             )
             all_segments.extend(event_segments)
@@ -234,7 +242,7 @@ class TransientDataObtainer(BaseDataObtainer):
         offsource_duration: float,
         scale_factor: float = 1.0,
         gps_key: Optional[int] = None,  # NEW: Pass key directly to avoid conversion
-        num_ifos: int = 1  # Expected number of IFOs
+        target_ifos: Optional[List[str]] = None  # NEW: Requested IFOs for subset selection
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
         """
         Attempt to retrieve a sample from cache (memory first, then disk).
@@ -242,7 +250,7 @@ class TransientDataObtainer(BaseDataObtainer):
         Args:
             gps_key: Optional GPS key (preferred - no conversion needed)
             gps_time: GPS time (fallback if key not provided)
-            num_ifos: Expected number of IFOs - if cache data has different count, treat as miss
+            target_ifos: List of IFO names to retrieve (must be present in cache)
             
         Returns:
             (onsource, offsource, source) where source is 'memory', 'disk', or 'miss'
@@ -254,29 +262,42 @@ class TransientDataObtainer(BaseDataObtainer):
         # Try memory cache first (fastest)
         if cache.in_memory and cache.has_key(gps_key):
             idx = cache._gps_index[gps_key]
-            onsource = cache._mem_onsource[idx] * scale_factor
-            offsource = cache._mem_offsource[idx] * scale_factor
-            # Validate IFO count
-            if len(onsource.shape) >= 1 and onsource.shape[0] != num_ifos:
-                # IFO mismatch - treat as miss for multi-IFO requests
-                return None, None, 'miss'
-            return onsource, offsource, 'memory'
-        
-        # Try disk cache (use key-based method - no conversion!)
-        if cache.has_key(gps_key):
-            result = cache.get_by_key(
-                gps_key,
-                sample_rate_hertz=sample_rate_hertz,
-                onsource_duration=onsource_duration,
-                offsource_duration=offsource_duration
-            )
-            if result is not None:
-                onsource, offsource, _, _ = result
-                # Validate IFO count
-                if len(onsource.shape) >= 1 and onsource.shape[0] != num_ifos:
-                    # IFO mismatch - treat as miss for multi-IFO requests
+            onsource = cache._mem_onsource[idx]
+            offsource = cache._mem_offsource[idx]
+            
+            # Filter channels if requested
+            if target_ifos:
+                meta = cache.get_metadata()
+                stored_ifos = meta.get('ifo_names', [])
+                if stored_ifos:
+                    try:
+                        channel_indices = [stored_ifos.index(ifo) for ifo in target_ifos]
+                        onsource = onsource[channel_indices]
+                        offsource = offsource[channel_indices]
+                    except ValueError:
+                        return None, None, 'miss'
+                elif len(target_ifos) != onsource.shape[0]:
                     return None, None, 'miss'
-                return onsource * scale_factor, offsource * scale_factor, 'disk'
+
+            return onsource * scale_factor, offsource * scale_factor, 'memory'
+        
+        # Try disk cache (use key-based lookup)
+        if cache.has_key(gps_key):
+            # Resolve index directly
+            idx = cache._gps_index[gps_key]
+            
+            try:
+                ons, off, _, _ = cache.get_batch(
+                    np.array([idx]),
+                    sample_rate_hertz=sample_rate_hertz,
+                    onsource_duration=onsource_duration,
+                    offsource_duration=offsource_duration,
+                    target_ifos=target_ifos
+                )
+                return ons[0] * scale_factor, off[0] * scale_factor, 'disk'
+            except (ValueError, KeyError):
+                # Request parameters incompatible or IFO missing
+                return None, None, 'miss'
         
         # Cache miss
         return None, None, 'miss'
@@ -709,7 +730,17 @@ class TransientDataObtainer(BaseDataObtainer):
         # Download at higher of requested or cache sample rate (can downsample but not upsample)
         download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
         
-        # Use parallel acquire for bulk download
+        # Universal Cache Logic:
+        # 1. We MUST acquire data for Requested IFOs (strict requirements)
+        # 2. We SHOULD acquire data for Universal Extra IFOs (best effort for cache health)
+        
+        # Determine target list
+        universal_names = set(TransientDefaults.UNIVERSAL_IFOS)
+        requested_names = set(i.name for i in ifos)
+        target_names = sorted(list(universal_names | requested_names))
+        
+        # Use parallel acquire for strict REQUESTED IFOs
+        # This ensures standard failure handling for required data
         segment_generator = self.acquire(
             download_sample_rate,
             miss_segments,
@@ -720,6 +751,49 @@ class TransientDataObtainer(BaseDataObtainer):
         for miss_idx_position, event_segment in enumerate(segment_generator):
             true_seg_idx = miss_indices[miss_idx_position]
             segment = self.transient_segments[true_seg_idx]
+            
+            # Reassemble data list to match TARGET IFOs (H1, L1, ...)
+            # Fill with acquired data where available, fetch extras where needed
+            new_data_list = []
+            
+            for target_name in target_names:
+                # Check if this IFO was in the strict acquisition
+                found_data = None
+                for i, req_ifo in enumerate(ifos):
+                    if req_ifo.name == target_name:
+                        found_data = event_segment.data[i]
+                        break
+                
+                # If not in strict acquisition, try manual fetch (Best Effort)
+                if found_data is None:
+                    try:
+                        target_ifo_obj = gf.IFO[target_name]
+                        # Use get_segment for consistency (handles frame lookup etc)
+                        found_data = self.get_segment(
+                            segment.start_gps_time,
+                            segment.end_gps_time,
+                            download_sample_rate,
+                            target_ifo_obj,
+                            f"universal_{segment.gps_key}" # Unique key for this fetch
+                        )
+                        # get_segment returns None on failure/integrity check
+                        if found_data is None:
+                            raise ValueError("Integrity check failed")
+                            
+                    except Exception as e:
+                        # Zero pad if extra IO fails - prevents losing the good data we already have!
+                        # Use reference shape from acquired data
+                        if len(event_segment.data) > 0:
+                            ref_len = np.shape(event_segment.data[0])[0]
+                            found_data = np.zeros((ref_len,), dtype="float32")
+                        else:
+                            # Should not happen if acquire returned segment
+                            found_data = np.zeros((0,), dtype="float32")
+                            
+                new_data_list.append(found_data)
+            
+            # Update event_segment to reflect the Full Universal set
+            event_segment.data = new_data_list
             
             # Extract at cache parameters
             num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
@@ -774,12 +848,27 @@ class TransientDataObtainer(BaseDataObtainer):
                 sample_rate_hertz,
                 offsource_duration_seconds
             )
+            
+            # Filter to requested IFOs for output
+            # target_ifos is the cache order (sorted Universal + Requested)
+            # ifos is the User Requested order
+            try:
+                # Find indices of requested ifos in the target_names list
+                output_indices = [target_names.index(ifo.name) for ifo in ifos]
+            except ValueError as e:
+                # This should logically never happen if target_names is built from ifos
+                logger.error(f"Requested IFO not found in target list! Request: {ifos}, Target: {target_names}")
+                raise e
 
-            if np.isnan(onsource_cropped).any():
-                logger.error(f"NAN DETECTED: In onsource_cropped! GPS: {segment.transient_gps_time}")
+            # Slice the cropped data
+            onsource_output = onsource_cropped[output_indices, :]
+            offsource_output = offsource_cropped[output_indices, :]
 
-            batch_subarrays.append(onsource_cropped * scale_factor)
-            batch_backgrounds.append(offsource_cropped * scale_factor)
+            if np.isnan(onsource_output).any():
+                logger.error(f"NAN DETECTED: In onsource_output! GPS: {segment.transient_gps_time}")
+            
+            batch_subarrays.append(onsource_output * scale_factor)
+            batch_backgrounds.append(offsource_output * scale_factor)
             batch_segments.append(segment)
             
             if len(batch_subarrays) >= num_examples_per_batch:
@@ -839,25 +928,58 @@ class TransientDataObtainer(BaseDataObtainer):
         cache = self._glitch_cache
         
         # Log cache status (once)
-        if cache.exists and not hasattr(self, '_cache_logged'):
+        # Validate cache shape compatibility
+        if cache.exists:
             try:
+                # Basic validation
                 cache.validate_request(sample_rate_hertz, onsource_duration_seconds, offsource_duration_seconds)
+                
+                # IMPORTANT: Validate IFO count/shape to prevent broadcast errors
+                # IMPORTANT: Validate IFO compatibility (allow subsets)
                 meta = cache.get_metadata()
-                logger.info(f"Cache: {meta['num_glitches']} glitches at {CACHE_SAMPLE_RATE_HERTZ}Hz")
-                self._cache_logged = True
+                cached_ifos = meta.get('ifo_names', [])
+                requested_ifos = [i.name for i in ifos]
+                
+                is_compatible = False
+                if not cached_ifos:
+                     # Legacy cache fallback: check length only
+                     if len(ifos) == meta.get('num_ifos', 0):
+                         is_compatible = True
+                else:
+                     # Check if requested IFOs are present in the cache
+                     is_compatible = set(requested_ifos).issubset(set(cached_ifos))
+                
+                if not is_compatible:
+                    logger.warning(
+                        f"Cache IFO mismatch (Cache: {cached_ifos}, Request: {requested_ifos}). "
+                        "Cache missing required IFOs. Resetting..."
+                    )
+                    cache.reset()  # Delete and recreate
+                
+                if not hasattr(self, '_cache_logged') and cache.exists:
+                    meta = cache.get_metadata()
+                    logger.info(f"Cache: {meta['num_glitches']} glitches at {CACHE_SAMPLE_RATE_HERTZ}Hz")
+                    self._cache_logged = True
             except ValueError as e:
-                logger.warning(f"Cache incompatible: {e}")
+                logger.warning(f"Cache incompatible: {e}. Resetting.")
+                cache.reset()
         
-        # Initialize cache file if needed
+        # Initialize cache file if needed (or if reset)
         if not cache.exists:
             num_cache_onsource = int(CACHE_ONSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
             num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
+            # Determine cache IFOs (Union of requested + Universal defaults)
+            # This ensures we build towards a standard H1+L1 cache even if only one is requested
+            universal_ifos = set(TransientDefaults.UNIVERSAL_IFOS)
+            requested_ifos = set(i.name for i in ifos)
+            target_ifos = sorted(list(universal_ifos | requested_ifos))
+            
             cache.initialize_file(
                 sample_rate_hertz=CACHE_SAMPLE_RATE_HERTZ,
                 onsource_duration=CACHE_ONSOURCE_DURATION,
                 offsource_duration=CACHE_OFFSOURCE_DURATION,
-                ifo_names=[i.name for i in ifos],
-                num_ifos=len(ifos),
+                ifo_names=target_ifos,
+                num_ifos=len(target_ifos),
                 onsource_samples=num_cache_onsource,
                 offsource_samples=num_cache_offsource
             )
@@ -867,29 +989,44 @@ class TransientDataObtainer(BaseDataObtainer):
 
     def get_onsource_offsource_chunks(
             self,
-            sample_rate_hertz: float,
-            onsource_duration_seconds: float,
-            padding_duration_seconds: float,
-            offsource_duration_seconds: float,
+            sample_rate_hertz: float = None,
+            onsource_duration_seconds: float = None,
+            crop_duration_seconds: float = None,
+            offsource_duration_seconds: float = None,
             num_examples_per_batch: int = None,
             ifos: List[gf.IFO] = None,
             scale_factor: float = None,
             seed: int = None,
-            sampling_mode: SamplingMode = SamplingMode.RANDOM
+            sampling_mode: SamplingMode = SamplingMode.RANDOM,
+            whiten: bool = False,
+            crop: bool = False
         ):
         """
         Wrapper to enforce shape contracts on generator.
+        
+        Args:
+            sample_rate_hertz: Sample rate in Hz
+            onsource_duration_seconds: Final onsource window duration
+            crop_duration_seconds: Cropping duration on each side (for edge effects)
+            offsource_duration_seconds: Background window duration
+            num_examples_per_batch: Batch size
+            ifos: List of interferometers
+            scale_factor: Amplitude scaling factor
+            seed: Random seed
+            sampling_mode: RANDOM or GRID sampling
         """
         gen = self._yield_onsource_offsource_chunks(
             sample_rate_hertz,
             onsource_duration_seconds,
-            padding_duration_seconds,
+            crop_duration_seconds,
             offsource_duration_seconds,
             num_examples_per_batch,
             ifos,
             scale_factor,
             seed,
-            sampling_mode
+            sampling_mode,
+            whiten,
+            crop
         )
 
         # Normalize ifos to list
@@ -899,31 +1036,80 @@ class TransientDataObtainer(BaseDataObtainer):
 
     def _yield_onsource_offsource_chunks(
             self,
-            sample_rate_hertz: float,
-            onsource_duration_seconds: float,
-            padding_duration_seconds: float,
-            offsource_duration_seconds: float,
+            sample_rate_hertz: float = None,
+            onsource_duration_seconds: float = None,
+            crop_duration_seconds: float = None,
+            offsource_duration_seconds: float = None,
             num_examples_per_batch: int = None,
             ifos: List[gf.IFO] = None,
             scale_factor: float = None,
             seed: int = None,
-            sampling_mode: SamplingMode = SamplingMode.RANDOM
+            sampling_mode: SamplingMode = SamplingMode.RANDOM,
+            whiten: bool = False,
+            crop: bool = False
         ):
         """
         Generate onsource/offsource chunks for TRANSIENT mode.
         
         Extracts centered windows around each event/glitch.
+        
+        Args:
+            sample_rate_hertz: Sample rate in Hz
+            onsource_duration_seconds: Final onsource window duration
+            crop_duration_seconds: Cropping duration on each side (for edge effects)
+            offsource_duration_seconds: Background window duration
+            num_examples_per_batch: Batch size
+            ifos: List of interferometers
+            scale_factor: Amplitude scaling factor
+            seed: Random seed
+            sampling_mode: RANDOM or GRID sampling
         """
         # Apply defaults
         ifos = ensure_list(ifos) or [gf.IFO.L1]
+        sample_rate_hertz = sample_rate_hertz or gf.Defaults.sample_rate_hertz
+        onsource_duration_seconds = onsource_duration_seconds or gf.Defaults.onsource_duration_seconds
+        crop_duration_seconds = crop_duration_seconds or gf.Defaults.crop_duration_seconds
+        offsource_duration_seconds = offsource_duration_seconds or gf.Defaults.offsource_duration_seconds
         num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
         scale_factor = scale_factor or gf.Defaults.scale_factor
         seed = seed or gf.Defaults.seed
         if self.rng is None:
             self.rng = default_rng(seed)
+
+        def _post_process(batch):
+            if batch is None:
+                return None
+            if whiten:
+                # Scale up before whitening to avoid numerical underflow with raw data
+                # Adjust scaling based on existing scale_factor to ensure data is O(1e21) range
+                # If data is already scaled (scale_factor ~ 1e21), multiplier will be ~1.0
+                target_scale = gf.Defaults.scale_factor
+                temp_scale = target_scale / (scale_factor if scale_factor > 0 else 1.0)
+                
+                batch[RV.ONSOURCE] *= temp_scale
+                batch[RV.OFFSOURCE] *= temp_scale
+                
+                batch[RV.ONSOURCE] = gf.whiten(
+                    batch[RV.ONSOURCE], 
+                    batch[RV.OFFSOURCE], 
+                    sample_rate_hertz
+                )
+
+                # Scale back down
+                # batch[RV.ONSOURCE] /= temp_scale  <-- REMOVED: Whitened data is unit variance, don't scale back to 1e-21
+                batch[RV.OFFSOURCE] /= temp_scale # Restore offsource too for consistency
+            if crop:
+                batch[RV.ONSOURCE] = gf.crop_samples(
+                    batch[RV.ONSOURCE], 
+                    onsource_duration_seconds, 
+                    sample_rate_hertz
+                )
+            batch[RV.ONSOURCE] = gf.replace_nan_and_inf_with_zero(batch[RV.ONSOURCE])
+            batch[RV.OFFSOURCE] = gf.replace_nan_and_inf_with_zero(batch[RV.OFFSOURCE])
+            return batch
         
-        # Calculate sample counts
-        total_onsource_duration_seconds = onsource_duration_seconds + (padding_duration_seconds * 2.0)
+        # Calculate sample counts (total_onsource = onsource + 2*crop)
+        total_onsource_duration_seconds = onsource_duration_seconds + (crop_duration_seconds * 2.0)
         num_onsource_samples = ensure_even(int(total_onsource_duration_seconds * sample_rate_hertz))
         num_offsource_samples = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
 
@@ -986,7 +1172,7 @@ class TransientDataObtainer(BaseDataObtainer):
                     offsource_duration_seconds,
                     scale_factor,
                     gps_key=segment.gps_key,  # Pass key - eliminates float→key conversion!
-                    num_ifos=len(ifos)  # Validate IFO count
+                    target_ifos=[i.name for i in ifos]  # Select specific IFOs from cache
                 )
                 
                 if source != 'miss':
@@ -1004,7 +1190,7 @@ class TransientDataObtainer(BaseDataObtainer):
                         self._last_log_count = total_samples
                     
                     if len(batch_subarrays) >= num_examples_per_batch:
-                        yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments)
+                        yield _post_process(self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments))
                         batch_subarrays = []
                         batch_backgrounds = []
                         batch_segments = []
@@ -1030,7 +1216,7 @@ class TransientDataObtainer(BaseDataObtainer):
                         batch_segments,
                         num_examples_per_batch
                     ):
-                        yield batch
+                        yield _post_process(batch)
                     miss_indices = []
 
             # Handle remaining miss_indices after for loop ends
@@ -1049,8 +1235,8 @@ class TransientDataObtainer(BaseDataObtainer):
                     batch_segments,
                     num_examples_per_batch
                 ):
-                    yield batch
+                    yield _post_process(batch)
 
             # Yield any remaining partial batch at end of epoch
             if len(batch_subarrays) > 0:
-                yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments)
+                yield _post_process(self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments))

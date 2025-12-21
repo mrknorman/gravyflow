@@ -61,17 +61,19 @@ def calculate_sample_counts(
 
 
 @dataclass
-class AcquisitionParams:
+class BatchConfig:
     """
-    Bundled parameters for data acquisition.
+    Configuration for batch generation parameters.
     
-    Reduces parameter passing overhead by grouping related acquisition parameters.
-    All parameters have sensible defaults from gf.Defaults.
+    This bundles batch-related parameters that are frequently passed
+    together but are NOT related to window durations (those are in WindowSpec).
+    
+    Attributes:
+        num_examples_per_batch: Number of examples in each batch
+        scale_factor: Amplitude scaling factor for data
+        seed: Random seed for reproducibility
+        ifos: List of interferometers to use
     """
-    sample_rate_hertz: float = None
-    onsource_duration_seconds: float = None
-    offsource_duration_seconds: float = None
-    crop_duration_seconds: float = None
     num_examples_per_batch: int = None
     scale_factor: float = None
     seed: int = None
@@ -79,14 +81,6 @@ class AcquisitionParams:
     
     def __post_init__(self):
         """Apply defaults from gf.Defaults for any None values."""
-        if self.sample_rate_hertz is None:
-            self.sample_rate_hertz = gf.Defaults.sample_rate_hertz
-        if self.onsource_duration_seconds is None:
-            self.onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
-        if self.offsource_duration_seconds is None:
-            self.offsource_duration_seconds = gf.Defaults.offsource_duration_seconds
-        if self.crop_duration_seconds is None:
-            self.crop_duration_seconds = gf.Defaults.crop_duration_seconds
         if self.num_examples_per_batch is None:
             self.num_examples_per_batch = gf.Defaults.num_examples_per_batch
         if self.scale_factor is None:
@@ -97,21 +91,6 @@ class AcquisitionParams:
             self.ifos = [gf.IFO.L1]
         else:
             self.ifos = ensure_list(self.ifos)
-    
-    @property
-    def total_onsource_duration_seconds(self) -> float:
-        """Onsource duration including crop padding on both sides."""
-        return self.onsource_duration_seconds + (self.crop_duration_seconds * 2.0)
-    
-    @property
-    def num_onsource_samples(self) -> int:
-        """Number of onsource samples including padding."""
-        return ensure_even(int(self.total_onsource_duration_seconds * self.sample_rate_hertz))
-    
-    @property
-    def num_offsource_samples(self) -> int:
-        """Number of offsource samples."""
-        return ensure_even(int(self.offsource_duration_seconds * self.sample_rate_hertz))
     
     @property
     def num_ifos(self) -> int:

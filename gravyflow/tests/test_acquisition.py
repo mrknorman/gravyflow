@@ -914,7 +914,7 @@ class TestGetOnsourceOffsourceChunks:
         gen = obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=1024.0,
             onsource_duration_seconds=1.0,
-            padding_duration_seconds=0.5,
+            crop_duration_seconds=0.5,
             offsource_duration_seconds=1.0,
             num_examples_per_batch=None,  # Use default
             ifos=gf.IFO.L1,
@@ -1777,7 +1777,7 @@ class TestGetOnsourceOffsourceChunksReal:
         gen = obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=1024.0,
             onsource_duration_seconds=1.0,
-            padding_duration_seconds=0.5,
+            crop_duration_seconds=0.5,
             offsource_duration_seconds=1.0,
             num_examples_per_batch=2,
             ifos=gf.IFO.L1,
@@ -1892,7 +1892,7 @@ class TestGenerateExampleExtractionPlot:
             extraction_points,
             onsource_duration_seconds=2.0,
             offsource_duration_seconds=1.0,
-            padding_duration_seconds=0.5
+            crop_duration_seconds=0.5
         )
         
         assert layout is not None
@@ -1958,7 +1958,7 @@ def _test_segment_visualization_plots(plot_results: bool = False) -> None:
         extraction_points,
         onsource_duration_seconds=2.0,
         offsource_duration_seconds=4.0,
-        padding_duration_seconds=0.5,
+        crop_duration_seconds=0.5,
         title="Example Extraction - Toy Data"
     )
     
@@ -2013,7 +2013,7 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
         gen = obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=2048.0,
             onsource_duration_seconds=1.0,
-            padding_duration_seconds=0.5,
+            crop_duration_seconds=0.5,
             offsource_duration_seconds=16.0,
             num_examples_per_batch=32,
             ifos=[gf.IFO.L1, gf.IFO.H1],
@@ -2064,7 +2064,7 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
             extraction_points,
             onsource_duration_seconds=1.0,
             offsource_duration_seconds=16.0,
-            padding_duration_seconds=0.5,
+            crop_duration_seconds=0.5,
             title="Example Extraction - Real O3 Data (Batch 1)"
         )
         

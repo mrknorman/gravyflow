@@ -23,7 +23,7 @@ import logging
 import threading
 
 logger = logging.getLogger(__name__)
-
+import os
 import numpy as np
 import h5py
 from keras import ops
@@ -136,7 +136,21 @@ class GlitchCache:
         """Check if cache file exists."""
         return self.path.exists()
     
-    @property  
+    def reset(self) -> None:
+        """Delete cache file and clear in-memory state."""
+        if self.path.exists():
+            try:
+                os.remove(self.path)
+            except OSError as e:
+                logger.warning(f"Failed to remove cache file {self.path}: {e}")
+        
+        self._gps_index = None
+        self._metadata = None
+        self._in_memory = False
+        self._mem_onsource = None
+        self._mem_offsource = None
+    
+    @property
     def in_memory(self) -> bool:
         """Check if data is loaded to memory."""
         return self._in_memory
@@ -158,6 +172,7 @@ class GlitchCache:
                 'sample_rate_hertz': float(grp.attrs.get('sample_rate_hertz', CACHE_SAMPLE_RATE_HERTZ)),
                 'onsource_duration': float(grp.attrs.get('onsource_duration', CACHE_ONSOURCE_DURATION)),
                 'offsource_duration': float(grp.attrs.get('offsource_duration', CACHE_OFFSOURCE_DURATION)),
+                'ifo_names': list(grp.attrs.get('ifo_names', [])),
                 'ifo_names': list(grp.attrs.get('ifo_names', [])),
                 'num_glitches': int(grp['gps_times'].shape[0]),
                 'num_ifos': int(grp['onsource'].shape[1]),
@@ -697,6 +712,7 @@ class GlitchCache:
         sample_rate_hertz: Optional[float] = None,
         onsource_duration: Optional[float] = None,
         offsource_duration: Optional[float] = None,
+        target_ifos: Optional[List[str]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Load a batch of glitches by indices.
@@ -708,6 +724,7 @@ class GlitchCache:
             sample_rate_hertz: Target sample rate
             onsource_duration: Target onsource duration
             offsource_duration: Target offsource duration
+            target_ifos: Optional list of IFO names to retrieve (must be subset of cached IFOs)
             
         Returns:
             Tuple of (onsource, offsource, gps_times, labels)
@@ -716,6 +733,7 @@ class GlitchCache:
         stored_rate = meta['sample_rate_hertz']
         stored_ons_dur = meta['onsource_duration']
         stored_off_dur = meta['offsource_duration']
+        stored_ifos = meta.get('ifo_names', [])
         
         # Determine target parameters
         target_rate = sample_rate_hertz if sample_rate_hertz else stored_rate
@@ -750,14 +768,35 @@ class GlitchCache:
         sorted_indices = indices[sort_order]
         unsort_order = np.argsort(sort_order)  # Inverse permutation
         
+        # Determine channel indices if filtering
+        channel_indices = slice(None)
+        if target_ifos:
+            if not stored_ifos:
+                # Fallback for old caches without ifo_names
+                if len(target_ifos) == 1:
+                     channel_indices = [0] # Assumption
+                else: 
+                     channel_indices = slice(None)
+            else:
+                try:
+                    channel_indices = [stored_ifos.index(ifo) for ifo in target_ifos]
+                except ValueError as e:
+                    raise ValueError(f"Requested IFO not in cache (Cache: {stored_ifos}, Request: {target_ifos})") from e
+
         with h5py.File(self.path, 'r') as f:
             grp = f['glitches']
             
             # Read only the slice we need: [sorted_indices, :ifos, start:end]
+            # We read all channels then slice in memory for simplicity/safety
             onsource = grp['onsource'][sorted_indices, :, ons_start:ons_end]
             offsource = grp['offsource'][sorted_indices, :, off_start:off_end]
             gps_times = grp['gps_times'][sorted_indices]
             labels = grp['labels'][sorted_indices]
+            
+        # Apply channel filtering
+        if target_ifos:
+            onsource = onsource[:, channel_indices, :]
+            offsource = offsource[:, channel_indices, :]
         
         # Restore original order
         onsource = onsource[unsort_order]

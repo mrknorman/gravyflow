@@ -52,7 +52,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
 # Local application/library specific imports
-from .src.dataset.config import Defaults
+from .src.dataset.config import Defaults, WindowSpec
 from .src.utils.tensor import (
     DistributionType, Distribution, randomise_arguments,
     replace_nan_and_inf_with_zero, expand_tensor, batch_tensor,
@@ -60,7 +60,7 @@ from .src.utils.tensor import (
     set_random_seeds
 )
 from .src.utils.numerics import (
-    ensure_even, ensure_list, calculate_sample_counts, AcquisitionParams
+    ensure_even, ensure_list, calculate_sample_counts, BatchConfig
 )
 from .src.utils.shapes import (
     ShapeContract, ShapeEnforcer, 

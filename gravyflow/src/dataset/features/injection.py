@@ -1197,7 +1197,13 @@ class InjectionGenerator:
             masks_list = []
             parameters_list = []
             
-            total_duration = onsource_duration_seconds + 2 * crop_duration_seconds
+            # Use WindowSpec for consistent total_onsource calculation
+            window_spec = gf.WindowSpec.from_params(
+                sample_rate_hertz=sample_rate_hertz,
+                onsource_duration_seconds=onsource_duration_seconds,
+                crop_duration_seconds=crop_duration_seconds
+            )
+            total_duration = window_spec.total_onsource_duration_seconds
             
             # Calculate max padding and delay across generators
             max_front_padding = 0.0

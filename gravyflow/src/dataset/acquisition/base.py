@@ -1373,21 +1373,68 @@ class BaseDataObtainer(ABC):
         """
         pass
 
+    def __call__(
+            self,
+            sample_rate_hertz: float = None,
+            onsource_duration_seconds: float = None,
+            crop_duration_seconds: float = None,
+            offsource_duration_seconds: float = None,
+            num_examples_per_batch: int = None,
+            ifos: List[gf.IFO] = None,
+            scale_factor: float = None,
+            seed: int = None,
+            sampling_mode: SamplingMode = None,
+            whiten: bool = False,
+            crop: bool = False
+        ) -> Generator[Dict, None, None]:
+        """
+        Unified entry point for data acquisition.
+        
+        Acts as a wrapper for get_onsource_offsource_chunks.
+        """
+        return self.get_onsource_offsource_chunks(
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration_seconds=onsource_duration_seconds,
+            crop_duration_seconds=crop_duration_seconds,
+            offsource_duration_seconds=offsource_duration_seconds,
+            num_examples_per_batch=num_examples_per_batch,
+            ifos=ifos,
+            scale_factor=scale_factor,
+            seed=seed,
+            sampling_mode=sampling_mode,
+            whiten=whiten,
+            crop=crop
+        )
+
     @abstractmethod
     def get_onsource_offsource_chunks(
             self,
-            sample_rate_hertz : float,
-            onsource_duration_seconds : float,
-            padding_duration_seconds : float,
-            offsource_duration_seconds : float,
-            num_examples_per_batch : int = None,
-            ifos : List[gf.IFO] = None,
-            scale_factor : float = None,
-            seed : int = None,
-            sampling_mode : SamplingMode = SamplingMode.RANDOM
+            sample_rate_hertz: float,
+            onsource_duration_seconds: float,
+            crop_duration_seconds: float,
+            offsource_duration_seconds: float,
+            num_examples_per_batch: int = None,
+            ifos: List[gf.IFO] = None,
+            scale_factor: float = None,
+            seed: int = None,
+            sampling_mode: SamplingMode = SamplingMode.RANDOM,
+            whiten: bool = False,
+            crop: bool = False
         ):
         """
         Generate onsource/offsource data chunks.
+        
+        Args:
+            sample_rate_hertz: Sample rate in Hz
+            onsource_duration_seconds: Final onsource window duration
+            crop_duration_seconds: Cropping duration on each side (for edge effects)
+            offsource_duration_seconds: Background window duration
+            num_examples_per_batch: Batch size
+            ifos: List of interferometers
+            scale_factor: Amplitude scaling factor
+            seed: Random seed
+            sampling_mode: RANDOM or GRID sampling
+            
         Must be implemented by subclasses.
         """
         pass

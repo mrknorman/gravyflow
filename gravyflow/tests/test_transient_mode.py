@@ -368,7 +368,7 @@ class TestSpecificEventAcquisition:
             batch_gen = transient_obtainer.get_onsource_offsource_chunks(
                 sample_rate_hertz=2048.0,
                 onsource_duration_seconds=1.0,
-                padding_duration_seconds=0.5,
+                crop_duration_seconds=0.5,
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=1,
                 ifos=[gf.IFO.H1, gf.IFO.L1],
@@ -415,7 +415,7 @@ class TestSpecificEventAcquisition:
             batch_gen = transient_obtainer.get_onsource_offsource_chunks(
                 sample_rate_hertz=2048.0,
                 onsource_duration_seconds=1.0,
-                padding_duration_seconds=0.5,
+                crop_duration_seconds=0.5,
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=2,
                 ifos=[gf.IFO.L1],
@@ -451,7 +451,7 @@ class TestSpecificEventAcquisition:
             batch_gen = transient_obtainer.get_onsource_offsource_chunks(
                 sample_rate_hertz=2048.0,
                 onsource_duration_seconds=1.0,
-                padding_duration_seconds=0.5,
+                crop_duration_seconds=0.5,
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=1,
                 ifos=[gf.IFO.H1],
