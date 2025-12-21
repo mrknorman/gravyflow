@@ -19,6 +19,7 @@ from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
     AcquisitionMode, SamplingMode, ObservingRun, IFOData
 )
+from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.utils.shapes import ShapeEnforcer
@@ -345,6 +346,35 @@ class NoiseDataObtainer(BaseDataObtainer):
             self._cache_valid_segments(self.valid_segments, group_name)
 
         return self.valid_segments
+
+    def get_segments_as_collection(
+        self, 
+        ifo_index: int = 0,
+        ifo: gf.IFO = None
+    ) -> SegmentCollection:
+        """
+        Get valid_segments as a SegmentCollection for unified access.
+        
+        Converts the internal np.ndarray representation to SegmentCollection,
+        providing object-oriented access to segment properties.
+        
+        Args:
+            ifo_index: Index of IFO to extract (if valid_segments is 3D)
+            ifo: Optional IFO to associate with segments
+            
+        Returns:
+            SegmentCollection with NoiseSegment objects
+        """
+        if self.valid_segments is None or len(self.valid_segments) == 0:
+            return SegmentCollection()
+        
+        # valid_segments can be (N, IFO, 2) or (N, 2)
+        if self.valid_segments.ndim == 3:
+            segments_2d = self.valid_segments[:, ifo_index, :]
+        else:
+            segments_2d = self.valid_segments
+        
+        return SegmentCollection.from_array(segments_2d, ifo=ifo)
 
     def get_onsource_offsource_chunks(
             self,
