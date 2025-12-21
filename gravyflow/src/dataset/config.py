@@ -280,7 +280,16 @@ class TransientDefaults:
     SEGMENT_EPSILON_SECONDS: float = 0.1
 
     # ==========================================================================
-    # UNIVERSAL CACHE DEFAULTS
+    # UNIVERSAL CACHE STRATEGY
     # ==========================================================================
-    # Default IFOs to include in cache even if not requested (improves reuse)
-    UNIVERSAL_IFOS: Tuple[str] = ("H1", "L1")
+    # Cache downloads all LIGO detectors (H1, L1) regardless of what the user
+    # requests. This ensures maximum cache reuse - a cache built with H1+L1 can
+    # serve any subset (H1 only, L1 only, etc.) without redownloading.
+    # 
+    # NOTE: V1 (Virgo) is NOT included because:
+    # - Only joined during O2 with limited coverage
+    # - No data available for O1 events
+    # - Would cause acquisition failures for older events
+    #
+    # Requested IFOs are filtered at output time, not download time.
+    UNIVERSAL_IFOS: Tuple[str, ...] = ("H1", "L1")

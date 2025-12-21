@@ -226,29 +226,9 @@ class TestTransientDatasetOutput:
             ifo.close()
 
 
-class TestReturnWantedSegments:
-    """Test the return_wanted_segments function directly."""
-    
-    def test_return_wanted_segments_finds_intersections(self):
-        """Verify return_wanted_segments finds event/segment intersections."""
-        ifo = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],
-            saturation=1.0
-        )
-        
-        try:
-            # First get valid segments without TRANSIENT mode processing
-            # to see the raw O3 segments
-            from gravyflow.src.dataset.acquisition import IFODataObtainer
-            
-            # Check if we can access return_wanted_segments
-            assert hasattr(ifo, 'return_wanted_segments'), \
-                "IFODataObtainer missing return_wanted_segments method"
-            
-        finally:
-            ifo.close()
+class TestTransientModeBatching:
+    """Test transient mode batching and multi-IFO alignment."""
+
             
     def test_transient_mode_batch_unique_events(self):
         """Verify that TRANSIENT mode returns unique events in a batch (Batch Size > 1)."""

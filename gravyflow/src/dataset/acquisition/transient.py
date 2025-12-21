@@ -19,6 +19,7 @@ from keras import ops
 import gravyflow as gf
 from gravyflow.src.dataset.features.event import EventConfidence
 from gravyflow.src.dataset.features.glitch_cache import GlitchCache, generate_glitch_cache_path
+from .cache import DiskCache
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
@@ -315,7 +316,9 @@ class TransientDataObtainer(BaseDataObtainer):
             Dict with ReturnVariables keys:
             - ONSOURCE: (Batch, IFO, Samples) = BIS
             - OFFSOURCE: (Batch, IFO, Samples) = BIS  
-            - TRANSIENT_GPS_TIME: (Batch, IFO) = BI (event/glitch center)
+            - TRANSIENT_GPS_TIME: (Batch, IFO) = BI
+              NOTE: This is the GPS time of the EVENT/GLITCH CENTER, not the start
+              of the data window. For window start time, use the segment boundaries.
             - DATA_LABEL: (Batch, IFO) = BI (1 for GLITCHES, 2 for EVENTS)
             - SUB_TYPE: (Batch, IFO) = BI (GlitchType.value or SourceType.value)
             - GLITCH_TYPE: (Batch, IFO) = BI (GlitchType.value if glitch, -1 otherwise)
@@ -457,97 +460,6 @@ class TransientDataObtainer(BaseDataObtainer):
         
         return onsource_stacked, offsource_stacked, event_gps_time
 
-    def return_wanted_segments(
-            self,
-            ifo: gf.IFO,
-            valid_segments: np.ndarray,        
-            start_padding_seconds: float = 32.0,
-            end_padding_seconds: float = 32.0,
-        ):
-        """
-        Get segments containing desired features (events/glitches).
-        """
-        from gravyflow.src.dataset.features.event import EventConfidence
-        from gravyflow.src.dataset.features.glitch import GlitchType
-        
-        wanted_segments = []
-        feature_times = {}
-        
-        # Event handling
-        has_events_supersede = DataLabel.EVENTS in self.data_labels
-        event_types_in_labels = [
-            label for label in self.data_labels 
-            if isinstance(label, EventConfidence)
-        ]
-        
-        if has_events_supersede or event_types_in_labels:
-            if has_events_supersede:
-                event_times = gf.get_all_event_times()
-            else:
-                event_times = gf.get_event_times_by_type(event_types_in_labels)
-            
-            if len(event_times) > 0:
-                wanted_segments.append(
-                    self.pad_gps_times_with_veto_window(
-                        event_times,
-                        start_padding_seconds=start_padding_seconds,
-                        end_padding_seconds=end_padding_seconds
-                    )
-                )
-                feature_times[gf.DataLabel.EVENTS] = event_times
-        
-        # Glitch handling
-        has_glitches_supersede = DataLabel.GLITCHES in self.data_labels
-        glitch_types_in_labels = [
-            label for label in self.data_labels 
-            if isinstance(label, GlitchType)
-        ]
-        
-        if has_glitches_supersede or glitch_types_in_labels:
-            if has_glitches_supersede:
-                glitch_types_to_fetch = None
-            else:
-                glitch_types_to_fetch = glitch_types_in_labels
-            
-            glitch_segments = gf.get_glitch_segments(
-                ifo,
-                start_gps_time=self.start_gps_times[0],
-                end_gps_time=self.end_gps_times[0],
-                glitch_types=glitch_types_to_fetch
-            )
-            
-            if len(glitch_segments) > 0:
-                padded_glitches = glitch_segments.copy()
-                padded_glitches[:, 0] -= start_padding_seconds
-                padded_glitches[:, 1] += end_padding_seconds
-                wanted_segments.append(padded_glitches)
-                
-                glitch_times, glitch_labels = gf.get_glitch_times_with_labels(
-                    ifo,
-                    start_gps_time=self.start_gps_times[0],
-                    end_gps_time=self.end_gps_times[0],
-                    glitch_types=glitch_types_to_fetch,
-                    balanced=self.balanced_glitch_types
-                )
-                feature_times[gf.DataLabel.GLITCHES] = glitch_times
-                # Note: Labels are now stored in TransientIndex, not legacy storage
-            
-        if wanted_segments:
-            wanted_segments = np.concatenate(wanted_segments)
-            
-            valid_segments = self.find_segment_intersections(
-                valid_segments,
-                wanted_segments
-            )
-        else:
-            raise ValueError("Cannot find any features which suit requirement!")
-
-        if not any(np.any(segment) for segment in valid_segments):
-            raise ValueError(
-                "Cannot find any features which overlap required times!"
-            )
-        
-        return valid_segments, feature_times
 
     def _cluster_transients(
         self, 
@@ -567,10 +479,6 @@ class TransientDataObtainer(BaseDataObtainer):
             data_download_rate = TransientDefaults.DATA_DOWNLOAD_RATE
         if max_segment_seconds is None:
             max_segment_seconds = TransientDefaults.MAX_SEGMENT_SECONDS
-        """
-        Cluster nearby transients using a greedy cost-optimized algorithm.
-        Limits max segment size to prevent OOM errors during download.
-        """
         if len(segments) == 0:
             return segments
         
@@ -708,7 +616,7 @@ class TransientDataObtainer(BaseDataObtainer):
             total_onsource_duration_seconds: Onsource duration including padding
             offsource_duration_seconds: Offsource duration
             scale_factor: Amplitude scale factor
-            cache: GlitchCache instance for storing/retrieving
+            cache: DiskCache instance for storing/retrieving
             batch_subarrays: Accumulated onsource arrays (mutated)
             batch_backgrounds: Accumulated offsource arrays (mutated)
             batch_segments: Accumulated TransientSegments (mutated)
@@ -730,70 +638,42 @@ class TransientDataObtainer(BaseDataObtainer):
         # Download at higher of requested or cache sample rate (can downsample but not upsample)
         download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
         
-        # Universal Cache Logic:
-        # 1. We MUST acquire data for Requested IFOs (strict requirements)
-        # 2. We SHOULD acquire data for Universal Extra IFOs (best effort for cache health)
+        # =====================================================================
+        # UNIVERSAL CACHE STRATEGY
+        # =====================================================================
+        # Always download ALL detectors (H1, L1, V1) regardless of what the user
+        # requested. This ensures the cache is maximally reusable:
+        #   - A cache built with [H1, L1, V1] can serve any subset
+        #   - No need to rebuild cache when switching from L1-only to H1+L1
+        #   - Downloading all upfront is one network request vs N separate ones
+        # 
+        # Requested IFOs are filtered at OUTPUT time, not download time.
+        # =====================================================================
         
-        # Determine target list
-        universal_names = set(TransientDefaults.UNIVERSAL_IFOS)
-        requested_names = set(i.name for i in ifos)
-        target_names = sorted(list(universal_names | requested_names))
+        # Convert UNIVERSAL_IFOS to IFO enum objects
+        all_detector_ifos = [gf.IFO[name] for name in TransientDefaults.UNIVERSAL_IFOS]
+        universal_ifo_names = list(TransientDefaults.UNIVERSAL_IFOS)
         
-        # Use parallel acquire for strict REQUESTED IFOs
-        # This ensures standard failure handling for required data
+        # Build segments array for ALL detectors (repeating the same GPS boundaries)
+        num_universal_ifos = len(all_detector_ifos)
+        miss_segment_boundaries = miss_segments[:, 0, :]  # Shape (N, 2) - take first IFO's times
+        universal_miss_segments = np.repeat(
+            miss_segment_boundaries[:, np.newaxis, :], 
+            num_universal_ifos, 
+            axis=1
+        )  # Shape (N, num_universal_ifos, 2)
+        
+        # Single acquire() call for ALL detectors
         segment_generator = self.acquire(
             download_sample_rate,
-            miss_segments,
-            ifos,
-            1.0  # Download RAW data for cache (scale=1.0)
+            universal_miss_segments,
+            all_detector_ifos,
+            1.0  # Download raw data for cache (scale=1.0)
         )
         
         for miss_idx_position, event_segment in enumerate(segment_generator):
             true_seg_idx = miss_indices[miss_idx_position]
             segment = self.transient_segments[true_seg_idx]
-            
-            # Reassemble data list to match TARGET IFOs (H1, L1, ...)
-            # Fill with acquired data where available, fetch extras where needed
-            new_data_list = []
-            
-            for target_name in target_names:
-                # Check if this IFO was in the strict acquisition
-                found_data = None
-                for i, req_ifo in enumerate(ifos):
-                    if req_ifo.name == target_name:
-                        found_data = event_segment.data[i]
-                        break
-                
-                # If not in strict acquisition, try manual fetch (Best Effort)
-                if found_data is None:
-                    try:
-                        target_ifo_obj = gf.IFO[target_name]
-                        # Use get_segment for consistency (handles frame lookup etc)
-                        found_data = self.get_segment(
-                            segment.start_gps_time,
-                            segment.end_gps_time,
-                            download_sample_rate,
-                            target_ifo_obj,
-                            f"universal_{segment.gps_key}" # Unique key for this fetch
-                        )
-                        # get_segment returns None on failure/integrity check
-                        if found_data is None:
-                            raise ValueError("Integrity check failed")
-                            
-                    except Exception as e:
-                        # Zero pad if extra IO fails - prevents losing the good data we already have!
-                        # Use reference shape from acquired data
-                        if len(event_segment.data) > 0:
-                            ref_len = np.shape(event_segment.data[0])[0]
-                            found_data = np.zeros((ref_len,), dtype="float32")
-                        else:
-                            # Should not happen if acquire returned segment
-                            found_data = np.zeros((0,), dtype="float32")
-                            
-                new_data_list.append(found_data)
-            
-            # Update event_segment to reflect the Full Universal set
-            event_segment.data = new_data_list
             
             # Extract at cache parameters
             num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
@@ -807,9 +687,7 @@ class TransientDataObtainer(BaseDataObtainer):
             )
             
             if onsource_full is None:
-                # Track dropped segment
-                if not hasattr(self, '_dropped_segments_count'):
-                    self._dropped_segments_count = 0
+                # Track dropped segment (counter initialized in BaseDataObtainer.__init__)
                 self._dropped_segments_count += 1
                 logger.warning(f"Dropped segment (extraction failed): GPS={segment.transient_gps_time:.3f}, total dropped={self._dropped_segments_count}")
                 continue
@@ -850,14 +728,12 @@ class TransientDataObtainer(BaseDataObtainer):
             )
             
             # Filter to requested IFOs for output
-            # target_ifos is the cache order (sorted Universal + Requested)
-            # ifos is the User Requested order
+            # universal_ifo_names is the cache order (H1, L1, V1)
+            # ifos is the user's requested subset
             try:
-                # Find indices of requested ifos in the target_names list
-                output_indices = [target_names.index(ifo.name) for ifo in ifos]
+                output_indices = [universal_ifo_names.index(ifo.name) for ifo in ifos]
             except ValueError as e:
-                # This should logically never happen if target_names is built from ifos
-                logger.error(f"Requested IFO not found in target list! Request: {ifos}, Target: {target_names}")
+                logger.error(f"Requested IFO not found in universal set! Request: {[i.name for i in ifos]}, Universal: {universal_ifo_names}")
                 raise e
 
             # Slice the cropped data
@@ -915,48 +791,27 @@ class TransientDataObtainer(BaseDataObtainer):
             else:
                 observing_run_name = self.observing_runs.name
         
+        # Universal Cache: path is independent of requested IFOs since cache
+        # always contains all detectors (H1, L1, V1)
         cache_path = generate_glitch_cache_path(
             observing_run=observing_run_name,
-            ifo="_".join([i.name for i in ifos]),
+            ifo="universal",  # Universal Cache - not specific to requested IFOs
             data_directory=data_dir
         )
         
         # Reuse existing cache if path matches (preserves GPS index)
         if not hasattr(self, '_glitch_cache') or self._glitch_cache is None or self._glitch_cache.path != cache_path:
-            self._glitch_cache = GlitchCache(cache_path, mode='a')
+            self._glitch_cache = DiskCache(cache_path, mode='a')
         
         cache = self._glitch_cache
         
-        # Log cache status (once)
-        # Validate cache shape compatibility
+        # Validate cache compatibility (sample rate and duration only)
+        # IFO validation is not needed - Universal Cache always has H1+L1+V1
         if cache.exists:
             try:
-                # Basic validation
                 cache.validate_request(sample_rate_hertz, onsource_duration_seconds, offsource_duration_seconds)
                 
-                # IMPORTANT: Validate IFO count/shape to prevent broadcast errors
-                # IMPORTANT: Validate IFO compatibility (allow subsets)
-                meta = cache.get_metadata()
-                cached_ifos = meta.get('ifo_names', [])
-                requested_ifos = [i.name for i in ifos]
-                
-                is_compatible = False
-                if not cached_ifos:
-                     # Legacy cache fallback: check length only
-                     if len(ifos) == meta.get('num_ifos', 0):
-                         is_compatible = True
-                else:
-                     # Check if requested IFOs are present in the cache
-                     is_compatible = set(requested_ifos).issubset(set(cached_ifos))
-                
-                if not is_compatible:
-                    logger.warning(
-                        f"Cache IFO mismatch (Cache: {cached_ifos}, Request: {requested_ifos}). "
-                        "Cache missing required IFOs. Resetting..."
-                    )
-                    cache.reset()  # Delete and recreate
-                
-                if not hasattr(self, '_cache_logged') and cache.exists:
+                if not hasattr(self, '_cache_logged'):
                     meta = cache.get_metadata()
                     logger.info(f"Cache: {meta['num_glitches']} glitches at {CACHE_SAMPLE_RATE_HERTZ}Hz")
                     self._cache_logged = True
@@ -965,25 +820,22 @@ class TransientDataObtainer(BaseDataObtainer):
                 cache.reset()
         
         # Initialize cache file if needed (or if reset)
+        # Universal Cache: Always use H1+L1+V1 regardless of requested IFOs
         if not cache.exists:
             num_cache_onsource = int(CACHE_ONSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
             num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
-            # Determine cache IFOs (Union of requested + Universal defaults)
-            # This ensures we build towards a standard H1+L1 cache even if only one is requested
-            universal_ifos = set(TransientDefaults.UNIVERSAL_IFOS)
-            requested_ifos = set(i.name for i in ifos)
-            target_ifos = sorted(list(universal_ifos | requested_ifos))
+            universal_ifos = list(TransientDefaults.UNIVERSAL_IFOS)
             
             cache.initialize_file(
                 sample_rate_hertz=CACHE_SAMPLE_RATE_HERTZ,
                 onsource_duration=CACHE_ONSOURCE_DURATION,
                 offsource_duration=CACHE_OFFSOURCE_DURATION,
-                ifo_names=target_ifos,
-                num_ifos=len(target_ifos),
+                ifo_names=universal_ifos,
+                num_ifos=len(universal_ifos),
                 onsource_samples=num_cache_onsource,
                 offsource_samples=num_cache_offsource
             )
-            logger.info(f"Created cache: {cache_path}")
+            logger.info(f"Created Universal Cache: {cache_path}")
         
         return cache, CACHE_SAMPLE_RATE_HERTZ
 
@@ -1076,37 +928,16 @@ class TransientDataObtainer(BaseDataObtainer):
         if self.rng is None:
             self.rng = default_rng(seed)
 
+        # Use shared post-processing from base class
         def _post_process(batch):
-            if batch is None:
-                return None
-            if whiten:
-                # Scale up before whitening to avoid numerical underflow with raw data
-                # Adjust scaling based on existing scale_factor to ensure data is O(1e21) range
-                # If data is already scaled (scale_factor ~ 1e21), multiplier will be ~1.0
-                target_scale = gf.Defaults.scale_factor
-                temp_scale = target_scale / (scale_factor if scale_factor > 0 else 1.0)
-                
-                batch[RV.ONSOURCE] *= temp_scale
-                batch[RV.OFFSOURCE] *= temp_scale
-                
-                batch[RV.ONSOURCE] = gf.whiten(
-                    batch[RV.ONSOURCE], 
-                    batch[RV.OFFSOURCE], 
-                    sample_rate_hertz
-                )
-
-                # Scale back down
-                # batch[RV.ONSOURCE] /= temp_scale  <-- REMOVED: Whitened data is unit variance, don't scale back to 1e-21
-                batch[RV.OFFSOURCE] /= temp_scale # Restore offsource too for consistency
-            if crop:
-                batch[RV.ONSOURCE] = gf.crop_samples(
-                    batch[RV.ONSOURCE], 
-                    onsource_duration_seconds, 
-                    sample_rate_hertz
-                )
-            batch[RV.ONSOURCE] = gf.replace_nan_and_inf_with_zero(batch[RV.ONSOURCE])
-            batch[RV.OFFSOURCE] = gf.replace_nan_and_inf_with_zero(batch[RV.OFFSOURCE])
-            return batch
+            return self._post_process_batch(
+                batch, 
+                sample_rate_hertz, 
+                onsource_duration_seconds,
+                scale_factor,
+                whiten, 
+                crop
+            )
         
         # Calculate sample counts (total_onsource = onsource + 2*crop)
         total_onsource_duration_seconds = onsource_duration_seconds + (crop_duration_seconds * 2.0)

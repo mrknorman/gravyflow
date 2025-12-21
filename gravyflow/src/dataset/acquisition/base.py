@@ -9,7 +9,7 @@ from enum import Enum, IntEnum, auto
 from contextlib import closing
 from typing import List, Tuple, Union, Dict, Any, Optional, Generator
 from pathlib import Path
-from collections import OrderedDict
+from .cache import MemoryCache
 from concurrent.futures import ThreadPoolExecutor, Future
 from abc import ABC, abstractmethod
 
@@ -196,6 +196,7 @@ def _random_subsection(
     num_samples = ops.shape(tensor_data)[0]
 
     # Calculate the range within which to generate random starts.
+    # The -16 provides a safety buffer to avoid edge artifacts from FFT/filtering operations.
     maxval = num_samples - num_onsource_samples - 16
     minval = num_offsource_samples
 
@@ -532,9 +533,9 @@ class BaseDataObtainer(ABC):
         self.valid_segments = None
         self.valid_segments_adjusted = None
         
-        # In-memory LRU cache for segments
-        self._segment_cache = OrderedDict()
+        # In-memory LRU cache for segments (unified cache interface)
         self._segment_cache_maxsize = 8
+        self._segment_cache = MemoryCache(maxsize=self._segment_cache_maxsize)
         
         # Prefetching configuration
         self.prefetch_segments = prefetch_segments
@@ -638,6 +639,73 @@ class BaseDataObtainer(ABC):
             data = ops.flip(data, axis=-1)
             
         return data
+    
+    def _post_process_batch(
+        self,
+        batch: dict,
+        sample_rate_hertz: float,
+        onsource_duration_seconds: float,
+        scale_factor: float = 1.0,
+        whiten: bool = False,
+        crop: bool = False
+    ) -> dict:
+        """
+        Apply post-processing to a batch dictionary.
+        
+        Shared implementation for both NOISE and TRANSIENT modes.
+        Handles whitening (with correct scale management), cropping, and NaN cleanup.
+        
+        Args:
+            batch: Dict containing at least ONSOURCE and OFFSOURCE tensors
+            sample_rate_hertz: Sample rate for cropping/whitening
+            onsource_duration_seconds: Target onsource duration for cropping
+            scale_factor: Current amplitude scale factor applied to data
+            whiten: Whether to apply whitening
+            crop: Whether to crop to onsource_duration_seconds
+            
+        Returns:
+            Processed batch dict (modified in place)
+            
+        Note:
+            Whitening scales data up before processing (to O(1e21) range for numerical
+            stability) and scales offsource back down afterward. Whitened onsource 
+            stays at unit variance - this is intentional for model training.
+        """
+        RV = gf.ReturnVariables
+        
+        if batch is None:
+            return None
+            
+        if whiten:
+            # Scale up before whitening to avoid numerical underflow with raw data
+            # Adjust scaling based on existing scale_factor to ensure data is O(1e21) range
+            target_scale = gf.Defaults.scale_factor
+            temp_scale = target_scale / (scale_factor if scale_factor > 0 else 1.0)
+            
+            batch[RV.ONSOURCE] *= temp_scale
+            batch[RV.OFFSOURCE] *= temp_scale
+            
+            batch[RV.ONSOURCE] = gf.whiten(
+                batch[RV.ONSOURCE], 
+                batch[RV.OFFSOURCE], 
+                sample_rate_hertz
+            )
+
+            # Whitened onsource stays at unit variance - don't scale back
+            # Scale offsource back down for consistency
+            batch[RV.OFFSOURCE] /= temp_scale
+            
+        if crop:
+            batch[RV.ONSOURCE] = gf.crop_samples(
+                batch[RV.ONSOURCE], 
+                onsource_duration_seconds, 
+                sample_rate_hertz
+            )
+            
+        batch[RV.ONSOURCE] = gf.replace_nan_and_inf_with_zero(batch[RV.ONSOURCE])
+        batch[RV.OFFSOURCE] = gf.replace_nan_and_inf_with_zero(batch[RV.OFFSOURCE])
+        
+        return batch
     
     def _get_effective_saturation(self):
         """
@@ -1048,9 +1116,10 @@ class BaseDataObtainer(ABC):
         
         cache_key = f"{segment_key}_{ifo.name}_{sample_rate_hertz}"
         
-        if cache_key in self._segment_cache:
-            self._segment_cache.move_to_end(cache_key)
-            return self._segment_cache[cache_key]
+        # Check memory cache first (using unified cache interface)
+        cached = self._segment_cache.get(cache_key)
+        if cached is not None:
+            return cached
     
         # TRANSIENT mode: Skip disk caching entirely - glitches go to GlitchCache
         use_disk_cache = (
@@ -1077,7 +1146,7 @@ class BaseDataObtainer(ABC):
                         segment = ops.convert_to_tensor(segment, dtype="float32")
                         
                         if gf.check_tensor_integrity(segment, 1, 10):
-                            self._add_to_segment_cache(cache_key, segment)
+                            self._segment_cache.put(cache_key, segment)
                             return segment
                         else:
                             logging.error(
@@ -1138,7 +1207,7 @@ class BaseDataObtainer(ABC):
                 segment = ops.convert_to_tensor(segment, dtype="float32")
                 
                 if gf.check_tensor_integrity(segment, 1, 10):
-                    self._add_to_segment_cache(cache_key, segment)
+                    self._segment_cache.put(cache_key, segment)
                     return segment
                 else:
                     logging.error("Segment integrity compromised, skipping")
@@ -1147,12 +1216,7 @@ class BaseDataObtainer(ABC):
                 logging.error("Segment is None for some reason, skipping")
                 return None
     
-    def _add_to_segment_cache(self, cache_key: str, segment):
-        """Add segment to in-memory LRU cache, evicting oldest if needed."""
-        self._segment_cache[cache_key] = segment
-        
-        while len(self._segment_cache) > self._segment_cache_maxsize:
-            self._segment_cache.popitem(last=False)
+    # Note: _add_to_segment_cache removed - now use self._segment_cache.put() directly
 
     def acquire(
         self, 

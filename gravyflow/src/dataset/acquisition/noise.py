@@ -290,7 +290,8 @@ class NoiseDataObtainer(BaseDataObtainer):
             for ifo in ifos:
                 valid_segments = self.get_all_segment_times(ifo)
 
-                group_split_seconds: float = 8196.0
+                # Split segments at 8192s boundaries (2^13 seconds) for deterministic group assignment
+                group_split_seconds: float = 8192.0
 
                 valid_segments = self.cut_segments(
                     valid_segments, 
@@ -431,33 +432,16 @@ class NoiseDataObtainer(BaseDataObtainer):
         scale_factor = scale_factor or gf.Defaults.scale_factor
         seed = seed or gf.Defaults.seed
 
+        # Use shared post-processing from base class
         def _post_process(batch):
-            if batch is None:
-                return None
-            if whiten:
-                # Scale up before whitening to avoid numerical underflow with raw data
-                temp_scale = gf.Defaults.scale_factor
-                batch[RV.ONSOURCE] *= temp_scale
-                batch[RV.OFFSOURCE] *= temp_scale
-
-                batch[RV.ONSOURCE] = gf.whiten(
-                    batch[RV.ONSOURCE],
-                    batch[RV.OFFSOURCE],
-                    sample_rate_hertz
-                )
-                
-                # Scale back down
-                batch[RV.ONSOURCE] /= temp_scale
-                batch[RV.OFFSOURCE] /= temp_scale # Restore offsource too for consistency
-            if crop:
-                batch[RV.ONSOURCE] = gf.crop_samples(
-                    batch[RV.ONSOURCE], 
-                    onsource_duration_seconds, 
-                    sample_rate_hertz
-                )
-            batch[RV.ONSOURCE] = gf.replace_nan_and_inf_with_zero(batch[RV.ONSOURCE])
-            batch[RV.OFFSOURCE] = gf.replace_nan_and_inf_with_zero(batch[RV.OFFSOURCE])
-            return batch
+            return self._post_process_batch(
+                batch, 
+                sample_rate_hertz, 
+                onsource_duration_seconds,
+                scale_factor,
+                whiten, 
+                crop
+            )
 
         if self.rng is None:
             self.rng = default_rng(seed)
@@ -513,6 +497,7 @@ class NoiseDataObtainer(BaseDataObtainer):
                         return
                     # Reset generator for next epoch
                     self._segment_generator = None
+                    self.current_segment = None  # Clear to free memory
                     self._current_segment_index = 0
                     self._segment_exhausted = True
                     continue
