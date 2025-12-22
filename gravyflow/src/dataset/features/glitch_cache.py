@@ -39,9 +39,9 @@ CACHE_OFFSOURCE_DURATION = TransientDefaults.CACHE_OFFSOURCE_DURATION
 CACHE_PADDING_DURATION = TransientDefaults.CACHE_PADDING_DURATION
 
 
-class GlitchCache:
+class TransientCache:
     """
-    Manages standardized glitch data cache with efficient bulk I/O.
+    Manages transient data cache (events and glitches) with efficient bulk I/O.
     
     All data is stored at maximum supported parameters and resampled/cropped
     at load time to match the requested configuration.
@@ -52,12 +52,12 @@ class GlitchCache:
     
     Example:
         # Writing cache
-        cache = GlitchCache(Path("glitches_O3_L1.h5"), mode='w')
+        cache = TransientCache(Path("transients_O3.h5"), mode='w')
         cache.save_all(onsource, offsource, gps_times, labels,
                       sample_rate_hertz=4096.0, ifo_names=['L1'])
         
         # Reading cache
-        cache = GlitchCache(Path("glitches_O3_L1.h5"), mode='r')
+        cache = TransientCache(Path("transients_O3.h5"), mode='r')
         cache.validate_request(2048.0, 1.0, 16.0)  # Raises if unsatisfiable
         data = cache.load_all()  # Single bulk read
     """
@@ -172,7 +172,6 @@ class GlitchCache:
                 'sample_rate_hertz': float(grp.attrs.get('sample_rate_hertz', CACHE_SAMPLE_RATE_HERTZ)),
                 'onsource_duration': float(grp.attrs.get('onsource_duration', CACHE_ONSOURCE_DURATION)),
                 'offsource_duration': float(grp.attrs.get('offsource_duration', CACHE_OFFSOURCE_DURATION)),
-                'ifo_names': list(grp.attrs.get('ifo_names', [])),
                 'ifo_names': list(grp.attrs.get('ifo_names', [])),
                 'num_glitches': int(grp['gps_times'].shape[0]),
                 'num_ifos': int(grp['onsource'].shape[1]),
@@ -425,6 +424,9 @@ class GlitchCache:
         """
         Append a single glitch to the cache.
         
+        The GPS index is invalidated by append() and rebuilt lazily on next access.
+        This is simpler and avoids race conditions vs incremental updates.
+        
         Args:
             onsource: Array of shape (IFOs, samples)
             offsource: Array of shape (IFOs, samples)
@@ -433,18 +435,13 @@ class GlitchCache:
             gps_key: Optional GPS key (10ms precision). If not provided, computed from gps_time.
         """
         # Expand dims to (1, IFOs, samples) for append
+        # Index is invalidated by append() and rebuilt lazily
         self.append(
             onsource=onsource[np.newaxis, ...],
             offsource=offsource[np.newaxis, ...],
             gps_times=np.array([gps_time]),
             labels=np.array([label])
         )
-        
-        # Invalidate GPS index to force rebuild on next access
-        # (We cannot safely update it here because we don't know the exact
-        # index position without re-reading from the HDF5 file)
-        with self._gps_lock:
-            self._gps_index = None
     
     def validate_request(
         self, 
@@ -702,8 +699,9 @@ class GlitchCache:
             grp['labels'].resize(n_total, axis=0)
             grp['labels'][n_current:] = labels.astype(np.int32)
             
-        self._metadata = None  # Metadata (count) changed
+        # Atomically invalidate both metadata and index inside lock
         with self._gps_lock:
+            self._metadata = None  # Metadata (count) changed
             self._gps_index = None  # Invalidate GPS index to force rebuild
     
     def get_batch(
@@ -902,33 +900,20 @@ class GlitchCache:
             }
 
 
-def generate_glitch_cache_path(
-    observing_run: str = None,
-    ifo: str = None,
-    data_directory: Optional[Path] = None
-) -> Path:
+def generate_glitch_cache_path(data_directory: Optional[Path] = None) -> Path:
     """
     Generate standardized cache file path.
     
-    Uses a single cache for all observing runs and IFOs
+    Uses a single universal cache for all observing runs and IFOs
     to avoid duplicate downloads of the same GPS times.
     
     Args:
-        observing_run: Ignored (kept for backward compatibility)
-        ifo: Ignored (kept for backward compatibility)
         data_directory: Base directory for cache files
         
     Returns:
         Path like: data_directory/glitch_cache.h5
-        
-    Note:
-        The cache stores glitches from all runs and IFOs together.
-        GPS keys ensure no duplicates - same event downloaded once regardless
-        of how many IFOs/runs request it.
     """
     if data_directory is None:
         data_directory = Path("./gravyflow_data")
     
-    # Single cache for all data
-    filename = "glitch_cache.h5"
-    return data_directory / filename
+    return data_directory / "glitch_cache.h5"

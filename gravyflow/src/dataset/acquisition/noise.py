@@ -45,9 +45,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             cache_segments: bool = True,
             overrides: dict = None,
             logging_level: int = logging.WARNING,
-            random_sign_reversal: bool = True,
-            random_time_reversal: bool = True,
-            augmentation_probability: float = 0.5,
+            augmentations: List = None,  # List of augmentation instances
             prefetch_segments: int = 16,
         ):
         
@@ -62,9 +60,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             cache_segments=cache_segments,
             overrides=overrides,
             logging_level=logging_level,
-            random_sign_reversal=random_sign_reversal,
-            random_time_reversal=random_time_reversal,
-            augmentation_probability=augmentation_probability,
+            augmentations=augmentations,
             prefetch_segments=prefetch_segments,
         )
         

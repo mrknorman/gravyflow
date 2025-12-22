@@ -12,7 +12,7 @@ from pathlib import Path
 import tempfile
 
 import gravyflow as gf
-from gravyflow.src.dataset.features.glitch_cache import GlitchCache
+from gravyflow.src.dataset.features.glitch_cache import TransientCache
 from gravyflow.src.dataset.config import TransientDefaults
 
 # Use central config constants
@@ -33,7 +33,7 @@ def temp_cache_dir():
 def sample_cache(temp_cache_dir):
     """Create a sample cache with test data."""
     cache_path = temp_cache_dir / "test_cache.h5"
-    cache = GlitchCache(cache_path, mode='w')
+    cache = TransientCache(cache_path, mode='w')
     
     N = 10
     num_ons = int(CACHE_SAMPLE_RATE_HERTZ * CACHE_ONSOURCE_DURATION)
@@ -65,21 +65,21 @@ class TestGPSLookup:
     
     def test_has_gps_returns_true_for_existing(self, sample_cache):
         cache_path, gps_times = sample_cache
-        cache = GlitchCache(cache_path, mode='r')
+        cache = TransientCache(cache_path, mode='r')
         
         for gps in gps_times:
             assert cache.has_gps(gps), f"Expected GPS {gps} to be in cache"
     
     def test_has_gps_returns_false_for_missing(self, sample_cache):
         cache_path, _ = sample_cache
-        cache = GlitchCache(cache_path, mode='r')
+        cache = TransientCache(cache_path, mode='r')
         
         assert not cache.has_gps(999999.0), "Expected missing GPS to return False"
         assert not cache.has_gps(2000000.0), "Expected missing GPS to return False"
     
     def test_get_by_gps_returns_data(self, sample_cache):
         cache_path, gps_times = sample_cache
-        cache = GlitchCache(cache_path, mode='r')
+        cache = TransientCache(cache_path, mode='r')
         
         result = cache.get_by_gps(gps_times[0])
         assert result is not None, "Expected get_by_gps to return data"
@@ -90,14 +90,14 @@ class TestGPSLookup:
     
     def test_get_by_gps_returns_none_for_missing(self, sample_cache):
         cache_path, _ = sample_cache
-        cache = GlitchCache(cache_path, mode='r')
+        cache = TransientCache(cache_path, mode='r')
         
         result = cache.get_by_gps(999999.0)
         assert result is None, "Expected missing GPS to return None"
     
     def test_get_by_gps_crops_and_resamples(self, sample_cache):
         cache_path, gps_times = sample_cache
-        cache = GlitchCache(cache_path, mode='r')
+        cache = TransientCache(cache_path, mode='r')
         
         target_rate = 1024.0
         target_ons_dur = 1.0
@@ -125,7 +125,7 @@ class TestAppendSingle:
     
     def test_append_single_adds_to_cache(self, temp_cache_dir):
         cache_path = temp_cache_dir / "append_test.h5"
-        cache = GlitchCache(cache_path, mode='w')
+        cache = TransientCache(cache_path, mode='w')
         
         num_ons = int(CACHE_SAMPLE_RATE_HERTZ * CACHE_ONSOURCE_DURATION)
         num_offs = int(CACHE_SAMPLE_RATE_HERTZ * CACHE_OFFSOURCE_DURATION)
@@ -162,7 +162,7 @@ class TestAppendSingle:
     
     def test_append_single_updates_index(self, temp_cache_dir):
         cache_path = temp_cache_dir / "index_test.h5"
-        cache = GlitchCache(cache_path, mode='w')
+        cache = TransientCache(cache_path, mode='w')
         
         num_ons = int(CACHE_SAMPLE_RATE_HERTZ * CACHE_ONSOURCE_DURATION)
         num_offs = int(CACHE_SAMPLE_RATE_HERTZ * CACHE_OFFSOURCE_DURATION)
@@ -212,7 +212,7 @@ class TestCachePersistence:
         num_offs = int(CACHE_SAMPLE_RATE_HERTZ * CACHE_OFFSOURCE_DURATION)
         
         # Create and populate
-        cache1 = GlitchCache(cache_path, mode='w')
+        cache1 = TransientCache(cache_path, mode='w')
         cache1.initialize_file(
             sample_rate_hertz=CACHE_SAMPLE_RATE_HERTZ,
             onsource_duration=CACHE_ONSOURCE_DURATION,
@@ -232,7 +232,7 @@ class TestCachePersistence:
         del cache1  # Close
         
         # Reopen and verify
-        cache2 = GlitchCache(cache_path, mode='r')
+        cache2 = TransientCache(cache_path, mode='r')
         assert cache2.has_gps(gps), "Data should persist after cache is closed and reopened"
 
 

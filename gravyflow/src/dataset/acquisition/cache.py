@@ -189,7 +189,7 @@ class DiskCache(AcquisitionCache):
     Used by TRANSIENT mode to persist downloaded and processed event/glitch
     windows to disk. Supports resampling and cropping at retrieval time.
     
-    This is a thin wrapper around GlitchCache that implements the unified
+    This is a thin wrapper around TransientCache that implements the unified
     AcquisitionCache interface.
     
     Args:
@@ -197,14 +197,14 @@ class DiskCache(AcquisitionCache):
         mode: File mode ('r', 'w', 'a')
         
     Note:
-        The underlying GlitchCache stores data at maximum parameters
+        The underlying TransientCache stores data at maximum parameters
         (sample rate, duration) and resamples/crops on retrieval.
     """
     
     def __init__(self, cache_path: Path, mode: str = 'a'):
         # Import here to avoid circular imports
-        from gravyflow.src.dataset.features.glitch_cache import GlitchCache
-        self._cache = GlitchCache(cache_path, mode=mode)
+        from gravyflow.src.dataset.features.glitch_cache import TransientCache
+        self._cache = TransientCache(cache_path, mode=mode)
         self._path = cache_path
     
     @property
@@ -253,7 +253,7 @@ class DiskCache(AcquisitionCache):
         """
         Append data to disk cache.
         
-        Note: GlitchCache handles duplicate detection internally.
+        Note: TransientCache handles duplicate detection internally.
         """
         self._cache.append_single(
             onsource=onsource,
@@ -328,7 +328,7 @@ class DiskCache(AcquisitionCache):
         """Return all GPS times in cache."""
         return self._cache.get_all_gps_times()
     
-    # === Passthrough methods for GlitchCache-specific functionality ===
+    # === Passthrough methods for TransientCache-specific functionality ===
     # These allow transient.py to access internal cache state efficiently
     
     @property
@@ -366,7 +366,7 @@ class DiskCache(AcquisitionCache):
         """
         Get a batch of cached data by indices.
         
-        Passthrough to GlitchCache.get_batch() for efficient bulk retrieval.
+        Passthrough to TransientCache.get_batch() for efficient bulk retrieval.
         
         Args:
             indices: Array of cache indices to load
@@ -394,7 +394,7 @@ class DiskCache(AcquisitionCache):
         label: int,
         gps_key: int = None
     ) -> None:
-        """Append single item to cache (passthrough to GlitchCache)."""
+        """Append single item to cache (passthrough to TransientCache)."""
         self._cache.append_single(
             onsource=onsource,
             offsource=offsource,

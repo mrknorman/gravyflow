@@ -362,6 +362,8 @@ class TransientIndex:
         
         # Extract arrays
         gps_times = np.array([r.transient_gps_time for r in self.records], dtype=np.float64)
+        start_times = np.array([r.start_gps_time for r in self.records], dtype=np.float64)
+        end_times = np.array([r.end_gps_time for r in self.records], dtype=np.float64)
         labels = np.array([r.label.value for r in self.records], dtype=np.int8)
         kinds = np.array([r.kind.value for r in self.records], dtype=np.int32)
         runs = np.array([list(ObservingRun).index(r.observing_run) for r in self.records], dtype=np.int8)
@@ -390,6 +392,8 @@ class TransientIndex:
         np.savez_compressed(
             path,
             gps_times=gps_times,
+            start_times=start_times,
+            end_times=end_times,
             labels=labels,
             kinds=kinds,
             runs=runs,
@@ -443,17 +447,26 @@ class TransientIndex:
             from gravyflow.src.utils.gps import gps_to_key
             seen_in = bitmask_to_ifos(int(ifo_masks[i]))
             
-            confidence = list(EventConfidence)[confidences[i]] if confidences[i] >= 0 else None
+            confidence = EventConfidence(confidences[i]) if confidences[i] >= 0 else None
             name = names[i] if names[i] else None
             
             gps_time = float(gps_times[i])
-            padding = 16.0  # Default padding
+            
+            # Restore boundaries from stored values, with fallback for old files
+            if "start_times" in data and "end_times" in data:
+                start_gps = float(data["start_times"][i])
+                end_gps = float(data["end_times"][i])
+            else:
+                # Backward compatibility: old files lack boundaries
+                padding = 16.0
+                start_gps = gps_time - padding
+                end_gps = gps_time + padding
             
             record = TransientSegment(
                 gps_key=gps_to_key(gps_time),
                 transient_gps_time=gps_time,
-                start_gps_time=gps_time - padding,
-                end_gps_time=gps_time + padding,
+                start_gps_time=start_gps,
+                end_gps_time=end_gps,
                 label=label,
                 kind=kind,
                 observing_run=run,
