@@ -20,12 +20,12 @@ logger = logging.getLogger(__name__)
 class ValidationBank:
     """Generate/store validation data: noise (FAR), injections (efficiency), and real events."""
 
-    _NOISE_OUTPUTS = (gf.ReturnVariables.WHITENED_ONSOURCE, gf.ReturnVariables.GPS_TIME)
+    _NOISE_OUTPUTS = (gf.ReturnVariables.WHITENED_ONSOURCE, gf.ReturnVariables.START_GPS_TIME)
     _INJ_OUTPUTS = (
         gf.ReturnVariables.WHITENED_ONSOURCE,
         gf.ReturnVariables.WHITENED_INJECTIONS,
         gf.ReturnVariables.INJECTION_MASKS,
-        gf.ReturnVariables.GPS_TIME,
+        gf.ReturnVariables.START_GPS_TIME,
         gf.ReturnVariables.CENTRAL_TIME,
         gf.ScalingTypes.SNR,
         gf.ScalingTypes.HPEAK,
@@ -135,7 +135,7 @@ class ValidationBank:
         gps_list: List[float] = []
         fp_heap: List[Tuple[float, float, Any]] = []
         keep = cfg.num_worst_per_bin * 5
-        gps_key = gf.ReturnVariables.GPS_TIME.name
+        gps_key = gf.ReturnVariables.START_GPS_TIME.name
 
         for b in tqdm(range(num_batches), desc="Scoring noise", unit="batch"):
             self._beat()
@@ -189,7 +189,7 @@ class ValidationBank:
             "snrs": "SNR",
             "mass1": gf.WaveformParameters.MASS_1_MSUN.name,
             "mass2": gf.WaveformParameters.MASS_2_MSUN.name,
-            "gps": gf.ReturnVariables.GPS_TIME.name,
+            "gps": gf.ReturnVariables.START_GPS_TIME.name,
             "ct": gf.ReturnVariables.CENTRAL_TIME.name,
             "hpeak": gf.ScalingTypes.HPEAK.name,
             "hrss": gf.ScalingTypes.HRSS.name,

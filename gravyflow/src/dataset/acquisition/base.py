@@ -1155,8 +1155,8 @@ class BaseDataObtainer(ABC):
                             self._segment_cache.put(cache_key, segment)
                             return segment
                         else:
-                            logging.error(
-                                "Segment integrity compromised, skipping"
+                            logging.debug(
+                                f"Segment integrity check failed for {ifo.name}, will zero-fill"
                             )
                             return None
                     else: 
@@ -1206,7 +1206,7 @@ class BaseDataObtainer(ABC):
                 )
 
             except Exception as e:
-                logging.error(f"Error acquiring segment: {type(e).__name__}, {str(e)}")
+                logging.debug(f"Segment acquisition failed (will zero-fill): {type(e).__name__}, {str(e)}")
                 return None
             
             if segment is not None:
@@ -1216,7 +1216,7 @@ class BaseDataObtainer(ABC):
                     self._segment_cache.put(cache_key, segment)
                     return segment
                 else:
-                    logging.error("Segment integrity compromised, skipping")
+                    logging.debug(f"Segment integrity check failed for {ifo.name}, will zero-fill")
                     return None
             else:
                 logging.error("Segment is None for some reason, skipping")
@@ -1227,7 +1227,8 @@ class BaseDataObtainer(ABC):
         sample_rate_hertz: Optional[float] = None,
         valid_segments: Optional[np.ndarray] = None,
         ifos: List[gf.IFO] = [gf.IFO.L1],
-        scale_factor: float = 1.0
+        scale_factor: float = 1.0,
+        quiet_zero_fill: bool = False  # Suppress zero-fill warnings (for universal cache)
     ) -> Generator[IFOData, None, None]:
         
         if sample_rate_hertz is None:
@@ -1275,10 +1276,11 @@ class BaseDataObtainer(ABC):
                             self._cache_segment(segment_key, segment_data)
                     else:
                         self._zero_filled_segments_count += 1
-                        logging.warning(
-                            f"Segment missing for {ifo.name} at {segment_start_gps_time}. "
-                            f"Filling with zeros (total zero-filled: {self._zero_filled_segments_count})."
-                        )
+                        if not quiet_zero_fill:
+                            logging.warning(
+                                f"Segment missing for {ifo.name} at {segment_start_gps_time}. "
+                                f"Filling with zeros (total zero-filled: {self._zero_filled_segments_count})."
+                            )
                         duration = segment_end_gps_time - segment_start_gps_time
                         num_samples = int(duration * sample_rate_hertz)
                         segments.append(ops.zeros((num_samples,), dtype="float32"))
@@ -1327,10 +1329,11 @@ class BaseDataObtainer(ABC):
                             self._cache_segment(segment_key, segment_data)
                     else:
                         self._zero_filled_segments_count += 1
-                        logging.warning(
-                            f"Prefetched segment missing. Filling with zeros "
-                            f"(total zero-filled: {self._zero_filled_segments_count})."
-                        )
+                        if not quiet_zero_fill:
+                            logging.warning(
+                                f"Prefetched segment missing. Filling with zeros "
+                                f"(total zero-filled: {self._zero_filled_segments_count})."
+                            )
                         duration = segment_end_gps_time - segment_start_gps_time
                         num_samples = int(duration * sample_rate_hertz)
                         segments.append(ops.zeros((num_samples,), dtype="float32"))
@@ -1359,10 +1362,11 @@ class BaseDataObtainer(ABC):
                             self._cache_segment(segment_key, segment_data)
                     else:
                         self._zero_filled_segments_count += 1
-                        logging.warning(
-                            f"Segment missing for {ifo.name} at {segment_start_gps_time}. "
-                            f"Filling with zeros (total zero-filled: {self._zero_filled_segments_count})."
-                        )
+                        if not quiet_zero_fill:
+                            logging.warning(
+                                f"Segment missing for {ifo.name} at {segment_start_gps_time}. "
+                                f"Filling with zeros (total zero-filled: {self._zero_filled_segments_count})."
+                            )
                         duration = segment_end_gps_time - segment_start_gps_time
                         num_samples = int(duration * sample_rate_hertz)
                         segments.append(ops.zeros((num_samples,), dtype="float32"))

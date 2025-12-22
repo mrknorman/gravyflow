@@ -38,7 +38,7 @@ def verify_dataset_shapes():
         noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
         output_variables=[
             ReturnVariables.ONSOURCE, 
-            ReturnVariables.GPS_TIME,
+            ReturnVariables.START_GPS_TIME,
             ReturnVariables.INJECTIONS
         ]
     )

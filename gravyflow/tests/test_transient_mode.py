@@ -89,7 +89,7 @@ class TestTransientDatasetOutput:
                 steps_per_epoch=5,
                 group='train',
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-                output_variables=[gf.ReturnVariables.GPS_TIME]
+                output_variables=[gf.ReturnVariables.START_GPS_TIME]
             )
             
             assert dataset is not None
@@ -121,7 +121,7 @@ class TestTransientDatasetOutput:
                 steps_per_epoch=1,
                 group='all',
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-                output_variables=[gf.ReturnVariables.GPS_TIME]
+                output_variables=[gf.ReturnVariables.START_GPS_TIME]
             )
             
             x_batch, y_batch = dataset[0]
@@ -140,7 +140,7 @@ class TestTransientDatasetOutput:
             ifo.close()
     
     def test_dataset_returns_gps_time_in_output(self):
-        """Verify Dataset returns GPS_TIME in y batch."""
+        """Verify Dataset returns START_GPS_TIME in y batch."""
         ifo = gf.IFODataObtainer(
             observing_runs=gf.ObservingRun.O3,
             data_quality=gf.DataQuality.BEST,
@@ -163,16 +163,16 @@ class TestTransientDatasetOutput:
                 steps_per_epoch=1,
                 group='test',
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-                output_variables=[gf.ReturnVariables.GPS_TIME]
+                output_variables=[gf.ReturnVariables.START_GPS_TIME]
             )
             
             x_batch, y_batch = dataset[0]
             
-            # y_batch should have GPS_TIME
-            assert gf.ReturnVariables.GPS_TIME.name in y_batch, \
-                f"GPS_TIME not in y_batch keys: {y_batch.keys()}"
+            # y_batch should have START_GPS_TIME
+            assert gf.ReturnVariables.START_GPS_TIME.name in y_batch, \
+                f"START_GPS_TIME not in y_batch keys: {y_batch.keys()}"
             
-            gps = y_batch[gf.ReturnVariables.GPS_TIME.name]
+            gps = y_batch[gf.ReturnVariables.START_GPS_TIME.name]
             # GPS should be valid O3 time range
             O3_START_GPS = 1238166018
             O3_END_GPS = 1269363618
@@ -207,13 +207,13 @@ class TestTransientDatasetOutput:
                 steps_per_epoch=5,  # Request 5 batches
                 group='all',
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-                output_variables=[gf.ReturnVariables.GPS_TIME]
+                output_variables=[gf.ReturnVariables.START_GPS_TIME]
             )
             
             gps_times = []
             for i in range(5):
                 x_batch, y_batch = dataset[i]
-                gps = y_batch[gf.ReturnVariables.GPS_TIME.name]
+                gps = y_batch[gf.ReturnVariables.START_GPS_TIME.name]
                 gps_value = float(np.array(gps).flatten()[0])
                 gps_times.append(gps_value)
             
@@ -258,12 +258,12 @@ class TestTransientModeBatching:
                 steps_per_epoch=1,
                 group='all',
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-                output_variables=[gf.ReturnVariables.GPS_TIME]
+                output_variables=[gf.ReturnVariables.START_GPS_TIME]
             )
             
             x_batch, y_batch = dataset[0]
             
-            gps_times = y_batch[gf.ReturnVariables.GPS_TIME.name]
+            gps_times = y_batch[gf.ReturnVariables.START_GPS_TIME.name]
             # Shape should be (Batch, 1) or (Batch,)
             # Convert to numpy and flatten to ensure we have standard floats
             gps_values = np.array(gps_times).flatten()
@@ -305,7 +305,7 @@ class TestTransientModeBatching:
                 steps_per_epoch=1,
                 group='all',
                 input_variables=[gf.ReturnVariables.ONSOURCE], # Raw data to check correlation/alignment if needed
-                output_variables=[gf.ReturnVariables.GPS_TIME]
+                output_variables=[gf.ReturnVariables.START_GPS_TIME]
             )
             
             x_batch, _ = dataset[0]

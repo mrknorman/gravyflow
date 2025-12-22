@@ -27,9 +27,9 @@ SAMPLE_RATE = 2048.0
 ONSOURCE_DURATION = 1.0
 OFFSOURCE_DURATION = 16.0
 BATCH_SIZE = 32
-STEPS_PER_EPOCH = 5000  # ~160K samples per epoch
-VALIDATION_STEPS = 1000  # ~32K validation samples
-EPOCHS = 100
+STEPS_PER_EPOCH = 50 # ~160K samples per epoch
+VALIDATION_STEPS = 10 # ~32K validation samples
+EPOCHS = 2
 NUM_CLASSES = len(gf.GlitchType)
 
 # Output directory for checkpoints and logs
@@ -87,11 +87,11 @@ def create_glitch_classifier(
     x = Dropout(0.5, name="Dropout_2")(x)
     
     # Output: softmax for multi-class classification
-    outputs = Dense(num_classes, activation='softmax', name=gf.ReturnVariables.GLITCH_TYPE.name)(x)
+    outputs = Dense(num_classes, activation='softmax', name="glitch_type")(x)
     
     model = Model(
         inputs=[onsource_input, offsource_input],
-        outputs={gf.ReturnVariables.GLITCH_TYPE.name: outputs},
+        outputs=outputs,  # Simple tensor output (not dictionary)
         name="glitch_classifier"
     )
     
@@ -115,16 +115,34 @@ class GlitchAdapterDataset(keras.utils.PyDataset):
     def __getitem__(self, index):
         features, labels = self.dataset[index]
         
-        # Convert integer labels to one-hot
+        # DEBUG: Print shapes
+        if index == 0:
+            print(f"DEBUG GlitchAdapterDataset.__getitem__:")
+            print(f"  features keys: {list(features.keys())}")
+            for k, v in features.items():
+                print(f"    {k}: shape={getattr(v, 'shape', 'N/A')}")
+            print(f"  labels keys: {list(labels.keys())}")
+            for k, v in labels.items():
+                print(f"    {k}: shape={getattr(v, 'shape', 'N/A')}, dtype={getattr(v, 'dtype', 'N/A')}")
+        
+        # Extract GLITCH_TYPE and convert to one-hot
         if gf.ReturnVariables.GLITCH_TYPE.name in labels:
             int_labels = labels[gf.ReturnVariables.GLITCH_TYPE.name]
+            # Labels are shape (batch, ifo) - squeeze IFO dim for single-detector
+            if len(int_labels.shape) > 1:
+                int_labels = int_labels[:, 0]  # Take first IFO
             # Handle negative labels (unknown)
-            int_labels = np.clip(int_labels, 0, self.num_classes - 1)
+            int_labels = np.clip(int_labels, 0, self.num_classes - 1).astype(int)
             # One-hot encode
             one_hot = np.eye(self.num_classes, dtype='float32')[int_labels]
-            labels[gf.ReturnVariables.GLITCH_TYPE.name] = one_hot
-        
-        return features, labels
+            
+            if index == 0:
+                print(f"  After one-hot: shape={one_hot.shape}")
+            
+            # Return as simple tensor (not dictionary) to match model output
+            return features, one_hot
+        else:
+            raise ValueError(f"GLITCH_TYPE not in labels: {list(labels.keys())}")
 
 # =============================================================================
 # Create Data Obtainers (Separate for Train and Validation)
@@ -138,18 +156,18 @@ train_ifo_obtainer = gf.IFODataObtainer(
     data_quality=gf.DataQuality.BEST,
     data_labels=[gf.DataLabel.GLITCHES],
     segment_order=gf.SegmentOrder.RANDOM,
-    # Augmentations
-    random_sign_reversal=True,
-    random_time_reversal=True,
-    random_shift=True,
-    shift_fraction=0.2,
-    add_noise=True,
-    noise_amplitude=0.05,
+    # Augmentations (new dataclass-based API)
+    augmentations=[
+        gf.SignReversal(probability=0.5),
+        gf.TimeReversal(probability=0.5),
+        gf.RandomShift(probability=0.5, shift_fraction=0.2),
+        gf.AddNoise(probability=0.5, amplitude=0.05),
+    ],
     # Class balancing
     balanced_glitch_types=True,
 )
 
-train_noise_obtainer = gf.TransientObtainer(
+train_noise_obtainer = gf.NoiseObtainer(
     ifo_data_obtainer=train_ifo_obtainer,
     ifos=[gf.IFO.L1]
 )
@@ -160,16 +178,13 @@ val_ifo_obtainer = gf.IFODataObtainer(
     data_quality=gf.DataQuality.BEST,
     data_labels=[gf.DataLabel.GLITCHES],
     segment_order=gf.SegmentOrder.RANDOM,
-    # NO augmentation for validation
-    random_sign_reversal=False,
-    random_time_reversal=False,
-    random_shift=False,
-    add_noise=False,
+    # NO augmentation for validation (empty list)
+    augmentations=[],
     # Class balancing still on for fair evaluation
     balanced_glitch_types=True,
 )
 
-val_noise_obtainer = gf.TransientObtainer(
+val_noise_obtainer = gf.NoiseObtainer(
     ifo_data_obtainer=val_ifo_obtainer,
     ifos=[gf.IFO.L1]
 )
@@ -252,12 +267,7 @@ callbacks = [
         save_freq='epoch',
         verbose=0
     ),
-    # TensorBoard logging
-    keras.callbacks.TensorBoard(
-        log_dir=OUTPUT_DIR / "logs",
-        histogram_freq=1,
-        write_graph=True
-    ),
+    # NOTE: TensorBoard removed - requires TensorFlow which isn't available
     # Early stopping
     keras.callbacks.EarlyStopping(
         monitor='val_accuracy',
@@ -288,7 +298,7 @@ print(f"Checkpoints will be saved to: {OUTPUT_DIR}")
 
 history = model.fit(
     training_dataset,
-    verbose=2,
+    verbose=1,
     validation_data=validation_dataset,
     epochs=EPOCHS,
     callbacks=callbacks

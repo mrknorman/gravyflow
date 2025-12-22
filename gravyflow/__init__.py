@@ -94,7 +94,8 @@ from .src.dataset.conditioning.pearson import rolling_pearson
 from .src.dataset.conditioning.detector import IFO, Network, project_wave
 from .src.dataset.acquisition import (
     DataQuality, DataLabel, SegmentOrder, AcquisitionMode, SamplingMode, ObservingRun,
-    IFOData, IFODataObtainer, NoiseDataObtainer, TransientDataObtainer
+    IFOData, IFODataObtainer, NoiseDataObtainer, TransientDataObtainer,
+    SignReversal, TimeReversal, RandomShift, AddNoise, default_augmentations
 )
 from .src.dataset.noise.noise import NoiseType, Obtainer, NoiseObtainer
 from .src.dataset.curriculum import Curriculum, CurriculumSchedule, CurriculumProgressCallback
