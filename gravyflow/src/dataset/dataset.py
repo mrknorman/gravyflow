@@ -47,7 +47,7 @@ def validate_noise_settings(
                 UserWarning
             )
             
-        if gf.ReturnVariables.GPS_TIME in variables_to_return:
+        if gf.ReturnVariables.START_GPS_TIME in variables_to_return:
             warn(
                 "Cannot return GPS time from simulated Noise defaulting to -1",
                 UserWarning
@@ -292,11 +292,17 @@ class GravyflowDataset(keras.utils.PyDataset):
                     batch_data.get(gf.ReturnVariables.TRANSIENT_GPS_TIME)
                 )
                 feature_labels = batch_data.get(gf.ReturnVariables.SUB_TYPE)
+                # Transient-specific outputs
+                glitch_type = batch_data.get(gf.ReturnVariables.GLITCH_TYPE)
+                source_type = batch_data.get(gf.ReturnVariables.SOURCE_TYPE)
+                data_label = batch_data.get(gf.ReturnVariables.DATA_LABEL)
             elif len(batch_data) == 4:
                 onsource, offsource, gps_times, feature_labels = batch_data
+                glitch_type, source_type, data_label = None, None, None
             else:
                 onsource, offsource, gps_times = batch_data
                 feature_labels = None
+                glitch_type, source_type, data_label = None, None, None
         except Exception as e:
             logger.info(f"Noise generation failed: {e}\nTraceback: {traceback.format_exc()}")
             raise Exception(f"Noise generation failed: {e}")
@@ -358,7 +364,10 @@ class GravyflowDataset(keras.utils.PyDataset):
             scaled_injections=scaled_injections, 
             raw_offsource=raw_offsource,
             sample_rate_hertz=self.sample_rate_hertz,
-            feature_labels=feature_labels
+            feature_labels=feature_labels,
+            glitch_type=glitch_type,
+            source_type=source_type,
+            data_label=data_label
         )
 
         return input_dict, output_dict
@@ -470,7 +479,7 @@ class GravyflowDataset(keras.utils.PyDataset):
 
     def _process_gps_times(self, gps_times):
         """Process GPS times if required."""
-        if gf.ReturnVariables.GPS_TIME in self.variables_to_return:
+        if gf.ReturnVariables.START_GPS_TIME in self.variables_to_return:
             return ops.cast(gps_times, "float64")
         return None
 
@@ -481,20 +490,26 @@ class GravyflowDataset(keras.utils.PyDataset):
             return mask
         return None
 
-    def _create_output_dictionaries(self, *args, scaled_injections=None, raw_offsource=None, sample_rate_hertz=None, feature_labels=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _create_output_dictionaries(self, *args, scaled_injections=None, raw_offsource=None, sample_rate_hertz=None, feature_labels=None, glitch_type=None, source_type=None, data_label=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         input_dict = create_variable_dictionary(
             self.input_variables, *args, 
             scaled_injections=scaled_injections, 
             sample_rate_hertz=sample_rate_hertz,
             raw_offsource=raw_offsource,
-            feature_labels=feature_labels
+            feature_labels=feature_labels,
+            glitch_type=glitch_type,
+            source_type=source_type,
+            data_label=data_label
         )
         output_dict = create_variable_dictionary(
             self.output_variables, *args,
             scaled_injections=scaled_injections,
             sample_rate_hertz=sample_rate_hertz,
             raw_offsource=raw_offsource,
-            feature_labels=feature_labels
+            feature_labels=feature_labels,
+            glitch_type=glitch_type,
+            source_type=source_type,
+            data_label=data_label
         )
         
         # Remove keys with None values
@@ -524,7 +539,10 @@ def create_variable_dictionary(
     scaled_injections = None,
     sample_rate_hertz: float = None,
     raw_offsource = None,
-    feature_labels = None
+    feature_labels = None,
+    glitch_type = None,
+    source_type = None,
+    data_label = None
     ) -> Dict:
     """
     Create dictionary of requested return variables.
@@ -536,6 +554,9 @@ def create_variable_dictionary(
         raw_offsource: Unprocessed offsource data used for SNR calculation.
                        If None, uses the processed offsource.
         feature_labels: Labels for SUB_TYPE classification (from TransientObtainer).
+        glitch_type: GLITCH_TYPE labels (from TransientObtainer).
+        source_type: SOURCE_TYPE labels (from TransientObtainer).
+        data_label: DATA_LABEL values (from TransientObtainer).
     """
     from keras import ops
     
@@ -543,13 +564,17 @@ def create_variable_dictionary(
         gf.ReturnVariables.ONSOURCE: onsource,
         gf.ReturnVariables.WHITENED_ONSOURCE: whitened_onsource,
         gf.ReturnVariables.OFFSOURCE: offsource,
-        gf.ReturnVariables.GPS_TIME: gps_times,
+        gf.ReturnVariables.START_GPS_TIME: gps_times,
         gf.ReturnVariables.INJECTIONS: injections,
         gf.ReturnVariables.WHITENED_INJECTIONS: whitened_injections,
         gf.ReturnVariables.INJECTION_MASKS: mask,
         gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE: rolling_pearson_onsource,
         gf.ReturnVariables.SPECTROGRAM_ONSOURCE: spectrogram_onsource,
         gf.ReturnVariables.SUB_TYPE: feature_labels,
+        # Transient-specific outputs
+        gf.ReturnVariables.GLITCH_TYPE: glitch_type,
+        gf.ReturnVariables.SOURCE_TYPE: source_type,
+        gf.ReturnVariables.DATA_LABEL: data_label,
     }
 
     # Add WaveformParameters from injection_parameters

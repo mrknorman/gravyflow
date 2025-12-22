@@ -918,7 +918,6 @@ def test_gps_time_uniqueness_across_batches():
                 f"Batch {batch_idx} has duplicate GPS times within the batch"
             )
 
-
 # ============================================================================
 # AUGMENTATION TESTS
 # ============================================================================
@@ -931,9 +930,12 @@ def test_ifo_data_obtainer_augmentation_defaults():
         observing_runs=[gf.ObservingRun.O3]
     )
     
-    assert obtainer.random_sign_reversal == True
-    assert obtainer.random_time_reversal == True
-    assert obtainer.augmentation_probability == 0.5
+    # Default augmentations should be SignReversal and TimeReversal
+    assert obtainer.augmentations is not None
+    assert len(obtainer.augmentations) == 2
+    assert isinstance(obtainer.augmentations[0], gf.SignReversal)
+    assert isinstance(obtainer.augmentations[1], gf.TimeReversal)
+    assert obtainer.augmentations[0].probability == 0.5
 
 
 def test_ifo_data_obtainer_augmentation_disabled():
@@ -942,12 +944,10 @@ def test_ifo_data_obtainer_augmentation_disabled():
         data_quality=gf.DataQuality.BEST,
         data_labels=[gf.DataLabel.NOISE],
         observing_runs=[gf.ObservingRun.O3],
-        random_sign_reversal=False,
-        random_time_reversal=False
+        augmentations=[]  # Empty list = no augmentations
     )
     
-    assert obtainer.random_sign_reversal == False
-    assert obtainer.random_time_reversal == False
+    assert obtainer.augmentations == []
 
 
 def test_effective_saturation_with_augmentation():
@@ -955,12 +955,15 @@ def test_effective_saturation_with_augmentation():
     base_saturation = 8.0
     prob = 0.5
     
-    # Both augmentations enabled
+    # Both augmentations enabled with same probability
     obtainer = gf.IFODataObtainer(
         data_quality=gf.DataQuality.BEST,
         data_labels=[gf.DataLabel.NOISE],
         saturation=base_saturation,
-        augmentation_probability=prob
+        augmentations=[
+            gf.SignReversal(probability=prob),
+            gf.TimeReversal(probability=prob)
+        ]
     )
     
     effective = obtainer._get_effective_saturation()
@@ -976,8 +979,7 @@ def test_effective_saturation_no_augmentation():
         data_quality=gf.DataQuality.BEST,
         data_labels=[gf.DataLabel.NOISE],
         saturation=base_saturation,
-        random_sign_reversal=False,
-        random_time_reversal=False
+        augmentations=[]  # Empty list = no augmentations
     )
     
     effective = obtainer._get_effective_saturation()

@@ -427,4 +427,50 @@ class DiskCache(AcquisitionCache):
             onsource_samples=onsource_samples,
             offsource_samples=offsource_samples
         )
-
+    
+    # === Chunked memory cache passthrough properties ===
+    
+    @property
+    def _chunk_in_memory(self) -> bool:
+        """Check if chunked cache mode is enabled."""
+        return self._cache._chunk_in_memory
+    
+    @property
+    def _gps_lock(self):
+        """Access GPS index lock."""
+        return self._cache._gps_lock
+    
+    def enable_chunked_mode(
+        self,
+        chunk_size: int = 5000,
+        sample_rate_hertz: float = None,
+        onsource_duration: float = None,
+        offsource_duration: float = None
+    ) -> None:
+        """Enable chunked memory mode for faster cache hits."""
+        self._cache.enable_chunked_mode(
+            chunk_size=chunk_size,
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration=onsource_duration,
+            offsource_duration=offsource_duration
+        )
+    
+    def get_from_chunk(
+        self,
+        idx: int,
+        target_ifos: list = None
+    ):
+        """Get sample from chunked memory cache."""
+        return self._cache.get_from_chunk(idx, target_ifos=target_ifos)
+    
+    def get_batch_from_chunk(
+        self,
+        indices: np.ndarray,
+        target_ifos: list = None
+    ):
+        """Get batch of samples from chunked cache."""
+        return self._cache.get_batch_from_chunk(indices, target_ifos=target_ifos)
+    
+    def _build_gps_index(self):
+        """Build GPS index (passthrough)."""
+        return self._cache._build_gps_index()

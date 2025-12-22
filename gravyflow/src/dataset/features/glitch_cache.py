@@ -127,6 +127,21 @@ class TransientCache:
         self._mem_ons_dur: Optional[float] = None
         self._mem_off_dur: Optional[float] = None
         
+        # Chunked memory cache for large datasets
+        # Loads a subset of samples into memory with LRU-style eviction
+        self._chunk_in_memory = False
+        self._chunk_start_idx: int = 0  # First index in current chunk
+        self._chunk_end_idx: int = 0    # Last index (exclusive) in current chunk
+        self._chunk_size: int = 5000    # Default chunk size (configurable)
+        self._chunk_onsource: Optional[np.ndarray] = None
+        self._chunk_offsource: Optional[np.ndarray] = None
+        self._chunk_gps: Optional[np.ndarray] = None
+        self._chunk_labels: Optional[np.ndarray] = None
+        # Chunk request parameters (for crop/resample consistency)
+        self._chunk_sample_rate: Optional[float] = None
+        self._chunk_ons_dur: Optional[float] = None
+        self._chunk_off_dur: Optional[float] = None
+        
         # Thread-safe GPS index access
         self._gps_lock = threading.RLock()
         self._gps_index: Optional[Dict[int, int]] = None
@@ -538,6 +553,245 @@ class TransientCache:
             'labels': labels
         }
     
+    def enable_chunked_mode(
+        self,
+        chunk_size: int = 5000,
+        sample_rate_hertz: Optional[float] = None,
+        onsource_duration: Optional[float] = None,
+        offsource_duration: Optional[float] = None,
+    ) -> None:
+        """
+        Enable chunked memory mode for large datasets.
+        
+        Loads a subset of samples into memory and streams new chunks
+        when requested samples are outside the current chunk.
+        
+        Args:
+            chunk_size: Number of samples per chunk (default 5000, ~1-2GB)
+            sample_rate_hertz: Target sample rate for loaded data
+            onsource_duration: Target onsource duration
+            offsource_duration: Target offsource duration
+        """
+        self._chunk_size = chunk_size
+        self._chunk_sample_rate = sample_rate_hertz
+        self._chunk_ons_dur = onsource_duration
+        self._chunk_off_dur = offsource_duration
+        self._chunk_in_memory = True
+        
+        # Load first chunk centered at index 0
+        self._load_chunk_around_index(0)
+        
+        logger.info(
+            f"Enabled chunked mode: chunk_size={chunk_size}, "
+            f"total_samples={self.get_metadata()['num_glitches']}"
+        )
+    
+    def _load_chunk_around_index(self, target_idx: int) -> None:
+        """
+        Load a chunk of data centered around the target index.
+        
+        Chunk bounds are clamped to [0, num_glitches).
+        """
+        meta = self.get_metadata()
+        n_total = meta['num_glitches']
+        
+        if n_total == 0:
+            self._chunk_start_idx = 0
+            self._chunk_end_idx = 0
+            return
+        
+        # Center chunk around target, clamped to valid range
+        half_chunk = self._chunk_size // 2
+        start = max(0, target_idx - half_chunk)
+        end = min(n_total, start + self._chunk_size)
+        
+        # Adjust start if end hit the limit
+        if end == n_total:
+            start = max(0, end - self._chunk_size)
+        
+        # Read chunk from disk
+        indices = np.arange(start, end)
+        
+        stored_rate = meta['sample_rate_hertz']
+        target_rate = self._chunk_sample_rate or stored_rate
+        target_ons_dur = self._chunk_ons_dur or meta['onsource_duration']
+        target_off_dur = self._chunk_off_dur or meta['offsource_duration']
+        
+        # Read raw data for this chunk range
+        with h5py.File(self.path, 'r') as f:
+            grp = f['glitches']
+            self._chunk_onsource = grp['onsource'][start:end]
+            self._chunk_offsource = grp['offsource'][start:end]
+            self._chunk_gps = grp['gps_times'][start:end]
+            self._chunk_labels = grp['labels'][start:end]
+        
+        # Apply crop/resample
+        self._chunk_onsource = self.crop_and_resample(
+            self._chunk_onsource, stored_rate, target_rate, target_ons_dur
+        )
+        self._chunk_offsource = self.crop_and_resample(
+            self._chunk_offsource, stored_rate, target_rate, target_off_dur
+        )
+        
+        self._chunk_start_idx = start
+        self._chunk_end_idx = end
+        
+        logger.debug(f"Loaded chunk [{start}:{end}] ({end-start} samples)")
+    
+    def get_from_chunk(
+        self,
+        idx: int,
+        target_ifos: Optional[List[str]] = None,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, float, int]]:
+        """
+        Get a sample from the chunked memory cache.
+        
+        If the sample is outside the current chunk, loads a new chunk
+        centered around the requested index.
+        
+        Args:
+            idx: Global index in the cache
+            target_ifos: Optional list of IFO names to filter channels
+            
+        Returns:
+            Tuple of (onsource, offsource, gps_time, label) or None if invalid
+        """
+        if not self._chunk_in_memory:
+            return None
+        
+        # Check if index is in current chunk
+        if not (self._chunk_start_idx <= idx < self._chunk_end_idx):
+            # Load new chunk centered on this index
+            self._load_chunk_around_index(idx)
+        
+        # Still not in range? (e.g., invalid index)
+        if not (self._chunk_start_idx <= idx < self._chunk_end_idx):
+            return None
+        
+        # Convert global index to chunk-local index
+        local_idx = idx - self._chunk_start_idx
+        
+        onsource = self._chunk_onsource[local_idx]
+        offsource = self._chunk_offsource[local_idx]
+        
+        # Apply IFO filtering if requested
+        if target_ifos:
+            meta = self.get_metadata()
+            stored_ifos = meta.get('ifo_names', [])
+            if stored_ifos:
+                try:
+                    channel_indices = [stored_ifos.index(ifo) for ifo in target_ifos]
+                    onsource = onsource[channel_indices]
+                    offsource = offsource[channel_indices]
+                except ValueError:
+                    return None
+        
+        return (
+            onsource,
+            offsource,
+            float(self._chunk_gps[local_idx]),
+            int(self._chunk_labels[local_idx])
+        )
+    
+    def get_batch_from_chunk(
+        self,
+        indices: np.ndarray,
+        target_ifos: Optional[List[str]] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Get multiple samples from chunked cache, batching reads efficiently.
+        
+        Separates indices into those in current chunk (fast) and those
+        requiring disk reads. Returns all found samples plus a mask of
+        which indices were retrieved.
+        
+        Args:
+            indices: Array of global indices
+            target_ifos: Optional IFO filter
+            
+        Returns:
+            Tuple of (onsource, offsource, gps_times, labels, found_mask)
+            where found_mask[i] is True if indices[i] was found
+        """
+        if not self._chunk_in_memory:
+            # Fallback to disk reads
+            found_mask = np.ones(len(indices), dtype=bool)
+            return (*self.get_batch(indices, 
+                                     sample_rate_hertz=self._chunk_sample_rate,
+                                     onsource_duration=self._chunk_ons_dur,
+                                     offsource_duration=self._chunk_off_dur,
+                                     target_ifos=target_ifos), found_mask)
+        
+        # Partition indices: in-chunk vs out-of-chunk
+        in_chunk_mask = (indices >= self._chunk_start_idx) & (indices < self._chunk_end_idx)
+        
+        results_onsource = []
+        results_offsource = []
+        results_gps = []
+        results_labels = []
+        found_mask = np.zeros(len(indices), dtype=bool)
+        
+        # Process in-chunk samples (fast path)
+        in_chunk_indices = indices[in_chunk_mask]
+        if len(in_chunk_indices) > 0:
+            local_indices = in_chunk_indices - self._chunk_start_idx
+            
+            ons_batch = self._chunk_onsource[local_indices]
+            off_batch = self._chunk_offsource[local_indices]
+            gps_batch = self._chunk_gps[local_indices]
+            label_batch = self._chunk_labels[local_indices]
+            
+            # Apply IFO filtering
+            if target_ifos:
+                meta = self.get_metadata()
+                stored_ifos = meta.get('ifo_names', [])
+                if stored_ifos:
+                    try:
+                        channel_indices = [stored_ifos.index(ifo) for ifo in target_ifos]
+                        ons_batch = ons_batch[:, channel_indices]
+                        off_batch = off_batch[:, channel_indices]
+                    except ValueError:
+                        pass  # Keep all channels if filter fails
+            
+            results_onsource.append(ons_batch)
+            results_offsource.append(off_batch)
+            results_gps.append(gps_batch)
+            results_labels.append(label_batch)
+            found_mask[in_chunk_mask] = True
+        
+        # Process out-of-chunk samples (disk path)
+        out_chunk_indices = indices[~in_chunk_mask]
+        if len(out_chunk_indices) > 0:
+            try:
+                ons_batch, off_batch, gps_batch, label_batch = self.get_batch(
+                    out_chunk_indices,
+                    sample_rate_hertz=self._chunk_sample_rate,
+                    onsource_duration=self._chunk_ons_dur,
+                    offsource_duration=self._chunk_off_dur,
+                    target_ifos=target_ifos
+                )
+                results_onsource.append(ons_batch)
+                results_offsource.append(off_batch)
+                results_gps.append(gps_batch)
+                results_labels.append(label_batch)
+                found_mask[~in_chunk_mask] = True
+            except Exception as e:
+                logger.warning(f"Failed to read out-of-chunk indices: {e}")
+        
+        # Concatenate results
+        if results_onsource:
+            return (
+                np.concatenate(results_onsource, axis=0) if len(results_onsource) > 1 else results_onsource[0],
+                np.concatenate(results_offsource, axis=0) if len(results_offsource) > 1 else results_offsource[0],
+                np.concatenate(results_gps, axis=0) if len(results_gps) > 1 else results_gps[0],
+                np.concatenate(results_labels, axis=0) if len(results_labels) > 1 else results_labels[0],
+                found_mask
+            )
+        else:
+            # No results
+            return (np.array([]), np.array([]), np.array([]), np.array([]), found_mask)
+
+    
     def save_all(
         self,
         onsource: np.ndarray,
@@ -675,6 +929,9 @@ class TransientCache:
     ) -> None:
         """
         Append a batch of glitches to the existing cache file.
+        
+        Uses incremental GPS index update instead of full invalidation
+        for O(1) instead of O(N) index maintenance.
         """
         if not self.exists:
             raise FileNotFoundError(f"Cache file not initialized: {self.path}")
@@ -699,10 +956,16 @@ class TransientCache:
             grp['labels'].resize(n_total, axis=0)
             grp['labels'][n_current:] = labels.astype(np.int32)
             
-        # Atomically invalidate both metadata and index inside lock
+        # Incremental GPS index update (O(n_new) instead of O(N) rebuild)
         with self._gps_lock:
             self._metadata = None  # Metadata (count) changed
-            self._gps_index = None  # Invalidate GPS index to force rebuild
+            
+            # If index exists, update incrementally; otherwise leave None for lazy rebuild
+            if self._gps_index is not None:
+                for i, gps in enumerate(gps_times):
+                    key = gps_to_key(gps)
+                    self._gps_index[key] = n_current + i
+
     
     def get_batch(
         self,
@@ -907,13 +1170,18 @@ def generate_glitch_cache_path(data_directory: Optional[Path] = None) -> Path:
     Uses a single universal cache for all observing runs and IFOs
     to avoid duplicate downloads of the same GPS times.
     
+    The default location is ~/.gravyflow/cache/ to ensure the same cache
+    is used regardless of current working directory.
+    
     Args:
-        data_directory: Base directory for cache files
+        data_directory: Base directory for cache files. If None, uses ~/.gravyflow/cache/
         
     Returns:
-        Path like: data_directory/glitch_cache.h5
+        Path like: data_directory/transient_cache.h5
     """
     if data_directory is None:
-        data_directory = Path("./gravyflow_data")
+        # Use absolute path in home directory to ensure consistent cache location
+        data_directory = Path.home() / ".gravyflow" / "cache"
+        data_directory.mkdir(parents=True, exist_ok=True)
     
-    return data_directory / "glitch_cache.h5"
+    return data_directory / "transient_cache.h5"

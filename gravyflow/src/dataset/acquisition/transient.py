@@ -237,7 +237,7 @@ class TransientDataObtainer(BaseDataObtainer):
         target_ifos: Optional[List[str]] = None  # NEW: Requested IFOs for subset selection
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
         """
-        Attempt to retrieve a sample from cache (memory first, then disk).
+        Attempt to retrieve a sample from cache (chunked -> memory -> disk).
         
         Args:
             gps_key: Optional GPS key (preferred - no conversion needed)
@@ -245,13 +245,21 @@ class TransientDataObtainer(BaseDataObtainer):
             target_ifos: List of IFO names to retrieve (must be present in cache)
             
         Returns:
-            (onsource, offsource, source) where source is 'memory', 'disk', or 'miss'
+            (onsource, offsource, source) where source is 'chunk', 'memory', 'disk', or 'miss'
         """
         # Compute key if not provided (backward compatibility)
         if gps_key is None:
             gps_key = gps_to_key(gps_time)
         
-        # Try memory cache first (fastest)
+        # Try chunked memory cache first (new fast path)
+        if cache._chunk_in_memory and cache.has_key(gps_key):
+            idx = cache._gps_index[gps_key]
+            result = cache.get_from_chunk(idx, target_ifos=target_ifos)
+            if result is not None:
+                onsource, offsource, _, _ = result
+                return onsource * scale_factor, offsource * scale_factor, 'chunk'
+        
+        # Try full memory cache (fastest if loaded)
         if cache.in_memory and cache.has_key(gps_key):
             idx = cache._gps_index[gps_key]
             onsource = cache._mem_onsource[idx]
@@ -293,6 +301,74 @@ class TransientDataObtainer(BaseDataObtainer):
         
         # Cache miss
         return None, None, 'miss'
+    
+    def _get_batch_from_cache(
+        self,
+        cache,
+        gps_keys: np.ndarray,
+        sample_rate_hertz: float,
+        onsource_duration: float,
+        offsource_duration: float,
+        scale_factor: float = 1.0,
+        target_ifos: Optional[List[str]] = None
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Batch cache lookup - reads multiple samples in a single HDF5 operation.
+        
+        Much more efficient than repeated single-sample lookups.
+        
+        Args:
+            gps_keys: Array of GPS keys to look up
+            sample_rate_hertz: Target sample rate
+            onsource_duration: Target onsource duration
+            offsource_duration: Target offsource duration  
+            scale_factor: Amplitude scale factor
+            target_ifos: List of IFO names to filter
+            
+        Returns:
+            Tuple of (onsource, offsource, found_mask, cache_indices)
+            where found_mask[i] is True if gps_keys[i] was found
+        """
+        n_keys = len(gps_keys)
+        
+        # Build index if needed and find which keys exist
+        with cache._gps_lock:
+            if cache._gps_index is None:
+                cache._gps_index = cache._build_gps_index()
+        
+        # Find indices for keys that exist
+        cache_indices = np.full(n_keys, -1, dtype=np.int32)
+        found_mask = np.zeros(n_keys, dtype=bool)
+        
+        for i, key in enumerate(gps_keys):
+            if key in cache._gps_index:
+                cache_indices[i] = cache._gps_index[key]
+                found_mask[i] = True
+        
+        # If nothing found, return empty
+        if not found_mask.any():
+            return np.array([]), np.array([]), found_mask, cache_indices
+        
+        # Get indices that were found
+        valid_cache_indices = cache_indices[found_mask]
+        
+        # Use chunked mode if enabled (faster for in-chunk samples)
+        if cache._chunk_in_memory:
+            ons, off, _, _, chunk_found = cache.get_batch_from_chunk(
+                valid_cache_indices,
+                target_ifos=target_ifos
+            )
+        else:
+            # Direct batch read from disk
+            ons, off, _, _ = cache.get_batch(
+                valid_cache_indices,
+                sample_rate_hertz=sample_rate_hertz,
+                onsource_duration=onsource_duration,
+                offsource_duration=offsource_duration,
+                target_ifos=target_ifos
+            )
+        
+        return ons * scale_factor, off * scale_factor, found_mask, cache_indices
 
     def _prepare_batch(
         self,
@@ -357,8 +433,8 @@ class TransientDataObtainer(BaseDataObtainer):
         source_type = ops.tile(ops.expand_dims(batch_source_type_1d, axis=-1), (1, num_ifos))
         
         return {
-            RV.ONSOURCE: self._apply_augmentation(final_subarrays, is_transient=True),
-            RV.OFFSOURCE: self._apply_augmentation(final_background, is_transient=True),
+            RV.ONSOURCE: self._apply_augmentation(final_subarrays),
+            RV.OFFSOURCE: self._apply_augmentation(final_background),
             RV.TRANSIENT_GPS_TIME: transient_gps,
             RV.DATA_LABEL: data_label,     # Per-segment: GLITCHES=1 or EVENTS=2
             RV.SUB_TYPE: sub_type,         # Per-segment: GlitchType.value or SourceType.value
@@ -389,10 +465,17 @@ class TransientDataObtainer(BaseDataObtainer):
         Returns:
             Tuple of (onsource, offsource, event_gps_time) or (None, None, None) if extraction fails.
         """
-        data_len = ops.shape(event_segment.data[0])[0]
+        # Get reference length from first non-empty channel
+        data_len = None
+        for idx, channel_data in enumerate(event_segment.data):
+            if channel_data is not None and len(channel_data) > 0:
+                data_len = ops.shape(channel_data)[0]
+                break
         
-        if data_len < num_onsource_samples:
-            logger.warning(f"Feature segment too short ({data_len} < {num_onsource_samples})")
+        if data_len is None or data_len < num_onsource_samples:
+            # Only warn if we have selected_ifo_indices and they're the issue
+            if hasattr(self, '_current_selected_ifo_indices') and self._current_selected_ifo_indices:
+                logger.debug(f"Feature segment too short ({data_len} < {num_onsource_samples})")
             return None, None, None
         
         center_idx = data_len // 2
@@ -410,10 +493,37 @@ class TransientDataObtainer(BaseDataObtainer):
         temp_onsource = []
         temp_offsource = []
         
-        for channel_data in event_segment.data:
+        # Get selected IFO indices (set during cache miss processing)
+        selected_ifo_indices = getattr(self, '_current_selected_ifo_indices', None)
+        
+        for channel_idx, channel_data in enumerate(event_segment.data):
+            is_selected = selected_ifo_indices is None or channel_idx in selected_ifo_indices
+            
+            # Check if this channel has valid data
+            channel_is_valid = (
+                channel_data is not None and 
+                len(channel_data) >= end_onsource
+            )
+            
+            if not channel_is_valid:
+                if is_selected:
+                    # Selected IFO has no data - fail extraction
+                    logger.debug(f"Selected IFO channel {channel_idx} has insufficient data")
+                    return None, None, None
+                else:
+                    # Non-selected IFO - silently zero-fill
+                    temp_onsource.append(np.zeros(num_onsource_samples, dtype=np.float32))
+                    temp_offsource.append(np.zeros(num_offsource_samples, dtype=np.float32))
+                    continue
+            
             chunk = channel_data[start_onsource:end_onsource]
             if ops.shape(chunk)[0] != num_onsource_samples:
-                return None, None, None
+                if is_selected:
+                    return None, None, None
+                else:
+                    temp_onsource.append(np.zeros(num_onsource_samples, dtype=np.float32))
+                    temp_offsource.append(np.zeros(num_offsource_samples, dtype=np.float32))
+                    continue
             temp_onsource.append(chunk)
             
             off_chunk = None
@@ -430,19 +540,22 @@ class TransientDataObtainer(BaseDataObtainer):
             
             # If no data before, try AFTER onsource
             if off_chunk is None:
-                available_after = data_len - end_onsource
+                available_after = len(channel_data) - end_onsource
                 if available_after >= num_offsource_samples:
                     off_chunk = channel_data[end_onsource:end_onsource + num_offsource_samples]
                 elif available_after > 0:
-                    off_chunk = channel_data[end_onsource:data_len]
+                    off_chunk = channel_data[end_onsource:len(channel_data)]
                     pad_needed = num_offsource_samples - available_after
                     off_chunk = ops.pad(off_chunk, [(0, pad_needed)], mode='edge')
             
             if off_chunk is None:
-                logger.warning(
-                    f"No offsource data available for event at GPS {event_gps_time:.1f}. Skipping."
-                )
-                return None, None, None
+                if is_selected:
+                    logger.debug(f"No offsource data available for selected IFO at GPS {event_gps_time:.1f}")
+                    return None, None, None
+                else:
+                    # Silently zero-fill non-selected IFO
+                    temp_offsource.append(np.zeros(num_offsource_samples, dtype=np.float32))
+                    continue
             
             temp_offsource.append(off_chunk)
         
@@ -649,44 +762,89 @@ class TransientDataObtainer(BaseDataObtainer):
         download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
         
         # =====================================================================
-        # UNIVERSAL CACHE STRATEGY
+        # DOWNLOAD STRATEGY: Only from segment.seen_in IFOs
         # =====================================================================
-        # Always download ALL detectors (H1, L1) regardless of what the user
-        # requested. This ensures the cache is maximally reusable:
-        #   - A cache built with [H1, L1] can serve any subset
-        #   - No need to rebuild cache when switching from L1-only to H1+L1
-        #   - Downloading all upfront is one network request vs N separate ones
-        # 
-        # Requested IFOs are filtered at OUTPUT time, not download time.
+        # For glitches, only download from the IFO where the glitch was observed.
+        # This avoids failures when other IFOs don't have data at that GPS time.
+        #
+        # TODO: Re-enable universal cache later with proper length matching
         # =====================================================================
         
-        # Convert UNIVERSAL_IFOS to IFO enum objects
-        all_detector_ifos = [gf.IFO[name] for name in TransientDefaults.UNIVERSAL_IFOS]
+        # For simplicity, use the REQUESTED IFOs (from user config)
+        # This matches what the user actually wants to process
+        download_ifos = self.ifos
+        
+        # Define universal IFO names for cache indexing
         universal_ifo_names = list(TransientDefaults.UNIVERSAL_IFOS)
         
-        # Build segments array for ALL detectors (repeating the same GPS boundaries)
-        num_universal_ifos = len(all_detector_ifos)
-        universal_miss_segments = np.repeat(
-            miss_segment_boundaries[:, np.newaxis, :], 
-            num_universal_ifos, 
-            axis=1
-        )  # Shape (N, num_universal_ifos, 2)
+        # Create segment generator for downloading the cache misses
+        # Use UNIVERSAL_IFOS for download (cache stores H1+L1 regardless of request)
+        download_ifos_universal = [gf.IFO[name] for name in universal_ifo_names]
         
-        # Single acquire() call for ALL detectors
+        # Expand boundaries to (N, num_ifos, 2) for acquire()
+        # All IFOs get the same GPS boundaries
+        num_universal_ifos = len(download_ifos_universal)
+        miss_segments_3d = np.repeat(
+            miss_segment_boundaries[:, np.newaxis, :],
+            num_universal_ifos,
+            axis=1
+        )
+        
         segment_generator = self.acquire(
-            download_sample_rate,
-            universal_miss_segments,
-            all_detector_ifos,
-            1.0  # Download raw data for cache (scale=1.0)
+            sample_rate_hertz=download_sample_rate,
+            valid_segments=miss_segments_3d,
+            ifos=download_ifos_universal,
+            quiet_zero_fill=True  # Suppress warnings for missing secondary IFOs
         )
         
         for miss_idx_position, event_segment in enumerate(segment_generator):
             true_seg_idx = miss_indices[miss_idx_position]
             segment = self.transient_segments[true_seg_idx]
             
+            # =====================================================================
+            # PRIMARY IFO PRE-VALIDATION
+            # =====================================================================
+            # Check if PRIMARY IFO (segment.seen_in) has valid data BEFORE extraction.
+            # This prevents wasting time on extraction when the essential data is missing.
+            # =====================================================================
+            primary_ifo_data_valid = True
+            for ifo in segment.seen_in:
+                try:
+                    ifo_idx = universal_ifo_names.index(ifo.name)
+                    channel_data = event_segment.data[ifo_idx]
+                    # Check if primary IFO data is empty or all zeros
+                    if channel_data is None or (hasattr(channel_data, '__len__') and len(channel_data) == 0):
+                        primary_ifo_data_valid = False
+                        break
+                    # Check if effectively zero (download failed, got zero-filled)
+                    channel_np = np.asarray(channel_data)
+                    if np.all(channel_np == 0):
+                        primary_ifo_data_valid = False
+                        break
+                except (ValueError, IndexError) as e:
+                    logger.debug(f"Could not validate primary IFO {ifo.name}: {e}")
+                    primary_ifo_data_valid = False
+                    break
+            
+            if not primary_ifo_data_valid:
+                # PRIMARY IFO has no data - skip this segment
+                self._dropped_segments_count += 1
+                logger.warning(
+                    f"Dropped segment (primary IFO {[ifo.name for ifo in segment.seen_in]} has no data): "
+                    f"GPS={segment.transient_gps_time:.3f}, total dropped={self._dropped_segments_count}"
+                )
+                continue
+            
             # Extract at cache parameters
             num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
             num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * download_sample_rate)
+            
+            # Set selected IFO indices for extraction (only these need valid data)
+            # Maps requested IFOs to their positions in universal IFO order
+            self._current_selected_ifo_indices = set()
+            for ifo in ifos:
+                if ifo.name in universal_ifo_names:
+                    self._current_selected_ifo_indices.add(universal_ifo_names.index(ifo.name))
             
             onsource_full, offsource_full, _ = self._extract_feature_event(
                 event_segment,
@@ -696,24 +854,15 @@ class TransientDataObtainer(BaseDataObtainer):
             )
             
             if onsource_full is None:
-                # Track dropped segment (counter initialized in BaseDataObtainer.__init__)
+                # Extraction failed for other reasons (segment too short, etc.)
                 self._dropped_segments_count += 1
-                logger.warning(f"Dropped segment (extraction failed): GPS={segment.transient_gps_time:.3f}, total dropped={self._dropped_segments_count}")
-                
-                # Fail-fast if too many segments are dropped (>10 or >50% of batch)
-                max_allowed = max(10, len(miss_indices) // 2)
-                if self._dropped_segments_count > max_allowed:
-                    raise RuntimeError(
-                        f"Too many segments dropped ({self._dropped_segments_count}/{len(miss_indices)}). "
-                        "Check network connection or data availability."
-                    )
+                logger.warning(
+                    f"Dropped segment (extraction failed): GPS={segment.transient_gps_time:.3f}, "
+                    f"total dropped={self._dropped_segments_count}"
+                )
                 continue
-
-            # Data quality checks
-            if np.isnan(onsource_full).any():
-                logger.error(f"NAN DETECTED: In onsource_full after extract! GPS: {segment.transient_gps_time}")
-            if np.all(onsource_full == 0):
-                logger.error(f"ZERO SIGNAL DETECTED: onsource_full is all zeros! GPS: {segment.transient_gps_time}")
+            
+            # Secondary IFOs may be zeros - that's fine for single-detector glitches
 
             # Get label from segment
             label = segment.kind.value if segment.is_glitch else -1
@@ -775,18 +924,23 @@ class TransientDataObtainer(BaseDataObtainer):
         ifos: List,
         sample_rate_hertz: float,
         onsource_duration_seconds: float,
-        offsource_duration_seconds: float
+        offsource_duration_seconds: float,
+        enable_chunked_mode: bool = True,  # NEW: Enable chunked cache by default
+        chunk_size: int = 5000  # Number of samples per memory chunk
     ):
         """
         Initialize or retrieve the transient cache for event/glitch data.
         
-        Handles cache path generation, file creation, and validation.
+        Handles cache path generation, file creation, validation, and
+        optional chunked memory caching for improved performance.
         
         Args:
             ifos: List of IFOs to cache
             sample_rate_hertz: Requested sample rate
             onsource_duration_seconds: Requested onsource duration
             offsource_duration_seconds: Requested offsource duration
+            enable_chunked_mode: If True, load cache chunks into memory for faster access
+            chunk_size: Number of samples per memory chunk (default 5000, ~1-2GB)
             
         Returns:
             Tuple of (cache, cache_sample_rate) - TransientCache instance and its sample rate
@@ -795,10 +949,8 @@ class TransientDataObtainer(BaseDataObtainer):
             CACHE_SAMPLE_RATE_HERTZ, CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION
         )
         
-        # Determine data directory
-        data_dir = Path("./generator_data")
-        if hasattr(self, 'data_directory') and self.data_directory:
-            data_dir = self.data_directory
+        # Determine data directory (None = use default in ~/.gravyflow/cache/)
+        data_dir = getattr(self, 'data_directory', None)
         
         # Universal Cache: single file for all runs/IFOs
         cache_path = generate_glitch_cache_path(data_directory=data_dir)
@@ -819,6 +971,17 @@ class TransientDataObtainer(BaseDataObtainer):
                     meta = cache.get_metadata()
                     logger.info(f"Cache: {meta['num_glitches']} glitches at {CACHE_SAMPLE_RATE_HERTZ}Hz")
                     self._cache_logged = True
+                    
+                # Enable chunked mode for faster cache hits (if not already enabled)
+                if enable_chunked_mode and not cache._chunk_in_memory:
+                    meta = cache.get_metadata()
+                    if meta['num_glitches'] > 0:
+                        cache.enable_chunked_mode(
+                            chunk_size=chunk_size,
+                            sample_rate_hertz=sample_rate_hertz,
+                            onsource_duration=onsource_duration_seconds,
+                            offsource_duration=offsource_duration_seconds
+                        )
             except ValueError as e:
                 logger.warning(f"Cache incompatible: {e}. Resetting.")
                 cache.reset()

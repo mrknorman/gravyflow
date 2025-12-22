@@ -753,7 +753,7 @@ def generate_waveform_plot(
     mass2 = get_scalar(gf.WaveformParameters.MASS_2_MSUN.name, 0)
     score = get_scalar('score', 0)
     snr = get_scalar(gf.ScalingTypes.SNR.name)
-    GPS_TIME_KEY = gf.ReturnVariables.GPS_TIME.name
+    GPS_TIME_KEY = gf.ReturnVariables.START_GPS_TIME.name
     gps_time = get_scalar(GPS_TIME_KEY)
     
     # Convert GPS to human readable (approximate - ignores leap seconds)

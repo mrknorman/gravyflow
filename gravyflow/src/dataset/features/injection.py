@@ -209,7 +209,6 @@ class ReturnVariables(Enum):
     SPECTROGRAM_ONSOURCE = ReturnVariable(8)
     
     # GPS Times (disambiguated)
-    GPS_TIME = ReturnVariable(3)            # Legacy alias for START_GPS_TIME
     START_GPS_TIME = ReturnVariable(13)     # Segment window start (real noise/transient)
     TRANSIENT_GPS_TIME = ReturnVariable(14) # Event/glitch center (transient mode only)
     CENTRAL_TIME = ReturnVariable(9)        # Injection peak time (normalized 0-1)
