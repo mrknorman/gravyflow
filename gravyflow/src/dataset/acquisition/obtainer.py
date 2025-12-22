@@ -27,15 +27,8 @@ def IFODataObtainer(
         overrides: dict = None,
         event_types: List[EventConfidence] = None,
         logging_level: int = logging.WARNING,
-        random_sign_reversal: bool = True,
-        random_time_reversal: bool = True,
-        augmentation_probability: float = 0.5,
+        augmentations: List = None,  # List of augmentation instances
         prefetch_segments: int = 16,
-        # TRANSIENT mode augmentations
-        random_shift: bool = False,
-        shift_fraction: float = 0.25,
-        add_noise: bool = False,
-        noise_amplitude: float = 0.1,
         # Class balancing
         balanced_glitch_types: bool = False,
         # Specific Names
@@ -45,13 +38,7 @@ def IFODataObtainer(
     Factory function that returns the appropriate IFO data obtainer.
     
     Automatically selects between NoiseDataObtainer and TransientDataObtainer
-    based on the data_labels parameter:
-    
-    - If DataLabel.NOISE is in data_labels: Returns NoiseDataObtainer
-    - Otherwise: Returns TransientDataObtainer (for EVENTS/GLITCHES)
-    
-    This function maintains full backwards compatibility with existing code
-    that uses gf.IFODataObtainer(...).
+    based on the data_labels parameter.
     
     Args:
         data_quality: Quality level of data to acquire (RAW or BEST)
@@ -65,14 +52,8 @@ def IFODataObtainer(
         overrides: Dictionary of attribute overrides
         event_types: Filter events by type (for TRANSIENT mode)
         logging_level: Logging verbosity
-        random_sign_reversal: Enable sign reversal augmentation
-        random_time_reversal: Enable time reversal augmentation
-        augmentation_probability: Probability of applying augmentations
+        augmentations: List of augmentation instances (SignReversal, TimeReversal, etc.)
         prefetch_segments: Number of segments to prefetch
-        random_shift: Enable random shift augmentation (TRANSIENT only)
-        shift_fraction: Maximum shift as fraction of onsource (TRANSIENT only)
-        add_noise: Enable noise perturbation augmentation (TRANSIENT only)
-        noise_amplitude: Noise amplitude relative to std (TRANSIENT only)
         balanced_glitch_types: Enable balanced sampling of glitch types
         event_names: Specific event names to acquire (TRANSIENT only)
         
@@ -84,22 +65,10 @@ def IFODataObtainer(
         data_labels = [data_labels]
     
     # Check if NOISE mode is requested
-    # Use strict type checking to avoid IntEnum value collision with GlitchType (e.g. 0 == 0)
-    is_noise = False
-    for label in data_labels:
-        # Check matching value AND that it's actually a DataLabel (or exactly NOISE)
-        # Avoids confusing GlitchType.AIR_COMPRESSOR (0) with DataLabel.NOISE (0)
-        if label == DataLabel.NOISE:
-            # If it's an enum member, check the type
-            if hasattr(label, 'value'): 
-                if isinstance(label, DataLabel):
-                    is_noise = True
-                    break
-            # Logic for raw integers (backward compat) - risky if mixing integers and enums
-            # but standard usage is Enums.
-            elif not isinstance(label, bool) and isinstance(label, int) and label == DataLabel.NOISE.value:
-                 is_noise = True 
-                 break
+    is_noise = any(
+        isinstance(label, DataLabel) and label == DataLabel.NOISE
+        for label in data_labels
+    )
                  
     if is_noise:
         return NoiseDataObtainer(
@@ -113,9 +82,7 @@ def IFODataObtainer(
             cache_segments=cache_segments,
             overrides=overrides,
             logging_level=logging_level,
-            random_sign_reversal=random_sign_reversal,
-            random_time_reversal=random_time_reversal,
-            augmentation_probability=augmentation_probability,
+            augmentations=augmentations,
             prefetch_segments=prefetch_segments,
         )
     else:
@@ -132,14 +99,8 @@ def IFODataObtainer(
             overrides=overrides,
             event_types=event_types,
             logging_level=logging_level,
-            random_sign_reversal=random_sign_reversal,
-            random_time_reversal=random_time_reversal,
-            augmentation_probability=augmentation_probability,
+            augmentations=augmentations,
             prefetch_segments=prefetch_segments,
-            random_shift=random_shift,
-            shift_fraction=shift_fraction,
-            add_noise=add_noise,
-            noise_amplitude=noise_amplitude,
             balanced_glitch_types=balanced_glitch_types,
             event_names=event_names
         )

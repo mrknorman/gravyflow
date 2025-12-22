@@ -18,7 +18,7 @@ from keras import ops
 
 import gravyflow as gf
 from gravyflow.src.dataset.features.event import EventConfidence
-from gravyflow.src.dataset.features.glitch_cache import GlitchCache, generate_glitch_cache_path
+from gravyflow.src.dataset.features.glitch_cache import TransientCache, generate_glitch_cache_path
 from .cache import DiskCache
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from .base import (
@@ -54,15 +54,8 @@ class TransientDataObtainer(BaseDataObtainer):
             overrides: dict = None,
             event_types: List[EventConfidence] = None,
             logging_level: int = logging.WARNING,
-            random_sign_reversal: bool = True,
-            random_time_reversal: bool = True,
-            augmentation_probability: float = 0.5,
+            augmentations: List = None,  # List of augmentation instances
             prefetch_segments: int = 64,  # Higher for smaller TRANSIENT segments
-            # TRANSIENT mode augmentations
-            random_shift: bool = False,
-            shift_fraction: float = 0.25,
-            add_noise: bool = False,
-            noise_amplitude: float = 0.1,
             # Class balancing
             balanced_glitch_types: bool = False,
             # Specific Names
@@ -89,25 +82,17 @@ class TransientDataObtainer(BaseDataObtainer):
             cache_segments=cache_segments,
             overrides=overrides,
             logging_level=logging_level,
-            random_sign_reversal=random_sign_reversal,
-            random_time_reversal=random_time_reversal,
-            augmentation_probability=augmentation_probability,
+            augmentations=augmentations,
             prefetch_segments=prefetch_segments,
         )
         
         self.acquisition_mode = AcquisitionMode.TRANSIENT
-        self._segment_cache_maxsize = 128  # TRANSIENT uses smaller, more segments
+        self._segment_cache_maxsize = 128  # TRANSIENT uses larger cache for many small segments
         
         # Event type filtering
         if event_types is None:
             event_types = [EventConfidence.CONFIDENT]
         self.event_types = event_types
-        
-        # TRANSIENT-specific augmentations
-        self.random_shift = random_shift
-        self.shift_fraction = shift_fraction
-        self.add_noise = add_noise
-        self.noise_amplitude = noise_amplitude
         
         # Class balancing
         self.balanced_glitch_types = balanced_glitch_types
@@ -118,32 +103,39 @@ class TransientDataObtainer(BaseDataObtainer):
         # TransientSegment objects (replaces raw numpy segments)
         self.transient_segments: List[TransientSegment] = []
 
-    def _apply_augmentation(self, data, is_transient: bool = True):
+    def _apply_augmentation(self, data):
         """
-        Apply augmentations including TRANSIENT-specific ones.
+        Apply augmentations including TRANSIENT-specific ones (RandomShift, AddNoise).
         """
-        data = super()._apply_augmentation(data, is_transient=False)
+        from gravyflow.src.dataset.acquisition.augmentations import (
+            SignReversal, TimeReversal, RandomShift, AddNoise
+        )
         
-        if self.rng is None:
+        if self.rng is None or not self.augmentations:
             return data
         
-        # TRANSIENT-specific augmentations
-        if is_transient:
-            # Random shift (move event off-center)
-            if self.random_shift and self.rng.random() < self.augmentation_probability:
+        for aug in self.augmentations:
+            if self.rng.random() >= aug.probability:
+                continue
+            
+            if isinstance(aug, SignReversal):
+                data = -data
+            elif isinstance(aug, TimeReversal):
+                data = ops.flip(data, axis=-1)
+            elif isinstance(aug, RandomShift):
+                # Shift event off-center
                 num_samples = int(ops.shape(data)[-1])
-                max_shift = int(self.shift_fraction * num_samples)
+                max_shift = int(aug.shift_fraction * num_samples)
                 shift = self.rng.integers(-max_shift, max_shift + 1)
                 data = ops.roll(data, shift, axis=-1)
-            
-            # Add noise perturbations
-            if self.add_noise and self.rng.random() < self.augmentation_probability:
+            elif isinstance(aug, AddNoise):
+                # Add noise perturbation
                 data_np = ops.convert_to_numpy(data)
-                noise = self.rng.normal(0, self.noise_amplitude, data_np.shape)
+                noise = self.rng.normal(0, aug.amplitude, data_np.shape)
                 std = np.std(data_np)
                 noise = noise * std if std > 0 else noise
                 data = ops.convert_to_tensor(data_np + noise, dtype=data.dtype)
-            
+        
         return data
 
     def build_feature_index(
@@ -187,8 +179,7 @@ class TransientDataObtainer(BaseDataObtainer):
             all_segments.extend(glitch_segments)
         
         
-        # Fetch event segments if requested  
-        data_labels_list = self.data_labels if isinstance(self.data_labels, list) else [self.data_labels]
+        # Fetch event segments if requested (reuse data_labels_list from above)
         has_events = any(isinstance(et, EventConfidence) for et in data_labels_list)
         # Check for EVENTS label - handle both enum and integer value comparisons
         has_events_label = any(
@@ -582,8 +573,7 @@ class TransientDataObtainer(BaseDataObtainer):
         
         if len(self.transient_segments) == 0:
             logger.warning(f"No segments found for group '{group_name}'")
-            self.valid_segments = np.empty((0, len(ifos), 2), dtype=np.float64)
-            return self.valid_segments
+            return np.empty((0, len(ifos), 2), dtype=np.float64)
         
         # Shuffle if needed
         if segment_order == SegmentOrder.RANDOM:
@@ -592,7 +582,12 @@ class TransientDataObtainer(BaseDataObtainer):
         elif segment_order == SegmentOrder.SHORTEST_FIRST:
             self.transient_segments.sort(key=lambda s: s.duration)
         
-        # Create valid_segments array for compatibility
+        logger.info(
+            f"TRANSIENT MODE: {len(self.transient_segments)} segments for '{group_name}'"
+        )
+        
+        # Return segments array for interface compatibility
+        # Shape: (num_segments, num_ifos, 2) where [:, :, 0]=start, [:, :, 1]=end
         num_ifos = len(ifos)
         segments_2d = np.array([
             [seg.start_gps_time, seg.end_gps_time]
@@ -600,13 +595,7 @@ class TransientDataObtainer(BaseDataObtainer):
         ], dtype=np.float64)
         
         expanded = np.expand_dims(segments_2d, axis=1)
-        self.valid_segments = np.repeat(expanded, num_ifos, axis=1)
-        
-        logger.info(
-            f"TRANSIENT MODE: {len(self.transient_segments)} segments for '{group_name}'"
-        )
-        
-        return self.valid_segments
+        return np.repeat(expanded, num_ifos, axis=1)
 
 
     def _process_cache_misses(
@@ -710,6 +699,14 @@ class TransientDataObtainer(BaseDataObtainer):
                 # Track dropped segment (counter initialized in BaseDataObtainer.__init__)
                 self._dropped_segments_count += 1
                 logger.warning(f"Dropped segment (extraction failed): GPS={segment.transient_gps_time:.3f}, total dropped={self._dropped_segments_count}")
+                
+                # Fail-fast if too many segments are dropped (>10 or >50% of batch)
+                max_allowed = max(10, len(miss_indices) // 2)
+                if self._dropped_segments_count > max_allowed:
+                    raise RuntimeError(
+                        f"Too many segments dropped ({self._dropped_segments_count}/{len(miss_indices)}). "
+                        "Check network connection or data availability."
+                    )
                 continue
 
             # Data quality checks
@@ -734,13 +731,13 @@ class TransientDataObtainer(BaseDataObtainer):
                 logger.warning(f"Failed to append sample to cache (GPS={segment.transient_gps_time:.3f}): {e}")
             
             # Crop and resample for this request
-            onsource_cropped = GlitchCache.crop_and_resample(
+            onsource_cropped = TransientCache.crop_and_resample(
                 np.asarray(onsource_full),
                 download_sample_rate,
                 sample_rate_hertz,
                 total_onsource_duration_seconds
             )
-            offsource_cropped = GlitchCache.crop_and_resample(
+            offsource_cropped = TransientCache.crop_and_resample(
                 np.asarray(offsource_full),
                 download_sample_rate,
                 sample_rate_hertz,
@@ -773,7 +770,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 batch_backgrounds.clear()
                 batch_segments.clear()
 
-    def _initialize_glitch_cache(
+    def _initialize_transient_cache(
         self,
         ifos: List,
         sample_rate_hertz: float,
@@ -781,7 +778,7 @@ class TransientDataObtainer(BaseDataObtainer):
         offsource_duration_seconds: float
     ):
         """
-        Initialize or retrieve the glitch cache for transient data.
+        Initialize or retrieve the transient cache for event/glitch data.
         
         Handles cache path generation, file creation, and validation.
         
@@ -792,7 +789,7 @@ class TransientDataObtainer(BaseDataObtainer):
             offsource_duration_seconds: Requested offsource duration
             
         Returns:
-            Tuple of (cache, cache_sample_rate) - GlitchCache instance and its sample rate
+            Tuple of (cache, cache_sample_rate) - TransientCache instance and its sample rate
         """
         from gravyflow.src.dataset.features.glitch_cache import (
             CACHE_SAMPLE_RATE_HERTZ, CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION
@@ -803,27 +800,14 @@ class TransientDataObtainer(BaseDataObtainer):
         if hasattr(self, 'data_directory') and self.data_directory:
             data_dir = self.data_directory
         
-        # Get observing run for cache path
-        observing_run_name = "unknown"
-        if self.observing_runs:
-            if isinstance(self.observing_runs, list):
-                observing_run_name = self.observing_runs[0].name
-            else:
-                observing_run_name = self.observing_runs.name
-        
-        # Universal Cache: path is independent of requested IFOs since cache
-        # always contains all detectors (H1, L1, V1)
-        cache_path = generate_glitch_cache_path(
-            observing_run=observing_run_name,
-            ifo="universal",  # Universal Cache - not specific to requested IFOs
-            data_directory=data_dir
-        )
+        # Universal Cache: single file for all runs/IFOs
+        cache_path = generate_glitch_cache_path(data_directory=data_dir)
         
         # Reuse existing cache if path matches (preserves GPS index)
-        if not hasattr(self, '_glitch_cache') or self._glitch_cache is None or self._glitch_cache.path != cache_path:
-            self._glitch_cache = DiskCache(cache_path, mode='a')
+        if not hasattr(self, '_transient_cache') or self._transient_cache is None or self._transient_cache.path != cache_path:
+            self._transient_cache = DiskCache(cache_path, mode='a')
         
-        cache = self._glitch_cache
+        cache = self._transient_cache
         
         # Validate cache compatibility (sample rate and duration only)
         # IFO validation is not needed - Universal Cache always has H1+L1+V1
@@ -978,21 +962,33 @@ class TransientDataObtainer(BaseDataObtainer):
             self.get_valid_segments(
                 ifos=ifos, 
                 seed=seed,
-                group_name=group_name
-        )
+                group_name=group_name,
+            )
         
-        # Initialize or retrieve glitch cache (extracted to helper for clarity)
-        cache, _ = self._initialize_glitch_cache(
+        # Initialize or retrieve transient cache (extracted to helper for clarity)
+        cache, _ = self._initialize_transient_cache(
             ifos, sample_rate_hertz, onsource_duration_seconds, offsource_duration_seconds
         )
         
         # Build batches: cache hits served instantly, misses downloaded in parallel
         rng = default_rng(seed)
-        segment_indices = np.arange(len(self.transient_segments))
+        n_segments = len(self.transient_segments)
         
-        # Shuffle once with fixed seed so order is deterministic across runs
-        # This ensures cache hits for previously downloaded glitches
-        rng.shuffle(segment_indices)
+        # Weighted sampling: if segments have non-uniform weights (from apply_balancing),
+        # use weighted choice to oversample rare classes. Otherwise, shuffle uniformly.
+        weights = np.array([seg.weight for seg in self.transient_segments], dtype=np.float32)
+        
+        if np.allclose(weights, 1.0):
+            # All weights equal - use simple shuffle (more efficient)
+            segment_indices = np.arange(n_segments)
+            rng.shuffle(segment_indices)
+        else:
+            # Weighted sampling - rare classes will appear more often
+            # Normalize weights to probabilities
+            probs = weights / weights.sum()
+            # Sample with replacement to allow oversampling of rare classes
+            segment_indices = rng.choice(n_segments, size=n_segments, replace=True, p=probs)
+            logger.info(f"Using weighted sampling: {len(np.unique(segment_indices))} unique segments from {n_segments} total")
         
         # Guard: If no segments, raise error rather than spin forever
         if len(segment_indices) == 0:
@@ -1033,8 +1029,8 @@ class TransientDataObtainer(BaseDataObtainer):
                     target_ifos=[i.name for i in ifos]  # Select specific IFOs from cache
                 )
                 
-                if source != 'miss':
-                    # Cache hit (memory or disk)
+                if source != 'miss' and onsource is not None:
+                    # Cache hit (memory or disk) with valid data
                     batch_subarrays.append(onsource)
                     batch_backgrounds.append(offsource)
                     batch_segments.append(segment)
@@ -1054,7 +1050,7 @@ class TransientDataObtainer(BaseDataObtainer):
                         batch_segments = []
                     continue
                 
-                # Cache miss - need to download this one
+                # Cache miss OR failed lookup (null data) - need to download
                 miss_indices.append(seg_idx)
                 self._cache_miss_count += 1
                 

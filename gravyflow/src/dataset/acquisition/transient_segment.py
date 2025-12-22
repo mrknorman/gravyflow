@@ -63,6 +63,12 @@ class TransientSegment(Segment):
     The GPS key is the immutable identity - it travels with this segment everywhere
     and is used for all matching operations.
     
+    Note:
+        The gps_key field is computed from transient_gps_time (event center),
+        NOT from start_gps_time. This shadows the base Segment.gps_key property
+        which uses start_gps_time. This is intentional - cache lookups should
+        use the event center time, not the download window start.
+    
     Attributes:
         # From Segment base class:
         start_gps_time: float              # Segment start (for data download)
@@ -121,5 +127,18 @@ class TransientSegment(Segment):
             self.gps_key,
             self.label,
             self.kind,
-            tuple(sorted(ifo.name for ifo in self.seen_in))  # Hashable sorted tuple
+            tuple(sorted(ifo.name for ifo in self.seen_in))
         ))
+    
+    def __eq__(self, other) -> bool:
+        """Equality based on GPS key and metadata (matches __hash__)."""
+        if not isinstance(other, TransientSegment):
+            return NotImplemented
+        return (
+            self.gps_key == other.gps_key and
+            self.label == other.label and
+            self.kind == other.kind and
+            tuple(sorted(ifo.name for ifo in self.seen_in)) == 
+            tuple(sorted(ifo.name for ifo in other.seen_in))
+        )
+

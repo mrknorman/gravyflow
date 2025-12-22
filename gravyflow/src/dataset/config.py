@@ -280,6 +280,13 @@ class TransientDefaults:
     SEGMENT_EPSILON_SECONDS: float = 0.1
 
     # ==========================================================================
+    # I/O CONFIGURATION
+    # ==========================================================================
+    # Parallel processes for TimeSeries.read() operations
+    TIMESERIES_NPROC: int = 100
+
+
+    # ==========================================================================
     # UNIVERSAL CACHE STRATEGY
     # ==========================================================================
     # Cache downloads all LIGO detectors (H1, L1) regardless of what the user

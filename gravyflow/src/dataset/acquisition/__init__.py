@@ -40,6 +40,14 @@ from .noise import NoiseDataObtainer
 from .transient import TransientDataObtainer
 from .transient_segment import TransientSegment
 from .segment import Segment, NoiseSegment, SegmentCollection
+from .augmentations import (
+    SignReversal,
+    TimeReversal,
+    RandomShift,
+    AddNoise,
+    Augmentation,
+    default_augmentations,
+)
 
 # Import the factory function
 from .obtainer import IFODataObtainer
@@ -74,4 +82,11 @@ __all__ = [
     'NoiseSegment',
     'SegmentCollection',
     'TransientSegment',
+    # Augmentations
+    'SignReversal',
+    'TimeReversal',
+    'RandomShift',
+    'AddNoise',
+    'Augmentation',
+    'default_augmentations',
 ]

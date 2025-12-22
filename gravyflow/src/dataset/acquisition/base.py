@@ -42,14 +42,18 @@ from gravyflow.src.utils.numerics import ensure_even, ensure_list
 # CONSTANTS
 # =============================================================================
 
-# GPS time precision for cache key matching (3 decimals = millisecond precision)
-GPS_PRECISION_DECIMALS = 3
+# Imported from TransientDefaults for consistency (canonical source)
+from gravyflow.src.dataset.config import TransientDefaults
+
+# GPS time precision is 10ms (0.01s) - defined in gravyflow.src.utils.gps
+# GPS_PRECISION_DECIMALS was 3 (1ms) which was stale - now using GPS_KEY_PRECISION
+GPS_PRECISION_DECIMALS = 2  # 10ms precision (matches gps.py)
 
 # Tolerance for GPS time matching in seconds (used in cache lookups)
-GPS_TOLERANCE_SECONDS = 0.5
+GPS_TOLERANCE_SECONDS = TransientDefaults.GPS_TOLERANCE_SECONDS
 
 # Epsilon buffer for segment boundary trimming (avoids edge artifacts)
-SEGMENT_EPSILON_SECONDS = 0.1
+SEGMENT_EPSILON_SECONDS = TransientDefaults.SEGMENT_EPSILON_SECONDS
 
 
 def ifo_canonical_key(ifos) -> tuple:
@@ -483,9 +487,7 @@ class BaseDataObtainer(ABC):
             cache_segments : bool = True,
             overrides : dict = None,
             logging_level : int = logging.WARNING,
-            random_sign_reversal : bool = True,
-            random_time_reversal : bool = True,
-            augmentation_probability : float = 0.5,
+            augmentations: List = None,  # List of augmentation instances
             prefetch_segments : int = 16,
         ):
         
@@ -515,10 +517,9 @@ class BaseDataObtainer(ABC):
         self.force_acquisition = force_acquisition
         self.cache_segments = cache_segments
             
-        # Data augmentation settings
-        self.random_sign_reversal = random_sign_reversal
-        self.random_time_reversal = random_time_reversal
-        self.augmentation_probability = augmentation_probability
+        # Data augmentation settings - list of augmentation instances
+        from gravyflow.src.dataset.acquisition.augmentations import default_augmentations
+        self.augmentations = augmentations if augmentations is not None else default_augmentations()
             
         # Unpack parameters from input observing runs:
         self.unpack_observing_runs(observing_runs, data_quality)
@@ -616,27 +617,34 @@ class BaseDataObtainer(ABC):
             self._prefetch_executor.shutdown(wait=True)
             self._prefetch_executor = None
     
-    def _apply_augmentation(self, data, is_transient: bool = False):
+    def _apply_augmentation(self, data):
         """
-        Apply random augmentations to data.
+        Apply augmentations to data based on configured augmentation list.
+        
+        Each augmentation instance carries its own probability and parameters.
         
         Args:
             data: Tensor of shape (Batch, IFOs, Samples)
-            is_transient: If True, apply TRANSIENT-specific augmentations
             
         Returns:
             Augmented tensor with same shape
         """
-        if self.rng is None:
+        from gravyflow.src.dataset.acquisition.augmentations import (
+            SignReversal, TimeReversal
+        )
+        
+        if self.rng is None or not self.augmentations:
             return data
-            
-        # Sign reversal (y-axis flip)
-        if self.random_sign_reversal and self.rng.random() < self.augmentation_probability:
-            data = -data
-            
-        # Time reversal (x-axis flip)
-        if self.random_time_reversal and self.rng.random() < self.augmentation_probability:
-            data = ops.flip(data, axis=-1)
+        
+        for aug in self.augmentations:
+            if self.rng.random() >= aug.probability:
+                continue
+                
+            if isinstance(aug, SignReversal):
+                data = -data
+            elif isinstance(aug, TimeReversal):
+                data = ops.flip(data, axis=-1)
+            # Subclasses handle their specific augmentation types
             
         return data
     
@@ -712,10 +720,8 @@ class BaseDataObtainer(ABC):
         Calculate effective saturation accounting for augmentation.
         """
         effective = self.saturation
-        if self.random_sign_reversal:
-            effective *= (1 + self.augmentation_probability)
-        if self.random_time_reversal:
-            effective *= (1 + self.augmentation_probability)
+        for aug in (self.augmentations or []):
+            effective *= (1 + aug.probability)
         return effective
     
     def _prefetch_segment_for_index(
@@ -760,7 +766,7 @@ class BaseDataObtainer(ABC):
         data_directory_path : Optional[Path] = None
         ) -> Path:
         
-        # TRANSIENT mode: Skip segment file creation - glitches go to GlitchCache only
+        # TRANSIENT mode: Skip segment file creation - transients go to TransientCache only
         if self.acquisition_mode == AcquisitionMode.TRANSIENT:
             self.file_path = None
             return None
@@ -1087,7 +1093,7 @@ class BaseDataObtainer(ABC):
                 channel=f"{ifo.name}:{channel}", 
                 start=segment_start_gps_time, 
                 end=segment_end_gps_time, 
-                nproc=100
+                nproc=TransientDefaults.TIMESERIES_NPROC if hasattr(TransientDefaults, 'TIMESERIES_NPROC') else 100
             )
             
         except Exception as e:
@@ -1111,7 +1117,7 @@ class BaseDataObtainer(ABC):
         ifo: gf.IFO,
         segment_key: str
     ):
-        epsilon = 0.1         
+        epsilon = SEGMENT_EPSILON_SECONDS
         segment = None
         
         cache_key = f"{segment_key}_{ifo.name}_{sample_rate_hertz}"
@@ -1121,7 +1127,7 @@ class BaseDataObtainer(ABC):
         if cached is not None:
             return cached
     
-        # TRANSIENT mode: Skip disk caching entirely - glitches go to GlitchCache
+        # TRANSIENT mode: Skip disk caching entirely - transients go to TransientCache
         use_disk_cache = (
             self.acquisition_mode != AcquisitionMode.TRANSIENT and
             self.file_path is not None and 
