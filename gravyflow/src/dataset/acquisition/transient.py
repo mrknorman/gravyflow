@@ -9,6 +9,7 @@ import logging
 import hashlib
 from typing import List, Dict, Optional, Union, Tuple
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
@@ -723,11 +724,13 @@ class TransientDataObtainer(BaseDataObtainer):
         batch_subarrays: List,
         batch_backgrounds: List,
         batch_segments: List,
-        num_examples_per_batch: int
+        num_examples_per_batch: int,
+        max_workers: int = 8  # Number of parallel download threads
     ):
         """
         Download, extract, cache and prepare batches for cache misses.
         
+        Uses parallel downloads with ThreadPoolExecutor for improved performance.
         Consolidates duplicated logic for processing segments that weren't in cache.
         Yields batches whenever batch_size is reached.
         
@@ -743,6 +746,7 @@ class TransientDataObtainer(BaseDataObtainer):
             batch_backgrounds: Accumulated offsource arrays (mutated)
             batch_segments: Accumulated TransientSegments (mutated)
             num_examples_per_batch: Batch size threshold
+            max_workers: Number of parallel download threads (default 8)
             
         Yields:
             Batch dicts when batch_size is reached
@@ -755,68 +759,105 @@ class TransientDataObtainer(BaseDataObtainer):
         if len(miss_indices) == 0:
             return
         
-        # Get boundaries directly from transient_segments (cleaner than valid_segments array)
-        miss_segment_boundaries = self._get_segment_boundaries(miss_indices)
-        
         # Download at higher of requested or cache sample rate (can downsample but not upsample)
         download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
         
-        # =====================================================================
-        # DOWNLOAD STRATEGY: Only from segment.seen_in IFOs
-        # =====================================================================
-        # For glitches, only download from the IFO where the glitch was observed.
-        # This avoids failures when other IFOs don't have data at that GPS time.
-        #
-        # TODO: Re-enable universal cache later with proper length matching
-        # =====================================================================
-        
-        # For simplicity, use the REQUESTED IFOs (from user config)
-        # This matches what the user actually wants to process
-        download_ifos = self.ifos
-        
         # Define universal IFO names for cache indexing
         universal_ifo_names = list(TransientDefaults.UNIVERSAL_IFOS)
-        
-        # Create segment generator for downloading the cache misses
-        # Use UNIVERSAL_IFOS for download (cache stores H1+L1 regardless of request)
         download_ifos_universal = [gf.IFO[name] for name in universal_ifo_names]
         
-        # Expand boundaries to (N, num_ifos, 2) for acquire()
-        # All IFOs get the same GPS boundaries
-        num_universal_ifos = len(download_ifos_universal)
-        miss_segments_3d = np.repeat(
-            miss_segment_boundaries[:, np.newaxis, :],
-            num_universal_ifos,
-            axis=1
-        )
+        # Pre-calculate extraction parameters
+        num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
+        num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * download_sample_rate)
         
-        segment_generator = self.acquire(
-            sample_rate_hertz=download_sample_rate,
-            valid_segments=miss_segments_3d,
-            ifos=download_ifos_universal,
-            quiet_zero_fill=True  # Suppress warnings for missing secondary IFOs
-        )
+        # Set selected IFO indices for extraction
+        selected_ifo_indices = set()
+        for ifo in ifos:
+            if ifo.name in universal_ifo_names:
+                selected_ifo_indices.add(universal_ifo_names.index(ifo.name))
         
-        for miss_idx_position, event_segment in enumerate(segment_generator):
-            true_seg_idx = miss_indices[miss_idx_position]
-            segment = self.transient_segments[true_seg_idx]
+        # Calculate output indices once
+        try:
+            output_indices = [universal_ifo_names.index(ifo.name) for ifo in ifos]
+        except ValueError as e:
+            logger.error(f"Requested IFO not found in universal set! Request: {[i.name for i in ifos]}, Universal: {universal_ifo_names}")
+            raise e
+        
+        # ==============================================================
+        # PARALLEL DOWNLOAD: Download all segments concurrently
+        # ==============================================================
+        
+        def download_single_segment(miss_idx: int) -> Tuple[int, Optional['IFOData']]:
+            """Download a single segment and return (index, IFOData or None)."""
+            segment = self.transient_segments[miss_idx]
+            boundary = np.array([[segment.start_gps_time, segment.end_gps_time]])
             
-            # =====================================================================
+            # Expand to (1, num_ifos, 2)
+            boundary_3d = np.repeat(
+                boundary[:, np.newaxis, :],
+                len(download_ifos_universal),
+                axis=1
+            )
+            
+            try:
+                # Use acquire() for single segment download
+                for event_segment in self.acquire(
+                    sample_rate_hertz=download_sample_rate,
+                    valid_segments=boundary_3d,
+                    ifos=download_ifos_universal,
+                    quiet_zero_fill=True
+                ):
+                    return (miss_idx, event_segment)
+            except Exception as e:
+                logger.debug(f"Download failed for GPS {segment.transient_gps_time}: {e}")
+                return (miss_idx, None)
+            
+            return (miss_idx, None)
+        
+        # Download in parallel
+        logger.info(f"Parallel downloading {len(miss_indices)} segments with {max_workers} workers")
+        downloaded_segments = {}  # miss_idx -> IFOData
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all downloads
+            futures = {executor.submit(download_single_segment, idx): idx for idx in miss_indices}
+            
+            # Collect results as they complete
+            for future in as_completed(futures):
+                try:
+                    miss_idx, event_segment = future.result(timeout=60)
+                    if event_segment is not None:
+                        downloaded_segments[miss_idx] = event_segment
+                except Exception as e:
+                    miss_idx = futures[future]
+                    logger.debug(f"Download future failed for index {miss_idx}: {e}")
+        
+        logger.info(f"Downloaded {len(downloaded_segments)}/{len(miss_indices)} segments successfully")
+        
+        # ==============================================================
+        # SEQUENTIAL PROCESSING: Extract, cache, and batch results
+        # ==============================================================
+        
+        self._current_selected_ifo_indices = selected_ifo_indices
+        
+        for miss_idx in miss_indices:
+            event_segment = downloaded_segments.get(miss_idx)
+            if event_segment is None:
+                # Download failed - skip
+                self._dropped_segments_count += 1
+                continue
+            
+            segment = self.transient_segments[miss_idx]
+            
             # PRIMARY IFO PRE-VALIDATION
-            # =====================================================================
-            # Check if PRIMARY IFO (segment.seen_in) has valid data BEFORE extraction.
-            # This prevents wasting time on extraction when the essential data is missing.
-            # =====================================================================
             primary_ifo_data_valid = True
             for ifo in segment.seen_in:
                 try:
                     ifo_idx = universal_ifo_names.index(ifo.name)
                     channel_data = event_segment.data[ifo_idx]
-                    # Check if primary IFO data is empty or all zeros
                     if channel_data is None or (hasattr(channel_data, '__len__') and len(channel_data) == 0):
                         primary_ifo_data_valid = False
                         break
-                    # Check if effectively zero (download failed, got zero-filled)
                     channel_np = np.asarray(channel_data)
                     if np.all(channel_np == 0):
                         primary_ifo_data_valid = False
@@ -827,7 +868,6 @@ class TransientDataObtainer(BaseDataObtainer):
                     break
             
             if not primary_ifo_data_valid:
-                # PRIMARY IFO has no data - skip this segment
                 self._dropped_segments_count += 1
                 logger.warning(
                     f"Dropped segment (primary IFO {[ifo.name for ifo in segment.seen_in]} has no data): "
@@ -835,17 +875,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 )
                 continue
             
-            # Extract at cache parameters
-            num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
-            num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * download_sample_rate)
-            
-            # Set selected IFO indices for extraction (only these need valid data)
-            # Maps requested IFOs to their positions in universal IFO order
-            self._current_selected_ifo_indices = set()
-            for ifo in ifos:
-                if ifo.name in universal_ifo_names:
-                    self._current_selected_ifo_indices.add(universal_ifo_names.index(ifo.name))
-            
+            # Extract windows
             onsource_full, offsource_full, _ = self._extract_feature_event(
                 event_segment,
                 num_cache_onsource,
@@ -854,7 +884,6 @@ class TransientDataObtainer(BaseDataObtainer):
             )
             
             if onsource_full is None:
-                # Extraction failed for other reasons (segment too short, etc.)
                 self._dropped_segments_count += 1
                 logger.warning(
                     f"Dropped segment (extraction failed): GPS={segment.transient_gps_time:.3f}, "
@@ -862,12 +891,8 @@ class TransientDataObtainer(BaseDataObtainer):
                 )
                 continue
             
-            # Secondary IFOs may be zeros - that's fine for single-detector glitches
-
-            # Get label from segment
+            # Get label and append to cache (buffered)
             label = segment.kind.value if segment.is_glitch else -1
-            
-            # Append to cache
             try:
                 cache.append_single(
                     np.array(onsource_full), 
@@ -893,16 +918,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 offsource_duration_seconds
             )
             
-            # Filter to requested IFOs for output
-            # universal_ifo_names is the cache order (H1, L1, V1)
-            # ifos is the user's requested subset
-            try:
-                output_indices = [universal_ifo_names.index(ifo.name) for ifo in ifos]
-            except ValueError as e:
-                logger.error(f"Requested IFO not found in universal set! Request: {[i.name for i in ifos]}, Universal: {universal_ifo_names}")
-                raise e
-
-            # Slice the cropped data
+            # Slice to requested IFOs
             onsource_output = onsource_cropped[output_indices, :]
             offsource_output = offsource_cropped[output_indices, :]
 
@@ -1235,6 +1251,8 @@ class TransientDataObtainer(BaseDataObtainer):
                     ):
                         yield _post_process(batch)
                     miss_indices = []
+                    # Flush any buffered cache writes
+                    cache.flush_write_buffer()
 
             # Handle remaining miss_indices after for loop ends
             if len(miss_indices) > 0:
@@ -1253,6 +1271,8 @@ class TransientDataObtainer(BaseDataObtainer):
                     num_examples_per_batch
                 ):
                     yield _post_process(batch)
+                # Flush any buffered cache writes at end of epoch
+                cache.flush_write_buffer()
 
             # Yield any remaining partial batch at end of epoch
             if len(batch_subarrays) > 0:

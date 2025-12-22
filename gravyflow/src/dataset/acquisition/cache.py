@@ -474,3 +474,13 @@ class DiskCache(AcquisitionCache):
     def _build_gps_index(self):
         """Build GPS index (passthrough)."""
         return self._cache._build_gps_index()
+    
+    def flush_write_buffer(self) -> None:
+        """Flush buffered writes to disk (passthrough to TransientCache)."""
+        self._cache.flush_write_buffer()
+    
+    @property
+    def write_buffer_count(self) -> int:
+        """Return number of buffered writes pending (passthrough)."""
+        return self._cache.write_buffer_count
+
