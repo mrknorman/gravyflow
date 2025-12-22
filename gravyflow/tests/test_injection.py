@@ -521,12 +521,8 @@ def test_scaling_method_scale_snr():
     assert ops.shape(scaled) == ops.shape(injection)
 
 
-def test_scaling_method_invalid_type():
-    """Test ScalingMethod.scale with invalid type raises error."""
-    # Create mock scaling method with invalid type using object trickery
-    # We can't easily create invalid enum, so skip this test
-    # The coverage will come from the valid tests hitting the match statement
-    pass
+# Removed: test_scaling_method_invalid_type (empty version)
+# The proper implementation is in the Coverage Tests section below (line 1114)
 
 
 def test_waveform_generator_init_network_list():

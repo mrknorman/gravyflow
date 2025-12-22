@@ -903,7 +903,7 @@ class TestGetOnsourceOffsourceChunks:
         # Set up obtainer state to prevent real data acquisition
         obtainer.acquisition_mode = gf.AcquisitionMode.NOISE
         obtainer.valid_segments_adjusted = obtainer.valid_segments
-        obtainer._segment_exausted = False
+        obtainer._segment_exhausted = False
         obtainer.current_segment = mock_segment
         obtainer._num_batches_in_current_segment = 2
         obtainer._current_batch_index = 0
@@ -1735,7 +1735,7 @@ class TestGetOnsourceOffsourceChunksReal:
         obtainer.valid_segments = test_segments
         obtainer.valid_segments_adjusted = test_segments
         obtainer.ifos = [gf.IFO.L1]
-        obtainer._segment_exausted = False
+        obtainer._segment_exhausted = False
         obtainer._current_segment_index = 0
         obtainer._current_batch_index = 0
         
