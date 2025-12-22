@@ -163,10 +163,10 @@ def _test_real_noise_multi(
                 layout.append(list_of_onsource)
             
             # Ensure output directory exists
-            gf.ensure_directory_exists(output_diretory_path)
+            gf.ensure_directory_exists(output_directory_path)
             
             # Define an output path for the dashboard
-            output_file(output_diretory_path / "multi_noise_plots.html")
+            output_file(output_directory_path / "multi_noise_plots.html")
 
             # Arrange the plots in a grid. 
             grid = gridplot(layout)
@@ -643,12 +643,9 @@ def test_noise_obtainer_default_groups():
     assert "test" in noise.groups
 
 
-def test_noise_obtainer_generator_none_error():
-    """Test that error is raised if generator fails to initialize."""
-    # This is a safety check - if match/case falls through with None
-    # We can't easily trigger this with normal usage since all types are handled
-    # But we test that the error message exists in case of future bugs
-    pass
+# Removed: test_noise_obtainer_generator_none_error
+# This was an empty test that couldn't be triggered through normal usage.
+# The error path it was meant to test is covered by type checking.
 
 
 def test_noise_obtainer_real_without_ifo_obtainer():
@@ -685,7 +682,7 @@ def test_white_noise_generator_iteration():
 
 
 
-def test_colored_noise_generator():
+def test_colored_noise_generator_with_cropping():
     """Test colored_noise_generator function directly."""
     num_examples = 2
     onsource_dur = 1.0
