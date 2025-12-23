@@ -253,20 +253,13 @@ class TransientDataObtainer(BaseDataObtainer):
             gps_key = gps_to_key(gps_time)
         
         # Try chunked memory cache first (new fast path)
+        # NOTE: Chunks are already resampled in _load_chunk_around_index(), so no
+        # crop_and_resample needed here
         if cache._chunk_in_memory and cache.has_key(gps_key):
             idx = cache._gps_index[gps_key]
             result = cache.get_from_chunk(idx, target_ifos=target_ifos)
             if result is not None:
-                onsource_raw, offsource_raw, _, _ = result
-                # Crop and resample from cache sample rate to requested rate
-                meta = cache.get_metadata()
-                cache_sample_rate = meta.get('sample_rate_hertz', 4096.0)
-                onsource = TransientCache.crop_and_resample(
-                    np.asarray(onsource_raw), cache_sample_rate, sample_rate_hertz, onsource_duration
-                )
-                offsource = TransientCache.crop_and_resample(
-                    np.asarray(offsource_raw), cache_sample_rate, sample_rate_hertz, offsource_duration
-                )
+                onsource, offsource, _, _ = result
                 return onsource * scale_factor, offsource * scale_factor, 'chunk'
         
         # Try full memory cache (fastest if loaded)
