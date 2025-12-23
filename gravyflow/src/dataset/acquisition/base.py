@@ -1121,7 +1121,20 @@ class BaseDataObtainer(ABC):
         Thread-safe static version of get_segment_data.
         
         Fetches segment data without using any instance state.
-        Can be called from multiple threads safely.
+        Can be safely called from multiple threads concurrently.
+        
+        Args:
+            segment_start_gps_time: Start GPS time of segment
+            segment_end_gps_time: End GPS time of segment
+            ifo: Interferometer to fetch data for
+            frame_type: Data frame type (e.g., 'HOFT_C00')
+            channel: Channel name (e.g., 'DCS-CALIB_STRAIN_CLEAN_C00')
+            
+        Returns:
+            TimeSeries containing the requested data
+            
+        Raises:
+            ValueError: If data cannot be fetched from local or remote sources
         """
         # Auto-detect observing run and adjust frame_type/channel if needed
         for run in ObservingRun:
@@ -1176,16 +1189,26 @@ class BaseDataObtainer(ABC):
         end_gps_times: List[float]
     ) -> Tuple[str, str]:
         """
-        Thread-safe static version of _get_frame_channel_for_gps.
+        Thread-safe static lookup for frame type and channel.
         
-        Get the correct frame_type and channel for a given GPS time
-        without accessing instance state.
+        Determines the correct frame_type and channel for a given GPS time
+        based on the observing run boundaries.
+        
+        Args:
+            gps_time: GPS time to look up
+            frame_types: List of frame types per observing run
+            channels: List of channels per observing run
+            start_gps_times: Start GPS times of each run
+            end_gps_times: End GPS times of each run
+            
+        Returns:
+            Tuple of (frame_type, channel) for the matching run,
+            or first entry if no match found
         """
         for i, (start, end) in enumerate(zip(start_gps_times, end_gps_times)):
             if start <= gps_time <= end:
                 return frame_types[i], channels[i]
-        # Fall back to first if no match
-        return frame_types[0], channels[0]
+        return frame_types[0], channels[0]  # Fallback to first run
 
     def get_segment(
         self,
