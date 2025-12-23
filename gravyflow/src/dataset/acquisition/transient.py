@@ -392,6 +392,25 @@ class TransientDataObtainer(BaseDataObtainer):
             - GLITCH_TYPE: (Batch, IFO) = BI (GlitchType.value if glitch, -1 otherwise)
             - SOURCE_TYPE: (Batch, IFO) = BI (SourceType.value if event, -1 otherwise)
         """
+        # Shape validation - identify mismatched arrays before stacking
+        if batch_subarrays:
+            shapes = [np.asarray(arr).shape for arr in batch_subarrays]
+            unique_shapes = set(shapes)
+            if len(unique_shapes) > 1:
+                # Log which segments have which shapes for debugging
+                logger.error(f"Shape mismatch in batch_subarrays! Unique shapes: {unique_shapes}")
+                for i, (arr, seg) in enumerate(zip(batch_subarrays, batch_segments)):
+                    logger.error(f"  Index {i}: shape={np.asarray(arr).shape}, GPS={seg.transient_gps_time:.3f}")
+                # Filter to most common shape to avoid crash
+                from collections import Counter
+                shape_counts = Counter(shapes)
+                most_common_shape = shape_counts.most_common(1)[0][0]
+                valid_indices = [i for i, s in enumerate(shapes) if s == most_common_shape]
+                batch_subarrays = [batch_subarrays[i] for i in valid_indices]
+                batch_backgrounds = [batch_backgrounds[i] for i in valid_indices]
+                batch_segments = [batch_segments[i] for i in valid_indices]
+                logger.warning(f"Filtered batch to {len(valid_indices)} samples with shape {most_common_shape}")
+        
         final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
         final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
         
