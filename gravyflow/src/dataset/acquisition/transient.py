@@ -10,6 +10,7 @@ import hashlib
 from typing import List, Dict, Optional, Union, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -814,20 +815,29 @@ class TransientDataObtainer(BaseDataObtainer):
             
             return (miss_idx, None)
         
-        # Download in parallel
-        logger.info(f"Parallel downloading {len(miss_indices)} segments with {max_workers} workers")
+        # Download in parallel with progress bar
         downloaded_segments = {}  # miss_idx -> IFOData
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all downloads
             futures = {executor.submit(download_single_segment, idx): idx for idx in miss_indices}
             
-            # Collect results as they complete
-            for future in as_completed(futures):
+            # Collect results as they complete with progress bar
+            download_pbar = tqdm(
+                as_completed(futures), 
+                total=len(futures),
+                desc="Downloading segments",
+                unit="seg",
+                leave=False,
+                dynamic_ncols=True
+            )
+            
+            for future in download_pbar:
                 try:
                     miss_idx, event_segment = future.result(timeout=60)
                     if event_segment is not None:
                         downloaded_segments[miss_idx] = event_segment
+                    download_pbar.set_postfix({'ok': len(downloaded_segments)})
                 except Exception as e:
                     miss_idx = futures[future]
                     logger.debug(f"Download future failed for index {miss_idx}: {e}")
@@ -1191,7 +1201,25 @@ class TransientDataObtainer(BaseDataObtainer):
                 self._cache_miss_count = 0
                 self._last_log_count = 0
             
-            for seg_idx in segment_indices:
+            # Progress bar for batch assembly
+            pbar = tqdm(
+                segment_indices, 
+                desc="Assembling batches",
+                unit="seg",
+                leave=False,
+                dynamic_ncols=True
+            )
+            
+            for seg_idx in pbar:
+                # Update progress bar description with cache stats
+                total = self._cache_hit_count + self._cache_miss_count
+                if total > 0:
+                    hit_rate = self._cache_hit_count / total * 100
+                    pbar.set_postfix({
+                        'hits': self._cache_hit_count,
+                        'misses': self._cache_miss_count,
+                        'hit%': f'{hit_rate:.0f}'
+                    })
                 # Get TransientSegment (has GPS key and times)
                 segment = self.transient_segments[seg_idx]
                 
