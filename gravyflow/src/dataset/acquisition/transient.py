@@ -261,10 +261,10 @@ class TransientDataObtainer(BaseDataObtainer):
                 # Crop and resample from cache sample rate to requested rate
                 meta = cache.get_metadata()
                 cache_sample_rate = meta.get('sample_rate_hertz', 4096.0)
-                onsource = cache.crop_and_resample(
+                onsource = TransientCache.crop_and_resample(
                     np.asarray(onsource_raw), cache_sample_rate, sample_rate_hertz, onsource_duration
                 )
-                offsource = cache.crop_and_resample(
+                offsource = TransientCache.crop_and_resample(
                     np.asarray(offsource_raw), cache_sample_rate, sample_rate_hertz, offsource_duration
                 )
                 return onsource * scale_factor, offsource * scale_factor, 'chunk'
@@ -292,10 +292,10 @@ class TransientDataObtainer(BaseDataObtainer):
             # Crop and resample from cache sample rate to requested rate
             meta = cache.get_metadata()
             cache_sample_rate = meta.get('sample_rate_hertz', 4096.0)
-            onsource = cache.crop_and_resample(
+            onsource = TransientCache.crop_and_resample(
                 np.asarray(onsource_raw), cache_sample_rate, sample_rate_hertz, onsource_duration
             )
-            offsource = cache.crop_and_resample(
+            offsource = TransientCache.crop_and_resample(
                 np.asarray(offsource_raw), cache_sample_rate, sample_rate_hertz, offsource_duration
             )
             return onsource * scale_factor, offsource * scale_factor, 'memory'
