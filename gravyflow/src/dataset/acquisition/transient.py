@@ -257,14 +257,23 @@ class TransientDataObtainer(BaseDataObtainer):
             idx = cache._gps_index[gps_key]
             result = cache.get_from_chunk(idx, target_ifos=target_ifos)
             if result is not None:
-                onsource, offsource, _, _ = result
+                onsource_raw, offsource_raw, _, _ = result
+                # Crop and resample from cache sample rate to requested rate
+                meta = cache.get_metadata()
+                cache_sample_rate = meta.get('sample_rate_hertz', 4096.0)
+                onsource = cache.crop_and_resample(
+                    np.asarray(onsource_raw), cache_sample_rate, sample_rate_hertz, onsource_duration
+                )
+                offsource = cache.crop_and_resample(
+                    np.asarray(offsource_raw), cache_sample_rate, sample_rate_hertz, offsource_duration
+                )
                 return onsource * scale_factor, offsource * scale_factor, 'chunk'
         
         # Try full memory cache (fastest if loaded)
         if cache.in_memory and cache.has_key(gps_key):
             idx = cache._gps_index[gps_key]
-            onsource = cache._mem_onsource[idx]
-            offsource = cache._mem_offsource[idx]
+            onsource_raw = cache._mem_onsource[idx]
+            offsource_raw = cache._mem_offsource[idx]
             
             # Filter channels if requested
             if target_ifos:
@@ -273,13 +282,22 @@ class TransientDataObtainer(BaseDataObtainer):
                 if stored_ifos:
                     try:
                         channel_indices = [stored_ifos.index(ifo) for ifo in target_ifos]
-                        onsource = onsource[channel_indices]
-                        offsource = offsource[channel_indices]
+                        onsource_raw = onsource_raw[channel_indices]
+                        offsource_raw = offsource_raw[channel_indices]
                     except ValueError:
                         return None, None, 'miss'
-                elif len(target_ifos) != onsource.shape[0]:
+                elif len(target_ifos) != onsource_raw.shape[0]:
                     return None, None, 'miss'
 
+            # Crop and resample from cache sample rate to requested rate
+            meta = cache.get_metadata()
+            cache_sample_rate = meta.get('sample_rate_hertz', 4096.0)
+            onsource = cache.crop_and_resample(
+                np.asarray(onsource_raw), cache_sample_rate, sample_rate_hertz, onsource_duration
+            )
+            offsource = cache.crop_and_resample(
+                np.asarray(offsource_raw), cache_sample_rate, sample_rate_hertz, offsource_duration
+            )
             return onsource * scale_factor, offsource * scale_factor, 'memory'
         
         # Try disk cache (use key-based lookup)
