@@ -1109,6 +1109,84 @@ class BaseDataObtainer(ABC):
                 
         return full_segment_data
 
+    @staticmethod
+    def get_segment_data_static(
+        segment_start_gps_time: float, 
+        segment_end_gps_time: float, 
+        ifo: "gf.IFO", 
+        frame_type: str, 
+        channel: str
+    ) -> TimeSeries:
+        """
+        Thread-safe static version of get_segment_data.
+        
+        Fetches segment data without using any instance state.
+        Can be called from multiple threads safely.
+        """
+        # Auto-detect observing run and adjust frame_type/channel if needed
+        for run in ObservingRun:
+            if run.value.start_gps_time <= segment_start_gps_time <= run.value.end_gps_time:
+                run_data = run.value
+                new_frame_type = run_data.frame_types[DataQuality.BEST]
+                new_channel = run_data.channels[DataQuality.BEST]
+                if new_frame_type != frame_type:
+                    frame_type = new_frame_type
+                    channel = new_channel
+                break
+
+        try:
+            files = find_urls(
+                site=ifo.name.strip("1"),
+                frametype=f"{ifo.name}_{frame_type}",
+                gpsstart=segment_start_gps_time,
+                gpsend=segment_end_gps_time,
+                urltype="file",
+            )
+            
+            if not files:
+                raise ValueError("No local files found.")
+                
+            full_segment_data = TimeSeries.read(
+                files, 
+                channel=f"{ifo.name}:{channel}", 
+                start=segment_start_gps_time, 
+                end=segment_end_gps_time, 
+                nproc=TransientDefaults.TIMESERIES_NPROC if hasattr(TransientDefaults, 'TIMESERIES_NPROC') else 100
+            )
+            
+        except Exception as e:
+            try:
+                full_segment_data = TimeSeries.fetch_open_data(
+                    ifo.name, 
+                    segment_start_gps_time, 
+                    segment_end_gps_time,
+                    cache=True
+                )
+            except Exception as e_remote:
+                raise ValueError(f"Failed to acquire data from local ({e}) or remote ({e_remote}).")
+                
+        return full_segment_data
+
+    @staticmethod
+    def get_frame_channel_for_gps_static(
+        gps_time: float,
+        frame_types: List[str],
+        channels: List[str],
+        start_gps_times: List[float],
+        end_gps_times: List[float]
+    ) -> Tuple[str, str]:
+        """
+        Thread-safe static version of _get_frame_channel_for_gps.
+        
+        Get the correct frame_type and channel for a given GPS time
+        without accessing instance state.
+        """
+        for i, (start, end) in enumerate(zip(start_gps_times, end_gps_times)):
+            if start <= gps_time <= end:
+                return frame_types[i], channels[i]
+        # Fall back to first if no match
+        return frame_types[0], channels[0]
+
     def get_segment(
         self,
         segment_start_gps_time: float,

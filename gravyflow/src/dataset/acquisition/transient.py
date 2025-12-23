@@ -9,6 +9,7 @@ import logging
 import hashlib
 from typing import List, Dict, Optional, Union, Tuple
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -813,48 +814,101 @@ class TransientDataObtainer(BaseDataObtainer):
             raise e
         
         # ==============================================================
-        # SEQUENTIAL DOWNLOAD: Download segments one at a time
-        # ==============================================================
-        # Note: self.acquire() is NOT thread-safe - it modifies shared state
-        # (_current_segment_index, _segment_exhausted, etc.)
+        # PARALLEL DOWNLOAD: Thread-safe stateless download function
         # ==============================================================
         
-        # Get segment boundaries for downloading
-        miss_segment_boundaries = self._get_segment_boundaries(miss_indices)
+        def download_segment_stateless(miss_idx: int) -> Tuple[int, Optional[IFOData]]:
+            """
+            Thread-safe download function with no shared state.
+            
+            All parameters are passed explicitly or captured from local scope.
+            Does NOT access self.acquire() or any mutable self.* state.
+            """
+            segment = self.transient_segments[miss_idx]
+            
+            data_list = []
+            start_gps_list = []
+            
+            for ifo in download_ifos_universal:
+                # Get frame type/channel for this GPS time (stateless lookup)
+                frame_type, channel = BaseDataObtainer.get_frame_channel_for_gps_static(
+                    segment.start_gps_time,
+                    self.frame_types,
+                    self.channels,
+                    self.start_gps_times,
+                    self.end_gps_times
+                )
+                
+                try:
+                    # Thread-safe download - no shared state
+                    segment_data = BaseDataObtainer.get_segment_data_static(
+                        segment.start_gps_time,
+                        segment.end_gps_time,
+                        ifo,
+                        frame_type,
+                        channel
+                    )
+                    # Resample if needed
+                    resampled = segment_data.resample(download_sample_rate)
+                    data_list.append(resampled.value)
+                    start_gps_list.append(float(segment.start_gps_time))
+                except Exception as e:
+                    # Zero-fill on failure
+                    num_samples = int((segment.end_gps_time - segment.start_gps_time) * download_sample_rate)
+                    data_list.append(np.zeros(num_samples, dtype=np.float32))
+                    start_gps_list.append(float(segment.start_gps_time))
+            
+            try:
+                event_segment = IFOData(
+                    data=data_list,
+                    sample_rate_hertz=download_sample_rate,
+                    start_gps_time=start_gps_list
+                )
+                return (miss_idx, event_segment)
+            except Exception:
+                return (miss_idx, None)
         
-        # Expand boundaries to (N, num_ifos, 2) for acquire()
-        num_universal_ifos = len(download_ifos_universal)
-        miss_segments_3d = np.repeat(
-            miss_segment_boundaries[:, np.newaxis, :],
-            num_universal_ifos,
-            axis=1
-        )
+        # Download in parallel with ThreadPoolExecutor
+        max_workers = min(32, len(miss_indices))  # Don't create more workers than tasks
+        downloaded_segments = {}
         
-        # Create segment generator for downloading
-        segment_generator = self.acquire(
-            sample_rate_hertz=download_sample_rate,
-            valid_segments=miss_segments_3d,
-            ifos=download_ifos_universal,
-            quiet_zero_fill=True
-        )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(download_segment_stateless, idx): idx for idx in miss_indices}
+            
+            download_pbar = tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc="Downloading segments",
+                unit="seg",
+                leave=False,
+                dynamic_ncols=True
+            )
+            
+            for future in download_pbar:
+                try:
+                    miss_idx, event_segment = future.result(timeout=120)
+                    if event_segment is not None:
+                        downloaded_segments[miss_idx] = event_segment
+                    download_pbar.set_postfix({'ok': len(downloaded_segments)})
+                except Exception as e:
+                    miss_idx = futures[future]
+                    logger.debug(f"Download future failed for index {miss_idx}: {e}")
+        
+        logger.info(f"Parallel downloaded {len(downloaded_segments)}/{len(miss_indices)} segments with {max_workers} workers")
+        
+        # ==============================================================
+        # SEQUENTIAL PROCESSING: Extract, cache, and batch results
+        # ==============================================================
         
         self._current_selected_ifo_indices = selected_ifo_indices
         
-        # Wrap with progress bar
-        download_pbar = tqdm(
-            enumerate(segment_generator),
-            total=len(miss_indices),
-            desc="Downloading segments",
-            unit="seg",
-            leave=False,
-            dynamic_ncols=True
-        )
-        
-        for miss_idx_position, event_segment in download_pbar:
-            true_seg_idx = miss_indices[miss_idx_position]
-            segment = self.transient_segments[true_seg_idx]
+        for miss_idx in miss_indices:
+            event_segment = downloaded_segments.get(miss_idx)
+            if event_segment is None:
+                self._dropped_segments_count += 1
+                continue
             
-            download_pbar.set_postfix({'GPS': f'{segment.transient_gps_time:.0f}'})
+            segment = self.transient_segments[miss_idx]
             
             # PRIMARY IFO PRE-VALIDATION
             primary_ifo_data_valid = True
