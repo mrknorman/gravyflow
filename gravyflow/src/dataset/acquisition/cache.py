@@ -392,7 +392,8 @@ class DiskCache(AcquisitionCache):
         offsource: np.ndarray,
         gps_time: float,
         label: int,
-        gps_key: int = None
+        gps_key: int = None,
+        metadata: dict = None
     ) -> None:
         """Append single item to cache (passthrough to TransientCache)."""
         self._cache.append_single(
@@ -400,7 +401,8 @@ class DiskCache(AcquisitionCache):
             offsource=offsource,
             gps_time=gps_time,
             label=label,
-            gps_key=gps_key
+            gps_key=gps_key,
+            metadata=metadata
         )
     
     def reset(self) -> None:

@@ -4,6 +4,11 @@
 # Train a Keras classifier to classify glitch types using GravyflowDataset.
 # This follows the style of 07_training_a_model.ipynb.
 
+# CRITICAL: Set multiprocessing to 'spawn' BEFORE any other imports
+# This prevents fork/JAX deadlocks when gwpy uses multiprocessing internally
+import multiprocessing
+multiprocessing.set_start_method('spawn', force=True)
+
 # Built-in imports
 from typing import List, Dict
 from pathlib import Path
@@ -105,7 +110,7 @@ class GlitchAdapterDataset(keras.utils.PyDataset):
     """Adapter to convert integer labels to one-hot encoding for Keras."""
     
     def __init__(self, dataset, num_classes):
-        super().__init__(workers=dataset.workers, use_multiprocessing=dataset.use_multiprocessing)
+        super().__init__(workers=0)
         self.dataset = dataset
         self.num_classes = num_classes
     

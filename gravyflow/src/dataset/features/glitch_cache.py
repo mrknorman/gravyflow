@@ -438,7 +438,8 @@ class TransientCache:
         offsource: np.ndarray,
         gps_time: float,
         label: int,
-        gps_key: Optional[int] = None
+        gps_key: Optional[int] = None,
+        metadata: Optional[Dict] = None
     ) -> None:
         """
         Buffer a single glitch for later batch append.
@@ -451,11 +452,29 @@ class TransientCache:
             onsource: Array of shape (IFOs, samples)
             offsource: Array of shape (IFOs, samples)
             gps_time: GPS time of the glitch (for storage and display)
-            label: GlitchType integer label
+            label: GlitchType/SourceType integer label
             gps_key: Optional GPS key (10ms precision). If not provided, computed from gps_time.
+            metadata: Optional dict with extended metadata:
+                - data_label: int (DataLabel enum value, -1 if missing)
+                - seen_in: int (bitmask, 0 if missing)
+                - snr, peak_freq, duration, ml_confidence: float (NaN if missing)
+                - mass1, mass2, distance, p_astro: float (NaN if missing, events only)
         """
-        # Add to buffer instead of writing immediately
-        self._write_buffer.append((onsource, offsource, gps_time, label))
+        if metadata is None:
+            metadata = {}
+        
+        # Compute GPS key if not provided
+        if gps_key is None:
+            gps_key = gps_to_key(gps_time)
+        
+        # Skip if already in cache or buffer (duplicate protection)
+        if self.has_key(gps_key):
+            return
+        if any(gps_to_key(item[2]) == gps_key for item in self._write_buffer):
+            return
+        
+        # Add to buffer with metadata
+        self._write_buffer.append((onsource, offsource, gps_time, label, metadata))
         
         # Auto-flush when buffer is full
         if len(self._write_buffer) >= self._write_buffer_size:
@@ -477,6 +496,23 @@ class TransientCache:
         gps_times = np.array([item[2] for item in self._write_buffer])
         labels = np.array([item[3] for item in self._write_buffer])
         
+        # Extract extended metadata (item[4] is metadata dict)
+        def get_meta(key, default):
+            return np.array([item[4].get(key, default) for item in self._write_buffer])
+        
+        metadata_arrays = {
+            'data_label': get_meta('data_label', -1).astype(np.int8),
+            'seen_in': get_meta('seen_in', 0).astype(np.uint8),
+            'snr': get_meta('snr', float('nan')).astype(np.float32),
+            'peak_freq': get_meta('peak_freq', float('nan')).astype(np.float32),
+            'duration': get_meta('duration', float('nan')).astype(np.float32),
+            'ml_confidence': get_meta('ml_confidence', float('nan')).astype(np.float32),
+            'mass1': get_meta('mass1', float('nan')).astype(np.float32),
+            'mass2': get_meta('mass2', float('nan')).astype(np.float32),
+            'distance': get_meta('distance', float('nan')).astype(np.float32),
+            'p_astro': get_meta('p_astro', float('nan')).astype(np.float32),
+        }
+        
         n_buffered = len(self._write_buffer)
         self._write_buffer.clear()
         
@@ -486,7 +522,8 @@ class TransientCache:
                 onsource=onsource_batch,
                 offsource=offsource_batch,
                 gps_times=gps_times,
-                labels=labels
+                labels=labels,
+                metadata=metadata_arrays
             )
             logger.debug(f"Flushed {n_buffered} samples to cache")
         except Exception as e:
@@ -952,12 +989,24 @@ class TransientCache:
                 dtype=np.int32
             )
             
+            # Extended metadata datasets (v2)
+            grp.create_dataset('data_label', shape=(0,), maxshape=(None,), dtype=np.int8)
+            grp.create_dataset('seen_in', shape=(0,), maxshape=(None,), dtype=np.uint8)
+            grp.create_dataset('snr', shape=(0,), maxshape=(None,), dtype=np.float32)
+            grp.create_dataset('peak_freq', shape=(0,), maxshape=(None,), dtype=np.float32)
+            grp.create_dataset('duration', shape=(0,), maxshape=(None,), dtype=np.float32)
+            grp.create_dataset('ml_confidence', shape=(0,), maxshape=(None,), dtype=np.float32)
+            grp.create_dataset('mass1', shape=(0,), maxshape=(None,), dtype=np.float32)
+            grp.create_dataset('mass2', shape=(0,), maxshape=(None,), dtype=np.float32)
+            grp.create_dataset('distance', shape=(0,), maxshape=(None,), dtype=np.float32)
+            grp.create_dataset('p_astro', shape=(0,), maxshape=(None,), dtype=np.float32)
+            
             # Store metadata
             grp.attrs['sample_rate_hertz'] = sample_rate_hertz
             grp.attrs['onsource_duration'] = onsource_duration
             grp.attrs['offsource_duration'] = offsource_duration
             grp.attrs['ifo_names'] = ifo_names
-            grp.attrs['version'] = 1
+            grp.attrs['version'] = 2
             
         self._metadata = None
         
@@ -966,25 +1015,58 @@ class TransientCache:
         onsource: np.ndarray,
         offsource: np.ndarray,
         gps_times: np.ndarray,
-        labels: np.ndarray
+        labels: np.ndarray,
+        metadata: Optional[Dict[str, np.ndarray]] = None
     ) -> None:
         """
         Append a batch of glitches to the existing cache file.
         
         Uses incremental GPS index update instead of full invalidation
         for O(1) instead of O(N) index maintenance.
+        
+        Args:
+            onsource: Array of shape (N, IFOs, samples)
+            offsource: Array of shape (N, IFOs, samples)
+            gps_times: Array of shape (N,)
+            labels: Array of shape (N,)
+            metadata: Optional dict of metadata arrays, keys:
+                data_label, seen_in, snr, peak_freq, duration, 
+                ml_confidence, mass1, mass2, distance, p_astro
         """
         if not self.exists:
             raise FileNotFoundError(f"Cache file not initialized: {self.path}")
+        
+        n_new = len(gps_times)
+        
+        # Default metadata with sentinel values
+        if metadata is None:
+            metadata = {}
+        
+        default_metadata = {
+            'data_label': np.full(n_new, -1, dtype=np.int8),
+            'seen_in': np.zeros(n_new, dtype=np.uint8),
+            'snr': np.full(n_new, np.nan, dtype=np.float32),
+            'peak_freq': np.full(n_new, np.nan, dtype=np.float32),
+            'duration': np.full(n_new, np.nan, dtype=np.float32),
+            'ml_confidence': np.full(n_new, np.nan, dtype=np.float32),
+            'mass1': np.full(n_new, np.nan, dtype=np.float32),
+            'mass2': np.full(n_new, np.nan, dtype=np.float32),
+            'distance': np.full(n_new, np.nan, dtype=np.float32),
+            'p_astro': np.full(n_new, np.nan, dtype=np.float32),
+        }
+        
+        # Merge provided metadata with defaults
+        for key in default_metadata:
+            if key not in metadata:
+                metadata[key] = default_metadata[key]
             
         with h5py.File(self.path, 'a') as f:
             grp = f['glitches']
             
-            n_new = len(gps_times)
             n_current = grp['gps_times'].shape[0]
             n_total = n_current + n_new
             
-            # Resize and append
+            # Resize and append core data
             grp['onsource'].resize(n_total, axis=0)
             grp['onsource'][n_current:] = onsource.astype(np.float32)
             
@@ -996,6 +1078,12 @@ class TransientCache:
             
             grp['labels'].resize(n_total, axis=0)
             grp['labels'][n_current:] = labels.astype(np.int32)
+            
+            # Append extended metadata
+            for key, arr in metadata.items():
+                if key in grp:
+                    grp[key].resize(n_total, axis=0)
+                    grp[key][n_current:] = arr
             
         # Incremental GPS index update (O(n_new) instead of O(N) rebuild)
         with self._gps_lock:

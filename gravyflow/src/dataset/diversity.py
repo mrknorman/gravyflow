@@ -154,7 +154,7 @@ class LabelTrackingDataset(keras.utils.PyDataset):
     """
     
     def __init__(self, dataset, label_key: str = 'SUB_TYPE'):
-        super().__init__(workers=dataset.workers, use_multiprocessing=dataset.use_multiprocessing)
+        super().__init__(workers=0)
         self.dataset = dataset
         self.label_key = label_key
         self._last_labels = None

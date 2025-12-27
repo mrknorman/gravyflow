@@ -84,6 +84,18 @@ class TransientSegment(Segment):
         confidence: Optional[EventConfidence]  # Event confidence (events only)
         name: Optional[str]                # Event name like "GW150914" (events only)
         weight: float                      # Sampling weight for balancing
+        
+        # Extended metadata (NaN = not available)
+        snr: float                         # Signal-to-noise ratio
+        peak_freq: float                   # Peak frequency Hz
+        duration: float                    # Glitch duration seconds
+        ml_confidence: float               # ML classification confidence
+        
+        # Event PE data (NaN for glitches)
+        mass1: float                       # Primary mass solar masses
+        mass2: float                       # Secondary mass solar masses
+        distance: float                    # Luminosity distance Mpc
+        p_astro: float                     # Astrophysical probability
     """
     # Transient-specific identity (required fields first)
     gps_key: int = None
@@ -99,6 +111,18 @@ class TransientSegment(Segment):
     confidence: Optional["EventConfidence"] = None
     name: Optional[str] = None
     weight: float = 1.0
+    
+    # Extended metadata (NaN = not available)
+    snr: float = float('nan')
+    peak_freq: float = float('nan')
+    duration: float = float('nan')
+    ml_confidence: float = float('nan')
+    
+    # Event PE data (NaN for glitches)
+    mass1: float = float('nan')
+    mass2: float = float('nan')
+    distance: float = float('nan')
+    p_astro: float = float('nan')
     
     @property
     def is_event(self) -> bool:

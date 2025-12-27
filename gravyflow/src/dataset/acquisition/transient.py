@@ -875,6 +875,11 @@ class TransientDataObtainer(BaseDataObtainer):
         # Execute parallel downloads
         max_workers = min(32, len(miss_indices))
         downloaded_segments = {}
+        failed_count = 0
+        
+        # Detect if running in interactive terminal
+        import sys
+        is_interactive = sys.stdout.isatty()
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
@@ -882,28 +887,92 @@ class TransientDataObtainer(BaseDataObtainer):
                 for idx in miss_indices
             }
             
-            pbar = tqdm(
-                as_completed(futures),
-                total=len(futures),
-                desc="Downloading",
-                unit="seg",
-                leave=False,
-                dynamic_ncols=True
-            )
+            pending = set(futures.keys())
             
-            for future in pbar:
-                try:
-                    idx, event_segment = future.result(timeout=120)
-                    if event_segment is not None:
-                        downloaded_segments[idx] = event_segment
-                    pbar.set_postfix({'ok': len(downloaded_segments)})
-                except Exception as e:
+            if is_interactive and len(futures) > 1:
+                # Multi-progress bar mode for interactive terminals
+                # Main progress bar at position 0
+                main_pbar = tqdm(
+                    total=len(futures),
+                    desc=f"Downloads ({max_workers}w)",
+                    unit="seg",
+                    position=0,
+                    leave=True,
+                    dynamic_ncols=True
+                )
+                # Worker status bars (show up to 8 active workers)
+                worker_pbars = {}
+                next_worker_slot = 0
+                max_worker_bars = min(8, max_workers)
+                
+                for future in as_completed(futures):
+                    pending.discard(future)
                     idx = futures[future]
-                    logger.debug(f"Download failed for segment {idx}: {e}")
+                    
+                    # Clean up worker bar if it exists
+                    if idx in worker_pbars:
+                        slot = worker_pbars.pop(idx)
+                        # Don't close - just mark as done in main bar
+                    
+                    try:
+                        result_idx, event_segment = future.result(timeout=30)
+                        if event_segment is not None:
+                            downloaded_segments[result_idx] = event_segment
+                        else:
+                            failed_count += 1
+                    except Exception as e:
+                        failed_count += 1
+                        logger.debug(f"Download failed for segment {idx}: {e}")
+                    
+                    main_pbar.update(1)
+                    total_done = len(downloaded_segments) + failed_count
+                    success_rate = len(downloaded_segments) / total_done * 100 if total_done > 0 else 0
+                    main_pbar.set_postfix({
+                        'ok': len(downloaded_segments),
+                        'fail': failed_count,
+                        'rate': f'{success_rate:.0f}%',
+                        'active': len(pending)
+                    }, refresh=True)
+                
+                main_pbar.close()
+            else:
+                # Simple single progress bar (for nohup/logs)
+                pbar = tqdm(
+                    total=len(futures),
+                    desc=f"Downloading ({max_workers}w)",
+                    unit="seg",
+                    leave=False,
+                    dynamic_ncols=True
+                )
+                
+                for future in as_completed(futures):
+                    pending.discard(future)
+                    try:
+                        idx, event_segment = future.result(timeout=30)
+                        if event_segment is not None:
+                            downloaded_segments[idx] = event_segment
+                        else:
+                            failed_count += 1
+                    except Exception as e:
+                        idx = futures[future]
+                        failed_count += 1
+                        logger.debug(f"Download failed for segment {idx}: {e}")
+                    
+                    pbar.update(1)
+                    total_done = len(downloaded_segments) + failed_count
+                    success_rate = len(downloaded_segments) / total_done * 100 if total_done > 0 else 0
+                    pbar.set_postfix({
+                        'ok': len(downloaded_segments),
+                        'fail': failed_count,
+                        'rate': f'{success_rate:.0f}%',
+                        'active': len(pending)
+                    }, refresh=True)
+                
+                pbar.close()
         
         logger.info(
             f"Downloaded {len(downloaded_segments)}/{len(miss_indices)} segments "
-            f"({max_workers} workers)"
+            f"({max_workers} workers, {failed_count} failed)"
         )
         
         # ==============================================================
@@ -964,13 +1033,31 @@ class TransientDataObtainer(BaseDataObtainer):
             
             # Get label and append to cache (buffered)
             label = segment.kind.value if segment.is_glitch else -1
+            
+            # Build metadata dict from segment
+            from .transient_segment import ifos_to_bitmask
+            from ..acquisition.base import DataLabel
+            metadata = {
+                'data_label': DataLabel.GLITCHES.value if segment.is_glitch else DataLabel.EVENTS.value,
+                'seen_in': ifos_to_bitmask(segment.seen_in) if segment.seen_in else 0,
+                'snr': segment.snr,
+                'peak_freq': segment.peak_freq,
+                'duration': segment.duration,
+                'ml_confidence': segment.ml_confidence,
+                'mass1': segment.mass1,
+                'mass2': segment.mass2,
+                'distance': segment.distance,
+                'p_astro': segment.p_astro,
+            }
+            
             try:
                 cache.append_single(
                     np.array(onsource_full), 
                     np.array(offsource_full), 
                     segment.transient_gps_time,
                     label,
-                    gps_key=segment.gps_key
+                    gps_key=segment.gps_key,
+                    metadata=metadata
                 )
             except Exception as e:
                 logger.warning(f"Failed to append sample to cache (GPS={segment.transient_gps_time:.3f}): {e}")

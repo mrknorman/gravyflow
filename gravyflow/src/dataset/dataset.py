@@ -116,13 +116,10 @@ class GravyflowDataset(keras.utils.PyDataset):
         output_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         mask_history: Optional[List] = None,
         steps_per_epoch: int = 1000,
-        workers: int = 1,
-        use_multiprocessing: bool = False,
-        max_queue_size: int = 10,
         sampling_mode: Optional["gf.SamplingMode"] = None
     ):
-        # Initialize PyDataset
-        super().__init__(workers=workers, use_multiprocessing=use_multiprocessing, max_queue_size=max_queue_size)
+        # Initialize PyDataset (single-threaded to avoid JAX/fork deadlocks)
+        super().__init__(workers=0)
         
         self.steps_per_epoch = steps_per_epoch
 
@@ -270,14 +267,6 @@ class GravyflowDataset(keras.utils.PyDataset):
         Generate the next batch of data.
         """
         # Note: 'index' is ignored because data generation is infinite/random.
-        # In a multiprocessing setup, each worker will call this.
-        # Since self.noise and self.injections are iterators, we need to be careful.
-        # PyDataset with workers=1 (default) runs in a thread pool, sharing the instance.
-        # Iterators are not thread-safe.
-        # However, for now, let's assume single-threaded or manage locks if needed.
-        # Or better, we can rely on the fact that next() is atomic enough for simple generators,
-        # but complex ones might have issues.
-        # For full safety with workers > 1, we might need to re-instantiate generators per worker.
         
         try:
             batch_data = next(self.noise)
