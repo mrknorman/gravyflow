@@ -1093,7 +1093,7 @@ class BaseDataObtainer(ABC):
                 channel=f"{ifo.name}:{channel}", 
                 start=segment_start_gps_time, 
                 end=segment_end_gps_time, 
-                nproc=TransientDefaults.TIMESERIES_NPROC if hasattr(TransientDefaults, 'TIMESERIES_NPROC') else 100
+                nproc=1  # Single-threaded to avoid fork issues with JAX
             )
             
         except Exception as e:
@@ -1102,7 +1102,8 @@ class BaseDataObtainer(ABC):
                     ifo.name, 
                     segment_start_gps_time, 
                     segment_end_gps_time,
-                    cache=True
+                    cache=True,
+                    timeout=30  # 30 second timeout
                 )
             except Exception as e_remote:
                 raise ValueError(f"Failed to acquire data from local ({e}) or remote ({e_remote}).")
@@ -1164,7 +1165,7 @@ class BaseDataObtainer(ABC):
                 channel=f"{ifo.name}:{channel}", 
                 start=segment_start_gps_time, 
                 end=segment_end_gps_time, 
-                nproc=TransientDefaults.TIMESERIES_NPROC if hasattr(TransientDefaults, 'TIMESERIES_NPROC') else 100
+                nproc=1  # Single-threaded to avoid fork issues with JAX
             )
             
         except Exception as e:
@@ -1173,7 +1174,8 @@ class BaseDataObtainer(ABC):
                     ifo.name, 
                     segment_start_gps_time, 
                     segment_end_gps_time,
-                    cache=True
+                    cache=True,
+                    timeout=30  # 30 second timeout
                 )
             except Exception as e_remote:
                 raise ValueError(f"Failed to acquire data from local ({e}) or remote ({e_remote}).")
