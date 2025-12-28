@@ -1,8 +1,9 @@
 """
-Test Suite for Unified Cache Architecture
+Test Suite for Transient Cache Architecture
 
-Tests the cache-first acquisition where all glitches are stored in the same HDF5 
-cache whether acquired during precaching or lazy loading.
+Tests the TransientCache system, which provides separate cache files for 
+glitches and events. Both use the same underlying TransientCache class,
+but are stored in distinct files (glitch_cache.h5, event_cache.h5).
 """
 
 import pytest
@@ -12,7 +13,7 @@ from pathlib import Path
 import tempfile
 
 import gravyflow as gf
-from gravyflow.src.dataset.features.glitch_cache import TransientCache
+from gravyflow.src.dataset.features.glitch_cache import TransientCache, generate_transient_cache_path
 from gravyflow.src.dataset.config import TransientDefaults
 
 # Use central config constants
@@ -147,6 +148,7 @@ class TestAppendSingle:
         label = 5
         
         cache.append_single(ons, offs, gps, label)
+        cache.flush_write_buffer()  # Flush buffer to persist data
         
         # Verify it exists
         assert cache.has_gps(gps), "Appended GPS should exist in cache"
@@ -183,6 +185,8 @@ class TestAppendSingle:
             offs = np.ones((1, num_offs), dtype=np.float32) * i
             gps = 1000000.0 + i
             cache.append_single(ons, offs, gps, i)
+        
+        cache.flush_write_buffer()  # Flush buffer to persist all data
         
         # All should be findable
         for i in range(5):
@@ -229,11 +233,45 @@ class TestCachePersistence:
             np.zeros((1, num_offs), dtype=np.float32),
             gps, 0
         )
+        cache1.flush_write_buffer()  # Flush buffer before closing
         del cache1  # Close
         
         # Reopen and verify
         cache2 = TransientCache(cache_path, mode='r')
         assert cache2.has_gps(gps), "Data should persist after cache is closed and reopened"
+
+
+class TestCachePathGeneration:
+    """Tests for cache path generation with different prefixes."""
+    
+    def test_default_prefix_is_transient(self, temp_cache_dir):
+        """Default prefix should be 'transient'."""
+        path = generate_transient_cache_path(data_directory=temp_cache_dir)
+        assert path.name == "transient_cache.h5"
+    
+    def test_glitch_prefix_generates_glitch_path(self, temp_cache_dir):
+        """Glitch prefix should generate glitch_cache.h5."""
+        path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="glitch")
+        assert path.name == "glitch_cache.h5"
+    
+    def test_event_prefix_generates_event_path(self, temp_cache_dir):
+        """Event prefix should generate event_cache.h5."""
+        path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="event")
+        assert path.name == "event_cache.h5"
+    
+    def test_different_prefixes_generate_different_paths(self, temp_cache_dir):
+        """Different prefixes should generate different paths."""
+        glitch_path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="glitch")
+        event_path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="event")
+        assert glitch_path != event_path
+        assert glitch_path.name == "glitch_cache.h5"
+        assert event_path.name == "event_cache.h5"
+    
+    def test_default_directory_is_gravyflow_cache(self):
+        """Default directory should be ~/.gravyflow/cache/."""
+        path = generate_transient_cache_path()
+        assert path.parent.name == "cache"
+        assert path.parent.parent.name == ".gravyflow"
 
 
 if __name__ == "__main__":

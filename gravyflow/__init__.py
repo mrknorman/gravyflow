@@ -119,7 +119,7 @@ from .src.utils.plotting import (
 )
 from .src.validate import Validator, ValidationConfig
 from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_times_with_labels, get_glitch_segments, get_glitch_type_from_index
-from .src.dataset.features.glitch_cache import TransientCache, generate_glitch_cache_path
+from .src.dataset.features.glitch_cache import TransientCache, generate_transient_cache_path
 from .src.dataset.features.event import (
     EventConfidence, SourceType, get_confident_event_times, get_marginal_event_times, 
     get_all_event_times, get_event_times_by_type, get_confident_events_with_params,
