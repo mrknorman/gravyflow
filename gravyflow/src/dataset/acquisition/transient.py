@@ -1306,8 +1306,10 @@ class TransientDataObtainer(BaseDataObtainer):
             )
         
         # Initialize or retrieve transient cache (extracted to helper for clarity)
+        # CRITICAL: Pass total_onsource (includes crop padding) so chunk cache loads
+        # enough data for whitening taper to be removed by post-processing crop
         cache, _ = self._initialize_transient_cache(
-            ifos, sample_rate_hertz, onsource_duration_seconds, offsource_duration_seconds
+            ifos, sample_rate_hertz, total_onsource_duration_seconds, offsource_duration_seconds
         )
         
         # Build batches: cache hits served instantly, misses downloaded in parallel
