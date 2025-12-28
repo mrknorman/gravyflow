@@ -32,9 +32,9 @@ SAMPLE_RATE = 2048.0
 ONSOURCE_DURATION = 1.0
 OFFSOURCE_DURATION = 16.0
 BATCH_SIZE = 32
-STEPS_PER_EPOCH = 50 # ~160K samples per epoch
-VALIDATION_STEPS = 10 # ~32K validation samples
-EPOCHS = 2
+STEPS_PER_EPOCH = 5000 # ~160K samples per epoch
+VALIDATION_STEPS = 1000 # ~32K validation samples
+EPOCHS = 100
 NUM_CLASSES = len(gf.GlitchType)
 
 # Output directory for checkpoints and logs

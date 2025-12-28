@@ -164,7 +164,8 @@ def get_event_times_by_type(
 
 def get_events_with_params(
     observing_runs: List = None,
-    event_types: List[EventConfidence] = None
+    event_types: List[EventConfidence] = None,
+    event_names: List[str] = None
 ) -> List[dict]:
     """
     Fetch GW events with full parameter estimation data.
@@ -296,6 +297,10 @@ def get_events_with_params(
         
         # Check if event belongs to requested run
         if target_runs and event["observing_run"] not in target_runs:
+            continue
+            
+        # Check if event matches requested names
+        if event_names and event["name"] not in event_names:
             continue
             
         if gps_key not in seen_gps:
