@@ -534,7 +534,7 @@ class BaseDataObtainer(ABC):
         self.valid_segments = None
         self.valid_segments_adjusted = None
         
-        # In-memory LRU cache for segments (unified cache interface)
+        # In-memory LRU cache for segments
         self._segment_cache_maxsize = 8
         self._segment_cache = MemoryCache(maxsize=self._segment_cache_maxsize)
         
@@ -1225,7 +1225,7 @@ class BaseDataObtainer(ABC):
         
         cache_key = f"{segment_key}_{ifo.name}_{sample_rate_hertz}"
         
-        # Check memory cache first (using unified cache interface)
+        # Check memory cache first
         cached = self._segment_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -1331,7 +1331,7 @@ class BaseDataObtainer(ABC):
         valid_segments: Optional[np.ndarray] = None,
         ifos: List[gf.IFO] = [gf.IFO.L1],
         scale_factor: float = 1.0,
-        quiet_zero_fill: bool = False  # Suppress zero-fill warnings (for universal cache)
+        quiet_zero_fill: bool = False  # Suppress zero-fill warnings (for batch cache downloads)
     ) -> Generator[IFOData, None, None]:
         
         if sample_rate_hertz is None:
@@ -1560,7 +1560,8 @@ class BaseDataObtainer(ABC):
             seed: int = None,
             sampling_mode: SamplingMode = None,
             whiten: bool = False,
-            crop: bool = False
+            crop: bool = False,
+            group: str = None
         ) -> Generator[Dict, None, None]:
         """
         Unified entry point for data acquisition.
@@ -1578,7 +1579,8 @@ class BaseDataObtainer(ABC):
             seed=seed,
             sampling_mode=sampling_mode,
             whiten=whiten,
-            crop=crop
+            crop=crop,
+            group=group
         )
 
     @abstractmethod
@@ -1594,7 +1596,8 @@ class BaseDataObtainer(ABC):
             seed: int = None,
             sampling_mode: SamplingMode = SamplingMode.RANDOM,
             whiten: bool = False,
-            crop: bool = False
+            crop: bool = False,
+            group: str = None
         ):
         """
         Generate onsource/offsource data chunks.

@@ -285,13 +285,13 @@ class TransientDefaults:
     # Parallel processes for TimeSeries.read() operations
     TIMESERIES_NPROC: int = 100
 
-
     # ==========================================================================
-    # UNIVERSAL CACHE STRATEGY
+    # CACHE STRATEGY (GLITCH + EVENT CACHES)
     # ==========================================================================
-    # Cache downloads all LIGO detectors (H1, L1) regardless of what the user
-    # requests. This ensures maximum cache reuse - a cache built with H1+L1 can
-    # serve any subset (H1 only, L1 only, etc.) without redownloading.
+    # Separate cache files are used for glitches (glitch_cache.h5) and events
+    # (event_cache.h5). Both use the same format and download data for all 
+    # configured IFOs (H1, L1). This ensures maximum cache reuse - a cache 
+    # built with H1+L1 can serve any subset without redownloading.
     # 
     # NOTE: V1 (Virgo) is NOT included because:
     # - Only joined during O2 with limited coverage

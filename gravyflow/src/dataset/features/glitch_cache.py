@@ -1292,25 +1292,27 @@ class TransientCache:
             }
 
 
-def generate_glitch_cache_path(data_directory: Optional[Path] = None) -> Path:
+def generate_transient_cache_path(data_directory: Optional[Path] = None, prefix: str = "transient") -> Path:
     """
     Generate standardized cache file path.
     
-    Uses a single universal cache for all observing runs and IFOs
-    to avoid duplicate downloads of the same GPS times.
+    Creates cache files in ~/.gravyflow/cache/ by default. Different prefixes
+    are used for different transient types (e.g., "glitch" for glitches, 
+    "event" for GW events), resulting in separate cache files.
     
     The default location is ~/.gravyflow/cache/ to ensure the same cache
     is used regardless of current working directory.
     
     Args:
         data_directory: Base directory for cache files. If None, uses ~/.gravyflow/cache/
+        prefix: Filename prefix (e.g. "transient", "glitch", "event")
         
     Returns:
-        Path like: data_directory/transient_cache.h5
+        Path like: data_directory/{prefix}_cache.h5
     """
     if data_directory is None:
         # Use absolute path in home directory to ensure consistent cache location
         data_directory = Path.home() / ".gravyflow" / "cache"
         data_directory.mkdir(parents=True, exist_ok=True)
     
-    return data_directory / "transient_cache.h5"
+    return data_directory / f"{prefix}_cache.h5"

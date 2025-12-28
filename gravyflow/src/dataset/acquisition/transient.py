@@ -20,7 +20,7 @@ from keras import ops
 
 import gravyflow as gf
 from gravyflow.src.dataset.features.event import EventConfidence
-from gravyflow.src.dataset.features.glitch_cache import TransientCache, generate_glitch_cache_path
+from gravyflow.src.dataset.features.glitch_cache import TransientCache, generate_transient_cache_path
 from .cache import DiskCache
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from .base import (
@@ -1103,7 +1103,8 @@ class TransientDataObtainer(BaseDataObtainer):
         onsource_duration_seconds: float,
         offsource_duration_seconds: float,
         enable_chunked_mode: bool = True,  # NEW: Enable chunked cache by default
-        chunk_size: int = 5000  # Number of samples per memory chunk
+        chunk_size: int = 5000,  # Number of samples per memory chunk
+        prefix: str = "transient"
     ):
         """
         Initialize or retrieve the transient cache for event/glitch data.
@@ -1118,6 +1119,7 @@ class TransientDataObtainer(BaseDataObtainer):
             offsource_duration_seconds: Requested offsource duration
             enable_chunked_mode: If True, load cache chunks into memory for faster access
             chunk_size: Number of samples per memory chunk (default 5000, ~1-2GB)
+            prefix: Cache type prefix ("transient", "glitch", "event")
             
         Returns:
             Tuple of (cache, cache_sample_rate) - TransientCache instance and its sample rate
@@ -1129,25 +1131,30 @@ class TransientDataObtainer(BaseDataObtainer):
         # Determine data directory (None = use default in ~/.gravyflow/cache/)
         data_dir = getattr(self, 'data_directory', None)
         
-        # Universal Cache: single file for all runs/IFOs
-        cache_path = generate_glitch_cache_path(data_directory=data_dir)
+        # Separate cache files for glitches and events (both use same format)
+        cache_path = generate_transient_cache_path(data_directory=data_dir, prefix=prefix)
+        
+        # Manage multiple caches (glitch, event)
+        cache_attr = f"_{prefix}_cache"
         
         # Reuse existing cache if path matches (preserves GPS index)
-        if not hasattr(self, '_transient_cache') or self._transient_cache is None or self._transient_cache.path != cache_path:
-            self._transient_cache = DiskCache(cache_path, mode='a')
+        if not hasattr(self, cache_attr) or getattr(self, cache_attr) is None or getattr(self, cache_attr).path != cache_path:
+            setattr(self, cache_attr, DiskCache(cache_path, mode='a'))
         
-        cache = self._transient_cache
+        cache = getattr(self, cache_attr)
         
         # Validate cache compatibility (sample rate and duration only)
-        # IFO validation is not needed - Universal Cache always has H1+L1+V1
+        # IFO validation is not needed - All caches use H1+L1+V1 format
         if cache.exists:
             try:
                 cache.validate_request(sample_rate_hertz, onsource_duration_seconds, offsource_duration_seconds)
                 
-                if not hasattr(self, '_cache_logged'):
+                # Use a unique logging attribute per cache
+                logged_attr = f"_{prefix}_cache_logged"
+                if not hasattr(self, logged_attr):
                     meta = cache.get_metadata()
-                    logger.info(f"Cache: {meta['num_glitches']} glitches at {CACHE_SAMPLE_RATE_HERTZ}Hz")
-                    self._cache_logged = True
+                    logger.info(f"{prefix.capitalize()} Cache: {meta['num_glitches']} items at {CACHE_SAMPLE_RATE_HERTZ}Hz")
+                    setattr(self, logged_attr, True)
                     
                 # Enable chunked mode for faster cache hits (if not already enabled)
                 if enable_chunked_mode and not cache._chunk_in_memory:
@@ -1160,11 +1167,11 @@ class TransientDataObtainer(BaseDataObtainer):
                             offsource_duration=offsource_duration_seconds
                         )
             except ValueError as e:
-                logger.warning(f"Cache incompatible: {e}. Resetting.")
+                logger.warning(f"{prefix.capitalize()} cache incompatible: {e}. Resetting.")
                 cache.reset()
         
         # Initialize cache file if needed (or if reset)
-        # Universal Cache: Always use H1+L1+V1 regardless of requested IFOs
+        # All caches use H1+L1+V1 format regardless of requested IFOs
         if not cache.exists:
             num_cache_onsource = int(CACHE_ONSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
             num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
@@ -1179,7 +1186,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 onsource_samples=num_cache_onsource,
                 offsource_samples=num_cache_offsource
             )
-            logger.info(f"Created Universal Cache: {cache_path}")
+            logger.info(f"Created {prefix.capitalize()} Cache: {cache_path}")
         
         return cache, CACHE_SAMPLE_RATE_HERTZ
 
@@ -1195,7 +1202,8 @@ class TransientDataObtainer(BaseDataObtainer):
             seed: int = None,
             sampling_mode: SamplingMode = SamplingMode.RANDOM,
             whiten: bool = False,
-            crop: bool = False
+            crop: bool = False,
+            group: str = None
         ):
         """
         Wrapper to enforce shape contracts on generator.
@@ -1222,7 +1230,8 @@ class TransientDataObtainer(BaseDataObtainer):
             seed,
             sampling_mode,
             whiten,
-            crop
+            crop,
+            group
         )
 
         # Normalize ifos to list
@@ -1242,7 +1251,8 @@ class TransientDataObtainer(BaseDataObtainer):
             seed: int = None,
             sampling_mode: SamplingMode = SamplingMode.RANDOM,
             whiten: bool = False,
-            crop: bool = False
+            crop: bool = False,
+            group: str = None
         ):
         """
         Generate onsource/offsource chunks for TRANSIENT mode.
@@ -1298,19 +1308,35 @@ class TransientDataObtainer(BaseDataObtainer):
         # Auto-initialize segments if not already done
         # For specific event names, use group="all" to get all matching events
         if not self.transient_segments:
-            group_name = "all" if self.event_names else "train"
+            group_name = group if group is not None else ("all" if self.event_names else "train")
             self.get_valid_segments(
                 ifos=ifos, 
                 seed=seed,
                 group_name=group_name,
             )
         
-        # Initialize or retrieve transient cache (extracted to helper for clarity)
-        # CRITICAL: Pass total_onsource (includes crop padding) so chunk cache loads
-        # enough data for whitening taper to be removed by post-processing crop
-        cache, _ = self._initialize_transient_cache(
-            ifos, sample_rate_hertz, total_onsource_duration_seconds, offsource_duration_seconds
-        )
+        # Initialize or retrieve transient caches based on what segments we have
+        # Optimization: if sparse request (few segments), disable chunked mode
+        is_sparse_request = (len(self.transient_segments) < 100) or (self.event_names is not None)
+        enable_chunking = (not is_sparse_request)
+        
+        # Helper to init a specific cache type
+        def ensure_cache(prefix):
+             return self._initialize_transient_cache(
+                ifos, 
+                sample_rate_hertz, 
+                total_onsource_duration_seconds, 
+                offsource_duration_seconds,
+                enable_chunked_mode=enable_chunking,
+                prefix=prefix
+            )
+
+        # We might need glitch cache, event cache, or both
+        has_glitches = any(s.is_glitch for s in self.transient_segments)
+        has_events = any(s.is_event for s in self.transient_segments)
+
+        glitch_cache, _ = ensure_cache("glitch") if has_glitches else (None, None)
+        event_cache, _ = ensure_cache("event") if has_events else (None, None)
         
         # Build batches: cache hits served instantly, misses downloaded in parallel
         rng = default_rng(seed)
@@ -1376,18 +1402,25 @@ class TransientDataObtainer(BaseDataObtainer):
                 # Get TransientSegment (has GPS key and times)
                 segment = self.transient_segments[seg_idx]
                 
-                # Unified cache lookup (memory -> disk -> miss)
-                # Use GPS time from segment (no recalculation!)
-                onsource, offsource, source = self._get_sample_from_cache(
-                    cache,
-                    segment.transient_gps_time,
-                    sample_rate_hertz,
-                    total_onsource_duration_seconds,
-                    offsource_duration_seconds,
-                    scale_factor,
-                    gps_key=segment.gps_key,  # Pass key - eliminates float→key conversion!
-                    target_ifos=[i.name for i in ifos]  # Select specific IFOs from cache
-                )
+                # Select appropriate cache
+                active_cache = event_cache if segment.is_event else glitch_cache
+                
+                # Cache lookup (memory -> disk -> miss) using appropriate cache
+                # Skip if force_acquisition is True or cache is not initialized
+                onsource, offsource, source = None, None, 'miss'
+                
+                if active_cache is not None and not self.force_acquisition:
+                    # Use GPS time from segment (no recalculation!)
+                    onsource, offsource, source = self._get_sample_from_cache(
+                        active_cache,
+                        segment.transient_gps_time,
+                        sample_rate_hertz,
+                        total_onsource_duration_seconds,
+                        offsource_duration_seconds,
+                        scale_factor,
+                        gps_key=segment.gps_key,  # Pass key - eliminates float→key conversion!
+                        target_ifos=[i.name for i in ifos]  # Select specific IFOs from cache
+                    )
                 
                 if source != 'miss' and onsource is not None:
                     # Cache hit (memory or disk) with valid data
@@ -1416,44 +1449,64 @@ class TransientDataObtainer(BaseDataObtainer):
                 
                 # Download in batches for efficiency
                 if len(miss_indices) >= num_examples_per_batch:
-                    # Use consolidated helper for download/cache/batch
-                    for batch in self._process_cache_misses(
-                        miss_indices,
-                        ifos,
-                        sample_rate_hertz,
-                        total_onsource_duration_seconds,
-                        offsource_duration_seconds,
-                        scale_factor,
-                        cache,
-                        batch_subarrays,
-                        batch_backgrounds,
-                        batch_segments,
-                        num_examples_per_batch
-                    ):
-                        yield _post_process(batch)
+                    # Determine cache to use for this batch (assuming mixed types handled by helpers)
+                    # NOTE: The _process_cache_misses helper takes a single 'cache' arg.
+                    # Since we might have mixed types in miss_indices, we need to handle that.
+                    # Simplification: Splitting miss_indices by type is complex inside the loop.
+                    # HOWEVER, _process_cache_misses writes to 'cache'.
+                    # Solution: Call process twice? Or make process handle it?
+                    # For now, let's group miss_indices by type.
+                    
+                    # Group indices by type (event vs glitch)
+                    event_misses = [idx for idx in miss_indices if self.transient_segments[idx].is_event]
+                    glitch_misses = [idx for idx in miss_indices if self.transient_segments[idx].is_glitch]
+                    
+                    if event_misses and event_cache:
+                         for batch in self._process_cache_misses(
+                            event_misses, ifos, sample_rate_hertz, 
+                            total_onsource_duration_seconds, offsource_duration_seconds, 
+                            scale_factor, event_cache, 
+                            batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
+                        ):
+                            yield _post_process(batch)
+                         event_cache.flush_write_buffer()
+                         
+                    if glitch_misses and glitch_cache:
+                         for batch in self._process_cache_misses(
+                            glitch_misses, ifos, sample_rate_hertz, 
+                            total_onsource_duration_seconds, offsource_duration_seconds, 
+                            scale_factor, glitch_cache, 
+                            batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
+                        ):
+                            yield _post_process(batch)
+                         glitch_cache.flush_write_buffer()
+                    
                     miss_indices = []
-                    # Flush any buffered cache writes
-                    cache.flush_write_buffer()
 
             # Handle remaining miss_indices after for loop ends
             if len(miss_indices) > 0:
-                # Use consolidated helper for remaining cache misses
-                for batch in self._process_cache_misses(
-                    miss_indices,
-                    ifos,
-                    sample_rate_hertz,
-                    total_onsource_duration_seconds,
-                    offsource_duration_seconds,
-                    scale_factor,
-                    cache,
-                    batch_subarrays,
-                    batch_backgrounds,
-                    batch_segments,
-                    num_examples_per_batch
-                ):
-                    yield _post_process(batch)
-                # Flush any buffered cache writes at end of epoch
-                cache.flush_write_buffer()
+                    event_misses = [idx for idx in miss_indices if self.transient_segments[idx].is_event]
+                    glitch_misses = [idx for idx in miss_indices if self.transient_segments[idx].is_glitch]
+                    
+                    if event_misses and event_cache:
+                         for batch in self._process_cache_misses(
+                            event_misses, ifos, sample_rate_hertz, 
+                            total_onsource_duration_seconds, offsource_duration_seconds, 
+                            scale_factor, event_cache, 
+                            batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
+                        ):
+                            yield _post_process(batch)
+                         event_cache.flush_write_buffer()
+
+                    if glitch_misses and glitch_cache:
+                         for batch in self._process_cache_misses(
+                            glitch_misses, ifos, sample_rate_hertz, 
+                            total_onsource_duration_seconds, offsource_duration_seconds, 
+                            scale_factor, glitch_cache, 
+                            batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
+                        ):
+                            yield _post_process(batch)
+                         glitch_cache.flush_write_buffer()
 
             # Yield any remaining partial batch at end of epoch
             if len(batch_subarrays) > 0:
