@@ -77,7 +77,8 @@ def build_glitch_segments(
 def build_event_segments(
     observing_runs: List[ObservingRun] = None,
     confidences: List[EventConfidence] = None,
-    padding: float = DEFAULT_PADDING
+    padding: float = DEFAULT_PADDING,
+    event_names: List[str] = None
 ) -> List[TransientSegment]:
     """
     Build TransientSegments for GW events with acquisition boundaries.
@@ -86,6 +87,7 @@ def build_event_segments(
         observing_runs: Filter to specific runs. None = all runs.
         confidences: Confidence levels. None = [CONFIDENT].
         padding: Padding on each side of event GPS time (seconds).
+        event_names: Filter to specific event names.
     
     Returns:
         List of TransientSegments for events.
@@ -98,8 +100,22 @@ def build_event_segments(
     # Fetch events
     events = get_events_with_params(
         observing_runs=observing_runs,
-        event_types=confidences
+        event_types=confidences,
+        event_names=event_names
     )
+    
+    # Warn if requested events were not found
+    if event_names:
+        found_names = {event['name'] for event in events}
+        missing = set(event_names) - found_names
+        if missing:
+            import logging
+            logger = logging.getLogger(__name__)
+            runs_str = str([r.name for r in observing_runs]) if observing_runs else "ALL"
+            logger.warning(
+                f"Requested events not found in {runs_str}: {missing}. "
+                "Check observing_runs filter."
+            )
     
     def determine_active_ifos(event: dict) -> list:
         """Determine which IFOs were active for this event from metadata."""

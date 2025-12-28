@@ -193,13 +193,16 @@ class TransientDataObtainer(BaseDataObtainer):
             # we should broaden the search (e.g., check all runs) to ensure they are found.
             # Otherwise, respect the strict observing_runs filter.
             effective_runs = self.observing_runs
-            if self.event_names:
-                effective_runs = None  # None = query all runs
+            
+            # Note: Previously we forced effective_runs=None here to search all runs.
+            # Now we respect the user's observing_runs filter. If finding an event from a different
+            # run is desired, set observing_runs=None or include the target run.
             
             logger.info(f"Building event segments (runs={effective_runs})")
             event_segments = build_event_segments(
                 observing_runs=effective_runs,
-                confidences=self.event_types if self.event_types else [EventConfidence.CONFIDENT]
+                confidences=self.event_types if self.event_types else [EventConfidence.CONFIDENT],
+                event_names=self.event_names
             )
             all_segments.extend(event_segments)
             logger.info(f"Built {len(event_segments)} event segments")
