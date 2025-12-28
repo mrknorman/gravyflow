@@ -111,7 +111,8 @@ from .src.dataset.features.waveforms.simple import (
     WaveShape, PeriodicWaveGenerator, SineGaussianGenerator,
     ChirpletGenerator, RingdownGenerator
 )
-from .src.dataset.dataset import data, Dataset, GravyflowDataset
+from .src.dataset.dataset import data, Dataset, GravyflowDataset, ComposedDataset
+from .src.dataset.pools import FeaturePool, PoolSampler
 from .src.utils.plotting import (
     generate_strain_plot, generate_psd_plot, generate_spectrogram, generate_correlation_plot,
     generate_segment_timeline_plot, generate_example_extraction_plot
