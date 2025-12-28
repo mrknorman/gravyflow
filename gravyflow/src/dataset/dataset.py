@@ -613,3 +613,348 @@ def Dataset(**kwargs):
 
 # Legacy class alias
 data = GravyflowDataset
+
+
+# =============================================================================
+# COMPOSED DATASET
+# =============================================================================
+
+class ComposedDataset(keras.utils.PyDataset):
+    """
+    A dataset composed of multiple FeaturePools with different probabilities and labels.
+    
+    Each pool can be a different data source (noise, glitches, events, injections)
+    with its own class label and sampling probability. Multiple pools can share
+    the same label for hierarchical classification.
+    
+    Example:
+        pools = [
+            gf.FeaturePool(
+                name="pure_noise",
+                label=0,
+                probability=0.5,
+                noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.REAL, ...)
+            ),
+            gf.FeaturePool(
+                name="glitches",
+                label=1,
+                probability=0.3,
+                transient_obtainer=gf.TransientDataObtainer(...)
+            ),
+            gf.FeaturePool(
+                name="cbc_signals",
+                label=2,
+                probability=0.2,
+                noise_obtainer=gf.NoiseObtainer(...),
+                injection_generators=[cbc_generator]
+            ),
+        ]
+        
+        dataset = gf.ComposedDataset(
+            pools=pools,
+            sample_rate_hertz=2048.0,
+            onsource_duration_seconds=1.0,
+            num_examples_per_batch=32,
+            input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
+            output_variables=[gf.ReturnVariables.POOL_LABEL]
+        )
+    """
+    
+    def __init__(
+        self,
+        pools: List["gf.FeaturePool"],
+        seed: Optional[int] = None,
+        sample_rate_hertz: Optional[float] = None,
+        onsource_duration_seconds: Optional[float] = None,
+        offsource_duration_seconds: Optional[float] = None,
+        crop_duration_seconds: Optional[float] = None,
+        scale_factor: Optional[float] = None,
+        num_examples_per_generation_batch: Optional[int] = None,
+        num_examples_per_batch: Optional[int] = None,
+        input_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
+        output_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
+        steps_per_epoch: int = 1000,
+        group: str = "train"
+    ):
+        """
+        Initialize the composed dataset.
+        
+        Args:
+            pools: List of FeaturePool objects defining data sources and labels.
+            seed: Random seed for reproducibility.
+            sample_rate_hertz: Sample rate in Hz.
+            onsource_duration_seconds: Duration of onsource window.
+            offsource_duration_seconds: Duration of offsource window.
+            crop_duration_seconds: Duration to crop from onsource edges.
+            scale_factor: Scaling factor for data.
+            num_examples_per_generation_batch: Batch size for waveform generation.
+            num_examples_per_batch: Batch size for returned data.
+            input_variables: Variables to include in input dict.
+            output_variables: Variables to include in output dict.
+            steps_per_epoch: Number of batches per epoch.
+            group: Dataset split (train/val/test).
+        """
+        super().__init__(workers=0)
+        
+        from gravyflow.src.dataset.pools import PoolSampler
+        
+        self.steps_per_epoch = steps_per_epoch
+        self.group = group
+        
+        # Set default values
+        self.seed = seed if seed is not None else Defaults.seed
+        self.sample_rate_hertz = sample_rate_hertz if sample_rate_hertz is not None else Defaults.sample_rate_hertz
+        self.onsource_duration_seconds = onsource_duration_seconds if onsource_duration_seconds is not None else Defaults.onsource_duration_seconds
+        self.offsource_duration_seconds = offsource_duration_seconds if offsource_duration_seconds is not None else Defaults.offsource_duration_seconds
+        self.crop_duration_seconds = crop_duration_seconds if crop_duration_seconds is not None else Defaults.crop_duration_seconds
+        self.scale_factor = scale_factor if scale_factor is not None else Defaults.scale_factor
+        self.num_examples_per_generation_batch = num_examples_per_generation_batch if num_examples_per_generation_batch is not None else Defaults.num_examples_per_generation_batch
+        self.num_examples_per_batch = num_examples_per_batch if num_examples_per_batch is not None else Defaults.num_examples_per_batch
+        
+        self.input_variables = input_variables if input_variables is not None else []
+        self.output_variables = output_variables if output_variables is not None else []
+        self.variables_to_return = set(self.input_variables + self.output_variables)
+        
+        if not self.variables_to_return:
+            raise ValueError("No return variables requested. What's the point?")
+        
+        # Initialize pool sampler
+        self.pools = pools
+        self.pool_sampler = PoolSampler(pools, seed=self.seed)
+        
+        # Set random seeds
+        gf.set_random_seeds(self.seed)
+        
+        # Initialize generators for each pool
+        self._pool_generators = {}
+        self._pool_injection_generators = {}
+        self._initialize_pool_generators()
+    
+    def _initialize_pool_generators(self):
+        """Initialize data generators for each pool."""
+        for i, pool in enumerate(self.pools):
+            generator_kwargs = {
+                'sample_rate_hertz': self.sample_rate_hertz,
+                'onsource_duration_seconds': self.onsource_duration_seconds,
+                'crop_duration_seconds': self.crop_duration_seconds,
+                'offsource_duration_seconds': self.offsource_duration_seconds,
+                'num_examples_per_batch': self.num_examples_per_batch,
+                'scale_factor': self.scale_factor,
+                'group': self.group,
+                'seed': self.seed + i,  # Unique seed per pool
+            }
+            
+            if pool.is_noise_pool:
+                # Add sampling_mode for noise obtainer
+                generator_kwargs['sampling_mode'] = gf.SamplingMode.RANDOM
+                self._pool_generators[i] = pool.noise_obtainer(**generator_kwargs)
+            else:
+                # Transient obtainer doesn't need sampling_mode
+                self._pool_generators[i] = pool.transient_obtainer(**generator_kwargs)
+            
+            # Initialize injection generator if pool has injections
+            if pool.has_injections:
+                waveform_parameters_to_return = [
+                    item for item in self.variables_to_return 
+                    if isinstance(item.value, gf.WaveformParameter)
+                ]
+                
+                # Set network for generators if not set
+                for gen in pool.injection_generators:
+                    if gen.network is None:
+                        gen.network = gf.Network(pool.noise_obtainer.ifos)
+                
+                injection_gen = gf.InjectionGenerator(
+                    waveform_generators=pool.injection_generators,
+                    parameters_to_return=waveform_parameters_to_return,
+                    seed=self.seed + i + 1000
+                )
+                self._pool_injection_generators[i] = injection_gen(
+                    sample_rate_hertz=self.sample_rate_hertz,
+                    onsource_duration_seconds=self.onsource_duration_seconds,
+                    crop_duration_seconds=self.crop_duration_seconds,
+                    num_examples_per_generation_batch=self.num_examples_per_generation_batch,
+                    num_examples_per_batch=self.num_examples_per_batch,
+                )
+    
+    def __len__(self):
+        return self.steps_per_epoch
+    
+    def __getitem__(self, index) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Generate the next batch of data from multiple pools.
+        """
+        # Get pool assignments for this batch
+        pool_assignments = self.pool_sampler.get_pool_batch_sizes(self.num_examples_per_batch)
+        
+        # Storage for batch data
+        batch_onsource = []
+        batch_offsource = []
+        batch_pool_labels = []
+        batch_gps_times = []
+        batch_glitch_type = []
+        batch_source_type = []
+        batch_data_label = []
+        batch_scaled_injections = []
+        batch_parameters = {}
+        
+        # Collect per-position data
+        position_data = {}
+        
+        for pool_idx, (count, positions) in pool_assignments.items():
+            pool = self.pools[pool_idx]
+            generator = self._pool_generators[pool_idx]
+            
+            # Generate data from this pool
+            try:
+                batch_data = next(generator)
+                
+                # Handle dict format (new) or tuple format (legacy)
+                if isinstance(batch_data, dict):
+                    onsource = batch_data[gf.ReturnVariables.ONSOURCE]
+                    offsource = batch_data[gf.ReturnVariables.OFFSOURCE]
+                    gps_times = batch_data.get(
+                        gf.ReturnVariables.START_GPS_TIME,
+                        batch_data.get(gf.ReturnVariables.TRANSIENT_GPS_TIME)
+                    )
+                    glitch_type = batch_data.get(gf.ReturnVariables.GLITCH_TYPE)
+                    source_type = batch_data.get(gf.ReturnVariables.SOURCE_TYPE)
+                    data_label = batch_data.get(gf.ReturnVariables.DATA_LABEL)
+                else:
+                    if len(batch_data) >= 3:
+                        onsource, offsource, gps_times = batch_data[:3]
+                    else:
+                        onsource, offsource = batch_data[:2]
+                        gps_times = None
+                    glitch_type, source_type, data_label = None, None, None
+            except Exception as e:
+                logger.error(f"Data generation failed for pool '{pool.name}': {e}")
+                raise
+            
+            # Apply injections if pool has them
+            scaled_injections = None
+            parameters = {}
+            if pool.has_injections and pool_idx in self._pool_injection_generators:
+                try:
+                    injections, mask, parameters = next(self._pool_injection_generators[pool_idx])
+                    
+                    injection_gen = gf.InjectionGenerator(
+                        waveform_generators=pool.injection_generators,
+                        parameters_to_return=[],
+                        seed=self.seed + pool_idx
+                    )
+                    injection_gen.sample_rate_hertz = self.sample_rate_hertz
+                    
+                    onsource, scaled_injections, scaling_params = injection_gen.add_injections_to_onsource(
+                        injections,
+                        mask,
+                        onsource,
+                        offsource,
+                        parameters_to_return=self.variables_to_return,
+                        onsource_duration_seconds=self.onsource_duration_seconds,
+                        injection_parameters=parameters
+                    )
+                    parameters.update(scaling_params)
+                except Exception as e:
+                    logger.error(f"Injection generation failed for pool '{pool.name}': {e}")
+                    raise
+            
+            # Map data to positions
+            for local_idx, global_pos in enumerate(positions):
+                if local_idx < ops.shape(onsource)[0]:
+                    position_data[global_pos] = {
+                        'onsource': onsource[local_idx],
+                        'offsource': offsource[local_idx],
+                        'pool_label': pool.label,
+                        'gps_time': gps_times[local_idx] if gps_times is not None else -1.0,
+                        'glitch_type': glitch_type[local_idx] if glitch_type is not None else -1,
+                        'source_type': source_type[local_idx] if source_type is not None else -1,
+                        'data_label': data_label[local_idx] if data_label is not None else pool.label,
+                        'scaled_injections': scaled_injections[..., local_idx, :, :] if scaled_injections is not None else None,
+                        'parameters': {k: v[local_idx] if ops.is_tensor(v) else v for k, v in parameters.items()}
+                    }
+        
+        # Assemble final batch in order
+        for pos in range(self.num_examples_per_batch):
+            if pos in position_data:
+                data = position_data[pos]
+                batch_onsource.append(data['onsource'])
+                batch_offsource.append(data['offsource'])
+                batch_pool_labels.append(data['pool_label'])
+                batch_gps_times.append(data['gps_time'])
+                batch_glitch_type.append(data['glitch_type'])
+                batch_source_type.append(data['source_type'])
+                batch_data_label.append(data['data_label'])
+                if data['scaled_injections'] is not None:
+                    batch_scaled_injections.append(data['scaled_injections'])
+                for k, v in data['parameters'].items():
+                    if k not in batch_parameters:
+                        batch_parameters[k] = []
+                    batch_parameters[k].append(v)
+        
+        # Stack into tensors
+        onsource = ops.stack(batch_onsource, axis=0)
+        offsource = ops.stack(batch_offsource, axis=0)
+        pool_labels = ops.convert_to_tensor(batch_pool_labels, dtype="int32")
+        gps_times = ops.convert_to_tensor(batch_gps_times, dtype="float64")
+        glitch_type = ops.convert_to_tensor(batch_glitch_type, dtype="int32")
+        source_type = ops.convert_to_tensor(batch_source_type, dtype="int32")
+        data_label = ops.convert_to_tensor(batch_data_label, dtype="int32")
+        
+        scaled_injections = None
+        if batch_scaled_injections:
+            try:
+                scaled_injections = ops.stack(batch_scaled_injections, axis=0)
+            except:
+                scaled_injections = None
+        
+        # Stack parameters
+        for k, v in batch_parameters.items():
+            try:
+                batch_parameters[k] = ops.stack(v, axis=0)
+            except:
+                pass
+        
+        # Process data (whitening, etc.)
+        whitened_onsource = None
+        if gf.ReturnVariables.WHITENED_ONSOURCE in self.variables_to_return:
+            whitened_onsource = whiten(onsource, offsource, self.sample_rate_hertz)
+            whitened_onsource = gf.crop_samples(
+                whitened_onsource,
+                self.onsource_duration_seconds,
+                self.sample_rate_hertz
+            )
+            whitened_onsource = ops.cast(whitened_onsource, "float16")
+            whitened_onsource = gf.replace_nan_and_inf_with_zero(whitened_onsource)
+        
+        # Build return dictionaries
+        operations = {
+            gf.ReturnVariables.ONSOURCE: gf.crop_samples(onsource, self.onsource_duration_seconds, self.sample_rate_hertz) if gf.ReturnVariables.ONSOURCE in self.variables_to_return else None,
+            gf.ReturnVariables.WHITENED_ONSOURCE: whitened_onsource,
+            gf.ReturnVariables.OFFSOURCE: offsource if gf.ReturnVariables.OFFSOURCE in self.variables_to_return else None,
+            gf.ReturnVariables.START_GPS_TIME: gps_times if gf.ReturnVariables.START_GPS_TIME in self.variables_to_return else None,
+            gf.ReturnVariables.POOL_LABEL: pool_labels,
+            gf.ReturnVariables.GLITCH_TYPE: glitch_type if gf.ReturnVariables.GLITCH_TYPE in self.variables_to_return else None,
+            gf.ReturnVariables.SOURCE_TYPE: source_type if gf.ReturnVariables.SOURCE_TYPE in self.variables_to_return else None,
+            gf.ReturnVariables.DATA_LABEL: data_label if gf.ReturnVariables.DATA_LABEL in self.variables_to_return else None,
+        }
+        
+        # Add waveform parameters
+        operations.update(batch_parameters)
+        
+        input_dict = {
+            key.name: operations[key] for key in self.input_variables
+            if key in operations and operations[key] is not None
+        }
+        output_dict = {
+            key.name: operations[key] for key in self.output_variables
+            if key in operations and operations[key] is not None
+        }
+        
+        return input_dict, output_dict
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        return self.__getitem__(0)

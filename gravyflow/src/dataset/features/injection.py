@@ -219,6 +219,7 @@ class ReturnVariables(Enum):
     GLITCH_TYPE = ReturnVariable(16)        # GlitchType.value if glitch, -1 otherwise
     SOURCE_TYPE = ReturnVariable(12)        # SourceType.value if event, -1 otherwise
     EVENT_TYPE = ReturnVariable(15)         # EventConfidence enum value (if event)
+    POOL_LABEL = ReturnVariable(17)         # FeaturePool class label (int, for ComposedDataset)
     
     def __lt__(self, other):
         return self.value.index < other.value.index
