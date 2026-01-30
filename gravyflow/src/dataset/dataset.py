@@ -18,7 +18,7 @@ from gravyflow.src.utils.tensor import crop_samples, replace_nan_and_inf_with_ze
 from gravyflow.src.dataset.config import Defaults
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
-from gravyflow.src.utils.numerics import ensure_even
+from gravyflow.src.utils.numerics import ensure_even, ensure_list
 
 def validate_noise_settings(
         noise_obtainer: gf.NoiseObtainer, 
@@ -42,7 +42,7 @@ def validate_noise_settings(
         
         if noise_obtainer.ifo_data_obtainer is not None:
             warn(
-                ("Noise is not REAL or PSEUDO-REAL, yet data obtainer is"
+                ("Noise is not real or PSEUDO-REAL, yet data obtainer is"
                  " defined."), 
                 UserWarning
             )
@@ -112,6 +112,7 @@ class GravyflowDataset(keras.utils.PyDataset):
         waveform_generators: Optional[List[Union[gf.CBCGenerator, gf.WNBGenerator]]] = None,
         num_examples_per_generation_batch: Optional[int] = None,
         num_examples_per_batch: Optional[int] = None,
+        ifos: Optional[List[gf.IFO]] = None,
         input_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         output_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         mask_history: Optional[List] = None,
@@ -135,6 +136,7 @@ class GravyflowDataset(keras.utils.PyDataset):
         
         self.noise_obtainer = noise_obtainer if noise_obtainer is not None else gf.NoiseObtainer()
         self.group = group
+        self.ifos = ensure_list(ifos) if ifos is not None else None
         
         # Default to RANDOM mode if not specified
         self.sampling_mode = sampling_mode if sampling_mode is not None else gf.SamplingMode.RANDOM
@@ -235,6 +237,10 @@ class GravyflowDataset(keras.utils.PyDataset):
             'group': self.group,
             'seed': self.seed,
         }
+        # Add ifos to noise_kwargs if provided
+        if self.ifos is not None:
+            noise_kwargs['ifos'] = self.ifos
+
         # Only pass sampling_mode to NoiseObtainer (not TransientObtainer)
         if hasattr(self.noise_obtainer, 'noise_type'):
             noise_kwargs['sampling_mode'] = self.sampling_mode
@@ -671,6 +677,7 @@ class ComposedDataset(keras.utils.PyDataset):
         scale_factor: Optional[float] = None,
         num_examples_per_generation_batch: Optional[int] = None,
         num_examples_per_batch: Optional[int] = None,
+        ifos: Optional[List[gf.IFO]] = None,
         input_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         output_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         steps_per_epoch: int = 1000,
@@ -710,6 +717,7 @@ class ComposedDataset(keras.utils.PyDataset):
         self.scale_factor = scale_factor if scale_factor is not None else Defaults.scale_factor
         self.num_examples_per_generation_batch = num_examples_per_generation_batch if num_examples_per_generation_batch is not None else Defaults.num_examples_per_generation_batch
         self.num_examples_per_batch = num_examples_per_batch if num_examples_per_batch is not None else Defaults.num_examples_per_batch
+        self.ifos = ifos if ifos is not None else [gf.IFO.L1]
         
         self.input_variables = input_variables if input_variables is not None else []
         self.output_variables = output_variables if output_variables is not None else []
@@ -739,6 +747,7 @@ class ComposedDataset(keras.utils.PyDataset):
                 'crop_duration_seconds': self.crop_duration_seconds,
                 'offsource_duration_seconds': self.offsource_duration_seconds,
                 'num_examples_per_batch': self.num_examples_per_batch,
+                'ifos': self.ifos,
                 'scale_factor': self.scale_factor,
                 'group': self.group,
                 'seed': self.seed + i,  # Unique seed per pool

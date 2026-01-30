@@ -298,6 +298,7 @@ class NoiseObtainer(Obtainer):
             crop_duration_seconds : float = None,
             offsource_duration_seconds : float = None,
             num_examples_per_batch : float = None,
+            ifos: List[gf.IFO] = None,
             scale_factor : float = 1.0,
             group : str = "train",
             seed : int = None,
@@ -318,6 +319,8 @@ class NoiseObtainer(Obtainer):
             num_examples_per_batch = gf.Defaults.num_examples_per_batch
         if seed is None:
             seed = gf.Defaults.seed
+        if ifos is not None:
+            self.ifos = gf.src.utils.numerics.ensure_list(ifos)
         if self.rng is None:
             self.rng = default_rng(seed)
         
@@ -404,7 +407,8 @@ class NoiseObtainer(Obtainer):
                         self.ifos,
                         scale_factor,
                         seed=seed_,
-                        sampling_mode=sampling_mode
+                        sampling_mode=sampling_mode,
+                        group=group
                     )
                 
             case _:

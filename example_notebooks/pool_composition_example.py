@@ -9,11 +9,12 @@ The example creates a multi-class classifier training dataset with:
 - Pure noise (label 0)  
 - Noise with CBC injections (label 1)
 - Noise with WNB injections (label 1) <- same label as CBC for "signal" class
+- Real LIGO glitches (label 2)
 
 This demonstrates key features:
 1. Multiple pools with different probabilities
 2. Multiple pools sharing the same class label
-3. Mixing of pure noise and injection pools
+3. Mixing of noise, injection, and transient (glitch) pools
 """
 
 import logging
@@ -63,19 +64,19 @@ def create_example_pools():
     
     # Define feature pools
     pools = [
-        # Pure noise pool (50% of examples, label 0)
+        # Pure noise pool (40% of examples, label 0)
         gf.FeaturePool(
             name="pure_noise",
             label=0,  # Noise class
-            probability=0.50,
+            probability=0.40,
             noise_obtainer=noise_obtainer
         ),
         
-        # CBC injection pool (30% of examples, label 1)
+        # CBC injection pool (20% of examples, label 1)
         gf.FeaturePool(
             name="cbc_injections",
             label=1,  # Signal class
-            probability=0.30,
+            probability=0.20,
             noise_obtainer=noise_obtainer,
             injection_generators=[cbc_generator]
         ),
@@ -87,6 +88,18 @@ def create_example_pools():
             probability=0.20,
             noise_obtainer=noise_obtainer,
             injection_generators=[wnb_generator]
+        ),
+        
+        # Glitch pool (20% of examples, label 2)
+        gf.FeaturePool(
+            name="real_glitches",
+            label=2,  # Glitch class
+            probability=0.20,
+            transient_obtainer=gf.TransientDataObtainer(
+                data_quality=gf.DataQuality.BEST,
+                data_labels=[gf.DataLabel.GLITCHES],
+                observing_runs=[gf.ObservingRun.O3]
+            )
         ),
     ]
     
@@ -111,6 +124,7 @@ def main():
     with gf.env():
         dataset = gf.ComposedDataset(
             pools=pools,
+            ifos=[gf.IFO.H1, gf.IFO.L1],
             sample_rate_hertz=2048.0,
             onsource_duration_seconds=1.0,
             offsource_duration_seconds=16.0,
@@ -134,7 +148,7 @@ def main():
         # Generate a few batches
         logger.info("\nGenerating sample batches...")
         
-        label_counts = {0: 0, 1: 0}
+        label_counts = {0: 0, 1: 0, 2: 0}
         n_batches = 5
         
         for i in range(n_batches):
@@ -152,13 +166,16 @@ def main():
         logger.info(f"\nLabel distribution across {n_batches} batches:")
         logger.info(f"  - Label 0 (noise): {label_counts[0]} ({label_counts[0]/total:.1%})")
         logger.info(f"  - Label 1 (signal): {label_counts[1]} ({label_counts[1]/total:.1%})")
+        logger.info(f"  - Label 2 (glitch): {label_counts[2]} ({label_counts[2]/total:.1%})")
         
         # Show expected vs actual
-        expected_noise = 0.50
-        expected_signal = 0.50  # 0.30 + 0.20
+        expected_noise = 0.40
+        expected_signal = 0.40  # 0.20 + 0.20
+        expected_glitch = 0.20
         logger.info(f"\nExpected distribution:")
         logger.info(f"  - Noise: {expected_noise:.0%}")
         logger.info(f"  - Signal: {expected_signal:.0%}")
+        logger.info(f"  - Glitch: {expected_glitch:.0%}")
         
         logger.info("\n" + "="*60)
         logger.info("Example complete!")
