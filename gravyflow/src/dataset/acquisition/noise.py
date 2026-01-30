@@ -384,7 +384,8 @@ class NoiseDataObtainer(BaseDataObtainer):
             seed: int = None,
             sampling_mode: SamplingMode = SamplingMode.RANDOM,
             whiten: bool = False,
-            crop: bool = False
+            crop: bool = False,
+            group: str = None
         ):
         """
         Wrapper to enforce shape contracts on generator.
@@ -411,7 +412,8 @@ class NoiseDataObtainer(BaseDataObtainer):
             seed,
             sampling_mode,
             whiten,
-            crop
+            crop,
+            group
         )
 
         # Normalize ifos to list
@@ -431,7 +433,8 @@ class NoiseDataObtainer(BaseDataObtainer):
             seed: int = None,
             sampling_mode: SamplingMode = SamplingMode.RANDOM,
             whiten: bool = False,
-            crop: bool = False
+            crop: bool = False,
+            group: str = None
         ):
         """
         Generate onsource/offsource chunks for NOISE mode.

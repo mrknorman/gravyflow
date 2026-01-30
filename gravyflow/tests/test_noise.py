@@ -23,6 +23,7 @@ from keras import ops
 import jax
 import jax.numpy as jnp
 
+
 def _test_real_noise_single(
         output_directory_path : Path = Path("./gravyflow_data/tests/"),
         plot_results : bool = False
@@ -30,75 +31,75 @@ def _test_real_noise_single(
 
     with gf.env():
 
-        # Setup ifo data acquisition object:
-        ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[
-                gf.DataLabel.NOISE, 
-                gf.DataLabel.GLITCHES
-            ],
-            observing_runs=gf.ObservingRun.O3,
-            segment_order=gf.SegmentOrder.RANDOM,
-            force_acquisition = True,
-            cache_segments = False
-        )
-        
-        # Initialize noise generator wrapper:
-        noise : gf.NoiseObtainer = gf.NoiseObtainer(
-            ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = gf.NoiseType.REAL,
-            ifos = gf.IFO.L1
-        )
-        
-        # Iterate through num_tests batches to check correct operation:
-        batch = next(noise())
-        
-        # Handle dict format
-        onsource = batch[gf.ReturnVariables.ONSOURCE]
-        offsource = batch[gf.ReturnVariables.OFFSOURCE]
-        gps_times = batch.get(gf.ReturnVariables.START_GPS_TIME)
-
-        parameters_dict = {
-            "onsource" : onsource,
-            "offsource" : offsource,
-            "gps_times" : gps_times
-        }
-
-        parameters_file_path : Path = (
-            gf.PATH / f"res/tests/real_noise_consistency_single.hdf5"
-        )
-        gf.tests.compare_and_save_parameters(
-            parameters_dict, parameters_file_path
-        )
-        
-        if plot_results:
-            layout = []
-            for onsource_, offsource_, gps_time in zip(onsource, offsource, gps_times):
-                
-                onsource_strain_plot = gf.generate_strain_plot(
-                    {"Onsource Noise" : onsource_},
-                    title = f"Onsource Background noise at {gps_time}"
-                )
-                
-                offsource_strain_plot = gf.generate_strain_plot(
-                    {"Offsource Noise" : offsource_},
-                    title = f"Offsource Background noise at {gps_time}"
-                )
-                
-                layout.append(
-                    [onsource_strain_plot, offsource_strain_plot]
-                )
+            # Setup ifo data acquisition object:
+            ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
+                data_quality=gf.DataQuality.BEST,
+                data_labels=[
+                    gf.DataLabel.NOISE, 
+                    gf.DataLabel.GLITCHES
+                ],
+                observing_runs=gf.ObservingRun.O3,
+                segment_order=gf.SegmentOrder.RANDOM,
+                force_acquisition = True,
+                cache_segments = False
+            )
             
-            # Ensure output directory exists
-            gf.ensure_directory_exists(output_directory_path)
+            # Initialize noise generator wrapper:
+            noise : gf.NoiseObtainer = gf.NoiseObtainer(
+                ifo_data_obtainer = ifo_data_obtainer,
+                noise_type = gf.NoiseType.REAL,
+                ifos = gf.IFO.L1
+            )
             
-            # Define an output path for the dashboard
-            output_file(output_directory_path / "noise_plots.html")
+            # Iterate through num_tests batches to check correct operation:
+            batch = next(noise())
+            
+            # Handle dict format
+            onsource = batch[gf.ReturnVariables.ONSOURCE]
+            offsource = batch[gf.ReturnVariables.OFFSOURCE]
+            gps_times = batch.get(gf.ReturnVariables.START_GPS_TIME)
 
-            # Arrange the plots in a grid. 
-            grid = gridplot(layout)
+            parameters_dict = {
+                "onsource" : onsource,
+                "offsource" : offsource,
+                "gps_times" : gps_times
+            }
+
+            parameters_file_path : Path = (
+                gf.PATH / f"res/tests/real_noise_consistency_single.hdf5"
+            )
+            gf.tests.compare_and_save_parameters(
+                parameters_dict, parameters_file_path
+            )
+            
+            if plot_results:
+                layout = []
+                for onsource_, offsource_, gps_time in zip(onsource, offsource, gps_times):
+                    
+                    onsource_strain_plot = gf.generate_strain_plot(
+                        {"Onsource Noise" : onsource_},
+                        title = f"Onsource Background noise at {gps_time}"
+                    )
+                    
+                    offsource_strain_plot = gf.generate_strain_plot(
+                        {"Offsource Noise" : offsource_},
+                        title = f"Offsource Background noise at {gps_time}"
+                    )
+                    
+                    layout.append(
+                        [onsource_strain_plot, offsource_strain_plot]
+                    )
                 
-            save(grid)
+                # Ensure output directory exists
+                gf.ensure_directory_exists(output_directory_path)
+                
+                # Define an output path for the dashboard
+                output_file(output_directory_path / "noise_plots.html")
+
+                # Arrange the plots in a grid. 
+                grid = gridplot(layout)
+                    
+                save(grid)
     
 def _test_real_noise_multi(
         output_directory_path : Path = Path("./gravyflow_data/tests/"),
@@ -106,135 +107,135 @@ def _test_real_noise_multi(
     ) -> None:
 
     with gf.env():
-        
-        # Setup ifo data acquisition object:
-        ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[
-                gf.DataLabel.NOISE, 
-                gf.DataLabel.GLITCHES
-            ],
-            observing_runs=gf.ObservingRun.O3,
-            segment_order=gf.SegmentOrder.RANDOM,
-            force_acquisition = True,
-            cache_segments = False
-        )
-        
-        # Initilise noise generator wrapper:
-        noise : gf.NoiseObtainer = gf.NoiseObtainer(
-            ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = gf.NoiseType.REAL,
-            ifos = [gf.IFO.L1, gf.IFO.H1]
-        )
-                
-        # Iterate through num_tests batches to check correct operation:
-        batch = next(noise())
-        onsource = batch[gf.ReturnVariables.ONSOURCE]
-        offsource = batch[gf.ReturnVariables.OFFSOURCE]
-        gps_times = batch.get(gf.ReturnVariables.START_GPS_TIME)
+            
+            # Setup ifo data acquisition object:
+            ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
+                data_quality=gf.DataQuality.BEST,
+                data_labels=[
+                    gf.DataLabel.NOISE, 
+                    gf.DataLabel.GLITCHES
+                ],
+                observing_runs=gf.ObservingRun.O3,
+                segment_order=gf.SegmentOrder.RANDOM,
+                force_acquisition = True,
+                cache_segments = False
+            )
+            
+            # Initilise noise generator wrapper:
+            noise : gf.NoiseObtainer = gf.NoiseObtainer(
+                ifo_data_obtainer = ifo_data_obtainer,
+                noise_type = gf.NoiseType.REAL,
+                ifos = [gf.IFO.L1, gf.IFO.H1]
+            )
+                    
+            # Iterate through num_tests batches to check correct operation:
+            batch = next(noise())
+            onsource = batch[gf.ReturnVariables.ONSOURCE]
+            offsource = batch[gf.ReturnVariables.OFFSOURCE]
+            gps_times = batch.get(gf.ReturnVariables.START_GPS_TIME)
 
-        parameters_dict = {
-            "onsource" : onsource,
-            "offsource" : offsource,
-            "gps_times" : gps_times
-        }
+            parameters_dict = {
+                "onsource" : onsource,
+                "offsource" : offsource,
+                "gps_times" : gps_times
+            }
 
-        parameters_file_path : Path = (
-            gf.PATH / f"res/tests/real_noise_consistancy_multi.hdf5"
-        )
-        gf.tests.compare_and_save_parameters(
-            parameters_dict, parameters_file_path
-        )
+            parameters_file_path : Path = (
+                gf.PATH / f"res/tests/real_noise_consistancy_multi.hdf5"
+            )
+            gf.tests.compare_and_save_parameters(
+                parameters_dict, parameters_file_path
+            )
 
-        if plot_results:
+            if plot_results:
 
-            layout = []
-            for onsource_, gps_time in zip(onsource, gps_times):
-                
-                list_of_onsource = []
-                for onsource_ifo in onsource_: 
-                    list_of_onsource.append(
-                        gf.generate_strain_plot(
-                            {"Onsource Noise" : onsource_ifo},
-                            title = f"Onsource Background noise at {gps_time}",
+                layout = []
+                for onsource_, gps_time in zip(onsource, gps_times):
+                    
+                    list_of_onsource = []
+                    for onsource_ifo in onsource_: 
+                        list_of_onsource.append(
+                            gf.generate_strain_plot(
+                                {"Onsource Noise" : onsource_ifo},
+                                title = f"Onsource Background noise at {gps_time}",
+                            )
                         )
-                    )
+                    
+                    layout.append(list_of_onsource)
                 
-                layout.append(list_of_onsource)
-            
-            # Ensure output directory exists
-            gf.ensure_directory_exists(output_directory_path)
-            
-            # Define an output path for the dashboard
-            output_file(output_directory_path / "multi_noise_plots.html")
+                # Ensure output directory exists
+                gf.ensure_directory_exists(output_directory_path)
+                
+                # Define an output path for the dashboard
+                output_file(output_directory_path / "multi_noise_plots.html")
 
-            # Arrange the plots in a grid. 
-            grid = gridplot(layout)
-                
-            save(grid)
+                # Arrange the plots in a grid. 
+                grid = gridplot(layout)
+                    
+                save(grid)
 
 def _test_noise_shape(
         num_tests : int = int(100)
     ) -> None:
     
     with gf.env():
-        
-        # Setup ifo data acquisition object:
-        ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[
-                gf.DataLabel.NOISE, 
-                gf.DataLabel.GLITCHES
-            ],
-            observing_runs=gf.ObservingRun.O3,
-            segment_order=gf.SegmentOrder.RANDOM,
-            force_acquisition=True,
-            cache_segments=False,
-            logging_level=logging.INFO
-        )
-        
-        # Initilise noise generator wrapper:
-        noise : gf.NoiseObtainer = gf.NoiseObtainer(
-            ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = gf.NoiseType.REAL,
-            ifos = gf.IFO.L1
-        )
             
-        batch = next(iter(noise()))
-        onsource = batch[RV.ONSOURCE]
-        offsource = batch[RV.OFFSOURCE]
-
-        onsource_shape = onsource.shape
-        offsource_shape = offsource.shape
-
-        logging.info("Start shape tests...")
-        for index, batch in tqdm(
-                enumerate(islice(noise(), num_tests))
-            ):
+            # Setup ifo data acquisition object:
+            ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
+                data_quality=gf.DataQuality.BEST,
+                data_labels=[
+                    gf.DataLabel.NOISE, 
+                    gf.DataLabel.GLITCHES
+                ],
+                observing_runs=gf.ObservingRun.O3,
+                segment_order=gf.SegmentOrder.RANDOM,
+                force_acquisition=True,
+                cache_segments=False,
+                logging_level=logging.INFO
+            )
+            
+            # Initilise noise generator wrapper:
+            noise : gf.NoiseObtainer = gf.NoiseObtainer(
+                ifo_data_obtainer = ifo_data_obtainer,
+                noise_type = gf.NoiseType.REAL,
+                ifos = gf.IFO.L1
+            )
+                
+            batch = next(iter(noise()))
             onsource = batch[RV.ONSOURCE]
             offsource = batch[RV.OFFSOURCE]
-            
-            np.testing.assert_equal(
-                onsource.shape,
-                onsource_shape,
-                err_msg="Onsource shape missmatch!"
-            )
-            np.testing.assert_equal(
-                offsource.shape,
-                offsource_shape,
-                err_msg="Offsource shape missmatch!"
-            )
 
-        np.testing.assert_equal(
-            index,
-            num_tests - 1,
-            err_msg=(
-                "Warning! Noise generator does not iterate the required"
-                " number of batches."
-            )
-        )            
-        
-        logging.info("Complete")
+            onsource_shape = onsource.shape
+            offsource_shape = offsource.shape
+
+            logging.info("Start shape tests...")
+            for index, batch in tqdm(
+                    enumerate(islice(noise(), num_tests))
+                ):
+                onsource = batch[RV.ONSOURCE]
+                offsource = batch[RV.OFFSOURCE]
+                
+                np.testing.assert_equal(
+                    onsource.shape,
+                    onsource_shape,
+                    err_msg="Onsource shape missmatch!"
+                )
+                np.testing.assert_equal(
+                    offsource.shape,
+                    offsource_shape,
+                    err_msg="Offsource shape missmatch!"
+                )
+
+            np.testing.assert_equal(
+                index,
+                num_tests - 1,
+                err_msg=(
+                    "Warning! Noise generator does not iterate the required"
+                    " number of batches."
+                )
+            )            
+            
+            logging.info("Complete")
 
 def _test_noise_iteration(
         num_tests : int = int(1.0E2)
@@ -242,41 +243,41 @@ def _test_noise_iteration(
 
     with gf.env():
 
-        # Setup ifo data acquisition object:
-        ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[
-                gf.DataLabel.NOISE, 
-                gf.DataLabel.GLITCHES
-            ],
-            observing_runs=gf.ObservingRun.O3,
-            segment_order=gf.SegmentOrder.RANDOM,
-            force_acquisition=True,
-            cache_segments=False,
-            logging_level=logging.INFO
-        )
-        
-        # Initilise noise generator wrapper:
-        noise : gf.NoiseObtainer = gf.NoiseObtainer(
-            ifo_data_obtainer = ifo_data_obtainer,
-            noise_type = gf.NoiseType.REAL,
-            ifos = gf.IFO.L1
-        )
-            
-        logging.info("Start iteration tests...")
-        for index, _ in tqdm(enumerate(islice(noise(), num_tests))):
-            pass
-        
-        np.testing.assert_equal(
-            index,
-            num_tests - 1,
-            err_msg=(
-                "Warning! Noise generator does not iterate the required"
-                " number of batches."
+            # Setup ifo data acquisition object:
+            ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
+                data_quality=gf.DataQuality.BEST,
+                data_labels=[
+                    gf.DataLabel.NOISE, 
+                    gf.DataLabel.GLITCHES
+                ],
+                observing_runs=gf.ObservingRun.O3,
+                segment_order=gf.SegmentOrder.RANDOM,
+                force_acquisition=True,
+                cache_segments=False,
+                logging_level=logging.INFO
             )
-        )           
+            
+            # Initilise noise generator wrapper:
+            noise : gf.NoiseObtainer = gf.NoiseObtainer(
+                ifo_data_obtainer = ifo_data_obtainer,
+                noise_type = gf.NoiseType.REAL,
+                ifos = gf.IFO.L1
+            )
+                
+            logging.info("Start iteration tests...")
+            for index, _ in tqdm(enumerate(islice(noise(), num_tests))):
+                pass
+            
+            np.testing.assert_equal(
+                index,
+                num_tests - 1,
+                err_msg=(
+                    "Warning! Noise generator does not iterate the required"
+                    " number of batches."
+                )
+            )           
 
-        logging.info("Complete")
+            logging.info("Complete")
 
 def test_real_noise_single(
         pytestconfig : Config
