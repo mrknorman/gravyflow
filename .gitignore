@@ -14,6 +14,7 @@ cuphenom_outputs*
 *gravyflow_data*
 *.npy
 *.egg-info
+*/glitch_cache/*
 
 # Event cache files (may contain sensitive/secret event data)
 **/event_cache/
