@@ -232,6 +232,12 @@ def get_events_with_params(
         try:
             with open(cache_file, 'r') as f:
                 events = json.load(f)
+            if len(events) < 10:
+                logging.warning(
+                    f"Event cache has only {len(events)} events (expected many more). "
+                    f"Discarding stale cache at {cache_file}"
+                )
+                events = []
         except Exception as e:
             logging.warning(f"Failed to load event cache: {e}. Re-fetching.")
             events = []

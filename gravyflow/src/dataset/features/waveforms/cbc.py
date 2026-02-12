@@ -9,8 +9,17 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 gravyflow_root = os.path.abspath(os.path.join(current_dir, "../../../../../"))
 ripple_src_path = os.path.join(gravyflow_root, "ripple", "src")
 
-if ripple_src_path not in sys.path:
-    sys.path.insert(0, ripple_src_path)
+if os.path.isdir(ripple_src_path):
+    if ripple_src_path not in sys.path:
+        sys.path.insert(0, ripple_src_path)
+else:
+    import warnings
+    warnings.warn(
+        f"Local ripple submodule not found at {ripple_src_path}. "
+        "Falling back to system ripplegw. Run 'git submodule update --init ripple' "
+        "to use the patched version.",
+        UserWarning
+    )
 
 import ripplegw
 # Alias ripplegw to ripple so existing imports work
