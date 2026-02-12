@@ -9,14 +9,18 @@ from keras import ops
 from gravyflow.src.dataset.dataset import GravyflowDataset
 
 
+@pytest.mark.skipif(
+    jax.default_backend() == "cpu",
+    reason="No GPU/TPU available; JAX is using CPU backend"
+)
 def test_jax_accelerator_available():
     """Verify that JAX has access to a hardware accelerator (GPU or TPU), not just CPU."""
     devices = jax.devices()
     backend = jax.default_backend()
-    
+
     # Check that we have at least one device
     assert len(devices) > 0, "No JAX devices found"
-    
+
     # Check that the backend is not CPU
     assert backend in ("gpu", "tpu"), (
         f"JAX is using '{backend}' backend. Expected 'gpu' or 'tpu'. "
@@ -438,7 +442,7 @@ def test_micro_training(basic_dataset_config):
     inputs = keras.Input(shape=input_shape, name=gf.ReturnVariables.WHITENED_ONSOURCE.name)
     x = keras.layers.Flatten()(inputs)
     x = keras.layers.Dense(4, activation="relu")(x)
-    outputs = keras.layers.Dense(np.prod(input_shape), activation="linear")(x)    
+    outputs = keras.layers.Dense(int(np.prod(input_shape)), activation="linear")(x)
     output_layer = keras.layers.Reshape(
         input_shape, 
         name=gf.ReturnVariables.WHITENED_INJECTIONS.name

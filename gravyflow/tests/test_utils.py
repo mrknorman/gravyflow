@@ -54,18 +54,23 @@ from unittest.mock import patch, MagicMock
 
 def test_gpu_utils():
     """Verify GPU discovery logic (mocked)."""
-    
-    with patch("gravyflow.src.utils.gpu.subprocess.check_output") as mock_subprocess:
-        # Mock the output of nvidia-smi
-        # Format: index, memory.total, memory.used, memory.free, utilization.gpu
-        mock_subprocess.return_value = "0, 8000, 4000, 4000, 50\n1, 8000, 2000, 6000, 25"
-        
-        gpu_info = gf.get_gpu_memory_info()
-        assert len(gpu_info) == 2
-        assert gpu_info[0]['index'] == '0'
-        assert gpu_info[0]['free'] == 4000
-        assert gpu_info[1]['index'] == '1'
-        assert gpu_info[1]['free'] == 6000
+
+    mock_path = MagicMock()
+    mock_path.exists.return_value = True
+    mock_path.__str__ = MagicMock(return_value="/usr/bin/nvidia-smi")
+
+    with patch("gravyflow.src.utils.gpu.NVIDIA_SMI_PATH", mock_path):
+        with patch("gravyflow.src.utils.gpu.subprocess.check_output") as mock_subprocess:
+            # Mock the output of nvidia-smi
+            # Format: index, memory.total, memory.used, memory.free, utilization.gpu
+            mock_subprocess.return_value = "0, 8000, 4000, 4000, 50\n1, 8000, 2000, 6000, 25"
+
+            gpu_info = gf.get_gpu_memory_info()
+            assert len(gpu_info) == 2
+            assert gpu_info[0]['index'] == '0'
+            assert gpu_info[0]['free'] == 4000
+            assert gpu_info[1]['index'] == '1'
+            assert gpu_info[1]['free'] == 6000
 
 def test_io_utils():
     """Verify ensure_directory_exists and other IO helpers."""

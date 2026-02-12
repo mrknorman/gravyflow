@@ -894,7 +894,7 @@ class BaseDataObtainer(ABC):
             "GWTC-2.1-marginal", 
             "GWTC-3-confident", 
             "GWTC-3-marginal",
-            "GWTC-4",
+            "GWTC-4.0",
         ]
 
         gps_times = np.array([])
