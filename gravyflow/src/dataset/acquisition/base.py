@@ -548,7 +548,9 @@ class BaseDataObtainer(ABC):
     Provides shared functionality for segment acquisition, caching, and processing.
     Subclasses implement mode-specific logic for NOISE vs TRANSIENT acquisition.
     """
-    
+
+    _segment_cache_maxsize = 8  # In-memory LRU cache of acquired segments.
+
     def __init__(
             self, 
             data_quality : DataQuality,
@@ -580,14 +582,6 @@ class BaseDataObtainer(ABC):
         
         self.acquisition_mode = None
 
-        self._current_segment_index = 0
-        self._current_batch_index = 0
-        self._segment_exhausted = True
-        self._num_batches_in_current_segment = 0
-        self._grid_cursors = {}  # GRID's position in each piece it walks
-        self.rng = None
-        self.ifos = None
-        
         # Default to all observing runs (O1, O2, O3) if not specified
         observing_runs = ensure_list(observing_runs) or [ObservingRun.O1, ObservingRun.O2, ObservingRun.O3]
         data_labels = ensure_list(data_labels)
@@ -616,25 +610,39 @@ class BaseDataObtainer(ABC):
         if overrides:
             self.override_attributes(overrides)
         
-        # Set file name to none, will be set up if caching is requested
-        self.file_path = None
-
-        self.valid_segments = None
-        self.sampling_plan = None
-        
-        # In-memory LRU cache for segments
-        self._segment_cache_maxsize = 8
-        self._segment_cache = MemoryCache(maxsize=self._segment_cache_maxsize)
-        
         # Prefetching configuration
         self.prefetch_segments = prefetch_segments
         self._prefetch_executor = ThreadPoolExecutor(max_workers=1) if prefetch_segments > 0 else None
-        self._prefetch_futures: Dict[int, Future] = {}
-        
-        # Segment acquisition tracking (for debugging silent failures)
-        self._dropped_segments_count = 0
-        self._zero_filled_segments_count = 0
-                
+
+        self.__dict__.update(self._served_state())
+
+    def _served_state(self) -> Dict[str, Any]:
+        """
+        Every attribute that serving data builds, at its starting value: the
+        split's segments, cursors, caches, statistics and rng. The rest of the
+        obtainer is its specification.
+
+        Served state belongs to the split and the process that built it, so a
+        copy or a pickle of an obtainer never carries it: each split reads
+        from a fresh copy, and no split can see another's segments.
+        """
+        return {
+            "rng": None,
+            "ifos": None,
+            "file_path": None,
+            "valid_segments": None,
+            "sampling_plan": None,
+            "_current_segment_index": 0,
+            "_current_batch_index": 0,
+            "_segment_exhausted": True,
+            "_num_batches_in_current_segment": 0,
+            "_grid_cursors": {},  # GRID's position in each piece it walks
+            "_segment_cache": MemoryCache(maxsize=self._segment_cache_maxsize),
+            "_prefetch_futures": {},
+            "_dropped_segments_count": 0,
+            "_zero_filled_segments_count": 0,
+        }
+
     def override_attributes(
         self,
         overrides : Dict
@@ -681,20 +689,21 @@ class BaseDataObtainer(ABC):
         return self.frame_types[0], self.channels[0]
     
     def __getstate__(self):
-        """Exclude ThreadPoolExecutor from pickling (can't be serialized)."""
-        state = self.__dict__.copy()
-        state['_prefetch_executor'] = None
-        state['_prefetch_futures'] = {}
-        return state
-    
+        """The specification only: served state and the executor stay behind."""
+        served = self._served_state()
+        return {
+            name: value for name, value in self.__dict__.items()
+            if name not in served and name != "_prefetch_executor"
+        }
+
     def __setstate__(self, state):
-        """Restore object and recreate ThreadPoolExecutor if needed."""
+        """A fresh obtainer of the same specification, with its own executor."""
         self.__dict__.update(state)
+        self.__dict__.update(self._served_state())
         if self.prefetch_segments > 0:
             self._prefetch_executor = ThreadPoolExecutor(max_workers=1)
         else:
             self._prefetch_executor = None
-        self._prefetch_futures = {}
         
     def __del__(self):
         if getattr(self, "_prefetch_executor", None) is not None:

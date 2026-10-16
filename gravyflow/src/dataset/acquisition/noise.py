@@ -8,7 +8,7 @@ noise data from long IFO segments (NOISE mode).
 import logging
 import hashlib
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple, Union
+from typing import Any, List, Dict, Optional, Tuple, Union
 
 import numpy as np
 from numpy.random import default_rng
@@ -124,9 +124,14 @@ class NoiseDataObtainer(BaseDataObtainer):
         )
         
         self.acquisition_mode = AcquisitionMode.NOISE
-        self._segment_cache_maxsize = 8  # NOISE mode uses larger segments
-        self._segment_generator = None  # Reusable generator over the sampling plan
-        self._current_row = None  # The GPS pieces of the row being drawn from
+
+    def _served_state(self) -> Dict[str, Any]:
+        return {
+            **super()._served_state(),
+            "_segment_generator": None,  # Reusable generator over the sampling plan
+            "_current_row": None,  # The GPS pieces of the row being drawn from
+            "current_segment": None,
+        }
 
     # =========================================================================
     # NOISE-SPECIFIC SEGMENT PROCESSING

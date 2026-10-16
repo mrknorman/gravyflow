@@ -111,20 +111,16 @@ class TransientIndex:
         """Sort records by GPS time ascending."""
         self.records.sort(key=lambda r: r.transient_gps_time)
     
-    def assign_groups(
-        self, 
-        groups: Dict[str, float],
-        seed: int = 42
-    ) -> None:
+    def assign_groups(self, groups: Dict[str, float]) -> None:
         """
-        Assign records to groups using deterministic hash-based assignment.
-        
-        This ensures stable group membership across runs and when new
-        data is added.
-        
+        Assign records to groups by a hash of each record's GPS key alone.
+
+        Membership never depends on a seed: every split of every run sees the
+        same partition, so no record can be in two splits. A seed only orders
+        or shuffles a split, after this.
+
         Args:
             groups: Dict mapping group name to proportion (e.g., {"train": 0.8, "val": 0.1, "test": 0.1})
-            seed: Random seed mixed into hash for reproducibility.
         """
         # Normalize proportions
         total = sum(groups.values())
@@ -141,16 +137,14 @@ class TransientIndex:
         # Assign each record based on hash of GPS key
         self._groups = {}
         for record in self.records:
-            # Create stable hash from GPS key and seed
-            hash_input = f"{record.gps_key}:{seed}".encode()
-            h = hashlib.md5(hash_input).hexdigest()
+            h = hashlib.md5(str(record.gps_key).encode()).hexdigest()
             u = int(h, 16) / (2**128)  # Uniform [0, 1)
-            
-            # Find group
-            for i, threshold in enumerate(cumulative):
-                if u <= threshold:
-                    self._groups[record.gps_key] = group_names[i]
-                    break
+
+            # The last group takes any u above a rounded cumulative sum.
+            self._groups[record.gps_key] = next(
+                (name for name, threshold in zip(group_names, cumulative) if u <= threshold),
+                group_names[-1],
+            )
     
     def apply_balancing(self, by: str = "kind") -> None:
         """

@@ -7,7 +7,7 @@ specific transient events (GW events, glitches) in TRANSIENT mode.
 
 import logging
 import hashlib
-from typing import List, Dict, Optional, Union, Tuple
+from typing import Any, List, Dict, Optional, Union, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
@@ -33,6 +33,10 @@ from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys, as_gps_times
 from gravyflow.src.dataset.features.transient_index import TransientIndex
 from .transient_segment import TransientSegment
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
+
+
+# The transient caches an obtainer may open, one per prefix (`_initialize_transient_cache`).
+TRANSIENT_CACHE_PREFIXES = ("transient", "glitch", "event")
 
 
 class TransientDataObtainer(BaseDataObtainer):
@@ -89,7 +93,6 @@ class TransientDataObtainer(BaseDataObtainer):
         )
         
         self.acquisition_mode = AcquisitionMode.TRANSIENT
-        self._segment_cache_maxsize = 128  # TRANSIENT uses larger cache for many small segments
         
         # Event type filtering
         if event_types is None:
@@ -98,12 +101,26 @@ class TransientDataObtainer(BaseDataObtainer):
         
         # Class balancing
         self.balanced_glitch_types = balanced_glitch_types
-        
-        # TransientIndex - canonical source of truth for transient examples
-        self._feature_index: Optional[TransientIndex] = None
-        
-        # TransientSegment objects (replaces raw numpy segments)
-        self.transient_segments: List[TransientSegment] = []
+
+    _segment_cache_maxsize = 128  # TRANSIENT uses larger cache for many small segments
+
+    def _served_state(self) -> Dict[str, Any]:
+        caches = {}
+        for prefix in TRANSIENT_CACHE_PREFIXES:
+            caches[f"_{prefix}_cache"] = None
+            caches[f"_{prefix}_cache_logged"] = False
+        return {
+            **super()._served_state(),
+            # TransientIndex - canonical source of truth for transient examples
+            "_feature_index": None,
+            # TransientSegment objects (replaces raw numpy segments)
+            "transient_segments": [],
+            "_current_selected_ifo_indices": None,
+            "_cache_hit_count": 0,
+            "_cache_miss_count": 0,
+            "_last_log_count": 0,
+            **caches,
+        }
 
     def _apply_augmentation(self, data):
         """
@@ -144,7 +161,6 @@ class TransientDataObtainer(BaseDataObtainer):
         self,
         ifos: List[gf.IFO],
         groups: Dict[str, float] = None,
-        seed: int = 42
     ) -> "TransientIndex":
         """
         Build TransientIndex from segment builders.
@@ -220,7 +236,7 @@ class TransientDataObtainer(BaseDataObtainer):
         
         # Assign groups
         if groups:
-            index.assign_groups(groups, seed=seed)
+            index.assign_groups(groups)
         
         # Apply balancing
         if self.balanced_glitch_types:
@@ -509,7 +525,7 @@ class TransientDataObtainer(BaseDataObtainer):
         
         if data_len is None or data_len < num_onsource_samples:
             # Only warn if we have selected_ifo_indices and they're the issue
-            if hasattr(self, '_current_selected_ifo_indices') and self._current_selected_ifo_indices:
+            if self._current_selected_ifo_indices:
                 logger.debug(f"Feature segment too short ({data_len} < {num_onsource_samples})")
             return None, None, None
         
@@ -529,7 +545,7 @@ class TransientDataObtainer(BaseDataObtainer):
         temp_offsource = []
         
         # Get selected IFO indices (set during cache miss processing)
-        selected_ifo_indices = getattr(self, '_current_selected_ifo_indices', None)
+        selected_ifo_indices = self._current_selected_ifo_indices
         
         for channel_idx, channel_data in enumerate(event_segment.data):
             is_selected = selected_ifo_indices is None or channel_idx in selected_ifo_indices
@@ -692,9 +708,10 @@ class TransientDataObtainer(BaseDataObtainer):
     ) -> np.ndarray:
         """
         Get valid segments for TRANSIENT mode.
-        
+
         Segments come from TransientIndex which contains full TransientSegments.
-        Direct TransientSegment usage.
+        The split's members are fixed by the index (`TransientIndex.assign_groups`);
+        ``seed`` only orders them (SegmentOrder.RANDOM).
         """
         if not isinstance(ifos, list):
             ifos = [ifos]
@@ -710,7 +727,7 @@ class TransientDataObtainer(BaseDataObtainer):
         
         # Build index if needed
         if self._feature_index is None:
-            self.build_feature_index(ifos=ifos, groups=groups, seed=seed)
+            self.build_feature_index(ifos=ifos, groups=groups)
         
         # Get segments for this group, filtered by requested IFOs
         # Segments with seen_in overlapping requested IFOs will be included
@@ -1144,7 +1161,7 @@ class TransientDataObtainer(BaseDataObtainer):
         cache_attr = f"_{prefix}_cache"
         
         # Reuse existing cache if path matches (preserves GPS index)
-        if not hasattr(self, cache_attr) or getattr(self, cache_attr) is None or getattr(self, cache_attr).path != cache_path:
+        if getattr(self, cache_attr) is None or getattr(self, cache_attr).path != cache_path:
             setattr(self, cache_attr, DiskCache(cache_path, mode='a'))
         
         cache = getattr(self, cache_attr)
@@ -1157,7 +1174,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 
                 # Use a unique logging attribute per cache
                 logged_attr = f"_{prefix}_cache_logged"
-                if not hasattr(self, logged_attr):
+                if not getattr(self, logged_attr):
                     meta = cache.get_metadata()
                     logger.info(f"{prefix.capitalize()} Cache: {meta['num_glitches']} items at {CACHE_SAMPLE_RATE_HERTZ}Hz")
                     setattr(self, logged_attr, True)
@@ -1379,12 +1396,6 @@ class TransientDataObtainer(BaseDataObtainer):
             
             # Track which indices need downloading
             miss_indices = []
-            
-            # Debug counters for cache tracking
-            if not hasattr(self, '_cache_hit_count'):
-                self._cache_hit_count = 0
-                self._cache_miss_count = 0
-                self._last_log_count = 0
             
             # Progress bar for batch assembly
             pbar = tqdm(

@@ -17,7 +17,6 @@ import jax
 import gravyflow as gf
 
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
-from gravyflow.src.dataset.acquisition import ifo_canonical_key
 from gravyflow.src.dataset.config import WindowSpec
 from gravyflow.src.rng import BatchStreams, SeedTree
 from gravyflow.src.rng.legacy import warn_deprecated
@@ -382,8 +381,10 @@ class NoiseObtainer(Obtainer):
 
     def _reader(self, ifos, tree : SeedTree, group : str, sample_rate_hertz : float):
         """
-        A copy of the IFO data obtainer with the split's segments: the reader
-        is the batcher's own, so the caller's obtainer is never changed.
+        A fresh copy of the IFO data obtainer with the split's segments: a
+        copy carries none of the state the original built while serving (see
+        BaseDataObtainer._served_state), so no other split's segments reach
+        this one, and the caller's obtainer is never changed.
         """
         if not self.ifo_data_obtainer:
             raise ValueError("""
@@ -393,15 +394,13 @@ class NoiseObtainer(Obtainer):
                 NoiseObtainer.ifo_data_obtainer
             """)
         reader = deepcopy(self.ifo_data_obtainer)
-        reader.rng = None
-        if reader.valid_segments is None or ifo_canonical_key(ifos) != reader.ifos:
-            reader.get_valid_segments(
-                ifos,
-                sequential_seed(tree, group, "noise/segment_order"),
-                self.groups,
-                group,
-            )
-            reader.generate_file_path(sample_rate_hertz, group, self.data_directory_path)
+        reader.get_valid_segments(
+            ifos,
+            sequential_seed(tree, group, "noise/segment_order"),
+            self.groups,
+            group,
+        )
+        reader.generate_file_path(sample_rate_hertz, group, self.data_directory_path)
         return reader
 
     def __call__(
@@ -519,11 +518,13 @@ class NoiseObtainer(Obtainer):
 def obtainer_batcher(obtainer, tree: SeedTree, group: str, **kwargs) -> NoiseBatcher:
     """
     The batcher of any obtainer: a NoiseObtainer's own, else (a transient
-    obtainer) a sequential reader seeded from ``tree`` and ``group``.
+    obtainer) a sequential reader of a fresh copy, seeded from ``tree`` and
+    ``group``. The seed orders the split; the split's members never depend on it.
     """
     if isinstance(obtainer, NoiseObtainer):
         return obtainer.batcher(tree, group, **kwargs)
     kwargs.pop("sampling_mode", None)
+    reader = deepcopy(obtainer)
     return sequential_batcher(
-        obtainer(**kwargs, group=group, seed=sequential_seed(tree, group, "transient/reader"))
+        reader(**kwargs, group=group, seed=sequential_seed(tree, group, "transient/reader"))
     )
