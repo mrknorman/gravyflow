@@ -64,6 +64,26 @@ def glitch_obtainer():
     )
 
 
+class OfflineNoiseObtainer(gf.NoiseDataObtainer):
+    """Science segments of 1000 s every 1500 s, with nothing vetoed."""
+
+    def get_segment_times(self, start, end, ifo, state_flags):
+        starts = np.arange(start, end - 1000.0, 1500.0)
+        return np.stack([starts, starts + 1000.0], axis=-1)
+
+    def remove_unwanted_segments(self, ifo, valid_segments, get_times=None):
+        return valid_segments, None
+
+
+def offline_noise_obtainer():
+    return OfflineNoiseObtainer(
+        observing_runs=gf.ObservingRun.O3,
+        data_quality=gf.DataQuality.BEST,
+        data_labels=[gf.DataLabel.NOISE],
+        prefetch_segments=0,
+    )
+
+
 def members(obtainer, split, seed):
     obtainer.get_valid_segments([gf.IFO.L1], seed=seed, group_name=split)
     return {segment.gps_key for segment in obtainer.transient_segments}
@@ -151,23 +171,7 @@ class TestObtainerCopies:
 
     def test_real_noise_reads_its_own_split_from_a_used_obtainer(self):
         """A caller's obtainer that already holds one split's segments never serves them to another."""
-
-        class OfflineNoiseObtainer(gf.NoiseDataObtainer):
-            """Science segments of 1000 s every 1500 s, with nothing vetoed."""
-
-            def get_segment_times(self, start, end, ifo, state_flags):
-                starts = np.arange(start, end - 1000.0, 1500.0)
-                return np.stack([starts, starts + 1000.0], axis=-1)
-
-            def remove_unwanted_segments(self, ifo, valid_segments, get_times=None):
-                return valid_segments, None
-
-        used = OfflineNoiseObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.NOISE],
-            prefetch_segments=0,
-        )
+        used = offline_noise_obtainer()
         noise = gf.NoiseObtainer(ifo_data_obtainer=used, noise_type=gf.NoiseType.REAL, ifos=[gf.IFO.L1])
         train = used.get_valid_segments([gf.IFO.L1], seed=1000, groups=noise.groups, group_name="train")
 
@@ -178,4 +182,124 @@ class TestObtainerCopies:
         reader = noise._reader([gf.IFO.L1], gf.SeedTree(gf.Defaults.seed), "validate", 2048.0)
         validate = reader.valid_segments
         assert len(validate) and len(train)
+        assert not set(map(tuple, validate[:, 0])) & set(map(tuple, train[:, 0]))
+
+
+class Served(Exception):
+    """A reader reached its data: the split it serves is fixed by then."""
+
+
+def served_members(route, split):
+    """
+    The records a route serves for ``split``: the reader's segments when it
+    first reaches its cache, where reading data would begin (stopped there,
+    offline).
+    """
+    served = {}
+
+    def stop(self, *args, **kwargs):
+        served["members"] = {segment.gps_key for segment in self.transient_segments}
+        raise Served
+
+    with mock.patch.object(gf.TransientDataObtainer, "_initialize_transient_cache", stop):
+        # A dataset reraises the stop as its own noise-generation error.
+        with pytest.raises(Exception) as stopped:
+            route(glitch_obtainer(), split)
+    assert "members" in served, f"the route stopped before its data: {stopped.value!r}"
+    return served["members"]
+
+
+DATASET_ARGS = dict(
+    input_variables=[gf.ReturnVariables.ONSOURCE],
+    output_variables=[gf.ReturnVariables.DATA_LABEL],
+    steps_per_epoch=1,
+)
+
+
+def through_a_direct_call(obtainer, split):
+    next(obtainer(ifos=[gf.IFO.L1], group=split))
+
+
+def through_a_dataset(obtainer, split):
+    gf.Dataset(noise_obtainer=obtainer, group=split, **DATASET_ARGS)[0]
+
+
+def through_a_noise_obtainer(obtainer, split):
+    noise = gf.NoiseObtainer(noise_type=gf.NoiseType.REAL, ifo_data_obtainer=obtainer, ifos=[gf.IFO.L1])
+    gf.Dataset(noise_obtainer=noise, group=split, **DATASET_ARGS)[0]
+
+
+def through_a_composed_dataset(obtainer, split):
+    pool = gf.FeaturePool(name="glitches", label=0, probability=1.0, transient_obtainer=obtainer)
+    gf.ComposedDataset(pools=[pool], group=split, **DATASET_ARGS)[0]
+
+
+ROUTES = {
+    "direct-call": through_a_direct_call,
+    "dataset": through_a_dataset,
+    "noise-obtainer": through_a_noise_obtainer,
+    "composed-dataset": through_a_composed_dataset,
+}
+
+
+class TestEveryRouteSplitsAlike:
+    """
+    Every entry point splits one catalogue by one set of fractions, so a
+    record is in the same split whichever route trains or evaluates on it.
+    """
+
+    @pytest.fixture
+    def by_route(self, catalogue):
+        index = TransientIndex(glitch_records())
+        index.assign_groups()
+        by_route = {
+            route: {split: served_members(through, split) for split in SPLITS}
+            for route, through in ROUTES.items()
+        }
+        by_route["index"] = {
+            split: {key for key, group in index._groups.items() if group == split} for split in SPLITS
+        }
+        by_route["valid-segments"] = {split: members(glitch_obtainer(), split, 1000) for split in SPLITS}
+        return by_route
+
+    def test_each_split_has_one_membership(self, by_route):
+        for split in SPLITS:
+            reference = by_route["index"][split]
+            assert reference, split
+            for route in by_route:
+                assert by_route[route][split] == reference, f"{route} serves another {split} split"
+
+    def test_splits_are_disjoint_across_routes(self, by_route):
+        for a in by_route:
+            for b in by_route:
+                for i, first in enumerate(SPLITS):
+                    for second in SPLITS[i + 1:]:
+                        shared = by_route[a][first] & by_route[b][second]
+                        assert not shared, f"{a} {first} and {b} {second} share {len(shared)} records"
+
+    def test_the_default_split_is_the_ruled_one(self):
+        assert dict(gf.DEFAULT_SPLIT_FRACTIONS) == {"train": 0.8, "validate": 0.1, "test": 0.1}
+        assert gf.NoiseObtainer().groups == dict(gf.DEFAULT_SPLIT_FRACTIONS)
+
+
+class TestOneObtainerCalledForTwoSplits:
+    """
+    An obtainer's served state belongs to the split that built it: called
+    again for another split, it rebuilds rather than serving the first.
+    """
+
+    def test_a_transient_obtainer_called_for_another_split(self, catalogue):
+        def train_then(obtainer, split):
+            with pytest.raises(Served):
+                through_a_direct_call(obtainer, "train")
+            through_a_direct_call(obtainer, split)
+
+        assert served_members(train_then, "validate") == served_members(through_a_direct_call, "validate")
+
+    def test_a_noise_obtainer_called_for_another_split(self):
+        obtainer = offline_noise_obtainer()
+        train = obtainer.get_valid_segments([gf.IFO.L1], seed=1000, group_name="train")
+        validate = obtainer.get_valid_segments([gf.IFO.L1], seed=1000, group_name="validate")
+        fresh = offline_noise_obtainer().get_valid_segments([gf.IFO.L1], seed=1000, group_name="validate")
+        np.testing.assert_array_equal(validate, fresh)
         assert not set(map(tuple, validate[:, 0])) & set(map(tuple, train[:, 0]))

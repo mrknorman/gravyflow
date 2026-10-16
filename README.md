@@ -61,6 +61,18 @@ and the splits never share a stream. Old seeds give new data. The replaced seed 
 - `gf.project_wave` takes no seed and needs every sky angle; nothing is drawn there.
 - `Curriculum` has no progress counter: `current_epoch` is gone, and `at(epoch)` gives the distribution of an epoch.
 - `Distribution.sample(n, rng)` returns an ndarray.
+- Splits are repartitioned. Every entry point that is given no fractions (a dataset, a composed dataset's pools,
+  `NoiseObtainer`, an obtainer called directly, `TransientIndex.assign_groups()`, the validator) splits by
+  `gf.DEFAULT_SPLIT_FRACTIONS`: 80% train, 10% validate, 10% test. They split 98/1/1 (an obtainer, and the datasets
+  reading one directly) or 89/10/1 (`NoiseObtainer`), so one record could be in train by one route and in validate
+  by another. A transient record's split is now a hash of its GPS key alone; it was the key and the seed. Records
+  have moved between splits: do not evaluate a model trained on an earlier release's split on this release's
+  validate or test split.
+- An obtainer called again for another split rebuilds its segments; it served the first split's.
+- `TransientIndex.assign_groups` and `TransientDataObtainer.build_feature_index` take no seed.
+- The model recipes take one root seed: `TrainingRun.train`'s `training_data` is called with the seed alone (it
+  took the seed and the first epoch), and `split_seeds`, `TrainingRun.train_seed` and
+  `GeorgeHuerta2017.dataset(first_epoch=)` / `dataset_regression(first_epoch=)` are gone; resume sets `ds.epoch`.
 
 ## 7. Test Gravyflow (optional)
 

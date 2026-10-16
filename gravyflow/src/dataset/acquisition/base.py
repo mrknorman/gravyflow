@@ -627,6 +627,8 @@ class BaseDataObtainer(ABC):
         from a fresh copy, and no split can see another's segments.
         """
         return {
+            # The split the served state was built for (see _serve_split).
+            "_served_split": None,
             "rng": None,
             "ifos": None,
             "file_path": None,
@@ -642,6 +644,20 @@ class BaseDataObtainer(ABC):
             "_dropped_segments_count": 0,
             "_zero_filled_segments_count": 0,
         }
+
+    def _serve_split(self, split) -> bool:
+        """
+        Make the served state ``split``'s: a hashable description of the split
+        asked for (its detectors, name and fractions, and what orders it).
+        State built for another split is dropped first, so an obtainer called
+        for one split and then another never serves the first's records as
+        the second's. Returns True when the split's state is still to be built.
+        """
+        if self._served_split == split:
+            return False
+        self.__dict__.update(self._served_state())
+        self._served_split = split
+        return True
 
     def override_attributes(
         self,
@@ -1609,6 +1625,7 @@ class BaseDataObtainer(ABC):
         self._zero_filled_segments_count = 0
 
     def clear_valid_segments(self) -> None:
+        self._served_split = None
         self.valid_segments = None
         self.sampling_plan = None
         self.ifos = None

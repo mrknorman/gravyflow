@@ -9,7 +9,6 @@ Manages collections of TransientSegments with:
 - Serialization to/from disk
 """
 
-import hashlib
 from dataclasses import replace
 from typing import List, Iterator, Dict, Optional, Set
 from pathlib import Path
@@ -21,6 +20,7 @@ from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.event import SourceType
 from gravyflow.src.dataset.acquisition.base import DataLabel, ObservingRun
 from gravyflow.src.dataset.features.event import EventConfidence
+from gravyflow.src.dataset.splits import split_fractions, split_of
 from gravyflow.src.utils.gps import gps_to_key
 
 
@@ -39,7 +39,7 @@ class TransientIndex:
         
         index = TransientIndex(events + glitches)
         index.dedupe()
-        index.assign_groups({"train": 0.8, "val": 0.1, "test": 0.1})
+        index.assign_groups()  # DEFAULT_SPLIT_FRACTIONS
         index.apply_balancing()
         
         # Iterate over training examples
@@ -111,40 +111,21 @@ class TransientIndex:
         """Sort records by GPS time ascending."""
         self.records.sort(key=lambda r: r.transient_gps_time)
     
-    def assign_groups(self, groups: Dict[str, float]) -> None:
+    def assign_groups(self, groups: Optional[Dict[str, float]] = None) -> None:
         """
-        Assign records to groups by a hash of each record's GPS key alone.
+        Assign records to groups by a hash of each record's GPS key alone
+        (gravyflow.src.dataset.splits.split_of).
 
         Membership never depends on a seed: every split of every run sees the
         same partition, so no record can be in two splits. A seed only orders
         or shuffles a split, after this.
 
         Args:
-            groups: Dict mapping group name to proportion (e.g., {"train": 0.8, "val": 0.1, "test": 0.1})
+            groups: Dict mapping group name to proportion (e.g., {"train": 0.8, "validate": 0.1,
+                "test": 0.1}); None for DEFAULT_SPLIT_FRACTIONS, as every other entry point.
         """
-        # Normalize proportions
-        total = sum(groups.values())
-        normalized = {k: v / total for k, v in groups.items()}
-        
-        # Build cumulative distribution
-        group_names = list(normalized.keys())
-        cumulative = []
-        cum = 0.0
-        for name in group_names:
-            cum += normalized[name]
-            cumulative.append(cum)
-        
-        # Assign each record based on hash of GPS key
-        self._groups = {}
-        for record in self.records:
-            h = hashlib.md5(str(record.gps_key).encode()).hexdigest()
-            u = int(h, 16) / (2**128)  # Uniform [0, 1)
-
-            # The last group takes any u above a rounded cumulative sum.
-            self._groups[record.gps_key] = next(
-                (name for name, threshold in zip(group_names, cumulative) if u <= threshold),
-                group_names[-1],
-            )
+        fractions = split_fractions(groups)
+        self._groups = {record.gps_key: split_of(record.gps_key, fractions) for record in self.records}
     
     def apply_balancing(self, by: str = "kind") -> None:
         """

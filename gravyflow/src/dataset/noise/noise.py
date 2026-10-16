@@ -18,6 +18,7 @@ import gravyflow as gf
 
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.dataset.config import WindowSpec
+from gravyflow.src.dataset.splits import split_fractions
 from gravyflow.src.rng import BatchStreams, SeedTree
 from gravyflow.src.rng.legacy import warn_deprecated
 from gravyflow.src.utils.shapes import ShapeEnforcer
@@ -286,12 +287,8 @@ class Obtainer:
         elif not isinstance(self.ifos, list) and not isinstance(self.ifos, tuple):
             self.ifos = [self.ifos]
 
-        if not self.groups:
-            self.groups = self._default_groups()
-
-    def _default_groups(self) -> dict:
-        """Override in subclasses for different default group splits."""
-        return {"train": 0.89, "validate": 0.1, "test": 0.01}
+        # Every route that is given no fractions splits by the same ones.
+        self.groups = split_fractions(self.groups)
 
 
 @dataclass

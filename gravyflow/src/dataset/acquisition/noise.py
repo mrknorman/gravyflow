@@ -6,7 +6,6 @@ noise data from long IFO segments (NOISE mode).
 """
 
 import logging
-import hashlib
 from dataclasses import dataclass
 from typing import Any, List, Dict, Optional, Tuple, Union
 
@@ -16,6 +15,7 @@ from keras import ops
 
 import gravyflow as gf
 from gravyflow.src.dataset.config import WindowSpec
+from gravyflow.src.dataset.splits import split_fractions, split_of
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder,
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS,
@@ -377,32 +377,13 @@ class NoiseDataObtainer(BaseDataObtainer):
         start_time: float
     ) -> np.ndarray:
         """
-        Deterministically assign segments to groups based on hash.
+        The segments in split ``group_name``: each segment's split is that of
+        its chunk index (see gravyflow.src.dataset.splits.split_of).
         """
-        selected_segments = []
-        
-        group_names = list(groups.keys())
-        probs = list(groups.values())
-        total = sum(probs)
-        probs = [p/total for p in probs]
-        
-        for start, end in segments:
-            idx = int(np.floor((start - start_time) / chunk_size))
-            
-            h = hashlib.md5(str(idx).encode()).hexdigest()
-            val = int(h, 16) / (2**128)
-            
-            cumulative = 0.0
-            assigned_group = group_names[-1]
-            for name, prob in zip(group_names, probs):
-                cumulative += prob
-                if val <= cumulative:
-                    assigned_group = name
-                    break
-            
-            if assigned_group == group_name:
-                selected_segments.append([start, end])
-                
+        selected_segments = [
+            [start, end] for start, end in segments
+            if split_of(int(np.floor((start - start_time) / chunk_size)), groups) == group_name
+        ]
         return np.array(selected_segments)
 
     # =========================================================================
@@ -425,21 +406,10 @@ class NoiseDataObtainer(BaseDataObtainer):
         if not segment_order:
             segment_order = self.segment_order
 
-        if not groups:
-            groups = {
-                "train": 0.98,
-                "validate": 0.01,
-                "test": 0.01
-            }
+        groups = split_fractions(groups, group_name)
 
-        if group_name == "all":
-            groups = {"all": 1.0}
-        elif group_name not in groups:
-            raise KeyError(
-                f"Group {group_name} not present in groups dictionary."
-            )
-
-        if self.valid_segments is None or len(self.valid_segments) != len(ifos):
+        # The served segments are one split's, in one order: another rebuilds them.
+        if self._serve_split((tuple(ifos), group_name, tuple(groups.items()), seed, segment_order)):
             self.valid_segments = []
 
             for ifo in ifos:

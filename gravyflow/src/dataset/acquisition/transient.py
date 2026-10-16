@@ -6,7 +6,6 @@ specific transient events (GW events, glitches) in TRANSIENT mode.
 """
 
 import logging
-import hashlib
 from typing import Any, List, Dict, Optional, Union, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,6 +32,7 @@ from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys, as_gps_times
 from gravyflow.src.dataset.features.transient_index import TransientIndex
 from .transient_segment import TransientSegment
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
+from gravyflow.src.dataset.splits import split_fractions
 
 
 # The transient caches an obtainer may open, one per prefix (`_initialize_transient_cache`).
@@ -719,13 +719,11 @@ class TransientDataObtainer(BaseDataObtainer):
         if not segment_order:
             segment_order = self.segment_order
         
-        if not groups:
-            groups = {"train": 0.98, "validate": 0.01, "test": 0.01}
-        
-        if group_name == "all":
-            groups = {"all": 1.0}
-        
-        # Build index if needed
+        groups = split_fractions(groups, group_name)
+
+        # The served state is one split's: another split rebuilds it, index
+        # included, since the index carries the split's fractions.
+        self._serve_split((tuple(ifos), group_name, tuple(groups.items())))
         if self._feature_index is None:
             self.build_feature_index(ifos=ifos, groups=groups)
         
@@ -1306,8 +1304,6 @@ class TransientDataObtainer(BaseDataObtainer):
         num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
         scale_factor = scale_factor or gf.Defaults.scale_factor
         seed = gf.src.rng.check_root(seed if seed is not None else gf.Defaults.seed)
-        if self.rng is None:
-            self.rng = default_rng(seed)
 
         # Use shared post-processing from base class
         def _post_process(batch):
@@ -1328,15 +1324,22 @@ class TransientDataObtainer(BaseDataObtainer):
         num_onsource_samples = window_spec.num_onsource_samples
         num_offsource_samples = window_spec.num_offsource_samples
 
-        # Auto-initialize segments if not already done
-        # For specific event names, use group="all" to get all matching events
-        if not self.transient_segments:
-            group_name = group if group is not None else ("all" if self.event_names else "train")
+        # Serve the split asked for: one already served (by get_valid_segments,
+        # with its fractions) is kept; any other is built afresh, so a call
+        # for another split never serves this one's records. With no group,
+        # the split served, else train (all for specific event names).
+        served = self._served_split[1] if self._served_split is not None else None
+        group_name = group if group is not None else (
+            served or ("all" if self.event_names else "train")
+        )
+        if group_name != served:
             self.get_valid_segments(
-                ifos=ifos, 
+                ifos=ifos,
                 seed=seed,
                 group_name=group_name,
             )
+        if self.rng is None:
+            self.rng = default_rng(seed)
         
         # Initialize or retrieve transient caches based on what segments we have
         # Optimization: if sparse request (few segments), disable chunked mode
