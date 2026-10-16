@@ -1,5 +1,6 @@
 from typing import List, Tuple, Union, Dict, Any, Iterator, Optional, Set
 from enum import Enum, auto
+import copy
 from pathlib import Path
 from dataclasses import dataclass
 from warnings import warn
@@ -14,6 +15,7 @@ from keras import ops
 import jax
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.whiten import whiten
+from gravyflow.src.dataset.tools.psd import SpectralConfig, estimate_psd, MIN_PSD_SEGMENTS
 from gravyflow.src.utils.tensor import crop_samples, replace_nan_and_inf_with_zero, set_random_seeds
 from gravyflow.src.dataset.config import Defaults
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
@@ -95,6 +97,65 @@ def get_max_arrival_time_difference(
     
     return max_arival_time_difference_seconds
 
+WHITENED_VARIABLES = (
+    gf.ReturnVariables.WHITENED_ONSOURCE,
+    gf.ReturnVariables.WHITENED_INJECTIONS,
+    gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE,
+    gf.ReturnVariables.SPECTROGRAM_ONSOURCE,
+)
+
+
+def _ifo_names(ifos) -> List[str]:
+    return [ifo.name if hasattr(ifo, "name") else str(ifo) for ifo in ensure_list(ifos)]
+
+
+def check_network_matches_ifos(network: "gf.Network", ifos) -> None:
+    """
+    Raise ValueError unless `network` projects onto exactly `ifos`, in order. A
+    network built from geometry alone (no IFO list) is checked by its detector
+    count.
+    """
+    expected = _ifo_names(ifos)
+    network_ifos = getattr(network, "ifos", None)
+    if network_ifos is not None:
+        if _ifo_names(network_ifos) != expected:
+            raise ValueError(
+                f"A waveform generator's network projects onto {_ifo_names(network_ifos)}, "
+                f"but the noise has detectors {expected}; they must be the same, in order."
+            )
+        return
+    num_detectors = getattr(network, "num_detectors", None)
+    if num_detectors is not None and int(np.asarray(num_detectors).ravel()[0]) != len(expected):
+        raise ValueError(
+            f"A waveform generator's network has {int(np.asarray(num_detectors).ravel()[0])} detectors, "
+            f"but the noise has {len(expected)} ({expected})."
+        )
+
+
+def lowest_generator_frequency(generator) -> Optional[float]:
+    """The lowest frequency a generator's parameters allow, where it declares one."""
+    lowest = None
+    for name in ("min_frequency_hertz", "frequency_hertz", "start_frequency_hertz", "end_frequency_hertz"):
+        value = getattr(generator, name, None)
+        if value is None:
+            continue
+        if isinstance(value, gf.Distribution):
+            if value.type_ == gf.DistributionType.CONSTANT:
+                value = value.value
+            elif value.min_ is not None:
+                value = value.min_
+            elif value.possible_values is not None:
+                value = min(value.possible_values)
+            else:
+                continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        lowest = value if lowest is None else min(lowest, value)
+    return lowest
+
+
 class GravyflowDataset(keras.utils.PyDataset):
     """
     A Keras PyDataset to generate data for gravitational wave detection training.
@@ -118,8 +179,16 @@ class GravyflowDataset(keras.utils.PyDataset):
         output_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         mask_history: Optional[List] = None,
         steps_per_epoch: int = 1000,
-        sampling_mode: Optional["gf.SamplingMode"] = None
+        sampling_mode: Optional["gf.SamplingMode"] = None,
+        spectral_config: Optional[SpectralConfig] = None
     ):
+        """
+        spectral_config: the band, PSD estimator and whitening filter shared by
+            SNR scaling, SNR labels and whitening (gf.SpectralConfig; default
+            band 20 Hz to Nyquist, 1 s / 0.5 s median Welch PSD, 1 s filter).
+            One PSD is estimated per batch from the offsource and reused by all
+            three.
+        """
         # Initialize PyDataset (single-threaded to avoid JAX/fork deadlocks)
         super().__init__(workers=0)
         
@@ -144,6 +213,7 @@ class GravyflowDataset(keras.utils.PyDataset):
         self.input_variables = input_variables if input_variables is not None else []
         self.output_variables = output_variables if output_variables is not None else []
         self.mask_history = mask_history
+        self.spectral_config = spectral_config if spectral_config is not None else SpectralConfig()
         
         # Initialize waveform generators
         self.waveform_generators = waveform_generators if waveform_generators is not None else []
@@ -180,16 +250,42 @@ class GravyflowDataset(keras.utils.PyDataset):
                 if hasattr(value, 'configure'):
                     value.configure(steps_per_epoch=self.steps_per_epoch)
 
+    def _noise_ifos(self) -> List:
+        """The detectors the noise will have: the dataset's `ifos`, else the obtainer's."""
+        if self.ifos is not None:
+            return list(self.ifos)
+        ifos = getattr(self.noise_obtainer, "ifos", None)
+        return ensure_list(ifos) if ifos is not None else [gf.IFO.L1]
+
     def _set_generator_networks(self):
-        """Set the network for waveform generators if not provided."""
+        """
+        Give every generator a network of exactly the noise's detectors, in order.
+
+        A generator without a network is copied and the copy gets one built from
+        the noise's detectors, so the caller's generator is never modified and can
+        serve another dataset. A generator with its own network must match the
+        noise's detectors; a mismatch would broadcast one projection into several
+        channels or mislabel them, so it raises.
+        """
+        noise_ifos = self._noise_ifos()
+
+        def bind(generator):
+            if generator.network is None:
+                generator = copy.copy(generator)
+                generator.network = gf.Network(noise_ifos)
+            else:
+                check_network_matches_ifos(generator.network, noise_ifos)
+            return generator
+
         if isinstance(self.waveform_generators, list):
-            for generator in self.waveform_generators:
-                if generator.network is None: 
-                    generator.network = gf.Network(self.noise_obtainer.ifos)
+            self.waveform_generators = [bind(generator) for generator in self.waveform_generators]
         elif isinstance(self.waveform_generators, dict):
-            for generator in self.waveform_generators.values():
-                if generator["generator"].network is None: 
-                    generator["generator"].network = gf.Network(self.noise_obtainer.ifos)
+            bound = {}
+            for name, entry in self.waveform_generators.items():
+                entry = dict(entry)
+                entry["generator"] = bind(entry["generator"])
+                bound[name] = entry
+            self.waveform_generators = bound
 
     def _validate_settings(self):
         """Validate the generator settings."""
@@ -198,6 +294,85 @@ class GravyflowDataset(keras.utils.PyDataset):
             raise ValueError("No return variables requested. What's the point?")
         validate_noise_settings(self.noise_obtainer, self.variables_to_return)
         self._validate_padding_settings()
+        self._validate_spectral_settings()
+
+    def _generator_list(self) -> List:
+        if isinstance(self.waveform_generators, list):
+            return list(self.waveform_generators)
+        if isinstance(self.waveform_generators, dict):
+            return [g["generator"] for g in self.waveform_generators.values()]
+        return []
+
+    def _validate_spectral_settings(self):
+        """
+        Check the windows against the PSD estimate and the whitening filter, once,
+        at construction:
+        - whitening needs a crop of at least half the filter on each side of the
+          onsource (so the padded onsource is at least as long as the filter),
+          since the filter corrupts that much at each edge;
+        - SNR scaling and whitening need an offsource holding at least
+          MIN_PSD_SEGMENTS Welch segments.
+        """
+        config = self.spectral_config
+        fs = self.sample_rate_hertz
+        config.validate_band(fs)
+
+        self._needs_whitening = any(
+            variable in self.variables_to_return for variable in WHITENED_VARIABLES
+        )
+        has_snr_scaling = any(
+            getattr(getattr(generator, "scaling_method", None), "type_", None) == gf.ScalingTypes.SNR
+            for generator in self._generator_list()
+        )
+        # SNR labels of HRSS/HPEAK-scaled injections are measured against the
+        # batch's spectrum too, so they share the one definition.
+        has_snr_label = self._generator_list() and gf.ScalingTypes.SNR in self.variables_to_return
+        self._needs_spectrum = self._needs_whitening or has_snr_scaling or bool(has_snr_label)
+
+        if self._needs_whitening:
+            ntaps = config.num_taps(fs)
+            crop_samples_each_side = int(round(self.crop_duration_seconds * fs))
+            if crop_samples_each_side < ntaps // 2:
+                raise ValueError(
+                    f"crop_duration_seconds ({self.crop_duration_seconds}) must be at least half of "
+                    f"the whitening filter ({config.filter_duration_seconds} s): the filter corrupts "
+                    f"{config.filter_duration_seconds / 2:g} s at each edge of the window."
+                )
+            if config.fft_duration_seconds > config.filter_duration_seconds:
+                warn(
+                    f"The PSD segments ({config.fft_duration_seconds} s) are longer than the "
+                    f"whitening filter ({config.filter_duration_seconds} s), which cannot realise "
+                    "the PSD's finer features (narrow lines are not removed).",
+                    UserWarning
+                )
+
+        if self._needs_spectrum:
+            num_offsource = int(round(self.offsource_duration_seconds * fs))
+            nperseg = config.nperseg(fs)
+            noverlap = config.noverlap(fs)
+            num_segments = 0 if num_offsource < nperseg else (num_offsource - nperseg) // (nperseg - noverlap) + 1
+            if num_segments < MIN_PSD_SEGMENTS:
+                raise ValueError(
+                    f"offsource_duration_seconds ({self.offsource_duration_seconds}) gives "
+                    f"{num_segments} Welch segment(s) of {config.fft_duration_seconds} s; the PSD "
+                    f"needs at least {MIN_PSD_SEGMENTS}."
+                )
+
+        if config.lower_frequency_hertz:
+            for generator in self._generator_list():
+                lowest = lowest_generator_frequency(generator)
+                if lowest is not None and lowest < config.lower_frequency_hertz:
+                    warn(
+                        f"{type(generator).__name__} can produce power at {lowest:g} Hz, below the "
+                        f"band's lower edge ({config.lower_frequency_hertz:g} Hz). That power is "
+                        "removed by whitening and not counted in the SNR, so SNR scaling can "
+                        "make such signals very loud in the raw onsource.",
+                        UserWarning
+                    )
+
+    def _batch_spectrum(self, offsource):
+        """The batch's one PSD estimate, shared by scaling, labels and whitening."""
+        return estimate_psd(offsource, self.sample_rate_hertz, self.spectral_config)
 
     def _validate_padding_settings(self):
         """Validate that padding does not exceed half of onsource duration."""
@@ -309,13 +484,16 @@ class GravyflowDataset(keras.utils.PyDataset):
             logger.info(f"Injection generation failed: {e}\nTraceback: {traceback.format_exc()}")
             raise Exception(f"Injection generation failed: {e}")
 
+        # One PSD per batch: scaling, labels and whitening all read this estimate.
+        spectrum = self._batch_spectrum(offsource) if self._needs_spectrum else None
+
         if self.waveform_generators:
             try:
                 onsource, scaled_injections, scaling_parameters = self.injection_generator.add_injections_to_onsource(
                     injections,
                     mask,
                     onsource,
-                    offsource,
+                    spectrum if spectrum is not None else offsource,
                     parameters_to_return=self.variables_to_return,
                     onsource_duration_seconds=self.onsource_duration_seconds,
                     injection_parameters=parameters,
@@ -338,7 +516,7 @@ class GravyflowDataset(keras.utils.PyDataset):
                 if key in self.variables_to_return:
                     parameters[key] = value
 
-            whitened_injections = self._process_whitened_injections(scaled_injections, offsource)
+            whitened_injections = self._process_whitened_injections(scaled_injections, spectrum)
             injections = self._process_injections(scaled_injections)
         else:
             scaled_injections = None
@@ -347,7 +525,7 @@ class GravyflowDataset(keras.utils.PyDataset):
 
 
 
-        whitened_onsource, rolling_pearson_onsource, spectrogram_onsource = self._process_onsource(onsource, offsource)
+        whitened_onsource, rolling_pearson_onsource, spectrogram_onsource = self._process_onsource(onsource, spectrum)
 
         onsource = self._process_raw_onsource(onsource)
         offsource = self._process_offsource(offsource)
@@ -365,31 +543,16 @@ class GravyflowDataset(keras.utils.PyDataset):
 
         return input_dict, output_dict
 
-    def _process_whitened_injections(self, scaled_injections, offsource):
-        """Process whitened injections if required."""
+    def _process_whitened_injections(self, scaled_injections, spectrum):
+        """Whiten the injections (G, B, I, T) with the batch's PSD, if required."""
         if gf.ReturnVariables.WHITENED_INJECTIONS in self.variables_to_return:
-            if len(ops.shape(scaled_injections)) == 4:
-                 # vmap over generator axis (axis 0)
-                 # whiten(timeseries, background, ...)
-                 # map over timeseries, broadcast background
-                 whitener = jax.vmap(
-                     lambda x: whiten(x, offsource, self.sample_rate_hertz),
-                     in_axes=0, out_axes=0
-                 )
-                 whitened_injections = whitener(scaled_injections)
-            else:
-                 whitened_injections = whiten(
-                    scaled_injections, 
-                    offsource, 
-                    self.sample_rate_hertz
-                )
-            
+            whitened_injections = whiten(scaled_injections, spectrum, self.sample_rate_hertz)
             whitened_injections = gf.crop_samples(
-                whitened_injections, 
-                self.onsource_duration_seconds, 
+                whitened_injections,
+                self.onsource_duration_seconds,
                 self.sample_rate_hertz
             )
-            
+            whitened_injections = ops.cast(whitened_injections, "float32")
             return gf.replace_nan_and_inf_with_zero(whitened_injections)
         return None
 
@@ -398,36 +561,31 @@ class GravyflowDataset(keras.utils.PyDataset):
         if gf.ReturnVariables.INJECTIONS in self.variables_to_return:
             # Crop raw injections to match onsource duration
             injections = gf.crop_samples(
-                scaled_injections, 
-                self.onsource_duration_seconds, 
+                scaled_injections,
+                self.onsource_duration_seconds,
                 self.sample_rate_hertz
             )
+            injections = ops.cast(injections, "float32")
             return gf.replace_nan_and_inf_with_zero(injections)
         return None
 
-    def _process_onsource(self, onsource, offsource):
+    def _process_onsource(self, onsource, spectrum):
         """Process onsource data, including whitening, rolling Pearson, and spectrogram generation."""
-        if (gf.ReturnVariables.WHITENED_ONSOURCE in self.variables_to_return) or \
-           (gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in self.variables_to_return) or \
-           (gf.ReturnVariables.SPECTROGRAM_ONSOURCE in self.variables_to_return):
-
-            whitened_onsource = whiten(
-                onsource, 
-                offsource, 
-                self.sample_rate_hertz
-            )
-            
+        if self._needs_whitening:
+            whitened_onsource = whiten(onsource, spectrum, self.sample_rate_hertz)
             whitened_onsource = gf.crop_samples(
-                whitened_onsource, 
-                self.onsource_duration_seconds, 
+                whitened_onsource,
+                self.onsource_duration_seconds,
                 self.sample_rate_hertz
             )
-                        
+            # float32, scrubbed before any cast: a float16 cast turned values
+            # above 65504 into inf and then silently into 0.
+            whitened_onsource = gf.replace_nan_and_inf_with_zero(
+                ops.cast(whitened_onsource, "float32")
+            )
+
             rolling_pearson_onsource = self._calculate_rolling_pearson(whitened_onsource)
             spectrogram_onsource = self._calculate_spectrogram(whitened_onsource)
-            
-            whitened_onsource = ops.cast(whitened_onsource, "float16")
-            whitened_onsource = gf.replace_nan_and_inf_with_zero(whitened_onsource)
 
             return whitened_onsource, rolling_pearson_onsource, spectrogram_onsource
         return None, None, None
@@ -504,12 +662,6 @@ class GravyflowDataset(keras.utils.PyDataset):
         output_dict = {k: v for k, v in output_dict.items() if v is not None}
         
         return input_dict, output_dict
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        return self.__getitem__(0)
 
 def create_variable_dictionary(
     return_variables: List[Union[gf.ReturnVariables, gf.WaveformParameters, gf.ScalingTypes]],

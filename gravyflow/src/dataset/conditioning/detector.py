@@ -561,6 +561,9 @@ class Network:
             )
                 
         self.num_detectors = num_detectors
+        # The detectors this network projects onto, in channel order; None when
+        # it was built from geometry rather than from IFOs.
+        self.ifos = list(parameters) if isinstance(parameters, list) else None
                 
         self.init_parameters(
             **arguments

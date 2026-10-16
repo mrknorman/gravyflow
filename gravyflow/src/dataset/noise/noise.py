@@ -349,8 +349,9 @@ class NoiseObtainer(Obtainer):
             num_examples_per_batch = gf.Defaults.num_examples_per_batch
         if seed is None:
             seed = gf.Defaults.seed
-        if ifos is not None:
-            self.ifos = gf.src.utils.numerics.ensure_list(ifos)
+        # The detectors for this call only: the obtainer's own `ifos` is never
+        # overwritten, so one obtainer can serve datasets with different detectors.
+        ifos = gf.src.utils.numerics.ensure_list(ifos) if ifos is not None else list(self.ifos)
         if self.rng is None:
             self.rng = default_rng(seed)
         
@@ -366,7 +367,7 @@ class NoiseObtainer(Obtainer):
             case NoiseType.WHITE:
                 self.generator = white_noise_generator(
                     num_examples_per_batch,
-                    self.ifos,
+                    ifos,
                     onsource_duration_seconds,
                     crop_duration_seconds,
                     offsource_duration_seconds,
@@ -380,7 +381,7 @@ class NoiseObtainer(Obtainer):
                     onsource_duration_seconds,
                     crop_duration_seconds,
                     offsource_duration_seconds,
-                    self.ifos,
+                    ifos,
                     sample_rate_hertz,
                     scale_factor,
                     seed=seed_,
@@ -396,11 +397,12 @@ class NoiseObtainer(Obtainer):
                     sample_rate_hertz,
                     group,
                     scale_factor,
-                    seed=seed_
+                    seed=seed_,
+                    ifos=ifos
                 )
             
             case NoiseType.REAL:
-                canonical_ifos = ifo_canonical_key(self.ifos)
+                canonical_ifos = ifo_canonical_key(ifos)
 
                 if not self.ifo_data_obtainer:
                     raise ValueError("""
@@ -417,7 +419,7 @@ class NoiseObtainer(Obtainer):
                 
                 if ifo_data_obtainer_copy.valid_segments is None or canonical_ifos != ifo_data_obtainer_copy.ifos:
                         ifo_data_obtainer_copy.get_valid_segments(
-                            self.ifos,
+                            ifos,
                             seed,
                             self.groups,
                             group,
@@ -435,7 +437,7 @@ class NoiseObtainer(Obtainer):
                         crop_duration_seconds,
                         offsource_duration_seconds,
                         num_examples_per_batch,
-                        self.ifos,
+                        ifos,
                         scale_factor,
                         seed=seed_,
                         sampling_mode=sampling_mode,
@@ -455,7 +457,7 @@ class NoiseObtainer(Obtainer):
             )
         
         # Enforce shape contracts
-        return ShapeEnforcer.wrap_generator(self.generator, num_ifos=len(self.ifos))
+        return ShapeEnforcer.wrap_generator(self.generator, num_ifos=len(ifos))
     
     def pseudo_real_noise_generator(
         self,
@@ -466,9 +468,11 @@ class NoiseObtainer(Obtainer):
         sample_rate_hertz: float,
         group : str,
         scale_factor : float,
-        seed : int
+        seed : int,
+        ifos : List[gf.IFO] = None
     ):
 
+        ifos = list(self.ifos) if ifos is None else ifos
         rng = default_rng(seed)
         
         # Use WindowSpec for consistent duration calculations
@@ -488,7 +492,7 @@ class NoiseObtainer(Obtainer):
             int(duration * sample_rate_hertz) for duration in durations_seconds
         ]
 
-        canonical_ifos = ifo_canonical_key(self.ifos)
+        canonical_ifos = ifo_canonical_key(ifos)
 
         if not self.ifo_data_obtainer:
             raise ValueError("""
@@ -500,7 +504,7 @@ class NoiseObtainer(Obtainer):
         elif self.ifo_data_obtainer.valid_segments is None or canonical_ifos != self.ifo_data_obtainer.ifos:
             
             valid_segments = self.ifo_data_obtainer.get_valid_segments(
-                self.ifos,
+                ifos,
                 seed,
                 self.groups,
                 group_name=group
@@ -515,7 +519,7 @@ class NoiseObtainer(Obtainer):
         for segment in self.ifo_data_obtainer.acquire(
             sample_rate_hertz, 
             valid_segments, 
-            self.ifos,
+            ifos,
             scale_factor
         ):
 
@@ -571,7 +575,7 @@ class NoiseObtainer(Obtainer):
                 yield {
                     RV.ONSOURCE: _generate_colored_noise(
                         num_examples_per_batch, 
-                        len(self.ifos),
+                        len(ifos),
                         num_samples_list[0], 
                         ops.sqrt(interpolated_onsource_psds),
                         seed=s1,
@@ -579,7 +583,7 @@ class NoiseObtainer(Obtainer):
                     ),
                     RV.OFFSOURCE: _generate_colored_noise(
                         num_examples_per_batch, 
-                        len(self.ifos),
+                        len(ifos),
                         num_samples_list[1], 
                         ops.sqrt(interpolated_offsource_psds),
                         seed=s2,

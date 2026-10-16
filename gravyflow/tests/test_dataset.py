@@ -856,7 +856,7 @@ def test_gravyflow_dataset_with_injections():
         seed=42,
         sample_rate_hertz=1024.0,
         onsource_duration_seconds=1.0,
-        offsource_duration_seconds=1.0,
+        offsource_duration_seconds=2.0,  # three Welch segments: the PSD minimum
         crop_duration_seconds=0.5,
         num_examples_per_batch=2,
         noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]),
@@ -880,7 +880,7 @@ def test_gravyflow_dataset_processing():
         seed=42,
         sample_rate_hertz=1024.0,
         onsource_duration_seconds=1.0,
-        offsource_duration_seconds=1.0,
+        offsource_duration_seconds=2.0,  # three Welch segments: the PSD minimum
         crop_duration_seconds=0.5,
         num_examples_per_batch=2,
         noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]),

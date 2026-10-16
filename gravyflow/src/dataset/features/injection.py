@@ -90,8 +90,6 @@ class ScalingMethod:
                     onsource,
                     scaling_parameters,
                     sample_rate_hertz,
-                    fft_duration_seconds=1.0,
-                    overlap_duration_seconds=0.5,
                     onsource_duration_seconds=onsource_duration_seconds,
                     return_scale_factor=True
                 )
@@ -1537,9 +1535,7 @@ class InjectionGenerator:
                             projected, onsource_duration_seconds, sample_rate
                         ),
                         scaling_background,
-                        sample_rate,
-                        fft_duration_seconds=1.0,
-                        overlap_duration_seconds=0.5
+                        sample_rate
                     )
                 value = ops.reshape(ops.cast(value, "float32"), (-1,))
                 labels[label_type].append(ops.where(present, value, np.nan))
