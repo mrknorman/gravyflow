@@ -15,7 +15,7 @@ from gravyflow.src.model.examples import validate_gabbard_2017 as validate_scrip
 from gravyflow.src.validate import ValidationConfig, Validator
 from gravyflow.src.validate.bank import ValidationBank
 from gravyflow.tests.leakage.fingerprints import (
-    assert_rows_disjoint, assert_streams_independent, strain_prints,
+    assert_noise_independent, assert_rows_disjoint, assert_streams_independent, strain_prints,
 )
 
 MODEL_INPUT = gf.ReturnVariables.WHITENED_ONSOURCE.name
@@ -137,13 +137,16 @@ def test_validator_sets_disjoint(tmp_path):
     validator = Validator.validate(model=model, name="leakage", dataset_args=dataset_args, config=config)
     assert len(scored) == 2 * STEPS, f"the validator scored {len(scored)} batches, expected {2 * STEPS}"
 
-    strain = {f"train batch {k}": strain_prints(inputs([batch])) for k, batch in enumerate(training)}
-    strain.update({
-        "validation": strain_prints(inputs(validation.batches)),
-        "validator noise": strain_prints({MODEL_INPUT: np.concatenate(scored[:STEPS])}),
-        "validator injections": strain_prints({MODEL_INPUT: np.concatenate(scored[STEPS:])}),
+    whitened = {f"train batch {k}": inputs([batch]) for k, batch in enumerate(training)}
+    whitened.update({
+        "validation": inputs(validation.batches),
+        "validator noise": {MODEL_INPUT: np.concatenate(scored[:STEPS])},
+        "validator injections": {MODEL_INPUT: np.concatenate(scored[STEPS:])},
     })
-    assert_rows_disjoint(strain)
+    assert_rows_disjoint({name: strain_prints(arrays) for name, arrays in whitened.items()})
+    # The injection set adds a signal to its noise, so shared noise there is
+    # never byte-equal: it shows as correlation instead.
+    assert_noise_independent({name: arrays[MODEL_INPUT] for name, arrays in whitened.items()})
 
     efficiency = validator.efficiency_data
     assert_streams_independent({

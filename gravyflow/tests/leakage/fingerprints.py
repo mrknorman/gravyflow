@@ -165,6 +165,62 @@ def assert_rows_disjoint(sets: Mapping[str, StrainPrints], min_rows: int = 2) ->
         raise AssertionError("Strain shared between sets:\n  " + "\n  ".join(findings))
 
 
+def _unit_rows(array: np.ndarray, name: str) -> np.ndarray:
+    rows = np.asarray(array, dtype=np.float64).reshape(-1, np.shape(array)[-1])
+    if rows.shape[0] == 0 or not np.all(np.isfinite(rows)):
+        raise ValueError(f"{name}: need finite rows, got shape {np.shape(array)}.")
+    rows = rows - rows.mean(axis=1, keepdims=True)
+    norms = np.linalg.norm(rows, axis=1, keepdims=True)
+    if np.any(norms == 0):
+        raise ValueError(f"{name}: a row is constant.")
+    return rows / norms
+
+
+def assert_noise_independent(sets: Mapping[str, np.ndarray], alpha: float = STREAM_ALPHA) -> float:
+    """
+    No row of one set shares its noise with a row of another, even when a
+    signal was added to one of them, so that no window is byte-equal.
+
+    For whitened data (approximately white noise), the normalised cross-
+    correlation of two independent rows of n samples has a standard deviation
+    of about 1/sqrt(n) at every lag. A row pair fails when its largest
+    |correlation| over all lags exceeds z/sqrt(n), z the normal quantile at
+    ``alpha`` divided by the number of (pair, lag) tests. Shared noise under a
+    signal of whitened SNR rho over n samples correlates at about
+    1/sqrt(1 + rho^2/n), and a shifted copy at its overlap fraction. Returns the
+    threshold. Not for coloured data, whose correlations are wider.
+
+    Raises:
+        AssertionError: the row pairs over the threshold, per pair of sets.
+    """
+    if len(sets) < 2:
+        raise ValueError("assert_noise_independent needs at least two sets.")
+    rows = {name: _unit_rows(array, name) for name, array in sets.items()}
+    lengths = {r.shape[1] for r in rows.values()}
+    if len(lengths) != 1:
+        raise ValueError(f"Rows of every set must have one length, got {sorted(lengths)}.")
+    n = lengths.pop()
+    size = 2 * n
+    spectra = {name: np.fft.rfft(r, n=size, axis=1) for name, r in rows.items()}
+    pairs = list(itertools.combinations(rows, 2))
+    tests = sum(rows[a].shape[0] * rows[b].shape[0] for a, b in pairs) * (2 * n - 1)
+    threshold = norm.isf(alpha / (2 * tests)) / math.sqrt(n)
+    findings = []
+    for a, b in pairs:
+        worst = np.empty((rows[a].shape[0], rows[b].shape[0]))
+        for i, spectrum in enumerate(spectra[a]):
+            correlation = np.fft.irfft(spectrum[None, :] * np.conj(spectra[b]), n=size, axis=1)
+            worst[i] = np.max(np.abs(correlation), axis=1)
+        over = np.argwhere(worst > threshold)
+        if over.size:
+            i, j = over[np.argmax(worst[tuple(over.T)])]
+            findings.append(f"{a} vs {b}: {len(over)} row pairs over {threshold:.3f}, "
+                            f"worst {worst[i, j]:.3f} ({a} row {i}, {b} row {j})")
+    if findings:
+        raise AssertionError("Noise shared between sets:\n  " + "\n  ".join(findings))
+    return threshold
+
+
 # ----------------------------------------------------------------- labels
 
 def label_streams(labels: Mapping[str, np.ndarray], num_examples: int) -> Dict[str, np.ndarray]:

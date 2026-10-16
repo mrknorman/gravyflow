@@ -13,8 +13,9 @@ import numpy as np
 import pytest
 
 from gravyflow.tests.leakage.fingerprints import (
-    OpaqueStateError, assert_rows_disjoint, assert_streams_independent, assert_unchanged,
-    concatenate_streams, label_streams, shared_rows, state_digest, state_items, strain_prints,
+    OpaqueStateError, assert_noise_independent, assert_rows_disjoint, assert_streams_independent,
+    assert_unchanged, concatenate_streams, label_streams, shared_rows, state_digest, state_items,
+    strain_prints,
 )
 
 
@@ -94,6 +95,26 @@ def test_disjoint_refuses_too_few_sets_or_rows():
         assert_rows_disjoint({"train": a})
     with pytest.raises(ValueError, match="has 1 rows; at least 2 are needed"):
         assert_rows_disjoint({"train": a, "test": a})
+
+
+def test_independent_noise_passes_the_correlation_check():
+    threshold = assert_noise_independent({
+        "train": _noise(1, (32, 1, 2048)), "validation": _noise(2, (32, 1, 2048)), "test": _noise(3, (32, 1, 2048))})
+    assert 0.1 < threshold < 0.25
+
+
+def test_shared_noise_under_a_signal_is_caught():
+    noise = _noise(1, (16, 2048))
+    t = np.arange(2048) / 2048.0
+    chirp = np.sin(2 * np.pi * (30 + 100 * t) * t) * np.exp(-((t - 0.7) / 0.1) ** 2)
+    injected = noise.copy()
+    injected[5] += (15.0 * chirp / np.linalg.norm(chirp)).astype(np.float32)   # whitened SNR 15
+    shifted = _noise(4, (16, 2048))
+    shifted[9, 1024:] = noise[2, :1024]                                          # half a row, moved
+    with pytest.raises(AssertionError, match=r"noise vs injections: 1 row pairs .* \(noise row 5, injections row 0\)"):
+        assert_noise_independent({"noise": noise, "injections": injected[5:6]})
+    with pytest.raises(AssertionError, match=r"noise vs other: 1 row pairs"):
+        assert_noise_independent({"noise": noise, "other": shifted})
 
 
 # ------------------------------------------------------------------ labels
