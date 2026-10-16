@@ -13,6 +13,32 @@ jax.config.update("jax_enable_x64", True)
 G_SI = 6.67430e-11
 C_SI = 299792458.0
 M_SOLAR_SI = 1.98855e30
+# The solar mass in seconds, G * M_sun / c^3 (about 4.93e-6 s).
+M_SOLAR_SECONDS = G_SI * M_SOLAR_SI / C_SI**3
+
+
+def _chirp_mass_seconds(mass_1_msun, mass_2_msun):
+    """
+    The chirp mass G * M_c / c^3, in seconds, of component masses in solar masses.
+
+    Working in solar masses keeps every intermediate value small: in SI units the
+    product of the two masses is about 1e63, beyond float32's range.
+    """
+    mass_1_msun = jnp.asarray(mass_1_msun)
+    mass_2_msun = jnp.asarray(mass_2_msun)
+    chirp_mass_msun = (
+        (mass_1_msun * mass_2_msun) ** (3.0 / 5.0)
+        / (mass_1_msun + mass_2_msun) ** (1.0 / 5.0)
+    )
+    return chirp_mass_msun * M_SOLAR_SECONDS
+
+
+# Both functions below use the leading-order (Newtonian) chirp relation between a
+# binary's gravitational-wave frequency f and its time to merger tau:
+#
+#     tau = 5 * m * (8 * pi * m * f) ** (-8 / 3),    m = G * M_c / c^3,
+#
+# solved for f in one and for tau in the other.
 
 def calc_minimum_frequency(
     mass_1_msun,
@@ -20,33 +46,19 @@ def calc_minimum_frequency(
     duration_seconds
 ):
     """
-    Calculates minimum frequency based on inputted masses and duration.
-    """
-    # Ensure inputs are tensors
-    mass_1_msun = jnp.array(mass_1_msun)
-    mass_2_msun = jnp.array(mass_2_msun)
-    duration_seconds = jnp.array(duration_seconds)
+    The frequency a binary has ``duration_seconds`` before merger, at least 1 Hz.
 
-    m1_kg = mass_1_msun * M_SOLAR_SI
-    m2_kg = mass_2_msun * M_SOLAR_SI
-    
-    mc_kg = ( (m1_kg * m2_kg)**3 / (m1_kg + m2_kg) )**(1.0/5.0)
-    
-    term1 = (duration_seconds / 5.0)**(-3.0/8.0)
-    term2 = 1.0 / (8.0 * np.pi)
-    term3 = (G_SI * mc_kg / (C_SI**3))**(-5.0/8.0)
-    
-    # Ensure term2 is compatible dtype
-    dtype = mass_1_msun.dtype
-    if dtype == jnp.float32:
-        term2 = jnp.array(term2, dtype=jnp.float32)
-    
-    f_min = term1 * term2 * term3
-    
+    Masses are in solar masses. The result has the floating dtype of the inputs and
+    is finite for float32 inputs.
+    """
+    chirp_mass = _chirp_mass_seconds(mass_1_msun, mass_2_msun)
+    duration_seconds = jnp.asarray(duration_seconds)
+
+    f_min = (5.0 * chirp_mass / duration_seconds) ** (3.0 / 8.0) / (8.0 * np.pi * chirp_mass)
+
     # Clamp to be at least 1.0 Hz
-    f_min = jnp.maximum(f_min, 1.0)
-        
-    return f_min
+    return jnp.maximum(f_min, 1.0)
+
 
 def calc_duration_from_f_min(
     mass_1_msun,
@@ -54,31 +66,15 @@ def calc_duration_from_f_min(
     f_min
 ):
     """
-    Calculates duration based on inputted masses and minimum frequency.
+    The time to merger, in seconds, of a binary at frequency ``f_min``.
+
+    Masses are in solar masses. The result has the floating dtype of the inputs and
+    is finite for float32 inputs.
     """
-    # Store original dtype for output
-    original_dtype = getattr(mass_1_msun, 'dtype', None)
-    
-    # Convert to float64 for precision in intermediate calculations
-    mass_1_msun = ops.cast(ops.convert_to_tensor(mass_1_msun), "float64")
-    mass_2_msun = ops.cast(ops.convert_to_tensor(mass_2_msun), "float64")
-    f_min = ops.cast(ops.convert_to_tensor(f_min), "float64")
+    chirp_mass = _chirp_mass_seconds(mass_1_msun, mass_2_msun)
+    f_min = jnp.asarray(f_min)
 
-    m1_kg = mass_1_msun * M_SOLAR_SI
-    m2_kg = mass_2_msun * M_SOLAR_SI
-    
-    mc_kg = ( (m1_kg * m2_kg)**3 / (m1_kg + m2_kg) )**(1.0/5.0)
-    
-    term2 = 1.0 / (8.0 * np.pi)
-    term3 = (G_SI * mc_kg / (C_SI**3))**(-5.0/8.0)
-
-    duration = 5.0 * (f_min / (term2 * term3))**(-8.0/3.0)
-    
-    # Cast back to original dtype if it was float32
-    if original_dtype == jnp.float32:
-        duration = ops.cast(duration, "float32")
-    
-    return duration
+    return 5.0 * chirp_mass * (8.0 * np.pi * chirp_mass * f_min) ** (-8.0 / 3.0)
 
 class Approximant(Enum):
     """Supported CBC approximants. Each value is the name ripple registers the model under."""
