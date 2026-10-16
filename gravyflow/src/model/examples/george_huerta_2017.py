@@ -150,13 +150,14 @@ class _GeorgeHuerta2017(ExampleModel):
         return Model(inputs={inputs.name: inputs}, outputs=outputs, name=cls._name)
 
     @classmethod
-    def _dataset(cls, config, seed, group, steps_per_epoch, regression: bool, curriculum: bool,
+    def _dataset(cls, config, noise_type, seed, group, steps_per_epoch, regression: bool, curriculum: bool,
                  first_epoch: int = 0, **kwargs):
         cfg = config or cls.config
         labels = ([gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN]
                   if regression else [gf.ReturnVariables.INJECTION_MASKS])
         return gf.GravyflowDataset(
             **cbc_dataset_args(
+                noise_obtainer=gf.NoiseObtainer(noise_type=noise_type, ifos=[gf.IFO.L1]),
                 sample_rate_hertz=cfg.sample_rate_hertz,
                 onsource_duration_seconds=cfg.onsource_duration_seconds,
                 offsource_duration_seconds=cfg.offsource_duration_seconds,
@@ -188,12 +189,11 @@ class _GeorgeHuerta2017(ExampleModel):
         """
         Detection data with ``INJECTION_MASKS`` labels; with ``curriculum``
         (and ``config.use_curriculum``), the SNR follows the training scheme
-        from ``first_epoch``. Coloured noise only, for now.
+        from ``first_epoch``. Coloured L1 noise, or public GWOSC L1 noise with
+        ``noise_type=NoiseType.REAL``.
         """
-        if noise_type is not gf.NoiseType.COLORED:
-            raise ValueError(f"{cls.__name__}.dataset supports coloured noise only.")
         cfg = config or cls.config
-        return cls._dataset(cfg, seed, group, steps_per_epoch, regression=False,
+        return cls._dataset(cfg, noise_type, seed, group, steps_per_epoch, regression=False,
                             curriculum=curriculum and cfg.use_curriculum, first_epoch=first_epoch, **kwargs)
 
     @classmethod
@@ -209,10 +209,8 @@ class _GeorgeHuerta2017(ExampleModel):
         **kwargs
     ) -> gf.GravyflowDataset:
         """Every example injected, with ``MASS_1_MSUN`` and ``MASS_2_MSUN`` labels."""
-        if noise_type is not gf.NoiseType.COLORED:
-            raise ValueError(f"{cls.__name__}.dataset_regression supports coloured noise only.")
         cfg = config or cls.config
-        return cls._dataset(cfg, seed, group, steps_per_epoch, regression=True,
+        return cls._dataset(cfg, noise_type, seed, group, steps_per_epoch, regression=True,
                             curriculum=curriculum and cfg.use_curriculum, first_epoch=first_epoch, **kwargs)
 
     @classmethod

@@ -126,14 +126,13 @@ class Gabbard2017(ExampleModel):
     ) -> gf.GravyflowDataset:
         """
         Training or evaluation data in the paper's configuration, with
-        ``INJECTION_MASKS`` labels. Real noise is not wired here yet: use
-        coloured noise.
+        ``INJECTION_MASKS`` labels, in coloured L1 noise or, with
+        ``noise_type=NoiseType.REAL``, public GWOSC L1 noise.
         """
         cfg = config or cls.config
-        if noise_type is not gf.NoiseType.COLORED:
-            raise ValueError("Gabbard2017.dataset supports coloured noise only.")
         return gf.GravyflowDataset(
             **cbc_dataset_args(
+                noise_obtainer=gf.NoiseObtainer(noise_type=noise_type, ifos=[gf.IFO.L1]),
                 sample_rate_hertz=cfg.sample_rate_hertz,
                 onsource_duration_seconds=cfg.onsource_duration_seconds,
                 offsource_duration_seconds=cfg.offsource_duration_seconds,
