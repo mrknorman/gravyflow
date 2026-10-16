@@ -160,23 +160,34 @@ print("SECTION 5: Pre-Caching for Large Training Runs")
 print("=" * 70)
 
 print("""
-For large training runs, pre-populate the cache before training:
+For large training runs, pre-populate the cache before training. The
+cache fills as windows are fetched, so draw one pass of the dataset you
+will train on, with the same settings:
 
 Example script:
-    
-    # Pre-cache all glitches
-    gf.precache_transients(
-        ifos=[gf.IFO.L1, gf.IFO.H1],
+
+    # Pre-cache the training split's glitch windows
+    train_data = gf.Dataset(
+        noise_obtainer=gf.NoiseObtainer(
+            ifo_data_obtainer=gf.IFODataObtainer(
+                observing_runs=[gf.ObservingRun.O3],
+                data_quality=gf.DataQuality.BEST,
+                data_labels=[gf.DataLabel.GLITCHES],
+            ),
+            ifos=[gf.IFO.L1, gf.IFO.H1],
+        ),
+        group="train",
         sample_rate_hertz=2048.0,
         onsource_duration_seconds=1.0,
         offsource_duration_seconds=16.0,
-        observing_runs=[gf.ObservingRun.O3],
-        data_labels=[gf.DataLabel.GLITCHES],
+        input_variables=[gf.ReturnVariables.ONSOURCE],
     )
+    for k in range(len(train_data)):
+        train_data[k]
 
 Run this ONCE before training:
-  1. Downloads all glitch windows
-  2. Stores in TransientCache
+  1. Downloads the split's glitch windows
+  2. Stores them in TransientCache
   3. Training reads from cache (fast!)
 
 Recommended workflow:
@@ -297,15 +308,16 @@ val_obtainer = gf.IFODataObtainer(
     augmentations=[],  # ← No augmentation for validation
 )
 
-# One dataset per split; every route splits by gf.DEFAULT_SPLIT_FRACTIONS
+# One dataset per split, each obtainer wrapped in a NoiseObtainer; every route
+# splits by gf.DEFAULT_SPLIT_FRACTIONS
 train_dataset = gf.Dataset(
-    noise_obtainer=train_obtainer,
+    noise_obtainer=gf.NoiseObtainer(ifo_data_obtainer=train_obtainer, ifos=[gf.IFO.L1, gf.IFO.H1]),
     ifos=[gf.IFO.L1, gf.IFO.H1],
     group="train",
 )
 
 val_dataset = gf.Dataset(
-    noise_obtainer=val_obtainer,
+    noise_obtainer=gf.NoiseObtainer(ifo_data_obtainer=val_obtainer, ifos=[gf.IFO.L1, gf.IFO.H1]),
     ifos=[gf.IFO.L1, gf.IFO.H1],
     group="validate",
 )
@@ -336,7 +348,7 @@ print("""
    - Higher for TRANSIENT, lower for NOISE
 
 5. PRE-CACHING:
-   - Use gf.precache_transients() before large runs
+   - Draw one pass of the training dataset before large runs
    - One-time cost, major training speedup
 
 6. CACHE MANAGEMENT:

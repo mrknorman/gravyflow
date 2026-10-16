@@ -200,14 +200,11 @@ Cache benefits:
 Cache files are stored in:
   ~/.gravyflow/cache/transient/
 
-To pre-populate the cache (for large training runs):
-  
-    gf.precache_transients(
-        ifos=[gf.IFO.L1, gf.IFO.H1],
-        sample_rate_hertz=2048.0,
-        onsource_duration_seconds=1.0,
-        offsource_duration_seconds=16.0,
-    )
+To pre-populate the cache (for large training runs), draw one pass of
+the dataset you will train on; the cache fills as windows are fetched:
+
+    for k in range(len(train_data)):
+        train_data[k]
 """)
 
 # =============================================================================
@@ -306,7 +303,7 @@ print("""
 5. CACHING:
    - Memory + disk caching
    - ~/.gravyflow/cache/transient/
-   - Use precache_transients() for large runs
+   - Draw one pass of the dataset to pre-cache large runs
 """)
 
 print("\n✓ Tutorial 05 complete!")
