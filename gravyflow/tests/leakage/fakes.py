@@ -206,6 +206,15 @@ class EventRecord:
         return (component, component)
 
     @property
+    def chirp_mass_source(self) -> float:
+        masses = self.masses
+        return float((masses[0] * masses[1]) ** 0.6 / (masses[0] + masses[1]) ** 0.2)
+
+    @property
+    def catalog(self) -> str:
+        return "GWTC-3-confident" if self.confident else "GWTC-3-marginal"
+
+    @property
     def extent(self) -> Tuple[float, float]:
         """The in-band signal: from 20 Hz to the merger."""
         return (self.gps - self.in_band_seconds, self.gps)
@@ -215,7 +224,7 @@ class EventRecord:
         return {
             "name": self.name, "gps": float(self.gps), "mass1": mass1, "mass2": mass2,
             "distance": 400.0, "p_bbh": 1.0, "p_bns": 0.0, "p_nsbh": 0.0,
-            "catalog": "GWTC-fake-confident" if self.confident else "GWTC-fake-marginal",
+            "catalog": self.catalog,
             "observing_run": observing_run,
             "event_type": 1 if self.confident else 0,
         }
@@ -296,33 +305,37 @@ def leftover_fakes() -> List[str]:
     return found
 
 
-def install_events(monkeypatch: pytest.MonkeyPatch, events: Sequence[EventRecord]) -> None:
+def write_event_catalogue(events: Sequence[EventRecord]) -> None:
     """
-    Replace every event producer with the fixture's table: in ``event``'s namespace,
-    on ``BaseDataObtainer``, and at every module-level binding of the originals.
+    Write the one event list (``event.get_event_catalogue``'s cache) into the current
+    ``GRAVYFLOW_CACHE_DIR``: every event time, the noise veto and the catalogue
+    glitch exclusion read it.
     """
-    from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
+    from gravyflow.src.dataset.acquisition.gwosc_data import _atomic_write_text
     from gravyflow.src.dataset.features import event as event_module
 
+    rows = [{
+        "gps": float(e.gps), "chirp_mass_source": e.chirp_mass_source, "name": e.name,
+        "catalog": e.catalog,
+    } for e in events]
+    _atomic_write_text(event_module.event_catalogue_cache_path(), json.dumps({
+        "runs": event_module._observing_runs_key(),
+        "catalogs": sorted({e.catalog for e in events}),
+        "events": rows,
+    }))
+
+
+def install_events(monkeypatch: pytest.MonkeyPatch, events: Sequence[EventRecord]) -> None:
+    """
+    Serve the fixture's events: the one event list is written to the cache, and the
+    separate parameter table (``get_events_with_params``) is replaced in ``event``'s
+    namespace and at every module-level binding of the original.
+    """
+    import importlib
+    from gravyflow.src.dataset.features import event as event_module
+
+    write_event_catalogue(events)
     events = list(events)
-    confident = np.array([e.gps for e in events if e.confident], dtype=np.float64)
-    marginal = np.array([e.gps for e in events if not e.confident], dtype=np.float64)
-
-    def confident_times(use_cache: bool = True):
-        return confident.copy()
-
-    def marginal_times(use_cache: bool = True):
-        return marginal.copy()
-
-    def all_times(use_cache: bool = True):
-        return np.concatenate([confident, marginal])
-
-    def times_by_type(event_types, use_cache: bool = True):
-        wanted = {int(t) for t in event_types}
-        parts = [confident] if int(event_module.EventConfidence.CONFIDENT) in wanted else []
-        if int(event_module.EventConfidence.MARGINAL) in wanted:
-            parts.append(marginal)
-        return np.concatenate(parts) if parts else np.array([])
 
     def events_with_params(observing_runs=None, event_types=None, event_names=None):
         if event_types is None:
@@ -343,30 +356,18 @@ def install_events(monkeypatch: pytest.MonkeyPatch, events: Sequence[EventRecord
             rows.append(e.as_catalogue_row(run))
         return rows
 
-    for fake in (confident_times, marginal_times, all_times, times_by_type, events_with_params):
-        fake._leakage_fake = True
+    events_with_params._leakage_fake = True
     # Import every consumer first: a module first imported while the patch is on
     # would bind the fake by name and keep it after the patch is undone.
-    import importlib
-
     for name in EVENT_CONSUMERS:
         importlib.import_module(name)
-
-    replacements = {
-        event_module.get_confident_event_times: confident_times,
-        event_module.get_marginal_event_times: marginal_times,
-        event_module.get_all_event_times: all_times,
-        event_module.get_event_times_by_type: times_by_type,
-        event_module.get_events_with_params: events_with_params,
-    }
+    original = event_module.get_events_with_params
     for module in list(sys.modules.values()):
         if module is None or not getattr(module, "__name__", "").startswith("gravyflow"):
             continue
         for attribute, value in list(vars(module).items()):
-            for original, fake in replacements.items():
-                if value is original:
-                    monkeypatch.setattr(module, attribute, fake)
-    monkeypatch.setattr(BaseDataObtainer, "get_all_event_times", lambda self: all_times())
+            if value is original:
+                monkeypatch.setattr(module, attribute, events_with_params)
 
 
 # =============================================================================
@@ -421,5 +422,6 @@ def installed(fixture, root: Path, cache_dir: Optional[Path] = None, strain: boo
 
 __all__ = [
     "GWOSC_FLAGS", "HARDWARE_INJECTION_FLAGS", "Fetch", "StrainSource", "close_obtainers",
-    "write_timelines", "write_gravity_spy", "GlitchRecord", "EventRecord", "install_events", "Harness", "installed",
+    "write_timelines", "write_gravity_spy", "GlitchRecord", "EventRecord", "write_event_catalogue",
+    "install_events", "leftover_fakes", "Harness", "installed",
 ]

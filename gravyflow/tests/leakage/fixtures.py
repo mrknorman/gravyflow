@@ -296,20 +296,14 @@ def events(edges: Sequence[float], in_band: Sequence[float] = (2.0, 60.0, 165.0)
 ONSOURCE_SECONDS, CROP_SECONDS, OFFSOURCE_SECONDS = 1.0, 0.5, 4.0
 
 
-def max_piece_seconds(rate: float) -> float:
-    """The longest piece the decoder is exact for: 2^18 samples (see ``provenance``)."""
-    return float(2 ** 18) / float(rate)
-
-
 def ifo_data_obtainer(fixture: Fixture, **overrides):
     """
     A REAL-noise IFODataObtainer over the fixture's runs: no augmentation, no
-    prefetch, no segment cache, and pieces of at most ``max_piece_seconds``.
+    prefetch, no segment cache.
     """
     import gravyflow as gf
 
     kwargs = dict(
-        max_segment_duration_seconds=max_piece_seconds(fixture.encoding.sample_rate_hertz),
         data_quality=gf.DataQuality.BEST,
         data_labels=[gf.DataLabel.NOISE],
         observing_runs=fixture.observing_runs(),
@@ -407,7 +401,7 @@ def served_segments(fixture: Fixture, ifos, split: str, seed: int = 7, **overrid
 
 
 __all__ = [
-    "ONSOURCE_SECONDS", "CROP_SECONDS", "OFFSOURCE_SECONDS", "max_piece_seconds", "ifo_data_obtainer",
+    "ONSOURCE_SECONDS", "CROP_SECONDS", "OFFSOURCE_SECONDS", "ifo_data_obtainer",
     "noise_obtainer", "noise_batches", "dataset", "dataset_batches", "window", "served_segments",
     "BLOCK_SECONDS", "GOLDEN_GROUPS", "GOLDEN_BLOCKS", "origin_gps", "golden_blocks", "block_of",
     "block_start", "golden_split", "boundary", "Fixture", "straddle", "odd_pieces",

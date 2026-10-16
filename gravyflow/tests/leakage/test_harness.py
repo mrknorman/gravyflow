@@ -16,7 +16,7 @@ import gravyflow as gf
 
 from . import audit
 from . import fixtures as fx
-from .conftest import package_snapshot, snapshot_changes
+from gravyflow.tests.conftest import PROXY_VARIABLES, tree_changes, tree_snapshot
 from .fakes import EventRecord, GlitchRecord, StrainSource
 from .provenance import (
     CODE_CEILING, DecodeRefused, Encoding, OutsideFixture, decode_row, decode_rows,
@@ -140,9 +140,14 @@ def test_decoder_refuses_swapped_detectors(code):
 def test_decoder_refuses_values_outside_the_fixture(code):
     with pytest.raises(DecodeRefused, match="outside"):
         decode_row(np.arange(CODE_CEILING, CODE_CEILING + 8, dtype=np.float64), "H1", code)
-    beyond = code.detector_base("H1") + 20 * 256 + np.arange(8)  # past the last island
+    # A row of the same code past the last island (the code extends; the fixture does not).
+    wider = Encoding.from_intervals([(1000.0, 1010.0), (2000.0, 2020.0)], 256.0)
+    beyond = wider.encode("H1", 2015 * 256, 300)
     with pytest.raises(DecodeRefused, match="outside the fixture"):
-        decode_row(beyond.astype(np.float64), "H1", code)
+        decode_row(beyond, "H1", code)
+    # A row too short to carry its block's digits refuses rather than guesses.
+    with pytest.raises(DecodeRefused, match="too short"):
+        decode_row(_row(code, n=4), "H1", code)
 
 
 def test_decoder_reads_an_exact_stride_only(code):
@@ -165,8 +170,8 @@ def test_the_fake_refuses_requests_outside_the_fixture(code):
 
 
 def test_encoding_refuses_a_layout_beyond_the_code():
-    with pytest.raises(ValueError, match="holds"):
-        Encoding.from_intervals([(0.0, 5000.0)], 256.0)
+    with pytest.raises(ValueError, match="the code holds"):
+        Encoding.from_intervals([(0.0, 10.0), (3e8, 3e8 + 10.0)], 256.0)
     with pytest.raises(ValueError, match="power of two"):
         Encoding.from_intervals([(0.0, 10.0)], 1000.0)
     with pytest.raises(ValueError, match="overlap"):
@@ -371,14 +376,16 @@ def test_catalogues_reach_every_consumer(world):
     with world(fixture):
         assert [e["name"] for e in event_module.get_events_with_params()] == ["GWSENTINEL"]
         assert [e["name"] for e in segment_builders.get_events_with_params()] == ["GWSENTINEL"]
-        assert list(fx.ifo_data_obtainer(fixture).get_all_event_times()) == [sentinel.gps]
-        rows = gf.get_glitch_segments(gf.IFO.L1, observing_run=gf.ObservingRun.O3)
-        assert rows.tolist() == [[glitch.peak, glitch.peak + glitch.duration]]
-        assert len(gf.get_glitch_segments(gf.IFO.H1, observing_run=gf.ObservingRun.O3)) == 0
+        assert event_module.get_all_event_times().tolist() == [sentinel.gps]
+        assert event_module.get_event_catalogue()["name"].tolist() == ["GWSENTINEL"]
+        rows = gf.get_glitch_catalogue(gf.IFO.L1, observing_run=gf.ObservingRun.O3)
+        assert rows["event_time"].tolist() == [glitch.peak]
+        assert len(gf.get_glitch_catalogue(gf.IFO.H1, observing_run=gf.ObservingRun.O3)["event_time"]) == 0
         served = fx.served_segments(fixture, IFOS, "train")
-    # The noise veto removed the time at the sentinel from the train side.
+    # The noise vetoes removed the sentinel event and the glitch from the train side.
     for ifo in IFOS:
-        audit.assert_avoids({ifo: served[ifo]}, [(sentinel.gps - 1.0, sentinel.gps + 1.0)])
+        audit.assert_avoids({ifo: served[ifo]}, [sentinel.extent])
+    audit.assert_avoids({"L1": served["L1"]}, [glitch.extent])
 
 
 def test_the_guard_refuses_and_records_connections(refusals):
@@ -405,21 +412,38 @@ def test_without_the_fake_real_noise_is_refused_and_zero(world, tmp_path, refusa
         decode_rows(onsource, IFOS, fixture.encoding)
 
 
-def test_package_snapshot_sees_every_change(tmp_path):
+def test_tree_snapshot_sees_every_change(tmp_path):
+    """The suite's package and user-cache check sees an added and a changed file."""
     (tmp_path / "a.npy").write_bytes(b"1")
     (tmp_path / "__pycache__").mkdir()
-    before = package_snapshot(tmp_path)
+    before = tree_snapshot(tmp_path)
     (tmp_path / "__pycache__" / "x.pyc").write_bytes(b"ignored")
-    assert snapshot_changes(before, package_snapshot(tmp_path)) == []
+    assert tree_changes(before, tree_snapshot(tmp_path)) == []
     (tmp_path / "res").mkdir()
     (tmp_path / "res" / "cached_event_times.npy").write_bytes(b"2")
     (tmp_path / "a.npy").write_bytes(b"12")
-    changes = snapshot_changes(before, package_snapshot(tmp_path))
+    changes = tree_changes(before, tree_snapshot(tmp_path))
     assert changes == ["added res/cached_event_times.npy", "changed a.npy"]
 
 
-def test_the_package_roots_are_temporary():
+def test_the_package_roots_are_temporary_and_proxies_unset():
     for name in ("HOME", "XDG_CACHE_HOME", "GRAVYFLOW_CACHE_DIR"):
         assert "leakage-home" in os.environ[name], name
     assert "leakage-home" in os.getcwd()
     assert str(Path.home()).startswith(os.environ["HOME"])
+    assert not [name for name in PROXY_VARIABLES if name in os.environ]
+
+
+def test_every_cache_lives_under_the_one_cache_root():
+    from gravyflow.src.dataset.acquisition import gwosc_data
+    from gravyflow.src.dataset.features import gravity_spy
+    from gravyflow.src.dataset.features.glitch_cache import generate_transient_cache_path
+
+    root = Path(os.environ["GRAVYFLOW_CACHE_DIR"])
+    for path in (
+        generate_transient_cache_path(prefix="glitch"),
+        generate_transient_cache_path(prefix="event"),
+        gravity_spy.cache_dir(),
+        gwosc_data._timeline_cache_path("O1", "H1_DATA", 0, 1),
+    ):
+        assert root in Path(path).parents, path
