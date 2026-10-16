@@ -9,13 +9,17 @@ content itself:
   byte, any window of the other, whatever its key (onsource, offsource,
   injections) or detector. A shifted copy, or an onsource cut from another
   example's offsource, is caught as well as an identical row.
-- **Label streams.** Each label is a per-example sequence. Two sets share a
-  stream when, at some lag, the rank correlation of their sequences exceeds a
-  threshold corrected for every lag and pair tested; the same stream mapped to
-  another range, or shifted by a few examples, has rank correlation one.
-  A continuous label must also share no more exactly equal values with the
-  same label of another set than chance allows, which catches a stream served
-  in another order.
+- **Shared noise under a signal.** The cross-correlation of whitened rows,
+  forwards and time-reversed, at every shift, against a threshold corrected
+  for every test.
+- **Label streams.** Each label is a per-example sequence, NaN where it is
+  absent. Two sets share a stream when, at some offset of one against the
+  other, the rank correlation of the examples present in both exceeds a
+  threshold corrected for every offset and pair tested; the same stream mapped
+  to another range, or served anywhere inside a longer one, has rank
+  correlation one. A continuous label must also share no more exactly equal
+  values with the same label of another set than chance allows, which catches
+  a stream served in another order.
 - **Object state.** A recursive digest of arrays, random generator states and
   plain attributes, which refuses, by name, any type whose state it cannot
   read.
@@ -179,14 +183,16 @@ def _unit_rows(array: np.ndarray, name: str) -> np.ndarray:
 def assert_noise_independent(sets: Mapping[str, np.ndarray], alpha: float = STREAM_ALPHA) -> float:
     """
     No row of one set shares its noise with a row of another, even when a
-    signal was added to one of them, so that no window is byte-equal.
+    signal was added to one of them, so that no window is byte-equal, or when
+    the row was time-reversed or negated, as augmentation does.
 
     For whitened data (approximately white noise), the normalised cross-
     correlation of two independent rows of n samples has a standard deviation
     of about 1/sqrt(n) at every lag. A row pair fails when its largest
-    |correlation| over all lags exceeds z/sqrt(n), z the normal quantile at
-    ``alpha`` divided by the number of (pair, lag) tests. Shared noise under a
-    signal of whitened SNR rho over n samples correlates at about
+    |correlation| over all lags, of the row and of its time reversal, exceeds
+    z/sqrt(n), z the normal quantile at ``alpha`` divided by the number of
+    (pair, lag, direction) tests; the absolute value covers negation. Shared
+    noise under a signal of whitened SNR rho over n samples correlates at about
     1/sqrt(1 + rho^2/n), and a shifted copy at its overlap fraction. Returns the
     threshold. Not for coloured data, whose correlations are wider.
 
@@ -202,20 +208,23 @@ def assert_noise_independent(sets: Mapping[str, np.ndarray], alpha: float = STRE
     n = lengths.pop()
     size = 2 * n
     spectra = {name: np.fft.rfft(r, n=size, axis=1) for name, r in rows.items()}
+    reversed_spectra = {name: np.fft.rfft(r[:, ::-1], n=size, axis=1) for name, r in rows.items()}
     pairs = list(itertools.combinations(rows, 2))
-    tests = sum(rows[a].shape[0] * rows[b].shape[0] for a, b in pairs) * (2 * n - 1)
+    tests = sum(rows[a].shape[0] * rows[b].shape[0] for a, b in pairs) * (2 * n - 1) * 2
     threshold = norm.isf(alpha / (2 * tests)) / math.sqrt(n)
     findings = []
     for a, b in pairs:
-        worst = np.empty((rows[a].shape[0], rows[b].shape[0]))
-        for i, spectrum in enumerate(spectra[a]):
-            correlation = np.fft.irfft(spectrum[None, :] * np.conj(spectra[b]), n=size, axis=1)
-            worst[i] = np.max(np.abs(correlation), axis=1)
-        over = np.argwhere(worst > threshold)
+        worst = np.empty((2, rows[a].shape[0], rows[b].shape[0]))
+        for direction, other in enumerate((spectra[b], reversed_spectra[b])):
+            for i, spectrum in enumerate(spectra[a]):
+                correlation = np.fft.irfft(spectrum[None, :] * np.conj(other), n=size, axis=1)
+                worst[direction, i] = np.max(np.abs(correlation), axis=1)
+        over = np.argwhere(worst.max(axis=0) > threshold)
         if over.size:
-            i, j = over[np.argmax(worst[tuple(over.T)])]
+            direction, i, j = np.unravel_index(np.argmax(worst), worst.shape)
             findings.append(f"{a} vs {b}: {len(over)} row pairs over {threshold:.3f}, "
-                            f"worst {worst[i, j]:.3f} ({a} row {i}, {b} row {j})")
+                            f"worst {worst[direction, i, j]:.3f} ({a} row {i}, {b} row {j}"
+                            f"{' reversed' if direction else ''})")
     if findings:
         raise AssertionError("Noise shared between sets:\n  " + "\n  ".join(findings))
     return threshold
@@ -257,8 +266,12 @@ def concatenate_streams(batches: Iterable[Mapping[str, np.ndarray]]) -> Dict[str
     return {key: np.concatenate([batch[key] for batch in batches]) for key in sorted(keys)}
 
 
+def _present(x: np.ndarray) -> np.ndarray:
+    return x[np.isfinite(x)]
+
+
 def _is_continuous(x: np.ndarray) -> bool:
-    """No two examples share a value: a draw from a continuous distribution."""
+    """No two present examples share a value: a draw from a continuous distribution."""
     return np.unique(x).size == x.size
 
 
@@ -281,28 +294,42 @@ def _chance_collisions(x: np.ndarray, y: np.ndarray, alpha: float) -> int:
     return int(poisson.isf(alpha, rate))
 
 
-def _max_lag(n: int, z: float) -> int:
-    """The largest lag whose overlap keeps the threshold at or below MAX_STREAM_THRESHOLD."""
-    min_overlap = math.ceil((z / MAX_STREAM_THRESHOLD) ** 2) + 1
-    return n - min_overlap
+def _min_overlap(z: float) -> int:
+    """The fewest examples an offset must compare for its threshold to be at most MAX_STREAM_THRESHOLD."""
+    return math.ceil((z / MAX_STREAM_THRESHOLD) ** 2) + 1
 
 
-def _rank_correlation(x: np.ndarray, y: np.ndarray) -> float:
-    rx, ry = rankdata(x), rankdata(y)
-    rx, ry = rx - rx.mean(), ry - ry.mean()
-    denominator = math.sqrt(float(np.dot(rx, rx) * np.dot(ry, ry)))
-    return float(np.dot(rx, ry) / denominator) if denominator else 0.0
+def stream_offsets(x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Every offset ``d`` of ``y`` against ``x``, from ``-(y.size - 1)`` to
+    ``x.size - 1``, with its overlap: how many ``t`` have both ``x[t + d]``
+    and ``y[t]`` present (finite). The shorter stream slides across the whole
+    of the longer one.
+    """
+    overlap = np.correlate(np.isfinite(x).astype(np.int64), np.isfinite(y).astype(np.int64), mode="full")
+    return np.arange(-(y.size - 1), x.size), overlap
 
 
-def lagged_rank_correlations(x: np.ndarray, y: np.ndarray, max_lag: int) -> Dict[int, Tuple[float, int]]:
-    """Spearman's rho of ``x[t + lag]`` against ``y[t]``, with its overlap, for every lag in range."""
-    n = min(x.size, y.size)
-    x, y = x[:n], y[:n]
-    out = {}
-    for lag in range(-max_lag, max_lag + 1):
-        a, b = (x[lag:], y[:n - lag]) if lag >= 0 else (x[:n + lag], y[-lag:])
-        out[lag] = (_rank_correlation(a, b), a.size)
-    return out
+def offset_rank_correlations(x: np.ndarray, y: np.ndarray, offsets: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Spearman's rho of ``x[t + d]`` against ``y[t]`` for each offset ``d``,
+    over the ``t`` where both are present, and how many such ``t`` there are.
+    """
+    offsets = np.asarray(offsets, dtype=np.int64)
+    index = np.arange(y.size)[None, :] + offsets[:, None]
+    inside = (index >= 0) & (index < x.size)
+    a = np.where(inside, x[np.clip(index, 0, x.size - 1)], np.nan)
+    b = np.broadcast_to(y, a.shape)
+    both = np.isfinite(a) & np.isfinite(b)
+    ranks = []
+    for values in (a, b):
+        r = rankdata(np.where(both, values, np.nan), axis=1, nan_policy="omit")
+        r = r - np.nanmean(r, axis=1, keepdims=True)
+        ranks.append(np.where(both, r, 0.0))
+    numerator = np.sum(ranks[0] * ranks[1], axis=1)
+    denominator = np.sqrt(np.sum(ranks[0] ** 2, axis=1) * np.sum(ranks[1] ** 2, axis=1))
+    rho = np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0)
+    return rho, both.sum(axis=1)
 
 
 def assert_streams_independent(
@@ -313,25 +340,35 @@ def assert_streams_independent(
     """
     No label stream of one set is shared with any stream of another set.
 
-    Every pair of streams across every pair of sets is tested, at every lag
-    whose overlap is long enough. Two checks:
+    A stream is a per-example sequence. NaN marks an example the label is
+    absent from (the library's rule where a generator injected nothing): an
+    absent example is left out of every comparison, but keeps its place, so the
+    alignment of the others is unchanged.
 
-    - the lagged rank correlation: at overlap n, a lag fails when
-      ``|rho| > z / sqrt(n - 1)``, where z is the two-sided normal quantile at
-      ``alpha`` divided by the number of tests (Bonferroni), so independent
-      streams fail with probability at most ``alpha`` and a shared stream,
-      monotone-transformed or shifted, has ``|rho| = 1`` and always fails;
+    Every pair of streams across every pair of sets is tested at every offset
+    of one against the other, the shorter slid across the whole of the longer,
+    whose overlap holds enough examples present in both. Two checks:
+
+    - the rank correlation at each offset: over an overlap of n examples, an
+      offset fails when ``|rho| > z / sqrt(n - 1)``, where z is the two-sided
+      normal quantile at ``alpha`` divided by the number of (pair, offset)
+      tests (Bonferroni), so independent streams fail with probability at most
+      ``alpha``, and a shared stream, monotone-transformed or shifted, has
+      ``|rho| = 1`` and always fails;
     - for the same label in both sets, continuous in both, more exactly equal
-      values than independent draws share by chance (`_chance_collisions`):
-      this catches a shared stream served in another order.
+      present values than independent draws share by chance
+      (`_chance_collisions`): this catches a shared stream served in another
+      order.
 
-    Streams that are constant within a set are excluded, and named in the
-    returned report. Returns ``{"excluded": [...], "tested": [...]}``.
+    Streams wholly absent or constant within a set are excluded, and named in
+    the returned report. Returns ``{"excluded": [...], "tested": [...]}``.
 
     Raises:
-        ValueError: fewer than two sets, a stream shorter than ``min_examples``,
-            or no stream left to test.
-        AssertionError: a shared stream, with its correlation, lag and threshold.
+        ValueError: fewer than two sets, a stream with fewer than
+            ``min_examples`` examples present, a pair of streams with no
+            offset long enough to test, or no stream left to test.
+        AssertionError: a shared stream, with its correlation, offset and
+            threshold.
     """
     if len(sets) < 2:
         raise ValueError("assert_streams_independent needs at least two sets.")
@@ -341,13 +378,18 @@ def assert_streams_independent(
         kept[name] = {}
         for key, x in streams.items():
             x = np.asarray(x, dtype=np.float64)
-            if x.ndim != 1 or x.size < min_examples:
-                raise ValueError(f"{name}/{key}: need a sequence of at least {min_examples} examples, "
-                                 f"got shape {x.shape}.")
-            if not np.all(np.isfinite(x)):
+            if x.ndim != 1:
+                raise ValueError(f"{name}/{key}: a stream is one sequence, got shape {x.shape}.")
+            if np.any(np.isinf(x)):
                 raise ValueError(f"{name}/{key}: the stream is not finite.")
-            if np.all(x == x[0]):
-                excluded.append(f"{name}/{key} (constant {x[0]:g})")
+            present = _present(x)
+            if present.size == 0:
+                excluded.append(f"{name}/{key} (absent)")
+            elif present.size < min_examples:
+                raise ValueError(f"{name}/{key}: need at least {min_examples} examples present, "
+                                 f"got {present.size} of {x.size}.")
+            elif np.all(present == present[0]):
+                excluded.append(f"{name}/{key} (constant {present[0]:g})")
             else:
                 kept[name][key] = x
     pairs = [
@@ -358,35 +400,37 @@ def assert_streams_independent(
     if not pairs:
         raise ValueError(f"No stream left to test; excluded: {excluded}.")
 
-    # Bonferroni over every (pair, lag): the lag range depends on z, so iterate to a fixed point.
-    z = norm.isf(alpha / 2)
-    for _ in range(8):
-        tests = sum(2 * max(_max_lag(min(a[2].size, b[2].size), z), 0) + 1 for a, b in pairs)
-        z_next = norm.isf(alpha / (2 * tests))
-        if abs(z_next - z) < 1e-9:
-            break
-        z = z_next
+    # Bonferroni over every (pair, offset) that could be tested at the
+    # smallest z, which over-counts the offsets tested at the final z: the
+    # bound stays conservative.
+    offsets = [stream_offsets(a[2], b[2]) for a, b in pairs]
+    countable = _min_overlap(norm.isf(alpha / 2))
+    tests = sum(int(np.count_nonzero(overlap >= countable)) for _, overlap in offsets)
+    z = norm.isf(alpha / (2 * max(tests, 1)))
+    need = _min_overlap(z)
 
     findings, tested = [], []
-    for (name_a, key_a, x), (name_b, key_b, y) in pairs:
+    for ((name_a, key_a, x), (name_b, key_b, y)), (shifts, overlap) in zip(pairs, offsets):
         label = f"{name_a}/{key_a} vs {name_b}/{key_b}"
-        max_lag = _max_lag(min(x.size, y.size), z)
-        if max_lag < 0:
-            raise ValueError(f"{label}: too few examples for a threshold of {MAX_STREAM_THRESHOLD}.")
-        correlations = lagged_rank_correlations(x, y, max_lag)
-        # The lag furthest beyond its own threshold (thresholds grow as the overlap shrinks).
-        lag, (rho, overlap) = max(
-            correlations.items(), key=lambda item: abs(item[1][0]) * math.sqrt(item[1][1] - 1))
-        threshold = z / math.sqrt(overlap - 1)
-        tested.append(f"{label}: rho {rho:+.3f} at lag {lag} (threshold {threshold:.3f})")
-        if abs(rho) > threshold:
-            findings.append(f"{label}: rho {rho:+.4f} at lag {lag} (overlap {overlap}) "
+        testable = shifts[overlap >= need]
+        if testable.size == 0:
+            raise ValueError(f"{label}: no offset holds {need} examples present in both "
+                             f"(at most {int(overlap.max())}); the threshold would exceed {MAX_STREAM_THRESHOLD}.")
+        rho, n = offset_rank_correlations(x, y, testable)
+        # The offset furthest beyond its own threshold (thresholds grow as the overlap shrinks).
+        worst = int(np.argmax(np.abs(rho) * np.sqrt(n - 1)))
+        threshold = z / math.sqrt(n[worst] - 1)
+        tested.append(f"{label}: rho {rho[worst]:+.3f} at offset {testable[worst]} (threshold {threshold:.3f}, "
+                      f"{testable.size} offsets)")
+        if abs(rho[worst]) > threshold:
+            findings.append(f"{label}: rho {rho[worst]:+.4f} at offset {testable[worst]} (overlap {n[worst]}) "
                             f"exceeds {threshold:.4f}")
-        if key_a == key_b and _is_continuous(x) and _is_continuous(y):
-            equal = int(np.count_nonzero(np.isin(x, y)))
-            allowed = _chance_collisions(x, y, alpha / len(pairs))
+        px, py = _present(x), _present(y)
+        if key_a == key_b and _is_continuous(px) and _is_continuous(py):
+            equal = int(np.count_nonzero(np.isin(px, py)))
+            allowed = _chance_collisions(px, py, alpha / len(pairs))
             if equal > allowed:
-                findings.append(f"{label}: {equal} of {x.size} values of {name_a} appear exactly in "
+                findings.append(f"{label}: {equal} of {px.size} values of {name_a} appear exactly in "
                                 f"{name_b} (chance allows {allowed})")
     if findings:
         raise AssertionError(

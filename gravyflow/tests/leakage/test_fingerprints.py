@@ -117,6 +117,15 @@ def test_shared_noise_under_a_signal_is_caught():
         assert_noise_independent({"noise": noise, "other": shifted})
 
 
+@pytest.mark.parametrize("sign", [1.0, -1.0], ids=["reversed", "negated and reversed"])
+def test_time_reversed_noise_is_caught(sign):
+    a = _noise(1, (32, 2048))
+    b = _noise(2, (32, 2048))
+    b[4] = sign * a[7, ::-1]                         # time reversal, with or without the sign flip
+    with pytest.raises(AssertionError, match=r"a vs b: 1 row pairs .* \(a row 7, b row 4 reversed\)"):
+        assert_noise_independent({"a": a, "b": b})
+
+
 # ------------------------------------------------------------------ labels
 
 def _uniform(seed, n=256):
@@ -134,15 +143,60 @@ def test_independent_streams_pass():
 
 def test_same_stream_mapped_to_another_range_is_caught():
     u = _uniform(1)
-    with pytest.raises(AssertionError, match=r"train/SNR vs validator/SNR: rho \+1.0000 at lag 0"):
+    with pytest.raises(AssertionError, match=r"train/SNR vs validator/SNR: rho \+1.0000 at offset 0"):
         assert_streams_independent({"train": {"SNR": 8 + 12 * u}, "validator": {"SNR": 15 * u}})
 
 
 def test_lagged_monotone_stream_is_caught():
     u = _uniform(1, 300)
     lagged = np.exp(u[3:259])           # the same draws, three examples later, transformed
-    with pytest.raises(AssertionError, match=r"train/RA vs test/SNR: rho \+1.0000 at lag 3"):
+    with pytest.raises(AssertionError, match=r"train/RA vs test/SNR: rho \+1.0000 at offset 3"):
         assert_streams_independent({"train": {"RA": u[:256]}, "test": {"SNR": lagged}})
+
+
+@pytest.mark.parametrize("start", [0, 40, 64])
+def test_a_stream_anywhere_inside_a_longer_one_is_caught(start):
+    u = _uniform(1, 128)
+    inside = np.exp(u[start:start + 64])             # 64 of the longer stream's draws, transformed
+    with pytest.raises(AssertionError, match=rf"long/X vs short/Y: rho \+1.0000 at offset {start} "):
+        assert_streams_independent({"long": {"X": u}, "short": {"Y": inside}})
+
+
+def test_absent_examples_keep_their_place():
+    """NaN marks an absent label: the present examples stay aligned, so a shared stream is still found."""
+    u = _uniform(1)
+    a, b = u.copy(), 15 * u
+    a[_uniform(2) < 0.3] = np.nan                    # absent in a, about 30%
+    b[_uniform(3) < 0.3] = np.nan                    # absent in b, elsewhere
+    with pytest.raises(AssertionError, match=r"train/SNR vs test/SNR: rho \+1.0000 at offset 0"):
+        assert_streams_independent({"train": {"SNR": a}, "test": {"SNR": b}})
+    c = _uniform(4)
+    c[np.isnan(b)] = np.nan
+    assert_streams_independent({"train": {"SNR": a}, "test": {"SNR": c}})
+
+
+def test_absent_streams_are_excluded_and_sparse_ones_refused():
+    report = assert_streams_independent({
+        "train": {"X": _uniform(1), "MASS": np.full(256, np.nan)},
+        "test": {"X": _uniform(2)},
+    })
+    assert report["excluded"] == ["train/MASS (absent)"]
+    sparse = _uniform(3)
+    sparse[40:] = np.nan
+    with pytest.raises(ValueError, match="need at least 64 examples present, got 40 of 256"):
+        assert_streams_independent({"train": {"X": sparse}, "test": {"X": _uniform(2)}})
+    with pytest.raises(ValueError, match="not finite"):
+        assert_streams_independent({"train": {"X": np.append(_uniform(1, 255), np.inf)},
+                                    "test": {"X": _uniform(2)}})
+
+
+def test_streams_that_never_overlap_enough_are_refused():
+    # 64 examples present in each of 1024, at random places: an offset compares a handful.
+    a, b = _uniform(1, 1024), _uniform(2, 1024)
+    for seed, x in ((3, a), (4, b)):
+        x[np.random.default_rng(seed).permutation(1024)[64:]] = np.nan
+    with pytest.raises(ValueError, match="no offset holds"):
+        assert_streams_independent({"train": {"X": a}, "test": {"X": b}})
 
 
 def test_one_shared_float64_value_is_caught():
