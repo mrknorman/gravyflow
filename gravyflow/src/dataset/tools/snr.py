@@ -182,7 +182,10 @@ def scale_to_snr(
 
     current_snr = snr(measured, spectrum, sample_rate_hertz)
     desired_snr = ops.cast(ops.convert_to_tensor(desired_snr), "float32")
-    desired_snr = ops.broadcast_to(desired_snr, current_snr.shape)
+    if desired_snr.size == current_snr.size:
+        desired_snr = ops.reshape(desired_snr, current_snr.shape)
+    else:
+        desired_snr = ops.broadcast_to(desired_snr, current_snr.shape)
     factor = ops.where(current_snr > 0, desired_snr / ops.where(current_snr > 0, current_snr, 1.0), 0.0)
 
     scaled = injection * factor if rank == 1 else injection * _expand_like(factor, rank)

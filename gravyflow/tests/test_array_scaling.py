@@ -12,7 +12,7 @@ class TestArrayScaling(unittest.TestCase):
         validation_config = ValidationDatasetConfig(
             sample_rate_hertz=2048.0,
             onsource_duration_seconds=1.0,
-            offsource_duration_seconds=1.0,
+            offsource_duration_seconds=2.0,  # three Welch segments: the PSD minimum
         )
         
         # Use COLORED noise for speed

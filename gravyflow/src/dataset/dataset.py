@@ -1047,8 +1047,10 @@ class ComposedDataset(keras.utils.PyDataset):
                 self.onsource_duration_seconds,
                 self.sample_rate_hertz
             )
-            whitened_onsource = ops.cast(whitened_onsource, "float16")
-            whitened_onsource = gf.replace_nan_and_inf_with_zero(whitened_onsource)
+            # float32, scrubbed before any cast (float16 overflowed to inf, then 0).
+            whitened_onsource = gf.replace_nan_and_inf_with_zero(
+                ops.cast(whitened_onsource, "float32")
+            )
         
         # Build return dictionaries
         operations = {
