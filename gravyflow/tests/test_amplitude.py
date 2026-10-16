@@ -422,6 +422,7 @@ def test_internal_units_are_applied_once(scaling_type):
     onsource, _, _ = injection_generator.add_injections_to_onsource(
         injections, mask, noise, offsource, parameters_to_return=[scaling_type],
         onsource_duration_seconds=1.0, injection_parameters={**parameters, **given_sky},
+        streams=injection_generator.streams(0),
     )
 
     raw = np.asarray(injections[0], np.float64)

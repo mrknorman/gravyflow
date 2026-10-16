@@ -344,6 +344,7 @@ def _add_to_zero_onsource(injector, injections, parameters, requested):
     return injector.add_injections_to_onsource(
         injections, None, zeros, offsource, parameters_to_return=requested,
         onsource_duration_seconds=ONSOURCE, injection_parameters=parameters,
+        streams=injector.streams(0),
     )
 
 

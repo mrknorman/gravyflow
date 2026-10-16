@@ -22,7 +22,7 @@ from gravyflow.src.utils.tensor import (
 from gravyflow.src.utils.shapes import BatchContract
 from gravyflow.src.dataset.config import Defaults
 from gravyflow.src.dataset.noise.noise import index_addressed, obtainer_batcher
-from gravyflow.src.rng import BatchStreams, SeedTree
+from gravyflow.src.rng import BatchStreams, SeedTree, check_split
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
@@ -194,7 +194,7 @@ class IndexedBatches:
     def _init_batches(self, seed, group: str, steps_per_epoch: int, epoch_mode: Optional[EpochMode]):
         self.tree = SeedTree.of(seed)
         self.seed = self.tree.root
-        self.group = group
+        self.group = check_split(group)
         self.steps_per_epoch = steps_per_epoch
         if epoch_mode is None:
             epoch_mode = EpochMode.FRESH if group == "train" else EpochMode.REPEAT
@@ -629,7 +629,8 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                 injection_parameters=parameters,
                 scale_factor=self.scale_factor,
                 streams=streams,
-                epoch=self._schedule_epoch
+                epoch=self._schedule_epoch,
+                steps_per_epoch=len(self),
             )
         except Exception as e:
             logger.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")
@@ -1116,7 +1117,8 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
                         onsource_duration_seconds=self.onsource_duration_seconds,
                         injection_parameters=parameters,
                         streams=pool_streams,
-                        epoch=self._schedule_epoch
+                        epoch=self._schedule_epoch,
+                        steps_per_epoch=len(self),
                     )
                     # Batch-first, so each position takes its own example.
                     parameters = {key: _batch_first(value) for key, value in labels.items()}

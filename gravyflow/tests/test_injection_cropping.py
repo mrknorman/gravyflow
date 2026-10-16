@@ -78,7 +78,8 @@ class TestInjectionCropping:
             onsource,
             offsource,
             parameters_to_return=[],
-            onsource_duration_seconds=onsource_duration
+            onsource_duration_seconds=onsource_duration,
+            streams=injection_gen.streams(0),
         )
         
         # The final onsource should have the same shape as input onsource

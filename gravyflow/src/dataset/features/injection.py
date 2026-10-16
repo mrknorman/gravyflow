@@ -1438,6 +1438,11 @@ class InjectionGenerator:
         its ``name`` or "{index}:{class}". Nothing is drawn from state kept
         between calls.
 
+        Called directly, ``__call__`` iterates over batches k = 0, 1, ...;
+        batch k is drawn from ``streams(k)``, which its
+        ``add_injections_to_onsource`` call takes too, so each batch gets its
+        own sky and targets.
+
         Args:
             seed: Deprecated. The root of the streams of the iterator
                 ``__call__`` returns (default ``gf.Defaults.seed``).
@@ -1488,12 +1493,16 @@ class InjectionGenerator:
 
         for k in count():
             yield self.generate(
-                self._tree.direct(k),
+                self.streams(k),
                 sample_rate_hertz=sample_rate_hertz,
                 onsource_duration_seconds=onsource_duration_seconds,
                 crop_duration_seconds=crop_duration_seconds,
                 num_examples_per_batch=num_examples_per_batch,
             )
+
+    def streams(self, k: Optional[int] = None) -> BatchStreams:
+        """The streams of the direct iterator's batch ``k`` (None: one direct batch)."""
+        return self._tree.direct(k)
 
     def generate(
         self,
@@ -1702,6 +1711,7 @@ class InjectionGenerator:
         scale_factor: float = None,
         streams: Optional[BatchStreams] = None,
         epoch: Optional[int] = None,
+        steps_per_epoch: Optional[int] = None,
     ):
         """
         Scale each generator's injections, project them, and add them to ``onsource``.
@@ -1709,8 +1719,12 @@ class InjectionGenerator:
         Randomness: sky and polarisation are drawn from the batch's
         ``sky/{g}`` and ``pol/{g}`` streams, scaling targets from
         ``scale/{g}`` (a Curriculum at ``epoch``; None is its end, the
-        evaluation distribution), and an array of targets is indexed by the
-        batch's k. Without ``streams`` the default direct streams are used.
+        evaluation distribution). A list of targets is read in order: batch
+        k of epoch e (``streams``' coordinates) takes the next examples from
+        position e x ``steps_per_epoch`` + k, cycling, so training epochs run
+        on through the list. ``streams`` are the batch's: a dataset's, or
+        ``streams(k)`` for the direct iterator's batch k. Leaving them out is
+        deprecated: it draws every call from the same direct streams.
 
         Units: ``onsource`` and ``offsource`` are in internal units, strain x S
         (``scale_factor``; default this InjectionGenerator's, then
@@ -1746,7 +1760,11 @@ class InjectionGenerator:
         if scale_factor is None:
             scale_factor = gf.Defaults.scale_factor
         if streams is None:
-            streams = self._tree.direct()
+            warn_deprecated(
+                "add_injections_to_onsource without streams",
+                "pass the batch's streams (InjectionGenerator.streams(k) for the iterator's batch k)"
+            )
+            streams = self.streams()
 
         # A generator without a scaling method is refused, by name, below.
         label_types = {
@@ -1881,9 +1899,9 @@ class InjectionGenerator:
             scaling_dist = gf.Curriculum.resolve(scaling_method.value, epoch)
 
             if isinstance(scaling_dist, (np.ndarray, list)):
-                # A fixed list of targets: batch k takes the next
-                # num_examples, cycling through the list.
-                first = (streams.k or 0) * num_examples
+                # A fixed list of targets, read in order across epochs.
+                position = (streams.k or 0) + (streams.epoch or 0) * (steps_per_epoch or 0)
+                first = position * num_examples
                 indices = (first + np.arange(num_examples)) % len(scaling_dist)
                 target_val = np.asarray(scaling_dist)[indices]
             else:

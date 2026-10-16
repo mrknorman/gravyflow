@@ -33,7 +33,7 @@ EPOCH_NONE = 0xFFFFFFFF
 K_NONE = 0xFFFFFFFF
 
 #: The split of a draw made outside a dataset (a generator or obtainer called
-#: directly). It is reserved: no dataset may use it.
+#: directly). It is reserved: ``check_split`` refuses it for any dataset.
 DIRECT_SPLIT = "direct"
 
 _MAX_COORDINATE = 0xFFFFFFFE
@@ -52,10 +52,22 @@ def _coordinate_words(value: Optional[int], none: int, name: str) -> Tuple[int, 
     """A coordinate (epoch or k) as two 32-bit words; None is the sentinel."""
     if value is None:
         return none, none
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer, got {type(value).__name__} {value!r}.")
     value = int(value)
     if value < 0 or value > _MAX_COORDINATE:
         raise ValueError(f"{name} must be in [0, {_MAX_COORDINATE}], got {value}.")
     return value & 0xFFFFFFFF, 0
+
+
+def check_split(split: str) -> str:
+    """A dataset's split: any valid name but the reserved ``direct``."""
+    check_name(split, "split")
+    if split == DIRECT_SPLIT:
+        raise ValueError(
+            f"The split '{DIRECT_SPLIT}' is reserved for draws made outside a dataset."
+        )
+    return split
 
 
 def check_root(seed) -> int:
@@ -137,8 +149,8 @@ class SeedTree:
         return jax.random.wrap_key_data(words, impl="threefry2x32")
 
     def batch(self, split: str, epoch: Optional[int] = None, k: Optional[int] = None) -> "BatchStreams":
-        """Every stream of one batch, at (split, epoch, k)."""
-        return BatchStreams(self, split, epoch, k)
+        """Every stream of one batch of a dataset's split, at (split, epoch, k)."""
+        return BatchStreams(self, check_split(split), epoch, k)
 
     def direct(self, k: Optional[int] = None) -> "BatchStreams":
         """The streams of a draw made outside a dataset."""
@@ -182,9 +194,6 @@ class BatchStreams:
 
     def sub(self, prefix: str) -> "BatchStreams":
         return BatchStreams(self.tree, self.split, self.epoch, self.k, _join(self.prefix, prefix))
-
-    def path(self, consumer: str) -> str:
-        return _join(self.tree.prefix, _join(self.prefix, consumer))
 
     def stream(self, consumer: str) -> np.random.Generator:
         return self.tree.stream(self.split, _join(self.prefix, consumer), self.epoch, self.k)

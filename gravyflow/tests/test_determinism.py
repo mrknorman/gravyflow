@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.rng import DIRECT_SPLIT
 
 SAMPLE_RATE = 512.0
 BATCH = 4
@@ -102,6 +103,26 @@ class TestSeedTree:
         with pytest.raises((TypeError, ValueError)):
             gf.SeedTree(seed)
 
+    @pytest.mark.parametrize("coordinate", [1.0, 1.7, True, "1", np.float32(1.0)])
+    def test_non_integer_coordinates_are_refused(self, coordinate):
+        # An epoch or k of 1.7, True or "1" aliased batch 1.
+        tree = gf.SeedTree(1)
+        with pytest.raises(TypeError):
+            tree.stream("train", "pool/assign", coordinate, 0)
+        with pytest.raises(TypeError):
+            tree.stream("train", "pool/assign", 0, coordinate)
+
+    def test_integer_coordinates_of_any_kind_agree(self):
+        tree = gf.SeedTree(1)
+        a = tree.stream("train", "pool/assign", np.int64(2), np.uint8(3)).random(2)
+        np.testing.assert_array_equal(a, tree.stream("train", "pool/assign", 2, 3).random(2))
+
+    def test_the_direct_split_is_reserved(self):
+        with pytest.raises(ValueError, match="reserved"):
+            gf.SeedTree(1).batch(DIRECT_SPLIT, 0, 0)
+        with pytest.raises(ValueError, match="reserved"):
+            dataset(group=DIRECT_SPLIT)
+
     @pytest.mark.parametrize("consumer", ["noise", "noisy/L1/on", "wave/x/param", "sky/a/b"])
     def test_unregistered_consumers_are_refused(self, consumer):
         with pytest.raises(ValueError):
@@ -172,6 +193,36 @@ class TestStatelessObjects:
         waveforms = np.asarray(waveforms)
         assert not np.array_equal(waveforms[:, 0], waveforms[:, 1])
 
+    def direct_labels(self, k, streams_of=None):
+        """Batch k of a direct InjectionGenerator, injected with the streams ``streams_of`` gives."""
+        generator = wnb(network=[gf.IFO.L1, gf.IFO.H1])
+        injector = gf.InjectionGenerator([generator])
+        batches = injector(sample_rate_hertz=SAMPLE_RATE, onsource_duration_seconds=1.0,
+                           crop_duration_seconds=0.5, num_examples_per_batch=BATCH)
+        for _ in range(k + 1):
+            injections, mask, parameters = next(batches)
+        noise = np.random.default_rng(0)
+        onsource = noise.normal(size=(BATCH, 2, int(2.0 * SAMPLE_RATE))).astype(np.float32)
+        offsource = noise.normal(size=(BATCH, 2, int(4.0 * SAMPLE_RATE))).astype(np.float32)
+        _, _, labels = injector.add_injections_to_onsource(
+            injections, mask, onsource, offsource,
+            parameters_to_return=[gf.ScalingTypes.SNR, gf.WaveformParameters.RIGHT_ASCENSION_RADIANS],
+            onsource_duration_seconds=1.0, injection_parameters=parameters,
+            streams=None if streams_of is None else streams_of(injector, k),
+        )
+        return {key: np.asarray(value) for key, value in labels.items()}
+
+    def test_direct_batches_draw_their_own_sky_and_targets(self):
+        # A direct iterator advanced k, but the injection layer drew every
+        # batch's sky and targets from k=None.
+        first, second = (self.direct_labels(k, lambda injector, k: injector.streams(k)) for k in (0, 1))
+        for key in first:
+            assert not np.array_equal(first[key], second[key]), key
+
+    def test_injecting_without_streams_is_deprecated(self):
+        with pytest.warns(DeprecationWarning, match="streams"):
+            self.direct_labels(0)
+
     def test_network_needs_every_sky_angle(self):
         network = gf.Network([gf.IFO.L1])
         with pytest.raises(ValueError, match="polarization"):
@@ -220,6 +271,25 @@ class TestIndexedDatasets:
         repeat = dataset(seed=3, epoch_mode=gf.EpochMode.REPEAT)
         repeat.on_epoch_end()
         assert digest(repeat[0]) == first_train
+
+    def test_a_target_list_runs_on_across_training_epochs(self):
+        # Batch k took targets [k B, (k + 1) B) in every epoch, so a list longer
+        # than one epoch's examples was never reached past its first epoch.
+        steps = 2
+        targets = 8.0 + np.arange(2 * steps * BATCH)
+        method = gf.ScalingMethod(targets, gf.ScalingTypes.SNR)
+
+        def snrs(ds):
+            return np.concatenate([np.asarray(ds[k][1]["SNR"]).ravel() for k in range(steps)])
+
+        train = dataset(seed=1, steps_per_epoch=steps, generators=[wnb(scaling_method=method)])
+        first = snrs(train)
+        train.on_epoch_end()
+        np.testing.assert_allclose(np.concatenate([first, snrs(train)]), targets, rtol=1e-5)
+        evaluation = dataset(seed=1, group="validate", steps_per_epoch=steps,
+                             generators=[wnb(scaling_method=method)])
+        evaluation.on_epoch_end()
+        np.testing.assert_allclose(snrs(evaluation), targets[:steps * BATCH], rtol=1e-5)
 
     def test_unseeded_splits_differ(self):
         # B28 (identical batches), B102 (equal targets), B36 (equal sky).
