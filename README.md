@@ -57,7 +57,10 @@ and the splits never share a stream. Old seeds give new data. The replaced seed 
 
 - `ds[k]` is batch k, and `next(iter(ds))` is always batch 0. Step through batches with `next(ds)`, or index them.
 - Under `model.fit`, a training split takes Keras' epoch: pass `callbacks=[ds.epoch_callback()]`. Without it, Keras
-  epoch e would draw the batches of epoch e + 1, and a warning says so.
+  epoch e would draw the batches of epoch e + 1, and a warning says so. With it, `fit(steps_per_epoch=)` must be
+  unset or the dataset's length (it is refused otherwise), and a second `fit` continues only with `initial_epoch`:
+  without it, it starts again at epoch 0 and serves the first's batches.
+- `ds[k]` and `ds.epoch` take integers only; a float, bool or string was truncated to an integer batch.
 - `gf.project_wave` takes no seed and needs every sky angle; nothing is drawn there.
 - `Curriculum` has no progress counter: `current_epoch` is gone, and `at(epoch)` gives the distribution of an epoch.
 - `Distribution.sample(n, rng)` returns an ndarray.

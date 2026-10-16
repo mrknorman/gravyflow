@@ -559,7 +559,9 @@ class WaveformGenerator:
                 f"{type(self).__name__}.apply_injection_chance(waveforms, seed)",
                 "pass the batch's streams"
             )
-            streams = self.resolve_streams(None, int(streams))
+            # The direct streams of that root, without generate(seed=)'s warning:
+            # the caller did not call generate.
+            streams = resolve_streams(None, int(streams), f"wave/{self.stream_label}")
         if self.injection_chance >= 1.0:
             return waveforms
             

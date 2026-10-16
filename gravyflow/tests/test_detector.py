@@ -1,6 +1,7 @@
 from typing import Optional, Dict, Tuple
 from pathlib import Path
 import logging
+import warnings
 
 import pytest
 
@@ -593,10 +594,14 @@ def test_network_load_distribution(tmp_path):
     with open(config_path, 'w') as f:
         json.dump(config, f)
     
-    network = gf.Network.load(config_path)
-    # Just check it loaded without error and has valid location
+    # Random geometry is drawn from the rng given, with no deprecated path.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        network = gf.Network.load(config_path, rng=np.random.default_rng(1))
     assert network.num_detectors == 1
     assert ops.shape(network.location) == (1, 3)
+    again = gf.Network.load(config_path, rng=np.random.default_rng(1))
+    np.testing.assert_array_equal(np.asarray(again.location), np.asarray(network.location))
 
 def test_check_and_convert_errors():
     """Test error conditions in check_and_convert."""

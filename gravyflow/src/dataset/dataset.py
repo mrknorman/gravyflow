@@ -22,7 +22,7 @@ from gravyflow.src.utils.tensor import (
 from gravyflow.src.utils.shapes import BatchContract
 from gravyflow.src.dataset.config import Defaults
 from gravyflow.src.dataset.noise.noise import index_addressed, obtainer_batcher
-from gravyflow.src.rng import BatchStreams, SeedTree, check_split
+from gravyflow.src.rng import BatchStreams, SeedTree, check_coordinate, check_split
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
@@ -166,6 +166,19 @@ class _KerasEpoch(keras.callbacks.Callback):
         super().__init__()
         self.dataset = dataset
 
+    def on_train_begin(self, logs=None):
+        # With fit(steps_per_epoch=) other than the dataset's length, Keras
+        # keeps one iterator across epochs and fetches ahead of
+        # on_epoch_begin, so an epoch would train batches addressed to the
+        # epoch before.
+        steps = self.params.get("steps")
+        if steps is not None and steps != len(self.dataset):
+            raise ValueError(
+                f"fit(steps_per_epoch={steps}) differs from the dataset's {len(self.dataset)} batches "
+                "per epoch, which would serve one epoch's batches in another. Give the dataset "
+                "steps_per_epoch instead, and leave fit's unset."
+            )
+
     def on_epoch_begin(self, epoch, logs=None):
         self.dataset.epoch = epoch
 
@@ -212,9 +225,7 @@ class IndexedBatches:
     @epoch.setter
     def epoch(self, epoch: int):
         """Set the epoch, e.g. to resume a run (Keras' ``initial_epoch``)."""
-        if int(epoch) < 0:
-            raise ValueError(f"epoch must be non-negative, got {epoch}.")
-        self._epoch = int(epoch)
+        self._epoch = check_coordinate(epoch, "epoch")
 
     @property
     def _batch_epoch(self) -> int:
@@ -227,8 +238,8 @@ class IndexedBatches:
 
     def streams(self, index: int) -> BatchStreams:
         """The streams of batch ``index`` at the current epoch."""
-        index = int(index)
-        if not 0 <= index < len(self):
+        index = check_coordinate(index, "batch index")
+        if index >= len(self):
             raise IndexError(f"Batch {index} is outside the {len(self)} batches of an epoch.")
         return self.tree.batch(self.group, self._batch_epoch, index)
 
@@ -244,7 +255,10 @@ class IndexedBatches:
         first epoch, so counting those calls would serve Keras epoch e the
         batches (and Curriculum) of epoch e + 1. Only a callback is told
         Keras' epoch: with it, Keras epoch e, ``initial_epoch`` included,
-        serves epoch e.
+        serves epoch e. So a second ``fit`` without ``initial_epoch`` starts
+        again at epoch 0 and serves the first's batches; continue a run with
+        ``initial_epoch``. ``fit(steps_per_epoch=)`` must be unset or the
+        dataset's length (it is refused otherwise).
         """
         self._epoch_from_keras = True
         return _KerasEpoch(self)

@@ -48,16 +48,25 @@ def _name_words(name: str, count: int) -> Tuple[int, ...]:
     )
 
 
-def _coordinate_words(value: Optional[int], none: int, name: str) -> Tuple[int, int]:
-    """A coordinate (epoch or k) as two 32-bit words; None is the sentinel."""
-    if value is None:
-        return none, none
+def check_coordinate(value, name: str) -> int:
+    """
+    An epoch or batch index: an integer in the tree's range. Floats, bools and
+    strings are refused rather than truncated, which would alias them to one
+    batch.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
         raise TypeError(f"{name} must be an integer, got {type(value).__name__} {value!r}.")
     value = int(value)
     if value < 0 or value > _MAX_COORDINATE:
         raise ValueError(f"{name} must be in [0, {_MAX_COORDINATE}], got {value}.")
-    return value & 0xFFFFFFFF, 0
+    return value
+
+
+def _coordinate_words(value: Optional[int], none: int, name: str) -> Tuple[int, int]:
+    """A coordinate (epoch or k) as two 32-bit words; None is the sentinel."""
+    if value is None:
+        return none, none
+    return check_coordinate(value, name) & 0xFFFFFFFF, 0
 
 
 def check_split(split: str) -> str:

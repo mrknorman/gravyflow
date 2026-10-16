@@ -668,9 +668,14 @@ class Network:
     @classmethod
     def load(
         cls,
-        config_path: Path, 
-        ) -> "Network":   
-        
+        config_path: Path,
+        rng: Optional[np.random.Generator] = None,
+        ) -> "Network":
+        """
+        The Network a JSON config describes. Geometry given as a distribution
+        is drawn once, from ``rng``, as for ``Network(dict, rng=)``.
+        """
+
         # Define replacement mapping
         replacements = {
             "constant": gf.DistributionType.CONSTANT,
@@ -699,8 +704,8 @@ class Network:
                 value = gf.Distribution(**value)
             arguments.update({key: value})
         
-        return Network(arguments)
-    
+        return Network(arguments, rng=rng)
+
     def get_time_delay(
         self,
         right_ascension, 

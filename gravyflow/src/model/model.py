@@ -1247,6 +1247,11 @@ class Model:
             #tf.keras.callbacks.TensorBoard(log_dir="logs", histogram_freq=1)
         ]
         
+        # A gravyflow dataset takes Keras' epoch; without it each Keras epoch
+        # would train the next epoch's batches (see epoch_callback).
+        if hasattr(training_dataset, "epoch_callback"):
+            callbacks += [training_dataset.epoch_callback()]
+
         num_batches = training_config["num_examples_per_epoc"] // self.batch_size.value
         num_validation_batches = training_config["num_validation_examples"] // 32
         

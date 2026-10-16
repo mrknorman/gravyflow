@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
-from gravyflow.src.rng import DIRECT_SPLIT
+from gravyflow.src.rng import DIRECT_SPLIT, resolve_streams
 
 SAMPLE_RATE = 512.0
 BATCH = 4
@@ -324,10 +324,15 @@ class TestDeprecations:
 
         generator = wnb(injection_chance=0.5)
         waveforms = np.ones((16, 2, 8), np.float32)
-        with pytest.warns(DeprecationWarning, match="apply_injection_chance"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             masked = generator.apply_injection_chance(waveforms, 3)
+        # One warning, for the call made: none for generate(seed=), never called.
+        deprecations = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert len(deprecations) == 1 and "apply_injection_chance" in deprecations[0], deprecations
         np.testing.assert_array_equal(
-            masked, generator.apply_injection_chance(waveforms, generator.resolve_streams(None, 3))
+            masked, generator.apply_injection_chance(
+                waveforms, resolve_streams(None, 3, f"wave/{generator.stream_label}"))
         )
 
         with pytest.warns(DeprecationWarning, match="white_noise_generator"):
@@ -370,6 +375,17 @@ class TestIndexedDatasets:
     def test_index_out_of_range(self):
         with pytest.raises(IndexError):
             dataset(seed=1, steps_per_epoch=2)[2]
+
+    @pytest.mark.parametrize("coordinate", [1.7, True, "1", np.float32(1.0)])
+    def test_non_integer_indices_and_epochs_are_refused(self, coordinate):
+        # ds[1.7], ds[True] and ds["1"] were all batch 1; so was ds.epoch = 1.6.
+        ds = dataset(seed=1, steps_per_epoch=2)
+        with pytest.raises(TypeError):
+            ds[coordinate]
+        with pytest.raises(TypeError):
+            ds.epoch = coordinate
+        ds.epoch = np.int64(1)
+        assert ds.epoch == 1 and digest(ds[np.int64(1)]) == digest(ds[1])
 
     def test_training_epochs_are_fresh_and_evaluation_fixed(self):
         train, val = dataset(seed=3), dataset(seed=3, group="validate")
@@ -494,7 +510,7 @@ class TestKerasEpochs:
         num_epochs=3,
     )
 
-    def fit(self, ds, epochs, initial_epoch=0, bind=True):
+    def fit(self, ds, epochs, initial_epoch=0, bind=True, steps_per_epoch=None):
         """Fit a tiny model; return, per Keras epoch, the (dataset epoch, SNRs) it was served."""
         import keras
 
@@ -530,7 +546,7 @@ class TestKerasEpochs:
         model.compile(optimizer="sgd", loss="mse")
         callbacks = [ds.epoch_callback(), Marker()] if bind else [Marker()]
         model.fit(Served(), epochs=epochs, initial_epoch=initial_epoch, shuffle=False,
-                  verbose=0, callbacks=callbacks)
+                  steps_per_epoch=steps_per_epoch, verbose=0, callbacks=callbacks)
         return served
 
     def assert_served_its_own_epoch(self, served, epochs):
@@ -553,6 +569,12 @@ class TestKerasEpochs:
     def test_resumed_fit_serves_the_resumed_epoch(self):
         served = self.fit(self.curriculum_dataset(), epochs=3, initial_epoch=2)
         self.assert_served_its_own_epoch(served, [2])
+
+    def test_fit_with_other_steps_per_epoch_is_refused(self):
+        # Keras then keeps one iterator across epochs and prefetches, so an
+        # epoch trained batches addressed to the epoch before.
+        with pytest.raises(ValueError, match="steps_per_epoch"):
+            self.fit(self.curriculum_dataset(), epochs=2, steps_per_epoch=2)
 
     def test_unbound_fresh_split_warns_under_keras(self):
         with pytest.warns(UserWarning, match="epoch_callback"):
