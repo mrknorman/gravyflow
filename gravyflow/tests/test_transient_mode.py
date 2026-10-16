@@ -10,6 +10,7 @@ These tests verify that the TRANSIENT mode correctly:
 import pytest
 import numpy as np
 import gravyflow as gf
+from gravyflow.tests.test_public_sources import offline_event_api  # noqa: F401  (pytest fixture)
 
 
 class TestTransientModeCoreSetup:
@@ -41,15 +42,22 @@ class TestTransientModeCoreSetup:
 
 
 class TestTransientSegmentRetrieval:
-    """Test that TRANSIENT mode retrieves correct number of segments."""
-    
+    """
+    Test that TRANSIENT mode retrieves correct number of segments, from GWOSC's event
+    API as served by the committed snapshot (``test_public_sources``).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _events(self, offline_event_api):
+        return offline_event_api
+
     def test_get_all_event_times_returns_many_events(self):
         """Verify get_all_event_times returns substantial number of events."""
         event_times = gf.get_all_event_times()
-        
+
         # Should have at least 100 events from GWTC catalogs
         assert len(event_times) >= 100, f"Expected >=100 events, got {len(event_times)}"
-    
+
     def test_o3_has_many_events(self):
         """Verify O3 observing run contains many events by GPS range."""
         O3_START_GPS = 1238166018
@@ -230,8 +238,13 @@ class TestTransientDatasetOutput:
             ifo.close()
 
 
+@pytest.mark.network
 class TestTransientModeBatching:
-    """Test transient mode batching and multi-IFO alignment."""
+    """
+    Test transient mode batching and multi-IFO alignment.
+
+    These download events' strain and parameters from GWOSC.
+    """
 
             
     def test_transient_mode_batch_unique_events(self):
@@ -332,8 +345,13 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
 
 
+@pytest.mark.network
 class TestSpecificEventAcquisition:
-    """Test acquisition of specific named events (direct download path)."""
+    """
+    Test acquisition of specific named events (direct download path).
+
+    These download events' strain and parameters from GWOSC.
+    """
     
     def test_specific_event_names_returns_proper_structure(self):
         """Test that specific event names path returns proper TransientSegment objects."""

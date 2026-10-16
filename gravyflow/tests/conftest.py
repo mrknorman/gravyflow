@@ -70,51 +70,56 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_network)
 
 
-#: Public sources that only tests run with --network may query.
-_NETWORK_ONLY_URLS = (
-    "gwosc.org/timeline/",
-    "gwosc.org/api/v2/timelines",
-    "zenodo.org/api/records/5649212",
-)
+def refuse_internet(monkeypatch) -> None:
+    """
+    Refuse every internet connection (loopback stays open), by name. Every network
+    source the library uses
+    (the GWOSC APIs, timeline, event list and strain files, Zenodo) connects through a
+    socket, whatever client it goes through (requests, urllib, gwosc, gwpy), so one
+    refusal covers them all, and any source added later.
+    """
+    import socket
+
+    original_connect, original_connect_ex = socket.socket.connect, socket.socket.connect_ex
+
+    def refuse(sock, address):
+        loopback = str(address[0]) in ("localhost", "::1") or str(address[0]).startswith("127.")
+        if sock.family in (socket.AF_INET, socket.AF_INET6) and not loopback:
+            raise ConnectionRefusedError(
+                f"Offline test: refused a connection to {address}; the network is "
+                "reachable only in test runs with --network."
+            )
+
+    def connect(sock, address, *args, **kwargs):
+        refuse(sock, address)
+        return original_connect(sock, address, *args, **kwargs)
+
+    def connect_ex(sock, address, *args, **kwargs):
+        refuse(sock, address)
+        return original_connect_ex(sock, address, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
 
 
 @pytest.fixture(autouse=True, scope="session")
-def public_sources_need_network_option(request):
+def offline_unless_network_option(request):
     """
-    Without --network, the GWOSC timeline and the Gravity Spy release are refused
-    and their caches start empty, so no test depends on them, or on what this
-    machine downloaded before, unless it is marked 'network'.
+    Without --network, every internet connection is refused and the user cache starts
+    empty, so no test depends on the network, or on what this machine downloaded
+    before, unless it is marked 'network'.
     """
     if request.config.getoption("--network"):
         yield
         return
 
     import tempfile
-    import requests
 
-    previous_cache_dir = os.environ.get("GRAVYFLOW_CACHE_DIR")
-    cache_dir = tempfile.TemporaryDirectory(prefix="gravyflow-test-cache-")
-    os.environ["GRAVYFLOW_CACHE_DIR"] = cache_dir.name
-
-    original_request = requests.Session.request
-
-    def guarded_request(session, method, url, *args, **kwargs):
-        if any(fragment in str(url) for fragment in _NETWORK_ONLY_URLS):
-            raise requests.ConnectionError(
-                f"{url} is reachable only in test runs with --network."
-            )
-        return original_request(session, method, url, *args, **kwargs)
-
-    requests.Session.request = guarded_request
-    try:
+    with tempfile.TemporaryDirectory(prefix="gravyflow-test-cache-") as cache_dir, \
+            pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", cache_dir)
+        refuse_internet(monkeypatch)
         yield
-    finally:
-        requests.Session.request = original_request
-        if previous_cache_dir is None:
-            os.environ.pop("GRAVYFLOW_CACHE_DIR", None)
-        else:
-            os.environ["GRAVYFLOW_CACHE_DIR"] = previous_cache_dir
-        cache_dir.cleanup()
 
 
 @pytest.fixture

@@ -14,6 +14,9 @@ The default run is offline. Network access is replaced by small committed fixtur
   classifications (Glanzer et al. 2023, Class. Quantum Grav. 40 065004; Zenodo,
   doi:10.5281/zenodo.5649212, v1.0.0, CC-BY-4.0), restricted to the columns gravyflow
   reads.
+- ``gwosc_events.csv``: every row of every catalogue GWOSC's event API listed on
+  2026-10-16 (https://gwosc.org/eventapi/json/), as gravyflow reads them: 1,062 rows
+  of 18 catalogues, with their GPS times and source-frame chirp masses.
 
 Tests marked ``network`` query GWOSC and Zenodo for real; they run only with
 ``--network``.
@@ -21,7 +24,6 @@ Tests marked ``network`` query GWOSC and Zenodo for real; they run only with
 import csv
 import hashlib
 import json
-import socket
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -31,6 +33,7 @@ import pytest
 
 import gravyflow as gf
 from gravyflow.src.dataset.acquisition.base import BaseDataObtainer, ObservingRunData
+from gravyflow.tests.conftest import refuse_internet
 
 FIXTURES = Path(__file__).parent / "fixtures" / "public_sources"
 TIMELINE = json.loads((FIXTURES / "gwosc_timeline.json").read_text())
@@ -132,18 +135,7 @@ def offline_public_sources(monkeypatch, tmp_path):
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path / ".gravyflow" / "cache"))
-
-    def _no_inet(sock, address, *args, **kwargs):
-        raise ConnectionError(f"Offline test: refused socket connection to {address}")
-
-    original_connect = socket.socket.connect
-
-    def _connect(sock, address, *args, **kwargs):
-        if sock.family in (socket.AF_INET, socket.AF_INET6):
-            return _no_inet(sock, address)
-        return original_connect(sock, address, *args, **kwargs)
-
-    monkeypatch.setattr(socket.socket, "connect", _connect)
+    refuse_internet(monkeypatch)  # even in runs with --network
 
     network = FakeNetwork()
     monkeypatch.setattr(requests, "get", network.get)
@@ -171,6 +163,51 @@ def offline_public_sources(monkeypatch, tmp_path):
 
     if gravity_spy is not None:
         gravity_spy.clear_memory_cache()
+
+
+class FakeEventApi:
+    """GWOSC's event API: a catalogue list and one table per catalogue."""
+
+    def __init__(self, catalogues):
+        self.catalogues = catalogues
+        self.fetched = []
+
+    def cataloglist(self, *args, **kwargs):
+        return {name: {"url": f"https://gwosc.org/eventapi/json/{name}"}
+                for name in self.catalogues}
+
+    def fetch_open_data(self, catalog, *args, **kwargs):
+        self.fetched.append(catalog)
+        return self.catalogues[catalog]
+
+    def serve(self, monkeypatch):
+        """Answer gravyflow's event-API calls."""
+        from gwosc import api as gwosc_api
+        from gravyflow.src.dataset.features import event as event_module
+
+        monkeypatch.setattr(gwosc_api, "fetch_cataloglist_json", self.cataloglist)
+        monkeypatch.setattr(event_module.EventTable, "fetch_open_data", self.fetch_open_data)
+        return self
+
+
+def event_snapshot_tables():
+    """The ``gwosc_events.csv`` snapshot, one astropy table per catalogue."""
+    from astropy.table import Table
+
+    rows = {}
+    with open(FIXTURES / "gwosc_events.csv", newline="") as handle:
+        for row in csv.DictReader(handle):
+            mass = float(row["chirp_mass_source"]) if row["chirp_mass_source"] else np.nan
+            rows.setdefault(row["catalog"], []).append((float(row["gps"]), row["name"], mass))
+    return {catalog: Table(rows=entries, names=["GPS", "commonName", "chirp_mass_source"])
+            for catalog, entries in rows.items()}
+
+
+@pytest.fixture
+def offline_event_api(monkeypatch, tmp_path):
+    """GWOSC's event API served from the snapshot, with an empty event cache."""
+    monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path))
+    return FakeEventApi(event_snapshot_tables()).serve(monkeypatch)
 
 
 def _fixture_intersection(dataset, ifo, flags):

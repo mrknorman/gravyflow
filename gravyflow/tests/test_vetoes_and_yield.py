@@ -249,39 +249,17 @@ def _table(rows, columns):
     return Table(rows=rows, names=columns) if rows else Table(names=columns)
 
 
-class FakeEventApi:
-    """GWOSC's event API: a catalogue list and one table per catalogue."""
-
-    def __init__(self, catalogues):
-        self.catalogues = catalogues
-        self.fetched = []
-
-    def cataloglist(self, *args, **kwargs):
-        return {name: {"url": f"https://gwosc.org/eventapi/json/{name}"}
-                for name in self.catalogues}
-
-    def fetch_open_data(self, catalog, *args, **kwargs):
-        self.fetched.append(catalog)
-        return self.catalogues[catalog]
-
-
 @pytest.fixture
 def event_api(monkeypatch, tmp_path):
-    from gwosc import api as gwosc_api
-    from gravyflow.src.dataset.features import event as event_module
-
     monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path))
-    fake = FakeEventApi({
+    return public.FakeEventApi({
         "GWTC": _table([(1126259462.4, "GW150914", 28.6)],
                        ["GPS", "commonName", "chirp_mass_source"]),
         "IAS-O3a": _table([(1253011836.5, "GW190920_113516", 3.7)],
                           ["GPS", "commonName", "chirp_mass_source"]),
         # Marginal IMBH candidates are published without masses.
         "O3_IMBH_marginal": _table([(1263002916.2, "200114_020818")], ["GPS", "commonName"]),
-    })
-    monkeypatch.setattr(gwosc_api, "fetch_cataloglist_json", fake.cataloglist)
-    monkeypatch.setattr(event_module.EventTable, "fetch_open_data", fake.fetch_open_data)
-    return fake
+    }).serve(monkeypatch)
 
 
 class TestEventList:
