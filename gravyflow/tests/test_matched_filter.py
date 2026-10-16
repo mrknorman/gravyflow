@@ -235,6 +235,7 @@ class TestMatchedFilterCore:
             # Assert it's definitely a detection
             assert recovered_snr > 5.0, "Failed to detect signal above noise floor"
     
+@pytest.mark.global_rng
 def test_matched_filter_with_sine_gaussian():
     """Test matched filter detection of sine-Gaussian signal.
     
