@@ -57,6 +57,12 @@ def test_logit_scores_read_two_class_and_single_logits():
         logit_scores(np.array([np.nan, 1.0]))
 
 
+def test_logit_scores_read_one_named_output():
+    np.testing.assert_allclose(logit_scores({"INJECTION_PRESENT": np.array([[3.0], [-1.0]])}), [3.0, -1.0])
+    with pytest.raises(ValueError, match="2 named outputs"):
+        logit_scores({"a": np.zeros((2, 1)), "b": np.zeros((2, 1))})
+
+
 def test_logits_do_not_saturate_where_softmax_ties():
     logits = np.array([[0.0, 40.0], [0.0, 41.0]], dtype=np.float32)
     softmax = np.exp(logits) / np.exp(logits).sum(axis=1, keepdims=True)

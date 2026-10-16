@@ -73,7 +73,15 @@ class HyperParameter:
         """
         Randomizes this hyperparameter based on its possible_values.
         """
-        self.value = self.distribution.sample()[0]
+        self.value = self._draw()
+
+    def _draw(self):
+        """
+        One value of the distribution, as a Python value: a sample is a NumPy
+        scalar, which Keras refuses for an integer setting (Dense units).
+        """
+        value = self.distribution.sample()[0]
+        return value.item() if isinstance(value, np.generic) else value
 
     def mutate(self, mutation_rate: float, mutation_strength : float = 0.1):
         """
@@ -98,7 +106,7 @@ class HyperParameter:
                         self.value, self.distribution.min_, self.distribution.max_, mutation_strength
                     )
                 case gf.DistributionType.CHOICE:
-                    self.value = self.distribution.sample()[0]
+                    self.value = self._draw()
                 case gf.DistributionType.LOG:
                     log_value = mutate_value(
                         np.log(self.value), self.distribution.min_, self.distribution.max_, mutation_strength

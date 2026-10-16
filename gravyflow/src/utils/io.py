@@ -47,6 +47,10 @@ def is_redirected():
         not sys.stderr.isatty()
     )
 
+def model_file(model_path) -> Path:
+    """A model's Keras checkpoint in its directory: Keras 3 saves whole models as ``.keras`` files only."""
+    return Path(model_path) / "model.keras"
+
 def load_history(filepath):
     history_path = filepath / "history.hdf5"
     
@@ -258,7 +262,7 @@ class EarlyStoppingWithLoad(Callback):
                     self.stopped_epoch = 0
                     self.best = best
                     # Use keras.models.load_model instead of tf.keras.models.load_model
-                    self.best_weights = keras.models.load_model(self.model_path).get_weights()
+                    self.best_weights = keras.models.load_model(model_file(self.model_path)).get_weights()
                     self.best_epoch = best_epoch
 
                 else:
@@ -266,7 +270,7 @@ class EarlyStoppingWithLoad(Callback):
 
                     self.wait = 0
                     self.stopped_epoch = 0
-                    self.best = np.Inf if self.monitor_op == np.less else -np.Inf
+                    self.best = np.inf if self.monitor_op == np.less else -np.inf
                     self.best_weights = None
                     self.best_epoch = 0
             else:
@@ -274,7 +278,7 @@ class EarlyStoppingWithLoad(Callback):
         else:
             self.wait = 0
             self.stopped_epoch = 0
-            self.best = np.Inf if self.monitor_op == np.less else -np.Inf
+            self.best = np.inf if self.monitor_op == np.less else -np.inf
             self.best_weights = None
             self.best_epoch = 0
 

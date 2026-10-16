@@ -495,6 +495,29 @@ def cap_value(x):
 
 from gravyflow.src.utils.numerics import ensure_even
 
+def epoch_sized(dataset_args: dict, training_config: dict = None) -> dict:
+    """
+    A copy of a training dataset's arguments, its length one epoch of the
+    training config: ``num_examples_per_epoc // num_examples_per_batch``
+    batches. The dataset's length is the one definition of an epoch: Model.train
+    lets it set fit's steps, so another explicit ``steps_per_epoch`` is refused.
+    """
+    args = deepcopy(dataset_args)
+    if not training_config or "num_examples_per_epoc" not in training_config:
+        return args
+    batch = args.get("num_examples_per_batch") or gf.Defaults.num_examples_per_batch
+    steps = training_config["num_examples_per_epoc"] // batch
+    given = args.setdefault("steps_per_epoch", steps)
+    if given != steps:
+        raise ValueError(
+            f"The training dataset's steps_per_epoch={given} differs from the training config's "
+            f"epoch of {steps} batches (num_examples_per_epoc="
+            f"{training_config['num_examples_per_epoc']} // num_examples_per_batch={batch}). "
+            "Leave steps_per_epoch unset: the training config sets an epoch's length."
+        )
+    return args
+
+
 class Model:
     def __init__(
         self, 
@@ -525,7 +548,7 @@ class Model:
         self.training_dataset = None
 
         if dataset_args is not None:
-            self.training_dataset = gf.Dataset(**deepcopy(dataset_args))
+            self.training_dataset = gf.Dataset(**epoch_sized(dataset_args, training_config))
 
         if seed is None:
             seed = gf.Defaults.seed
@@ -915,11 +938,11 @@ class Model:
             )
         
         # Check if the model file exists
-        if os.path.exists(model_path) and not force_overwrite:
+        if os.path.exists(gf.model_file(model_path)) and not force_overwrite:
             try:
                 # Try to load the model
                 logger.info(f"Loading model from {model_path}")
-                loaded_model = keras.models.load_model(model_path)
+                loaded_model = keras.models.load_model(gf.model_file(model_path))
                 model.model = loaded_model
                 model.loaded=True
 
@@ -1005,7 +1028,9 @@ class Model:
         # Build output layer
         output_tensor = self.build_output_layer(last_output_tensors[-1], output_config)
 
-        self.model = keras.Model(inputs=inputs, outputs=output_tensor)
+        # Named, as the dataset's targets are: Keras 3 matches a dict of targets
+        # only to a dict of outputs.
+        self.model = keras.Model(inputs=inputs, outputs={output_config["name"]: output_tensor})
         
         # If metrics is empty use best guess
         if not metrics:
@@ -1015,11 +1040,11 @@ class Model:
                 case "binary":
                     metrics = [keras.metrics.BinaryAccuracy()]
         
-        # Compile model
+        # Keyed by the output's name, as its target is.
         self.model.compile(
-            optimizer = self.optimizer.value, 
-            loss = self.loss.value,
-            metrics = metrics
+            optimizer = self.optimizer.value,
+            loss = {output_config["name"]: self.loss.value},
+            metrics = {output_config["name"]: metrics}
         )
     
     def build_hidden_layer(
@@ -1194,7 +1219,7 @@ class Model:
                         f"Model already completed training. Skipping! Current epoch {initial_epoch}, best epoch {best_epoch}."
                     )
                     self.model = keras.models.load_model(
-                        self.model_path
+                        gf.model_file(self.model_path)
                     )
                     self.metrics.append(history_data)
                     
@@ -1224,7 +1249,7 @@ class Model:
             )
 
         model_checkpoint = keras.callbacks.ModelCheckpoint(
-            self.model_path,
+            gf.model_file(self.model_path),
             monitor=checkpoint_monitor,
             save_best_only=True,
             save_freq="epoch", 
@@ -1252,7 +1277,14 @@ class Model:
         if hasattr(training_dataset, "epoch_callback"):
             callbacks += [training_dataset.epoch_callback()]
 
-        num_batches = training_config["num_examples_per_epoc"] // self.batch_size.value
+        # A dataset's length is its epoch (see epoch_sized); only a dataset
+        # without one is given fit's steps from the training config.
+        if hasattr(training_dataset, "__len__"):
+            epoch_steps = {}
+        else:
+            epoch_steps = {
+                "steps_per_epoch": training_config["num_examples_per_epoc"] // self.batch_size.value
+            }
         num_validation_batches = training_config["num_validation_examples"] // 32
         
         verbose : int = 1
@@ -1271,10 +1303,10 @@ class Model:
                 validation_steps=num_validation_batches,
                 epochs=current_max_epoch, 
                 initial_epoch = initial_epoch,
-                steps_per_epoch = num_batches,
                 callbacks = callbacks,
                 batch_size = self.batch_size.value,
-                verbose=verbose
+                verbose=verbose,
+                **epoch_steps
             )
         )
 

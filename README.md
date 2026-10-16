@@ -63,6 +63,11 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
   epoch e would draw the batches of epoch e + 1, and a warning says so. With it, `fit(steps_per_epoch=)` must be
   unset or the dataset's length (it is refused otherwise), and a second `fit` continues only with `initial_epoch`:
   without it, it starts again at epoch 0 and serves the first's batches.
+- `gf.Model` gives its training dataset `steps_per_epoch = num_examples_per_epoc // num_examples_per_batch` from its
+  training config, and refuses `dataset_args` with another `steps_per_epoch`; `Model.train` passes `fit` no
+  `steps_per_epoch` for a dataset with a length. Its Keras model's output is named (a dict, as the dataset's targets
+  are), and it is saved to `model_path / "model.keras"` (`gf.model_file`): Keras 3 saves whole models only as
+  `.keras` files.
 - `ds[k]` and `ds.epoch` take integers only; a float, bool or string was truncated to an integer batch.
 - `gf.project_wave` takes no seed and needs every sky angle; nothing is drawn there.
 - `Curriculum` has no progress counter: `current_epoch` is gone, and `at(epoch)` gives the distribution of an epoch.

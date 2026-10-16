@@ -40,9 +40,18 @@ def logit_scores(outputs) -> np.ndarray:
       class 1 (signal);
     - ``(B, 1)`` or ``(B,)`` logits of a sigmoid are already log-odds.
 
+    A model with one named output gives a dict of one entry: its value is read.
+
     Raises:
-        ValueError: on any other shape, or on a non-finite score.
+        ValueError: on any other shape or number of outputs, or on a non-finite score.
     """
+    if isinstance(outputs, dict):
+        if len(outputs) != 1:
+            raise ValueError(
+                f"Cannot read detection scores from {len(outputs)} named outputs "
+                f"{sorted(outputs)}: expected one."
+            )
+        (outputs,) = outputs.values()
     o = np.asarray(outputs, dtype=np.float64)
     if o.ndim == 2 and o.shape[1] == 2:
         scores = o[:, 1] - o[:, 0]
