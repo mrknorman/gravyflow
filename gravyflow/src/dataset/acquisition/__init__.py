@@ -41,6 +41,7 @@ from .gwosc_data import (
     GWOSC_DATA_FLAGS,
     GWOSC_BURST_FLAGS,
     GWOSC_CBC_FLAGS,
+    GWOSC_NO_HW_INJECTION_FLAGS,
     DEFAULT_GWOSC_FLAGS,
     UpsamplingRefused,
 )
@@ -80,6 +81,7 @@ __all__ = [
     'GWOSC_DATA_FLAGS',
     'GWOSC_BURST_FLAGS',
     'GWOSC_CBC_FLAGS',
+    'GWOSC_NO_HW_INJECTION_FLAGS',
     'DEFAULT_GWOSC_FLAGS',
     'UpsamplingRefused',
     # Utility functions

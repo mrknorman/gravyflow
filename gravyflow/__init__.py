@@ -99,6 +99,7 @@ from .src.dataset.acquisition import (
     IFOData, IFODataObtainer, NoiseDataObtainer, TransientDataObtainer,
     SignReversal, TimeReversal, RandomShift, AddNoise, default_augmentations,
     GWOSC_DATA_FLAGS, GWOSC_BURST_FLAGS, GWOSC_CBC_FLAGS, DEFAULT_GWOSC_FLAGS,
+    GWOSC_NO_HW_INJECTION_FLAGS,
 )
 from .src.dataset.noise.noise import NoiseType, Obtainer, NoiseObtainer
 from .src.dataset.curriculum import Curriculum, CurriculumSchedule, CurriculumProgressCallback
@@ -126,7 +127,7 @@ from .src.dataset.features.glitch_cache import TransientCache, generate_transien
 from .src.dataset.features.event import (
     EventConfidence, SourceType, get_confident_event_times, get_marginal_event_times, 
     get_all_event_times, get_event_times_by_type, get_confident_events_with_params,
-    search_events
+    search_events, get_event_catalogue, get_event_veto_segments
 )
 # record.py removed - functionality replaced by TransientSegment
 from .src.dataset.features.transient_index import TransientIndex

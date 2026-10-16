@@ -48,12 +48,16 @@ GWOSC_RUNS: Dict[str, Dict] = {
 
 #: Data present only.
 GWOSC_DATA_FLAGS: Tuple[str, ...] = ("DATA",)
-#: Data present, passing the burst category 1 and 2 vetoes (the default).
+#: Data present, passing the burst category 1 and 2 vetoes.
 GWOSC_BURST_FLAGS: Tuple[str, ...] = ("DATA", "BURST_CAT1", "BURST_CAT2")
 #: Data present, passing the CBC category 1 and 2 vetoes.
 GWOSC_CBC_FLAGS: Tuple[str, ...] = ("DATA", "CBC_CAT1", "CBC_CAT2")
-#: The default real-noise selection.
-DEFAULT_GWOSC_FLAGS: Tuple[str, ...] = GWOSC_BURST_FLAGS
+#: Times with no CBC and no burst hardware injection. GWOSC names these flags for the
+#: times that pass ("H1: no cbc injection", "H1: no burst injections"), so they are
+#: intersected like the others.
+GWOSC_NO_HW_INJECTION_FLAGS: Tuple[str, ...] = ("NO_CBC_HW_INJ", "NO_BURST_HW_INJ")
+#: The default real-noise selection: the burst vetoes, without hardware injections.
+DEFAULT_GWOSC_FLAGS: Tuple[str, ...] = GWOSC_BURST_FLAGS + GWOSC_NO_HW_INJECTION_FLAGS
 
 #: Strain sample rates GWOSC publishes, in Hz.
 GWOSC_SAMPLE_RATES_HERTZ: Tuple[float, ...] = (4096.0, 16384.0)
@@ -223,6 +227,37 @@ def intersect_segments(first: np.ndarray, second: np.ndarray) -> np.ndarray:
             i += 1
         else:
             j += 1
+    return _as_segment_array(out)
+
+
+def subtract_segments(segments: np.ndarray, vetoes: np.ndarray) -> np.ndarray:
+    """
+    The times in ``segments`` that lie in no veto, as a sorted, coalesced (N, 2) array.
+
+    Both lists are sorted and coalesced first, so they may arrive in any order and may
+    overlap. Pieces of zero length are dropped.
+    """
+    segments, vetoes = coalesce_segments(segments), coalesce_segments(vetoes)
+    if len(segments) == 0 or len(vetoes) == 0:
+        return segments
+    out = []
+    j = 0
+    for start, end in segments:
+        # Skip vetoes that end before this segment starts; they end before every
+        # later segment too, because both lists are sorted and coalesced.
+        while j < len(vetoes) and vetoes[j, 1] <= start:
+            j += 1
+        current = start
+        k = j
+        while k < len(vetoes) and vetoes[k, 0] < end:
+            if vetoes[k, 0] > current:
+                out.append((current, vetoes[k, 0]))
+            current = max(current, vetoes[k, 1])
+            if current >= end:
+                break
+            k += 1
+        if current < end:
+            out.append((current, end))
     return _as_segment_array(out)
 
 

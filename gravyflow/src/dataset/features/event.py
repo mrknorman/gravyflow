@@ -52,6 +52,162 @@ MARGINAL_CATALOGS = [
 ]
 
 
+#: Every GWOSC catalogue whose events are vetoed: confident, marginal and auxiliary
+#: GWTC releases, the cumulative GWTC table and GWTC-4.0.
+VETO_CATALOGS = CONFIDENT_CATALOGS + MARGINAL_CATALOGS + ["GWTC-4.0"]
+
+#: An event's veto starts where its signal enters the band at this frequency.
+EVENT_VETO_LOW_FREQUENCY_HERTZ = 20.0
+#: The leading-order chirp time is multiplied by this factor to cover higher-order and
+#: spin terms. With it, every catalogued event's veto (with masses) is at least as long
+#: as LALSuite's upper bound on the chirp time (``XLALSimInspiralChirpTimeBound``) at
+#: its source-frame masses and maximal spins; 1.1, LALSuite's own factor, falls up to
+#: 2 s short for extreme mass ratios such as GW191219_163120.
+EVENT_VETO_CHIRP_TIME_FACTOR = 1.25
+#: Seconds added before the in-band signal and after the merger: merger and ringdown,
+#: the catalogue's 0.1 s GPS rounding and the light travel time between detectors.
+EVENT_VETO_PADDING_SECONDS = 2.0
+#: Chirp mass (solar masses) assumed when a catalogue gives no masses: a 1 + 1 solar
+#: mass binary, lighter than any catalogued neutron-star binary, so its duration is
+#: an upper bound.
+UNKNOWN_EVENT_CHIRP_MASS_SOLAR = 0.87
+
+#: Version of the cached event table; bump it to re-fetch.
+_EVENT_CATALOGUE_FORMAT = 1
+
+_SOLAR_MASS_SECONDS = 4.925490947e-6  # G M_sun / c^3
+
+
+def chirp_time_seconds(
+    chirp_mass_solar,
+    low_frequency_hertz: float = EVENT_VETO_LOW_FREQUENCY_HERTZ,
+):
+    """
+    Leading-order time from ``low_frequency_hertz`` to merger for a chirp mass.
+
+    tau = (5 / 256) (pi f)^(-8/3) (G Mc / c^3)^(-5/3). Source-frame masses give an
+    upper bound on the observed duration, since the detector-frame mass (1 + z) Mc is
+    larger. GW170817 (Mc = 1.186) gives about 165 s from 20 Hz.
+    """
+    chirp_mass_seconds = np.asarray(chirp_mass_solar, dtype=np.float64) * _SOLAR_MASS_SECONDS
+    return (5.0 / 256.0) * (np.pi * low_frequency_hertz) ** (-8.0 / 3.0) \
+        * chirp_mass_seconds ** (-5.0 / 3.0)
+
+
+def _row_value(row, column):
+    try:
+        value = row[column]
+    except (KeyError, IndexError, ValueError):
+        return np.nan
+    if np.ma.is_masked(value):
+        return np.nan
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def _row_chirp_mass(row) -> float:
+    """Source-frame chirp mass of a catalogue row, or NaN if it has no masses."""
+    chirp_mass = _row_value(row, "chirp_mass_source")
+    if np.isfinite(chirp_mass):
+        return chirp_mass
+    m1, m2 = _row_value(row, "mass_1_source"), _row_value(row, "mass_2_source")
+    if np.isfinite(m1) and np.isfinite(m2) and m1 > 0 and m2 > 0:
+        return (m1 * m2) ** 0.6 / (m1 + m2) ** 0.2
+    # Detector-frame chirp mass: larger than the source-frame one, so it is used only
+    # when nothing else is published.
+    return _row_value(row, "chirp_mass")
+
+
+def get_event_catalogue(use_cache: bool = True) -> dict:
+    """
+    Every event in ``VETO_CATALOGS``, one row per catalogue entry.
+
+    Returns arrays ``gps``, ``chirp_mass_source`` (solar masses; NaN when the catalogue
+    gives no masses), ``name`` and ``catalog``. The table is fetched from GWOSC once
+    and cached in the user cache (``~/.gravyflow/cache/gwosc_events``). A catalogue
+    that cannot be fetched raises: a partial list would silently leave events in noise.
+    """
+    import json
+    from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
+
+    cache_file = user_cache_dir("gwosc_events") / f"event_catalogue_v{_EVENT_CATALOGUE_FORMAT}.json"
+    if use_cache and cache_file.exists():
+        try:
+            rows = json.loads(cache_file.read_text())
+            if rows.get("catalogs") == VETO_CATALOGS:
+                return _event_rows_to_arrays(rows["events"])
+        except (ValueError, KeyError) as error:
+            logging.warning(f"Ignoring unreadable event cache {cache_file}: {error}")
+
+    events = []
+    for catalog in VETO_CATALOGS:
+        table = EventTable.fetch_open_data(catalog)
+        for row in table:
+            gps = _row_value(row, "GPS")
+            if not np.isfinite(gps):
+                continue
+            chirp_mass = _row_chirp_mass(row)
+            name = row["commonName"] if "commonName" in table.colnames else row["name"]
+            events.append({
+                "gps": gps,
+                "chirp_mass_source": chirp_mass if np.isfinite(chirp_mass) else None,
+                "name": str(name),
+                "catalog": catalog,
+            })
+
+    if use_cache:
+        cache_file.write_text(json.dumps({"catalogs": VETO_CATALOGS, "events": events}))
+    return _event_rows_to_arrays(events)
+
+
+def _event_rows_to_arrays(events: List[dict]) -> dict:
+    return {
+        "gps": np.array([e["gps"] for e in events], dtype=np.float64),
+        "chirp_mass_source": np.array(
+            [np.nan if e["chirp_mass_source"] is None else e["chirp_mass_source"] for e in events],
+            dtype=np.float64,
+        ),
+        "name": np.array([e["name"] for e in events], dtype=str),
+        "catalog": np.array([e["catalog"] for e in events], dtype=str),
+    }
+
+
+def get_event_veto_segments(
+    low_frequency_hertz: float = EVENT_VETO_LOW_FREQUENCY_HERTZ,
+    padding_seconds: float = EVENT_VETO_PADDING_SECONDS,
+    catalogue: Optional[dict] = None,
+) -> np.ndarray:
+    """
+    One veto segment per catalogued event, covering its whole in-band signal.
+
+    Each segment is [t - 1.25 tau - padding, t + padding], where t is the catalogue's
+    merger time and tau the leading-order chirp time from ``low_frequency_hertz`` for
+    the event's source-frame chirp mass (see ``chirp_time_seconds``). Events without
+    masses use ``UNKNOWN_EVENT_CHIRP_MASS_SOLAR``. Confident, marginal and auxiliary
+    events are all included.
+
+    Returns:
+        A sorted, coalesced (N, 2) array of GPS segments.
+    """
+    from gravyflow.src.dataset.acquisition.gwosc_data import coalesce_segments
+
+    if catalogue is None:
+        catalogue = get_event_catalogue()
+    gps = np.asarray(catalogue["gps"], dtype=np.float64)
+    if len(gps) == 0:
+        return np.empty((0, 2))
+    chirp_mass = np.asarray(catalogue["chirp_mass_source"], dtype=np.float64)
+    chirp_mass = np.where(np.isfinite(chirp_mass) & (chirp_mass > 0), chirp_mass,
+                          UNKNOWN_EVENT_CHIRP_MASS_SOLAR)
+    in_band = EVENT_VETO_CHIRP_TIME_FACTOR * chirp_time_seconds(chirp_mass, low_frequency_hertz)
+    segments = np.stack(
+        [gps - in_band - padding_seconds, gps + padding_seconds], axis=1
+    )
+    return coalesce_segments(segments)
+
+
 def _fetch_event_times_from_catalogs(
     catalogs: List[str],
     cache_file: Optional[Path] = None

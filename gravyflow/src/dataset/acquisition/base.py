@@ -28,7 +28,6 @@ import jax
 import jax.numpy as jnp
 
 from gwdatafind import find_urls
-from gwpy.segments import SegmentList
 from gwpy.table import EventTable
 from gwpy.timeseries import TimeSeries
 
@@ -38,8 +37,8 @@ from gravyflow.src.utils.tensor import resample_fft
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
 from gravyflow.src.utils.gps import as_gps_times
 from .gwosc_data import (
-    GWOSC_RUNS, DEFAULT_GWOSC_FLAGS, UpsamplingRefused, get_gwosc_segments,
-    gwosc_sample_rate_hertz,
+    GWOSC_RUNS, DEFAULT_GWOSC_FLAGS, UpsamplingRefused, coalesce_segments,
+    get_gwosc_segments, gwosc_sample_rate_hertz, subtract_segments,
 )
 
 
@@ -57,8 +56,17 @@ GPS_PRECISION_DECIMALS = 2  # 10ms precision (matches gps.py)
 # Tolerance for GPS time matching in seconds (used in cache lookups)
 GPS_TOLERANCE_SECONDS = TransientDefaults.GPS_TOLERANCE_SECONDS
 
-# Epsilon buffer for segment boundary trimming (avoids edge artifacts)
+# Kept for compatibility; real-noise segments are no longer trimmed by it.
 SEGMENT_EPSILON_SECONDS = TransientDefaults.SEGMENT_EPSILON_SECONDS
+
+# Real-noise segments are cut on an absolute grid of this many GPS seconds:
+# block k is [2048 k, 2048 (k + 1)).
+SEGMENT_GRID_ORIGIN_GPS = 0.0
+
+# Version of the stored real-noise segment layout (vetoes, absolute grid, whole
+# segments). It is part of the segment file's hash, so files written under an
+# earlier layout are never read back.
+SEGMENT_LAYOUT_VERSION = "segment-layout-2"
 
 
 def ifo_canonical_key(ifos) -> tuple:
@@ -563,7 +571,8 @@ class BaseDataObtainer(ABC):
             gwosc_flags: GWOSC timeline flags whose intersection defines usable
                 times, e.g. ``gf.GWOSC_DATA_FLAGS`` or ``gf.GWOSC_CBC_FLAGS``. Each
                 flag lists the times that pass it. None uses each run's default:
-                ``DATA`` with ``BURST_CAT1`` and ``BURST_CAT2`` applied.
+                ``DATA`` with ``BURST_CAT1`` and ``BURST_CAT2`` applied, and no CBC or
+                burst hardware injections (``NO_CBC_HW_INJ``, ``NO_BURST_HW_INJ``).
         """
 
         # Initiate logging for ifo_data:
@@ -862,7 +871,8 @@ class BaseDataObtainer(ABC):
                 self.data_labels, 
                 self.max_segment_duration_seconds,
                 sample_rate_hertz,
-                group
+                group,
+                SEGMENT_LAYOUT_VERSION,
             ]  
         
         segment_parameters = [
@@ -951,7 +961,10 @@ class BaseDataObtainer(ABC):
         self,
         ifo : gf.IFO
     ) -> np.ndarray:
-
+        """
+        Usable times of ``ifo`` over every configured run, as one sorted, coalesced
+        (N, 2) array, whatever order the runs were given in.
+        """
         valid_segments = []
         for index, start_gps_time in enumerate(self.start_gps_times):
             valid_segments.append(
@@ -967,7 +980,9 @@ class BaseDataObtainer(ABC):
             )
 
         # Each run yields a different number of segments: concatenate, never stack.
-        return np.concatenate(valid_segments, axis=0)
+        # Then sort and coalesce, so that runs given out of order still give a
+        # chronological list for the vetoes and the binning.
+        return coalesce_segments(np.concatenate(valid_segments, axis=0))
     
     def get_all_event_times(self) -> np.ndarray:
         cache_file_path : Path = gf.PATH / "res/cached_event_times.npy"
@@ -998,6 +1013,15 @@ class BaseDataObtainer(ABC):
         np.save(cache_file_path, gps_times)
         return gps_times
 
+    def get_event_veto_segments(self) -> np.ndarray:
+        """
+        Veto segments for every catalogued GW event (confident and marginal), each
+        covering the signal's time in band from 20 Hz plus padding. See
+        ``gravyflow.get_event_veto_segments``.
+        """
+        from gravyflow.src.dataset.features.event import get_event_veto_segments
+        return get_event_veto_segments()
+
     def pad_gps_times_with_veto_window(
         self,
         gps_times: np.ndarray,
@@ -1018,15 +1042,19 @@ class BaseDataObtainer(ABC):
         segments: np.ndarray,
         veto_segments: np.ndarray
     ) -> np.ndarray:
-        
+        """
+        Remove every vetoed time from ``segments``.
+
+        Both lists may be in any order and may overlap: they are sorted and coalesced
+        before the subtraction. Returns a sorted, coalesced (N, 2) array.
+        """
         if len(veto_segments) == 0:
             return segments
-            
-        seg_list = SegmentList([tuple(s) for s in segments])
-        veto_list = SegmentList([tuple(v) for v in veto_segments])
-        
-        result = seg_list - veto_list
-        return np.array(result)
+
+        return subtract_segments(
+            np.reshape(np.asarray(segments, dtype=np.float64), (-1, 2)),
+            np.reshape(np.asarray(veto_segments, dtype=np.float64), (-1, 2)),
+        )
 
     def compress_segments(self, segments: np.ndarray) -> np.ndarray:
         if segments.size == 0:
@@ -1111,7 +1139,13 @@ class BaseDataObtainer(ABC):
         chunk_size: float,
         start_time: float
     ) -> np.ndarray:
-        
+        """
+        Cut segments at ``start_time + k * chunk_size`` for every integer k.
+
+        Real-noise binning uses ``start_time = SEGMENT_GRID_ORIGIN_GPS`` (GPS 0), so
+        the cut is absolute and does not depend on which runs are configured.
+        Returns an (N, 2) array.
+        """
         new_segments = []
         for start, end in segments:
             curr = start
@@ -1126,7 +1160,7 @@ class BaseDataObtainer(ABC):
                 
                 curr = cut_point
                 
-        return np.array(new_segments)
+        return np.reshape(np.array(new_segments, dtype=np.float64), (-1, 2))
 
     def _cache_segment(self, key: str, segment: Any) -> None:
         if self.file_path is None:
@@ -1292,7 +1326,15 @@ class BaseDataObtainer(ABC):
         ifo: gf.IFO,
         segment_key: str
     ):
-        epsilon = SEGMENT_EPSILON_SECONDS
+        """
+        The strain of one segment at ``sample_rate_hertz``, or None if it cannot be had.
+
+        The whole segment is fetched, with no margin trimmed at either end. Only its
+        tail is cut, to a whole number of seconds, so that the number of distinct
+        segment lengths (and so of compilations of the window sampler) stays bounded.
+        No sample before the segment's start is lost, and at most one second at its
+        end.
+        """
         segment = None
         
         cache_key = f"{segment_key}_{ifo.name}_{sample_rate_hertz}"
@@ -1346,8 +1388,8 @@ class BaseDataObtainer(ABC):
                 # Get correct frame_type/channel for this GPS time's observing run
                 frame_type, channel = self._get_frame_channel_for_gps(segment_start_gps_time)
                 raw_segment = self.get_segment_data(
-                    segment_start_gps_time + epsilon,
-                    segment_end_gps_time - epsilon,
+                    segment_start_gps_time,
+                    segment_end_gps_time,
                     ifo,
                     frame_type,
                     channel,
@@ -1363,25 +1405,18 @@ class BaseDataObtainer(ABC):
                     )
 
                 segment_data = jnp.array(raw_segment.value, dtype=jnp.float32)
-                
-                downsample_ratio = original_sample_rate / sample_rate_hertz
-                std_sizes_at_original = [int(s * downsample_ratio) for s in gf.Defaults.STANDARD_SEGMENT_SAMPLES]
+
+                # Keep every sample from the segment's start; cut only the tail, to
+                # whole seconds (see the docstring).
+                samples_per_second = int(round(original_sample_rate))
                 num_samples = segment_data.shape[0]
-                
-                std_size = None
-                for s in reversed(std_sizes_at_original):
-                    if s <= num_samples:
-                        std_size = s
-                        break
-                
-                if std_size is not None:
-                    # Use center-truncation to preserve event centering (important for TRANSIENT mode)
-                    # Start-truncation would shift centered events toward the end or cut them off
-                    excess = num_samples - std_size
-                    start_offset = excess // 2
-                    segment_data = segment_data[start_offset:start_offset + std_size]
-                else:
-                    logging.warning(f"Segment too small ({num_samples}) for standardization")
+                whole_seconds = num_samples // samples_per_second
+                if whole_seconds < 1:
+                    logging.debug(
+                        f"Segment shorter than one second ({num_samples} samples); skipped."
+                    )
+                    return None
+                segment_data = segment_data[:whole_seconds * samples_per_second]
                 
                 segment = resample_fft(
                     segment_data, 

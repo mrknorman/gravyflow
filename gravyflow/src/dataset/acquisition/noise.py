@@ -16,8 +16,8 @@ from keras import ops
 import gravyflow as gf
 from gravyflow.src.dataset.config import WindowSpec
 from .base import (
-    BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
-    AcquisitionMode, SamplingMode, ObservingRun, IFOData
+    BaseDataObtainer, DataQuality, DataLabel, SegmentOrder,
+    AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS
 )
 from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
@@ -74,6 +74,48 @@ class NoiseDataObtainer(BaseDataObtainer):
     # NOISE-SPECIFIC SEGMENT PROCESSING
     # =========================================================================
 
+    def _glitch_catalogues(self, ifo: gf.IFO, **kwargs) -> List[Dict]:
+        """
+        The Gravity Spy catalogue of ``ifo`` over every configured run. Runs that the
+        public release does not cover (O4) give a warning and no glitches.
+        """
+        from gravyflow.src.dataset.features.glitch import get_glitch_catalogue
+
+        catalogues = []
+        for start, end in zip(self.start_gps_times, self.end_gps_times):
+            try:
+                catalogues.append(get_glitch_catalogue(
+                    ifo, start_gps_time=start, end_gps_time=end, **kwargs
+                ))
+            except ValueError as error:
+                logging.warning(
+                    f"No glitch veto for {ifo.name} over GPS {start}-{end}: {error}"
+                )
+        return catalogues
+
+    def get_glitch_veto_segments(self, ifo: gf.IFO) -> np.ndarray:
+        """
+        Veto segments for the Gravity Spy entries of ``ifo`` over every configured run:
+        each entry's whole extent plus its class's padding on each side
+        (``glitch.glitch_veto_padding``). The entries vetoed are
+        ``NOISE_VETO_GLITCH_TYPES`` at ``NOISE_VETO_MIN_ML_CONFIDENCE`` or above.
+        """
+        from gravyflow.src.dataset.features.glitch import (
+            NOISE_VETO_GLITCH_TYPES, glitch_veto_padding,
+            NOISE_VETO_MIN_ML_CONFIDENCE, glitch_extents,
+        )
+        catalogues = self._glitch_catalogues(
+            ifo,
+            glitch_types=NOISE_VETO_GLITCH_TYPES,
+            min_ml_confidence=NOISE_VETO_MIN_ML_CONFIDENCE,
+            exclude_events=False,
+        )
+        if not catalogues:
+            return np.empty((0, 2))
+        return np.concatenate(
+            [glitch_extents(catalogue, glitch_veto_padding(catalogue)) for catalogue in catalogues]
+        )
+
     def remove_unwanted_segments(
             self,
             ifo: gf.IFO,
@@ -81,7 +123,13 @@ class NoiseDataObtainer(BaseDataObtainer):
             get_times: List = None
         ):
         """
-        Remove segments containing unwanted events/glitches from noise data.
+        Remove every catalogued GW event and Gravity Spy glitch from noise segments.
+
+        Unless the obtainer's labels include EVENTS, each event's in-band signal is
+        vetoed (``get_event_veto_segments``); unless they include GLITCHES, each
+        glitch's whole extent is vetoed (``get_glitch_veto_segments``). Both cover
+        every configured run. Returns the vetoed segments and the event and glitch
+        peak times.
         """
         if get_times is None:
             get_times = []
@@ -94,30 +142,24 @@ class NoiseDataObtainer(BaseDataObtainer):
             event_times = []
 
         if DataLabel.GLITCHES in get_times or DataLabel.GLITCHES not in self.data_labels:
-            glitch_times = gf.get_glitch_times(
-                ifo,
-                start_gps_time=self.start_gps_times[0],
-                end_gps_time=self.end_gps_times[0]
+            catalogues = self._glitch_catalogues(ifo)
+            glitch_times = (
+                np.concatenate([catalogue["event_time"] for catalogue in catalogues])
+                if catalogues else np.array([])
             )
         else:
             glitch_times = []
 
         if DataLabel.EVENTS not in self.data_labels:
-            veto_segments.append(
-                self.pad_gps_times_with_veto_window(event_times)
-            )
+            veto_segments.append(self.get_event_veto_segments())
 
         if DataLabel.GLITCHES not in self.data_labels:
-            veto_segments.append(
-                gf.get_glitch_segments(
-                    ifo,
-                    start_gps_time=self.start_gps_times[0],
-                    end_gps_time=self.end_gps_times[0]
-                )
-            )
+            veto_segments.append(self.get_glitch_veto_segments(ifo))
 
         if veto_segments:
-            veto_segments = np.concatenate(veto_segments)
+            veto_segments = np.concatenate(
+                [np.reshape(veto, (-1, 2)) for veto in veto_segments]
+            )
             valid_segments = \
                 self.veto_time_segments(valid_segments, veto_segments)
 
@@ -160,10 +202,17 @@ class NoiseDataObtainer(BaseDataObtainer):
 
     def merge_bins(self, new_segments_list, interval):
         """
-        Merges split segments into bins of shape [G, N].
+        Group each IFO's segments into absolute bins of ``interval`` seconds
+        ([interval k, interval (k + 1)) in GPS), clipping them to the bin.
+
+        Returns one entry per bin in which every IFO has data: a list holding, for each
+        IFO, its (M, 2) pieces in that bin. The segments may be in any order.
         """
-        min_time = min(segment[0, 0] for segment in new_segments_list)
-        max_time = max(segment[-1, 1] for segment in new_segments_list)
+        non_empty = [np.reshape(s, (-1, 2)) for s in new_segments_list if np.size(s) > 0]
+        if len(non_empty) < len(new_segments_list) or not non_empty:
+            return []
+        min_time = min(float(np.min(segment[:, 0])) for segment in non_empty)
+        max_time = max(float(np.max(segment[:, 1])) for segment in non_empty)
 
         bins = np.arange(
             np.floor(min_time / interval) * interval, 
@@ -173,7 +222,7 @@ class NoiseDataObtainer(BaseDataObtainer):
         result = [[] for _ in bins]
 
         for i, bin_start in enumerate(bins):
-            for segments in new_segments_list:
+            for segments in non_empty:
                 in_bin = segments[
                     (segments[:, 0] < bin_start + interval) 
                     & (segments[:, 1] > bin_start)
@@ -193,10 +242,44 @@ class NoiseDataObtainer(BaseDataObtainer):
 
         return filtered_result
     
+    def all_segments_per_bin(self, filtered_bins_result):
+        """
+        Every piece of every bin, as rows of one piece per IFO.
+
+        A bin whose IFOs have n_1, ..., n_k pieces gives max(n_i) rows. Each IFO's
+        pieces are sorted longest first; row r takes piece (r mod n_i) of each IFO, so
+        every piece of every IFO is used, the longest pieces are paired together, and an
+        IFO with fewer pieces repeats its own.
+
+        Returns an array of shape (num_ifos, num_rows, 2).
+        """
+        if not filtered_bins_result:
+            return np.empty((0, 0, 2))
+
+        num_ifos = len(filtered_bins_result[0])
+        rows_per_ifo = [[] for _ in range(num_ifos)]
+
+        for bin in filtered_bins_result:
+            ordered = []
+            for segments in bin:
+                segments = np.reshape(segments, (-1, 2))
+                durations = segments[:, 1] - segments[:, 0]
+                ordered.append(segments[np.argsort(-durations, kind="stable")])
+            num_rows = max(len(segments) for segments in ordered)
+            for j, segments in enumerate(ordered):
+                for r in range(num_rows):
+                    rows_per_ifo[j].append(segments[r % len(segments)])
+
+        return np.array([np.array(rows) for rows in rows_per_ifo])
+
     def largest_segments_per_bin(self, filtered_bins_result):
         """
         Extracts the largest segment in each bin from each list.
+
+        Real-noise acquisition uses ``all_segments_per_bin``, which keeps every piece.
         """
+        if not filtered_bins_result:
+            return np.empty((0, 0, 2))
         largest_segments_list = [
             [] for _ in range(len(filtered_bins_result[0]))
         ]
@@ -312,10 +395,12 @@ class NoiseDataObtainer(BaseDataObtainer):
                     valid_segments
                 )
 
+                # Cut on the absolute grid [d k, d (k + 1)) in GPS (d = 2048 s by
+                # default), the grid merge_bins uses, so whole blocks survive.
                 valid_segments = self.cut_segments(
-                    valid_segments, 
+                    valid_segments,
                     self.max_segment_duration_seconds,
-                    self.start_gps_times[0]
+                    SEGMENT_GRID_ORIGIN_GPS
                 )
 
                 if len(valid_segments) == 0:
@@ -325,11 +410,18 @@ class NoiseDataObtainer(BaseDataObtainer):
 
             # Merge and process segments
             self.valid_segments = self.merge_bins(
-                self.valid_segments, 
+                self.valid_segments,
                 self.max_segment_duration_seconds
             )
-                    
-            self.valid_segments = self.largest_segments_per_bin(
+
+            if not self.valid_segments:
+                raise ValueError(
+                    f"IFOs {[ifo.name for ifo in ifos]} share no "
+                    f"{self.max_segment_duration_seconds} s bin with data (NOISE mode)!"
+                )
+
+            # Keep every piece of every bin, not just the longest.
+            self.valid_segments = self.all_segments_per_bin(
                 self.valid_segments
             )
                     

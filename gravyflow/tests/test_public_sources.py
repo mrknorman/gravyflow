@@ -40,8 +40,17 @@ GWOSC_RUN_BOUNDS = {
     "O3a": (1238166018, 1253977218),
     "O3b": (1256655618, 1269363618),
 }
-# Public events inside the fixture windows, used as the event-veto list.
+# Public events inside the fixture windows, used as the event-veto list, with their
+# source-frame chirp masses from GWOSC's GWTC table: GW150914, GW170817, GW190521,
+# GW200129_065458.
 FIXTURE_EVENT_TIMES = np.array([1126259462.4, 1187008882.4, 1242442967.4, 1264316116.4])
+FIXTURE_EVENTS = {
+    "gps": FIXTURE_EVENT_TIMES,
+    "chirp_mass_source": np.array([27.9, 1.186, 63.3, 27.2]),
+    "name": np.array(["GW150914", "GW170817", "GW190521", "GW200129_065458"]),
+    "catalog": np.array(["GWTC-2.1-confident", "GWTC-1-confident",
+                         "GWTC-2.1-confident", "GWTC-3-confident"]),
+}
 
 
 # =============================================================================
@@ -148,6 +157,12 @@ def offline_public_sources(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         BaseDataObtainer, "get_all_event_times", lambda self: FIXTURE_EVENT_TIMES.copy()
+    )
+    from gravyflow.src.dataset.features import event as event_module
+    monkeypatch.setattr(
+        event_module, "get_event_catalogue",
+        lambda use_cache=True: {key: value.copy() for key, value in FIXTURE_EVENTS.items()},
+        raising=False,
     )
     # Glitch queries retry with sleeps in older code; never sleep in tests.
     import time
@@ -276,7 +291,7 @@ class TestGwoscSegments:
         np.testing.assert_array_equal(first, second)
         assert len(offline_public_sources.requests) == n_requests
         cached = list((tmp_path / ".gravyflow" / "cache" / "gwosc_timeline").glob("*.json"))
-        assert len(cached) == 3  # DATA, BURST_CAT1, BURST_CAT2 for L1 O1
+        assert len(cached) == len(gf.DEFAULT_GWOSC_FLAGS)  # one file per flag, L1 O1
         assert not list((gf.PATH / "res").glob("**/*gwosc*"))
 
 
@@ -548,7 +563,9 @@ class TestPublicDefaults:
         noise = gf.NoiseObtainer(noise_type=gf.NoiseType.REAL, ifos=[gf.IFO.L1])
         assert noise.ifo_data_obtainer is not None
         assert gf.DataLabel.NOISE in noise.ifo_data_obtainer.data_labels
-        assert noise.ifo_data_obtainer.state_flags[0] == ("DATA", "BURST_CAT1", "BURST_CAT2")
+        assert noise.ifo_data_obtainer.state_flags[0] == (
+            "DATA", "BURST_CAT1", "BURST_CAT2", "NO_CBC_HW_INJ", "NO_BURST_HW_INJ"
+        )
 
     def test_example_model_real_noise_builds_offline(self, offline_public_sources):
         dataset = gf.Gabbard2017.dataset(

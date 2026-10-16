@@ -6,7 +6,18 @@ Glitches come from the Gravity Spy machine-learning classifications released on 
 v1.0.0, CC-BY-4.0). See ``gravity_spy`` for the download, verification and cache.
 
 Defaults: every class except ``No_Glitch`` (which marks a trigger that is not a
-glitch), and ``ml_confidence >= 0.9``.
+glitch), and ``ml_confidence >= 0.9``. Entries that overlap a catalogued GW event (its
+in-band signal, see ``event.get_event_veto_segments``) are removed: Gravity Spy lists
+some real events, GW190521 among them, as Blips.
+
+A glitch's extent is its Omicron trigger, [start_time, start_time + duration], which
+contains the peak time (``event_time``). Noise vetoes cover that extent plus a padding
+on each side: ``GLITCH_VETO_PADDING_SECONDS`` (1 s), or more for the classes in
+``GLITCH_VETO_PADDING_BY_TYPE`` (3 s for Extremely_Loud). In public GWOSC strain,
+measured on 2,535 glitches of every class over 30 hours of O1 to O3 data, the excess
+power around a glitch reaches beyond its Omicron extent by at most 0.44 s for 99%
+of glitches and 1.0 s for 99.9%; the only glitches beyond 1.25 s were Extremely_Loud,
+at up to 2.5 s.
 """
 from enum import IntEnum
 from typing import Dict, List, Optional, Union
@@ -19,7 +30,13 @@ import numpy as np
 from gravyflow.src.dataset.acquisition.base import ObservingRun
 from gravyflow.src.dataset.conditioning.detector import IFO
 from gravyflow.src.dataset.features import gravity_spy
+from gravyflow.src.dataset.features import event as event_module
 from gravyflow.src.dataset.features.gravity_spy import DEFAULT_MIN_ML_CONFIDENCE
+from gravyflow.src.dataset.acquisition.gwosc_data import coalesce_segments
+
+#: Seconds added on each side of a glitch's Omicron extent when it is vetoed from noise
+#: (see the module docstring for the measurement behind it).
+GLITCH_VETO_PADDING_SECONDS = 1.0
 
 
 class GlitchType(IntEnum):
@@ -98,6 +115,25 @@ _GLITCH_TYPE_BY_LABEL = {label: glitch_type for glitch_type, label in GLITCH_TYP
 #: Classes used when none are requested: every class but NO_GLITCH.
 DEFAULT_GLITCH_TYPES = [glitch_type for glitch_type in GlitchType if glitch_type != GlitchType.NO_GLITCH]
 
+#: Entries vetoed from real noise: every Gravity Spy entry, whatever its class and
+#: classification confidence. Each is an Omicron trigger above SNR 7.5; the class and
+#: its confidence say what kind of excess power it is, not whether there is any.
+NOISE_VETO_GLITCH_TYPES = list(GlitchType)
+NOISE_VETO_MIN_ML_CONFIDENCE = 0.0
+
+#: Classes whose excess power reaches further beyond the Omicron extent: their veto
+#: padding in seconds, used instead of ``GLITCH_VETO_PADDING_SECONDS``.
+GLITCH_VETO_PADDING_BY_TYPE = {GlitchType.EXTREMELY_LOUD: 3.0}
+
+
+def glitch_veto_padding(catalogue: Dict[str, np.ndarray]) -> np.ndarray:
+    """Per-entry veto padding (s) for a catalogue from ``get_glitch_catalogue``."""
+    labels = np.asarray(catalogue["label"])
+    padding = np.full(len(labels), GLITCH_VETO_PADDING_SECONDS, dtype=np.float64)
+    for glitch_type, seconds in GLITCH_VETO_PADDING_BY_TYPE.items():
+        padding[labels == int(glitch_type)] = seconds
+    return padding
+
 
 def _resolve_bounds(observing_run, start_gps_time, end_gps_time):
     if start_gps_time is None:
@@ -122,6 +158,7 @@ def get_glitch_catalogue(
     start_gps_time: float = None,
     end_gps_time: float = None,
     min_ml_confidence: float = DEFAULT_MIN_ML_CONFIDENCE,
+    exclude_events: bool = True,
 ) -> Dict[str, np.ndarray]:
     """
     Glitches of one detector with their Gravity Spy metadata.
@@ -132,6 +169,8 @@ def get_glitch_catalogue(
         glitch_types: Classes to keep. None keeps every class but NO_GLITCH.
         start_gps_time, end_gps_time: Keep glitches whose peak time lies inside.
         min_ml_confidence: Keep classifications with at least this confidence.
+        exclude_events: Drop entries whose extent overlaps a catalogued GW event's
+            veto segment (confident or marginal), so no real event is ever a glitch.
 
     Returns:
         Arrays sorted by time: ``event_time`` (peak GPS), ``start_time``, ``duration``,
@@ -151,7 +190,39 @@ def get_glitch_catalogue(
         dtype=np.int32,
     )
     rows["label"] = labels
+    if exclude_events and len(labels) > 0:
+        keep = ~overlaps_segments(glitch_extents(rows), event_module.get_event_veto_segments())
+        rows = {key: value[keep] for key, value in rows.items()}
     return rows
+
+
+def glitch_extents(catalogue: Dict[str, np.ndarray], padding_seconds=0.0) -> np.ndarray:
+    """
+    (N, 2) extents of catalogue glitches: the Omicron trigger
+    [start_time, start_time + duration], widened if needed to contain the peak time,
+    plus ``padding_seconds`` (a number, or one per entry) on each side.
+    """
+    peak = np.asarray(catalogue["event_time"], dtype=np.float64)
+    start = np.asarray(catalogue["start_time"], dtype=np.float64)
+    end = start + np.asarray(catalogue["duration"], dtype=np.float64)
+    start = np.minimum(start, peak) - padding_seconds
+    end = np.maximum(end, peak) + padding_seconds
+    return np.stack([start, end], axis=1).reshape(-1, 2)
+
+
+def overlaps_segments(intervals: np.ndarray, segments: np.ndarray) -> np.ndarray:
+    """Boolean mask: which (N, 2) ``intervals`` overlap any of ``segments``."""
+    intervals = np.reshape(np.asarray(intervals, dtype=np.float64), (-1, 2))
+    segments = coalesce_segments(segments)
+    if len(segments) == 0 or len(intervals) == 0:
+        return np.zeros(len(intervals), dtype=bool)
+    # The last segment starting before each interval ends is the only candidate,
+    # because coalesced segments are disjoint and sorted.
+    index = np.searchsorted(segments[:, 0], intervals[:, 1], side="left") - 1
+    valid = index >= 0
+    overlaps = np.zeros(len(intervals), dtype=bool)
+    overlaps[valid] = segments[index[valid], 1] > intervals[valid, 0]
+    return overlaps
 
 
 def get_glitch_times(
@@ -218,16 +289,21 @@ def get_glitch_segments(
     start_gps_time : float = None,
     end_gps_time : float = None,
     min_ml_confidence: float = DEFAULT_MIN_ML_CONFIDENCE,
+    padding_seconds: Optional[float] = None,
+    exclude_events: bool = True,
     ) -> np.ndarray:
     """
-    (N, 2) array of [peak time, peak time + duration] for the selected glitches.
+    (N, 2) veto segments for the selected glitches: each glitch's whole extent (see
+    ``glitch_extents``) plus ``padding_seconds`` on each side, sorted by peak time.
+    None pads by class (``glitch_veto_padding``).
     """
     catalogue = get_glitch_catalogue(
-        ifo, observing_run, glitch_types, start_gps_time, end_gps_time, min_ml_confidence
+        ifo, observing_run, glitch_types, start_gps_time, end_gps_time, min_ml_confidence,
+        exclude_events=exclude_events,
     )
-    return np.stack(
-        [catalogue["event_time"], catalogue["event_time"] + catalogue["duration"]], axis=1
-    )
+    if padding_seconds is None:
+        padding_seconds = glitch_veto_padding(catalogue)
+    return glitch_extents(catalogue, padding_seconds)
 
 def get_glitch_type_from_index(index: int) -> Union[GlitchType, None]:
     """
