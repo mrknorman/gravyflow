@@ -26,7 +26,7 @@ dependencies = [
   "jaxlib>=0.8.1",
 
   "keras>=3.0",
-  "ripplegw",
+  "ripplegw>=0.4.1,<0.5",
   "gwdatafind",
   "gwpy",
   "pycbc",
@@ -79,7 +79,7 @@ Repository = "https://github.com/mrknorman/gravyflow"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["gravyflow*"]
-exclude = ["ripple*", "tests*"]
+exclude = ["tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["gravyflow/tests"]

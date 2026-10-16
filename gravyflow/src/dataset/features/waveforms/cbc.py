@@ -1,42 +1,9 @@
-import sys
-import os
-
-# Add local ripple submodule to path
-# Assuming gravyflow root is 3 levels up from this file
-# .../gravyflow/src/dataset/features/waveforms/cbc.py
-# We want .../gravyflow/ripple/src
-current_dir = os.path.dirname(os.path.abspath(__file__))
-gravyflow_root = os.path.abspath(os.path.join(current_dir, "../../../../../"))
-ripple_src_path = os.path.join(gravyflow_root, "ripple", "src")
-
-if os.path.isdir(ripple_src_path):
-    if ripple_src_path not in sys.path:
-        sys.path.insert(0, ripple_src_path)
-else:
-    import warnings
-    warnings.warn(
-        f"Local ripple submodule not found at {ripple_src_path}. "
-        "Falling back to system ripplegw. Run 'git submodule update --init ripple' "
-        "to use the patched version.",
-        UserWarning
-    )
-
-import ripplegw
-# Alias ripplegw to ripple so existing imports work
-sys.modules["ripple"] = ripplegw
+from enum import Enum
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from ripple.waveforms import (
-    IMRPhenomD, 
-    IMRPhenomXAS, 
-    IMRPhenomPv2, 
-    TaylorF2, 
-    IMRPhenomD_NRTidalv2
-)
-from typing import Union, List, Tuple
-from ripple import ms_to_Mc_eta
+import ripplegw
 import keras
 from keras import ops
 
@@ -113,25 +80,105 @@ def calc_duration_from_f_min(
     
     return duration
 
-from enum import Enum
-
 class Approximant(Enum):
-    """Enum for supported gravitational waveform approximants."""
+    """Supported CBC approximants. Each value is the name ripple registers the model under."""
     IMRPhenomD = "IMRPhenomD"
     IMRPhenomXAS = "IMRPhenomXAS"
     IMRPhenomPv2 = "IMRPhenomPv2"
     TaylorF2 = "TaylorF2"
     IMRPhenomD_NRTidalv2 = "IMRPhenomD_NRTidalv2"
 
-APPROXIMANT_MODULES = {
-    Approximant.IMRPhenomD: IMRPhenomD,
-    Approximant.IMRPhenomXAS: IMRPhenomXAS,
-    Approximant.IMRPhenomPv2: IMRPhenomPv2,
-    Approximant.TaylorF2: TaylorF2,
-    Approximant.IMRPhenomD_NRTidalv2: IMRPhenomD_NRTidalv2
-}
 
-@jax.jit(static_argnames=["num_waveforms", "sample_rate_hertz", "duration_seconds", "approximant"])
+def _as_approximant(approximant) -> Approximant:
+    """Return ``approximant`` as an ``Approximant``, accepting its string value."""
+    if isinstance(approximant, Approximant):
+        return approximant
+    try:
+        return Approximant(approximant)
+    except ValueError:
+        raise ValueError(
+            f"Approximant '{approximant}' not supported. "
+            f"Available: {[a.value for a in Approximant]}"
+        ) from None
+
+
+def _source_parameters(
+    mass_1_msun,
+    mass_2_msun,
+    spin_1,
+    spin_2,
+    lambda_1,
+    lambda_2,
+    distance_mpc,
+    reference_orbital_phase,
+    inclination_radians,
+) -> dict:
+    """
+    Every CBC source parameter gravyflow supplies, keyed by ripple's parameter names.
+
+    Spins have their Cartesian components on the last axis. Each model takes the
+    subset its ``parameter_names`` lists.
+    """
+    def f64(value):
+        return jnp.asarray(value, dtype=jnp.float64)
+
+    mass_1_msun = f64(mass_1_msun)
+    mass_2_msun = f64(mass_2_msun)
+    spin_1 = f64(spin_1)
+    spin_2 = f64(spin_2)
+    total_mass = mass_1_msun + mass_2_msun
+    product = mass_1_msun * mass_2_msun
+
+    return {
+        "M_c": product ** (3.0 / 5.0) / total_mass ** (1.0 / 5.0),
+        "eta": product / total_mass ** 2,
+        "s1_x": spin_1[..., 0],
+        "s1_y": spin_1[..., 1],
+        "s1_z": spin_1[..., 2],
+        "s2_x": spin_2[..., 0],
+        "s2_y": spin_2[..., 1],
+        "s2_z": spin_2[..., 2],
+        "lambda_1": f64(lambda_1),
+        "lambda_2": f64(lambda_2),
+        "d_L": f64(distance_mpc),
+        "phase_c": f64(reference_orbital_phase),
+        "iota": f64(inclination_radians),
+    }
+
+
+def _frequency_domain_polarisations(
+    approximant: Approximant,
+    frequencies,
+    parameters: dict,
+    f_ref,
+    coalescence_time,
+):
+    """
+    Plus and cross polarisations of one source from ripple, on ``frequencies``.
+
+    ``frequencies`` is a uniform grid starting at 0 Hz. The model is evaluated
+    above 0 Hz only, and the 0 Hz bin is zero. Ripple's models place the merger
+    at t = 0; a linear phase moves it to ``coalescence_time`` seconds.
+    """
+    model = ripplegw.waveform(approximant.value, f_ref=f_ref)
+    missing = [name for name in model.parameter_names if name not in parameters]
+    if missing:
+        raise ValueError(  # pragma: no cover
+            f"Approximant {approximant.value} needs parameters {missing}, "
+            "which gravyflow does not supply."
+        )
+
+    positive = frequencies[1:]
+    strain = model(positive, {name: parameters[name] for name in model.parameter_names})
+    time_shift = jnp.exp(-2j * jnp.pi * positive * coalescence_time)
+    dc = jnp.zeros((1,), dtype=jnp.complex128)
+
+    hp = jnp.concatenate([dc, strain["p"] * time_shift])
+    hc = jnp.concatenate([dc, strain["c"] * time_shift])
+    return hp, hc
+
+
+@jax.jit(static_argnames=["num_waveforms", "sample_rate_hertz", "duration_seconds", "approximant", "f_ref"])
 def _generate_cbc_waveform_jit(
     num_waveforms: int = 1,
     sample_rate_hertz: float = 4096.0,
@@ -153,50 +200,10 @@ def _generate_cbc_waveform_jit(
     coalescence_time: float = None
 ):
     """
-    JIT-compiled core of generate_cbc_waveform.
-    """
-    # ... (rest of the function body is unchanged, just indented? No, replace_file_content replaces the block)
-    # Wait, I need to provide the body if I replace the definition.
-    # But the body is long.
-    # I can just rename the decorator and function name, then add the wrapper below.
-    # But the wrapper needs to call the JIT function.
-    
-    # Let's try to rename the function in place, and add the wrapper.
-    # But I can't easily insert the wrapper *after* the function without reading the whole file or guessing line numbers.
-    # Actually, I can rename the function definition line.
-    # And then add the wrapper at the end of the file?
-    # Or rename it, and add the wrapper *before* it? No, wrapper calls it.
-    
-    # I'll rename the function to `_generate_cbc_waveform_jit`.
-    # And then I'll append the wrapper `generate_cbc_waveform` at the end of the file.
-    
-    pass
-
-# Actually, I'll use multi_replace to do it cleanly.
-# 1. Rename the function definition.
-# 2. Add the wrapper at the end of the file.
-
-# Wait, `replace_file_content` replaces a block.
-# I will replace lines 102-122 with the renamed function definition.
-# And I will append the wrapper at the end of the file.
-
-    """
-    Generates time-domain waveforms using ripplegw.
+    Generates time-domain waveforms using ripple.
     Returns array of shape (num_waveforms, 2, num_samples).
     """
-    
-    # Handle string input for backward compatibility
-    if isinstance(approximant, str):
-        try:
-            approximant = Approximant(approximant)
-        except ValueError:
-            raise ValueError(f"Approximant '{approximant}' not supported. Available: {[a.value for a in Approximant]}")
-    
-    if approximant not in APPROXIMANT_MODULES:
-        raise ValueError(f"Approximant {approximant} not supported. Available: {list(APPROXIMANT_MODULES.keys())}")  # pragma: no cover
-        
-    waveform_module = APPROXIMANT_MODULES[approximant]
-    gen_func = getattr(waveform_module, f"gen_{approximant.value}_hphc")
+    approximant = _as_approximant(approximant)
 
     # Helper to ensure JAX array
     def ensure_jax(val, length):
@@ -249,63 +256,22 @@ def _generate_cbc_waveform_jit(
     # This prevents the waveform from starting before the buffer and wrapping around.
     f_mins = calc_minimum_frequency(m1_jax, m2_jax, tc_jax)
     
-    # We need f_l for frequency grid.
-    # ripple gen_func takes `fs`.
-    # We define fs based on duration and sample rate.
-    
     f_u = sample_rate_hertz / 2.0
     num_samples = int(sample_rate_hertz * duration_seconds)
     num_freqs = num_samples // 2 + 1
     # Use float64 for frequency grid to ensure phase precision
     fs = jnp.linspace(0, f_u, num_freqs, dtype=jnp.float64)
-    
-    # Mc, eta calculation
-    # ms_to_Mc_eta takes (m1, m2) in solar masses
-    # Vectorize it
-    # ms_to_Mc_eta is JAX-jit compatible.
-    
-    Mc, eta = jax.vmap(ms_to_Mc_eta)(jnp.stack([m1_jax, m2_jax], axis=1))
-    
-    # Construct theta
-    if approximant in [Approximant.IMRPhenomD, Approximant.IMRPhenomXAS]:
-        chi1 = spin_1_in[:, 2]
-        chi2 = spin_2_in[:, 2]
-        theta = jnp.stack([Mc, eta, chi1, chi2, dist_jax, tc_jax, phi_jax, inc_jax], axis=1)
-        theta = theta.astype(jnp.float64)
-        
-    elif approximant == Approximant.IMRPhenomPv2:
-        chi1x = spin_1_in[:, 0]
-        chi1y = spin_1_in[:, 1]
-        chi1z = spin_1_in[:, 2]
-        chi2x = spin_2_in[:, 0]
-        chi2y = spin_2_in[:, 1]
-        chi2z = spin_2_in[:, 2]
-        theta = jnp.stack([
-            Mc, eta, 
-            chi1x, chi1y, chi1z, 
-            chi2x, chi2y, chi2z, 
-            dist_jax, tc_jax, phi_jax, inc_jax
-        ], axis=1)
-        
-    elif approximant in [Approximant.TaylorF2, Approximant.IMRPhenomD_NRTidalv2]:
-        chi1 = spin_1_in[:, 2]
-        chi2 = spin_2_in[:, 2]
-        theta = jnp.stack([
-            Mc, eta, 
-            chi1, chi2, 
-            lambda1_jax, lambda2_jax, 
-            dist_jax, tc_jax, phi_jax, inc_jax
-        ], axis=1)
-    else:
-        raise ValueError(f"Parameter packing for {approximant} not implemented.")  # pragma: no cover
 
-    # Generate batch
-    # We use jax.vmap directly.
-    # gen_func is JIT-able.
-    
-    def gen_one(theta_i, f_min_i):
-        hp, hc = gen_func(fs, theta_i, f_ref)
-        
+    parameters = _source_parameters(
+        m1_jax, m2_jax,
+        spin_1_in, spin_2_in,
+        lambda1_jax, lambda2_jax,
+        dist_jax, phi_jax, inc_jax
+    )
+
+    def gen_one(parameters_i, f_min_i, tc_i):
+        hp, hc = _frequency_domain_polarisations(approximant, fs, parameters_i, f_ref, tc_i)
+
         # Apply taper to avoid ringing from hard frequency cut
         taper_width = 8.0 # Hz
         f_taper_end = f_min_i + taper_width
@@ -325,7 +291,7 @@ def _generate_cbc_waveform_jit(
         
         return hp, hc
 
-    hp_freq, hc_freq = jax.vmap(gen_one)(theta, f_mins)
+    hp_freq, hc_freq = jax.vmap(gen_one)(parameters, f_mins, tc_jax)
     
     # IFFT
     # jnp.fft.irfft
@@ -419,7 +385,8 @@ def generate_cbc_waveform(
         lambda_1=lambda_1,
         lambda_2=lambda_2,
         approximant=approximant,
-        f_ref=f_ref,
+        # The reference frequency configures the model, so it is static.
+        f_ref=float(f_ref),
         coalescence_time=coalescence_time
     )
     

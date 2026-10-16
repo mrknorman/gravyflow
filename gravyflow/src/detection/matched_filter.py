@@ -92,15 +92,13 @@ class MatchedFilter:
         if self._templates is not None and not force_regenerate:
             return self._templates
         
-        # Import ripple here to avoid circular imports
-        try:
-            from ripple.waveforms import IMRPhenomD
-            from ripple import ms_to_Mc_eta
-        except ImportError:
-            raise ImportError(
-                "ripple is required for template generation. "
-                "Install with: pip install ripple-gw"
-            )
+        # Import here to avoid circular imports
+        from gravyflow.src.dataset.features.waveforms.cbc import (
+            Approximant,
+            _frequency_domain_polarisations,
+            _source_parameters,
+            calc_minimum_frequency,
+        )
         
         mass_1, mass_2 = self._template_params
         num_samples = int(self.duration_seconds * self.sample_rate_hertz)
@@ -120,18 +118,16 @@ class MatchedFilter:
         # Generate templates using vmap
         @jax.vmap
         def generate_one(m1, m2):
-            # Convert component masses to chirp mass and symmetric mass ratio
-            Mc, eta = ms_to_Mc_eta(jnp.array([m1, m2]))
+            # Non-spinning IMRPhenomD, through the same ripple path as the CBC generator
+            parameters = _source_parameters(
+                m1, m2, jnp.zeros(3), jnp.zeros(3), 0.0, 0.0, distance_mpc, phi, inc
+            )
+            hp, hc = _frequency_domain_polarisations(
+                Approximant.IMRPhenomD, freqs, parameters, f_ref, tc
+            )
             
-            # ripple IMRPhenomD expects theta = [Mc, eta, chi1, chi2, dist, tc, phi, inc]
-            theta = jnp.array([Mc, eta, 0.0, 0.0, distance_mpc, tc, phi, inc])
-            
-            # Get frequency-domain waveform
-            hp, hc = IMRPhenomD.gen_IMRPhenomD_hphc(freqs, theta, f_ref)
-            
-            # Apply low-frequency mask to avoid NaN (below where waveform exists)
+            # Apply low-frequency mask (below where the template starts in the buffer)
             # Calculate minimum frequency for this mass pair
-            from gravyflow.src.dataset.features.waveforms.cbc import calc_minimum_frequency
             f_min = calc_minimum_frequency(m1, m2, tc)
             
             # Apply taper
