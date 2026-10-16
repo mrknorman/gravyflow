@@ -318,6 +318,63 @@ def _resolve_spectrum(
     return estimate_psd(background, sample_rate_hertz, config)
 
 
+def _filter_settings(spectrum: PowerSpectrum, num_samples: int, sample_rate_hertz: float):
+    """
+    (ntaps, ncorner, nupper, gain) of the whitening filter for a num_samples
+    series: the FIR length, the band's transfer-function edges and the
+    inverse-bias power gain (1.0 when the correction is off).
+    """
+    config = spectrum.config
+    ntaps = config.num_taps(sample_rate_hertz)
+    if ntaps % 2:
+        ntaps += 1
+    if num_samples < ntaps:
+        raise ValueError(
+            f"The timeseries has {num_samples} samples ({num_samples / sample_rate_hertz:g} s), "
+            f"shorter than the {ntaps}-tap ({config.filter_duration_seconds:g} s) whitening "
+            "filter; lengthen the window or shorten the filter."
+        )
+    # The edge tapers sit outside the band, so the filter has full gain on every
+    # bin the SNR counts ([f_low, f_high), see SpectralConfig.band_indices); only
+    # at the Nyquist frequency does the taper fall inside.
+    df = sample_rate_hertz / num_samples
+    ncorner = 0
+    if config.lower_frequency_hertz:
+        ncorner = max(int(config.lower_frequency_hertz / df) - EDGE_TAPER_BINS, 0)
+    nupper = None
+    if config.upper_frequency_hertz is not None:
+        nupper = min(int(config.upper_frequency_hertz / df) + EDGE_TAPER_BINS, num_samples // 2 + 1)
+
+    gain = 1.0
+    if config.correct_inverse_bias:
+        gain = whitening_gain(
+            config.nperseg(sample_rate_hertz), config.noverlap(sample_rate_hertz),
+            spectrum.num_segments, config.psd_method, num_samples, ntaps,
+        )
+    return ntaps, ncorner, nupper, gain
+
+
+def whitening_filter(spectrum: PowerSpectrum, num_samples: int, window: str = "hann"):
+    """
+    The FIR filter (..., ntaps) that `whiten` applies, with this spectrum, to a
+    num_samples series (the whitened series is the 'same'-mode convolution of the
+    series, divided by the spectrum's scale, with this filter, times
+    sqrt(2) / sqrt(gain)). One filter per row of the spectrum. A matched filter
+    whitens its templates with it, so they see exactly what the data saw.
+    """
+    sample_rate_hertz = spectrum.sample_rate_hertz
+    ntaps, ncorner, nupper, _ = _filter_settings(spectrum, int(num_samples), sample_rate_hertz)
+    return _fir(spectrum, int(num_samples), ntaps, ncorner, nupper, window)
+
+
+@jax.jit(static_argnames=["num_samples", "ntaps", "ncorner", "nupper", "window"])
+def _fir(spectrum: PowerSpectrum, num_samples, ntaps, ncorner, nupper, window):
+    # Work in the background's normalised units: the transfer 1/ASD then has the
+    # same magnitude at any input scale.
+    asd = spectrum.interpolate(num_samples, amplitude=True)
+    return fir_from_transfer(1.0 / asd, ntaps, window=window, ncorner=ncorner, nupper=nupper)
+
+
 def whiten(
     timeseries,
     background: Union[jnp.ndarray, PowerSpectrum],
@@ -370,33 +427,7 @@ def whiten(
         raise ValueError("num_samples differs from the timeseries length.")
     num_samples = int(timeseries.shape[-1])
 
-    config = spectrum.config
-    ntaps = config.num_taps(sample_rate_hertz)
-    if ntaps % 2:
-        ntaps += 1
-    if num_samples < ntaps:
-        raise ValueError(
-            f"The timeseries has {num_samples} samples ({num_samples / sample_rate_hertz:g} s), "
-            f"shorter than the {ntaps}-tap ({config.filter_duration_seconds:g} s) whitening "
-            "filter; lengthen the window or shorten the filter."
-        )
-    # The edge tapers sit outside the band, so the filter has full gain on every
-    # bin the SNR counts ([f_low, f_high), see SpectralConfig.band_indices); only
-    # at the Nyquist frequency does the taper fall inside.
-    df = sample_rate_hertz / num_samples
-    ncorner = 0
-    if config.lower_frequency_hertz:
-        ncorner = max(int(config.lower_frequency_hertz / df) - EDGE_TAPER_BINS, 0)
-    nupper = None
-    if config.upper_frequency_hertz is not None:
-        nupper = min(int(config.upper_frequency_hertz / df) + EDGE_TAPER_BINS, num_samples // 2 + 1)
-
-    gain = 1.0
-    if config.correct_inverse_bias:
-        gain = whitening_gain(
-            config.nperseg(sample_rate_hertz), config.noverlap(sample_rate_hertz),
-            spectrum.num_segments, config.psd_method, num_samples, ntaps,
-        )
+    ntaps, ncorner, nupper, gain = _filter_settings(spectrum, num_samples, sample_rate_hertz)
     out = _whiten(timeseries, spectrum, ntaps, ncorner, nupper, detrend, window, float(1.0 / np.sqrt(gain)))
     return out[0] if is_1d else out
 
@@ -409,9 +440,7 @@ def _whiten(timeseries, spectrum: PowerSpectrum, ntaps, ncorner, nupper, detrend
     # Work in the background's normalised units: the transfer 1/ASD then has the
     # same magnitude at any input scale.
     timeseries = timeseries / spectrum.scale
-    asd = spectrum.interpolate(num_samples, amplitude=True)
-    transfer = 1.0 / asd
-    fir = fir_from_transfer(transfer, ntaps, window=window, ncorner=ncorner, nupper=nupper)
+    fir = _fir(spectrum, num_samples, ntaps, ncorner, nupper, window)
     out = convolve(timeseries, fir, window=window)
     # sqrt(2 dt) in physical units; in normalised units dt cancels with the
     # sample rate folded into the normalised PSD.
