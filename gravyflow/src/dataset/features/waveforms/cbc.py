@@ -168,13 +168,22 @@ def _frequency_domain_polarisations(
             "which gravyflow does not supply."
         )
 
-    positive = frequencies[1:]
-    strain = model(positive, {name: parameters[name] for name in model.parameter_names})
-    time_shift = jnp.exp(-2j * jnp.pi * positive * coalescence_time)
-    dc = jnp.zeros((1,), dtype=jnp.complex128)
+    # Some models read the grid spacing from their first two frequencies, so the
+    # model sees a uniform grid moved up one bin, which never reaches 0 Hz, and
+    # its output is rolled back down: bin k holds the model at bin k's
+    # frequency, and bin 0 is zeroed. Under jit and vmap this runs at the
+    # model's own speed; concatenating a zero bin onto the output of a model
+    # evaluated above 0 Hz nearly doubled the cost.
+    spacing = frequencies[1] - frequencies[0]
+    strain = model(
+        frequencies + spacing,
+        {name: parameters[name] for name in model.parameter_names},
+    )
+    time_shift = jnp.exp(-2j * jnp.pi * frequencies * coalescence_time)
+    dc = jnp.arange(frequencies.shape[0]) == 0
 
-    hp = jnp.concatenate([dc, strain["p"] * time_shift])
-    hc = jnp.concatenate([dc, strain["c"] * time_shift])
+    hp = jnp.where(dc, 0.0, jnp.roll(strain["p"], 1) * time_shift)
+    hc = jnp.where(dc, 0.0, jnp.roll(strain["c"], 1) * time_shift)
     return hp, hc
 
 
