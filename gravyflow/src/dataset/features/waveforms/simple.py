@@ -65,9 +65,6 @@ class PeriodicWaveGenerator(gf.WaveformGenerator):
         self.phase_radians = self.ensure_float("phase_radians", self.phase_radians)
         self.duration_seconds = self.ensure_float("duration_seconds", self.duration_seconds)
         
-        if self.scale_factor is None:
-            self.scale_factor = 1.0
-        
         super().__post_init__()
     
     def get_max_generated_duration(self):
@@ -141,7 +138,7 @@ class PeriodicWaveGenerator(gf.WaveformGenerator):
             gf.WaveformParameters.DURATION_SECONDS: dur,
         }
         
-        return waveform * self.scale_factor, params
+        return waveform, params
     
     def _generate_envelope(self, max_samples, dur_samples):
         """Generate Hann window envelopes centered in the output."""
@@ -188,9 +185,6 @@ class SineGaussianGenerator(gf.WaveformGenerator):
         self.quality_factor = self.ensure_float("quality_factor", self.quality_factor)
         self.amplitude = self.ensure_float("amplitude", self.amplitude)
         self.phase_radians = self.ensure_float("phase_radians", self.phase_radians)
-        
-        if self.scale_factor is None:
-            self.scale_factor = 1.0
         
         super().__post_init__()
     
@@ -262,7 +256,7 @@ class SineGaussianGenerator(gf.WaveformGenerator):
             gf.WaveformParameters.TAU_SECONDS: tau,
         }
         
-        return waveform * self.scale_factor, params
+        return waveform, params
 
 
 @dataclass  
@@ -299,9 +293,6 @@ class ChirpletGenerator(gf.WaveformGenerator):
         self.amplitude = self.ensure_float("amplitude", self.amplitude)
         self.duration_seconds = self.ensure_float("duration_seconds", self.duration_seconds)
         self.phase_radians = self.ensure_float("phase_radians", self.phase_radians)
-        
-        if self.scale_factor is None:
-            self.scale_factor = 1.0
         
         super().__post_init__()
     
@@ -361,7 +352,7 @@ class ChirpletGenerator(gf.WaveformGenerator):
             gf.WaveformParameters.DURATION_SECONDS: dur,
         }
         
-        return waveform * self.scale_factor, params
+        return waveform, params
     
     def _generate_envelope(self, max_samples, dur_samples):
         """Generate Hann window envelopes."""
@@ -408,9 +399,6 @@ class RingdownGenerator(gf.WaveformGenerator):
         self.damping_time_seconds = self.ensure_float("damping_time_seconds", self.damping_time_seconds)
         self.amplitude = self.ensure_float("amplitude", self.amplitude)
         self.phase_radians = self.ensure_float("phase_radians", self.phase_radians)
-        
-        if self.scale_factor is None:
-            self.scale_factor = 1.0
         
         super().__post_init__()
     
@@ -466,4 +454,4 @@ class RingdownGenerator(gf.WaveformGenerator):
             gf.WaveformParameters.PHASE_RADIANS: phase,
         }
         
-        return waveform * self.scale_factor, params
+        return waveform, params

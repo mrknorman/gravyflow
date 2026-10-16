@@ -171,7 +171,7 @@ def snr(
 
 from gravyflow.src.utils.tensor import crop_samples
 
-@jax.jit(static_argnames=["sample_rate_hertz", "fft_duration_seconds", "overlap_duration_seconds", "lower_frequency_cutoff", "onsource_duration_seconds"])
+@jax.jit(static_argnames=["sample_rate_hertz", "fft_duration_seconds", "overlap_duration_seconds", "lower_frequency_cutoff", "onsource_duration_seconds", "return_scale_factor"])
 def scale_to_snr(
         injection, 
         background,
@@ -180,7 +180,8 @@ def scale_to_snr(
         fft_duration_seconds: float = 4.0, 
         overlap_duration_seconds: float = 2.0,
         lower_frequency_cutoff: float = 20.0,
-        onsource_duration_seconds: float = None
+        onsource_duration_seconds: float = None,
+        return_scale_factor: bool = False
     ):
     
     injection = ops.convert_to_tensor(injection)
@@ -239,4 +240,6 @@ def scale_to_snr(
     # Multiply using broadcasting
     scaled_injection = injection * scale_factor
     
+    if return_scale_factor:
+        return scaled_injection, ops.reshape(scale_factor, [-1])
     return scaled_injection

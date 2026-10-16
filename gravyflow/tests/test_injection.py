@@ -258,7 +258,7 @@ def test_injection_iteration(
 
 
 def test_calculate_hrss():
-    # Batch=2, Channels=1, Time=100
+    # Batch=2, Channels=1, Time=100, sampled at 100 Hz (dt = 0.01 s)
     # Signal 1: Amplitude 1.0
     # Signal 2: Amplitude 2.0
     
@@ -270,23 +270,23 @@ def test_calculate_hrss():
     injection = injection[:, np.newaxis, :] # (2, 1, 100)
     injection = ops.convert_to_tensor(injection)
     
-    hrss = gf_inj.calculate_hrss(injection)
+    hrss = gf_inj.calculate_hrss(injection, 100.0)
     
-    # Expected: sqrt(sum(x^2))
-    # s1: sqrt(100 * 1^2) = 10.0
-    # s2: sqrt(100 * 2^2) = 20.0
+    # Expected: sqrt(sum(x^2) dt)
+    # s1: sqrt(100 * 1^2 * 0.01) = 1.0
+    # s2: sqrt(100 * 2^2 * 0.01) = 2.0
     
     assert ops.shape(hrss) == (2,)
-    np.testing.assert_allclose(hrss, [10.0, 20.0], atol=1e-5)
+    np.testing.assert_allclose(hrss, [1.0, 2.0], atol=1e-5)
 
 def test_scale_to_hrss():
     t = np.ones((100,), dtype=np.float32)
     injection = ops.convert_to_tensor(t.reshape(1, 1, 100))
     
     target_hrss = 5.0
-    scaled = gf_inj.scale_to_hrss(injection, target_hrss)
+    scaled = gf_inj.scale_to_hrss(injection, target_hrss, 100.0)
     
-    new_hrss = gf_inj.calculate_hrss(scaled)
+    new_hrss = gf_inj.calculate_hrss(scaled, 100.0)
     np.testing.assert_allclose(new_hrss, [target_hrss], atol=1e-5)
 
 def test_ensure_last_dim_even():
@@ -369,15 +369,13 @@ def test_scale_to_hpeak():
 
 
 def test_calculate_hpeak():
-    """Test calculate_hpeak function.
-    
-    Note: calculate_hpeak returns max over last axis only (per-channel peaks).
-    """
+    """Test calculate_hpeak function: one peak, max_t sqrt(sum over
+    polarisations of h^2), per example."""
     # Simple case - single batch, single channel
     t = np.array([1.0, 2.0, 3.0, 2.0, 1.0], dtype=np.float32)
     injection = ops.convert_to_tensor(t.reshape(1, 1, 5))
     hpeak = gf_inj.calculate_hpeak(injection)
-    # Shape is (1, 1) - batch and channel dims preserved
+    assert ops.shape(hpeak) == (1,)
     assert float(ops.max(hpeak)) == 3.0
     
     # Negative peak (should return absolute value)
@@ -385,73 +383,6 @@ def test_calculate_hpeak():
     injection = ops.convert_to_tensor(t.reshape(1, 1, 4))
     hpeak = gf_inj.calculate_hpeak(injection)
     assert float(ops.max(hpeak)) == 5.0
-
-
-def test_scale_function_snr():
-    """Test scale function with SNR type (covers lines 120-128)."""
-    # Create a simple sinusoidal injection
-    t = np.linspace(0, 1, 1024, endpoint=False).astype(np.float32)
-    signal = np.sin(2 * np.pi * 10 * t)
-    injection = np.stack([signal, signal * 0.5], axis=0)
-    injection = injection[np.newaxis, :, :]  # (1, 2, 1024)
-    injection = ops.convert_to_tensor(injection.astype(np.float32))
-    
-    # Create noise-like onsource
-    onsource = np.random.randn(1, 1, 1024).astype(np.float32) * 0.1
-    onsource = ops.convert_to_tensor(onsource)
-    
-    target_snr = np.array([20.0], dtype=np.float32)
-    
-    scaled = gf_inj.scale(
-        injection, 
-        onsource, 
-        target_snr,
-        sample_rate_hertz=1024.0,
-        scaling_type="SNR"
-    )
-    
-    # Shape preserved
-    assert ops.shape(scaled) == ops.shape(injection)
-
-
-def test_scale_function_hrss():
-    """Test scale function with HRSS type (covers lines 129-133)."""
-    injection = np.ones((1, 1, 100), dtype=np.float32)
-    injection = ops.convert_to_tensor(injection)
-    
-    target_hrss = np.array([5.0], dtype=np.float32)
-    
-    scaled = gf_inj.scale(
-        injection, 
-        None,  # onsource not needed for HRSS
-        target_hrss,
-        sample_rate_hertz=1024.0,  # Required but not used for HRSS
-        scaling_type="HRSS"
-    )
-    
-    assert scaled is not None
-    new_hrss = gf_inj.calculate_hrss(scaled)
-    np.testing.assert_allclose(new_hrss, [5.0], atol=1e-4)
-
-
-def test_scale_function_hpeak():
-    """Test scale function with HPEAK type (covers lines 134-138)."""
-    injection = np.ones((1, 1, 100), dtype=np.float32)
-    injection = ops.convert_to_tensor(injection)
-    
-    target_hpeak = np.array([3.0], dtype=np.float32)
-    
-    scaled = gf_inj.scale(
-        injection, 
-        None,
-        target_hpeak,
-        sample_rate_hertz=1024.0,
-        scaling_type="HPEAK"
-    )
-    
-    assert scaled is not None
-    peak = float(ops.max(ops.abs(scaled)))
-    np.testing.assert_allclose(peak, 3.0, atol=1e-4)
 
 
 def test_scaling_types_get():
@@ -512,13 +443,14 @@ def test_scaling_method_scale_snr():
     # Sample scaling parameters
     scaling_parameters = np.array([20.0], dtype=np.float32)
     
-    scaled = scaling.scale(
+    scaled, factor = scaling.scale(
         injection, onsource, scaling_parameters, 
         sample_rate_hertz=1024.0, onsource_duration_seconds=1.0
     )
     
     assert scaled is not None
     assert ops.shape(scaled) == ops.shape(injection)
+    assert ops.shape(factor) == (1,)
 
 
 # Removed: test_scaling_method_invalid_type (empty version)
@@ -563,7 +495,8 @@ def test_waveform_generator_copy():
     
     # Verify it's a copy, not the same object
     assert gen_copy is not gen
-    assert gen_copy.scale_factor == gen.scale_factor
+    assert gen_copy.duration_seconds is not gen.duration_seconds
+    assert gen_copy.injection_chance == gen.injection_chance
 
 
 def test_waveform_generator_get_max_generated_duration():
@@ -665,14 +598,14 @@ def test_scaling_method_scale_hrss():
     # Scaling parameters (HRSS values)
     scaling_parameters = np.array([5.0], dtype=np.float32)
     
-    scaled = scaling.scale(
+    scaled, factor = scaling.scale(
         injection, None, scaling_parameters, 
         sample_rate_hertz=1024.0
     )
     
     assert scaled is not None
     # Verify HRSS was scaled correctly
-    new_hrss = gf_inj.calculate_hrss(scaled)
+    new_hrss = gf_inj.calculate_hrss(scaled, 1024.0)
     np.testing.assert_allclose(new_hrss, [5.0], atol=1e-3)
 
 
@@ -689,7 +622,7 @@ def test_scaling_method_scale_hpeak():
     # Scaling parameters
     scaling_parameters = np.array([3.0], dtype=np.float32)
     
-    scaled = scaling.scale(
+    scaled, factor = scaling.scale(
         injection, None, scaling_parameters, 
         sample_rate_hertz=1024.0
     )
@@ -771,7 +704,6 @@ def test_incoherent_generator():
     incoherent_gen = gf_inj.IncoherentGenerator([gen1, gen2])
     
     # Verify properties are inherited from first generator
-    assert incoherent_gen.scale_factor == gen1.scale_factor
     assert incoherent_gen.injection_chance == gen1.injection_chance
     
     # Generate waveforms
@@ -1155,7 +1087,6 @@ def test_waveform_generator_load_missing_scaling_type():
         "injection_chance": 1.0,
         "front_padding_duration_seconds": 0.0,
         "back_padding_duration_seconds": 0.0,
-        "scale_factor": 1.0,
         "duration_seconds": 1.0,
         "min_frequency_hertz": 10.0,
         "max_frequency_hertz": 100.0
@@ -1174,8 +1105,7 @@ def test_waveform_generator_load_invalid_waveform_type():
     config = {
         "type": "INVALID_WAVEFORM",
         "scaling_distribution": {"value": 1.0, "type_": "CONSTANT"},
-        "scaling_type": "SNR",
-        "scale_factor": 1.0
+        "scaling_type": "SNR"
     }
     
     with patch("json.load", return_value=config):
@@ -1259,7 +1189,6 @@ def test_incoherent_generator_stack_failure():
     gen1.injection_chance = 1.0
     gen1.front_padding_duration_seconds = 0.0
     gen1.back_padding_duration_seconds = 0.0
-    gen1.scale_factor = 1.0
     
     gen2 = MagicMock()
     gen2.generate.return_value = (ops.zeros((2, 1, 200)), {}) # Different length
@@ -1330,29 +1259,6 @@ def test_scale_to_hpeak_vector():
     assert np.max(np.abs(scaled_np[0])) == pytest.approx(6.0, rel=1e-3)
     assert np.max(np.abs(scaled_np[1])) == pytest.approx(2.0, rel=1e-3)
 
-def test_waveform_generator_load_with_scale_factor():
-    """Test load with scale_factor in config (covers line 316)."""
-    config = {
-        "type": "WNB",
-        "scaling_distribution": {"value": 1.0, "type_": "CONSTANT"},
-        "scaling_type": "SNR",
-        "scaling_type": "SNR",
-        "scale_factor": 2.5,
-        "duration_seconds": {"value": 1.0, "type_": "CONSTANT"},
-        "min_frequency_hertz": {"value": 10.0, "type_": "CONSTANT"},
-        "max_frequency_hertz": {"value": 100.0, "type_": "CONSTANT"},
-        "injection_chance": 1.0,
-        "front_padding_duration_seconds": 0.0,
-        "back_padding_duration_seconds": 0.0
-    }
-    
-    with patch("json.load", return_value=config):
-        mock_path = MagicMock(spec=Path)
-        mock_path.open.return_value.__enter__.return_value = MagicMock()
-        
-        gen = gf.WaveformGenerator.load(mock_path)
-        assert gen.scale_factor == 2.5
-
 def test_injection_generator_snr_scaling():
     """Test InjectionGenerator with SNR scaling type."""
     mock_gen = MagicMock()
@@ -1412,28 +1318,6 @@ def test_scale_to_hpeak_batched():
     assert np.max(np.abs(scaled_np[0])) == pytest.approx(6.0, rel=1e-3)
     # Second example: max was 2.0, scaled to 4.0
     assert np.max(np.abs(scaled_np[1])) == pytest.approx(4.0, rel=1e-3)
-
-def test_waveform_generator_load_with_scale_factor_override():
-    """Test load() when scale_factor argument is passed (covers line 316)."""
-    config = {
-        "type": "WNB",
-        "scaling_distribution": {"value": 1.0, "type_": "CONSTANT"},
-        "scaling_type": "SNR",
-        "duration_seconds": {"value": 1.0, "type_": "CONSTANT"},
-        "min_frequency_hertz": {"value": 10.0, "type_": "CONSTANT"},
-        "max_frequency_hertz": {"value": 100.0, "type_": "CONSTANT"},
-        "injection_chance": 1.0,
-        "front_padding_duration_seconds": 0.0,
-        "back_padding_duration_seconds": 0.0
-    }
-    
-    with patch("json.load", return_value=config):
-        mock_path = MagicMock(spec=Path)
-        mock_path.open.return_value.__enter__.return_value = MagicMock()
-        
-        # Pass scale_factor as argument to load() - this triggers line 316
-        gen = gf.WaveformGenerator.load(mock_path, scale_factor=5.0)
-        assert gen.scale_factor == 5.0
 
 def test_wnb_get_max_duration_uniform_branch():
     """Test get_max_generated_duration when duration is UNIFORM (covers line 525-526)."""
@@ -1497,28 +1381,6 @@ def test_cbc_generate_with_non_enum_parameters():
     except Exception:
         # Even if generation fails, the code paths are hit
         pass
-
-def test_handle_before_projection_signature():
-    """Test that handle_before_projection accepts expected parameters."""
-    import inspect
-    sig = inspect.signature(gf_inj.handle_before_projection)
-    param_names = list(sig.parameters.keys())
-    
-    # Verify expected parameters exist
-    expected = ['injection', 'onsource', 'scaling_parameters', 'sample_rate_hertz', 'scaling_type']
-    for p in expected:
-        assert p in param_names, f"{p} not in handle_before_projection signature"
-
-def test_handle_after_projection_signature():
-    """Test that handle_after_projection accepts expected parameters."""
-    import inspect
-    sig = inspect.signature(gf_inj.handle_after_projection)
-    param_names = list(sig.parameters.keys())
-    
-    # Verify expected parameters exist
-    expected = ['injection', 'onsource', 'scaling_parameters', 'sample_rate_hertz', 'scaling_type']
-    for p in expected:
-        assert p in param_names, f"{p} not in handle_after_projection signature"
 
 def test_batch_injection_parameters_with_none_values():
     """Test batch_injection_parameters handles None values (covers lines 1044, 1049, 1053-1058)."""

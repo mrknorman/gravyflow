@@ -62,134 +62,148 @@ class ScalingMethod:
         onsource,
         scaling_parameters,
         sample_rate_hertz : float,
-        onsource_duration_seconds: float = None
+        onsource_duration_seconds: float = None,
+        measure = None
         ):
-        
-        scaled_injections = None
-        
+        """
+        Scale ``injections`` to the targets ``scaling_parameters``.
+
+        HRSS and HPEAK act on (Batch, 2, Time) polarisations, and give them the
+        target in the units the target is given in. SNR acts on projected
+        (Batch, IFOs, Time) strain against ``onsource``, the background, and
+        is a ratio of same-unit quantities.
+
+        Args:
+            measure: the current hrss or hpeak of each injection, if it was
+                measured elsewhere (for example on a longer buffer); measured
+                on ``injections`` when None. Not used for SNR.
+
+        Returns:
+            (scaled injections, the factor k applied to each example, (Batch,)).
+            Examples with nothing to scale get k = 0.
+        """
         match self.type_:
             
             case ScalingTypes.SNR:
-                
-                scaled_injections = gf.scale_to_snr(
+                return gf.scale_to_snr(
                     injections, 
                     onsource,
                     scaling_parameters,
                     sample_rate_hertz,
                     fft_duration_seconds=1.0,
                     overlap_duration_seconds=0.5,
-                    onsource_duration_seconds=onsource_duration_seconds
+                    onsource_duration_seconds=onsource_duration_seconds,
+                    return_scale_factor=True
                 )
 
             case ScalingTypes.HRSS:
-                scaled_injections = scale_to_hrss(
-                    injections,
-                    scaling_parameters,
-                )
-                
+                if measure is None:
+                    measure = calculate_hrss(injections, sample_rate_hertz)
+                    
             case ScalingTypes.HPEAK:
-                scaled_injections = scale_to_hpeak(
-                    injections,
-                    scaling_parameters,
-                )
+                if measure is None:
+                    measure = calculate_hpeak(injections)
 
             case _:
                 raise ValueError(f"Scaling type {self.type_} not recognised.")
         
-        if scaled_injections is not None:
-            scaled_injections = gf.replace_nan_and_inf_with_zero(
-                scaled_injections
-            )    
-            pass
-        
-        return scaled_injections
+        factor = _ratio(scaling_parameters, measure)
+        return injections * _per_example(factor, injections), factor
 
-def scale(
-        injections,
-        onsource,
-        scaling_parameters,
-        sample_rate_hertz: float,
-        scaling_type: str
-    ):
-    
-    """
-    Function to scale injections based on different scaling types.
-    """
-    
-    if scaling_type == "SNR":
-        return gf.scale_to_snr(
-            injections,
-            onsource,
-            scaling_parameters,
-            sample_rate_hertz,
-            fft_duration_seconds=1.0,
-            overlap_duration_seconds=0.5
-        )
-    elif scaling_type == "HRSS":
-        return scale_to_hrss(
-            injections,
-            scaling_parameters,
-        )
-    elif scaling_type == "HPEAK":
-        return scale_to_hpeak(
-            injections,
-            scaling_parameters,
-        )
+def _per_example(values, like):
+    """Reshape a (Batch,) vector to broadcast against ``like``'s (Batch, ...)."""
+    rank = len(ops.shape(like))
+    return ops.reshape(values, (-1,) + (1,) * (rank - 1))
+
+def _ratio(target, current):
+    """target / current, 0 where current is 0 (nothing to scale)."""
+    target = ops.reshape(ops.convert_to_tensor(target, dtype="float32"), (-1,))
+    current = ops.reshape(ops.convert_to_tensor(current, dtype="float32"), (-1,))
+    positive = current > 0
+    return ops.where(
+        positive, target / ops.where(positive, current, 1.0), 0.0
+    )
+
+def _peak_normalise(injection):
+    """(injection / m, m), with m = max |injection| per example (1 where 0)."""
+    injection = ops.convert_to_tensor(injection, dtype="float32")
+    axes = tuple(range(1, len(ops.shape(injection))))
+    peak = ops.max(ops.abs(injection), axis=axes, keepdims=True)
+    peak = ops.where(peak > 0, peak, 1.0)
+    return injection / peak, ops.reshape(peak, (-1,))
 
 def calculate_hrss(
-    injection
+    injection,
+    sample_rate_hertz : float
     ):
-    
-    return ops.sqrt(
-        ops.sum(
-            ops.sum(injection*injection, axis = 1), 
-            axis = -1
-        )
+    """
+    The root-sum-square strain of each example: sqrt(sum_t (h+^2 + hx^2) dt).
+
+    ``injection`` is (Batch, 2, Time) polarisations, or (Batch, Time); every
+    axis but the first is summed. The LAL/burst convention, as
+    ``XLALMeasureHrss``. Computed as m * hrss(h / m), with m = max |h|, so
+    physical strain (~1e-21) does not underflow in float32.
+
+    Returns: (Batch,), in the units of ``injection`` x sqrt(s).
+    """
+    normalised, peak = _peak_normalise(injection)
+    axes = tuple(range(1, len(ops.shape(normalised))))
+    return peak * ops.sqrt(
+        ops.sum(normalised * normalised, axis=axes) / sample_rate_hertz
     )
 
 def calculate_hpeak(
     injection
     ):
-    
-    return ops.max(ops.abs(injection), axis=-1)
+    """
+    The peak strain of each example: max_t sqrt(h+^2 + hx^2).
+
+    ``injection`` is (Batch, 2, Time) polarisations, or (Batch, Time). The
+    LAL/burst convention, as ``XLALMeasureHPeak``; float32-safe as
+    ``calculate_hrss``.
+
+    Returns: (Batch,), in the units of ``injection``.
+    """
+    normalised, peak = _peak_normalise(injection)
+    if len(ops.shape(normalised)) > 2:
+        magnitude = ops.sqrt(ops.sum(normalised * normalised, axis=1))
+    else:
+        magnitude = ops.abs(normalised)
+    axes = tuple(range(1, len(ops.shape(magnitude))))
+    return peak * ops.max(magnitude, axis=axes)
 
 def scale_to_hrss(
     injection, 
-    desired_hrss
+    desired_hrss,
+    sample_rate_hertz : float
     ):
-    
-    epsilon = 1.0E-7
-    
-    current_hrss = calculate_hrss(
-        injection
-    )
-    
-    scale_factor = desired_hrss/(current_hrss + epsilon)
-    
-    if len(ops.shape(scale_factor)) == 1: 
-        scale_factor = ops.reshape(scale_factor, (-1, 1))
-        
-    scale_factor = ops.expand_dims(scale_factor, axis = 1)
-    
-    return injection*scale_factor
+    """
+    Scale (Batch, 2, Time) polarisations to an hrss of ``desired_hrss``
+    (scalar or (Batch,)). Zero injections stay zero.
+    """
+    factor = _ratio(desired_hrss, calculate_hrss(injection, sample_rate_hertz))
+    return injection * _per_example(factor, injection)
 
 def scale_to_hpeak(
     injection, 
     desired_hpeak
     ):
-    
-    epsilon = 1.0E-7
-    
-    current_hpeak = calculate_hpeak(
-        injection
-    )
-    
-    scale_factor = desired_hpeak/(current_hpeak + epsilon)
-    
-    if len(ops.shape(scale_factor)) == 1: 
-        scale_factor = ops.reshape(scale_factor, (-1, 1))
-    
-    return injection*scale_factor
+    """
+    Scale (Batch, 2, Time) polarisations to an hpeak of ``desired_hpeak``
+    (scalar or (Batch,)). Zero injections stay zero.
+    """
+    factor = _ratio(desired_hpeak, calculate_hpeak(injection))
+    return injection * _per_example(factor, injection)
+
+def to_internal(strain, scale_factor : float = None):
+    """
+    Convert physical strain to internal units, strain x S, where S is
+    ``scale_factor`` (default ``gf.Defaults.scale_factor``). Every stream of
+    physical strain passes through this once.
+    """
+    if scale_factor is None:
+        scale_factor = gf.Defaults.scale_factor
+    return strain * np.float32(scale_factor)
 
 @dataclass 
 class ReturnVariable:
@@ -229,7 +243,6 @@ class WaveformGenerator:
     injection_chance : float = 1.0
     front_padding_duration_seconds : float = 0.0
     back_padding_duration_seconds : float = 0.3
-    scale_factor : Union[float, None] = None
     network : Union[List[gf.IFO], gf.Network, Path, None] = None
 
     distributed_attributes : Union[Tuple, None] = None
@@ -283,7 +296,6 @@ class WaveformGenerator:
         cls,
         path: Path, 
         scaling_method: ScalingMethod = None,
-        scale_factor : float = None,
         network : Union[List[gf.IFO], gf.Network, Path] = None
     ) -> Type[cls]:
 
@@ -324,9 +336,6 @@ class WaveformGenerator:
         else:
             raise ValueError("Missing Scaling Type!")
                         
-        if scale_factor is not None:
-            config["scale_factor"] = scale_factor
-        
         generator = None
         waveform_cls = None
         match config.pop("type"):
@@ -339,7 +348,6 @@ class WaveformGenerator:
                 
         generator = waveform_cls(
             scaling_method=config.pop("scaling_method"),
-            scale_factor=config.pop("scale_factor", None),
             network=cls.init_network(network),
             injection_chance=config.pop("injection_chance"),
             front_padding_duration_seconds=config.pop(
@@ -536,9 +544,6 @@ class WNBGenerator(WaveformGenerator):
         self.min_frequency_hertz = self.ensure_float("min_frequency_hertz", self.min_frequency_hertz)
         self.max_frequency_hertz = self.ensure_float("max_frequency_hertz", self.max_frequency_hertz)
 
-        if self.scale_factor is None:
-            self.scale_factor=1.0
-
         super().__post_init__()
     
     def get_max_generated_duration(self):
@@ -609,7 +614,6 @@ class WNBGenerator(WaveformGenerator):
                 seed=int(seed)
             )
             
-            waveforms *= self.scale_factor
             waveforms = ensure_last_dim_even(waveforms)
             
             # Apply injection chance (randomly zero out waveforms)
@@ -693,9 +697,6 @@ class CBCGenerator(WaveformGenerator):
 
         # Parameter validation warnings
         self._validate_parameters()
-
-        if self.scale_factor is None:
-            self.scale_factor=gf.Defaults.scale_factor
 
         super().__post_init__()
     
@@ -851,8 +852,6 @@ class CBCGenerator(WaveformGenerator):
                     **cbc_kwargs
             )
             
-            waveforms *= self.scale_factor
-
             waveforms = ensure_last_dim_even(waveforms)
             
             # Apply injection chance (randomly zero out waveforms)
@@ -885,7 +884,6 @@ class IncoherentGenerator(WaveformGenerator):
         self.injection_chance = component_generators[0].injection_chance
         self.front_padding_duration_seconds = component_generators[0].front_padding_duration_seconds
         self.back_padding_duration_seconds = component_generators[0].back_padding_duration_seconds
-        self.scale_factor = component_generators[0].scale_factor
         self.network = component_generators[0].network
         
         if self.network is not None:
@@ -929,83 +927,6 @@ class IncoherentGenerator(WaveformGenerator):
         parameters = parameters[0]
 
         return waveforms, parameters
-
-def handle_before_projection(
-        injection,
-        onsource, 
-        scaling_parameters,
-        sample_rate_hertz,
-        scaling_type,
-        seed,
-        x_vector,
-        y_vector,
-        x_length_meters,
-        y_length_meters,
-        x_response,
-        y_response,
-        response,
-        location
-    ):
-
-    scaled = scale(
-        injection,
-        onsource,
-        scaling_parameters,
-        sample_rate_hertz,
-        scaling_type
-    )
-    return gf.project_wave(
-        seed,
-        scaled,
-        sample_rate_hertz,
-        x_vector,
-        y_vector,
-        x_length_meters,
-        y_length_meters,
-        x_response,
-        y_response,
-        response,
-        location
-    )
-
-def handle_after_projection(
-        injection,
-        onsource, 
-        scaling_parameters,
-        sample_rate_hertz,
-        scaling_type,
-        seed,
-        x_vector,
-        y_vector,
-        x_length_meters,
-        y_length_meters,
-        x_response,
-        y_response,
-        response,
-        location
-    ):
-    
-    projected = gf.project_wave(
-        seed,
-        injection,
-        sample_rate_hertz,
-        x_vector,
-        y_vector,
-        x_length_meters,
-        y_length_meters,
-        x_response,
-        y_response,
-        response,
-        location
-    )
-    
-    return scale(
-        projected,
-        onsource,
-        scaling_parameters,
-        sample_rate_hertz,
-        scaling_type
-    )
 
 def roll_vector_zero_padding(vector, shift):
     """
@@ -1095,13 +1016,26 @@ def batch_injection_parameters(parameters_list):
             
     return batched
 
+# Keys of the source measures InjectionGenerator records with each batch.
+SOURCE_HRSS = "source_hrss"
+SOURCE_HPEAK = "source_hpeak"
+
 class InjectionGenerator:
     def __init__(
         self,
         waveform_generators: List[WaveformGenerator],
         parameters_to_return: List = None,
-        seed: int = None
+        seed: int = None,
+        scale_factor: float = None
     ):
+        """
+        Args:
+            scale_factor: S, the internal unit of strain (internal = strain x S).
+                Injections scaled to a physical HRSS or HPEAK are multiplied
+                by S once; the noise must carry the same S. Default:
+                ``gf.Defaults.scale_factor``.
+        """
+        self.scale_factor = scale_factor
         self.waveform_generators = waveform_generators
         if not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
             self.waveform_generators = [self.waveform_generators]
@@ -1205,6 +1139,12 @@ class InjectionGenerator:
                 )
                 
                 mask = generate_mask(waveforms)
+
+                # The source's hrss and hpeak, on the whole generated buffer,
+                # before the window is cut from it.
+                finite = ops.where(ops.isfinite(waveforms), waveforms, 0.0)
+                params[SOURCE_HRSS] = calculate_hrss(finite, sample_rate_hertz)
+                params[SOURCE_HPEAK] = calculate_hpeak(finite)
                 
                 # Check for NaN injections that silently zero the mask
                 num_nan_injections = int(ops.sum(ops.any(ops.isnan(waveforms), axis=(1, 2))))
@@ -1306,7 +1246,46 @@ class InjectionGenerator:
         parameters_to_return,
         onsource_duration_seconds: float = None,
         injection_parameters: Optional[Dict] = None,
+        scale_factor: float = None,
     ):
+        """
+        Scale each generator's injections, project them, and add them to ``onsource``.
+
+        Units: ``onsource`` and ``offsource`` are in internal units, strain x S
+        (``scale_factor``; default this InjectionGenerator's, then
+        ``gf.Defaults.scale_factor``). Each example's polarisations are first
+        normalised to unit hpeak. HRSS and HPEAK: scaled to the physical
+        target, converted to internal units once (``to_internal``), projected
+        and cropped. SNR: projected, cropped and scaled against ``offsource``,
+        so they take the noise's units.
+
+        Returns:
+            onsource: with the injections added.
+            scaled_injections: (Generators, Batch, IFOs, Time), internal units.
+            labels: for each ScalingType requested in ``parameters_to_return``
+                (all of them when it is None) and each type applied: the target
+                for the type applied, and the value it implies for the others
+                (HRSS and HPEAK in physical strain; SNR by the measure SNR
+                scaling uses). NaN where an example has no injection. (Batch,)
+                for one generator, (Batch, Generators) for several.
+                CENTRAL_TIME too, when requested.
+        """
+        if scale_factor is None:
+            scale_factor = self.scale_factor
+        if scale_factor is None:
+            scale_factor = gf.Defaults.scale_factor
+
+        label_types = {
+            generator.scaling_method.type_ for generator in self.waveform_generators
+        }
+        if parameters_to_return is None:
+            label_types |= set(ScalingTypes)
+        else:
+            label_types |= {
+                item for item in parameters_to_return if isinstance(item, ScalingTypes)
+            }
+        labels = {type_: [] for type_ in ScalingTypes if type_ in label_types}
+
         scaled_injections_list = []
         scaling_params_list = []
         
@@ -1486,70 +1465,92 @@ class InjectionGenerator:
             
             # Determine target length from onsource
             target_num_samples = ops.shape(onsource)[-1]
-            
-            if scaling_method.type_.value.ordinality == ScalingOrdinality.BEFORE_PROJECTION:
-                scaled_raw = scaling_method.scale(
-                    raw_waveforms,
-                    scaling_background, 
-                    target_val,
-                    sample_rate,
-                    onsource_duration_seconds=None # Do not crop
-                )
-                
+
+            def project_and_crop(strain):
                 projected = network.project_wave(
-                    scaled_raw,
+                    strain,
                     sample_rate_hertz=sample_rate,
                     right_ascension=input_ra,
                     declination=input_dec,
                     polarization=input_pol
                 )
-                
-                # Crop to target length
                 start = (ops.shape(projected)[-1] - target_num_samples) // 2
-                end = start + target_num_samples
-                projected = projected[..., start:end]
-                
+                return projected[..., start:start + target_num_samples]
+
+            raw = ops.convert_to_tensor(raw_waveforms, dtype="float32")
+            raw = ops.where(ops.isfinite(raw), raw, 0.0)
+
+            # The source's measures, from the whole generated buffer when the
+            # generator recorded them.
+            source_hrss = self._generator_parameter(injection_parameters, SOURCE_HRSS, i)
+            source_hpeak = self._generator_parameter(injection_parameters, SOURCE_HPEAK, i)
+            if source_hrss is None:
+                source_hrss = calculate_hrss(raw, sample_rate)
+            if source_hpeak is None:
+                source_hpeak = calculate_hpeak(raw)
+
+            # 1. Unit hpeak, so no shape overflows float32 at any amplitude.
+            normalisation = _ratio(1.0, source_hpeak)
+            unit = raw * _per_example(normalisation, raw)
+            unit_hrss = ops.reshape(source_hrss, (-1,)) * normalisation
+            unit_hpeak = ops.where(normalisation > 0, 1.0, 0.0)
+
+            type_ = scaling_method.type_
+            if type_.value.ordinality == ScalingOrdinality.BEFORE_PROJECTION:
+                # 2. Physical target; 3. internal units, once; 4-5. project, crop.
+                measure = unit_hrss if type_ == ScalingTypes.HRSS else unit_hpeak
+                physical, physical_factor = scaling_method.scale(
+                    unit, None, target_val, sample_rate, measure=measure
+                )
+                projected = project_and_crop(to_internal(physical, scale_factor))
             else:
-                projected = network.project_wave(
-                    raw_waveforms,
-                    sample_rate_hertz=sample_rate,
-                    right_ascension=input_ra,
-                    declination=input_dec,
-                    polarization=input_pol
-                )
-                
-                # Crop to target length
-                start = (ops.shape(projected)[-1] - target_num_samples) // 2
-                end = start + target_num_samples
-                projected = projected[..., start:end]
-                
-                scaled_raw = scaling_method.scale(
-                    projected,
-                    scaling_background,
+                # 4-5. Project, crop; 6. scale to the SNR against the noise.
+                projected, factor = scaling_method.scale(
+                    project_and_crop(unit),
+                    scaling_background, 
                     target_val,
                     sample_rate,
                     onsource_duration_seconds=onsource_duration_seconds
                 )
-                projected = scaled_raw
-            
+                physical_factor = factor / np.float32(scale_factor)
+
+            # 7. Sum into the noise.
             final_onsource = final_onsource + projected
-            
             scaled_injections_list.append(projected)
-            
-            key = scaling_method.type_ 
-            scaling_params_list.append({key: target_val})
+
+            present = normalisation > 0
+            if mask is not None:
+                present = ops.logical_and(
+                    present, ops.reshape(ops.convert_to_tensor(mask[i]), (-1,)) > 0
+                )
+
+            for label_type in labels:
+                if label_type == type_:
+                    value = target_val
+                elif label_type == ScalingTypes.HRSS:
+                    value = unit_hrss * physical_factor
+                elif label_type == ScalingTypes.HPEAK:
+                    value = unit_hpeak * physical_factor
+                else:
+                    value = gf.snr(
+                        projected if onsource_duration_seconds is None else gf.crop_samples(
+                            projected, onsource_duration_seconds, sample_rate
+                        ),
+                        scaling_background,
+                        sample_rate,
+                        fft_duration_seconds=1.0,
+                        overlap_duration_seconds=0.5
+                    )
+                value = ops.reshape(ops.cast(value, "float32"), (-1,))
+                labels[label_type].append(ops.where(present, value, np.nan))
 
         try:
             scaled_injections = ops.stack(scaled_injections_list, axis=0)
-
-            
-            # Ensure shape matches final_onsource logic?
-            # final_onsource is (Batch, IFOs, Samples).
-            # scaled_injections should match.
             if ops.shape(scaled_injections)[-1] != ops.shape(final_onsource)[-1]:
-                logging.warning(f"Shape mismatch: injections {ops.shape(scaled_injections)} vs onsource {ops.shape(final_onsource)}")
-                # Force match if needed, but better to warn/debug first.
-                
+                logging.warning(
+                    f"Shape mismatch: injections {ops.shape(scaled_injections)} "
+                    f"vs onsource {ops.shape(final_onsource)}"
+                )
         except:
             scaled_injections = None
             
@@ -1563,4 +1564,25 @@ class InjectionGenerator:
         for k, v in combined_scaling_params.items():
             combined_scaling_params[k] = ops.stack(v, axis=0)
 
+        for label_type, values in labels.items():
+            if len(values) == 1:
+                combined_scaling_params[label_type] = values[0]
+            else:
+                combined_scaling_params[label_type] = ops.stack(values, axis=-1)
+
         return final_onsource, scaled_injections, combined_scaling_params
+
+    def _generator_parameter(self, injection_parameters, key, index):
+        """Generator ``index``'s value of a batched injection parameter, or None."""
+        if not injection_parameters or key not in injection_parameters:
+            return None
+        value = injection_parameters[key]
+        if isinstance(value, (list, tuple)):
+            value = value[index] if len(value) == len(self.waveform_generators) else None
+        elif len(ops.shape(value)) > 1 and ops.shape(value)[0] == len(self.waveform_generators):
+            value = value[index]
+        elif len(self.waveform_generators) > 1:
+            return None
+        if value is None:
+            return None
+        return ops.convert_to_tensor(value, dtype="float32")
