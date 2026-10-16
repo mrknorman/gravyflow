@@ -71,34 +71,27 @@ def validate_noise_settings(
             )
             
 def get_max_arrival_time_difference(
-    waveform_generators : List
+    waveform_generators : List,
+    ifos : Optional[List[gf.IFO]] = None
     ) -> float:
-    
-    max_arival_time_difference_seconds : float = 0.01
-    
-    max_arrival_time_differences = []
+    """
+    The lag range of ``ROLLING_PEARSON_ONSOURCE`` (s): the largest light travel
+    time between the detectors of the generators' networks or, with no
+    generator, of the network of ``ifos``; 0.01 s with neither.
 
+    A Python float, because `rolling_pearson` takes it as a static argument.
+    Deriving it from the detectors also when no generator is present keeps
+    noise-only and injection batches the same shape.
+    """
+    networks = []
     if isinstance(waveform_generators, list):
-        for generator in waveform_generators:
-            if (generator is not None) and (generator.network is not None):
-                max_arrival_time_differences.append(
-                    generator.network.max_arrival_time_difference_seconds
-                )     
+        networks = [g.network for g in waveform_generators if g is not None]
     elif isinstance(waveform_generators, dict):
-        for generator in waveform_generators.values(): 
-            if (generator is not None) and (generator["generator"].network is not None):
-                max_arrival_time_differences.append(
-                    generator["generator"].network.max_arrival_time_difference_seconds
-                )     
-    
-    if len(max_arrival_time_differences):
-        # Use ops.stack and ops.max instead of tf
-        max_arrival_time_differences = ops.stack(max_arrival_time_differences)
-        max_arival_time_difference_seconds = ops.max(
-            max_arrival_time_differences
-        )
-    
-    return max_arival_time_difference_seconds
+        networks = [g["generator"].network for g in waveform_generators.values() if g is not None]
+    times = [float(n.max_arrival_time_difference_seconds) for n in networks if n is not None]
+    if not times and ifos:
+        times = [float(gf.Network(ensure_list(ifos)).max_arrival_time_difference_seconds)]
+    return max(times) if times else 0.01
 
 WHITENED_VARIABLES = (
     gf.ReturnVariables.WHITENED_ONSOURCE,
@@ -600,7 +593,9 @@ class GravyflowDataset(keras.utils.PyDataset):
     def _calculate_rolling_pearson(self, whitened_onsource):
         """Calculate rolling Pearson correlation if required."""
         if gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in self.variables_to_return:
-            max_arrival_time_difference_seconds = get_max_arrival_time_difference(self.waveform_generators)
+            max_arrival_time_difference_seconds = get_max_arrival_time_difference(
+                self.waveform_generators, self.noise_obtainer.ifos
+            )
             return gf.rolling_pearson(
                 whitened_onsource,
                 max_arrival_time_difference_seconds,

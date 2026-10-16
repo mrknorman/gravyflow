@@ -19,6 +19,14 @@ def pearson(x, y):
     
     return numerator / (denominator + 1e-5)
 
+def num_lags(max_arrival_time_difference_seconds: float, sample_rate_hertz: float) -> int:
+    """
+    The number of lags `rolling_pearson` computes for each detector pair:
+    ``2 * int(max_arrival_time_difference_seconds * sample_rate_hertz)``.
+    """
+    return 2 * int(float(max_arrival_time_difference_seconds) * float(sample_rate_hertz))
+
+
 @jax.jit(static_argnames=["max_arrival_time_difference_seconds", "sample_rate_hertz"])
 def rolling_pearson(
         tensor, 
@@ -30,7 +38,7 @@ def rolling_pearson(
     # tensor: (Batch, Channels, Time)
     
     # Calculate max arrival time difference in samples
-    max_samples = int(max_arrival_time_difference_seconds * sample_rate_hertz)
+    max_samples = num_lags(max_arrival_time_difference_seconds, sample_rate_hertz) // 2
     
     # The original code uses a doubled max_arrival_time_difference_samples value.
     # The shift logic is: shift = 2M - offset.
