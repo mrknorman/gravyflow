@@ -8,6 +8,7 @@ Available Models:
 - GeorgeHuerta2017Shallow: Shallow CNN from George & Huerta (2017)
 - GeorgeHuerta2017Deep: Deep CNN from George & Huerta (2017)
 - Gabbard2017: Binary black hole detection CNN from Gabbard et al. (2017)
+- MLyCoincidence, MLyCoherence: the burst networks of MLy, Skliris et al. (2024)
 - MatchedFilterBaseline: Traditional matched filtering for comparison
 
 Every network takes ``WHITENED_ONSOURCE`` and returns logits.
@@ -24,6 +25,7 @@ from gravyflow.src.model.examples.george_huerta_2017 import (
     GeorgeHuerta2017Deep,
     GeorgeHuerta2017Config
 )
+from gravyflow.src.model.examples.mly_2024 import MLy, MLyCoherence, MLyCoincidence, MLyConfig
 from gravyflow.src.model.examples.matched_filter_baseline import (
     MatchedFilterBaseline,
     MatchedFilterBaselineConfig
@@ -46,6 +48,10 @@ __all__ = [
     'GeorgeHuerta2017Config',
     'Gabbard2017',
     'Gabbard2017Config',
+    'MLy',
+    'MLyCoincidence',
+    'MLyCoherence',
+    'MLyConfig',
     'MatchedFilterBaseline',
     'MatchedFilterBaselineConfig',
     'DetectionBatches',

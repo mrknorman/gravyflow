@@ -1,206 +1,211 @@
 """
-MLy 2024 - Real-Time Detection of Unmodeled Gravitational-Wave Transients
+MLy: real-time detection of unmodelled gravitational-wave bursts.
 
-Paper: "Real-Time Detection of Unmodeled Gravitational-Wave Transients Using
-       Convolutional Neural Networks"
+Paper: "Toward real-time detection of unmodeled gravitational wave transients
+       using convolutional neural networks"
 Authors: Vasileios Skliris, Michael R. K. Norman, Patrick J. Sutton
-arXiv: 2009.14611v4
+Published: Physical Review D 110, 104034 (2024); arXiv:2009.14611
 
-This module implements the MLy pipeline with two CNN models:
-1. MLyCoincidence (Model 1) - ResNet detecting coincident signals
-2. MLyCoherence (Model 2) - Dual-branch with correlation input
+Two networks, whose scores the pipeline multiplies:
 
-Key Features:
-- Detects generic transients without requiring precise signal models
-- Uses Pearson cross-correlation between detectors for coherence
-- Combined score = Model1_score × Model2_score
+1. `MLyCoincidence` (model 1): three residual blocks over the whitened strain
+   of every detector; it finds signals present in more than one detector.
+2. `MLyCoherence` (model 2): a strain branch and a branch over the Pearson
+   correlation of each detector pair at each lag; it finds signals that are
+   correlated across detectors.
 
-Dataset Configuration:
-- 3 detectors: LIGO-Hanford (H), LIGO-Livingston (L), Virgo (V)
-- 1 second segments at 1024 Hz
-- Whitened with 20 Hz highpass
-- Training signals: White Noise Bursts (WNBs)
+The layer layouts, optimisers and batch size follow the authors' training code
+(github.com/VasSkliris/mly-methods-paper, ``virgo_rescaling/model{1,2}.py``);
+the data follow Section III of the paper where the library allows: 1 s of
+whitened strain at 1024 Hz from H1, L1 and V1, whitened with 16 s of
+offsource, and white-noise bursts (WNBs) of 0.05-0.9 s, 40-480 Hz wide, scaled
+to a network SNR (12-30 for model 1, 10-50 for model 2).
+
+Every network takes ``WHITENED_ONSOURCE`` (model 2 also
+``ROLLING_PEARSON_ONSOURCE``) and returns two logits (noise, signal).
+
+Where this example departs from the paper:
+
+- **Training data.** Noise (type 0) and coherent WNBs (type 1) only, in the
+  paper's ratio of the two (6:3 for model 1, 10:10 for model 2). The paper also
+  trains on single-detector WNBs (type 3, model 1) and incoherent WNBs in each
+  detector (types 2a-2c, model 2), labelled noise; the library cannot yet
+  generate those.
+- **Output.** Two logits with a two-class softmax cross-entropy, where the
+  paper has two sigmoid units with binary cross-entropy: the library's
+  validator ranks the log-odds ``z1 - z0`` of a two-class softmax. The
+  combined score (`MLy.combined_score`) is the log-odds of the product of the
+  two models' signal probabilities, which ranks exactly as the paper's product.
+- **Correlation lags.** The library's rolling Pearson spans the detectors'
+  largest light travel time (54 lags for H1, L1 and V1 at 1024 Hz), where the
+  paper uses ±30 ms (60 lags). The weight count is the same.
+- **Schedule.** Model 2's learning rate is constant (the paper halves it when
+  the loss stalls for 5 epochs). Both runs keep the model with the lowest
+  validation loss and stop early on it (the paper keeps the best validation
+  accuracy and stops on the training loss), and draw new data every step,
+  where the paper reuses one fixed set of 150,000 or 300,000 examples.
+  Keras 3's Nadam has a fixed momentum schedule (the authors' set
+  ``schedule_decay`` to 2e-6).
+- **Noise.** Coloured Gaussian noise from the library's detector PSDs, with no
+  20 Hz high-pass and no rescaling of Virgo's PSD (the paper raises it by 4 for
+  model 1 and 32 for model 2).
+- **WNB band.** The paper gives the bandwidth (uniform over 40-480 Hz) inside a
+  20-512 Hz search band, not the lower edge; the library draws the two edges
+  independently, so the lower edge is uniform over 20-30 Hz and the upper over
+  70-500 Hz, which spans 40-480 Hz of bandwidth (flat over 50-470 Hz).
 """
 
-import os
-from typing import Optional, Tuple, List, Union
-from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
+from typing import Optional, Tuple
 
-import numpy as np
 import keras
+import numpy as np
+from keras import ops
 from keras.layers import (
-    Input, Conv1D, Dense, Flatten, Activation, Add,
-    GlobalAveragePooling1D, BatchNormalization, Concatenate
+    Add, BatchNormalization, Concatenate, Conv1D, Dense, GlobalAveragePooling1D, Permute,
 )
 from keras.models import Model
 
 import gravyflow as gf
-from gravyflow.src.model.examples.base import ExampleModel
+from gravyflow.src.dataset.conditioning.pearson import num_lags
+from gravyflow.src.model.examples.base import MODEL_INPUT, ExampleModel, model_input
+
+# Model 2's second input: the Pearson correlation of each detector pair at each lag.
+CORRELATION_INPUT = gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE
 
 
-@dataclass
+@dataclass(frozen=True)
 class MLyConfig:
-    """
-    Configuration matching MLy paper specifications.
-    
-    References:
-        Skliris et al., arXiv:2009.14611v4
-    """
-    # Sampling parameters
+    """The paper's settings (Section III) and the authors' layer layouts."""
+    # Data
     sample_rate_hertz: float = 1024.0
     onsource_duration_seconds: float = 1.0
-    offsource_duration_seconds: float = 16.0  # For PSD estimation
-    
-    # Correlation parameters
-    max_delay_seconds: float = 0.030  # ±30ms for light travel time
-    
-    # WNB signal parameters (Section III.B)
-    wnb_bandwidth_min_hertz: float = 40.0
-    wnb_bandwidth_max_hertz: float = 480.0
-    wnb_duration_min_seconds: float = 0.05
-    wnb_duration_max_seconds: float = 0.9
-    
-    # SNR ranges for training
-    signal_snr_min: float = 10.0
-    signal_snr_max: float = 50.0
-    glitch_snr_min: float = 6.0
-    glitch_snr_max: float = 70.0
-    
-    # Virgo PSD rescaling factors (Section IV.D)
-    # These lower SNR of training signals in Virgo relative to LIGO
-    virgo_rescale_model1: float = 4.0
-    virgo_rescale_model2: float = 32.0
-    
-    # Training parameters
-    injection_chance: float = 0.5
-    batch_size: int = 32
-    
-    # Model 1 (Coincidence) architecture
-    resnet_filters: Tuple[int, int, int] = (64, 128, 128)
-    resnet_kernels: Tuple[Tuple[int, int], ...] = ((42, 36), (42, 36), (42, 36))
-    
-    # Model 2 (Coherence) architecture
-    strain_filters: Tuple[int, int, int] = (56, 128, 214)
-    strain_kernels: Tuple[int, int, int] = (32, 24, 16)
-    strain_strides: Tuple[int, int, int] = (4, 2, 2)
-    corr_filters: Tuple[int, int] = (64, 64)
-    corr_kernels: Tuple[int, int] = (8, 5)
-    
-    # Dense layers
-    dense_units: int = 256
+    offsource_duration_seconds: float = 16.0
+    ifos: Tuple[gf.IFO, ...] = (gf.IFO.H1, gf.IFO.L1, gf.IFO.V1)
+
+    # WNBs: duration, and the band's lower and upper edges (see the module notes)
+    wnb_duration_seconds: Tuple[float, float] = (0.05, 0.9)
+    wnb_min_frequency_hertz: Tuple[float, float] = (20.0, 30.0)
+    wnb_max_frequency_hertz: Tuple[float, float] = (70.0, 500.0)
+
+    # Network SNR of the training signals, and the fraction of examples holding
+    # one: the paper's ratio of noise to signal (6N:3N and 10N:10N).
+    coincidence_snr: Tuple[float, float] = (12.0, 30.0)
+    coherence_snr: Tuple[float, float] = (10.0, 50.0)
+    coincidence_injection_chance: float = 1.0 / 3.0
+    coherence_injection_chance: float = 0.5
+
+    batch_size: int = 16
+
+    # Model 1: residual blocks (filters, first kernel, second kernel); dense units
+    coincidence_blocks: Tuple[Tuple[int, int, int], ...] = ((64, 42, 36), (128, 42, 36), (128, 42, 36))
+    coincidence_dense_units: Tuple[int, ...] = (256, 256)
+    # Nadam under a triangular cyclic learning rate between these bounds, half
+    # a cycle every coincidence_half_cycle_steps steps: the paper's four passes
+    # over its 135,000 training examples in batches of 16.
+    coincidence_cyclic_learning_rate: Tuple[float, float] = (1e-5, 7e-3)
+    coincidence_half_cycle_steps: int = 33_750
+
+    # Model 2: (filters, kernel, stride) of the strain and correlation branches
+    coherence_strain_convs: Tuple[Tuple[int, int, int], ...] = ((56, 32, 4), (128, 24, 2), (214, 16, 2))
+    coherence_correlation_convs: Tuple[Tuple[int, int, int], ...] = ((64, 8, 1), (64, 5, 1))
+    coherence_dense_units: int = 256
+    coherence_learning_rate: float = 2e-3
+
     num_output_classes: int = 2
 
-
-class MLyCoincidence(ExampleModel):
-    """
-    MLy Coincidence Model (Model 1) - ResNet Architecture
-    
-    Detects coincident signals appearing in at least two detectors.
-    Uses residual blocks with skip connections to prevent vanishing gradients.
-    
-    Architecture (Figure 1 of paper):
-    - 3 Residual blocks with Conv1D layers
-    - BatchNormalization + ReLU after each layer
-    - Global Average Pooling -> Dense(256) -> Dense(256) -> Softmax(2)
-    
-    Input: (batch, 1024, 3) - whitened strain from 3 detectors
-    Output: (batch, 2) - [P(noise), P(signal)]
-    
-    Usage:
-        >>> model = MLyCoincidence.model()
-        >>> dataset = MLyCoincidence.dataset()
-    """
-    
-    config = MLyConfig()
-    
     @classmethod
-    def model(
-        cls,
-        input_shape: Optional[Tuple[int, int]] = None,
-        config: Optional[MLyConfig] = None
-    ) -> keras.Model:
-        """
-        Create the MLy Coincidence ResNet architecture.
-        
-        Architecture from Figure 1:
-        - 3 Residual blocks, each with 2 Conv1D layers
-        - Skip connection adds input to output of each block
-        - ReLU activation + BatchNorm after each Conv
-        
-        Args:
-            input_shape: Shape of input (samples, detectors). Default: (1024, 3)
-            config: Model configuration.
-        
-        Returns:
-            Keras model ready for compilation.
-        """
-        cfg = config or cls.config
-        
-        if input_shape is None:
-            num_samples = int(cfg.onsource_duration_seconds * cfg.sample_rate_hertz)
-            input_shape = (num_samples, 3)  # 3 detectors
-        
-        # Input layer
-        inputs = Input(shape=input_shape, name="strain")
-        x = inputs
-        
-        # 3 Residual blocks
-        for block_idx, (filters, kernels) in enumerate(
-            zip(cfg.resnet_filters, cfg.resnet_kernels)
-        ):
-            block_num = block_idx + 1
-            
-            # Save input for skip connection
-            shortcut = x
-            
-            # First Conv1D in block
-            x = Conv1D(
-                filters, kernels[0], 
-                padding='same',
-                name=f"block{block_num}_conv1"
-            )(x)
-            x = BatchNormalization(name=f"block{block_num}_bn1")(x)
-            x = Activation('relu', name=f"block{block_num}_relu1")(x)
-            
-            # Second Conv1D in block
-            x = Conv1D(
-                filters, kernels[1],
-                padding='same', 
-                name=f"block{block_num}_conv2"
-            )(x)
-            x = BatchNormalization(name=f"block{block_num}_bn2")(x)
-            
-            # Skip connection - need to match dimensions
-            if shortcut.shape[-1] != filters:
-                shortcut = Conv1D(
-                    filters, 1, 
-                    padding='same',
-                    name=f"block{block_num}_shortcut"
-                )(shortcut)
-            
-            x = Add(name=f"block{block_num}_add")([x, shortcut])
-            x = Activation('relu', name=f"block{block_num}_relu2")(x)
-        
-        # Head
-        x = GlobalAveragePooling1D(name="global_pool")(x)
-        x = Dense(cfg.dense_units, name="dense1")(x)
-        x = BatchNormalization(name="dense1_bn")(x)
-        x = Activation('relu', name="dense1_relu")(x)
-        x = Dense(cfg.dense_units, name="dense2")(x)
-        x = BatchNormalization(name="dense2_bn")(x)
-        x = Activation('relu', name="dense2_relu")(x)
-        
-        # Output
-        outputs = Dense(
-            cfg.num_output_classes, 
-            activation='softmax',
-            name="output"
-        )(x)
-        
-        model = Model(inputs=inputs, outputs=outputs, name="MLyCoincidence")
-        return model
-    
+    def cpu(cls) -> "MLyConfig":
+        """The paper's settings with two detectors, H1 and L1."""
+        return replace(cls(), ifos=(gf.IFO.H1, gf.IFO.L1))
+
+    @property
+    def correlation_shape(self) -> Tuple[int, int]:
+        """``ROLLING_PEARSON_ONSOURCE`` per example: (detector pairs, lags)."""
+        n = len(self.ifos)
+        lags = num_lags(gf.Network(list(self.ifos)).max_arrival_time_difference_seconds, self.sample_rate_hertz)
+        return n * (n - 1) // 2, lags
+
+
+@keras.saving.register_keras_serializable(package="gravyflow.mly")
+class CyclicLearningRate(keras.optimizers.schedules.LearningRateSchedule):
+    """
+    A triangular cyclic learning rate (Smith 2017): from ``base`` up to
+    ``peak`` over ``half_cycle_steps`` steps, then back down, repeated.
+    """
+
+    def __init__(self, base: float, peak: float, half_cycle_steps: int):
+        self.base, self.peak, self.half_cycle_steps = float(base), float(peak), int(half_cycle_steps)
+
+    def __call__(self, step):
+        step = ops.cast(step, "float32")
+        half = float(self.half_cycle_steps)
+        cycle = ops.floor(1.0 + step / (2.0 * half))
+        distance = ops.abs(step / half - 2.0 * cycle + 1.0)
+        return self.base + (self.peak - self.base) * ops.maximum(0.0, 1.0 - distance)
+
+    def get_config(self):
+        return {"base": self.base, "peak": self.peak, "half_cycle_steps": self.half_cycle_steps}
+
+
+def _uniform(bounds: Tuple[float, float]) -> gf.Distribution:
+    return gf.Distribution(min_=bounds[0], max_=bounds[1], type_=gf.DistributionType.UNIFORM)
+
+
+def mly_dataset_args(
+    config: MLyConfig,
+    snr: Tuple[float, float],
+    injection_chance: float,
+    input_variables: list,
+    noise_type: gf.NoiseType = gf.NoiseType.COLORED,
+    **kwargs,
+) -> dict:
+    """
+    Arguments of a dataset of WNBs in noise from ``config.ifos`` (coloured by
+    default), with ``INJECTION_PRESENT`` labels.
+    """
+    return {
+        "sample_rate_hertz": config.sample_rate_hertz,
+        "onsource_duration_seconds": config.onsource_duration_seconds,
+        "offsource_duration_seconds": config.offsource_duration_seconds,
+        "noise_obtainer": gf.NoiseObtainer(noise_type=noise_type, ifos=list(config.ifos)),
+        "waveform_generators": gf.WNBGenerator(
+            duration_seconds=_uniform(config.wnb_duration_seconds),
+            min_frequency_hertz=_uniform(config.wnb_min_frequency_hertz),
+            max_frequency_hertz=_uniform(config.wnb_max_frequency_hertz),
+            scaling_method=gf.ScalingMethod(value=_uniform(snr), type_=gf.ScalingTypes.SNR),
+            injection_chance=injection_chance,
+        ),
+        "num_examples_per_batch": config.batch_size,
+        "input_variables": input_variables,
+        "output_variables": [gf.ReturnVariables.INJECTION_PRESENT],
+        **kwargs,
+    }
+
+
+def _classifier_compile(model: keras.Model, learning_rate) -> keras.Model:
+    model.compile(
+        optimizer=keras.optimizers.Nadam(learning_rate=learning_rate, beta_1=0.9, beta_2=0.999, epsilon=1e-8),
+        loss=keras.losses.CategoricalCrossentropy(from_logits=True),
+        metrics=[keras.metrics.CategoricalAccuracy(name="accuracy")],
+    )
+    return model
+
+
+class _MLyModel(ExampleModel):
+    """The two networks' shared data: subclasses give the layers, inputs and SNRs."""
+
+    config = MLyConfig()
+    _snr_attr: str
+    _chance_attr: str
+    _inputs: Tuple[gf.ReturnVariables, ...]
+
+    @classmethod
+    def _dataset_args(cls, config: MLyConfig, noise_type: gf.NoiseType, **kwargs) -> dict:
+        return mly_dataset_args(
+            config, getattr(config, cls._snr_attr), getattr(config, cls._chance_attr),
+            list(cls._inputs), noise_type=noise_type, **kwargs)
+
     @classmethod
     def dataset(
         cls,
@@ -208,368 +213,157 @@ class MLyCoincidence(ExampleModel):
         config: Optional[MLyConfig] = None,
         seed: Optional[int] = None,
         group: str = "train",
-        steps_per_epoch: int = 5000,
+        steps_per_epoch: int = 1000,
         **kwargs
     ) -> gf.GravyflowDataset:
-        """
-        Create dataset for Model 1 training.
-        
-        Training ratios from paper (N = 10000):
-        - 6N Type 0 (noise)
-        - 3N Type 1 (signal)
-        - 6N Type 3 (single-detector glitches)
-        
-        For simplicity, we use WNBGenerator with injection_chance=0.5
-        """
+        """Training data: noise, and WNBs in the paper's SNR range and ratio."""
         cfg = config or cls.config
-        
-        # WNB generator for coherent signals
-        waveform_generator = gf.WNBGenerator(
-            duration_seconds=gf.Distribution(
-                min_=cfg.wnb_duration_min_seconds,
-                max_=cfg.wnb_duration_max_seconds,
-                type_=gf.DistributionType.UNIFORM
-            ),
-            min_frequency_hertz=gf.Distribution(
-                min_=20.0,
-                max_=cfg.wnb_bandwidth_min_hertz,
-                type_=gf.DistributionType.UNIFORM
-            ),
-            max_frequency_hertz=gf.Distribution(
-                min_=cfg.wnb_bandwidth_min_hertz,
-                max_=cfg.wnb_bandwidth_max_hertz + 20.0,
-                type_=gf.DistributionType.UNIFORM
-            ),
-            scaling_method=gf.ScalingMethod(
-                value=gf.Distribution(
-                    min_=cfg.signal_snr_min,
-                    max_=cfg.signal_snr_max,
-                    type_=gf.DistributionType.UNIFORM
-                ),
-                type_=gf.ScalingTypes.SNR
-            ),
-            injection_chance=cfg.injection_chance,
-        )
-        
-        # Use 3 detectors - H, L, V
-        # Note: Virgo may fall back to colored noise if real data unavailable
-        noise_obtainer = gf.NoiseObtainer(
-            noise_type=noise_type,
-            ifos=[gf.IFO.H1, gf.IFO.L1, gf.IFO.V1]
-        )
-        
-        dataset = gf.GravyflowDataset(
-            sample_rate_hertz=cfg.sample_rate_hertz,
-            onsource_duration_seconds=cfg.onsource_duration_seconds,
-            offsource_duration_seconds=cfg.offsource_duration_seconds,
-            noise_obtainer=noise_obtainer,
-            waveform_generators=waveform_generator,
-            num_examples_per_batch=cfg.batch_size,
-            seed=seed,
-            group=group,
-            steps_per_epoch=steps_per_epoch,
-            input_variables=[
-                gf.ReturnVariables.WHITENED_ONSOURCE,
-            ],
-            output_variables=[
-                gf.ReturnVariables.INJECTION_PRESENT
-            ],
-            **kwargs
-        )
-        
-        return dataset
-    
-    @classmethod
-    def compile_model(
-        cls,
-        model: keras.Model,
-        learning_rate: float = 0.001
-    ) -> keras.Model:
-        """Compile with binary cross-entropy loss."""
-        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
-        model.compile(
-            optimizer=optimizer,
-            loss='categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        return model
+        return gf.GravyflowDataset(**cls._dataset_args(
+            cfg, noise_type, seed=seed, group=group, steps_per_epoch=steps_per_epoch, **kwargs))
 
-
-class MLyCoherence(ExampleModel):
-    """
-    MLy Coherence Model (Model 2) - Dual-Branch Architecture
-    
-    Detects correlation in phase and amplitude between detectors.
-    Uses both strain data and Pearson correlation as inputs.
-    
-    Architecture (Figure 2 of paper):
-    - Branch A (Strain): 3 Conv1D layers with stride
-    - Branch B (Correlation): 2 Conv1D layers
-    - Concatenate + Dense(256) -> Softmax(2)
-    
-    Inputs:
-        - strain: (batch, 1024, 3) - whitened strain
-        - correlation: (batch, 60, 3) - Pearson correlation for 3 detector pairs
-    
-    Output: (batch, 2) - [P(noise), P(signal)]
-    
-    Usage:
-        >>> model = MLyCoherence.model()
-        >>> dataset = MLyCoherence.dataset()
-    """
-    
-    config = MLyConfig()
-    
     @classmethod
-    def model(
+    def validation_dataset_args(
         cls,
-        input_shape_strain: Optional[Tuple[int, int]] = None,
-        input_shape_corr: Optional[Tuple[int, int]] = None,
-        config: Optional[MLyConfig] = None
-    ) -> keras.Model:
-        """
-        Create the MLy Coherence dual-branch architecture.
-        
-        Architecture from Figure 2:
-        - Branch A: Strain through 3 strided Conv1D layers
-        - Branch B: Correlation through 2 Conv1D layers
-        - Concatenate and pass through dense layer
-        
-        Args:
-            input_shape_strain: Shape of strain input (samples, detectors).
-            input_shape_corr: Shape of correlation input (delays, pairs).
-            config: Model configuration.
-        
-        Returns:
-            Keras model with two inputs.
-        """
-        cfg = config or cls.config
-        
-        if input_shape_strain is None:
-            num_samples = int(cfg.onsource_duration_seconds * cfg.sample_rate_hertz)
-            input_shape_strain = (num_samples, 3)
-        
-        if input_shape_corr is None:
-            # ±30ms at 1024 Hz = ±30 samples = 60 total delays
-            # 3 detector pairs: HL, HV, LV
-            num_delays = int(2 * cfg.max_delay_seconds * cfg.sample_rate_hertz)
-            input_shape_corr = (num_delays, 3)
-        
-        # Branch A: Strain input
-        strain_input = Input(shape=input_shape_strain, name="strain")
-        x_strain = strain_input
-        
-        for i, (filters, kernel, stride) in enumerate(
-            zip(cfg.strain_filters, cfg.strain_kernels, cfg.strain_strides)
-        ):
-            x_strain = Conv1D(
-                filters, kernel,
-                strides=stride,
-                padding='same',
-                activation='relu',
-                name=f"strain_conv{i+1}"
-            )(x_strain)
-        
-        x_strain = GlobalAveragePooling1D(name="strain_pool")(x_strain)
-        
-        # Branch B: Correlation input
-        corr_input = Input(shape=input_shape_corr, name="correlation")
-        x_corr = corr_input
-        
-        for i, (filters, kernel) in enumerate(
-            zip(cfg.corr_filters, cfg.corr_kernels)
-        ):
-            x_corr = Conv1D(
-                filters, kernel,
-                padding='same',
-                activation='relu',
-                name=f"corr_conv{i+1}"
-            )(x_corr)
-        
-        x_corr = GlobalAveragePooling1D(name="corr_pool")(x_corr)
-        
-        # Merge branches
-        x = Concatenate(name="merge")([x_strain, x_corr])
-        x = Dense(cfg.dense_units, activation='relu', name="dense")(x)
-        
-        # Output
-        outputs = Dense(
-            cfg.num_output_classes,
-            activation='softmax',
-            name="output"
-        )(x)
-        
-        model = Model(
-            inputs=[strain_input, corr_input],
-            outputs=outputs,
-            name="MLyCoherence"
-        )
-        return model
-    
-    @classmethod
-    def dataset(
-        cls,
-        noise_type: gf.NoiseType = gf.NoiseType.COLORED,
         config: Optional[MLyConfig] = None,
-        seed: Optional[int] = None,
-        group: str = "train",
-        steps_per_epoch: int = 5000,
-        **kwargs
-    ) -> gf.GravyflowDataset:
+        noise_type: gf.NoiseType = gf.NoiseType.COLORED,
+    ) -> dict:
         """
-        Create dataset for Model 2 training.
-        
-        Training ratios from paper (N = 10000):
-        - 10N Type 0 (noise)
-        - 10N Type 1 (signal)  
-        - 5N Type 2a/b (incoherent glitches)
-        - 5N Type 2c (coincident incoherent)
-        
-        Returns dataset with both whitened strain and rolling Pearson correlation.
+        Dataset arguments for `gf.Validator`, which sets the SNR range, the
+        injection chance and the seeds itself.
+        """
+        return cls._dataset_args(config or cls.config, noise_type)
+
+
+class MLyCoincidence(_MLyModel):
+    """
+    Model 1, the coincidence network: three residual blocks of two
+    convolutions, global average pooling, two dense layers, two logits.
+
+    Each convolution and dense layer applies ReLU and then batch normalisation;
+    each block adds its first convolution's output to its output.
+    """
+
+    _snr_attr, _chance_attr = "coincidence_snr", "coincidence_injection_chance"
+    _inputs = (MODEL_INPUT,)
+
+    @classmethod
+    def model(cls, config: Optional[MLyConfig] = None) -> keras.Model:
+        """``WHITENED_ONSOURCE`` (detectors, samples) in; two logits out."""
+        cfg = config or cls.config
+        inputs = model_input(cfg.sample_rate_hertz, cfg.onsource_duration_seconds, len(cfg.ifos))
+        x = Permute((2, 1), name="permute")(inputs)  # (samples, detectors), as the paper
+        for n, (filters, first_kernel, second_kernel) in enumerate(cfg.coincidence_blocks, start=1):
+            first = Conv1D(filters, first_kernel, padding="same", activation="relu", name=f"block{n}_conv1")(x)
+            y = BatchNormalization(name=f"block{n}_bn1")(first)
+            y = Conv1D(filters, second_kernel, padding="same", activation="relu", name=f"block{n}_conv2")(y)
+            y = BatchNormalization(name=f"block{n}_bn2")(y)
+            x = Add(name=f"block{n}_add")([first, y])
+        x = GlobalAveragePooling1D(name="pool")(x)
+        for n, units in enumerate(cfg.coincidence_dense_units, start=1):
+            x = Dense(units, activation="relu", name=f"dense{n}")(x)
+            x = BatchNormalization(name=f"dense{n}_bn")(x)
+        outputs = Dense(cfg.num_output_classes, name="output")(x)
+        return Model(inputs={inputs.name: inputs}, outputs=outputs, name="MLyCoincidence")
+
+    @classmethod
+    def compile_model(cls, model: keras.Model, config: Optional[MLyConfig] = None) -> keras.Model:
+        """Nadam under the paper's cyclic learning rate; cross-entropy of logits."""
+        cfg = config or cls.config
+        base, peak = cfg.coincidence_cyclic_learning_rate
+        return _classifier_compile(model, CyclicLearningRate(base, peak, cfg.coincidence_half_cycle_steps))
+
+
+class MLyCoherence(_MLyModel):
+    """
+    Model 2, the coherence network: a strain branch (three strided
+    convolutions) and a correlation branch (two convolutions), each pooled,
+    concatenated, then one dense layer and two logits.
+
+    Each convolution and the dense layer apply ReLU and then batch
+    normalisation.
+    """
+
+    _snr_attr, _chance_attr = "coherence_snr", "coherence_injection_chance"
+    _inputs = (MODEL_INPUT, CORRELATION_INPUT)
+
+    @classmethod
+    def model(cls, config: Optional[MLyConfig] = None) -> keras.Model:
+        """
+        ``WHITENED_ONSOURCE`` (detectors, samples) and
+        ``ROLLING_PEARSON_ONSOURCE`` (pairs, lags) in; two logits out.
+
+        Raises:
+            ValueError: fewer lags than the correlation branch's kernels span.
         """
         cfg = config or cls.config
-        
-        waveform_generator = gf.WNBGenerator(
-            duration_seconds=gf.Distribution(
-                min_=cfg.wnb_duration_min_seconds,
-                max_=cfg.wnb_duration_max_seconds,
-                type_=gf.DistributionType.UNIFORM
-            ),
-            min_frequency_hertz=gf.Distribution(
-                min_=20.0,
-                max_=cfg.wnb_bandwidth_min_hertz,
-                type_=gf.DistributionType.UNIFORM
-            ),
-            max_frequency_hertz=gf.Distribution(
-                min_=cfg.wnb_bandwidth_min_hertz,
-                max_=cfg.wnb_bandwidth_max_hertz + 20.0,
-                type_=gf.DistributionType.UNIFORM
-            ),
-            scaling_method=gf.ScalingMethod(
-                value=gf.Distribution(
-                    min_=cfg.signal_snr_min,
-                    max_=cfg.signal_snr_max,
-                    type_=gf.DistributionType.UNIFORM
-                ),
-                type_=gf.ScalingTypes.SNR
-            ),
-            injection_chance=cfg.injection_chance,
-        )
-        
-        noise_obtainer = gf.NoiseObtainer(
-            noise_type=noise_type,
-            ifos=[gf.IFO.H1, gf.IFO.L1, gf.IFO.V1]
-        )
-        
-        dataset = gf.GravyflowDataset(
-            sample_rate_hertz=cfg.sample_rate_hertz,
-            onsource_duration_seconds=cfg.onsource_duration_seconds,
-            offsource_duration_seconds=cfg.offsource_duration_seconds,
-            noise_obtainer=noise_obtainer,
-            waveform_generators=waveform_generator,
-            num_examples_per_batch=cfg.batch_size,
-            seed=seed,
-            group=group,
-            steps_per_epoch=steps_per_epoch,
-            input_variables=[
-                gf.ReturnVariables.WHITENED_ONSOURCE,
-                gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE,
-            ],
-            output_variables=[
-                gf.ReturnVariables.INJECTION_PRESENT
-            ],
-            max_arrival_time_difference_seconds=cfg.max_delay_seconds,
-            **kwargs
-        )
-        
-        return dataset
-    
+        if len(cfg.ifos) < 2:
+            raise ValueError("The coherence network needs at least two detectors.")
+        pairs, lags = cfg.correlation_shape
+        span = sum(kernel - 1 for _, kernel, _ in cfg.coherence_correlation_convs) + 1
+        if lags < span:
+            raise ValueError(f"{lags} correlation lags at {cfg.sample_rate_hertz:g} Hz; the correlation "
+                             f"branch needs at least {span}.")
+
+        strain = model_input(cfg.sample_rate_hertz, cfg.onsource_duration_seconds, len(cfg.ifos))
+        x = Permute((2, 1), name="strain_permute")(strain)
+        for n, (filters, kernel, stride) in enumerate(cfg.coherence_strain_convs, start=1):
+            x = Conv1D(filters, kernel, strides=stride, activation="relu", name=f"strain_conv{n}")(x)
+            x = BatchNormalization(name=f"strain_bn{n}")(x)
+        x = GlobalAveragePooling1D(name="strain_pool")(x)
+
+        correlation = keras.Input(shape=(pairs, lags), name=CORRELATION_INPUT.name, dtype="float32")
+        c = Permute((2, 1), name="correlation_permute")(correlation)  # (lags, pairs), as the paper
+        for n, (filters, kernel, stride) in enumerate(cfg.coherence_correlation_convs, start=1):
+            c = Conv1D(filters, kernel, strides=stride, activation="relu", name=f"correlation_conv{n}")(c)
+            c = BatchNormalization(name=f"correlation_bn{n}")(c)
+        c = GlobalAveragePooling1D(name="correlation_pool")(c)
+
+        f = Concatenate(name="merge")([x, c])
+        f = Dense(cfg.coherence_dense_units, activation="relu", name="dense")(f)
+        f = BatchNormalization(name="dense_bn")(f)
+        outputs = Dense(cfg.num_output_classes, name="output")(f)
+        return Model(inputs={strain.name: strain, correlation.name: correlation}, outputs=outputs,
+                     name="MLyCoherence")
+
     @classmethod
-    def compile_model(
-        cls,
-        model: keras.Model,
-        learning_rate: float = 0.001
-    ) -> keras.Model:
-        """Compile with binary cross-entropy loss."""
-        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
-        model.compile(
-            optimizer=optimizer,
-            loss='categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        return model
+    def compile_model(cls, model: keras.Model, config: Optional[MLyConfig] = None) -> keras.Model:
+        """Nadam at the paper's constant learning rate; cross-entropy of logits."""
+        cfg = config or cls.config
+        return _classifier_compile(model, cfg.coherence_learning_rate)
 
 
-class MLy(ExampleModel):
-    """
-    Combined MLy Pipeline
-    
-    Combines Coincidence (Model 1) and Coherence (Model 2) by multiplying
-    their output scores.
-    
-    Final score = Model1_score[signal] × Model2_score[signal]
-    
-    A candidate needs high scores from BOTH models to be detected,
-    requiring both coincidence in multiple detectors AND correlation.
-    
-    Usage:
-        >>> model1 = MLy.coincidence_model()
-        >>> model2 = MLy.coherence_model()
-        >>> score = MLy.combined_score(model1_output, model2_output)
-    """
-    
+class MLy:
+    """The pipeline: both networks, and their combined score."""
+
     config = MLyConfig()
-    
-    @classmethod
-    def coincidence_model(cls, **kwargs) -> keras.Model:
-        """Create Model 1 (Coincidence)."""
-        return MLyCoincidence.model(**kwargs)
-    
-    @classmethod
-    def coherence_model(cls, **kwargs) -> keras.Model:
-        """Create Model 2 (Coherence)."""
-        return MLyCoherence.model(**kwargs)
-    
+
     @classmethod
     def model(cls, config: Optional[MLyConfig] = None) -> Tuple[keras.Model, keras.Model]:
-        """
-        Create both MLy models.
-        
-        Returns:
-            Tuple of (coincidence_model, coherence_model)
-        """
+        """The two networks: (coincidence, coherence)."""
         cfg = config or cls.config
-        return (
-            MLyCoincidence.model(config=cfg),
-            MLyCoherence.model(config=cfg)
-        )
-    
+        return MLyCoincidence.model(cfg), MLyCoherence.model(cfg)
+
     @staticmethod
-    def combined_score(
-        coincidence_output: np.ndarray,
-        coherence_output: np.ndarray
-    ) -> np.ndarray:
+    def combined_score(coincidence_logits, coherence_logits) -> np.ndarray:
         """
-        Compute combined MLy score.
-        
+        The combined detection score, as a log-odds (float64): the paper
+        multiplies the two networks' signal probabilities, p = p1·p2; this is
+        log(p / (1 - p)), which ranks exactly as p does but does not saturate.
+
         Args:
-            coincidence_output: Model 1 output, shape (batch, 2)
-            coherence_output: Model 2 output, shape (batch, 2)
-        
-        Returns:
-            Combined scores, shape (batch,), on [0, 1]
+            coincidence_logits, coherence_logits: (examples, 2) logits.
         """
-        # Take signal class probability (index 1) from each model
-        score1 = coincidence_output[:, 1]
-        score2 = coherence_output[:, 1]
-        return score1 * score2
-    
-    @classmethod
-    def dataset(cls, **kwargs) -> gf.GravyflowDataset:
-        """Create dataset suitable for both models."""
-        return MLyCoherence.dataset(**kwargs)
-    
-    @classmethod
-    def compile_model(cls, model: keras.Model, **kwargs) -> keras.Model:
-        """Compile a single model."""
-        return MLyCoincidence.compile_model(model, **kwargs)
+        s1, s2 = (np.asarray(o, dtype=np.float64) for o in (coincidence_logits, coherence_logits))
+        s1, s2 = s1[:, 1] - s1[:, 0], s2[:, 1] - s2[:, 0]
+
+        def log_sigmoid(x):
+            return -np.logaddexp(0.0, -x)
+
+        log_p = log_sigmoid(s1) + log_sigmoid(s2)
+        # 1 - p1·p2 = (1 - p1) + p1·(1 - p2)
+        log_not_p = np.logaddexp(log_sigmoid(-s1), log_sigmoid(s1) + log_sigmoid(-s2))
+        return log_p - log_not_p
+
+
+__all__ = ["CORRELATION_INPUT", "CyclicLearningRate", "MLy", "MLyCoherence", "MLyCoincidence", "MLyConfig",
+           "mly_dataset_args"]
