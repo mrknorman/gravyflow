@@ -215,8 +215,13 @@ class TestStatelessObjects:
     def test_direct_batches_draw_their_own_sky_and_targets(self):
         # A direct iterator advanced k, but the injection layer drew every
         # batch's sky and targets from k=None.
+        # The labels also carry every parameter the generator drew, some of
+        # them constant; the injection layer's own draws are the sky, the
+        # polarisation and the SNR target.
         first, second = (self.direct_labels(k, lambda injector, k: injector.streams(k)) for k in (0, 1))
-        for key in first:
+        drawn_here = [gf.ScalingTypes.SNR, gf.WaveformParameters.RIGHT_ASCENSION_RADIANS,
+                      gf.WaveformParameters.DECLINATION_RADIANS, gf.WaveformParameters.POLARIZATION_RADIANS]
+        for key in drawn_here:
             assert not np.array_equal(first[key], second[key]), key
 
     def test_injecting_without_streams_is_deprecated(self):
