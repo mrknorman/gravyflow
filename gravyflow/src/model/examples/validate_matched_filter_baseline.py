@@ -52,9 +52,12 @@ def main(argv=None) -> Validator:
     )
     config = ValidationConfig(seed=args.seed, num_examples=args.num_examples, batch_size=args.batch_size)
     output_dir = Path(args.output_dir)
-    model = MatchedFilterBaseline.model()
-    print(f"Validating the matched-filter baseline ({model.get_layer('matched_filter').num_templates} templates) "
-          f"on coloured noise; results in {output_dir}")
+    # The search covers the merger times the validation data's placement produces.
+    model = MatchedFilterBaseline.model(dataset_args=dataset_args)
+    layer = model.get_layer("matched_filter")
+    print(f"Validating the matched-filter baseline ({layer.num_templates} templates, merger times "
+          f"{layer.search_window_seconds[0]:.3f}-{layer.search_window_seconds[1]:.3f} s) on coloured noise; "
+          f"results in {output_dir}")
     validator = Validator.validate(
         model=model,
         name="matched_filter_baseline",

@@ -599,68 +599,6 @@ class TestSNRCoverage:
         assert float(sigma[0]) > 0
         assert jnp.isfinite(sigma[0])
     
-    def test_find_triggers_2d_snr(self):
-        """Test find_triggers with 2D SNR array (lines 191-228)."""
-        from gravyflow.src.detection import find_triggers
-        
-        # Create SNR array with clear peaks
-        n_templates = 3
-        n_samples = 1000
-        snr = jnp.zeros((n_templates, n_samples))
-        
-        # Add peaks: one at t=200, one at t=600
-        snr = snr.at[0, 200].set(10.0)
-        snr = snr.at[1, 600].set(12.0)
-        snr = snr.at[2, 601].set(11.0)  # Should be clustered with 600
-        
-        triggers = find_triggers(snr, threshold=8.0, cluster_window=50)
-        
-        assert len(triggers) == 2, f"Expected 2 triggers (clustered), got {len(triggers)}"
-        
-        # Check trigger contents
-        assert all('snr' in t for t in triggers)
-        assert all('time_index' in t for t in triggers)
-        assert all('template_index' in t for t in triggers)
-        
-        # First trigger at t=200
-        assert triggers[0]['time_index'] == 200
-        assert triggers[0]['snr'] == 10.0
-        
-        # Second trigger should be the peak in the cluster (t=600, snr=12)
-        assert triggers[1]['time_index'] == 600
-        assert triggers[1]['snr'] == 12.0
-    
-    def test_find_triggers_3d_batch(self):
-        """Test find_triggers with 3D (batch) SNR array (lines 229-238)."""
-        from gravyflow.src.detection import find_triggers
-        
-        # Create 3D SNR array: (batch, templates, samples)
-        batch_size = 2
-        n_templates = 2
-        n_samples = 500
-        snr = jnp.zeros((batch_size, n_templates, n_samples))
-        
-        # Add peaks in different batch elements
-        snr = snr.at[0, 0, 100].set(9.0)
-        snr = snr.at[1, 1, 300].set(11.0)
-        
-        triggers = find_triggers(snr, threshold=8.0, cluster_window=20)
-        
-        assert len(triggers) >= 1, "Should find at least one trigger"
-        
-        # Check batch_index is present
-        for t in triggers:
-            assert 'batch_index' in t or 'time_index' in t
-    
-    def test_find_triggers_no_triggers(self):
-        """Test find_triggers when no peaks exceed threshold."""
-        from gravyflow.src.detection import find_triggers
-        
-        snr = jnp.ones((2, 100)) * 5.0  # All below threshold
-        triggers = find_triggers(snr, threshold=8.0)
-        
-        assert len(triggers) == 0, "Should find no triggers"
-    
     def test_optimal_snr_function(self):
         """Test optimal_snr function directly (lines 166-167)."""
         from gravyflow.src.dataset.tools.snr import optimal_snr

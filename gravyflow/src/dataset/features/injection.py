@@ -372,6 +372,30 @@ class WaveformGenerator:
         high = window_seconds / 2.0 if high is None else float(high)
         return -low, high
 
+    def detector_margin_seconds(self, network=None) -> float:
+        """
+        The largest delay between the geocentre and a detector of `network`
+        (default the generator's), in seconds: how far a detector's reference
+        time can lie from the placed one. 0.0 without a network.
+        """
+        network = self.network if network is None else network
+        if network is None:
+            return 0.0
+        locations = np.asarray(network.location, dtype=np.float64)
+        return float(np.max(np.linalg.norm(locations, axis=-1))) / 299792458.0
+
+    def reference_time_window_seconds(self, window_seconds : float, network=None):
+        """
+        Where the reference time (a CBC's merger) can fall in any detector of
+        `network` (default the generator's), as (start, end) in seconds from
+        the window's start: the placement range around the centre, widened by
+        the detector margin, inside the window.
+        """
+        low, high = self.placement_range_seconds(window_seconds)
+        margin = self.detector_margin_seconds(network)
+        centre = window_seconds / 2.0
+        return max(centre + low - margin, 0.0), min(centre + high + margin, float(window_seconds))
+
     @classmethod
     def init_network(cls, network):
         
@@ -1618,10 +1642,7 @@ class InjectionGenerator:
             before, after = generator.get_signal_extent_seconds(parameters)
             before = np.broadcast_to(np.asarray(before, dtype=np.float64), (num_examples,))
             after = np.broadcast_to(np.asarray(after, dtype=np.float64), (num_examples,))
-            margin = 0.0
-            if generator.network is not None:
-                locations = np.asarray(generator.network.location, dtype=np.float64)
-                margin = float(np.max(np.linalg.norm(locations, axis=-1))) / 299792458.0
+            margin = generator.detector_margin_seconds()
             fits_low = before + margin - window_seconds / 2.0
             fits_high = window_seconds / 2.0 - after - margin
             low = np.maximum(low, fits_low)

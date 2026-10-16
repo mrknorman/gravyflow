@@ -4,10 +4,14 @@ The matched-filter baseline: a CBC template-bank search on whitened data.
 The data path whitens each example with the PSD of its offsource
 (`gf.whiten`), and models take that whitened onsource window. The matched
 filter takes the same window and the same spectrum, and whitens its templates
-with the exact FIR filter the data were whitened with
-(`whitening_filter`), so a template sees what an injected signal of its
-parameters looks like in the data. On whitened data the noise is white with
-unit variance, so the inner product is a plain sum over samples.
+with the FIR filter the data were whitened with (`whitening_filter`), so a
+template sees what an injected signal of its parameters looks like in the
+data. The data path also removes the raw onsource's mean and tapers its first
+and last half-filter before convolving; templates get neither. Both act only
+on the crops, which reach the window through the filter's tapered tails: with
+crops of at least half the filter the statistic differs by less than 2e-4.
+On whitened data the noise is white with unit variance, so the inner product
+is a plain sum over samples.
 
 The statistic, for every template and every merger time in the window:
 
@@ -24,19 +28,22 @@ The statistic, for every template and every merger time in the window:
   SNR the dataset's labels report).
 - Detectors are combined in coincidence: rho_net^2(t) = sum over detectors of
   the largest rho_i^2 within the light travel time (plus a margin) of t in the
-  first detector, for the same template.
+  first detector, for the same template. The other detectors are evaluated
+  beyond the searched merger times by that window, so a coincidence at the
+  search's edge is complete.
 
 The reported time is the merger time in the window (the template's merger is
 its reference point), in seconds from the window's start.
 
-Memory is bounded by chunking over examples and templates; the cost per
-(example, detector, template) is two complex FFTs of about the template buffer
-plus a filter length.
+Memory is bounded by chunking over examples and templates and keeping, per
+merger time, only the loudest template so far; the cost per (example,
+detector, template) is two complex FFTs of about the template buffer plus a
+filter length. Only `snr_series` returns every template's series.
 """
 
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -48,28 +55,45 @@ from scipy.fft import next_fast_len
 from gravyflow.src.dataset.config import Defaults
 from gravyflow.src.dataset.conditioning.whiten import whitening_filter
 from gravyflow.src.dataset.tools.psd import PowerSpectrum, SpectralConfig, estimate_psd
-from gravyflow.src.detection.template_grid import TemplateBank, TemplateGrid, cbc_templates
+from gravyflow.src.detection.template_grid import BankPlacement, MatchSpace, TemplateBank, TemplateGrid, cbc_templates
 
-SPEED_OF_LIGHT = 299792458.0
 # Added to the light travel time between detectors in the coincidence window,
 # for the timing error of each detector's peak.
 COINCIDENCE_MARGIN_SECONDS = 0.002
+# The SpectralConfig fields that shape the whitening filter and the band: a
+# spectrum must agree with the matched filter's config on each.
+FILTER_SHAPING_FIELDS = ("filter_duration_seconds", "lower_frequency_hertz", "upper_frequency_hertz")
 
 
-def light_travel_seconds(ifos: Sequence) -> float:
-    """The largest light travel time between any two of `ifos` (gf.IFO members), in seconds."""
-    from astropy import coordinates, units
-    positions = []
-    for ifo in ifos:
-        v = ifo.value
-        loc = coordinates.EarthLocation.from_geodetic(
-            v.longitude_radians * units.rad, v.latitude_radians * units.rad, v.height_meters * units.meter)
-        positions.append([loc.x.value, loc.y.value, loc.z.value])
-    positions = np.asarray(positions, dtype=np.float64)
-    if len(positions) < 2:
-        return 0.0
-    distances = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=-1)
-    return float(distances.max() / SPEED_OF_LIGHT)
+def default_bank_placement(
+    mass_range: Tuple[float, float] = (5.0, 95.0),
+    minimal_match: float = 0.97,
+    sample_rate_hertz: float = Defaults.sample_rate_hertz,
+    onsource_duration_seconds: float = Defaults.onsource_duration_seconds,
+    spectral_config: Optional[SpectralConfig] = None,
+    ifo=None,
+) -> BankPlacement:
+    """
+    The placement of a MatchedFilter's default bank: non-spinning IMRPhenomD
+    over `mass_range` at `minimal_match`, matched on what the filter can see of
+    a signal (the window plus half the whitening filter before the merger) with
+    the detector's noise curve from the band's lower edge. H1 shares L1's
+    curve, so both get L1's (bundled) bank.
+    """
+    import gravyflow as gf
+    config = _as_spectral_config(spectral_config)
+    fs = float(sample_rate_hertz)
+    ifo = gf.IFO.L1 if ifo is None else ifo
+    if ifo.value.optimal_psd_path == gf.IFO.L1.value.optimal_psd_path:
+        ifo = gf.IFO.L1
+    space = MatchSpace(fs, float(onsource_duration_seconds) + _even_taps(config, fs) / (2.0 * fs),
+                       float(config.lower_frequency_hertz), ifo.name, "IMRPhenomD")
+    return BankPlacement(space, (float(mass_range[0]), float(mass_range[1])), float(minimal_match))
+
+
+def _even_taps(config: SpectralConfig, sample_rate_hertz: float) -> int:
+    ntaps = config.num_taps(sample_rate_hertz)
+    return ntaps + (ntaps % 2)
 
 
 def _as_spectral_config(value) -> SpectralConfig:
@@ -106,12 +130,21 @@ def _search(data, fir, template_fft, *, n_fft, merger_index, num_samples, lags, 
     with the filter. lags: (first, stop) merger times searched, in window samples.
     max_shift: the coincidence window in samples.
 
-    reduce=True returns per example (rho_net (B,), template (B,), lag (B,));
-    reduce=False returns rho_net (B, T, num_lags).
+    reduce=True returns, per example and searched merger time, the loudest
+    template's rho_net and its index: (B, L) float32 and (B, L) int32, scanned
+    over template chunks so that memory does not grow with the bank.
+    reduce=False returns rho_net (B, T, L).
     """
     num_freqs = n_fft // 2 + 1
     lag_lo, lag_hi = lags
     num_lags = lag_hi - lag_lo
+    # Other detectors are coincident within max_shift of the first's merger
+    # time, so they are evaluated that far beyond the searched times (inside
+    # the window); the first detector's own range is cropped back after.
+    if data.shape[1] > 1:
+        ext_lo, ext_hi = max(lag_lo - max_shift, 0), min(lag_hi + max_shift, num_samples)
+    else:
+        ext_lo, ext_hi = lag_lo, lag_hi
     d_fft = jnp.conj(jnp.fft.rfft(data, n=n_fft, axis=-1))                  # (B, I, F)
     if fir is not None:
         f_fft = jnp.fft.rfft(fir, n=n_fft, axis=-1)                         # (B, I, F)
@@ -120,7 +153,7 @@ def _search(data, fir, template_fft, *, n_fft, merger_index, num_samples, lags, 
     analytic[0] = 1.0
     analytic[-1] = 1.0
     # Shift s = merger_index - lag; window sums over [s, s + N) of the template.
-    shifts = merger_index - np.arange(lag_lo, lag_hi)                       # (L,)
+    shifts = merger_index - np.arange(ext_lo, ext_hi)                       # (L_ext,)
 
     def one_chunk(h_chunk):
         # h_chunk (Tc, F)
@@ -128,7 +161,7 @@ def _search(data, fir, template_fft, *, n_fft, merger_index, num_samples, lags, 
         g = g * analytic
         pad = [(0, 0)] * (g.ndim - 1) + [(0, n_fft - num_freqs)]
         g_a = jnp.fft.ifft(jnp.pad(g * d_fft[:, :, None, :], pad), axis=-1)  # z(s) = sum_t d(t) g_a(t + s)
-        z = g_a[..., shifts]                                                # (B, I, Tc, L)
+        z = g_a[..., shifts]                                                # (B, I, Tc, L_ext)
         t_a = jnp.fft.ifft(jnp.pad(g, pad), axis=-1)                        # analytic whitened template
         gc, gs = jnp.real(t_a), jnp.imag(t_a)
 
@@ -144,17 +177,16 @@ def _search(data, fir, template_fft, *, n_fft, merger_index, num_samples, lags, 
         scale = jnp.maximum(a * c, 1e-30)
         ok = (det > 1e-6 * scale) & (a > 0) & (c > 0)
         rho2 = jnp.where(ok, (c * zc * zc - 2.0 * b * zc * zs + a * zs * zs) / jnp.where(ok, det, 1.0), 0.0)
-        rho2 = jnp.maximum(rho2, 0.0)                                       # (B, I, Tc, L)
+        rho2 = jnp.maximum(rho2, 0.0)                                       # (B, I, Tc, L_ext)
+        net = rho2[:, 0]
         if rho2.shape[1] > 1:
             others = rho2[:, 1:]
             if max_shift > 0:
                 others = jax.lax.reduce_window(
                     others, 0.0, jax.lax.max, (1, 1, 1, 2 * max_shift + 1), (1, 1, 1, 1),
                     [(0, 0), (0, 0), (0, 0), (max_shift, max_shift)])
-            net = rho2[:, 0] + jnp.sum(others, axis=1)
-        else:
-            net = rho2[:, 0]
-        return net                                                          # (B, Tc, L)
+            net = net + jnp.sum(others, axis=1)
+        return net[..., lag_lo - ext_lo:lag_lo - ext_lo + num_lags]         # (B, Tc, L)
 
     chunks = template_fft.reshape((-1, template_chunk, num_freqs))
     if not reduce:
@@ -162,22 +194,19 @@ def _search(data, fir, template_fft, *, n_fft, merger_index, num_samples, lags, 
         out = jnp.moveaxis(out, 0, 1).reshape((data.shape[0], -1, num_lags))
         return jnp.sqrt(out)
 
-    batch = data.shape[0]
-
     def step(carry, inputs):
-        best, best_t, best_l = carry
+        best, best_t = carry
         index, h_chunk = inputs
-        net = one_chunk(h_chunk).reshape((batch, -1))
-        arg = jnp.argmax(net, axis=-1)
-        value = jnp.take_along_axis(net, arg[:, None], axis=-1)[:, 0]
+        net = one_chunk(h_chunk)                                            # (B, Tc, L)
+        arg = jnp.argmax(net, axis=1)
+        value = jnp.max(net, axis=1)
         better = value > best
-        t = index * template_chunk + arg // num_lags
-        return (jnp.where(better, value, best), jnp.where(better, t, best_t),
-                jnp.where(better, arg % num_lags, best_l)), None
+        return (jnp.where(better, value, best), jnp.where(better, (index * template_chunk + arg).astype(jnp.int32), best_t)), None
 
-    init = (jnp.full((batch,), -1.0, jnp.float32), jnp.zeros((batch,), jnp.int32), jnp.zeros((batch,), jnp.int32))
-    (best, best_t, best_l), _ = jax.lax.scan(step, init, (jnp.arange(chunks.shape[0]), chunks))
-    return jnp.sqrt(jnp.maximum(best, 0.0)), best_t, best_l + lag_lo
+    batch = data.shape[0]
+    init = (jnp.full((batch, num_lags), -1.0, jnp.float32), jnp.zeros((batch, num_lags), jnp.int32))
+    (best, best_t), _ = jax.lax.scan(step, init, (jnp.arange(chunks.shape[0]), chunks))
+    return jnp.sqrt(jnp.maximum(best, 0.0)), best_t
 
 
 # ---------------------------------------------------------------------------
@@ -232,25 +261,17 @@ class MatchedFilter:
         self.sample_rate_hertz = fs
         self.num_samples = int(round(self.onsource_duration_seconds * fs))
         self.num_whitening_samples = self.num_samples + 2 * int(round(self.crop_duration_seconds * fs))
-        ntaps = self.spectral_config.num_taps(fs)
-        self.num_taps = ntaps + (ntaps % 2)
+        self.num_taps = _even_taps(self.spectral_config, fs)
         if 2 * int(round(self.crop_duration_seconds * fs)) < self.num_taps:
             raise ValueError("crop_duration_seconds must be at least half the whitening filter, as in the dataset.")
         if self.spectral_config.lower_frequency_hertz is None:
             raise ValueError("The matched filter needs a lower band edge (spectral_config.lower_frequency_hertz).")
         self.spectral_config.validate_band(fs)
         if self.bank is None:
-            import gravyflow as gf
-            # The bank is placed with the first detector's noise curve; H1 and L1
-            # share theirs, so both get the same (bundled) bank.
-            ifo = self.ifos[0] if self.ifos else gf.IFO.L1
-            if ifo.value.optimal_psd_path == gf.IFO.L1.value.optimal_psd_path:
-                ifo = gf.IFO.L1
-            self.bank = TemplateBank.stochastic(
-                mass_range=tuple(self.mass_range), minimal_match=self.minimal_match, sample_rate_hertz=fs,
-                visible_seconds=self.onsource_duration_seconds + self.num_taps / (2.0 * fs),
-                lower_frequency_hertz=self.spectral_config.lower_frequency_hertz,
-                ifo=ifo)
+            # Placed with the first detector's noise curve.
+            self.bank = TemplateBank.place(default_bank_placement(
+                self.mass_range, self.minimal_match, fs, self.onsource_duration_seconds, self.spectral_config,
+                self.ifos[0] if self.ifos else None))
         elif isinstance(self.bank, TemplateGrid):
             self.bank = TemplateBank.from_grid(self.bank)
         # The raw template buffer: the merger at the centre, and enough on each
@@ -305,10 +326,24 @@ class MatchedFilter:
     # ------------------------------------------------------------- inputs
 
     def spectrum(self, background) -> Optional[PowerSpectrum]:
-        """The PowerSpectrum the data were whitened with: given, or estimated from an offsource."""
-        if background is None or isinstance(background, PowerSpectrum):
-            if background is not None and background.sample_rate_hertz != self.sample_rate_hertz:
+        """
+        The PowerSpectrum the data were whitened with: given, or estimated from
+        an offsource. A given spectrum must have this filter's sample rate,
+        filter length and band (FILTER_SHAPING_FIELDS): the templates' alignment
+        and FFT length are fixed by this filter's spectral_config, while their
+        whitening filter is designed from the spectrum's.
+        """
+        if background is None:
+            return None
+        if isinstance(background, PowerSpectrum):
+            if background.sample_rate_hertz != self.sample_rate_hertz:
                 raise ValueError("The PowerSpectrum's sample rate differs from the matched filter's.")
+            for name in FILTER_SHAPING_FIELDS:
+                given, own = getattr(background.config, name), getattr(self.spectral_config, name)
+                if given != own:
+                    raise ValueError(
+                        f"The PowerSpectrum's {name} ({given}) differs from the matched filter's "
+                        f"spectral_config ({own}): build the filter with the spectrum's config.")
             return background
         return estimate_psd(ops.cast(ops.convert_to_tensor(background), "float32"),
                             self.sample_rate_hertz, self.spectral_config)
@@ -362,7 +397,9 @@ class MatchedFilter:
         elif self.ifos is not None:
             if len(self.ifos) != num_detectors:
                 raise ValueError(f"{len(self.ifos)} ifos given for {num_detectors} data channels.")
-            seconds = light_travel_seconds(self.ifos) + COINCIDENCE_MARGIN_SECONDS
+            import gravyflow as gf
+            network = gf.Network(list(self.ifos))
+            seconds = float(network.max_arrival_time_difference_seconds) + COINCIDENCE_MARGIN_SECONDS
         else:
             raise ValueError("Multi-detector data need `ifos` (or max_time_offset_seconds) for the coincidence window.")
         return int(np.ceil(seconds * self.sample_rate_hertz))
@@ -395,7 +432,7 @@ class MatchedFilter:
             lags=self.lags, max_shift=self.max_time_offset_samples(data.shape[2]),
             template_chunk=self.template_chunk, reduce=reduce)
         if reduce:
-            out = tuple(o.reshape((-1,))[:batch] for o in out)
+            out = tuple(o.reshape((-1, o.shape[-1]))[:batch] for o in out)
         else:
             out = out.reshape((-1,) + tuple(out.shape[2:]))[:batch, :self.num_templates]
         return out, rank
@@ -420,12 +457,14 @@ class MatchedFilter:
         arrays 'snr' (network SNR), 'template_index', 'time_seconds' (merger time
         from the window's start), 'mass_1', 'mass_2'. Unbatched data give scalars.
         """
-        (snr, template, lag), rank = self._run(data, background, reduce=True)
-        template = np.asarray(template)
+        (best, best_template), rank = self._run(data, background, reduce=True)
+        best, best_template = np.asarray(best), np.asarray(best_template)
+        lag = np.argmax(best, axis=-1)
+        template = np.take_along_axis(best_template, lag[:, None], axis=-1)[:, 0]
         result = {
-            "snr": np.asarray(snr, dtype=np.float32),
+            "snr": np.take_along_axis(best, lag[:, None], axis=-1)[:, 0].astype(np.float32),
             "template_index": template,
-            "time_seconds": np.asarray(lag) / self.sample_rate_hertz,
+            "time_seconds": (lag + self.lags[0]) / self.sample_rate_hertz,
             "mass_1": self.bank.mass_1[template],
             "mass_2": self.bank.mass_2[template],
         }
@@ -435,21 +474,21 @@ class MatchedFilter:
 
     def statistic(self, data, background=None) -> jnp.ndarray:
         """The loudest network SNR of each example, (batch,) float32, traceable under jit."""
-        (snr, _, _), _ = self._run(data, background, reduce=True)
-        return snr
+        (best, _), _ = self._run(data, background, reduce=True)
+        return jnp.max(best, axis=-1)
 
     def detect(self, data, background=None, threshold: float = 8.0,
                cluster_seconds: float = 0.1) -> List[Dict[str, Any]]:
         """
         Triggers above `threshold`, clustered in time per example (see
         `find_triggers`), each with 'batch_index', 'snr', 'time_seconds' (merger
-        time), 'template_index', 'mass_1' and 'mass_2'.
+        time), 'template_index', 'mass_1' and 'mass_2'. The loudest template at
+        each merger time is kept as the bank is scanned, so memory does not grow
+        with the bank.
         """
-        series = self.snr_series(data, background)
-        series = np.asarray(series)
-        if series.ndim == 2:
-            series = series[None]
-        triggers = find_triggers(series, threshold, int(round(cluster_seconds * self.sample_rate_hertz)))
+        (best, best_template), _ = self._run(data, background, reduce=True)
+        triggers = _cluster(np.asarray(best), np.asarray(best_template), threshold,
+                            int(round(cluster_seconds * self.sample_rate_hertz)), batched=True)
         for trig in triggers:
             trig["time_seconds"] = (trig.pop("time_index") + self.lags[0]) / self.sample_rate_hertz
             trig["mass_1"] = float(self.bank.mass_1[trig["template_index"]])
@@ -474,8 +513,11 @@ def find_triggers(snr, threshold: float = 8.0, cluster_window: int = 100) -> Lis
         snr = snr[None]
     if snr.ndim != 3:
         raise ValueError("snr must be (templates, samples) or (batch, templates, samples).")
-    best = snr.max(axis=1)
-    template = snr.argmax(axis=1)
+    return _cluster(snr.max(axis=1), snr.argmax(axis=1), threshold, cluster_window, batched)
+
+
+def _cluster(best, template, threshold, cluster_window, batched) -> List[Dict[str, Any]]:
+    """find_triggers' clustering of (batch, samples) series maximised over templates."""
     triggers = []
     for b in range(best.shape[0]):
         above = np.flatnonzero(best[b] > threshold)
@@ -577,7 +619,8 @@ class MatchedFilterLayer(keras.Layer):
         whitened, offsource = self._split(inputs)
         mf = self._matched_filter
         h_fft = mf.template_spectra(self.templates)
-        (snr, _, _), _ = mf._run(whitened, offsource, reduce=True, h_fft=h_fft)
+        (best, _), _ = mf._run(whitened, offsource, reduce=True, h_fft=h_fft)
+        snr = ops.max(best, axis=-1)
         logit = (snr - self.snr_threshold) / self.temperature
         return ops.stack([ops.zeros_like(logit), logit], axis=-1)
 

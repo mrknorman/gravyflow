@@ -10,8 +10,12 @@ leaves light binaries badly covered (a fitting factor near 0.5 below 30 solar
 masses for a 16 x 16 grid over 5-95), so it is kept only as a simple utility.
 """
 
-from dataclasses import dataclass, field
+import hashlib
+import json
+import warnings
+from dataclasses import asdict, dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -78,6 +82,18 @@ def noise_curve_psd(ifo, frequencies: np.ndarray) -> np.ndarray:
     return np.exp(2.0 * np.interp(np.log(f), np.log(curve_frequencies), np.log(asd)))
 
 
+def waveform_model(approximant_name: str) -> dict:
+    """
+    The waveform model `cbc_templates` computes: the approximant and the
+    release series (major.minor) of ripplegw, which computes it. A release
+    series is the unit the dependency is pinned to; a change within one is
+    caught by the bank's coverage tests, not by the bank's key.
+    """
+    from importlib.metadata import version
+    major, minor = version("ripplegw").split(".")[:2]
+    return {"approximant": approximant_name, "package": "ripplegw", "series": f"{major}.{minor}"}
+
+
 def cbc_templates(
     mass_1,
     mass_2,
@@ -137,6 +153,20 @@ class MatchSpace:
     def window_seconds(self) -> float:
         return 2.0 * self.visible_seconds
 
+    def identity(self) -> dict:
+        """
+        Everything the match depends on: these settings, the noise curve (its
+        file and a hash of its contents) and the waveform model (the
+        approximant, and the release series of the package that computes it).
+        """
+        import gravyflow as gf
+        curve = Path(gf.IFO[self.ifo_name].value.optimal_psd_path)
+        return {
+            **asdict(self),
+            "noise_curve": {"file": curve.name, "sha256": hashlib.sha256(curve.read_bytes()).hexdigest()},
+            "waveform_model": waveform_model(self.approximant_name),
+        }
+
     @property
     def num_samples(self) -> int:
         return int(round(self.window_seconds * self.sample_rate_hertz))
@@ -195,24 +225,69 @@ def max_matches(a: np.ndarray, b: np.ndarray, chunk: int = 64) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class BankPlacement:
+    """
+    The arguments of a stochastic placement (see `TemplateBank.stochastic`).
+    Its `key` names everything the placed bank depends on, so a stored bank is
+    reused only for exactly the placement it came from.
+    """
+    space: MatchSpace
+    mass_range: Tuple[float, float]
+    minimal_match: float
+    seed: int = 2026
+    candidates_per_round: int = 128
+    target_coverage: float = 0.99
+    convergence_candidates: int = 2048
+
+    def __post_init__(self):
+        if not 0.0 < self.minimal_match < 1.0:
+            raise ValueError("minimal_match must be in (0, 1).")
+        lo, hi = self.mass_range
+        if not 0.0 < lo <= hi:
+            raise ValueError("mass_range must be (min, max) with 0 < min <= max.")
+
+    def key(self) -> dict:
+        return {
+            "space": self.space.identity(),
+            "mass_range": [float(m) for m in self.mass_range],
+            "minimal_match": float(self.minimal_match),
+            "seed": int(self.seed),
+            "candidates_per_round": int(self.candidates_per_round),
+            "target_coverage": float(self.target_coverage),
+            "convergence_candidates": int(self.convergence_candidates),
+        }
+
+    @classmethod
+    def from_key(cls, key: dict) -> "BankPlacement":
+        fields = {name: key["space"][name] for name in MatchSpace.__dataclass_fields__}
+        return cls(MatchSpace(**fields), tuple(key["mass_range"]), key["minimal_match"], key["seed"],
+                   key["candidates_per_round"], key["target_coverage"], key["convergence_candidates"])
+
+
+@dataclass(frozen=True)
 class TemplateBank:
     """
-    Component masses of a non-spinning CBC template bank (m1 >= m2), with how it
-    was made. Build one with `TemplateBank.stochastic`, or wrap fixed masses with
-    `TemplateBank.from_masses` (no coverage guarantee).
+    Component masses of a non-spinning CBC template bank (m1 >= m2), with the
+    placement that made it. Build one with `TemplateBank.stochastic`, or wrap
+    fixed masses with `TemplateBank.from_masses` (no coverage guarantee).
     """
     mass_1: np.ndarray
     mass_2: np.ndarray
-    minimal_match: Optional[float] = None
-    space: Optional[MatchSpace] = None
-    mass_range: Optional[Tuple[float, float]] = None
-    seed: Optional[int] = None
+    placement: Optional[BankPlacement] = None
     candidates_tried: int = 0
     final_acceptance: float = float("nan")
 
     @property
     def num_templates(self) -> int:
         return int(len(self.mass_1))
+
+    @property
+    def minimal_match(self) -> Optional[float]:
+        return None if self.placement is None else self.placement.minimal_match
+
+    @property
+    def space(self) -> Optional[MatchSpace]:
+        return None if self.placement is None else self.placement.space
 
     @classmethod
     def from_masses(cls, mass_1, mass_2) -> "TemplateBank":
@@ -254,36 +329,47 @@ class TemplateBank:
 
         The match is `MatchSpace`'s: the IFO's noise curve (default L1) over
         [lower_frequency_hertz, Nyquist), on the `visible_seconds` before merger.
-        Deterministic for a given seed; banks are cached per argument set, and a
-        bank bundled with gravyflow for exactly these arguments (in
-        res/template_banks) is loaded instead of placed again.
+        See `place` for caching and the banks bundled with gravyflow.
         """
         import gravyflow as gf
         ifo = gf.IFO.L1 if ifo is None else ifo
-        if not 0.0 < minimal_match < 1.0:
-            raise ValueError("minimal_match must be in (0, 1).")
-        lo, hi = float(mass_range[0]), float(mass_range[1])
-        if not 0.0 < lo <= hi:
-            raise ValueError("mass_range must be (min, max) with 0 < min <= max.")
         space = MatchSpace(float(sample_rate_hertz), float(visible_seconds), float(lower_frequency_hertz),
                            ifo.name, "IMRPhenomD")
-        arguments = _bank_arguments(space, lo, hi, minimal_match, seed, candidates_per_round, target_coverage,
-                                    convergence_candidates)
+        placement = BankPlacement(space, (float(mass_range[0]), float(mass_range[1])), float(minimal_match),
+                                  int(seed), int(candidates_per_round), float(target_coverage),
+                                  int(convergence_candidates))
+        return cls.place(placement, max_templates=max_templates, use_bundled=use_bundled)
+
+    @classmethod
+    def place(cls, placement: BankPlacement, max_templates: int = 4096,
+              use_bundled: bool = True) -> "TemplateBank":
+        """
+        The bank of `placement`. Deterministic for a given seed; banks are cached
+        per placement, and a bank bundled with gravyflow (res/template_banks)
+        whose stored key equals the placement's is loaded instead of placed
+        again. A bundled bank for the same arguments but another noise curve or
+        waveform model is not loaded: a warning names it and the bank is placed.
+        """
         if use_bundled:
-            bundled = _bundled_banks().get(_key(arguments))
-            if bundled is not None:
-                return cls(np.asarray(bundled["mass_1"]), np.asarray(bundled["mass_2"]), float(minimal_match),
-                           space, (lo, hi), int(seed), int(bundled["candidates_tried"]),
-                           float(bundled["final_acceptance"]))
-        m1, m2, tried, acceptance = _stochastic_masses(
-            space, lo, hi, float(minimal_match), int(seed), int(candidates_per_round),
-            float(target_coverage), int(convergence_candidates), int(max_templates))
-        return cls(m1, m2, float(minimal_match), space, (lo, hi), int(seed), tried, acceptance)
+            key = _normalised(placement.key())
+            for record in _bundled_banks():
+                if record["arguments"] == key:
+                    return cls.from_dict(record)
+            for record in _bundled_banks():
+                stale = [name for name in ("noise_curve", "waveform_model")
+                         if record["arguments"]["space"].get(name) != key["space"][name]]
+                if stale and _without_identity(record["arguments"]) == _without_identity(key):
+                    warnings.warn(f"The bundled bank for these arguments was placed with another {' and '.join(stale)} "
+                                  "(regenerate it with gravyflow.src.detection.bundle_banks); placing a new bank.")
+        m1, m2, tried, acceptance = _stochastic_masses(placement, int(max_templates))
+        return cls(m1, m2, placement, tried, acceptance)
 
     def fitting_factors(self, mass_1, mass_2, space: Optional[MatchSpace] = None) -> np.ndarray:
         """
         The fitting factor (best match with any template) of each signal
-        (mass_1[i], mass_2[i]) in the bank's match space (or `space`).
+        (mass_1[i], mass_2[i]) in the bank's match space (or `space`). This is
+        the metric the bank is placed with; it measures placement, and agrees
+        with independent overlaps only as far as the coverage tests show.
         """
         space = space or self.space or MatchSpace()
         signals = space.whitened_spectra(mass_1, mass_2)
@@ -291,24 +377,29 @@ class TemplateBank:
         return np.max(max_matches(signals, bank), axis=1)
 
     def to_dict(self) -> dict:
+        """The bank as JSON-ready data: its placement's key, masses and placement statistics."""
         return {
-            "arguments": None if self.space is None else _bank_arguments(
-                self.space, *self.mass_range, self.minimal_match, self.seed, None, None, None),
+            "arguments": None if self.placement is None else _normalised(self.placement.key()),
             "mass_1": [float(v) for v in self.mass_1],
             "mass_2": [float(v) for v in self.mass_2],
-            "minimal_match": self.minimal_match,
-            "space": None if self.space is None else dict(self.space.__dict__),
-            "mass_range": None if self.mass_range is None else list(self.mass_range),
-            "seed": self.seed,
-            "candidates_tried": self.candidates_tried,
-            "final_acceptance": self.final_acceptance,
+            "candidates_tried": int(self.candidates_tried),
+            "final_acceptance": float(self.final_acceptance),
         }
+
+    @classmethod
+    def from_dict(cls, record: dict) -> "TemplateBank":
+        arguments = record.get("arguments")
+        return cls(np.asarray(record["mass_1"], dtype=np.float64), np.asarray(record["mass_2"], dtype=np.float64),
+                   None if arguments is None else BankPlacement.from_key(arguments),
+                   int(record["candidates_tried"]), float(record["final_acceptance"]))
 
 
 @lru_cache(maxsize=16)
-def _stochastic_masses(space, lo, hi, minimal_match, seed, per_round, target_coverage,
-                       convergence_candidates, max_templates):
-    rng = np.random.default_rng(seed)
+def _stochastic_masses(placement: BankPlacement, max_templates: int):
+    space, minimal_match, per_round = placement.space, placement.minimal_match, placement.candidates_per_round
+    lo, hi = placement.mass_range
+    convergence_candidates, target_coverage = placement.convergence_candidates, placement.target_coverage
+    rng = np.random.default_rng(placement.seed)
     bank_spectra = np.zeros((0, space.num_samples // 2 + 1), dtype=np.complex64)
     m1_kept, m2_kept = [], []
     history = []  # 1 for each kept candidate, 0 for each rejected one
@@ -341,33 +432,21 @@ def _stochastic_masses(space, lo, hi, minimal_match, seed, per_round, target_cov
 BUNDLED_BANK_DIRECTORY = "res/template_banks"
 
 
-def _bank_arguments(space, lo, hi, minimal_match, seed, candidates_per_round, target_coverage,
-                    convergence_candidates) -> dict:
-    return {
-        "space": dict(space.__dict__),
-        "mass_range": [float(lo), float(hi)],
-        "minimal_match": float(minimal_match),
-        "seed": int(seed),
-        "candidates_per_round": None if candidates_per_round is None else int(candidates_per_round),
-        "target_coverage": None if target_coverage is None else float(target_coverage),
-        "convergence_candidates": None if convergence_candidates is None else int(convergence_candidates),
-    }
+def _normalised(data: dict) -> dict:
+    """`data` as it reads back from JSON (tuples become lists)."""
+    return json.loads(json.dumps(data))
 
 
-def _key(arguments: dict) -> str:
-    import json
-    return json.dumps(arguments, sort_keys=True)
+def _without_identity(arguments: dict) -> dict:
+    space = {k: v for k, v in arguments["space"].items() if k not in ("noise_curve", "waveform_model")}
+    return {**arguments, "space": space}
 
 
 @lru_cache(maxsize=1)
-def _bundled_banks() -> dict:
-    """The banks shipped in res/template_banks, keyed by the arguments that place them."""
-    import json
+def _bundled_banks() -> tuple:
+    """The bank records shipped in res/template_banks."""
     import gravyflow as gf
-    banks = {}
     directory = gf.PATH / BUNDLED_BANK_DIRECTORY
-    if directory.is_dir():
-        for path in sorted(directory.glob("*.json")):
-            record = json.loads(path.read_text())
-            banks[_key(record["arguments"])] = record
-    return banks
+    if not directory.is_dir():
+        return ()
+    return tuple(json.loads(path.read_text()) for path in sorted(directory.glob("*.json")))

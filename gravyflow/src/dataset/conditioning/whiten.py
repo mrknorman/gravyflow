@@ -357,10 +357,13 @@ def _filter_settings(spectrum: PowerSpectrum, num_samples: int, sample_rate_hert
 def whitening_filter(spectrum: PowerSpectrum, num_samples: int, window: str = "hann"):
     """
     The FIR filter (..., ntaps) that `whiten` applies, with this spectrum, to a
-    num_samples series (the whitened series is the 'same'-mode convolution of the
-    series, divided by the spectrum's scale, with this filter, times
-    sqrt(2) / sqrt(gain)). One filter per row of the spectrum. A matched filter
-    whitens its templates with it, so they see exactly what the data saw.
+    num_samples series. One filter per row of the spectrum. `whiten` first
+    removes the series' mean (its `detrend`) and Hann-tapers its first and last
+    ceil(ntaps / 2) samples (`convolve`); the whitened series is then the
+    'same'-mode convolution of that series, divided by the spectrum's scale,
+    with this filter, times sqrt(2) / sqrt(gain). A matched filter whitens its
+    templates with this filter alone: away from the tapered edges, they see
+    what the data saw.
     """
     sample_rate_hertz = spectrum.sample_rate_hertz
     ntaps, ncorner, nupper, _ = _filter_settings(spectrum, int(num_samples), sample_rate_hertz)

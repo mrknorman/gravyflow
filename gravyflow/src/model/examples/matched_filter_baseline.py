@@ -10,12 +10,14 @@ same filter, and returns two logits whose difference is
 
 The baseline is a reference for comparison, so it is configured to see what
 the models see and no more: the dataset's window, crop, band and PSD
-estimator, a bank over the injection's mass range with a minimal match of
-0.97, and merger times anywhere in the window.
+estimator, a bank of non-spinning, 22-mode templates over the injection's mass
+range with a minimal match of 0.97, and the merger times the dataset's
+placement can produce. It has no signal-consistency veto, so on real noise
+with glitches it is penalised against a veto-equipped search.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Tuple
 
 import keras
 from keras.models import Model
@@ -49,7 +51,8 @@ class MatchedFilterBaselineConfig:
     # The bank: non-spinning IMRPhenomD over both component masses.
     mass_range_msun: Tuple[float, float] = (5.0, 95.0)
     minimal_match: float = 0.97
-    # Merger times searched, in seconds from the window's start (None: all).
+    # Merger times searched, in seconds from the window's start. None: where
+    # the dataset's placement can put a merger (`search_window_seconds`).
     search_window_seconds: Optional[Tuple[float, float]] = None
 
     # The logits: (rho - snr_threshold) / temperature.
@@ -85,10 +88,37 @@ class MatchedFilterBaseline(ExampleModel):
         return [MODEL_INPUT, BACKGROUND_INPUT]
 
     @classmethod
+    def search_window_seconds(cls, dataset_args: dict) -> Tuple[float, float]:
+        """
+        The merger times a dataset's placement can produce in any of its
+        detectors, (start, end) in seconds from the window's start: the union
+        over its waveform generators of each one's placement range, widened by
+        its detectors' delays from the geocentre.
+        """
+        window = float(dataset_args["onsource_duration_seconds"])
+        generators = dataset_args["waveform_generators"]
+        if isinstance(generators, dict):
+            generators = [entry["generator"] for entry in generators.values()]
+        elif not isinstance(generators, (list, tuple)):
+            generators = [generators]
+        noise_network = gf.Network(list(dataset_args["noise_obtainer"].ifos))
+        ranges = [g.reference_time_window_seconds(window, noise_network if g.network is None else g.network)
+                  for g in generators]
+        return min(lo for lo, _ in ranges), max(hi for _, hi in ranges)
+
+    @classmethod
     def model(cls, config: Optional[MatchedFilterBaselineConfig] = None, num_ifos: Optional[int] = None,
-              **kwargs) -> Model:
-        """WHITENED_ONSOURCE (detectors, samples) and OFFSOURCE (detectors, samples) in, logits out."""
+              dataset_args: Optional[dict] = None, **kwargs) -> Model:
+        """
+        WHITENED_ONSOURCE (detectors, samples) and OFFSOURCE (detectors,
+        samples) in, logits out. Unless the config sets the search window, it
+        is the placement range of `dataset_args` (default the config's own
+        dataset), the data the baseline will be scored on.
+        """
         config = config or cls.config
+        search_window = config.search_window_seconds
+        if search_window is None:
+            search_window = cls.search_window_seconds(dataset_args or cls.dataset_args(config=config))
         num_ifos = len(config.ifos) if num_ifos is None else num_ifos
         if num_ifos != len(config.ifos):
             raise ValueError(f"num_ifos ({num_ifos}) differs from the config's ifos ({len(config.ifos)}).")
@@ -105,7 +135,7 @@ class MatchedFilterBaseline(ExampleModel):
             onsource_duration_seconds=config.onsource_duration_seconds,
             crop_duration_seconds=config.crop_duration_seconds,
             spectral_config=config.spectral_config,
-            search_window_seconds=config.search_window_seconds,
+            search_window_seconds=search_window,
             ifos=config.ifos,
             snr_threshold=config.snr_threshold,
             temperature=config.temperature,

@@ -166,20 +166,21 @@ def test_a_psd_array_is_not_mistaken_for_a_spectrum():
         mf.max_snr(np.zeros((1, N + 2 * CROP), dtype=np.float32))
 
 
+def white_signal(mf, merger_samples):
+    """A unit-SNR (30, 25) signal in white data, merger `merger_samples` into the window."""
+    t = cbc_templates([30.0], [25.0], FS, 3.0, 20.0)[0].astype(np.float64)
+    g = np.fft.irfft(mf._white_band_spectra(np.fft.rfft(t, n=mf.n_fft)), n=mf.n_fft)
+    s = mf.template_merger_index - merger_samples
+    w = g[s:s + N]
+    return w / np.sqrt(np.sum(w ** 2))
+
+
 def test_network_snr_is_coincident_not_averaged():
     # H1 and L1 see the signal with opposite signs (their antenna patterns) and
     # 8 ms apart: the network SNR is the quadrature sum, not the channel mean's.
     mf = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS,
                        ifos=[gf.IFO.H1, gf.IFO.L1])
-    t = cbc_templates([30.0], [25.0], FS, 3.0, 20.0)[0].astype(np.float64)
-    band = mf._white_band_spectra(np.fft.rfft(t, n=mf.n_fft))
-    g = np.fft.irfft(band, n=mf.n_fft)
-
-    def at(merger_samples):
-        s = mf.template_merger_index - merger_samples
-        w = g[s:s + N]
-        return w / np.sqrt(np.sum(w ** 2))
-
+    at = lambda merger_samples: white_signal(mf, merger_samples)
     shift = int(0.008 * FS)
     x = np.stack([10.0 * at(1000), -8.0 * at(1000 + shift)])[None].astype(np.float32)
     out = mf.max_snr(x)
@@ -190,6 +191,49 @@ def test_network_snr_is_coincident_not_averaged():
     assert float(mf.max_snr(far)["snr"][0]) < 10.6
     with pytest.raises(ValueError):  # two channels need the detectors' geometry
         MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS).max_snr(x)
+
+
+def test_the_coincidence_window_is_the_networks_light_travel_time():
+    mf = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS,
+                       ifos=[gf.IFO.H1, gf.IFO.L1, gf.IFO.V1])
+    seconds = float(gf.Network([gf.IFO.H1, gf.IFO.L1, gf.IFO.V1]).max_arrival_time_difference_seconds)
+    assert mf.max_time_offset_samples(3) == int(np.ceil((seconds + 0.002) * FS))
+
+
+def test_network_snr_at_the_edge_of_the_search_window():
+    # The first detector's merger is just inside the searched merger times and
+    # the second's just outside them: coincidence still finds the second.
+    mf = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS,
+                       ifos=[gf.IFO.H1, gf.IFO.L1], search_window_seconds=(0.3, 0.6))
+    h1, l1 = int(round(0.595 * FS)), int(round(0.603 * FS))
+    x = np.stack([10.0 * white_signal(mf, h1), 8.0 * white_signal(mf, l1)])[None].astype(np.float32)
+    out = mf.max_snr(x)
+    assert abs(float(out["snr"][0]) - np.hypot(10.0, 8.0)) < 0.05, out["snr"]
+    assert abs(float(out["time_seconds"][0]) - h1 / FS) <= 1.0 / FS
+    # ... and the same at the window's lower edge.
+    mf = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS,
+                       ifos=[gf.IFO.H1, gf.IFO.L1], search_window_seconds=(0.3, 0.6))
+    h1, l1 = int(round(0.305 * FS)), int(round(0.297 * FS))
+    x = np.stack([10.0 * white_signal(mf, h1), 8.0 * white_signal(mf, l1)])[None].astype(np.float32)
+    assert abs(float(mf.max_snr(x)["snr"][0]) - np.hypot(10.0, 8.0)) < 0.05
+
+
+def test_a_spectrum_shaped_for_another_filter_is_refused():
+    # The filter's length and band are its spectral_config's: a spectrum
+    # estimated with another filter length or band would misalign or rescale
+    # every template, so it is refused by name.
+    rng = np.random.default_rng(10)
+    noise = coloured_noise(rng, (1,), 16.0).astype(np.float32)
+    mf = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS)
+    w = np.zeros((1, N), dtype=np.float32)
+    for name, config in [("filter_duration_seconds", gf.SpectralConfig(filter_duration_seconds=0.5)),
+                         ("lower_frequency_hertz", gf.SpectralConfig(lower_frequency_hertz=30.0)),
+                         ("upper_frequency_hertz", gf.SpectralConfig(upper_frequency_hertz=800.0))]:
+        with pytest.raises(ValueError, match=name):
+            mf.max_snr(w, gf.estimate_psd(noise, FS, config))
+    # Estimator settings that do not shape the filter are the spectrum's own.
+    out = mf.max_snr(w, gf.estimate_psd(noise, FS, gf.SpectralConfig(psd_method="mean")))
+    assert out["snr"].shape == (1,)
 
 
 def test_band_and_templates_start_at_f_low():
@@ -217,12 +261,45 @@ def test_chunking_does_not_change_the_result(spectrum):
     np.testing.assert_array_equal(a["template_index"], b["template_index"])
 
 
+def test_detect_does_not_build_the_full_series(spectrum, monkeypatch):
+    # detect maximises over templates as it scans them, so its memory does not
+    # grow with the bank; its triggers are those of the full series.
+    rng = np.random.default_rng(11)
+    raw = coloured_noise(rng, (3,), 2.0)
+    raw[1] += raw_onsource(30.0, 25.0, 0.6) * 12.0 / whitened(raw_onsource(30.0, 25.0, 0.6), spectrum)[1]
+    w = np.asarray(whiten(raw.astype(np.float32), spectrum, FS))[:, CROP:-CROP]
+    mf = MatchedFilter(bank=TemplateBank.from_masses([30.0, 20.0, 12.0], [25.0, 15.0, 8.0]), sample_rate_hertz=FS,
+                       template_chunk=1)
+    expected = find_triggers(np.asarray(mf.snr_series(w, spectrum)), 5.0, int(0.1 * FS))
+    monkeypatch.setattr(MatchedFilter, "snr_series", lambda *args, **kwargs: pytest.fail("built the full series"))
+    triggers = mf.detect(w, spectrum, threshold=5.0)
+    assert len(triggers) == len(expected) and any(t["batch_index"] == 1 for t in triggers)
+    for t, e in zip(triggers, expected):
+        assert (t["batch_index"], t["template_index"]) == (e["batch_index"], e["template_index"])
+        assert t["time_seconds"] == e["time_index"] / FS and abs(t["snr"] - e["snr"]) < 1e-4 * e["snr"]
+
+
 def test_find_triggers_clusters_each_example():
+    # Maximised over templates first: the loudest template at each time.
+    series = np.zeros((3, 1000), dtype=np.float32)
+    series[0, 200] = 10.0
+    series[1, 600] = 12.0
+    series[2, 601] = 11.0
+    trig = find_triggers(series, threshold=8.0, cluster_window=50)
+    assert [(t["time_index"], t["snr"], t["template_index"]) for t in trig] == [(200, 10.0, 0), (600, 12.0, 1)]
+    assert "batch_index" not in trig[0]
+    # Each example is clustered on its own.
     peak = np.zeros((1, 1000), dtype=np.float32)
-    peak[0, 400:460] = 20.0 * np.hanning(60)
+    peak[0, 400:461] = 20.0 * np.hanning(61)
     assert len(find_triggers(peak, threshold=8.0, cluster_window=200)) == 1
     batched = find_triggers(np.stack([peak, peak]), threshold=8.0, cluster_window=200)
-    assert [t["batch_index"] for t in batched] == [0, 1]
+    assert [(t["batch_index"], t["time_index"]) for t in batched] == [(0, 430), (1, 430)]
+    two = np.zeros((2, 2, 500), dtype=np.float32)
+    two[0, 0, 100] = 9.0
+    two[1, 1, 300] = 11.0
+    trig = find_triggers(two, threshold=8.0, cluster_window=20)
+    assert [(t["batch_index"], t["time_index"], t["template_index"]) for t in trig] == [(0, 100, 0), (1, 300, 1)]
+    assert find_triggers(np.full((2, 100), 5.0), threshold=8.0) == []
     run = np.zeros((1, 2000), dtype=np.float32)
     run[0, 100:1100] = 9.0
     run[0, 600] = 12.0
@@ -233,7 +310,10 @@ def test_find_triggers_clusters_each_example():
     assert len(find_triggers(two, 8.0, 200)) == 2
 
 
-def test_stochastic_bank_covers_its_range():
+def test_stochastic_placement_reaches_its_minimal_match():
+    # The placement algorithm, in the metric it places with: the stopping rule
+    # leaves little of the range below the minimal match. Whether that metric
+    # is the search's is tested below, independently of it.
     bank = TemplateBank.stochastic(mass_range=(20.0, 40.0), convergence_candidates=512, use_bundled=False)
     rng = np.random.default_rng(8)
     m = rng.uniform(20.0, 40.0, size=(40, 2))
@@ -241,17 +321,90 @@ def test_stochastic_bank_covers_its_range():
     assert np.median(ff) >= 0.97 and np.min(ff) >= 0.95, (np.median(ff), np.min(ff))
 
 
-def test_default_bank_covers_light_binaries():
-    # The default bank (bundled) over 5-95 Msun: light binaries are covered too.
-    bank = MatchedFilter(sample_rate_hertz=FS).bank
-    assert bank.minimal_match == 0.97 and bank.num_templates > 136
-    rng = np.random.default_rng(9)
-    m = np.exp(rng.uniform(np.log(5.0), np.log(95.0), size=(48, 2)))
+def test_the_default_bank_covers_the_search(spectrum):
+    # The fitting factor through the search itself, not the metric the bank
+    # was placed with: the default bank's SNR over each injection's own
+    # template's, for noise-free whitened injections across the mass range and
+    # the window.
+    rng = np.random.default_rng(19)
+    m = np.exp(rng.uniform(np.log(5.0), np.log(95.0), size=(10, 2)))
     m1, m2 = m.max(axis=1), m.min(axis=1)
-    ff = bank.fitting_factors(m1, m2)
-    light = (m1 + m2) < 30.0
-    assert np.median(ff) >= 0.97 and np.percentile(ff, 5) >= 0.95, (np.median(ff), np.percentile(ff, 5))
-    assert light.sum() >= 5 and np.median(ff[light]) >= 0.97
+    mergers = rng.uniform(0.02, 0.98, size=len(m1))
+    w = np.concatenate([whitened(raw_onsource(a, b, t), spectrum, target=20.0)[0] for a, b, t in zip(m1, m2, mergers)])
+    bank = MatchedFilter(sample_rate_hertz=FS).max_snr(w, spectrum)
+    own = np.array([MatchedFilter(bank=TemplateBank.from_masses([a], [b]), sample_rate_hertz=FS)
+                    .max_snr(w[i:i + 1], spectrum)["snr"][0] for i, (a, b) in enumerate(zip(m1, m2))])
+    ff = bank["snr"] / own
+    assert ff.min() >= 0.97, list(zip(m1.round(1), m2.round(1), ff.round(4)))
+    assert np.all(np.abs(bank["time_seconds"] - mergers) <= 0.01)
+
+
+def test_the_bank_metric_is_pycbcs_overlap():
+    # pycbc's match (its own overlap, LALSimulation's analytic noise curve) on
+    # the search's waveforms equals the fitting factor the bank is placed with.
+    import pycbc.filter
+    import pycbc.psd
+    import pycbc.types
+    from gravyflow.src.detection.template_grid import MatchSpace
+    space = MatchSpace()
+    n = int(4 * FS)
+    psd = pycbc.psd.from_string("aLIGOO3LowT1800545", n // 2 + 1, FS / n, 10.0)
+
+    def visible(m1, m2):
+        h = cbc_templates(m1, m2, FS, space.window_seconds, 20.0).astype(np.float64) * space._ramp()
+        h = h[:, h.shape[-1] // 2 - int(space.visible_seconds * FS):]
+        return [pycbc.types.TimeSeries(np.pad(row, (0, n - len(row))), delta_t=1 / FS) for row in h]
+
+    signals = visible([51.7, 12.2, 26.7], [10.4, 9.1, 8.3])
+    templates = visible([50.0, 13.0, 28.0, 30.0], [11.0, 8.5, 8.0, 25.0])
+    pycbc_ff = [max(pycbc.filter.match(s, t, psd=psd, low_frequency_cutoff=20.0)[0] for t in templates)
+                for s in signals]
+    bank = TemplateBank.from_masses([50.0, 13.0, 28.0, 30.0], [11.0, 8.5, 8.0, 25.0])
+    own = bank.fitting_factors([51.7, 12.2, 26.7], [10.4, 9.1, 8.3], space)
+    np.testing.assert_allclose(own, pycbc_ff, atol=1e-3)
+    assert np.min(own) < 0.97  # the comparison spans matches either side of the minimal match
+
+
+def test_the_bundled_bank_is_the_default_filters_and_names_what_it_depends_on():
+    import hashlib
+    import json
+    from gravyflow.src.detection.matched_filter import default_bank_placement
+    from gravyflow.src.detection.template_grid import BUNDLED_BANK_DIRECTORY
+    key = json.loads(json.dumps(default_bank_placement().key()))
+    curve = gf.IFO.L1.value.optimal_psd_path
+    with open(curve, "rb") as f:
+        assert key["space"]["noise_curve"]["sha256"] == hashlib.sha256(f.read()).hexdigest()
+    assert key["space"]["waveform_model"]["approximant"] == "IMRPhenomD"
+    records = [json.loads(p.read_text()) for p in sorted((gf.PATH / BUNDLED_BANK_DIRECTORY).glob("*.json"))]
+    assert [r["arguments"] for r in records] == [key]
+    bank = MatchedFilter(sample_rate_hertz=FS).bank
+    assert bank.minimal_match == 0.97 and bank.num_templates == len(records[0]["mass_1"])
+    assert bank.to_dict() == records[0]  # the library's own serialiser writes the loadable record
+
+
+def test_a_bank_record_is_found_by_its_key_and_a_stale_one_is_not(monkeypatch):
+    from gravyflow.src.detection import template_grid
+    from gravyflow.src.detection.matched_filter import default_bank_placement
+    placement = default_bank_placement(mass_range=(30.0, 40.0))
+    record = TemplateBank(np.array([35.0, 31.0]), np.array([33.0, 30.0]), placement, 256, 0.004).to_dict()
+    monkeypatch.setattr(template_grid, "_bundled_banks", lambda: (record,))
+    monkeypatch.setattr(template_grid, "_stochastic_masses",
+                        lambda *args: (np.array([40.0]), np.array([30.0]), 128, 0.0))
+    found = TemplateBank.place(placement)
+    np.testing.assert_array_equal(found.mass_1, [35.0, 31.0])
+    assert found.placement == placement and found.to_dict() == record
+    # The same arguments with another noise curve: not loaded, and said so.
+    stale = json_copy(record)
+    stale["arguments"]["space"]["noise_curve"]["sha256"] = "0" * 64
+    monkeypatch.setattr(template_grid, "_bundled_banks", lambda: (stale,))
+    with pytest.warns(UserWarning, match="noise_curve"):
+        placed = TemplateBank.place(placement)
+    np.testing.assert_array_equal(placed.mass_1, [40.0])
+
+
+def json_copy(data):
+    import json
+    return json.loads(json.dumps(data))
 
 
 def test_baseline_takes_the_example_input_contract():
@@ -273,6 +426,24 @@ def test_baseline_takes_the_example_input_contract():
     assert logits.shape == (4, 2) and logits.dtype == np.float32
     snr = logits[:, 1] * cfg.temperature + cfg.snr_threshold
     assert np.all(snr > 9.0), snr  # every example holds an SNR-15 injection
+
+
+def test_the_baseline_searches_the_datasets_placement_range():
+    from gravyflow.src.model.examples.matched_filter_baseline import (
+        MatchedFilterBaseline, MatchedFilterBaselineConfig)
+    cfg = MatchedFilterBaselineConfig(mass_range_msun=(25.0, 35.0))
+    args = MatchedFilterBaseline.dataset_args(config=cfg)
+    # The default placement puts mergers anywhere in the window.
+    assert MatchedFilterBaseline.search_window_seconds(args) == (0.0, 1.0)
+    # A narrower placement narrows the search, widened by the detector's delay
+    # from the geocentre (a detector sees the merger that much off the placed time).
+    args["waveform_generators"].front_padding_duration_seconds = 0.0
+    args["waveform_generators"].back_padding_duration_seconds = 0.3
+    margin = float(np.max(np.linalg.norm(np.asarray(gf.Network([gf.IFO.L1]).location), axis=-1))) / 299792458.0
+    lo, hi = MatchedFilterBaseline.search_window_seconds(args)
+    assert lo == pytest.approx(0.5 - margin) and hi == pytest.approx(0.8 + margin) and 0.02 < margin < 0.022
+    layer = MatchedFilterBaseline.model(config=cfg, dataset_args=args).get_layer("matched_filter")
+    assert layer.search_window_seconds == (lo, hi)
 
 
 def test_layer_round_trips_through_its_config_and_a_saved_model(tmp_path):

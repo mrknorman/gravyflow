@@ -5,7 +5,16 @@
    "visible_seconds": 1.5,
    "lower_frequency_hertz": 20.0,
    "ifo_name": "L1",
-   "approximant_name": "IMRPhenomD"
+   "approximant_name": "IMRPhenomD",
+   "noise_curve": {
+    "file": "aligo_o3low_t1800545.csv",
+    "sha256": "1ba2b316774273c76ce773c140a07fcc29231885f2a3f1ea44565386fe5a05b4"
+   },
+   "waveform_model": {
+    "approximant": "IMRPhenomD",
+    "package": "ripplegw",
+    "series": "0.4"
+   }
   },
   "mass_range": [
    5.0,
@@ -1573,19 +1582,6 @@
   13.575905109867996,
   7.469401544054746
  ],
- "minimal_match": 0.97,
- "space": {
-  "sample_rate_hertz": 2048.0,
-  "visible_seconds": 1.5,
-  "lower_frequency_hertz": 20.0,
-  "ifo_name": "L1",
-  "approximant_name": "IMRPhenomD"
- },
- "mass_range": [
-  5.0,
-  95.0
- ],
- "seed": 2026,
  "candidates_tried": 12160,
  "final_acceptance": 0.00927734375
 }
