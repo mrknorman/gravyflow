@@ -40,7 +40,7 @@ Use DataLabel.EVENTS to enable GW event acquisition:
 
     gf.IFODataObtainer(
         data_labels=[gf.DataLabel.EVENTS],  # ← GW events
-        ...
+        # ... the other settings
     )
 
 Event data:
@@ -76,7 +76,7 @@ This is useful for:
 Example:
     obtainer = gf.IFODataObtainer(
         event_names=["GW190521", "GW190814"],  # ← Specific events
-        ...
+        # ... the other settings
     )
 """)
 
@@ -108,7 +108,7 @@ For classification training, use 'balanced_glitch_types=True':
     obtainer = gf.IFODataObtainer(
         data_labels=[gf.DataLabel.GLITCHES],
         balanced_glitch_types=True,  # ← Enable balancing
-        ...
+        # ... the other settings
     )
 
 How balancing works:
@@ -200,11 +200,16 @@ Cache benefits:
 Cache files are stored in:
   ~/.gravyflow/cache/transient/
 
-To pre-populate the cache (for large training runs), draw one pass of
-the dataset you will train on; the cache fills as windows are fetched:
+To pre-populate the cache (for large training runs), draw the dataset
+you will train on; the cache keeps every window it draws:
 
+    # train_data: the gf.Dataset you will train on
     for k in range(len(train_data)):
         train_data[k]
+
+One pass draws len(train_data) = steps_per_epoch batches of
+num_examples_per_batch windows (32,000 at the defaults) and caches
+those, not every glitch of the split. Tutorial 07 shows a full example.
 """)
 
 # =============================================================================
@@ -220,7 +225,7 @@ You can combine multiple data labels for mixed training:
 
     obtainer = gf.IFODataObtainer(
         data_labels=[gf.DataLabel.GLITCHES, gf.DataLabel.EVENTS],
-        ...
+        # ... the other settings
     )
 
 This is useful for:
@@ -303,7 +308,7 @@ print("""
 5. CACHING:
    - Memory + disk caching
    - ~/.gravyflow/cache/transient/
-   - Draw one pass of the dataset to pre-cache large runs
+   - Draw the training dataset to pre-cache the windows it draws
 """)
 
 print("\n✓ Tutorial 05 complete!")

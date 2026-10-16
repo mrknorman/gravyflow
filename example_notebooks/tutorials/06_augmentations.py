@@ -42,7 +42,7 @@ OLD API (deprecated):
         random_time_reversal=True,
         random_shift=True,
         shift_fraction=0.2,
-        ...
+        # ... the other settings
     )
 
 NEW API:
@@ -52,7 +52,7 @@ NEW API:
             gf.TimeReversal(probability=0.5),
             gf.RandomShift(probability=0.5, shift_fraction=0.2),
         ],
-        ...
+        # ... the other settings
     )
 
 Benefits of new API:

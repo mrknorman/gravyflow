@@ -73,7 +73,7 @@ This avoids querying GWOSC segment databases repeatedly.
 Enable with:
     obtainer = gf.IFODataObtainer(
         cache_segments=True,  # ← Enable segment caching (default)
-        ...
+        # ... the other settings
     )
 
 What gets cached:
@@ -134,7 +134,7 @@ current data, hiding network latency.
 Configure with:
     obtainer = gf.IFODataObtainer(
         prefetch_segments=16,  # Number of segments to prefetch
-        ...
+        # ... the other settings
     )
 
 Recommended values:
@@ -161,12 +161,12 @@ print("=" * 70)
 
 print("""
 For large training runs, pre-populate the cache before training. The
-cache fills as windows are fetched, so draw one pass of the dataset you
-will train on, with the same settings:
+cache keeps every window a dataset draws, so draw the dataset you will
+train on, with the same settings:
 
 Example script:
 
-    # Pre-cache the training split's glitch windows
+    # Pre-cache the glitch windows of one pass over the training data
     train_data = gf.Dataset(
         noise_obtainer=gf.NoiseObtainer(
             ifo_data_obtainer=gf.IFODataObtainer(
@@ -181,14 +181,21 @@ Example script:
         onsource_duration_seconds=1.0,
         offsource_duration_seconds=16.0,
         input_variables=[gf.ReturnVariables.ONSOURCE],
+        steps_per_epoch=1000,
+        num_examples_per_batch=32,
     )
     for k in range(len(train_data)):
         train_data[k]
 
+One pass draws len(train_data) = steps_per_epoch batches of
+num_examples_per_batch windows, 32,000 here (the defaults), and caches
+those: a split with more glitches than one pass draws is cached only in
+part. A larger steps_per_epoch draws, and caches, more of them.
+
 Run this ONCE before training:
-  1. Downloads the split's glitch windows
+  1. Downloads the windows it draws
   2. Stores them in TransientCache
-  3. Training reads from cache (fast!)
+  3. Training reads those windows from the cache (fast!)
 
 Recommended workflow:
   ┌───────────────┐    ┌──────────────┐    ┌────────────────┐
@@ -310,16 +317,21 @@ val_obtainer = gf.IFODataObtainer(
 
 # One dataset per split, each obtainer wrapped in a NoiseObtainer; every route
 # splits by gf.DEFAULT_SPLIT_FRACTIONS
-train_dataset = gf.Dataset(
-    noise_obtainer=gf.NoiseObtainer(ifo_data_obtainer=train_obtainer, ifos=[gf.IFO.L1, gf.IFO.H1]),
-    ifos=[gf.IFO.L1, gf.IFO.H1],
-    group="train",
+dataset_settings = dict(
+    sample_rate_hertz=2048.0,
+    onsource_duration_seconds=1.0,
+    offsource_duration_seconds=16.0,
+    input_variables=[gf.ReturnVariables.ONSOURCE],
 )
-
-val_dataset = gf.Dataset(
+train_data = gf.Dataset(
+    noise_obtainer=gf.NoiseObtainer(ifo_data_obtainer=train_obtainer, ifos=[gf.IFO.L1, gf.IFO.H1]),
+    group="train",
+    **dataset_settings,
+)
+val_data = gf.Dataset(
     noise_obtainer=gf.NoiseObtainer(ifo_data_obtainer=val_obtainer, ifos=[gf.IFO.L1, gf.IFO.H1]),
-    ifos=[gf.IFO.L1, gf.IFO.H1],
     group="validate",
+    **dataset_settings,
 )
 """)
 
@@ -348,7 +360,8 @@ print("""
    - Higher for TRANSIENT, lower for NOISE
 
 5. PRE-CACHING:
-   - Draw one pass of the training dataset before large runs
+   - Draw the training dataset before large runs: each pass caches
+     the steps_per_epoch x num_examples_per_batch windows it draws
    - One-time cost, major training speedup
 
 6. CACHE MANAGEMENT:
