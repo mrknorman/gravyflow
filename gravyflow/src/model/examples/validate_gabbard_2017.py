@@ -39,15 +39,12 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def main(argv=None) -> Validator:
-    args = parse_args(argv)
-    run_dir = RunDirectory(args.run_dir)
-    run = run_dir.run
-    if run is None:
-        raise FileNotFoundError(f"No training run in {run_dir.path}.")
-    model = run_dir.load_model("model", run["config_sha256"])
+def build_validation(args, run: dict) -> tuple:
+    """
+    The validator's data, exactly as `main` scores it: the dataset arguments,
+    from the training run's recorded configuration, and the validation settings.
+    """
     data = run["description"]["config"]
-
     noise_type = gf.NoiseType.REAL if args.noise_type == "real" else gf.NoiseType.COLORED
     dataset_args = validation_dataset_args(
         noise_type=noise_type,
@@ -63,6 +60,19 @@ def main(argv=None) -> Validator:
         batch_size=args.batch_size,
         score_real_events=args.real_events,
     )
+    return dataset_args, config
+
+
+def main(argv=None) -> Validator:
+    args = parse_args(argv)
+    run_dir = RunDirectory(args.run_dir)
+    run = run_dir.run
+    if run is None:
+        raise FileNotFoundError(f"No training run in {run_dir.path}.")
+    model = run_dir.load_model("model", run["config_sha256"])
+
+    dataset_args, config = build_validation(args, run)
+    noise_type = dataset_args["noise_obtainer"].noise_type
     output_dir = Path(args.output_dir) if args.output_dir else run_dir.path / "validation"
     name = f"gabbard_2017_{noise_type.name.lower()}"
     print(f"Validating {run_dir.path / 'model.keras'} on {noise_type.name} noise; results in {output_dir}")

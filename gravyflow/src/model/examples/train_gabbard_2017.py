@@ -66,6 +66,27 @@ def build_run(args) -> tuple:
     return config, run
 
 
+def build_datasets(config: Gabbard2017Config, run: TrainingRun) -> tuple:
+    """
+    The run's data, exactly as `main` trains on it: the training batches, given
+    the run's root seed (`TrainingRun.train`'s ``training_data``), and the fixed
+    validation set.
+    """
+    schedule = run.schedule
+    validation = materialise(
+        DetectionBatches(Gabbard2017.dataset(
+            config=config, seed=run.seed, group="validate",
+            steps_per_epoch=schedule.validation_batches)),
+        schedule.validation_batches,
+    )
+
+    def training_data(seed):
+        return DetectionBatches(Gabbard2017.dataset(
+            config=config, seed=seed, group="train", steps_per_epoch=schedule.steps_per_epoch))
+
+    return training_data, validation
+
+
 def main(argv=None) -> keras.Model:
     args = parse_args(argv)
     config, run = build_run(args)
@@ -74,16 +95,10 @@ def main(argv=None) -> keras.Model:
           f"{config.sample_rate_hertz:g} Hz, {schedule.epochs} epochs x {schedule.steps_per_epoch} steps")
     print(f"Run directory: {run.directory.path}")
 
-    validation = materialise(
-        DetectionBatches(Gabbard2017.dataset(
-            config=config, seed=run.seed, group="validate",
-            steps_per_epoch=schedule.validation_batches)),
-        schedule.validation_batches,
-    )
+    training_data, validation = build_datasets(config, run)
     model = run.train(
         build_model=lambda: Gabbard2017.compile_model(Gabbard2017.model(config), config),
-        training_data=lambda seed: DetectionBatches(Gabbard2017.dataset(
-            config=config, seed=seed, group="train", steps_per_epoch=schedule.steps_per_epoch)),
+        training_data=training_data,
         validation_data=validation,
         verbose=args.verbose,
     )

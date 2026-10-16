@@ -74,15 +74,25 @@ def configure(args):
     return config, replace(schedule, monitor_from_epoch=span)
 
 
-def train_phase(model_class, task, config, schedule, args, pretrained=None):
-    regression = task == "regression"
-    run = TrainingRun(
+def build_run(model_class, task, config, schedule, args, pretrained=None) -> TrainingRun:
+    """One phase's run, in ``OUTPUT_DIR/task``."""
+    return TrainingRun(
         directory=RunDirectory(Path(args.output_dir) / task),
         schedule=schedule,
         seed=args.seed,
         description={"model": model_class.__name__, "task": task, "config": config,
                      "transfer": pretrained is not None},
     )
+
+
+def build_datasets(model_class, task, config, run: TrainingRun) -> tuple:
+    """
+    One phase's data, exactly as `train_phase` trains on it: the training
+    batches, given the run's root seed (`TrainingRun.train`'s
+    ``training_data``), and the fixed validation set.
+    """
+    schedule = run.schedule
+    regression = task == "regression"
     make = model_class.dataset_regression if regression else model_class.dataset
     wrap = (lambda ds: RegressionBatches(ds, MASSES)) if regression else DetectionBatches
     validation = materialise(
@@ -90,6 +100,18 @@ def train_phase(model_class, task, config, schedule, args, pretrained=None):
                   steps_per_epoch=schedule.validation_batches)),
         schedule.validation_batches,
     )
+
+    def training_data(seed):
+        return wrap(make(
+            config=config, seed=seed, group="train", steps_per_epoch=schedule.steps_per_epoch,
+            curriculum=config.use_curriculum))
+
+    return training_data, validation
+
+
+def train_phase(model_class, task, config, schedule, args, pretrained=None):
+    run = build_run(model_class, task, config, schedule, args, pretrained)
+    training_data, validation = build_datasets(model_class, task, config, run)
 
     def build():
         model = model_class.model(config, task=task)
@@ -101,9 +123,7 @@ def train_phase(model_class, task, config, schedule, args, pretrained=None):
           f"in {run.directory.path}")
     return run.train(
         build_model=build,
-        training_data=lambda seed: wrap(make(
-            config=config, seed=seed, group="train", steps_per_epoch=schedule.steps_per_epoch,
-            curriculum=config.use_curriculum)),
+        training_data=training_data,
         validation_data=validation,
         verbose=args.verbose,
     )
