@@ -1051,8 +1051,9 @@ def test_cbc_get_max_duration():
     
     max_dur = gen.get_max_generated_duration()
     
-    # Should return a positive float
-    assert max_dur > 0.0
+    # CBC generation is sized from the requested window alone, so a CBC source
+    # needs no longer window, whatever its masses and minimum frequency.
+    assert max_dur == 0.0
 
 
 def test_is_not_inherited():
@@ -1310,7 +1311,7 @@ def test_cbc_get_max_duration_float():
     # Should return float
     dur = gen.get_max_generated_duration()
     assert isinstance(dur, float)
-    assert dur > 0.0
+    assert dur == 0.0
 
 def test_scale_to_hpeak_vector():
     """Test scale_to_hpeak with vector target (covers line 191)."""
@@ -1471,7 +1472,7 @@ def test_cbc_generator_get_min_float_branch():
     
     duration = gen.get_max_generated_duration()
     assert isinstance(duration, float)
-    assert duration > 0.0
+    assert duration == 0.0
 
 def test_cbc_generate_with_non_enum_parameters():
     """Test CBCGenerator.generate parameter conversion fallback (covers lines 832-838)."""

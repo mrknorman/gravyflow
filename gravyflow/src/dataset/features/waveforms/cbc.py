@@ -202,11 +202,16 @@ def _generate_cbc_waveform_jit(
     lambda_2 = 0.0,
     approximant: Approximant = Approximant.IMRPhenomD,
     f_ref: float = 20.0,
-    coalescence_time: float = None
+    coalescence_time: float = None,
+    min_frequency_hertz = None
 ):
     """
     Generates time-domain waveforms using ripple.
     Returns array of shape (num_waveforms, 2, num_samples).
+
+    Each waveform starts at the frequency it has at the start of the buffer,
+    ``coalescence_time`` before merger, or at ``min_frequency_hertz`` when that is
+    given and higher, with an 8 Hz sine-squared taper above its start.
     """
     approximant = _as_approximant(approximant)
 
@@ -260,6 +265,9 @@ def _generate_cbc_waveform_jit(
     # Use tc_jax (time to merger) to calculate the starting frequency at t=0
     # This prevents the waveform from starting before the buffer and wrapping around.
     f_mins = calc_minimum_frequency(m1_jax, m2_jax, tc_jax)
+    if min_frequency_hertz is not None:
+        # No content below the requested minimum frequency (the f_lower of LAL).
+        f_mins = jnp.maximum(f_mins, ensure_jax(min_frequency_hertz, num_waveforms))
     
     f_u = sample_rate_hertz / 2.0
     num_samples = int(sample_rate_hertz * duration_seconds)
@@ -340,6 +348,53 @@ def _generate_cbc_waveform_jit(
     
     # Return JAX array (which Keras 3 can handle as Tensor)
     return waveforms
+
+def _cbc_buffer_seconds(window_seconds: float) -> float:
+    """
+    The buffer a CBC window of ``window_seconds`` is generated on, in seconds.
+
+    It is the next power of two at or above twice the window, and depends on
+    nothing else, so one window length compiles one generator shape whatever
+    the masses. With the merger half a window before the buffer's end and the
+    last window kept, at least one window of buffer precedes the kept window.
+    That is enough for each waveform's start taper, which spans a fixed
+    fraction of its time to merger, to end before the kept window begins.
+    """
+    return float(2.0 ** np.ceil(np.log2(2.0 * float(window_seconds))))
+
+
+def _generate_cbc_window(
+    num_waveforms: int,
+    sample_rate_hertz: float,
+    window_seconds: float,
+    min_frequency_hertz,
+    approximant: Approximant = Approximant.IMRPhenomD,
+    f_ref: float = 20.0,
+    **source
+):
+    """
+    CBC waveforms of ``window_seconds``, each with its merger at the window's centre.
+
+    The waveforms are generated on the fixed buffer of ``_cbc_buffer_seconds``
+    and the last ``window_seconds`` are kept. Each starts at the higher of
+    ``min_frequency_hertz`` and its frequency at the buffer's start, so the kept
+    window does not depend on the buffer or on the other sources in the batch.
+    Returns an array of shape (num_waveforms, 2, int(window_seconds * sample_rate_hertz)).
+    """
+    buffer_seconds = _cbc_buffer_seconds(window_seconds)
+    waveforms = _generate_cbc_waveform_jit(
+        num_waveforms=num_waveforms,
+        sample_rate_hertz=sample_rate_hertz,
+        duration_seconds=buffer_seconds,
+        approximant=approximant,
+        f_ref=float(f_ref),
+        coalescence_time=buffer_seconds - window_seconds / 2.0,
+        min_frequency_hertz=min_frequency_hertz,
+        **source
+    )
+    num_samples_keep = int(window_seconds * sample_rate_hertz)
+    return waveforms[..., -num_samples_keep:]
+
 
 def generate_cbc_waveform(
     num_waveforms: int = 1,

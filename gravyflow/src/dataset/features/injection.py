@@ -23,8 +23,7 @@ from numpy.random import default_rng
 # Local imports:
 import gravyflow as gf
 from gravyflow.src.dataset.features.waveforms.cbc import (
-    generate_cbc_waveform, 
-    calc_duration_from_f_min,
+    _generate_cbc_window,
     Approximant
 )
 
@@ -763,31 +762,16 @@ class CBCGenerator(WaveformGenerator):
             )
     
     def get_max_generated_duration(self):
-        # Calculate max duration based on min frequency and min masses
-        
-        def get_min(val):
-            if isinstance(val, gf.Distribution):
-                if val.type_ == gf.DistributionType.CONSTANT:
-                    return val.value
-                return val.min_
-            return val
-            
-        m1 = get_min(self.mass_1_msun)
-        m2 = get_min(self.mass_2_msun)
-        f_min = get_min(self.min_frequency_hertz)
-        
-        # calc_duration_from_f_min expects tensors or floats
-        # It returns a tensor if inputs are tensors, or float if floats (if using numpy/python math, but it uses ops)
-        # We need a float return.
-        
-        # Create dummy tensors for calculation
-        m1_t = ops.convert_to_tensor(m1, dtype="float32")
-        m2_t = ops.convert_to_tensor(m2, dtype="float32")
-        f_min_t = ops.convert_to_tensor(f_min, dtype="float32")
-        
-        duration = calc_duration_from_f_min(m1_t, m2_t, f_min_t)
-        
-        return float(duration)
+        """
+        The window length a CBC source needs beyond the one requested: none.
+
+        CBC waveforms are generated on a buffer sized from the requested window
+        alone, and each starts at the higher of ``min_frequency_hertz`` and its
+        frequency at the buffer's start, so any window holds its source's merger
+        and the inspiral within it. The whole inspiral from
+        ``min_frequency_hertz`` is never generated.
+        """
+        return 0.0
     
     def generate(
             self,
@@ -846,43 +830,9 @@ class CBCGenerator(WaveformGenerator):
             # Add duration to parameters
             parameters["duration_seconds"] = ops.full((num_waveforms,), duration_seconds)
 
-            # Calculate required duration for f_min
+            # No waveform has content below its minimum frequency.
             f_min = parameters.get("min_frequency_hertz", 20.0)
             f_min = ops.convert_to_tensor(f_min, dtype="float32")
-            
-            required_durations = calc_duration_from_f_min(
-                parameters["mass_1_msun"],
-                parameters["mass_2_msun"],
-                f_min
-            )
-            
-            # Find max required duration in batch
-            max_required_duration = ops.max(required_durations)
-            
-            # Convert to float for JIT compatibility (triggers sync)
-            max_required_duration = float(max_required_duration)
-            
-            # Use the larger of requested duration or required duration + half duration (to accommodate merger placement)
-            # We need start_time >= 0.
-            # start_time = tc - max_required_duration
-            # tc = gen_duration - duration_seconds / 2.0
-            # So gen_duration - duration_seconds / 2.0 - max_required_duration >= 0
-            # gen_duration >= max_required_duration + duration_seconds / 2.0
-            # We add a 2.0s safety buffer to account for approximations in calc_duration_from_f_min
-            gen_duration = max(duration_seconds, max_required_duration + (duration_seconds / 2.0) + 2.0)
-            
-            # Snap to next power of 2 to reduce recompilation
-            gen_duration = 2**np.ceil(np.log2(gen_duration))
-            
-            # Calculate coalescence time to place merger in the center of the *requested* duration
-            # relative to the end of the generated waveform.
-            # We want to keep the last `duration_seconds`.
-            # And we want the merger to be at `duration_seconds / 2.0` from the start of that chunk.
-            # So `tc` relative to start of generated waveform is:
-            # (gen_duration - duration_seconds) + (duration_seconds / 2.0)
-            # = gen_duration - duration_seconds / 2.0
-            
-            coalescence_time = gen_duration - (duration_seconds / 2.0)
             
             # Create kwargs for CBC generator, removing parameters it doesn't accept
             cbc_kwargs = parameters.copy()
@@ -891,18 +841,15 @@ class CBCGenerator(WaveformGenerator):
             if "duration_seconds" in cbc_kwargs:
                 cbc_kwargs.pop("duration_seconds")
 
-            waveforms = generate_cbc_waveform(
+            # The merger is at the centre of the window.
+            waveforms = _generate_cbc_window(
                     num_waveforms=num_waveforms, 
                     sample_rate_hertz=sample_rate_hertz, 
-                    duration_seconds=gen_duration,
+                    window_seconds=duration_seconds,
+                    min_frequency_hertz=f_min,
                     approximant=self.approximant,
-                    coalescence_time=coalescence_time,
                     **cbc_kwargs
             )
-            
-            # Crop to the last `duration_seconds`
-            num_samples_keep = int(duration_seconds * sample_rate_hertz)
-            waveforms = waveforms[..., -num_samples_keep:]
             
             waveforms *= self.scale_factor
 
