@@ -51,7 +51,10 @@ Real noise and glitches use public data only; no credentials are needed:
 
 Every random draw comes from one seed tree, rooted at a dataset's `seed` (default `gf.Defaults.seed`) and addressed
 by the split (`group`), the epoch, the batch index and what the draw is for. A batch is rebuilt from its address alone,
-and the splits never share a stream. Old seeds give new data. The replaced seed arguments (`Distribution(seed=)`,
+and the splits never share a stream. Old seeds give new data. Every draw is bit-identical between rebuilds; on CPU,
+XLA's multi-threaded kernels can still round the projected strain differently from one call to the next, in the last
+bits of float32. For bit-identical batches, set `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false` before importing
+gravyflow (the results then differ, also in the last bits, from multi-threaded ones). The replaced seed arguments (`Distribution(seed=)`,
 `generate(seed=)`, `reseed`, `Network(seed=)`, `Curriculum(seed=)` and the like) still work for one release, with a
 `DeprecationWarning`. These changes have no such period:
 
