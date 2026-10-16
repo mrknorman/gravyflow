@@ -70,28 +70,27 @@ def validate_noise_settings(
                 UserWarning
             )
             
-def get_max_arrival_time_difference(
-    waveform_generators : List,
-    ifos : Optional[List[gf.IFO]] = None
-    ) -> float:
+def noise_ifos(ifos, noise_obtainer) -> List:
+    """
+    The detectors a dataset's noise has, and so its generators' network: the
+    dataset's own ``ifos``, else its noise obtainer's, else L1.
+    """
+    if ifos is not None:
+        return ensure_list(ifos)
+    obtainer_ifos = getattr(noise_obtainer, "ifos", None)
+    return ensure_list(obtainer_ifos) if obtainer_ifos is not None else [gf.IFO.L1]
+
+
+def get_max_arrival_time_difference(ifos: List[gf.IFO]) -> float:
     """
     The lag range of ``ROLLING_PEARSON_ONSOURCE`` (s): the largest light travel
-    time between the detectors of the generators' networks or, with no
-    generator, of the network of ``ifos``; 0.01 s with neither.
+    time between ``ifos``, the detectors the dataset uses (``noise_ifos``; every
+    generator's network is bound to them). Noise-only and injection batches
+    therefore have the same shape.
 
     A Python float, because `rolling_pearson` takes it as a static argument.
-    Deriving it from the detectors also when no generator is present keeps
-    noise-only and injection batches the same shape.
     """
-    networks = []
-    if isinstance(waveform_generators, list):
-        networks = [g.network for g in waveform_generators if g is not None]
-    elif isinstance(waveform_generators, dict):
-        networks = [g["generator"].network for g in waveform_generators.values() if g is not None]
-    times = [float(n.max_arrival_time_difference_seconds) for n in networks if n is not None]
-    if not times and ifos:
-        times = [float(gf.Network(ensure_list(ifos)).max_arrival_time_difference_seconds)]
-    return max(times) if times else 0.01
+    return float(gf.Network(ensure_list(ifos)).max_arrival_time_difference_seconds)
 
 WHITENED_VARIABLES = (
     gf.ReturnVariables.WHITENED_ONSOURCE,
@@ -248,11 +247,8 @@ class GravyflowDataset(keras.utils.PyDataset):
                     value.configure(steps_per_epoch=self.steps_per_epoch)
 
     def _noise_ifos(self) -> List:
-        """The detectors the noise will have: the dataset's `ifos`, else the obtainer's."""
-        if self.ifos is not None:
-            return list(self.ifos)
-        ifos = getattr(self.noise_obtainer, "ifos", None)
-        return ensure_list(ifos) if ifos is not None else [gf.IFO.L1]
+        """The detectors the noise will have (``noise_ifos``)."""
+        return noise_ifos(self.ifos, self.noise_obtainer)
 
     def _set_generator_networks(self):
         """
@@ -594,7 +590,7 @@ class GravyflowDataset(keras.utils.PyDataset):
         """Calculate rolling Pearson correlation if required."""
         if gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in self.variables_to_return:
             max_arrival_time_difference_seconds = get_max_arrival_time_difference(
-                self.waveform_generators, self.noise_obtainer.ifos
+                self._noise_ifos()
             )
             return gf.rolling_pearson(
                 whitened_onsource,

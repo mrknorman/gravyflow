@@ -34,10 +34,15 @@ def wnb(snr=20.0, injection_chance=1.0):
         injection_chance=injection_chance)
 
 
-def pearson_dataset(ifos, generator, sample_rate_hertz=1024.0):
+def pearson_dataset(ifos, generator, sample_rate_hertz=1024.0, on_dataset=False):
+    """A Pearson dataset whose detectors are set on the noise obtainer, or on the dataset."""
+    if on_dataset:
+        where = dict(ifos=list(ifos), noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED))
+    else:
+        where = dict(noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED, ifos=list(ifos)))
     return gf.Dataset(
         sample_rate_hertz=sample_rate_hertz, onsource_duration_seconds=1.0, offsource_duration_seconds=16.0,
-        noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED, ifos=list(ifos)),
+        **where,
         waveform_generators=generator, num_examples_per_batch=2, seed=1, steps_per_epoch=1,
         input_variables=[gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE], output_variables=[])
 
@@ -48,14 +53,18 @@ def test_rolling_pearson_runs_with_a_generator():
     # The lag range reached rolling_pearson as a JAX array, which a static jit argument cannot be.
     x, _ = pearson_dataset(HL, wnb())[0]
     p = np.asarray(x["ROLLING_PEARSON_ONSOURCE"])
-    assert p.shape == (2, 1, 20) and np.all(np.isfinite(p)) and np.all(np.abs(p) <= 1.0 + 1e-3)
+    # H1-L1 is 10.01 ms, 10.25 samples at 1024 Hz: lags -11 to +11.
+    assert p.shape == (2, 1, 23) and np.all(np.isfinite(p)) and np.all(np.abs(p) <= 1.0 + 1e-3)
 
 
+@pytest.mark.parametrize("on_dataset", [False, True])
 @pytest.mark.parametrize("ifos,sample_rate_hertz", [(HLV, 1024.0), (HL, 4096.0)])
-def test_rolling_pearson_lags_do_not_depend_on_the_generators(ifos, sample_rate_hertz):
+def test_rolling_pearson_lags_do_not_depend_on_the_generators(ifos, sample_rate_hertz, on_dataset):
     # Without a generator the lag range was a fixed 10 ms, not the detectors' light travel time,
-    # so a noise-only batch and an injection batch differed in shape.
-    shapes = {np.shape(pearson_dataset(ifos, g, sample_rate_hertz)[0][0]["ROLLING_PEARSON_ONSOURCE"])
+    # so a noise-only batch and an injection batch differed in shape. With the detectors set on
+    # the dataset rather than its noise obtainer, it read the obtainer's default L1: no lags.
+    shapes = {np.shape(pearson_dataset(ifos, g, sample_rate_hertz, on_dataset)[0][0]
+                       ["ROLLING_PEARSON_ONSOURCE"])
               for g in (wnb(), None)}
     lags = num_lags(gf.Network(list(ifos)).max_arrival_time_difference_seconds, sample_rate_hertz)
     pairs = len(ifos) * (len(ifos) - 1) // 2
@@ -113,9 +122,10 @@ def test_coherence_layers_match_the_paper():
         (56, 32, 4, "valid", "relu"), (128, 24, 2, "valid", "relu"), (214, 16, 2, "valid", "relu"),
         (64, 8, 1, "valid", "relu"), (64, 5, 1, "valid", "relu")]
     # 713,288 with the paper's 60 lags; the library's lag range for H, L and V
-    # at 1024 Hz is 54 lags, which changes no weight count.
+    # at 1024 Hz (27.3 ms, 27.9 samples: lags -28 to +28) is 57 lags, which
+    # changes no weight count.
     assert model.count_params() == 713_288
-    assert config.correlation_shape == (3, 54)
+    assert config.correlation_shape == (3, 57)
 
 
 def test_combined_score_is_the_log_odds_of_the_product():
@@ -199,3 +209,40 @@ def test_train_script_settings():
     config, schedule = train.configure(gpu)
     # The paper: 135,000 training examples in batches of 16, 15 epochs (model 1).
     assert config.ifos == HLV and schedule.epochs == 15 and schedule.steps_per_epoch == 8438
+
+
+# ------------------------------------------------------------ real events
+
+def test_real_event_inputs_feed_the_coherence_network():
+    # Real events were given only the whitened onsource, the onsource and the offsource,
+    # so a model reading ROLLING_PEARSON_ONSOURCE raised KeyError.
+    from gravyflow.src.validate.bank import real_event_inputs
+
+    config = small(HLV)
+    model = MLyCoherence.model(config)
+    rng = np.random.default_rng(2)
+    on = rng.normal(size=(3, 3, 2048)).astype(np.float32)
+    off = rng.normal(size=(3, 3, 16 * 1024)).astype(np.float32)
+    whitened, x = real_event_inputs(model, on, off, list(HLV), 1024.0, 1.0)
+    assert sorted(x) == ["ROLLING_PEARSON_ONSOURCE", "WHITENED_ONSOURCE"]
+    assert x["ROLLING_PEARSON_ONSOURCE"].shape == (3, *config.correlation_shape)
+    assert whitened.shape == (3, 3, 1024)
+    assert np.all(np.isfinite(logit_scores_of(model, x)))
+
+
+def logit_scores_of(model, x):
+    from gravyflow.src.validate.bank import logit_scores
+    return logit_scores(model.predict(x, verbose=0))
+
+
+@pytest.mark.parametrize("shape,n,expected", [
+    ((1, 1, 2), 1, [0.0]),      # one example, two detectors
+    ((1, 2), 1, [0.0]),
+    ((4, 2), 4, [0, 2, 4, 6]),
+    ((1, 4, 2), 4, [0, 2, 4, 6]),
+    ((4, 1, 2), 4, [0, 2, 4, 6]),
+])
+def test_per_detector_labels_give_the_first_detector(shape, n, expected):
+    from gravyflow.src.validate.bank import per_example
+    value = np.arange(np.prod(shape), dtype=float).reshape(shape)
+    np.testing.assert_array_equal(per_example(value, n, "ct", per_detector=True), expected)

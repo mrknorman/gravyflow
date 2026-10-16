@@ -1,3 +1,5 @@
+import math
+
 import keras
 from keras import ops
 import jax.numpy as jnp
@@ -19,12 +21,20 @@ def pearson(x, y):
     
     return numerator / (denominator + 1e-5)
 
+def max_lag_samples(max_arrival_time_difference_seconds: float, sample_rate_hertz: float) -> int:
+    """
+    The largest lag `rolling_pearson` computes, in samples: the largest arrival-time
+    difference rounded up, so that every physically allowed delay is sampled.
+    """
+    return math.ceil(float(max_arrival_time_difference_seconds) * float(sample_rate_hertz))
+
+
 def num_lags(max_arrival_time_difference_seconds: float, sample_rate_hertz: float) -> int:
     """
-    The number of lags `rolling_pearson` computes for each detector pair:
-    ``2 * int(max_arrival_time_difference_seconds * sample_rate_hertz)``.
+    The number of lags `rolling_pearson` computes for each detector pair: every lag
+    from -M to +M samples, ``2 M + 1``, where M is ``max_lag_samples``.
     """
-    return 2 * int(float(max_arrival_time_difference_seconds) * float(sample_rate_hertz))
+    return 2 * max_lag_samples(max_arrival_time_difference_seconds, sample_rate_hertz) + 1
 
 
 @jax.jit(static_argnames=["max_arrival_time_difference_seconds", "sample_rate_hertz"])
@@ -34,17 +44,15 @@ def rolling_pearson(
         sample_rate_hertz: float
     ):
     
+    """
+    The Pearson correlation of every detector pair at every lag from -M to +M
+    samples (``num_lags``), shape (Batch, Pairs, 2 M + 1). Lag index i compares the
+    first detector with the second rolled by M - i samples.
+    """
     tensor = ops.convert_to_tensor(tensor)
     # tensor: (Batch, Channels, Time)
-    
-    # Calculate max arrival time difference in samples
-    max_samples = num_lags(max_arrival_time_difference_seconds, sample_rate_hertz) // 2
-    
-    # The original code uses a doubled max_arrival_time_difference_samples value.
-    # The shift logic is: shift = 2M - offset.
-    # Since offset ranges from 0 to 2M-1, the shift ranges from 2M down to 1.
-    # This results in positive (right) shifts.
-    
+    max_samples = max_lag_samples(max_arrival_time_difference_seconds, sample_rate_hertz)
+
     num_batches, num_arrays, array_size = ops.shape(tensor)
     
     # Create pairs
@@ -64,17 +72,11 @@ def rolling_pearson(
     x_all = ops.transpose(x_all, (1, 0, 2)) # (Batch, NumPairs, Time)
     y_all = ops.transpose(y_all, (1, 0, 2)) # (Batch, NumPairs, Time)
     
-    # Define offset loop/map
-    N_offsets = max_samples * 2
-    offsets = jnp.arange(N_offsets)
+    # Lags +M down to -M, inclusive.
+    offsets = jnp.arange(2 * max_samples + 1)
     
     def compute_for_offset(offset, x, y):
-        # offset is scalar
-        # x, y are (Batch, Time)
-        
-        # Replicate original logic:
-        # shift = N_offsets - offset
-        
+        # offset is scalar; x, y are (Batch, Time).
         shift = max_samples - offset
         
         # tf.roll(y, shift, axis=-1)

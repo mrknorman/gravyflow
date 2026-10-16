@@ -37,8 +37,9 @@ Where this example departs from the paper:
   combined score (`MLy.combined_score`) is the log-odds of the product of the
   two models' signal probabilities, which ranks exactly as the paper's product.
 - **Correlation lags.** The library's rolling Pearson spans the detectors'
-  largest light travel time (54 lags for H1, L1 and V1 at 1024 Hz), where the
-  paper uses ±30 ms (60 lags). The weight count is the same.
+  largest light travel time, every lag from -M to +M samples with M rounded up
+  (57 lags for H1, L1 and V1 at 1024 Hz), where the paper uses ±30 ms (60 lags).
+  The weight count is the same.
 - **Schedule.** Model 2's learning rate is constant (the paper halves it when
   the loss stalls for 5 epochs). Both runs keep the model with the lowest
   validation loss and stop early on it (the paper keeps the best validation
@@ -73,6 +74,7 @@ from keras.models import Model
 
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.pearson import num_lags
+from gravyflow.src.dataset.dataset import get_max_arrival_time_difference
 from gravyflow.src.model.examples.base import MODEL_INPUT, ExampleModel, model_input
 
 # Model 2's second input: the Pearson correlation of each detector pair at each lag.
@@ -128,7 +130,7 @@ class MLyConfig:
     def correlation_shape(self) -> Tuple[int, int]:
         """``ROLLING_PEARSON_ONSOURCE`` per example: (detector pairs, lags)."""
         n = len(self.ifos)
-        lags = num_lags(gf.Network(list(self.ifos)).max_arrival_time_difference_seconds, self.sample_rate_hertz)
+        lags = num_lags(get_max_arrival_time_difference(self.ifos), self.sample_rate_hertz)
         return n * (n - 1) // 2, lags
 
 

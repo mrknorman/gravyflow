@@ -51,3 +51,18 @@ def test_rolling_pearson():
     max_corr = float(ops.max(corrs))
     assert max_corr > 0.95, f"Max correlation should be ~1.0 for identical signals, got {max_corr}"
 
+
+
+def test_rolling_pearson_lags_are_symmetric_and_inclusive():
+    """Lags run from -M to +M samples, M = ceil(delay * rate): every allowed delay is sampled."""
+    sample_rate, max_delay = 1.0, 3.5
+    assert gf_pearson.num_lags(max_delay, sample_rate) == 9  # M = 4
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=256).astype(np.float32)
+    found = []
+    for k in range(-4, 5):
+        tensor = ops.convert_to_tensor(np.stack([x, np.roll(x, -k)])[None])
+        corrs = np.asarray(gf_pearson.rolling_pearson(tensor, max_delay, sample_rate))[0, 0]
+        assert corrs.shape == (9,) and corrs.max() > 0.99
+        found.append(int(np.argmax(corrs)))
+    assert sorted(found) == list(range(9))

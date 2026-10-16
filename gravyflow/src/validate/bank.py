@@ -62,6 +62,33 @@ def require_logit_model(model) -> None:
         )
 
 
+def real_event_inputs(model, onsource, offsource, ifos, sample_rate_hertz, onsource_seconds):
+    """
+    A model's inputs for real events, prepared as the dataset prepares its examples:
+    whitened by the offsource and cropped to the onsource, with the rolling Pearson
+    correlation over the dataset's lag range. Returns the whitened onsource and the
+    inputs by name.
+    """
+    from gravyflow.src.dataset.conditioning.whiten import whiten
+    from gravyflow.src.dataset.dataset import get_max_arrival_time_difference
+
+    whitened = np.asarray(gf.crop_samples(
+        whiten(onsource, offsource, sample_rate_hertz), onsource_seconds, sample_rate_hertz))
+    inputs = {
+        gf.ReturnVariables.WHITENED_ONSOURCE.name: lambda: whitened,
+        gf.ReturnVariables.ONSOURCE.name: lambda: np.asarray(
+            gf.crop_samples(onsource, onsource_seconds, sample_rate_hertz)),
+        gf.ReturnVariables.OFFSOURCE.name: lambda: offsource,
+        gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE.name: lambda: np.asarray(gf.rolling_pearson(
+            whitened, get_max_arrival_time_difference(ifos), sample_rate_hertz)),
+    }
+    names = [t.name for t in model.inputs]
+    missing = [name for name in names if name not in inputs]
+    if missing:
+        raise ValueError(f"Real events cannot provide the model's inputs {missing}.")
+    return whitened, {name: np.asarray(inputs[name](), dtype=np.float32) for name in names}
+
+
 def per_example(value, n: int, name: str, per_detector: bool = False) -> np.ndarray:
     """
     One float64 value per example, from a label array of any singleton layout.
@@ -70,6 +97,8 @@ def per_example(value, n: int, name: str, per_detector: bool = False) -> np.ndar
     detector's value. Anything else that is not one value per example raises.
     """
     array = np.asarray(value, dtype=np.float64)
+    if per_detector and array.ndim >= 2 and array.shape[0] == n:
+        return array.reshape(n, -1)[:, 0]
     squeezed = np.squeeze(array)
     if squeezed.shape == (n,) or (n == 1 and squeezed.ndim == 0):
         return squeezed.reshape(n)
@@ -226,14 +255,13 @@ class ValidationBank:
         from that background.
         """
         from gravyflow.src.dataset.features.event import EventConfidence, get_events_with_params
-        from gravyflow.src.dataset.conditioning.whiten import whiten
+        from gravyflow.src.dataset.dataset import noise_ifos
 
         if self.far_scores is None:
             raise ValueError("Score the noise background (generate_noise) before real events.")
         if observing_runs is None:
             observing_runs = [gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3]
-        noise_obtainer = self.dataset_args.get("noise_obtainer")
-        ifos = getattr(noise_obtainer, "ifos", None) or [gf.IFO.H1, gf.IFO.L1]
+        ifos = noise_ifos(self.dataset_args.get("ifos"), self.dataset_args.get("noise_obtainer"))
         letters = {ifo.name[0] for ifo in ifos}
 
         events, seen = [], set()
@@ -280,14 +308,10 @@ class ValidationBank:
 
         background = self.background()
         if onsource:
-            on, off = np.concatenate(onsource), np.concatenate(offsource)
-            whitened = np.asarray(gf.crop_samples(whiten(on, off, sample_rate), onsource_seconds, sample_rate))
-            available = {
-                gf.ReturnVariables.WHITENED_ONSOURCE.name: whitened,
-                gf.ReturnVariables.ONSOURCE.name: np.asarray(gf.crop_samples(on, onsource_seconds, sample_rate)),
-                gf.ReturnVariables.OFFSOURCE.name: off,
-            }
-            x = {t.name: available[t.name].astype(np.float32) for t in self.model.inputs}
+            whitened, x = real_event_inputs(
+                self.model, np.concatenate(onsource), np.concatenate(offsource),
+                ifos, sample_rate, onsource_seconds,
+            )
             for i, (t, s) in enumerate(zip(gps, logit_scores(self.model.predict(x, verbose=0)))):
                 event = next((e for e in events if abs(e["gps"] - t) < 20.0), None)
                 if event is None:
