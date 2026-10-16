@@ -16,10 +16,29 @@ The acquisition process is designed to retrieve valid, high-quality data segment
 The core logic resides in the `get_valid_segments` method of the `IFODataObtainer` class. Here is the step-by-step flow:
 
 ### 1. Initial Retrieval (`get_all_segment_times`)
-The process begins by querying the Data Quality Segment Database (DQSegDB) for each requested interferometer (e.g., H1, L1).
--   **Input**: Start/End GPS times for an observing run (e.g., O3), Detector (IFO), and State Flag (e.g., `DCS-ANALYSIS_READY_C01:1`).
--   **Operation**: Returns a list of `[start, end]` time pairs where the detector was active and the data quality was good.
+The process begins by reading the public GWOSC timeline for each requested interferometer (e.g., H1, L1). No LVK credentials are needed.
+-   **Input**: The GPS bounds of each observing run, from the GWOSC run API (O3 is GWOSC's O3a plus O3b), the detector (IFO), and the GWOSC flags to apply.
+-   **Flags**: GWOSC defines each data-quality flag as the times that *pass* it, so applying a category means intersecting with its flag. The default is `DATA` with `BURST_CAT1` and `BURST_CAT2` applied (`gf.GWOSC_BURST_FLAGS`); `gwosc_flags=gf.GWOSC_DATA_FLAGS` or `gf.GWOSC_CBC_FLAGS` selects others.
+-   **Operation**: Returns a list of `[start, end)` time pairs where the detector passes every flag.
+-   **Cache**: Timeline segments are cached in `~/.gravyflow/cache/gwosc_timeline` (or `$GRAVYFLOW_CACHE_DIR`).
 -   **Result**: A list of valid segments for *one* detector.
+
+Livetime per option (days), measured from the GWOSC timeline:
+
+| Run | IFO | `DATA` | `+BURST_CAT1` | `+BURST_CAT2` (default) | `DATA+CBC_CAT1+CBC_CAT2` |
+|---|---|---|---|---|---|
+| O1 | H1 | 76.70 | 76.70 | 76.22 | 75.89 |
+| O1 | L1 | 65.81 | 65.81 | 65.78 | 65.80 |
+| O2 | H1 | 157.81 | 157.81 | 157.24 | 157.38 |
+| O2 | L1 | 153.96 | 153.96 | 153.56 | 153.72 |
+| O3 | H1 | 245.21 | 245.21 | 243.53 | 244.70 |
+| O3 | L1 | 251.93 | 251.93 | 250.47 | 251.47 |
+
+Strain comes from local frames when a frame server is configured, and otherwise from GWOSC through `TimeSeries.fetch_open_data`, at 4096 Hz when that suffices and at 16384 Hz otherwise. Sample rates above 16384 Hz are refused: real data is never upsampled.
+
+### Glitch catalogue
+
+Glitch times, classes and metadata (SNR, peak frequency, duration, confidence) come from the public Gravity Spy machine-learning classifications: Glanzer et al. 2023, *Class. Quantum Grav.* 40 065004, released on Zenodo (doi:10.5281/zenodo.5649212, v1.0.0, CC-BY-4.0). Please cite both if you use glitches from gravyflow. Each detector and run's file (16 to 216 MB) is downloaded on first use, checked against its published md5, and cached in compact form in `~/.gravyflow/cache/gravityspy`. The defaults keep every class except `No_Glitch`, with `ml_confidence >= 0.9`.
 
 ### 2. Coincidence and Cutting (`cut_segments`)
 To train a model on multi-detector data, we need times where *all* detectors were active.
@@ -57,7 +76,7 @@ Finally, the segments are ordered based on the user's preference:
 
 ```mermaid
 graph TD
-    A["Query DQSegDB"] --> B["Raw Segments per IFO"]
+    A["Read GWOSC timeline flags"] --> B["Raw Segments per IFO"]
     B --> C["Cut into Fixed Blocks (e.g. 8196s)"]
     C --> D{"Assign Group"}
     D -- Train --> E["Train Segments"]

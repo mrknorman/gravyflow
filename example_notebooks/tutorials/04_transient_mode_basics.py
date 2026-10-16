@@ -13,7 +13,7 @@ LEARNING OBJECTIVES:
 3. Understand GlitchType enum and filtering
 4. Work with TransientSegment metadata
 
-RUNTIME: ~3-4 minutes (downloads glitch data from GravitySpy + GWOSC)
+RUNTIME: ~3-4 minutes (downloads the public Gravity Spy catalogue from Zenodo, and strain from GWOSC)
 """
 
 # =============================================================================
@@ -71,7 +71,8 @@ print("SECTION 2: GlitchType Enum")
 print("=" * 70)
 
 print("""
-GravitySpy has classified glitches into ~20 morphological types.
+Gravity Spy (Glanzer et al. 2023, doi:10.5281/zenodo.5649212) classifies glitches
+into 24 types: 22 in O1 and O2, with Blip_Low_Frequency and Fast_Scattering added in O3.
 Each type corresponds to a different instrumental or environmental cause.
 """)
 
@@ -95,7 +96,7 @@ print("=" * 70)
 # Important parameters:
 #   - data_labels: GLITCHES triggers TRANSIENT mode
 #   - observing_runs: Which science runs to query for glitches
-#   - Data is fetched from GravitySpy database
+#   - Glitch times come from the public Gravity Spy release (ml_confidence >= 0.9)
 
 print("Creating TRANSIENT mode obtainer for glitches...")
 
@@ -129,7 +130,7 @@ transient_obtainer = gf.NoiseObtainer(
 )
 
 print("Fetching glitch-centered windows...")
-print("(This queries GravitySpy and downloads from GWOSC)")
+print("(This reads the Gravity Spy catalogue and downloads strain from GWOSC)")
 
 data_gen = transient_obtainer(
     sample_rate_hertz=SAMPLE_RATE_HERTZ,
@@ -267,10 +268,10 @@ print("""
 
 2. Data is CENTERED on known events (not random like NOISE mode)
 
-3. GlitchType enum has 20 morphological types from GravitySpy
+3. GlitchType enum has the 24 Gravity Spy classes
 
 4. Output includes additional metadata:
-   - GLITCH_TYPE: Integer label (0-19)
+   - GLITCH_TYPE: Integer label (GlitchType value, 0-23)
    - START_GPS_TIME: Window start time
    - TRANSIENT_GPS_TIME: Event center time
    - DATA_LABEL: What type (NOISE=0, GLITCHES=1, EVENTS=2)

@@ -11,10 +11,10 @@ It acts as a high-level wrapper around `IFODataObtainer`, managing the logic of 
 
 ### 1. Identify -> Cluster -> Cache
 When initialized, the `TransientObtainer` performs three main steps:
-1.  **Identify**: It queries a metadata source (like GraceDB for events or GravitySpy for glitches) to find a list of GPS times and labels.
+1.  **Identify**: It queries a metadata source (GWOSC event catalogues for events, the public Gravity Spy release for glitches) to find a list of GPS times and labels.
 2.  **Cluster**: It groups improved segments that are close together (within `max_segment_seconds`) into single continuous blocks. This is efficient for fetching multiple events that occur in quick succession.
 3.  **Cache**: 
-    *   **Full Precache**: If `precache_cap` is set (default behavior), it downloads *all* identified segments immediately and stores them in `res/glitch_cache` or `res/event_cache`.
+    *   **Full Precache**: If `precache_cap` is set (default behavior), it downloads *all* identified segments immediately and stores them in the transient cache (`~/.gravyflow/cache/glitch_cache.h5` or `event_cache.h5`).
     *   **Lazy Loading**: If `precache_cap=0`, it skips the immediate download. Segments are fetched on-the-fly during generation.
 
 ### 2. Balancing (`balanced_glitch_types`)
@@ -113,4 +113,4 @@ print(f"Glitch Type: {glitch_enum.name}")
 ## Troubleshooting
 
 *   **"Min count: X" Log**: When using `balanced_glitch_types=True`, look for this log line. It tells you the bottleneck class limit. If this number is too small, consider disabling balancing or manually excluding rare glitch types.
-*   **"Unterminated string literal"**: Warning from GravitySpy queries. Usually harmless/transient, but if persistent, it means a specific glitch class query is malformed.
+*   **Gravity Spy download or md5 errors**: Glitches come from the public Gravity Spy release on Zenodo (doi:10.5281/zenodo.5649212; Glanzer et al. 2023, *Class. Quantum Grav.* 40 065004). A failed download or checksum raises an error and caches nothing; retry, or check access to zenodo.org.

@@ -40,18 +40,12 @@ Follow these guides for setting up permissions to access real data:
 https://computing.docs.ligo.org/guide/auth/scitokens/
 https://computing.docs.ligo.org/guide/auth/kerberos/
 
-## 5. Setup Gravity Spy Permissions:
+## 5. Public data sources
 
-Access Gravity Spy credentials by logging in with your LIGO credentials at:
+Real noise and glitches use public data only; no credentials are needed:
 
-https://secrets.ligo.org/secrets/144/
-
-Then, export the obtained username and password:
-
-```bash
-export GRAVITYSPY_DATABASE_USER=<user>
-export GRAVITYSPY_DATABASE_PASSWD=<password>
-```
+- Segments and observing-run bounds come from the GWOSC timeline and run API (https://gwosc.org). The default selection is `DATA` with the `BURST_CAT1` and `BURST_CAT2` vetoes applied.
+- Glitches come from the Gravity Spy machine-learning classifications: Glanzer et al. 2023, *Class. Quantum Grav.* 40 065004, released on Zenodo (doi:10.5281/zenodo.5649212, v1.0.0, CC-BY-4.0). Please cite both if you use them. Each file is downloaded on first use and cached in `~/.gravyflow/cache` (override with `GRAVYFLOW_CACHE_DIR`).
 
 ## 6. Test Gravyflow (optional)
 
