@@ -20,7 +20,7 @@ from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.event import SourceType
 from gravyflow.src.dataset.acquisition.base import DataLabel, ObservingRun
 from gravyflow.src.dataset.features.event import EventConfidence
-from gravyflow.src.dataset.splits import split_fractions, split_of
+from gravyflow.src.dataset.splits import in_split, split_fractions, split_of
 from gravyflow.src.utils.gps import gps_to_key
 
 
@@ -177,7 +177,7 @@ class TransientIndex:
         Iterate over records with optional filtering.
         
         Args:
-            group: Filter to specific group (e.g., "train").
+            group: Filter to specific group (e.g., "train"); "all" keeps every record.
             label: Filter to specific label (EVENTS or GLITCHES).
             ifos_filter: Filter to specific IFOs (segments must overlap with these IFOs).
             shuffle: If True, shuffle records before iterating.
@@ -192,7 +192,7 @@ class TransientIndex:
         if group is not None:
             if self._groups is None:
                 raise ValueError("Groups not assigned. Call assign_groups() first.")
-            records_iter = (r for r in records_iter if self._groups.get(r.gps_key) == group)
+            records_iter = (r for r in records_iter if in_split(self._groups.get(r.gps_key), group))
         
         # Filter by label
         if label is not None:

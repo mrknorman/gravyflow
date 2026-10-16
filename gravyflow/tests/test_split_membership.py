@@ -9,6 +9,7 @@ synthetic catalogue records.
 """
 
 import copy
+from dataclasses import replace
 from unittest import mock
 
 import numpy as np
@@ -65,11 +66,15 @@ def glitch_obtainer():
     )
 
 
+#: Where each detector's science segments start in each 1500 s, so each has its own.
+SCIENCE_OFFSET_SECONDS = {gf.IFO.L1: 0.0, gf.IFO.H1: 300.0}
+
+
 class OfflineNoiseObtainer(gf.NoiseDataObtainer):
-    """Science segments of 1000 s every 1500 s, with nothing vetoed."""
+    """Science segments of 1000 s every 1500 s, offset by detector, with nothing vetoed."""
 
     def get_segment_times(self, start, end, ifo, state_flags):
-        starts = np.arange(start, end - 1000.0, 1500.0)
+        starts = np.arange(start, end - 1000.0, 1500.0) + SCIENCE_OFFSET_SECONDS[ifo]
         return np.stack([starts, starts + 1000.0], axis=-1)
 
     def remove_unwanted_segments(self, ifo, valid_segments):
@@ -297,9 +302,12 @@ WINDOW = dict(
 )
 
 
-def noise_split(split):
-    """The segments of ``split``, from a fresh obtainer: the reference membership."""
-    segments = offline_noise_obtainer().get_valid_segments([gf.IFO.L1], seed=1000, group_name=split)
+def noise_split(split, ifos=(gf.IFO.L1,)):
+    """
+    The segments of ``split`` on ``ifos``, from a fresh obtainer (the first
+    detector's): the reference membership.
+    """
+    segments = offline_noise_obtainer().get_valid_segments(list(ifos), seed=1000, group_name=split)
     return set(map(tuple, segments[:, 0]))
 
 
@@ -329,13 +337,26 @@ def fake_strain(self, sample_rate_hertz, valid_segments, ifos, scale_factor, **k
 
 
 def cached_glitch(self, cache, gps_time, sample_rate_hertz, onsource_duration, offsource_duration,
-                  *args, **kwargs):
-    """A cache hit of zeros for every record."""
+                  *args, target_ifos=None, **kwargs):
+    """A cache hit of zeros for every record, on each detector asked for."""
+    detectors = len(target_ifos or [None])
     return (
-        np.zeros((1, int(onsource_duration * sample_rate_hertz)), np.float32),
-        np.zeros((1, int(offsource_duration * sample_rate_hertz)), np.float32),
+        np.zeros((detectors, int(onsource_duration * sample_rate_hertz)), np.float32),
+        np.zeros((detectors, int(offsource_duration * sample_rate_hertz)), np.float32),
         "memory",
     )
+
+
+#: A strain value for each detector, so a batch shows whose strain it holds.
+DETECTOR_STRAIN = {gf.IFO.L1: 1.0, gf.IFO.H1: 2.0}
+
+
+def detector_strain(self, sample_rate_hertz, valid_segments, ifos, scale_factor, **kwargs):
+    """Constant strain for each row of segments: each detector's DETECTOR_STRAIN."""
+    for row in valid_segments:
+        data = [np.full(int((end - start) * sample_rate_hertz), DETECTOR_STRAIN[ifo], np.float32)
+                for ifo, (start, end) in zip(ifos, row)]
+        yield gf.IFOData(data, sample_rate_hertz, [start for start, _ in row])
 
 
 class TestOneObtainerCalledForEachSplit:
@@ -400,6 +421,116 @@ class TestOneObtainerCalledForEachSplit:
             with pytest.raises(RuntimeError, match="another split"):
                 next(train)
             next(validate)
+
+
+class TestTheAllSplit:
+    """
+    Split "all" is every record: it is served by not filtering the one
+    partition, never by a second set of fractions.
+    """
+
+    def test_split_all_takes_the_default_fractions(self):
+        assert split_fractions(None, "all") == dict(gf.DEFAULT_SPLIT_FRACTIONS)
+
+    def test_a_transient_obtainer_serves_every_record_for_all(self, catalogue):
+        obtainer = glitch_obtainer()
+        obtainer.get_valid_segments([gf.IFO.L1], seed=1, group_name="all")
+        assert {segment.gps_key for segment in obtainer.transient_segments} == catalogue
+        assert served_members(through_a_direct_call, "all") == catalogue
+
+    def test_split_all_leaves_the_other_splits_alone(self, catalogue):
+        obtainer = glitch_obtainer()
+        for split in ("all", *SPLITS):
+            expected = catalogue if split == "all" else members(glitch_obtainer(), split, 1000)
+            assert members(obtainer, split, 1000) == expected, split
+
+    def test_a_noise_obtainer_serves_every_segment_for_all(self):
+        assert noise_split("all") == noise_split("train") | noise_split("validate") | noise_split("test")
+
+    def test_named_events_are_served_without_a_group(self, offline_events):
+        names = [event["name"] for event in offline_events]
+        obtainer = gf.TransientDataObtainer(
+            observing_runs=gf.ObservingRun.O3,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[gf.DataLabel.EVENTS],
+            event_names=names,
+        )
+        obtainer.augmentations = []
+        batch = next(obtainer(ifos=[gf.IFO.H1, gf.IFO.L1], **{**WINDOW, "num_examples_per_batch": 3}))
+        assert np.shape(batch[gf.ReturnVariables.ONSOURCE])[:2] == (3, 2)
+        assert {segment.name for segment in obtainer.transient_segments} == set(names)
+
+
+@pytest.fixture
+def two_detector_catalogue():
+    """Glitches offline, alternately seen in L1 and in H1. Yields their keys by detector."""
+    records = [
+        replace(record, seen_in=[(gf.IFO.L1, gf.IFO.H1)[i % 2]])
+        for i, record in enumerate(glitch_records())
+    ]
+    with mock.patch(
+        "gravyflow.src.dataset.features.segment_builders.build_glitch_segments",
+        return_value=records,
+    ):
+        yield {ifo: {r.gps_key for r in records if ifo in r.seen_in} for ifo in (gf.IFO.L1, gf.IFO.H1)}
+
+
+#: One obtainer's calls for one split, on other detectors in turn.
+DETECTOR_CALLS = ([gf.IFO.L1], [gf.IFO.H1], [gf.IFO.L1, gf.IFO.H1], [gf.IFO.L1])
+
+
+class TestOneObtainerCalledForOtherDetectors:
+    """
+    The served state belongs to the detectors that built it too: one obtainer
+    called for one split on L1, then H1, then both, serves each call its own
+    detectors' records, never the first call's.
+    """
+
+    def test_a_noise_obtainer_serves_each_call_its_detectors(self):
+        obtainer = offline_noise_obtainer()
+        obtainer.augmentations = []
+        for ifos in DETECTOR_CALLS:
+            served = served_noise(lambda split: next(obtainer(ifos=ifos, group=split, **WINDOW)), "train")
+            names = [ifo.name for ifo in ifos]
+            assert served == noise_split("train", ifos), f"the {names} call served other detectors"
+            with mock.patch.object(OfflineNoiseObtainer, "acquire", detector_strain):
+                onsource = np.asarray(next(obtainer(ifos=ifos, group="train", seed=7, **WINDOW))[
+                    gf.ReturnVariables.ONSOURCE])
+            assert onsource.shape[:2] == (4, len(ifos))
+            for channel, ifo in enumerate(ifos):
+                np.testing.assert_array_equal(onsource[:, channel], DETECTOR_STRAIN[ifo])
+
+    def test_a_call_keeps_the_order_its_split_was_given(self):
+        # NoiseObtainer orders a split by one seed and draws its windows by
+        # another: the drawing call keeps the order, on the same detectors.
+        obtainer = offline_noise_obtainer()
+        ordered = obtainer.get_valid_segments([gf.IFO.L1], seed=1000, group_name="train").copy()
+        reordered = offline_noise_obtainer().get_valid_segments([gf.IFO.L1], seed=7, group_name="train")
+        assert not np.array_equal(reordered, ordered), "the seed does not order the split"
+        served = {}
+
+        def stop(self, *args, **kwargs):
+            served["segments"] = self.valid_segments.copy()
+            raise Served
+
+        with mock.patch.object(OfflineNoiseObtainer, "acquire", stop), pytest.raises(Served):
+            next(obtainer(ifos=[gf.IFO.L1], group="train", seed=7, **WINDOW))
+        np.testing.assert_array_equal(served["segments"], ordered)
+
+    def test_a_transient_obtainer_serves_each_call_its_detectors(self, two_detector_catalogue):
+        obtainer = glitch_obtainer()
+        obtainer.augmentations = []
+        for ifos in DETECTOR_CALLS:
+            reference = served_members(lambda fresh, split: next(fresh(ifos=ifos, group=split)), "train")
+            assert reference and reference <= set().union(*(two_detector_catalogue[i] for i in ifos))
+            served = served_members(lambda _, split: next(obtainer(ifos=ifos, group=split)), "train")
+            assert served == reference, f"the {[ifo.name for ifo in ifos]} call served other detectors"
+            with mock.patch.object(gf.TransientDataObtainer, "_initialize_transient_cache",
+                                   lambda self, *args, **kwargs: (object(), None)), \
+                 mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", cached_glitch):
+                onsource = next(obtainer(ifos=ifos, group="train", seed=7, **WINDOW))[
+                    gf.ReturnVariables.ONSOURCE]
+            assert np.shape(onsource)[:2] == (4, len(ifos))
 
 
 #: Fractions other than the default: other values, a missing split, another order, none.

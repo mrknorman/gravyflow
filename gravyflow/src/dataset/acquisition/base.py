@@ -48,6 +48,7 @@ from .gwosc_data import (
 
 # Imported from TransientDefaults for consistency (canonical source)
 from gravyflow.src.dataset.config import TransientDefaults
+from gravyflow.src.dataset.splits import split_fractions
 
 # GPS time precision is 10ms (0.01s) - defined in gravyflow.src.utils.gps
 # GPS_PRECISION_DECIMALS was 3 (1ms) which was stale - now using GPS_KEY_PRECISION
@@ -628,8 +629,10 @@ class BaseDataObtainer(ABC):
         from a fresh copy, and no split can see another's segments.
         """
         return {
-            # The split the served state was built for (see _serve_split).
+            # The split the served state was built for, and the order it was
+            # given (see _serve_split).
             "_served_split": None,
+            "_served_order": None,
             # This build of the served state: a generator serves only while it
             # is unchanged (see _while_served).
             "_served_build": object(),
@@ -649,18 +652,32 @@ class BaseDataObtainer(ABC):
             "_zero_filled_segments_count": 0,
         }
 
-    def _serve_split(self, split) -> bool:
+    @staticmethod
+    def _split(
+            ifos: List[gf.IFO],
+            group_name: str,
+            groups: Optional[Dict[str, float]] = None,
+        ) -> Tuple:
         """
-        Make the served state ``split``'s: a hashable description of the split
-        asked for (its detectors, name and fractions, and what orders it).
-        State built for another split is dropped first, so an obtainer called
-        for one split and then another never serves the first's records as
+        The split a call names, as a key: its detectors, in order, its name and
+        the fractions it is drawn from. Every call that serves a split, through
+        get_valid_segments or _serve_group, names it by this one key.
+        """
+        return (tuple(ensure_list(ifos)), group_name,
+                tuple(split_fractions(groups, group_name).items()))
+
+    def _serve_split(self, split: Tuple, order: Tuple = ()) -> bool:
+        """
+        Make the served state ``split``'s (see _split), in ``order``: a
+        hashable description of what orders it. State built for another split
+        or order is dropped first, so an obtainer called for one split, or one
+        set of detectors, and then another never serves the first's records as
         the second's. Returns True when the split's state is still to be built.
         """
-        if self._served_split == split:
+        if (self._served_split, self._served_order) == (split, order):
             return False
         self.__dict__.update(self._served_state())
-        self._served_split = split
+        self._served_split, self._served_order = split, order
         return True
 
     @property
@@ -670,11 +687,14 @@ class BaseDataObtainer(ABC):
 
     def _serve_group(self, ifos: List[gf.IFO], seed: int, group: str) -> None:
         """
-        Serve split ``group`` to a call: the split already served is kept, with
-        the order get_valid_segments gave it; any other is built afresh, so a
-        call for one split never serves another's records.
+        Serve split ``group`` on ``ifos`` to a call: the split already served
+        on those detectors is kept, with the order get_valid_segments gave it
+        (``seed`` here orders only a split built afresh, since a call's seed
+        draws its windows); any other split, or the same split on other
+        detectors, is built afresh, so a call never serves another split's
+        records or another detector's.
         """
-        if group != self._served_group:
+        if self._split(ifos, group) != self._served_split:
             self.get_valid_segments(ifos=ifos, seed=seed, group_name=group)
 
     def _while_served(self, batches: Generator) -> Generator:

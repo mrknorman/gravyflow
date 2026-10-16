@@ -215,3 +215,13 @@ def test_the_validator_scores_injections_on_two_detectors(tmp_path):
     samples = [s for bin_samples in v.worst_performers["false_negatives"].values() for s in bin_samples]
     assert samples and all(np.shape(s["WHITENED_INJECTIONS"]) == (1, 2, SAMPLES) for s in samples)
     v.plot(tmp_path / "report.html")
+
+
+@pytest.mark.global_rng
+def test_the_validator_scores_real_events(dataset_args, offline_events):
+    # The real-event stage reads every named event, split "all", with no group named.
+    bank = ValidationBank(logit_model(1), dataset_args, ValidationConfig(num_examples=32, batch_size=32))
+    bank.far_scores = np.random.default_rng(3).standard_normal(64)
+    bank.generate_real_events(observing_runs=[gf.ObservingRun.O3])
+    assert sorted(e["name"] for e in bank.real_events) == sorted(e["name"] for e in offline_events)
+    assert all(e["status"] == "scored" and np.isfinite(e["score"]) for e in bank.real_events)

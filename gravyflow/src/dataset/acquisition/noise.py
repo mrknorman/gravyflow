@@ -15,7 +15,7 @@ from keras import ops
 
 import gravyflow as gf
 from gravyflow.src.dataset.config import WindowSpec
-from gravyflow.src.dataset.splits import split_fractions, split_of
+from gravyflow.src.dataset.splits import in_split, split_fractions, split_of
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder,
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS,
@@ -377,11 +377,12 @@ class NoiseDataObtainer(BaseDataObtainer):
     ) -> np.ndarray:
         """
         The segments in split ``group_name``: each segment's split is that of
-        its chunk index (see gravyflow.src.dataset.splits.split_of).
+        its chunk index (see gravyflow.src.dataset.splits.split_of), and split
+        "all" holds every segment.
         """
         selected_segments = [
             [start, end] for start, end in segments
-            if split_of(int(np.floor((start - start_time) / chunk_size)), groups) == group_name
+            if in_split(split_of(int(np.floor((start - start_time) / chunk_size)), groups), group_name)
         ]
         return np.array(selected_segments)
 
@@ -408,7 +409,7 @@ class NoiseDataObtainer(BaseDataObtainer):
         groups = split_fractions(groups, group_name)
 
         # The served segments are one split's, in one order: another rebuilds them.
-        if self._serve_split((tuple(ifos), group_name, tuple(groups.items()), seed, segment_order)):
+        if self._serve_split(self._split(ifos, group_name, groups), order=(seed, segment_order)):
             self.valid_segments = []
 
             for ifo in ifos:

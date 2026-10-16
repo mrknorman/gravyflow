@@ -12,6 +12,9 @@ an obtainer called directly, TransientIndex, the validator) splits by
 different fractions would hash one key into different splits, and train on
 what the other evaluates. Configurable fractions return with a split
 specification that every route reads.
+
+Split ``ALL`` is every record. It is no set of fractions of its own: it is
+served by not filtering the one partition (``in_split``).
 """
 
 import hashlib
@@ -32,10 +35,11 @@ def split_fractions(
         group_name: Optional[str] = None,
     ) -> Dict[str, float]:
     """
-    The fractions a split is drawn from: ``DEFAULT_SPLIT_FRACTIONS``, given as
-    ``groups`` or not; for ``group_name`` "all", everything. Raises ValueError
-    for any other ``groups`` (other keys, order or values), and KeyError for a
-    ``group_name`` the fractions do not name.
+    The fractions every split is drawn from: ``DEFAULT_SPLIT_FRACTIONS``, given
+    as ``groups`` or not, whichever ``group_name`` is served from them. Raises
+    ValueError for any other ``groups`` (other keys, order or values), and
+    KeyError for a ``group_name`` that is neither ``ALL`` nor a split the
+    fractions name.
     """
     fractions = dict(DEFAULT_SPLIT_FRACTIONS)
     if groups is not None and list(dict(groups).items()) != list(fractions.items()):
@@ -45,10 +49,10 @@ def split_fractions(
             "split by one route and in another by another. Leave the fractions "
             "unset; configurable fractions return with the split specification."
         )
-    if group_name == ALL:
-        return {ALL: 1.0}
-    if group_name is not None and group_name not in fractions:
-        raise KeyError(f"Group {group_name} not present in groups dictionary {fractions}.")
+    if group_name is not None and group_name != ALL and group_name not in fractions:
+        raise KeyError(
+            f"Group {group_name} not present in groups dictionary {fractions}, and not {ALL!r}."
+        )
     return fractions
 
 
@@ -66,3 +70,11 @@ def split_of(key: Hashable, fractions: Mapping[str, float]) -> str:
         if u <= cumulative:
             return name
     return list(fractions)[-1]
+
+
+def in_split(split: Optional[str], group_name: str) -> bool:
+    """
+    Whether a record of split ``split`` is served for ``group_name``: every
+    record for ``ALL``, else the records of that split alone.
+    """
+    return group_name == ALL or split == group_name

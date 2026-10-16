@@ -31,7 +31,7 @@ from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys, as_gps_times
 from gravyflow.src.dataset.features.transient_index import TransientIndex
 from .transient_segment import TransientSegment
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
-from gravyflow.src.dataset.splits import split_fractions
+from gravyflow.src.dataset.splits import ALL, split_fractions
 
 
 # The transient caches an obtainer may open, one per prefix (`_initialize_transient_cache`).
@@ -234,8 +234,7 @@ class TransientDataObtainer(BaseDataObtainer):
             logger.info(f"After filtering: {len(index)} segments")
         
         # Assign groups
-        if groups:
-            index.assign_groups(groups)
+        index.assign_groups(groups)
         
         # Apply balancing
         if self.balanced_glitch_types:
@@ -720,9 +719,10 @@ class TransientDataObtainer(BaseDataObtainer):
         
         groups = split_fractions(groups, group_name)
 
-        # The served state is one split's: another split rebuilds it, index
-        # included, since the index carries the split's fractions.
-        self._serve_split((tuple(ifos), group_name, tuple(groups.items())))
+        # The served state is one split's, on its detectors: another rebuilds
+        # it, index included, since the index carries the split's fractions
+        # and the detectors' records.
+        self._serve_split(self._split(ifos, group_name, groups))
         if self._feature_index is None:
             self.build_feature_index(ifos=ifos, groups=groups)
         
@@ -1276,7 +1276,7 @@ class TransientDataObtainer(BaseDataObtainer):
 
         # With no group, the split served, else train (all for specific event names).
         self._serve_group(ifos, seed, group if group is not None else (
-            self._served_group or ("all" if self.event_names else "train")
+            self._served_group or (ALL if self.event_names else "train")
         ))
         if self.rng is None:
             self.rng = default_rng(seed)

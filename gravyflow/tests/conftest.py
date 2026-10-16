@@ -168,6 +168,46 @@ def data_obtainer():
         observing_runs=gf.ObservingRun.O3, 
         data_quality=gf.DataQuality.BEST, 
         data_labels=[
-            gf.DataLabel.NOISE, 
+            gf.DataLabel.NOISE,
             gf.DataLabel.GLITCHES]
     )
+
+
+#: Three O3 events seen by H1 and L1, as the GWTC catalogue lists them.
+OFFLINE_EVENTS = [
+    {"name": name, "gps": gps, "network": "H1L1", "catalog": "GWTC-3-confident",
+     "observing_run": "O3", "p_bbh": 1.0}
+    for name, gps in (("GW-OFFLINE-A", 1240000000.4), ("GW-OFFLINE-B", 1250000000.4),
+                      ("GW-OFFLINE-C", 1260000000.4))
+]
+
+
+@pytest.fixture
+def offline_events():
+    """
+    The event catalogue and the transient cache, offline: the catalogue lists
+    OFFLINE_EVENTS, and every record is a cache hit of unit Gaussian strain.
+    Yields the events.
+    """
+    from unittest import mock
+    import numpy as np
+
+    def cached_strain(self, cache, gps_time, sample_rate_hertz, onsource_duration,
+                      offsource_duration, scale_factor=1.0, gps_key=None, target_ifos=None):
+        rng = np.random.default_rng(int(gps_time))
+        detectors = len(target_ifos or [None])
+        return (
+            rng.standard_normal((detectors, int(onsource_duration * sample_rate_hertz))).astype(np.float32),
+            rng.standard_normal((detectors, int(offsource_duration * sample_rate_hertz))).astype(np.float32),
+            "memory",
+        )
+
+    def listed(observing_runs=None, event_types=None, event_names=None, **kwargs):
+        return [dict(e) for e in OFFLINE_EVENTS if event_names is None or e["name"] in event_names]
+
+    with mock.patch("gravyflow.src.dataset.features.event.get_events_with_params", listed), \
+         mock.patch("gravyflow.src.dataset.features.segment_builders.get_events_with_params", listed), \
+         mock.patch.object(gf.TransientDataObtainer, "_initialize_transient_cache",
+                           lambda self, *args, **kwargs: (object(), None)), \
+         mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", cached_strain):
+        yield [dict(e) for e in OFFLINE_EVENTS]
