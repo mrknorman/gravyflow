@@ -22,8 +22,9 @@ from .provenance import Encoding
 
 #: The split block, in seconds.
 BLOCK_SECONDS = 8192.0
-#: The fractions the golden table was blessed with (NoiseObtainer's defaults).
-GOLDEN_GROUPS = {"train": 0.89, "validate": 0.1, "test": 0.01}
+#: The fractions the golden table was blessed with: gf.DEFAULT_SPLIT_FRACTIONS, the only
+#: ones every route accepts.
+GOLDEN_GROUPS = {"train": 0.8, "validate": 0.1, "test": 0.1}
 _LETTERS = {"r": "train", "v": "validate", "t": "test"}
 
 #: {origin run: {first block index: letters}}, one letter per block from that index;
@@ -32,30 +33,30 @@ _LETTERS = {"r": "train", "v": "validate", "t": "test"}
 GOLDEN_BLOCKS: Dict[str, Dict[int, str]] = {
     "O3": {
         1: (
-            "rrvrvrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrvrrrrvrrrrrrrrrrrrrrvvrrrrrrrrrr"
-            "vrrrvrrtrrrrrrrrrrvrrrvrvrvrrrvrrrrrrrrrrvrrrrrrrrrvrrrrrrrrrrrrrrrrrrrrrvr"
-            "rrrrrrrrrrrrrvrrrrrrrrvrrrrrrrvrrrvrrrrrrrrrrrrrrrrrrrvrrrrrvrrrrrrvrvrrrrr"
-            "rrrrrrrrrrrrrrrvvrrrrrrrrrrrrtvrrrrrrrrvvvrrrrrrrrrrrrrrrrrrrrrrvrrrrrrrrvr"
+            "rrtrvrrrrvrrrrrrrrrrrrrrrrrrrrrrrvrrrrvvrrrtrvrrtrrrvrrrrrrrrrrttrrrrrvrvrv"
+            "trrvtrrtrrrrrrrrrrtrrvtrtrtrrrtrrrrrrrrrrtrrvrrrrrrtrvrrrrrrrrrvrrrrrrrrrtr"
+            "rrrrrrrrrrrrrtrrrrrrrrtrrrrrrrtrvrtrrrrvrrrrrrrrrrrrvrtrrrrrtrrrrrrtrtrrrrv"
+            "rrrrrrrvrrrrrrrtvrrrrrrrrrrrrttvrvrrrrvvttrrrrrrvrvrrvrvrrrrrrrrtrrrrrvrrtr"
         ),
     },
     "O1": {
         1: (
-            "rrvrvrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrvrrrrvrrrrrrrrrrrrrrvvrrrrrrrrrr"
-            "vrrrvrrtrrrrrrrrrrvrrrvrvrvrrrvrrrrrrrrrrvrrrrrrrrrvrrrrrrrrrrrrrrrrrrrrrvr"
-            "rrrrrrrrrrrrrvrrrrrrrrvrrrrrrrvrrrvrrrrrrrrrrrrrrrrrrrvrrrrrvrrrrrrvrvrrrrr"
-            "rrrrrrrrrrrrrrrvvrrrrrrrrrrrrtvrrrrrrrrvvvrrrrrrrrrrrrrrrrrrrrrrvrrrrrrrrvr"
+            "rrtrvrrrrvrrrrrrrrrrrrrrrrrrrrrrrvrrrrvvrrrtrvrrtrrrvrrrrrrrrrrttrrrrrvrvrv"
+            "trrvtrrtrrrrrrrrrrtrrvtrtrtrrrtrrrrrrrrrrtrrvrrrrrrtrvrrrrrrrrrvrrrrrrrrrtr"
+            "rrrrrrrrrrrrrtrrrrrrrrtrrrrrrrtrvrtrrrrvrrrrrrrrrrrrvrtrrrrrtrrrrrrtrtrrrrv"
+            "rrrrrrrvrrrrrrrtvrrrrrrrrrrrrttvrvrrrrvvttrrrrrrvrvrrvrvrrrrrrrrtrrrrrvrrtr"
         ),
         4701: (
-            "rrrvrrrrrrrrrrrrrrrrrvrrrvrrrrrvrrrrrrvrrrrrrrrrrrvrrrrrrrrvrvrvrrrrrrrrrrr"
-            "rrrvrrrrrrrrrrrrrrrrrrrtrrrrrrrvrrrrrrrvrrvrrrrrrrrrrrrvrrrrrrrrrrrrvrrrrvr"
-            "rrrrrrrrrvrrrrrrrvrrrrrvrrrrrrrrrrrrrrrrvrrrvrrrrrrvrrrrrrrrrrrrvvrvrrrrrrv"
-            "rrrvrrrrrrrrvrrrrrrrrrrrvrrrrrrrrrrrrrrrrrrrvrrrrrrrrrrrrrvrrrvrrrrrrrvrrrr"
+            "rrrtvvrvrrrrrrrrrrvvrtrvrtrrrrrtrrrrrrtrrrvrrvrrrrtrvrrrvrvtrtrtvrrrvvrrrrr"
+            "rrrtrrrrrrrrrrrrrrrrrvvtrrrrrrrtrrrrrrrtvrtrrrrrrrrrvrrtrrrrrrrrrrrrtrvrrtr"
+            "rrrrrrrrrtrrrrvvrtrrrrrtvrrrrrrrrrrrrrvrtrrrtrrrrrrtrvrrrrrrrrrrvtvtrvrrrrt"
+            "rrrtrrrvrrrrtrrrrrrvrrrrtrrrrrvrrrrrrrrrrrrrtrvrrrrrrrrrrrtrrrtrrvrrrrvvrrr"
         ),
         13686: (
-            "rvrrrrrrrrrvrrrrrrrrrrrrrrrrrrrvrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrvrrrrr"
-            "rrrrvrrrrrrrrrrrrvrrrrrrrrrrrrrrrrrrrrrrrrrrvvrrtrrvrrrrrrrrrrrrrrvrrrrrrrr"
-            "rrrrrrvrrrrrvrrrrrrrrrrrrrrrrrrrrrrrrrrrrvrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrv"
-            "rrrrrrrrrrrrrrvrrrtrrvrrrvrrrrrrrrrrrvrvrrrrrrrrrrrvrrrrrrrrrrrrrrvrrrrrrrr"
+            "rtrrrrrrrrrvrrrrrrrrrrrrrvrrrrrvrrrrrrvrrrrrrrrvrrrrrrrrrrrrvvrrrrrrrtrrrrr"
+            "rrvrvrrrrrrrrrrrrtrvrrrrrrrrrrrrrvvrrrrrrrrrttrrtrrtvvrrrrrrrrrrrrtrrrrrrrr"
+            "rrrvrvtrrrrrtrvrrrrrrrrvvrrrrrrrrrrrrrrrrtrrrrrrrvrrvrrrrrrrrrrrrrrrrrrrrrv"
+            "rrvrrrrrrrrrrrtrrrtrrtrrrtrvrrrrrrrrrtrtvrrrrrvvvrrtrrrrrrrrrrrvrrtrvrrrrrr"
         ),
     },
 }

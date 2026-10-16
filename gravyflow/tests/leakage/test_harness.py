@@ -49,13 +49,28 @@ def test_noise_round_trip_decodes_every_sample(world, tmp_path, rate, mode):
     audit.assert_inside_one_fetch(records.values(), harness)
 
 
+def _train_record_time(start):
+    """
+    The first time from ``start``, in 10 s steps, whose transient record the library
+    puts in train: a record's split is a hash of its GPS key alone, not its block's.
+    """
+    from gravyflow.src.dataset.splits import DEFAULT_SPLIT_FRACTIONS, split_of
+    from gravyflow.src.utils.gps import gps_to_key
+
+    for step in range(100):
+        time = start + 10.0 * step
+        if split_of(gps_to_key(time), DEFAULT_SPLIT_FRACTIONS) == "train":
+            return time
+    raise LookupError(f"no train record time within 1000 s of {start}")
+
+
 def test_transient_round_trip_decodes_every_sample(world, tmp_path):
     """
     Glitch windows, fetched at 4096 Hz and thinned by stride to 256 Hz, decode
     exactly, and each padded onsource is centred on its own glitch.
     """
     edge = fx.boundary("O3", "train", "train", skip=3)
-    peaks = np.array([edge + 1000.0, edge + 3000.0])
+    peaks = np.array([_train_record_time(edge + 1000.0), _train_record_time(edge + 3000.0)])
     fixture = fx._fixture([(t - 50.0, t + 50.0) for t in peaks], 4096.0, "O3", ("O3",))
     fixture = fixture.with_catalogues(glitches=[
         GlitchRecord("H1", peaks[0], peaks[0] - 0.5, 1.0, "Blip", 0.95),

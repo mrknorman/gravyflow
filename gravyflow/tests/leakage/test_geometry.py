@@ -139,9 +139,15 @@ def _dataset_batch(world, fixture, directory, rows=(), generators=False):
             if generators else [RV.START_GPS_TIME],
             waveform_generators=[_snr_generator()] if generators else None,
         )
-        raw = next(ds.noise)
-        ds.noise = iter([_copy_batch(raw, rows)])
+        noise, raws = ds.noise, []
+
+        def perturbed(streams):
+            raws.append(noise(streams))
+            return _copy_batch(raws[-1], rows)
+
+        ds.noise = perturbed
         batch = {key: np.asarray(value) for part in ds[0] for key, value in part.items()}
+        (raw,) = raws
         assert harness.source.snapshot()[0], "the batch fetched nothing"
     (received,), (psd,) = spy.inputs, spy.outputs
     return batch, raw, received, psd
