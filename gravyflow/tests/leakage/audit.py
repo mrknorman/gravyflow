@@ -195,6 +195,30 @@ def assert_in_split(records: Iterable[Records], origin: str) -> None:
         raise AssertionError(f"{len(bad)} footprint(s) outside their split's blocks: {bad[:5]}")
 
 
+def assert_served_in_split(served: Mapping[str, np.ndarray], split: str, origin: str) -> None:
+    """
+    Every segment of a split's served-time set ({ifo: (N, 2)}, the library's own
+    ``get_valid_segments``) lies inside one block of the golden table, of that split.
+
+    The check is exhaustive, so it has no miss probability: decoded footprints are
+    then judged against this served time (the two layers of critique G7).
+    """
+    if not served or not any(len(segments) for segments in served.values()):
+        raise AssertionError(f"assert_served_in_split: the {split} served-time set is empty")
+    bad = []
+    for ifo, segments in served.items():
+        for a, z in np.asarray(segments, dtype=np.float64):
+            try:
+                found = fx.golden_split(origin, a, z)
+            except AssertionError as error:
+                bad.append((ifo, str(error)))
+                continue
+            if found != split:
+                bad.append((ifo, f"in a {found} block", (float(a), float(z))))
+    if bad:
+        raise AssertionError(f"{len(bad)} {split} served segment(s) outside its blocks: {bad[:5]}")
+
+
 def _distance(first: SegmentList, second: SegmentList) -> Tuple[float, Optional[Tuple]]:
     best, pair = np.inf, None
     for a in first:

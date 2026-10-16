@@ -48,7 +48,9 @@ def test_window_inside_own_piece(world, tmp_path, layout, mode, path):
     Each decoded window lies inside one fetched piece of its own detector, inside the
     library's served time for its split, and inside a block of its split; its offsource
     ends where its padded onsource starts; and every sample is its own GPS time (the
-    decoder refuses any drop, duplicate, reversal or rescale).
+    decoder refuses any drop, duplicate, reversal or rescale). The served time itself
+    is judged against the golden table, every segment of it, so a split edge that
+    moves by any amount fails even where no sampled window lands.
     """
     build, splits = LAYOUTS[layout]
     fixture = build()
@@ -58,6 +60,8 @@ def test_window_inside_own_piece(world, tmp_path, layout, mode, path):
             onsource_cropped=(path == "dataset"),
         )
         served = {split: fx.served_segments(fixture, IFOS, split) for split in splits}
+    for split, segments in served.items():
+        audit.assert_served_in_split(segments, split, fixture.origin)
     audit.assert_inside_one_fetch(records.values(), harness)
     audit.assert_in_split(records.values(), fixture.origin)
     for record in records.values():
@@ -68,10 +72,11 @@ def test_window_inside_own_piece(world, tmp_path, layout, mode, path):
 # EVERY OUTPUT ROW DEPENDS ONLY ON ITS OWN RAW ROW
 # =============================================================================
 #
-# The perturbation is applied to one raw row as acquisition hands it on (after the
+# The perturbation is applied to raw rows as acquisition hands them on (after the
 # piece's resampling, whose float32 FFT couples every sample of a piece through its
 # rounding), so the test isolates what the per-row stages (PSD, whitening, SNR
-# scaling and labels) read.
+# scaling and labels) read. Every row is perturbed in turn: a dependency from any row
+# to any other is seen, whichever pair it joins.
 
 PERTURBATION = 1.0 + 2.0 ** -3
 
@@ -88,19 +93,18 @@ def _snr_generator():
     )
 
 
-def _perturb_row(batch, row):
-    """A copy of a raw batch dict with ONSOURCE and OFFSOURCE of row (j, d) scaled."""
+def _copy_batch(batch, rows=()):
+    """
+    A copy of a raw batch dict, with ONSOURCE and OFFSOURCE scaled at each index in
+    ``rows``: (j, d) is one row, (j,) every detector of example j.
+    """
     out = dict(batch)
     for key in (RV.ONSOURCE, RV.OFFSOURCE):
         values = np.array(batch[key], dtype=np.float32, copy=True)
-        values[row] *= PERTURBATION
+        for row in rows:
+            values[row] *= PERTURBATION
         out[key] = values
     return out
-
-
-def _perturbing(iterator, row):
-    for batch in iterator:
-        yield _perturb_row(batch, row)
 
 
 class PsdSpy:
@@ -113,18 +117,18 @@ class PsdSpy:
     def __call__(self, background, *args, **kwargs):
         spectrum = self._estimate(background, *args, **kwargs)
         self.inputs.append(np.asarray(background))
-        self.outputs.append((np.asarray(spectrum.normalised), np.asarray(spectrum.scale)))
+        self.outputs.append({"normalised": np.asarray(spectrum.normalised),
+                             "scale": np.asarray(spectrum.scale)})
         return spectrum
 
 
-def _drawing(draw, drawn):
-    """Yield one batch, drawn lazily (so collect sees its fetches), and keep it."""
-    drawn.append(draw())
-    yield drawn[-1]
-
-
-def _dataset_batch(world, fixture, directory, generators, row=None):
-    """One Dataset batch (noise-only or with an SNR-scaled burst) and the PSD spy."""
+def _dataset_batch(world, fixture, directory, rows=(), generators=False):
+    """
+    One fresh Dataset batch (noise only, or with an SNR-scaled burst) with the raw
+    rows ``rows`` perturbed, the raw noise batch it was made from, and the PSD the
+    Dataset estimated (its input and output). Each build draws the same raw data and
+    the same injection streams, so builds differ only where the perturbation reaches.
+    """
     with world(fixture) as harness:
         spy = PsdSpy()
         harness.monkeypatch.setattr(dataset_module, "estimate_psd", spy)
@@ -135,90 +139,96 @@ def _dataset_batch(world, fixture, directory, generators, row=None):
             if generators else [RV.START_GPS_TIME],
             waveform_generators=[_snr_generator()] if generators else None,
         )
-        if row is not None:
-            ds.noise = _perturbing(ds.noise, row)
-        drawn = []
-        records = audit.collect(harness, {"train": ("train", _drawing(lambda: ds[0], drawn))}, 1,
-                                IFOS, fx.window(), onsource_cropped=True) \
-            if not generators and row is None else None
-        if not drawn:
-            drawn.append(ds[0])
-    batch = {key: np.asarray(value) for part in drawn[0] for key, value in part.items()}
-    return batch, spy, (records["train"].footprints if records else None)
+        raw = next(ds.noise)
+        ds.noise = iter([_copy_batch(raw, rows)])
+        batch = {key: np.asarray(value) for part in ds[0] for key, value in part.items()}
+        assert harness.source.snapshot()[0], "the batch fetched nothing"
+    (received,), (psd,) = spy.inputs, spy.outputs
+    return batch, raw, received, psd
 
 
-def _assert_only_row_changed(control, perturbed, key, row, what):
+def _assert_only_row_changed(control, perturbed, row, what):
+    """Row ``row`` of the (B, I, ...) arrays changed, and no other row did."""
     j, d = row
-    assert not np.array_equal(control[key][j, d], perturbed[key][j, d]), \
-        f"{what}: the perturbed row did not change"
-    for b, k in np.ndindex(control[key].shape[:2]):
+    assert not np.array_equal(control[j, d], perturbed[j, d]), \
+        f"{what}: the perturbed row [{j}, {d}] did not change"
+    for b, k in np.ndindex(control.shape[:2]):
         if (b, k) != (j, d):
-            assert np.array_equal(control[key][b, k], perturbed[key][b, k]), \
+            assert np.array_equal(control[b, k], perturbed[b, k]), \
                 f"{what}: row [{b}, {k}] changed with row [{j}, {d}]'s data"
 
 
 def test_psd_is_per_row(world, tmp_path):
     """
     The PSD estimator is handed exactly each row's own offsource (decoded from what it
-    receives). Perturbing one raw row [j, d] changes no other row's PSD or whitened
-    onsource, and no other example's injections or SNR labels.
+    receives). Perturbing each raw row [j, d] in turn changes that row's PSD and
+    whitened onsource and no other row's. With an SNR-scaled injection, perturbing
+    each example in turn changes no other example's whitened onsource, injections or
+    SNR label (the detectors of one example share its network SNR scale by design).
     """
     fixture = fx.straddle("train", "test", half_width=256.0)
-    noise, spy, prints = _dataset_batch(world, fixture, tmp_path / "noise", generators=False)
-    assert len(spy.inputs) == 1
-    received = decode_rows(spy.inputs[0], IFOS, fixture.encoding, what="PSD input")
-    assert np.array_equal(received[..., 0], prints[..., 0])
-    assert np.all(received[..., 1] - received[..., 0] == fx.window().offsource)
+    whitened = RV.WHITENED_ONSOURCE.name
+    control, raw, received, psd = _dataset_batch(world, fixture, tmp_path / "noise")
+    own = decode_rows(raw[RV.OFFSOURCE], IFOS, fixture.encoding, what="raw offsource")
+    assert np.array_equal(decode_rows(received, IFOS, fixture.encoding, what="PSD input"), own)
+    assert np.all(own[..., 1] - own[..., 0] == fx.window().offsource)
 
-    row = (1, 0)
-    # Noise only: one PSD and one whitened onsource per row.
-    noise_b, spy_b, _ = _dataset_batch(world, fixture, tmp_path / "noise-b", generators=False, row=row)
-    psd_changed = False
-    for index, part in enumerate(("normalised", "scale")):
-        a, b = spy.outputs[0][index], spy_b.outputs[0][index]
-        for other in np.ndindex(a.shape[:2]):
-            if other != row:
-                assert np.array_equal(a[other], b[other]), f"PSD {part} of row {other} changed"
-        psd_changed |= not np.array_equal(a[row], b[row])
-    assert psd_changed, "the perturbed row's PSD did not change"
-    _assert_only_row_changed(noise, noise_b, RV.WHITENED_ONSOURCE.name, row, "whitened onsource")
+    rows = list(np.ndindex(control[whitened].shape[:2]))
+    assert len(rows) == 16
+    for row in rows:
+        perturbed, _, _, psd_b = _dataset_batch(world, fixture, tmp_path / f"noise-{row}", [row])
+        _assert_only_row_changed(control[whitened], perturbed[whitened], row, "whitened onsource")
+        for part in ("normalised", "scale"):
+            _assert_only_row_changed(psd[part], psd_b[part], row, f"PSD {part}")
 
-    # With an SNR-scaled injection: detectors of one example share the network SNR
-    # scale by design; every other example is bit-identical.
-    control, _, _ = _dataset_batch(world, fixture, tmp_path / "a", generators=True)
-    perturbed, _, _ = _dataset_batch(world, fixture, tmp_path / "b", generators=True, row=row)
-    assert np.array_equal(control[RV.OFFSOURCE.name], noise[RV.OFFSOURCE.name])
-    others = np.arange(control[RV.INJECTIONS.name].shape[0]) != row[0]
-    for key in (RV.WHITENED_ONSOURCE.name, RV.INJECTIONS.name, RV.WHITENED_INJECTIONS.name,
-                gf.ScalingTypes.SNR.name):
-        assert np.array_equal(control[key][others], perturbed[key][others]), key
-    assert not np.array_equal(control[RV.INJECTIONS.name][row[0]], perturbed[RV.INJECTIONS.name][row[0]])
+    injected, *_ = _dataset_batch(world, fixture, tmp_path / "injected", generators=True)
+    assert np.array_equal(injected[RV.OFFSOURCE.name], control[RV.OFFSOURCE.name])
+    keys = (whitened, RV.INJECTIONS.name, RV.WHITENED_INJECTIONS.name, gf.ScalingTypes.SNR.name)
+    examples = injected[RV.INJECTIONS.name].shape[0]
+    assert examples == 8
+    for j in range(examples):
+        perturbed, *_ = _dataset_batch(world, fixture, tmp_path / f"injected-{j}", [(j,)], True)
+        assert not np.array_equal(injected[RV.INJECTIONS.name][j], perturbed[RV.INJECTIONS.name][j]), \
+            f"example {j}'s injections did not change with its noise"
+        others = np.arange(examples) != j
+        for key in keys:
+            assert np.array_equal(injected[key][others], perturbed[key][others]), \
+                f"{key}: another example changed with example {j}'s data"
 
 
 def test_obtainer_whitening_is_per_row(world, tmp_path):
-    """The obtainer's own whiten=True path: a perturbed raw row changes no other row."""
+    """
+    The obtainer's own whiten=True path: perturbing each raw row in turn changes that
+    row's whitened onsource and no other row's. The raw batch is captured where the
+    obtainer hands it to its post-processing, then replayed through it.
+    """
     fixture = fx.straddle("train", "test", half_width=256.0)
-    row = (2, 1)
+    with world(fixture) as harness:
+        obtainer = fx.ifo_data_obtainer(fixture)
+        post_process, captured = obtainer._post_process_batch, []
 
-    def run(perturb):
-        with world(fixture) as harness:
-            obtainer = fx.ifo_data_obtainer(fixture)
-            if perturb:
-                post_process = obtainer._post_process_batch
+        def capturing(batch, *args, **kwargs):
+            captured.append((_copy_batch(batch), args, kwargs))
+            return post_process(batch, *args, **kwargs)
 
-                def perturbed_post_process(batch, *args, **kwargs):
-                    return post_process(_perturb_row(batch, row), *args, **kwargs)
+        obtainer._post_process_batch = capturing
+        ifos = [gf.IFO[name] for name in IFOS]
+        obtainer.get_valid_segments(ifos, 7, dict(fx.GOLDEN_GROUPS), "train")
+        generator = obtainer.get_onsource_offsource_chunks(
+            256.0, fx.ONSOURCE_SECONDS, fx.CROP_SECONDS, fx.OFFSOURCE_SECONDS, 8, ifos,
+            1.0, 7, gf.SamplingMode.RANDOM, whiten=True,
+        )
+        served = np.asarray(next(generator)[RV.ONSOURCE])
+        assert harness.source.snapshot()[0], "the whitened batch fetched nothing"
+    raw, args, kwargs = captured[0]
 
-                obtainer._post_process_batch = perturbed_post_process
-            ifos = [gf.IFO[name] for name in IFOS]
-            obtainer.get_valid_segments(ifos, 7, dict(fx.GOLDEN_GROUPS), "train")
-            generator = obtainer.get_onsource_offsource_chunks(
-                256.0, fx.ONSOURCE_SECONDS, fx.CROP_SECONDS, fx.OFFSOURCE_SECONDS, 8, ifos,
-                1.0, 7, gf.SamplingMode.RANDOM, whiten=True,
-            )
-            batch = next(generator)
-            assert harness.source.snapshot()[0], "the whitened batch fetched nothing"
-        return {key: np.asarray(value) for key, value in batch.items()}
+    def run(rows=()):
+        return np.asarray(post_process(_copy_batch(raw, rows), *args, **kwargs)[RV.ONSOURCE])
 
-    control, perturbed = run(False), run(True)
-    _assert_only_row_changed(control, perturbed, RV.ONSOURCE, row, "whitened onsource")
+    control = run()
+    assert np.array_equal(control, served), "the replay differs from the served batch"
+    rows = list(np.ndindex(control.shape[:2]))
+    assert len(rows) == 16
+    for row in rows:
+        _assert_only_row_changed(control, run([row]), row, "whitened onsource")
+

@@ -269,6 +269,19 @@ def test_assert_in_split_refuses_a_footprint_in_another_split():
         audit.assert_in_split([_records("t", "test", outside)], "O3")
 
 
+def test_assert_served_in_split_refuses_served_time_past_a_block_edge():
+    """A served segment that crosses into, or lies in, another split's block fails."""
+    edge = fx.boundary("O3", "train", "test")
+    served = {"H1": [(edge, edge + 600.0)], "L1": [(edge + 10.0, edge + 2048.0)]}
+    audit.assert_served_in_split(served, "test", "O3")
+    with pytest.raises(AssertionError, match="crosses the edge"):
+        audit.assert_served_in_split({**served, "L1": [(edge - 0.5, edge + 600.0)]}, "test", "O3")
+    with pytest.raises(AssertionError, match="in a train block"):
+        audit.assert_served_in_split({**served, "H1": [(edge - 600.0, edge)]}, "test", "O3")
+    with pytest.raises(AssertionError, match="is empty"):
+        audit.assert_served_in_split({"H1": [], "L1": []}, "test", "O3")
+
+
 def test_assert_split_gap_refuses_close_splits():
     edge = fx.boundary("O3", "train", "test")
     train = np.stack([np.stack([[edge - 300.0 - 7 * k, edge - 294.0 - 7 * k]] * 2) for k in range(8)])
