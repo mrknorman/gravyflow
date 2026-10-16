@@ -485,8 +485,9 @@ def test_scale_to_snr():
         lower_frequency_cutoff=5.0
     )
     
-    # Relax tolerance to 25% due to potential windowing/interpolation effects
-    np.testing.assert_allclose(new_snr, desired_snr, rtol=1e-07)
+    # The SNR is computed in float32 (machine epsilon 1.2e-7), so rescaling to an
+    # SNR and measuring it again agrees to float32 rounding, not to 1e-7.
+    np.testing.assert_allclose(new_snr, desired_snr, rtol=1e-06)
 
 def test_snr_theoretical_sine():
     # Verify SNR matches theoretical expectation for a sine wave in white noise

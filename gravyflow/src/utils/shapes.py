@@ -17,6 +17,8 @@ from typing import Optional, Tuple, Generator, Any
 
 import jax.numpy as jnp
 
+from gravyflow.src.utils.gps import as_gps_times
+
 
 @dataclass(frozen=True)
 class ContractSpec:
@@ -139,7 +141,18 @@ class ShapeEnforcer:
         Raises:
             ValueError: If tensor doesn't match contract.
         """
-        x = jnp.asarray(x)
+        return self._check(jnp.asarray(x), contract, name)
+    
+    def validate_gps_times(self, x: Any, contract: ShapeContract, name: str = "gps_times"):
+        """
+        Validate GPS times against a shape contract, keeping them NumPy float64.
+        
+        A JAX array would round GPS times to float32, about 100 s near 1.3e9 s.
+        """
+        return self._check(as_gps_times(x), contract, name)
+    
+    def _check(self, x, contract: ShapeContract, name: str):
+        """Raise ValueError unless ``x`` matches ``contract``; return ``x``."""
         spec = contract.value
         
         # Check ndim
@@ -230,6 +243,7 @@ class ShapeEnforcer:
         }
         
         REQUIRED_KEYS = {RV.ONSOURCE, RV.OFFSOURCE}
+        GPS_KEYS = {RV.START_GPS_TIME, RV.TRANSIENT_GPS_TIME}
         
         for item in gen:
             # Handle dict format (new)
@@ -242,7 +256,11 @@ class ShapeEnforcer:
                 # Validate and transform each tensor
                 validated = {}
                 for key, tensor in item.items():
-                    if key in SHAPE_CONTRACTS:
+                    if key in GPS_KEYS:
+                        validated[key] = enforcer.validate_gps_times(
+                            tensor, SHAPE_CONTRACTS[key], key.name
+                        )
+                    elif key in SHAPE_CONTRACTS:
                         validated[key] = enforcer.validate(
                             tensor, SHAPE_CONTRACTS[key], key.name
                         )
@@ -273,7 +291,7 @@ class ShapeEnforcer:
                 
                 on = enforcer.validate(on, ShapeContract.BIS, "onsource")
                 off = enforcer.validate(off, ShapeContract.BIS, "offsource")
-                gps = enforcer.validate(gps, ShapeContract.BI, "gps_times")
+                gps = enforcer.validate_gps_times(gps, ShapeContract.BI, "gps_times")
                 
                 if labels is not None:
                     labels = enforcer.validate(labels, ShapeContract.BI, "labels")

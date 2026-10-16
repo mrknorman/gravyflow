@@ -29,7 +29,7 @@ from .base import (
 )
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.utils.shapes import ShapeEnforcer
-from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys
+from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys, as_gps_times
 from gravyflow.src.dataset.features.transient_index import TransientIndex
 from .transient_segment import TransientSegment
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
@@ -435,8 +435,8 @@ class TransientDataObtainer(BaseDataObtainer):
         
         # Extract GPS times from segments
         batch_gps_times = [seg.transient_gps_time for seg in batch_segments]
-        gps_1d = ops.convert_to_tensor(batch_gps_times, dtype="float64")
-        transient_gps = ops.tile(ops.expand_dims(gps_1d, axis=-1), (1, num_ifos))
+        gps_1d = as_gps_times(batch_gps_times)
+        transient_gps = np.tile(np.expand_dims(gps_1d, axis=-1), (1, num_ifos))
         
         # Compute DATA_LABEL per-segment based on segment type
         # DataLabel.GLITCHES = 1, DataLabel.EVENTS = 2

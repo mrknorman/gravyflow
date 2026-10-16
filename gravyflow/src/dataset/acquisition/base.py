@@ -36,6 +36,7 @@ from gwpy.timeseries import TimeSeries
 import gravyflow as gf
 from gravyflow.src.utils.tensor import resample_fft
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
+from gravyflow.src.utils.gps import as_gps_times
 
 
 # =============================================================================
@@ -179,7 +180,6 @@ class ObservingRun(Enum):
 # RANDOM SUBSECTION FUNCTIONS (JIT-compiled)
 # =============================================================================
 
-@jax.jit(static_argnames=["num_examples_per_batch", "num_onsource_samples", "num_offsource_samples"])
 def _random_subsection(
         tensor_data,
         num_examples_per_batch: int,
@@ -189,13 +189,38 @@ def _random_subsection(
         start_gps_times : float,
         seed
     ):
-
     """
-    Generate random subsections from a tensor. JIT compiled for efficiency.
-    """
-    # Cast input parameters
-    start_gps_times = ops.cast(start_gps_times, "float64")
+    Generate random subsections from a tensor.
 
+    Returns the onsource and offsource subsections and the GPS start time of
+    each onsource subsection, as NumPy float64.
+    """
+    batch_subarrays, batch_background_chunks, random_starts = _random_subsection_jit(
+        tensor_data,
+        num_examples_per_batch,
+        num_onsource_samples,
+        num_offsource_samples,
+        seed
+    )
+
+    # The start times are computed outside JAX, in float64.
+    start_times = np.asarray(random_starts).astype(np.float64) * as_gps_times(time_interval_seconds)
+    start_times += as_gps_times(start_gps_times)
+
+    return batch_subarrays, batch_background_chunks, start_times
+
+
+@jax.jit(static_argnames=["num_examples_per_batch", "num_onsource_samples", "num_offsource_samples"])
+def _random_subsection_jit(
+        tensor_data,
+        num_examples_per_batch: int,
+        num_onsource_samples: int,
+        num_offsource_samples: int,
+        seed
+    ):
+    """
+    Random subsections of a tensor and their start indices. JIT compiled for efficiency.
+    """
     # Determine the size of the input tensor.
     num_samples = ops.shape(tensor_data)[0]
 
@@ -246,12 +271,7 @@ def _random_subsection(
         tensor_data, background_chunk_indices, axis=0
     )
 
-    # Calculate the start times for each subsection.
-    start_times = ops.cast(random_starts, "float64") * ops.cast(time_interval_seconds, "float64")
-
-    start_times += start_gps_times
-
-    return batch_subarrays, batch_background_chunks, start_times
+    return batch_subarrays, batch_background_chunks, random_starts
 
 
 def concatenate_batches(subarrays, background_chunks, start_times):
@@ -260,7 +280,7 @@ def concatenate_batches(subarrays, background_chunks, start_times):
     """
     stacked_subarrays = ops.concatenate(subarrays, axis=1)
     stacked_background_chunks = ops.concatenate(background_chunks, axis=1)
-    stacked_start_times = ops.concatenate(start_times, axis=1)
+    stacked_start_times = np.concatenate([as_gps_times(times) for times in start_times], axis=1)
     
     return stacked_subarrays, stacked_background_chunks, stacked_start_times
 
@@ -304,7 +324,7 @@ def random_subsection(
                 ops.expand_dims(batch_background_chunks, 1)
             )
             all_subsections_start_gps_time.append(
-                ops.expand_dims(subsections_start_gps_time, 1)
+                np.expand_dims(subsections_start_gps_time, 1)
             )
 
         # Concatenate the batches
@@ -449,12 +469,12 @@ class IFOData:
             # Stack into batch
             all_subarrays.append(ops.expand_dims(ops.stack(subarrays_batch), axis=1))
             all_background_chunks.append(ops.expand_dims(ops.stack(background_batch), axis=1))
-            all_gps_times.append(ops.expand_dims(ops.convert_to_tensor(gps_times_batch, dtype="float64"), axis=1))
+            all_gps_times.append(np.expand_dims(as_gps_times(gps_times_batch), axis=1))
         
         # Concatenate across detectors
         stacked_subarrays = ops.concatenate(all_subarrays, axis=1)
         stacked_background = ops.concatenate(all_background_chunks, axis=1)
-        stacked_gps = ops.concatenate(all_gps_times, axis=1)
+        stacked_gps = np.concatenate(all_gps_times, axis=1)
         
         # New grid position (advanced by batch)
         new_grid_position = grid_position + (num_examples_per_batch * num_onsource_samples)

@@ -82,6 +82,8 @@ class MatchedFilter:
         Generate templates on-the-fly using ripple.
         
         Templates are cached after first generation unless force_regenerate=True.
+        They are generated in float64 and returned in float32, like the data
+        they filter.
         
         Args:
             force_regenerate: If True, regenerate even if cached.
@@ -93,6 +95,22 @@ class MatchedFilter:
             return self._templates
         
         # Import here to avoid circular imports
+        from gravyflow.src.dataset.features.waveforms.cbc import _in_x64
+        
+        raw_templates = _in_x64(self._generate_raw_templates)().astype(jnp.float32)
+        
+        # Scale templates by gf.Defaults.scale_factor for consistency with dataset
+        # This is the same scaling applied to noise and injections
+        import gravyflow as gf
+        self._template_scale = 1.0 / gf.Defaults.scale_factor
+        self._templates = raw_templates * gf.Defaults.scale_factor
+        
+        print(f"Templates generated: shape {self._templates.shape}, scaled by {gf.Defaults.scale_factor:.2e}")
+        
+        return self._templates
+    
+    def _generate_raw_templates(self) -> jnp.ndarray:
+        """The unscaled templates, in the precision JAX is set to when called."""
         from gravyflow.src.dataset.features.waveforms.cbc import (
             Approximant,
             _frequency_domain_polarisations,
@@ -150,17 +168,7 @@ class MatchedFilter:
             return h_time
         
         print(f"Generating {len(mass_1)} templates on GPU...")
-        raw_templates = generate_one(mass_1, mass_2)
-        
-        # Scale templates by gf.Defaults.scale_factor for consistency with dataset
-        # This is the same scaling applied to noise and injections
-        import gravyflow as gf
-        self._template_scale = 1.0 / gf.Defaults.scale_factor
-        self._templates = raw_templates * gf.Defaults.scale_factor
-        
-        print(f"Templates generated: shape {self._templates.shape}, scaled by {gf.Defaults.scale_factor:.2e}")
-        
-        return self._templates
+        return generate_one(mass_1, mass_2)
     
     def filter(
         self,

@@ -34,8 +34,10 @@ def snr(
     """
     Calculate the signal-to-noise ratio (SNR) of a given signal.
     """
-    injection = ops.convert_to_tensor(injection, dtype="float64")
-    background = ops.convert_to_tensor(background, dtype="float64")
+    # float32, the precision gravyflow's data is in: JAX's 64-bit mode is on only
+    # for waveform generation.
+    injection = ops.convert_to_tensor(injection, dtype="float32")
+    background = ops.convert_to_tensor(background, dtype="float32")
     
 
     

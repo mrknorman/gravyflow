@@ -25,3 +25,14 @@ def key_to_gps(key: int) -> float:
 def gps_array_to_keys(gps_times: np.ndarray) -> np.ndarray:
     """Vectorized GPS to integer key conversion."""
     return np.round(np.asarray(gps_times) * 100).astype(np.int64)
+
+
+def as_gps_times(gps_times) -> np.ndarray:
+    """
+    GPS times as a NumPy float64 array.
+
+    GPS times near 1.3e9 s keep only about 100 s of precision in float32, the
+    dtype JAX arrays take by default, so they are carried in NumPy float64 and
+    never converted to JAX arrays.
+    """
+    return np.asarray(gps_times, dtype=np.float64)

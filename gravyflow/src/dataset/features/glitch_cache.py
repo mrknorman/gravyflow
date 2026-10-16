@@ -29,7 +29,7 @@ import h5py
 from keras import ops
 
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
-from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys
+from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys, as_gps_times
 from gravyflow.src.dataset.config import TransientDefaults
 
 # Re-export from TransientDefaults for internal use
@@ -1320,7 +1320,7 @@ class TransientCache:
             
             # Convert to dict format with (B, I) shape for GPS and labels
             num_ifos = onsource.shape[1]
-            gps_expanded = ops.tile(ops.expand_dims(gps_times, axis=-1), (1, num_ifos))
+            gps_expanded = np.tile(np.expand_dims(as_gps_times(gps_times), axis=-1), (1, num_ifos))
             labels_expanded = ops.tile(ops.expand_dims(labels, axis=-1), (1, num_ifos))
             
             yield {

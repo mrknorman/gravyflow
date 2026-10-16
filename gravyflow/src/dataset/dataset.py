@@ -19,6 +19,7 @@ from gravyflow.src.dataset.config import Defaults
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
+from gravyflow.src.utils.gps import as_gps_times
 
 def validate_noise_settings(
         noise_obtainer: gf.NoiseObtainer, 
@@ -475,7 +476,7 @@ class GravyflowDataset(keras.utils.PyDataset):
     def _process_gps_times(self, gps_times):
         """Process GPS times if required."""
         if gf.ReturnVariables.START_GPS_TIME in self.variables_to_return:
-            return ops.cast(gps_times, "float64")
+            return as_gps_times(gps_times)
         return None
 
     def _process_mask(self, mask):
@@ -905,7 +906,7 @@ class ComposedDataset(keras.utils.PyDataset):
         onsource = ops.stack(batch_onsource, axis=0)
         offsource = ops.stack(batch_offsource, axis=0)
         pool_labels = ops.convert_to_tensor(batch_pool_labels, dtype="int32")
-        gps_times = ops.convert_to_tensor(batch_gps_times, dtype="float64")
+        gps_times = as_gps_times(batch_gps_times)
         glitch_type = ops.convert_to_tensor(batch_glitch_type, dtype="int32")
         source_type = ops.convert_to_tensor(batch_source_type, dtype="int32")
         data_label = ops.convert_to_tensor(batch_data_label, dtype="int32")

@@ -1,13 +1,37 @@
 from enum import Enum
+import functools
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import ripplegw
 import keras
 from keras import ops
 
-jax.config.update("jax_enable_x64", True)
+
+def _in_x64(function):
+    """
+    Run ``function`` with JAX's 64-bit mode on, and the caller's mode restored after.
+
+    Waveform generation needs float64 for the phase of long frequency grids and
+    for the time shift that places the merger; the rest of gravyflow runs in
+    float32. This is the one place gravyflow turns 64-bit mode on.
+    """
+    @functools.wraps(function)
+    def scoped(*args, **kwargs):
+        with jax.enable_x64(True):
+            return function(*args, **kwargs)
+    return scoped
+
+
+# Importing ripplegw switches 64-bit mode on for the whole process: some of its
+# models call jax.config.update("jax_enable_x64", True) at import. Import it with
+# 64-bit mode on, so its module-level tables are float64, then restore the
+# process's own setting.
+_x64_before_ripplegw = jax.config.read("jax_enable_x64")
+with jax.enable_x64(True):
+    import ripplegw
+jax.config.update("jax_enable_x64", _x64_before_ripplegw)
+del _x64_before_ripplegw
 
 # Constants
 G_SI = 6.67430e-11
@@ -183,6 +207,7 @@ def _frequency_domain_polarisations(
     return hp, hc
 
 
+@_in_x64
 @jax.jit(static_argnames=["num_waveforms", "sample_rate_hertz", "duration_seconds", "approximant", "f_ref"])
 def _generate_cbc_waveform_jit(
     num_waveforms: int = 1,
