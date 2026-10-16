@@ -403,19 +403,19 @@ def extract_parameters(
                 ],
                 'injections': input_dict[
                     gf.ReturnVariables.INJECTIONS.name
-                ][0],
+                ][:, 0],
                 'whitened_injections': input_dict[
                     gf.ReturnVariables.WHITENED_INJECTIONS.name
-                ][0],
+                ][:, 0],
                 'masks': input_dict[
                     gf.ReturnVariables.INJECTION_MASKS.name
-                ][0],
+                ][:, 0],
                 'mass_1_msun': input_dict[
                     gf.WaveformParameters.MASS_1_MSUN.name
-                ][0],
+                ][:, 0],
                 'mass_2_msun': input_dict[
                     gf.WaveformParameters.MASS_2_MSUN.name
-                ][0]
+                ][:, 0]
             }
         case "wnb":
             return_dict = {
@@ -424,16 +424,16 @@ def extract_parameters(
                 ],
                 'injections': input_dict[
                     gf.ReturnVariables.INJECTIONS.name
-                ][0],
+                ][:, 0],
                 'whitened_injections': input_dict[
                     gf.ReturnVariables.WHITENED_INJECTIONS.name
-                ][0],
+                ][:, 0],
                 'masks': input_dict[
                     gf.ReturnVariables.INJECTION_MASKS.name
-                ][0],
+                ][:, 0],
                 'duration_seconds': input_dict[
                     gf.WaveformParameters.DURATION_SECONDS.name
-                ][0]
+                ][:, 0]
             }
         case "incoherent":
             return_dict = {
@@ -442,19 +442,19 @@ def extract_parameters(
                 ],
                 'injections': input_dict[
                     gf.ReturnVariables.INJECTIONS.name
-                ][0],
+                ][:, 0],
                 'whitened_injections': input_dict[
                     gf.ReturnVariables.WHITENED_INJECTIONS.name
-                ][0],
+                ][:, 0],
                 'masks': input_dict[
                     gf.ReturnVariables.INJECTION_MASKS.name
-                ][0],
+                ][:, 0],
                 'mass_1_msun': input_dict[
                     gf.WaveformParameters.MASS_1_MSUN.name
-                ][0],
+                ][:, 0],
                 'mass_2_msun': input_dict[
                     gf.WaveformParameters.MASS_2_MSUN.name
-                ][0]
+                ][:, 0]
             }
         case _:
             raise ValueError(f"waveform_type: {waveform_type} not recognised!")
@@ -870,9 +870,9 @@ def test_gravyflow_dataset_with_injections():
     assert gf.ReturnVariables.INJECTIONS.name in inputs
     injections = inputs[gf.ReturnVariables.INJECTIONS.name]
     
-    # Injections shape: (NumGenerators, Batch, Detectors, Time)
+    # Injections shape: (Batch, Generators, Detectors, Time)
     # Time = onsource_duration_seconds * sample_rate = 1.0 * 1024 = 1024
-    assert ops.shape(injections) == (1, 2, 1, 1024)
+    assert ops.shape(injections) == (2, 1, 1, 1024)
 
 def test_gravyflow_dataset_processing():
     # Test whitening and spectrogram

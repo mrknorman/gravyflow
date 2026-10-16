@@ -106,7 +106,7 @@ class ExampleModel(ABC):
         steps_per_epoch: int = 1000,
         **kwargs
     ) -> gf.GravyflowDataset:
-        """A dataset in the model's input contract, with ``INJECTION_MASKS`` labels."""
+        """A dataset in the model's input contract, with ``INJECTION_PRESENT`` labels."""
 
     @classmethod
     @abstractmethod
@@ -187,7 +187,7 @@ def validation_dataset_args(
         snr=gf.Distribution(min_=cfg.snr_min, max_=cfg.snr_max, type_=gf.DistributionType.UNIFORM),
         injection_chance=0.5,
         batch_size=cfg.batch_size,
-        output_variables=[gf.ReturnVariables.INJECTION_MASKS],
+        output_variables=[gf.ReturnVariables.INJECTION_PRESENT],
         noise_obtainer=gf.NoiseObtainer(
             noise_type=noise_type, ifos=cfg.ifos, ifo_data_obtainer=ifo_data_obtainer),
         seed=seed,

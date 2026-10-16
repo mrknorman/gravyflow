@@ -98,6 +98,9 @@ filterwarnings = [
   # Expected warnings in tests (intentional behavior)
   "ignore:Whitening requested for WHITE NOISE:UserWarning",
   "ignore:The structure of `inputs` doesn't match:UserWarning",
+  # Past acquisition (where data gaps are expected), a NaN or inf the sanitiser
+  # replaces is a failure upstream: tests fail on it.
+  "error::gravyflow.src.utils.tensor.NonFiniteWarning:gravyflow\\.src\\.dataset\\.(dataset|features\\.injection|tools\\.snr)",
 ]
 addopts = "--cov=gravyflow --cov-report=term-missing --cov-fail-under=90"
 

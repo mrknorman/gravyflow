@@ -177,9 +177,8 @@ def test_peak_jitter(basic_noise_obtainer):
     # Get injections: (Batch, IFO, Time)
     injections = batch[0][gf.ReturnVariables.WHITENED_INJECTIONS.name]
     
-    # Flatten IFO dim if present
-    if len(ops.shape(injections)) == 3:
-        injections = injections[:, 0, :]
+    # (Batch, Generators, IFO, Time): the one generator, the first IFO
+    injections = injections[:, 0, 0, :]
         
     # Find argmax
     peak_indices = np.argmax(np.abs(injections), axis=-1)
@@ -248,7 +247,7 @@ def test_snr_bounds(basic_noise_obtainer):
     # injections shape: (NumGenerators, Batch, IFO, Time)
     # offsource shape: (Batch, IFO, Time)
     # Take first generator's injections
-    injections = injections[0]  # Now (Batch, IFO, Time)
+    injections = injections[:, 0]  # (Batch, Generators, IFO, Time) -> (Batch, IFO, Time)
     
     calculated_snrs = gf.snr(
         injections,
@@ -309,8 +308,8 @@ def test_produced_snr(basic_noise_obtainer):
     injections = inputs[gf.ReturnVariables.INJECTIONS.name]
     offsource = inputs[gf.ReturnVariables.OFFSOURCE.name]
     
-    # injections: (NumGenerators, Batch, IFO, Time) -> (Batch, IFO, Time)
-    injections = injections[0]
+    # injections: (Batch, Generators, IFO, Time) -> (Batch, IFO, Time)
+    injections = injections[:, 0]
     
     # Calculate actual SNR of the produced (cropped) injections
     calculated_snrs = gf.snr(
@@ -378,7 +377,7 @@ def test_snr_bounds_cbc(basic_noise_obtainer):
     print(f"CBC Offsource shape: {offsource.shape}")
     
     # Calculate SNR for each example
-    injections = injections[0]  # First generator: (Batch, IFO, Time)
+    injections = injections[:, 0]  # First generator: (Batch, IFO, Time)
     
     calculated_snrs = gf.snr(
         injections,
@@ -443,8 +442,9 @@ def test_micro_training(basic_dataset_config):
     x = keras.layers.Flatten()(inputs)
     x = keras.layers.Dense(4, activation="relu")(x)
     outputs = keras.layers.Dense(int(np.prod(input_shape)), activation="linear")(x)
+    # The target is (Batch, Generators, IFO, Time), one generator here.
     output_layer = keras.layers.Reshape(
-        input_shape, 
+        (1,) + tuple(input_shape), 
         name=gf.ReturnVariables.WHITENED_INJECTIONS.name
     )(outputs)
     
@@ -467,7 +467,10 @@ def test_micro_training(basic_dataset_config):
     assert len(history.history["loss"]) > 0, "Training did not produce loss history."
 
 def test_parameter_independence(basic_noise_obtainer):
-    """Verify that generated parameters are uncorrelated (e.g. inclination vs distance)."""
+    """Verify that drawn parameters are uncorrelated (e.g. inclination vs mass).
+
+    Not inclination vs distance: under SNR scaling DISTANCE_MPC is the distance
+    the injected amplitude implies, which depends on the inclination."""
     
     # Setup generator with distributed parameters
     injection_directory_path = gf.tests.PATH / "example_injection_parameters"
@@ -498,7 +501,7 @@ def test_parameter_independence(basic_noise_obtainer):
         "waveform_generators": [cbc_generator],
         "input_variables": [
             gf.WaveformParameters.INCLINATION_RADIANS,
-            gf.WaveformParameters.DISTANCE_MPC
+            gf.WaveformParameters.MASS_1_MSUN
         ]
     }
     
@@ -509,17 +512,17 @@ def test_parameter_independence(basic_noise_obtainer):
     # Input dict will contain the requested parameters
     inputs = batch[0]
     inclination = inputs[gf.WaveformParameters.INCLINATION_RADIANS.name]
-    distance = inputs[gf.WaveformParameters.DISTANCE_MPC.name]
+    mass = inputs[gf.WaveformParameters.MASS_1_MSUN.name]
     
-    # Flatten if necessary (Batch, 1) -> (Batch,)
+    # Flatten (Batch, Generators) -> (Batch,)
     inclination = np.array(inclination).flatten()
-    distance = np.array(distance).flatten()
+    mass = np.array(mass).flatten()
     
     # Check correlation
-    correlation = np.corrcoef(inclination, distance)[0, 1]
+    correlation = np.corrcoef(inclination, mass)[0, 1]
     
     # Should be close to 0
-    print(f"Correlation between Inclination and Distance: {correlation}")
+    print(f"Correlation between Inclination and Mass 1: {correlation}")
     assert np.abs(correlation) < 0.3, f"Parameters appear correlated! Coeff: {correlation}"
 
 def test_parameter_variation(basic_noise_obtainer):
@@ -671,8 +674,7 @@ def test_padding_adherence(basic_noise_obtainer):
     batch = next(iter(dataset))
     
     injections = batch[0][gf.ReturnVariables.WHITENED_INJECTIONS.name]
-    if len(ops.shape(injections)) == 3:
-        injections = injections[:, 0, :]
+    injections = injections[:, 0, 0, :]  # the one generator, the first IFO
         
     peak_indices = np.argmax(np.abs(injections), axis=-1)
     
@@ -808,10 +810,9 @@ def test_injection_mask_consistency(basic_noise_obtainer):
         batch = next(iterator)
         inputs = batch[0]
         
-        # injections: (NumGenerators, Batch, IFO, Time)
-        injections = inputs[gf.ReturnVariables.INJECTIONS.name][0]
-        # masks: (Batch,)
-        masks = inputs[gf.ReturnVariables.INJECTION_MASKS.name][0]
+        # injections: (Batch, Generators, IFO, Time); masks: (Batch, Generators)
+        injections = inputs[gf.ReturnVariables.INJECTIONS.name][:, 0]
+        masks = inputs[gf.ReturnVariables.INJECTION_MASKS.name][:, 0]
         
         # Check consistency
         batch_size = injections.shape[0]

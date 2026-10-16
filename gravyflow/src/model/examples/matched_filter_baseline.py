@@ -196,7 +196,7 @@ class MatchedFilterBaseline(ExampleModel):
             num_examples_per_batch=config.batch_size,
             waveform_generators=[cbc_generator],
             input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-            output_variables=[gf.ReturnVariables.INJECTION_MASKS],
+            output_variables=[gf.ReturnVariables.INJECTION_PRESENT],
             seed=seed,
             group=group,
             steps_per_epoch=steps_per_epoch,

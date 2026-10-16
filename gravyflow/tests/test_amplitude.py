@@ -141,8 +141,7 @@ def _batch(generators, outputs, num_examples=8, seed=1234, ifos=(gf.IFO.H1, gf.I
 
 
 def _whitened_norm(batch):
-    whitened = batch["WHITENED_INJECTIONS"]
-    whitened = whitened.reshape((-1,) + whitened.shape[-3:])[0]  # first generator
+    whitened = batch["WHITENED_INJECTIONS"][:, 0]  # (B, G, I, T): the first generator
     return np.sqrt(np.sum(whitened ** 2, axis=(-2, -1)))
 
 
@@ -286,8 +285,8 @@ def test_hrss_injection_has_its_physical_snr():
         _sine_gaussian_generator(gf.ScalingTypes.HRSS, _constant(1e-21)),
         WAVES + LABELS, num_examples=16,
     )
-    injections = batch["INJECTIONS"].reshape((-1,) + batch["INJECTIONS"].shape[-3:])[0]
-    whitened = batch["WHITENED_INJECTIONS"].reshape(injections.shape)
+    injections = batch["INJECTIONS"][:, 0]  # (B, G, I, T): the one generator
+    whitened = batch["WHITENED_INJECTIONS"][:, 0]
     ifos = [gf.IFO.H1, gf.IFO.L1]
 
     expected = np.array([
@@ -309,7 +308,7 @@ def test_hrss_injection_has_its_physical_snr():
     assert np.all(network >= 0.05 * optimal)
 
     np.testing.assert_array_equal(batch["HRSS"], np.float32(1e-21))
-    np.testing.assert_allclose(batch["SNR"], _whitened_norm(batch), rtol=0.05)
+    np.testing.assert_allclose(batch["SNR"][:, 0], _whitened_norm(batch), rtol=0.05)
 
 
 def test_hrss_labels_are_the_targets():
@@ -318,8 +317,8 @@ def test_hrss_labels_are_the_targets():
     batch = _batch(
         _sine_gaussian_generator(gf.ScalingTypes.HRSS, targets), [gf.ScalingTypes.HRSS]
     )
-    assert batch["HRSS"].shape == (8,)
-    np.testing.assert_array_equal(batch["HRSS"], targets.astype(np.float64))
+    assert batch["HRSS"].shape == (8, 1)  # (B, G)
+    np.testing.assert_array_equal(batch["HRSS"][:, 0], targets.astype(np.float64))
 
 
 def test_snr_label_is_the_target_and_the_whitened_norm_matches():
@@ -340,7 +339,7 @@ def test_hpeak_scaled_dataset():
     )
     np.testing.assert_array_equal(batch["HPEAK"], np.float32(1e-21))
     _assert_sine_gaussian_shape_ratio(batch["HRSS"] / batch["HPEAK"])
-    np.testing.assert_allclose(batch["SNR"], _whitened_norm(batch), rtol=0.05)
+    np.testing.assert_allclose(batch["SNR"][:, 0], _whitened_norm(batch), rtol=0.05)
 
 
 def test_derived_labels_agree_across_scaling_types():

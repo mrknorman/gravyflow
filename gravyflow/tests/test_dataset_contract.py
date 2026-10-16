@@ -50,7 +50,7 @@ def test_networks_are_built_from_the_datasets_detectors():
     assert [ifo.name for ifo in ds.waveform_generators[0].network.ifos] == ["H1", "L1"]
     inputs, _ = ds[0]
     injections = np.asarray(inputs["INJECTIONS"])
-    injections = injections[0] if injections.ndim == 4 else injections
+    injections = injections[:, 0]  # (B, G, I, T): the one generator
     assert injections.shape[1] == 2 == np.asarray(inputs["WHITENED_ONSOURCE"]).shape[1]
     # Two detectors see different projections, never one broadcast copy.
     assert not np.allclose(injections[:, 0], injections[:, 1])
@@ -124,7 +124,7 @@ def test_whitened_injections_carry_the_target_snr():
                  input_variables=[gf.ReturnVariables.WHITENED_INJECTIONS])
     inputs, _ = ds[0]
     whitened = np.asarray(inputs["WHITENED_INJECTIONS"], dtype=np.float64)
-    whitened = whitened[0] if whitened.ndim == 4 else whitened
+    whitened = whitened[:, 0]  # (B, G, I, T): the one generator
     norm = np.sqrt(np.sum(whitened ** 2, axis=(-1, -2)))
     np.testing.assert_allclose(norm, 10.0, rtol=0.02)
 
@@ -150,7 +150,7 @@ def test_snr_labels_of_hrss_scaled_injections_match_their_whitened_norm():
                  output_variables=[gf.ScalingTypes.SNR])
     inputs, outputs = ds[0]
     whitened = np.asarray(inputs["WHITENED_INJECTIONS"], dtype=np.float64)
-    whitened = whitened[0] if whitened.ndim == 4 else whitened
+    whitened = whitened[:, 0]  # (B, G, I, T): the one generator
     norm = np.sqrt(np.sum(whitened ** 2, axis=(-1, -2)))
     label = np.ravel(np.asarray(outputs["SNR"]))
     assert np.all(norm > 1.0)

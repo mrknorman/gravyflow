@@ -126,7 +126,7 @@ class Gabbard2017(ExampleModel):
     ) -> gf.GravyflowDataset:
         """
         Training or evaluation data in the paper's configuration, with
-        ``INJECTION_MASKS`` labels, in coloured L1 noise or, with
+        ``INJECTION_PRESENT`` labels, in coloured L1 noise or, with
         ``noise_type=NoiseType.REAL``, public GWOSC L1 noise.
         """
         cfg = config or cls.config
@@ -141,7 +141,7 @@ class Gabbard2017(ExampleModel):
                 snr=gf.Distribution(min_=cfg.snr_min, max_=cfg.snr_max, type_=gf.DistributionType.UNIFORM),
                 injection_chance=cfg.injection_chance,
                 batch_size=cfg.batch_size,
-                output_variables=[gf.ReturnVariables.INJECTION_MASKS],
+                output_variables=[gf.ReturnVariables.INJECTION_PRESENT],
             ),
             seed=seed,
             group=group,

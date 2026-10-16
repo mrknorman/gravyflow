@@ -16,7 +16,7 @@ from gravyflow.src.model.examples import (
 )
 from gravyflow.src.model.examples.george_huerta_2017 import curriculum_epochs
 from gravyflow.src.model.examples.recipe import (
-    FixedBatches, RunDirectory, TrainingRun, TrainingSchedule, injection_present, materialise, split_seeds,
+    DetectionBatches, FixedBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise, split_seeds,
 )
 from gravyflow.src.validate import StaleCheckpointError
 
@@ -114,12 +114,18 @@ def test_curriculum_needs_room():
 
 # -------------------------------------------------------------- batches
 
-def test_injection_present_takes_any_generator():
-    masks = np.array([[1, 0, 0, 0], [0, 0, 1, 0]], dtype=np.float32)  # (generators, examples)
-    np.testing.assert_array_equal(injection_present(masks, 4), [True, False, True, False])
-    np.testing.assert_array_equal(injection_present(np.array([[1.0], [0.0]]), 2), [True, False])
-    with pytest.raises(ValueError):
-        injection_present(np.ones((3, 3)), 4)
+def test_detection_labels_are_one_hot_injection_present():
+    class Batches:
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index):
+            x = {"WHITENED_ONSOURCE": np.zeros((4, 1, 16), np.float64)}
+            return x, {"INJECTION_PRESENT": np.array([1.0, 0.0, 1.0, 0.0], np.float32)}
+
+    x, y = DetectionBatches(Batches())[0]
+    assert x["WHITENED_ONSOURCE"].dtype == np.float32
+    np.testing.assert_array_equal(y, [[0, 1], [1, 0], [0, 1], [1, 0]])
 
 
 class CountingBatches(keras.utils.PyDataset):

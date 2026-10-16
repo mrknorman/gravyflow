@@ -178,10 +178,6 @@ class IndependentBetaPrime(layers.Layer):
         return config
 
 
-def adjust_features(features, labels):
-    labels['INJECTION_MASKS'] = labels['INJECTION_MASKS'][0]
-    return features, labels
-
 @dataclass
 class BaseLayer:
     layer_type: str = "Base"
@@ -529,9 +525,7 @@ class Model:
         self.training_dataset = None
 
         if dataset_args is not None:
-            self.training_dataset = gf.Dataset(
-                **deepcopy(dataset_args)
-            ).map(adjust_features)
+            self.training_dataset = gf.Dataset(**deepcopy(dataset_args))
 
         if seed is None:
             seed = gf.Defaults.seed
@@ -653,7 +647,7 @@ class Model:
         )
 
         output_config = {
-            "name" : gf.ReturnVariables.INJECTION_MASKS.name,
+            "name" : gf.ReturnVariables.INJECTION_PRESENT.name,
             "type" : "binary"
         }
 

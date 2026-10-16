@@ -26,7 +26,7 @@ import jax
 from gravyflow.src.dataset.tools.psd import (
     PowerSpectrum, SpectralConfig, estimate_psd
 )
-from gravyflow.src.utils.tensor import crop_samples
+from gravyflow.src.utils.tensor import crop_samples, replace_nan_and_inf_with_zero
 
 
 @jax.jit(static_argnames=["scalar"])
@@ -173,7 +173,7 @@ def scale_to_snr(
         lower_frequency_cutoff, upper_frequency_cutoff, psd_method,
     )
     injection = ops.cast(ops.convert_to_tensor(injection), "float32")
-    injection = ops.where(ops.isfinite(injection), injection, ops.zeros_like(injection))
+    injection = replace_nan_and_inf_with_zero(injection, "scale_to_snr's injection")
     rank = len(injection.shape)
 
     measured = injection

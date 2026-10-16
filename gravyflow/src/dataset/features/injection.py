@@ -22,6 +22,10 @@ from numpy.random import default_rng
 
 # Local imports:
 import gravyflow as gf
+from gravyflow.src.utils.shapes import (
+    BATCH, GENERATOR, IFO, SAMPLES, OFFSOURCE_SAMPLES, ANY
+)
+from gravyflow.src.utils.tensor import replace_nan_and_inf_with_zero
 from gravyflow.src.dataset.features.waveforms.cbc import (
     _generate_cbc_window,
     Approximant
@@ -35,7 +39,8 @@ class ScalingOrdinality(Enum):
 class ScalingType:
     index : int
     ordinality : ScalingOrdinality
-    shape: tuple = (1,)
+    # The shape of one label, per example and generator.
+    shape: tuple = ()
 
 class ScalingTypes(Enum):
     SNR = ScalingType(1, ScalingOrdinality.AFTER_PROJECTION)
@@ -206,31 +211,51 @@ def to_internal(strain, scale_factor : float = None):
 @dataclass 
 class ReturnVariable:
     index : int
-    shape: tuple = (1,)
+    # The documented shape of the batch output, in gravyflow.src.utils.shapes'
+    # axis symbols (see BatchContract), and its dtype.
+    shape: tuple
+    dtype: str = "float32"
 
 class ReturnVariables(Enum):
+    """
+    The outputs a dataset can return. Every output is batch-first, in the
+    shape shown (B examples, G waveform generators, I detectors, T onsource
+    and T_off offsource samples), float32 but START_GPS_TIME (float64).
+    Per-generator labels (INJECTION_MASKS, CENTRAL_TIME, and every
+    WaveformParameter and ScalingType) are NaN where generator g injected
+    nothing into example b, except INJECTION_MASKS, which is 0 there.
+    """
     # Core data outputs
-    ONSOURCE = ReturnVariable(0)
-    WHITENED_ONSOURCE = ReturnVariable(1)
-    OFFSOURCE = ReturnVariable(2)
-    INJECTIONS = ReturnVariable(4)
-    WHITENED_INJECTIONS = ReturnVariable(5)
-    INJECTION_MASKS = ReturnVariable(6)
-    ROLLING_PEARSON_ONSOURCE = ReturnVariable(7)
-    SPECTROGRAM_ONSOURCE = ReturnVariable(8)
+    ONSOURCE = ReturnVariable(0, (BATCH, IFO, SAMPLES))
+    WHITENED_ONSOURCE = ReturnVariable(1, (BATCH, IFO, SAMPLES))
+    OFFSOURCE = ReturnVariable(2, (BATCH, IFO, OFFSOURCE_SAMPLES))
+    INJECTIONS = ReturnVariable(4, (BATCH, GENERATOR, IFO, SAMPLES))
+    WHITENED_INJECTIONS = ReturnVariable(5, (BATCH, GENERATOR, IFO, SAMPLES))
+    # 1 where generator g injected into example b, else 0.
+    INJECTION_MASKS = ReturnVariable(6, (BATCH, GENERATOR))
+    # 1 where any generator injected into the example, else 0: the
+    # signal-or-noise classification label.
+    INJECTION_PRESENT = ReturnVariable(18, (BATCH,))
+    ROLLING_PEARSON_ONSOURCE = ReturnVariable(7, (BATCH, ANY))
+    SPECTROGRAM_ONSOURCE = ReturnVariable(8, (BATCH, ANY))
     
     # GPS Times (disambiguated)
-    START_GPS_TIME = ReturnVariable(13)     # Segment window start (real noise/transient)
-    TRANSIENT_GPS_TIME = ReturnVariable(14) # Event/glitch center (transient mode only)
-    CENTRAL_TIME = ReturnVariable(9)        # Injection peak time (normalized 0-1)
+    START_GPS_TIME = ReturnVariable(13, (BATCH, IFO), "float64")     # Segment window start (real noise/transient); NaN for simulated noise
+    TRANSIENT_GPS_TIME = ReturnVariable(14, (BATCH, IFO), "float64") # Event/glitch center (transient mode only)
+    # The arrival of each injection's reference time at each detector, as a
+    # fraction of the onsource window: a burst's peak (its envelope's centre),
+    # a ringdown's start, and a CBC's coalescence time as its waveform model
+    # defines it, which lies after the strain's peak (IMRPhenomD: 1.5 ms for
+    # 10+10 Msun, 3.4 ms for 30+30, 5.9 ms for 60+40).
+    CENTRAL_TIME = ReturnVariable(9, (BATCH, GENERATOR, IFO))
     
-    # Labels and Types
-    DATA_LABEL = ReturnVariable(11)         # DataLabel enum: NOISE=0, GLITCHES=1, EVENTS=2
-    SUB_TYPE = ReturnVariable(10)           # GlitchType.value (if glitch) or SourceType.value (if event)
-    GLITCH_TYPE = ReturnVariable(16)        # GlitchType.value if glitch, -1 otherwise
-    SOURCE_TYPE = ReturnVariable(12)        # SourceType.value if event, -1 otherwise
-    EVENT_TYPE = ReturnVariable(15)         # EventConfidence enum value (if event)
-    POOL_LABEL = ReturnVariable(17)         # FeaturePool class label (int, for ComposedDataset)
+    # Labels and Types (transient mode), per detector
+    DATA_LABEL = ReturnVariable(11, (BATCH, IFO))         # DataLabel enum: NOISE=0, GLITCHES=1, EVENTS=2
+    SUB_TYPE = ReturnVariable(10, (BATCH, IFO))           # GlitchType.value (if glitch) or SourceType.value (if event)
+    GLITCH_TYPE = ReturnVariable(16, (BATCH, IFO))        # GlitchType.value if glitch, -1 otherwise
+    SOURCE_TYPE = ReturnVariable(12, (BATCH, IFO))        # SourceType.value if event, -1 otherwise
+    EVENT_TYPE = ReturnVariable(15, (BATCH, IFO))         # EventConfidence enum value (if event)
+    POOL_LABEL = ReturnVariable(17, (BATCH,))  # FeaturePool class label (ComposedDataset)
     
     def __lt__(self, other):
         return self.value.index < other.value.index
@@ -555,7 +580,9 @@ class WaveformGenerator:
 @dataclass 
 class WaveformParameter:
     index : str
-    shape: tuple = (1,)
+    # The shape of one value, per example and generator: a dataset returns
+    # (B, G) + shape.
+    shape: tuple = ()
     
 class WaveformParameters(Enum):
     
@@ -1288,6 +1315,64 @@ def batch_injection_parameters(parameters_list):
             
     return batched
 
+# The sky keys add_injections_to_onsource read before its sky labels were
+# WaveformParameters.
+RENAMED_SKY_KEYS = {
+    "right_ascension": WaveformParameters.RIGHT_ASCENSION_RADIANS,
+    "declination": WaveformParameters.DECLINATION_RADIANS,
+    "polarization": WaveformParameters.POLARIZATION_RADIANS,
+}
+
+def refuse_renamed_sky_keys(injection_parameters):
+    """
+    Raise if ``injection_parameters`` gives a sky angle under its old name,
+    which would otherwise be ignored and the sky drawn instead. (The one
+    place the old names are handled, so it can become a deprecation warning.)
+    """
+    for old, new in RENAMED_SKY_KEYS.items():
+        if old in injection_parameters:
+            raise KeyError(
+                f'The injection parameter "{old}" is now gf.WaveformParameters.{new.name}; '
+                "give the sky under that key."
+            )
+
+def _absent_as_nan(labels, present, num_examples):
+    """
+    One generator's labels as float32 (Batch, ...) arrays, NaN where it
+    injected nothing (``present`` False). A None value (a key the generator
+    did not draw) is left None.
+    """
+    present = ops.reshape(ops.convert_to_tensor(present), (-1,))
+    result = {}
+    for key, value in labels.items():
+        if value is None:
+            result[key] = None
+            continue
+        value = ops.convert_to_tensor(value, dtype="float32")
+        if len(ops.shape(value)) == 0:
+            value = ops.broadcast_to(value, (num_examples,))
+        mask = ops.reshape(present, (-1,) + (1,) * (len(ops.shape(value)) - 1))
+        result[key] = ops.where(mask, value, np.float32(np.nan))
+    return result
+
+def _stack_generator_labels(labels_list):
+    """
+    Per-generator label dicts as (Generators, Batch, ...) arrays; a key some
+    generators lack is NaN for them.
+    """
+    keys = []
+    for labels in labels_list:
+        keys.extend(key for key in labels if key not in keys)
+    stacked = {}
+    for key in keys:
+        values = [labels.get(key) for labels in labels_list]
+        like = next((value for value in values if value is not None), None)
+        if like is not None:
+            stacked[key] = ops.stack(
+                [ops.full_like(like, np.nan) if value is None else value for value in values], axis=0
+            )
+    return stacked
+
 # Keys of the source measures InjectionGenerator records with each batch.
 SOURCE_HRSS = "source_hrss"
 SOURCE_HPEAK = "source_hpeak"
@@ -1396,23 +1481,18 @@ class InjectionGenerator:
                     duration_seconds=extended_duration,
                     seed=seed
                 )
+                # Non-finite samples (a waveform model failing at some
+                # parameters) are reported and count as no signal.
+                waveforms = replace_nan_and_inf_with_zero(
+                    waveforms, f"{type(generator).__name__} waveforms"
+                )
 
                 mask = generate_mask(waveforms)
 
                 # The source's hrss and hpeak, on the whole generated buffer,
                 # before the window is cut from it.
-                finite = ops.where(ops.isfinite(waveforms), waveforms, 0.0)
-                params[SOURCE_HRSS] = calculate_hrss(finite, sample_rate_hertz)
-                params[SOURCE_HPEAK] = calculate_hpeak(finite)
-
-                # Check for NaN injections that silently zero the mask
-                num_nan_injections = int(ops.sum(ops.any(ops.isnan(waveforms), axis=(1, 2))))
-                if num_nan_injections > 0:
-                    logging.warning(
-                        f"InjectionGenerator: {num_nan_injections}/{num_examples_per_batch} "
-                        f"waveforms contain NaN values and will have mask=0. "
-                        f"This may indicate an issue with waveform parameters."
-                    )
+                params[SOURCE_HRSS] = calculate_hrss(waveforms, sample_rate_hertz)
+                params[SOURCE_HPEAK] = calculate_hpeak(waveforms)
 
                 # Reduce mask to a single boolean flag per example (0.0 or 1.0)
                 mask = ops.max(mask, axis=(1, 2))
@@ -1463,22 +1543,22 @@ class InjectionGenerator:
                 injections_list.append(waveforms)
                 parameters_list.append(params)
 
-            try:
+            if injections_list:
                 injections = ops.stack(injections_list, axis=0)
                 masks = ops.stack(masks_list, axis=0)
-                
-                # Validate shapes: injections should be (G, B, 2, S) = GBPS
-                # where G=num_generators, 2=polarizations (h+/hx)
-                if injections is not None:
-                    expected_ndim = 4  # GBPS
-                    if len(ops.shape(injections)) != expected_ndim:
-                        logging.warning(
-                            f"Injection shape mismatch: expected {expected_ndim}D (GBPS), "
-                            f"got {len(ops.shape(injections))}D with shape {ops.shape(injections)}"
-                        )
-            except:
-                injections = None
-                masks = None
+            else:
+                # No generators: no injections, and every example is noise.
+                target_length = int(total_duration * sample_rate_hertz)
+                injections = ops.zeros((0, num_examples_per_batch, 2, target_length), "float32")
+                masks = ops.zeros((0, num_examples_per_batch), "float32")
+
+            # (Generators, Batch, 2, Time) polarisations, unless a generator
+            # stacks more (IncoherentGenerator).
+            if len(ops.shape(injections)) != 4:
+                logging.warning(
+                    "Injection shape mismatch: expected (Generators, Batch, 2, Time), "
+                    f"got {ops.shape(injections)}"
+                )
             
             batched_params = batch_injection_parameters(parameters_list)
             
@@ -1559,14 +1639,22 @@ class InjectionGenerator:
         Returns:
             onsource: with the injections added.
             scaled_injections: (Generators, Batch, IFOs, Time), internal units.
-            labels: for each ScalingType requested in ``parameters_to_return``
-                (all of them when it is None) and each type applied: the target
-                for the type applied, and the value it implies for the others
-                (HRSS and HPEAK in physical strain; SNR by the measure SNR
-                scaling uses). NaN where an example has no injection. (Batch,)
-                for one generator, (Batch, Generators) for several.
-                CENTRAL_TIME too, when requested.
+            labels: every label of every generator, generator-first,
+                (Generators, Batch) + the label's own shape, float32, and NaN
+                where the generator injected nothing into the example:
+                - each WaveformParameter the generators drew, with
+                  DISTANCE_MPC the distance the injected amplitude implies
+                  (the drawn distance over the gain scaling applied);
+                - the sky and polarisation the projection used;
+                - for each ScalingType requested in ``parameters_to_return``
+                  (all of them when it is None) and each type applied: the
+                  target for the type applied, and the value it implies for
+                  the others (HRSS and HPEAK in physical strain; SNR by the
+                  measure SNR scaling uses);
+                - CENTRAL_TIME, when requested: (Generators, Batch, IFOs).
         """
+        if injection_parameters:
+            refuse_renamed_sky_keys(injection_parameters)
         if scale_factor is None:
             scale_factor = self.scale_factor
         if scale_factor is None:
@@ -1583,10 +1671,14 @@ class InjectionGenerator:
             label_types |= {
                 item for item in parameters_to_return if isinstance(item, ScalingTypes)
             }
-        labels = {type_: [] for type_ in ScalingTypes if type_ in label_types}
+        label_types = [type_ for type_ in ScalingTypes if type_ in label_types]
+        drawn_keys = [
+            key for key in (injection_parameters or {})
+            if isinstance(key, (WaveformParameters, ScalingTypes))
+        ]
 
         scaled_injections_list = []
-        scaling_params_list = []
+        labels_list = []
         
         final_onsource = onsource
         
@@ -1675,7 +1767,11 @@ class InjectionGenerator:
                 p = network.rng.random(num_inj).astype("float32")
                 input_pol = ops.convert_to_tensor(np.pi * p)
 
-            scaling_params_list.append({
+            generator_labels = {
+                key: self._generator_parameter(injection_parameters, key, i)
+                for key in drawn_keys
+            }
+            generator_labels.update({
                 WaveformParameters.RIGHT_ASCENSION_RADIANS: input_ra,
                 WaveformParameters.DECLINATION_RADIANS: input_dec,
                 WaveformParameters.POLARIZATION_RADIANS: input_pol,
@@ -1703,7 +1799,7 @@ class InjectionGenerator:
                 # Normalize by duration (0 to 1)
                 normalized_time = final_time / dur
 
-                scaling_params_list.append({ReturnVariables.CENTRAL_TIME: normalized_time})
+                generator_labels[ReturnVariables.CENTRAL_TIME] = normalized_time
 
 
             scaling_dist = scaling_method.value
@@ -1747,8 +1843,9 @@ class InjectionGenerator:
                 start = (ops.shape(projected)[-1] - target_num_samples) // 2
                 return projected[..., start:start + target_num_samples]
 
+            # InjectionGenerator yields finite waveforms (it reports and
+            # zeroes non-finite samples).
             raw = ops.convert_to_tensor(raw_waveforms, dtype="float32")
-            raw = ops.where(ops.isfinite(raw), raw, 0.0)
 
             # The source's measures, from the whole generated buffer when the
             # generator recorded them.
@@ -1794,7 +1891,15 @@ class InjectionGenerator:
                     present, ops.reshape(ops.convert_to_tensor(mask[i]), (-1,)) > 0
                 )
 
-            for label_type in labels:
+            # The gain from the generated strain to the injected physical
+            # strain; a CBC's amplitude goes as 1 / distance, so the distance
+            # the injection implies is the drawn one over the gain.
+            gain = normalisation * physical_factor
+            distance = generator_labels.get(WaveformParameters.DISTANCE_MPC)
+            if distance is not None:
+                generator_labels[WaveformParameters.DISTANCE_MPC] = _ratio(distance, gain)
+
+            for label_type in label_types:
                 if label_type == type_:
                     value = target_val
                 elif label_type == ScalingTypes.HRSS:
@@ -1809,36 +1914,16 @@ class InjectionGenerator:
                         scaling_background,
                         sample_rate
                     )
-                value = ops.reshape(ops.cast(value, "float32"), (-1,))
-                labels[label_type].append(ops.where(present, value, np.nan))
+                generator_labels[label_type] = value
 
-        try:
+            labels_list.append(_absent_as_nan(generator_labels, present, num_examples))
+
+        if scaled_injections_list:
             scaled_injections = ops.stack(scaled_injections_list, axis=0)
-            if ops.shape(scaled_injections)[-1] != ops.shape(final_onsource)[-1]:
-                logging.warning(
-                    f"Shape mismatch: injections {ops.shape(scaled_injections)} "
-                    f"vs onsource {ops.shape(final_onsource)}"
-                )
-        except:
-            scaled_injections = None
-            
-        combined_scaling_params = {}
-        for d in scaling_params_list:
-            for k, v in d.items():
-                if k not in combined_scaling_params:
-                    combined_scaling_params[k] = []
-                combined_scaling_params[k].append(v)
-        
-        for k, v in combined_scaling_params.items():
-            combined_scaling_params[k] = ops.stack(v, axis=0)
+        else:
+            scaled_injections = ops.zeros((0,) + tuple(ops.shape(onsource)), "float32")
 
-        for label_type, values in labels.items():
-            if len(values) == 1:
-                combined_scaling_params[label_type] = values[0]
-            else:
-                combined_scaling_params[label_type] = ops.stack(values, axis=-1)
-
-        return final_onsource, scaled_injections, combined_scaling_params
+        return final_onsource, scaled_injections, _stack_generator_labels(labels_list)
 
     def _generator_parameter(self, injection_parameters, key, index):
         """Generator ``index``'s value of a batched injection parameter, or None."""

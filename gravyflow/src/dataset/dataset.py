@@ -16,7 +16,10 @@ import jax
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.whiten import whiten
 from gravyflow.src.dataset.tools.psd import SpectralConfig, estimate_psd, MIN_PSD_SEGMENTS
-from gravyflow.src.utils.tensor import crop_samples, replace_nan_and_inf_with_zero, set_random_seeds
+from gravyflow.src.utils.tensor import (
+    crop_samples, replace_nan_and_inf_with_zero, set_random_seeds, window_samples
+)
+from gravyflow.src.utils.shapes import BatchContract
 from gravyflow.src.dataset.config import Defaults
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
@@ -52,7 +55,7 @@ def validate_noise_settings(
             
         if gf.ReturnVariables.START_GPS_TIME in variables_to_return:
             warn(
-                "Cannot return GPS time from simulated Noise defaulting to -1",
+                "Simulated noise has no GPS time: START_GPS_TIME is NaN.",
                 UserWarning
             )
     
@@ -225,6 +228,7 @@ class GravyflowDataset(keras.utils.PyDataset):
 
         # Validate settings
         self._validate_settings()
+        self.batch_contract = self._batch_contract()
 
         # Set random seeds
         gf.set_random_seeds(self.seed)
@@ -370,6 +374,15 @@ class GravyflowDataset(keras.utils.PyDataset):
                         UserWarning
                     )
 
+    def _batch_contract(self) -> BatchContract:
+        """The shapes and dtypes every batch of this dataset is checked against."""
+        return BatchContract(
+            batch=self.num_examples_per_batch,
+            generators=len(self._generator_list()),
+            ifos=len(self._noise_ifos()),
+            onsource_samples=window_samples(self.onsource_duration_seconds, self.sample_rate_hertz),
+        )
+
     def _batch_spectrum(self, offsource):
         """The batch's one PSD estimate, shared by scaling, labels and whitening."""
         return estimate_psd(offsource, self.sample_rate_hertz, self.spectral_config)
@@ -493,58 +506,42 @@ class GravyflowDataset(keras.utils.PyDataset):
         # One PSD per batch: scaling, labels and whitening all read this estimate.
         spectrum = self._batch_spectrum(offsource) if self._needs_spectrum else None
 
-        if self.waveform_generators:
-            try:
-                onsource, scaled_injections, scaling_parameters = self.injection_generator.add_injections_to_onsource(
-                    injections,
-                    mask,
-                    onsource,
-                    spectrum if spectrum is not None else offsource,
-                    parameters_to_return=self.variables_to_return,
-                    onsource_duration_seconds=self.onsource_duration_seconds,
-                    injection_parameters=parameters,
-                    scale_factor=self.scale_factor
-                )
-            except Exception as e:
-                logger.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")
-                # Return empty or raise? PyDataset expects a batch.
-                raise e
+        try:
+            onsource, scaled_injections, labels = self.injection_generator.add_injections_to_onsource(
+                injections,
+                mask,
+                onsource,
+                spectrum if spectrum is not None else offsource,
+                parameters_to_return=self.variables_to_return,
+                onsource_duration_seconds=self.onsource_duration_seconds,
+                injection_parameters=parameters,
+                scale_factor=self.scale_factor
+            )
+        except Exception as e:
+            logger.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")
+            raise e
 
-            if onsource is None:
-                raise ValueError("Onsource is None!")
-
-            if offsource is None:
-                raise ValueError("Offsource is None!")
-
-            # The labels are the injection layer's: targets, and the values
-            # they imply for the scaling types not applied; NaN where absent.
-            for key, value in scaling_parameters.items():
-                if key in self.variables_to_return:
-                    parameters[key] = value
-
-            whitened_injections = self._process_whitened_injections(scaled_injections, spectrum)
-            injections = self._process_injections(scaled_injections)
-        else:
-            scaled_injections = None
-            whitened_injections = None
-            injections = None
-
-
+        whitened_injections = self._process_whitened_injections(scaled_injections, spectrum)
+        injections = self._process_injections(scaled_injections)
+        labels = self._batch_labels(labels, mask)
 
         whitened_onsource, rolling_pearson_onsource, spectrogram_onsource = self._process_onsource(onsource, spectrum)
 
         onsource = self._process_raw_onsource(onsource)
         offsource = self._process_offsource(offsource)
         gps_times = self._process_gps_times(gps_times)
-        mask = self._process_mask(mask)
 
         input_dict, output_dict = self._create_output_dictionaries(
             onsource, whitened_onsource, offsource, gps_times, injections,
-            whitened_injections, mask, rolling_pearson_onsource, spectrogram_onsource, parameters,
-            feature_labels=feature_labels,
-            glitch_type=glitch_type,
-            source_type=source_type,
-            data_label=data_label
+            whitened_injections, labels[gf.ReturnVariables.INJECTION_MASKS],
+            rolling_pearson_onsource, spectrogram_onsource, labels,
+            feature_labels=self._process_transient_label(feature_labels),
+            glitch_type=self._process_transient_label(glitch_type),
+            source_type=self._process_transient_label(source_type),
+            data_label=self._process_transient_label(data_label)
+        )
+        self.batch_contract.check(
+            (self.input_variables, self.output_variables), input_dict, output_dict
         )
 
         return input_dict, output_dict
@@ -559,7 +556,9 @@ class GravyflowDataset(keras.utils.PyDataset):
                 self.sample_rate_hertz
             )
             whitened_injections = ops.cast(whitened_injections, "float32")
-            return gf.replace_nan_and_inf_with_zero(whitened_injections)
+            return _batch_first(gf.replace_nan_and_inf_with_zero(
+                whitened_injections, gf.ReturnVariables.WHITENED_INJECTIONS.name
+            ))
         return None
 
     def _process_injections(self, scaled_injections):
@@ -572,7 +571,9 @@ class GravyflowDataset(keras.utils.PyDataset):
                 self.sample_rate_hertz
             )
             injections = ops.cast(injections, "float32")
-            return gf.replace_nan_and_inf_with_zero(injections)
+            return _batch_first(gf.replace_nan_and_inf_with_zero(
+                injections, gf.ReturnVariables.INJECTIONS.name
+            ))
         return None
 
     def _process_onsource(self, onsource, spectrum):
@@ -587,7 +588,7 @@ class GravyflowDataset(keras.utils.PyDataset):
             # float32, scrubbed before any cast: a float16 cast turned values
             # above 65504 into inf and then silently into 0.
             whitened_onsource = gf.replace_nan_and_inf_with_zero(
-                ops.cast(whitened_onsource, "float32")
+                ops.cast(whitened_onsource, "float32"), gf.ReturnVariables.WHITENED_ONSOURCE.name
             )
 
             rolling_pearson_onsource = self._calculate_rolling_pearson(whitened_onsource)
@@ -622,30 +623,49 @@ class GravyflowDataset(keras.utils.PyDataset):
                 self.sample_rate_hertz
             )
             onsource = ops.cast(onsource, "float32")
-            onsource = gf.replace_nan_and_inf_with_zero(onsource)
-            return onsource
+            return gf.replace_nan_and_inf_with_zero(onsource, gf.ReturnVariables.ONSOURCE.name)
         return None
 
     def _process_offsource(self, offsource):
         """Process offsource data if required."""
         if gf.ReturnVariables.OFFSOURCE in self.variables_to_return:
             offsource = ops.cast(offsource, "float32")
-            offsource = gf.replace_nan_and_inf_with_zero(offsource)
-            return offsource
+            return gf.replace_nan_and_inf_with_zero(offsource, gf.ReturnVariables.OFFSOURCE.name)
         return None
 
     def _process_gps_times(self, gps_times):
-        """Process GPS times if required."""
+        """GPS times (B, I), float64, if required; NaN where the noise has none."""
         if gf.ReturnVariables.START_GPS_TIME in self.variables_to_return:
+            if gps_times is None:
+                return np.full(self.batch_contract.shape(gf.ReturnVariables.START_GPS_TIME), np.nan)
             return as_gps_times(gps_times)
         return None
 
-    def _process_mask(self, mask):
-        """Process injection masks if required."""
-        if gf.ReturnVariables.INJECTION_MASKS in self.variables_to_return:
-            mask = ops.cast(mask, "float32")
-            return mask
-        return None
+    @staticmethod
+    def _process_transient_label(label):
+        """A transient label (class ids per detector) as float32, like every label."""
+        return None if label is None else ops.cast(label, "float32")
+
+    def _batch_labels(self, labels, mask):
+        """
+        The batch's labels, batch-first: INJECTION_MASKS (B, G),
+        INJECTION_PRESENT (B,), and every per-generator label requested,
+        (B, G) + its own shape, float32. A label is NaN where generator g
+        injected nothing into example b (the injection layer's rule), and
+        wholly NaN when no generator draws it.
+        """
+        mask = ops.transpose(ops.cast(mask, "float32"))
+        batch = {
+            gf.ReturnVariables.INJECTION_MASKS: mask,
+            gf.ReturnVariables.INJECTION_PRESENT: ops.cast(ops.any(mask > 0, axis=1), "float32"),
+        }
+        for key in self.variables_to_return:
+            if isinstance(key, (gf.WaveformParameters, gf.ScalingTypes)) \
+                    or key is gf.ReturnVariables.CENTRAL_TIME:
+                value = labels.get(key)
+                batch[key] = _batch_first(value) if value is not None else \
+                    ops.full(self.batch_contract.shape(key), np.nan, dtype="float32")
+        return batch
 
     def _create_output_dictionaries(self, *args, feature_labels=None, glitch_type=None, source_type=None, data_label=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         input_dict = create_variable_dictionary(
@@ -668,6 +688,11 @@ class GravyflowDataset(keras.utils.PyDataset):
         output_dict = {k: v for k, v in output_dict.items() if v is not None}
         
         return input_dict, output_dict
+
+def _batch_first(value):
+    """A generator-first (G, B, ...) array as batch-first (B, G, ...)."""
+    return ops.moveaxis(ops.convert_to_tensor(value), 0, 1)
+
 
 def create_variable_dictionary(
     return_variables: List[Union[gf.ReturnVariables, gf.WaveformParameters, gf.ScalingTypes]],
@@ -974,7 +999,7 @@ class ComposedDataset(keras.utils.PyDataset):
                     )
                     injection_gen.sample_rate_hertz = self.sample_rate_hertz
                     
-                    onsource, scaled_injections, scaling_params = injection_gen.add_injections_to_onsource(
+                    onsource, scaled_injections, labels = injection_gen.add_injections_to_onsource(
                         injections,
                         mask,
                         onsource,
@@ -983,7 +1008,8 @@ class ComposedDataset(keras.utils.PyDataset):
                         onsource_duration_seconds=self.onsource_duration_seconds,
                         injection_parameters=parameters
                     )
-                    parameters.update(scaling_params)
+                    # Batch-first, so each position takes its own example.
+                    parameters = {key: _batch_first(value) for key, value in labels.items()}
                 except Exception as e:
                     logger.error(f"Injection generation failed for pool '{pool.name}': {e}")
                     raise
@@ -1055,7 +1081,7 @@ class ComposedDataset(keras.utils.PyDataset):
             )
             # float32, scrubbed before any cast (float16 overflowed to inf, then 0).
             whitened_onsource = gf.replace_nan_and_inf_with_zero(
-                ops.cast(whitened_onsource, "float32")
+                ops.cast(whitened_onsource, "float32"), gf.ReturnVariables.WHITENED_ONSOURCE.name
             )
         
         # Build return dictionaries

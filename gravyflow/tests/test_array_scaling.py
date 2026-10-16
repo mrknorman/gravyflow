@@ -52,9 +52,8 @@ class TestArrayScaling(unittest.TestCase):
         masks = targets[mask_key]
         print(f"Masks shape: {masks.shape}")
         print(f"Masks values: {masks}")
-        # Expected shape: (NumGenerators, Batch) -> (1, 8)
-        self.assertEqual(masks.shape[0], 1)
-        self.assertEqual(masks.shape[1], num_examples_per_batch)
+        # Expected shape: (Batch, Generators) -> (8, 1)
+        self.assertEqual(masks.shape, (num_examples_per_batch, 1))
         
         # Verify all masks are 1.0 (since injection_chance=1.0)
         # If this fails, print debug info

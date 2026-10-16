@@ -154,7 +154,7 @@ class _GeorgeHuerta2017(ExampleModel):
                  first_epoch: int = 0, **kwargs):
         cfg = config or cls.config
         labels = ([gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN]
-                  if regression else [gf.ReturnVariables.INJECTION_MASKS])
+                  if regression else [gf.ReturnVariables.INJECTION_PRESENT])
         return gf.GravyflowDataset(
             **cbc_dataset_args(
                 noise_obtainer=gf.NoiseObtainer(noise_type=noise_type, ifos=[gf.IFO.L1]),
@@ -187,7 +187,7 @@ class _GeorgeHuerta2017(ExampleModel):
         **kwargs
     ) -> gf.GravyflowDataset:
         """
-        Detection data with ``INJECTION_MASKS`` labels; with ``curriculum``
+        Detection data with ``INJECTION_PRESENT`` labels; with ``curriculum``
         (and ``config.use_curriculum``), the SNR follows the training scheme
         from ``first_epoch``. Coloured L1 noise, or public GWOSC L1 noise with
         ``noise_type=NoiseType.REAL``.

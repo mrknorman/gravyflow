@@ -55,7 +55,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 from .src.dataset.config import Defaults, WindowSpec
 from .src.utils.tensor import (
     DistributionType, Distribution, randomise_arguments,
-    replace_nan_and_inf_with_zero, expand_tensor, batch_tensor,
+    replace_nan_and_inf_with_zero, NonFiniteWarning, expand_tensor, batch_tensor,
     crop_samples, rfftfreq, get_element_shape, check_tensor_integrity,
     set_random_seeds
 )
@@ -63,9 +63,8 @@ from .src.utils.numerics import (
     ensure_even, ensure_list, calculate_sample_counts, BatchConfig
 )
 from .src.utils.shapes import (
-    ShapeContract, ShapeEnforcer, 
-    Axis_BIS, Axis_BI, Axis_GBIS, Axis_GB,
-    Axis_BPS, Axis_GBPS
+    ShapeContract, ShapeEnforcer, Axis_BIS, Axis_BI,
+    BatchContract, BatchContractError
 )
 from .src.utils.gpu import (setup_cuda, find_available_GPUs, get_tf_memory_usage, env, 
     get_gpu_memory_info)
@@ -109,7 +108,7 @@ from .src.dataset.features.injection import (
     IncoherentGenerator, InjectionGenerator,
     roll_vector_zero_padding, generate_mask, is_not_inherited,
     batch_injection_parameters, CBCGenerator, Approximant,
-    calculate_hrss, calculate_hpeak
+    calculate_hrss, calculate_hpeak, RENAMED_SKY_KEYS
 )
 from .src.dataset.features.waveforms.simple import (
     WaveShape, PeriodicWaveGenerator, SineGaussianGenerator,

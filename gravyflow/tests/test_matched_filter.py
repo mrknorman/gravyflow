@@ -357,7 +357,7 @@ class TestMatchedFilterValidation:
             num_examples_per_batch=8,  # Batch to get mix of signal/noise
             waveform_generators=[cbc_generator],
             input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-            output_variables=[gf.ReturnVariables.INJECTION_MASKS],
+            output_variables=[gf.ReturnVariables.INJECTION_PRESENT],
             seed=123,
         )
         
@@ -385,14 +385,7 @@ class TestMatchedFilterValidation:
         inputs, outputs = batch
         
         onsource = inputs[gf.ReturnVariables.WHITENED_ONSOURCE.name]
-        masks = outputs[gf.ReturnVariables.INJECTION_MASKS.name]
-        
-        # Handle mask shape
-        if len(masks.shape) == 3:
-            # (generator, batch, time) -> (batch,) via max over time
-            masks = jnp.max(masks[0], axis=-1)
-        elif len(masks.shape) == 2:
-            masks = masks[0] if masks.shape[0] == 1 else jnp.max(masks, axis=-1)
+        masks = outputs[gf.ReturnVariables.INJECTION_PRESENT.name]  # (batch,)
         
         batch_size = onsource.shape[0]
         
@@ -502,9 +495,7 @@ class TestMatchedFilterValidation:
         onsource = inputs[gf.ReturnVariables.ONSOURCE.name]
         offsource = inputs[gf.ReturnVariables.OFFSOURCE.name]
         injections = inputs[gf.ReturnVariables.INJECTIONS.name]
-        injected_snrs = np.array(outputs["SNR"])  # Shape: (batch,) - calculated SNR
-        if len(injected_snrs.shape) > 1:
-            injected_snrs = injected_snrs[0]  # Handle if (generators, batch) shape
+        injected_snrs = np.array(outputs["SNR"])[:, 0]  # (batch, generators): the one generator
         
         print("\nSNR Recovery Validation (using exact injections as templates):")
         
@@ -626,9 +617,7 @@ class TestMatchedFilterValidation:
         
         onsource = inputs[gf.ReturnVariables.ONSOURCE.name]
         offsource = inputs[gf.ReturnVariables.OFFSOURCE.name]
-        injected_snrs = np.array(outputs["SNR"])  # Shape: (batch,)
-        if len(injected_snrs.shape) > 1:
-            injected_snrs = injected_snrs[0]
+        injected_snrs = np.array(outputs["SNR"])[:, 0]  # (batch, generators): the one generator
         
         print("\nSNR Recovery with Template Grid (realistic mismatch):")
         print(f"  Template grid: {mf.num_templates} templates")

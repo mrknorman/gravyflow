@@ -1,20 +1,18 @@
 """
-Shape enforcement utilities for Gravyflow.
+Shape contracts for Gravyflow.
 
-Provides a unified ShapeEnforcer class with strict validation
-for standard tensor shape contracts in the data pipeline.
-
-Shape Contracts:
-- BIS: (Batch, IFO, Samples) - Onsource/Offsource strain data
-- BI: (Batch, IFO) - GPS times, Labels
-- GBIS: (Generator, Batch, IFO, Samples) - Multi-generator injections
-- GB: (Generator, Batch) - Injection masks per generator
+- ShapeEnforcer checks what the noise and transient obtainers yield:
+  BIS (Batch, IFO, Samples) strain and BI (Batch, IFO) GPS times and labels.
+- BatchContract is the one typed contract of a dataset's batch: every output
+  is batch-first, with the documented shape its key declares, in float32
+  (START_GPS_TIME in float64). A dataset checks every batch against it.
 """
 
 from enum import Enum
 from dataclasses import dataclass
-from typing import Optional, Tuple, Generator, Any
+from typing import Optional, Tuple, Generator, Any, Mapping, Iterable
 
+import numpy as np
 import jax.numpy as jnp
 
 from gravyflow.src.utils.gps import as_gps_times
@@ -29,29 +27,14 @@ class ContractSpec:
 
 
 class ShapeContract(Enum):
-    """
-    Standard tensor shape contracts for Gravyflow.
-    
-    Each contract defines expected dimensionality and axis semantics.
-    """
-    # Core data shapes (post-projection, per-IFO)
+    """The shape contracts of what the obtainers yield."""
     BIS = ContractSpec(3, ("Batch", "IFO", "Samples"), "Onsource/Offsource strain data")
     BI = ContractSpec(2, ("Batch", "IFO"), "GPS times")
-
-    # Multi-generator data (post-projection)
-    GBIS = ContractSpec(4, ("Generator", "Batch", "IFO", "Samples"), "Multi-generator injections")
-    GB = ContractSpec(2, ("Generator", "Batch"), "Injection masks per generator")
-    
-    # Waveform shapes (pre-projection, polarizations h+/hx)
-    BPS = ContractSpec(3, ("Batch", "Polarization", "Samples"), "Single waveform (h+/hx)")
-    GBPS = ContractSpec(4, ("Generator", "Batch", "Polarization", "Samples"), "Multi-generator waveforms")
 
 
 # =============================================================================
 # Semantic Axis Constants
 # =============================================================================
-# Use these instead of magic numbers like shape[0], shape[1], shape[2]
-# Each class corresponds to a ShapeContract
 
 class Axis_BIS:
     """Axis indices for BIS (Batch, IFO, Samples) tensors."""
@@ -66,33 +49,111 @@ class Axis_BI:
     IFO = 1
 
 
-class Axis_GBIS:
-    """Axis indices for GBIS (Generator, Batch, IFO, Samples) tensors."""
-    GENERATOR = 0
-    BATCH = 1
-    IFO = 2
-    SAMPLES = 3
+# =============================================================================
+# The batch contract
+# =============================================================================
+
+# The axes a documented batch shape is written in. A key declares its shape
+# as a tuple of these symbols and integers (a fixed size), e.g. (BATCH,
+# GENERATOR, 3); ANY ends a shape whose trailing axes are derived elsewhere.
+BATCH = "B"              # examples in the batch
+GENERATOR = "G"          # waveform generators (0 for a noise-only dataset)
+IFO = "I"                # detectors
+SAMPLES = "T"            # samples of the onsource window
+OFFSOURCE_SAMPLES = "T_off"  # samples of the offsource window
+ANY = ...
+
+BATCH_FIRST = (BATCH,)
+PER_GENERATOR = (BATCH, GENERATOR)
 
 
-class Axis_GB:
-    """Axis indices for GB (Generator, Batch) tensors."""
-    GENERATOR = 0
-    BATCH = 1
+class BatchContractError(ValueError):
+    """A dataset's batch does not match its documented contract."""
 
 
-class Axis_BPS:
-    """Axis indices for BPS (Batch, Polarization, Samples) waveforms."""
-    BATCH = 0
-    POLARIZATION = 1  # 0=h+, 1=hx
-    SAMPLES = 2
+@dataclass(frozen=True)
+class BatchContract:
+    """
+    The documented shape and dtype of every output of one dataset's batches.
+
+    Each key declares its shape (``key.value.shape``): a ReturnVariable its
+    whole shape; a WaveformParameter or ScalingType, a value per example and
+    generator, (B, G) + its own shape. Every output is float32 but the GPS
+    times, which are float64 (``key.value.dtype``).
+
+    The sizes come from the dataset's settings: B examples, G generators, I
+    detectors, T onsource samples. The offsource length is the obtainer's
+    (its window rule), taken from the batch and checked for consistency.
+    """
+    batch: int
+    generators: int
+    ifos: int
+    onsource_samples: int
+
+    @staticmethod
+    def template(key) -> Tuple:
+        """The documented shape of ``key``'s output, in axis symbols."""
+        from gravyflow.src.dataset.features.injection import ReturnVariables
+        if isinstance(key, ReturnVariables):
+            return tuple(key.value.shape)
+        return PER_GENERATOR + tuple(key.value.shape)
+
+    @staticmethod
+    def dtype(key) -> str:
+        return getattr(key.value, "dtype", "float32")
+
+    def shape(self, key, offsource_samples: Optional[int] = None) -> Tuple:
+        """``key``'s documented shape with this contract's sizes; ANY stays ANY."""
+        sizes = {
+            BATCH: self.batch, GENERATOR: self.generators, IFO: self.ifos,
+            SAMPLES: self.onsource_samples, OFFSOURCE_SAMPLES: offsource_samples,
+        }
+        return tuple(sizes.get(axis, axis) if isinstance(axis, str) else axis
+                     for axis in self.template(key))
+
+    def describe(self, key) -> str:
+        """The documented shape, e.g. "(B=32, G=2, I=2) float32"."""
+        sizes = {BATCH: self.batch, GENERATOR: self.generators, IFO: self.ifos,
+                 SAMPLES: self.onsource_samples}
+        axes = []
+        for axis in self.template(key):
+            if axis is ANY:
+                axes.append("...")
+            elif isinstance(axis, str):
+                axes.append(f"{axis}={sizes[axis]}" if axis in sizes else axis)
+            else:
+                axes.append(str(axis))
+        return f"({', '.join(axes)}) {self.dtype(key)}"
+
+    def check(self, requested: Iterable, *batches: Mapping[str, Any]) -> None:
+        """
+        Raise BatchContractError unless each of ``batches`` (name -> array)
+        holds every key of ``requested`` it was asked for, each in its
+        documented shape and dtype. ``requested`` is a list per batch dict.
+        """
+        offsource_samples = None
+        for keys, batch in zip(requested, batches):
+            for key in keys:
+                if key.name not in batch:
+                    raise BatchContractError(
+                        f"{key.name} was requested but the batch has no {key.name}: this "
+                        "dataset's noise obtainer and waveform generators do not provide it."
+                    )
+                value = batch[key.name]
+                shape, dtype = tuple(np.shape(value)), str(value.dtype)
+                if OFFSOURCE_SAMPLES in self.template(key) and offsource_samples is None:
+                    offsource_samples = shape[self.template(key).index(OFFSOURCE_SAMPLES)]
+                if not _matches(shape, self.shape(key, offsource_samples)) or dtype != self.dtype(key):
+                    raise BatchContractError(
+                        f"{key.name} is {shape} {dtype}; its contract is {self.describe(key)}."
+                    )
 
 
-class Axis_GBPS:
-    """Axis indices for GBPS (Generator, Batch, Polarization, Samples) waveforms."""
-    GENERATOR = 0
-    BATCH = 1
-    POLARIZATION = 2  # 0=h+, 1=hx
-    SAMPLES = 3
+def _matches(shape: Tuple, expected: Tuple) -> bool:
+    if expected and expected[-1] is ANY:
+        fixed = expected[:-1]
+        return len(shape) >= len(fixed) and shape[:len(fixed)] == fixed
+    return shape == expected
 
 
 class ShapeEnforcer:
@@ -111,20 +172,12 @@ class ShapeEnforcer:
             on, off, gps = batch
     """
     
-    def __init__(
-        self, 
-        num_ifos: Optional[int] = None, 
-        num_generators: Optional[int] = None
-    ):
+    def __init__(self, num_ifos: Optional[int] = None):
         """
-        Initialize enforcer with expected axis sizes.
-        
         Args:
             num_ifos: Expected number of interferometers (IFO axis).
-            num_generators: Expected number of waveform generators (G axis).
         """
         self.num_ifos = num_ifos
-        self.num_generators = num_generators
     
     def validate(self, x: Any, contract: ShapeContract, name: str = "tensor") -> jnp.ndarray:
         """
@@ -173,16 +226,6 @@ class ShapeEnforcer:
                     f"Shape: {x.shape}, Contract: {contract.name}"
                 )
         
-        # Check Generator axis if applicable
-        if self.num_generators is not None:
-            gen_axis = self._get_generator_axis(contract)
-            if gen_axis is not None and x.shape[gen_axis] != self.num_generators:
-                raise ValueError(
-                    f"Generator axis mismatch for '{name}': "
-                    f"expected {self.num_generators}, got {x.shape[gen_axis]}. "
-                    f"Shape: {x.shape}, Contract: {contract.name}"
-                )
-        
         return x
     
     def _get_ifo_axis(self, contract: ShapeContract) -> Optional[int]:
@@ -190,13 +233,6 @@ class ShapeEnforcer:
         axis_names = contract.value.axis_names
         if "IFO" in axis_names:
             return axis_names.index("IFO")
-        return None
-    
-    def _get_generator_axis(self, contract: ShapeContract) -> Optional[int]:
-        """Get the Generator axis index for a contract, or None if not applicable."""
-        axis_names = contract.value.axis_names
-        if "Generator" in axis_names:
-            return axis_names.index("Generator")
         return None
     
     @staticmethod
@@ -312,49 +348,3 @@ class ShapeEnforcer:
                     result[RV.DATA_LABEL] = labels
                 
                 yield result
-    
-    # =========================================================================
-    # Static helper methods for common shape checks
-    # =========================================================================
-    
-    @staticmethod
-    def is_1d(x) -> bool:
-        """Check if tensor is 1-dimensional."""
-        return len(jnp.asarray(x).shape) == 1
-    
-    @staticmethod
-    def is_2d(x) -> bool:
-        """Check if tensor is 2-dimensional."""
-        return len(jnp.asarray(x).shape) == 2
-    
-    @staticmethod
-    def is_3d(x) -> bool:
-        """Check if tensor is 3-dimensional."""
-        return len(jnp.asarray(x).shape) == 3
-    
-    @staticmethod
-    def is_4d(x) -> bool:
-        """Check if tensor is 4-dimensional."""
-        return len(jnp.asarray(x).shape) == 4
-    
-    @staticmethod
-    def get_batch_size(x, contract: ShapeContract = None) -> int:
-        """
-        Get batch size from tensor based on contract.
-        
-        Args:
-            x: Input tensor
-            contract: Shape contract (default assumes batch is axis 0)
-        
-        Returns:
-            Batch size as integer
-        """
-        x = jnp.asarray(x)
-        if contract is None:
-            return int(x.shape[0])
-        
-        axis_names = contract.value.axis_names
-        if "Batch" in axis_names:
-            batch_axis = axis_names.index("Batch")
-            return int(x.shape[batch_axis])
-        return int(x.shape[0])

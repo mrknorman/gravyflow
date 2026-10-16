@@ -2,6 +2,7 @@ from enum import Enum, auto
 from typing import Union, Type, List
 from dataclasses import dataclass
 import random
+import warnings
 
 import numpy as np
 import logging
@@ -195,13 +196,39 @@ def randomise_arguments(input_dict, func):
 
     return func(**output_dict), output_dict
 
+class NonFiniteWarning(UserWarning):
+    """NaN or infinite values were replaced with zeros."""
+
+
 @jax.jit
-def replace_nan_and_inf_with_zero(tensor):
-    """Replace NaN and Inf values with zeros. JIT compiled for efficiency."""
+def _zero_non_finite(tensor):
+    """(tensor with NaN and inf set to 0, how many were)."""
+    finite = jnp.isfinite(tensor)
+    return jnp.where(finite, tensor, jnp.zeros_like(tensor)), jnp.sum(~finite)
+
+
+def replace_nan_and_inf_with_zero(tensor, name: str = None):
+    """
+    ``tensor`` with every NaN and infinite value replaced by 0: the library's
+    one sanitiser of non-finite values.
+
+    It never replaces silently: when it replaces anything it issues a
+    NonFiniteWarning that names the tensor (``name``; else the caller's line)
+    and counts the values replaced. A non-finite value past acquisition is a
+    failure upstream, so make the warning an error to find it:
+    ``warnings.simplefilter("error", gf.NonFiniteWarning)``.
+    """
     tensor = ops.convert_to_tensor(tensor)
-    tensor = ops.where(ops.isnan(tensor), ops.zeros_like(tensor), tensor)
-    tensor = ops.where(ops.isinf(tensor), ops.zeros_like(tensor), tensor)
-    return tensor    
+    cleaned, count = _zero_non_finite(tensor)
+    count = int(count)
+    if count:
+        warnings.warn(
+            f"{name or 'A tensor'}: {count} of {int(np.prod(tensor.shape))} values were NaN or "
+            "infinite and were replaced with 0.",
+            NonFiniteWarning,
+            stacklevel=2,
+        )
+    return cleaned
 
 def expand_tensor(
         signal, 
@@ -410,6 +437,10 @@ def set_random_seeds(
     # Set core Python.random seed:
     random.seed(seed)
     
+def window_samples(duration_seconds: float, sample_rate_hertz: float) -> int:
+    """The samples crop_samples keeps of a window of ``duration_seconds``."""
+    return int(duration_seconds * sample_rate_hertz)
+
 def crop_samples(
         batched_onsource, 
         onsource_duration_seconds: float, 
@@ -442,9 +473,7 @@ def crop_samples(
     if dims == 1:
         batched_onsource = ops.expand_dims(batched_onsource, 0) 
     
-    # Calculate the desired number of samples based on example duration and 
-    # sample rate:
-    desired_num_samples = int(onsource_duration_seconds * sample_rate_hertz)
+    desired_num_samples = window_samples(onsource_duration_seconds, sample_rate_hertz)
     
     # Calculate the start and end index for cropping
     start = (ops.shape(batched_onsource)[-1] - desired_num_samples) // 2

@@ -77,19 +77,6 @@ def _float32(features: Dict[str, Any]) -> Dict[str, np.ndarray]:
     return {k: np.asarray(v, dtype=np.float32) for k, v in features.items()}
 
 
-def injection_present(masks, batch_size: int) -> np.ndarray:
-    """
-    Whether each example holds an injection, from ``INJECTION_MASKS`` shaped
-    (examples,) or (generators, examples): present if any generator injected.
-    """
-    m = np.squeeze(np.asarray(masks))
-    if m.shape == (batch_size,) or (batch_size == 1 and m.ndim == 0):
-        return m.reshape(batch_size) > 0.5
-    if m.ndim == 2 and m.shape[1] == batch_size:
-        return np.max(m, axis=0) > 0.5
-    raise ValueError(f"INJECTION_MASKS of shape {np.shape(masks)} for a batch of {batch_size}.")
-
-
 class DetectionBatches(keras.utils.PyDataset):
     """A gravyflow dataset as (float32 inputs, one-hot [noise, signal] labels)."""
 
@@ -102,10 +89,8 @@ class DetectionBatches(keras.utils.PyDataset):
 
     def __getitem__(self, index):
         x, y = self.dataset[index]
-        x = _float32(x)
-        n = next(iter(x.values())).shape[0]
-        present = injection_present(y[gf.ReturnVariables.INJECTION_MASKS.name], n)
-        return x, np.eye(2, dtype=np.float32)[present.astype(int)]
+        present = np.asarray(y[gf.ReturnVariables.INJECTION_PRESENT.name]) > 0.5
+        return _float32(x), np.eye(2, dtype=np.float32)[present.astype(int)]
 
 
 class RegressionBatches(keras.utils.PyDataset):
@@ -344,5 +329,5 @@ class TrainingRun:
 
 __all__ = [
     "DetectionBatches", "FixedBatches", "RegressionBatches", "RunDirectory", "StaleCheckpointError",
-    "TrainingRun", "TrainingSchedule", "injection_present", "materialise", "split_seeds",
+    "TrainingRun", "TrainingSchedule", "materialise", "split_seeds",
 ]

@@ -272,7 +272,7 @@ class MLyCoincidence(ExampleModel):
                 gf.ReturnVariables.WHITENED_ONSOURCE,
             ],
             output_variables=[
-                gf.ReturnVariables.INJECTION_MASKS
+                gf.ReturnVariables.INJECTION_PRESENT
             ],
             **kwargs
         )
@@ -476,7 +476,7 @@ class MLyCoherence(ExampleModel):
                 gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE,
             ],
             output_variables=[
-                gf.ReturnVariables.INJECTION_MASKS
+                gf.ReturnVariables.INJECTION_PRESENT
             ],
             max_arrival_time_difference_seconds=cfg.max_delay_seconds,
             **kwargs

@@ -8,11 +8,19 @@ import keras
 from keras import ops
 from gravyflow.src.utils import tensor as gf_tensor
 
-def test_replace_nan_and_inf_with_zero():
+def test_replace_nan_and_inf_with_zero_reports_what_it_replaced():
     x = ops.convert_to_tensor([1.0, np.nan, np.inf, -np.inf, 2.0])
-    y = gf_tensor.replace_nan_and_inf_with_zero(x)
-    expected = np.array([1.0, 0.0, 0.0, 0.0, 2.0])
-    np.testing.assert_allclose(y, expected)
+    with pytest.warns(gf.NonFiniteWarning, match="onsource: 3 of 5 values were NaN or infinite"):
+        y = gf_tensor.replace_nan_and_inf_with_zero(x, "onsource")
+    np.testing.assert_allclose(y, np.array([1.0, 0.0, 0.0, 0.0, 2.0]))
+
+
+def test_replace_nan_and_inf_with_zero_is_silent_on_finite_data():
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", gf.NonFiniteWarning)
+        y = gf_tensor.replace_nan_and_inf_with_zero(ops.convert_to_tensor([1.0, 2.0]))
+    np.testing.assert_allclose(y, [1.0, 2.0])
 
 def test_expand_tensor():
     mask = ops.convert_to_tensor([True, False, True])
