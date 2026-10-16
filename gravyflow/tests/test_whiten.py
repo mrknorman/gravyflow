@@ -417,10 +417,11 @@ def test_planck():
     nright = 10
     window = gf_whiten.planck(N, nleft, nright)
     assert ops.shape(window) == (N,)
-    # The implementation produces 0.5 at the left edge and ~0.27 at the right edge
-    assert np.isclose(window[0], 0.5)
-    assert np.isclose(window[-1], 0.26894, atol=1e-4)
-    # assert window[50] == 1.0 # This might also be 1.0
+    window = np.asarray(window)
+    # A Planck taper reaches exactly 0 at both ends and is flat in the middle.
+    assert window[0] == 0.0 and window[-1] == 0.0
+    np.testing.assert_allclose(window[nleft:N - nright], 1.0)
+    assert np.all(np.diff(window[:nleft]) > 0) and np.all(np.diff(window[N - nright:]) < 0)
 
 def test_fftconvolve():
     # Simple convolution

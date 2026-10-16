@@ -78,7 +78,7 @@ from .src.utils.io import (
 PATH = get_file_parent_path()
 from .src.utils.processes import (Heart, HeartbeatCallback, Process, Manager, 
     explain_exit_code)
-from .src.dataset.tools.psd import psd
+from .src.dataset.tools.psd import psd, SpectralConfig, PowerSpectrum, estimate_psd
 from .src.dataset.tools.snr import snr, scale_to_snr
 from .src.dataset.features.waveforms.wnb import wnb
 from .src.dataset.conditioning.conditioning import spectrogram, spectrogram_shape

@@ -511,16 +511,27 @@ def test_snr_theoretical_sine():
     # SNR = A * sqrt(T * fs / 2)
     expected_snr = amplitude * np.sqrt(duration * sample_rate / 2.0)
     
-    calculated_snr = gf_snr.snr(
-        injection, 
-        background, 
+    # With the exact PSD of the background (2 / fs) the formula is exact. A
+    # pure sine sits in one frequency bin, so with an estimated PSD its SNR
+    # carries that one bin's estimation noise (about 7% here): too loose for a
+    # value check of the definition.
+    config = gf.SpectralConfig(lower_frequency_hertz=5.0)
+    exact = gf.PowerSpectrum(
+        np.full((1, 1, int(sample_rate) // 2 + 1), 2.0, dtype=np.float32),
+        np.ones((1, 1, 1), dtype=np.float32), sample_rate, config,
+    )
+    calculated_snr = gf_snr.snr(injection, exact, sample_rate_hertz=sample_rate)
+    np.testing.assert_allclose(calculated_snr[0], expected_snr, rtol=1e-4)
+
+    estimated_snr = gf_snr.snr(
+        injection,
+        background,
         sample_rate_hertz=sample_rate,
-        fft_duration_seconds=1.0, 
+        fft_duration_seconds=1.0,
         overlap_duration_seconds=0.5,
         lower_frequency_cutoff=5.0
     )
-        
-    assert np.isclose(calculated_snr[0], expected_snr, rtol=0.02)
+    assert np.isclose(estimated_snr[0], expected_snr, rtol=0.2)
 
 def test_scale_to_snr_chirp():
     # Verify scaling works for a broadband chirp signal

@@ -11,7 +11,7 @@ Available Classes:
 """
 
 from gravyflow.src.detection.template_grid import TemplateGrid
-from gravyflow.src.detection.snr import matched_filter_fft, optimal_snr, template_sigma
+from gravyflow.src.dataset.tools.snr import matched_filter_fft, optimal_snr, template_sigma
 from gravyflow.src.detection.matched_filter import MatchedFilter, MatchedFilterLayer
 
 __all__ = [

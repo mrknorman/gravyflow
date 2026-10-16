@@ -1,245 +1,393 @@
+"""The one SNR definition, for the data path and the matched filter.
+
+The optimal SNR of a signal h in noise with one-sided PSD S, over the band
+[f_low, f_high), is
+
+    rho^2 = 4 * df * sum_{k in band} |h~_k|^2 / S_k,    h~ = rfft(h) / fs,
+
+with pycbc's band convention (pycbc.filter.sigma): DC is never included, and
+neither is the Nyquist bin of an even-length series. A signal on several
+detectors has the network SNR sqrt(sum over detectors of rho^2).
+
+The PSD comes from a PowerSpectrum (see gravyflow.src.dataset.tools.psd), so
+the data path uses one estimate per batch, with its band and its relative
+floor, for scaling, labels and whitening alike. `psd=None` in the matched-filter
+functions means unit-variance white noise (S = 2 / fs): the PSD of whitened
+data.
+"""
+from typing import Optional, Union
+
+import numpy as np
 import keras
 from keras import ops
 import jax.numpy as jnp
-import numpy as np
-
-from gravyflow.src.dataset.tools.psd import psd
-
 import jax
+
+from gravyflow.src.dataset.tools.psd import (
+    PowerSpectrum, SpectralConfig, estimate_psd
+)
+from gravyflow.src.utils.tensor import crop_samples
+
 
 @jax.jit(static_argnames=["scalar"])
 def find_closest(
-        tensor, 
+        tensor,
         scalar : float
     ):
-    
     tensor = ops.convert_to_tensor(tensor)
-    # Calculate the absolute differences between the tensor and the scalar
-    diffs = ops.abs(tensor - scalar)
-    
-    # Get the index of the minimum difference
-    closest_index = ops.argmin(diffs)
-    
-    return closest_index
+    return ops.argmin(ops.abs(tensor - scalar))
 
-@jax.jit(static_argnames=["sample_rate_hertz", "fft_duration_seconds", "overlap_duration_seconds", "lower_frequency_cutoff"])
+
+def _spectrum_for(
+        background,
+        sample_rate_hertz: float,
+        fft_duration_seconds,
+        overlap_duration_seconds,
+        lower_frequency_cutoff,
+        upper_frequency_cutoff,
+        psd_method,
+    ) -> PowerSpectrum:
+    """The given PowerSpectrum (checked against explicit arguments), or one estimated now."""
+    if isinstance(background, PowerSpectrum):
+        config = background.config
+        explicit = {
+            "fft_duration_seconds": fft_duration_seconds,
+            "overlap_duration_seconds": overlap_duration_seconds,
+            "lower_frequency_hertz": lower_frequency_cutoff,
+            "upper_frequency_hertz": upper_frequency_cutoff,
+            "psd_method": psd_method,
+        }
+        for name, value in explicit.items():
+            if value is not None and value != getattr(config, name):
+                raise ValueError(
+                    f"{name}={value} conflicts with the given PowerSpectrum's "
+                    f"{name}={getattr(config, name)}."
+                )
+        if background.sample_rate_hertz != float(sample_rate_hertz):
+            raise ValueError("sample_rate_hertz differs from the PowerSpectrum's.")
+        return background
+
+    defaults = SpectralConfig()
+    config = SpectralConfig(
+        lower_frequency_hertz=defaults.lower_frequency_hertz if lower_frequency_cutoff is None else (lower_frequency_cutoff or None),
+        upper_frequency_hertz=upper_frequency_cutoff,
+        fft_duration_seconds=defaults.fft_duration_seconds if fft_duration_seconds is None else fft_duration_seconds,
+        overlap_duration_seconds=defaults.overlap_duration_seconds if overlap_duration_seconds is None else overlap_duration_seconds,
+        psd_method=defaults.psd_method if psd_method is None else psd_method,
+    )
+    background = ops.cast(ops.convert_to_tensor(background), "float32")
+    return estimate_psd(background, sample_rate_hertz, config)
+
+
+@jax.jit(static_argnames=["band", "network"])
+def _snr_from_spectrum(injection, spectrum: PowerSpectrum, band, network: bool):
+    """Per-channel optimal SNR over `band`, combined over the detector axis if `network`."""
+    num_samples = injection.shape[-1]
+    kmin, kmax = band
+    # Normalised units: h / scale against the normalised PSD (see psd.py); the
+    # scale cancels, so physical and scaled strain give the same SNR.
+    h = injection / spectrum.scale
+    # Unit peak per row before squaring, so the power sums cannot overflow or
+    # underflow float32 whatever the injection's amplitude; rho scales back exactly.
+    peak = ops.max(ops.abs(h), axis=-1, keepdims=True)
+    peak = ops.where(peak > 0, peak, ops.ones_like(peak))
+    h_fft = jnp.fft.rfft(h / peak)[..., kmin:kmax]
+    power = ops.real(h_fft) ** 2 + ops.imag(h_fft) ** 2
+    psd_n = spectrum.interpolate(num_samples)[..., kmin:kmax] * spectrum.inverse_bias
+    rho = peak[..., 0] * ops.sqrt((4.0 / num_samples) * ops.sum(power / psd_n, axis=-1))
+    if network:
+        largest = ops.max(rho, axis=-1, keepdims=True)
+        largest = ops.where(largest > 0, largest, ops.ones_like(largest))
+        rho = largest[..., 0] * ops.sqrt(ops.sum((rho / largest) ** 2, axis=-1))
+    return rho
+
+
 def snr(
-        injection, 
-        background,
-        sample_rate_hertz: float, 
-        fft_duration_seconds: float = 4.0, 
-        overlap_duration_seconds: float = 2.0,
-        lower_frequency_cutoff: float = 20.0
+        injection,
+        background: Union[jnp.ndarray, PowerSpectrum],
+        sample_rate_hertz: float,
+        fft_duration_seconds: Optional[float] = None,
+        overlap_duration_seconds: Optional[float] = None,
+        lower_frequency_cutoff: Optional[float] = None,
+        upper_frequency_cutoff: Optional[float] = None,
+        psd_method: Optional[str] = None,
     ):
     """
-    Calculate the signal-to-noise ratio (SNR) of a given signal.
+    Optimal SNR of `injection` in the noise of `background`.
+
+    Shapes: (B, I, T) gives the network SNR per example, (B,); (B, T) gives one
+    SNR per row, (B,); (T,) gives a scalar. Leading axes beyond three are kept:
+    (G, B, I, T) gives (G, B).
+
+    `background` is a PowerSpectrum (its band and estimator apply; explicit
+    arguments must agree with it) or a timeseries (..., T_off) whose PSD is
+    estimated with the given settings, defaulting to SpectralConfig's (1 s / 0.5 s
+    median Welch, band from 20 Hz to Nyquist). `lower_frequency_cutoff=0` means
+    no lower edge.
     """
-    # float32, the precision gravyflow's data is in: JAX's 64-bit mode is on only
-    # for waveform generation.
-    injection = ops.convert_to_tensor(injection, dtype="float32")
-    background = ops.convert_to_tensor(background, dtype="float32")
-    
-
-    
-    injection_num_samples = ops.shape(injection)[-1]
-    injection_duration_seconds = ops.cast(injection_num_samples, "float32") / sample_rate_hertz
-    
-    overlap_num_samples = int(sample_rate_hertz * overlap_duration_seconds)
-    fft_num_samples = int(sample_rate_hertz * fft_duration_seconds)
-    
-    # Set the frequency integration limits
-    upper_frequency_cutoff = int(sample_rate_hertz / 2.0)
-
-    # Calculate and normalize the Fourier transform of the signal
-    # Use jnp.fft.rfft directly
-    inj_fft = jnp.fft.rfft(injection) / sample_rate_hertz
-    
-    df = 1.0 / injection_duration_seconds
-    
-    # fsamples range
-    num_freqs = injection_num_samples // 2 + 1
-    fsamples = ops.arange(0, num_freqs, dtype="float32") * df
-
-    # Get rid of DC
-    # Slicing along last dimension
-    inj_fft_no_dc  = inj_fft[..., 1:]
-    fsamples_no_dc = fsamples[1:]
-
-    # Calculate PSD of the background noise
-    freqs, psd_val = psd(
-        background, 
-        sample_rate_hertz = sample_rate_hertz, 
-        nperseg           = fft_num_samples, 
-        noverlap          = overlap_num_samples,
-        mode="mean"
+    spectrum = _spectrum_for(
+        background, sample_rate_hertz, fft_duration_seconds, overlap_duration_seconds,
+        lower_frequency_cutoff, upper_frequency_cutoff, psd_method,
     )
-    
-    # Interpolate ASD to match the length of the original signal    
-    freqs = ops.cast(freqs, "float32")
-    
-    def interp_fn(p):
-        return jnp.interp(fsamples_no_dc, freqs, p)
-        
-    # If psd has batch dim, map over it.
-    # Check rank
-    rank = len(ops.shape(psd_val))
+    injection = ops.cast(ops.convert_to_tensor(injection), "float32")
+    rank = len(injection.shape)
+    if rank == 1:
+        injection = injection[None, :]
+    num_samples = int(injection.shape[-1])
+    band = spectrum.config.band_indices(num_samples, sample_rate_hertz)
+    result = _snr_from_spectrum(injection, spectrum, band, rank >= 3)
+    return result[0] if rank == 1 else result
 
-    if rank > 1:
-        # Assuming batch is first dim(s). Flatten to (Batch, Freqs)
-        psd_flat = ops.reshape(psd_val, (-1, ops.shape(psd_val)[-1]))
-        # vmap
-        psd_interp = jnp.vectorize(interp_fn, signature='(n)->(m)')(psd_flat)
-        # Reshape back
-        target_len = ops.shape(fsamples_no_dc)[0]
-        psd_interp = ops.reshape(psd_interp, (*ops.shape(psd_val)[:-1], target_len))
-    else:  # pragma: no cover - psd() always returns 2D
-        psd_interp = jnp.interp(fsamples_no_dc, freqs, psd_val)
-        
-    # Compute the frequency window for SNR calculation
-    start_freq_num_samples = find_closest(
-        fsamples_no_dc, 
-        lower_frequency_cutoff
-    )
-    end_freq_num_samples = find_closest(
-        fsamples_no_dc, 
-        upper_frequency_cutoff
-    )
-    
-    # Compute the SNR numerator in the frequency window
-    # conj in JAX/Keras
-    inj_fft_conj = jnp.conj(inj_fft_no_dc)
-    inj_fft_squared = ops.abs(inj_fft_no_dc * inj_fft_conj)   
 
-    # Slicing
-    # start/end are tensors (indices).
-    # Dynamic slicing in JAX requires lax.dynamic_slice or similar if indices are not static.
-    # find_closest returns a tensor index.
-    
-    # We can use a mask instead of slicing if indices are dynamic.
-    # Or ops.slice?
-    
-    # Let's try to use a mask for robustness in JAX.
-    freq_indices = ops.arange(ops.shape(fsamples_no_dc)[0])
-    mask = (freq_indices >= start_freq_num_samples) & (freq_indices < end_freq_num_samples)
-    mask = ops.cast(mask, dtype=inj_fft_squared.dtype)
-    
-    snr_numerator = inj_fft_squared * mask
-    snr_denominator = psd_interp # Assuming same shape or broadcastable
-    
-    # If we use mask, we sum over all, but masked out values are 0.
-    # Denominator might be 0 where mask is 0? No, denominator is PSD.
-    # But we only want sum in the window.
-    
-    # Avoid division by zero if denominator is zero (unlikely for PSD but possible)
-    ratio = snr_numerator / (snr_denominator + 1e-10)
-    
-    # Apply mask again to ratio to be sure
-    ratio = ratio * mask
+def _expand_like(values, rank: int):
+    """(…batch) values to broadcast against a rank-`rank` injection."""
+    trailing = 2 if rank >= 3 else 1
+    return ops.reshape(values, tuple(values.shape) + (1,) * trailing)
 
-    # Calculate the SNR
-    # Sum over frequency axis (-1)
-    
-    integral = ops.sum(ratio, axis=-1)
-    
-    SNR = ops.sqrt(
-        (4.0 / injection_duration_seconds) * integral
-    )    
-    
-    # Handle infs
-    SNR = ops.where(ops.isinf(SNR), ops.zeros_like(SNR), SNR)
-    
-    # Combine if multi-channel (not handled explicitly in original but implied by reduce_sum(SNR**2))
-    # Original: SNR = tf.sqrt(tf.reduce_sum(SNR**2, axis = -1))
-    # If input was (Batch, Channel, Time), then SNR is (Batch, Channel).
-    # Then reduce sum over Channel?
-    # Let's assume input is (Batch, Time) -> SNR is (Batch,).
-    # If (Batch, Channel, Time) -> SNR is (Batch, Channel).
-    
-    # The original code had:
-    # SNR = tf.sqrt(tf.reduce_sum(SNR**2, axis = -1))
-    # This implies SNR was not scalar yet?
-    # Ah, `tf.reduce_sum(snr_numerator / snr_denominator, axis = -1)` reduces frequency dim.
-    # So if input was (Batch, Channel, Time), SNR is (Batch, Channel).
-    # Then reduce_sum(SNR**2, axis=-1) reduces Channel dim.
-    # If input was (Batch, Time), SNR is (Batch,). reduce_sum axis=-1 would reduce Batch? No, that would be wrong.
-    # It likely expects (Batch, Detectors, Time).
-    
-    # Let's keep the final reduction logic.
-    SNR = ops.sqrt(ops.sum(SNR**2, axis=-1))
 
-    return SNR
-
-from gravyflow.src.utils.tensor import crop_samples
-
-@jax.jit(static_argnames=["sample_rate_hertz", "fft_duration_seconds", "overlap_duration_seconds", "lower_frequency_cutoff", "onsource_duration_seconds", "return_scale_factor"])
 def scale_to_snr(
-        injection, 
-        background,
+        injection,
+        background: Union[jnp.ndarray, PowerSpectrum],
         desired_snr,
-        sample_rate_hertz: float, 
-        fft_duration_seconds: float = 4.0, 
-        overlap_duration_seconds: float = 2.0,
-        lower_frequency_cutoff: float = 20.0,
-        onsource_duration_seconds: float = None,
-        return_scale_factor: bool = False
+        sample_rate_hertz: float,
+        fft_duration_seconds: Optional[float] = None,
+        overlap_duration_seconds: Optional[float] = None,
+        lower_frequency_cutoff: Optional[float] = None,
+        onsource_duration_seconds: Optional[float] = None,
+        upper_frequency_cutoff: Optional[float] = None,
+        psd_method: Optional[str] = None,
+        return_scale_factor: bool = False,
     ):
-    
-    injection = ops.convert_to_tensor(injection)
-    background = ops.convert_to_tensor(background)
-    desired_snr = ops.convert_to_tensor(desired_snr)
-    
-    epsilon = 1.0E-7
-    
-    # If onsource_duration_seconds is provided, crop the signals to that duration
-    # to calculate SNR on the "visible" part.
-    if onsource_duration_seconds is not None:
-        snr_injection = crop_samples(injection, onsource_duration_seconds, sample_rate_hertz)
-        snr_background = background # Do not crop background, we need full duration for PSD
-    else:
-        snr_injection = injection
-        snr_background = background
+    """
+    Scale each example of `injection` to `desired_snr`, measured with `snr()` on
+    the central `onsource_duration_seconds` window (the whole injection if None):
+    the SNR of what the onsource window shows.
 
-    # DEBUG
-    # jax.debug.print("DEBUG: snr_injection has NaNs: {}", ops.any(ops.isnan(snr_injection)))
-    # jax.debug.print("DEBUG: snr_injection has Infs: {}", ops.any(ops.isinf(snr_injection)))
-    # jax.debug.print("DEBUG: snr_injection max abs: {}", ops.max(ops.abs(snr_injection)))
-    
-    # Force clean
-    snr_injection = ops.where(ops.isnan(snr_injection), 0.0, snr_injection)
-    snr_injection = ops.where(ops.isinf(snr_injection), 0.0, snr_injection)
-
-    # Calculate the current SNR
-    current_snr = snr(
-        snr_injection, 
-        snr_background,
-        sample_rate_hertz, 
-        fft_duration_seconds=fft_duration_seconds, 
-        overlap_duration_seconds=overlap_duration_seconds,
-        lower_frequency_cutoff=lower_frequency_cutoff
+    Each example is scaled by its own factor: (B, I, T) and (B, T) inputs take
+    (B,) targets. An example with no power in the band gets the factor 0, never
+    a division by zero. With return_scale_factor, returns (scaled, factor) with
+    the factor k applied to each example, shaped like the SNR (for example (B,)).
+    """
+    spectrum = _spectrum_for(
+        background, sample_rate_hertz, fft_duration_seconds, overlap_duration_seconds,
+        lower_frequency_cutoff, upper_frequency_cutoff, psd_method,
     )
-    
-    # DEBUG
-    
-    # Ensure `desired_snr` and `current_snr` have compatible shapes
-    desired_snr = ops.reshape(desired_snr, [-1])  # Shape: [batch_size]
-    current_snr = ops.reshape(current_snr, [-1])  # Shape: [batch_size]
-    
-    # Calculate scale factor
-    scale_factor = desired_snr / (current_snr + epsilon)  # Shape: [batch_size]
-    
-    # Reshape scale_factor to [batch_size, 1, 1] for broadcasting
-    # Assuming injection is (Batch, Channel, Time) or similar.
-    # If injection is (Batch, Time), we need [batch_size, 1].
-    
-    rank = len(ops.shape(injection))
-    if rank == 2:
-        scale_factor = ops.reshape(scale_factor, [-1, 1])
-    elif rank == 3:
-        scale_factor = ops.reshape(scale_factor, [-1, 1, 1])
-    
-    # Multiply using broadcasting
-    scaled_injection = injection * scale_factor
-    
+    injection = ops.cast(ops.convert_to_tensor(injection), "float32")
+    injection = ops.where(ops.isfinite(injection), injection, ops.zeros_like(injection))
+    rank = len(injection.shape)
+
+    measured = injection
+    if onsource_duration_seconds is not None:
+        measured = crop_samples(injection, onsource_duration_seconds, sample_rate_hertz)
+
+    current_snr = snr(measured, spectrum, sample_rate_hertz)
+    desired_snr = ops.cast(ops.convert_to_tensor(desired_snr), "float32")
+    desired_snr = ops.broadcast_to(desired_snr, current_snr.shape)
+    factor = ops.where(current_snr > 0, desired_snr / ops.where(current_snr > 0, current_snr, 1.0), 0.0)
+
+    scaled = injection * factor if rank == 1 else injection * _expand_like(factor, rank)
     if return_scale_factor:
-        return scaled_injection, ops.reshape(scale_factor, [-1])
-    return scaled_injection
+        return scaled, factor
+    return scaled
+
+
+# ---------------------------------------------------------------------------
+# Matched filtering
+# ---------------------------------------------------------------------------
+
+def _weight_on_grid(psd, num_samples: int, sample_rate_hertz: float):
+    """
+    The PSD on the rfft grid of a num_samples series as a weight relative to
+    unit-variance white noise (S = 2 / fs * weight), and the amplitude scale to
+    divide the data by first. `psd` is None (white, unit variance: the PSD of
+    whitened data), a PowerSpectrum (scale free), or a one-sided PSD array on a
+    uniform grid from DC to Nyquist (interpolated, floored at 1e-4 of its median).
+    Returns (weight (..., F), scale or None).
+    """
+    num_freqs = num_samples // 2 + 1
+    if psd is None:
+        return jnp.ones((num_freqs,), dtype="float32"), None
+    if isinstance(psd, PowerSpectrum):
+        if psd.sample_rate_hertz != float(sample_rate_hertz):
+            raise ValueError("sample_rate_hertz differs from the PowerSpectrum's.")
+        # S = normalised * scale^2 / fs: with the data divided by scale, the
+        # weight is normalised / 2.
+        return psd.interpolate(num_samples) * (psd.inverse_bias / 2.0), psd.scale
+    psd = ops.cast(ops.convert_to_tensor(psd), "float32")
+    if psd.shape[-1] != num_freqs:
+        source = np.linspace(0.0, sample_rate_hertz / 2.0, psd.shape[-1], dtype=np.float32)
+        target = np.arange(num_freqs, dtype=np.float32) * (sample_rate_hertz / num_samples)
+        flat = ops.reshape(psd, (-1, psd.shape[-1]))
+        psd = ops.reshape(jax.vmap(lambda v: jnp.interp(target, source, v))(flat),
+                          tuple(psd.shape[:-1]) + (num_freqs,))
+    weight = psd * (sample_rate_hertz / 2.0)
+    floor = 1.0e-4 * jnp.median(weight, axis=-1, keepdims=True)
+    return ops.maximum(weight, floor), None
+
+
+def _band(num_samples: int, sample_rate_hertz: float, lower, upper):
+    config = SpectralConfig(lower_frequency_hertz=lower, upper_frequency_hertz=upper)
+    return config.band_indices(num_samples, sample_rate_hertz)
+
+
+@jax.jit(static_argnames=["num_samples", "kmin", "kmax"])
+def _sigma_squared(h_fft, weight, num_samples, kmin, kmax):
+    """
+    <h|h> = 4 df sum |h~|^2 / S with h~ = rfft/fs, S = 2/fs * weight, df = fs/N:
+    (2 / N) * sum |rfft(h)|^2 / weight. h_fft (..., F) against weight (F,) or
+    (B, F) (then the result is (B, ...)).
+    """
+    power = ops.real(h_fft[..., kmin:kmax]) ** 2 + ops.imag(h_fft[..., kmin:kmax]) ** 2
+    w = weight[..., kmin:kmax]
+    if w.ndim > 1:
+        power = power[None]
+        w = w.reshape(w.shape[:1] + (1,) * (power.ndim - 2) + w.shape[-1:])
+    return (2.0 / num_samples) * ops.sum(power / w, axis=-1)
+
+
+def template_sigma(
+    templates: jnp.ndarray,
+    psd=None,
+    sample_rate_hertz: float = 8192.0,
+    lower_frequency_cutoff: Optional[float] = None,
+    upper_frequency_cutoff: Optional[float] = None,
+) -> jnp.ndarray:
+    """
+    sigma = sqrt(<h|h>) of each template with the module's SNR definition.
+    templates: (NumTemplates, Samples) -> (NumTemplates,); with a per-row PSD
+    (B, F) -> (B, NumTemplates).
+    """
+    templates = ops.cast(ops.convert_to_tensor(templates), "float32")
+    num_samples = int(templates.shape[-1])
+    kmin, kmax = _band(num_samples, sample_rate_hertz, lower_frequency_cutoff, upper_frequency_cutoff)
+    weight, scale = _weight_on_grid(psd, num_samples, sample_rate_hertz)
+    if scale is not None:
+        if scale.size != 1:
+            raise ValueError("template_sigma takes a PowerSpectrum of one row.")
+        templates = templates / ops.reshape(scale, ())
+        weight = ops.reshape(weight, (-1,))
+    return ops.sqrt(_sigma_squared(jnp.fft.rfft(templates), weight, num_samples, kmin, kmax))
+
+
+def optimal_snr(
+    signal: jnp.ndarray,
+    psd=None,
+    sample_rate_hertz: float = 8192.0,
+    lower_frequency_cutoff: Optional[float] = None,
+    upper_frequency_cutoff: Optional[float] = None,
+) -> float:
+    """Optimal SNR of one signal (Samples,): the SNR an exactly matching template recovers."""
+    signal = ops.convert_to_tensor(signal)
+    return template_sigma(signal[None, :], psd, sample_rate_hertz,
+                          lower_frequency_cutoff, upper_frequency_cutoff)[..., 0]
+
+
+def matched_filter_fft(
+    data: jnp.ndarray,
+    templates: jnp.ndarray,
+    psd=None,
+    sample_rate_hertz: float = 8192.0,
+    lower_frequency_cutoff: Optional[float] = None,
+    upper_frequency_cutoff: Optional[float] = None,
+) -> jnp.ndarray:
+    """
+    Matched-filter SNR timeseries |<d|h>(t)| / sigma_h, maximised over the
+    template's phase (the complex SNR), for every template.
+
+    data: (Samples,) or (Batch, Samples); templates: (NumTemplates, Samples).
+    psd: None for whitened data (unit-variance white noise), otherwise the
+    one-sided PSD of the data: an array (shared, or one row per batch entry) or
+    a PowerSpectrum with one row per batch entry.
+    Returns (Batch, NumTemplates, Samples), or (NumTemplates, Samples) for 1D data.
+    """
+    data = ops.cast(ops.convert_to_tensor(data), "float32")
+    templates = ops.cast(ops.convert_to_tensor(templates), "float32")
+    data_1d = data.ndim == 1
+    if data_1d:
+        data = data[None, :]
+    num_samples = int(data.shape[-1])
+    kmin, kmax = _band(num_samples, sample_rate_hertz, lower_frequency_cutoff, upper_frequency_cutoff)
+    weight, scale = _weight_on_grid(psd, num_samples, sample_rate_hertz)
+    if scale is not None:
+        data = data / ops.reshape(scale, (-1, 1))
+        weight = ops.reshape(weight, (-1, weight.shape[-1]))
+    # The template's amplitude cancels in the SNR; unit peak keeps its power sums
+    # representable in float32 whatever its units.
+    peak = ops.max(ops.abs(templates), axis=-1, keepdims=True)
+    templates = templates / ops.where(peak > 0, peak, 1.0)
+    snr_series = _matched_filter(data, templates, weight, kmin, kmax)
+    return snr_series[0] if data_1d else snr_series
+
+
+@jax.jit(static_argnames=["kmin", "kmax"])
+def _matched_filter(data, templates, weight, kmin, kmax):
+    num_samples = data.shape[-1]
+    d_fft = jnp.fft.rfft(data, axis=-1)            # (Batch, F)
+    h_fft = jnp.fft.rfft(templates, axis=-1)       # (NumTemplates, F)
+    num_freqs = d_fft.shape[-1]
+    band = np.zeros(num_freqs, dtype=np.float32)
+    band[kmin:kmax] = 1.0
+    w = weight[:, None, :] if weight.ndim > 1 else weight
+    corr = d_fft[:, None, :] * jnp.conj(h_fft)[None, :, :] * (band / w)
+    # Positive frequencies only: the inverse FFT then gives the complex inner
+    # product, whose modulus is the SNR maximised over the template's phase.
+    # <d|h>(t) = 4 df sum d~ h~* / S e^{2 pi i f t} = 2 * ifft(D H* / weight).
+    full = jnp.zeros(corr.shape[:-1] + (num_samples,), dtype=corr.dtype).at[..., :num_freqs].set(corr)
+    inner = 2.0 * jnp.fft.ifft(full, axis=-1)
+    sigma = ops.sqrt(_sigma_squared(h_fft, weight, num_samples, kmin, kmax))  # (T,) or (B, T)
+    sigma = jnp.where(sigma > 0, sigma, 1.0)
+    sigma = sigma[None, :, None] if sigma.ndim == 1 else sigma[:, :, None]
+    return jnp.abs(inner) / sigma
+
+
+def find_triggers(
+    snr: jnp.ndarray,
+    threshold: float = 8.0,
+    cluster_window: int = 100,
+) -> list:
+    """
+    Find triggers (peaks) above an SNR threshold.
+
+    snr: (NumTemplates, Samples), or (Batch, NumTemplates, Samples).
+    Returns a list of dicts with 'snr', 'time_index', 'template_index' (and
+    'batch_index' for batched input).
+    """
+    if snr.ndim == 2:
+        max_snr_over_templates = jnp.max(snr, axis=0)
+        best_template = jnp.argmax(snr, axis=0)
+    else:
+        max_snr_over_templates = jnp.max(snr, axis=1)
+        best_template = jnp.argmax(snr, axis=1)
+
+    triggers = []
+    snr_np = np.array(max_snr_over_templates)
+    template_np = np.array(best_template)
+
+    above_thresh = snr_np > threshold
+    indices = np.where(above_thresh)[0] if snr.ndim == 2 else np.argwhere(above_thresh)
+
+    i = 0
+    while i < len(indices):
+        if snr.ndim == 2:
+            cluster_end = i + 1
+            while cluster_end < len(indices) and indices[cluster_end] - indices[i] < cluster_window:
+                cluster_end += 1
+            cluster_indices = indices[i:cluster_end]
+            peak_idx = cluster_indices[np.argmax(snr_np[cluster_indices])]
+            triggers.append({
+                'snr': float(snr_np[peak_idx]),
+                'time_index': int(peak_idx),
+                'template_index': int(template_np[peak_idx]),
+            })
+            i = cluster_end
+        else:
+            batch_idx, time_idx = indices[i]
+            triggers.append({
+                'snr': float(snr_np[batch_idx, time_idx]),
+                'time_index': int(time_idx),
+                'template_index': int(template_np[batch_idx, time_idx]),
+                'batch_index': int(batch_idx),
+            })
+            i += 1
+
+    return triggers

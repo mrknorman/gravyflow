@@ -72,8 +72,9 @@ def test_snr_calculation():
         overlap_duration_seconds=0.5
     )
     
-    # SNR should be positive
-    assert float(snr_val) > 0.0
+    # One SNR per row of a (batch, time) input, and positive
+    assert np.shape(snr_val) == (1,)
+    assert float(snr_val[0]) > 0.0
 
 
 def test_scale_to_snr():

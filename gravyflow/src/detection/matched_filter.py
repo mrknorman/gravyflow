@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from gravyflow.src.detection.template_grid import TemplateGrid
-from gravyflow.src.detection.snr import matched_filter_fft, template_sigma, find_triggers
+from gravyflow.src.dataset.tools.snr import matched_filter_fft, template_sigma, find_triggers
 
 
 @dataclass
@@ -181,7 +181,8 @@ class MatchedFilter:
         Args:
             data: Whitened strain data, shape (samples,) or (batch, samples).
                   Expected to be O(1) amplitude (e.g., from GravyflowDataset).
-            psd: One-sided PSD for template weighting. If None, uniform.
+            psd: One-sided PSD of the data. If None, the data are taken as
+                 whitened (unit-variance white noise).
         
         Returns:
             SNR timeseries of shape:
