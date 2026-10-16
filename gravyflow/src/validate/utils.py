@@ -3,36 +3,15 @@ from scipy.interpolate import interp1d
 
 
 def _extract_sample_data(x_batch, y_batch, sample_idx, score):
-    """Extract data for a single sample from batch for worst performers."""
+    """
+    Example ``sample_idx`` of a batch, for the worst performers: row
+    ``sample_idx`` of every array output, since every output is batch-first
+    (its documented shape, ``ReturnVariable.shape``), with ``score``.
+    """
     element = {}
-    
-    # Add inputs - shape is typically (batch, detectors, samples)
-    if x_batch:
-        for k, v in x_batch.items():
-            if hasattr(v, 'shape') and len(v.shape) >= 1:
-                element[k] = np.array(v[sample_idx])
-            else:
-                element[k] = v
-    
-    # Add outputs - handle different shapes
-    if y_batch:
-        for k, v in y_batch.items():
-            if hasattr(v, 'shape'):
-                if len(v.shape) == 4:  # (generators, batch, det, samples)
-                    # Check first dim bound
-                    if v.shape[0] > 0:
-                        element[k] = np.array(v[0, sample_idx])
-                    else:
-                        element[k] = np.array(v[sample_idx]) # Fallback
-                elif len(v.shape) >= 2:
-                    element[k] = np.array(v[sample_idx])
-                elif len(v.shape) == 1:
-                    element[k] = np.array(v[sample_idx])
-                else:
-                    element[k] = v
-            else:
-                element[k] = v
-
+    for batch in (x_batch, y_batch):
+        for key, value in (batch or {}).items():
+            element[key] = np.array(value[sample_idx]) if np.ndim(value) else value
     element["score"] = score
     return element
 

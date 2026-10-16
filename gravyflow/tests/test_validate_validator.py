@@ -13,6 +13,8 @@ import gravyflow as gf
 from gravyflow.src.model.examples.base import ValidationDatasetConfig, validation_dataset_args
 from gravyflow.src.validate import StaleCheckpointError, ValidationConfig, Validator
 from gravyflow.src.validate.bank import ValidationBank, derived_seed, per_example
+from gravyflow.src.validate.plotting import first_detector
+from gravyflow.src.validate.utils import _extract_sample_data
 
 SAMPLES = 2048
 
@@ -102,6 +104,18 @@ def test_checkpoint_refuses_other_settings(validated, dataset_args):
         Validator.validate(model, "tiny", dataset_args, ValidationConfig(num_examples=32, batch_size=32), path)
 
 
+def test_checkpoint_of_another_format_is_refused(validated, dataset_args, small_config, tmp_path):
+    # A worst performer's injection was (detectors, samples) before format 3.
+    model, path, _ = validated
+    old = tmp_path / "format.h5"
+    old.write_bytes(path.read_bytes())
+    with h5py.File(old, "a") as f:
+        f.attrs["format_version"] = Validator.FORMAT_VERSION - 1
+    assert Validator.load(old).far_scores is None
+    with pytest.raises(StaleCheckpointError):
+        Validator.validate(model, "tiny", dataset_args, small_config, old)
+
+
 def test_checkpoint_without_provenance_is_refused(tmp_path, dataset_args, small_config):
     path = tmp_path / "old.h5"
     with h5py.File(path, "w") as f:
@@ -132,3 +146,39 @@ def test_per_example_labels_are_strict():
         per_example(np.ones((2, 4)), 4, "two generators")
     with pytest.raises(ValueError):
         per_example(np.float64(np.nan), 4, "a scalar for a batch")
+
+
+def test_a_worst_performer_sample_is_its_own_example():
+    # Every output is batch-first: sample i is row i of each array, whatever its rank.
+    x = {"WHITENED_ONSOURCE": np.arange(4 * 2 * 8.0).reshape(4, 2, 8)}
+    y = {"WHITENED_INJECTIONS": np.arange(4 * 1 * 2 * 8.0).reshape(4, 1, 2, 8),
+         "SNR": np.arange(4.0).reshape(4, 1), "INJECTION_PRESENT": np.ones(4)}
+    for i in range(4):
+        sample = _extract_sample_data(x, y, i, 0.5)
+        for key, value in {**x, **y}.items():
+            np.testing.assert_array_equal(sample[key], value[i], err_msg=key)
+        assert sample["score"] == 0.5
+
+
+def test_worst_false_negatives_carry_their_own_injection(validated):
+    # Each worst false negative's whitened injection has the SNR its label gives.
+    _, _, v = validated
+    samples = [s for bin_samples in v.worst_performers["false_negatives"].values() for s in bin_samples]
+    assert len(samples) > 1
+    for sample in samples:
+        injection = np.asarray(sample["WHITENED_INJECTIONS"], dtype=np.float64)
+        norm = np.sqrt(np.sum(injection ** 2))
+        np.testing.assert_allclose(norm, float(np.ravel(sample["SNR"])[0]), rtol=0.05, atol=0.05)
+        assert injection.shape == (1, 1, SAMPLES)  # (generators, detectors, samples)
+
+
+def test_the_waveform_plot_takes_the_first_detector():
+    onsource = np.arange(2 * 8.0).reshape(2, 8)
+    injection = np.arange(2 * 2 * 8.0).reshape(2, 2, 8)
+    plotted_onsource, plotted_injection = first_detector(
+        {"WHITENED_ONSOURCE": onsource, "WHITENED_INJECTIONS": injection})
+    np.testing.assert_array_equal(plotted_onsource, onsource[0])
+    np.testing.assert_array_equal(plotted_injection, injection[0, 0] + injection[1, 0])
+    assert first_detector({"WHITENED_ONSOURCE": onsource})[1] is None
+    with pytest.raises(ValueError, match="WHITENED_INJECTIONS"):
+        first_detector({"WHITENED_ONSOURCE": onsource, "WHITENED_INJECTIONS": injection[0]})

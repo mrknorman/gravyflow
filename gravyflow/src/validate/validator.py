@@ -30,7 +30,9 @@ class Validator:
     match: a checkpoint written for another model or other settings is refused.
     """
 
-    FORMAT_VERSION = 2
+    # 3: worst performers are batch-first examples; an injection is
+    # (generators, detectors, samples).
+    FORMAT_VERSION = 3
 
     def __init__(self, name: str = "model", config: Optional[ValidationConfig] = None,
                  dataset_args: Optional[dict] = None):
@@ -218,10 +220,12 @@ class Validator:
         that results can be loaded for comparison plots.
         """
         with h5py.File(file_path, "r") as f:
-            if f.attrs.get("format_version") != cls.FORMAT_VERSION:
-                v = cls()  # an older file carries no provenance: nothing to reuse
+            found = f.attrs.get("format_version")
+            if found != cls.FORMAT_VERSION:
+                v = cls()  # another format: nothing in it is read, or reused
                 v.model_sha256 = v.config_sha256 = None
-                logger.warning(f"{file_path} predates provenance records; it cannot be reused.")
+                logger.warning(f"{file_path} is in format {found}, not {cls.FORMAT_VERSION}; "
+                               "it cannot be reused.")
                 return v
             config = ValidationConfig(**json.loads(f.attrs["config"]))
             v = cls(str(f.attrs["name"]), config, {

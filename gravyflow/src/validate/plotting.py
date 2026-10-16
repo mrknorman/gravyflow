@@ -607,6 +607,27 @@ def generate_roc_curves(
     ))
     return p, select
 
+def first_detector(sample: dict):
+    """
+    A worst performer's whitened onsource and injection in its first detector.
+
+    ``sample`` is one example of batch-first outputs: WHITENED_ONSOURCE is
+    (detectors, samples) and WHITENED_INJECTIONS (generators, detectors,
+    samples), summed over its generators. The injection is None for a sample
+    without one (a noise-only false positive).
+    """
+    onsource = np.asarray(sample[gf.ReturnVariables.WHITENED_ONSOURCE.name])
+    if onsource.ndim != 2:
+        raise ValueError(f"WHITENED_ONSOURCE: expected (detectors, samples), got {onsource.shape}.")
+    injection = sample.get(gf.ReturnVariables.WHITENED_INJECTIONS.name)
+    if injection is None:
+        return onsource[0], None
+    injection = np.asarray(injection)
+    if injection.ndim != 3:
+        raise ValueError(
+            f"WHITENED_INJECTIONS: expected (generators, detectors, samples), got {injection.shape}.")
+    return onsource[0], injection.sum(axis=0)[0]
+
 def generate_waveform_plot(
     data : dict,
     onsource_duration_seconds : float,
@@ -621,26 +642,13 @@ def generate_waveform_plot(
     if not isinstance(colors, (list, tuple)):
         colors = list(colors)
     
-    # Extract and flatten data for plotting
-    onsource_data = np.array(data[gf.ReturnVariables.WHITENED_ONSOURCE.name])
-    
-    # WHITENED_INJECTIONS is optional (not present for noise-only false positives)
-    has_injection = gf.ReturnVariables.WHITENED_INJECTIONS.name in data
-    if has_injection:
-        injection_data = np.array(data[gf.ReturnVariables.WHITENED_INJECTIONS.name])
-    else:
-        injection_data = None
-    
-    # Flatten multi-detector data - take first detector if multi-dimensional
-    if onsource_data.ndim > 1:
-        onsource_data = onsource_data.flatten() if onsource_data.shape[0] == 1 else onsource_data[0]
-    if has_injection and injection_data is not None and injection_data.ndim > 1:
-        injection_data = injection_data.flatten() if injection_data.shape[0] == 1 else injection_data[0]
-    
+    onsource_data, injection_data = first_detector(data)
+    has_injection = injection_data is not None
+
     # Cast onsource to float32 for Datashader (avoids float16 error)
     onsource_data = onsource_data.astype(np.float32)
     # Cast injection to float64 for Bokeh/JS compatibility (avoids serialization/browser errors)
-    if has_injection and injection_data is not None:
+    if has_injection:
         injection_data = injection_data.astype(np.float64)
     
     # Helper to extract scalar value from data
@@ -718,7 +726,7 @@ def generate_waveform_plot(
     # Create slider for injection scale (only if injection exists)
     scale_slider = None
     
-    if has_injection and injection_data is not None:
+    if has_injection:
         # Now add the interactive lines (Injection) using standard Bokeh
         # These remain as vectors so they are sharp and interact fast with JS
         
