@@ -285,11 +285,22 @@ class Obtainer:
 
 @dataclass
 class NoiseObtainer(Obtainer):
-    """Obtainer for noise data (white, colored, pseudo-real, or real)."""
+    """
+    Obtainer for noise data (white, colored, pseudo-real, or real).
+
+    Real noise with no ``ifo_data_obtainer`` uses public GWOSC data: O1, O2 and O3,
+    DATA with the BURST_CAT1 and BURST_CAT2 vetoes, with known events and Gravity Spy
+    glitches removed.
+    """
     noise_type: NoiseType = NoiseType.REAL
-    
+
     def __post_init__(self):
         super().__post_init__()
+        if self.noise_type == NoiseType.REAL and self.ifo_data_obtainer is None:
+            self.ifo_data_obtainer = gf.IFODataObtainer(
+                data_quality=gf.DataQuality.BEST,
+                data_labels=[gf.DataLabel.NOISE],
+            )
     
     def __call__(
             self,

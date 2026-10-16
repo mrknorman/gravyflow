@@ -62,8 +62,12 @@ class TestTransientSegmentRetrieval:
         assert len(o3_events) >= 50, f"Expected >=50 O3 events, got {len(o3_events)}"
 
 
+@pytest.mark.network
 class TestTransientDatasetOutput:
-    """Test that Dataset in TRANSIENT mode returns correct data."""
+    """Test that Dataset in TRANSIENT mode returns correct data.
+
+    These request 8192 Hz real data, which needs GWOSC's 16 kHz strain files.
+    """
     
     def test_dataset_creation_with_transient_mode(self):
         """Verify Dataset can be created with TRANSIENT mode config."""

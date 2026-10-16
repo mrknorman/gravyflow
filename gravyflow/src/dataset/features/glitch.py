@@ -1,103 +1,36 @@
-from enum import Enum, IntEnum, auto
-from typing import Union, List, TYPE_CHECKING
-from pathlib import Path
-import time
-import hashlib
-#import threading
-import queue
+"""
+Glitch times, labels and segments from the public Gravity Spy catalogue.
+
+Glitches come from the Gravity Spy machine-learning classifications released on Zenodo
+(Glanzer et al. 2023, Class. Quantum Grav. 40 065004; doi:10.5281/zenodo.5649212,
+v1.0.0, CC-BY-4.0). See ``gravity_spy`` for the download, verification and cache.
+
+Defaults: every class except ``No_Glitch`` (which marks a trigger that is not a
+glitch), and ``ml_confidence >= 0.9``.
+"""
+from enum import IntEnum
+from typing import Dict, List, Optional, Union
 
 import logging
 logger = logging.getLogger(__name__)
 
 import numpy as np
-import pandas as pd
-from gwpy.table import GravitySpyTable
 
 from gravyflow.src.dataset.acquisition.base import ObservingRun
 from gravyflow.src.dataset.conditioning.detector import IFO
+from gravyflow.src.dataset.features import gravity_spy
+from gravyflow.src.dataset.features.gravity_spy import DEFAULT_MIN_ML_CONFIDENCE
 
-if TYPE_CHECKING:
-    import gravyflow as gf
-
-# Import PATH directly to avoid circular import
-from gravyflow import PATH as GF_PATH
-
-
-def _get_cache_path(selection: str) -> Path:
-    """Generate cache file path based on selection hash."""
-    cache_dir = GF_PATH / "res" / "glitch_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Hash the selection string for a unique filename
-    selection_hash = hashlib.md5(selection.encode()).hexdigest()[:16]
-    return cache_dir / f"glitch_query_{selection_hash}.csv"
-
-
-def fetch_event_times(selection, max_retries=10, use_cache=True):
-    """
-    Fetch glitch event times from GravitySpy with local caching.
-    
-    Cache files are stored in gravyflow/res/glitch_cache/ for fast reuse.
-    """
-    # Check cache first
-    if use_cache:
-        cache_path = _get_cache_path(selection)
-        if cache_path.exists():
-            try:
-                data = pd.read_csv(cache_path)
-                return data
-            except Exception as e:
-                print(f"Cache read failed: {e}, fetching from server...")
-    
-    attempts = 0
-    while True:
-        try:
-            # Attempt to fetch the data
-            data = GravitySpyTable.fetch(
-                "gravityspy",
-                "glitches",
-                columns=["event_time", "duration"],
-                selection=selection
-            ).to_pandas()
-
-            if attempts == 0 and "ml_label" in selection:
-                 print(f"DEBUG: Found {len(data)} events for selection='{selection}'")
-
-            # Cache the result
-            if use_cache and len(data) > 0:
-                try:
-                    cache_path = _get_cache_path(selection)
-                    data.to_csv(cache_path, index=False)
-                except Exception as e:
-                    print(f"Cache write failed: {e}")
-
-            return data
-
-        except Exception as e:
-            msg = str(e)
-            print(f"Failed to acquire gravity spy data because: {msg} retrying...")
-            
-            # Don't retry on syntax errors
-            if "Cannot parse filter definition" in msg or "SyntaxError" in msg or "unterminated string literal" in msg:
-                raise e
-                
-            # If an exception occurs, increment the attempts counter
-            attempts += 1
-            # Check if the maximum number of retries has been reached
-            if attempts >= max_retries:
-                raise Exception(f"Max retries reached: {max_retries}") from e
-            
-            # Wait for 30 seconds before retrying
-            time.sleep(30)
-    
-    return -1  # If successful, return the data
 
 class GlitchType(IntEnum):
     """
-    Glitch types from GravitySpy.
-    
+    Glitch classes from Gravity Spy.
+
     Using IntEnum allows direct .value access for integer labels,
     eliminating the need for list(GlitchType).index() lookups.
+
+    O1 and O2 use 22 classes. O3 adds BLIP_LOW_FREQUENCY and FAST_SCATTERING.
+    The values of the first twenty classes are fixed; later classes are appended.
     """
     AIR_COMPRESSOR = 0
     BLIP = 1
@@ -119,8 +52,20 @@ class GlitchType(IntEnum):
     VIOLIN_MODE = 17
     WANDERING_LINE = 18
     WHISTLE = 19
+    LINES_1080 = 20
+    RIPPLES_1400 = 21
+    BLIP_LOW_FREQUENCY = 22
+    FAST_SCATTERING = 23
 
-# Mapping from GlitchType enum to GravitySpy database ml_label values
+    @classmethod
+    def from_gravity_spy_label(cls, label: str) -> "GlitchType":
+        """The GlitchType for a Gravity Spy ``ml_label``, e.g. "1080Lines"."""
+        try:
+            return _GLITCH_TYPE_BY_LABEL[label]
+        except KeyError:
+            raise ValueError(f"Unknown Gravity Spy label {label!r}.") from None
+
+# Mapping from GlitchType enum to Gravity Spy ml_label values
 GLITCH_TYPE_DB_NAMES = {
     GlitchType.AIR_COMPRESSOR: "Air_Compressor",
     GlitchType.BLIP: "Blip",
@@ -142,55 +87,85 @@ GLITCH_TYPE_DB_NAMES = {
     GlitchType.VIOLIN_MODE: "Violin_Mode",
     GlitchType.WANDERING_LINE: "Wandering_Line",
     GlitchType.WHISTLE: "Whistle",
+    GlitchType.LINES_1080: "1080Lines",
+    GlitchType.RIPPLES_1400: "1400Ripples",
+    GlitchType.BLIP_LOW_FREQUENCY: "Blip_Low_Frequency",
+    GlitchType.FAST_SCATTERING: "Fast_Scattering",
 }
+
+_GLITCH_TYPE_BY_LABEL = {label: glitch_type for glitch_type, label in GLITCH_TYPE_DB_NAMES.items()}
+
+#: Classes used when none are requested: every class but NO_GLITCH.
+DEFAULT_GLITCH_TYPES = [glitch_type for glitch_type in GlitchType if glitch_type != GlitchType.NO_GLITCH]
+
+
+def _resolve_bounds(observing_run, start_gps_time, end_gps_time):
+    if start_gps_time is None:
+        start_gps_time = observing_run.value.start_gps_time
+    if end_gps_time is None:
+        end_gps_time = observing_run.value.end_gps_time
+    return start_gps_time, end_gps_time
+
+
+def _resolve_types(glitch_types) -> List[GlitchType]:
+    if not glitch_types:
+        return list(DEFAULT_GLITCH_TYPES)
+    if not isinstance(glitch_types, (list, tuple)):
+        glitch_types = [glitch_types]
+    return [GlitchType(glitch_type) for glitch_type in glitch_types]
+
+
+def get_glitch_catalogue(
+    ifo: IFO,
+    observing_run: ObservingRun = ObservingRun.O3,
+    glitch_types: Union[List[GlitchType], GlitchType] = None,
+    start_gps_time: float = None,
+    end_gps_time: float = None,
+    min_ml_confidence: float = DEFAULT_MIN_ML_CONFIDENCE,
+) -> Dict[str, np.ndarray]:
+    """
+    Glitches of one detector with their Gravity Spy metadata.
+
+    Args:
+        ifo: Detector (H1 or L1).
+        observing_run: Run whose bounds are used when start/end are not given.
+        glitch_types: Classes to keep. None keeps every class but NO_GLITCH.
+        start_gps_time, end_gps_time: Keep glitches whose peak time lies inside.
+        min_ml_confidence: Keep classifications with at least this confidence.
+
+    Returns:
+        Arrays sorted by time: ``event_time`` (peak GPS), ``start_time``, ``duration``,
+        ``peak_frequency``, ``snr``, ``ml_confidence`` and ``label`` (GlitchType values).
+    """
+    start_gps_time, end_gps_time = _resolve_bounds(observing_run, start_gps_time, end_gps_time)
+    glitch_types = _resolve_types(glitch_types)
+    rows = gravity_spy.query(
+        ifo.name,
+        start_gps_time,
+        end_gps_time,
+        labels=[GLITCH_TYPE_DB_NAMES[glitch_type] for glitch_type in glitch_types],
+        min_ml_confidence=min_ml_confidence,
+    )
+    labels = np.array(
+        [_GLITCH_TYPE_BY_LABEL[label].value for label in rows.pop("ml_label")],
+        dtype=np.int32,
+    )
+    rows["label"] = labels
+    return rows
+
 
 def get_glitch_times(
     ifo: IFO,
     observing_run: ObservingRun = ObservingRun.O3,
     glitch_types: Union[List[GlitchType], GlitchType] = None,
     start_gps_time : float = None,
-    end_gps_time : float = None
+    end_gps_time : float = None,
+    min_ml_confidence: float = DEFAULT_MIN_ML_CONFIDENCE,
 ) -> np.ndarray:
-    
-    if start_gps_time is None:
-        start_gps_time = observing_run.value.start_gps_time
-    if end_gps_time is None:
-        end_gps_time = observing_run.value.end_gps_time
-    
-    ifo = ifo.name
-
-    # Initialize an empty list to hold the data from each query.
-    all_data = []
-    
-    # This condition checks if glitch_types is not None and not an empty list.
-    if glitch_types:
-        # Ensure glitch_types is a list for easier processing.
-        if not isinstance(glitch_types, list):
-            glitch_types = [glitch_types]
-
-        # Loop over each glitch type and perform individual queries.
-        for glitch_type in glitch_types:
-            # BLACKLIST: Wandering_Line is broken in GravitySpy (unterminated string literal error)
-            if glitch_type == GlitchType.WANDERING_LINE:
-                continue
-                
-            glitch_name = GLITCH_TYPE_DB_NAMES[glitch_type]
-            selection = f"ifo = '{ifo}' AND event_time >= {start_gps_time} AND event_time <= {end_gps_time} AND ml_label = '{glitch_name}' AND No_Glitch < 0.1"
-            
-            data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
-            
-            # Append the results to the all_data list.
-            all_data.append(data)
-
-        # Concatenate all the numpy arrays from each query into one array.
-        return np.concatenate(all_data)
-    else:
-        # If glitch_types is None or an empty list, it selects all glitch types.
-        selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && No_Glitch<0.1"
-
-        data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
-
-        return data
+    """Peak GPS times of the selected glitches (see ``get_glitch_catalogue``)."""
+    return get_glitch_catalogue(
+        ifo, observing_run, glitch_types, start_gps_time, end_gps_time, min_ml_confidence
+    )["event_time"]
 
 
 def get_glitch_times_with_labels(
@@ -199,181 +174,78 @@ def get_glitch_times_with_labels(
     glitch_types: Union[List[GlitchType], GlitchType] = None,
     start_gps_time: float = None,
     end_gps_time: float = None,
-    balanced: bool = False
+    balanced: bool = False,
+    min_ml_confidence: float = DEFAULT_MIN_ML_CONFIDENCE,
 ) -> tuple:
     """
     Get glitch times with type labels for classification.
-    
+
     Args:
         ifo: Detector to query
         observing_run: Observing run for default time bounds
-        glitch_types: List of glitch types to include. If None, includes all types.
+        glitch_types: Classes to include. None includes every class but NO_GLITCH.
         start_gps_time: Start GPS time (defaults to observing run start)
         end_gps_time: End GPS time (defaults to observing run end)
-        balanced: If True, sample equally from each type
-        
-    Returns:
-        Tuple of (gps_times, type_indices) where type_indices are integers
-        corresponding to GlitchType enum order (0-19)
-    """
-    if start_gps_time is None:
-        start_gps_time = observing_run.value.start_gps_time
-    if end_gps_time is None:
-        end_gps_time = observing_run.value.end_gps_time
-    
-    # Get all GlitchType values or use provided subset
-    # Exclude NO_GLITCH by default as it's a placeholder (always returns 0 results with No_Glitch < 0.1 filter)
-    if glitch_types is None:
-        glitch_types = [gt for gt in GlitchType if gt != GlitchType.NO_GLITCH and gt != GlitchType.CHIRP]
-    elif not isinstance(glitch_types, list):
-        glitch_types = [glitch_types]
-    
-    ifo_name = ifo.name
-    all_times = []
-    all_labels = []
-    
-    for glitch_type in glitch_types:
-        # BLACKLIST: Wandering_Line is broken in GravitySpy
-        if glitch_type == GlitchType.WANDERING_LINE:
-            continue
+        balanced: If True, oversample every non-empty class to the largest
+        min_ml_confidence: Keep classifications with at least this confidence
 
-        # Get enum index (0-19)
-        type_index = glitch_type.value
-        glitch_name = GLITCH_TYPE_DB_NAMES[glitch_type]
-        
-        selection = f"ifo = '{ifo_name}' AND event_time >= {start_gps_time} AND event_time <= {end_gps_time} AND ml_label = '{glitch_name}' AND No_Glitch < 0.1"
-        
-        logger.debug(f"Fetching {glitch_name} glitches: {selection}")
-        
-        try:
-            data = fetch_event_times(selection, max_retries=10)['event_time'].to_numpy()
-            all_times.append(data)
-            all_labels.append(np.full(len(data), type_index, dtype=np.int32))
-            print(f"DEBUG: Found {len(data)} {glitch_name} glitches for {ifo_name}", flush=True)
-        except Exception as e:
-            print(f"WARNING: Failed to fetch {glitch_name}: {e}", flush=True)
-            all_times.append(np.array([]))
-            all_labels.append(np.array([], dtype=np.int32))
-            continue
-    
-    if not all_times:
-        return np.array([]), np.array([], dtype=np.int32)
-    
-    times = np.concatenate(all_times)
-    labels = np.concatenate(all_labels)
-    
-    # Balance classes if requested
-    if balanced and len(all_times) > 1:
-        # Filter out empty classes for balancing purposes
-        non_empty_indices = [i for i, t in enumerate(all_times) if len(t) > 0]
-        
-        if non_empty_indices:
-             # Find MAX count across NON-EMPTY types for oversampling
-            max_count = max(len(all_times[i]) for i in non_empty_indices)
-            
-            print(f"DEBUG: Non-empty indices: {non_empty_indices}")
-            print(f"DEBUG: Max count: {max_count}")
-            
-            balanced_times = []
-            balanced_labels = []
-            
-            for i, (type_times, type_idx) in enumerate(zip(all_times, [gt.value for gt in glitch_types])):
-                if len(type_times) > 0:
-                    # Oversample to max_count with replacement
-                    indices = np.random.choice(len(type_times), max_count, replace=True)
-                    balanced_times.append(type_times[indices])
-                    balanced_labels.append(np.full(max_count, type_idx, dtype=np.int32))
-            
-            times = np.concatenate(balanced_times)
-            labels = np.concatenate(balanced_labels)
-            print(f"DEBUG: Balanced total times (Oversampled): {len(times)}")
-        else:
-            # All empty
-            print("DEBUG: All classes empty")
-            times = np.array([])
-            labels = np.array([], dtype=np.int32)
-    
+    Returns:
+        Tuple of (gps_times, type_indices), where type_indices are GlitchType values
+    """
+    catalogue = get_glitch_catalogue(
+        ifo, observing_run, glitch_types, start_gps_time, end_gps_time, min_ml_confidence
+    )
+    times, labels = catalogue["event_time"], catalogue["label"]
+
+    if balanced and len(times) > 0:
+        classes = [value for value in np.unique(labels)]
+        max_count = max(int(np.sum(labels == value)) for value in classes)
+        balanced_times, balanced_labels = [], []
+        for value in classes:
+            class_times = times[labels == value]
+            indices = np.random.choice(len(class_times), max_count, replace=True)
+            balanced_times.append(class_times[indices])
+            balanced_labels.append(np.full(max_count, value, dtype=np.int32))
+        times = np.concatenate(balanced_times)
+        labels = np.concatenate(balanced_labels)
+
     return times, labels
-    
+
 def get_glitch_segments(
     ifo: IFO,
     observing_run: ObservingRun = ObservingRun.O3,
     glitch_types: Union[List[GlitchType], GlitchType] = None,
     start_gps_time : float = None,
     end_gps_time : float = None,
+    min_ml_confidence: float = DEFAULT_MIN_ML_CONFIDENCE,
     ) -> np.ndarray:
-    
-    if start_gps_time is None:
-        start_gps_time = observing_run.value.start_gps_time
-    if end_gps_time is None:
-        end_gps_time = observing_run.value.end_gps_time
-    
-    ifo = ifo.name
+    """
+    (N, 2) array of [peak time, peak time + duration] for the selected glitches.
+    """
+    catalogue = get_glitch_catalogue(
+        ifo, observing_run, glitch_types, start_gps_time, end_gps_time, min_ml_confidence
+    )
+    return np.stack(
+        [catalogue["event_time"], catalogue["event_time"] + catalogue["duration"]], axis=1
+    )
 
-    # Initialize an empty list to hold the data from each query.
-    all_data = []
-    
-    # This condition checks if glitch_types is not None and not an empty list.
-    if glitch_types:
-        # Ensure glitch_types is a list for easier processing.
-        if not isinstance(glitch_types, list):
-            glitch_types = [glitch_types]
-
-        # Loop over each glitch type and perform individual queries.
-        for glitch_type in glitch_types:
-            # BLACKLIST: Wandering_Line is broken in GravitySpy
-            if glitch_type == GlitchType.WANDERING_LINE:
-                continue
-                
-            glitch_name = GLITCH_TYPE_DB_NAMES[glitch_type]
-            selection = f"ifo = '{ifo}' AND event_time >= {start_gps_time} AND event_time <= {end_gps_time} AND ml_label = '{glitch_name}' AND No_Glitch < 0.1"
-            
-            data = fetch_event_times(selection, max_retries=10)
-            
-            # Calculate 'end_time' by adding 'duration' to 'start_time'
-            data['end_time'] = data['event_time'] + data['duration'] 
-            data['start_time'] = data['event_time']
-
-            # Select the 'start_time' and 'end_time' and convert to a NumPy array
-            data = data[['start_time', 'end_time']].to_numpy()
-            
-            # Append the results to the all_data list.
-            all_data.append(data)
-
-        # Concatenate all the numpy arrays from each query into one array.
-        return np.concatenate(all_data)
-    else:
-        # If glitch_types is None or an empty list, it selects all glitch types.
-        selection = f"ifo={ifo} && event_time>{start_gps_time} & event_time<{end_gps_time} && No_Glitch<0.1"
-
-        data = fetch_event_times(selection, max_retries=10)
-        
-        # Calculate 'end_time' by adding 'duration' to 'start_time'
-        
-        data['end_time'] = data['event_time'] + data['duration']
-        data['start_time'] = data['event_time']
-
-        # Select the 'start_time' and 'end_time' and convert to a NumPy array
-        data = data[['start_time', 'end_time']].to_numpy()
-
-        return data
 def get_glitch_type_from_index(index: int) -> Union[GlitchType, None]:
     """
     Convert integer index back to GlitchType enum.
-    
+
     Args:
-        index: Integer index (0-19) or -1 for unknown.
-        
+        index: GlitchType value, or -1 for unknown.
+
     Returns:
         GlitchType enum member or None if index is -1.
-        
+
     Raises:
         ValueError: If index is out of range.
     """
     if index == -1:
         return None
-        
+
     try:
-        return list(GlitchType)[index]
-    except IndexError:
+        return GlitchType(int(index))
+    except ValueError:
         raise ValueError(f"Invalid glitch type index: {index}. Must be between 0 and {len(GlitchType)-1}.")

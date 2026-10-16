@@ -650,13 +650,17 @@ def test_noise_obtainer_default_groups():
 
 
 def test_noise_obtainer_real_without_ifo_obtainer():
-    """Test that REAL noise without ifo_data_obtainer raises ValueError."""
+    """REAL noise without an ifo_data_obtainer defaults to public GWOSC data;
+    removing the obtainer afterwards raises ValueError."""
     noise = gf.NoiseObtainer(
         noise_type=gf.NoiseType.REAL,
         ifos=gf.IFO.L1,
-        ifo_data_obtainer=None  # Explicitly no obtainer
+        ifo_data_obtainer=None  # No obtainer: the public-data default is built
     )
-    
+    assert noise.ifo_data_obtainer is not None
+    assert noise.ifo_data_obtainer.data_labels == [gf.DataLabel.NOISE]
+
+    noise.ifo_data_obtainer = None
     with pytest.raises(ValueError, match="No IFO obtainer object present"):
         next(noise())
 

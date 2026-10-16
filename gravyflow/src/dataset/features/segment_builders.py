@@ -7,7 +7,7 @@ TransientSegments with acquisition boundaries already set.
 from typing import List
 from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.acquisition.base import DataLabel, ObservingRun
-from gravyflow.src.dataset.features.glitch import GlitchType, get_glitch_times_with_labels, get_glitch_type_from_index
+from gravyflow.src.dataset.features.glitch import GlitchType, get_glitch_catalogue, get_glitch_type_from_index
 from gravyflow.src.dataset.features.event import EventConfidence, SourceType, get_events_with_params
 from gravyflow.src.utils.gps import gps_to_key
 import gravyflow as gf
@@ -44,18 +44,19 @@ def build_glitch_segments(
     
     for run in observing_runs:
         for ifo in ifos:
-            # Fetch glitch times and labels for this IFO/run
-            gps_times, labels = get_glitch_times_with_labels(
+            # Glitches and their Gravity Spy metadata for this IFO/run
+            catalogue = get_glitch_catalogue(
                 ifo=ifo,
                 observing_run=run,
                 glitch_types=glitch_types
             )
-            
-            for gps_time, label_idx in zip(gps_times, labels):
+
+            for i, (gps_time, label_idx) in enumerate(zip(catalogue["event_time"], catalogue["label"])):
                 kind = get_glitch_type_from_index(label_idx)
                 if kind is None:
                     continue  # Skip invalid labels
-                
+                gps_time = float(gps_time)
+
                 segment = TransientSegment(
                     gps_key=gps_to_key(gps_time),
                     transient_gps_time=gps_time,
@@ -67,7 +68,11 @@ def build_glitch_segments(
                     seen_in=[ifo],  # Glitches are single-detector
                     confidence=None,
                     name=None,
-                    weight=1.0
+                    weight=1.0,
+                    snr=float(catalogue["snr"][i]),
+                    peak_freq=float(catalogue["peak_frequency"][i]),
+                    duration=float(catalogue["duration"][i]),
+                    ml_confidence=float(catalogue["ml_confidence"][i]),
                 )
                 segments.append(segment)
     

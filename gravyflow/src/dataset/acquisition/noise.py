@@ -7,7 +7,7 @@ noise data from long IFO segments (NOISE mode).
 
 import logging
 import hashlib
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Tuple, Union
 
 import numpy as np
 from numpy.random import default_rng
@@ -47,8 +47,9 @@ class NoiseDataObtainer(BaseDataObtainer):
             logging_level: int = logging.WARNING,
             augmentations: List = None,  # List of augmentation instances
             prefetch_segments: int = 16,
+            gwosc_flags: Optional[Tuple[str, ...]] = None,
         ):
-        
+
         super().__init__(
             data_quality=data_quality,
             data_labels=data_labels,
@@ -62,6 +63,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             logging_level=logging_level,
             augmentations=augmentations,
             prefetch_segments=prefetch_segments,
+            gwosc_flags=gwosc_flags,
         )
         
         self.acquisition_mode = AcquisitionMode.NOISE

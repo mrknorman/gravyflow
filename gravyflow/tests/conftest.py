@@ -46,9 +46,16 @@ def pytest_addoption(parser):
         "--plot", action="store_true", default=False,
         help="Enable plotting of results"
     )
+    parser.addoption(
+        "--network", action="store_true", default=False,
+        help="Run tests marked 'network', which query GWOSC and Zenodo"
+    )
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "slow: marks tests as slow (skipped on small runs)")
+    config.addinivalue_line(
+        "markers", "network: needs internet access to GWOSC or Zenodo (opt-in: --network)"
+    )
 
 def pytest_collection_modifyitems(config, items):
     if config.getoption("--runsize") == "small":
@@ -56,6 +63,59 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
+    if not config.getoption("--network"):
+        skip_network = pytest.mark.skip(reason="Network test: run with --network")
+        for item in items:
+            if "network" in item.keywords:
+                item.add_marker(skip_network)
+
+
+#: Public sources that only tests run with --network may query.
+_NETWORK_ONLY_URLS = (
+    "gwosc.org/timeline/",
+    "gwosc.org/api/v2/timelines",
+    "zenodo.org/api/records/5649212",
+)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def public_sources_need_network_option(request):
+    """
+    Without --network, the GWOSC timeline and the Gravity Spy release are refused
+    and their caches start empty, so no test depends on them, or on what this
+    machine downloaded before, unless it is marked 'network'.
+    """
+    if request.config.getoption("--network"):
+        yield
+        return
+
+    import tempfile
+    import requests
+
+    previous_cache_dir = os.environ.get("GRAVYFLOW_CACHE_DIR")
+    cache_dir = tempfile.TemporaryDirectory(prefix="gravyflow-test-cache-")
+    os.environ["GRAVYFLOW_CACHE_DIR"] = cache_dir.name
+
+    original_request = requests.Session.request
+
+    def guarded_request(session, method, url, *args, **kwargs):
+        if any(fragment in str(url) for fragment in _NETWORK_ONLY_URLS):
+            raise requests.ConnectionError(
+                f"{url} is reachable only in test runs with --network."
+            )
+        return original_request(session, method, url, *args, **kwargs)
+
+    requests.Session.request = guarded_request
+    try:
+        yield
+    finally:
+        requests.Session.request = original_request
+        if previous_cache_dir is None:
+            os.environ.pop("GRAVYFLOW_CACHE_DIR", None)
+        else:
+            os.environ["GRAVYFLOW_CACHE_DIR"] = previous_cache_dir
+        cache_dir.cleanup()
+
 
 @pytest.fixture
 def data_obtainer():

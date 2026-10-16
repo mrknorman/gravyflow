@@ -6,7 +6,7 @@ selects the appropriate obtainer class (NoiseDataObtainer or TransientDataObtain
 based on the data_labels parameter.
 """
 
-from typing import Union, List
+from typing import Optional, Tuple, Union, List
 import logging
 
 from .base import DataLabel, DataQuality, SegmentOrder, ObservingRun, SamplingMode
@@ -32,7 +32,9 @@ def IFODataObtainer(
         # Class balancing
         balanced_glitch_types: bool = False,
         # Specific Names
-        event_names: List[str] = None
+        event_names: List[str] = None,
+        # Real-noise segment selection
+        gwosc_flags: Optional[Tuple[str, ...]] = None,
     ):
     """
     Factory function that returns the appropriate IFO data obtainer.
@@ -56,7 +58,10 @@ def IFODataObtainer(
         prefetch_segments: Number of segments to prefetch
         balanced_glitch_types: Enable balanced sampling of glitch types
         event_names: Specific event names to acquire (TRANSIENT only)
-        
+        gwosc_flags: GWOSC timeline flags whose intersection defines usable noise
+            times (NOISE only). None uses DATA with BURST_CAT1 and BURST_CAT2
+            applied; gf.GWOSC_DATA_FLAGS and gf.GWOSC_CBC_FLAGS are alternatives.
+
     Returns:
         NoiseDataObtainer or TransientDataObtainer instance
     """
@@ -84,6 +89,7 @@ def IFODataObtainer(
             logging_level=logging_level,
             augmentations=augmentations,
             prefetch_segments=prefetch_segments,
+            gwosc_flags=gwosc_flags,
         )
     else:
         # TRANSIENT mode for events/glitches

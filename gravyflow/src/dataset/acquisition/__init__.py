@@ -36,6 +36,14 @@ from .base import (
     BaseDataObtainer,
 )
 
+from .gwosc_data import (
+    GWOSC_RUNS,
+    GWOSC_DATA_FLAGS,
+    GWOSC_BURST_FLAGS,
+    GWOSC_CBC_FLAGS,
+    DEFAULT_GWOSC_FLAGS,
+    UpsamplingRefused,
+)
 from .noise import NoiseDataObtainer
 from .transient import TransientDataObtainer
 from .transient_segment import TransientSegment
@@ -67,6 +75,13 @@ __all__ = [
     'GPS_PRECISION_DECIMALS',
     'GPS_TOLERANCE_SECONDS',
     'SEGMENT_EPSILON_SECONDS',
+    # Public GWOSC sources
+    'GWOSC_RUNS',
+    'GWOSC_DATA_FLAGS',
+    'GWOSC_BURST_FLAGS',
+    'GWOSC_CBC_FLAGS',
+    'DEFAULT_GWOSC_FLAGS',
+    'UpsamplingRefused',
     # Utility functions
     'ensure_even',
     'ifo_canonical_key',

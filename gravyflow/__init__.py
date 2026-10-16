@@ -95,7 +95,8 @@ from .src.dataset.conditioning.detector import IFO, Network, project_wave
 from .src.dataset.acquisition import (
     DataQuality, DataLabel, SegmentOrder, AcquisitionMode, SamplingMode, ObservingRun,
     IFOData, IFODataObtainer, NoiseDataObtainer, TransientDataObtainer,
-    SignReversal, TimeReversal, RandomShift, AddNoise, default_augmentations
+    SignReversal, TimeReversal, RandomShift, AddNoise, default_augmentations,
+    GWOSC_DATA_FLAGS, GWOSC_BURST_FLAGS, GWOSC_CBC_FLAGS, DEFAULT_GWOSC_FLAGS,
 )
 from .src.dataset.noise.noise import NoiseType, Obtainer, NoiseObtainer
 from .src.dataset.curriculum import Curriculum, CurriculumSchedule, CurriculumProgressCallback
@@ -118,7 +119,7 @@ from .src.utils.plotting import (
     generate_segment_timeline_plot, generate_example_extraction_plot
 )
 from .src.validate import Validator, ValidationConfig
-from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_times_with_labels, get_glitch_segments, get_glitch_type_from_index
+from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_times_with_labels, get_glitch_segments, get_glitch_type_from_index, get_glitch_catalogue
 from .src.dataset.features.glitch_cache import TransientCache, generate_transient_cache_path
 from .src.dataset.features.event import (
     EventConfidence, SourceType, get_confident_event_times, get_marginal_event_times, 

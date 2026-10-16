@@ -794,7 +794,10 @@ class TransientDataObtainer(BaseDataObtainer):
         
         # Download at higher of requested or cache sample rate (can downsample but not upsample)
         download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
-        
+        # Refuse rates no public source holds, before the zero-fill fallback below.
+        from .gwosc_data import gwosc_sample_rate_hertz
+        gwosc_sample_rate_hertz(download_sample_rate)
+
         # Define universal IFO names for cache indexing
         universal_ifo_names = list(TransientDefaults.UNIVERSAL_IFOS)
         download_ifos_universal = [gf.IFO[name] for name in universal_ifo_names]
@@ -855,8 +858,11 @@ class TransientDataObtainer(BaseDataObtainer):
                         segment.end_gps_time,
                         ifo,
                         frame_type,
-                        channel
+                        channel,
+                        sample_rate_hertz=download_sample_rate,
                     )
+                    if segment_data.sample_rate.value < download_sample_rate:
+                        raise ValueError("source rate below the download rate")
                     resampled = segment_data.resample(download_sample_rate)
                     data_list.append(resampled.value)
                     start_gps_list.append(float(segment.start_gps_time))
