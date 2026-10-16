@@ -321,31 +321,6 @@ class TestSegmentProcessing:
             cache_segments=False
         )
     
-    def test_pad_gps_times_with_veto_window_normal(self, obtainer):
-        """Test padding GPS times creates correct segments."""
-        gps_times = np.array([1000.0, 2000.0, 3000.0])
-        
-        segments = obtainer.pad_gps_times_with_veto_window(
-            gps_times,
-            start_padding_seconds=2.0,
-            end_padding_seconds=2.0
-        )
-        
-        expected = np.array([
-            [998.0, 1002.0],
-            [1998.0, 2002.0],
-            [2998.0, 3002.0]
-        ])
-        np.testing.assert_array_equal(segments, expected)
-    
-    def test_pad_gps_times_empty_input(self, obtainer):
-        """Test padding empty GPS times returns empty array (line 886)."""
-        gps_times = np.array([])
-        
-        segments = obtainer.pad_gps_times_with_veto_window(gps_times)
-        
-        assert segments.shape == (0, 2)
-    
     def test_veto_time_segments(self, obtainer):
         """Test veto_time_segments removes overlapping regions."""
         segments = np.array([
@@ -1434,27 +1409,6 @@ class TestGetSegmentTimes:
 
 
 @pytest.mark.slow
-class TestGetAllEventTimes:
-    """Tests for get_all_event_times (lines 477-503)."""
-    
-    def test_get_all_event_times_with_cache(self):
-        """Test fetching event times, uses cache if available (lines 480-503)."""
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.NOISE, gf.DataLabel.EVENTS],
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
-        )
-        
-        # This should either load from cache or fetch from catalogues
-        event_times = obtainer.get_all_event_times()
-        
-        assert isinstance(event_times, np.ndarray)
-        # Should have many events across all GWTC catalogues
-        assert len(event_times) > 50
-
-
-@pytest.mark.slow
 class TestRemoveUnwantedSegments:
     """Tests for remove_unwanted_segments (lines 505-555)."""
     
@@ -1476,15 +1430,14 @@ class TestRemoveUnwantedSegments:
         obtainer.start_gps_times = [1238166018.0]
         obtainer.end_gps_times = [1238166018.0 + 7200]
         
-        result_segments, feature_times = obtainer.remove_unwanted_segments(
+        result_segments = obtainer.remove_unwanted_segments(
             gf.IFO.L1,
             test_segments.copy()
         )
         
         assert isinstance(result_segments, np.ndarray)
-        assert isinstance(feature_times, dict)
-        assert gf.DataLabel.EVENTS in feature_times
-        assert gf.DataLabel.GLITCHES in feature_times
+        assert np.all(result_segments[:, 0] >= test_segments[0, 0])
+        assert np.all(result_segments[:, 1] <= test_segments[0, 1])
 
 
 
@@ -2253,18 +2206,10 @@ class TestFeatureModePipeline:
         
         This tests the full flow:
         1. Create obtainer with EVENTS label (no NOISE)
-        2. Mock event times to avoid network calls
-        3. Mock segment queries
-        4. Verify TRANSIENT mode is triggered
-        5. Verify auto-precaching info message is logged
+        2. Mock segment queries
+        3. Verify TRANSIENT mode is triggered
+        4. Verify auto-precaching info message is logged
         """
-        # Create mock event times
-        mock_event_times = np.array([
-            1238166018.0,  # GW190412
-            1239917954.0,  # GW190425
-            1240215503.0,  # GW190503
-        ])
-        
         # Create mock valid segments that contain our events
         # Each segment is [start, end] with enough padding
         mock_segments = np.array([
@@ -2284,10 +2229,9 @@ class TestFeatureModePipeline:
         assert gf.DataLabel.EVENTS in obtainer.data_labels
         
         # Mock the methods that would require network
-        with patch.object(obtainer, 'get_all_event_times', return_value=mock_event_times):
-            with patch.object(obtainer, 'get_all_segment_times', return_value=mock_segments):
-                # Verify we can access the obtainer's data labels
-                assert len(obtainer.data_labels) > 0
+        with patch.object(obtainer, 'get_all_segment_times', return_value=mock_segments):
+            # Verify we can access the obtainer's data labels
+            assert len(obtainer.data_labels) > 0
         
         obtainer.close()
     

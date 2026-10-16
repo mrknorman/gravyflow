@@ -1,8 +1,16 @@
 """
-Event acquisition for gravitational wave events from GWTC catalogs.
+Gravitational-wave events from the GWOSC event API.
 
-Provides EventConfidence enum (CONFIDENT/MARGINAL) for catalog confidence level,
-plus functions to fetch event times from GWTC catalogs.
+``get_event_catalogue`` is the one event list behind the noise vetoes, the glitch
+catalogue's event exclusion and the event-time functions: every event in every
+catalogue GWOSC's event API lists (https://gwosc.org/eventapi/json/). That is the GWTC
+releases (confident, marginal and auxiliary, and the cumulative GWTC table) and also
+the other lists GWOSC hosts, such as O3_IMBH_marginal, IAS-O3a, O3_Discovery_Papers,
+O4_Discovery_Papers and O1_O2-Preliminary: the conservative reading of "real events",
+at a negligible cost in livetime.
+
+Also provides EventConfidence (CONFIDENT/MARGINAL) and the parameter-estimation queries
+used to build event examples.
 """
 
 from enum import Enum, IntEnum, auto
@@ -12,8 +20,6 @@ import logging
 
 import numpy as np
 from gwpy.table import EventTable
-
-import gravyflow as gf
 
 
 class EventConfidence(IntEnum):
@@ -52,10 +58,6 @@ MARGINAL_CATALOGS = [
 ]
 
 
-#: Every GWOSC catalogue whose events are vetoed: confident, marginal and auxiliary
-#: GWTC releases, the cumulative GWTC table and GWTC-4.0.
-VETO_CATALOGS = CONFIDENT_CATALOGS + MARGINAL_CATALOGS + ["GWTC-4.0"]
-
 #: An event's veto starts where its signal enters the band at this frequency.
 EVENT_VETO_LOW_FREQUENCY_HERTZ = 20.0
 #: The leading-order chirp time is multiplied by this factor to cover higher-order and
@@ -72,8 +74,8 @@ EVENT_VETO_PADDING_SECONDS = 2.0
 #: an upper bound.
 UNKNOWN_EVENT_CHIRP_MASS_SOLAR = 0.87
 
-#: Version of the cached event table; bump it to re-fetch.
-_EVENT_CATALOGUE_FORMAT = 1
+#: Version of the cached event table's format; bumping it re-fetches every cache.
+_EVENT_CATALOGUE_FORMAT = 2
 
 _SOLAR_MASS_SECONDS = 4.925490947e-6  # G M_sun / c^3
 
@@ -120,29 +122,61 @@ def _row_chirp_mass(row) -> float:
     return _row_value(row, "chirp_mass")
 
 
-def get_event_catalogue(use_cache: bool = True) -> dict:
-    """
-    Every event in ``VETO_CATALOGS``, one row per catalogue entry.
+def fetch_event_catalogue_names() -> List[str]:
+    """Every catalogue GWOSC's event API lists, sorted by name."""
+    from gwosc.api import fetch_cataloglist_json
 
-    Returns arrays ``gps``, ``chirp_mass_source`` (solar masses; NaN when the catalogue
-    gives no masses), ``name`` and ``catalog``. The table is fetched from GWOSC once
-    and cached in the user cache (``~/.gravyflow/cache/gwosc_events``). A catalogue
-    that cannot be fetched raises: a partial list would silently leave events in noise.
-    """
-    import json
+    return sorted(fetch_cataloglist_json())
+
+
+def _observing_runs_key() -> dict:
+    """The GWOSC runs this gravyflow knows, as stored in the event cache."""
+    from gravyflow.src.dataset.acquisition.gwosc_data import GWOSC_RUNS
+
+    return {name: [run["gps_start"], run["gps_end"]] for name, run in GWOSC_RUNS.items()}
+
+
+def event_catalogue_cache_path():
+    """Where ``get_event_catalogue`` caches the event table."""
     from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
 
-    cache_file = user_cache_dir("gwosc_events") / f"event_catalogue_v{_EVENT_CATALOGUE_FORMAT}.json"
+    return user_cache_dir("gwosc_events") / f"event_catalogue_v{_EVENT_CATALOGUE_FORMAT}.json"
+
+
+def get_event_catalogue(use_cache: bool = True) -> dict:
+    """
+    Every event GWOSC's event API publishes, one row per catalogue entry.
+
+    The catalogues are discovered from the API (``fetch_event_catalogue_names``), so a
+    list GWOSC adds is vetoed without a code change. Returns arrays ``gps``,
+    ``chirp_mass_source`` (solar masses; NaN when the catalogue gives no masses),
+    ``name`` and ``catalog``.
+
+    The table is cached in the user cache (``~/.gravyflow/cache/gwosc_events``) with
+    the catalogue names and the GWOSC runs it was fetched under (``GWOSC_RUNS``). It
+    is fetched again when gravyflow's runs change, as they do when a run is added, so
+    events published with a new run are vetoed. To pick up events GWOSC adds inside
+    known runs, call with ``use_cache=False`` or delete the file
+    (``event_catalogue_cache_path``). A catalogue that cannot be fetched raises: a
+    partial list would silently leave events in noise.
+    """
+    import json
+    from gravyflow.src.dataset.acquisition.gwosc_data import _atomic_write_text
+
+    cache_file = event_catalogue_cache_path()
+    runs = _observing_runs_key()
     if use_cache and cache_file.exists():
         try:
-            rows = json.loads(cache_file.read_text())
-            if rows.get("catalogs") == VETO_CATALOGS:
-                return _event_rows_to_arrays(rows["events"])
+            cached = json.loads(cache_file.read_text())
+            if cached["runs"] == runs:
+                return _event_rows_to_arrays(cached["events"])
+            logging.info(f"GWOSC runs changed since {cache_file} was written; re-fetching.")
         except (ValueError, KeyError) as error:
             logging.warning(f"Ignoring unreadable event cache {cache_file}: {error}")
 
+    catalogs = fetch_event_catalogue_names()
     events = []
-    for catalog in VETO_CATALOGS:
+    for catalog in catalogs:
         table = EventTable.fetch_open_data(catalog)
         for row in table:
             gps = _row_value(row, "GPS")
@@ -158,7 +192,10 @@ def get_event_catalogue(use_cache: bool = True) -> dict:
             })
 
     if use_cache:
-        cache_file.write_text(json.dumps({"catalogs": VETO_CATALOGS, "events": events}))
+        _atomic_write_text(
+            cache_file,
+            json.dumps({"runs": runs, "catalogs": catalogs, "events": events}),
+        )
     return _event_rows_to_arrays(events)
 
 
@@ -208,114 +245,40 @@ def get_event_veto_segments(
     return coalesce_segments(segments)
 
 
-def _fetch_event_times_from_catalogs(
-    catalogs: List[str],
-    cache_file: Optional[Path] = None
-) -> np.ndarray:
-    """
-    Fetch GPS times from specified GWTC catalogs.
-    
-    Args:
-        catalogs: List of catalog names to query
-        cache_file: Optional path to cache results
-        
-    Returns:
-        Array of GPS times
-    """
-    if cache_file is not None and cache_file.exists():
-        logging.info(f"Loading event times from cache: {cache_file}")
-        return np.load(cache_file)
-    
-    logging.info(f"Fetching event times from catalogs: {catalogs}")
-    gps_times = np.array([])
-    
-    for catalogue in catalogs:
-        try:
-            events = EventTable.fetch_open_data(catalogue)
-            gps_times = np.append(gps_times, events["GPS"].data.compressed())
-        except Exception as e:
-            logging.warning(f"Failed to fetch {catalogue}: {e}")
-            continue
-    
-    if cache_file is not None:
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        np.save(cache_file, gps_times)
-        logging.info(f"Cached event times to: {cache_file}")
-    
-    return gps_times
+def _event_times(catalogs: Optional[List[str]], use_cache: bool) -> np.ndarray:
+    """GPS times from ``get_event_catalogue``, of the given catalogues or of all."""
+    catalogue = get_event_catalogue(use_cache)
+    if catalogs is None:
+        return catalogue["gps"]
+    return catalogue["gps"][np.isin(catalogue["catalog"], catalogs)]
 
 
 def get_confident_event_times(use_cache: bool = True) -> np.ndarray:
-    """
-    Fetch GPS times of confirmed GW events from GWTC *-confident catalogs.
-    
-    Args:
-        use_cache: Whether to use/update cache file
-        
-    Returns:
-        Array of GPS times for confident events
-    """
-    cache_file = gf.PATH / "res/cached_confident_event_times.npy" if use_cache else None
-    return _fetch_event_times_from_catalogs(CONFIDENT_CATALOGS, cache_file)
+    """GPS times of the events in the GWTC confident catalogues (``CONFIDENT_CATALOGS``)."""
+    return _event_times(CONFIDENT_CATALOGS, use_cache)
 
 
 def get_marginal_event_times(use_cache: bool = True) -> np.ndarray:
-    """
-    Fetch GPS times of marginal/candidate events from GWTC *-marginal catalogs.
-    
-    Args:
-        use_cache: Whether to use/update cache file
-        
-    Returns:
-        Array of GPS times for marginal events
-    """
-    cache_file = gf.PATH / "res/cached_marginal_event_times.npy" if use_cache else None
-    return _fetch_event_times_from_catalogs(MARGINAL_CATALOGS, cache_file)
+    """GPS times of the events in the GWTC marginal catalogues (``MARGINAL_CATALOGS``)."""
+    return _event_times(MARGINAL_CATALOGS, use_cache)
 
 
 def get_all_event_times(use_cache: bool = True) -> np.ndarray:
-    """
-    Fetch GPS times of all events (confident + marginal).
-    
-    Backward compatible with original get_all_event_times behavior.
-    
-    Args:
-        use_cache: Whether to use/update cache file
-        
-    Returns:
-        Array of GPS times for all events
-    """
-    confident = get_confident_event_times(use_cache)
-    marginal = get_marginal_event_times(use_cache)
-    return np.concatenate([confident, marginal])
+    """GPS times of every event GWOSC publishes: the times the noise vetoes remove."""
+    return _event_times(None, use_cache)
 
 
 def get_event_times_by_type(
     event_types: List[EventConfidence],
     use_cache: bool = True
 ) -> np.ndarray:
-    """
-    Fetch GPS times for specified event types.
-    
-    Args:
-        event_types: List of EventConfidence values to fetch
-        use_cache: Whether to use cache
-        
-    Returns:
-        Array of GPS times for requested event types
-    """
-    times = []
-    
-    for event_type in event_types:
-        if event_type == EventConfidence.CONFIDENT:
-            times.append(get_confident_event_times(use_cache))
-        elif event_type == EventConfidence.MARGINAL:
-            times.append(get_marginal_event_times(use_cache))
-    
-    if not times:
-        return np.array([])
-    
-    return np.concatenate(times)
+    """GPS times of the events in the GWTC catalogues of the given confidences."""
+    catalogs = []
+    if EventConfidence.CONFIDENT in event_types:
+        catalogs += CONFIDENT_CATALOGS
+    if EventConfidence.MARGINAL in event_types:
+        catalogs += MARGINAL_CATALOGS
+    return _event_times(catalogs, use_cache)
 
 
 def get_events_with_params(

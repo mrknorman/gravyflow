@@ -22,44 +22,40 @@ class TestEventConfidence:
         assert gf.EventConfidence.MARGINAL in gf.EventConfidence
 
 
+_CATALOGUE = {
+    "gps": np.array([1126259462.4, 1187008882.4, 1200000000.0, 1250000000.0]),
+    "chirp_mass_source": np.array([28.6, 1.186, np.nan, np.nan]),
+    "name": np.array(["GW150914", "GW170817", "marginal", "ias"]),
+    "catalog": np.array(["GWTC-1-confident", "GWTC-1-confident", "GWTC-1-marginal",
+                         "IAS-O3a"]),
+}
+
+
 class TestEventTimeFunctions:
-    """Tests for event time retrieval functions."""
-    
-    def test_get_confident_event_times_returns_array(self):
-        """Test get_confident_event_times returns numpy array."""
-        with patch.object(event_module, '_fetch_event_times_from_catalogs') as mock:
-            mock.return_value = np.array([1126259462.0, 1187008882.0])
-            times = gf.get_confident_event_times(use_cache=False)
-            assert isinstance(times, np.ndarray)
-    
-    def test_get_marginal_event_times_returns_array(self):
-        """Test get_marginal_event_times returns numpy array."""
-        with patch.object(event_module, '_fetch_event_times_from_catalogs') as mock:
-            mock.return_value = np.array([1200000000.0])
-            times = gf.get_marginal_event_times(use_cache=False)
-            assert isinstance(times, np.ndarray)
-    
-    def test_get_all_event_times_combines_both(self):
-        """Test get_all_event_times returns combined confident + marginal."""
-        confident = np.array([1.0, 2.0])
-        marginal = np.array([3.0, 4.0])
-        
-        with patch.object(event_module, 'get_confident_event_times', return_value=confident):
-            with patch.object(event_module, 'get_marginal_event_times', return_value=marginal):
-                # Need to reimport to pick up patched functions
-                all_times = event_module.get_all_event_times(use_cache=False)
-                assert len(all_times) == 4
-    
+    """The event-time functions read the one event list, ``get_event_catalogue``."""
+
+    @pytest.fixture(autouse=True)
+    def catalogue(self, monkeypatch):
+        monkeypatch.setattr(event_module, "get_event_catalogue",
+                            lambda use_cache=True: _CATALOGUE)
+
+    def test_get_confident_event_times(self):
+        np.testing.assert_array_equal(gf.get_confident_event_times(use_cache=False),
+                                      [1126259462.4, 1187008882.4])
+
+    def test_get_marginal_event_times(self):
+        np.testing.assert_array_equal(gf.get_marginal_event_times(use_cache=False),
+                                      [1200000000.0])
+
+    def test_get_all_event_times_is_every_vetoed_event(self):
+        np.testing.assert_array_equal(gf.get_all_event_times(use_cache=False),
+                                      _CATALOGUE["gps"])
+
     def test_get_event_times_by_type_confident_only(self):
-        """Test filtering by CONFIDENT type only."""
-        confident = np.array([1.0, 2.0])
-        
-        with patch.object(event_module, 'get_confident_event_times', return_value=confident):
-            times = gf.get_event_times_by_type([gf.EventConfidence.CONFIDENT], use_cache=False)
-            np.testing.assert_array_equal(times, confident)
-    
+        times = gf.get_event_times_by_type([gf.EventConfidence.CONFIDENT], use_cache=False)
+        np.testing.assert_array_equal(times, [1126259462.4, 1187008882.4])
+
     def test_get_event_times_by_type_empty_list(self):
-        """Test empty event type list returns empty array."""
         times = gf.get_event_times_by_type([], use_cache=False)
         assert len(times) == 0
 

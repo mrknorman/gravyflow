@@ -28,7 +28,6 @@ import jax
 import jax.numpy as jnp
 
 from gwdatafind import find_urls
-from gwpy.table import EventTable
 from gwpy.timeseries import TimeSeries
 
 # Local imports:
@@ -985,58 +984,13 @@ class BaseDataObtainer(ABC):
         # chronological list for the vetoes and the binning.
         return coalesce_segments(np.concatenate(valid_segments, axis=0))
     
-    def get_all_event_times(self) -> np.ndarray:
-        cache_file_path : Path = gf.PATH / "res/cached_event_times.npy"
-        
-        if cache_file_path.exists():
-            return np.load(cache_file_path)
-        
-        logging.info("Cache not found, fetching event times.")
-        catalogues = [
-            "GWTC", 
-            "GWTC-1-confident", 
-            "GWTC-1-marginal", 
-            "GWTC-2", 
-            "GWTC-2.1-auxiliary", 
-            "GWTC-2.1-confident", 
-            "GWTC-2.1-marginal", 
-            "GWTC-3-confident", 
-            "GWTC-3-marginal",
-            "GWTC-4.0",
-        ]
-
-        gps_times = np.array([])
-        for catalogue in catalogues:
-            events = EventTable.fetch_open_data(catalogue)
-            gps_times = np.append(gps_times, events["GPS"].data.compressed())
-        
-        cache_file_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(cache_file_path, gps_times)
-        return gps_times
-
     def get_event_veto_segments(self) -> np.ndarray:
         """
-        Veto segments for every catalogued GW event (confident and marginal), each
-        covering the signal's time in band from 20 Hz plus padding. See
-        ``gravyflow.get_event_veto_segments``.
+        Veto segments for every event GWOSC publishes, each covering the signal's time
+        in band from 20 Hz plus padding. See ``gravyflow.get_event_veto_segments``.
         """
         from gravyflow.src.dataset.features.event import get_event_veto_segments
         return get_event_veto_segments()
-
-    def pad_gps_times_with_veto_window(
-        self,
-        gps_times: np.ndarray,
-        start_padding_seconds: float = 2.0,
-        end_padding_seconds: float = 2.0
-    ) -> np.ndarray:
-        
-        if len(gps_times) == 0:
-            return np.empty((0, 2))
-            
-        starts = gps_times - start_padding_seconds
-        ends = gps_times + end_padding_seconds
-        
-        return np.stack((starts, ends), axis=1)
 
     def veto_time_segments(
         self,
@@ -1047,11 +1001,9 @@ class BaseDataObtainer(ABC):
         Remove every vetoed time from ``segments``.
 
         Both lists may be in any order and may overlap: they are sorted and coalesced
-        before the subtraction. Returns a sorted, coalesced (N, 2) array.
+        before the subtraction. Returns a sorted, coalesced (N, 2) array, with no piece
+        of zero length.
         """
-        if len(veto_segments) == 0:
-            return segments
-
         return subtract_segments(
             np.reshape(np.asarray(segments, dtype=np.float64), (-1, 2)),
             np.reshape(np.asarray(veto_segments, dtype=np.float64), (-1, 2)),

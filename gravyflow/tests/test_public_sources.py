@@ -157,9 +157,6 @@ def offline_public_sources(monkeypatch, tmp_path):
         monkeypatch.setattr(gravity_spy, "RELEASE_FILES", _fixture_md5s())
         gravity_spy.clear_memory_cache()
 
-    monkeypatch.setattr(
-        BaseDataObtainer, "get_all_event_times", lambda self: FIXTURE_EVENT_TIMES.copy()
-    )
     from gravyflow.src.dataset.features import event as event_module
     monkeypatch.setattr(
         event_module, "get_event_catalogue",

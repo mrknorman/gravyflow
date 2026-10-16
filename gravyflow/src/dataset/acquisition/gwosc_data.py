@@ -204,8 +204,9 @@ def _as_segment_array(segments: Iterable) -> np.ndarray:
 
 
 def coalesce_segments(segments: np.ndarray) -> np.ndarray:
-    """Sort segments and merge any that overlap or touch."""
+    """Sort segments, drop any of zero length and merge any that overlap or touch."""
     segments = _as_segment_array(segments)
+    segments = segments[segments[:, 1] > segments[:, 0]]
     if len(segments) == 0:
         return segments
     segments = segments[np.argsort(segments[:, 0], kind="stable")]

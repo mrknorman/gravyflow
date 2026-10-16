@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.dataset.acquisition import gwosc_data
 from gravyflow.src.dataset.features import gravity_spy
 from gravyflow.tests import test_public_sources as public
 from gravyflow.tests.test_public_sources import (  # noqa: F401  (pytest fixture)
@@ -103,6 +104,22 @@ class TestVetoSubtraction:
         assert np.array_equal(got, mask)
 
 
+    def test_zero_length_veto_does_not_split_a_segment(self, obtainer):
+        result = obtainer.veto_time_segments(
+            np.array([[16.0, 48.0], [26.0, 55.0], [25.0, 59.0]]), np.array([[23.0, 23.0]])
+        )
+        np.testing.assert_array_equal(result, [[16.0, 59.0]])
+
+    def test_no_vetoes_still_sorts_coalesces_and_drops_empty_pieces(self, obtainer):
+        segments = np.array([[33.0, 33.0], [40.0, 50.0], [3.0, 11.0], [11.0, 20.0]])
+        expected = [[3.0, 20.0], [40.0, 50.0]]
+        np.testing.assert_array_equal(obtainer.veto_time_segments(segments, np.empty((0, 2))),
+                                      expected)
+        np.testing.assert_array_equal(gwosc_data.subtract_segments(segments, np.empty((0, 2))),
+                                      expected)
+        np.testing.assert_array_equal(gwosc_data.coalesce_segments(segments), expected)
+
+
 # =============================================================================
 # RUN ORDER
 # =============================================================================
@@ -119,7 +136,7 @@ class TestRunOrder:
 
         with patch.object(obtainer, "get_all_segment_times", return_value=np.concatenate([o3, o1])), \
              patch.object(obtainer, "remove_unwanted_segments",
-                          side_effect=lambda ifo, s, get_times=None: (s, {})):
+                          side_effect=lambda ifo, s: s):
             rows = obtainer.get_valid_segments(
                 ifos=[gf.IFO.L1], seed=1, group_name="all",
                 segment_order=gf.SegmentOrder.CHRONOLOGICAL,
@@ -144,21 +161,48 @@ def _all_fixture_glitches(ifo_name, runs):
 
 class TestNoiseVetoes:
 
-    def test_glitch_vetoes_cover_every_run(self, offline_public_sources):
-        runs = [gf.ObservingRun.O1, gf.ObservingRun.O3]
+    @pytest.mark.parametrize("runs", [
+        [gf.ObservingRun.O2, gf.ObservingRun.O3],
+        [gf.ObservingRun.O3, gf.ObservingRun.O2],
+    ])
+    def test_glitch_vetoes_cover_every_run(self, offline_public_sources, runs):
         obtainer = _noise_obtainer(runs)
         segments = obtainer.get_all_segment_times(gf.IFO.L1)
         glitches = _all_fixture_glitches("L1", runs)
         in_data = _inside(glitches["event_time"], segments)
-        assert np.sum(in_data) > 5  # the fixture has glitches inside the data
+        # Every configured run has fixture glitches inside its data, so a veto that
+        # skipped any run would leave some.
+        for run in runs:
+            in_run = ((glitches["event_time"] >= run.value.start_gps_time)
+                      & (glitches["event_time"] < run.value.end_gps_time))
+            assert np.sum(in_data & in_run) > 5, run
 
-        result, _ = obtainer.remove_unwanted_segments(gf.IFO.L1, segments)
+        result = obtainer.remove_unwanted_segments(gf.IFO.L1, segments)
 
         assert not np.any(_inside(glitches["event_time"], result))
         # The whole Omicron extent is vetoed, not just the peak.
         extents = np.stack([glitches["start_time"],
                             glitches["start_time"] + glitches["duration"]], axis=1)
         assert _overlap(result, extents[in_data]) == 0.0
+
+    def test_glitch_veto_padding(self):
+        """Each glitch's extent is widened by 1 s, and by 3 s for Extremely_Loud."""
+        from gravyflow.src.dataset.features.glitch import GlitchType
+
+        catalogue = {
+            "event_time": np.array([1000.5, 2000.5]),
+            "start_time": np.array([1000.0, 2000.0]),
+            "duration": np.array([1.0, 1.0]),
+            "label": np.array([int(GlitchType.BLIP), int(GlitchType.EXTREMELY_LOUD)]),
+        }
+        obtainer = _noise_obtainer(gf.ObservingRun.O3)
+        with patch.object(obtainer, "_glitch_catalogues", return_value=[catalogue]):
+            vetoes = obtainer.get_glitch_veto_segments(gf.IFO.L1)
+        np.testing.assert_array_equal(vetoes, [[999.0, 1002.0], [1997.0, 2004.0]])
+
+        result = obtainer.veto_time_segments(np.array([[900.0, 2100.0]]), vetoes)
+        np.testing.assert_array_equal(result, [[900.0, 999.0], [1002.0, 1997.0],
+                                               [2004.0, 2100.0]])
 
     def test_glitch_veto_covers_pre_peak_extent(self, offline_public_sources):
         catalogue = gf.get_glitch_catalogue(gf.IFO.L1, gf.ObservingRun.O3)
@@ -173,7 +217,7 @@ class TestNoiseVetoes:
         obtainer = _noise_obtainer(gf.ObservingRun.O2)
         merger = 1187008882.4  # GW170817: about 165 s in band from 20 Hz
         segments = np.array([[merger - 1000.0, merger + 1000.0]])
-        result, _ = obtainer.remove_unwanted_segments(gf.IFO.L1, segments)
+        result = obtainer.remove_unwanted_segments(gf.IFO.L1, segments)
         assert _overlap(result, [[merger - 166.0, merger + 1.0]]) == 0.0
 
     def test_event_veto_durations(self):
@@ -192,6 +236,96 @@ class TestNoiseVetoes:
                      "name": np.array(["x"]), "catalog": np.array(["GWTC-3-marginal"])}
         (veto,) = gf.get_event_veto_segments(catalogue=catalogue)
         assert 1e9 - veto[0] > 250.0
+
+
+# =============================================================================
+# THE EVENT LIST
+# =============================================================================
+
+def _table(rows, columns):
+    from astropy.table import Table
+    return Table(rows=rows, names=columns) if rows else Table(names=columns)
+
+
+class FakeEventApi:
+    """GWOSC's event API: a catalogue list and one table per catalogue."""
+
+    def __init__(self, catalogues):
+        self.catalogues = catalogues
+        self.fetched = []
+
+    def cataloglist(self, *args, **kwargs):
+        return {name: {"url": f"https://gwosc.org/eventapi/json/{name}"}
+                for name in self.catalogues}
+
+    def fetch_open_data(self, catalog, *args, **kwargs):
+        self.fetched.append(catalog)
+        return self.catalogues[catalog]
+
+
+@pytest.fixture
+def event_api(monkeypatch, tmp_path):
+    from gwosc import api as gwosc_api
+    from gravyflow.src.dataset.features import event as event_module
+
+    monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path))
+    fake = FakeEventApi({
+        "GWTC": _table([(1126259462.4, "GW150914", 28.6)],
+                       ["GPS", "commonName", "chirp_mass_source"]),
+        "IAS-O3a": _table([(1253011836.5, "GW190920_113516", 3.7)],
+                          ["GPS", "commonName", "chirp_mass_source"]),
+        # Marginal IMBH candidates are published without masses.
+        "O3_IMBH_marginal": _table([(1263002916.2, "200114_020818")], ["GPS", "commonName"]),
+    })
+    monkeypatch.setattr(gwosc_api, "fetch_cataloglist_json", fake.cataloglist)
+    monkeypatch.setattr(event_module.EventTable, "fetch_open_data", fake.fetch_open_data)
+    return fake
+
+
+class TestEventList:
+
+    def test_every_catalogue_the_api_lists_is_vetoed(self, event_api):
+        catalogue = gf.get_event_catalogue()
+        assert sorted(set(catalogue["catalog"])) == ["GWTC", "IAS-O3a", "O3_IMBH_marginal"]
+        assert sorted(event_api.fetched) == ["GWTC", "IAS-O3a", "O3_IMBH_marginal"]
+
+        vetoes = gf.get_event_veto_segments(catalogue=catalogue)
+        for gps in (1126259462.4, 1253011836.5, 1263002916.2):
+            assert _inside([gps], vetoes)[0]
+        # No masses: the 1 + 1 solar-mass duration, the longest the veto uses.
+        (imbh,) = [v for v in vetoes if v[0] <= 1263002916.2 <= v[1]]
+        assert 1263002916.2 - imbh[0] > 250.0
+
+    def test_cache_is_reused_while_the_runs_are_unchanged(self, event_api):
+        first = gf.get_event_catalogue()
+        second = gf.get_event_catalogue()
+        assert len(event_api.fetched) == 3
+        np.testing.assert_array_equal(first["gps"], second["gps"])
+
+    def test_cache_is_refetched_when_a_run_is_added(self, event_api, monkeypatch):
+        from gravyflow.src.dataset.acquisition import gwosc_data
+
+        gf.get_event_catalogue()
+        event_api.catalogues["GWTC"] = _table(
+            [(1126259462.4, "GW150914", 28.6), (1430000000.0, "GW_NEW_RUN", 30.0)],
+            ["GPS", "commonName", "chirp_mass_source"],
+        )
+        monkeypatch.setitem(gwosc_data.GWOSC_RUNS, "O4c", {
+            "gps_start": 1427000000, "gps_end": 1440000000, "dataset": "O4c_4KHZ_R1",
+        })
+        catalogue = gf.get_event_catalogue()
+        assert len(event_api.fetched) == 6
+        assert 1430000000.0 in catalogue["gps"]
+
+    def test_noise_vetoes_read_only_the_event_list(self, event_api):
+        obtainer = _noise_obtainer(gf.ObservingRun.O1)
+        segments = np.array([[1126259000.0, 1126260000.0]])
+        with patch.object(obtainer, "get_glitch_veto_segments", return_value=np.empty((0, 2))):
+            result = obtainer.remove_unwanted_segments(gf.IFO.L1, segments)
+        assert _overlap(result, [[1126259460.4, 1126259464.4]]) == 0.0  # merger ± 2 s
+        assert sorted(event_api.fetched) == ["GWTC", "IAS-O3a", "O3_IMBH_marginal"]
+        assert gf.get_all_event_times().size == 3
+        assert len(event_api.fetched) == 3  # the same cached list
 
 
 # =============================================================================
@@ -279,7 +413,7 @@ class TestSegmentYield:
     def _rows(self, obtainer, per_ifo, ifos):
         with patch.object(obtainer, "get_all_segment_times", side_effect=per_ifo), \
              patch.object(obtainer, "remove_unwanted_segments",
-                          side_effect=lambda ifo, s, get_times=None: (s, {})):
+                          side_effect=lambda ifo, s: s):
             return obtainer.get_valid_segments(
                 ifos=ifos, seed=1, group_name="all",
                 segment_order=gf.SegmentOrder.CHRONOLOGICAL,

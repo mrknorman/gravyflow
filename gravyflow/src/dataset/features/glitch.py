@@ -6,8 +6,8 @@ Glitches come from the Gravity Spy machine-learning classifications released on 
 v1.0.0, CC-BY-4.0). See ``gravity_spy`` for the download, verification and cache.
 
 Defaults: every class except ``No_Glitch`` (which marks a trigger that is not a
-glitch), and ``ml_confidence >= 0.9``. Entries that overlap a catalogued GW event (its
-in-band signal, see ``event.get_event_veto_segments``) are removed: Gravity Spy lists
+glitch), and ``ml_confidence >= 0.9``. Entries that overlap a GW event GWOSC publishes
+(its in-band signal, see ``event.get_event_veto_segments``) are removed: Gravity Spy lists
 some real events, GW190521 among them, as Blips.
 
 A glitch's extent is its Omicron trigger, [start_time, start_time + duration], which
@@ -16,8 +16,8 @@ on each side: ``GLITCH_VETO_PADDING_SECONDS`` (1 s), or more for the classes in
 ``GLITCH_VETO_PADDING_BY_TYPE`` (3 s for Extremely_Loud). In public GWOSC strain,
 measured on 2,535 glitches of every class over 30 hours of O1 to O3 data, the excess
 power around a glitch reaches beyond its Omicron extent by at most 0.44 s for 99%
-of glitches and 1.0 s for 99.9%; the only glitches beyond 1.25 s were Extremely_Loud,
-at up to 2.5 s.
+of glitches; 99.88% lie within 1 s and the 99.9th percentile is 1.02 s. The only
+glitches beyond 1.25 s were Extremely_Loud, at up to 2.5 s.
 """
 from enum import IntEnum
 from typing import Dict, List, Optional, Union

@@ -120,55 +120,26 @@ class NoiseDataObtainer(BaseDataObtainer):
             self,
             ifo: gf.IFO,
             valid_segments: np.ndarray,
-            get_times: List = None
-        ):
+        ) -> np.ndarray:
         """
-        Remove every catalogued GW event and Gravity Spy glitch from noise segments.
+        Remove every published GW event and Gravity Spy glitch from noise segments.
 
         Unless the obtainer's labels include EVENTS, each event's in-band signal is
         vetoed (``get_event_veto_segments``); unless they include GLITCHES, each
         glitch's whole extent is vetoed (``get_glitch_veto_segments``). Both cover
-        every configured run. Returns the vetoed segments and the event and glitch
-        peak times.
+        every configured run. Returns the vetoed segments, sorted and coalesced.
         """
-        if get_times is None:
-            get_times = []
-
         veto_segments = []
-
-        if DataLabel.EVENTS in get_times or DataLabel.EVENTS not in self.data_labels:
-            event_times = self.get_all_event_times()
-        else:
-            event_times = []
-
-        if DataLabel.GLITCHES in get_times or DataLabel.GLITCHES not in self.data_labels:
-            catalogues = self._glitch_catalogues(ifo)
-            glitch_times = (
-                np.concatenate([catalogue["event_time"] for catalogue in catalogues])
-                if catalogues else np.array([])
-            )
-        else:
-            glitch_times = []
-
         if DataLabel.EVENTS not in self.data_labels:
             veto_segments.append(self.get_event_veto_segments())
-
         if DataLabel.GLITCHES not in self.data_labels:
             veto_segments.append(self.get_glitch_veto_segments(ifo))
-
-        if veto_segments:
-            veto_segments = np.concatenate(
-                [np.reshape(veto, (-1, 2)) for veto in veto_segments]
-            )
-            valid_segments = \
-                self.veto_time_segments(valid_segments, veto_segments)
-
-        feature_times = {
-            gf.DataLabel.EVENTS: event_times,
-            gf.DataLabel.GLITCHES: glitch_times    
-        }
-
-        return valid_segments, feature_times
+        if not veto_segments:
+            return valid_segments
+        return self.veto_time_segments(
+            valid_segments,
+            np.concatenate([np.reshape(veto, (-1, 2)) for veto in veto_segments]),
+        )
 
     def remove_short_segments(
             self,
@@ -390,10 +361,7 @@ class NoiseDataObtainer(BaseDataObtainer):
                     self.start_gps_times[0]
                 )
 
-                valid_segments, feature_times = self.remove_unwanted_segments(
-                    ifo,
-                    valid_segments
-                )
+                valid_segments = self.remove_unwanted_segments(ifo, valid_segments)
 
                 # Cut on the absolute grid [d k, d (k + 1)) in GPS (d = 2048 s by
                 # default), the grid merge_bins uses, so whole blocks survive.
