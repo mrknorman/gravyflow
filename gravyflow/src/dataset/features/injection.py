@@ -234,6 +234,10 @@ class ReturnVariables(Enum):
     Per-generator labels (INJECTION_MASKS, CENTRAL_TIME, and every
     WaveformParameter and ScalingType) are NaN where generator g injected
     nothing into example b, except INJECTION_MASKS, which is 0 there.
+
+    GravyflowDataset checks every batch against this contract. ComposedDataset
+    is outside it for now and unchecked: its class labels are int32, and its
+    per-generator labels have rows only for the examples whose pool injected.
     """
     # Core data outputs
     ONSOURCE = ReturnVariable(0, (BATCH, IFO, SAMPLES))
@@ -252,11 +256,15 @@ class ReturnVariables(Enum):
     # GPS Times (disambiguated)
     START_GPS_TIME = ReturnVariable(13, (BATCH, IFO), "float64")     # Segment window start (real noise/transient); NaN for simulated noise
     TRANSIENT_GPS_TIME = ReturnVariable(14, (BATCH, IFO), "float64") # Event/glitch center (transient mode only)
-    # The arrival of each injection's reference time at each detector, as a
-    # fraction of the onsource window: a burst's peak (its envelope's centre),
-    # a ringdown's start, and a CBC's coalescence time as its waveform model
-    # defines it, which lies after the strain's peak (IMRPhenomD: 1.5 ms for
-    # 10+10 Msun, 3.4 ms for 30+30, 5.9 ms for 60+40).
+    # The event time: the time most recognised as the event's, chosen per
+    # source type, as it arrives at each detector, as a fraction of the
+    # onsource window. It is each waveform's reference time:
+    # - a CBC: its merger (coalescence) time, as its waveform model defines
+    #   it, which lies after the strain's peak (IMRPhenomD: 1.5 ms for 10+10
+    #   Msun, 3.4 ms for 30+30, 5.9 ms for 60+40);
+    # - a supernova: its explosion;
+    # - a generic burst: its peak, the envelope's centre for a sine-Gaussian,
+    #   chirplet, WNB or periodic wave, and a ringdown's start.
     CENTRAL_TIME = ReturnVariable(9, (BATCH, GENERATOR, IFO))
     
     # Labels and Types (transient mode), per detector
@@ -1803,8 +1811,9 @@ class InjectionGenerator:
                 input_ra, input_dec, gps_time_seconds=gps_time_seconds
             )
 
-            # The peak-time label: the reference time's position in the
-            # onsource window at each detector, as a fraction of the window.
+            # The event-time label (CENTRAL_TIME): the reference time's
+            # position in the onsource window at each detector, as a fraction
+            # of the window.
             if return_injection_times and current_shifts is not None:
                 dur = onsource_duration_seconds
                 if dur is None:
