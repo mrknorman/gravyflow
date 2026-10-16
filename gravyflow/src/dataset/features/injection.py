@@ -127,6 +127,16 @@ def _ratio(target, current):
         positive, target / ops.where(positive, current, 1.0), 0.0
     )
 
+def _at_gain(value, gain, power):
+    """
+    A drawn parameter's value for the source scaled by ``gain``: value x
+    gain ** power, per example (0 where the gain is 0 and power < 0).
+    """
+    if power == 0:
+        return value
+    factor = gain ** power if power > 0 else _ratio(1.0, gain ** -power)
+    return ops.convert_to_tensor(value, dtype="float32") * _per_example(factor, value)
+
 def _peak_normalise(injection):
     """(injection / m, m), with m = max |injection| per example (1 where 0)."""
     injection = ops.convert_to_tensor(injection, dtype="float32")
@@ -583,6 +593,12 @@ class WaveformParameter:
     # The shape of one value, per example and generator: a dataset returns
     # (B, G) + shape.
     shape: tuple = ()
+    # How the parameter goes with the waveform's amplitude: the source's
+    # amplitude is proportional to parameter ** (1 / amplitude_power), so when
+    # scaling multiplies the generated amplitude by a gain, the injected
+    # source's value is the drawn one times gain ** amplitude_power. 0: the
+    # parameter does not depend on the amplitude.
+    amplitude_power: int = 0
     
 class WaveformParameters(Enum):
     
@@ -590,7 +606,8 @@ class WaveformParameters(Enum):
     MASS_1_MSUN = WaveformParameter(100)
     MASS_2_MSUN = WaveformParameter(101)
     INCLINATION_RADIANS = WaveformParameter(102)
-    DISTANCE_MPC = WaveformParameter(103)
+    # A CBC's amplitude goes as 1 / distance.
+    DISTANCE_MPC = WaveformParameter(103, amplitude_power=-1)
     REFERENCE_ORBITAL_PHASE_IN = WaveformParameter(104)
     ASCENDING_NODE_LONGITUDE = WaveformParameter(105)
     ECCENTRICITY = WaveformParameter(106)
@@ -607,7 +624,9 @@ class WaveformParameters(Enum):
     
     # Simple waveform parameters:
     FREQUENCY_HERTZ = WaveformParameter(301)
-    AMPLITUDE = WaveformParameter(302)
+    # A burst's amplitude: its hrss (sine-Gaussian, chirplet, ringdown) or its
+    # peak (periodic wave).
+    AMPLITUDE = WaveformParameter(302, amplitude_power=1)
     PHASE_RADIANS = WaveformParameter(303)
     QUALITY_FACTOR = WaveformParameter(304)
     TAU_SECONDS = WaveformParameter(305)
@@ -1642,9 +1661,11 @@ class InjectionGenerator:
             labels: every label of every generator, generator-first,
                 (Generators, Batch) + the label's own shape, float32, and NaN
                 where the generator injected nothing into the example:
-                - each WaveformParameter the generators drew, with
-                  DISTANCE_MPC the distance the injected amplitude implies
-                  (the drawn distance over the gain scaling applied);
+                - each WaveformParameter the generators drew; those the
+                  amplitude depends on (``amplitude_power``: DISTANCE_MPC,
+                  AMPLITUDE) take the value the injected amplitude implies,
+                  the drawn value times the gain scaling applied to that
+                  power;
                 - the sky and polarisation the projection used;
                 - for each ScalingType requested in ``parameters_to_return``
                   (all of them when it is None) and each type applied: the
@@ -1892,12 +1913,12 @@ class InjectionGenerator:
                 )
 
             # The gain from the generated strain to the injected physical
-            # strain; a CBC's amplitude goes as 1 / distance, so the distance
-            # the injection implies is the drawn one over the gain.
+            # strain: every parameter the amplitude depends on is labelled
+            # with the value the injected amplitude implies.
             gain = normalisation * physical_factor
-            distance = generator_labels.get(WaveformParameters.DISTANCE_MPC)
-            if distance is not None:
-                generator_labels[WaveformParameters.DISTANCE_MPC] = _ratio(distance, gain)
+            for key, value in generator_labels.items():
+                if isinstance(key, WaveformParameters) and value is not None:
+                    generator_labels[key] = _at_gain(value, gain, key.value.amplitude_power)
 
             for label_type in label_types:
                 if label_type == type_:

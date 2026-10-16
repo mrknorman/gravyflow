@@ -200,6 +200,25 @@ def test_distance_label_follows_the_snr_target():
     np.testing.assert_allclose(distances[0] / distances[1], 2.0, rtol=1e-4)
 
 
+AMPLITUDE_IS_HRSS = {
+    "sine-Gaussian": lambda method: gf.SineGaussianGenerator(
+        scaling_method=method, amplitude=constant(3.0), frequency_hertz=constant(150.0),
+        quality_factor=constant(9.0)),
+    "chirplet": lambda method: gf.ChirpletGenerator(scaling_method=method, amplitude=constant(3.0)),
+    "ringdown": lambda method: gf.RingdownGenerator(scaling_method=method, amplitude=constant(3.0)),
+}
+
+
+@pytest.mark.parametrize("method", [scaling(ST.HRSS, 2e-22), scaling(ST.HPEAK, 1e-21), scaling(ST.SNR, 12.0)],
+                         ids=["HRSS", "HPEAK", "SNR"])
+@pytest.mark.parametrize("make", AMPLITUDE_IS_HRSS.values(), ids=AMPLITUDE_IS_HRSS.keys())
+def test_amplitude_label_is_the_injected_amplitude(make, method):
+    """B140's class: a burst's AMPLITUDE (its hrss) is the hrss injected, not the one drawn."""
+    _, y = dataset([make(method)], [gf.IFO.L1], inputs=[RV.WHITENED_ONSOURCE],
+                   outputs=[WP.AMPLITUDE, ST.HRSS])[0]
+    np.testing.assert_allclose(np.asarray(y["AMPLITUDE"]), np.asarray(y["HRSS"]), rtol=1e-4)
+
+
 def test_the_old_sky_keys_are_refused_by_name():
     injector = gf.InjectionGenerator([cbc()], seed=1)
     injector.waveform_generators[0].network = gf.Network([gf.IFO.L1])
