@@ -450,20 +450,35 @@ class Network:
     def __init__ (
             self,
             parameters : Union[List[IFO], Dict],
-            seed : Optional[int] = None
+            seed : Optional[int] = None,
+            rng : Optional[np.random.Generator] = None
         ):
-
+        """
+        A detector network: a list of IFOs, or a dict of geometry. A dict's
+        values may be gf.Distributions, drawn once here from ``rng`` (a NumPy
+        Generator); the Network then holds that fixed geometry and no random
+        state. ``seed`` is deprecated.
+        """
         if seed is not None:
             warn_deprecated("Network(seed=)", "a Network holds no random state; its sky is drawn by the dataset")
-        
+
+        def geometry_rng():
+            nonlocal rng
+            if rng is None:
+                warn_deprecated(
+                    "A Network with random geometry and no rng", "pass rng= (a NumPy Generator)"
+                )
+                rng = np.random.default_rng(seed if seed is not None else gf.Defaults.seed)
+            return rng
+
         arguments = {}
-        # ... (Parameter parsing logic mostly unchanged, just ops.convert_to_tensor)
         
         if isinstance(parameters, dict):
+            parameters = dict(parameters)
             if "num_detectors" in parameters:
                 num_detectors = parameters.pop("num_detectors")
-                if isinstance(num_detectors, gf.Distribution):  # pragma: no cover
-                    num_detectors = num_detectors.sample(1)
+                if isinstance(num_detectors, gf.Distribution):
+                    num_detectors = int(num_detectors.sample(1, geometry_rng())[0])
             else:
                 num_detectors = None
                 
@@ -474,12 +489,12 @@ class Network:
                     arguments[key] = ops.convert_to_tensor(value, dtype="float32")
                 elif ops.is_tensor(value):  # pragma: no cover
                      arguments[key] = ops.cast(value, "float32")
-                elif isinstance(value, gf.Distribution):  # pragma: no cover
+                elif isinstance(value, gf.Distribution):
                     if num_detectors is None:
                         raise ValueError("Num detectors not specified")
                     else:
                         arguments[key] = ops.convert_to_tensor(
-                            value.sample(num_detectors), 
+                            value.sample(num_detectors, geometry_rng()),
                             dtype="float32"
                         )
                         

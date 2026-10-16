@@ -223,6 +223,34 @@ class TestStatelessObjects:
         with pytest.warns(DeprecationWarning, match="streams"):
             self.direct_labels(0)
 
+    def test_incoherent_components_share_their_presence(self):
+        # Each component drew its own injection chance, so an example could
+        # carry a signal in one detector only and still be labelled injected.
+        incoherent = gf.IncoherentGenerator([wnb(injection_chance=0.5), wnb(injection_chance=0.5)])
+        waveforms, _ = incoherent.generate(64, SAMPLE_RATE, 1.0)
+        present = np.any(np.asarray(waveforms) != 0.0, axis=(2, 3))  # (examples, components)
+        assert np.array_equal(present[:, 0], present[:, 1])
+        assert 0 < present[:, 0].sum() < 64
+
+    def test_random_network_geometry_draws_from_its_rng(self):
+        # The geometry was drawn through the deprecated rng-less sample().
+        def uniform(low, high):
+            return gf.Distribution(min_=low, max_=high, type_=gf.DistributionType.UNIFORM)
+
+        geometry = {
+            "num_detectors": 2, "latitude_radians": uniform(-1.0, 1.0),
+            "longitude_radians": uniform(0.0, 6.0), "y_angle_radians": uniform(0.0, 6.0),
+            "x_length_meters": 4000.0, "y_length_meters": 4000.0, "height_meters": 0.0,
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            a = gf.Network(geometry, rng=np.random.default_rng(3))
+            b = gf.Network(geometry, rng=np.random.default_rng(3))
+        np.testing.assert_array_equal(np.asarray(a.location), np.asarray(b.location))
+        assert geometry["num_detectors"] == 2  # the caller's dict is not changed
+        with pytest.warns(DeprecationWarning, match="no rng"):
+            gf.Network(geometry)
+
     def test_network_needs_every_sky_angle(self):
         network = gf.Network([gf.IFO.L1])
         with pytest.raises(ValueError, match="polarization"):
@@ -239,6 +267,59 @@ class TestStatelessObjects:
             curriculum.sample(4, rng, epoch=0)
         assert curriculum.at(0).min_ == 50.0
         assert curriculum.at(None).min_ == 5.0
+
+
+class TestDeprecations:
+    """The replaced seed API warns for one release, where a user will see it."""
+
+    SCRIPT = textwrap.dedent("""
+        import gravyflow as gf
+        uniform = dict(type_=gf.DistributionType.UNIFORM)
+        gf.Distribution(min_=1.0, max_=2.0, seed=1, **uniform)
+        gf.Distribution(min_=1.0, max_=2.0, **uniform).sample(2)
+        curriculum = gf.Curriculum(
+            start=gf.Distribution(min_=80.0, max_=100.0, **uniform),
+            end=gf.Distribution(min_=5.0, max_=15.0, **uniform),
+            seed=1, steps_per_epoch=10,
+        )
+        curriculum.sample(2)
+        curriculum.min_
+        gf.WNBGenerator(
+            duration_seconds=0.2, min_frequency_hertz=40.0, max_frequency_hertz=200.0,
+        ).generate(2, 512.0, 1.0, seed=1)
+        gf.Network([gf.IFO.L1], seed=1)
+    """)
+
+    def test_deprecations_show_under_default_filters(self, tmp_path):
+        # A fixed stacklevel pointed most of these warnings at library code,
+        # where Python's default filters drop a DeprecationWarning.
+        import os
+        script = tmp_path / "user_script.py"
+        script.write_text(self.SCRIPT)
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONWARNINGS"}
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(__import__("pathlib").Path(gf.__file__).parents[1]), env.get("PYTHONPATH", "")]
+        )
+        out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env)
+        assert out.returncode == 0, out.stderr
+        for name in ("Distribution(seed=)", "Distribution.sample() without an rng", "Curriculum(seed=)",
+                     "Curriculum(steps_per_epoch=)", "Curriculum.sample() without an rng",
+                     "Curriculum.min_", "WNBGenerator.generate(seed=)", "Network(seed=)"):
+            assert f"{name} is deprecated" in out.stderr, name
+            assert "user_script.py" in out.stderr
+
+    def test_deprecated_curriculum_sampling_keeps_its_old_meaning(self):
+        # It drew the end distribution, the same values every call.
+        curriculum = gf.Curriculum(
+            start=gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM),
+            end=gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM),
+        )
+        with pytest.warns(DeprecationWarning):
+            first, second = curriculum.sample(3), curriculum.sample(3)
+        assert not np.array_equal(first, second)
+        assert np.all((first >= 80.0) & (first <= 100.0))
+        with pytest.warns(DeprecationWarning):
+            assert (curriculum.min_, curriculum.max_) == (80.0, 100.0)
 
 
 class TestIndexedDatasets:

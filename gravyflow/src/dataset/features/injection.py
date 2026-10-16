@@ -9,7 +9,7 @@ from enum import Enum, auto
 from dataclasses import dataclass
 from typing import Union, List, Dict, Type, List
 import json
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import replace
 from itertools import count
 from warnings import warn
@@ -1249,16 +1249,20 @@ class IncoherentGenerator(WaveformGenerator):
             
             streams = self.resolve_streams(streams, seed)
             waveforms, parameters = [], []
-            # Each component draws from its own streams.
+            # Each component draws its waveform from its own streams, but an
+            # example is present in every component or none: the presence is
+            # drawn once, from this generator's own chance stream.
             for j, generator in enumerate(self.component_generators):
-                waveforms_, parameters_ = generator.generate(
+                unconditional = copy(generator)
+                unconditional.injection_chance = 1.0
+                waveforms_, parameters_ = unconditional.generate(
                     num_waveforms,
                     sample_rate_hertz, 
                     duration_seconds,
                     streams.sub(f"comp/{j}")
                 )
 
-                waveforms.append(waveforms_)
+                waveforms.append(self.apply_injection_chance(waveforms_, streams))
                 parameters.append(parameters_)
         
         try:

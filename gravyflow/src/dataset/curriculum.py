@@ -60,6 +60,7 @@ class Curriculum:
         schedule: Type of interpolation schedule.
         custom_schedule_fn: Optional function (epoch, num_epochs) -> float (0-1).
         seed: Deprecated; the dataset's seed tree draws the samples.
+        steps_per_epoch: Deprecated and unused; a dataset passes its epoch.
     """
     start: 'gf.Distribution'
     end: 'gf.Distribution'
@@ -69,12 +70,16 @@ class Curriculum:
     seed: Optional[int] = None  # Deprecated.
     verbose: bool = False  # Deprecated: use CurriculumProgressCallback.
     name: str = "Curriculum"  # Name for CurriculumProgressCallback's output
+    steps_per_epoch: Optional[int] = field(default=None, repr=False)  # Deprecated.
 
     def __post_init__(self):
         if self.seed is not None:
             warn_deprecated("Curriculum(seed=)", "the dataset's seed tree draws the samples")
         if self.verbose:
             warn_deprecated("Curriculum(verbose=)", "print progress with gf.CurriculumProgressCallback")
+        if self.steps_per_epoch is not None:
+            warn_deprecated("Curriculum(steps_per_epoch=)", "a dataset passes its epoch to Curriculum.at")
+        self._legacy_rng = None
         if self.start.type_ != self.end.type_:
             raise ValueError(
                 f"Start and end distributions must have same type. "
@@ -140,8 +145,36 @@ class Curriculum:
         )
 
     def sample(self, num_samples: int = 1, rng=None, epoch: Optional[int] = None):
-        """``num_samples`` values from ``at(epoch)``, drawn from ``rng``."""
+        """
+        ``num_samples`` values from ``at(epoch)``, drawn from ``rng``.
+
+        Without ``rng`` (deprecated), as before: the draw comes from a stream
+        kept on the object (seeded by ``seed`` or ``gf.Defaults.seed``), at
+        the start distribution unless ``epoch`` is given.
+        """
+        if rng is None:
+            warn_deprecated(
+                "Curriculum.sample() without an rng",
+                "pass a NumPy Generator and the epoch: sample(n, rng, epoch)"
+            )
+            if self._legacy_rng is None:
+                self._legacy_rng = np.random.default_rng(
+                    self.seed if self.seed is not None else gf.Defaults.seed
+                )
+            rng = self._legacy_rng
+            epoch = 0 if epoch is None else epoch
         return self.at(epoch).sample(num_samples, rng)
+
+    def _legacy_value(self, name: str):
+        warn_deprecated(f"Curriculum.{name}", f"read it from Curriculum.at(epoch).{name}")
+        # A Curriculum no longer tracks progress; it used to start at `start`.
+        return getattr(self.at(0), name)
+
+    min_ = property(lambda self: self._legacy_value("min_"))
+    max_ = property(lambda self: self._legacy_value("max_"))
+    value = property(lambda self: self._legacy_value("value"))
+    mean = property(lambda self: self._legacy_value("mean"))
+    std = property(lambda self: self._legacy_value("std"))
 
     @staticmethod
     def resolve(value, epoch: Optional[int]):
