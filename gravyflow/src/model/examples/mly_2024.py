@@ -47,12 +47,17 @@ Where this example departs from the paper:
   Keras 3's Nadam has a fixed momentum schedule (the authors' set
   ``schedule_decay`` to 2e-6).
 - **Noise.** Coloured Gaussian noise from the library's detector PSDs, with no
-  20 Hz high-pass and no rescaling of Virgo's PSD (the paper raises it by 4 for
-  model 1 and 32 for model 2).
+  rescaling of Virgo's PSD (the paper raises it by 4 for model 1 and 32 for
+  model 2). The whitening filter is band-limited to the dataset's spectral band
+  (20 Hz to Nyquist by default), which stands in for the paper's 20 Hz
+  high-pass.
 - **WNB band.** The paper gives the bandwidth (uniform over 40-480 Hz) inside a
   20-512 Hz search band, not the lower edge; the library draws the two edges
   independently, so the lower edge is uniform over 20-30 Hz and the upper over
-  70-500 Hz, which spans 40-480 Hz of bandwidth (flat over 50-470 Hz).
+  70-500 Hz, which spans 40-480 Hz of bandwidth (flat over 50-470 Hz). The
+  library also redraws every burst whose duration times bandwidth is below
+  ``WNBGenerator.min_time_bandwidth`` (4): 0.15% of these draws, all shorter
+  than 0.1 s.
 """
 
 from dataclasses import dataclass, replace
