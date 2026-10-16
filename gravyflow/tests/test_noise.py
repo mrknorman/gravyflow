@@ -460,7 +460,8 @@ def test_colored_noise_psd_shape():
         num_ifos=num_ifos,
         num_samples=num_samples,
         interpolated_asd=interpolated_asd,
-        seed=seed
+        seed=seed,
+        sample_rate_hertz=1024.0
     )
     
     assert ops.shape(result) == (num_examples, num_ifos, num_samples)
@@ -518,6 +519,8 @@ def test_generate_colored_noise_direct():
     num_samples = 512
     seed = 42
     
+    sample_rate_hertz = 512.0
+    
     # Create flat ASD (white noise with amplitude scaling)
     num_freqs = num_samples // 2 + 1
     asd = jnp.ones((1, num_ifos, num_freqs), dtype=jnp.complex64) * 2.0
@@ -527,14 +530,16 @@ def test_generate_colored_noise_direct():
         num_ifos=num_ifos,
         num_samples=num_samples,
         interpolated_asd=asd,
-        seed=seed
+        seed=seed,
+        sample_rate_hertz=sample_rate_hertz
     )
     
     assert ops.shape(result) == (num_examples, num_ifos, num_samples)
     
-    # Since ASD is 2.0, output should have roughly std ~ 2.0
+    # A flat one-sided ASD of 2 / sqrt(Hz) up to fs / 2 is white noise of
+    # variance 2^2 * fs / 2: std 2 * sqrt(256) = 32.
     std = float(ops.std(result))
-    assert 1.0 < std < 4.0  # Reasonable range
+    assert std == pytest.approx(2.0 * np.sqrt(sample_rate_hertz / 2.0), rel=0.1)
 
 
 def test_noise_obtainer_defaults():

@@ -417,10 +417,18 @@ class IFO_:
     y_length_meters : float
 
 NOISE_PROFILE_DIRECTORY_PATH : Path = gf.PATH / "res/noise_profiles/"
+
+# Bundled amplitude spectral densities (strain / sqrt(Hz)), generated from
+# lalsimulation's curves; each file's header names its source.
+_ALIGO_O3_LOW = "aligo_o3low_t1800545.csv"      # LIGO-T1800545, aLIGOO3LowT1800545
+_ADVIRGO_O3_LOW = "advirgo_o3low_t1800545.csv"  # LIGO-T1800545, AdVO3LowT1800545
+_ALIGO_DESIGN = "aligo_design_t1800044.csv"     # LIGO-T1800044, aLIGODesignSensitivityT1800044
+_ADVIRGO_DESIGN = "advirgo_design_p1200087.csv" # LIGO-P1200087, AdVDesignSensitivityP1200087
+
 ifo_data : Dict = {
     "livingston" : {
         "name": "Livingston",
-        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / "livingston.csv",
+        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / _ALIGO_O3_LOW,
         "longitude_radians" : -1.5843093707829257, 
         "latitude_radians" : 0.5334231350225018,
         "x_angle_radians" : 4.403177738189697,
@@ -431,7 +439,7 @@ ifo_data : Dict = {
     },
     "hanford" : {
         "name": "Hanford",
-        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / "hanford.csv",
+        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / _ALIGO_O3_LOW,
         "longitude_radians" : -2.08405676916594, 
         "latitude_radians" : 0.810795263791696,
         "x_angle_radians": 5.654877185821533,
@@ -442,7 +450,7 @@ ifo_data : Dict = {
     },
     "virgo" : {
         "name": "Virgo",
-        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / "virgo.csv",
+        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / _ADVIRGO_O3_LOW,
         "longitude_radians" : 0.1833380521285067, 
         "latitude_radians" : 0.7615118398044829,
         "x_angle_radians": 0.3391628563404083,
@@ -457,6 +465,22 @@ class IFO(Enum):
     L1 = IFO_(**ifo_data["livingston"])
     H1 = IFO_(**ifo_data["hanford"])
     V1 = IFO_(**ifo_data["virgo"])
+
+class NoiseProfile(Enum):
+    """
+    A named set of per-detector noise curves for simulated (coloured) noise.
+
+    O3_LOW, the default, is each detector's ``optimal_psd_path``: the O3
+    low-noise curves of LIGO-T1800545 (aLIGO for H1 and L1, Advanced Virgo for
+    V1). DESIGN is the aLIGO design curve of LIGO-T1800044 for H1 and L1, and
+    the Advanced Virgo design curve of LIGO-P1200087 for V1.
+    """
+    O3_LOW = {"Hanford": _ALIGO_O3_LOW, "Livingston": _ALIGO_O3_LOW, "Virgo": _ADVIRGO_O3_LOW}
+    DESIGN = {"Hanford": _ALIGO_DESIGN, "Livingston": _ALIGO_DESIGN, "Virgo": _ADVIRGO_DESIGN}
+
+    def path(self, ifo: "IFO") -> Path:
+        """The ASD file of this profile for ``ifo``."""
+        return NOISE_PROFILE_DIRECTORY_PATH / self.value[ifo.value.name]
     
     @property
     def index(self) -> int:

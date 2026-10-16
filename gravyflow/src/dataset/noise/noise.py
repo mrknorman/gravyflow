@@ -108,10 +108,18 @@ def _generate_colored_noise(
     num_ifos : int,
     num_samples: int,
     interpolated_asd: jnp.ndarray, # JAX array
-    seed : int
+    seed : int,
+    *,
+    sample_rate_hertz : float
 ):
     """
-    Function to generate colored Gaussian noise.
+    Generate Gaussian noise whose one-sided PSD is ``interpolated_asd ** 2``.
+
+    ``interpolated_asd`` is the ASD on the rfft grid of ``num_samples`` samples,
+    ``rfftfreq(num_samples, 1 / sample_rate_hertz)``, broadcastable to
+    (Batch, IFOs, Freqs). White noise w ~ N(0, 1) is coloured as
+    x = irfft(sqrt(fs / 2) * ASD * rfft(w)): the factor sqrt(fs / 2) turns
+    unit-variance samples into a one-sided density of 1 / Hz.
     """
     key = jax.random.PRNGKey(seed)
     
@@ -121,19 +129,13 @@ def _generate_colored_noise(
         dtype=jnp.float32
     )
 
-    # FFT
     white_noise_fft = jnp.fft.rfft(white_noise)
     
-    # Apply ASD
-    # interpolated_asd shape: (1, IFOs, Freqs) or similar?
-    # white_noise_fft shape: (Batch, IFOs, Freqs)
+    colored_noise_fft = (
+        np.float32(np.sqrt(sample_rate_hertz / 2.0)) * interpolated_asd * white_noise_fft
+    )
     
-    colored_noise_fft = interpolated_asd * white_noise_fft
-    
-    # IFFT
-    colored_noise = jnp.fft.irfft(colored_noise_fft, n=num_samples)
-    
-    return colored_noise
+    return jnp.fft.irfft(colored_noise_fft, n=num_samples)
 
 def interpolate_onsource_offsource_psd(
     num_samples_list: List[int],
@@ -142,26 +144,29 @@ def interpolate_onsource_offsource_psd(
     psd_val: jnp.ndarray
 ) -> List[jnp.ndarray]:
     """
-    Interpolates onsource and offsource PSDs to a new frequency axis.
+    Interpolates a spectrum onto the rfft grid of each length in ``num_samples_list``.
+
+    Each bin k gets the spectrum at its own frequency, k * fs / N. DC and
+    frequencies below the spectrum's lowest are set to zero; frequencies above
+    its highest hold its last value. Returns the onsource and offsource spectra.
     """
+
+    psd_freq = jnp.asarray(psd_freq, dtype=jnp.float32)
+    psd_val = jnp.asarray(psd_val, dtype=jnp.float32)
 
     interpolated_psds = []
     
     for num in num_samples_list:
-        # New frequency grid
-        new_freqs = jnp.linspace(
-            0.0, 
-            min(psd_freq[-1], sample_rate_hertz / 2),  # Nyquist frequency
-            num // 2 + 1,
+        new_freqs = jnp.asarray(
+            np.fft.rfftfreq(int(num), 1.0 / sample_rate_hertz), dtype=jnp.float32
         )
         
-        # Interpolate
-        # jnp.interp(x, xp, fp)
         interp_val = jnp.interp(new_freqs, psd_freq, psd_val)
+        interp_val = jnp.where(
+            (new_freqs > 0.0) & (new_freqs >= psd_freq[0]), interp_val, 0.0
+        )
         
-        # Cast to complex64 for FFT multiplication? 
-        # Usually ASD is real, but we multiply with complex FFT.
-        # Original code cast to complex64.
+        # Complex, to multiply the complex rfft.
         interp_val = ops.cast(interp_val, "complex64")
         
         interpolated_psds.append(interp_val)
@@ -176,10 +181,15 @@ def colored_noise_generator(
     ifos : List[gf.IFO],
     sample_rate_hertz: float,
     scale_factor : float,
-    seed : int
+    seed : int,
+    noise_profile : "gf.NoiseProfile" = None
 ) -> Iterator:
     """
     Generator function that yields colored Gaussian noise.
+
+    Each detector's noise has the one-sided PSD of its curve in
+    ``noise_profile`` (default: each IFO's ``optimal_psd_path``), times
+    ``scale_factor ** 2``.
     """
     # Use WindowSpec for consistent duration calculations
     window_spec = WindowSpec.from_params(
@@ -195,9 +205,11 @@ def colored_noise_generator(
     ]
 
     def load_psd(ifo, scale_factor):
-        frequencies, asd = np.loadtxt(
-            ifo.value.optimal_psd_path, delimiter=","
-        ).T
+        path = (
+            ifo.value.optimal_psd_path if noise_profile is None
+            else noise_profile.path(ifo)
+        )
+        frequencies, asd = np.loadtxt(path, delimiter=",").T
         frequencies = jnp.array(frequencies, dtype=jnp.float32)
         asd = jnp.array(asd, dtype=jnp.float32)
         return frequencies, asd * scale_factor
@@ -247,14 +259,16 @@ def colored_noise_generator(
                 len(ifos),
                 num_samples_list[0], 
                 interpolated_onsource_asds,
-                seed=s1
+                seed=s1,
+                sample_rate_hertz=sample_rate_hertz
             ),
             RV.OFFSOURCE: _generate_colored_noise(
                 num_examples_per_batch, 
                 len(ifos),
                 num_samples_list[1], 
                 interpolated_offsource_asds,
-                seed=s2
+                seed=s2,
+                sample_rate_hertz=sample_rate_hertz
             ),
         }
     
@@ -291,8 +305,13 @@ class NoiseObtainer(Obtainer):
     Real noise with no ``ifo_data_obtainer`` uses public GWOSC data: O1, O2 and O3,
     DATA with the BURST_CAT1 and BURST_CAT2 vetoes, with known events and Gravity Spy
     glitches removed.
+
+    Noise is returned in internal units, strain x ``scale_factor`` (default
+    ``gf.Defaults.scale_factor``). COLORED noise follows ``noise_profile``
+    (default: ``gf.NoiseProfile.O3_LOW``, each IFO's ``optimal_psd_path``).
     """
     noise_type: NoiseType = NoiseType.REAL
+    noise_profile: "gf.NoiseProfile" = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -310,7 +329,7 @@ class NoiseObtainer(Obtainer):
             offsource_duration_seconds : float = None,
             num_examples_per_batch : float = None,
             ifos: List[gf.IFO] = None,
-            scale_factor : float = 1.0,
+            scale_factor : float = None,
             group : str = "train",
             seed : int = None,
             sampling_mode : "gf.SamplingMode" = None
@@ -364,7 +383,8 @@ class NoiseObtainer(Obtainer):
                     self.ifos,
                     sample_rate_hertz,
                     scale_factor,
-                    seed=seed_
+                    seed=seed_,
+                    noise_profile=self.noise_profile
                 )
             
             case NoiseType.PSEUDO_REAL:
@@ -554,13 +574,15 @@ class NoiseObtainer(Obtainer):
                         len(self.ifos),
                         num_samples_list[0], 
                         ops.sqrt(interpolated_onsource_psds),
-                        seed=s1
+                        seed=s1,
+                        sample_rate_hertz=sample_rate_hertz
                     ),
                     RV.OFFSOURCE: _generate_colored_noise(
                         num_examples_per_batch, 
                         len(self.ifos),
                         num_samples_list[1], 
                         ops.sqrt(interpolated_offsource_psds),
-                        seed=s2
+                        seed=s2,
+                        sample_rate_hertz=sample_rate_hertz
                     ),
                 }
