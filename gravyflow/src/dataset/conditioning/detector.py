@@ -19,43 +19,91 @@ import gravyflow as gf
 # Define the speed of light constant (in m/s)
 C = 299792458.0
 
+# The GPS time at which sky positions are defined when none is given. Right
+# ascension is fixed to the sky; the Earth turns under it, so mapping a source
+# to the detectors needs a time. Any time gives an isotropic population; this
+# one is a round number that lal reproduces directly.
+REFERENCE_GPS_TIME_SECONDS = 1_000_000_000.0
+
+# GPS seconds at which each GPS - UTC offset (leap seconds since 1980) begins.
+_LEAP_SECOND_GPS_TIMES = np.array([
+    46828800, 78364801, 109900802, 173059203, 252028804, 315187205,
+    346723206, 393984007, 425520008, 457056009, 504489610, 551750411,
+    599184012, 820108813, 914803214, 1025136015, 1119744016, 1167264017,
+], dtype=np.float64)
+
+# GPS - UTC at J2000.0 (2000-01-01 12:00:00 UTC) is 13 s, so J2000.0 is GPS
+# 630763213 and 630763200 UTC seconds after the GPS epoch.
+_J2000_UTC_SECONDS_SINCE_GPS_EPOCH = 630763200.0
+
+
+def gps_leap_seconds(gps_time_seconds):
+    """GPS - UTC, in seconds, at ``gps_time_seconds``."""
+    gps = np.asarray(gps_time_seconds, dtype=np.float64)
+    return np.searchsorted(_LEAP_SECOND_GPS_TIMES, gps, side="right").astype(np.float64)
+
+
+def greenwich_mean_sidereal_time(gps_time_seconds):
+    """
+    Greenwich mean sidereal time, in radians in [0, 2 pi), at a GPS time.
+
+    The IAU 1982 expression on UTC, as lal's ``GreenwichMeanSiderealTime``
+    evaluates it (UT1 is taken as UTC). Computed in float64 with numpy.
+    """
+    gps = np.asarray(gps_time_seconds, dtype=np.float64)
+    utc_seconds = gps - gps_leap_seconds(gps) - _J2000_UTC_SECONDS_SINCE_GPS_EPOCH
+    t = utc_seconds / (86400.0 * 36525.0)  # Julian centuries since J2000.0
+    sidereal_seconds = (
+        67310.54841
+        + (3155760000.0 + 8640184.812866) * t
+        + 0.093104 * t ** 2
+        - 6.2e-6 * t ** 3
+    )
+    return np.mod(sidereal_seconds * np.pi / 43200.0, 2.0 * np.pi)
+
+
+def _greenwich_hour_angle(right_ascension, gmst_radians):
+    right_ascension = ops.convert_to_tensor(right_ascension, dtype="float32")
+    if gmst_radians is None:
+        return -right_ascension
+    return ops.convert_to_tensor(gmst_radians, dtype="float32") - right_ascension
+
+
 @jax.jit
 def get_time_delay_(
         right_ascension, 
         declination,
-        location
+        location,
+        gmst_radians = None
     ):
 
     """
-    Calculate the time delay for various combinations of right ascension,
-    declination, and detector locations.
+    The arrival time at each detector minus the arrival time at the Earth's
+    centre, in seconds, as lal's ``TimeDelayFromEarthCenter``.
+
+    The source is at ``right_ascension`` and ``declination`` (radians) when the
+    Greenwich mean sidereal time is ``gmst_radians``. A detector displaced
+    towards the source hears it first, so its delay is negative.
+
+    Returns an array of shape (num_sources, num_detectors).
     """
-    right_ascension = ops.convert_to_tensor(right_ascension)
+    hour_angle = _greenwich_hour_angle(right_ascension, gmst_radians)
     declination = ops.convert_to_tensor(declination)
     location = ops.convert_to_tensor(location)
 
     cos_declination = ops.cos(declination)
     sin_declination = ops.sin(declination)
-    cos_ra_angle = ops.cos(right_ascension)
-    sin_ra_angle = ops.sin(right_ascension)
 
-    e0 = cos_declination * cos_ra_angle
-    e1 = cos_declination * -sin_ra_angle
+    # The unit vector towards the source, in Earth-fixed coordinates.
+    e0 = cos_declination * ops.cos(hour_angle)
+    e1 = cos_declination * -ops.sin(hour_angle)
     e2 = sin_declination
 
     ehat = ops.stack([e0, e1, e2], axis=0)  # Shape (3, N)
-    ehat = ops.expand_dims(ehat, 1)  # Shape (3, 1, N) to allow broadcasting
 
-    # Compute the dot product using tensordot
-    # location: (X, 3)
-    # ehat: (3, 1, N)
-    # axes=[[1], [0]] -> sum over axis 1 of location (3) and axis 0 of ehat (3)
-    # Result: (X, 1, N)
-    time_delay = ops.tensordot(location, ehat, axes=[[1], [0]]) 
-    time_delay = time_delay / C  # Normalize by speed of light
-    
-    # squeeze axis 1 -> (X, N)
-    time_delay = ops.squeeze(time_delay, axis=1)
+    # location: (X, 3); result: (X, N)
+    time_delay = -ops.tensordot(location, ehat, axes=[[1], [0]]) / C
+
     # transpose -> (N, X)
     time_delay = ops.transpose(time_delay)
     
@@ -72,9 +120,20 @@ def get_antenna_pattern_(
         y_length_meters,
         x_response,
         y_response,
-        response
+        response,
+        gmst_radians = None
     ):
-    
+    """
+    Antenna patterns (F+, Fx) of each detector, as lal's ``ComputeDetAMResponse``.
+
+    The source is at ``right_ascension`` and ``declination`` with polarisation
+    angle ``polarization`` (radians, the LAL/Anderson et al. convention) when the
+    Greenwich mean sidereal time is ``gmst_radians``.
+
+    Returns an array of shape (num_sources, num_detectors, 2).
+    """
+    # The expressions below take the Greenwich hour angle.
+    right_ascension = _greenwich_hour_angle(right_ascension, gmst_radians)
     right_ascension = ops.expand_dims(right_ascension, 1)
     declination = ops.expand_dims(declination, 1)
     polarization = ops.expand_dims(polarization, 1)
@@ -166,7 +225,7 @@ def generate_direction_vectors(
     """
     Generate random direction vectors uniformly distributed over the sphere.
     """
-    PI = 3.14159
+    PI = np.pi
 
     # Right Ascension
     if right_ascension is None:
@@ -211,71 +270,22 @@ def shift_waveform(
         axis=0
     )
     time_shift_seconds = ops.expand_dims(time_shift_seconds, axis=-1)
-    
-    PI = 3.14159
 
-    # Use jnp.fft.rfft directly
     strain_fft = jnp.fft.rfft(strain) 
+    phase_factor = ops.exp(-2j * np.pi * frequency_axis * time_shift_seconds)
+    shifted_strain = jnp.fft.irfft(phase_factor * strain_fft, n=strain.shape[-1])
 
-    imaj_part = -2.0*PI*frequency_axis*time_shift_seconds
-    
-    # tf.complex(real, imag) -> jax.lax.complex(real, imag) or real + 1j * imag
-    phase_factor = ops.exp(
-        1j * imaj_part
-    )
-    
-    # jnp.fft.irfft
-    shitfted_strain = jnp.fft.irfft(phase_factor * strain_fft, n=strain.shape[-1])
-    
-    # Masking to prevent wrapping
-    # shift_waveform expects time_shift_seconds to be (Batch, D, 1) here
-    # time_shift_seconds was expanded in line 216.
-    
-    shift_samples = time_shift_seconds * sample_rate_hertz # (Batch, D, 1)
-    
+    # The shift is circular: zero only the samples that wrapped round from the
+    # other end. A delay of s samples (s > 0) wraps into indices below ceil(s);
+    # an advance (s < 0) wraps into indices at or above floor(N + s).
+    shift_samples = time_shift_seconds * sample_rate_hertz  # (Batch, D, 1)
     num_samples = strain.shape[-1]
-    indices = ops.arange(num_samples)
-    # Expand indices to (1, 1, Time)
-    indices = ops.expand_dims(ops.expand_dims(indices, 0), 0)
-    
-    # Mask logic: Keep if (indices >= shift) AND (indices < N + shift)
-    # Use ceil/floor to be conservative and avoid fractional boundary artifacts
-    lower_bound = ops.ceil(shift_samples)
-    upper_bound = ops.floor(num_samples + shift_samples)
-    
-    # Create a soft mask (taper) to avoid harsh cutoffs
-    # We want a transition from 0 to 1 at lower_bound and 1 to 0 at upper_bound.
-    # Taper width in samples
-    taper_width = 16.0 
-    
-    # Sigmoid-like or linear taper? Sine-squared is standard.
-    # We can define a continuous mask function based on indices.
-    
-    # distance from lower bound (positive = inside)
-    dist_lower = indices - lower_bound
-    # distance from upper bound (positive = inside)
-    dist_upper = upper_bound - indices
-    
-    # We want min(dist_lower, dist_upper) to determine the taper
-    # If dist < 0: 0
-    # If dist > width: 1
-    # If 0 < dist < width: taper
-    
-    min_dist = ops.minimum(dist_lower, dist_upper)
-    
-    # Clamp to [0, width]
-    clamped_dist = ops.clip(min_dist, 0.0, taper_width)
-    
-    # Normalize to [0, 1]
-    x = clamped_dist / taper_width
-    
-    # Sine-squared taper: sin^2(pi/2 * x)
-    taper = ops.sin(3.14159 / 2.0 * x) ** 2
-    
-    mask = taper
-    mask = ops.cast(mask, "float32")
-    
-    return ops.real(shitfted_strain) * mask
+    indices = ops.expand_dims(ops.expand_dims(ops.arange(num_samples), 0), 0)
+    keep = (indices >= ops.ceil(shift_samples)) & (
+        indices < ops.floor(num_samples + shift_samples)
+    )
+
+    return ops.real(shifted_strain) * ops.cast(keep, "float32")
 
 @jax.jit(static_argnames=["sample_rate_hertz"])
 def project_wave(
@@ -292,14 +302,21 @@ def project_wave(
         location,
         right_ascension = None,
         declination = None,
-        polarization = None
+        polarization = None,
+        gmst_radians = None
     ):
+    """
+    Project polarisations onto the detectors, delayed to each detector's arrival.
+
+    Sky angles follow LAL: right ascension and declination are equatorial, and
+    ``gmst_radians`` (the Greenwich mean sidereal time) fixes the Earth's
+    orientation. Missing angles are drawn isotropically from ``seed``.
+    """
 
     # Ensure the seed is of the correct shape [2] and dtype int32
     seed_tensor = ops.cast(seed, dtype="int32")
     
     num_injections = strain.shape[0]
-    PI = 3.14159
     
     # We need to handle seed carefully. 
     # generate_direction_vectors expects a tuple or something usable as PRNGKey.
@@ -319,12 +336,13 @@ def project_wave(
         declination = random_declination
 
     if polarization is None:
+        # The polarisation angle is defined modulo pi.
         key = jax.random.PRNGKey(seed_tensor[0] + 2) # Offset seed
         polarization = jax.random.uniform(
             key,
             shape=[num_injections], 
             minval=0.0, 
-            maxval=2 * PI, 
+            maxval=np.pi, 
             dtype="float32"
         )
     
@@ -338,7 +356,8 @@ def project_wave(
         y_length_meters,
         x_response,
         y_response,
-        response
+        response,
+        gmst_radians
     ) 
     
     antenna_patern = ops.expand_dims(antenna_patern, axis=-1)
@@ -352,7 +371,8 @@ def project_wave(
     time_shift_seconds = get_time_delay_(
         right_ascension, 
         declination,
-        location
+        location,
+        gmst_radians
     )
     
     shifted_waveoform = shift_waveform(
@@ -415,6 +435,16 @@ class IFO_:
     height_meters : float
     x_length_meters : float
     y_length_meters : float
+    # The arms' tilt above the local horizontal, as in lal's frDetector.
+    x_altitude_radians : float = 0.0
+    y_altitude_radians : float = 0.0
+
+# lal's arm altitudes (its frDetector values) for the bundled detectors.
+_ARM_ALTITUDE_RADIANS : Dict = {
+    "livingston" : {"x_altitude_radians": -3.1210e-4, "y_altitude_radians": -6.1070e-4},
+    "hanford" : {"x_altitude_radians": -6.1950e-4, "y_altitude_radians": 1.2500e-5},
+    "virgo" : {"x_altitude_radians": 0.0, "y_altitude_radians": 0.0},
+}
 
 NOISE_PROFILE_DIRECTORY_PATH : Path = gf.PATH / "res/noise_profiles/"
 
@@ -462,9 +492,14 @@ ifo_data : Dict = {
 }
     
 class IFO(Enum):
-    L1 = IFO_(**ifo_data["livingston"])
-    H1 = IFO_(**ifo_data["hanford"])
-    V1 = IFO_(**ifo_data["virgo"])
+    L1 = IFO_(**ifo_data["livingston"], **_ARM_ALTITUDE_RADIANS["livingston"])
+    H1 = IFO_(**ifo_data["hanford"], **_ARM_ALTITUDE_RADIANS["hanford"])
+    V1 = IFO_(**ifo_data["virgo"], **_ARM_ALTITUDE_RADIANS["virgo"])
+
+    @property
+    def index(self) -> int:
+        """Get integer index for this IFO (L1=0, H1=1, V1=2)."""
+        return list(IFO).index(self)
 
 class NoiseProfile(Enum):
     """
@@ -481,11 +516,6 @@ class NoiseProfile(Enum):
     def path(self, ifo: "IFO") -> Path:
         """The ASD file of this profile for ``ifo``."""
         return NOISE_PROFILE_DIRECTORY_PATH / self.value[ifo.value.name]
-    
-    @property
-    def index(self) -> int:
-        """Get integer index for this IFO (L1=0, H1=1, V1=2)."""
-        return list(IFO).index(self)
 
 
 class Network:
@@ -534,8 +564,10 @@ class Network:
                 "x_angle_radians", 
                 "y_angle_radians", 
                 "x_length_meters", 
-                "y_length_meters", 
-                "height_meters"
+                "y_length_meters",
+                "height_meters",
+                "x_altitude_radians",
+                "y_altitude_radians"
             ]
             
             num_detectors = len(parameters)
@@ -577,61 +609,48 @@ class Network:
         x_angle_radians = None,  # Batched tensor or None
         height_meters = None,  # Batched tensor
         x_length_meters = None,  # Batched tensor
-        y_length_meters = None   # Batched tensor
+        y_length_meters = None,  # Batched tensor
+        x_altitude_radians = None,  # Batched tensor or None (level arms)
+        y_altitude_radians = None   # Batched tensor or None (level arms)
     ):
         
         PI = np.pi
-    
+
         if x_angle_radians is None:
             x_angle_radians = \
                 y_angle_radians + ops.convert_to_tensor(PI / 2.0, dtype="float32")
+        if x_altitude_radians is None:
+            x_altitude_radians = ops.zeros_like(y_angle_radians)
+        if y_altitude_radians is None:
+            y_altitude_radians = ops.zeros_like(y_angle_radians)
 
-        # Rotation matrices using the provided functions
-        rm1 = rotation_matrix_z(longitude_radians)
-        rm2 = rotation_matrix_y(PI / 2.0 - latitude_radians)    
-        rm = ops.matmul(rm2, rm1)
+        # The arm unit vectors and the response tensor in Earth-fixed
+        # coordinates, as lal's XLALCreateDetector builds them: each arm has an
+        # azimuth (clockwise from North) and an altitude above the local
+        # horizontal, and the response is (x x^T - y y^T) / 2.
+        def f64(value):
+            return np.asarray(value, dtype=np.float64).reshape(-1)
 
-        # Calculate response in earth centered coordinates
-        responses = []
-        vecs = []
+        lon, lat = f64(longitude_radians), f64(latitude_radians)
 
-        for angle in [y_angle_radians, x_angle_radians]:
-            a, b = ops.cos(2 * angle), ops.sin(2 * angle)
-            
-            response = ops.stack([
-                ops.stack([-a, b, ops.zeros_like(a)], axis=-1), 
-                ops.stack([b, a, ops.zeros_like(a)], axis=-1), 
-                ops.stack(
-                    [
-                        ops.zeros_like(a), 
-                        ops.zeros_like(a), 
-                        ops.zeros_like(a)
-                    ], 
-                    axis=-1
-                )
-            ], axis=1)
+        def arm(azimuth, altitude):
+            u_north = np.cos(altitude) * np.cos(azimuth)
+            u_east = np.cos(altitude) * np.sin(azimuth)
+            u_up = np.sin(altitude)
+            u_rho = -np.sin(lat) * u_north + np.cos(lat) * u_up
+            return np.stack([
+                np.cos(lon) * u_rho - np.sin(lon) * u_east,
+                np.sin(lon) * u_rho + np.cos(lon) * u_east,
+                np.cos(lat) * u_north + np.sin(lat) * u_up,
+            ], axis=-1)
 
-            response = ops.matmul(response, rm)
-            response = ops.matmul(
-                ops.transpose(rm, axes=[0, 2, 1]), 
-                response
-            ) / 4.0
-            
-            responses.append(response)
-            
-            angle_vector = ops.stack([
-                -ops.cos(angle),
-                ops.sin(angle),
-                ops.zeros_like(angle)
-            ], axis=1)
-
-            angle_vector = ops.reshape(angle_vector, [-1, 3, 1])
-            
-            vec = ops.matmul(ops.transpose(rm, axes=[0, 2, 1]), angle_vector)
-            vec = ops.squeeze(vec, axis=-1)
-            vecs.append(vec)
-
-        full_response = responses[0] - responses[1]
+        x_arm = arm(f64(x_angle_radians), f64(x_altitude_radians))
+        y_arm = arm(f64(y_angle_radians), f64(y_altitude_radians))
+        x_arm_response = 0.5 * np.einsum("ni,nj->nij", x_arm, x_arm)
+        y_arm_response = 0.5 * np.einsum("ni,nj->nij", y_arm, y_arm)
+        full_response = ops.convert_to_tensor(
+            x_arm_response - y_arm_response, dtype="float32"
+        )
 
         # Handling the coordinates.EarthLocation method
         # This part requires numpy/cpu execution as astropy is not differentiable/JAX-native
@@ -652,27 +671,45 @@ class Network:
 
         self.location = loc
         self.response = full_response
-        self.x_response = responses[1]
-        self.y_response = responses[0]
-        self.x_vector = vecs[1]
-        self.y_vector = vecs[0]
+        self.x_response = ops.convert_to_tensor(x_arm_response, dtype="float32")
+        self.y_response = ops.convert_to_tensor(y_arm_response, dtype="float32")
+        self.x_vector = ops.convert_to_tensor(x_arm, dtype="float32")
+        self.y_vector = ops.convert_to_tensor(y_arm, dtype="float32")
         self.y_angle_radians = y_angle_radians
         self.x_angle_radians = x_angle_radians
+        self.x_altitude_radians = x_altitude_radians
+        self.y_altitude_radians = y_altitude_radians
         self.height_meters = height_meters
-        self.x_altitude_meters = ops.zeros_like(height_meters)
-        self.y_altitude_meters = ops.zeros_like(height_meters)
         self.y_length_meters = y_length_meters
         self.x_length_meters = x_length_meters
         
         self.calculate_max_arrival_time_difference()
     
+    @staticmethod
+    def gmst_radians(gps_time_seconds = None, num_sources : int = None):
+        """
+        The Greenwich mean sidereal time at ``gps_time_seconds`` (scalar or per
+        source), as a float32 tensor of length ``num_sources`` when given.
+        ``None`` means ``REFERENCE_GPS_TIME_SECONDS``.
+        """
+        if gps_time_seconds is None:
+            gps_time_seconds = REFERENCE_GPS_TIME_SECONDS
+        gmst = greenwich_mean_sidereal_time(np.asarray(gps_time_seconds, dtype=np.float64))
+        if num_sources is not None:
+            gmst = np.broadcast_to(gmst, (num_sources,))
+        return ops.convert_to_tensor(np.asarray(gmst, dtype=np.float32))
+
     def get_antenna_pattern(
             self,
             right_ascension, 
             declination, 
-            polarization
+            polarization,
+            gps_time_seconds = None
         ):
-        
+        """
+        F+ and Fx of each detector, shape (num_sources, num_detectors, 2), for
+        equatorial sky angles at ``gps_time_seconds`` (LAL conventions).
+        """
         return get_antenna_pattern_(
             right_ascension, 
             declination, 
@@ -683,7 +720,8 @@ class Network:
             self.y_length_meters,
             self.x_response,
             self.y_response,
-            self.response
+            self.response,
+            self.gmst_radians(gps_time_seconds, ops.shape(right_ascension)[0])
         )
     
     @classmethod
@@ -725,13 +763,18 @@ class Network:
     def get_time_delay(
         self,
         right_ascension, 
-        declination
+        declination,
+        gps_time_seconds = None
     ):
-        
+        """
+        Arrival time at each detector minus arrival at the Earth's centre, shape
+        (num_sources, num_detectors), as lal's ``TimeDelayFromEarthCenter``.
+        """
         return get_time_delay_(
             right_ascension, 
             declination,
-            self.location
+            self.location,
+            self.gmst_radians(gps_time_seconds, ops.shape(right_ascension)[0])
         )
 
     def check_and_convert(
@@ -777,8 +820,14 @@ class Network:
         sample_rate_hertz = None,
         right_ascension = None,
         declination  = None,
-        polarization  = None
+        polarization  = None,
+        gps_time_seconds = None
     ):
+        """
+        Project (Batch, 2, Time) polarisations onto the network, each detector's
+        copy delayed to its arrival time. Sky angles follow LAL and are defined
+        at ``gps_time_seconds`` (default ``REFERENCE_GPS_TIME_SECONDS``).
+        """
 
         if sample_rate_hertz is None:
             sample_rate_hertz = gf.Defaults.sample_rate_hertz
@@ -813,7 +862,8 @@ class Network:
         kwargs = dict(
             right_ascension=right_ascension,
             declination=declination,
-            polarization=polarization
+            polarization=polarization,
+            gmst_radians=self.gmst_radians(gps_time_seconds, strain_length)
         )
         
         try:

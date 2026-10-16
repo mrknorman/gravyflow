@@ -231,13 +231,25 @@ def test_time_delay(
             np.random.uniform(-np.pi / 2, np.pi / 2, size=(num_tests,)), dtype="float32"
         )
 
-        delay = network.get_time_delay(right_ascension, declination)
-        if hasattr(delay, "numpy"):
-            delay = delay.numpy()
-        else:
-            delay = np.array(delay)
+        gps = 1126259462.4
+        delay = np.array(network.get_time_delay(
+            right_ascension, declination, gps_time_seconds=gps
+        ))
+        # L1-H1 is 10 ms of light travel, L1-V1 27 ms.
         np.testing.assert_allclose(delay[:, 0], delay[:, 1], atol=0.011)
         np.testing.assert_allclose(delay[:, 0], delay[:, 2], atol=0.032)
+
+        # Against lal: the arrival time at the detector minus at the geocentre,
+        # negative for a detector displaced towards the source.
+        import lal
+        detectors = (lal.LLO_4K_DETECTOR, lal.LHO_4K_DETECTOR, lal.VIRGO_DETECTOR)
+        for index, detector in enumerate(detectors):
+            location = lal.CachedDetectors[detector].location
+            expected = [
+                lal.TimeDelayFromEarthCenter(location, float(ra), float(dec), gps)
+                for ra, dec in zip(np.array(right_ascension), np.array(declination))
+            ]
+            np.testing.assert_allclose(delay[:, index], expected, atol=1e-7)
 
 
 
@@ -354,24 +366,40 @@ def _test_antenna_pattern(
             dtype="float32"
         )
 
-        gps_reference = 0
+        # Sky angles are equatorial, at a GPS time; the reference
+        # implementations below take the Greenwich hour angle, GMST - RA.
+        gps_reference = 1126259462
         d = Detector("L1")
+        hour_angle = gf.greenwich_mean_sidereal_time(gps_reference) - np.array(right_ascension)
 
         # Compute the output
         antenna_pattern = network.get_antenna_pattern(
-            d.gmst_estimate(gps_reference) - np.array(right_ascension), 
-            declination, 
-            polarization
+            right_ascension,
+            declination,
+            polarization,
+            gps_time_seconds=gps_reference
         )
 
         f_plus = ops.squeeze(antenna_pattern[...,0])
         f_cross = ops.squeeze(antenna_pattern[...,1])
 
         f_plus_zomb, f_cross_zomb = zombie_antenna_pattern(
-            d.gmst_estimate(gps_reference) - np.array(right_ascension),
-            np.array(declination), 
+            hour_angle,
+            np.array(declination),
             np.array(polarization)
         )
+
+        import lal
+        gmst = lal.GreenwichMeanSiderealTime(gps_reference)
+        response = lal.CachedDetectors[lal.LLO_4K_DETECTOR].response
+        f_lal = np.array([
+            lal.ComputeDetAMResponse(response, float(ra), float(dec), float(psi), gmst)
+            for ra, dec, psi in zip(
+                np.array(right_ascension), np.array(declination), np.array(polarization)
+            )
+        ])
+        np.testing.assert_allclose(f_plus, f_lal[:, 0], atol=1e-5)
+        np.testing.assert_allclose(f_cross, f_lal[:, 1], atol=1e-5)
 
         f_plus_pycbc, f_cross_pycbc = d.antenna_pattern(
             np.array(right_ascension),
