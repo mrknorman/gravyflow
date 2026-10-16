@@ -3,6 +3,9 @@ from pathlib import Path
 import logging
 
 import pytest
+
+# Its tests draw their data from global RNGs (see conftest's guard).
+pytestmark = pytest.mark.global_rng
 import gravyflow as gf
 
 import numpy as np
@@ -266,26 +269,28 @@ def _test_projection(
         gf.tests.PATH / "example_injection_parameters"
     )
 
-    # Use gf.Defaults.seed for deterministic test
-    seed = gf.Defaults.seed
-    gf.set_random_seeds(seed)
-    
-    # Create fresh Network with default seed (don't use fixture - its RNG was already consumed)
     if single_ifo:
-        test_network = gf.Network([gf.IFO.L1], seed=seed)
+        test_network = gf.Network([gf.IFO.L1])
     else:
-        test_network = gf.Network([gf.IFO.L1, gf.IFO.H1, gf.IFO.V1], seed=seed)
+        test_network = gf.Network([gf.IFO.L1, gf.IFO.H1, gf.IFO.V1])
 
     phenom_d_generator = gf.WaveformGenerator.load(
         injection_directory_path / "phenom_d_parameters.json"
     )
     phenom_d_generator.injection_chance = 1.0
 
-    # InjectionGenerator now defaults to gf.Defaults.seed
     injection_generator = gf.InjectionGenerator([phenom_d_generator])
     injections, _, _ = next(injection_generator())
 
-    projected_injections = test_network.project_wave(injections[0])
+    # An isotropic sky, drawn from the default tree's direct streams.
+    num = injections.shape[1]
+    sky = gf.SeedTree().direct().stream("sky/test")
+    projected_injections = test_network.project_wave(
+        injections[0],
+        right_ascension=ops.convert_to_tensor(2.0 * np.pi * sky.random(num), dtype="float32"),
+        declination=ops.convert_to_tensor(np.arcsin(2.0 * sky.random(num) - 1.0), dtype="float32"),
+        polarization=ops.convert_to_tensor(np.pi * sky.random(num), dtype="float32"),
+    )
 
     # Verify output shape and content
     projected_injections = np.array(projected_injections)

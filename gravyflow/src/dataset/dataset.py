@@ -17,10 +17,12 @@ import gravyflow as gf
 from gravyflow.src.dataset.conditioning.whiten import whiten
 from gravyflow.src.dataset.tools.psd import SpectralConfig, estimate_psd, MIN_PSD_SEGMENTS
 from gravyflow.src.utils.tensor import (
-    crop_samples, replace_nan_and_inf_with_zero, set_random_seeds, window_samples
+    crop_samples, replace_nan_and_inf_with_zero, window_samples
 )
 from gravyflow.src.utils.shapes import BatchContract
 from gravyflow.src.dataset.config import Defaults
+from gravyflow.src.dataset.noise.noise import obtainer_batcher
+from gravyflow.src.rng import BatchStreams, SeedTree
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
@@ -151,9 +153,98 @@ def lowest_generator_frequency(generator) -> Optional[float]:
     return lowest
 
 
-class GravyflowDataset(keras.utils.PyDataset):
+class EpochMode(Enum):
+    """How a dataset's batches change from epoch to epoch."""
+    FRESH = auto()   # New draws every epoch: batch k of epoch e is addressed by (e, k).
+    REPEAT = auto()  # The same batches every epoch: epoch 0's.
+
+
+class IndexedBatches:
+    """
+    Batches addressed by index: ``ds[k]`` is a pure function of the dataset's
+    specification, its seed tree, its split, its effective epoch and k.
+
+    The training split (EpochMode.FRESH, the default for ``group="train"``)
+    draws fresh batches every epoch: Keras calls ``on_epoch_end``, which moves
+    the epoch on. Other splits (EpochMode.REPEAT) always serve epoch 0, so an
+    evaluation set is the same in every epoch and every run. ``next(ds)`` is
+    a cursor over (epoch, k).
+    """
+
+    def _init_batches(self, seed, group: str, steps_per_epoch: int, epoch_mode: Optional[EpochMode]):
+        self.tree = SeedTree.of(seed)
+        self.seed = self.tree.root
+        self.group = group
+        self.steps_per_epoch = steps_per_epoch
+        if epoch_mode is None:
+            epoch_mode = EpochMode.FRESH if group == "train" else EpochMode.REPEAT
+        self.epoch_mode = epoch_mode
+        self._epoch = 0
+        self._cursor = 0
+
+    @property
+    def epoch(self) -> int:
+        """The training epoch: it selects the batches and any Curriculum's distribution."""
+        return self._epoch
+
+    @epoch.setter
+    def epoch(self, epoch: int):
+        """Set the epoch, e.g. to resume a run (Keras' ``initial_epoch``)."""
+        if int(epoch) < 0:
+            raise ValueError(f"epoch must be non-negative, got {epoch}.")
+        self._epoch = int(epoch)
+
+    @property
+    def _batch_epoch(self) -> int:
+        return self._epoch if self.epoch_mode is EpochMode.FRESH else 0
+
+    @property
+    def _schedule_epoch(self) -> Optional[int]:
+        """The epoch a Curriculum is read at: training's, else its end (None)."""
+        return self._epoch if self.epoch_mode is EpochMode.FRESH else None
+
+    def streams(self, index: int) -> BatchStreams:
+        """The streams of batch ``index`` at the current epoch."""
+        index = int(index)
+        if not 0 <= index < len(self):
+            raise IndexError(f"Batch {index} is outside the {len(self)} batches of an epoch.")
+        return self.tree.batch(self.group, self._batch_epoch, index)
+
+    def __len__(self):
+        return self.steps_per_epoch
+
+    def on_epoch_end(self):
+        if self.epoch_mode is EpochMode.FRESH:
+            self._epoch += 1
+
+    def __next__(self):
+        if self._cursor >= len(self):
+            self._cursor = 0
+            self.on_epoch_end()
+        batch = self[self._cursor]
+        self._cursor += 1
+        return batch
+
+    @property
+    def seed_metadata(self) -> dict:
+        """Where the data's randomness came from, to record beside a model."""
+        return {
+            **self.tree.metadata(),
+            "split": self.group,
+            "epoch_mode": self.epoch_mode.name,
+        }
+
+
+class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
     """
     A Keras PyDataset to generate data for gravitational wave detection training.
+
+    Randomness: one seed tree, rooted at ``seed`` (default ``gf.Defaults.seed``),
+    with every draw addressed by (split ``group``, epoch, batch k, consumer);
+    see IndexedBatches. Different splits never share a stream, so train,
+    validate and test built from one seed are independent. The dataset works
+    on its own copies of the obtainer and generators it is given, so the
+    caller's objects are never changed and can serve other datasets.
     """
 
     def __init__(
@@ -175,9 +266,12 @@ class GravyflowDataset(keras.utils.PyDataset):
         mask_history: Optional[List] = None,
         steps_per_epoch: int = 1000,
         sampling_mode: Optional["gf.SamplingMode"] = None,
-        spectral_config: Optional[SpectralConfig] = None
+        spectral_config: Optional[SpectralConfig] = None,
+        epoch_mode: Optional[EpochMode] = None
     ):
         """
+        seed: the root of the seed tree, an integer >= 0 or a gf.SeedTree.
+        epoch_mode: EpochMode.FRESH (default for group="train") or REPEAT.
         spectral_config: the band, PSD estimator and whitening filter shared by
             SNR scaling, SNR labels and whitening (gf.SpectralConfig; default
             band 20 Hz to Nyquist, 1 s / 0.5 s median Welch PSD, 1 s filter).
@@ -186,11 +280,9 @@ class GravyflowDataset(keras.utils.PyDataset):
         """
         # Initialize PyDataset (single-threaded to avoid JAX/fork deadlocks)
         super().__init__(workers=0)
-        
-        self.steps_per_epoch = steps_per_epoch
+        self._init_batches(seed, group, steps_per_epoch, epoch_mode)
 
         # Set default values
-        self.seed = seed if seed is not None else gf.Defaults.seed
         self.sample_rate_hertz = sample_rate_hertz if sample_rate_hertz is not None else gf.Defaults.sample_rate_hertz
         self.onsource_duration_seconds = onsource_duration_seconds if onsource_duration_seconds is not None else gf.Defaults.onsource_duration_seconds
         self.offsource_duration_seconds = offsource_duration_seconds if offsource_duration_seconds is not None else gf.Defaults.offsource_duration_seconds
@@ -199,8 +291,8 @@ class GravyflowDataset(keras.utils.PyDataset):
         self.num_examples_per_generation_batch = num_examples_per_generation_batch if num_examples_per_generation_batch is not None else gf.Defaults.num_examples_per_generation_batch
         self.num_examples_per_batch = num_examples_per_batch if num_examples_per_batch is not None else gf.Defaults.num_examples_per_batch
         
-        self.noise_obtainer = noise_obtainer if noise_obtainer is not None else gf.NoiseObtainer()
-        self.group = group
+        # The dataset's own copies: the caller's objects are never changed.
+        self.noise_obtainer = copy.deepcopy(noise_obtainer) if noise_obtainer is not None else gf.NoiseObtainer()
         self.ifos = ensure_list(ifos) if ifos is not None else None
         
         # Default to RANDOM mode if not specified
@@ -211,7 +303,7 @@ class GravyflowDataset(keras.utils.PyDataset):
         self.spectral_config = spectral_config if spectral_config is not None else SpectralConfig()
         
         # Initialize waveform generators
-        self.waveform_generators = waveform_generators if waveform_generators is not None else []
+        self.waveform_generators = copy.deepcopy(waveform_generators) if waveform_generators is not None else []
         if not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
             self.waveform_generators = [self.waveform_generators]
 
@@ -222,29 +314,8 @@ class GravyflowDataset(keras.utils.PyDataset):
         self._validate_settings()
         self.batch_contract = self._batch_contract()
 
-        # Set random seeds
-        gf.set_random_seeds(self.seed)
-
         # Create noise and injection generators
         self._create_generators()
-
-        # Configure any Curriculum objects in waveform generators
-        self._configure_curricula()
-
-    def _configure_curricula(self):
-        """Auto-configure any Curriculum objects in waveform generators."""
-        generators = []
-        if isinstance(self.waveform_generators, list):
-            generators = self.waveform_generators
-        elif isinstance(self.waveform_generators, dict):
-            generators = [g["generator"] for g in self.waveform_generators.values()]
-        
-        for generator in generators:
-            if hasattr(generator, 'scaling_method') and generator.scaling_method is not None:
-                value = generator.scaling_method.value
-                # Duck-type check for Curriculum (has configure method)
-                if hasattr(value, 'configure'):
-                    value.configure(steps_per_epoch=self.steps_per_epoch)
 
     def _noise_ifos(self) -> List:
         """The detectors the noise will have (``noise_ifos``)."""
@@ -254,17 +325,15 @@ class GravyflowDataset(keras.utils.PyDataset):
         """
         Give every generator a network of exactly the noise's detectors, in order.
 
-        A generator without a network is copied and the copy gets one built from
-        the noise's detectors, so the caller's generator is never modified and can
-        serve another dataset. A generator with its own network must match the
-        noise's detectors; a mismatch would broadcast one projection into several
-        channels or mislabel them, so it raises.
+        A generator without a network (the dataset's own copy) gets one built
+        from the noise's detectors. A generator with its own network must match
+        the noise's detectors; a mismatch would broadcast one projection into
+        several channels or mislabel them, so it raises.
         """
         noise_ifos = self._noise_ifos()
 
         def bind(generator):
             if generator.network is None:
-                generator = copy.copy(generator)
                 generator.network = gf.Network(noise_ifos)
             else:
                 check_network_matches_ifos(generator.network, noise_ifos)
@@ -418,18 +487,13 @@ class GravyflowDataset(keras.utils.PyDataset):
             'offsource_duration_seconds': self.offsource_duration_seconds,
             'num_examples_per_batch': self.num_examples_per_batch,
             'scale_factor': self.scale_factor,
-            'group': self.group,
-            'seed': self.seed,
+            'sampling_mode': self.sampling_mode,
         }
         # Add ifos to noise_kwargs if provided
         if self.ifos is not None:
             noise_kwargs['ifos'] = self.ifos
 
-        # Only pass sampling_mode to NoiseObtainer (not TransientObtainer)
-        if hasattr(self.noise_obtainer, 'noise_type'):
-            noise_kwargs['sampling_mode'] = self.sampling_mode
-        
-        self.noise = self.noise_obtainer(**noise_kwargs)
+        self.noise = obtainer_batcher(self.noise_obtainer, self.tree, self.group, **noise_kwargs)
 
         waveform_parameters_to_return = [
             item for item in self.variables_to_return if isinstance(
@@ -439,27 +503,15 @@ class GravyflowDataset(keras.utils.PyDataset):
         self.injection_generator = gf.InjectionGenerator(
             waveform_generators=self.waveform_generators,
             parameters_to_return=waveform_parameters_to_return,
-            seed=self.seed
         )
-        self.injections = self.injection_generator(
-            sample_rate_hertz=self.sample_rate_hertz,
-            onsource_duration_seconds=self.onsource_duration_seconds,
-            crop_duration_seconds=self.crop_duration_seconds,
-            num_examples_per_generation_batch=self.num_examples_per_generation_batch,
-            num_examples_per_batch=self.num_examples_per_batch,
-        )
-
-    def __len__(self):
-        return self.steps_per_epoch
 
     def __getitem__(self, index) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
-        Generate the next batch of data.
+        Batch ``index`` of the current epoch: a pure function of its address.
         """
-        # Note: 'index' is ignored because data generation is infinite/random.
-        
+        streams = self.streams(index)
         try:
-            batch_data = next(self.noise)
+            batch_data = self.noise(streams)
             
             # Handle dict format (new) or tuple format (legacy)
             if isinstance(batch_data, dict):
@@ -487,7 +539,13 @@ class GravyflowDataset(keras.utils.PyDataset):
             raise Exception(f"Noise generation failed: {e}")
 
         try:
-            injections, mask, parameters = next(self.injections)
+            injections, mask, parameters = self.injection_generator.generate(
+                streams,
+                sample_rate_hertz=self.sample_rate_hertz,
+                onsource_duration_seconds=self.onsource_duration_seconds,
+                crop_duration_seconds=self.crop_duration_seconds,
+                num_examples_per_batch=self.num_examples_per_batch,
+            )
         except Exception as e:
             logger.info(f"Injection generation failed: {e}\nTraceback: {traceback.format_exc()}")
             raise Exception(f"Injection generation failed: {e}")
@@ -504,7 +562,9 @@ class GravyflowDataset(keras.utils.PyDataset):
                 parameters_to_return=self.variables_to_return,
                 onsource_duration_seconds=self.onsource_duration_seconds,
                 injection_parameters=parameters,
-                scale_factor=self.scale_factor
+                scale_factor=self.scale_factor,
+                streams=streams,
+                epoch=self._schedule_epoch
             )
         except Exception as e:
             logger.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")
@@ -761,9 +821,13 @@ data = GravyflowDataset
 # COMPOSED DATASET
 # =============================================================================
 
-class ComposedDataset(keras.utils.PyDataset):
+class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
     """
     A dataset composed of multiple FeaturePools with different probabilities and labels.
+
+    Randomness: as GravyflowDataset (see IndexedBatches). Each example's pool
+    is drawn from ``pool/assign``, and every draw of a pool sits under
+    ``pool/{name}/``, so pools never share a stream.
     
     Each pool can be a different data source (noise, glitches, events, injections)
     with its own class label and sampling probability. Multiple pools can share
@@ -817,14 +881,15 @@ class ComposedDataset(keras.utils.PyDataset):
         input_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         output_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         steps_per_epoch: int = 1000,
-        group: str = "train"
+        group: str = "train",
+        epoch_mode: Optional[EpochMode] = None
     ):
         """
         Initialize the composed dataset.
         
         Args:
             pools: List of FeaturePool objects defining data sources and labels.
-            seed: Random seed for reproducibility.
+            seed: The root of the seed tree (an integer >= 0 or a gf.SeedTree).
             sample_rate_hertz: Sample rate in Hz.
             onsource_duration_seconds: Duration of onsource window.
             offsource_duration_seconds: Duration of offsource window.
@@ -836,16 +901,15 @@ class ComposedDataset(keras.utils.PyDataset):
             output_variables: Variables to include in output dict.
             steps_per_epoch: Number of batches per epoch.
             group: Dataset split (train/val/test).
+            epoch_mode: EpochMode.FRESH (default for group="train") or REPEAT.
         """
         super().__init__(workers=0)
-        
+
         from gravyflow.src.dataset.pools import PoolSampler
-        
-        self.steps_per_epoch = steps_per_epoch
-        self.group = group
-        
+
+        self._init_batches(seed, group, steps_per_epoch, epoch_mode)
+
         # Set default values
-        self.seed = seed if seed is not None else Defaults.seed
         self.sample_rate_hertz = sample_rate_hertz if sample_rate_hertz is not None else Defaults.sample_rate_hertz
         self.onsource_duration_seconds = onsource_duration_seconds if onsource_duration_seconds is not None else Defaults.onsource_duration_seconds
         self.offsource_duration_seconds = offsource_duration_seconds if offsource_duration_seconds is not None else Defaults.offsource_duration_seconds
@@ -862,13 +926,10 @@ class ComposedDataset(keras.utils.PyDataset):
         if not self.variables_to_return:
             raise ValueError("No return variables requested. What's the point?")
         
-        # Initialize pool sampler
-        self.pools = pools
-        self.pool_sampler = PoolSampler(pools, seed=self.seed)
-        
-        # Set random seeds
-        gf.set_random_seeds(self.seed)
-        
+        # The dataset's own copies: the caller's pools are never changed.
+        self.pools = copy.deepcopy(pools)
+        self.pool_sampler = PoolSampler(self.pools)
+
         # Initialize generators for each pool
         self._pool_generators = {}
         self._pool_injection_generators = {}
@@ -885,18 +946,13 @@ class ComposedDataset(keras.utils.PyDataset):
                 'num_examples_per_batch': self.num_examples_per_batch,
                 'ifos': self.ifos,
                 'scale_factor': self.scale_factor,
-                'group': self.group,
-                'seed': self.seed + i,  # Unique seed per pool
+                'sampling_mode': gf.SamplingMode.RANDOM,
             }
-            
-            if pool.is_noise_pool:
-                # Add sampling_mode for noise obtainer
-                generator_kwargs['sampling_mode'] = gf.SamplingMode.RANDOM
-                self._pool_generators[i] = pool.noise_obtainer(**generator_kwargs)
-            else:
-                # Transient obtainer doesn't need sampling_mode
-                self._pool_generators[i] = pool.transient_obtainer(**generator_kwargs)
-            
+            obtainer = pool.noise_obtainer if pool.is_noise_pool else pool.transient_obtainer
+            self._pool_generators[i] = obtainer_batcher(
+                obtainer, self.tree.sub(f"pool/{pool.name}"), self.group, **generator_kwargs
+            )
+                        
             # Initialize injection generator if pool has injections
             if pool.has_injections:
                 waveform_parameters_to_return = [
@@ -909,28 +965,20 @@ class ComposedDataset(keras.utils.PyDataset):
                     if gen.network is None:
                         gen.network = gf.Network(pool.noise_obtainer.ifos)
                 
-                injection_gen = gf.InjectionGenerator(
+                self._pool_injection_generators[i] = gf.InjectionGenerator(
                     waveform_generators=pool.injection_generators,
                     parameters_to_return=waveform_parameters_to_return,
-                    seed=self.seed + i + 1000
                 )
-                self._pool_injection_generators[i] = injection_gen(
-                    sample_rate_hertz=self.sample_rate_hertz,
-                    onsource_duration_seconds=self.onsource_duration_seconds,
-                    crop_duration_seconds=self.crop_duration_seconds,
-                    num_examples_per_generation_batch=self.num_examples_per_generation_batch,
-                    num_examples_per_batch=self.num_examples_per_batch,
-                )
-    
-    def __len__(self):
-        return self.steps_per_epoch
-    
+
     def __getitem__(self, index) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
-        Generate the next batch of data from multiple pools.
+        Batch ``index`` of the current epoch, from multiple pools: a pure
+        function of its address.
         """
-        # Get pool assignments for this batch
-        pool_assignments = self.pool_sampler.get_pool_batch_sizes(self.num_examples_per_batch)
+        streams = self.streams(index)
+        pool_assignments = self.pool_sampler.get_pool_batch_sizes(
+            self.num_examples_per_batch, streams.stream("pool/assign")
+        )
         
         # Storage for batch data
         batch_onsource = []
@@ -948,11 +996,11 @@ class ComposedDataset(keras.utils.PyDataset):
         
         for pool_idx, (count, positions) in pool_assignments.items():
             pool = self.pools[pool_idx]
-            generator = self._pool_generators[pool_idx]
-            
+            pool_streams = streams.sub(f"pool/{pool.name}")
+
             # Generate data from this pool
             try:
-                batch_data = next(generator)
+                batch_data = self._pool_generators[pool_idx](pool_streams)
                 
                 # Handle dict format (new) or tuple format (legacy)
                 if isinstance(batch_data, dict):
@@ -981,15 +1029,14 @@ class ComposedDataset(keras.utils.PyDataset):
             parameters = {}
             if pool.has_injections and pool_idx in self._pool_injection_generators:
                 try:
-                    injections, mask, parameters = next(self._pool_injection_generators[pool_idx])
-                    
-                    injection_gen = gf.InjectionGenerator(
-                        waveform_generators=pool.injection_generators,
-                        parameters_to_return=[],
-                        seed=self.seed + pool_idx
+                    injection_gen = self._pool_injection_generators[pool_idx]
+                    injections, mask, parameters = injection_gen.generate(
+                        pool_streams,
+                        sample_rate_hertz=self.sample_rate_hertz,
+                        onsource_duration_seconds=self.onsource_duration_seconds,
+                        crop_duration_seconds=self.crop_duration_seconds,
+                        num_examples_per_batch=self.num_examples_per_batch,
                     )
-                    injection_gen.sample_rate_hertz = self.sample_rate_hertz
-                    
                     onsource, scaled_injections, labels = injection_gen.add_injections_to_onsource(
                         injections,
                         mask,
@@ -997,7 +1044,9 @@ class ComposedDataset(keras.utils.PyDataset):
                         offsource,
                         parameters_to_return=self.variables_to_return,
                         onsource_duration_seconds=self.onsource_duration_seconds,
-                        injection_parameters=parameters
+                        injection_parameters=parameters,
+                        streams=pool_streams,
+                        epoch=self._schedule_epoch
                     )
                     # Batch-first, so each position takes its own example.
                     parameters = {key: _batch_first(value) for key, value in labels.items()}
@@ -1100,9 +1149,3 @@ class ComposedDataset(keras.utils.PyDataset):
         }
         
         return input_dict, output_dict
-    
-    def __iter__(self):
-        return self
-    
-    def __next__(self):
-        return self.__getitem__(0)

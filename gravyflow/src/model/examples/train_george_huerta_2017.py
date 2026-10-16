@@ -86,7 +86,7 @@ def train_phase(model_class, task, config, schedule, args, pretrained=None):
     make = model_class.dataset_regression if regression else model_class.dataset
     wrap = (lambda ds: RegressionBatches(ds, MASSES)) if regression else DetectionBatches
     validation = materialise(
-        wrap(make(config=config, seed=run.seeds["validate"], group="validate",
+        wrap(make(config=config, seed=run.seed, group="validate",
                   steps_per_epoch=schedule.validation_batches)),
         schedule.validation_batches,
     )

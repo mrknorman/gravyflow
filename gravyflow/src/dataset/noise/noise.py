@@ -1,7 +1,8 @@
 from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Union, Iterator, List
+from itertools import count
+from typing import Callable, Dict, Union, Iterator, List
 from copy import deepcopy
 import logging
 
@@ -12,13 +13,14 @@ import keras
 from keras import ops
 import jax.numpy as jnp
 import jax
-from numpy.random import default_rng  
 
 import gravyflow as gf
 
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.dataset.acquisition import ifo_canonical_key
 from gravyflow.src.dataset.config import WindowSpec
+from gravyflow.src.rng import BatchStreams, SeedTree
+from gravyflow.src.rng.legacy import warn_deprecated
 from gravyflow.src.utils.shapes import ShapeEnforcer
 
 class NoiseType(Enum):
@@ -28,114 +30,49 @@ class NoiseType(Enum):
     REAL = auto()
 
 from gravyflow.src.utils.numerics import ensure_even
-    
-def _generate_white_noise(
+
+#: A noise batcher: the batch at an address, from its streams.
+NoiseBatcher = Callable[[BatchStreams], Dict]
+
+
+def unit_normal_noise(
+    streams: BatchStreams,
+    ifos: List["gf.IFO"],
+    window: str,
     num_examples_per_batch: int,
-    num_ifos : int,
     num_samples: int,
-    seed : int
 ):
     """
-    Optimized function to generate white Gaussian noise.
+    Unit Gaussian noise, (Batch, IFO, Samples), float32.
+
+    Each detector's noise comes from its own stream, ``noise/{IFO}/{window}``,
+    so adding a detector changes no other detector's noise.
     """
-    # Use jax.random directly for efficiency and correctness with JAX backend
-    key = jax.random.PRNGKey(seed)
-    
-    return jax.random.normal(
-        key,
-        shape=(num_examples_per_batch, num_ifos, num_samples),
-        dtype=jnp.float32
-    )
+    return jnp.stack([
+        jax.random.normal(
+            streams.key(f"noise/{ifo.name}/{window}"),
+            shape=(num_examples_per_batch, num_samples),
+            dtype=jnp.float32
+        )
+        for ifo in ifos
+    ], axis=1)
 
-def white_noise_generator(
-    num_examples_per_batch: int,
-    ifos : List[gf.IFO],
-    onsource_duration_seconds: float,
-    crop_duration_seconds : float,
-    offsource_duration_seconds: float,
-    sample_rate_hertz: float,
-    seed : int
-) -> Iterator:
+
+def color_noise(white_noise, interpolated_asd, *, sample_rate_hertz: float):
     """
-    Generator function that yields white Gaussian noise.
-    
-    Yields:
-        Dict with ReturnVariables keys:
-        - ONSOURCE: (Batch, IFO, Samples) white noise
-        - OFFSOURCE: (Batch, IFO, Samples) white noise
-        
-        Note: Synthetic noise does not include START_GPS_TIME or DATA_LABEL.
-    """
+    Colour unit Gaussian noise so that its one-sided PSD is ``interpolated_asd ** 2``.
 
-    # Use WindowSpec for consistent duration/sample calculations
-    window_spec = WindowSpec.from_params(
-        sample_rate_hertz=sample_rate_hertz,
-        onsource_duration_seconds=onsource_duration_seconds,
-        offsource_duration_seconds=offsource_duration_seconds,
-        crop_duration_seconds=crop_duration_seconds
-    )
-    
-    num_onsource_samples = window_spec.num_onsource_samples
-    num_offsource_samples = window_spec.num_offsource_samples
-
-    rng = default_rng(seed)
-
-    while True:
-        # Generate new seeds for each batch
-        s1 = rng.integers(1000000000)
-        s2 = rng.integers(1000000000)
-        
-        # Yield dict with only required keys for synthetic noise
-        # Shape: ONSOURCE = (Batch, IFO, Samples) = BIS
-        # Shape: OFFSOURCE = (Batch, IFO, Samples) = BIS
-        yield {
-            RV.ONSOURCE: _generate_white_noise(
-                num_examples_per_batch, 
-                len(ifos),
-                num_onsource_samples,
-                seed=s1
-            ),
-            RV.OFFSOURCE: _generate_white_noise(
-                num_examples_per_batch, 
-                len(ifos),
-                num_offsource_samples,
-                seed=s2
-            ),
-        }
-        
-def _generate_colored_noise(
-    num_examples_per_batch: int,
-    num_ifos : int,
-    num_samples: int,
-    interpolated_asd: jnp.ndarray, # JAX array
-    seed : int,
-    *,
-    sample_rate_hertz : float
-):
-    """
-    Generate Gaussian noise whose one-sided PSD is ``interpolated_asd ** 2``.
-
-    ``interpolated_asd`` is the ASD on the rfft grid of ``num_samples`` samples,
-    ``rfftfreq(num_samples, 1 / sample_rate_hertz)``, broadcastable to
-    (Batch, IFOs, Freqs). White noise w ~ N(0, 1) is coloured as
-    x = irfft(sqrt(fs / 2) * ASD * rfft(w)): the factor sqrt(fs / 2) turns
+    ``interpolated_asd`` is the ASD on the rfft grid of the noise's length,
+    broadcastable to (Batch, IFOs, Freqs). White noise w ~ N(0, 1) is coloured
+    as x = irfft(sqrt(fs / 2) * ASD * rfft(w)): the factor sqrt(fs / 2) turns
     unit-variance samples into a one-sided density of 1 / Hz.
     """
-    key = jax.random.PRNGKey(seed)
-    
-    white_noise = jax.random.normal(
-        key,
-        shape=(num_examples_per_batch, num_ifos, num_samples),
-        dtype=jnp.float32
-    )
-
-    white_noise_fft = jnp.fft.rfft(white_noise)
-    
+    num_samples = white_noise.shape[-1]
     colored_noise_fft = (
-        np.float32(np.sqrt(sample_rate_hertz / 2.0)) * interpolated_asd * white_noise_fft
+        np.float32(np.sqrt(sample_rate_hertz / 2.0)) * interpolated_asd * jnp.fft.rfft(white_noise)
     )
-    
     return jnp.fft.irfft(colored_noise_fft, n=num_samples)
+
 
 def interpolate_onsource_offsource_psd(
     num_samples_list: List[int],
@@ -173,105 +110,128 @@ def interpolate_onsource_offsource_psd(
     
     return interpolated_psds[0], interpolated_psds[1]
 
-def colored_noise_generator(
-    num_examples_per_batch: int,
-    onsource_duration_seconds: float,
-    crop_duration_seconds : float,
-    offsource_duration_seconds: float,
-    ifos : List[gf.IFO],
-    sample_rate_hertz: float,
-    scale_factor : float,
-    seed : int,
-    noise_profile : "gf.NoiseProfile" = None
-) -> Iterator:
-    """
-    Generator function that yields colored Gaussian noise.
 
-    Each detector's noise has the one-sided PSD of its curve in
-    ``noise_profile`` (default: each IFO's ``optimal_psd_path``), times
-    ``scale_factor ** 2``.
+
+def white_noise_batcher(
+    num_examples_per_batch: int,
+    ifos: List["gf.IFO"],
+    onsource_duration_seconds: float,
+    crop_duration_seconds: float,
+    offsource_duration_seconds: float,
+    sample_rate_hertz: float,
+) -> NoiseBatcher:
     """
-    # Use WindowSpec for consistent duration calculations
+    White Gaussian noise, one batch per address: a dict of ONSOURCE and
+    OFFSOURCE, each (Batch, IFO, Samples). Synthetic noise has no
+    START_GPS_TIME or DATA_LABEL.
+    """
     window_spec = WindowSpec.from_params(
         sample_rate_hertz=sample_rate_hertz,
         onsource_duration_seconds=onsource_duration_seconds,
         offsource_duration_seconds=offsource_duration_seconds,
         crop_duration_seconds=crop_duration_seconds
     )
-    
-    durations_seconds = [
-        window_spec.total_onsource_duration_seconds, 
-        offsource_duration_seconds
+
+    def batch(streams: BatchStreams) -> Dict:
+        return {
+            RV.ONSOURCE: unit_normal_noise(
+                streams, ifos, "on", num_examples_per_batch, window_spec.num_onsource_samples
+            ),
+            RV.OFFSOURCE: unit_normal_noise(
+                streams, ifos, "off", num_examples_per_batch, window_spec.num_offsource_samples
+            ),
+        }
+
+    return batch
+
+
+def colored_noise_batcher(
+    num_examples_per_batch: int,
+    onsource_duration_seconds: float,
+    crop_duration_seconds : float,
+    offsource_duration_seconds: float,
+    ifos : List["gf.IFO"],
+    sample_rate_hertz: float,
+    scale_factor : float,
+    noise_profile : "gf.NoiseProfile" = None
+) -> NoiseBatcher:
+    """
+    Colored Gaussian noise, one batch per address.
+
+    Each detector's noise has the one-sided PSD of its curve in
+    ``noise_profile`` (default: each IFO's ``optimal_psd_path``), times
+    ``scale_factor ** 2``.
+    """
+    window_spec = WindowSpec.from_params(
+        sample_rate_hertz=sample_rate_hertz,
+        onsource_duration_seconds=onsource_duration_seconds,
+        offsource_duration_seconds=offsource_duration_seconds,
+        crop_duration_seconds=crop_duration_seconds
+    )
+    num_samples_list = [
+        ensure_even(int(duration * sample_rate_hertz)) for duration in (
+            window_spec.total_onsource_duration_seconds, offsource_duration_seconds
+        )
     ]
 
-    def load_psd(ifo, scale_factor):
+    onsource_asds, offsource_asds = [], []
+    for ifo in ifos:
         path = (
             ifo.value.optimal_psd_path if noise_profile is None
             else noise_profile.path(ifo)
         )
         frequencies, asd = np.loadtxt(path, delimiter=",").T
-        frequencies = jnp.array(frequencies, dtype=jnp.float32)
-        asd = jnp.array(asd, dtype=jnp.float32)
-        return frequencies, asd * scale_factor
-
-    interpolated_onsource_asds = []
-    interpolated_offsource_asds = []
-    for ifo in ifos:
-        frequencies, asd = load_psd(ifo, scale_factor)
-        
-        num_samples_list = [
-            ensure_even(int(duration * sample_rate_hertz)) for duration in durations_seconds
-        ]
-
-        interpolated_asd_onsource, interpolated_asd_offsource = interpolate_onsource_offsource_psd(
-                num_samples_list,
-                sample_rate_hertz,
-                frequencies,
-                asd
-            )
-
-        interpolated_onsource_asds.append(
-            interpolated_asd_onsource
+        onsource_asd, offsource_asd = interpolate_onsource_offsource_psd(
+            num_samples_list,
+            sample_rate_hertz,
+            jnp.array(frequencies, dtype=jnp.float32),
+            jnp.array(asd, dtype=jnp.float32) * scale_factor
         )
-        interpolated_offsource_asds.append(
-            interpolated_asd_offsource
-        )
+        onsource_asds.append(onsource_asd)
+        offsource_asds.append(offsource_asd)
 
-    interpolated_onsource_asds = ops.stack(interpolated_onsource_asds, axis=0) # (IFOs, Freqs)
-    interpolated_offsource_asds = ops.stack(interpolated_offsource_asds, axis=0)
-    
-    # Expand dims for batch broadcasting
-    interpolated_onsource_asds = ops.expand_dims(interpolated_onsource_asds, 0) # (1, IFOs, Freqs)
-    interpolated_offsource_asds = ops.expand_dims(interpolated_offsource_asds, 0)
+    # (1, IFOs, Freqs), to broadcast over the batch.
+    onsource_asds = ops.expand_dims(ops.stack(onsource_asds, axis=0), 0)
+    offsource_asds = ops.expand_dims(ops.stack(offsource_asds, axis=0), 0)
 
-    rng = default_rng(seed)
-    
-    while True:
-        s1 = rng.integers(1000000000)
-        s2 = rng.integers(1000000000)
-        
-        # Yield dict with only required keys for synthetic noise
-        # Shape: ONSOURCE = (Batch, IFO, Samples) = BIS
-        # Shape: OFFSOURCE = (Batch, IFO, Samples) = BIS
-        yield {
-            RV.ONSOURCE: _generate_colored_noise(
-                num_examples_per_batch, 
-                len(ifos),
-                num_samples_list[0], 
-                interpolated_onsource_asds,
-                seed=s1,
+    def batch(streams: BatchStreams) -> Dict:
+        return {
+            RV.ONSOURCE: color_noise(
+                unit_normal_noise(streams, ifos, "on", num_examples_per_batch, num_samples_list[0]),
+                onsource_asds,
                 sample_rate_hertz=sample_rate_hertz
             ),
-            RV.OFFSOURCE: _generate_colored_noise(
-                num_examples_per_batch, 
-                len(ifos),
-                num_samples_list[1], 
-                interpolated_offsource_asds,
-                seed=s2,
+            RV.OFFSOURCE: color_noise(
+                unit_normal_noise(streams, ifos, "off", num_examples_per_batch, num_samples_list[1]),
+                offsource_asds,
                 sample_rate_hertz=sample_rate_hertz
             ),
         }
-    
+
+    return batch
+
+
+def sequential_batcher(iterator: Iterator) -> NoiseBatcher:
+    """
+    A batcher over a sequential reader: each call takes the reader's next
+    batch, whatever the address. Real noise and transients are read this way
+    until they are addressed by index.
+    """
+    def batch(streams: BatchStreams) -> Dict:
+        return next(iterator)
+
+    return batch
+
+
+def enforce_shapes(batch: Dict, num_ifos: int) -> Dict:
+    """One batch, checked against the noise shape contracts."""
+    return next(ShapeEnforcer.wrap_generator(iter([batch]), num_ifos=num_ifos))
+
+
+def sequential_seed(tree: SeedTree, split: str, consumer: str) -> int:
+    """An integer seed for a sequential reader, from its own stream of the tree."""
+    return int(tree.stream(split, consumer).integers(2**63))
+
 
 @dataclass
 class Obtainer:
@@ -280,18 +240,16 @@ class Obtainer:
     ifo_data_obtainer: Union[None, gf.IFODataObtainer] = None
     ifos: List[gf.IFO] = None
     groups: Union[dict, None] = None
-    
+
     def __post_init__(self):
         if self.ifos is None:
             self.ifos = [gf.IFO.L1]
         elif not isinstance(self.ifos, list) and not isinstance(self.ifos, tuple):
             self.ifos = [self.ifos]
-        
+
         if not self.groups:
             self.groups = self._default_groups()
-        
-        self.rng = None
-    
+
     def _default_groups(self) -> dict:
         """Override in subclasses for different default group splits."""
         return {"train": 0.89, "validate": 0.1, "test": 0.01}
@@ -309,6 +267,9 @@ class NoiseObtainer(Obtainer):
     Noise is returned in internal units, strain x ``scale_factor`` (default
     ``gf.Defaults.scale_factor``). COLORED noise follows ``noise_profile``
     (default: ``gf.NoiseProfile.O3_LOW``, each IFO's ``optimal_psd_path``).
+
+    An obtainer is a specification: building batches never changes it, so one
+    obtainer can serve any number of datasets and splits.
     """
     noise_type: NoiseType = NoiseType.REAL
     noise_profile: "gf.NoiseProfile" = None
@@ -320,7 +281,129 @@ class NoiseObtainer(Obtainer):
                 data_quality=gf.DataQuality.BEST,
                 data_labels=[gf.DataLabel.NOISE],
             )
-    
+
+    def batcher(
+            self,
+            tree : SeedTree,
+            group : str,
+            sample_rate_hertz : float  = None,
+            onsource_duration_seconds : float = None,
+            crop_duration_seconds : float = None,
+            offsource_duration_seconds : float = None,
+            num_examples_per_batch : int = None,
+            ifos: List[gf.IFO] = None,
+            scale_factor : float = None,
+            sampling_mode : "gf.SamplingMode" = None
+        ) -> NoiseBatcher:
+        """
+        The noise of split ``group``, one batch per address.
+
+        WHITE and COLORED noise is a pure function of the batch's streams.
+        PSEUDO_REAL and REAL noise is read sequentially, from readers seeded
+        from ``tree`` and ``group``, until it is addressed by index.
+        """
+        if sample_rate_hertz is None:
+            sample_rate_hertz = gf.Defaults.sample_rate_hertz
+        if onsource_duration_seconds is None:
+            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
+        if offsource_duration_seconds is None:
+            offsource_duration_seconds = gf.Defaults.offsource_duration_seconds
+        if crop_duration_seconds is None:
+            crop_duration_seconds = gf.Defaults.crop_duration_seconds
+        if scale_factor is None:
+            scale_factor = gf.Defaults.scale_factor
+        if num_examples_per_batch is None:
+            num_examples_per_batch = gf.Defaults.num_examples_per_batch
+        if sampling_mode is None:
+            sampling_mode = gf.SamplingMode.RANDOM
+        # The detectors for this call only: the obtainer's own `ifos` is never
+        # overwritten, so one obtainer can serve datasets with different detectors.
+        ifos = gf.src.utils.numerics.ensure_list(ifos) if ifos is not None else list(self.ifos)
+
+        match self.noise_type:
+            case NoiseType.WHITE:
+                batch = white_noise_batcher(
+                    num_examples_per_batch,
+                    ifos,
+                    onsource_duration_seconds,
+                    crop_duration_seconds,
+                    offsource_duration_seconds,
+                    sample_rate_hertz,
+                )
+
+            case NoiseType.COLORED:
+                batch = colored_noise_batcher(
+                    num_examples_per_batch,
+                    onsource_duration_seconds,
+                    crop_duration_seconds,
+                    offsource_duration_seconds,
+                    ifos,
+                    sample_rate_hertz,
+                    scale_factor,
+                    noise_profile=self.noise_profile
+                )
+
+            case NoiseType.PSEUDO_REAL:
+                batch = sequential_batcher(self.pseudo_real_noise_generator(
+                    num_examples_per_batch,
+                    onsource_duration_seconds,
+                    crop_duration_seconds,
+                    offsource_duration_seconds,
+                    sample_rate_hertz,
+                    group,
+                    scale_factor,
+                    tree=tree,
+                    ifos=ifos
+                ))
+
+            case NoiseType.REAL:
+                ifo_data_obtainer = self._reader(ifos, tree, group, sample_rate_hertz)
+                batch = sequential_batcher(ifo_data_obtainer.get_onsource_offsource_chunks(
+                    sample_rate_hertz,
+                    onsource_duration_seconds,
+                    crop_duration_seconds,
+                    offsource_duration_seconds,
+                    num_examples_per_batch,
+                    ifos,
+                    scale_factor,
+                    seed=sequential_seed(tree, group, "noise/real"),
+                    sampling_mode=sampling_mode,
+                    group=group
+                ))
+
+            case _:
+                raise ValueError(
+                    f"NoiseType {self.noise_type} not recognised, please choose"
+                    "from NoiseType.WHITE, NoiseType.COLORED, "
+                    "NoiseType.PSEUDO_REAL, or NoiseType.REAL. "
+                )
+
+        return lambda streams: enforce_shapes(batch(streams), num_ifos=len(ifos))
+
+    def _reader(self, ifos, tree : SeedTree, group : str, sample_rate_hertz : float):
+        """
+        A copy of the IFO data obtainer with the split's segments: the reader
+        is the batcher's own, so the caller's obtainer is never changed.
+        """
+        if not self.ifo_data_obtainer:
+            raise ValueError("""
+                No IFO obtainer object present. In order to acquire real
+                noise please parse a IFOObtainer object to NoiseObtainer
+                either during initlisation or through setting
+                NoiseObtainer.ifo_data_obtainer
+            """)
+        reader = deepcopy(self.ifo_data_obtainer)
+        reader.rng = None
+        if reader.valid_segments is None or ifo_canonical_key(ifos) != reader.ifos:
+            reader.get_valid_segments(
+                ifos,
+                sequential_seed(tree, group, "noise/segment_order"),
+                self.groups,
+                group,
+            )
+            reader.generate_file_path(sample_rate_hertz, group, self.data_directory_path)
+        return reader
+
     def __call__(
             self,
             sample_rate_hertz : float  = None,
@@ -334,131 +417,25 @@ class NoiseObtainer(Obtainer):
             seed : int = None,
             sampling_mode : "gf.SamplingMode" = None
         ) -> Iterator:
+        """
+        An iterator over the batches k = 0, 1, ... of split ``group`` (epoch
+        0) of the seed tree rooted at ``seed`` (default ``gf.Defaults.seed``).
+        """
+        tree = SeedTree.of(seed)
+        batch = self.batcher(
+            tree,
+            group,
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration_seconds=onsource_duration_seconds,
+            crop_duration_seconds=crop_duration_seconds,
+            offsource_duration_seconds=offsource_duration_seconds,
+            num_examples_per_batch=num_examples_per_batch,
+            ifos=ifos,
+            scale_factor=scale_factor,
+            sampling_mode=sampling_mode,
+        )
+        return (batch(tree.batch(group, 0, k)) for k in count())
 
-        if sample_rate_hertz is None:
-            sample_rate_hertz = gf.Defaults.sample_rate_hertz
-        if onsource_duration_seconds is None:
-            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
-        if offsource_duration_seconds is None:
-            offsource_duration_seconds = gf.Defaults.offsource_duration_seconds
-        if crop_duration_seconds is None:
-            crop_duration_seconds = gf.Defaults.crop_duration_seconds
-        if scale_factor is None:
-            scale_factor = gf.Defaults.scale_factor
-        if num_examples_per_batch is None:
-            num_examples_per_batch = gf.Defaults.num_examples_per_batch
-        if seed is None:
-            seed = gf.Defaults.seed
-        # The detectors for this call only: the obtainer's own `ifos` is never
-        # overwritten, so one obtainer can serve datasets with different detectors.
-        ifos = gf.src.utils.numerics.ensure_list(ifos) if ifos is not None else list(self.ifos)
-        if self.rng is None:
-            self.rng = default_rng(seed)
-        
-        # Default to RANDOM mode if not specified
-        if sampling_mode is None:
-            sampling_mode = gf.SamplingMode.RANDOM
-
-        self.generator = None
-
-        seed_ = self.rng.integers(1000000000)
-                
-        match self.noise_type:
-            case NoiseType.WHITE:
-                self.generator = white_noise_generator(
-                    num_examples_per_batch,
-                    ifos,
-                    onsource_duration_seconds,
-                    crop_duration_seconds,
-                    offsource_duration_seconds,
-                    sample_rate_hertz,
-                    seed=seed_
-                )
-                
-            case NoiseType.COLORED:
-                self.generator = colored_noise_generator(
-                    num_examples_per_batch,
-                    onsource_duration_seconds,
-                    crop_duration_seconds,
-                    offsource_duration_seconds,
-                    ifos,
-                    sample_rate_hertz,
-                    scale_factor,
-                    seed=seed_,
-                    noise_profile=self.noise_profile
-                )
-            
-            case NoiseType.PSEUDO_REAL:
-                self.generator = self.pseudo_real_noise_generator(
-                    num_examples_per_batch,
-                    onsource_duration_seconds,
-                    crop_duration_seconds,
-                    offsource_duration_seconds,
-                    sample_rate_hertz,
-                    group,
-                    scale_factor,
-                    seed=seed_,
-                    ifos=ifos
-                )
-            
-            case NoiseType.REAL:
-                canonical_ifos = ifo_canonical_key(ifos)
-
-                if not self.ifo_data_obtainer:
-                    raise ValueError("""
-                        No IFO obtainer object present. In order to acquire real 
-                        noise please parse a IFOObtainer object to NoiseObtainer
-                        either during initlisation or through setting
-                        NoiseObtainer.ifo_data_obtainer
-                    """)
-                
-                # Deepcopy to ensure each generator has independent state
-                ifo_data_obtainer_copy = deepcopy(self.ifo_data_obtainer)
-                # Reset rng to ensure fresh random state (deepcopy carries over rng state)
-                ifo_data_obtainer_copy.rng = None
-                
-                if ifo_data_obtainer_copy.valid_segments is None or canonical_ifos != ifo_data_obtainer_copy.ifos:
-                        ifo_data_obtainer_copy.get_valid_segments(
-                            ifos,
-                            seed,
-                            self.groups,
-                            group,
-                        )
-                    
-                        ifo_data_obtainer_copy.generate_file_path(
-                            sample_rate_hertz,
-                            group,
-                            self.data_directory_path
-                        )
-                
-                self.generator = ifo_data_obtainer_copy.get_onsource_offsource_chunks(
-                        sample_rate_hertz,
-                        onsource_duration_seconds,
-                        crop_duration_seconds,
-                        offsource_duration_seconds,
-                        num_examples_per_batch,
-                        ifos,
-                        scale_factor,
-                        seed=seed_,
-                        sampling_mode=sampling_mode,
-                        group=group
-                    )
-                
-            case _:
-                raise ValueError(
-                    f"NoiseType {self.noise_type} not recognised, please choose"
-                    "from NoiseType.WHITE, NoiseType.COLORED, "
-                    "NoiseType.PSEUDO_REAL, or NoiseType.REAL. "
-                )
-                
-        if self.generator is None:  # pragma: no cover
-            raise ValueError(
-                "Noise generator failed to initilise..."
-            )
-        
-        # Enforce shape contracts
-        return ShapeEnforcer.wrap_generator(self.generator, num_ifos=len(ifos))
-    
     def pseudo_real_noise_generator(
         self,
         num_examples_per_batch: int,
@@ -468,125 +445,85 @@ class NoiseObtainer(Obtainer):
         sample_rate_hertz: float,
         group : str,
         scale_factor : float,
-        seed : int,
+        tree : SeedTree,
         ifos : List[gf.IFO] = None
     ):
-
+        """
+        Gaussian noise coloured by the PSDs of real segments, read in order.
+        Batch b of the reader draws from the streams of (group, epoch 0, b).
+        """
         ifos = list(self.ifos) if ifos is None else ifos
-        rng = default_rng(seed)
-        
-        # Use WindowSpec for consistent duration calculations
+
         window_spec = WindowSpec.from_params(
             sample_rate_hertz=sample_rate_hertz,
             onsource_duration_seconds=onsource_duration_seconds,
             offsource_duration_seconds=offsource_duration_seconds,
             crop_duration_seconds=crop_duration_seconds
         )
-        
-        durations_seconds = [
-            window_spec.total_onsource_duration_seconds, 
-            offsource_duration_seconds
-        ]
-        
         num_samples_list = [
-            int(duration * sample_rate_hertz) for duration in durations_seconds
+            int(duration * sample_rate_hertz) for duration in (
+                window_spec.total_onsource_duration_seconds, offsource_duration_seconds
+            )
         ]
 
-        canonical_ifos = ifo_canonical_key(ifos)
+        reader = self._reader(ifos, tree, group, sample_rate_hertz)
+        num_batches_in_segment : int = int(
+              reader.max_segment_duration_seconds
+            * reader.saturation
+            / (num_examples_per_batch * onsource_duration_seconds)
+        )
 
-        if not self.ifo_data_obtainer:
-            raise ValueError("""
-                No IFO obtainer object present. In order to acquire real 
-                noise please parse a IFOObtainer object to NoiseObtainer
-                either during initlisation or through setting
-                NoiseObtainer.ifo_data_obtainer
-            """)
-        elif self.ifo_data_obtainer.valid_segments is None or canonical_ifos != self.ifo_data_obtainer.ifos:
-            
-            valid_segments = self.ifo_data_obtainer.get_valid_segments(
-                ifos,
-                seed,
-                self.groups,
-                group_name=group
-            ) 
-
-            self.ifo_data_obtainer.generate_file_path(
-                sample_rate_hertz,
-                group,
-                self.data_directory_path
-            )
-
-        for segment in self.ifo_data_obtainer.acquire(
-            sample_rate_hertz, 
-            valid_segments, 
+        batch_index = count()
+        for segment in reader.acquire(
+            sample_rate_hertz,
+            reader.valid_segments,
             ifos,
             scale_factor
         ):
-
-            interpolated_onsource_psds = []
-            interpolated_offsource_psds = []
+            onsource_psds, offsource_psds = [], []
             for data in segment.data:
-
                 frequencies, psd = gf.psd(
-                    data, 
-                    nperseg=1024, 
+                    data,
+                    nperseg=1024,
                     sample_rate_hertz=sample_rate_hertz
                 )
-                
-                # Squeeze to 1D - psd returns (batch, freqs), we need (freqs,)
-                frequencies = ops.squeeze(frequencies)
-                psd = ops.squeeze(psd)
-                
-                interpolated_psd_onsource, interpolated_psd_offsource = \
-                    interpolate_onsource_offsource_psd(
-                        num_samples_list,
-                        sample_rate_hertz,
-                        frequencies,
-                        psd
-                    )
-                
-                interpolated_onsource_psds.append(
-                    interpolated_psd_onsource
+                # psd returns (batch, freqs); one spectrum per detector.
+                onsource_psd, offsource_psd = interpolate_onsource_offsource_psd(
+                    num_samples_list,
+                    sample_rate_hertz,
+                    ops.squeeze(frequencies),
+                    ops.squeeze(psd)
                 )
-                interpolated_offsource_psds.append(
-                    interpolated_psd_offsource
-                )
+                onsource_psds.append(onsource_psd)
+                offsource_psds.append(offsource_psd)
 
-            interpolated_onsource_psds = ops.stack(interpolated_onsource_psds, axis=0)
-            interpolated_offsource_psds = ops.stack(interpolated_offsource_psds, axis=0)
-            
-            interpolated_onsource_psds = ops.expand_dims(interpolated_onsource_psds, 0)
-            interpolated_offsource_psds = ops.expand_dims(interpolated_offsource_psds, 0)
-            
-            num_batches_in_segment : int = \
-                int(
-                      self.ifo_data_obtainer.max_segment_duration_seconds
-                    * self.ifo_data_obtainer.saturation
-                    / (num_examples_per_batch * onsource_duration_seconds)
-                )
-                        
+            onsource_asds = ops.sqrt(ops.expand_dims(ops.stack(onsource_psds, axis=0), 0))
+            offsource_asds = ops.sqrt(ops.expand_dims(ops.stack(offsource_psds, axis=0), 0))
+
             for _ in range(num_batches_in_segment):
-                s1 = rng.integers(1000000000)
-                s2 = rng.integers(1000000000)
-                
-                # Yield dict for pseudo-real noise (synthetic from real PSD)
-                # Shape: ONSOURCE = (Batch, IFO, Samples) = BIS
-                # Shape: OFFSOURCE = (Batch, IFO, Samples) = BIS
+                streams = tree.batch(group, 0, next(batch_index))
                 yield {
-                    RV.ONSOURCE: _generate_colored_noise(
-                        num_examples_per_batch, 
-                        len(ifos),
-                        num_samples_list[0], 
-                        ops.sqrt(interpolated_onsource_psds),
-                        seed=s1,
+                    RV.ONSOURCE: color_noise(
+                        unit_normal_noise(streams, ifos, "on", num_examples_per_batch, num_samples_list[0]),
+                        onsource_asds,
                         sample_rate_hertz=sample_rate_hertz
                     ),
-                    RV.OFFSOURCE: _generate_colored_noise(
-                        num_examples_per_batch, 
-                        len(ifos),
-                        num_samples_list[1], 
-                        ops.sqrt(interpolated_offsource_psds),
-                        seed=s2,
+                    RV.OFFSOURCE: color_noise(
+                        unit_normal_noise(streams, ifos, "off", num_examples_per_batch, num_samples_list[1]),
+                        offsource_asds,
                         sample_rate_hertz=sample_rate_hertz
                     ),
                 }
+
+
+def obtainer_batcher(obtainer, tree: SeedTree, group: str, **kwargs) -> NoiseBatcher:
+    """
+    The batcher of any obtainer: a NoiseObtainer's own, else (a transient
+    obtainer) a sequential reader seeded from ``tree`` and ``group``.
+    """
+    if isinstance(obtainer, NoiseObtainer):
+        return obtainer.batcher(tree, group, **kwargs)
+    kwargs.pop("sampling_mode", None)
+    return sequential_batcher(
+        obtainer(**kwargs, group=group, seed=sequential_seed(tree, group, "transient/reader"))
+    )

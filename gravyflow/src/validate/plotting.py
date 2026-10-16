@@ -912,7 +912,7 @@ def generate_parameter_space_plot(
     # Downsample for scatter overlay if needed
     n_total = len(snrs)
     if n_total > max_points:
-        idx = np.random.choice(n_total, max_points, replace=False)
+        idx = gf.SeedTree().direct().stream("validator/plot").choice(n_total, max_points, replace=False)
     else:
         idx = np.arange(n_total)
     

@@ -53,6 +53,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 # Local application/library specific imports
 from .src.dataset.config import Defaults, WindowSpec
+from .src.rng import SeedTree, BatchStreams
 from .src.utils.tensor import (
     DistributionType, Distribution, randomise_arguments,
     replace_nan_and_inf_with_zero, NonFiniteWarning, expand_tensor, batch_tensor,
@@ -115,7 +116,7 @@ from .src.dataset.features.waveforms.simple import (
     WaveShape, PeriodicWaveGenerator, SineGaussianGenerator,
     ChirpletGenerator, RingdownGenerator
 )
-from .src.dataset.dataset import data, Dataset, GravyflowDataset, ComposedDataset
+from .src.dataset.dataset import data, Dataset, GravyflowDataset, ComposedDataset, EpochMode
 from .src.dataset.pools import FeaturePool, PoolSampler
 from .src.utils.plotting import (
     generate_strain_plot, generate_psd_plot, generate_spectrogram, generate_correlation_plot,

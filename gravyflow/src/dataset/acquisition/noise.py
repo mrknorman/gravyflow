@@ -622,7 +622,7 @@ class NoiseDataObtainer(BaseDataObtainer):
         ifos = ensure_list(ifos) or [gf.IFO.L1]
         num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
         scale_factor = scale_factor or gf.Defaults.scale_factor
-        seed = seed or gf.Defaults.seed
+        seed = gf.src.rng.check_root(seed if seed is not None else gf.Defaults.seed)
 
         # Use shared post-processing from base class
         def _post_process(batch):

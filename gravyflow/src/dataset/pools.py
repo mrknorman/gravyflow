@@ -38,6 +38,9 @@ from typing import List, Optional, Tuple, TYPE_CHECKING
 import numpy as np
 from numpy.random import Generator, default_rng
 
+from gravyflow.src.dataset.config import Defaults
+from gravyflow.src.rng.legacy import warn_deprecated
+
 if TYPE_CHECKING:
     from gravyflow.src.dataset.acquisition.noise import NoiseObtainer
     from gravyflow.src.dataset.acquisition.transient import TransientDataObtainer
@@ -141,10 +144,13 @@ class PoolSampler:
     def __init__(self, pools: List[FeaturePool], seed: int = None):
         """
         Initialize the sampler.
-        
+
+        Every draw takes a NumPy Generator (a ComposedDataset passes the
+        batch's ``pool/assign`` stream); the sampler holds no random state.
+
         Args:
             pools: List of FeaturePool objects to sample from.
-            seed: Random seed for reproducibility.
+            seed: Deprecated; the seed of the stream used when no rng is passed.
         """
         if not pools:
             raise ValueError("PoolSampler requires at least one pool")
@@ -159,8 +165,20 @@ class PoolSampler:
         # Track unique labels
         self._unique_labels = set(p.label for p in pools)
         
-        # Initialize RNG
-        self._rng = default_rng(seed)
+        if seed is not None:
+            warn_deprecated("PoolSampler(seed=)", "pass an rng to each draw")
+        self._legacy_seed = seed
+        self._legacy_rng = None
+
+    def _generator(self, rng):
+        """``rng``; without one (deprecated), a stream kept on the sampler."""
+        if rng is not None:
+            return rng
+        warn_deprecated("PoolSampler draws without an rng", "pass a NumPy Generator")
+        if self._legacy_rng is None:
+            seed = self._legacy_seed if self._legacy_seed is not None else Defaults.seed
+            self._legacy_rng = default_rng(seed)
+        return self._legacy_rng
     
     def _validate_pools(self):
         """Validate pool configuration."""
@@ -183,17 +201,17 @@ class PoolSampler:
         """Number of unique class labels."""
         return len(self._unique_labels)
     
-    def sample_pool(self) -> FeaturePool:
+    def sample_pool(self, rng: np.random.Generator = None) -> FeaturePool:
         """
         Select a single pool based on probabilities.
-        
+
         Returns:
             The selected FeaturePool.
         """
-        idx = self._rng.choice(len(self.pools), p=self._probabilities)
+        idx = self._generator(rng).choice(len(self.pools), p=self._probabilities)
         return self.pools[idx]
     
-    def sample_pool_indices(self, batch_size: int) -> np.ndarray:
+    def sample_pool_indices(self, batch_size: int, rng: np.random.Generator = None) -> np.ndarray:
         """
         Sample pool indices for an entire batch.
         
@@ -203,9 +221,9 @@ class PoolSampler:
         Returns:
             Array of pool indices of shape (batch_size,).
         """
-        return self._rng.choice(len(self.pools), size=batch_size, p=self._probabilities)
+        return self._generator(rng).choice(len(self.pools), size=batch_size, p=self._probabilities)
     
-    def sample_batch_assignments(self, batch_size: int) -> List[Tuple[int, FeaturePool]]:
+    def sample_batch_assignments(self, batch_size: int, rng: np.random.Generator = None) -> List[Tuple[int, FeaturePool]]:
         """
         Sample pool assignments for an entire batch.
         
@@ -217,10 +235,10 @@ class PoolSampler:
         Returns:
             List of (pool_index, FeaturePool) tuples.
         """
-        indices = self.sample_pool_indices(batch_size)
+        indices = self.sample_pool_indices(batch_size, rng)
         return [(int(i), self.pools[i]) for i in indices]
     
-    def get_pool_batch_sizes(self, batch_size: int) -> dict:
+    def get_pool_batch_sizes(self, batch_size: int, rng: np.random.Generator = None) -> dict:
         """
         Sample and group examples by pool.
         
@@ -233,8 +251,8 @@ class PoolSampler:
         Returns:
             Dict mapping pool_index -> (count, list of original positions).
         """
-        indices = self.sample_pool_indices(batch_size)
-        
+        indices = self.sample_pool_indices(batch_size, rng)
+
         pool_assignments = {}
         for pos, pool_idx in enumerate(indices):
             pool_idx = int(pool_idx)
@@ -246,5 +264,5 @@ class PoolSampler:
         return pool_assignments
     
     def reseed(self, seed: int):
-        """Reset the random number generator with a new seed."""
-        self._rng = default_rng(seed)
+        warn_deprecated("PoolSampler.reseed", "pass an rng to each draw")
+        self._legacy_rng = default_rng(seed)

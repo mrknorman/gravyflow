@@ -27,15 +27,50 @@ import gravyflow as gf
 import warnings
 import pytest
 
-# Autouse fixture to reset seeds before each test for isolation
+def _global_rng_state():
+    """NumPy's, Python's and Keras' global random states, comparable with ==."""
+    import random
+    import numpy as np
+    from keras.src.backend.common import global_state
+
+    keras_generator = global_state.get_global_attribute("global_seed_generator")
+    keras_state = None if keras_generator is None else np.asarray(keras_generator.state.value).tolist()
+    numpy_state = np.random.get_state()
+    return (
+        (numpy_state[0], numpy_state[1].tobytes(), *numpy_state[2:]),
+        random.getstate(),
+        keras_state,
+    )
+
+
 @pytest.fixture(autouse=True)
-def reset_random_seeds():
-    """Reset random seeds before each test for proper isolation."""
+def global_rng_guard(request):
+    """
+    The library draws only from its seed tree, never from a global RNG: fail a
+    test whose run changed NumPy's, Python's or Keras' global random state.
+
+    A test module that draws its own test data from the global RNG declares
+    it with ``pytestmark = pytest.mark.global_rng``; its tests start from a
+    fixed global state instead, and are not checked.
+    """
     import gravyflow as gf
-    gf.set_random_seeds(gf.Defaults.seed)
+    if request.node.get_closest_marker("global_rng") is not None:
+        gf.set_random_seeds(gf.Defaults.seed)
+        yield
+        return
+    before = _global_rng_state()
     yield
-    # Optionally reset after test too
-    gf.set_random_seeds(gf.Defaults.seed)
+    assert _global_rng_state() == before, (
+        "The global random state changed during the test: library code must draw "
+        "from a gf.SeedTree stream, never a global RNG."
+    )
+
+
+@pytest.fixture
+def tree():
+    """A seed tree for tests that need one."""
+    import gravyflow as gf
+    return gf.SeedTree(gf.Defaults.seed)
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -53,6 +88,9 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "slow: marks tests as slow (skipped on small runs)")
+    config.addinivalue_line(
+        "markers", "global_rng: the test draws its own data from a global RNG (not guarded)"
+    )
     config.addinivalue_line(
         "markers", "network: needs internet access to GWOSC or Zenodo (opt-in: --network)"
     )

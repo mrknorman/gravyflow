@@ -50,7 +50,7 @@ def test_colored_noise_psd_matches_its_profile(sample_rate_hertz):
     estimate for 50 %-overlapped Hann windows."""
     duration = 16.0
     num_examples = 32 if sample_rate_hertz == 2048.0 else 16
-    generator = gf_noise.colored_noise_generator(
+    batch = gf_noise.colored_noise_batcher(
         num_examples_per_batch=num_examples,
         onsource_duration_seconds=duration,
         crop_duration_seconds=0.0,
@@ -58,9 +58,8 @@ def test_colored_noise_psd_matches_its_profile(sample_rate_hertz):
         ifos=ALL_IFOS,
         sample_rate_hertz=sample_rate_hertz,
         scale_factor=1.0,
-        seed=7,
     )
-    x = next(generator)[gf.ReturnVariables.ONSOURCE]
+    x = batch(gf.SeedTree(7).batch("train", 0, 0))[gf.ReturnVariables.ONSOURCE]
     ratio, f = _welch_ratio(x, ALL_IFOS, sample_rate_hertz)
     band = (f >= 30.0) & (f <= 900.0)
 

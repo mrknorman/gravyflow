@@ -6,6 +6,9 @@ test_matched_filter_search.py.
 """
 
 import pytest
+
+# Its tests draw their data from global RNGs (see conftest's guard).
+pytestmark = pytest.mark.global_rng
 import numpy as np
 import jax.numpy as jnp
 

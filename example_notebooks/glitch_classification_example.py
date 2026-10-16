@@ -177,7 +177,8 @@ train_noise_obtainer = gf.NoiseObtainer(
     ifos=[gf.IFO.L1]
 )
 
-# VALIDATION: Separate obtainer with NO augmentation and different seed
+# VALIDATION: Separate obtainer with NO augmentation. The split (group) gives
+# it its own random streams; no separate seed is needed.
 val_ifo_obtainer = gf.IFODataObtainer(
     observing_runs=[gf.ObservingRun.O3],
     data_quality=gf.DataQuality.BEST,
@@ -214,7 +215,6 @@ training_dataset = gf.Dataset(
 
 validation_dataset = gf.Dataset(
     noise_obtainer=val_noise_obtainer,
-    seed=1001,  # Different seed for validation
     group="validate",
     input_variables=[
         gf.ReturnVariables.ONSOURCE,

@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 from astropy import coordinates, units
-from numpy.random import default_rng  
+from gravyflow.src.rng.legacy import warn_deprecated
 
 import gravyflow as gf
 
@@ -215,44 +215,6 @@ def get_antenna_pattern_(
 
     return antenna_pattern
 
-@jax.jit(static_argnames=["num_injections"])
-def generate_direction_vectors(
-        num_injections: int, 
-        seed_tensor: Tuple[int, int],
-        right_ascension = None,
-        declination = None
-    ):
-    """
-    Generate random direction vectors uniformly distributed over the sphere.
-    """
-    PI = np.pi
-
-    # Right Ascension
-    if right_ascension is None:
-        # JAX random
-        key = jax.random.PRNGKey(seed_tensor[0]) # Use first seed
-        right_ascension = jax.random.uniform(
-            key,
-            shape=[num_injections], 
-            minval=0.0, 
-            maxval=2.0 * PI, 
-            dtype="float32"
-        )
-
-    # Declination
-    if declination is None:
-        key = jax.random.PRNGKey(seed_tensor[1]) # Use second seed (or seed+1)
-        sin_declination = jax.random.uniform(
-            key,
-            shape=[num_injections], 
-            minval=-1.0, 
-            maxval=1.0, 
-            dtype="float32"
-        )
-        declination = ops.arcsin(sin_declination)
-
-    return right_ascension, declination
-
 @jax.jit(static_argnames=["sample_rate_hertz"])
 def shift_waveform(
         strain, 
@@ -289,7 +251,6 @@ def shift_waveform(
 
 @jax.jit(static_argnames=["sample_rate_hertz"])
 def project_wave(
-        seed,
         strain,
         sample_rate_hertz : float,
         x_vector,
@@ -300,9 +261,9 @@ def project_wave(
         y_response,
         response,
         location,
-        right_ascension = None,
-        declination = None,
-        polarization = None,
+        right_ascension,
+        declination,
+        polarization,
         gmst_radians = None
     ):
     """
@@ -310,42 +271,9 @@ def project_wave(
 
     Sky angles follow LAL: right ascension and declination are equatorial, and
     ``gmst_radians`` (the Greenwich mean sidereal time) fixes the Earth's
-    orientation. Missing angles are drawn isotropically from ``seed``.
+    orientation. The angles are (Batch,) arrays; nothing is drawn here.
     """
 
-    # Ensure the seed is of the correct shape [2] and dtype int32
-    seed_tensor = ops.cast(seed, dtype="int32")
-    
-    num_injections = strain.shape[0]
-    
-    # We need to handle seed carefully. 
-    # generate_direction_vectors expects a tuple or something usable as PRNGKey.
-    # seed_tensor is a tensor.
-    
-    random_right_ascension, random_declination = generate_direction_vectors(
-        num_injections, 
-        seed_tensor, # Pass tensor, handle inside?
-        right_ascension,
-        declination
-    )
-
-    if right_ascension is None:
-        right_ascension = random_right_ascension
-    
-    if declination is None:
-        declination = random_declination
-
-    if polarization is None:
-        # The polarisation angle is defined modulo pi.
-        key = jax.random.PRNGKey(seed_tensor[0] + 2) # Offset seed
-        polarization = jax.random.uniform(
-            key,
-            shape=[num_injections], 
-            minval=0.0, 
-            maxval=np.pi, 
-            dtype="float32"
-        )
-    
     antenna_patern = get_antenna_pattern_(
         right_ascension, 
         declination, 
@@ -525,10 +453,8 @@ class Network:
             seed : Optional[int] = None
         ):
 
-        if seed is None:
-            seed = gf.Defaults.seed
-
-        self.rng = default_rng(seed)
+        if seed is not None:
+            warn_deprecated("Network(seed=)", "a Network holds no random state; its sky is drawn by the dataset")
         
         arguments = {}
         # ... (Parameter parsing logic mostly unchanged, just ops.convert_to_tensor)
@@ -814,6 +740,13 @@ class Network:
 
         return input
     
+    @property
+    def rng(self):
+        warn_deprecated("Network.rng", "a Network holds no random state; draw from a gf.SeedTree stream")
+        if getattr(self, "_legacy_rng", None) is None:
+            self._legacy_rng = np.random.default_rng(gf.Defaults.seed)
+        return self._legacy_rng
+
     def project_wave(
         self,
         strain,
@@ -843,11 +776,20 @@ class Network:
             polarization, "polarization", tensor_length=strain_length
         )
         
-        # rng.integers(1E10, size=2)
-        seed = self.rng.integers(1000000000, size=2)
-        
+        missing = [
+            name for name, value in (
+                ("right_ascension", right_ascension),
+                ("declination", declination),
+                ("polarization", polarization),
+            ) if value is None
+        ]
+        if missing:
+            raise ValueError(
+                f"project_wave needs every sky angle; missing: {', '.join(missing)}. "
+                "Draw them from a stream (an injection generator does)."
+            )
+
         args = (
-            seed,
             strain,
             sample_rate_hertz,
             self.x_vector,

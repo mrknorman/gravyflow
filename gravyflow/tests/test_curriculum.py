@@ -1,412 +1,190 @@
 """
-Tests for Curriculum Learning functionality.
+Curriculum: a distribution that moves with the epoch, with no state.
+
+``at(epoch)`` is the distribution of one training epoch and ``at(None)`` the
+end distribution, which evaluation splits use.
 """
 
-import pytest
 import numpy as np
+import pytest
 
 import gravyflow as gf
 
 
-class TestCurriculumSchedule:
-    """Tests for CurriculumSchedule enum."""
-    
+def uniform(low, high):
+    return gf.Distribution(min_=low, max_=high, type_=gf.DistributionType.UNIFORM)
+
+
+def curriculum(**kwargs):
+    return gf.Curriculum(
+        start=kwargs.pop("start", uniform(80.0, 100.0)),
+        end=kwargs.pop("end", uniform(0.0, 20.0)),
+        num_epochs=kwargs.pop("num_epochs", 10),
+        **kwargs,
+    )
+
+
+class TestCurriculumBasics:
+
     def test_schedule_types_exist(self):
-        """Verify all expected schedule types exist."""
-        assert gf.CurriculumSchedule.LINEAR
-        assert gf.CurriculumSchedule.EXPONENTIAL
-        assert gf.CurriculumSchedule.STEP
-        assert gf.CurriculumSchedule.COSINE
-        assert gf.CurriculumSchedule.CUSTOM
+        assert {s.name for s in gf.CurriculumSchedule} == {
+            "LINEAR", "EXPONENTIAL", "STEP", "COSINE", "CUSTOM"
+        }
 
-
-class TestCurriculumInit:
-    """Tests for Curriculum initialization."""
-    
     def test_basic_init(self):
-        """Test basic curriculum creation."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(start=start, end=end, num_epochs=10)
-        
-        assert curriculum.start == start
-        assert curriculum.end == end
-        assert curriculum.num_epochs == 10
-        assert curriculum.schedule == gf.CurriculumSchedule.LINEAR
-        assert curriculum._configured == False
-    
-    def test_init_with_constant_distributions(self):
-        """Test curriculum with CONSTANT distribution type."""
-        start = gf.Distribution(value=100.0, type_=gf.DistributionType.CONSTANT)
-        end = gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT)
-        
-        curriculum = gf.Curriculum(start=start, end=end, num_epochs=5)
-        
-        assert curriculum.type_ == gf.DistributionType.CONSTANT
-    
+        c = curriculum()
+        assert c.num_epochs == 10
+        assert c.schedule == gf.CurriculumSchedule.LINEAR
+        assert c.type_ == gf.DistributionType.UNIFORM
+
     def test_mismatched_distribution_types_raises(self):
-        """Test that mismatched distribution types raise an error."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT)
-        
         with pytest.raises(ValueError, match="same type"):
-            gf.Curriculum(start=start, end=end)
-    
-    def test_schedule_option(self):
-        """Test different schedule options."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(
-            start=start, 
-            end=end, 
-            schedule=gf.CurriculumSchedule.EXPONENTIAL
-        )
-        
-        assert curriculum.schedule == gf.CurriculumSchedule.EXPONENTIAL
+            curriculum(end=gf.Distribution(value=5.0, type_=gf.DistributionType.CONSTANT))
+
+    @pytest.mark.parametrize("kwargs", [{"seed": 3}, {"verbose": True}])
+    def test_deprecated_arguments_warn(self, kwargs):
+        with pytest.warns(DeprecationWarning):
+            curriculum(**kwargs)
+
+    @pytest.mark.parametrize("method", ["reset", "configure"])
+    def test_deprecated_methods_warn(self, method):
+        c = curriculum()
+        with pytest.warns(DeprecationWarning):
+            getattr(c, method)(*([100] if method == "configure" else []))
 
 
-class TestCurriculumConfiguration:
-    """Tests for Curriculum configuration from dataset."""
-    
-    def test_configure_sets_steps_per_epoch(self):
-        """Test that configure() sets steps_per_epoch."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(start=start, end=end, num_epochs=10)
-        
-        assert curriculum._configured == False
-        assert curriculum.steps_per_epoch is None
-        
-        curriculum.configure(steps_per_epoch=1000)
-        
-        assert curriculum._configured == True
-        assert curriculum.steps_per_epoch == 1000
-    
-    def test_current_epoch_before_configuration(self):
-        """Test current_epoch returns 0 when not configured."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(start=start, end=end)
-        
-        assert curriculum.current_epoch == 0
-    
-    def test_current_epoch_calculation(self):
-        """Test current_epoch calculation based on steps."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(start=start, end=end, num_epochs=10)
-        curriculum.configure(steps_per_epoch=100)
-        
-        # Initially at epoch 0
-        assert curriculum.current_epoch == 0
-        
-        # Simulate 50 steps (still epoch 0)
-        curriculum._current_step = 50
-        assert curriculum.current_epoch == 0
-        
-        # Simulate 100 steps (epoch 1)
-        curriculum._current_step = 100
-        assert curriculum.current_epoch == 1
-        
-        # Simulate 250 steps (epoch 2)
-        curriculum._current_step = 250
-        assert curriculum.current_epoch == 2
+class TestCurriculumSchedules:
 
+    @pytest.mark.parametrize("epoch, expected", [(0, 0.0), (9, 1.0), (20, 1.0), (None, 1.0)])
+    def test_linear_endpoints(self, epoch, expected):
+        assert curriculum().progress(epoch) == expected
 
-class TestCurriculumProgress:
-    """Tests for curriculum progress calculation."""
-    
-    def test_linear_schedule(self):
-        """Test LINEAR schedule progress calculation."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(
-            start=start, end=end, 
-            num_epochs=10,
-            schedule=gf.CurriculumSchedule.LINEAR
-        )
-        curriculum.configure(steps_per_epoch=100)
-        
-        # Epoch 0 -> progress 0
-        assert curriculum._get_progress() == 0.0
-        
-        # Epoch 4 (step 450 // 100 = 4) -> progress = 4/9 = 0.444
-        curriculum._current_step = 450
-        progress = curriculum._get_progress()
-        assert 0.40 < progress < 0.50
-        
-        # Epoch 9 -> progress 1.0
-        curriculum._current_step = 900
-        assert curriculum._get_progress() == 1.0
-    
+    def test_linear_midpoint(self):
+        assert curriculum().progress(4) == pytest.approx(4 / 9)
+
     def test_step_schedule(self):
-        """Test STEP schedule progress calculation."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(
-            start=start, end=end, 
-            num_epochs=10,
-            schedule=gf.CurriculumSchedule.STEP
-        )
-        curriculum.configure(steps_per_epoch=100)
-        
-        # Before midpoint -> 0
-        curriculum._current_step = 400
-        assert curriculum._get_progress() == 0.0
-        
-        # After midpoint -> 1
-        curriculum._current_step = 500
-        assert curriculum._get_progress() == 1.0
-    
+        c = curriculum(schedule=gf.CurriculumSchedule.STEP)
+        assert c.progress(4) == 0.0
+        assert c.progress(5) == 1.0
+
+    def test_exponential_and_cosine_are_monotone(self):
+        for schedule in (gf.CurriculumSchedule.EXPONENTIAL, gf.CurriculumSchedule.COSINE):
+            c = curriculum(schedule=schedule)
+            values = [c.progress(e) for e in range(10)]
+            assert values[0] == pytest.approx(0.0)
+            assert all(b >= a for a, b in zip(values, values[1:]))
+
     def test_custom_schedule(self):
-        """Test CUSTOM schedule with user function."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        # Custom function: jump to 1.0 at epoch 5
-        def custom_fn(epoch, num_epochs):
-            return 1.0 if epoch >= 5 else 0.0
-        
-        curriculum = gf.Curriculum(
-            start=start, end=end, 
-            num_epochs=10,
-            schedule=gf.CurriculumSchedule.CUSTOM,
-            custom_schedule_fn=custom_fn
-        )
-        curriculum.configure(steps_per_epoch=100)
-        
-        # Epoch 3 -> 0
-        curriculum._current_step = 300
-        assert curriculum._get_progress() == 0.0
-        
-        # Epoch 5 -> 1
-        curriculum._current_step = 500
-        assert curriculum._get_progress() == 1.0
-    
+        c = curriculum(schedule=gf.CurriculumSchedule.CUSTOM,
+                       custom_schedule_fn=lambda epoch, n: 0.0 if epoch < 5 else 1.0)
+        assert c.progress(3) == 0.0
+        assert c.progress(5) == 1.0
+
     def test_custom_schedule_without_function_raises(self):
-        """Test CUSTOM schedule without function raises error."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(
-            start=start, end=end,
-            schedule=gf.CurriculumSchedule.CUSTOM
-        )
-        curriculum.configure(steps_per_epoch=100)
-        
-        with pytest.raises(ValueError, match="custom_schedule_fn required"):
-            curriculum._get_progress()
+        with pytest.raises(ValueError, match="custom_schedule_fn"):
+            curriculum(schedule=gf.CurriculumSchedule.CUSTOM).progress(1)
+
+    def test_single_epoch_stays_at_start(self):
+        assert curriculum(num_epochs=1).progress(5) == 0.0
 
 
-class TestCurriculumInterpolation:
-    """Tests for value interpolation."""
-    
+class TestCurriculumAt:
+
     def test_min_max_interpolation(self):
-        """Test min/max interpolation over epochs."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=0.0, max_=20.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(
-            start=start, end=end,
-            num_epochs=10,
-            schedule=gf.CurriculumSchedule.LINEAR
-        )
-        curriculum.configure(steps_per_epoch=100)
-        
-        # At epoch 0: should be start values
-        assert curriculum.min_ == 80.0
-        assert curriculum.max_ == 100.0
-        
-        # At epoch 4.5 (half-way): should be interpolated
-        curriculum._current_step = 450
-        assert 35.0 < curriculum.min_ < 45.0
-        assert 55.0 < curriculum.max_ < 65.0
-        
-        # At epoch 9 (end): should be end values
-        curriculum._current_step = 900
-        assert curriculum.min_ == 0.0
-        assert curriculum.max_ == 20.0
-    
+        c = curriculum()
+        assert (c.at(0).min_, c.at(0).max_) == (80.0, 100.0)
+        assert 35.0 < c.at(4).min_ < 45.0 and 55.0 < c.at(4).max_ < 65.0
+        assert (c.at(9).min_, c.at(9).max_) == (0.0, 20.0)
+        assert (c.at(None).min_, c.at(None).max_) == (0.0, 20.0)
+
     def test_constant_value_interpolation(self):
-        """Test constant value interpolation."""
-        start = gf.Distribution(value=100.0, type_=gf.DistributionType.CONSTANT)
-        end = gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT)
-        
-        curriculum = gf.Curriculum(
-            start=start, end=end,
-            num_epochs=10,
-            schedule=gf.CurriculumSchedule.LINEAR
-        )
-        curriculum.configure(steps_per_epoch=100)
-        
-        # At epoch 0
-        assert curriculum.value == 100.0
-        
-        # At epoch 9
-        curriculum._current_step = 900
-        assert curriculum.value == 10.0
+        c = curriculum(start=gf.Distribution(value=100.0, type_=gf.DistributionType.CONSTANT),
+                       end=gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT))
+        assert c.at(0).value == 100.0
+        assert c.at(9).value == 10.0
 
-
-class TestCurriculumSampling:
-    """Tests for Curriculum sampling."""
-    
-    def test_sample_returns_array_like(self):
-        """Test that sample() returns an array-like object."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(start=start, end=end)
-        curriculum.configure(steps_per_epoch=100)
-        
-        samples = curriculum.sample(10)
-        
-        # Distribution.sample() returns numpy array or list
-        assert hasattr(samples, '__len__')
-        assert len(samples) == 10
-    
-    def test_sample_advances_step(self):
-        """Test that sample() advances the step counter."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(start=start, end=end)
-        curriculum.configure(steps_per_epoch=100)
-        
-        assert curriculum._current_step == 0
-        
-        curriculum.sample(5)
-        assert curriculum._current_step == 1
-        
-        curriculum.sample(5)
-        assert curriculum._current_step == 2
-    
     def test_samples_in_expected_range(self):
-        """Test that samples are within interpolated min/max range."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(start=start, end=end, num_epochs=10)
-        curriculum.configure(steps_per_epoch=100)
-        
-        # At epoch 0, samples should be in [80, 100]
-        samples = curriculum.sample(100)
-        assert all(80.0 <= s <= 100.0 for s in samples)
-        
-        # Move to end (epoch 9)
-        curriculum._current_step = 899  # Will be 900 after next sample
-        
-        # At epoch 9, samples should be in [5, 15]
-        for _ in range(5):
-            curriculum._current_step = 900  # Reset to epoch 9
-            samples = curriculum.sample(100)
-            assert all(5.0 <= s <= 15.0 for s in samples), f"Got samples outside range: {min(samples)}, {max(samples)}"
-            curriculum._current_step = 900  # Keep at epoch 9
-    
-    def test_reset(self):
-        """Test that reset() clears the step counter."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(start=start, end=end)
-        curriculum.configure(steps_per_epoch=100)
-        
-        curriculum._current_step = 500
-        assert curriculum._current_step == 500
-        
-        curriculum.reset()
-        assert curriculum._current_step == 0
+        c = curriculum(end=uniform(5.0, 15.0))
+        rng = np.random.default_rng(0)
+        assert np.all((c.sample(100, rng, epoch=0) >= 80.0) & (c.sample(100, rng, epoch=0) <= 100.0))
+        late = c.sample(100, rng, epoch=9)
+        assert np.all((late >= 5.0) & (late <= 15.0))
+
+    def test_sampling_changes_nothing(self):
+        c = curriculum()
+        rng = np.random.default_rng(0)
+        for _ in range(50):
+            c.sample(4, rng, epoch=3)
+        assert c.at(0).min_ == 80.0
+
+    def test_resolve(self):
+        c = curriculum()
+        assert gf.Curriculum.resolve(c, 0).min_ == 80.0
+        plain = uniform(1.0, 2.0)
+        assert gf.Curriculum.resolve(plain, 0) is plain
 
 
 class TestCurriculumDatasetIntegration:
-    """Tests for Curriculum integration with GravyflowDataset."""
-    
-    def test_dataset_configures_curriculum(self):
-        """Test that GravyflowDataset auto-configures Curriculum."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(start=start, end=end, num_epochs=10)
-        
-        scaling_method = gf.ScalingMethod(
-            value=curriculum,
-            type_=gf.ScalingTypes.SNR
+
+    def dataset(self, c, group="train", **kwargs):
+        generator = gf.WNBGenerator(
+            scaling_method=gf.ScalingMethod(c, gf.ScalingTypes.SNR),
+            duration_seconds=gf.Distribution(min_=0.1, max_=0.3, type_=gf.DistributionType.UNIFORM),
+            min_frequency_hertz=gf.Distribution(min_=40.0, max_=60.0, type_=gf.DistributionType.UNIFORM),
+            max_frequency_hertz=gf.Distribution(min_=100.0, max_=150.0, type_=gf.DistributionType.UNIFORM),
         )
-        
-        waveform_gen = gf.WNBGenerator(
-            duration_seconds=gf.Distribution(value=0.1, type_=gf.DistributionType.CONSTANT),
-            min_frequency_hertz=gf.Distribution(value=100.0, type_=gf.DistributionType.CONSTANT),
-            max_frequency_hertz=gf.Distribution(value=200.0, type_=gf.DistributionType.CONSTANT),
-            scaling_method=scaling_method
+        return gf.Dataset(
+            seed=1, group=group,
+            noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]),
+            waveform_generators=[generator], sample_rate_hertz=512.0, offsource_duration_seconds=4.0,
+            num_examples_per_batch=8, steps_per_epoch=2,
+            input_variables=[gf.ReturnVariables.ONSOURCE], output_variables=[gf.ScalingTypes.SNR],
+            **kwargs,
         )
-        
-        # Curriculum should not be configured yet
-        assert curriculum._configured == False
-        
-        # Create noise obtainer with simulated noise
-        noise_obtainer = gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE)
-        
-        # Create dataset - should auto-configure curriculum
-        dataset = gf.GravyflowDataset(
-            noise_obtainer=noise_obtainer,
-            waveform_generators=waveform_gen,
-            steps_per_epoch=500,
-            num_examples_per_batch=4,
-            sample_rate_hertz=1024,
-            onsource_duration_seconds=1.0,
-            offsource_duration_seconds=2.0,
-            input_variables=[gf.ReturnVariables.ONSOURCE],
-            output_variables=[gf.ReturnVariables.INJECTION_MASKS]
-        )
-        
-        # Now curriculum should be configured
-        assert curriculum._configured == True
-        assert curriculum.steps_per_epoch == 500
-    
-    def test_curriculum_progresses_during_iteration(self):
-        """Test that curriculum progresses as dataset is iterated."""
-        start = gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM)
-        end = gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM)
-        
-        curriculum = gf.Curriculum(start=start, end=end, num_epochs=10)
-        
-        scaling_method = gf.ScalingMethod(
-            value=curriculum,
-            type_=gf.ScalingTypes.SNR
-        )
-        
-        waveform_gen = gf.WNBGenerator(
-            duration_seconds=gf.Distribution(value=0.1, type_=gf.DistributionType.CONSTANT),
-            min_frequency_hertz=gf.Distribution(value=100.0, type_=gf.DistributionType.CONSTANT),
-            max_frequency_hertz=gf.Distribution(value=200.0, type_=gf.DistributionType.CONSTANT),
-            scaling_method=scaling_method
-        )
-        
-        # Create noise obtainer with simulated noise
-        noise_obtainer = gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE)
-        
-        dataset = gf.GravyflowDataset(
-            noise_obtainer=noise_obtainer,
-            waveform_generators=waveform_gen,
-            steps_per_epoch=10,  # Small for quick test
-            num_examples_per_batch=2,
-            sample_rate_hertz=1024,
-            onsource_duration_seconds=1.0,
-            offsource_duration_seconds=2.0,
-            input_variables=[gf.ReturnVariables.ONSOURCE],
-            output_variables=[gf.ReturnVariables.INJECTION_MASKS]
-        )
-        
-        initial_step = curriculum._current_step
-        
-        # Get a batch - this should call sample() and advance step
-        _ = dataset[0]
-        
-        # Step should have advanced
-        assert curriculum._current_step > initial_step
+
+    def test_training_follows_the_epoch(self):
+        c = curriculum(start=uniform(80.0, 100.0), end=uniform(5.0, 15.0), num_epochs=3)
+        ds = self.dataset(c)
+        early = np.asarray(ds[0][1]["SNR"])
+        assert np.all((early >= 80.0) & (early <= 100.0))
+        ds.on_epoch_end()
+        ds.on_epoch_end()
+        late = np.asarray(ds[0][1]["SNR"])
+        assert np.all((late >= 5.0) & (late <= 15.0))
+
+    def test_evaluation_uses_the_end_distribution(self):
+        c = curriculum(start=uniform(80.0, 100.0), end=uniform(5.0, 15.0), num_epochs=3)
+        val = self.dataset(c, group="validate")
+        targets = np.asarray(val[0][1]["SNR"])
+        assert np.all((targets >= 5.0) & (targets <= 15.0))
+
+    def test_validation_does_not_move_training(self):
+        # B37: validation sampled the shared curriculum and advanced it.
+        c = curriculum(num_epochs=3)
+        train, val = self.dataset(c), self.dataset(c, group="validate")
+        reference = np.asarray(train[1][1]["SNR"])
+        for k in range(2):
+            val[k]
+        np.testing.assert_array_equal(np.asarray(train[1][1]["SNR"]), reference)
+
+    def test_resumed_run_sets_the_epoch(self):
+        c = curriculum(start=uniform(80.0, 100.0), end=uniform(5.0, 15.0), num_epochs=3)
+        ds = self.dataset(c)
+        ds.epoch = 2
+        late = np.asarray(ds[0][1]["SNR"])
+        assert np.all((late >= 5.0) & (late <= 15.0))
+
+
+class TestCurriculumProgressCallback:
+
+    def test_prints_the_epoch_range(self, capsys):
+        callback = gf.CurriculumProgressCallback(curriculum(), name="SNR")
+        callback.on_train_begin()
+        callback.on_epoch_begin(9)
+        out = capsys.readouterr().out
+        assert "Epoch 10: SNR range [0.0, 20.0] (progress: 100.0%)" in out
+
+    def test_quiet(self, capsys):
+        callback = gf.CurriculumProgressCallback(curriculum(), verbose=False)
+        callback.on_epoch_begin(0)
+        assert capsys.readouterr().out == ""

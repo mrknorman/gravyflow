@@ -1,228 +1,294 @@
 """
-Lightweight determinism test suite for gravyflow.
+Determinism: one seed tree, batches addressed by index, splits independent.
 
-Tests that deterministic outputs are produced when seeds are properly set.
-These tests verify the core tenet of gravyflow: reproducible results.
-
-Key design principles:
-- Each test runs the same operation TWICE with same seed and verifies identical output
-- Tests are lightweight (no slow markers unless absolutely necessary)
-- Tests cover all major RNG sources in the codebase
+Every random draw comes from a stream of a gf.SeedTree addressed by (split,
+consumer, epoch, k). These tests check the tree itself, that the objects a
+caller builds hold no random state, and that datasets are pure functions of
+their address with independent splits.
 """
 
-import pytest
+import hashlib
+import pickle
+import subprocess
+import sys
+import textwrap
+import warnings
+
 import numpy as np
-from keras import ops
-import random
+import pytest
 
 import gravyflow as gf
 
-
-class TestRandomSeedBehavior:
-    """Test that set_random_seeds properly affects all RNG sources."""
-    
-    def test_set_random_seeds_affects_numpy(self):
-        """Verify set_random_seeds affects numpy random state."""
-        gf.set_random_seeds(42)
-        val1 = np.random.rand()
-        
-        gf.set_random_seeds(42)
-        val2 = np.random.rand()
-        
-        assert val1 == val2, "Numpy random should be deterministic with same seed"
-    
-    def test_set_random_seeds_affects_python_random(self):
-        """Verify set_random_seeds affects Python's random module."""
-        gf.set_random_seeds(42)
-        val1 = random.random()
-        
-        gf.set_random_seeds(42)
-        val2 = random.random()
-        
-        assert val1 == val2, "Python random should be deterministic with same seed"
-    
-    def test_set_random_seeds_different_seeds(self):
-        """Verify different seeds produce different results."""
-        gf.set_random_seeds(42)
-        np_val1 = np.random.rand()
-        py_val1 = random.random()
-        
-        gf.set_random_seeds(123)
-        np_val2 = np.random.rand()
-        py_val2 = random.random()
-        
-        assert np_val1 != np_val2, "Different seeds should produce different numpy values"
-        assert py_val1 != py_val2, "Different seeds should produce different Python random values"
+SAMPLE_RATE = 512.0
+BATCH = 4
 
 
-class TestComponentDefaultSeeds:
-    """Test that components use gf.Defaults.seed when no seed is provided."""
-    
-    def test_network_uses_default_seed(self):
-        """Verify Network uses gf.Defaults.seed when seed=None."""
-        # Create two networks without explicit seed - should both use gf.Defaults.seed
-        network1 = gf.Network([gf.IFO.L1])
-        network2 = gf.Network([gf.IFO.L1])
-        
-        # Their RNGs should be seeded identically, so first random from each should match
-        val1 = network1.rng.integers(1000000)
-        val2 = network2.rng.integers(1000000)
-        
-        assert val1 == val2, "Networks without explicit seed should use gf.Defaults.seed"
-    
-    def test_distribution_uses_default_seed(self):
-        """Verify Distribution uses gf.Defaults.seed when seed=None."""
-        dist1 = gf.Distribution(type_=gf.DistributionType.UNIFORM, min_=0.0, max_=1.0)
-        dist2 = gf.Distribution(type_=gf.DistributionType.UNIFORM, min_=0.0, max_=1.0)
-        
-        samples1 = dist1.sample(10)
-        samples2 = dist2.sample(10)
-        
-        np.testing.assert_allclose(samples1, samples2,
-            err_msg="Distributions without explicit seed should use gf.Defaults.seed")
-    
-    def test_injection_generator_uses_default_seed(self):
-        """Verify InjectionGenerator uses gf.Defaults.seed when seed=None."""
-        config_path = gf.tests.PATH / "example_injection_parameters/phenom_d_parameters.json"
-        
-        # First generator
-        gen1 = gf.WaveformGenerator.load(config_path)
-        gen1.injection_chance = 1.0
-        inj_gen1 = gf.InjectionGenerator([gen1])
-        
-        # Second generator - should produce identical results
-        gen2 = gf.WaveformGenerator.load(config_path)
-        gen2.injection_chance = 1.0
-        inj_gen2 = gf.InjectionGenerator([gen2])
-        
-        # First random value from each RNG should match
-        val1 = inj_gen1.rng.integers(1000000)
-        val2 = inj_gen2.rng.integers(1000000)
-        
-        assert val1 == val2, "InjectionGenerators without explicit seed should use gf.Defaults.seed"
+def snr_uniform(low=8.0, high=20.0):
+    return gf.ScalingMethod(
+        gf.Distribution(min_=low, max_=high, type_=gf.DistributionType.UNIFORM),
+        gf.ScalingTypes.SNR,
+    )
 
 
-class TestComponentDeterminism:
-    """Test that components produce deterministic results with same seed."""
-    
-    def test_network_determinism_with_explicit_seed(self):
-        """Verify Network produces deterministic results with same seed."""
-        seed = 42
-        
-        network1 = gf.Network([gf.IFO.L1], seed=seed)
-        loc1 = np.array(network1.location)
-        
-        network2 = gf.Network([gf.IFO.L1], seed=seed)
-        loc2 = np.array(network2.location)
-        
-        np.testing.assert_allclose(loc1, loc2, 
-            err_msg="Network locations should be deterministic with same seed")
-    
-    def test_distribution_determinism_with_explicit_seed(self):
-        """Verify Distribution sampling is deterministic with same seed."""
-        seed = 42
-        
-        dist1 = gf.Distribution(type_=gf.DistributionType.UNIFORM, min_=0.0, max_=1.0, seed=seed)
-        samples1 = dist1.sample(100)
-        
-        dist2 = gf.Distribution(type_=gf.DistributionType.UNIFORM, min_=0.0, max_=1.0, seed=seed)
-        samples2 = dist2.sample(100)
-        
-        np.testing.assert_allclose(samples1, samples2,
-            err_msg="Distribution samples should be deterministic with same seed")
-    
-    def test_injection_generator_determinism_full(self):
-        """Verify InjectionGenerator produces deterministic waveforms."""
-        config_path = gf.tests.PATH / "example_injection_parameters/phenom_d_parameters.json"
-        seed = gf.Defaults.seed
-        
-        # First run
-        gf.set_random_seeds(seed)
-        gen1 = gf.WaveformGenerator.load(config_path)
-        gen1.injection_chance = 1.0
-        inj_gen1 = gf.InjectionGenerator([gen1])
-        injections1, _, _ = next(inj_gen1())
-        
-        # Second run
-        gf.set_random_seeds(seed)
-        gen2 = gf.WaveformGenerator.load(config_path)
-        gen2.injection_chance = 1.0
-        inj_gen2 = gf.InjectionGenerator([gen2])
-        injections2, _, _ = next(inj_gen2())
-        
-        np.testing.assert_allclose(np.array(injections1), np.array(injections2),
-            err_msg="InjectionGenerator should produce identical waveforms with same seed")
+def wnb(**kwargs):
+    return gf.WNBGenerator(
+        scaling_method=kwargs.pop("scaling_method", snr_uniform()),
+        duration_seconds=gf.Distribution(min_=0.1, max_=0.4, type_=gf.DistributionType.UNIFORM),
+        min_frequency_hertz=gf.Distribution(min_=40.0, max_=80.0, type_=gf.DistributionType.UNIFORM),
+        max_frequency_hertz=gf.Distribution(min_=120.0, max_=200.0, type_=gf.DistributionType.UNIFORM),
+        **kwargs,
+    )
 
 
-class TestFullPipelineDeterminism:
-    """Test determinism through complete pipelines."""
-    
-    def test_projection_pipeline_determinism(self):
-        """Verify the full injection -> projection pipeline is deterministic."""
-        config_path = gf.tests.PATH / "example_injection_parameters/phenom_d_parameters.json"
-        seed = gf.Defaults.seed
-        
-        # Run 1
-        gf.set_random_seeds(seed)
-        network1 = gf.Network([gf.IFO.L1], seed=seed)
-        gen1 = gf.WaveformGenerator.load(config_path)
-        gen1.injection_chance = 1.0
-        inj_gen1 = gf.InjectionGenerator([gen1])
-        injections1, _, _ = next(inj_gen1())
-        proj1 = np.array(network1.project_wave(injections1[0]))
-        
-        # Run 2
-        gf.set_random_seeds(seed)
-        network2 = gf.Network([gf.IFO.L1], seed=seed)
-        gen2 = gf.WaveformGenerator.load(config_path)
-        gen2.injection_chance = 1.0
-        inj_gen2 = gf.InjectionGenerator([gen2])
-        injections2, _, _ = next(inj_gen2())
-        proj2 = np.array(network2.project_wave(injections2[0]))
-        
-        np.testing.assert_allclose(proj1, proj2, atol=1e-6,
-            err_msg="Full injection->projection pipeline should be deterministic")
+def dataset(seed=None, group="train", generators=None, noise=None, **kwargs):
+    return gf.Dataset(
+        seed=seed,
+        group=group,
+        noise_obtainer=noise or gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1, gf.IFO.H1]),
+        waveform_generators=[wnb()] if generators is None else generators,
+        sample_rate_hertz=SAMPLE_RATE,
+        offsource_duration_seconds=4.0,
+        num_examples_per_batch=BATCH,
+        steps_per_epoch=kwargs.pop("steps_per_epoch", 8),
+        input_variables=[gf.ReturnVariables.ONSOURCE],
+        output_variables=[gf.ScalingTypes.SNR, gf.WaveformParameters.RIGHT_ASCENSION_RADIANS],
+        **kwargs,
+    )
 
 
-class TestEdgeCases:
-    """Test edge cases and potential sources of non-determinism."""
-    
-    def test_multiple_sequential_samples_deterministic(self):
-        """Verify that multiple sequential samples are deterministic."""
-        seed = 42
-        
-        # Run 1: Sample 5 times
-        gf.set_random_seeds(seed)
-        results1 = [np.random.rand() for _ in range(5)]
-        
-        # Run 2: Sample 5 times
-        gf.set_random_seeds(seed)
-        results2 = [np.random.rand() for _ in range(5)]
-        
-        assert results1 == results2, "Sequential samples should be deterministic"
-    
-    def test_interleaved_rng_usage_deterministic(self):
-        """Verify determinism when multiple RNGs are used interleaved."""
-        seed = gf.Defaults.seed
-        
-        # Run 1
-        gf.set_random_seeds(seed)
-        network1 = gf.Network([gf.IFO.L1], seed=seed)
-        dist1 = gf.Distribution(type_=gf.DistributionType.UNIFORM, min_=0.0, max_=1.0, seed=seed)
-        
-        val_net1 = network1.rng.integers(1000000)
-        val_dist1 = dist1.sample(1)[0]
-        val_net1b = network1.rng.integers(1000000)
-        
-        # Run 2
-        gf.set_random_seeds(seed)
-        network2 = gf.Network([gf.IFO.L1], seed=seed)
-        dist2 = gf.Distribution(type_=gf.DistributionType.UNIFORM, min_=0.0, max_=1.0, seed=seed)
-        
-        val_net2 = network2.rng.integers(1000000)
-        val_dist2 = dist2.sample(1)[0]
-        val_net2b = network2.rng.integers(1000000)
-        
-        assert val_net1 == val_net2, "First network RNG values should match"
-        assert val_dist1 == val_dist2, "Distribution values should match"
-        assert val_net1b == val_net2b, "Second network RNG values should match"
+def digest(batch):
+    x, y = batch
+    h = hashlib.sha256()
+    for part in (x, y):
+        for key in sorted(part):
+            h.update(key.encode())
+            h.update(np.ascontiguousarray(np.asarray(part[key])).tobytes())
+    return h.hexdigest()
+
+
+class TestSeedTree:
+
+    def test_same_path_same_stream(self):
+        a = gf.SeedTree(42).stream("train", "noise/L1/on", 0, 3).random(4)
+        b = gf.SeedTree(42).stream("train", "noise/L1/on", 0, 3).random(4)
+        np.testing.assert_array_equal(a, b)
+
+    @pytest.mark.parametrize("other", [
+        (43, "train", "noise/L1/on", 0, 3),
+        (42, "validate", "noise/L1/on", 0, 3),
+        (42, "train", "noise/H1/on", 0, 3),
+        (42, "train", "noise/L1/off", 0, 3),
+        (42, "train", "noise/L1/on", 1, 3),
+        (42, "train", "noise/L1/on", 0, 4),
+        (42, "train", "noise/L1/on", None, 3),
+        (42, "train", "noise/L1/on", 0, None),
+    ])
+    def test_every_coordinate_moves_the_stream(self, other):
+        base = gf.SeedTree(42).stream("train", "noise/L1/on", 0, 3).random(4)
+        root, *path = other
+        assert not np.array_equal(base, gf.SeedTree(root).stream(*path).random(4))
+
+    def test_seed_zero_is_its_own_root(self):
+        # B155: seed 0 was mapped to the default seed.
+        assert gf.SeedTree(0).root == 0
+        assert gf.SeedTree(None).root == gf.Defaults.seed
+        assert gf.SeedTree(None).source == "default" and gf.SeedTree(0).source == "user"
+        zero = gf.SeedTree(0).stream("train", "pool/assign").random(4)
+        default = gf.SeedTree(None).stream("train", "pool/assign").random(4)
+        assert not np.array_equal(zero, default)
+
+    @pytest.mark.parametrize("seed", [-1, 1.5, "1", True])
+    def test_bad_roots_are_refused(self, seed):
+        with pytest.raises((TypeError, ValueError)):
+            gf.SeedTree(seed)
+
+    @pytest.mark.parametrize("consumer", ["noise", "noisy/L1/on", "wave/x/param", "sky/a/b"])
+    def test_unregistered_consumers_are_refused(self, consumer):
+        with pytest.raises(ValueError):
+            gf.SeedTree(1).stream("train", consumer)
+
+    def test_scoped_consumers_are_registered(self):
+        tree = gf.SeedTree(1)
+        for consumer in ("pool/noise/noise/L1/on", "validator/far/noise/H1/off",
+                         "wave/0:CBCGenerator/comp/1/param/mass_1_msun", "wave/g/param/spin_1_in/2",
+                         "inject/g/shift", "scale/g", "pol/g"):
+            tree.stream("train", consumer)
+
+    def test_sub_tree_never_meets_its_parent(self):
+        tree = gf.SeedTree(42)
+        assert not np.array_equal(
+            tree.stream("test", "noise/L1/on", 0, 0).random(4),
+            tree.sub("validator/far").stream("test", "noise/L1/on", 0, 0).random(4),
+        )
+
+    def test_keys_are_distinct_across_many_batches(self):
+        # B154: 30-bit chained seeds repeated; tree keys are 64-bit and addressed.
+        tree = gf.SeedTree(7)
+        words = {
+            tuple(np.asarray(tree.seed_sequence("train", "noise/L1/on", e, k).generate_state(2)))
+            for e in range(4) for k in range(2500)
+        }
+        assert len(words) == 10000
+
+    def test_stream_is_the_same_in_another_process(self):
+        here = gf.SeedTree(42).stream("validate", "sky/g", 2, 9).random(3).tolist()
+        code = textwrap.dedent("""
+            import gravyflow as gf
+            print(gf.SeedTree(42).stream("validate", "sky/g", 2, 9).random(3).tolist())
+        """)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+        assert out.stdout.strip().splitlines()[-1] == str(here)
+
+
+class TestStatelessObjects:
+
+    def test_distribution_is_not_changed_by_sampling(self):
+        distribution = gf.Distribution(min_=1.0, max_=3.0, type_=gf.DistributionType.NORMAL, mean=2.0, std=1.0)
+        before = (distribution.min_, distribution.max_, distribution.mean, distribution.std)
+        distribution.sample(16, np.random.default_rng(0))
+        assert (distribution.min_, distribution.max_, distribution.mean, distribution.std) == before
+
+    def test_integer_uniform_reaches_its_max(self):
+        # B157: rng.uniform then int() never gave the maximum.
+        distribution = gf.Distribution(min_=1, max_=3, type_=gf.DistributionType.UNIFORM, dtype=int)
+        samples = distribution.sample(2000, np.random.default_rng(0))
+        assert set(samples.tolist()) == {1, 2, 3}
+
+    def test_sample_without_rng_is_deprecated(self):
+        with pytest.warns(DeprecationWarning):
+            gf.Distribution(value=1.0).sample(1)
+
+    def test_direct_generate_is_deterministic(self):
+        # B156: generate() without a seed crashed for WNB with injection_chance.
+        generator = wnb(injection_chance=0.5)
+        a, _ = generator.generate(8, SAMPLE_RATE, 1.0)
+        b, _ = generator.generate(8, SAMPLE_RATE, 1.0)
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def test_incoherent_components_draw_independently(self):
+        # B33: every component was seeded the same.
+        generator = gf.IncoherentGenerator([wnb(), wnb()])
+        waveforms, _ = generator.generate(4, SAMPLE_RATE, 1.0)
+        waveforms = np.asarray(waveforms)
+        assert not np.array_equal(waveforms[:, 0], waveforms[:, 1])
+
+    def test_network_needs_every_sky_angle(self):
+        network = gf.Network([gf.IFO.L1])
+        with pytest.raises(ValueError, match="polarization"):
+            network.project_wave(np.zeros((2, 2, 64), np.float32), SAMPLE_RATE, 0.1, 0.2, None)
+
+    def test_curriculum_has_no_counter(self):
+        curriculum = gf.Curriculum(
+            start=gf.Distribution(min_=50.0, max_=60.0, type_=gf.DistributionType.UNIFORM),
+            end=gf.Distribution(min_=5.0, max_=10.0, type_=gf.DistributionType.UNIFORM),
+            num_epochs=3,
+        )
+        rng = np.random.default_rng(0)
+        for _ in range(5):
+            curriculum.sample(4, rng, epoch=0)
+        assert curriculum.at(0).min_ == 50.0
+        assert curriculum.at(None).min_ == 5.0
+
+
+class TestIndexedDatasets:
+
+    def test_batch_is_a_pure_function_of_its_index(self):
+        ds = dataset(seed=11)
+        fifth = digest(ds[5])
+        _ = [ds[k] for k in range(5)]
+        assert digest(ds[5]) == fifth
+        assert digest(dataset(seed=11)[5]) == fifth
+
+    def test_iteration_and_indexing_agree(self):
+        ds = dataset(seed=11)
+        by_index = [digest(ds[k]) for k in range(3)]
+        cursor = dataset(seed=11)
+        assert [digest(next(cursor)) for _ in range(3)] == by_index
+        assert [digest(batch) for batch, _ in zip(dataset(seed=11), range(3))] == by_index
+
+    def test_index_out_of_range(self):
+        with pytest.raises(IndexError):
+            dataset(seed=1, steps_per_epoch=2)[2]
+
+    def test_training_epochs_are_fresh_and_evaluation_fixed(self):
+        train, val = dataset(seed=3), dataset(seed=3, group="validate")
+        first_train, first_val = digest(train[0]), digest(val[0])
+        train.on_epoch_end()
+        val.on_epoch_end()
+        assert digest(train[0]) != first_train
+        assert digest(val[0]) == first_val
+        repeat = dataset(seed=3, epoch_mode=gf.EpochMode.REPEAT)
+        repeat.on_epoch_end()
+        assert digest(repeat[0]) == first_train
+
+    def test_unseeded_splits_differ(self):
+        # B28 (identical batches), B102 (equal targets), B36 (equal sky).
+        train, val = dataset(), dataset(group="validate")
+        for k in range(3):
+            (x_t, y_t), (x_v, y_v) = train[k], val[k]
+            assert not np.array_equal(x_t["ONSOURCE"], x_v["ONSOURCE"])
+            assert not np.array_equal(y_t["SNR"], y_v["SNR"])
+            assert not np.array_equal(
+                y_t["RIGHT_ASCENSION_RADIANS"], y_v["RIGHT_ASCENSION_RADIANS"]
+            )
+
+    def test_generators_draw_independent_skies(self):
+        # B107: two generators shared sky, polarisation and targets.
+        ds = dataset(seed=5, generators=[wnb(), wnb()])
+        _, y = ds[0]
+        ra = np.asarray(y["RIGHT_ASCENSION_RADIANS"]).squeeze()
+        ra = ra if ra.shape[0] == 2 else ra.T  # (generators, batch)
+        assert ra.shape == (2, BATCH)
+        assert not np.array_equal(ra[0], ra[1])
+
+    def test_caller_objects_are_never_changed(self):
+        noise = gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1])
+        generator = wnb()
+        before = pickle.dumps((noise, generator))
+        ds = dataset(seed=2, generators=[generator], noise=noise, ifos=[gf.IFO.L1])
+        _ = [ds[k] for k in range(3)]
+        assert pickle.dumps((noise, generator)) == before
+        assert generator.network is None
+
+    def test_validation_does_not_move_training(self):
+        # B120: a validation call changed later training batches.
+        noise = gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1])
+        generator = wnb()
+        train = dataset(seed=9, generators=[generator], noise=noise, ifos=[gf.IFO.L1])
+        reference = digest(train[1])
+        val = dataset(seed=9, group="validate", generators=[generator], noise=noise, ifos=[gf.IFO.L1])
+        val[0]
+        assert digest(train[1]) == reference
+        # B119: a rebuilt dataset repeats the first.
+        rebuilt = dataset(seed=9, generators=[generator], noise=noise, ifos=[gf.IFO.L1])
+        assert digest(rebuilt[1]) == reference
+
+    def test_composed_pools_do_not_share_streams_across_seeds(self):
+        # B121: seed 42's pool 1 equalled seed 43's pool 0.
+        def composed(seed):
+            pools = [
+                gf.FeaturePool(name=f"noise_{i}", label=i, probability=0.5,
+                               noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]))
+                for i in range(2)
+            ]
+            return gf.ComposedDataset(
+                pools=pools, seed=seed, sample_rate_hertz=SAMPLE_RATE, offsource_duration_seconds=4.0,
+                num_examples_per_batch=BATCH, steps_per_epoch=4,
+                input_variables=[gf.ReturnVariables.ONSOURCE], output_variables=[gf.ReturnVariables.POOL_LABEL],
+            )
+        a, b = composed(42), composed(43)
+        x_a, y_a = a[0]
+        x_b, y_b = b[0]
+        for i, j in [(i, j) for i in range(BATCH) for j in range(BATCH)]:
+            assert not np.array_equal(np.asarray(x_a["ONSOURCE"])[i], np.asarray(x_b["ONSOURCE"])[j])
+        assert digest(composed(42)[0]) == digest(a[0])
+
+    def test_seed_metadata_records_the_root(self):
+        assert dataset().seed_metadata["source"] == "default"
+        meta = dataset(seed=0, group="test").seed_metadata
+        assert (meta["root"], meta["source"], meta["split"], meta["epoch_mode"]) == (0, "user", "test", "REPEAT")
+
+    def test_library_draws_no_deprecated_paths(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            dataset(seed=1)[0]

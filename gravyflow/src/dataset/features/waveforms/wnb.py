@@ -57,7 +57,7 @@ def wnb(
     duration_seconds,
     min_frequency_hertz,
     max_frequency_hertz,
-    seed : int,
+    key,
     polarization_eccentricity = None
 ):
     """
@@ -69,6 +69,8 @@ def wnb(
     max_frequency_hertz], and multiplied by a Hann envelope of full width
     ``duration_seconds`` centred on the same sample. Returns (num_waveforms, 2,
     floor(max_duration_seconds * sample_rate_hertz)), float32.
+
+    ``key`` is the JAX random key of the Gaussian noise.
 
     ``polarization_eccentricity`` (LAL's polarisation-ellipse eccentricity,
     per waveform) scales the plus and cross polarisations by sqrt(2) a and
@@ -83,7 +85,6 @@ def wnb(
     t = time_axis(max_num_samples, sample_rate_hertz)
 
     # Unit Gaussian noise for both polarisations, kept inside the burst.
-    key = jax.random.PRNGKey(seed)
     gaussian_noise = jax.random.normal(
         key,
         shape=[num_waveforms, 2, max_num_samples],

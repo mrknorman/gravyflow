@@ -55,7 +55,6 @@ class GeorgeHuerta2017Config:
     snr_curriculum_start_max: float = 100.0
     # Set from the run's length: see `curriculum_epochs`.
     snr_curriculum_num_epochs: int = 10
-    snr_curriculum_verbose: bool = False
 
     injection_chance: float = 0.5
     batch_size: int = 32
@@ -79,11 +78,11 @@ class GeorgeHuerta2017Config:
         """
         return replace(cls(), sample_rate_hertz=2048.0)
 
-    def snr(self, curriculum: bool, first_step: int = 0) -> "gf.Distribution | gf.Curriculum":
+    def snr(self, curriculum: bool) -> "gf.Distribution | gf.Curriculum":
         """
         The SNR distribution: the curriculum for training, the target range
-        otherwise. ``first_step`` is the training step the curriculum starts
-        at, so that a resumed run continues it rather than starting it again.
+        otherwise. A dataset reads the curriculum at its own epoch, so a
+        resumed run continues it rather than starting it again.
         """
         target = gf.Distribution(min_=self.snr_min, max_=self.snr_max, type_=gf.DistributionType.UNIFORM)
         if not curriculum:
@@ -94,9 +93,7 @@ class GeorgeHuerta2017Config:
             end=target,
             num_epochs=self.snr_curriculum_num_epochs,
             schedule=gf.CurriculumSchedule.LINEAR,
-            verbose=self.snr_curriculum_verbose,
             name="SNR",
-            _current_step=first_step,
         )
 
 
@@ -155,7 +152,7 @@ class _GeorgeHuerta2017(ExampleModel):
         cfg = config or cls.config
         labels = ([gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN]
                   if regression else [gf.ReturnVariables.INJECTION_PRESENT])
-        return gf.GravyflowDataset(
+        dataset = gf.GravyflowDataset(
             **cbc_dataset_args(
                 noise_obtainer=gf.NoiseObtainer(noise_type=noise_type, ifos=[gf.IFO.L1]),
                 sample_rate_hertz=cfg.sample_rate_hertz,
@@ -163,7 +160,7 @@ class _GeorgeHuerta2017(ExampleModel):
                 offsource_duration_seconds=cfg.offsource_duration_seconds,
                 mass_distribution_type=gf.DistributionType.UNIFORM,
                 mass_range_msun=(cfg.mass_1_min_msun, cfg.mass_1_max_msun),
-                snr=cfg.snr(curriculum, first_step=first_epoch * steps_per_epoch),
+                snr=cfg.snr(curriculum),
                 injection_chance=1.0 if regression else cfg.injection_chance,
                 batch_size=cfg.batch_size,
                 output_variables=labels,
@@ -173,6 +170,8 @@ class _GeorgeHuerta2017(ExampleModel):
             steps_per_epoch=steps_per_epoch,
             **kwargs,
         )
+        dataset.epoch = first_epoch
+        return dataset
 
     @classmethod
     def dataset(

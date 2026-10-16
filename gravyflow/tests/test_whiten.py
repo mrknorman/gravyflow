@@ -535,6 +535,9 @@ def test_whiten_colored_noise():
 
 import pytest
 
+# Its tests draw their data from global RNGs (see conftest's guard).
+pytestmark = pytest.mark.global_rng
+
 
 def test_truncate_transfer_ncorner_validation():
     """Test that truncate_transfer raises ValueError for invalid ncorner."""

@@ -1,5 +1,8 @@
 
 import pytest
+
+# Its tests draw their data from global RNGs (see conftest's guard).
+pytestmark = pytest.mark.global_rng
 import numpy as np
 import gravyflow as gf
 from bokeh.models import Plot

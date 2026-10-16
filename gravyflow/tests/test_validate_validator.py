@@ -9,10 +9,13 @@ import keras
 import numpy as np
 import pytest
 
+# Its tests draw their data from global RNGs (see conftest's guard).
+pytestmark = pytest.mark.global_rng
+
 import gravyflow as gf
 from gravyflow.src.model.examples.base import ValidationDatasetConfig, validation_dataset_args
 from gravyflow.src.validate import StaleCheckpointError, ValidationConfig, Validator
-from gravyflow.src.validate.bank import ValidationBank, derived_seed, per_example
+from gravyflow.src.validate.bank import ValidationBank, per_example
 from gravyflow.src.validate.plotting import first_detector
 from gravyflow.src.validate.utils import _extract_sample_data
 
@@ -132,10 +135,21 @@ def test_probability_models_are_refused(dataset_args):
         ValidationBank(logit_model(1, activation="softmax"), dataset_args)
 
 
-def test_the_validator_draws_its_own_seeds():
-    assert derived_seed(1000, "validator", "far") != derived_seed(1000, "validator", "injections")
-    assert derived_seed(1000, "validator", "far") == derived_seed(1000, "validator", "far")
-    assert derived_seed(1000, "validator", "far") != derived_seed(1001, "validator", "far")
+def test_the_validator_draws_its_own_streams(dataset_args):
+    # B68: the FAR set and the injection set shared noise, and validation
+    # reused training's seed. Each stage now draws under validator/{stage}.
+    config = ValidationConfig(seed=42, num_examples=32, batch_size=32)
+    bank = ValidationBank(logit_model(1), dataset_args, config)
+    outputs = [gf.ReturnVariables.WHITENED_ONSOURCE]
+    far = bank._dataset("far", [], outputs)
+    inj = bank._dataset("inj", [], outputs)
+    training = gf.Dataset(**{**dataset_args, "seed": 42, "group": config.group, "waveform_generators": [],
+                             "num_examples_per_batch": 32, "steps_per_epoch": 1, "output_variables": outputs})
+    batches = [np.asarray(ds[0][0]["WHITENED_ONSOURCE"]) for ds in (far, inj, training)]
+    for i in range(3):
+        for j in range(i + 1, 3):
+            assert not np.array_equal(batches[i], batches[j])
+    assert far.seed_metadata["prefix"] == "validator/far"
     with pytest.raises(ValueError):
         ValidationConfig(group="train")
 

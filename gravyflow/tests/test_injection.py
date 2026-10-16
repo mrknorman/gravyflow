@@ -424,6 +424,7 @@ def test_generate_mask():
     assert float(ops.sum(mask)) == 2.0
 
 
+@pytest.mark.global_rng
 def test_scaling_method_scale_snr():
     """Test ScalingMethod.scale with SNR type (covers lines 69-106)."""
     # Create scaled injection
@@ -1199,18 +1200,17 @@ def test_incoherent_generator_stack_failure():
 
 # --- InjectionGenerator Edge Cases ---
 
-def test_injection_generator_init_default_seed():
-    """Test init uses default seed if None provided."""
-    # Mock waveform generators
-    gen = gf_inj.InjectionGenerator(waveform_generators=[MagicMock()])
-    assert gen.seed == gf.Defaults.seed
+def test_injection_generator_seed_is_deprecated():
+    """The seed tree replaces InjectionGenerator(seed=)."""
+    with pytest.warns(DeprecationWarning):
+        gf_inj.InjectionGenerator(waveform_generators=[], seed=3)
 
 def test_apply_injection_chance_always():
     """Test apply_injection_chance returns as-is when chance is 1.0."""
     gen = gf_inj.WaveformGenerator()
     gen.injection_chance = 1.0
     injections = ops.ones((2, 100))
-    result = gen.apply_injection_chance(injections, seed=123)
+    result = gen.apply_injection_chance(injections, gf.SeedTree(123).direct().sub("wave/g"))
     assert result is injections # Should return same object if optimized, or at least equal
     np.testing.assert_array_equal(result, injections)
 
@@ -1219,7 +1219,7 @@ def test_apply_injection_chance_never():
     gen = gf_inj.WaveformGenerator()
     gen.injection_chance = 0.0
     injections = ops.ones((2, 100))
-    result = gen.apply_injection_chance(injections, seed=123)
+    result = gen.apply_injection_chance(injections, gf.SeedTree(123).direct().sub("wave/g"))
     assert float(ops.sum(result)) == 0.0
 
 

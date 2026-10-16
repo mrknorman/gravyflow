@@ -15,8 +15,8 @@ def test_wnb_generation():
     duration = ops.convert_to_tensor([0.5, 0.8])
     min_freq = ops.convert_to_tensor([10.0, 20.0])
     max_freq = ops.convert_to_tensor([40.0, 45.0])
-    seed = 42
-    
+    key = gf.SeedTree(42).direct().key("wave/g/noise")
+        
     waveforms = gf_wnb.wnb(
         num_waveforms,
         sample_rate,
@@ -24,7 +24,7 @@ def test_wnb_generation():
         duration,
         min_freq,
         max_freq,
-        seed
+        key
     )
     
     # Shape: (Batch, 2, Time)

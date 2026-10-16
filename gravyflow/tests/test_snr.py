@@ -13,6 +13,10 @@ from bokeh.palettes import Bright
 from bokeh.layouts import gridplot
 from bokeh.models import ColumnDataSource, HoverTool, Legend
 from _pytest.config import Config
+import pytest
+
+# Its tests draw their data from global RNGs (see conftest's guard).
+pytestmark = pytest.mark.global_rng
 
 # Local imports:
 

@@ -10,13 +10,16 @@ import keras
 import numpy as np
 import pytest
 
+# Its tests draw their data from global RNGs (see conftest's guard).
+pytestmark = pytest.mark.global_rng
+
 import gravyflow as gf
 from gravyflow.src.model.examples import (
     Gabbard2017, Gabbard2017Config, GeorgeHuerta2017Config, GeorgeHuerta2017Deep, GeorgeHuerta2017Shallow,
 )
 from gravyflow.src.model.examples.george_huerta_2017 import curriculum_epochs
 from gravyflow.src.model.examples.recipe import (
-    DetectionBatches, FixedBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise, split_seeds,
+    DetectionBatches, FixedBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise, starting_at,
 )
 from gravyflow.src.validate import StaleCheckpointError
 
@@ -98,12 +101,9 @@ def test_curriculum_reaches_the_target_before_the_run_ends(epochs):
     config, schedule = train.configure(args)
     assert config.snr_curriculum_num_epochs == curriculum_epochs(epochs) <= epochs
     assert schedule.monitor_from_epoch == config.snr_curriculum_num_epochs
-    steps = 10
-    last = config.snr(True, first_step=(epochs - 1) * steps)
-    last.configure(steps)
+    last = config.snr(True).at(epochs - 1)
     assert (last.min_, last.max_) == (config.snr_min, config.snr_max)
-    first = config.snr(True)
-    first.configure(steps)
+    first = config.snr(True).at(0)
     assert (first.min_, first.max_) == (config.snr_curriculum_start_min, config.snr_curriculum_start_max)
 
 
@@ -151,9 +151,10 @@ def test_materialise_serves_identical_batches():
     assert fixed[1] is fixed[1]
 
 
-def test_split_seeds_are_distinct_and_repeatable():
-    seeds = split_seeds(1000)
-    assert len(set(seeds.values())) == 3 and seeds == split_seeds(1000) and seeds != split_seeds(0)
+def test_starting_at_sets_the_epoch():
+    class Epoch:
+        epoch = 0
+    assert starting_at(Epoch(), 3).epoch == 3
 
 
 # ------------------------------------------------------ resume and provenance
@@ -193,7 +194,6 @@ def test_training_resumes_from_the_last_epoch(tmp_path):
     resumed = make_run(tmp_path, 4)  # extend the finished run
     resumed.train(build, data, validation, verbose=0)
     assert len(builds) == 1 and first_epochs == [0, 2]  # resumed from the checkpoint, at epoch 2
-    assert resumed.train_seed(2) != resumed.train_seed(0)  # new data, not a replay
     state = directory.state
     assert state["epoch"] == 3 and [h["epoch"] for h in state["history"]] == [0, 1, 2, 3]
     assert (tmp_path / "model.keras").exists()

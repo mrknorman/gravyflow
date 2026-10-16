@@ -3,13 +3,14 @@ Scores a model on validation data: a noise background (for false-alarm rates),
 injections (for efficiency) and, optionally, real GW events.
 
 Scores are logits (see `metrics`). The validator draws its own data: each stage
-builds its dataset from a seed derived from ``ValidationConfig.seed`` and the
-stage's name, in the held-out ``ValidationConfig.group``.
+builds its dataset from the seed tree rooted at ``ValidationConfig.seed``,
+scoped to ``validator/{stage}`` (``far`` or ``inj``), in the held-out
+``ValidationConfig.group``. Training never draws under ``validator/``, so the
+validator's streams cannot coincide with training's, whatever the seeds.
 """
 
 from __future__ import annotations
 
-import hashlib
 import heapq
 import logging
 import math
@@ -36,18 +37,6 @@ _INJECTION_LABELS = {
     "central_times": gf.ReturnVariables.CENTRAL_TIME,
 }
 _CBC_LABELS = ("mass1", "mass2")
-
-
-def derived_seed(root: int, *path: str) -> int:
-    """
-    A seed for one stage of a run, derived from its root and a name.
-
-    Different names give independent seeds from one root. (The library's seed
-    tree, when it lands, replaces this with streams keyed by split and consumer.)
-    """
-    words = np.frombuffer(hashlib.sha256("/".join(path).encode()).digest()[:16], dtype=np.uint32)
-    return int(np.random.SeedSequence(int(root), spawn_key=tuple(int(w) for w in words))
-               .generate_state(1)[0])
 
 
 def require_logit_model(model) -> None:
@@ -153,7 +142,7 @@ class ValidationBank:
             steps_per_epoch=self._num_batches(),
             output_variables=outputs,
             group=self.config.group,
-            seed=derived_seed(self.config.seed, "validator", stage),
+            seed=gf.SeedTree(self.config.seed).sub(f"validator/{stage}"),
         )
         if self._real_noise:
             args["output_variables"] = [*outputs, gf.ReturnVariables.START_GPS_TIME]
@@ -211,7 +200,7 @@ class ValidationBank:
                   if k not in _CBC_LABELS or isinstance(generator, gf.CBCGenerator)}
         outputs = [gf.ReturnVariables.WHITENED_ONSOURCE, gf.ReturnVariables.WHITENED_INJECTIONS,
                    *labels.values()]
-        dataset = self._dataset("injections", [generator], outputs)
+        dataset = self._dataset("inj", [generator], outputs)
 
         edges = cfg.snr_bin_edges
         worst: List[list] = [[] for _ in range(edges.size - 1)]

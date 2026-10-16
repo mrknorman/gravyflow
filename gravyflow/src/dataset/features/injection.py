@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import Union, List, Dict, Type, List
 import json
 from copy import deepcopy
+from dataclasses import replace
+from itertools import count
 from warnings import warn
 
 # Library imports:
@@ -18,14 +20,14 @@ import keras
 from keras import ops
 import jax.numpy as jnp
 import jax
-from numpy.random import default_rng  
-
 # Local imports:
 import gravyflow as gf
 from gravyflow.src.utils.shapes import (
     BATCH, GENERATOR, IFO, SAMPLES, OFFSOURCE_SAMPLES, ANY
 )
 from gravyflow.src.utils.tensor import replace_nan_and_inf_with_zero
+from gravyflow.src.rng import BatchStreams, SeedTree, check_name, resolve_streams
+from gravyflow.src.rng.legacy import warn_deprecated
 from gravyflow.src.dataset.features.waveforms.cbc import (
     _generate_cbc_window,
     Approximant
@@ -295,6 +297,13 @@ class WaveformGenerator:
     are LAL's equatorial angles and polarisation angle, defined at
     reference_gps_time_seconds. Each is a float, a gf.Distribution, or None for
     an isotropic draw (polarisation uniform in [0, pi)).
+
+    Randomness: ``generate(n, sample_rate_hertz, duration_seconds, streams)``
+    draws every value from ``streams`` (a gf.BatchStreams), one stream per
+    attribute, so a batch is a pure function of its address and the generator
+    is never changed by generating. ``name`` names the generator's streams in a
+    dataset (default: its position and class), so reordering named generators
+    moves none of their streams.
     """
     scaling_method : Union[ScalingMethod, None] = None
     injection_chance : float = 1.0
@@ -306,11 +315,12 @@ class WaveformGenerator:
     declination_radians : Union[float, gf.Distribution, None] = None
     polarization_radians : Union[float, gf.Distribution, None] = None
     reference_gps_time_seconds : Optional[float] = None
+    name : Optional[str] = None
 
     distributed_attributes : Union[Tuple, None] = None
 
-    # Sky attributes; reseeded after the distributed attributes, so adding them
-    # leaves every other attribute's random stream as it was.
+    # Sky attributes, drawn by the injection layer from the generator's sky
+    # and polarisation streams.
     sky_attributes : ClassVar[Tuple[str, ...]] = (
         "right_ascension_radians",
         "declination_radians",
@@ -320,24 +330,14 @@ class WaveformGenerator:
     def __post_init__(self):
         self.network = self.init_network(self.network)
         self.convert_all_distributions()
-
-        # Deep copy all distributed attributes to ensure they are independent instances
-        # This prevents shared state if the same Distribution object was passed to multiple arguments
-        if self.distributed_attributes is not None:
-            for attribute in self.distributed_attributes:
-                val = getattr(self, attribute)
-                if isinstance(val, gf.Distribution):
-                    setattr(self, attribute, deepcopy(val))
-                elif isinstance(val, (tuple, list)):
-                    setattr(self, attribute, type(val)(deepcopy(element) for element in val))
+        if self.name is not None:
+            check_name(self.name, "generator name")
 
         for attribute in self.sky_attributes:
             value = getattr(self, attribute, None)
-            if value is None:
+            if value is None or isinstance(value, gf.Distribution):
                 continue
-            if isinstance(value, gf.Distribution):
-                setattr(self, attribute, deepcopy(value))
-            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
                 setattr(self, attribute, gf.Distribution(
                     value=float(value), type_=gf.DistributionType.CONSTANT
                 ))
@@ -346,8 +346,32 @@ class WaveformGenerator:
                     f"{attribute} should be a float, a gf.Distribution or None."
                 )
 
-        # Ensure attributes are decorrelated by default
-        self.reseed(gf.Defaults.seed)
+    @property
+    def stream_label(self) -> str:
+        """The generator's name in stream paths when it is called directly."""
+        return self.name or type(self).__name__
+
+    def resolve_streams(self, streams, seed=None) -> BatchStreams:
+        """
+        The streams ``generate`` draws from: ``streams`` as given; else, for a
+        direct call, the deterministic default streams (of ``seed``, deprecated,
+        or ``gf.Defaults.seed``).
+        """
+        if isinstance(streams, (int, np.integer)) and not isinstance(streams, bool):
+            streams, seed = None, streams
+        if seed is not None:
+            warn_deprecated(
+                f"{type(self).__name__}.generate(seed=)",
+                "pass streams (a gf.BatchStreams), or none for the default streams"
+            )
+        return resolve_streams(streams, seed, f"wave/{self.stream_label}")
+
+    def sample_attribute(self, attribute : str, num_samples : int, streams : BatchStreams):
+        """``num_samples`` draws of one attribute, from its own stream, as float64."""
+        return np.asarray(
+            getattr(self, attribute).sample(num_samples, streams.stream(f"param/{attribute}")),
+            dtype=np.float64
+        )
 
     def get_max_generated_duration(self):
         return 0.0
@@ -519,49 +543,23 @@ class WaveformGenerator:
                 setattr(self, attribute, converted)
     
     def reseed(self, seed):
+        warn_deprecated(
+            f"{type(self).__name__}.reseed",
+            "a generator holds no random state; pass streams to generate()"
+        )
 
-        rng = default_rng(seed)
-        if self.distributed_attributes is not None:
-            for attribute in self.distributed_attributes:
-                distribution = getattr(self, attribute)
-                seed = rng.integers(1000000000)
-                if isinstance(distribution, gf.Distribution):
-                    distribution.reseed(seed)
-                    setattr(self, attribute, distribution)
-                elif isinstance(distribution, (tuple, list)):
-                    # Each component of a vector attribute gets its own stream.
-                    component_seeds = default_rng(seed).integers(
-                        1000000000, size=len(distribution)
-                    )
-                    for element, component_seed in zip(distribution, component_seeds):
-                        if isinstance(element, gf.Distribution):
-                            element.reseed(int(component_seed))
-        for attribute in self.sky_attributes:
-            seed = rng.integers(1000000000)
-            distribution = getattr(self, attribute, None)
-            if isinstance(distribution, gf.Distribution):
-                distribution.reseed(seed)
-
-    def apply_injection_chance(self, waveforms, seed):
+    def apply_injection_chance(self, waveforms, streams : BatchStreams):
         """
-        Randomly zeros out waveforms based on injection_chance.
+        Zero each waveform with probability 1 - injection_chance, drawn from
+        the generator's ``chance`` stream.
         """
         if self.injection_chance >= 1.0:
             return waveforms
             
         num_waveforms = ops.shape(waveforms)[0]
-        
-        # Use JAX random if possible for JIT compatibility, or numpy if eager
-        # Since we are likely inside a JITted context or using Keras ops, 
-        # we should try to use Keras ops or JAX.
-        
-        # We need a key for JAX
-        key = jax.random.PRNGKey(seed)
-        
-        # Split key to avoid correlation with other uses of seed
-        key, subkey = jax.random.split(key)
-        
-        mask = jax.random.bernoulli(subkey, p=self.injection_chance, shape=(num_waveforms,))
+        mask = jax.random.bernoulli(
+            streams.key("chance"), p=self.injection_chance, shape=(num_waveforms,)
+        )
         mask = ops.cast(mask, waveforms.dtype)
         
         # Reshape for broadcasting: (Batch, 1, 1)
@@ -592,8 +590,7 @@ class WaveformGenerator:
         else:
             if value.dtype == int:
                 logging.warn(f"{name} should not have dtype = int, automatically adjusting.")
-                value.dtype = float
-                return value
+                return replace(value, dtype=float)
             else:
                 return value
 
@@ -614,8 +611,7 @@ class WaveformGenerator:
         else:
             if value.dtype == int:
                 logging.warn(f"{name} should not have dtype = int, automatically adjusting.")
-                value.dtype = float
-                return value
+                return replace(value, dtype=float)
             else:
                 return value
 
@@ -809,10 +805,15 @@ class WNBGenerator(WaveformGenerator):
         half = np.asarray(parameters[WaveformParameters.DURATION_SECONDS]) / 2.0
         return half, half
 
-    def _draw(self, num_waveforms, nyquist):
+    def _draw(self, num_waveforms, nyquist, streams):
         """Durations and realised bands, redrawn until each meets the floor."""
+        rngs = {
+            attribute: streams.stream(f"param/{attribute}")
+            for attribute in ("duration_seconds", "min_frequency_hertz", "max_frequency_hertz")
+        }
+
         def sample(attribute, count):
-            return np.asarray(getattr(self, attribute).sample(count), dtype=np.float64)
+            return np.asarray(getattr(self, attribute).sample(count, rngs[attribute]), dtype=np.float64)
 
         duration = sample("duration_seconds", num_waveforms)
         first = sample("min_frequency_hertz", num_waveforms)
@@ -842,14 +843,14 @@ class WNBGenerator(WaveformGenerator):
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds: float,
-        seed : int
+        streams : Optional[BatchStreams] = None,
+        *,
+        seed : Optional[int] = None
     ):
 
         if (num_waveforms > 0):
 
-            if seed is not None:
-                self.reseed(seed)
-
+            streams = self.resolve_streams(streams, seed)
             name = type(self).__name__
             nyquist = sample_rate_hertz / 2.0
             if _finite_support(self, "min_frequency_hertz")[0] >= nyquist \
@@ -865,10 +866,8 @@ class WNBGenerator(WaveformGenerator):
                     "clipped to it, and labelled as clipped.", UserWarning
                 )
 
-            duration, low, high = self._draw(num_waveforms, nyquist)
-            eccentricity = np.asarray(
-                self.polarization_eccentricity.sample(num_waveforms), dtype=np.float64
-            )
+            duration, low, high = self._draw(num_waveforms, nyquist, streams)
+            eccentricity = self.sample_attribute("polarization_eccentricity", num_waveforms, streams)
 
             if np.any(duration > duration_seconds):
                 warn(
@@ -889,14 +888,11 @@ class WNBGenerator(WaveformGenerator):
                 sample_rate_hertz,
                 duration_seconds,
                 **parameters,
-                seed=int(seed)
+                key=streams.key("noise")
             )
 
             waveforms = ensure_last_dim_even(waveforms)
-
-            # Apply injection chance (randomly zero out waveforms)
-            if seed is not None:
-                waveforms = self.apply_injection_chance(waveforms, seed)
+            waveforms = self.apply_injection_chance(waveforms, streams)
 
             enum_parameters = {
                 WaveformParameters.get(key) : value for key, value in parameters.items()
@@ -1110,14 +1106,14 @@ class CBCGenerator(WaveformGenerator):
             num_waveforms : int,
             sample_rate_hertz : float,
             duration_seconds : float,
-            seed : int = None
+            streams : Optional[BatchStreams] = None,
+            *,
+            seed : Optional[int] = None
         ):
         
         if (num_waveforms > 0):
             
-            if seed is not None:
-                self.reseed(seed)
-            
+            streams = self.resolve_streams(streams, seed)
             parameters = {}
             for attribute in self.distributed_attributes:
                 value = getattr(self, attribute)
@@ -1138,18 +1134,19 @@ class CBCGenerator(WaveformGenerator):
                         components = [
                             np.zeros(num_waveforms),
                             np.zeros(num_waveforms),
-                            np.asarray(value.sample(num_waveforms), dtype=np.float64),
+                            self.sample_attribute(attribute, num_waveforms, streams),
                         ]
                     else:
+                        # Each component of a vector attribute has its own stream.
                         components = [
-                            np.asarray(element.sample(num_waveforms), dtype=np.float64)
-                            for element in value
+                            np.asarray(element.sample(
+                                num_waveforms, streams.stream(f"param/{attribute}/{j}")
+                            ), dtype=np.float64)
+                            for j, element in enumerate(value)
                         ]
                     parameters[attribute] = np.stack(components, axis=-1)
                 else:
-                    parameters[attribute] = np.asarray(
-                        value.sample(num_waveforms), dtype=np.float64
-                    )
+                    parameters[attribute] = self.sample_attribute(attribute, num_waveforms, streams)
 
             waveforms = None
 
@@ -1203,10 +1200,7 @@ class CBCGenerator(WaveformGenerator):
             )
             
             waveforms = ensure_last_dim_even(waveforms)
-            
-            # Apply injection chance (randomly zero out waveforms)
-            if seed is not None:
-                waveforms = self.apply_injection_chance(waveforms, seed)
+            waveforms = self.apply_injection_chance(waveforms, streams)
             
             # Convert parameters to Enum keys for return
             enum_parameters = {}
@@ -1228,8 +1222,9 @@ class CBCGenerator(WaveformGenerator):
 class IncoherentGenerator(WaveformGenerator):
     component_generators : List[WaveformGenerator]
     
-    def __init__(self, component_generators):
+    def __init__(self, component_generators, name : Optional[str] = None):
         self.component_generators = component_generators
+        self.name = None if name is None else check_name(name, "generator name")
         self.scaling_method = component_generators[0].scaling_method
         self.injection_chance = component_generators[0].injection_chance
         self.front_padding_duration_seconds = component_generators[0].front_padding_duration_seconds
@@ -1240,29 +1235,27 @@ class IncoherentGenerator(WaveformGenerator):
             if self.network.num_detectors != len(self.component_generators):
                 raise ValueError("When using component generators num ifos must equal num generators!")
 
-    def reseed(self, seed):
-        rng = default_rng(seed)
-        for generator in self.component_generators:
-            seed = rng.integers(1000000000)
-            generator.reseed(seed)
-    
     def generate(
         self,
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds : float,
-        seed: int = None
+        streams : Optional[BatchStreams] = None,
+        *,
+        seed : Optional[int] = None
     ):
                     
         if len(self.component_generators) > 0:
             
+            streams = self.resolve_streams(streams, seed)
             waveforms, parameters = [], []
-            for generator in self.component_generators: 
+            # Each component draws from its own streams.
+            for j, generator in enumerate(self.component_generators):
                 waveforms_, parameters_ = generator.generate(
                     num_waveforms,
                     sample_rate_hertz, 
                     duration_seconds,
-                    seed
+                    streams.sub(f"comp/{j}")
                 )
 
                 waveforms.append(waveforms_)
@@ -1437,7 +1430,17 @@ class InjectionGenerator:
         scale_factor: float = None
     ):
         """
+        Randomness: ``generate(streams, ...)`` and
+        ``add_injections_to_onsource(..., streams=)`` draw everything from the
+        batch's streams: each generator's own draws under ``wave/{g}``, its
+        placement from ``inject/{g}/shift``, its sky from ``sky/{g}`` and
+        ``pol/{g}``, and its scaling targets from ``scale/{g}``, where {g} is
+        its ``name`` or "{index}:{class}". Nothing is drawn from state kept
+        between calls.
+
         Args:
+            seed: Deprecated. The root of the streams of the iterator
+                ``__call__`` returns (default ``gf.Defaults.seed``).
             scale_factor: S, the internal unit of strain (internal = strain x S).
                 Injections scaled to a physical HRSS or HPEAK are multiplied
                 by S once; the noise must carry the same S. Default:
@@ -1453,11 +1456,15 @@ class InjectionGenerator:
         else:
             self.parameters_to_return = parameters_to_return
         
-        # Use gf.Defaults.seed if no seed provided for determinism
-        if seed is None:
-            seed = gf.Defaults.seed
-        self.seed = seed
-        self.rng = default_rng(seed)
+        if seed is not None:
+            warn_deprecated("InjectionGenerator(seed=)", "pass streams to generate()")
+        self._tree = SeedTree(seed)
+        self.labels = [
+            generator.name or f"{index}:{type(generator).__name__}"
+            for index, generator in enumerate(self.waveform_generators)
+        ]
+        if len(set(self.labels)) != len(self.labels):
+            raise ValueError(f"Waveform generator names must be unique, got {self.labels}.")
         self.sample_rate_hertz = gf.Defaults.sample_rate_hertz # Default
         
     def __call__(
@@ -1479,141 +1486,161 @@ class InjectionGenerator:
         if num_examples_per_batch is None:
             num_examples_per_batch = gf.Defaults.num_examples_per_batch
 
-        self.sample_rate_hertz = sample_rate_hertz
-        
-        while True:
-            injections_list = []
-            masks_list = []
-            parameters_list = []
-            
-            # Use WindowSpec for consistent total_onsource calculation
-            window_spec = gf.WindowSpec.from_params(
+        for k in count():
+            yield self.generate(
+                self._tree.direct(k),
                 sample_rate_hertz=sample_rate_hertz,
                 onsource_duration_seconds=onsource_duration_seconds,
-                crop_duration_seconds=crop_duration_seconds
+                crop_duration_seconds=crop_duration_seconds,
+                num_examples_per_batch=num_examples_per_batch,
             )
-            total_duration = window_spec.total_onsource_duration_seconds
-            
-            # Placement. Each generator puts its waveforms' reference time (the
-            # peak, or a CBC's merger) at sample N / 2 of the buffer it
-            # generates. The window kept from that buffer is chosen so that the
-            # reference time lands at an offset from the onsource window's
-            # centre drawn uniformly from the generator's placement range,
-            # narrowed per example unless the generator allows partial signals
-            # (see WaveformGenerator). "shift" records the realised offset, in
-            # samples.
-            ranges = [
-                generator.placement_range_seconds(onsource_duration_seconds)
-                for generator in self.waveform_generators
-            ]
-            max_shift = max((max(abs(low), abs(high)) for low, high in ranges), default=0.0)
-            max_delay = 0.0
-            for generator in self.waveform_generators:
-                if generator.network is not None:
-                     max_delay = max(max_delay, float(generator.network.max_arrival_time_difference_seconds))
 
-            # Room for the shifts and the detector delays either side.
-            extra_duration = 2.0 * (max_shift + max_delay) + 1.0
+    def generate(
+        self,
+        streams : BatchStreams,
+        sample_rate_hertz : float,
+        onsource_duration_seconds : float,
+        crop_duration_seconds : float,
+        num_examples_per_batch : int,
+    ):
+        """
+        One batch of unscaled injections, drawn from ``streams``: a pure
+        function of the batch's address.
 
-            # Calculate max signal duration required by generators
-            max_signal_duration = 0.0
-            for generator in self.waveform_generators:
-                max_signal_duration = max(max_signal_duration, generator.get_max_generated_duration())
+        Returns (injections (G, B, 2, S), masks (G, B), parameters).
+        """
+        self.sample_rate_hertz = sample_rate_hertz
+        injections_list = []
+        masks_list = []
+        parameters_list = []
 
-            for generator, (range_low, range_high) in zip(self.waveform_generators, ranges):
-                seed = self.rng.integers(1000000000)
+        # Use WindowSpec for consistent total_onsource calculation
+        window_spec = gf.WindowSpec.from_params(
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration_seconds=onsource_duration_seconds,
+            crop_duration_seconds=crop_duration_seconds
+        )
+        total_duration = window_spec.total_onsource_duration_seconds
 
-                max_abs_shift = int(max(abs(range_low), abs(range_high)) * sample_rate_hertz)
-                extended_duration = max(total_duration, max_signal_duration) + extra_duration + 2.0 * max_abs_shift / sample_rate_hertz
+        # Placement. Each generator puts its waveforms' reference time (the
+        # peak, or a CBC's merger) at sample N / 2 of the buffer it
+        # generates. The window kept from that buffer is chosen so that the
+        # reference time lands at an offset from the onsource window's
+        # centre drawn uniformly from the generator's placement range,
+        # narrowed per example unless the generator allows partial signals
+        # (see WaveformGenerator). "shift" records the realised offset, in
+        # samples.
+        ranges = [
+            generator.placement_range_seconds(onsource_duration_seconds)
+            for generator in self.waveform_generators
+        ]
+        max_shift = max((max(abs(low), abs(high)) for low, high in ranges), default=0.0)
+        max_delay = 0.0
+        for generator in self.waveform_generators:
+            if generator.network is not None:
+                 max_delay = max(max_delay, float(generator.network.max_arrival_time_difference_seconds))
 
-                waveforms, params = generator.generate(
-                    num_waveforms=num_examples_per_batch,
-                    sample_rate_hertz=sample_rate_hertz,
-                    duration_seconds=extended_duration,
-                    seed=seed
-                )
-                # Non-finite samples (a waveform model failing at some
-                # parameters) are reported and count as no signal.
-                waveforms = replace_nan_and_inf_with_zero(
-                    waveforms, f"{type(generator).__name__} waveforms"
-                )
+        # Room for the shifts and the detector delays either side.
+        extra_duration = 2.0 * (max_shift + max_delay) + 1.0
 
-                mask = generate_mask(waveforms)
+        # Calculate max signal duration required by generators
+        max_signal_duration = 0.0
+        for generator in self.waveform_generators:
+            max_signal_duration = max(max_signal_duration, generator.get_max_generated_duration())
 
-                # The source's hrss and hpeak, on the whole generated buffer,
-                # before the window is cut from it.
-                params[SOURCE_HRSS] = calculate_hrss(waveforms, sample_rate_hertz)
-                params[SOURCE_HPEAK] = calculate_hpeak(waveforms)
+        for generator, label, (range_low, range_high) in zip(self.waveform_generators, self.labels, ranges):
+            max_abs_shift = int(max(abs(range_low), abs(range_high)) * sample_rate_hertz)
+            extended_duration = max(total_duration, max_signal_duration) + extra_duration + 2.0 * max_abs_shift / sample_rate_hertz
 
-                # Reduce mask to a single boolean flag per example (0.0 or 1.0)
-                mask = ops.max(mask, axis=(1, 2))
-                masks_list.append(mask)
+            waveforms, params = generator.generate(
+                num_examples_per_batch,
+                sample_rate_hertz,
+                extended_duration,
+                streams.sub(f"wave/{label}")
+            )
+            # Non-finite samples (a waveform model failing at some
+            # parameters) are reported and count as no signal.
+            waveforms = replace_nan_and_inf_with_zero(
+                waveforms, f"{type(generator).__name__} waveforms"
+            )
 
-                offsets = self._draw_offsets_seconds(
-                    generator, params, range_low, range_high,
-                    onsource_duration_seconds, num_examples_per_batch
-                )
+            mask = generate_mask(waveforms)
 
-                # Slice so the reference sample, N_ext / 2, lands at
-                # target_length / 2 + offset of the kept window.
-                extended_samples = waveforms.shape[-1]
-                target_length = int(total_duration * sample_rate_hertz)
-                slice_starts = np.rint(
-                    extended_samples / 2.0 - target_length / 2.0 - offsets * sample_rate_hertz
-                )
-                slice_starts = np.clip(slice_starts, 0, extended_samples - target_length)
-                shifts = extended_samples / 2.0 - slice_starts - target_length / 2.0
-                slice_starts = jnp.asarray(slice_starts, dtype="int32")
+            # The source's hrss and hpeak, on the whole generated buffer,
+            # before the window is cut from it.
+            params[SOURCE_HRSS] = calculate_hrss(waveforms, sample_rate_hertz)
+            params[SOURCE_HPEAK] = calculate_hpeak(waveforms)
 
-                def slice_one(w, s):
-                    # w: (..., Time)
-                    # s: scalar int
-                    # We slice along the last axis
-                    rank = len(w.shape)
-                    zeros = [jnp.array(0, dtype="int32")] * (rank - 1)
-                    start_indices = tuple(zeros + [s.astype("int32")])
+            # Reduce mask to a single boolean flag per example (0.0 or 1.0)
+            mask = ops.max(mask, axis=(1, 2))
+            masks_list.append(mask)
 
-                    slice_sizes = w.shape[:-1] + (target_length,)
+            offsets = self._draw_offsets_seconds(
+                generator, params, range_low, range_high,
+                onsource_duration_seconds, num_examples_per_batch,
+                streams.stream(f"inject/{label}/shift")
+            )
 
-                    return jax.lax.dynamic_slice(w, start_indices, slice_sizes)
+            # Slice so the reference sample, N_ext / 2, lands at
+            # target_length / 2 + offset of the kept window.
+            extended_samples = waveforms.shape[-1]
+            target_length = int(total_duration * sample_rate_hertz)
+            slice_starts = np.rint(
+                extended_samples / 2.0 - target_length / 2.0 - offsets * sample_rate_hertz
+            )
+            slice_starts = np.clip(slice_starts, 0, extended_samples - target_length)
+            shifts = extended_samples / 2.0 - slice_starts - target_length / 2.0
+            slice_starts = jnp.asarray(slice_starts, dtype="int32")
 
-                waveforms = jax.vmap(slice_one)(waveforms, slice_starts)
+            def slice_one(w, s):
+                # w: (..., Time)
+                # s: scalar int
+                # We slice along the last axis
+                rank = len(w.shape)
+                zeros = [jnp.array(0, dtype="int32")] * (rank - 1)
+                start_indices = tuple(zeros + [s.astype("int32")])
 
-                # Update coalescence time
-                # The merger time in the generated waveform is `coalescence_time`.
-                # In the sliced waveform, the time axis is shifted.
-                # `t_sliced = t_gen - slice_start`.
-                # So `tc_sliced = tc_gen - slice_start`.
-                # slice_start is in samples. Convert to seconds.
-                if "coalescence_time" in params:
-                    # params["coalescence_time"] is (Batch,)
-                    # slice_starts is (Batch,)
-                    params["coalescence_time"] -= slice_starts / sample_rate_hertz
+                slice_sizes = w.shape[:-1] + (target_length,)
 
-                params["shift"] = jnp.asarray(shifts, dtype="float32")
-                injections_list.append(waveforms)
-                parameters_list.append(params)
+                return jax.lax.dynamic_slice(w, start_indices, slice_sizes)
 
-            if injections_list:
-                injections = ops.stack(injections_list, axis=0)
-                masks = ops.stack(masks_list, axis=0)
-            else:
-                # No generators: no injections, and every example is noise.
-                target_length = int(total_duration * sample_rate_hertz)
-                injections = ops.zeros((0, num_examples_per_batch, 2, target_length), "float32")
-                masks = ops.zeros((0, num_examples_per_batch), "float32")
+            waveforms = jax.vmap(slice_one)(waveforms, slice_starts)
 
-            # (Generators, Batch, 2, Time) polarisations, unless a generator
-            # stacks more (IncoherentGenerator).
-            if len(ops.shape(injections)) != 4:
-                logging.warning(
-                    "Injection shape mismatch: expected (Generators, Batch, 2, Time), "
-                    f"got {ops.shape(injections)}"
-                )
-            
-            batched_params = batch_injection_parameters(parameters_list)
-            
-            yield injections, masks, batched_params
+            # Update coalescence time
+            # The merger time in the generated waveform is `coalescence_time`.
+            # In the sliced waveform, the time axis is shifted.
+            # `t_sliced = t_gen - slice_start`.
+            # So `tc_sliced = tc_gen - slice_start`.
+            # slice_start is in samples. Convert to seconds.
+            if "coalescence_time" in params:
+                # params["coalescence_time"] is (Batch,)
+                # slice_starts is (Batch,)
+                params["coalescence_time"] -= slice_starts / sample_rate_hertz
+
+            params["shift"] = jnp.asarray(shifts, dtype="float32")
+            injections_list.append(waveforms)
+            parameters_list.append(params)
+
+        if injections_list:
+            injections = ops.stack(injections_list, axis=0)
+            masks = ops.stack(masks_list, axis=0)
+        else:
+            # No generators: no injections, and every example is noise.
+            target_length = int(total_duration * sample_rate_hertz)
+            injections = ops.zeros((0, num_examples_per_batch, 2, target_length), "float32")
+            masks = ops.zeros((0, num_examples_per_batch), "float32")
+
+        # (Generators, Batch, 2, Time) polarisations, unless a generator
+        # stacks more (IncoherentGenerator).
+        if len(ops.shape(injections)) != 4:
+            logging.warning(
+                "Injection shape mismatch: expected (Generators, Batch, 2, Time), "
+                f"got {ops.shape(injections)}"
+            )
+
+        batched_params = batch_injection_parameters(parameters_list)
+
+        return injections, masks, batched_params
 
     def _draw_offsets_seconds(
         self,
@@ -1622,7 +1649,8 @@ class InjectionGenerator:
         range_low : float,
         range_high : float,
         window_seconds : float,
-        num_examples : int
+        num_examples : int,
+        rng : np.random.Generator
     ):
         """
         Each example's reference-time offset from the window's centre, seconds.
@@ -1634,7 +1662,7 @@ class InjectionGenerator:
         delay, lies inside the window. A signal too long for that is centred,
         with a warning.
         """
-        uniform = self.rng.random(num_examples)
+        uniform = rng.random(num_examples)
         low = np.full(num_examples, float(range_low))
         high = np.full(num_examples, float(range_high))
 
@@ -1672,9 +1700,17 @@ class InjectionGenerator:
         onsource_duration_seconds: float = None,
         injection_parameters: Optional[Dict] = None,
         scale_factor: float = None,
+        streams: Optional[BatchStreams] = None,
+        epoch: Optional[int] = None,
     ):
         """
         Scale each generator's injections, project them, and add them to ``onsource``.
+
+        Randomness: sky and polarisation are drawn from the batch's
+        ``sky/{g}`` and ``pol/{g}`` streams, scaling targets from
+        ``scale/{g}`` (a Curriculum at ``epoch``; None is its end, the
+        evaluation distribution), and an array of targets is indexed by the
+        batch's k. Without ``streams`` the default direct streams are used.
 
         Units: ``onsource`` and ``offsource`` are in internal units, strain x S
         (``scale_factor``; default this InjectionGenerator's, then
@@ -1709,6 +1745,8 @@ class InjectionGenerator:
             scale_factor = self.scale_factor
         if scale_factor is None:
             scale_factor = gf.Defaults.scale_factor
+        if streams is None:
+            streams = self._tree.direct()
 
         # A generator without a scaling method is refused, by name, below.
         label_types = {
@@ -1737,7 +1775,7 @@ class InjectionGenerator:
         if parameters_to_return and ReturnVariables.CENTRAL_TIME in parameters_to_return:
             return_injection_times = True
 
-        for i, generator in enumerate(self.waveform_generators):
+        for i, (generator, label) in enumerate(zip(self.waveform_generators, self.labels)):
             raw_waveforms = injections[i] 
             
             scaling_method = generator.scaling_method
@@ -1757,8 +1795,9 @@ class InjectionGenerator:
             
             # Sky position and polarisation, LAL conventions, defined at the
             # generator's reference GPS time. In order of precedence: values
-            # the generator returned among its parameters, the generator's own
-            # distributions, then an isotropic draw from the network's stream.
+            # the generator returned among its parameters, then the
+            # generator's own distributions, else an isotropic draw; drawn
+            # from the generator's sky and polarisation streams.
             if scaling_method is None:
                 raise ValueError(
                     f"{type(generator).__name__} has no scaling_method; give it a "
@@ -1769,9 +1808,6 @@ class InjectionGenerator:
                     f"{type(generator).__name__} has no network to project onto."
                 )
 
-            # The network's stream is drawn as before, so isotropic skies are
-            # unchanged by the sky parameters.
-            proj_seed = network.rng.integers(1000000000, size=2)
             num_inj = ops.shape(raw_waveforms)[0]
             gps_time_seconds = getattr(generator, "reference_gps_time_seconds", None)
 
@@ -1783,39 +1819,28 @@ class InjectionGenerator:
                     value = value[i]
                 return ops.convert_to_tensor(value, dtype="float32")
 
-            def configured(attribute):
+            def draw(attribute, rng, isotropic):
                 distribution = getattr(generator, attribute, None)
-                if distribution is None:
-                    return None
-                return ops.convert_to_tensor(
-                    np.asarray(distribution.sample(num_inj), dtype=np.float32)
-                )
+                values = isotropic(rng) if distribution is None else distribution.sample(num_inj, rng)
+                return ops.convert_to_tensor(np.asarray(values, dtype=np.float32))
 
+            # Isotropic: right ascension uniform in [0, 2 pi), sin(declination)
+            # uniform in [-1, 1), polarisation uniform in [0, pi) (it is
+            # defined modulo pi).
+            sky_rng = streams.stream(f"sky/{label}")
+            pol_rng = streams.stream(f"pol/{label}")
             input_ra = given(WaveformParameters.RIGHT_ASCENSION_RADIANS)
             input_dec = given(WaveformParameters.DECLINATION_RADIANS)
             input_pol = given(WaveformParameters.POLARIZATION_RADIANS)
             if input_ra is None:
-                input_ra = configured("right_ascension_radians")
+                input_ra = draw("right_ascension_radians", sky_rng,
+                                lambda rng: 2.0 * np.pi * rng.random(num_inj))
             if input_dec is None:
-                input_dec = configured("declination_radians")
+                input_dec = draw("declination_radians", sky_rng,
+                                 lambda rng: np.arcsin(2.0 * rng.random(num_inj) - 1.0))
             if input_pol is None:
-                input_pol = configured("polarization_radians")
-
-            if input_ra is None or input_dec is None:
-                # Isotropic: right ascension uniform in [0, 2 pi), sin(declination)
-                # uniform in [-1, 1).
-                u = network.rng.random(num_inj).astype("float32")
-                v = network.rng.random(num_inj).astype("float32")
-
-                if input_ra is None:
-                    input_ra = ops.convert_to_tensor(2.0 * np.pi * u)
-                if input_dec is None:
-                    input_dec = ops.arcsin(2.0 * v - 1.0)
-
-            if input_pol is None:
-                # The polarisation angle is defined modulo pi.
-                p = network.rng.random(num_inj).astype("float32")
-                input_pol = ops.convert_to_tensor(np.pi * p)
+                input_pol = draw("polarization_radians", pol_rng,
+                                 lambda rng: np.pi * rng.random(num_inj))
 
             generator_labels = {
                 key: self._generator_parameter(injection_parameters, key, i)
@@ -1853,25 +1878,16 @@ class InjectionGenerator:
                 generator_labels[ReturnVariables.CENTRAL_TIME] = normalized_time
 
 
-            scaling_dist = scaling_method.value
-
-            if not hasattr(self, "_scaling_indices"):
-                self._scaling_indices = [0] * len(self.waveform_generators)
+            scaling_dist = gf.Curriculum.resolve(scaling_method.value, epoch)
 
             if isinstance(scaling_dist, (np.ndarray, list)):
-                current_idx = self._scaling_indices[i]
-                end_idx = current_idx + num_examples
-                
-                if end_idx > len(scaling_dist):
-                     # Wrap around
-                     current_idx = 0
-                     end_idx = num_examples
-                     self._scaling_indices[i] = 0
-                
-                target_val = scaling_dist[current_idx : end_idx]
-                self._scaling_indices[i] = end_idx
+                # A fixed list of targets: batch k takes the next
+                # num_examples, cycling through the list.
+                first = (streams.k or 0) * num_examples
+                indices = (first + np.arange(num_examples)) % len(scaling_dist)
+                target_val = np.asarray(scaling_dist)[indices]
             else:
-                target_val = scaling_dist.sample(num_examples)
+                target_val = scaling_dist.sample(num_examples, streams.stream(f"scale/{label}"))
             target_val = ops.convert_to_tensor(target_val, dtype="float32")
             
             sample_rate = self.sample_rate_hertz

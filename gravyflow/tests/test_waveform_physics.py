@@ -218,7 +218,7 @@ def test_wnb_band_at_nyquist():
 def test_wnb_is_gaussian_and_unpolarised_by_default():
     n = 64
     waveforms = np.asarray(gf.wnb(
-        n, FS, 2.0, np.full(n, 0.5, "f4"), np.full(n, 100.0, "f4"), np.full(n, 400.0, "f4"), seed=5
+        n, FS, 2.0, np.full(n, 0.5, "f4"), np.full(n, 100.0, "f4"), np.full(n, 400.0, "f4"), key=gf.SeedTree(5).direct().key("wave/g/noise")
     ), np.float64)
     t = np.asarray(wnb_module.time_axis(waveforms.shape[-1], FS))
     envelope = np.asarray(wnb_module.hann_envelope(wnb_module.time_axis(waveforms.shape[-1], FS),
@@ -232,7 +232,7 @@ def test_wnb_is_gaussian_and_unpolarised_by_default():
 
     linear = np.asarray(gf.wnb(
         2, FS, 2.0, np.full(2, 0.5, "f4"), np.full(2, 100.0, "f4"), np.full(2, 400.0, "f4"),
-        seed=5, polarization_eccentricity=np.ones(2, "f4"),
+        key=gf.SeedTree(5).direct().key("wave/g/noise"), polarization_eccentricity=np.ones(2, "f4"),
     ))
     assert np.all(linear[:, 1] == 0.0)
 

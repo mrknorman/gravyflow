@@ -15,6 +15,8 @@ from scipy.stats import truncnorm
 import gravyflow as gf
 import jax
 
+from gravyflow.src.rng.legacy import warn_deprecated
+
 logger = logging.getLogger(__name__)
 
 class DistributionType(Enum):
@@ -27,6 +29,13 @@ class DistributionType(Enum):
 
 @dataclass
 class Distribution:
+    """
+    A distribution of one parameter.
+
+    ``sample(n, rng)`` draws n values from the NumPy Generator ``rng`` and
+    returns an ndarray. A Distribution holds no random state and is never
+    changed by sampling, so one object can serve any number of datasets.
+    """
     value : Union[int, float] = None
     dtype : Type = float
     min_ : Union[int, float] = None
@@ -35,159 +44,129 @@ class Distribution:
     std : float = None
     possible_values : List = None
     type_ : DistributionType = DistributionType.CONSTANT
-    seed : int = None
+    seed : int = None  # Deprecated: pass an rng to sample().
 
     def __post_init__(self):
-
-        if self.seed is None:
-            self.rng = default_rng(gf.Defaults.seed)
-        else:
-            self.rng = default_rng(self.seed)
+        if self.seed is not None:
+            warn_deprecated("Distribution(seed=)", "pass a NumPy Generator to sample(n, rng)")
+        self._legacy_rng = None
 
         # Check and adjust min and max values
         if self.min_ is not None or self.max_ is not None:
             if self.min_ is None or self.max_ is None:
                 raise ValueError("Both min and max must be provided if one is provided.")
-            
+
             if self.min_ > self.max_:
                 self.min_, self.max_ = self.max_, self.min_  # Swap values
 
-    def reseed(self, seed):
+    def _legacy_generator(self):
+        if self._legacy_rng is None:
+            seed = self.seed if self.seed is not None else gf.Defaults.seed
+            self._legacy_rng = default_rng(seed)
+        return self._legacy_rng
 
+    @property
+    def rng(self):
+        warn_deprecated("Distribution.rng", "pass a NumPy Generator to sample(n, rng)")
+        return self._legacy_generator()
+
+    def reseed(self, seed):
+        warn_deprecated("Distribution.reseed", "pass a NumPy Generator to sample(n, rng)")
         self.seed = seed
-        self.rng = default_rng(self.seed)            
+        self._legacy_rng = default_rng(seed)
 
     def sample(
-        self, 
-        num_samples : int = 1
-        ) -> Union[List[Union[int, float]], Union[int, float]]:
+        self,
+        num_samples : int = 1,
+        rng : np.random.Generator = None
+        ) -> np.ndarray:
+        """
+        ``num_samples`` values drawn from ``rng``, as an ndarray.
+
+        Without ``rng`` (deprecated) the draw comes from a stream kept on the
+        object, seeded by ``seed`` or ``gf.Defaults.seed``.
+        """
+        if rng is None:
+            warn_deprecated(
+                "Distribution.sample() without an rng", "pass a NumPy Generator: sample(n, rng)"
+            )
+            rng = self._legacy_generator()
+
+        low, high = self.min_, self.max_
 
         match self.type_:
-            
-            case DistributionType.CONSTANT:
 
+            case DistributionType.CONSTANT:
                 if self.value is None:
                     raise ValueError(
                         "No constant value given in constant distribution."
                     )
-                else:
-                    samples = [self.value] * num_samples
-            
+                samples = np.asarray([self.value] * num_samples)
+
             case DistributionType.UNIFORM:
-
-                # Check and adjust min and max values
-                if self.min_ is not None or self.max_ is not None:
-                    if self.min_ is None or self.max_ is None:
-                        raise ValueError("Both min and max must be provided if one is provided.")
-                    
-                    if self.min_ > self.max_:
-                        self.min_ = self.max_
-
-                                        
-                if self.min_ is None:
-                     raise ValueError(
-                        "No minumum value given in uniform distribution."
+                if low is None:
+                    raise ValueError("No minumum value given in uniform distribution.")
+                if high is None:
+                    raise ValueError("No maximum value given in uniform distribution.")
+                if self.dtype == int:
+                    # Integers in [min_, max_], both ends included.
+                    samples = rng.integers(
+                        int(np.ceil(low)), int(np.floor(high)) + 1, size=num_samples
                     )
-                elif self.max_ is None:
-                    raise ValueError(
-                        "No maximum value given in uniform distribution."
-                    )
-                elif self.min_ == self.max_:
-                    samples = [self.min_] * num_samples
-                else:                
-                    samples = self.rng.uniform(
-                            self.min_, 
-                            self.max_, 
-                            num_samples
-                        )
-                    
-            case DistributionType.NORMAL:
-
-                if self.mean is None:
-                    raise ValueError(
-                        "No mean value given in normal distribution."
-                    )
-                elif self.std is None:
-                    raise ValueError(
-                        "No std value given in normal distribution."
-                    )
+                elif low == high:
+                    samples = np.full(num_samples, low)
                 else:
-                        
-                    if self.min_ is None:
-                        self.min_ = float("-inf")
-                    if self.max_ is None:
-                        self.max_ = float("inf")
-                       
-                    # Check and adjust min and max values
-                    if self.min_ is not None or self.max_ is not None:
-                        if self.min_ is None or self.max_ is None:
-                            raise ValueError("Both min and max must be provided if one is provided.")
-                        
-                        if self.min_ > self.max_:
-                            self.min_ = self.max_
+                    samples = rng.uniform(low, high, num_samples)
 
-                    if self.min_ == self.max_:
-                        samples = [self.min_] * num_samples
-                    else:
-                        samples = truncnorm.rvs(
-                                (self.min_ - self.mean) / self.std,
-                                (self.max_ - self.mean) / self.std,
-                                loc=self.mean,
-                                scale=self.std,
-                                size=num_samples,
-                                random_state=self.rng.integers(2**32 - 1)
-                            )
+            case DistributionType.NORMAL:
+                if self.mean is None:
+                    raise ValueError("No mean value given in normal distribution.")
+                if self.std is None:
+                    raise ValueError("No std value given in normal distribution.")
+                low = float("-inf") if low is None else low
+                high = float("inf") if high is None else high
+                if low == high:
+                    samples = np.full(num_samples, low)
+                else:
+                    samples = truncnorm.rvs(
+                        (low - self.mean) / self.std,
+                        (high - self.mean) / self.std,
+                        loc=self.mean,
+                        scale=self.std,
+                        size=num_samples,
+                        random_state=rng
+                    )
+
             case DistributionType.CHOICE:
                 if self.possible_values is None:
                     raise ValueError(
                         "No possible values given in choice distribution."
                     )
-                samples = self.rng.choice(
-                    self.possible_values,
-                    size=num_samples
-                )
+                samples = rng.choice(self.possible_values, size=num_samples)
+
             case DistributionType.LOG:
-                if self.min_ is None:
-                    raise ValueError(
-                        "No minumum value given in log distribution."
-                    )
-                elif self.max_ is None:
-                    raise ValueError(
-                        "No maximum value given in log distribution."
-                    )
-                elif self.min_ <= 0:
-                    raise ValueError(
-                        "LOG distribution requires min_ > 0."
-                    )
-                # Sample uniformly in log-space, then exponentiate to get
-                # values log-uniformly distributed between min_ and max_
-                log_min = np.log10(self.min_)
-                log_max = np.log10(self.max_)
-                log_samples = self.rng.uniform(log_min, log_max, num_samples)
-                samples = 10 ** log_samples
+                if low is None:
+                    raise ValueError("No minumum value given in log distribution.")
+                if high is None:
+                    raise ValueError("No maximum value given in log distribution.")
+                if low <= 0:
+                    raise ValueError("LOG distribution requires min_ > 0.")
+                # Uniform in log10, so log-uniform between min_ and max_.
+                samples = 10 ** rng.uniform(np.log10(low), np.log10(high), num_samples)
 
             case DistributionType.POW_TWO:
-                power_low, power_high = map(int, np.log2((self.min_, self.max_)))
-                power = self.rng.integers(power_low, high=power_high + 1, size=num_samples)
+                power_low, power_high = map(int, np.log2((low, high)))
+                power = rng.integers(power_low, high=power_high + 1, size=num_samples)
                 samples = 2**power
-            
+
             case _:
                 raise ValueError(f'Unsupported distribution type {self.type_}')
 
-        if self.dtype == int:
-
-            if self.type_ == DistributionType.LOG:
-                raise ValueError(
-                    "Cannot convert log values to ints."
-                )
-            elif self.type_ == DistributionType.CHOICE:
-                raise ValueError(
-                    "Cannot convert choice values to ints."
-                )
-
-            samples = [int(sample) for sample in samples]
-        
+        samples = np.asarray(samples)
+        if self.dtype == int and samples.dtype.kind != "i":
+            samples = np.rint(samples.astype(np.float64)).astype(np.int64)
         return samples
+
     
 def randomise_arguments(input_dict, func):
     output_dict = {}

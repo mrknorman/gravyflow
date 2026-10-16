@@ -4,8 +4,11 @@ and evaluated.
 
 - **Presets.** `TrainingSchedule.cpu` sizes a run for a laptop CPU;
   `TrainingSchedule.gpu` is the scale the papers used.
-- **Seeds.** One root seed gives each split its own seed (`split_seeds`), so the
-  training, validation and test data never share a stream.
+- **Seeds.** One root seed for every split: each dataset draws from its split's
+  streams of the seed tree (its ``group``), so the training, validation and
+  test data never share a stream. A resumed run starts its training dataset at
+  the resumed epoch (`starting_at`), so it draws new data rather than
+  replaying the first epochs.
 - **A run directory outside the package.** `RunDirectory` refuses any path
   inside the installed library, so a run can never overwrite shipped files.
 - **Resume.** Each epoch ends with the model and its optimiser saved
@@ -34,7 +37,7 @@ import keras
 import numpy as np
 
 import gravyflow as gf
-from gravyflow.src.validate.bank import derived_seed, per_example
+from gravyflow.src.validate.bank import per_example
 from gravyflow.src.validate.provenance import (
     StaleCheckpointError, canonical, config_fingerprint, model_fingerprint, require_match,
 )
@@ -66,9 +69,10 @@ class TrainingSchedule:
         return cls(epochs=1000, steps_per_epoch=11250, validation_batches=625, patience=5)
 
 
-def split_seeds(root: int) -> Dict[str, int]:
-    """A seed for each split, derived from one root."""
-    return {split: derived_seed(root, "split", split) for split in SPLITS}
+def starting_at(dataset, epoch: int):
+    """``dataset`` with its epoch set to ``epoch`` (a resumed run's first)."""
+    dataset.epoch = epoch
+    return dataset
 
 
 # ---------------------------------------------------------------- batches
@@ -87,6 +91,9 @@ class DetectionBatches(keras.utils.PyDataset):
     def __len__(self) -> int:
         return len(self.dataset)
 
+    def on_epoch_end(self):
+        self.dataset.on_epoch_end()
+
     def __getitem__(self, index):
         x, y = self.dataset[index]
         present = np.asarray(y[gf.ReturnVariables.INJECTION_PRESENT.name]) > 0.5
@@ -103,6 +110,9 @@ class RegressionBatches(keras.utils.PyDataset):
 
     def __len__(self) -> int:
         return len(self.dataset)
+
+    def on_epoch_end(self):
+        self.dataset.on_epoch_end()
 
     def __getitem__(self, index):
         x, y = self.dataset[index]
@@ -257,10 +267,6 @@ class TrainingRun:
     description: Dict[str, Any] = field(default_factory=dict)
 
     @property
-    def seeds(self) -> Dict[str, int]:
-        return split_seeds(self.seed)
-
-    @property
     def config_sha256(self) -> str:
         return config_fingerprint(self._full_description())
 
@@ -269,13 +275,6 @@ class TrainingRun:
         # out lets a finished run be extended.
         schedule = {k: v for k, v in asdict(self.schedule).items() if k != "epochs"}
         return {**self.description, "schedule": schedule, "seed": self.seed}
-
-    def train_seed(self, first_epoch: int) -> int:
-        """
-        The training data's seed for a run (re)started at ``first_epoch``: a
-        resumed run draws new data rather than replaying the first epochs.
-        """
-        return derived_seed(self.seeds["train"], "from-epoch", str(first_epoch))
 
     def train(
         self,
@@ -290,9 +289,9 @@ class TrainingRun:
 
         Args:
             build_model: a new compiled model.
-            training_data: the training batches, given a seed (see `train_seed`) and
-                the first epoch they serve (for a schedule, such as a curriculum,
-                that depends on the epoch).
+            training_data: the training batches, given the run's root seed and
+                the first epoch they serve (see `starting_at`): a resumed run
+                draws that epoch's batches, and a curriculum reads that epoch.
             validation_data: fixed validation batches (see `materialise`).
 
         Raises:
@@ -313,7 +312,7 @@ class TrainingRun:
         first_epoch = state["epoch"] + 1
         if first_epoch < self.schedule.epochs and not state["stopped_early"]:
             model.fit(
-                training_data(self.train_seed(first_epoch), first_epoch),
+                training_data(self.seed, first_epoch),
                 validation_data=validation_data,
                 epochs=self.schedule.epochs,
                 initial_epoch=first_epoch,
@@ -329,5 +328,5 @@ class TrainingRun:
 
 __all__ = [
     "DetectionBatches", "FixedBatches", "RegressionBatches", "RunDirectory", "StaleCheckpointError",
-    "TrainingRun", "TrainingSchedule", "materialise", "split_seeds",
+    "TrainingRun", "TrainingSchedule", "materialise", "starting_at",
 ]

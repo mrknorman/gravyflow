@@ -153,7 +153,9 @@ def test_snr_labels_of_hrss_scaled_injections_match_their_whitened_norm():
     whitened = whitened[:, 0]  # (B, G, I, T): the one generator
     norm = np.sqrt(np.sum(whitened ** 2, axis=(-1, -2)))
     label = np.ravel(np.asarray(outputs["SNR"]))
-    assert np.all(norm > 1.0)
+    # Every injection is present; a sky near a detector's null gives a small
+    # norm (0.56 for one example of this batch's sky draw).
+    assert np.all(norm > 0.1)
     np.testing.assert_allclose(label, norm, rtol=0.02)
 
 

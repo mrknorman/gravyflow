@@ -311,50 +311,6 @@ def test_noise_iteration(
         num_tests=gf.tests.num_tests_from_config(pytestconfig)
     )
 
-def test_white_noise_generator():
-    # Test white noise generation
-    # It yields dict with ONSOURCE and OFFSOURCE
-    
-    num_examples = 2
-    ifos = [gf.IFO.L1]
-    onsource_dur = 1.0
-    crop_dur = 0.5
-    offsource_dur = 2.0
-    sample_rate = 1024.0
-    seed = 42
-    
-    gen = gf_noise.white_noise_generator(
-        num_examples_per_batch=num_examples,
-        ifos=ifos,
-        onsource_duration_seconds=onsource_dur,
-        crop_duration_seconds=crop_dur,
-        offsource_duration_seconds=offsource_dur,
-        sample_rate_hertz=sample_rate,
-        seed=seed
-    )
-    
-    batch = next(gen)
-    
-    # Handle dict format
-    from gravyflow.src.dataset.features.injection import ReturnVariables as RV
-    onsource = batch[RV.ONSOURCE]
-    offsource = batch[RV.OFFSOURCE]
-    
-    # Check shapes
-    # onsource: (Batch, IFOs, Time)
-    # Time = (1.0 + 2*0.5) * 1024 = 2048
-    assert ops.shape(onsource) == (num_examples, 1, 2048)
-    assert ops.shape(offsource) == (num_examples, 1, int(offsource_dur * sample_rate))
-    # Synthetic noise doesn't have GPS times
-    
-    # Check stats (roughly)
-    # Mean ~ 0, Std ~ 1
-    mean = ops.mean(onsource)
-    std = ops.std(onsource)
-    
-    assert np.abs(mean) < 0.1
-    assert np.abs(std - 1.0) < 0.1
-
 def test_interpolate_psd():
     # Test PSD interpolation
     # Create dummy PSD
@@ -376,62 +332,6 @@ def test_interpolate_psd():
     assert ops.shape(interp_on)[-1] == 2048 // 2 + 1
     assert ops.shape(interp_off)[-1] == 1024 // 2 + 1
 
-def test_colored_noise_generator():
-    """Test colored_noise_generator produces valid output."""
-    gen = gf_noise.colored_noise_generator(
-        num_examples_per_batch=2,
-        onsource_duration_seconds=1.0,
-        crop_duration_seconds=0.0,
-        offsource_duration_seconds=1.0,
-        ifos=[gf.IFO.L1],
-        sample_rate_hertz=1024.0,
-        scale_factor=1.0,
-        seed=42
-    )
-    
-    batch = next(gen)
-    onsource = batch[RV.ONSOURCE]
-    offsource = batch[RV.OFFSOURCE]
-    
-    # Check shapes
-    assert ops.shape(onsource) == (2, 1, 1024)
-    assert ops.shape(offsource) == (2, 1, 1024)
-
-def test_noise_generation_consistency():
-    """Verify that calling noise generator with same seed produces identical output."""
-    seed = 12345
-    num_examples = 2
-    
-    # Run 1
-    gen1 = gf_noise.white_noise_generator(
-        num_examples_per_batch=num_examples,
-        ifos=[gf.IFO.L1],
-        onsource_duration_seconds=1.0,
-        crop_duration_seconds=0.0,
-        offsource_duration_seconds=1.0,
-        sample_rate_hertz=1024.0,
-        seed=seed
-    )
-    batch1 = next(gen1)
-    onsource1 = batch1[RV.ONSOURCE]
-    
-    # Run 2
-    gen2 = gf_noise.white_noise_generator(
-        num_examples_per_batch=num_examples,
-        ifos=[gf.IFO.L1],
-        onsource_duration_seconds=1.0,
-        crop_duration_seconds=0.0,
-        offsource_duration_seconds=1.0,
-        sample_rate_hertz=1024.0,
-        seed=seed
-    )
-    batch2 = next(gen2)
-    onsource2 = batch2[RV.ONSOURCE]
-    
-    # Check equality
-    # Note: JAX arrays might need conversion or specific assertion
-    np.testing.assert_array_equal(onsource1, onsource2, err_msg="Noise generation not consistent with same seed.")
-
 def test_unsupported_noise_type():
     """Verify error is raised for invalid noise type."""
     # This might need to test NoiseObtainer validation
@@ -441,106 +341,6 @@ def test_unsupported_noise_type():
     with pytest.raises(ValueError, match="NoiseType .* not recognised"):
         # Validation happens in __call__
         next(noise())
-
-def test_colored_noise_psd_shape():
-    """Verify that _generate_colored_noise produces correct shapes."""
-    # Test _generate_colored_noise directly with a mock ASD
-    num_examples = 2
-    num_ifos = 1
-    num_samples = 1024
-    seed = 42
-    
-    # Create a dummy ASD (complex64 for FFT multiplication)
-    # Shape should be (1, IFOs, Freqs) for broadcasting
-    num_freqs = num_samples // 2 + 1
-    interpolated_asd = jnp.ones((1, num_ifos, num_freqs), dtype=jnp.complex64)
-    
-    result = gf_noise._generate_colored_noise(
-        num_examples_per_batch=num_examples,
-        num_ifos=num_ifos,
-        num_samples=num_samples,
-        interpolated_asd=interpolated_asd,
-        seed=seed,
-        sample_rate_hertz=1024.0
-    )
-    
-    assert ops.shape(result) == (num_examples, num_ifos, num_samples)
-
-
-# ============================================================================
-# NEW TESTS FOR COMPREHENSIVE COVERAGE
-# ============================================================================
-
-
-
-
-def test_generate_white_noise_direct():
-    """Test _generate_white_noise directly."""
-    num_examples = 4
-    num_ifos = 2
-    num_samples = 512
-    seed = 123
-    
-    result = gf_noise._generate_white_noise(
-        num_examples_per_batch=num_examples,
-        num_ifos=num_ifos,
-        num_samples=num_samples,
-        seed=seed
-    )
-    
-    # Check shape
-    assert ops.shape(result) == (num_examples, num_ifos, num_samples)
-    
-    # Check dtype
-    assert result.dtype == jnp.float32
-    
-    # Check stats (mean ~ 0, std ~ 1)
-    mean = float(ops.mean(result))
-    std = float(ops.std(result))
-    
-    assert np.abs(mean) < 0.2  # Allow some variance
-    assert np.abs(std - 1.0) < 0.2
-
-
-def test_generate_white_noise_reproducibility():
-    """Test that same seed produces same noise."""
-    seed = 42
-    
-    result1 = gf_noise._generate_white_noise(4, 1, 100, seed)
-    result2 = gf_noise._generate_white_noise(4, 1, 100, seed)
-    
-    np.testing.assert_array_equal(result1, result2)
-
-
-def test_generate_colored_noise_direct():
-    """Test _generate_colored_noise directly."""
-    num_examples = 2
-    num_ifos = 1
-    num_samples = 512
-    seed = 42
-    
-    sample_rate_hertz = 512.0
-    
-    # Create flat ASD (white noise with amplitude scaling)
-    num_freqs = num_samples // 2 + 1
-    asd = jnp.ones((1, num_ifos, num_freqs), dtype=jnp.complex64) * 2.0
-    
-    result = gf_noise._generate_colored_noise(
-        num_examples_per_batch=num_examples,
-        num_ifos=num_ifos,
-        num_samples=num_samples,
-        interpolated_asd=asd,
-        seed=seed,
-        sample_rate_hertz=sample_rate_hertz
-    )
-    
-    assert ops.shape(result) == (num_examples, num_ifos, num_samples)
-    
-    # A flat one-sided ASD of 2 / sqrt(Hz) up to fs / 2 is white noise of
-    # variance 2^2 * fs / 2: std 2 * sqrt(256) = 32.
-    std = float(ops.std(result))
-    assert std == pytest.approx(2.0 * np.sqrt(sample_rate_hertz / 2.0), rel=0.1)
-
 
 def test_noise_obtainer_defaults():
     """Test NoiseObtainer default parameter handling."""
@@ -670,60 +470,6 @@ def test_noise_obtainer_real_without_ifo_obtainer():
         next(noise())
 
 
-def test_white_noise_generator_iteration():
-    """Test that white noise generator can be iterated multiple times."""
-    gen = gf_noise.white_noise_generator(
-        num_examples_per_batch=2,
-        ifos=[gf.IFO.L1],
-        onsource_duration_seconds=1.0,
-        crop_duration_seconds=0.0,
-        offsource_duration_seconds=1.0,
-        sample_rate_hertz=1024.0,
-        seed=42
-    )
-    
-    # Iterate 5 times
-    for i in range(5):
-        batch = next(gen)
-        onsource = batch[RV.ONSOURCE]
-        assert ops.shape(onsource) == (2, 1, 1024)
-
-
-
-
-
-def test_colored_noise_generator_with_cropping():
-    """Test colored_noise_generator function directly."""
-    num_examples = 2
-    onsource_dur = 1.0
-    crop_dur = 0.5
-    offsource_dur = 1.0
-    sample_rate = 1024.0
-    seed = 42
-    
-    gen = gf_noise.colored_noise_generator(
-        num_examples_per_batch=num_examples,
-        onsource_duration_seconds=onsource_dur,
-        crop_duration_seconds=crop_dur,
-        offsource_duration_seconds=offsource_dur,
-        ifos=[gf.IFO.L1],
-        sample_rate_hertz=sample_rate,
-        scale_factor=1.0,
-        seed=seed
-    )
-    
-    batch = next(gen)
-    onsource = batch[RV.ONSOURCE]
-    offsource = batch[RV.OFFSOURCE]
-    
-    # Check shapes
-    expected_onsource_samples = gf_noise.ensure_even(int((onsource_dur + 2*crop_dur) * sample_rate))
-    expected_offsource_samples = gf_noise.ensure_even(int(offsource_dur * sample_rate))
-    
-    assert ops.shape(onsource) == (num_examples, 1, expected_onsource_samples)
-    assert ops.shape(offsource) == (num_examples, 1, expected_offsource_samples)
-
-
 def test_noise_obtainer_colored_type():
     """Test NoiseObtainer with COLORED noise type."""
     noise = gf.NoiseObtainer(
@@ -747,46 +493,6 @@ def test_noise_obtainer_colored_type():
     # Check shapes
     assert len(ops.shape(onsource)) == 3
     assert ops.shape(onsource)[0] == 2  # batch
-
-
-def test_colored_noise_generator_multi_ifo():
-    """Test colored_noise_generator with multiple IFOs."""
-    gen = gf_noise.colored_noise_generator(
-        num_examples_per_batch=2,
-        onsource_duration_seconds=1.0,
-        crop_duration_seconds=0.0,
-        offsource_duration_seconds=1.0,
-        ifos=[gf.IFO.L1, gf.IFO.H1],
-        sample_rate_hertz=1024.0,
-        scale_factor=1.0,
-        seed=42
-    )
-    
-    batch = next(gen)
-    onsource = batch[RV.ONSOURCE]
-    
-    # Should have 2 IFOs
-    assert ops.shape(onsource)[1] == 2
-
-
-def test_colored_noise_generator_iteration():
-    """Test that colored noise generator can be iterated multiple times."""
-    gen = gf_noise.colored_noise_generator(
-        num_examples_per_batch=2,
-        onsource_duration_seconds=1.0,
-        crop_duration_seconds=0.0,
-        offsource_duration_seconds=1.0,
-        ifos=[gf.IFO.L1],
-        sample_rate_hertz=1024.0,
-        scale_factor=1.0,
-        seed=42
-    )
-    
-    # Iterate 3 times
-    for i in range(3):
-        batch = next(gen)
-        onsource = batch[RV.ONSOURCE]
-        assert ops.shape(onsource) == (2, 1, 1024)
 
 
 def test_noise_obtainer_scale_factor_none():
@@ -992,3 +698,59 @@ def test_effective_saturation_no_augmentation():
     effective = obtainer._get_effective_saturation()
     assert effective == base_saturation
 
+
+# --- Synthetic noise batchers: one batch per address -------------------------
+
+def _streams(seed=7, split="train", epoch=0, k=0):
+    return gf.SeedTree(seed).batch(split, epoch, k)
+
+
+@pytest.mark.parametrize("kind", ["white", "colored"])
+def test_noise_batchers_shapes_and_addresses(kind):
+    ifos = [gf.IFO.L1, gf.IFO.H1]
+    if kind == "white":
+        batch = gf_noise.white_noise_batcher(4, ifos, 1.0, 0.5, 4.0, 1024.0)
+    else:
+        batch = gf_noise.colored_noise_batcher(4, 1.0, 0.5, 4.0, ifos, 1024.0, 1.0)
+    first = batch(_streams())
+    onsource = np.asarray(first[gf.ReturnVariables.ONSOURCE])
+    offsource = np.asarray(first[gf.ReturnVariables.OFFSOURCE])
+    assert onsource.shape == (4, 2, 2048) and offsource.shape == (4, 2, 4096)
+    assert np.all(np.isfinite(onsource)) and np.all(np.isfinite(offsource))
+    # The same address gives the same batch; any other address another.
+    np.testing.assert_array_equal(np.asarray(batch(_streams())[gf.ReturnVariables.ONSOURCE]), onsource)
+    for other in (_streams(k=1), _streams(epoch=1), _streams(split="validate"), _streams(seed=8)):
+        assert not np.array_equal(np.asarray(batch(other)[gf.ReturnVariables.ONSOURCE]), onsource)
+
+
+def test_each_detector_has_its_own_noise_stream():
+    one = gf_noise.white_noise_batcher(2, [gf.IFO.L1], 1.0, 0.5, 4.0, 512.0)(_streams())
+    two = gf_noise.white_noise_batcher(2, [gf.IFO.L1, gf.IFO.H1], 1.0, 0.5, 4.0, 512.0)(_streams())
+    # Adding H1 leaves L1's noise as it was.
+    np.testing.assert_array_equal(np.asarray(two[gf.ReturnVariables.ONSOURCE])[:, 0],
+                                  np.asarray(one[gf.ReturnVariables.ONSOURCE])[:, 0])
+
+
+def test_white_noise_is_unit_normal():
+    batch = gf_noise.white_noise_batcher(64, [gf.IFO.L1], 1.0, 0.0, 1.0, 1024.0)(_streams())
+    x = np.asarray(batch[gf.ReturnVariables.ONSOURCE])
+    assert abs(x.mean()) < 0.01 and abs(x.std() - 1.0) < 0.01
+
+
+def test_color_noise_shapes():
+    white = jnp.ones((2, 3, 64), dtype=jnp.float32)
+    asd = jnp.ones((1, 3, 33), dtype=jnp.complex64)
+    assert gf_noise.color_noise(white, asd, sample_rate_hertz=64.0).shape == (2, 3, 64)
+
+
+def test_obtainer_iterator_walks_the_batches_of_epoch_zero():
+    obtainer = gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1])
+    kwargs = dict(sample_rate_hertz=512.0, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
+                  offsource_duration_seconds=4.0, num_examples_per_batch=2)
+    iterator = obtainer(seed=3, group="validate", **kwargs)
+    batch = obtainer.batcher(gf.SeedTree(3), "validate", **kwargs)
+    for k in range(3):
+        np.testing.assert_array_equal(
+            np.asarray(next(iterator)[gf.ReturnVariables.ONSOURCE]),
+            np.asarray(batch(gf.SeedTree(3).batch("validate", 0, k))[gf.ReturnVariables.ONSOURCE]),
+        )

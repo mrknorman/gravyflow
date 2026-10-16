@@ -13,7 +13,7 @@ class ValidationConfig:
 
     The validator draws its own data, from ``seed`` and ``group``; it never
     reuses the training dataset's seed. Each stage (the noise background, the
-    injection set) gets a seed derived from ``seed`` and the stage's name.
+    injection set) draws from its own scope of the seed tree rooted at ``seed``.
     """
     # The validator's own random root, never the training seed.
     seed: int = gf.Defaults.seed

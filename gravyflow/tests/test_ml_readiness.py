@@ -57,10 +57,9 @@ def test_data_diversity(basic_dataset_config):
     # Use a fixed seed for reproducibility of the TEST, but the dataset should evolve
     dataset = GravyflowDataset(**basic_dataset_config, seed=100)
     
-    # Get first batch
-    batch1 = next(iter(dataset))
-    # Get second batch
-    batch2 = next(iter(dataset))
+    # Batches 0 and 1
+    batch1 = dataset[0]
+    batch2 = dataset[1]
     
     # Unpack (inputs, targets)
     X1, _ = batch1
@@ -404,6 +403,7 @@ def test_numerical_stability(basic_dataset_config):
         X = batch[0][gf.ReturnVariables.WHITENED_ONSOURCE.name]
         assert np.all(np.isfinite(X)), "Input data contains NaNs or Infs."
 
+@pytest.mark.global_rng
 def test_micro_training(basic_dataset_config):
     """Run a minimal training loop to ensure plumbing works with Keras."""
     
@@ -554,15 +554,15 @@ def test_parameter_variation(basic_noise_obtainer):
     
     dataset = GravyflowDataset(**config, seed=123)
     
-    # Batch 1
-    batch1 = next(iter(dataset))
+    # Batch 0
+    batch1 = dataset[0]
     m1_batch1 = np.array(batch1[0][gf.WaveformParameters.MASS_1_MSUN.name]).flatten()
     
     # Check variation within batch
     assert np.std(m1_batch1) > 0.0, "Parameter constant within batch (expected variation)."
     
-    # Batch 2
-    batch2 = next(iter(dataset))
+    # Batch 1
+    batch2 = dataset[1]
     m1_batch2 = np.array(batch2[0][gf.WaveformParameters.MASS_1_MSUN.name]).flatten()
     
     # Check variation across batches

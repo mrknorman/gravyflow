@@ -28,7 +28,7 @@ Conventions, shared by every generator here:
 """
 
 from dataclasses import dataclass
-from typing import Union, Tuple
+from typing import Optional, Union, Tuple
 from enum import Enum, auto
 
 import jax.numpy as jnp
@@ -126,8 +126,8 @@ def _check_below_nyquist(generator, names, sample_rate_hertz):
             )
 
 
-def _sample(distribution, num_waveforms):
-    return jnp.asarray(np.asarray(distribution.sample(num_waveforms), dtype=np.float32))
+def _sample(generator, attribute, num_waveforms, streams):
+    return jnp.asarray(generator.sample_attribute(attribute, num_waveforms, streams), dtype=jnp.float32)
 
 
 @dataclass
@@ -181,20 +181,21 @@ class PeriodicWaveGenerator(gf.WaveformGenerator):
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds: float,
-        seed: int
+        streams: Optional["gf.BatchStreams"] = None,
+        *,
+        seed: Optional[int] = None
     ):
         if num_waveforms <= 0:
             return None, {}
 
-        if seed is not None:
-            self.reseed(seed)
+        streams = self.resolve_streams(streams, seed)
         _check_below_nyquist(self, ("frequency_hertz",), sample_rate_hertz)
 
         # Sample parameters
-        freq = _sample(self.frequency_hertz, num_waveforms)
-        amp = _sample(self.amplitude, num_waveforms)
-        phase = _sample(self.phase_radians, num_waveforms)
-        dur = _sample(self.duration_seconds, num_waveforms)
+        freq = _sample(self, "frequency_hertz", num_waveforms, streams)
+        amp = _sample(self, "amplitude", num_waveforms, streams)
+        phase = _sample(self, "phase_radians", num_waveforms, streams)
+        dur = _sample(self, "duration_seconds", num_waveforms, streams)
 
         num_samples = int(sample_rate_hertz * duration_seconds)
         t = time_axis(num_samples, sample_rate_hertz)
@@ -223,7 +224,7 @@ class PeriodicWaveGenerator(gf.WaveformGenerator):
         waveform = jnp.stack([waveform, jnp.zeros_like(waveform)], axis=1).astype("float32")
 
         # Apply injection chance
-        waveform = self.apply_injection_chance(waveform, seed)
+        waveform = self.apply_injection_chance(waveform, streams)
 
         params = {
             gf.WaveformParameters.FREQUENCY_HERTZ: freq,
@@ -299,21 +300,22 @@ class SineGaussianGenerator(gf.WaveformGenerator):
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds: float,
-        seed: int
+        streams: Optional["gf.BatchStreams"] = None,
+        *,
+        seed: Optional[int] = None
     ):
         if num_waveforms <= 0:
             return None, {}
 
-        if seed is not None:
-            self.reseed(seed)
+        streams = self.resolve_streams(streams, seed)
         _check_below_nyquist(self, ("frequency_hertz",), sample_rate_hertz)
 
         # Sample parameters
-        freq = _sample(self.frequency_hertz, num_waveforms)
-        q = _sample(self.quality_factor, num_waveforms)
-        amp = _sample(self.amplitude, num_waveforms)
-        phase = _sample(self.phase_radians, num_waveforms)
-        eccentricity = _sample(self.polarization_eccentricity, num_waveforms)
+        freq = _sample(self, "frequency_hertz", num_waveforms, streams)
+        q = _sample(self, "quality_factor", num_waveforms, streams)
+        amp = _sample(self, "amplitude", num_waveforms, streams)
+        phase = _sample(self, "phase_radians", num_waveforms, streams)
+        eccentricity = _sample(self, "polarization_eccentricity", num_waveforms, streams)
 
         tau = q / (freq * jnp.sqrt(2.0) * jnp.pi)
 
@@ -339,7 +341,7 @@ class SineGaussianGenerator(gf.WaveformGenerator):
         waveform = jnp.stack([plus, cross], axis=1).astype("float32")
 
         # Apply injection chance
-        waveform = self.apply_injection_chance(waveform, seed)
+        waveform = self.apply_injection_chance(waveform, streams)
 
         params = {
             gf.WaveformParameters.FREQUENCY_HERTZ: freq,
@@ -416,24 +418,25 @@ class ChirpletGenerator(gf.WaveformGenerator):
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds: float,
-        seed: int
+        streams: Optional["gf.BatchStreams"] = None,
+        *,
+        seed: Optional[int] = None
     ):
         if num_waveforms <= 0:
             return None, {}
 
-        if seed is not None:
-            self.reseed(seed)
+        streams = self.resolve_streams(streams, seed)
         _check_below_nyquist(
             self, ("start_frequency_hertz", "end_frequency_hertz"), sample_rate_hertz
         )
 
         # Sample parameters
-        f0 = _sample(self.start_frequency_hertz, num_waveforms)
-        f1 = _sample(self.end_frequency_hertz, num_waveforms)
-        amp = _sample(self.amplitude, num_waveforms)
-        dur = _sample(self.duration_seconds, num_waveforms)
-        phase = _sample(self.phase_radians, num_waveforms)
-        eccentricity = _sample(self.polarization_eccentricity, num_waveforms)
+        f0 = _sample(self, "start_frequency_hertz", num_waveforms, streams)
+        f1 = _sample(self, "end_frequency_hertz", num_waveforms, streams)
+        amp = _sample(self, "amplitude", num_waveforms, streams)
+        dur = _sample(self, "duration_seconds", num_waveforms, streams)
+        phase = _sample(self, "phase_radians", num_waveforms, streams)
+        eccentricity = _sample(self, "polarization_eccentricity", num_waveforms, streams)
 
         # Chirp rate k = (f1 - f0) / duration
         k = (f1 - f0) / dur
@@ -450,7 +453,7 @@ class ChirpletGenerator(gf.WaveformGenerator):
         )
 
         # Apply injection chance
-        waveform = self.apply_injection_chance(waveform, seed)
+        waveform = self.apply_injection_chance(waveform, streams)
 
         params = {
             gf.WaveformParameters.START_FREQUENCY_HERTZ: f0,
@@ -528,21 +531,22 @@ class RingdownGenerator(gf.WaveformGenerator):
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds: float,
-        seed: int
+        streams: Optional["gf.BatchStreams"] = None,
+        *,
+        seed: Optional[int] = None
     ):
         if num_waveforms <= 0:
             return None, {}
 
-        if seed is not None:
-            self.reseed(seed)
+        streams = self.resolve_streams(streams, seed)
         _check_below_nyquist(self, ("frequency_hertz",), sample_rate_hertz)
 
         # Sample parameters
-        freq = _sample(self.frequency_hertz, num_waveforms)
-        tau = _sample(self.damping_time_seconds, num_waveforms)
-        amp = _sample(self.amplitude, num_waveforms)
-        phase = _sample(self.phase_radians, num_waveforms)
-        eccentricity = _sample(self.polarization_eccentricity, num_waveforms)
+        freq = _sample(self, "frequency_hertz", num_waveforms, streams)
+        tau = _sample(self, "damping_time_seconds", num_waveforms, streams)
+        amp = _sample(self, "amplitude", num_waveforms, streams)
+        phase = _sample(self, "phase_radians", num_waveforms, streams)
+        eccentricity = _sample(self, "polarization_eccentricity", num_waveforms, streams)
 
         num_samples = int(sample_rate_hertz * duration_seconds)
         t = time_axis(num_samples, sample_rate_hertz)[None, :]
@@ -552,7 +556,7 @@ class RingdownGenerator(gf.WaveformGenerator):
         waveform = _elliptical(envelope, argument, amp, eccentricity, sample_rate_hertz)
 
         # Apply injection chance
-        waveform = self.apply_injection_chance(waveform, seed)
+        waveform = self.apply_injection_chance(waveform, streams)
 
         params = {
             gf.WaveformParameters.FREQUENCY_HERTZ: freq,

@@ -2,6 +2,9 @@ import os
 os.environ["KERAS_BACKEND"] = "jax"
 
 import pytest
+
+# Its tests draw their data from global RNGs (see conftest's guard).
+pytestmark = pytest.mark.global_rng
 import gravyflow as gf
 import numpy as np
 import keras

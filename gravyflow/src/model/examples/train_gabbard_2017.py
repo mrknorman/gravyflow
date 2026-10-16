@@ -25,7 +25,7 @@ import keras
 import gravyflow as gf
 from gravyflow.src.model.examples.gabbard_2017 import Gabbard2017, Gabbard2017Config
 from gravyflow.src.model.examples.recipe import (
-    DetectionBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise,
+    DetectionBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise, starting_at,
 )
 
 PRESETS = {
@@ -44,7 +44,7 @@ def parse_args(argv=None):
     parser.add_argument("--validation-batches", type=int, help="Override the preset's validation batches")
     parser.add_argument("--patience", type=int, help="Override the preset's early-stopping patience")
     parser.add_argument("--seed", type=int, default=gf.Defaults.seed,
-                        help="Root seed; each split derives its own")
+                        help="Root seed; each split draws its own streams from it")
     parser.add_argument("--verbose", type=int, default=2, choices=[0, 1, 2])
     return parser.parse_args(argv)
 
@@ -76,14 +76,15 @@ def main(argv=None) -> keras.Model:
 
     validation = materialise(
         DetectionBatches(Gabbard2017.dataset(
-            config=config, seed=run.seeds["validate"], group="validate",
+            config=config, seed=run.seed, group="validate",
             steps_per_epoch=schedule.validation_batches)),
         schedule.validation_batches,
     )
     model = run.train(
         build_model=lambda: Gabbard2017.compile_model(Gabbard2017.model(config), config),
-        training_data=lambda seed, first_epoch: DetectionBatches(Gabbard2017.dataset(
-            config=config, seed=seed, group="train", steps_per_epoch=schedule.steps_per_epoch)),
+        training_data=lambda seed, first_epoch: DetectionBatches(starting_at(Gabbard2017.dataset(
+            config=config, seed=seed, group="train", steps_per_epoch=schedule.steps_per_epoch),
+            first_epoch)),
         validation_data=validation,
         verbose=args.verbose,
     )
