@@ -13,7 +13,7 @@ import gravyflow as gf
 from .bank import ValidationBank
 from .config import ValidationConfig
 from .metrics import Background, EfficiencyCurve, FarThreshold, efficiency_curve, roc_curve
-from .provenance import config_fingerprint, model_fingerprint, require_match
+from .provenance import StaleCheckpointError, config_fingerprint, model_fingerprint, require_match
 
 if TYPE_CHECKING:  # avoids importing keras at runtime
     import keras
@@ -52,6 +52,7 @@ class Validator:
 
         self.model_sha256: Optional[str] = None
         self.config_sha256: Optional[str] = None
+        self.format_version: Optional[int] = self.FORMAT_VERSION  # as loaded, by `load`
         self.bank: Optional[ValidationBank] = None
 
     # --------------------------------------------------------------- run
@@ -74,8 +75,8 @@ class Validator:
         written for this model and these settings.
 
         Raises:
-            StaleCheckpointError: the checkpoint belongs to another model or to
-                other settings.
+            StaleCheckpointError: the checkpoint is in another format, or belongs
+                to another model or to other settings.
         """
         v = cls(name, config, dataset_args)
         v.model_sha256 = model_fingerprint(model)
@@ -83,6 +84,12 @@ class Validator:
         path = Path(checkpoint_file_path) if checkpoint_file_path else None
         if path is not None and path.exists():
             saved = cls.load(path)
+            if saved.format_version != cls.FORMAT_VERSION:
+                raise StaleCheckpointError(
+                    f"{path} is in checkpoint format {saved.format_version}, not "
+                    f"{cls.FORMAT_VERSION}, and cannot be resumed. Use a new path, or delete "
+                    "it to start again."
+                )
             require_match("model", saved.model_sha256, v.model_sha256, path)
             require_match("validation configuration", saved.config_sha256, v.config_sha256, path)
             for attr in ("far_scores", "noise_gps_times", "efficiency_data", "worst_performers", "real_events"):
@@ -223,7 +230,7 @@ class Validator:
             found = f.attrs.get("format_version")
             if found != cls.FORMAT_VERSION:
                 v = cls()  # another format: nothing in it is read, or reused
-                v.model_sha256 = v.config_sha256 = None
+                v.format_version = None if found is None else int(found)
                 logger.warning(f"{file_path} is in format {found}, not {cls.FORMAT_VERSION}; "
                                "it cannot be reused.")
                 return v

@@ -262,7 +262,7 @@ class ReturnVariables(Enum):
     # - a CBC: its merger (coalescence) time, as its waveform model defines
     #   it, which lies after the strain's peak (IMRPhenomD: 1.5 ms for 10+10
     #   Msun, 3.4 ms for 30+30, 5.9 ms for 60+40);
-    # - a supernova: its explosion;
+    # - a supernova, once a supernova generator exists: its explosion;
     # - a generic burst: its peak, the envelope's centre for a sine-Gaussian,
     #   chirplet, WNB or periodic wave, and a ringdown's start.
     CENTRAL_TIME = ReturnVariable(9, (BATCH, GENERATOR, IFO))

@@ -218,21 +218,24 @@ def replace_nan_and_inf_with_zero(tensor, name: str = None):
     failure upstream, so make the warning an error to find it:
     ``warnings.simplefilter("error", gf.NonFiniteWarning)``.
 
-    It runs eagerly, since it reports how many values it replaced: under
-    ``jax.jit``, ``jax.vmap`` or another transformation it raises a TypeError
-    naming itself. Traced code that must zero non-finite values silently uses
+    It runs eagerly, since it reports how many values it replaced: an eager
+    ``jax.grad`` works (its values are concrete, and replaced values get zero
+    gradient), but under ``jax.jit``, ``jax.vmap`` or any transformation whose
+    values are abstract it raises a TypeError naming itself. Traced code that must
+    zero non-finite values silently uses
     ``jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)``.
     """
-    if isinstance(tensor, jax.core.Tracer):
+    tensor = ops.convert_to_tensor(tensor)
+    cleaned, count = _zero_non_finite(tensor)
+    try:
+        count = int(count)
+    except TypeError:  # JAX's concretization errors: the count is abstract
         raise TypeError(
             "replace_nan_and_inf_with_zero runs eagerly (it reports what it replaces), "
             f"but was called on a traced value ({name or 'unnamed'}) under a JAX "
             "transformation such as jax.jit or jax.vmap. Call it outside the "
             "transformation, or use jnp.nan_to_num in traced code."
-        )
-    tensor = ops.convert_to_tensor(tensor)
-    cleaned, count = _zero_non_finite(tensor)
-    count = int(count)
+        ) from None
     if count:
         warnings.warn(
             f"{name or 'A tensor'}: {count} of {int(np.prod(tensor.shape))} values were NaN or "

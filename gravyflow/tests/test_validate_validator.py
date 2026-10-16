@@ -112,7 +112,9 @@ def test_checkpoint_of_another_format_is_refused(validated, dataset_args, small_
     with h5py.File(old, "a") as f:
         f.attrs["format_version"] = Validator.FORMAT_VERSION - 1
     assert Validator.load(old).far_scores is None
-    with pytest.raises(StaleCheckpointError):
+    # Refused for its format, by name: not as written for another model.
+    with pytest.raises(StaleCheckpointError, match=f"format {Validator.FORMAT_VERSION - 1}, not "
+                                                   f"{Validator.FORMAT_VERSION}"):
         Validator.validate(model, "tiny", dataset_args, small_config, old)
 
 

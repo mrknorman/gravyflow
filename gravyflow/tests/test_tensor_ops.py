@@ -27,8 +27,16 @@ def test_replace_nan_and_inf_with_zero_is_silent_on_finite_data():
 def test_replace_nan_and_inf_with_zero_refuses_traced_input_by_name(transform):
     # It counts what it replaces, so it runs eagerly; traced code is refused.
     x = ops.convert_to_tensor([[1.0, np.nan], [np.inf, 2.0]])
-    with pytest.raises(TypeError, match="replace_nan_and_inf_with_zero"):
+    with pytest.raises(TypeError, match="replace_nan_and_inf_with_zero runs eagerly"):
         transform(lambda t: gf.replace_nan_and_inf_with_zero(t, "traced"))(x)
+
+
+def test_replace_nan_and_inf_with_zero_differentiates_eagerly():
+    # Under an eager jax.grad the values, and so the count, are concrete.
+    x = ops.convert_to_tensor([1.0, np.nan, 2.0])
+    with pytest.warns(gf.NonFiniteWarning, match="g: 1 of 3"):
+        grad = jax.grad(lambda t: gf.replace_nan_and_inf_with_zero(t, "g").sum())(x)
+    np.testing.assert_allclose(grad, [1.0, 0.0, 1.0])
 
 def test_expand_tensor():
     mask = ops.convert_to_tensor([True, False, True])
