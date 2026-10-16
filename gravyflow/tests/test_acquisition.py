@@ -944,7 +944,6 @@ class TestGetValidSegmentsErrors:
             obtainer.get_valid_segments(
                 ifos=[gf.IFO.L1],
                 seed=42,
-                groups={"train": 0.8, "validate": 0.2},
                 group_name="nonexistent_group"
             )
 
@@ -1600,12 +1599,9 @@ class TestGetValidSegmentsReal:
         obtainer.start_gps_times = [1238166018.0]
         obtainer.end_gps_times = [1238166018.0 + 86400]
         
-        groups = {"train": 0.7, "validate": 0.15, "test": 0.15}
-        
         train_segments = obtainer.get_valid_segments(
             ifos=[gf.IFO.L1],
             seed=42,
-            groups=groups,
             group_name="train"
         )
         

@@ -67,13 +67,18 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
 - `gf.project_wave` takes no seed and needs every sky angle; nothing is drawn there.
 - `Curriculum` has no progress counter: `current_epoch` is gone, and `at(epoch)` gives the distribution of an epoch.
 - `Distribution.sample(n, rng)` returns an ndarray.
-- Splits are repartitioned. Every entry point that is given no fractions (a dataset, a composed dataset's pools,
-  `NoiseObtainer`, an obtainer called directly, `TransientIndex.assign_groups()`, the validator) splits by
-  `gf.DEFAULT_SPLIT_FRACTIONS`: 80% train, 10% validate, 10% test. They split 98/1/1 (an obtainer, and the datasets
+- Splits are repartitioned. Every entry point (a dataset, a composed dataset's pools, `NoiseObtainer`, an obtainer
+  called directly, `TransientIndex.assign_groups()`, the validator) splits by `gf.DEFAULT_SPLIT_FRACTIONS`: 80%
+  train, 10% validate, 10% test. They split 98/1/1 (an obtainer, and the datasets
   reading one directly) or 89/10/1 (`NoiseObtainer`), so one record could be in train by one route and in validate
   by another. A transient record's split is now a hash of its GPS key alone; it was the key and the seed. Records
   have moved between splits: do not evaluate a model trained on an earlier release's split on this release's
   validate or test split.
+- Split fractions other than `gf.DEFAULT_SPLIT_FRACTIONS` (its keys, in its order, with its values) raise
+  `ValueError` wherever they are given (`NoiseObtainer(groups=)`, `get_valid_segments(groups=)`,
+  `TransientIndex.assign_groups(groups)`): they were taken silently by one route, which could then train on another
+  route's validate or test records. Leave them unset; configurable fractions return with a split specification
+  that every route reads.
 - An obtainer called for a split serves that split, called directly or through a `NoiseObtainer`; called again for
   another, it rebuilds its segments (it served the first split's, and a fresh real-noise obtainer called directly
   served nothing). A generator it gave out for the first split then raises `RuntimeError`.

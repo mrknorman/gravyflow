@@ -7,10 +7,11 @@ never a seed, so every split of every run, through every entry point, sees one
 partition and no record can be in two splits. A seed only orders a split.
 
 Every entry point (datasets, composed datasets and their pools, NoiseObtainer,
-an obtainer called directly, TransientIndex, the validator) that is not given
-fractions uses ``DEFAULT_SPLIT_FRACTIONS``: two routes with different defaults
-would hash one key into different splits, and train on what the other
-evaluates.
+an obtainer called directly, TransientIndex, the validator) splits by
+``DEFAULT_SPLIT_FRACTIONS``, and refuses any other fractions: two routes with
+different fractions would hash one key into different splits, and train on
+what the other evaluates. Configurable fractions return with a split
+specification that every route reads.
 """
 
 import hashlib
@@ -31,13 +32,21 @@ def split_fractions(
         group_name: Optional[str] = None,
     ) -> Dict[str, float]:
     """
-    The fractions a split is drawn from: ``groups``, else the default; for
-    ``group_name`` "all", everything. Raises KeyError for a ``group_name``
-    the fractions do not name.
+    The fractions a split is drawn from: ``DEFAULT_SPLIT_FRACTIONS``, given as
+    ``groups`` or not; for ``group_name`` "all", everything. Raises ValueError
+    for any other ``groups`` (other keys, order or values), and KeyError for a
+    ``group_name`` the fractions do not name.
     """
+    fractions = dict(DEFAULT_SPLIT_FRACTIONS)
+    if groups is not None and list(dict(groups).items()) != list(fractions.items()):
+        raise ValueError(
+            f"Split fractions {dict(groups)} are refused: every route splits by "
+            f"gf.DEFAULT_SPLIT_FRACTIONS {fractions}, so that no record is in one "
+            "split by one route and in another by another. Leave the fractions "
+            "unset; configurable fractions return with the split specification."
+        )
     if group_name == ALL:
         return {ALL: 1.0}
-    fractions = dict(groups) if groups else dict(DEFAULT_SPLIT_FRACTIONS)
     if group_name is not None and group_name not in fractions:
         raise KeyError(f"Group {group_name} not present in groups dictionary {fractions}.")
     return fractions

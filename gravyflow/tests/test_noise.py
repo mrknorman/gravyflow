@@ -420,8 +420,8 @@ def test_noise_obtainer_single_ifo_conversion():
     assert len(noise.ifos) == 1
 
 
-def test_noise_obtainer_custom_groups():
-    """Test NoiseObtainer with custom groups."""
+def test_noise_obtainer_takes_the_default_groups_by_value():
+    """NoiseObtainer accepts the default fractions given as a dict (others are refused)."""
     custom_groups = {
         "train": 0.8,
         "validate": 0.1,

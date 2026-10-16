@@ -52,9 +52,9 @@ Each detector's segments are cut, separately, into 8192 s blocks for the group a
 ### 3. Group Assignment (`get_segments_for_group`)
 Data is deterministically assigned to `train`, `validate`, or `test` groups to ensure no leakage between them.
 -   **Logic**: The timeline is divided into 8192 s blocks. Each block is hashed or assigned based on its time to a specific group.
--   **Fractions**: Every entry point that is given no fractions splits by `gf.DEFAULT_SPLIT_FRACTIONS`, 80% train,
-    10% validate, 10% test, so for every 100 blocks about 80 go to training. One default for every route keeps a
-    record in one split whichever route reads it (`gravyflow/src/dataset/splits.py`).
+-   **Fractions**: Every entry point splits by `gf.DEFAULT_SPLIT_FRACTIONS`, 80% train, 10% validate, 10% test,
+    so for every 100 blocks about 80 go to training. One set of fractions for every route keeps a record in one
+    split whichever route reads it, so any other fractions are refused (`gravyflow/src/dataset/splits.py`).
 -   **Result**: A filtered list of segments that belong *only* to the requested group (e.g., "train").
 -   **Transients**: Each glitch or event record is assigned by a hash of its GPS key alone. A seed only orders or
     shuffles a split, never decides its members, so every split of every run sees the same partition. A record's

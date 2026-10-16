@@ -252,7 +252,7 @@ print("""
 ╠═══════════════════════════════════════════════════════════════════════╣
 ║  6. Batch size ≥ 16            │  Better GPU utilization              ║
 ╠═══════════════════════════════════════════════════════════════════════╣
-║  7. Use groups for splits      │  Deterministic train/val without    ║
+║  7. Use group= for splits      │  Deterministic train/val without    ║
 ║                                │  separate cache files                ║
 ╚═══════════════════════════════════════════════════════════════════════╝
 """)
@@ -297,19 +297,17 @@ val_obtainer = gf.IFODataObtainer(
     augmentations=[],  # ← No augmentation for validation
 )
 
-# Use with TransientObtainer and groups
-train_transient = gf.TransientObtainer(
-    ifo_data_obtainer=train_obtainer,
+# One dataset per split; every route splits by gf.DEFAULT_SPLIT_FRACTIONS
+train_dataset = gf.Dataset(
+    noise_obtainer=train_obtainer,
     ifos=[gf.IFO.L1, gf.IFO.H1],
     group="train",
-    groups={"train": 0.8, "validate": 0.2},
 )
 
-val_transient = gf.TransientObtainer(
-    ifo_data_obtainer=val_obtainer,
+val_dataset = gf.Dataset(
+    noise_obtainer=val_obtainer,
     ifos=[gf.IFO.L1, gf.IFO.H1],
     group="validate",
-    groups={"train": 0.8, "validate": 0.2},
 )
 """)
 

@@ -20,6 +20,7 @@ from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.transient_index import TransientIndex
 from gravyflow.src.dataset.noise.noise import sequential_seed
+from gravyflow.src.dataset.splits import split_fractions
 from gravyflow.src.utils.gps import gps_to_key
 
 SPLITS = ("train", "validate", "test")
@@ -399,3 +400,49 @@ class TestOneObtainerCalledForEachSplit:
             with pytest.raises(RuntimeError, match="another split"):
                 next(train)
             next(validate)
+
+
+#: Fractions other than the default: other values, a missing split, another order, none.
+OTHER_FRACTIONS = [
+    {"train": 0.9, "validate": 0.05, "test": 0.05},
+    {"train": 0.8, "validate": 0.2},
+    {"train": 0.8, "test": 0.1, "validate": 0.1},
+    {},
+]
+
+
+class TestOnlyTheDefaultFractions:
+    """
+    Until splits are specified as a whole, every route splits by
+    gf.DEFAULT_SPLIT_FRACTIONS: other fractions given to any one route would put
+    another route's validate or test records in its train split, so they are
+    refused, by name, wherever they are given.
+    """
+
+    @pytest.mark.parametrize("fractions", OTHER_FRACTIONS)
+    def test_every_route_refuses_other_fractions(self, catalogue, fractions):
+        routes = {
+            "split_fractions": lambda: split_fractions(fractions),
+            "NoiseObtainer": lambda: gf.NoiseObtainer(groups=fractions),
+            "noise get_valid_segments": lambda: offline_noise_obtainer().get_valid_segments(
+                [gf.IFO.L1], seed=1000, groups=fractions),
+            "transient get_valid_segments": lambda: glitch_obtainer().get_valid_segments(
+                [gf.IFO.L1], seed=1000, groups=fractions),
+            "TransientIndex.assign_groups":
+                lambda: TransientIndex(glitch_records(10)).assign_groups(fractions),
+        }
+        for route, call in routes.items():
+            with pytest.raises(ValueError, match="DEFAULT_SPLIT_FRACTIONS") as refused:
+                call()
+            assert "split specification" in str(refused.value), route
+
+    def test_the_default_fractions_are_accepted_as_a_copy(self, catalogue):
+        fractions = dict(gf.DEFAULT_SPLIT_FRACTIONS)
+        assert split_fractions(fractions) == split_fractions() == fractions
+        assert gf.NoiseObtainer(groups=fractions).groups == fractions
+        noise = offline_noise_obtainer().get_valid_segments([gf.IFO.L1], seed=1000, groups=fractions)
+        assert set(map(tuple, noise[:, 0])) == noise_split("train")
+        glitches = glitch_obtainer()
+        glitches.get_valid_segments([gf.IFO.L1], seed=1000, groups=fractions, group_name="test")
+        assert {segment.gps_key for segment in glitches.transient_segments} \
+            == members(glitch_obtainer(), "test", 1000)

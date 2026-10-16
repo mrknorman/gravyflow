@@ -9,7 +9,7 @@ train/validation splitting, and multi-detector acquisition.
 
 LEARNING OBJECTIVES:
 1. Understand SamplingMode: RANDOM vs GRID
-2. Use groups for train/validation splitting
+2. Select a train, validate or test split
 3. Acquire data from multiple detectors
 4. Work with segment collections
 
@@ -81,56 +81,39 @@ print("SECTION 2: Train/Validation Splitting")
 print("=" * 70)
 
 print("""
-The 'groups' parameter enables deterministic train/validation splitting.
-Segments are assigned to groups based on a hash of their GPS times,
-ensuring consistent splits across runs.
+Every route splits the data by one set of fractions, gf.DEFAULT_SPLIT_FRACTIONS:
+80% train, 10% validate, 10% test. Segments are assigned to splits by a hash
+of their 8192 s block, so the splits are disjoint and the same on every run,
+whatever the seed. Other fractions are refused, so that no route can train on
+another route's validate or test data.
 
 How it works:
-  1. Each segment gets hashed based on GPS time and chunk position
-  2. Hash determines which group the segment belongs to
-  3. Same segments always go to same group (reproducible splits)
+  1. The timeline is cut into 8192 s blocks
+  2. A hash of each block's index decides its split
+  3. The same block is always in the same split (reproducible splits)
 
-Example configuration:
-  groups = {"train": 0.8, "validate": 0.2}
-  
-  This assigns 80% of segments to "train" and 20% to "validate"
+Select a split with the 'group' parameter when calling:
+  noise(group="train"), noise(group="validate"), noise(group="test")
 """)
 
-# Create obtainers for train and validation
-print("Creating train obtainer (80% of segments)...")
-train_obtainer = gf.IFODataObtainer(
+print(f"Split fractions: {dict(gf.DEFAULT_SPLIT_FRACTIONS)}")
+
+# One obtainer serves every split: each call reads its split from a fresh copy.
+obtainer = gf.IFODataObtainer(
     observing_runs=[gf.ObservingRun.O3],
     data_quality=gf.DataQuality.BEST,
     data_labels=[gf.DataLabel.NOISE],
     segment_order=gf.SegmentOrder.RANDOM,
 )
 
-print("Creating validation obtainer (20% of segments)...")
-val_obtainer = gf.IFODataObtainer(
-    observing_runs=[gf.ObservingRun.O3],
-    data_quality=gf.DataQuality.BEST,
-    data_labels=[gf.DataLabel.NOISE],
-    segment_order=gf.SegmentOrder.RANDOM,
-)
-
-# The group assignment happens when creating the NoiseObtainer
-# via the 'group' and 'groups' parameters
-
-train_noise = gf.NoiseObtainer(
-    ifo_data_obtainer=train_obtainer,
+noise = gf.NoiseObtainer(
+    ifo_data_obtainer=obtainer,
     ifos=[gf.IFO.L1],
-    groups={"train": 0.8, "validate": 0.2},  # Split ratios
 )
 
-val_noise = gf.NoiseObtainer(
-    ifo_data_obtainer=val_obtainer,
-    ifos=[gf.IFO.L1],
-    groups={"train": 0.8, "validate": 0.2},  # Same ratios
-)
-
-print(f"Train obtainer uses group: 'train' (80%)")
-print(f"Validation obtainer uses group: 'validate' (20%)")
-print("\nNote: Groups are passed to NoiseObtainer and selected via 'group' param when calling")
+print("Train batches:      noise(group='train')    (80% of segments)")
+print("Validation batches: noise(group='validate') (10% of segments)")
+print("Test batches:       noise(group='test')     (10% of segments)")
 
 # =============================================================================
 # SECTION 3: MULTI-DETECTOR ACQUISITION
@@ -262,8 +245,8 @@ print("""
    - SamplingMode.GRID: Best for inference/coverage
 
 2. TRAIN/VALIDATION SPLITTING:
-   - Use 'groups' dict to define split ratios: {"train": 0.8, "validate": 0.2}
-   - Use 'group' parameter to select which group to use
+   - Splits are gf.DEFAULT_SPLIT_FRACTIONS: 80% train, 10% validate, 10% test
+   - Use 'group' parameter to select which split to use
    - Splits are deterministic (hash-based on GPS times)
 
 3. MULTI-DETECTOR:
