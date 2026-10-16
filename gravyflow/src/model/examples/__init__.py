@@ -36,7 +36,6 @@ from gravyflow.src.model.examples.recipe import (
     TrainingRun,
     TrainingSchedule,
     materialise,
-    starting_at,
 )
 
 __all__ = [
@@ -59,5 +58,4 @@ __all__ = [
     'TrainingRun',
     'TrainingSchedule',
     'materialise',
-    'starting_at',
 ]

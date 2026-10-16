@@ -148,11 +148,11 @@ class _GeorgeHuerta2017(ExampleModel):
 
     @classmethod
     def _dataset(cls, config, noise_type, seed, group, steps_per_epoch, regression: bool, curriculum: bool,
-                 first_epoch: int = 0, **kwargs):
+                 **kwargs):
         cfg = config or cls.config
         labels = ([gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN]
                   if regression else [gf.ReturnVariables.INJECTION_PRESENT])
-        dataset = gf.GravyflowDataset(
+        return gf.GravyflowDataset(
             **cbc_dataset_args(
                 noise_obtainer=gf.NoiseObtainer(noise_type=noise_type, ifos=[gf.IFO.L1]),
                 sample_rate_hertz=cfg.sample_rate_hertz,
@@ -170,8 +170,6 @@ class _GeorgeHuerta2017(ExampleModel):
             steps_per_epoch=steps_per_epoch,
             **kwargs,
         )
-        dataset.epoch = first_epoch
-        return dataset
 
     @classmethod
     def dataset(
@@ -182,18 +180,17 @@ class _GeorgeHuerta2017(ExampleModel):
         group: str = "train",
         steps_per_epoch: int = 1000,
         curriculum: bool = False,
-        first_epoch: int = 0,
         **kwargs
     ) -> gf.GravyflowDataset:
         """
         Detection data with ``INJECTION_PRESENT`` labels; with ``curriculum``
         (and ``config.use_curriculum``), the SNR follows the training scheme
-        from ``first_epoch``. Coloured L1 noise, or public GWOSC L1 noise with
+        at the dataset's epoch (Keras', with ``epoch_callback``). Coloured L1 noise, or public GWOSC L1 noise with
         ``noise_type=NoiseType.REAL``.
         """
         cfg = config or cls.config
         return cls._dataset(cfg, noise_type, seed, group, steps_per_epoch, regression=False,
-                            curriculum=curriculum and cfg.use_curriculum, first_epoch=first_epoch, **kwargs)
+                            curriculum=curriculum and cfg.use_curriculum, **kwargs)
 
     @classmethod
     def dataset_regression(
@@ -204,13 +201,12 @@ class _GeorgeHuerta2017(ExampleModel):
         group: str = "train",
         steps_per_epoch: int = 1000,
         curriculum: bool = False,
-        first_epoch: int = 0,
         **kwargs
     ) -> gf.GravyflowDataset:
         """Every example injected, with ``MASS_1_MSUN`` and ``MASS_2_MSUN`` labels."""
         cfg = config or cls.config
         return cls._dataset(cfg, noise_type, seed, group, steps_per_epoch, regression=True,
-                            curriculum=curriculum and cfg.use_curriculum, first_epoch=first_epoch, **kwargs)
+                            curriculum=curriculum and cfg.use_curriculum, **kwargs)
 
     @classmethod
     def compile_model(

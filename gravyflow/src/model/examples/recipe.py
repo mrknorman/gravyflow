@@ -6,9 +6,9 @@ and evaluated.
   `TrainingSchedule.gpu` is the scale the papers used.
 - **Seeds.** One root seed for every split: each dataset draws from its split's
   streams of the seed tree (its ``group``), so the training, validation and
-  test data never share a stream. A resumed run starts its training dataset at
-  the resumed epoch (`starting_at`), so it draws new data rather than
-  replaying the first epochs.
+  test data never share a stream. The training data takes Keras' epoch
+  (``epoch_callback``), so each epoch, and a resumed run's first, draws that
+  epoch's batches rather than replaying earlier ones.
 - **A run directory outside the package.** `RunDirectory` refuses any path
   inside the installed library, so a run can never overwrite shipped files.
 - **Resume.** Each epoch ends with the model and its optimiser saved
@@ -69,12 +69,6 @@ class TrainingSchedule:
         return cls(epochs=1000, steps_per_epoch=11250, validation_batches=625, patience=5)
 
 
-def starting_at(dataset, epoch: int):
-    """``dataset`` with its epoch set to ``epoch`` (a resumed run's first)."""
-    dataset.epoch = epoch
-    return dataset
-
-
 # ---------------------------------------------------------------- batches
 
 def _float32(features: Dict[str, Any]) -> Dict[str, np.ndarray]:
@@ -90,6 +84,12 @@ class DetectionBatches(keras.utils.PyDataset):
 
     def __len__(self) -> int:
         return len(self.dataset)
+
+    def epoch_callback(self) -> keras.callbacks.Callback:
+        return self.dataset.epoch_callback()
+
+    def on_epoch_begin(self):
+        self.dataset.on_epoch_begin()
 
     def on_epoch_end(self):
         self.dataset.on_epoch_end()
@@ -110,6 +110,12 @@ class RegressionBatches(keras.utils.PyDataset):
 
     def __len__(self) -> int:
         return len(self.dataset)
+
+    def epoch_callback(self) -> keras.callbacks.Callback:
+        return self.dataset.epoch_callback()
+
+    def on_epoch_begin(self):
+        self.dataset.on_epoch_begin()
 
     def on_epoch_end(self):
         self.dataset.on_epoch_end()
@@ -279,7 +285,7 @@ class TrainingRun:
     def train(
         self,
         build_model: Callable[[], keras.Model],
-        training_data: Callable[[int, int], keras.utils.PyDataset],
+        training_data: Callable[[int], keras.utils.PyDataset],
         validation_data: keras.utils.PyDataset,
         verbose: int = 2,
     ) -> keras.Model:
@@ -289,9 +295,10 @@ class TrainingRun:
 
         Args:
             build_model: a new compiled model.
-            training_data: the training batches, given the run's root seed and
-                the first epoch they serve (see `starting_at`): a resumed run
-                draws that epoch's batches, and a curriculum reads that epoch.
+            training_data: the training batches, given the run's root seed.
+                Its ``epoch_callback()``, when it has one, gives it Keras'
+                epoch: a resumed run draws its first epoch's batches, and a
+                curriculum reads that epoch.
             validation_data: fixed validation batches (see `materialise`).
 
         Raises:
@@ -311,12 +318,16 @@ class TrainingRun:
             model = self.directory.load_model("last", sha)
         first_epoch = state["epoch"] + 1
         if first_epoch < self.schedule.epochs and not state["stopped_early"]:
+            data = training_data(self.seed)
+            callbacks = [_EpochCheckpoint(self.directory, sha, self.schedule, state)]
+            if hasattr(data, "epoch_callback"):
+                callbacks.insert(0, data.epoch_callback())
             model.fit(
-                training_data(self.seed, first_epoch),
+                data,
                 validation_data=validation_data,
                 epochs=self.schedule.epochs,
                 initial_epoch=first_epoch,
-                callbacks=[_EpochCheckpoint(self.directory, sha, self.schedule, state)],
+                callbacks=callbacks,
                 verbose=verbose,
             )
         best = self.directory.load_model("best", sha)
@@ -328,5 +339,5 @@ class TrainingRun:
 
 __all__ = [
     "DetectionBatches", "FixedBatches", "RegressionBatches", "RunDirectory", "StaleCheckpointError",
-    "TrainingRun", "TrainingSchedule", "materialise", "starting_at",
+    "TrainingRun", "TrainingSchedule", "materialise",
 ]

@@ -250,14 +250,16 @@ model.compile(
 )
 
 # Wrap datasets with adapter for one-hot encoding
-training_dataset = GlitchAdapterDataset(training_dataset, NUM_CLASSES)
-validation_dataset = GlitchAdapterDataset(validation_dataset, NUM_CLASSES)
+training_batches = GlitchAdapterDataset(training_dataset, NUM_CLASSES)
+validation_batches = GlitchAdapterDataset(validation_dataset, NUM_CLASSES)
 
 # =============================================================================
 # Setup Callbacks
 # =============================================================================
 
 callbacks = [
+    # Give the training dataset Keras' epoch, so each epoch draws its own batches
+    training_dataset.epoch_callback(),
     # Save best model
     keras.callbacks.ModelCheckpoint(
         filepath=OUTPUT_DIR / "best_model.keras",
@@ -302,9 +304,9 @@ print("\nTraining model...")
 print(f"Checkpoints will be saved to: {OUTPUT_DIR}")
 
 history = model.fit(
-    training_dataset,
+    training_batches,
     verbose=1,
-    validation_data=validation_dataset,
+    validation_data=validation_batches,
     epochs=EPOCHS,
     callbacks=callbacks
 )

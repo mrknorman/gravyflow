@@ -19,7 +19,7 @@ from gravyflow.src.model.examples import (
 )
 from gravyflow.src.model.examples.george_huerta_2017 import curriculum_epochs
 from gravyflow.src.model.examples.recipe import (
-    DetectionBatches, FixedBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise, starting_at,
+    DetectionBatches, FixedBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise,
 )
 from gravyflow.src.validate import StaleCheckpointError
 
@@ -151,12 +151,6 @@ def test_materialise_serves_identical_batches():
     assert fixed[1] is fixed[1]
 
 
-def test_starting_at_sets_the_epoch():
-    class Epoch:
-        epoch = 0
-    assert starting_at(Epoch(), 3).epoch == 3
-
-
 # ------------------------------------------------------ resume and provenance
 
 def tiny_model():
@@ -174,16 +168,34 @@ def make_run(path, epochs, seed=7):
                        seed=seed, description={"model": "tiny"})
 
 
+class EpochBatches(CountingBatches):
+    """Counting batches that record the epoch of the gravyflow training split they stand for."""
+
+    def __init__(self, seed, served):
+        super().__init__(seed)
+        self.served = served
+        self.dataset = gf.Dataset(
+            seed=seed, noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
+            steps_per_epoch=self.n, input_variables=[gf.ReturnVariables.ONSOURCE],
+        )
+
+    def epoch_callback(self):
+        return self.dataset.epoch_callback()
+
+    def __getitem__(self, index):
+        self.served.append(self.dataset.epoch)
+        return super().__getitem__(index)
+
+
 def test_training_resumes_from_the_last_epoch(tmp_path):
-    builds, first_epochs = [], []
+    builds, served = [], []
 
     def build():
         builds.append(1)
         return tiny_model()
 
-    def data(seed, first_epoch):
-        first_epochs.append(first_epoch)
-        return CountingBatches(seed)
+    def data(seed):
+        return EpochBatches(seed, served)
 
     validation = materialise(CountingBatches(99), 2)
     make_run(tmp_path, 2).train(build, data, validation, verbose=0)
@@ -193,7 +205,11 @@ def test_training_resumes_from_the_last_epoch(tmp_path):
 
     resumed = make_run(tmp_path, 4)  # extend the finished run
     resumed.train(build, data, validation, verbose=0)
-    assert len(builds) == 1 and first_epochs == [0, 2]  # resumed from the checkpoint, at epoch 2
+    assert len(builds) == 1  # resumed from the checkpoint
+    # Each Keras epoch, the resumed ones too, served that epoch's batches. Each
+    # fit first peeks at two batches to build the model (epoch 0's: shapes only).
+    peek = [0, 0]
+    assert served == peek + [0, 0, 0, 1, 1, 1] + peek + [2, 2, 2, 3, 3, 3]
     state = directory.state
     assert state["epoch"] == 3 and [h["epoch"] for h in state["history"]] == [0, 1, 2, 3]
     assert (tmp_path / "model.keras").exists()
@@ -203,15 +219,15 @@ def test_training_resumes_from_the_last_epoch(tmp_path):
 
 def test_resume_refuses_another_configuration(tmp_path):
     validation = materialise(CountingBatches(99), 2)
-    make_run(tmp_path, 1).train(tiny_model, lambda s, e: CountingBatches(s), validation, verbose=0)
+    make_run(tmp_path, 1).train(tiny_model, CountingBatches, validation, verbose=0)
     with pytest.raises(StaleCheckpointError, match="run configuration"):
-        make_run(tmp_path, 2, seed=8).train(tiny_model, lambda s, e: CountingBatches(s), validation, verbose=0)
+        make_run(tmp_path, 2, seed=8).train(tiny_model, CountingBatches, validation, verbose=0)
 
 
 def test_a_replaced_checkpoint_is_refused(tmp_path):
     validation = materialise(CountingBatches(99), 2)
     run = make_run(tmp_path, 1)
-    run.train(tiny_model, lambda s, e: CountingBatches(s), validation, verbose=0)
+    run.train(tiny_model, CountingBatches, validation, verbose=0)
     keras.utils.set_random_seed(123)
     tiny_model().save(tmp_path / "checkpoints" / "last.keras")  # a stale or foreign file
     with pytest.raises(StaleCheckpointError, match="another model"):

@@ -292,3 +292,77 @@ class TestIndexedDatasets:
         with warnings.catch_warnings():
             warnings.simplefilter("error", DeprecationWarning)
             dataset(seed=1)[0]
+
+
+class TestKerasEpochs:
+    """Under ``model.fit``, Keras epoch e serves the dataset's epoch e."""
+
+    CURRICULUM = gf.Curriculum(
+        start=gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM),
+        end=gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM),
+        num_epochs=3,
+    )
+
+    def fit(self, ds, epochs, initial_epoch=0, bind=True):
+        """Fit a tiny model; return, per Keras epoch, the (dataset epoch, SNRs) it was served."""
+        import keras
+
+        served = {}
+        keras_epoch = [None]
+
+        class Served(keras.utils.PyDataset):
+            def __len__(self):
+                return len(ds)
+
+            def __getitem__(self, k):
+                x, y = ds[k]
+                served.setdefault(keras_epoch[0], []).append((ds.epoch, np.asarray(y["SNR"])))
+                onsource = np.asarray(x["ONSOURCE"], dtype=np.float32)
+                return onsource.reshape(len(onsource), -1), np.ones((len(onsource), 1), np.float32)
+
+            def on_epoch_begin(self):
+                ds.on_epoch_begin()
+
+            def on_epoch_end(self):
+                ds.on_epoch_end()
+
+        class Marker(keras.callbacks.Callback):
+            def on_epoch_begin(self, epoch, logs=None):
+                keras_epoch[0] = epoch
+
+        x, _ = ds[0]
+        inputs = int(np.prod(np.shape(x["ONSOURCE"])[1:]))
+        model = keras.Sequential([
+            keras.Input((inputs,)),
+            keras.layers.Dense(1, kernel_initializer="zeros"),
+        ])
+        model.compile(optimizer="sgd", loss="mse")
+        callbacks = [ds.epoch_callback(), Marker()] if bind else [Marker()]
+        model.fit(Served(), epochs=epochs, initial_epoch=initial_epoch, shuffle=False,
+                  verbose=0, callbacks=callbacks)
+        return served
+
+    def assert_served_its_own_epoch(self, served, epochs):
+        for epoch in epochs:
+            low, high = self.CURRICULUM.at(epoch).min_, self.CURRICULUM.at(epoch).max_
+            assert served[epoch], f"Keras epoch {epoch} served nothing"
+            for data_epoch, snr in served[epoch]:
+                assert data_epoch == epoch
+                assert np.all((snr >= low) & (snr <= high)), (epoch, snr, low, high)
+
+    def curriculum_dataset(self, seed=4):
+        return dataset(seed=seed, steps_per_epoch=3, generators=[wnb(
+            scaling_method=gf.ScalingMethod(self.CURRICULUM, gf.ScalingTypes.SNR)
+        )])
+
+    def test_fit_serves_each_epoch_its_own_batches(self):
+        served = self.fit(self.curriculum_dataset(), epochs=3)
+        self.assert_served_its_own_epoch(served, range(3))
+
+    def test_resumed_fit_serves_the_resumed_epoch(self):
+        served = self.fit(self.curriculum_dataset(), epochs=3, initial_epoch=2)
+        self.assert_served_its_own_epoch(served, [2])
+
+    def test_unbound_fresh_split_warns_under_keras(self):
+        with pytest.warns(UserWarning, match="epoch_callback"):
+            self.fit(self.curriculum_dataset(), epochs=1, bind=False)

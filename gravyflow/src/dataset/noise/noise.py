@@ -515,6 +515,11 @@ class NoiseObtainer(Obtainer):
                 }
 
 
+def index_addressed(obtainer) -> bool:
+    """Whether the obtainer's batches are pure functions of their address (else read in order)."""
+    return isinstance(obtainer, NoiseObtainer) and obtainer.noise_type in (NoiseType.WHITE, NoiseType.COLORED)
+
+
 def obtainer_batcher(obtainer, tree: SeedTree, group: str, **kwargs) -> NoiseBatcher:
     """
     The batcher of any obtainer: a NoiseObtainer's own, else (a transient

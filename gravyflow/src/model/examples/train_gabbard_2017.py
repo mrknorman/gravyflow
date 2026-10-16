@@ -25,7 +25,7 @@ import keras
 import gravyflow as gf
 from gravyflow.src.model.examples.gabbard_2017 import Gabbard2017, Gabbard2017Config
 from gravyflow.src.model.examples.recipe import (
-    DetectionBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise, starting_at,
+    DetectionBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise,
 )
 
 PRESETS = {
@@ -82,9 +82,8 @@ def main(argv=None) -> keras.Model:
     )
     model = run.train(
         build_model=lambda: Gabbard2017.compile_model(Gabbard2017.model(config), config),
-        training_data=lambda seed, first_epoch: DetectionBatches(starting_at(Gabbard2017.dataset(
-            config=config, seed=seed, group="train", steps_per_epoch=schedule.steps_per_epoch),
-            first_epoch)),
+        training_data=lambda seed: DetectionBatches(Gabbard2017.dataset(
+            config=config, seed=seed, group="train", steps_per_epoch=schedule.steps_per_epoch)),
         validation_data=validation,
         verbose=args.verbose,
     )

@@ -38,7 +38,8 @@ class Curriculum:
     random state, so a validation call cannot move training's schedule.
 
     Use it as a ScalingMethod's value. A dataset evaluates it at its own
-    epoch: the training split at the current epoch, the validation and test
+    epoch: the training split at the current epoch (Keras', under
+    ``model.fit`` with ``ds.epoch_callback()``), the validation and test
     splits at the end, so their metrics stay comparable across epochs.
 
     Example - George & Huerta 2017 style (SNR decreasing from 100 to 5-15):
@@ -155,7 +156,7 @@ class CurriculumProgressCallback:
     Usage:
         >>> curriculum = gf.Curriculum(...)
         >>> callback = gf.CurriculumProgressCallback(curriculum, name="SNR")
-        >>> model.fit(dataset, epochs=20, callbacks=[callback])
+        >>> model.fit(dataset, epochs=20, callbacks=[dataset.epoch_callback(), callback])
 
     Output example:
         Epoch 1: SNR range [80.0, 100.0] (progress: 0.0%)

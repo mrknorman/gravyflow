@@ -101,9 +101,9 @@ def train_phase(model_class, task, config, schedule, args, pretrained=None):
           f"in {run.directory.path}")
     return run.train(
         build_model=build,
-        training_data=lambda seed, first_epoch: wrap(make(
+        training_data=lambda seed: wrap(make(
             config=config, seed=seed, group="train", steps_per_epoch=schedule.steps_per_epoch,
-            curriculum=config.use_curriculum, first_epoch=first_epoch)),
+            curriculum=config.use_curriculum)),
         validation_data=validation,
         verbose=args.verbose,
     )

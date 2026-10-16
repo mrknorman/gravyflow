@@ -21,7 +21,7 @@ from gravyflow.src.utils.tensor import (
 )
 from gravyflow.src.utils.shapes import BatchContract
 from gravyflow.src.dataset.config import Defaults
-from gravyflow.src.dataset.noise.noise import obtainer_batcher
+from gravyflow.src.dataset.noise.noise import index_addressed, obtainer_batcher
 from gravyflow.src.rng import BatchStreams, SeedTree
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
@@ -159,16 +159,36 @@ class EpochMode(Enum):
     REPEAT = auto()  # The same batches every epoch: epoch 0's.
 
 
+class _KerasEpoch(keras.callbacks.Callback):
+    """Sets a dataset's epoch to Keras' epoch, before Keras reads its batches."""
+
+    def __init__(self, dataset: "IndexedBatches"):
+        super().__init__()
+        self.dataset = dataset
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.dataset.epoch = epoch
+
+
 class IndexedBatches:
     """
     Batches addressed by index: ``ds[k]`` is a pure function of the dataset's
     specification, its seed tree, its split, its effective epoch and k.
 
     The training split (EpochMode.FRESH, the default for ``group="train"``)
-    draws fresh batches every epoch: Keras calls ``on_epoch_end``, which moves
-    the epoch on. Other splits (EpochMode.REPEAT) always serve epoch 0, so an
-    evaluation set is the same in every epoch and every run. ``next(ds)`` is
-    a cursor over (epoch, k).
+    draws fresh batches every epoch. Other splits (EpochMode.REPEAT) always
+    serve epoch 0, so an evaluation set is the same in every epoch and every
+    run.
+
+    The epoch moves on with ``on_epoch_end``: a loop over ``ds[k]`` or
+    ``iter(ds)`` calls it after each pass, and ``next(ds)``, a cursor over
+    (epoch, k), calls it itself. Under ``model.fit`` the epoch is Keras' own,
+    from ``ds.epoch_callback()``.
+
+    REAL, PSEUDO_REAL and transient noise are still read in order, whatever
+    the address (``seed_metadata["index_addressed"]`` is False): their batches
+    depend on the order they are asked for, so their evaluation sets are not
+    yet fixed across epochs or runs.
     """
 
     def _init_batches(self, seed, group: str, steps_per_epoch: int, epoch_mode: Optional[EpochMode]):
@@ -181,6 +201,8 @@ class IndexedBatches:
         self.epoch_mode = epoch_mode
         self._epoch = 0
         self._cursor = 0
+        self._epoch_from_keras = False
+        self._warned_keras_epoch = False
 
     @property
     def epoch(self) -> int:
@@ -213,6 +235,37 @@ class IndexedBatches:
     def __len__(self):
         return self.steps_per_epoch
 
+    def epoch_callback(self) -> keras.callbacks.Callback:
+        """
+        The callback that gives this dataset Keras' epoch:
+        ``model.fit(ds, ..., callbacks=[ds.epoch_callback()])``.
+
+        Keras also calls ``on_epoch_end`` when ``fit`` starts, before its
+        first epoch, so counting those calls would serve Keras epoch e the
+        batches (and Curriculum) of epoch e + 1. Only a callback is told
+        Keras' epoch: with it, Keras epoch e, ``initial_epoch`` included,
+        serves epoch e.
+        """
+        self._epoch_from_keras = True
+        return _KerasEpoch(self)
+
+    def on_epoch_begin(self):
+        """Keras calls this before each epoch's batches; a plain loop never does."""
+        if (
+            self.epoch_mode is EpochMode.FRESH
+            and not self._epoch_from_keras
+            and not self._warned_keras_epoch
+        ):
+            self._warned_keras_epoch = True
+            warn(
+                f"The '{self.group}' split draws fresh batches each epoch, but Keras "
+                "is driving it without its epoch: Keras calls on_epoch_end once "
+                "before the first epoch, so each Keras epoch would serve the next "
+                "epoch's batches. Pass callbacks=[dataset.epoch_callback()] to fit.",
+                UserWarning,
+                stacklevel=2,
+            )
+
     def on_epoch_end(self):
         if self.epoch_mode is EpochMode.FRESH:
             self._epoch += 1
@@ -232,7 +285,13 @@ class IndexedBatches:
             **self.tree.metadata(),
             "split": self.group,
             "epoch_mode": self.epoch_mode.name,
+            "index_addressed": self.index_addressed,
         }
+
+    @property
+    def index_addressed(self) -> bool:
+        """Whether every batch is a pure function of its address (see the class docstring)."""
+        return all(index_addressed(obtainer) for obtainer in self._obtainers())
 
 
 class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
@@ -241,7 +300,9 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
 
     Randomness: one seed tree, rooted at ``seed`` (default ``gf.Defaults.seed``),
     with every draw addressed by (split ``group``, epoch, batch k, consumer);
-    see IndexedBatches. Different splits never share a stream, so train,
+    see IndexedBatches, which also says which noise is not yet read by
+    address. Under ``model.fit``, pass ``callbacks=[ds.epoch_callback()]`` for
+    a training split. Different splits never share a stream, so train,
     validate and test built from one seed are independent. The dataset works
     on its own copies of the obtainer and generators it is given, so the
     caller's objects are never changed and can serve other datasets.
@@ -505,9 +566,13 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             parameters_to_return=waveform_parameters_to_return,
         )
 
+    def _obtainers(self) -> List:
+        return [self.noise_obtainer]
+
     def __getitem__(self, index) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
-        Batch ``index`` of the current epoch: a pure function of its address.
+        Batch ``index`` of the current epoch: a pure function of its address
+        when the noise is (see IndexedBatches).
         """
         streams = self.streams(index)
         try:
@@ -937,7 +1002,7 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
     
     def _initialize_pool_generators(self):
         """Initialize data generators for each pool."""
-        for i, pool in enumerate(self.pools):
+        for i, (pool, obtainer) in enumerate(zip(self.pools, self._obtainers())):
             generator_kwargs = {
                 'sample_rate_hertz': self.sample_rate_hertz,
                 'onsource_duration_seconds': self.onsource_duration_seconds,
@@ -948,7 +1013,6 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
                 'scale_factor': self.scale_factor,
                 'sampling_mode': gf.SamplingMode.RANDOM,
             }
-            obtainer = pool.noise_obtainer if pool.is_noise_pool else pool.transient_obtainer
             self._pool_generators[i] = obtainer_batcher(
                 obtainer, self.tree.sub(f"pool/{pool.name}"), self.group, **generator_kwargs
             )
@@ -970,10 +1034,16 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
                     parameters_to_return=waveform_parameters_to_return,
                 )
 
+    def _obtainers(self) -> List:
+        return [
+            pool.noise_obtainer if pool.is_noise_pool else pool.transient_obtainer
+            for pool in self.pools
+        ]
+
     def __getitem__(self, index) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Batch ``index`` of the current epoch, from multiple pools: a pure
-        function of its address.
+        function of its address when every pool's noise is (see IndexedBatches).
         """
         streams = self.streams(index)
         pool_assignments = self.pool_sampler.get_pool_batch_sizes(
