@@ -35,6 +35,7 @@ _INJECTION_LABELS = {
     "mass2": gf.WaveformParameters.MASS_2_MSUN,
     "central_times": gf.ReturnVariables.CENTRAL_TIME,
 }
+_CBC_LABELS = ("mass1", "mass2")
 
 
 def derived_seed(root: int, *path: str) -> int:
@@ -177,20 +178,25 @@ class ValidationBank:
             min_=cfg.snr_range[0], max_=cfg.snr_range[1], type_=gf.DistributionType.UNIFORM
         )
         generator.injection_chance = 1.0
+        # Component masses exist only for CBC injections (a burst set has none).
+        labels = {k: v for k, v in _INJECTION_LABELS.items()
+                  if k not in _CBC_LABELS or isinstance(generator, gf.CBCGenerator)}
         outputs = [gf.ReturnVariables.WHITENED_ONSOURCE, gf.ReturnVariables.WHITENED_INJECTIONS,
-                   *_INJECTION_LABELS.values()]
+                   *labels.values()]
         dataset = self._dataset("injections", [generator], outputs)
 
         edges = cfg.snr_bin_edges
         worst: List[list] = [[] for _ in range(edges.size - 1)]
-        columns: Dict[str, list] = {k: [] for k in ("scores", "gps_times", *_INJECTION_LABELS)}
+        columns: Dict[str, list] = {k: [] for k in ("scores", "gps_times", *labels)}
         for b in tqdm(range(self._num_batches()), desc="Scoring injections", unit="batch"):
             x, y = dataset[b]
             batch_scores = self._score(x)
             n = batch_scores.size
             columns["scores"].append(batch_scores)
-            for key, label in _INJECTION_LABELS.items():
-                columns[key].append(per_example(y[label.name], n, label.name))
+            for key, label in labels.items():
+                # The central time is per detector (the arrival time at each): keep the first's.
+                columns[key].append(per_example(y[label.name], n, label.name,
+                                                per_detector=key == "central_times"))
             batch_gps = self._gps(y, n)
             if batch_gps is not None:
                 columns["gps_times"].append(batch_gps)
