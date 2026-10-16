@@ -117,11 +117,9 @@ def test_cbc_waveforms_match_a_64_bit_reference(approximant):
 def test_matched_filter_templates_are_float32_and_leave_x64_off():
     with jax.enable_x64(False):
         matched_filter = gf.MatchedFilter(
-            mass_1_range=(20.0, 30.0),
-            mass_2_range=(20.0, 30.0),
-            num_templates_per_dim=2,
+            bank=gf.TemplateBank.from_masses([20.0, 30.0, 30.0], [20.0, 20.0, 30.0]),
             sample_rate_hertz=SAMPLE_RATE,
-            duration_seconds=1.0,
+            onsource_duration_seconds=1.0,
         )
         templates = matched_filter.generate_templates()
         assert not jax.config.jax_enable_x64

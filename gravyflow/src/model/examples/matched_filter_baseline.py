@@ -1,134 +1,145 @@
 """
-Matched Filter Baseline Model
+Matched-filter baseline model.
 
-Wraps the MatchedFilter as an ExampleModel subclass for fair comparison 
-with neural network detectors on identical datasets.
+A CBC template-bank matched filter wrapped as an example model, so that it can
+be scored on exactly the data the neural-network examples see, by the same
+validator. It takes the whitened onsource window (the example models' input)
+and the offsource the dataset whitened it with, whitens its templates with the
+same filter, and returns two logits whose difference is
+(network SNR - snr_threshold) / temperature: the validator ranks by the SNR.
+
+The baseline is a reference for comparison, so it is configured to see what
+the models see and no more: the dataset's window, crop, band and PSD
+estimator, a bank over the injection's mass range with a minimal match of
+0.97, and merger times anywhere in the window.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import keras
 from keras.models import Model
-from keras.layers import Input
 
 import gravyflow as gf
-from gravyflow.src.model.examples.base import ExampleModel
-from gravyflow.src.detection.matched_filter import MatchedFilter, MatchedFilterLayer
+from gravyflow.src.model.examples.base import (
+    ExampleModel, MODEL_INPUT, ValidationDatasetConfig, cbc_dataset_args, onsource_samples,
+    validation_dataset_args as _validation_dataset_args,
+)
+from gravyflow.src.detection.matched_filter import MatchedFilterLayer
+
+# The second input: the offsource the whitening PSD is estimated from.
+BACKGROUND_INPUT = gf.ReturnVariables.OFFSOURCE
 
 
 @dataclass
 class MatchedFilterBaselineConfig:
-    """Configuration for MatchedFilterBaseline.
-    
-    Template Grid:
-        - Mass ranges and grid density control template bank size
-        - num_templates_per_dim=16 gives 136 templates
-        - Increase for better coverage but slower inference
-    
-    Detection:
-        - snr_threshold: Threshold for detection probability
-        - temperature: Sigmoid sharpness (lower = sharper decision boundary)
-    
-    Dataset (for comparison with ML models):
-        - Uses same CBC injection parameters as Gabbard2017
     """
-    
-    # Template grid parameters
-    mass_1_range: Tuple[float, float] = (5.0, 95.0)
-    mass_2_range: Tuple[float, float] = (5.0, 95.0)
-    num_templates_per_dim: int = 16
-    
-    # Signal parameters
-    sample_rate_hertz: float = 8192.0
-    duration_seconds: float = 2.0
-    f_low: float = 20.0
-    
-    # Detection parameters
+    Configuration of the matched-filter baseline and of its dataset.
+
+    The window, crop, offsource and band must be the dataset's: the filter
+    whitens its templates with the filter the dataset designed for them.
+    """
+    sample_rate_hertz: float = 2048.0
+    onsource_duration_seconds: float = 1.0
+    offsource_duration_seconds: float = 16.0
+    crop_duration_seconds: float = 0.5
+    spectral_config: Optional[gf.SpectralConfig] = None
+    ifos: List[gf.IFO] = field(default_factory=lambda: [gf.IFO.L1])
+
+    # The bank: non-spinning IMRPhenomD over both component masses.
+    mass_range_msun: Tuple[float, float] = (5.0, 95.0)
+    minimal_match: float = 0.97
+    # Merger times searched, in seconds from the window's start (None: all).
+    search_window_seconds: Optional[Tuple[float, float]] = None
+
+    # The logits: (rho - snr_threshold) / temperature.
     snr_threshold: float = 8.0
     temperature: float = 2.0
-    
-    # Dataset parameters (to match Gabbard2017 for comparison)
+
+    # Memory: examples and templates per step.
+    batch_chunk: int = 16
+    template_chunk: int = 8
+
+    # The dataset (for detection with INJECTION_PRESENT labels).
     injection_chance: float = 0.5
-    snr_min: float = 10.0
-    snr_max: float = 80.0
+    snr_min: float = 8.0
+    snr_max: float = 20.0
     batch_size: int = 32
 
 
 class MatchedFilterBaseline(ExampleModel):
     """
-    Matched Filter Baseline for Comparison with ML Models.
-    
-    Provides the traditional matched filtering approach wrapped as an ExampleModel,
-    enabling fair comparison with neural network detectors on identical datasets.
-    
-    Key Differences from ML Models:
-        - No training required (uses physics-based template bank)
-        - `compile_model()` is a no-op
-        - `pretrained()` returns model directly (no weights to load)
-    
-    Usage:
-        >>> # Create model
+    The matched-filter baseline as an example model. No training: `compile_model`
+    returns the model unchanged and `pretrained` builds it.
+
         >>> model = MatchedFilterBaseline.model()
-        >>> 
-        >>> # Use with dataset (same as you would with Gabbard2017)
-        >>> dataset = MatchedFilterBaseline.dataset()
-        >>> probs = model.predict(dataset)
-        >>> 
-        >>> # Compare with ML model
-        >>> ml_model = Gabbard2017.pretrained()
-        >>> ml_probs = ml_model.predict(dataset)
+        >>> dataset = MatchedFilterBaseline.dataset(seed=1)
+        >>> logits = model.predict_on_batch(dataset[0][0])
     """
-    
+
     config = MatchedFilterBaselineConfig()
-    
+
     @classmethod
-    def model(
-        cls,
-        input_shape_onsource: Optional[Tuple[int, int]] = None,
-        input_shape_offsource: Optional[Tuple[int, int]] = None,
-        config: Optional[MatchedFilterBaselineConfig] = None,
-        **kwargs
-    ) -> Model:
-        """
-        Create Keras model wrapping MatchedFilterLayer.
-        
-        Args:
-            input_shape_onsource: Shape of onsource input (samples, channels).
-            input_shape_offsource: Unused (no whitening layer needed).
-            config: Model configuration. Uses class default if None.
-        
-        Returns:
-            Keras model with MatchedFilterLayer.
-        """
-        if config is None:
-            config = cls.config
-        
-        # Compute default input shape
-        if input_shape_onsource is None:
-            num_samples = int(config.sample_rate_hertz * config.duration_seconds)
-            input_shape_onsource = (num_samples,)
-        
-        # Create input layer
-        inputs = Input(shape=input_shape_onsource, name="onsource")
-        
-        # Create matched filter layer
-        mf_layer = MatchedFilterLayer(
-            mass_1_range=config.mass_1_range,
-            mass_2_range=config.mass_2_range,
-            num_templates_per_dim=config.num_templates_per_dim,
+    def inputs(cls, config: Optional[MatchedFilterBaselineConfig] = None) -> list:
+        """The model's input variables, in order."""
+        return [MODEL_INPUT, BACKGROUND_INPUT]
+
+    @classmethod
+    def model(cls, config: Optional[MatchedFilterBaselineConfig] = None, num_ifos: Optional[int] = None,
+              **kwargs) -> Model:
+        """WHITENED_ONSOURCE (detectors, samples) and OFFSOURCE (detectors, samples) in, logits out."""
+        config = config or cls.config
+        num_ifos = len(config.ifos) if num_ifos is None else num_ifos
+        if num_ifos != len(config.ifos):
+            raise ValueError(f"num_ifos ({num_ifos}) differs from the config's ifos ({len(config.ifos)}).")
+        onsource = keras.Input(
+            shape=(num_ifos, onsource_samples(config.sample_rate_hertz, config.onsource_duration_seconds)),
+            name=MODEL_INPUT.name, dtype="float32")
+        offsource = keras.Input(
+            shape=(num_ifos, onsource_samples(config.sample_rate_hertz, config.offsource_duration_seconds)),
+            name=BACKGROUND_INPUT.name, dtype="float32")
+        layer = MatchedFilterLayer(
+            mass_range=config.mass_range_msun,
+            minimal_match=config.minimal_match,
             sample_rate_hertz=config.sample_rate_hertz,
-            duration_seconds=config.duration_seconds,
-            f_low=config.f_low,
+            onsource_duration_seconds=config.onsource_duration_seconds,
+            crop_duration_seconds=config.crop_duration_seconds,
+            spectral_config=config.spectral_config,
+            search_window_seconds=config.search_window_seconds,
+            ifos=config.ifos,
             snr_threshold=config.snr_threshold,
             temperature=config.temperature,
-            name="matched_filter"
+            batch_chunk=config.batch_chunk,
+            template_chunk=config.template_chunk,
+            name="matched_filter",
         )
-        
-        outputs = mf_layer(inputs)
-        
-        return Model(inputs=inputs, outputs=outputs, name="MatchedFilterBaseline")
-    
+        outputs = layer({MODEL_INPUT.name: onsource, BACKGROUND_INPUT.name: offsource})
+        return Model(inputs=[onsource, offsource], outputs=outputs, name="MatchedFilterBaseline")
+
+    @classmethod
+    def dataset_args(cls, noise_type: gf.NoiseType = gf.NoiseType.COLORED,
+                     config: Optional[MatchedFilterBaselineConfig] = None, **kwargs) -> dict:
+        """Arguments of a BBH dataset (masses uniform over the bank's range) in the model's input contract."""
+        config = config or cls.config
+        if noise_type != gf.NoiseType.COLORED:
+            raise ValueError("The example dataset uses coloured noise; pass a noise_obtainer for other noise.")
+        return cbc_dataset_args(
+            sample_rate_hertz=config.sample_rate_hertz,
+            onsource_duration_seconds=config.onsource_duration_seconds,
+            offsource_duration_seconds=config.offsource_duration_seconds,
+            mass_distribution_type=gf.DistributionType.UNIFORM,
+            mass_range_msun=config.mass_range_msun,
+            snr=gf.Distribution(min_=config.snr_min, max_=config.snr_max, type_=gf.DistributionType.UNIFORM),
+            injection_chance=config.injection_chance,
+            batch_size=config.batch_size,
+            output_variables=[gf.ReturnVariables.INJECTION_PRESENT],
+            noise_obtainer=gf.NoiseObtainer(noise_type=noise_type, ifos=list(config.ifos)),
+            input_variables=cls.inputs(config),
+            crop_duration_seconds=config.crop_duration_seconds,
+            **({"spectral_config": config.spectral_config} if config.spectral_config is not None else {}),
+            **kwargs,
+        )
+
     @classmethod
     def dataset(
         cls,
@@ -139,89 +150,45 @@ class MatchedFilterBaseline(ExampleModel):
         steps_per_epoch: int = 1000,
         **kwargs
     ) -> gf.GravyflowDataset:
-        """
-        Create dataset compatible with matched filter model.
-        
-        Uses similar CBC injection parameters as Gabbard2017 for fair comparison.
-        
-        Args:
-            noise_type: Type of noise (COLORED, WHITE, REAL).
-            config: Dataset configuration.
-            seed: Random seed for reproducibility.
-            group: Dataset group ("train", "validate", "test").
-            steps_per_epoch: Number of batches per epoch.
-        
-        Returns:
-            GravyflowDataset that outputs whitened onsource data.
-        """
-        if config is None:
-            config = cls.config
-        
-        # CBC generator with same parameter space as Gabbard2017
-        cbc_generator = gf.CBCGenerator(
-            mass_1_msun=gf.Distribution(
-                min_=config.mass_1_range[0],
-                max_=config.mass_1_range[1],
-                type_=gf.DistributionType.LOG
-            ),
-            mass_2_msun=gf.Distribution(
-                min_=config.mass_2_range[0],
-                max_=config.mass_2_range[1],
-                type_=gf.DistributionType.LOG
-            ),
-            injection_chance=config.injection_chance,
-            scaling_method=gf.ScalingMethod(
-                value=gf.Distribution(
-                    min_=config.snr_min,
-                    max_=config.snr_max,
-                    type_=gf.DistributionType.UNIFORM
-                ),
-                type_=gf.ScalingTypes.SNR
-            ),
-            network=[gf.IFO.L1],  # Single detector
-        )
-        
-        # Setup noise
-        noise_obtainer = gf.NoiseObtainer(
-            noise_type=noise_type,
-            ifos=[gf.IFO.L1]
-        )
-        
-        # Dataset outputs whitened onsource for matched filter
-        return gf.GravyflowDataset(
-            noise_obtainer=noise_obtainer,
-            sample_rate_hertz=config.sample_rate_hertz,
-            onsource_duration_seconds=config.duration_seconds,
-            offsource_duration_seconds=16.0,
-            num_examples_per_batch=config.batch_size,
-            waveform_generators=[cbc_generator],
-            input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-            output_variables=[gf.ReturnVariables.INJECTION_PRESENT],
-            seed=seed,
-            group=group,
-            steps_per_epoch=steps_per_epoch,
-            **kwargs
-        )
-    
+        """A dataset in the model's input contract, with ``INJECTION_PRESENT`` labels."""
+        return gf.Dataset(**cls.dataset_args(noise_type, config, seed=seed, group=group,
+                                             steps_per_epoch=steps_per_epoch, **kwargs))
+
     @classmethod
-    def compile_model(
+    def validation_dataset_args(
         cls,
-        model: Model,
-        learning_rate: float = 0.001,
+        noise_type: gf.NoiseType = gf.NoiseType.COLORED,
+        config: Optional[ValidationDatasetConfig] = None,
+        baseline: Optional[MatchedFilterBaselineConfig] = None,
         **kwargs
-    ) -> Model:
+    ) -> dict:
         """
-        No-op for matched filter (no training required).
-        
-        Returns the model unchanged. Included for API compatibility.
+        The example models' common validation data (`validation_dataset_args`),
+        with the offsource as a second input. The baseline's window must match.
         """
+        cfg = config or ValidationDatasetConfig()
+        baseline = baseline or cls.config
+        mismatched = [
+            name for name, a, b in [
+                ("sample_rate_hertz", cfg.sample_rate_hertz, baseline.sample_rate_hertz),
+                ("onsource_duration_seconds", cfg.onsource_duration_seconds, baseline.onsource_duration_seconds),
+                ("offsource_duration_seconds", cfg.offsource_duration_seconds, baseline.offsource_duration_seconds),
+            ] if float(a) != float(b)
+        ]
+        if mismatched:
+            raise ValueError(f"The validation data and the baseline differ in {mismatched}.")
+        return _validation_dataset_args(
+            noise_type=noise_type, config=cfg, input_variables=cls.inputs(baseline),
+            crop_duration_seconds=baseline.crop_duration_seconds,
+            **({"spectral_config": baseline.spectral_config} if baseline.spectral_config is not None else {}),
+            **kwargs)
+
+    @classmethod
+    def compile_model(cls, model: Model, **kwargs) -> Model:
+        """No-op: the matched filter has nothing to train."""
         return model
-    
+
     @classmethod
     def pretrained(cls, weights_path=None) -> Model:
-        """
-        Return model directly (no weights to load).
-        
-        Matched filters use physics-based templates, not learned weights.
-        """
+        """The model itself: its 'weights' are the template bank."""
         return cls.model()

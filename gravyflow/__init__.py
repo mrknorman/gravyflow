@@ -133,6 +133,6 @@ from .src.dataset.features.transient_index import TransientIndex
 from .src.utils.alert import send_email
 from .src.model.examples.gabbard_2017 import Gabbard2017
 from .src.model.examples.matched_filter_baseline import MatchedFilterBaseline, MatchedFilterBaselineConfig
-from .src.detection import MatchedFilter, MatchedFilterLayer, TemplateGrid, matched_filter_fft, optimal_snr
+from .src.detection import MatchedFilter, MatchedFilterLayer, TemplateBank, TemplateGrid, matched_filter_fft, optimal_snr
 from .src.dataset.diversity import DiversityCallback, LabelTrackingDataset, compute_diversity_score
 

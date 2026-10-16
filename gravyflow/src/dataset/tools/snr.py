@@ -301,6 +301,10 @@ def matched_filter_fft(
     psd: None for whitened data (unit-variance white noise), otherwise the
     one-sided PSD of the data: an array (shared, or one row per batch entry) or
     a PowerSpectrum with one row per batch entry.
+    The correlation is circular and the data are not windowed: give conditioned
+    data (whitened, or tapered and high-passed). Raw strain leaks its
+    low-frequency power into every bin. The template-bank search on whitened
+    windows is gravyflow.src.detection.MatchedFilter.
     Returns (Batch, NumTemplates, Samples), or (NumTemplates, Samples) for 1D data.
     """
     data = ops.cast(ops.convert_to_tensor(data), "float32")
@@ -341,56 +345,3 @@ def _matched_filter(data, templates, weight, kmin, kmax):
     sigma = jnp.where(sigma > 0, sigma, 1.0)
     sigma = sigma[None, :, None] if sigma.ndim == 1 else sigma[:, :, None]
     return jnp.abs(inner) / sigma
-
-
-def find_triggers(
-    snr: jnp.ndarray,
-    threshold: float = 8.0,
-    cluster_window: int = 100,
-) -> list:
-    """
-    Find triggers (peaks) above an SNR threshold.
-
-    snr: (NumTemplates, Samples), or (Batch, NumTemplates, Samples).
-    Returns a list of dicts with 'snr', 'time_index', 'template_index' (and
-    'batch_index' for batched input).
-    """
-    if snr.ndim == 2:
-        max_snr_over_templates = jnp.max(snr, axis=0)
-        best_template = jnp.argmax(snr, axis=0)
-    else:
-        max_snr_over_templates = jnp.max(snr, axis=1)
-        best_template = jnp.argmax(snr, axis=1)
-
-    triggers = []
-    snr_np = np.array(max_snr_over_templates)
-    template_np = np.array(best_template)
-
-    above_thresh = snr_np > threshold
-    indices = np.where(above_thresh)[0] if snr.ndim == 2 else np.argwhere(above_thresh)
-
-    i = 0
-    while i < len(indices):
-        if snr.ndim == 2:
-            cluster_end = i + 1
-            while cluster_end < len(indices) and indices[cluster_end] - indices[i] < cluster_window:
-                cluster_end += 1
-            cluster_indices = indices[i:cluster_end]
-            peak_idx = cluster_indices[np.argmax(snr_np[cluster_indices])]
-            triggers.append({
-                'snr': float(snr_np[peak_idx]),
-                'time_index': int(peak_idx),
-                'template_index': int(template_np[peak_idx]),
-            })
-            i = cluster_end
-        else:
-            batch_idx, time_idx = indices[i]
-            triggers.append({
-                'snr': float(snr_np[batch_idx, time_idx]),
-                'time_index': int(time_idx),
-                'template_index': int(template_np[batch_idx, time_idx]),
-                'batch_index': int(batch_idx),
-            })
-            i += 1
-
-    return triggers

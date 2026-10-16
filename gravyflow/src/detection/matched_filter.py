@@ -1,436 +1,619 @@
 """
-GPU Matched Filter
+The matched-filter baseline: a CBC template-bank search on whitened data.
 
-Main matched filtering class for gravitational wave detection using
-on-the-fly template generation via ripple.
+The data path whitens each example with the PSD of its offsource
+(`gf.whiten`), and models take that whitened onsource window. The matched
+filter takes the same window and the same spectrum, and whitens its templates
+with the exact FIR filter the data were whitened with
+(`whitening_filter`), so a template sees what an injected signal of its
+parameters looks like in the data. On whitened data the noise is white with
+unit variance, so the inner product is a plain sum over samples.
+
+The statistic, for every template and every merger time in the window:
+
+- The signal in a window is the part of the whitened waveform inside it, which
+  depends on where the merger falls: a long inspiral starts before the window.
+  So the filter correlates the window with the whitened template linearly (no
+  wrap-around), and normalises each merger time by the norm of the part of the
+  template that falls inside the window.
+- The SNR is maximised over the template's phase exactly: with the in-window
+  quadratures g_c, g_s (the template and its Hilbert transform), z = (<d|g_c>,
+  <d|g_s>) and their Gram matrix M, rho^2 = z^T M^-1 z. In Gaussian noise rho^2
+  is chi-squared with 2 degrees of freedom at every merger time, and a template
+  that matches the signal recovers the signal's optimal SNR in the window (the
+  SNR the dataset's labels report).
+- Detectors are combined in coincidence: rho_net^2(t) = sum over detectors of
+  the largest rho_i^2 within the light travel time (plus a margin) of t in the
+  first detector, for the same template.
+
+The reported time is the merger time in the window (the template's merger is
+its reference point), in seconds from the window's start.
+
+Memory is bounded by chunking over examples and templates; the cost per
+(example, detector, template) is two complex FFTs of about the template buffer
+plus a filter length.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple, List, Dict, Any
+from functools import partial
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
+import keras
 import numpy as np
+from keras import ops
+from scipy.fft import next_fast_len
 
-from gravyflow.src.detection.template_grid import TemplateGrid
-from gravyflow.src.dataset.tools.snr import matched_filter_fft, template_sigma, find_triggers
+from gravyflow.src.dataset.config import Defaults
+from gravyflow.src.dataset.conditioning.whiten import whitening_filter
+from gravyflow.src.dataset.tools.psd import PowerSpectrum, SpectralConfig, estimate_psd
+from gravyflow.src.detection.template_grid import TemplateBank, TemplateGrid, cbc_templates
 
+SPEED_OF_LIGHT = 299792458.0
+# Added to the light travel time between detectors in the coincidence window,
+# for the timing error of each detector's peak.
+COINCIDENCE_MARGIN_SECONDS = 0.002
+
+
+def light_travel_seconds(ifos: Sequence) -> float:
+    """The largest light travel time between any two of `ifos` (gf.IFO members), in seconds."""
+    from astropy import coordinates, units
+    positions = []
+    for ifo in ifos:
+        v = ifo.value
+        loc = coordinates.EarthLocation.from_geodetic(
+            v.longitude_radians * units.rad, v.latitude_radians * units.rad, v.height_meters * units.meter)
+        positions.append([loc.x.value, loc.y.value, loc.z.value])
+    positions = np.asarray(positions, dtype=np.float64)
+    if len(positions) < 2:
+        return 0.0
+    distances = np.linalg.norm(positions[:, None, :] - positions[None, :, :], axis=-1)
+    return float(distances.max() / SPEED_OF_LIGHT)
+
+
+def _as_spectral_config(value) -> SpectralConfig:
+    if value is None:
+        return SpectralConfig()
+    if isinstance(value, SpectralConfig):
+        return value
+    if isinstance(value, dict):
+        return SpectralConfig(**value)
+    raise TypeError("spectral_config must be a gf.SpectralConfig, a dict of its fields, or None.")
+
+
+# ---------------------------------------------------------------------------
+# The statistic
+# ---------------------------------------------------------------------------
+
+@partial(jax.jit, static_argnames=["n_fft", "merger_index", "num_samples", "lags", "max_shift",
+                                   "template_chunk", "reduce"])
+def _search_chunks(data, fir, template_fft, **kwargs):
+    """_search over batch chunks: data (C, Bc, I, N), fir (C, Bc, I, K) or None."""
+    if fir is None:
+        return jax.lax.map(lambda d: _search(d, None, template_fft, **kwargs), data)
+    return jax.lax.map(lambda args: _search(args[0], args[1], template_fft, **kwargs), (data, fir))
+
+
+def _search(data, fir, template_fft, *, n_fft, merger_index, num_samples, lags, max_shift,
+            template_chunk, reduce):
+    """
+    data (B, I, N) whitened; fir (B, I, K) whitening filters, or None for data that
+    are white already (then template_fft must already be band-limited);
+    template_fft (T, F), T a multiple of template_chunk.
+
+    merger_index: the merger's index in the linear convolution of a raw template
+    with the filter. lags: (first, stop) merger times searched, in window samples.
+    max_shift: the coincidence window in samples.
+
+    reduce=True returns per example (rho_net (B,), template (B,), lag (B,));
+    reduce=False returns rho_net (B, T, num_lags).
+    """
+    num_freqs = n_fft // 2 + 1
+    lag_lo, lag_hi = lags
+    num_lags = lag_hi - lag_lo
+    d_fft = jnp.conj(jnp.fft.rfft(data, n=n_fft, axis=-1))                  # (B, I, F)
+    if fir is not None:
+        f_fft = jnp.fft.rfft(fir, n=n_fft, axis=-1)                         # (B, I, F)
+    # One-sided weights of the analytic signal: 1 at DC and Nyquist, 2 between.
+    analytic = np.full(num_freqs, 2.0, dtype=np.float32)
+    analytic[0] = 1.0
+    analytic[-1] = 1.0
+    # Shift s = merger_index - lag; window sums over [s, s + N) of the template.
+    shifts = merger_index - np.arange(lag_lo, lag_hi)                       # (L,)
+
+    def one_chunk(h_chunk):
+        # h_chunk (Tc, F)
+        g = h_chunk[None, None] if fir is None else f_fft[:, :, None, :] * h_chunk[None, None]  # (B, I, Tc, F)
+        g = g * analytic
+        pad = [(0, 0)] * (g.ndim - 1) + [(0, n_fft - num_freqs)]
+        g_a = jnp.fft.ifft(jnp.pad(g * d_fft[:, :, None, :], pad), axis=-1)  # z(s) = sum_t d(t) g_a(t + s)
+        z = g_a[..., shifts]                                                # (B, I, Tc, L)
+        t_a = jnp.fft.ifft(jnp.pad(g, pad), axis=-1)                        # analytic whitened template
+        gc, gs = jnp.real(t_a), jnp.imag(t_a)
+
+        def window_sums(x):
+            c = jnp.concatenate([jnp.zeros(x.shape[:-1] + (1,), x.dtype), jnp.cumsum(x, axis=-1)], axis=-1)
+            return c[..., shifts + num_samples] - c[..., shifts]
+
+        a = window_sums(gc * gc)
+        c = window_sums(gs * gs)
+        b = window_sums(gc * gs)
+        zc, zs = jnp.real(z), jnp.imag(z)
+        det = a * c - b * b
+        scale = jnp.maximum(a * c, 1e-30)
+        ok = (det > 1e-6 * scale) & (a > 0) & (c > 0)
+        rho2 = jnp.where(ok, (c * zc * zc - 2.0 * b * zc * zs + a * zs * zs) / jnp.where(ok, det, 1.0), 0.0)
+        rho2 = jnp.maximum(rho2, 0.0)                                       # (B, I, Tc, L)
+        if rho2.shape[1] > 1:
+            others = rho2[:, 1:]
+            if max_shift > 0:
+                others = jax.lax.reduce_window(
+                    others, 0.0, jax.lax.max, (1, 1, 1, 2 * max_shift + 1), (1, 1, 1, 1),
+                    [(0, 0), (0, 0), (0, 0), (max_shift, max_shift)])
+            net = rho2[:, 0] + jnp.sum(others, axis=1)
+        else:
+            net = rho2[:, 0]
+        return net                                                          # (B, Tc, L)
+
+    chunks = template_fft.reshape((-1, template_chunk, num_freqs))
+    if not reduce:
+        out = jax.lax.map(one_chunk, chunks)                                # (C, B, Tc, L)
+        out = jnp.moveaxis(out, 0, 1).reshape((data.shape[0], -1, num_lags))
+        return jnp.sqrt(out)
+
+    batch = data.shape[0]
+
+    def step(carry, inputs):
+        best, best_t, best_l = carry
+        index, h_chunk = inputs
+        net = one_chunk(h_chunk).reshape((batch, -1))
+        arg = jnp.argmax(net, axis=-1)
+        value = jnp.take_along_axis(net, arg[:, None], axis=-1)[:, 0]
+        better = value > best
+        t = index * template_chunk + arg // num_lags
+        return (jnp.where(better, value, best), jnp.where(better, t, best_t),
+                jnp.where(better, arg % num_lags, best_l)), None
+
+    init = (jnp.full((batch,), -1.0, jnp.float32), jnp.zeros((batch,), jnp.int32), jnp.zeros((batch,), jnp.int32))
+    (best, best_t, best_l), _ = jax.lax.scan(step, init, (jnp.arange(chunks.shape[0]), chunks))
+    return jnp.sqrt(jnp.maximum(best, 0.0)), best_t, best_l + lag_lo
+
+
+# ---------------------------------------------------------------------------
+# The matched filter
+# ---------------------------------------------------------------------------
 
 @dataclass
 class MatchedFilter:
     """
-    GPU-accelerated matched filtering with on-the-fly ripple templates.
-    
-    This class provides a traditional matched filtering baseline for
-    comparison with deep learning detectors. Templates are generated
-    on-the-fly using ripple's JAX-based waveform generation, eliminating
-    the need for stored template banks.
-    
+    A CBC template-bank matched filter on whitened data (see the module docstring).
+
     Args:
-        mass_1_range: (min, max) for primary mass in solar masses
-        mass_2_range: (min, max) for secondary mass in solar masses
-        num_templates_per_dim: Grid points per mass dimension
-        sample_rate_hertz: Sample rate in Hz
-        duration_seconds: Template duration in seconds
-        f_low: Low frequency cutoff in Hz
-    
-    Usage:
-        >>> mf = MatchedFilter(
-        ...     mass_1_range=(5.0, 75.0),
-        ...     mass_2_range=(5.0, 75.0),
-        ...     num_templates_per_dim=16  # 136 templates
-        ... )
-        >>> snr = mf.filter(data, psd)
-        >>> triggers = mf.detect(data, psd, threshold=8.0)
+        bank: the template bank; default `TemplateBank.stochastic` over
+            `mass_range` at `minimal_match`, placed for this window and band.
+        mass_range, minimal_match: the default bank's mass range (solar masses,
+            both components) and minimal match.
+        sample_rate_hertz, onsource_duration_seconds, crop_duration_seconds:
+            the dataset's window: the whitened window the filter takes, and the
+            crop on each side of it (the whitening filter is designed on the
+            onsource plus both crops, as the dataset designs it).
+        spectral_config: the dataset's gf.SpectralConfig (band, PSD estimator,
+            whitening filter). The SNR's band starts at its lower frequency, and
+            so do the templates.
+        search_window_seconds: (start, end) of the merger times searched, in
+            seconds from the window's start; default the whole window.
+        ifos: the detectors of the data's channels, for the coincidence window
+            (their largest light travel time plus 2 ms). Required for more than
+            one channel unless `max_time_offset_seconds` is given.
+        max_time_offset_seconds: the coincidence window, overriding `ifos`.
+        batch_chunk, template_chunk: examples and templates per step; memory
+            grows with their product (see `chunk_bytes`).
     """
-    
-    mass_1_range: Tuple[float, float] = (5.0, 75.0)
-    mass_2_range: Tuple[float, float] = (5.0, 75.0)
-    num_templates_per_dim: int = 16
-    sample_rate_hertz: float = 8192.0
-    duration_seconds: float = 2.0
-    f_low: float = 20.0
-    
-    # Internal state
-    _grid: TemplateGrid = field(init=False, repr=False)
-    _templates: Optional[jnp.ndarray] = field(default=None, init=False, repr=False)
-    _template_scale: float = field(default=1.0, init=False, repr=False)  # Amplitude scale factor
-    _template_params: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = field(
-        default=None, init=False, repr=False
-    )
-    
+
+    bank: Optional[TemplateBank] = None
+    mass_range: Tuple[float, float] = (5.0, 95.0)
+    minimal_match: float = 0.97
+    sample_rate_hertz: float = Defaults.sample_rate_hertz
+    onsource_duration_seconds: float = Defaults.onsource_duration_seconds
+    crop_duration_seconds: float = Defaults.crop_duration_seconds
+    spectral_config: Optional[SpectralConfig] = None
+    search_window_seconds: Optional[Tuple[float, float]] = None
+    ifos: Optional[Sequence] = None
+    max_time_offset_seconds: Optional[float] = None
+    batch_chunk: int = 16
+    template_chunk: int = 8
+
+    _templates: Optional[np.ndarray] = field(default=None, init=False, repr=False)
+
     def __post_init__(self):
-        self._grid = TemplateGrid(
-            mass_1_range=self.mass_1_range,
-            mass_2_range=self.mass_2_range,
-            num_mass_1_points=self.num_templates_per_dim,
-        )
-        self._template_params = self._grid.get_parameters()
-    
+        self.spectral_config = _as_spectral_config(self.spectral_config)
+        fs = float(self.sample_rate_hertz)
+        self.sample_rate_hertz = fs
+        self.num_samples = int(round(self.onsource_duration_seconds * fs))
+        self.num_whitening_samples = self.num_samples + 2 * int(round(self.crop_duration_seconds * fs))
+        ntaps = self.spectral_config.num_taps(fs)
+        self.num_taps = ntaps + (ntaps % 2)
+        if 2 * int(round(self.crop_duration_seconds * fs)) < self.num_taps:
+            raise ValueError("crop_duration_seconds must be at least half the whitening filter, as in the dataset.")
+        if self.spectral_config.lower_frequency_hertz is None:
+            raise ValueError("The matched filter needs a lower band edge (spectral_config.lower_frequency_hertz).")
+        self.spectral_config.validate_band(fs)
+        if self.bank is None:
+            import gravyflow as gf
+            # The bank is placed with the first detector's noise curve; H1 and L1
+            # share theirs, so both get the same (bundled) bank.
+            ifo = self.ifos[0] if self.ifos else gf.IFO.L1
+            if ifo.value.optimal_psd_path == gf.IFO.L1.value.optimal_psd_path:
+                ifo = gf.IFO.L1
+            self.bank = TemplateBank.stochastic(
+                mass_range=tuple(self.mass_range), minimal_match=self.minimal_match, sample_rate_hertz=fs,
+                visible_seconds=self.onsource_duration_seconds + self.num_taps / (2.0 * fs),
+                lower_frequency_hertz=self.spectral_config.lower_frequency_hertz,
+                ifo=ifo)
+        elif isinstance(self.bank, TemplateGrid):
+            self.bank = TemplateBank.from_grid(self.bank)
+        # The raw template buffer: the merger at the centre, and enough on each
+        # side that the whitened template is exact over the window at any lag.
+        half = self.num_samples + self.num_taps // 2
+        self.template_samples = 2 * half
+        self.template_merger_index = half
+        # The merger's index in the linear convolution with the filter: the
+        # dataset's 'same'-mode convolution starts (ntaps - 1) // 2 samples in.
+        self.merger_index = half + (self.num_taps - 1) // 2
+        self.n_fft = int(next_fast_len(self.template_samples + self.num_taps - 1, real=True))
+        if self.search_window_seconds is None:
+            self.lags = (0, self.num_samples)
+        else:
+            lo, hi = self.search_window_seconds
+            lags = (int(round(lo * fs)), int(round(hi * fs)))
+            if not 0 <= lags[0] < lags[1] <= self.num_samples:
+                raise ValueError("search_window_seconds must lie inside the window, start before end.")
+            self.lags = lags
+
+    # ------------------------------------------------------------ templates
+
     @property
     def num_templates(self) -> int:
-        """Number of templates in the bank."""
-        return self._grid.num_templates
-    
+        return self.bank.num_templates
+
     @property
-    def template_masses(self) -> Tuple[jnp.ndarray, jnp.ndarray]:
-        """Return (mass_1, mass_2) arrays for all templates."""
-        return self._template_params
-    
-    def generate_templates(self, force_regenerate: bool = False) -> jnp.ndarray:
+    def template_masses(self) -> Tuple[np.ndarray, np.ndarray]:
+        return self.bank.mass_1, self.bank.mass_2
+
+    def generate_templates(self) -> np.ndarray:
         """
-        Generate templates on-the-fly using ripple.
-        
-        Templates are cached after first generation unless force_regenerate=True.
-        They are generated in float64 and returned in float32, like the data
-        they filter.
-        
-        Args:
-            force_regenerate: If True, regenerate even if cached.
-        
-        Returns:
-            Template array of shape (num_templates, num_samples)
+        The raw templates (T, template_samples), float32, unit peak: the plus
+        polarisation of each bank point from the dataset's CBC generator, merger
+        at index template_merger_index, no content below the band's lower edge.
         """
-        if self._templates is not None and not force_regenerate:
-            return self._templates
-        
-        # Import here to avoid circular imports
-        from gravyflow.src.dataset.features.waveforms.cbc import _in_x64
-        
-        raw_templates = _in_x64(self._generate_raw_templates)().astype(jnp.float32)
-        
-        # Scale templates by gf.Defaults.scale_factor for consistency with dataset
-        # This is the same scaling applied to noise and injections
-        import gravyflow as gf
-        self._template_scale = 1.0 / gf.Defaults.scale_factor
-        self._templates = raw_templates * gf.Defaults.scale_factor
-        
-        print(f"Templates generated: shape {self._templates.shape}, scaled by {gf.Defaults.scale_factor:.2e}")
-        
+        if self._templates is None:
+            self._templates = cbc_templates(
+                self.bank.mass_1, self.bank.mass_2, self.sample_rate_hertz,
+                self.template_samples / self.sample_rate_hertz, self.spectral_config.lower_frequency_hertz)
         return self._templates
-    
-    def _generate_raw_templates(self) -> jnp.ndarray:
-        """The unscaled templates, in the precision JAX is set to when called."""
-        from gravyflow.src.dataset.features.waveforms.cbc import (
-            Approximant,
-            _frequency_domain_polarisations,
-            _source_parameters,
-            calc_minimum_frequency,
-        )
-        
-        mass_1, mass_2 = self._template_params
-        num_samples = int(self.duration_seconds * self.sample_rate_hertz)
-        num_freqs = num_samples // 2 + 1
-        
-        # Frequency array for waveform generation
-        f_u = self.sample_rate_hertz / 2.0
-        freqs = jnp.linspace(0, f_u, num_freqs, dtype=jnp.float64)
-        f_ref = self.f_low
-        
-        # Fixed parameters for templates (normalized)
-        distance_mpc = 1.0  # Normalized - SNR scaling handles distance
-        tc = self.duration_seconds * 0.9  # Merger at 90% of duration
-        phi = 0.0  # Reference phase
-        inc = 0.0  # Face-on (optimal orientation)
-        
-        # Generate templates using vmap
-        @jax.vmap
-        def generate_one(m1, m2):
-            # Non-spinning IMRPhenomD, through the same ripple path as the CBC generator
-            parameters = _source_parameters(
-                m1, m2, jnp.zeros(3), jnp.zeros(3), 0.0, 0.0, distance_mpc, phi, inc
-            )
-            hp, hc = _frequency_domain_polarisations(
-                Approximant.IMRPhenomD, freqs, parameters, f_ref, tc
-            )
-            
-            # Apply low-frequency mask (below where the template starts in the buffer)
-            # Calculate minimum frequency for this mass pair
-            f_min = calc_minimum_frequency(m1, m2, tc)
-            
-            # Apply taper
-            taper_width = 8.0  # Hz
-            f_taper_end = f_min + taper_width
-            
-            mask_zero = freqs < f_min
-            mask_one = freqs >= f_taper_end
-            mask_taper = (freqs >= f_min) & (freqs < f_taper_end)
-            
-            taper_factor = jnp.sin((jnp.pi / 2.0) * (freqs - f_min) / (f_taper_end - f_min)) ** 2
-            final_mask = jnp.where(mask_zero, 0.0, jnp.where(mask_one, 1.0, taper_factor))
-            
-            hp = jnp.where(mask_zero, 0.0, hp * final_mask)
-            
-            # Convert to time domain
-            h_time = jnp.fft.irfft(hp, n=num_samples)
-            h_time = h_time * self.sample_rate_hertz  # Scale factor
-            
-            return h_time
-        
-        print(f"Generating {len(mass_1)} templates on GPU...")
-        return generate_one(mass_1, mass_2)
-    
-    def filter(
-        self,
-        data: jnp.ndarray,
-        psd: Optional[jnp.ndarray] = None,
-    ) -> jnp.ndarray:
-        """
-        Compute SNR timeseries for all templates.
-        
-        Args:
-            data: Whitened strain data, shape (samples,) or (batch, samples).
-                  Expected to be O(1) amplitude (e.g., from GravyflowDataset).
-            psd: One-sided PSD of the data. If None, the data are taken as
-                 whitened (unit-variance white noise).
-        
-        Returns:
-            SNR timeseries of shape:
-            - (num_templates, samples) if data is 1D
-            - (batch, num_templates, samples) if data is 2D
-        """
-        templates = self.generate_templates()
-        
-        # Templates are normalized to O(1) amplitude for numerical stability.
-        # Input data should also be O(1) (e.g., whitened data).
-        # matched_filter_fft already computes SNR = inner_product / sigma
-        snr = matched_filter_fft(
-            data, 
-            templates, 
-            psd=psd,
-            sample_rate_hertz=self.sample_rate_hertz,
-        )
-            
-        return snr
-    
-    def detect(
-        self,
-        data: jnp.ndarray,
-        psd: Optional[jnp.ndarray] = None,
-        threshold: float = 8.0,
-        cluster_window_seconds: float = 0.1,
-    ) -> List[Dict[str, Any]]:
-        """
-        Find triggers above SNR threshold.
-        
-        Args:
-            data: Strain data, shape (samples,) or (batch, samples)
-            psd: One-sided PSD
-            threshold: Minimum SNR for trigger
-            cluster_window_seconds: Time window (s) to cluster nearby peaks
-        
-        Returns:
-            List of trigger dictionaries with keys:
-            - 'snr': Peak SNR value
-            - 'time_index': Sample index of peak
-            - 'time_seconds': Time of peak in seconds
-            - 'template_index': Which template triggered
-            - 'mass_1': Primary mass of best template
-            - 'mass_2': Secondary mass of best template
-        """
-        snr = self.filter(data, psd)
-        
-        cluster_window = int(cluster_window_seconds * self.sample_rate_hertz)
-        triggers = find_triggers(snr, threshold, cluster_window)
-        
-        # Add mass parameters and time
-        mass_1, mass_2 = self._template_params
-        for trig in triggers:
-            idx = trig['template_index']
-            trig['mass_1'] = float(mass_1[idx])
-            trig['mass_2'] = float(mass_2[idx])
-            trig['time_seconds'] = trig['time_index'] / self.sample_rate_hertz
-        
-        return triggers
-    
-    def max_snr(
-        self,
-        data: jnp.ndarray,
-        psd: Optional[jnp.ndarray] = None,
-    ) -> Tuple[float, int, int]:
-        """
-        Get maximum SNR across all templates and times.
-        
-        Args:
-            data: Strain data, shape (Samples,) or (Batch, Samples)
-            psd: One-sided PSD
-        
-        Returns:
-            Tuple of (max_snr, best_template_index, best_time_index)
-        """
-        snr = self.filter(data, psd)
-        
-        # Shape check: snr is (NumTemplates, Samples) for 2D or (Batch, NumTemplates, Samples) for 3D
-        if snr.ndim == 2:
-            # Shape: (NumTemplates, Samples)
-            # Axis 0 = NumTemplates, Axis 1 = Samples
-            flat_idx = jnp.argmax(snr)
-            template_idx = int(flat_idx // snr.shape[1])  # shape[1] = Samples
-            time_idx = int(flat_idx % snr.shape[1])
-            max_val = float(snr[template_idx, time_idx])
+
+    def template_spectra(self, templates=None) -> jnp.ndarray:
+        """rfft of the templates on the search's FFT grid, padded to a multiple of template_chunk."""
+        templates = self.generate_templates() if templates is None else templates
+        templates = jnp.asarray(templates, dtype=jnp.float32)
+        pad = (-templates.shape[0]) % self.template_chunk
+        if pad:
+            templates = jnp.pad(templates, ((0, pad), (0, 0)))
+        return jnp.fft.rfft(templates, n=self.n_fft, axis=-1)
+
+    # ------------------------------------------------------------- inputs
+
+    def spectrum(self, background) -> Optional[PowerSpectrum]:
+        """The PowerSpectrum the data were whitened with: given, or estimated from an offsource."""
+        if background is None or isinstance(background, PowerSpectrum):
+            if background is not None and background.sample_rate_hertz != self.sample_rate_hertz:
+                raise ValueError("The PowerSpectrum's sample rate differs from the matched filter's.")
+            return background
+        return estimate_psd(ops.cast(ops.convert_to_tensor(background), "float32"),
+                            self.sample_rate_hertz, self.spectral_config)
+
+    def filters(self, background, shape) -> Optional[jnp.ndarray]:
+        """The whitening FIR of each (example, detector), (B, I, K), or None for white data."""
+        spectrum = self.spectrum(background)
+        if spectrum is None:
+            return None
+        fir = whitening_filter(spectrum, self.num_whitening_samples)
+        rows = tuple(fir.shape[:-1])
+        if rows != tuple(shape[:-1]) and int(np.prod(rows)) == int(np.prod(shape[:-1])):
+            fir = fir.reshape(tuple(shape[:-1]) + (fir.shape[-1],))  # (B,) rows for (B, 1) data
+        elif rows != tuple(shape[:-1]):
+            if int(np.prod(rows)) != 1:
+                raise ValueError(
+                    f"The spectrum has rows {rows}, the data {tuple(shape[:-1])}: one spectrum row per "
+                    "(example, detector) is needed, or a single row for all.")
+            fir = jnp.broadcast_to(fir.reshape((1, 1, -1)), tuple(shape[:-1]) + (fir.shape[-1],))
+        return fir
+
+    def _white_band_spectra(self, h_fft):
+        kmin, kmax = self.spectral_config.band_indices(self.n_fft, self.sample_rate_hertz)
+        mask = np.zeros(self.n_fft // 2 + 1, dtype=np.float32)
+        mask[kmin:kmax] = 1.0
+        return h_fft * mask
+
+    def _prepare(self, data, background):
+        data = ops.cast(ops.convert_to_tensor(data), "float32")
+        rank = len(data.shape)
+        if rank == 1:
+            data = data[None, None]
+        elif rank == 2:
+            data = data[:, None]
+        elif rank != 3:
+            raise ValueError("data must be (samples,), (batch, samples) or (batch, detectors, samples).")
+        if data.shape[-1] != self.num_samples:
+            raise ValueError(f"The window has {data.shape[-1]} samples; this filter takes {self.num_samples}.")
+        if background is not None and not isinstance(background, PowerSpectrum):
+            background = ops.cast(ops.convert_to_tensor(background), "float32")
+            if len(background.shape) == rank:
+                background = background.reshape(data.shape[:-1] + (background.shape[-1],))
+        fir = self.filters(background, data.shape)
+        return data, fir, rank
+
+    def max_time_offset_samples(self, num_detectors: int) -> int:
+        if num_detectors < 2:
+            return 0
+        if self.max_time_offset_seconds is not None:
+            seconds = float(self.max_time_offset_seconds)
+        elif self.ifos is not None:
+            if len(self.ifos) != num_detectors:
+                raise ValueError(f"{len(self.ifos)} ifos given for {num_detectors} data channels.")
+            seconds = light_travel_seconds(self.ifos) + COINCIDENCE_MARGIN_SECONDS
         else:
-            # Shape: (Batch, NumTemplates, Samples)
-            # Axis 0 = Batch, Axis 1 = NumTemplates, Axis 2 = Samples
-            max_val = float(jnp.max(snr))
-            flat_idx = jnp.argmax(snr.reshape(-1))
-            template_idx = int((flat_idx % (snr.shape[1] * snr.shape[2])) // snr.shape[2])  # shape[1]=Templates, shape[2]=Samples
-            time_idx = int(flat_idx % snr.shape[2])  # shape[2] = Samples
-        
-        return max_val, template_idx, time_idx
+            raise ValueError("Multi-detector data need `ifos` (or max_time_offset_seconds) for the coincidence window.")
+        return int(np.ceil(seconds * self.sample_rate_hertz))
+
+    def chunk_bytes(self, num_detectors: int = 1) -> int:
+        """An estimate of the working memory of one step (complex64 and float32 arrays)."""
+        per = self.batch_chunk * num_detectors * self.template_chunk
+        return int(per * (self.n_fft * (8 * 4 + 4 * 2) + (self.lags[1] - self.lags[0]) * 4 * 8))
+
+    # ------------------------------------------------------------- search
+
+    def _run(self, data, background, reduce: bool, h_fft=None):
+        data, fir, rank = self._prepare(data, background)
+        if h_fft is None:
+            h_fft = self.template_spectra()
+        if fir is None:
+            h_fft = self._white_band_spectra(h_fft)
+        batch = data.shape[0]
+        step = min(self.batch_chunk, batch)
+        pad = (-batch) % step
+        if pad:
+            data = jnp.pad(data, ((0, pad), (0, 0), (0, 0)))
+            fir = None if fir is None else jnp.pad(fir, ((0, pad), (0, 0), (0, 0)))
+        chunks = data.shape[0] // step
+        data = data.reshape((chunks, step) + tuple(data.shape[1:]))
+        fir = None if fir is None else fir.reshape((chunks, step) + tuple(fir.shape[1:]))
+        out = _search_chunks(
+            data, fir, h_fft, n_fft=self.n_fft, num_samples=self.num_samples,
+            merger_index=self.template_merger_index if fir is None else self.merger_index,
+            lags=self.lags, max_shift=self.max_time_offset_samples(data.shape[2]),
+            template_chunk=self.template_chunk, reduce=reduce)
+        if reduce:
+            out = tuple(o.reshape((-1,))[:batch] for o in out)
+        else:
+            out = out.reshape((-1,) + tuple(out.shape[2:]))[:batch, :self.num_templates]
+        return out, rank
+
+    def snr_series(self, data, background=None) -> jnp.ndarray:
+        """
+        The network SNR of every template at every searched merger time:
+        (batch, templates, lags), or (templates, lags) for unbatched data. Its
+        size is the product of those; use `max_snr` for large inputs.
+
+        data: whitened windows, (samples,), (batch, samples) or (batch,
+            detectors, samples). background: the spectrum they were whitened
+            with (a PowerSpectrum, or the offsource it was estimated from), or
+            None for data that are white already (unit-variance noise).
+        """
+        out, rank = self._run(data, background, reduce=False)
+        return out[0] if rank == 1 else out
+
+    def max_snr(self, data, background=None) -> Dict[str, np.ndarray]:
+        """
+        The loudest template and merger time of each example: a dict of (batch,)
+        arrays 'snr' (network SNR), 'template_index', 'time_seconds' (merger time
+        from the window's start), 'mass_1', 'mass_2'. Unbatched data give scalars.
+        """
+        (snr, template, lag), rank = self._run(data, background, reduce=True)
+        template = np.asarray(template)
+        result = {
+            "snr": np.asarray(snr, dtype=np.float32),
+            "template_index": template,
+            "time_seconds": np.asarray(lag) / self.sample_rate_hertz,
+            "mass_1": self.bank.mass_1[template],
+            "mass_2": self.bank.mass_2[template],
+        }
+        if rank == 1:
+            result = {k: v[0] for k, v in result.items()}
+        return result
+
+    def statistic(self, data, background=None) -> jnp.ndarray:
+        """The loudest network SNR of each example, (batch,) float32, traceable under jit."""
+        (snr, _, _), _ = self._run(data, background, reduce=True)
+        return snr
+
+    def detect(self, data, background=None, threshold: float = 8.0,
+               cluster_seconds: float = 0.1) -> List[Dict[str, Any]]:
+        """
+        Triggers above `threshold`, clustered in time per example (see
+        `find_triggers`), each with 'batch_index', 'snr', 'time_seconds' (merger
+        time), 'template_index', 'mass_1' and 'mass_2'.
+        """
+        series = self.snr_series(data, background)
+        series = np.asarray(series)
+        if series.ndim == 2:
+            series = series[None]
+        triggers = find_triggers(series, threshold, int(round(cluster_seconds * self.sample_rate_hertz)))
+        for trig in triggers:
+            trig["time_seconds"] = (trig.pop("time_index") + self.lags[0]) / self.sample_rate_hertz
+            trig["mass_1"] = float(self.bank.mass_1[trig["template_index"]])
+            trig["mass_2"] = float(self.bank.mass_2[trig["template_index"]])
+        return triggers
+
+
+def find_triggers(snr, threshold: float = 8.0, cluster_window: int = 100) -> List[Dict[str, Any]]:
+    """
+    Triggers in SNR series above `threshold`, clustered in time.
+
+    snr: (templates, samples) or (batch, templates, samples). The series is first
+    maximised over templates. Above-threshold samples of one example whose gap to
+    the previous above-threshold sample is at most `cluster_window` samples form
+    one trigger (a gap rule, so an excursion of any length is one trigger), at
+    its loudest sample. Returns dicts with 'snr', 'time_index' and
+    'template_index', plus 'batch_index' for batched input.
+    """
+    snr = np.asarray(snr)
+    batched = snr.ndim == 3
+    if snr.ndim == 2:
+        snr = snr[None]
+    if snr.ndim != 3:
+        raise ValueError("snr must be (templates, samples) or (batch, templates, samples).")
+    best = snr.max(axis=1)
+    template = snr.argmax(axis=1)
+    triggers = []
+    for b in range(best.shape[0]):
+        above = np.flatnonzero(best[b] > threshold)
+        if not len(above):
+            continue
+        breaks = np.flatnonzero(np.diff(above) > cluster_window) + 1
+        for cluster in np.split(above, breaks):
+            peak = int(cluster[np.argmax(best[b, cluster])])
+            trig = {"snr": float(best[b, peak]), "time_index": peak, "template_index": int(template[b, peak])}
+            if batched:
+                trig["batch_index"] = b
+            triggers.append(trig)
+    return triggers
 
 
 # =============================================================================
-# Keras Layer Wrapper for Pipeline Compatibility
+# Keras layer
 # =============================================================================
-
-import keras
-
 
 @keras.saving.register_keras_serializable(package="gravyflow")
 class MatchedFilterLayer(keras.Layer):
     """
-    Keras-compatible layer wrapping MatchedFilter for pipeline integration.
-    
-    Enables matched filtering to be used with standard Keras `.predict()` interface,
-    allowing direct comparison with neural network models on identical datasets.
-    
-    The layer converts matched filter SNR to binary detection probabilities:
-    - Output shape: (batch, 2) for [P(noise), P(signal)]
-    - P(signal) = sigmoid((max_snr - threshold) / temperature)
-    
-    Args:
-        mass_1_range: (min, max) for primary mass in solar masses
-        mass_2_range: (min, max) for secondary mass in solar masses
-        num_templates_per_dim: Grid points per mass dimension
-        sample_rate_hertz: Sample rate in Hz
-        duration_seconds: Template duration in seconds
-        f_low: Low frequency cutoff in Hz
-        snr_threshold: SNR threshold for detection
-        temperature: Sigmoid temperature (lower = sharper)
-    
-    Usage:
-        >>> layer = MatchedFilterLayer(num_templates_per_dim=16)
-        >>> model = keras.Sequential([layer])
-        >>> probs = model.predict(data)  # (batch, 2)
+    The matched filter as a Keras layer: [whitened onsource (B, I, N), offsource
+    (B, I, M)] in, logits (B, 2) out, with z1 - z0 = (rho_net - snr_threshold) /
+    temperature, so a softmax gives P(signal) = sigmoid((rho - threshold) / T)
+    and the validator ranks examples by their network SNR.
+
+    The offsource is the one the dataset estimated the whitening PSD from; the
+    layer estimates the same PowerSpectrum from it (with `spectral_config`) and
+    whitens its templates with the dataset's filter.
+
+    The bank's masses are a non-trainable weight, so a model's fingerprint
+    includes its bank.
     """
-    
+
     def __init__(
         self,
-        mass_1_range: Tuple[float, float] = (5.0, 75.0),
-        mass_2_range: Tuple[float, float] = (5.0, 75.0),
-        num_templates_per_dim: int = 16,
-        sample_rate_hertz: float = 8192.0,
-        duration_seconds: float = 2.0,
-        f_low: float = 20.0,
+        mass_range: Tuple[float, float] = (5.0, 95.0),
+        minimal_match: float = 0.97,
+        sample_rate_hertz: float = Defaults.sample_rate_hertz,
+        onsource_duration_seconds: float = Defaults.onsource_duration_seconds,
+        crop_duration_seconds: float = Defaults.crop_duration_seconds,
+        spectral_config=None,
+        search_window_seconds=None,
+        ifos=None,
+        max_time_offset_seconds=None,
         snr_threshold: float = 8.0,
         temperature: float = 2.0,
-        **kwargs
+        batch_chunk: int = 16,
+        template_chunk: int = 8,
+        bank_masses=None,
+        **kwargs,
     ):
         super().__init__(**kwargs)
-        
-        self.mass_1_range = tuple(mass_1_range)
-        self.mass_2_range = tuple(mass_2_range)
-        self.num_templates_per_dim = num_templates_per_dim
-        self.sample_rate_hertz = sample_rate_hertz
-        self.duration_seconds = duration_seconds
-        self.f_low = f_low
-        self.snr_threshold = snr_threshold
-        self.temperature = temperature
-        
-        # Create underlying matched filter
+        import gravyflow as gf
+        self.mass_range = tuple(float(m) for m in mass_range)
+        self.minimal_match = float(minimal_match)
+        self.sample_rate_hertz = float(sample_rate_hertz)
+        self.onsource_duration_seconds = float(onsource_duration_seconds)
+        self.crop_duration_seconds = float(crop_duration_seconds)
+        self.spectral_config = _as_spectral_config(spectral_config)
+        self.search_window_seconds = None if search_window_seconds is None else tuple(search_window_seconds)
+        self.ifos = None if ifos is None else [gf.IFO[i] if isinstance(i, str) else i for i in ifos]
+        self.max_time_offset_seconds = max_time_offset_seconds
+        self.snr_threshold = float(snr_threshold)
+        self.temperature = float(temperature)
+        self.batch_chunk = int(batch_chunk)
+        self.template_chunk = int(template_chunk)
+        bank = None
+        if bank_masses is not None:
+            bank = TemplateBank.from_masses(*np.asarray(bank_masses, dtype=np.float64))
         self._matched_filter = MatchedFilter(
-            mass_1_range=self.mass_1_range,
-            mass_2_range=self.mass_2_range,
-            num_templates_per_dim=self.num_templates_per_dim,
-            sample_rate_hertz=self.sample_rate_hertz,
-            duration_seconds=self.duration_seconds,
-            f_low=self.f_low,
-        )
-    
+            bank=bank, mass_range=self.mass_range, minimal_match=self.minimal_match,
+            sample_rate_hertz=self.sample_rate_hertz, onsource_duration_seconds=self.onsource_duration_seconds,
+            crop_duration_seconds=self.crop_duration_seconds, spectral_config=self.spectral_config,
+            search_window_seconds=self.search_window_seconds, ifos=self.ifos,
+            max_time_offset_seconds=self.max_time_offset_seconds,
+            batch_chunk=self.batch_chunk, template_chunk=self.template_chunk)
+
     def build(self, input_shape):
-        """Pre-generate templates on first call."""
-        self._matched_filter.generate_templates()
+        mf = self._matched_filter
+        templates = mf.generate_templates()
+        self.bank_masses = self.add_weight(
+            name="bank_masses", shape=(2, mf.num_templates), trainable=False, dtype="float32",
+            initializer=keras.initializers.Constant(np.stack([mf.bank.mass_1, mf.bank.mass_2]).astype(np.float32)))
+        self.templates = self.add_weight(
+            name="templates", shape=templates.shape, trainable=False, dtype="float32",
+            initializer=keras.initializers.Constant(templates))
         super().build(input_shape)
-    
+
+    def _split(self, inputs):
+        import gravyflow as gf
+        if isinstance(inputs, dict):
+            return (inputs[gf.ReturnVariables.WHITENED_ONSOURCE.name], inputs[gf.ReturnVariables.OFFSOURCE.name])
+        whitened, offsource = inputs
+        return whitened, offsource
+
     def call(self, inputs, training=None):
-        """
-        Run matched filter and convert SNR to probabilities.
-        
-        Args:
-            inputs: Strain data of shape (Batch, Samples) or (Batch, Channels, Samples)
-            training: Unused (no training for matched filter)
-        
-        Returns:
-            Binary probabilities of shape (Batch, 2) for [P(noise), P(signal)]
-        """
-        # Shape check for multi-channel input
-        if len(inputs.shape) == 3:
-            # Shape: (Batch, Channels, Samples) - e.g., multi-IFO data
-            # Axis 0 = Batch, Axis 1 = Channels/IFOs, Axis 2 = Samples
-            data = jnp.mean(inputs, axis=1)  # -> (Batch, Samples)
-        else:
-            # Shape: (Batch, Samples)
-            data = inputs
-        
-        # Get SNR for each batch element
-        # Shape: snr = (Batch, NumTemplates, Samples) or (NumTemplates, Samples)
-        snr = self._matched_filter.filter(data)
-        
-        # Get maximum SNR over templates and time for each batch element
-        if snr.ndim == 3:
-            # Shape: (Batch, NumTemplates, Samples)
-            # Reduce over axes 1 (templates) and 2 (samples)
-            max_snr = jnp.max(snr, axis=(1, 2))  # -> (Batch,)
-        elif snr.ndim == 2:
-            # Shape: (NumTemplates, Samples) - single sample
-            max_snr = jnp.array([jnp.max(snr)])  # -> (1,)
-        else:
-            max_snr = jnp.max(snr)
-            max_snr = jnp.atleast_1d(max_snr)
-        
-        # Convert SNR to detection probability via sigmoid
-        prob_signal = jax.nn.sigmoid(
-            (max_snr - self.snr_threshold) / self.temperature
-        )
-        prob_noise = 1.0 - prob_signal
-        
-        # Return: shape (Batch, 2) matching classification model output
-        return jnp.stack([prob_noise, prob_signal], axis=-1)
-    
+        whitened, offsource = self._split(inputs)
+        mf = self._matched_filter
+        h_fft = mf.template_spectra(self.templates)
+        (snr, _, _), _ = mf._run(whitened, offsource, reduce=True, h_fft=h_fft)
+        logit = (snr - self.snr_threshold) / self.temperature
+        return ops.stack([ops.zeros_like(logit), logit], axis=-1)
+
+    def compute_output_spec(self, inputs, training=None):
+        whitened, _ = self._split(inputs)
+        return keras.KerasTensor((whitened.shape[0], 2), dtype="float32")
+
+    def compute_output_shape(self, input_shape):
+        first = input_shape[0] if isinstance(input_shape, (list, tuple)) and isinstance(input_shape[0], (list, tuple)) \
+            else next(iter(input_shape.values())) if isinstance(input_shape, dict) else input_shape
+        return (first[0], 2)
+
     def get_config(self):
-        """Return layer config for serialization."""
         config = super().get_config()
         config.update({
-            "mass_1_range": self.mass_1_range,
-            "mass_2_range": self.mass_2_range,
-            "num_templates_per_dim": self.num_templates_per_dim,
+            "mass_range": list(self.mass_range),
+            "minimal_match": self.minimal_match,
             "sample_rate_hertz": self.sample_rate_hertz,
-            "duration_seconds": self.duration_seconds,
-            "f_low": self.f_low,
+            "onsource_duration_seconds": self.onsource_duration_seconds,
+            "crop_duration_seconds": self.crop_duration_seconds,
+            "spectral_config": dict(self.spectral_config.__dict__),
+            "search_window_seconds": None if self.search_window_seconds is None else list(self.search_window_seconds),
+            "ifos": None if self.ifos is None else [i.name for i in self.ifos],
+            "max_time_offset_seconds": self.max_time_offset_seconds,
             "snr_threshold": self.snr_threshold,
             "temperature": self.temperature,
+            "batch_chunk": self.batch_chunk,
+            "template_chunk": self.template_chunk,
+            "bank_masses": np.stack([self._matched_filter.bank.mass_1, self._matched_filter.bank.mass_2]).tolist(),
         })
         return config
-    
-    @classmethod
-    def from_config(cls, config):
-        """Reconstruct layer from config."""
-        return cls(**config)
-    
-    def compute_output_shape(self, input_shape):
-        """Output shape is (batch, 2) for binary classification."""
-        if isinstance(input_shape, tuple):
-            batch_size = input_shape[0]
-        else:
-            batch_size = None
-        return (batch_size, 2)
-    
+
     @property
     def matched_filter(self) -> MatchedFilter:
-        """Access underlying MatchedFilter for advanced operations."""
         return self._matched_filter
-    
+
     @property
     def num_templates(self) -> int:
-        """Number of templates in the bank."""
         return self._matched_filter.num_templates
