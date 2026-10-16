@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, IntEnum, auto
 from contextlib import closing
-from typing import List, Tuple, Union, Dict, Any, Optional, Generator
+from typing import List, Tuple, Union, Dict, Any, Optional, Generator, Sequence
 from pathlib import Path
 from .cache import MemoryCache
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -235,25 +235,33 @@ class ObservingRun(Enum):
 #: FFT and filtering operations.
 WINDOW_EDGE_BUFFER_SAMPLES = 16
 
+#: Tolerance on a piece's duration before it is cut to whole seconds: GPS times near
+#: 1e9 s carry float64 rounding of about 1e-7 s, far below one sample.
+_KEPT_SECONDS_TOLERANCE = 1e-6
+
+
+def kept_seconds(duration_seconds):
+    """
+    The whole seconds of a piece that are loaded: its duration, cut to whole seconds
+    at its end (``get_segment``), so that the number of distinct piece lengths, and
+    so of compilations of the window sampler, stays bounded. The sampling plan
+    measures a piece's window starts on this same length: the plan from the piece's
+    GPS span, the loader from the samples it fetched, which agree unless a fetch
+    returns less than its span.
+    """
+    return np.floor(np.asarray(duration_seconds, dtype=np.float64) + _KEPT_SECONDS_TOLERANCE)
+
 
 def window_start_bounds(
         num_samples,
         num_onsource_samples: int,
         num_offsource_samples: int,
-        share: Optional[Tuple[float, float]] = None,
     ) -> Tuple[int, int]:
     """
     The [lo, hi) onsource start indices whose windows fit in a piece of ``num_samples``:
     the offsource before the onsource, and ``WINDOW_EDGE_BUFFER_SAMPLES`` spare after it.
-    ``share = (f0, f1)`` narrows them to that fraction of the range, at least one start.
     """
-    lo = num_offsource_samples
-    hi = num_samples - num_onsource_samples - WINDOW_EDGE_BUFFER_SAMPLES
-    if share is not None:
-        span = hi - lo
-        first = int(share[0] * span)
-        lo, hi = lo + first, lo + max(int(share[1] * span), first + 1)
-    return lo, hi
+    return num_offsource_samples, num_samples - num_onsource_samples - WINDOW_EDGE_BUFFER_SAMPLES
 
 
 def _random_subsection(
@@ -477,37 +485,39 @@ class IFOData:
         num_onsource_samples: int,
         num_offsource_samples: int,
         num_examples_per_batch: int,
-        grid_position: int,
-        shares: Optional[np.ndarray] = None,
+        cursors: Sequence[Optional[int]],
     ):
         """
         Sequential windows, one onsource apart, from each detector's piece.
 
-        Each detector walks its window starts (``window_start_bounds``) from
-        ``grid_position``, wrapping at their end. ``shares[i] = (f0, f1)`` limits
-        detector i to the fraction of its starts that its row owns, so rows that share
-        a piece walk different windows of it. Detector i is offset by i / n of its
-        range, so the detectors' windows differ.
+        Detector i walks its piece's window starts (``window_start_bounds``) from
+        ``cursors[i]``, an offset into them, wrapping at their end. A cursor of None
+        starts a piece not walked before, at i / n of its starts, so that detectors
+        on one stretch of time take different windows.
 
-        Returns: (subarrays, background_chunks, gps_times, new_grid_position), or
-        Nones when a piece is too short for one window.
+        Returns: (subarrays, background_chunks, gps_times, new_cursors), or Nones
+        when a piece is too short for one window.
         """
         all_subarrays = []
         all_background_chunks = []
         all_gps_times = []
+        new_cursors = []
 
         num_detectors = max(len(self.data), 1)
-        steps = grid_position + num_onsource_samples * np.arange(num_examples_per_batch)
+        steps = num_onsource_samples * np.arange(num_examples_per_batch)
 
         for ifo_idx, (tensor_data, start_gps_time) in enumerate(zip(self.data, self.start_gps_time)):
-            share = None if shares is None else shares[ifo_idx]
             lo, hi = window_start_bounds(
-                int(ops.shape(tensor_data)[0]), num_onsource_samples, num_offsource_samples, share
+                int(ops.shape(tensor_data)[0]), num_onsource_samples, num_offsource_samples
             )
             span = hi - lo
             if span <= 0:
-                return None, None, None, grid_position
-            positions = lo + (steps + ifo_idx * (span // num_detectors)) % span
+                return None, None, None, cursors
+            cursor = cursors[ifo_idx]
+            if cursor is None:
+                cursor = ifo_idx * (span // num_detectors)
+            positions = lo + (cursor + steps) % span
+            new_cursors.append(int((cursor + num_examples_per_batch * num_onsource_samples) % span))
 
             onsource = ops.stack([tensor_data[pos:pos + num_onsource_samples] for pos in positions])
             offsource = ops.stack(
@@ -523,9 +533,7 @@ class IFOData:
         stacked_background = ops.concatenate(all_background_chunks, axis=1)
         stacked_gps = np.concatenate(all_gps_times, axis=1)
 
-        new_grid_position = grid_position + (num_examples_per_batch * num_onsource_samples)
-
-        return stacked_subarrays, stacked_background, stacked_gps, new_grid_position
+        return stacked_subarrays, stacked_background, stacked_gps, new_cursors
 
 
 # =============================================================================
@@ -576,7 +584,7 @@ class BaseDataObtainer(ABC):
         self._current_batch_index = 0
         self._segment_exhausted = True
         self._num_batches_in_current_segment = 0
-        self._grid_position = 0
+        self._grid_cursors = {}  # GRID's position in each piece it walks
         self.rng = None
         self.ifos = None
         
@@ -1275,10 +1283,8 @@ class BaseDataObtainer(ABC):
         The strain of one segment at ``sample_rate_hertz``, or None if it cannot be had.
 
         The whole segment is fetched, with no margin trimmed at either end. Only its
-        tail is cut, to a whole number of seconds, so that the number of distinct
-        segment lengths (and so of compilations of the window sampler) stays bounded.
-        No sample before the segment's start is lost, and at most one second at its
-        end.
+        tail is cut, to whole seconds (``kept_seconds``). No sample before the
+        segment's start is lost, and less than one second at its end.
         """
         segment = None
         
@@ -1355,7 +1361,7 @@ class BaseDataObtainer(ABC):
                 # whole seconds (see the docstring).
                 samples_per_second = int(round(original_sample_rate))
                 num_samples = segment_data.shape[0]
-                whole_seconds = num_samples // samples_per_second
+                whole_seconds = int(kept_seconds(num_samples / original_sample_rate))
                 if whole_seconds < 1:
                     logging.debug(
                         f"Segment shorter than one second ({num_samples} samples); skipped."
@@ -1451,7 +1457,7 @@ class BaseDataObtainer(ABC):
                                 f"Segment missing for {ifo.name} at {segment_start_gps_time}. "
                                 f"Filling with zeros (total zero-filled: {self._zero_filled_segments_count})."
                             )
-                        duration = segment_end_gps_time - segment_start_gps_time
+                        duration = kept_seconds(segment_end_gps_time - segment_start_gps_time)
                         num_samples = int(duration * sample_rate_hertz)
                         segments.append(ops.zeros((num_samples,), dtype="float32"))
                         gps_start_times.append(segment_start_gps_time)
@@ -1504,7 +1510,7 @@ class BaseDataObtainer(ABC):
                                 f"Prefetched segment missing. Filling with zeros "
                                 f"(total zero-filled: {self._zero_filled_segments_count})."
                             )
-                        duration = segment_end_gps_time - segment_start_gps_time
+                        duration = kept_seconds(segment_end_gps_time - segment_start_gps_time)
                         num_samples = int(duration * sample_rate_hertz)
                         segments.append(ops.zeros((num_samples,), dtype="float32"))
                         gps_start_times.append(segment_start_gps_time)
@@ -1539,7 +1545,7 @@ class BaseDataObtainer(ABC):
                                 f"Segment missing for {ifo.name} at {segment_start_gps_time}. "
                                 f"Filling with zeros (total zero-filled: {self._zero_filled_segments_count})."
                             )
-                        duration = segment_end_gps_time - segment_start_gps_time
+                        duration = kept_seconds(segment_end_gps_time - segment_start_gps_time)
                         num_samples = int(duration * sample_rate_hertz)
                         segments.append(ops.zeros((num_samples,), dtype="float32"))
                         gps_start_times.append(segment_start_gps_time)

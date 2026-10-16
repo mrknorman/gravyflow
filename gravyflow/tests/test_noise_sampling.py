@@ -116,7 +116,7 @@ class TestIFODataGridSubsection:
     """Test IFOData.grid_subsection method."""
     
     def test_grid_subsection_returns_correct_format(self):
-        """Grid subsection should return (subarrays, background, gps_times, new_pos)."""
+        """Grid subsection should return (subarrays, background, gps_times, new_cursors)."""
         from keras import ops
         
         # Create mock IFOData with fake data
@@ -141,17 +141,17 @@ class TestIFODataGridSubsection:
             num_onsource,
             num_offsource,
             batch_size,
-            grid_position=0
+            cursors=[None],
         )
         
         # Should return 4-tuple
         assert len(result) == 4
-        subarrays, background, gps_times, new_pos = result
+        subarrays, background, gps_times, new_cursors = result
         
         # Check shapes if not None
         if subarrays is not None:
             assert len(ops.shape(subarrays)) == 3  # (batch, detectors, samples)
-            assert new_pos > 0  # Position should advance
+            assert new_cursors[0] > 0  # The cursor advances
 
 
 class TestSegmentCyclingRegression:

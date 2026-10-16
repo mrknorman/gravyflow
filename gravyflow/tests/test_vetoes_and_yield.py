@@ -469,31 +469,34 @@ class TestSegmentYield:
 # SAMPLING DENSITY
 # =============================================================================
 
+from gravyflow.src.dataset.acquisition.base import kept_seconds  # noqa: E402
 from gravyflow.src.dataset.acquisition.noise import couple_pieces  # noqa: E402
 
-#: The test window at 64 Hz: 1 s onsource with 0.5 s crops (2 s loaded) and 2 s
-#: offsource, plus the sampler's 16-sample buffer: 4.25 s of footprint, so a piece
-#: of 4.25 + x seconds has x seconds of window starts. Usable pieces: >= 8 s.
+#: The test window at 64 Hz: 1 s onsource with 0.5 s crops (2 s loaded) and 1.75 s
+#: offsource, plus the sampler's 16-sample buffer: 4 s of footprint, so a piece of
+#: 4 + x whole seconds has x seconds of window starts. Usable pieces: >= 7.5 s.
 RATE, BATCH = 64.0, 16
-FOOTPRINT = 4.25
+FOOTPRINT, OFFSOURCE = 4.0, 1.75
 
 
-def _draw(obtainer, rows, num_batches, mode=gf.SamplingMode.RANDOM):
+def _draw(obtainer, rows, num_batches, mode=gf.SamplingMode.RANDOM, offsource_seconds=OFFSOURCE,
+          batch=BATCH, seed=7):
     """START_GPS_TIME of ``num_batches`` batches drawn from ``rows`` with fake strain."""
     def fake_acquire(sample_rate_hertz, valid_segments, ifos, scale_factor, **kwargs):
+        # As the loader does: each piece is kept to whole seconds (kept_seconds).
         for row in valid_segments:
-            data = [np.zeros(int(round((end - start) * sample_rate_hertz)), np.float32)
+            data = [np.zeros(int(kept_seconds(end - start) * sample_rate_hertz), np.float32)
                     for start, end in row]
             yield gf.IFOData(data, sample_rate_hertz, [start for start, _ in row])
 
     obtainer.valid_segments = np.asarray(rows, dtype=np.float64)
-    obtainer.augmentations = []  # saturation 8 exactly: 0.5 batches per second of starts
+    obtainer.augmentations = []  # saturation exactly: 8 gives 0.5 batches per second of starts
     ifos = [gf.IFO.H1, gf.IFO.L1][:obtainer.valid_segments.shape[1]]
     with patch.object(obtainer, "acquire", side_effect=fake_acquire):
         generator = obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=RATE, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
-            offsource_duration_seconds=2.0, num_examples_per_batch=BATCH, ifos=ifos,
-            scale_factor=1.0, seed=7, sampling_mode=mode,
+            offsource_duration_seconds=offsource_seconds, num_examples_per_batch=batch, ifos=ifos,
+            scale_factor=1.0, seed=seed, sampling_mode=mode,
         )
         starts = [np.asarray(next(generator)[gf.ReturnVariables.START_GPS_TIME])
                   for _ in range(num_batches)]
@@ -513,16 +516,14 @@ class TestSamplingDensity:
     """
 
     def test_couple_pieces_uses_each_piece_in_proportion(self):
-        index, shares, weights = couple_pieces([np.array([3.0, 1.0]), np.array([2.0, 1.0, 1.0])])
+        index, weights = couple_pieces([np.array([3.0, 1.0]), np.array([2.0, 1.0, 1.0])])
         assert np.isclose(np.sum(weights), 1.0)
         for i, measure in enumerate([np.array([3.0, 1.0]), np.array([2.0, 1.0, 1.0])]):
+            # Each detector's pieces come in order, each in one run of rows.
+            assert np.all(np.diff(index[:, i]) >= 0)
             for k, m in enumerate(measure):
                 in_rows = index[:, i] == k
                 assert np.isclose(np.sum(weights[in_rows]), m / np.sum(measure))
-                # The rows of a piece cover it exactly once, in order.
-                covered = shares[in_rows, i]
-                assert np.isclose(covered[0, 0], 0.0) and np.isclose(covered[-1, 1], 1.0)
-                np.testing.assert_allclose(covered[1:, 0], covered[:-1, 1])
         # The longest pieces go together.
         assert tuple(index[0]) == (0, 0)
 
@@ -547,16 +548,38 @@ class TestSamplingDensity:
         np.testing.assert_array_equal(h1_density, [8.0, 8.0])
         np.testing.assert_array_equal(l1_windows, [75 * BATCH, 0])
 
-    def test_grid_rows_sharing_a_piece_walk_different_windows(self):
-        # One H1 piece, two L1 pieces: two rows share the H1 piece.
+
+    def test_a_pass_with_no_batch_due_does_not_end_the_generator(self):
+        # One 40 s piece per detector at saturation 1: about 0.68 batches are due per
+        # pass, so a pass can be due none. The generator ended on such a pass.
+        piece = np.array([[1238166018.0, 1238166058.0]])
+        rows = np.stack([piece, piece], axis=1)
+        for seed in range(5):
+            obtainer = _noise_obtainer(gf.ObservingRun.O3, saturation=1.0)
+            starts = _draw(obtainer, rows, num_batches=20, offsource_seconds=16.0, batch=32, seed=seed)
+            assert starts.shape == (20 * 32, 2)
+
+    def test_the_plan_measures_pieces_as_the_loader_keeps_them(self):
+        # The loader keeps whole seconds of a piece; the plan measured its exact length,
+        # so short fractional pieces were drawn up to 5.6% too densely.
         obtainer = _noise_obtainer(gf.ObservingRun.O3)
-        h1 = np.array([[0.0, FOOTPRINT + 100.0]])
-        l1 = np.array([[0.0, FOOTPRINT + 50.0], [1000.0, 1000.0 + FOOTPRINT + 50.0]])
-        rows = np.stack([np.repeat(h1, 2, axis=0), l1], axis=1)
-        starts = _draw(obtainer, rows, num_batches=50, mode=gf.SamplingMode.GRID)
-        first = starts[:, 1] < 1000.0
-        assert 0 < np.sum(first) < len(starts)
-        assert not set(starts[first, 0]) & set(starts[~first, 0])
+        plan = obtainer.plan_sampling(np.array([[[0.0, 30.6]]]), 8.0, FOOTPRINT)
+        np.testing.assert_allclose(plan.start_seconds, [30.0 - FOOTPRINT])
+
+    def test_grid_walks_each_piece_once_across_its_rows(self):
+        # Saturation 0.5: a 2 s stride visits each start once. One H1 piece shares five
+        # rows with five L1 pieces, each due about 1.6 batches a pass. GRID wrapped inside
+        # each row's share, overlapping that row's own windows.
+        obtainer = _noise_obtainer(gf.ObservingRun.O3, saturation=0.5)
+        h1 = np.array([[0.0, FOOTPRINT + 256.0]])
+        l1 = np.array([[k * 100.0, k * 100.0 + FOOTPRINT + 51.0] for k in range(5)])
+        rows = np.stack([np.repeat(h1, 5, axis=0), l1], axis=1)
+        # 16 batches of 16 windows walk the piece's 128 two-second positions twice over,
+        # across rows and passes.
+        starts = _draw(obtainer, rows, num_batches=16, mode=gf.SamplingMode.GRID)[:, 0]
+        positions, visits = np.unique(starts, return_counts=True)
+        assert len(positions) == 128 and np.all(visits == 2)
+        assert np.min(np.diff(positions)) >= 2.0 - 1e-9  # no window overlaps another
 
 
 class _RecordingFetch:

@@ -154,7 +154,7 @@ def test_gps_times_survive_random_subsection():
 
 def test_gps_times_survive_grid_subsection():
     with jax.enable_x64(False):
-        onsource, _, gps_times, _ = _segment().grid_subsection(ONSOURCE, OFFSOURCE, 4, OFFSOURCE)
+        onsource, _, gps_times, _ = _segment().grid_subsection(ONSOURCE, OFFSOURCE, 4, [None, None])
     assert gps_times.dtype == np.float64
     expected = np.array([GPS, GPS + 100.0])[None, :] + np.asarray(onsource)[:, :, 0].astype(np.float64) * INTERVAL
     np.testing.assert_allclose(gps_times, expected, rtol=0.0, atol=1e-6)

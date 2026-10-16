@@ -19,7 +19,7 @@ from gravyflow.src.dataset.config import WindowSpec
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder,
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS,
-    WINDOW_EDGE_BUFFER_SAMPLES,
+    WINDOW_EDGE_BUFFER_SAMPLES, kept_seconds,
 )
 from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
@@ -27,7 +27,7 @@ from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.utils.shapes import ShapeEnforcer
 
 
-def couple_pieces(measures: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def couple_pieces(measures: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
     """
     Rows of one piece per detector, in which each detector's pieces take part in
     proportion to ``measures``.
@@ -39,9 +39,8 @@ def couple_pieces(measures: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray, n
     row, and a piece's rows add up to its tile: at most ``sum(n_i) - k + 1`` rows for
     k detectors with n_i pieces.
 
-    Returns, for each row: each detector's piece index (R, k); the fraction
-    [f0, f1) of each detector's piece that the row covers (R, k, 2); and the row's
-    weight, its interval's width (R,).
+    Returns, for each row: each detector's piece index (R, k), and the row's weight,
+    its interval's width (R,).
     """
     tiles = []
     for measure in measures:
@@ -60,37 +59,26 @@ def couple_pieces(measures: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray, n
         np.clip(np.searchsorted(tile, middle, side="right") - 1, 0, len(tile) - 2)
         for tile in tiles
     ], axis=1)
-    shares = np.stack([
-        np.stack([
-            np.clip((bound - tile[index[:, i]]) / (tile[index[:, i] + 1] - tile[index[:, i]]), 0.0, 1.0)
-            for bound in (lower, upper)
-        ], axis=1)
-        for i, tile in enumerate(tiles)
-    ], axis=1)
-    return index, shares, upper - lower
+    return index, upper - lower
 
 
 @dataclass(frozen=True)
 class SamplingPlan:
     """
-    How real-noise windows are drawn: the rows to load, and what each row owns.
+    How real-noise windows are drawn: the rows to load, and each row's budget.
 
     Within each bin, each detector's window starts are drawn uniformly over the starts
     of all its usable pieces, so no piece is sampled more densely than another; the
     bin's number of examples is set by the detector with the fewest starts, which is
     sampled at the nominal density and the others at or below it.
 
-    - ``rows``: (M, detectors, 2) GPS pieces to load.
-    - ``shares``: (M, detectors, 2) the fraction [f0, f1) of each piece's window
-      starts that the row owns. GRID walks only that fraction, so rows that share a
-      piece do not repeat its windows; RANDOM draws over the whole piece, since every
-      row of a piece does, in proportion to its share.
-    - ``start_seconds``: (M,) the row's budget: the fewest seconds of window starts
+    - ``rows``: (M, detectors, 2) GPS pieces to load. A piece's rows together hold
+      its share of the bin, and each draws over the whole piece.
+- ``start_seconds``: (M,) the row's budget: the fewest seconds of window starts
       any detector owns in it. A row's expected number of examples is this times the
       nominal density.
     """
     rows: np.ndarray
-    shares: np.ndarray
     start_seconds: np.ndarray
 
 
@@ -138,7 +126,7 @@ class NoiseDataObtainer(BaseDataObtainer):
         self.acquisition_mode = AcquisitionMode.NOISE
         self._segment_cache_maxsize = 8  # NOISE mode uses larger segments
         self._segment_generator = None  # Reusable generator over the sampling plan
-        self._current_shares = None  # The current row's shares (SamplingPlan.shares)
+        self._current_row = None  # The GPS pieces of the row being drawn from
 
     # =========================================================================
     # NOISE-SPECIFIC SEGMENT PROCESSING
@@ -222,8 +210,9 @@ class NoiseDataObtainer(BaseDataObtainer):
 
         Within each ``max_segment_duration_seconds`` bin, each detector's pieces of at
         least ``minimum_duration_seconds`` are usable; a bin where some detector has
-        none is skipped. Each piece's window starts span its length less
-        ``footprint_seconds``; the usable pieces are re-paired with ``couple_pieces``
+        none is skipped. A piece is measured as it is loaded, in whole seconds
+        (``kept_seconds``), and its window starts span that length less
+        ``footprint_seconds``. The usable pieces are re-paired with ``couple_pieces``
         in proportion to those starts, longest first, so every usable piece is drawn
         from and no short piece is drawn more densely than a long one. Bins keep the
         order in which ``segments`` first reach them.
@@ -233,27 +222,27 @@ class NoiseDataObtainer(BaseDataObtainer):
         bins = np.floor(segments[:, 0, 0] / self.max_segment_duration_seconds)
         _, first = np.unique(bins, return_index=True)
 
-        rows, shares, start_seconds = [], [], []
+        rows, start_seconds = [], []
         for bin_index in bins[np.sort(first)]:
             in_bin = segments[bins == bin_index]
-            usable = []
+            usable, starts = [], []
             for j in range(num_ifos):
                 pieces = np.unique(in_bin[:, j, :], axis=0)
-                lengths = pieces[:, 1] - pieces[:, 0]
-                pieces = pieces[lengths >= minimum_duration_seconds]
-                lengths = pieces[:, 1] - pieces[:, 0]
-                usable.append(pieces[np.argsort(-lengths, kind="stable")])
+                lengths = kept_seconds(pieces[:, 1] - pieces[:, 0])
+                keep = lengths >= minimum_duration_seconds
+                pieces, lengths = pieces[keep], lengths[keep]
+                order = np.argsort(-lengths, kind="stable")
+                usable.append(pieces[order])
+                starts.append(lengths[order] - footprint_seconds)
             if any(len(pieces) == 0 for pieces in usable):
                 continue
-            starts = [pieces[:, 1] - pieces[:, 0] - footprint_seconds for pieces in usable]
-            index, row_shares, weights = couple_pieces(starts)
+            index, weights = couple_pieces(starts)
             rows.append(np.stack([usable[j][index[:, j]] for j in range(num_ifos)], axis=1))
-            shares.append(row_shares)
             start_seconds.append(weights * min(np.sum(s) for s in starts))
 
         if not rows:
-            return SamplingPlan(np.empty((0, num_ifos, 2)), np.empty((0, num_ifos, 2)), np.empty(0))
-        return SamplingPlan(np.concatenate(rows), np.concatenate(shares), np.concatenate(start_seconds))
+            return SamplingPlan(np.empty((0, num_ifos, 2)), np.empty(0))
+        return SamplingPlan(np.concatenate(rows), np.concatenate(start_seconds))
 
     def _planned_segments(
             self,
@@ -264,18 +253,34 @@ class NoiseDataObtainer(BaseDataObtainer):
             scale_factor: float,
         ):
         """
-        One pass over ``plan``: each row's loaded segment, its shares and its number of
-        batches. A row's expected number of batches is its ``start_seconds`` times
-        ``batches_per_start_second``, rounded up or down at random in proportion, so
-        no row is over- or under-sampled on average; rows given none are not loaded.
+        Passes over ``plan``, without end: each due row's pieces, its loaded segment
+        and its number of batches.
+
+        Each pass, a row accrues its expected number of batches, its ``start_seconds``
+        times ``batches_per_start_second``, and is due the whole batches it has
+        accrued; the fraction left is carried to the next pass. Accruals start at a
+        random fraction, so rows that expect less than a batch a pass come due in
+        random order. Every row is thus drawn at its expected rate, to within one
+        batch over any number of passes. A pass in which no row is due is not the
+        end: the passes end only when one with rows due loads none of them.
         """
         expected = plan.start_seconds * batches_per_start_second
-        batches = np.floor(expected + self.rng.random(len(expected))).astype(int)
-        for row, shares, num_batches in zip(plan.rows, plan.shares, batches):
-            if num_batches == 0:
-                continue
-            for segment in self.acquire(sample_rate_hertz, row[None], ifos, scale_factor):
-                yield segment, shares, num_batches
+        if not np.any(expected > 0):
+            return
+        accrued = self.rng.random(len(expected))
+        while True:
+            accrued += expected
+            due = np.floor(accrued).astype(int)
+            accrued -= due
+            loaded = not np.any(due)
+            for row, num_batches in zip(plan.rows, due):
+                if num_batches == 0:
+                    continue
+                for segment in self.acquire(sample_rate_hertz, row[None], ifos, scale_factor):
+                    loaded = True
+                    yield row, segment, num_batches
+            if not loaded:
+                return
 
     def calculate_bin_indices(self, segments, interval, start_period):
         """Calculate bin indices for segments based on time interval."""
@@ -352,7 +357,7 @@ class NoiseDataObtainer(BaseDataObtainer):
                 segments = np.reshape(segments, (-1, 2))
                 durations = segments[:, 1] - segments[:, 0]
                 ordered.append(segments[np.argsort(-durations, kind="stable")])
-            index, _, _ = couple_pieces([segments[:, 1] - segments[:, 0] for segments in ordered])
+            index, _ = couple_pieces([segments[:, 1] - segments[:, 0] for segments in ordered])
             for j, segments in enumerate(ordered):
                 rows_per_ifo[j].extend(segments[index[:, j]])
 
@@ -649,6 +654,9 @@ class NoiseDataObtainer(BaseDataObtainer):
         if not self._current_batch_index and not self._current_segment_index:
             window_seconds = \
                 window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds
+            # A new plan starts new passes, and GRID walks its pieces afresh.
+            self._segment_generator = None
+            self._grid_cursors = {}
             self.sampling_plan = self.plan_sampling(
                 self.valid_segments,
                 minimum_duration_seconds=2.0 * window_seconds,
@@ -665,8 +673,6 @@ class NoiseDataObtainer(BaseDataObtainer):
             num_examples_per_batch * window_spec.onsource_duration_seconds
         )
 
-        _consecutive_stop_iterations = 0
-        
         while True:
             while self._segment_exhausted:
                 # Create generator ONCE and reuse it (preserves prefetch across batches)
@@ -680,21 +686,14 @@ class NoiseDataObtainer(BaseDataObtainer):
                     )
                 
                 try:
-                    (self.current_segment, self._current_shares,
+                    (self._current_row, self.current_segment,
                      self._num_batches_in_current_segment) = next(self._segment_generator)
-                    _consecutive_stop_iterations = 0
                 except StopIteration:
-                    _consecutive_stop_iterations += 1
-                    if _consecutive_stop_iterations > 1:
-                        logging.warning("No valid segments available. Generator exhausted.")
-                        return
-                    # Reset generator for next epoch
+                    logging.warning("No planned segment could be loaded. Generator exhausted.")
                     self._segment_generator = None
                     self.current_segment = None  # Clear to free memory
-                    self._current_segment_index = 0
-                    self._segment_exhausted = True
-                    continue
-            
+                    return
+
                 min_num_samples = min([ops.shape(tensor)[0] for tensor in self.current_segment.data])
 
                 if min_num_samples < (num_onsource_samples + num_offsource_samples):
@@ -713,30 +712,30 @@ class NoiseDataObtainer(BaseDataObtainer):
                         self.rng.integers(1E10)
                     )
                 else:
-                    # GRID mode
-                    result = self.current_segment.grid_subsection(
-                        num_onsource_samples, 
-                        num_offsource_samples, 
-                        num_examples_per_batch,
-                        self._grid_position,
-                        self._current_shares,
-                    )
-                    subarrays, background_chunks, start_gps_times, new_grid_pos = result
+                    # GRID walks each detector's piece on from where its last row left
+                    # it, across rows and passes, so a piece's windows repeat only once
+                    # the whole piece has been walked.
+                    keys = [(i, float(start), float(end))
+                            for i, (start, end) in enumerate(self._current_row)]
+                    subarrays, background_chunks, start_gps_times, cursors = \
+                        self.current_segment.grid_subsection(
+                            num_onsource_samples,
+                            num_offsource_samples,
+                            num_examples_per_batch,
+                            [self._grid_cursors.get(key) for key in keys],
+                        )
                     if subarrays is not None:
-                        self._grid_position = new_grid_pos
+                        self._grid_cursors.update(zip(keys, cursors))
 
                 if subarrays is None or background_chunks is None or start_gps_times is None:
                     if sampling_mode == SamplingMode.GRID:
                         self._segment_exhausted = True
-                        self._grid_position = 0
                     continue
-                
+
                 self._current_batch_index += 1
                 if not self._current_batch_index < self._num_batches_in_current_segment:
                     self._segment_exhausted = True
                     self._current_batch_index = 0
-                    if sampling_mode == SamplingMode.GRID:
-                        self._grid_position = 0
 
                 # Yield dict for real noise
                 # Shapes: ONSOURCE/OFFSOURCE = (Batch, IFO, Samples) = BIS
