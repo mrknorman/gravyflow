@@ -55,9 +55,6 @@ GPS_PRECISION_DECIMALS = 2  # 10ms precision (matches gps.py)
 # Tolerance for GPS time matching in seconds (used in cache lookups)
 GPS_TOLERANCE_SECONDS = TransientDefaults.GPS_TOLERANCE_SECONDS
 
-# Kept for compatibility; real-noise segments are no longer trimmed by it.
-SEGMENT_EPSILON_SECONDS = TransientDefaults.SEGMENT_EPSILON_SECONDS
-
 # Real-noise segments are cut on an absolute grid of this many GPS seconds:
 # block k is [2048 k, 2048 (k + 1)).
 SEGMENT_GRID_ORIGIN_GPS = 0.0
@@ -234,6 +231,31 @@ class ObservingRun(Enum):
 # RANDOM SUBSECTION FUNCTIONS (JIT-compiled)
 # =============================================================================
 
+#: Samples left spare after the last window of a piece, against edge artifacts from
+#: FFT and filtering operations.
+WINDOW_EDGE_BUFFER_SAMPLES = 16
+
+
+def window_start_bounds(
+        num_samples,
+        num_onsource_samples: int,
+        num_offsource_samples: int,
+        share: Optional[Tuple[float, float]] = None,
+    ) -> Tuple[int, int]:
+    """
+    The [lo, hi) onsource start indices whose windows fit in a piece of ``num_samples``:
+    the offsource before the onsource, and ``WINDOW_EDGE_BUFFER_SAMPLES`` spare after it.
+    ``share = (f0, f1)`` narrows them to that fraction of the range, at least one start.
+    """
+    lo = num_offsource_samples
+    hi = num_samples - num_onsource_samples - WINDOW_EDGE_BUFFER_SAMPLES
+    if share is not None:
+        span = hi - lo
+        first = int(share[0] * span)
+        lo, hi = lo + first, lo + max(int(share[1] * span), first + 1)
+    return lo, hi
+
+
 def _random_subsection(
         tensor_data,
         num_examples_per_batch: int,
@@ -278,10 +300,8 @@ def _random_subsection_jit(
     # Determine the size of the input tensor.
     num_samples = ops.shape(tensor_data)[0]
 
-    # Calculate the range within which to generate random starts.
-    # The -16 provides a safety buffer to avoid edge artifacts from FFT/filtering operations.
-    maxval = num_samples - num_onsource_samples - 16
-    minval = num_offsource_samples
+    # The range of starts whose windows fit (see window_start_bounds).
+    minval, maxval = window_start_bounds(num_samples, num_onsource_samples, num_offsource_samples)
 
     # Generate uniformly distributed random start indices for each batch.
     # Use JAX random
@@ -457,82 +477,54 @@ class IFOData:
         num_onsource_samples: int,
         num_offsource_samples: int,
         num_examples_per_batch: int,
-        grid_position: int
+        grid_position: int,
+        shares: Optional[np.ndarray] = None,
     ):
         """
-        Extract sequential non-overlapping chunks from segment.
-        Each detector gets an offset to ensure different GPS times.
-        
-        Returns: (subarrays, background_chunks, gps_times, new_grid_position)
+        Sequential windows, one onsource apart, from each detector's piece.
+
+        Each detector walks its window starts (``window_start_bounds``) from
+        ``grid_position``, wrapping at their end. ``shares[i] = (f0, f1)`` limits
+        detector i to the fraction of its starts that its row owns, so rows that share
+        a piece walk different windows of it. Detector i is offset by i / n of its
+        range, so the detectors' windows differ.
+
+        Returns: (subarrays, background_chunks, gps_times, new_grid_position), or
+        Nones when a piece is too short for one window.
         """
         all_subarrays = []
         all_background_chunks = []
         all_gps_times = []
-        
-        num_detectors = len(self.data)
-        
+
+        num_detectors = max(len(self.data), 1)
+        steps = grid_position + num_onsource_samples * np.arange(num_examples_per_batch)
+
         for ifo_idx, (tensor_data, start_gps_time) in enumerate(zip(self.data, self.start_gps_time)):
-            segment_length = int(ops.shape(tensor_data)[0])
-            
-            # Offset each detector by segment_length // num_detectors to ensure different GPS times
-            detector_offset = ifo_idx * (segment_length // max(num_detectors, 1))
-            
-            subarrays_batch = []
-            background_batch = []
-            gps_times_batch = []
-            
-            current_pos = grid_position
-            
-            for _ in range(num_examples_per_batch):
-                # Position with detector offset, wrapped if needed
-                pos = (current_pos + detector_offset) % (segment_length - num_onsource_samples - num_offsource_samples)
-                
-                # Ensure we have room for offsource before onsource
-                if pos < num_offsource_samples:
-                    pos = num_offsource_samples
-                
-                # Extract onsource chunk
-                onsource_start = pos
-                onsource_end = pos + num_onsource_samples
-                
-                if onsource_end > segment_length:
-                    # Segment exhausted for this batch
-                    break
-                    
-                onsource_chunk = tensor_data[onsource_start:onsource_end]
-                
-                # Extract offsource (background before onsource)
-                offsource_start = pos - num_offsource_samples
-                offsource_end = pos
-                offsource_chunk = tensor_data[offsource_start:offsource_end]
-                
-                # Calculate GPS time
-                gps_time = float(start_gps_time) + (pos * float(self.time_interval_seconds))
-                
-                subarrays_batch.append(onsource_chunk)
-                background_batch.append(offsource_chunk)
-                gps_times_batch.append(gps_time)
-                
-                # Advance position for next sample (non-overlapping)
-                current_pos += num_onsource_samples
-            
-            if len(subarrays_batch) < num_examples_per_batch:
-                # Couldn't fill batch - segment exhausted
-                return None, None, None, current_pos
-            
-            # Stack into batch
-            all_subarrays.append(ops.expand_dims(ops.stack(subarrays_batch), axis=1))
-            all_background_chunks.append(ops.expand_dims(ops.stack(background_batch), axis=1))
-            all_gps_times.append(np.expand_dims(as_gps_times(gps_times_batch), axis=1))
-        
-        # Concatenate across detectors
+            share = None if shares is None else shares[ifo_idx]
+            lo, hi = window_start_bounds(
+                int(ops.shape(tensor_data)[0]), num_onsource_samples, num_offsource_samples, share
+            )
+            span = hi - lo
+            if span <= 0:
+                return None, None, None, grid_position
+            positions = lo + (steps + ifo_idx * (span // num_detectors)) % span
+
+            onsource = ops.stack([tensor_data[pos:pos + num_onsource_samples] for pos in positions])
+            offsource = ops.stack(
+                [tensor_data[pos - num_offsource_samples:pos] for pos in positions]
+            )
+            gps_times = float(start_gps_time) + positions * float(self.time_interval_seconds)
+
+            all_subarrays.append(ops.expand_dims(onsource, axis=1))
+            all_background_chunks.append(ops.expand_dims(offsource, axis=1))
+            all_gps_times.append(np.expand_dims(as_gps_times(gps_times), axis=1))
+
         stacked_subarrays = ops.concatenate(all_subarrays, axis=1)
         stacked_background = ops.concatenate(all_background_chunks, axis=1)
         stacked_gps = np.concatenate(all_gps_times, axis=1)
-        
-        # New grid position (advanced by batch)
+
         new_grid_position = grid_position + (num_examples_per_batch * num_onsource_samples)
-        
+
         return stacked_subarrays, stacked_background, stacked_gps, new_grid_position
 
 
@@ -620,7 +612,7 @@ class BaseDataObtainer(ABC):
         self.file_path = None
 
         self.valid_segments = None
-        self.valid_segments_adjusted = None
+        self.sampling_plan = None
         
         # In-memory LRU cache for segments
         self._segment_cache_maxsize = 8
@@ -1603,7 +1595,7 @@ class BaseDataObtainer(ABC):
 
     def clear_valid_segments(self) -> None:
         self.valid_segments = None
-        self.valid_segments_adjusted = None
+        self.sampling_plan = None
         self.ifos = None
         self._current_segment_index = 0
         self._current_batch_index = 0

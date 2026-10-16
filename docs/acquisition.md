@@ -5,11 +5,11 @@ This document provides a detailed explanation of the data acquisition process in
 ## High-Level Overview
 
 The acquisition process is designed to retrieve valid, high-quality data segments from gravitational wave detectors (IFOs) like LIGO. The process ensures that:
-1.  Data is available for all requested detectors simultaneously (coincident time).
+1.  Every requested detector has data in the same 2048 s bin. Detectors are not intersected: each one's windows are drawn independently within the bin, so their data is not coincident in time.
 2.  Data meets specific quality criteria (state flags).
 3.  Segments are split into manageable chunks for training, validation, and testing.
 4.  Unwanted periods (glitches, known events) are vetoed or handled appropriately.
-5.  For noise acquisition, long segments are prioritized to maximize the number of background samples.
+5.  For noise acquisition, every usable piece of data is used, and each detector's windows are drawn uniformly over its usable time in each bin.
 
 ## The Segment Selection Pipeline
 
@@ -44,14 +44,14 @@ Glitch times, classes and metadata (SNR, peak frequency, duration, confidence) c
 
 Event times and source-frame chirp masses come from every catalogue GWOSC's event API lists (https://gwosc.org/eventapi/json/), discovered from the API: the GWTC releases (confident, marginal and auxiliary, GWTC-4.0 onwards and the cumulative GWTC table) and the other lists GWOSC hosts, such as O3_IMBH_marginal, IAS-O3a, O3_Discovery_Papers, O4_Discovery_Papers and O1_O2-Preliminary (`gf.get_event_catalogue`). This is the one event list: the noise vetoes, the glitch catalogue's event exclusion and the event-time functions (`gf.get_all_event_times` and its kin) all read it. It is fetched once and cached in `~/.gravyflow/cache/gwosc_events`, with the GWOSC runs it was fetched under; it is fetched again when gravyflow's runs change. To pick up events GWOSC adds inside known runs, call `gf.get_event_catalogue(use_cache=False)` or delete the cache file.
 
-### 2. Coincidence and Cutting (`cut_segments`)
-To train a model on multi-detector data, we need times where *all* detectors were active.
--   **Splitting**: Before finding intersections, segments are often split into smaller, fixed-duration chunks (e.g., 8196 seconds) to facilitate consistent grouping later.
--   **Operation**: The `cut_segments` method takes long continuous segments and chops them into these fixed-size blocks.
+### 2. Group Cut (`cut_segments`)
+Each detector's segments are cut, separately, into 8192 s blocks for the group assignment below. Detectors are never intersected here or later: section 5 bins them on a common grid instead.
+-   **Operation**: The `cut_segments` method chops long continuous segments into these fixed-size blocks.
+-   **Origin**: The blocks are still counted from the first configured run's start, not from GPS 0. Where the cut falls therefore depends on the run list, and a 2048 s bin (section 5) that straddles it is split into two pieces: about one bin in four of contiguous data.
 
 ### 3. Group Assignment (`get_segments_for_group`)
 Data is deterministically assigned to `train`, `validate`, or `test` groups to ensure no leakage between them.
--   **Logic**: The timeline is divided into blocks (e.g., 8196s). Each block is hashed or assigned based on its time to a specific group.
+-   **Logic**: The timeline is divided into 8192 s blocks. Each block is hashed or assigned based on its time to a specific group.
 -   **Example**: If the split is 98% train, 1% validate, 1% test, then for every 100 blocks, 98 go to training.
 -   **Result**: A filtered list of segments that belong *only* to the requested group (e.g., "train").
 
@@ -62,10 +62,11 @@ Unless the data labels include them, every event GWOSC publishes (see the event 
 -   **Operation** (`veto_time_segments`): both lists are sorted and coalesced (pieces of zero length dropped), then the vetoes are subtracted from the segments, splitting a segment where a veto falls inside it.
 
 ### 5. Noise Acquisition Specifics (`cut_segments`, `merge_bins` & `all_segments_per_bin`)
--   **Binning**: Segments are cut on an absolute grid of `max_segment_duration_seconds` (2048 s by default): bin k is `[2048 k, 2048 (k + 1))` in GPS, whatever runs are configured. A contiguous stretch of data therefore yields whole 2048 s segments.
+-   **Binning**: Segments are cut on an absolute grid of `max_segment_duration_seconds` (2048 s by default): bin k is `[2048 k, 2048 (k + 1))` in GPS, whatever runs are configured. A contiguous stretch of data therefore yields whole 2048 s segments, except where the 8192 s group cut (section 2) falls inside a bin and splits it.
 -   **Merging (`merge_bins`)**: Each detector's pieces are grouped into these bins; bins where some requested detector has no data are dropped.
--   **Selection (`all_segments_per_bin`)**: Every piece of every bin is kept. A bin whose detectors have different numbers of pieces gives as many rows as the detector with the most; each detector's pieces are paired longest first, and a detector with fewer pieces repeats its own.
+-   **Selection (`all_segments_per_bin`)**: Every piece of every bin is kept, as rows of one piece per detector. Each detector's pieces, longest first, tile the bin's share in proportion to their lengths, and each row takes the pieces whose tiles overlap (`couple_pieces`): the longest pieces go together, and a detector with fewer pieces shares one piece among several rows. The pieces of a row need not overlap in time.
 -   **Result**: An array of shape `(rows, detectors, 2)` of `[start, end]` pairs.
+-   **Sampling (`plan_sampling`)**: Once the window is known, each detector's pieces shorter than twice the window are set aside, and the usable pieces of each bin are paired again, now in proportion to their window starts (a piece's length less the window's footprint). Each detector's windows are thus drawn uniformly over the starts of all its usable pieces in the bin: no usable piece is dropped and no short piece is sampled more densely than a long one. The bin's number of examples is set by the detector with the fewest starts, which is sampled at the nominal density (saturation examples per onsource duration); the others are sampled at or below it. A row's number of batches is its expected number rounded up or down at random in proportion, each pass. A bin where some detector has no usable piece is skipped. `RANDOM` draws each detector's start over its whole piece; `GRID` walks only the part of the piece its row owns, so rows that share a piece do not repeat its windows.
 
 ### Loading segments
 Each segment's strain is fetched whole, from its first sample: nothing is trimmed from its start, and its end is cut to a whole number of seconds, so the number of distinct segment lengths stays bounded. On the GWOSC timeline (O1 to O3, H1 and L1, each detector alone, at 2048 Hz), the noise available in pieces of at least 36 s rose from 9,458 h to 21,275 h, with the event and glitch vetoes now applied (with them applied to the previous binning, 5,780 h).
@@ -81,14 +82,14 @@ Finally, the segments are ordered based on the user's preference:
 ```mermaid
 graph TD
     A["Read GWOSC timeline flags"] --> B["Raw Segments per IFO"]
-    B --> C["Cut into Fixed Blocks (e.g. 8196s)"]
+    B --> C["Cut into 8192 s Blocks"]
     C --> D{"Assign Group"}
     D -- Train --> E["Train Segments"]
     D -- Test --> F["Test Segments"]
     E --> G["Veto Events/Glitches"]
     G --> H["Fragmented Segments"]
     H --> I["Cut on the Absolute 2048 s Grid & Bin"]
-    I --> J["Keep Every Piece of Each Bin"]
+    I --> J["Keep Every Piece of Each Bin; Plan Uniform Sampling"]
     J --> K["Final Valid Segments"]
 ```
 

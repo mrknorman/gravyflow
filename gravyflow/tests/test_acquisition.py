@@ -412,20 +412,21 @@ class TestSegmentProcessing:
         np.testing.assert_array_equal(start_bins, [1, 3, 5])
         np.testing.assert_array_equal(end_bins, [2, 4, 6])
     
-    def test_remove_short_segments(self, obtainer):
-        """Test remove_short_segments filters correctly."""
-        # Shape (NumSegments, NumIFOs, 2) -> (3, 1, 2)
+    def test_plan_sampling_drops_short_pieces(self, obtainer):
+        """The sampling plan draws only from pieces of at least the minimum length."""
+        # Shape (NumSegments, NumIFOs, 2) -> (3, 1, 2), each in its own 2048 s bin
         segments = np.array([
-            [[0, 10]],    # 10s duration
-            [[20, 25]],   # 5s duration
-            [[30, 50]]    # 20s duration
-        ])
+            [[0, 10]],         # 10s duration
+            [[2048, 2053]],    # 5s duration
+            [[4096, 4116]]     # 20s duration
+        ], dtype=float)
         
-        filtered = obtainer.remove_short_segments(segments, 8.0)
+        plan = obtainer.plan_sampling(segments, 8.0, 2.0)
         
-        assert ops.shape(filtered) == (2, 1, 2)
-        durations = filtered[:, 0, 1] - filtered[:, 0, 0]
+        assert plan.rows.shape == (2, 1, 2)
+        durations = plan.rows[:, 0, 1] - plan.rows[:, 0, 0]
         assert np.all(durations >= 8.0)
+        np.testing.assert_allclose(plan.start_seconds, [8.0, 18.0])
 
 
 class TestSegmentOrdering:
@@ -549,26 +550,6 @@ class TestCutAndGroupSegments:
         
         assert isinstance(result, list)
     
-    def test_largest_segments_per_bin(self, obtainer):
-        """Test largest_segments_per_bin extracts largest (lines 740-777)."""
-        # Create filtered bins result format
-        filtered_bins = [
-            [np.array([[0.0, 50.0], [10.0, 30.0]]),
-             np.array([[5.0, 45.0]])]
-        ]
-        
-        result = obtainer.largest_segments_per_bin(filtered_bins)
-        
-        assert isinstance(result, np.ndarray)
-
-
-# =============================================================================
-# CACHE AND ACQUISITION TESTS
-# =============================================================================
-
-class TestCachingMethods:
-    """Tests for caching-related methods."""
-    
     def test_cache_segment_no_file_path(self):
         """Test _cache_segment with no file_path does nothing (lines 909-910)."""
         obtainer = gf.IFODataObtainer(
@@ -596,7 +577,7 @@ class TestClearValidSegments:
         
         # Set some state
         obtainer.valid_segments = np.array([[0, 100]])
-        obtainer.valid_segments_adjusted = np.array([[10, 90]])
+        obtainer.sampling_plan = obtainer.plan_sampling(np.array([[[0.0, 100.0]]]), 8.0, 2.0)
         obtainer.ifos = [gf.IFO.L1]
         obtainer._current_segment_index = 5
         obtainer._current_batch_index = 3
@@ -606,7 +587,7 @@ class TestClearValidSegments:
         obtainer.clear_valid_segments()
         
         assert obtainer.valid_segments is None
-        assert obtainer.valid_segments_adjusted is None
+        assert obtainer.sampling_plan is None
         assert obtainer.ifos is None
         assert obtainer._current_segment_index == 0
         assert obtainer._current_batch_index == 0
@@ -877,7 +858,6 @@ class TestGetOnsourceOffsourceChunks:
         
         # Set up obtainer state to prevent real data acquisition
         obtainer.acquisition_mode = gf.AcquisitionMode.NOISE
-        obtainer.valid_segments_adjusted = obtainer.valid_segments
         obtainer._segment_exhausted = False
         obtainer.current_segment = mock_segment
         obtainer._num_batches_in_current_segment = 2
@@ -1064,19 +1044,18 @@ class TestMultipleIFOSegments:
             cache_segments=False
         )
     
-    def test_remove_short_segments_multi_ifo(self, obtainer):
-        """Test remove_short_segments with multiple IFOs."""
-        # Shape (NumSegments, NumIFOs, 2) -> (3, 2, 2)
+    def test_plan_sampling_multi_ifo(self, obtainer):
+        """A bin is drawn from only where every IFO has a usable piece."""
+        # Shape (NumSegments, NumIFOs, 2) -> (3, 2, 2), each in its own 2048 s bin
         segments = np.array([
-            [[0, 10], [0, 15]],     # L1: 10s, H1: 15s
-            [[20, 25], [20, 30]],   # L1: 5s, H1: 10s -> should be removed (L1 too short)
-            [[30, 50], [30, 55]]    # L1: 20s, H1: 25s
-        ])
+            [[0, 10], [0, 15]],         # L1: 10s, H1: 15s
+            [[2048, 2053], [2048, 2058]],   # L1: 5s, H1: 10s -> dropped (L1 too short)
+            [[4096, 4116], [4096, 4121]]    # L1: 20s, H1: 25s
+        ], dtype=float)
         
-        filtered = obtainer.remove_short_segments(segments, 8.0)
+        plan = obtainer.plan_sampling(segments, 8.0, 2.0)
         
-        # Should keep segments where ALL IFOs are >= 8s
-        assert ops.shape(filtered)[0] == 2
+        assert plan.rows.shape[0] == 2
     
     def test_order_segments_multi_ifo(self, obtainer):
         """Test ordering with multiple IFOs."""
@@ -1686,7 +1665,6 @@ class TestGetOnsourceOffsourceChunksReal:
         ])
         
         obtainer.valid_segments = test_segments
-        obtainer.valid_segments_adjusted = test_segments
         obtainer.ifos = [gf.IFO.L1]
         obtainer._segment_exhausted = False
         obtainer._current_segment_index = 0

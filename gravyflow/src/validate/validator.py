@@ -255,11 +255,9 @@ class Validator:
         """The real-noise segments the noise obtainer already holds, for the GPS plot."""
         noise = (self.dataset_args or {}).get("noise_obtainer")
         obtainer = getattr(noise, "ifo_data_obtainer", None)
-        for attr in ("valid_segments_adjusted", "valid_segments"):
-            segments = getattr(obtainer, attr, None)
-            if segments is not None:
-                return np.asarray(segments)
-        return None
+        plan = getattr(obtainer, "sampling_plan", None)
+        segments = plan.rows if plan is not None else getattr(obtainer, "valid_segments", None)
+        return None if segments is None else np.asarray(segments)
 
     def plot(self, output_path: Path = None, comparison_validators: Optional[List["Validator"]] = None):
         """Generate the validation dashboard (a Panel template); save it if given a path."""

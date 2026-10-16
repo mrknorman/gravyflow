@@ -8,6 +8,8 @@ Tests for real-noise vetoes and segment yield.
 - Hardware injections are excluded by default.
 - Segments are cut on an absolute 2048 s GPS grid, every piece of each bin is kept,
   and segments are fetched whole: no margin trimmed, no power-of-two truncation.
+- Windows are drawn uniformly over each detector's usable pieces in each bin: no
+  usable piece is dropped and no short piece is oversampled.
 
 Offline: the GWOSC timeline, the Gravity Spy release and the event catalogue come from
 the committed fixtures, through the harness in ``test_public_sources``.
@@ -447,9 +449,114 @@ class TestSegmentYield:
         longest = rows[np.argmax(rows[:, 1, 1] - rows[:, 1, 0])]
         assert tuple(longest[1]) == (b + 600.0, b + 2048.0)
 
+    def test_the_relative_group_cut_still_splits_a_bin(self):
+        # The 8192 s group cut is counted from the first run's start, not GPS 0, so a
+        # contiguous stretch is split where it falls inside a 2048 s bin.
+        start = gf.ObservingRun.O3.value.start_gps_time
+        cut = start + 11 * 8192.0
+        b = 2048.0 * np.floor(cut / 2048.0)
+        assert b < cut < b + 2048.0
+        obtainer = _noise_obtainer(gf.ObservingRun.O3)
+        rows = self._rows(obtainer, [np.array([[b, b + 2048.0]])], [gf.IFO.L1])
+        assert sorted(map(tuple, rows[:, 0, :])) == [(b, cut), (cut, b + 2048.0)]
+
     def test_merge_bins_with_an_empty_ifo_gives_no_bins(self):
         obtainer = _noise_obtainer(gf.ObservingRun.O3)
         assert obtainer.merge_bins([np.array([[0.0, 10.0]]), np.empty((0, 2))], 2048.0) == []
+
+
+# =============================================================================
+# SAMPLING DENSITY
+# =============================================================================
+
+from gravyflow.src.dataset.acquisition.noise import couple_pieces  # noqa: E402
+
+#: The test window at 64 Hz: 1 s onsource with 0.5 s crops (2 s loaded) and 2 s
+#: offsource, plus the sampler's 16-sample buffer: 4.25 s of footprint, so a piece
+#: of 4.25 + x seconds has x seconds of window starts. Usable pieces: >= 8 s.
+RATE, BATCH = 64.0, 16
+FOOTPRINT = 4.25
+
+
+def _draw(obtainer, rows, num_batches, mode=gf.SamplingMode.RANDOM):
+    """START_GPS_TIME of ``num_batches`` batches drawn from ``rows`` with fake strain."""
+    def fake_acquire(sample_rate_hertz, valid_segments, ifos, scale_factor, **kwargs):
+        for row in valid_segments:
+            data = [np.zeros(int(round((end - start) * sample_rate_hertz)), np.float32)
+                    for start, end in row]
+            yield gf.IFOData(data, sample_rate_hertz, [start for start, _ in row])
+
+    obtainer.valid_segments = np.asarray(rows, dtype=np.float64)
+    obtainer.augmentations = []  # saturation 8 exactly: 0.5 batches per second of starts
+    ifos = [gf.IFO.H1, gf.IFO.L1][:obtainer.valid_segments.shape[1]]
+    with patch.object(obtainer, "acquire", side_effect=fake_acquire):
+        generator = obtainer.get_onsource_offsource_chunks(
+            sample_rate_hertz=RATE, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
+            offsource_duration_seconds=2.0, num_examples_per_batch=BATCH, ifos=ifos,
+            scale_factor=1.0, seed=7, sampling_mode=mode,
+        )
+        starts = [np.asarray(next(generator)[gf.ReturnVariables.START_GPS_TIME])
+                  for _ in range(num_batches)]
+    return np.concatenate(starts)
+
+
+def _windows_per_piece(starts, pieces):
+    return np.array([np.sum((starts >= a) & (starts < b)) for a, b in pieces])
+
+
+class TestSamplingDensity:
+    """
+    Each detector's windows are drawn uniformly over the window starts of its usable
+    pieces in each bin: no usable piece is dropped and no short piece is oversampled.
+    The test pieces give whole numbers of batches (0.5 batches per second of starts at
+    the default saturation of 8), so one pass is exact.
+    """
+
+    def test_couple_pieces_uses_each_piece_in_proportion(self):
+        index, shares, weights = couple_pieces([np.array([3.0, 1.0]), np.array([2.0, 1.0, 1.0])])
+        assert np.isclose(np.sum(weights), 1.0)
+        for i, measure in enumerate([np.array([3.0, 1.0]), np.array([2.0, 1.0, 1.0])]):
+            for k, m in enumerate(measure):
+                in_rows = index[:, i] == k
+                assert np.isclose(np.sum(weights[in_rows]), m / np.sum(measure))
+                # The rows of a piece cover it exactly once, in order.
+                covered = shares[in_rows, i]
+                assert np.isclose(covered[0, 0], 0.0) and np.isclose(covered[-1, 1], 1.0)
+                np.testing.assert_allclose(covered[1:, 0], covered[:-1, 1])
+        # The longest pieces go together.
+        assert tuple(index[0]) == (0, 0)
+
+    def test_short_pieces_are_not_oversampled(self):
+        obtainer = _noise_obtainer(gf.ObservingRun.O3)
+        pieces = np.array([[0.0, FOOTPRINT + 200.0], [300.0, 300.0 + FOOTPRINT + 20.0],
+                           [2048.0, 2048.0 + FOOTPRINT + 100.0]])
+        starts = _draw(obtainer, pieces[:, None, :], num_batches=100 + 10 + 50)
+        density = _windows_per_piece(starts[:, 0], pieces) / np.array([200.0, 20.0, 100.0])
+        np.testing.assert_array_equal(density, [8.0, 8.0, 8.0])  # saturation / onsource
+
+    def test_no_usable_piece_is_dropped(self):
+        # H1 has two usable pieces; L1's second piece is too short. Pairing by rank put
+        # H1's second piece with it, and the row was dropped.
+        obtainer = _noise_obtainer(gf.ObservingRun.O3)
+        h1 = np.array([[0.0, FOOTPRINT + 100.0], [1000.0, 1000.0 + FOOTPRINT + 50.0]])
+        l1 = np.array([[0.0, FOOTPRINT + 200.0], [1500.0, 1505.0]])
+        rows = np.stack([h1, l1], axis=1)
+        starts = _draw(obtainer, rows, num_batches=75)  # 0.5 x min(150, 200) s
+        h1_density = _windows_per_piece(starts[:, 0], h1) / np.array([100.0, 50.0])
+        l1_windows = _windows_per_piece(starts[:, 1], l1)
+        np.testing.assert_array_equal(h1_density, [8.0, 8.0])
+        np.testing.assert_array_equal(l1_windows, [75 * BATCH, 0])
+
+    def test_grid_rows_sharing_a_piece_walk_different_windows(self):
+        # One H1 piece, two L1 pieces: two rows share the H1 piece.
+        obtainer = _noise_obtainer(gf.ObservingRun.O3)
+        h1 = np.array([[0.0, FOOTPRINT + 100.0]])
+        l1 = np.array([[0.0, FOOTPRINT + 50.0], [1000.0, 1000.0 + FOOTPRINT + 50.0]])
+        rows = np.stack([np.repeat(h1, 2, axis=0), l1], axis=1)
+        starts = _draw(obtainer, rows, num_batches=50, mode=gf.SamplingMode.GRID)
+        first = starts[:, 1] < 1000.0
+        assert 0 < np.sum(first) < len(starts)
+        assert not set(starts[first, 0]) & set(starts[~first, 0])
 
 
 class _RecordingFetch:

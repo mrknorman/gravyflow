@@ -7,6 +7,7 @@ noise data from long IFO segments (NOISE mode).
 
 import logging
 import hashlib
+from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple, Union
 
 import numpy as np
@@ -17,12 +18,80 @@ import gravyflow as gf
 from gravyflow.src.dataset.config import WindowSpec
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder,
-    AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS
+    AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS,
+    WINDOW_EDGE_BUFFER_SAMPLES,
 )
 from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.utils.shapes import ShapeEnforcer
+
+
+def couple_pieces(measures: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Rows of one piece per detector, in which each detector's pieces take part in
+    proportion to ``measures``.
+
+    Each detector's pieces, in the order given, tile [0, 1) in proportion to their
+    measures. The edges of every detector's tiles cut [0, 1) into intervals; each
+    interval is a row, holding for each detector the piece whose tile contains it, so
+    first pieces go with first pieces (the comonotone coupling). Every piece is in a
+    row, and a piece's rows add up to its tile: at most ``sum(n_i) - k + 1`` rows for
+    k detectors with n_i pieces.
+
+    Returns, for each row: each detector's piece index (R, k); the fraction
+    [f0, f1) of each detector's piece that the row covers (R, k, 2); and the row's
+    weight, its interval's width (R,).
+    """
+    tiles = []
+    for measure in measures:
+        measure = np.asarray(measure, dtype=np.float64)
+        tile = np.concatenate([[0.0], np.cumsum(measure) / np.sum(measure)])
+        tile[-1] = 1.0
+        tiles.append(tile)
+    edges = np.unique(np.concatenate(tiles))
+    lower, upper = edges[:-1], edges[1:]
+    # Edges equal but for rounding leave slivers; every tile is far wider.
+    keep = upper - lower > 1e-12
+    lower, upper = lower[keep], upper[keep]
+    middle = (lower + upper) / 2.0
+
+    index = np.stack([
+        np.clip(np.searchsorted(tile, middle, side="right") - 1, 0, len(tile) - 2)
+        for tile in tiles
+    ], axis=1)
+    shares = np.stack([
+        np.stack([
+            np.clip((bound - tile[index[:, i]]) / (tile[index[:, i] + 1] - tile[index[:, i]]), 0.0, 1.0)
+            for bound in (lower, upper)
+        ], axis=1)
+        for i, tile in enumerate(tiles)
+    ], axis=1)
+    return index, shares, upper - lower
+
+
+@dataclass(frozen=True)
+class SamplingPlan:
+    """
+    How real-noise windows are drawn: the rows to load, and what each row owns.
+
+    Within each bin, each detector's window starts are drawn uniformly over the starts
+    of all its usable pieces, so no piece is sampled more densely than another; the
+    bin's number of examples is set by the detector with the fewest starts, which is
+    sampled at the nominal density and the others at or below it.
+
+    - ``rows``: (M, detectors, 2) GPS pieces to load.
+    - ``shares``: (M, detectors, 2) the fraction [f0, f1) of each piece's window
+      starts that the row owns. GRID walks only that fraction, so rows that share a
+      piece do not repeat its windows; RANDOM draws over the whole piece, since every
+      row of a piece does, in proportion to its share.
+    - ``start_seconds``: (M,) the row's budget: the fewest seconds of window starts
+      any detector owns in it. A row's expected number of examples is this times the
+      nominal density.
+    """
+    rows: np.ndarray
+    shares: np.ndarray
+    start_seconds: np.ndarray
 
 
 class NoiseDataObtainer(BaseDataObtainer):
@@ -68,7 +137,8 @@ class NoiseDataObtainer(BaseDataObtainer):
         
         self.acquisition_mode = AcquisitionMode.NOISE
         self._segment_cache_maxsize = 8  # NOISE mode uses larger segments
-        self._segment_generator = None  # Reusable generator (preserves prefetch)
+        self._segment_generator = None  # Reusable generator over the sampling plan
+        self._current_shares = None  # The current row's shares (SamplingPlan.shares)
 
     # =========================================================================
     # NOISE-SPECIFIC SEGMENT PROCESSING
@@ -141,25 +211,71 @@ class NoiseDataObtainer(BaseDataObtainer):
             np.concatenate([np.reshape(veto, (-1, 2)) for veto in veto_segments]),
         )
 
-    def remove_short_segments(
+    def plan_sampling(
             self,
-            segments: np.ndarray, 
-            minimum_duration_seconds: float
-        ) -> np.ndarray:
+            segments: np.ndarray,
+            minimum_duration_seconds: float,
+            footprint_seconds: float,
+        ) -> SamplingPlan:
         """
-        Removes segments where duration is less than minimum.
-        
-        Parameters:
-            segments: Input array of shape [N, X, 2].
-            minimum_duration_seconds: Minimum allowed duration.
-            
-        Returns:
-            Filtered array with short segments removed.
+        The plan for drawing windows from ``segments`` (rows from ``get_valid_segments``).
+
+        Within each ``max_segment_duration_seconds`` bin, each detector's pieces of at
+        least ``minimum_duration_seconds`` are usable; a bin where some detector has
+        none is skipped. Each piece's window starts span its length less
+        ``footprint_seconds``; the usable pieces are re-paired with ``couple_pieces``
+        in proportion to those starts, longest first, so every usable piece is drawn
+        from and no short piece is drawn more densely than a long one. Bins keep the
+        order in which ``segments`` first reach them.
         """
-        durations = segments[:, :, 1] - segments[:, :, 0] 
-        valid_columns = np.all(durations >= minimum_duration_seconds, axis=1) 
-        filtered_segments = segments[valid_columns, :, :] 
-        return filtered_segments
+        segments = np.reshape(np.asarray(segments, dtype=np.float64), (len(segments), -1, 2))
+        num_ifos = segments.shape[1]
+        bins = np.floor(segments[:, 0, 0] / self.max_segment_duration_seconds)
+        _, first = np.unique(bins, return_index=True)
+
+        rows, shares, start_seconds = [], [], []
+        for bin_index in bins[np.sort(first)]:
+            in_bin = segments[bins == bin_index]
+            usable = []
+            for j in range(num_ifos):
+                pieces = np.unique(in_bin[:, j, :], axis=0)
+                lengths = pieces[:, 1] - pieces[:, 0]
+                pieces = pieces[lengths >= minimum_duration_seconds]
+                lengths = pieces[:, 1] - pieces[:, 0]
+                usable.append(pieces[np.argsort(-lengths, kind="stable")])
+            if any(len(pieces) == 0 for pieces in usable):
+                continue
+            starts = [pieces[:, 1] - pieces[:, 0] - footprint_seconds for pieces in usable]
+            index, row_shares, weights = couple_pieces(starts)
+            rows.append(np.stack([usable[j][index[:, j]] for j in range(num_ifos)], axis=1))
+            shares.append(row_shares)
+            start_seconds.append(weights * min(np.sum(s) for s in starts))
+
+        if not rows:
+            return SamplingPlan(np.empty((0, num_ifos, 2)), np.empty((0, num_ifos, 2)), np.empty(0))
+        return SamplingPlan(np.concatenate(rows), np.concatenate(shares), np.concatenate(start_seconds))
+
+    def _planned_segments(
+            self,
+            plan: SamplingPlan,
+            batches_per_start_second: float,
+            sample_rate_hertz: float,
+            ifos: List[gf.IFO],
+            scale_factor: float,
+        ):
+        """
+        One pass over ``plan``: each row's loaded segment, its shares and its number of
+        batches. A row's expected number of batches is its ``start_seconds`` times
+        ``batches_per_start_second``, rounded up or down at random in proportion, so
+        no row is over- or under-sampled on average; rows given none are not loaded.
+        """
+        expected = plan.start_seconds * batches_per_start_second
+        batches = np.floor(expected + self.rng.random(len(expected))).astype(int)
+        for row, shares, num_batches in zip(plan.rows, plan.shares, batches):
+            if num_batches == 0:
+                continue
+            for segment in self.acquire(sample_rate_hertz, row[None], ifos, scale_factor):
+                yield segment, shares, num_batches
 
     def calculate_bin_indices(self, segments, interval, start_period):
         """Calculate bin indices for segments based on time interval."""
@@ -217,10 +333,10 @@ class NoiseDataObtainer(BaseDataObtainer):
         """
         Every piece of every bin, as rows of one piece per IFO.
 
-        A bin whose IFOs have n_1, ..., n_k pieces gives max(n_i) rows. Each IFO's
-        pieces are sorted longest first; row r takes piece (r mod n_i) of each IFO, so
-        every piece of every IFO is used, the longest pieces are paired together, and an
-        IFO with fewer pieces repeats its own.
+        Each IFO's pieces in a bin are sorted longest first and paired by
+        ``couple_pieces`` in proportion to their lengths, so every piece of every IFO
+        is in a row and the longest pieces go together. ``plan_sampling`` re-pairs
+        them once the window, and so which pieces are usable, is known.
 
         Returns an array of shape (num_ifos, num_rows, 2).
         """
@@ -236,36 +352,11 @@ class NoiseDataObtainer(BaseDataObtainer):
                 segments = np.reshape(segments, (-1, 2))
                 durations = segments[:, 1] - segments[:, 0]
                 ordered.append(segments[np.argsort(-durations, kind="stable")])
-            num_rows = max(len(segments) for segments in ordered)
+            index, _, _ = couple_pieces([segments[:, 1] - segments[:, 0] for segments in ordered])
             for j, segments in enumerate(ordered):
-                for r in range(num_rows):
-                    rows_per_ifo[j].append(segments[r % len(segments)])
+                rows_per_ifo[j].extend(segments[index[:, j]])
 
         return np.array([np.array(rows) for rows in rows_per_ifo])
-
-    def largest_segments_per_bin(self, filtered_bins_result):
-        """
-        Extracts the largest segment in each bin from each list.
-
-        Real-noise acquisition uses ``all_segments_per_bin``, which keeps every piece.
-        """
-        if not filtered_bins_result:
-            return np.empty((0, 0, 2))
-        largest_segments_list = [
-            [] for _ in range(len(filtered_bins_result[0]))
-        ]
-
-        for bin in filtered_bins_result:
-            for j, segments in enumerate(bin):
-                durations = segments[:, 1] - segments[:, 0]  
-                largest_segment_index = np.argmax(durations)  
-                largest_segments_list[j].append(segments[largest_segment_index])  
-        
-        result_arrays = [
-            np.array(segments) for segments in largest_segments_list
-        ]
-
-        return np.array(result_arrays)
 
     def get_segments_for_group(
         self,
@@ -556,18 +647,23 @@ class NoiseDataObtainer(BaseDataObtainer):
             return
         
         if not self._current_batch_index and not self._current_segment_index:
-            min_segment_duration_seconds = \
+            window_seconds = \
                 window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds
-            min_segment_duration_seconds *= 2.0
-            
-            self.valid_segments_adjusted = self.remove_short_segments(
-                self.valid_segments, 
-                min_segment_duration_seconds
+            self.sampling_plan = self.plan_sampling(
+                self.valid_segments,
+                minimum_duration_seconds=2.0 * window_seconds,
+                footprint_seconds=(num_onsource_samples + num_offsource_samples
+                                   + WINDOW_EDGE_BUFFER_SAMPLES) / window_spec.sample_rate_hertz,
             )
         
-        if self.valid_segments_adjusted is None or len(self.valid_segments_adjusted) == 0:
+        if self.sampling_plan is None or len(self.sampling_plan.rows) == 0:
             logging.warning("No valid segments available in NOISE mode. Generator will be empty.")
             return
+
+        # Nominal density: saturation examples per onsource duration of window starts.
+        batches_per_start_second = self._get_effective_saturation() / (
+            num_examples_per_batch * window_spec.onsource_duration_seconds
+        )
 
         _consecutive_stop_iterations = 0
         
@@ -575,15 +671,17 @@ class NoiseDataObtainer(BaseDataObtainer):
             while self._segment_exhausted:
                 # Create generator ONCE and reuse it (preserves prefetch across batches)
                 if self._segment_generator is None:
-                    self._segment_generator = self.acquire(
+                    self._segment_generator = self._planned_segments(
+                        self.sampling_plan,
+                        batches_per_start_second,
                         window_spec.sample_rate_hertz,
-                        self.valid_segments_adjusted,
                         ifos,
                         scale_factor
                     )
                 
                 try:
-                    self.current_segment = next(self._segment_generator)
+                    (self.current_segment, self._current_shares,
+                     self._num_batches_in_current_segment) = next(self._segment_generator)
                     _consecutive_stop_iterations = 0
                 except StopIteration:
                     _consecutive_stop_iterations += 1
@@ -604,15 +702,6 @@ class NoiseDataObtainer(BaseDataObtainer):
                     self._segment_exhausted = True
                 else: 
                     self._segment_exhausted = False
-
-                min_num_samples = ops.cast(min_num_samples, "float32")
-
-                segment_duration = min_num_samples / window_spec.sample_rate_hertz
-
-                self._num_batches_in_current_segment = max(1, int(
-                    segment_duration * self._get_effective_saturation()
-                    / (num_examples_per_batch * window_spec.onsource_duration_seconds)
-                ))
             
             while self._current_batch_index < self._num_batches_in_current_segment and not self._segment_exhausted:
 
@@ -629,7 +718,8 @@ class NoiseDataObtainer(BaseDataObtainer):
                         num_onsource_samples, 
                         num_offsource_samples, 
                         num_examples_per_batch,
-                        self._grid_position
+                        self._grid_position,
+                        self._current_shares,
                     )
                     subarrays, background_chunks, start_gps_times, new_grid_pos = result
                     if subarrays is not None:

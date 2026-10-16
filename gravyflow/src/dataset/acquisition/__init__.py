@@ -26,7 +26,6 @@ from .base import (
     # Constants
     GPS_PRECISION_DECIMALS,
     GPS_TOLERANCE_SECONDS,
-    SEGMENT_EPSILON_SECONDS,
     # Utility functions
     ensure_even,
     ifo_canonical_key,
@@ -75,7 +74,6 @@ __all__ = [
     # Constants
     'GPS_PRECISION_DECIMALS',
     'GPS_TOLERANCE_SECONDS',
-    'SEGMENT_EPSILON_SECONDS',
     # Public GWOSC sources
     'GWOSC_RUNS',
     'GWOSC_DATA_FLAGS',
