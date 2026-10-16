@@ -16,6 +16,7 @@ Run with visual plots:
 """
 
 import pytest
+import warnings
 
 import numpy as np
 import tempfile
@@ -286,7 +287,9 @@ class TestIFODataObtainerInit:
             assert "segment_data_" in path.name
     
     def test_generate_file_path_default_directory(self):
-        """Test generate_file_path uses default directory when None (line 414)."""
+        """With no directory, segment caches go under the one user cache root."""
+        from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
+
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
@@ -300,8 +303,32 @@ class TestIFODataObtainerInit:
             data_directory_path=None  # Uses default
         )
         
-        assert path is not None
+        assert path.parent == user_cache_dir("segments")
         assert path.suffix == ".hdf5"
+        # The NoiseObtainer's default directory is that root too.
+        assert obtainer.generate_file_path(
+            1024.0, "train", gf.NoiseObtainer().data_directory_path
+        ) == path
+
+    def test_a_segment_cache_left_in_generator_data_is_named_once(self, tmp_path, monkeypatch):
+        """A segment cache where the old default put it is named, once, with where it goes."""
+        monkeypatch.chdir(tmp_path)
+        obtainer = gf.IFODataObtainer(
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
+            cache_segments=False
+        )
+        path = obtainer.generate_file_path(1024.0, "train", None)
+        legacy = Path("generator_data") / path.name
+        legacy.parent.mkdir()
+        legacy.write_bytes(b"")
+        with pytest.warns(UserWarning, match="no longer reads generator_data") as record:
+            obtainer.generate_file_path(1024.0, "train", None)
+        assert str(path) in str(record[0].message)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            obtainer.generate_file_path(1024.0, "train", None)
 
 
 # =============================================================================

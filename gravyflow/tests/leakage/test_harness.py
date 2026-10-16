@@ -435,10 +435,41 @@ def test_every_cache_lives_under_the_one_cache_root():
     from gravyflow.src.dataset.features.glitch_cache import generate_transient_cache_path
 
     root = Path(os.environ["GRAVYFLOW_CACHE_DIR"])
+    obtainer = gf.IFODataObtainer(
+        observing_runs=gf.ObservingRun.O3, data_quality=gf.DataQuality.BEST,
+        data_labels=[gf.DataLabel.NOISE],
+    )
     for path in (
         generate_transient_cache_path(prefix="glitch"),
         generate_transient_cache_path(prefix="event"),
         gravity_spy.cache_dir(),
         gwosc_data._timeline_cache_path("O1", "H1_DATA", 0, 1),
+        obtainer.generate_file_path(256.0, "train", gf.NoiseObtainer().data_directory_path),
     ):
         assert root in Path(path).parents, path
+
+
+def test_strain_downloads_are_cached_under_the_one_cache_root(monkeypatch):
+    """gwpy's GWOSC strain download goes to astropy's cache, which is moved under the root."""
+    from astropy.config import get_cache_dir_path
+    from gwpy.timeseries import TimeSeries
+
+    from gravyflow.src.dataset.acquisition import base
+
+    def no_local_frames(**kwargs):
+        raise ValueError("no local frames")
+
+    seen = []
+
+    def fetch_open_data(*args, **kwargs):
+        seen.append((get_cache_dir_path(), kwargs.get("cache")))
+        return TimeSeries(np.ones(16), t0=args[1], sample_rate=16)
+
+    monkeypatch.setattr(base, "find_urls", no_local_frames)
+    monkeypatch.setattr(TimeSeries, "fetch_open_data", fetch_open_data)
+    base.BaseDataObtainer.get_segment_data_static(1238166018.0, 1238166019.0, gf.IFO.L1, "HOFT_C01",
+                                                   "DCS-CALIB_STRAIN_CLEAN_C01", 4096.0)
+    (directory, cache), = seen
+    assert cache is True
+    assert Path(os.environ["GRAVYFLOW_CACHE_DIR"]) in directory.parents, directory
+    assert Path(os.environ["GRAVYFLOW_CACHE_DIR"]) not in get_cache_dir_path().parents

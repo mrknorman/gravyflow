@@ -277,6 +277,26 @@ class TestCachePathGeneration:
         path = generate_transient_cache_path(prefix="event")
         assert path == tmp_path / "home" / ".gravyflow" / "cache" / "event_cache.h5"
 
+    def test_a_cache_left_where_the_override_was_ignored_is_named_once(self, monkeypatch, tmp_path):
+        """
+        Before the override was honoured, the glitch cache stayed in ~/.gravyflow/cache:
+        it is named, once, with where to move it, until the new place has a cache.
+        """
+        import warnings
+
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path / "override"))
+        legacy = tmp_path / "home" / ".gravyflow" / "cache" / "glitch_cache.h5"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_bytes(b"")
+        with pytest.warns(UserWarning, match="no longer reads") as record:
+            path = generate_transient_cache_path(prefix="glitch")
+        assert str(legacy) in str(record[0].message) and str(path) in str(record[0].message)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            generate_transient_cache_path(prefix="glitch")
+            generate_transient_cache_path(prefix="event")  # no event cache was left behind
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

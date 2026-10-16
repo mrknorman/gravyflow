@@ -2,7 +2,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import count
-from typing import Callable, Dict, Union, Iterator, List
+from typing import Callable, Dict, Iterator, List, Optional, Union
 from copy import deepcopy
 import logging
 
@@ -276,7 +276,9 @@ def sequential_seed(tree: SeedTree, split: str, consumer: str) -> int:
 @dataclass
 class Obtainer:
     """Base class for data obtainers (noise and transient)."""
-    data_directory_path: Path = Path("./generator_data")
+    #: Where real-noise segment caches go; None is the one user cache root
+    #: (``gwosc_data.user_cache_dir("segments")``).
+    data_directory_path: Optional[Path] = None
     ifo_data_obtainer: Union[None, gf.IFODataObtainer] = None
     ifos: List[gf.IFO] = None
     groups: Union[dict, None] = None

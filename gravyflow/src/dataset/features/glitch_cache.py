@@ -1350,8 +1350,13 @@ def generate_transient_cache_path(data_directory: Optional[Path] = None, prefix:
         Path like: data_directory/{prefix}_cache.h5
     """
     if data_directory is None:
-        from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
+        from gravyflow.src.dataset.acquisition.gwosc_data import (
+            user_cache_dir, warn_of_moved_cache,
+        )
 
-        data_directory = user_cache_dir()
+        path = user_cache_dir() / f"{prefix}_cache.h5"
+        # Before the one cache root, this cache ignored GRAVYFLOW_CACHE_DIR.
+        warn_of_moved_cache(path, Path.home() / ".gravyflow" / "cache" / path.name)
+        return path
 
     return Path(data_directory) / f"{prefix}_cache.h5"

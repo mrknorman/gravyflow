@@ -38,7 +38,8 @@ from gravyflow.src.utils.gps import as_gps_times
 from gravyflow.src.utils.shapes import ShapeEnforcer
 from .gwosc_data import (
     GWOSC_RUNS, DEFAULT_GWOSC_FLAGS, UpsamplingRefused, coalesce_segments,
-    get_gwosc_segments, gwosc_sample_rate_hertz, subtract_segments, user_cache_dir,
+    get_gwosc_segments, gwosc_sample_rate_hertz, strain_download_cache, subtract_segments,
+    user_cache_dir, warn_of_moved_cache,
 )
 
 
@@ -947,7 +948,8 @@ class BaseDataObtainer(ABC):
             self.file_path = None
             return None
 
-        if data_directory_path is None:
+        default_directory = data_directory_path is None
+        if default_directory:
             # The one user cache root; never beside the installed package.
             data_directory_path = user_cache_dir("segments")
         
@@ -978,7 +980,14 @@ class BaseDataObtainer(ABC):
             prefix = "transient_data"
             
         self.file_path = Path(data_directory_path) / f"{prefix}_{segment_hash}.hdf5"
-        
+        if default_directory:
+            # Where the default put segment caches before the one cache root.
+            warn_of_moved_cache(
+                self.file_path,
+                gf.PATH.parent / self.file_path.name,
+                Path("generator_data") / self.file_path.name,
+            )
+
         return self.file_path
     
     def _get_cached_valid_segments(self, ifos: List, group_name: str) -> np.ndarray:
@@ -1315,14 +1324,15 @@ class BaseDataObtainer(ABC):
 
         except Exception as e:
             try:
-                full_segment_data = TimeSeries.fetch_open_data(
-                    ifo.name,
-                    segment_start_gps_time,
-                    segment_end_gps_time,
-                    sample_rate=int(open_data_rate),
-                    cache=True,
-                    timeout=30  # 30 second timeout
-                )
+                with strain_download_cache():
+                    full_segment_data = TimeSeries.fetch_open_data(
+                        ifo.name,
+                        segment_start_gps_time,
+                        segment_end_gps_time,
+                        sample_rate=int(open_data_rate),
+                        cache=True,
+                        timeout=30  # 30 second timeout
+                    )
             except Exception as e_remote:
                 raise ValueError(f"Failed to acquire data from local ({e}) or remote ({e_remote}).")
 
