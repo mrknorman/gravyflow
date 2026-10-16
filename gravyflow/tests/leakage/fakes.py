@@ -74,6 +74,9 @@ class StrainSource:
         self.encoding = encoding
         self.fetches: List[Fetch] = []
         self.errors: List[str] = []
+        #: (ifo, first, stop, factor): served samples [first, stop) of ``ifo`` are
+        #: multiplied by ``factor`` (for tests that perturb one row's raw data).
+        self.perturbations: List[Tuple[str, int, int, float]] = []
         self._lock = threading.Lock()
 
     def fetch(
@@ -97,6 +100,10 @@ class StrainSource:
             first = int(np.ceil(np.float64(segment_start_gps_time) * rate))
             stop = int(np.ceil(np.float64(segment_end_gps_time) * rate))
             values = self.encoding.encode(name, first, stop - first)
+            samples = np.arange(first, stop)
+            for ifo_name, lo, hi, factor in self.perturbations:
+                if ifo_name == name:
+                    values[(samples >= lo) & (samples < hi)] *= factor
         except Exception as error:
             with self._lock:
                 self.errors.append(f"{name} [{segment_start_gps_time}, {segment_end_gps_time}): {error}")
