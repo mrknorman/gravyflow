@@ -156,9 +156,10 @@ def get_event_catalogue(use_cache: bool = True) -> dict:
     the catalogue names and the GWOSC runs it was fetched under (``GWOSC_RUNS``). It
     is fetched again when gravyflow's runs change, as they do when a run is added, so
     events published with a new run are vetoed. To pick up events GWOSC adds inside
-    known runs, call with ``use_cache=False`` or delete the file
-    (``event_catalogue_cache_path``). A catalogue that cannot be fetched raises: a
-    partial list would silently leave events in noise.
+    known runs, call with ``use_cache=False``: the table is fetched afresh and the
+    cache rewritten, so every later call (the noise vetoes among them) reads it. A
+    catalogue that cannot be fetched raises and leaves the cache as it was: a partial
+    list would silently leave events in noise.
     """
     import json
     from gravyflow.src.dataset.acquisition.gwosc_data import _atomic_write_text
@@ -191,11 +192,10 @@ def get_event_catalogue(use_cache: bool = True) -> dict:
                 "catalog": catalog,
             })
 
-    if use_cache:
-        _atomic_write_text(
-            cache_file,
-            json.dumps({"runs": runs, "catalogs": catalogs, "events": events}),
-        )
+    _atomic_write_text(
+        cache_file,
+        json.dumps({"runs": runs, "catalogs": catalogs, "events": events}),
+    )
     return _event_rows_to_arrays(events)
 
 

@@ -319,6 +319,19 @@ class TestEventList:
         assert len(event_api.fetched) == 6
         assert 1430000000.0 in catalogue["gps"]
 
+    def test_refresh_rewrites_the_cache_the_vetoes_read(self, event_api):
+        # use_cache=False returned the fresh table but left the stale cache, which the
+        # noise vetoes went on reading.
+        gf.get_event_catalogue()
+        event_api.catalogues["GWTC"] = _table(
+            [(1126259462.4, "GW150914", 28.6), (1240000000.0, "GW_ADDED", 30.0)],
+            ["GPS", "commonName", "chirp_mass_source"],
+        )
+        assert 1240000000.0 in gf.get_event_catalogue(use_cache=False)["gps"]
+        assert 1240000000.0 in gf.get_event_catalogue()["gps"]
+        assert _inside([1240000000.0], gf.get_event_veto_segments())[0]
+        assert len(event_api.fetched) == 6  # the default calls read the refreshed cache
+
     def test_noise_vetoes_read_only_the_event_list(self, event_api):
         obtainer = _noise_obtainer(gf.ObservingRun.O1)
         segments = np.array([[1126259000.0, 1126260000.0]])
