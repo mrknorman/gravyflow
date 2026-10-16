@@ -1,113 +1,92 @@
 #!/usr/bin/env python
 """
-Validation script for Gabbard et al. 2017 model.
+Validate a Gabbard et al. 2017 model trained by ``train_gabbard_2017``.
 
-This script validates a trained Gabbard2017 model using the universal
-validation framework, computing efficiency curves, FAR, and ROC metrics.
+    python -m gravyflow.src.model.examples.validate_gabbard_2017 --run-dir RUN_DIR
 
-Usage:
-    python validate_gabbard_2017.py --model path/to/model.keras
+Scores a noise background and an injection set drawn from the validator's own
+seeds (never the training seed), and writes ``validation.h5`` and the report
+``validation.html`` to ``RUN_DIR/validation`` (or ``--output-dir``). Running it
+again resumes from ``validation.h5`` if that file belongs to this model and these
+settings, and refuses it otherwise.
 """
 
 import os
-os.environ['KERAS_BACKEND'] = 'jax'
+
+os.environ.setdefault("KERAS_BACKEND", "jax")
 
 import argparse
 from pathlib import Path
 
-import keras
-
 import gravyflow as gf
-from gravyflow.src.validate import Validator
-from gravyflow.src.model.examples.base import validation_dataset_args, ValidationConfig
-from gravyflow.src.model.examples.gabbard_2017 import Gabbard2017, Gabbard2017Config
+from gravyflow.src.model.examples.base import ValidationDatasetConfig, validation_dataset_args
+from gravyflow.src.model.examples.recipe import RunDirectory
+from gravyflow.src.validate import ValidationConfig, Validator
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Validate Gabbard et al. 2017 BBH detection model"
-    )
-    parser.add_argument(
-        '--output-dir', type=str, default='./validation_results',
-        help='Directory to save validation results'
-    )
-    parser.add_argument(
-        '--name', type=str, default=None,
-        help='Name for validation run (defaults to model filename)'
-    )
-    parser.add_argument(
-        "--noise-type", type=str, default="real", choices=["real", "colored"],
-        help="Noise type to use for validation (real or colored)."
-    )
-    return parser.parse_args()
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Validate a trained Gabbard et al. 2017 model")
+    parser.add_argument("--run-dir", required=True, help="The training run's directory")
+    parser.add_argument("--output-dir", help="Where to write results (default: RUN_DIR/validation)")
+    parser.add_argument("--noise-type", choices=["colored", "real"], default="colored",
+                        help="Background noise; real noise needs network access")
+    parser.add_argument("--num-examples", type=int, default=100_000,
+                        help="Examples in the noise background and in the injection set")
+    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--seed", type=int, default=gf.Defaults.seed, help="The validator's own root seed")
+    parser.add_argument("--real-events", action="store_true",
+                        help="Also score real GW events (needs network access)")
+    return parser.parse_args(argv)
 
 
-def main():
-    args = parse_args()
-    
-    # Determine noise type
-    noise_type = gf.NoiseType.REAL
-    if args.noise_type == "colored":
-        noise_type = gf.NoiseType.COLORED
-    
-    print("=" * 60)
-    print("Gabbard et al. 2017 - Model Validation")
-    print("=" * 60)
-    
-    model = Gabbard2017.pretrained()
-    print("Model loaded successfully")
-    
-    # Model-specific config overrides
-    gabbard_config = Gabbard2017Config()
-    validation_config = ValidationConfig(
-        sample_rate_hertz=gabbard_config.sample_rate_hertz,
-        onsource_duration_seconds=gabbard_config.onsource_duration_seconds,
-        offsource_duration_seconds=gabbard_config.offsource_duration_seconds,
-    )
-    
-    # Get universal dataset args with model-specific overrides
+def main(argv=None) -> Validator:
+    args = parse_args(argv)
+    run_dir = RunDirectory(args.run_dir)
+    run = run_dir.run
+    if run is None:
+        raise FileNotFoundError(f"No training run in {run_dir.path}.")
+    model = run_dir.load_model("model", run["config_sha256"])
+    data = run["description"]["config"]
+
+    noise_type = gf.NoiseType.REAL if args.noise_type == "real" else gf.NoiseType.COLORED
     dataset_args = validation_dataset_args(
         noise_type=noise_type,
-        config=validation_config,
-        seed=42
+        config=ValidationDatasetConfig(
+            sample_rate_hertz=data["sample_rate_hertz"],
+            onsource_duration_seconds=data["onsource_duration_seconds"],
+            offsource_duration_seconds=data["offsource_duration_seconds"],
+        ),
     )
-    
-    print(f"Noise type: {noise_type.name}")
-    print(f"Sample rate: {validation_config.sample_rate_hertz} Hz")
-    print(f"Onsource duration: {validation_config.onsource_duration_seconds} s")
-    print("=" * 60)
-    
-    # Setup output paths - include noise type in filenames
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    noise_suffix = noise_type.name.lower()
-    name = f"gabbard_2017_{noise_suffix}"
-    checkpoint_path = output_dir / f"{name}_validation.h5"
-    plot_path = output_dir / f"{name}_validation.html"
-    
-    print(f"\nStarting validation...")
-    print(f"Checkpoint: {checkpoint_path}")
-    print(f"Plots: {plot_path}")
-    
-    # Run validation with 10^7 examples for stress test
-    from gravyflow.src.validate import ValidationConfig as ValidatorConfig
+    config = ValidationConfig(
+        seed=args.seed,
+        num_examples=args.num_examples,
+        batch_size=args.batch_size,
+        score_real_events=args.real_events,
+    )
+    output_dir = Path(args.output_dir) if args.output_dir else run_dir.path / "validation"
+    name = f"gabbard_2017_{noise_type.name.lower()}"
+    print(f"Validating {run_dir.path / 'model.keras'} on {noise_type.name} noise; results in {output_dir}")
     validator = Validator.validate(
         model=model,
         name=name,
         dataset_args=dataset_args,
-        checkpoint_file_path=checkpoint_path,
-        config=ValidatorConfig(num_examples=1E5),  # 10^7 examples
+        config=config,
+        checkpoint_file_path=output_dir / "validation.h5",
     )
-    
-    # Generate plots
-    print("\nGenerating plots...")
-    validator.plot(plot_path)
-    
-    print("\n" + "=" * 60)
-    print("Validation Complete")
-    print("=" * 60)
-    print(f"Results saved to: {output_dir}")
+    validator.plot(output_dir / "validation.html")
+
+    background = validator.background()
+    print(f"Background: {background.num_windows} windows, {background.livetime_seconds:.0f} s livetime")
+    for far, (threshold, curve) in validator.efficiency_curves([1e-1, 1e-2, 1e-3]).items():
+        if threshold.resolved:
+            print(f"FAR {far:.0e} Hz: threshold {threshold.threshold:.3f}, achieved "
+                  f"{threshold.achieved.rate_hz:.2e} Hz (≤ {threshold.achieved.upper_hz:.2e}); "
+                  f"efficiency by SNR bin {[round(e, 2) for e in curve.efficiency.tolist()]}")
+        else:
+            print(f"FAR {far:.0e} Hz: unresolved by {background.livetime_seconds:.0f} s of background")
+    for key, roc in validator.roc_curves().items():
+        print(f"ROC {key}: AUC {roc['roc_auc']:.4f}")
+    return validator
 
 
 if __name__ == "__main__":

@@ -1,256 +1,176 @@
 """
-Base class for example model implementations.
+The shared interface and data contract of the example models.
 
-All example models (George & Huerta 2017, Gabbard 2017, etc.) inherit from
-ExampleModel to ensure a consistent interface.
+Every example model takes ``WHITENED_ONSOURCE``, shaped (detectors, samples)
+per example: whitening is done in the data path, not inside the model. Every
+classifier returns logits (no softmax): the validator ranks logits, because
+saturated probabilities tie.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import List, Optional, Sequence
 
 import keras
+import numpy as np
+
 import gravyflow as gf
+
+# The batch contract every example model is built on.
+MODEL_INPUT = gf.ReturnVariables.WHITENED_ONSOURCE
+
+
+def onsource_samples(sample_rate_hertz: float, onsource_duration_seconds: float) -> int:
+    return int(round(sample_rate_hertz * onsource_duration_seconds))
+
+
+def model_input(sample_rate_hertz: float, onsource_duration_seconds: float, num_ifos: int = 1):
+    """The Keras input of an example model: (detectors, samples), float32."""
+    return keras.Input(
+        shape=(num_ifos, onsource_samples(sample_rate_hertz, onsource_duration_seconds)),
+        name=MODEL_INPUT.name,
+        dtype="float32",
+    )
+
+
+def cbc_dataset_args(
+    *,
+    sample_rate_hertz: float,
+    onsource_duration_seconds: float,
+    offsource_duration_seconds: float,
+    mass_distribution_type: gf.DistributionType,
+    mass_range_msun: Sequence[float],
+    snr: "gf.Distribution | gf.Curriculum",
+    injection_chance: float,
+    batch_size: int,
+    output_variables: list,
+    noise_obtainer: Optional[gf.NoiseObtainer] = None,
+    **kwargs,
+) -> dict:
+    """
+    Arguments of a dataset of non-spinning BBH injections (IMRPhenomD) in noise
+    (coloured L1 noise by default), returning the example models' input contract.
+
+    Inclination is uniform in [0, π]: the library has no uniform-in-cos(ι)
+    prior, which the papers use.
+    """
+    lo, hi = mass_range_msun
+    masses = gf.Distribution(min_=lo, max_=hi, type_=mass_distribution_type)
+    return {
+        "sample_rate_hertz": sample_rate_hertz,
+        "onsource_duration_seconds": onsource_duration_seconds,
+        "offsource_duration_seconds": offsource_duration_seconds,
+        "noise_obtainer": noise_obtainer or gf.NoiseObtainer(
+            noise_type=gf.NoiseType.COLORED, ifos=[gf.IFO.L1]),
+        "waveform_generators": gf.CBCGenerator(
+            mass_1_msun=masses,
+            mass_2_msun=masses,
+            inclination_radians=gf.Distribution(min_=0.0, max_=np.pi, type_=gf.DistributionType.UNIFORM),
+            scaling_method=gf.ScalingMethod(value=snr, type_=gf.ScalingTypes.SNR),
+            injection_chance=injection_chance,
+            spin_1_in=(0.0, 0.0, 0.0),
+            spin_2_in=(0.0, 0.0, 0.0),
+        ),
+        "num_examples_per_batch": batch_size,
+        "input_variables": [MODEL_INPUT],
+        "output_variables": output_variables,
+        **kwargs,
+    }
 
 
 class ExampleModel(ABC):
     """
-    Abstract base class for example GW detection models.
-    
-    All example models should inherit from this class and implement
-    the required abstract methods to ensure a consistent interface.
-    
-    Required class attributes:
-        config: Configuration dataclass for the model
-    
-    Required methods:
-        model(): Create the neural network architecture
-        dataset(): Create a training/validation dataset
-        compile_model(): Compile the model with optimizer and loss
-    
-    Usage:
-        >>> class MyModel(ExampleModel):
-        ...     config = MyConfig()
-        ...     
-        ...     @classmethod
-        ...     def model(cls, ...): ...
-        ...     
-        ...     @classmethod  
-        ...     def dataset(cls, ...): ...
-        ...     
-        ...     @classmethod
-        ...     def compile_model(cls, model): ...
+    Abstract base class of the example GW detection models.
+
+    Subclasses define ``config`` (a configuration dataclass), ``weights_name``
+    (the file of their shipped weights in ``res/model``) and the methods below.
     """
-    
-    # Subclasses must define their config
+
     config = None
-    
+    weights_name: Optional[str] = None
+
     @classmethod
     @abstractmethod
-    def model(
-        cls,
-        input_shape_onsource: Optional[Tuple[int, int]] = None,
-        input_shape_offsource: Optional[Tuple[int, int]] = None,
-        config = None,
-        **kwargs
-    ) -> keras.Model:
-        """
-        Create the neural network architecture.
-        
-        Args:
-            input_shape_onsource: Shape of onsource input (samples, channels).
-            input_shape_offsource: Shape of offsource input for whitening.
-            config: Model configuration. Uses class default if None.
-            **kwargs: Additional model-specific arguments.
-        
-        Returns:
-            Uncompiled Keras model.
-        """
-        pass
-    
+    def model(cls, config=None, num_ifos: int = 1, **kwargs) -> keras.Model:
+        """The uncompiled network: ``WHITENED_ONSOURCE`` in, logits out."""
+
     @classmethod
     @abstractmethod
     def dataset(
         cls,
         noise_type: gf.NoiseType = gf.NoiseType.COLORED,
-        config = None,
+        config=None,
         seed: Optional[int] = None,
         group: str = "train",
         steps_per_epoch: int = 1000,
         **kwargs
     ) -> gf.GravyflowDataset:
-        """
-        Create a dataset for training or evaluation.
-        
-        Args:
-            noise_type: Type of noise to use.
-            config: Dataset configuration. Uses class default if None.
-            seed: Random seed for reproducibility.
-            group: Dataset group ("train", "validate", "test").
-            steps_per_epoch: Number of batches per epoch.
-            **kwargs: Additional dataset-specific arguments.
-        
-        Returns:
-            GravyflowDataset configured for this model.
-        """
-        pass
-    
+        """A dataset in the model's input contract, with ``INJECTION_MASKS`` labels."""
+
     @classmethod
     @abstractmethod
-    def compile_model(
-        cls,
-        model: keras.Model,
-        learning_rate: float = 0.001,
-        **kwargs
-    ) -> keras.Model:
-        """
-        Compile model with optimizer and loss function.
-        
-        Args:
-            model: Keras model to compile.
-            learning_rate: Learning rate for optimizer.
-            **kwargs: Additional compilation arguments.
-        
-        Returns:
-            Compiled model.
-        """
-        pass
-    
+    def compile_model(cls, model: keras.Model, **kwargs) -> keras.Model:
+        """Compile with the model's optimiser and a loss that takes logits."""
+
     @classmethod
     def pretrained(cls, weights_path: Optional[Path] = None) -> keras.Model:
         """
-        Load a pre-trained model.
-        
-        Default implementation loads from res/model/{model_name.lower()}.keras.
-        Subclasses can override for custom behavior.
-        
-        Args:
-            weights_path: Path to weights file. If None, uses default.
-        
-        Returns:
-            Model with pre-trained weights.
-        
+        Load trained weights, by default the shipped ones in ``res/model``.
+
         Raises:
-            FileNotFoundError: If weights file not found.
+            FileNotFoundError: no weights at the path.
+            ValueError: the weights were trained for another input contract (a
+                model that whitens inside itself, or returns probabilities);
+                retrain them with the example's training script.
         """
         if weights_path is None:
-            model_name = cls.__name__.lower()
-            weights_path = Path(gf.__file__).parent / "res" / "model" / f"{model_name}.keras"
-        
-        if not weights_path.exists():
-            raise FileNotFoundError(
-                f"Pre-trained weights not found at {weights_path}. "
-                f"Train the model first or download weights."
+            weights_path = Path(gf.__file__).parent / "res" / "model" / (cls.weights_name or "")
+        weights_path = Path(weights_path)
+        if not weights_path.is_file():
+            raise FileNotFoundError(f"No trained weights at {weights_path}.")
+        model = keras.models.load_model(str(weights_path))
+        inputs = [t.name for t in model.inputs]
+        activation = getattr(getattr(model.layers[-1], "activation", None), "__name__", None)
+        if inputs != [MODEL_INPUT.name] or activation in ("softmax", "sigmoid"):
+            raise ValueError(
+                f"The weights at {weights_path} were trained for an older input contract "
+                f"(inputs {inputs}, output activation {activation}); the example models take "
+                f"{MODEL_INPUT.name} and return logits. Retrain with the example's training script."
             )
-        
-        return keras.models.load_model(str(weights_path))
-
-
-from dataclasses import dataclass
-import numpy as np
+        return model
 
 
 @dataclass
-class ValidationConfig:
+class ValidationDatasetConfig:
     """
-    Universal configuration for model validation datasets.
-    
-    This config is used across all models to ensure consistent
-    validation benchmarks.
+    The common validation data of the example models, so that they are
+    compared on one benchmark. The validator sets the SNR distribution and the
+    seed itself; this sets everything else.
     """
-    # Sampling parameters
     sample_rate_hertz: float = 2048.0
     onsource_duration_seconds: float = 1.0
     offsource_duration_seconds: float = 16.0
-    
-    # Detector configuration
-    ifos: list = None  # Defaults to [gf.IFO.H1, gf.IFO.L1] if None
-    
-    # Mass distributions (broad BBH range)
-    mass_1_min_msun: float = 5.0
-    mass_1_max_msun: float = 95.0
-    mass_2_min_msun: float = 5.0
-    mass_2_max_msun: float = 95.0
-    
-    # SNR range for validation
+    ifos: List[gf.IFO] = field(default_factory=lambda: [gf.IFO.L1])
+    mass_range_msun: Sequence[float] = (5.0, 95.0)
     snr_min: float = 8.0
     snr_max: float = 20.0
-    
-    # Batch size
     batch_size: int = 32
-    
-    def __post_init__(self):
-        if self.ifos is None:
-            self.ifos = [gf.IFO.L1]  # Default to single detector list
-
 
 
 def validation_dataset_args(
     noise_type: gf.NoiseType = gf.NoiseType.COLORED,
-    config: Optional[ValidationConfig] = None,
+    config: Optional[ValidationDatasetConfig] = None,
     seed: Optional[int] = None,
     **kwargs
 ) -> dict:
     """
-    Create universal dataset arguments for model validation.
-    
-    This provides a consistent dataset configuration for validating
-    all models, ensuring fair comparisons across architectures.
-    
-    Args:
-        noise_type: Type of noise to use.
-        config: Validation configuration. Uses defaults if None.
-        seed: Random seed for reproducibility.
-        **kwargs: Additional arguments passed to dataset.
-    
-    Returns:
-        Dictionary of dataset arguments compatible with GravyflowDataset
-        and Validator.validate().
+    Dataset arguments for validating an example model (`gf.Validator`).
+
+    ``seed`` matters only when the arguments build a dataset directly: the
+    validator replaces it with seeds of its own.
     """
-    cfg = config or ValidationConfig()
-    
-    # Mass distributions
-    mass_1_distribution = gf.Distribution(
-        min_=cfg.mass_1_min_msun,
-        max_=cfg.mass_1_max_msun,
-        type_=gf.DistributionType.UNIFORM
-    )
-    
-    mass_2_distribution = gf.Distribution(
-        min_=cfg.mass_2_min_msun,
-        max_=cfg.mass_2_max_msun,
-        type_=gf.DistributionType.UNIFORM
-    )
-    
-    # Inclination distribution
-    inclination_distribution = gf.Distribution(
-        min_=0.0,
-        max_=np.pi,
-        type_=gf.DistributionType.UNIFORM
-    )
-    
-    # SNR scaling
-    scaling_method = gf.ScalingMethod(
-        value=gf.Distribution(
-            min_=cfg.snr_min,
-            max_=cfg.snr_max,
-            type_=gf.DistributionType.UNIFORM
-        ),
-        type_=gf.ScalingTypes.SNR
-    )
-    
-    # Waveform generator
-    waveform_generator = gf.CBCGenerator(
-        mass_1_msun=mass_1_distribution,
-        mass_2_msun=mass_2_distribution,
-        inclination_radians=inclination_distribution,
-        scaling_method=scaling_method,
-        injection_chance=0.5,
-        spin_1_in=(0.0, 0.0, 0.0),
-        spin_2_in=(0.0, 0.0, 0.0),
-    )
-    
-    # Noise configuration
+    cfg = config or ValidationDatasetConfig()
     ifo_data_obtainer = None
     if noise_type == gf.NoiseType.REAL:
         ifo_data_obtainer = gf.IFODataObtainer(
@@ -258,30 +178,18 @@ def validation_dataset_args(
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE]
         )
-
-    noise_obtainer = gf.NoiseObtainer(
-        noise_type=noise_type,
-        ifos=cfg.ifos,
-        ifo_data_obtainer=ifo_data_obtainer
+    return cbc_dataset_args(
+        sample_rate_hertz=cfg.sample_rate_hertz,
+        onsource_duration_seconds=cfg.onsource_duration_seconds,
+        offsource_duration_seconds=cfg.offsource_duration_seconds,
+        mass_distribution_type=gf.DistributionType.UNIFORM,
+        mass_range_msun=cfg.mass_range_msun,
+        snr=gf.Distribution(min_=cfg.snr_min, max_=cfg.snr_max, type_=gf.DistributionType.UNIFORM),
+        injection_chance=0.5,
+        batch_size=cfg.batch_size,
+        output_variables=[gf.ReturnVariables.INJECTION_MASKS],
+        noise_obtainer=gf.NoiseObtainer(
+            noise_type=noise_type, ifos=cfg.ifos, ifo_data_obtainer=ifo_data_obtainer),
+        seed=seed,
+        **kwargs,
     )
-    
-    # Build dataset args dict
-    dataset_args = {
-        "sample_rate_hertz": cfg.sample_rate_hertz,
-        "onsource_duration_seconds": cfg.onsource_duration_seconds,
-        "offsource_duration_seconds": cfg.offsource_duration_seconds,
-        "noise_obtainer": noise_obtainer,
-        "waveform_generators": waveform_generator,
-        "num_examples_per_batch": cfg.batch_size,
-        "seed": seed,
-        "input_variables": [
-            gf.ReturnVariables.ONSOURCE,
-            gf.ReturnVariables.OFFSOURCE
-        ],
-        "output_variables": [
-            gf.ReturnVariables.INJECTION_MASKS
-        ],
-        **kwargs
-    }
-    
-    return dataset_args

@@ -26,7 +26,7 @@ from holoviews.operation.datashader import datashade
 import holoviews.operation.datashader
 
 import gravyflow as gf
-from .utils import downsample_data, pad_with_random_values, calculate_far_score_thresholds
+from .utils import downsample_data
 
 logger = logging.getLogger(__name__)
 
@@ -488,212 +488,123 @@ def generate_gps_distribution_plot(
     return column(p_main, p_detail)
 
 
+def _display_indices(n: int, max_points: int) -> np.ndarray:
+    """Indices of at most ``max_points`` exact points, dense at the start of a ranked curve."""
+    if n <= max_points:
+        return np.arange(n)
+    return np.unique(np.geomspace(1, n, max_points).astype(int) - 1)
+
+
+def _title(validator, index: int) -> str:
+    return gf.snake_to_capitalized_spaces(validator.name) if validator.name else f"Model {index}"
+
+
+def _style(p, legend_location: str) -> None:
+    p.legend.location = legend_location
+    p.legend.click_policy = "hide"
+    p.legend.label_text_font_size = "18pt"
+    p.axis.axis_label_text_font_size = "21pt"
+    p.axis.major_label_text_font_size = "18pt"
+    p.title.text_font_size = '24pt'
+
+
 def generate_far_curves(
         validators : list,
         colors : List[str] = Bright[7],
         width : int = 800,
         height : int = 600
     ):
-
-    colors = cycle(colors)
-    
+    """FAR (Hz) against the score threshold (logit), with each curve's Poisson band."""
     tooltips = [
-        ("Score Threshold", "@x{0.0000}"),
+        ("Score Threshold", "@x{0.000}"),
         ("False Alarm Rate (Hz)", "@y{0.0e}"),
+        ("Interval (Hz)", "@lower{0.0e} – @upper{0.0e}"),
     ]
-
     p = figure(
-        #title = "False Alarm Rate (FAR) curves",
         width=width,
         height=height,
-        x_axis_label="Score Threshold",
+        x_axis_label="Score Threshold (logit)",
         y_axis_label="False Alarm Rate (Hz)",
         tooltips=tooltips,
-        x_axis_type="log",
         y_axis_type="log"
     )
-        
-    max_num_points = 2000
-
-    for index, (color, validator) in enumerate(zip(colors, validators)):
-        far_scores = validator.far_scores
-        
-        name = validator.name
-
-        if name is not None:
-            title = gf.snake_to_capitalized_spaces(name)
-        else:
-            title = f"default_{index}"
-            name = index
-                
-        far_scores = np.sort(far_scores)[::-1]
-        total_num_seconds = len(far_scores) * validator.input_duration_seconds
-        far_axis = np.arange(1, len(far_scores) + 1, dtype=float) / total_num_seconds
-        
-        downsampled_far_scores, downsampled_far_axis = downsample_data(
-            far_scores, far_axis, max_num_points
-        )
-        
-        # Round to 6 decimal places to reduce serialized size
-        downsampled_far_scores = np.around(downsampled_far_scores, decimals=6)
-        downsampled_far_axis = np.around(downsampled_far_axis, decimals=8)
-        
-        source = ColumnDataSource(
-            data=dict(
-                x=downsampled_far_scores, 
-                y=downsampled_far_axis
-            )
-        )
-        
-        p.line(
-            "x", 
-            "y", 
-            source=source, 
-            line_color=color,
-            line_width=2,
-            legend_label=title
-        )
-
-    hover = HoverTool()
-    hover.tooltips = tooltips
-    p.add_tools(hover)
-    
-    p.legend.location = "bottom_left"
-    p.legend.click_policy = "hide"
-    p.legend.click_policy = "hide"
-    p.legend.label_text_font_size = "18pt"
-
-    # Increase font sizes
-    p.axis.axis_label_text_font_size = "21pt"  # Increase axis label font size
-    p.axis.major_label_text_font_size = "18pt"  # Increase tick label font size
-
-    # If you have titles
-    p.title.text_font_size = '24pt'
-
+    for index, (color, validator) in enumerate(zip(cycle(colors), validators)):
+        if validator.far_scores is None:
+            continue
+        confidence = validator.config.confidence
+        curve = validator.background().far_curve(confidence)
+        keep = _display_indices(curve.thresholds.size, 2000)
+        source = ColumnDataSource(data=dict(
+            x=curve.thresholds[keep], y=curve.rate_hz[keep],
+            lower=curve.lower_hz[keep], upper=curve.upper_hz[keep],
+        ))
+        title = _title(validator, index)
+        p.varea(x="x", y1="lower", y2="upper", source=source, fill_color=color, fill_alpha=0.2,
+                legend_label=f"{title} ({confidence:.0%} interval)")
+        p.line("x", "y", source=source, line_color=color, line_width=2, legend_label=title)
+    _style(p, "bottom_left")
     return p
 
 def generate_roc_curves(
     validators: list,
-    colors : List[str] = Bright[7], 
+    colors : List[str] = Bright[7],
     width : int = 800,
     height : int = 600
     ):
-
-    colors = cycle(colors)
-    
+    """Exact ROC curves (per window) of noise against an injection population."""
     p = figure(
-        #title="Receiver Operating Characteristic (ROC) Curves",
-        x_axis_label='False Alarm Rate (Hz)',
-        y_axis_label='Accuracy (Per Cent)',
-        width=width, 
+        x_axis_label='False Positive Rate (per window)',
+        y_axis_label='True Positive Rate (%)',
+        width=width,
         height=height,
-        x_axis_type='log', 
-        x_range=[1e-6, 1], 
+        x_axis_type='log',
+        x_range=[1e-6, 1],
         y_range=[0.0, 100.0]
     )
-    
     max_num_points = 500
-
-    initial_population_key = list(validators[0].roc_data.keys())[0]
-    all_sources = {}
-    
-    for color, validator in zip(colors, validators):
-        roc_data = validator.roc_data[initial_population_key]
-        name = validator.name
-                
-        if name is not None:
-            title = gf.snake_to_capitalized_spaces(name)
-        else:
-            title = f"default_{index}"
-            name = index
-        
-        fpr = roc_data["fpr"]
-        tpr = roc_data["tpr"]*100
-        roc_auc = roc_data["roc_auc"]
-
-        reduced_fpr, reduced_tpr = downsample_data(fpr, tpr, max_num_points)
-        source = ColumnDataSource(
-            data=dict(
-                x=reduced_fpr, 
-                y=reduced_tpr, 
-                roc_auc=[roc_auc] * len(reduced_fpr))
-            )
-        all_sources[name] = source
-        line = p.line(
-            x='x', 
-            y='y', 
-            source=source,
-            color=color, 
-            width=2, 
-            legend_label=f'{title} (area = {roc_auc:.5f})'
-        )
-        
-        hover = HoverTool(
-            tooltips=[
-                ("Series", title),
-                ("False Positive Rate", "{0.0000}"),
-                ("True Positive Rate", "{0.0000}")
-            ],
-            renderers=[line]
-        )
-        p.add_tools(hover)
-
-    p.legend.location = "bottom_right"
-    p.legend.click_policy = "hide"
-    p.legend.click_policy = "hide"
-    p.legend.label_text_font_size = "18pt"
-
-    # Increase font sizes
-    p.axis.axis_label_text_font_size = "21pt"  # Increase axis label font size
-    p.axis.major_label_text_font_size = "18pt"  # Increase tick label font size
-
-    # If you have titles
-    p.title.text_font_size = '24pt'
-    
-    # Dropdown to select the test population
-    populations = list(validators[0].roc_data.keys())
-    select = Select(
-        title="Test Population:", 
-        value=initial_population_key, 
-        options=populations
-    )
-    # JS code to update the curves when the test population changes
-    update_code = """
-        const selected_population = cb_obj.value;
-        
-        for (let name in all_sources) {
-            const source = all_sources[name];
-            const new_data = all_data[name][selected_population];
-            source.data.x = new_data.fpr;
-            source.data.y = new_data.tpr;
-            source.data.roc_auc = new Array(new_data.fpr.length).fill(new_data.roc_auc);
-            source.change.emit();
-        }
-    """
-
-    # Organize all data in a structured way for JS to easily pick it
-    all_data = {}
-    for validator in validators:
-        name = validator.name
+    all_data, all_sources = {}, {}
+    for index, validator in enumerate(validators):
+        name = validator.name or f"Model {index}"
         all_data[name] = {}
-        for population, data in validator.roc_data.items():
-            fpr, tpr = downsample_data(data["fpr"], data["tpr"]*100, max_num_points)
+        for population, roc in validator.roc_curves().items():
+            keep = _display_indices(roc["fpr"].size, max_num_points)
             all_data[name][population] = {
-                'fpr': fpr,
-                'tpr': tpr,
-                'roc_auc': data['roc_auc']
+                'fpr': roc["fpr"][keep], 'tpr': roc["tpr"][keep] * 100, 'roc_auc': roc["roc_auc"]
             }
+    populations = list(next(iter(all_data.values()), {}).keys())
+    if not populations:
+        return p, Select(title="Test Population:", options=[])
+    initial = populations[0]
 
-    callback = CustomJS(
-        args=
-        {
-            'all_sources': all_sources, 
-            'all_data': all_data
-        }, 
-        code=update_code
-    )
-    select.js_on_change('value', callback)
-    
+    for index, (color, validator) in enumerate(zip(cycle(colors), validators)):
+        name = validator.name or f"Model {index}"
+        data = all_data[name].get(initial)
+        if data is None:
+            continue
+        source = ColumnDataSource(data=dict(x=data['fpr'], y=data['tpr']))
+        all_sources[name] = source
+        line = p.line(x='x', y='y', source=source, color=color, width=2,
+                      legend_label=f'{_title(validator, index)} (area = {data["roc_auc"]:.5f})')
+        p.add_tools(HoverTool(
+            tooltips=[("Series", _title(validator, index)),
+                      ("False Positive Rate", "@x{0.0000e}"),
+                      ("True Positive Rate (%)", "@y{0.00}")],
+            renderers=[line]
+        ))
+    _style(p, "bottom_right")
+
+    select = Select(title="Test Population:", value=initial, options=populations)
+    select.js_on_change('value', CustomJS(
+        args={'all_sources': all_sources, 'all_data': all_data},
+        code="""
+        const population = cb_obj.value;
+        for (const name in all_sources) {
+            const data = all_data[name][population];
+            if (!data) { continue; }
+            all_sources[name].data = {x: data.fpr, y: data.tpr};
+        }
+        """
+    ))
     return p, select
 
 def generate_waveform_plot(
@@ -745,7 +656,7 @@ def generate_waveform_plot(
                 return float(arr.flatten()[0])
             else:
                 return default
-        except:
+        except (TypeError, ValueError, OverflowError):
              return default
     
     # Extract parameters
@@ -764,7 +675,7 @@ def generate_waveform_plot(
         try:
             dt = gps_epoch + timedelta(seconds=float(gps_time) - 18)  # Approximate UTC
             human_time = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-        except:
+        except (TypeError, ValueError, OverflowError):
             human_time = "Error"
     
     # Create time axis
@@ -1060,11 +971,10 @@ def generate_parameter_space_plot(
     p_rolling = figure(
         title=f"Rolling Average Score vs {initial_x}",
         x_axis_label=initial_x,
-        y_axis_label="Average Score",
+        y_axis_label="Average Score (logit)",
         width=width,
         height=200,
         tools="pan,box_zoom,wheel_zoom,reset",
-        y_range=(-0.1, 1.1)
     )
     
     # Initial rolling data
@@ -1089,11 +999,12 @@ def generate_parameter_space_plot(
     # ----------------------------
     
     # Color mapper for score
+    # Scores are logits (unbounded): span the central 98% of them.
     mapper = linear_cmap(
         field_name='color',
         palette=Viridis256,
-        low=0.0,
-        high=1.0
+        low=float(np.percentile(scores, 1)) if scores.size else 0.0,
+        high=float(np.percentile(scores, 99)) if scores.size else 1.0
     )
     
     # Scatter plot
@@ -1223,416 +1134,104 @@ def generate_parameter_space_plot(
 
 def generate_efficiency_plot(
     validators: list,
-    fars: List[float] = [1e-1, 1e-2, 1e-3, 1e-4],
     colors: List[str] = Bright[7],
     width: int = 1000,
     height: int = 800
 ):
     """
-    Generate interactive efficiency plot with slider for FAR.
-    Calculates efficiency curves (Recall vs SNR) for each FAR.
+    Efficiency against injected SNR at a chosen FAR, one point per SNR bin with
+    its binomial interval. A FAR the noise background cannot resolve has no curve.
+
+    Returns:
+        ``(figure, select)``: the plot and the FAR selector.
     """
-    colors = cycle(colors)
-    
     p = figure(
-        #title="Efficiency vs SNR",
-        x_axis_label="SNR",
-        y_axis_label="Efficiency (Recall) / Score",
+        x_axis_label="Injected SNR (bin mean)",
+        y_axis_label="Efficiency",
         y_range=(0, 1.05),
         width=width,
         height=height,
-        tools="pan,box_zoom,wheel_zoom,reset"  # No default hover - we add scoped one later
+        tools="pan,box_zoom,wheel_zoom,reset"
     )
-    
-    # Increase font sizes by 50%
-    p.axis.axis_label_text_font_size = "21pt"  # 14pt * 1.5
-    p.axis.major_label_text_font_size = "18pt"  # 12pt * 1.5
-    p.title.text_font_size = "24pt"  # 16pt * 1.5
-    # Note: legend font size set after legend is created
-    
-    # Add Datashaded Scatter of Scores (Background)
-    all_snrs = []
-    all_scores = []
-    # Collect data from all validators
-    for validator in validators:
-        if validator.efficiency_data:
-             all_snrs.append(validator.efficiency_data["snrs"])
-             all_scores.append(validator.efficiency_data["scores"])
-    
-    if all_snrs:
-        combined_snrs = np.concatenate(all_snrs).astype(np.float32)
-        combined_scores = np.concatenate(all_scores).astype(np.float32)
-        
-        # Use HoloViews for rasterization (compute 2D histogram on server)
-        import holoviews as hv
-        import datashader as ds
-        import holoviews.operation.datashader
-        
-        # Points
-        points = hv.Points((combined_snrs, combined_scores))
-        
-        # Rasterize to get a 2D grid of counts
-        raster = hv.operation.datashader.rasterize(points, width=400, height=400, dynamic=False)
-        
-        # Extract data directy from HoloViews element
-        bounds = raster.bounds.lbrt()
-        x0 = bounds[0]  # left
-        y0 = bounds[1]  # bottom
-        dw = bounds[2] - bounds[0]  # right - left
-        dh = bounds[3] - bounds[1]  # top - bottom
-        
-        try:
-            counts = raster.dimension_values(raster.vdims[0], flat=False)
-        except:
-            counts = np.zeros((400, 400))
-            
-        counts = np.nan_to_num(np.array(counts))
-        rows, cols = counts.shape
-        
-        # Initialize RGBA grid (all transparent)
-        rgba = np.zeros((rows, cols), dtype=np.uint32) 
-        
-        heatmap_source = ColumnDataSource(data=dict(
-            image=[rgba], 
-            counts=[counts], # Pass raw counts grid
-            x=[x0], y=[y0], dw=[dw], dh=[dh]
-        ))
-        
-        # Create ImageRGBA glyph
-        p.image_rgba(image='image', x='x', y='y', dw='dw', dh='dh', source=heatmap_source)
-        
-        p.xaxis.axis_label = "SNR"
-        p.yaxis.axis_label = "Efficiency (Recall) / Score"
-    else:
-        heatmap_source = None
-    
-    # Store curve renderers for hover tool
-    curve_renderers = []
-    
-    all_data = {}
-    sources = {}
-    all_thresholds = {}
-    thresh_sources = {}
-    thresh_labels = {}
-    
-    initial_far = fars[0]
-    
-    for i, (validator, color) in enumerate(zip(validators, colors)):
-        name = validator.name or f"Model {i}"
-        
+    all_data, sources = {}, {}
+    far_keys: List[str] = []
+    for index, (validator, color) in enumerate(zip(validators, cycle(colors))):
         if validator.efficiency_data is None or validator.far_scores is None:
             continue
-            
-        snrs = validator.efficiency_data["snrs"]
-        scores = validator.efficiency_data["scores"]
-        far_scores = validator.far_scores
-        
-        # Calculate thresholds for requested FARs
-        thresholds = calculate_far_score_thresholds(
-            far_scores,
-            validator.input_duration_seconds,
-            np.array(fars)
-        )
-        
-        # Binning setup - use rolling window for smoother curves
-        min_snr = np.floor(snrs.min())
-        max_snr = np.ceil(snrs.max())
-        
-        # Sort data by SNR for efficient rolling window
-        sort_idx = np.argsort(snrs)
-        sorted_snrs = snrs[sort_idx]
-        sorted_scores = scores[sort_idx]
-        
-        model_curves = {}
-        
-        for far in fars:
-            if far not in thresholds:
-                continue
-                
-            thresh = thresholds[far][1]
-            
-            # Skip if threshold >= 1.0 - no sample can pass
-            if thresh >= 1.0:
-                model_curves[f"{far:.1e}"] = {"x": [], "y": []}
-                continue
-            
-            # Rolling window approach
-            window_half_width = 0.5
-            min_samples = 20
-            
-            eval_snrs = np.linspace(min_snr + window_half_width, max_snr - window_half_width, 50)
-            rolling_recalls = []
-            valid_snrs = []
-            
-            for snr_center in eval_snrs:
-                mask = (sorted_snrs >= snr_center - window_half_width) & (sorted_snrs < snr_center + window_half_width)
-                if np.sum(mask) >= min_samples:
-                    recall = np.mean(sorted_scores[mask] > thresh)
-                    rolling_recalls.append(recall)
-                    valid_snrs.append(snr_center)
-            
-            if len(valid_snrs) < 5:
-                model_curves[f"{far:.1e}"] = {"x": [], "y": []}
-                continue
-            
-            model_curves[f"{far:.1e}"] = {"x": list(valid_snrs), "y": list(rolling_recalls)}
+        name = validator.name or f"Model {index}"
+        curves = {}
+        for far, (threshold, curve) in validator.efficiency_curves().items():
+            key = f"{far:.1e}"
+            ok = np.isfinite(curve.efficiency)
+            curves[key] = dict(
+                x=curve.snr_mean[ok].tolist(), y=curve.efficiency[ok].tolist(),
+                lower=curve.lower[ok].tolist(), upper=curve.upper[ok].tolist(),
+                n=curve.total[ok].tolist(),
+            )
+            if threshold.resolved and key not in far_keys:
+                far_keys.append(key)
+        all_data[name] = curves
+        sources[name] = ColumnDataSource(data=dict(x=[], y=[], lower=[], upper=[], n=[]))
+        confidence = validator.config.confidence
+        p.varea(x="x", y1="lower", y2="upper", source=sources[name], fill_color=color,
+                fill_alpha=0.2, legend_label=f"{name} ({confidence:.0%} interval)")
+        line = p.line(x="x", y="y", source=sources[name], line_width=3, color=color, legend_label=name)
+        p.scatter(x="x", y="y", source=sources[name], size=8, color=color)
+        p.add_tools(HoverTool(renderers=[line], tooltips=[
+            ("SNR", "@x{0.0}"), ("Efficiency", "@y{0.000}"),
+            ("Interval", "@lower{0.000} – @upper{0.000}"), ("Injections", "@n"),
+        ]))
 
-        all_data[name] = model_curves
-        
-        # Store thresholds for this validator
-        thresh_map = {}
-        for far in fars:
-            if far in thresholds:
-                thresh_map[f"{far:.1e}"] = thresholds[far][1]
-            else:
-                thresh_map[f"{far:.1e}"] = 0.0
-        
-        all_thresholds[name] = thresh_map
-        
-        init_curve = model_curves.get(f"{initial_far:.1e}", {"x": [], "y": []})
-        source = ColumnDataSource(data=dict(x=init_curve["x"], y=init_curve["y"]))
-        sources[name] = source
-        
-        curve_line = p.line(
-            x='x', y='y', source=source,
-            line_width=3, color=color, legend_label=name
-        )
-        curve_renderers.append(curve_line)
-        
-        # Add invisible scatter markers for hover interaction only
-        curve_circles = p.scatter(
-            x='x', y='y', source=source,
-            size=10, color=color, alpha=0, marker='circle'
-        )
-        curve_renderers.append(curve_circles)
-        
-        # Add dynamic threshold line
-        init_thresh = thresh_map.get(f"{initial_far:.1e}", 0.0)
-        thresh_source = ColumnDataSource(data=dict(x=[0, 20], y=[init_thresh, init_thresh]))
-        thresh_sources[name] = thresh_source
-        
-        p.line(
-            x='x', y='y', source=thresh_source,
-            line_width=2, color=color, line_dash='dashed', alpha=0.7,
-            legend_label=f"{name} Threshold"
-        )
-        
-        # Add threshold label (dynamic text)
-        thresh_label = Label(
-            x=0.5, y=init_thresh, 
-            text=f"{init_thresh}",
-            text_font_size="15pt",
-            text_color=color,
-            x_units='screen', y_units='data',
-            x_offset=5
-        )
-        p.add_layout(thresh_label)
-        thresh_labels[name] = thresh_label
-    
-    p.legend.location = "bottom_right"
-    p.legend.click_policy = "hide"
-    p.legend.label_text_font_size = "18pt"  # 50% larger fonts
-    
-    # Add hover tool scoped only to efficiency curve lines
-    if curve_renderers:
-        curve_hover = HoverTool(
-            renderers=curve_renderers,
-            tooltips=[("SNR", "@x{0.1f}"), ("Recall", "@y{0.3f}")]
-        )
-        p.add_tools(curve_hover)
-        
-    # Filter FAR options
-    valid_fars = []
-    if validators and all_thresholds and all_data:
-        first_model = list(all_thresholds.keys())[0]
-        model_curves = all_data.get(first_model, {})
-        for far_str, thresh_val in all_thresholds[first_model].items():
-            curve_data = model_curves.get(far_str, {"x": [], "y": []})
-            if thresh_val < 1.0 and len(curve_data.get("x", [])) > 0:
-                valid_fars.append(far_str)
-    
-    far_options = valid_fars if valid_fars else [f"{f:.1e}" for f in fars]
-    
-    # Power-of-10 discrete options for dropdown
-    power_of_10_options = []
-    for far_str in far_options:
-        try:
-            val = float(far_str)
-            import math
-            log_val = math.log10(val)
-            if abs(log_val - round(log_val)) < 0.01:
-                exp = int(round(log_val))
-                superscript_digits = {'0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', 
-                                      '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹', '-': '⁻'}
-                exp_str = str(exp)
-                superscript = ''.join(superscript_digits.get(c, c) for c in exp_str)
-                display = f"10{superscript}"
-                power_of_10_options.append((far_str, display))
-        except:
-            pass
-    
-    if not power_of_10_options:
-        power_of_10_options = [(far_options[i], f"Option {i+1}") for i in range(min(4, len(far_options)))]
-    
-    slider = Slider(
-        start=0, 
-        end=len(far_options)-1, 
-        value=0, 
-        step=1, 
-        title=f"FAR: {far_options[0]}",
-        show_value=False
-    )
-    
-    select_options = [(opt[0], opt[1]) for opt in power_of_10_options]
-    select = Select(
-        title="FAR (Power of 10):",
-        value=power_of_10_options[0][0] if power_of_10_options else far_options[0],
-        options=select_options
-    )
-    
-    code = """
-        let active_thresh = null;
-        const far_index = cb_obj.value;
-        const far_val = far_options[far_index];
-        cb_obj.title = "FAR: " + far_val;
-        
-        for (const name in sources) {
-            const source = sources[name];
-            const data = all_data[name][far_val];
-            if (data) {
-                source.data.x = data.x;
-                source.data.y = data.y;
-                source.change.emit();
-            }
-            
-            // Update threshold line
-            const thresh_source = thresh_sources[name];
-            const thresh = all_thresholds[name][far_val];
-            if (thresh_source && thresh !== undefined) {
-                thresh_source.data.y = [thresh, thresh];
-                thresh_source.change.emit();
-            }
-            
-            // Update threshold label
-            const label = thresh_labels[name];
-            if (label && thresh !== undefined) {
-                label.y = thresh;
-                label.text = String(thresh);
-            }
-            
-            if (name === current_model_name && thresh !== undefined) {
-                active_thresh = thresh;
-            }
-        }
-        
-        // Heatmap Update Logic
-        if (heatmap_source && active_thresh !== null) {
-            const data = heatmap_source.data;
-            const counts_flat = data['counts'][0]; 
-            const image = data['image'][0]; 
-            const y0 = data['y'][0];
-            const dh = data['dh'][0];
-            
-            const N = 400; // width
-            const M = 400; // height
-            
-            for (let i = 0; i < image.length; i++) {
-                const count = counts_flat[i];
-                if (count > 0) {
-                    const r = Math.floor(i / N);
-                    const y_val = y0 + (r / M) * dh;
-                    
-                    let color = 0;
-                    if (y_val >= active_thresh) {
-                        color = 0xFF00CC00; // Green
-                    } else {
-                        color = 0xFFAAAAAA; // Grey
-                    }
-                    image[i] = color;
-                } else {
-                    image[i] = 0;
-                }
-            }
-            heatmap_source.change.emit();
-        }
-    """
-    
-    primary_name = validators[-1].name if validators else "Model 0"
-    
-    slider_callback = CustomJS(
-        args=dict(
-            sources=sources, 
-            all_data=all_data, 
-            far_options=far_options, 
-            thresh_sources=thresh_sources, 
-            all_thresholds=all_thresholds,
-            thresh_labels=thresh_labels,
-            heatmap_source=heatmap_source,
-            current_model_name=primary_name
-        ), 
-        code=code
-    )
-    slider.js_on_change('value', slider_callback)
-    
-    select_code = """
-        const selected_far = cb_obj.value;
-        let best_idx = 0;
-        let best_diff = Infinity;
-        for (let i = 0; i < far_options.length; i++) {
-            const opt = parseFloat(far_options[i]);
-            const sel = parseFloat(selected_far);
-            const diff = Math.abs(Math.log10(opt) - Math.log10(sel));
-            if (diff < best_diff) {
-                best_diff = diff;
-                best_idx = i;
-            }
-        }
-        slider.value = best_idx;
-    """
+    if not far_keys:
+        far_keys = [f"{f:.1e}" for f in (validators[-1].config.far_thresholds if validators else [])][:1]
+    initial = far_keys[0] if far_keys else None
+    for name, source in sources.items():
+        if initial in all_data[name]:
+            source.data = all_data[name][initial]
+    if sources:
+        p.legend.location = "bottom_right"
+        p.legend.click_policy = "hide"
+        p.legend.label_text_font_size = "18pt"
+    p.axis.axis_label_text_font_size = "21pt"
+    p.axis.major_label_text_font_size = "18pt"
+
+    select = Select(title="False Alarm Rate (Hz):", value=initial, options=far_keys)
     select.js_on_change('value', CustomJS(
-        args=dict(slider=slider, far_options=far_options),
-        code=select_code
+        args=dict(sources=sources, all_data=all_data),
+        code="""
+        const far = cb_obj.value;
+        for (const name in sources) {
+            const data = all_data[name][far];
+            sources[name].data = data ? data : {x: [], y: [], lower: [], upper: [], n: []};
+        }
+        """
     ))
-    
-    controls = row(select, slider)
-    
-    return p, controls
-
+    return p, select
 
 def generate_real_events_table(
     events: List[Dict],
-    far_scores: np.ndarray = None,
-    input_duration_seconds: float = 1.0,
     far_thresholds: List[float] = [1e-1, 1e-2, 1e-3, 1e-4],
     width: int = 1200,
     num_waveform_plots: int = 5
 ):
     """
-    Generate interactive table for real GW events with FAR-based coloring.
-    
+    Generate interactive table for real GW events.
+
+    Each scored event carries its FAR (Hz) read from the validator's noise
+    background (``far_hz``) and the upper end of its interval (``far_upper_hz``).
+
     Args:
         events: List of event dicts with name, gps, mass1, mass2, distance, score, etc.
-        far_scores: Noise scores for FAR threshold calculation
-        input_duration_seconds: Duration per sample for FAR calculation
         far_thresholds: List of FAR values for dropdown
         width: Table width in pixels
-    
+
     Returns:
         Tuple of (table_layout, far_select)
     """
-    from .utils import calculate_far_score_thresholds
     import panel as pn
-    
+
     if not events:
         return pn.pane.Markdown("**No real events data available.**"), None
-    
-    # Calculate FAR thresholds if we have noise scores
-    if far_scores is not None and len(far_scores) > 0:
-        thresholds = calculate_far_score_thresholds(
-            far_scores, input_duration_seconds, np.array(far_thresholds)
-        )
-    else:
-        thresholds = {}
     
     # Separate events by type
     confident = [e for e in events if e.get("event_type") == "CONFIDENT"]
@@ -1643,16 +1242,7 @@ def generate_real_events_table(
     for event in confident + marginal:
         score = event.get("score")
         
-        # Calculate minimum FAR at which this event would be detected
-        min_far = None
-        if score is not None and thresholds:
-            for far in sorted(far_thresholds):
-                far_key = far
-                if far_key in thresholds:
-                    thresh_score = thresholds[far_key][1]
-                    if score >= thresh_score:
-                        min_far = far
-                        break
+        far_hz, far_upper_hz = event.get("far_hz"), event.get("far_upper_hz")
         
         # Convert GPS to human-readable date
         gps_time = event.get('gps', 0)
@@ -1663,7 +1253,7 @@ def generate_real_events_table(
             gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
             dt = gps_epoch + timedelta(seconds=gps_time + 18)
             date_str = dt.strftime("%Y-%m-%d %H:%M")
-        except:
+        except (TypeError, ValueError, OverflowError):
             date_str = "-"
         
         # Helper for safe formatting
@@ -1674,7 +1264,7 @@ def generate_real_events_table(
             try:
                 if np.isnan(val): return "-"
                 return f"{val:{fmt}}"
-            except:
+            except (TypeError, ValueError, OverflowError):
                 return "-"
 
         row = {
@@ -1688,7 +1278,7 @@ def generate_real_events_table(
             "p(BBH)": safe_fmt("p_bbh", ".2f"),
             "p(BNS)": safe_fmt("p_bns", ".2f"),
             "Score": f"{score:.3f}" if score is not None else "Pending",
-            "Min FAR": f"{min_far:.1e}" if min_far is not None else "-",
+            "FAR (Hz)": f"{far_hz:.1e} (≤ {far_upper_hz:.1e})" if far_hz is not None else "-",
             "_score_num": score if score is not None else -1,
             "_type": event.get("event_type", "Unknown"),
         }
@@ -1721,7 +1311,7 @@ def generate_real_events_table(
     )
     
     # Display columns (exclude internal columns)
-    display_cols = ["Name", "Type", "Run", "Date", "M₁ (M☉)", "M₂ (M☉)", "D (Mpc)", "p(BBH)", "p(BNS)", "Score", "Min FAR"]
+    display_cols = ["Name", "Type", "Run", "Date", "M₁ (M☉)", "M₂ (M☉)", "D (Mpc)", "p(BBH)", "p(BNS)", "Score", "FAR (Hz)"]
     
     # Summary stats
     num_confident = len(confident)
@@ -1806,7 +1396,7 @@ def generate_real_events_table(
                 try: 
                     if np.isnan(val): return "-"
                     return f"{val:{fmt}}"
-                except: return "-"
+                except (TypeError, ValueError, OverflowError): return "-"
 
             # Parameter Box (Dark Theme)
             params_html = f"""

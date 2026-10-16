@@ -1,236 +1,178 @@
 """
-George & Huerta 2017 - Deep Filtering for Gravitational Wave Detection
+George & Huerta 2017: Deep Filtering for gravitational-wave detection.
 
 Paper: "Deep Neural Networks to Enable Real-time Multimessenger Astrophysics"
 Authors: Daniel George, E. A. Huerta
 arXiv: 1701.00008v3
 Published: Physical Review D 97, 044039 (2018)
 
-This module provides two model architectures from the paper:
-1. GeorgeHuerta2017Shallow - 3 conv layers (Fig. 5), ~2MB, faster
-2. GeorgeHuerta2017Deep - 4 conv layers (Fig. 6), ~23MB, more accurate
+Two networks from the paper:
 
-Key Innovations:
-- Dilated convolutions for temporal aggregation
-- Transfer learning from predictor to classifier
-- Gradual noise increase training scheme
+1. `GeorgeHuerta2017Shallow`: three dilated convolutional layers (Fig. 5);
+2. `GeorgeHuerta2017Deep`: four dilated convolutional layers (Fig. 6).
 
-Dataset Configuration:
-- Component masses: 5-75 M☉ (mass ratio 1-10)
-- Whitened timeseries, 1 second @ 8192 Hz
-- EOB waveforms (non-spinning, quasi-circular)
-- Peak shifted randomly within 0.2 seconds
+Each is a classifier (two logits: noise, signal) or a regressor of the two
+component masses (the paper's predictor). The paper trains the predictor first
+and transfers its weights to the classifier; ``train_george_huerta_2017``
+does that.
+
+The data follow the paper where the library allows: 1 s of whitened strain at
+8192 Hz from one detector (``WHITENED_ONSOURCE``: whitening is in the data
+path), non-spinning BBHs with masses 5–75 M☉, and the paper's training scheme
+of SNR falling from 80–100 to 5–15 (`gf.Curriculum`). The waveforms are
+IMRPhenomD, not the paper's EOB, and inclination is uniform in [0, π].
 """
 
-import os
-from typing import Optional, Tuple, Dict, Any
-from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
+from typing import Optional
 
-import numpy as np
 import keras
-from keras.layers import (
-    Input, Conv1D, MaxPooling1D, Dense, Flatten, Dropout, 
-    Activation, Permute, Softmax, Reshape
-)
+from keras.layers import Activation, Conv1D, Dense, Flatten, MaxPooling1D, Permute
 from keras.models import Model
 
 import gravyflow as gf
-from gravyflow.src.model.examples.base import ExampleModel
+from gravyflow.src.model.examples.base import ExampleModel, cbc_dataset_args, model_input
 
 
-@dataclass
+@dataclass(frozen=True)
 class GeorgeHuerta2017Config:
-    """
-    Configuration matching George & Huerta 2017 paper specifications.
-    
-    References:
-        Section III "Method" of arXiv:1701.00008v3
-    """
-    # Sampling parameters
+    """The paper's settings (Section III and Figs. 5 and 6)."""
+    # Sampling
     sample_rate_hertz: float = 8192.0
     onsource_duration_seconds: float = 1.0
     offsource_duration_seconds: float = 16.0
-    
-    # Mass distributions (Paper: "individual masses of the BBH... 
-    # restricted to lie between 5M☉ and 75M☉" with "mass-ratios 
-    # confined between 1 and 10")
+
+    # Component masses 5-75 Msun
     mass_1_min_msun: float = 5.0
     mass_1_max_msun: float = 75.0
-    mass_2_min_msun: float = 5.0
-    mass_2_max_msun: float = 75.0
-    
-    # SNR scaling (Paper trains with SNR gradually decreasing from 100 to 5-15)
-    # For inference testing, paper uses range 5-15
+
+    # The target SNR range; with the curriculum, training starts at
+    # 80-100 and falls linearly to it over snr_curriculum_num_epochs.
     snr_min: float = 5.0
     snr_max: float = 15.0
-    
-    # Curriculum learning (Paper: "trains with SNR gradually decreasing from 100 to 5-15")
-    # Enable to match paper's gradual noise increase training scheme
     use_curriculum: bool = True
     snr_curriculum_start_min: float = 80.0
     snr_curriculum_start_max: float = 100.0
-    snr_curriculum_num_epochs: int = 80
-    snr_curriculum_schedule: 'gf.CurriculumSchedule' = None  # Defaults to LINEAR
-    snr_curriculum_verbose: bool = False  # Print SNR range at each epoch
-    
-    # Training parameters
-    injection_chance: float = 0.5  # 50% signal+noise, 50% noise-only
+    # Set from the run's length: see `curriculum_epochs`.
+    snr_curriculum_num_epochs: int = 10
+    snr_curriculum_verbose: bool = False
+
+    injection_chance: float = 0.5
     batch_size: int = 32
-    
-    # Shallow model architecture from Fig. 5
-    # Layer 1: Conv 16 filters, kernel 16, no dilation
-    # Layer 2: Conv 32 filters, kernel 8, dilation 4
-    # Layer 3: Conv 64 filters, kernel 8, dilation 4
-    # Pool size 4, stride 4 after each conv
-    # FC: 64, 2
-    shallow_conv_configs: tuple = (
-        (16, 16, 1),   # filters, kernel, dilation
-        (32, 8, 4),    # with dilation
-        (64, 8, 4),    # with dilation
-    )
-    shallow_pool_size: int = 4
-    shallow_fc_units: int = 64
-    
-    # Deep model architecture from Fig. 6
-    # Layer 1: Conv 64 filters, kernel 16, dilation 1
-    # Layer 2: Conv 128 filters, kernel 16, dilation 2
-    # Layer 3: Conv 256 filters, kernel 16, dilation 2
-    # Layer 4: Conv 512 filters, kernel 32, dilation 2
-    # Pool size 4, stride 4 after each conv
-    # FC: 128, 64, 2
-    deep_conv_configs: tuple = (
-        (64, 16, 1),
-        (128, 16, 2),
-        (256, 16, 2),
-        (512, 32, 2),
-    )
-    deep_pool_size: int = 4
+    learning_rate: float = 1e-4
+
+    # Fig. 5: (filters, kernel, dilation), max-pool 4 after each; dense 64
+    shallow_conv_configs: tuple = ((16, 16, 1), (32, 8, 4), (64, 8, 4))
+    shallow_fc_units: tuple = (64,)
+    # Fig. 6: (filters, kernel, dilation), max-pool 4 after each; dense 128, 64
+    deep_conv_configs: tuple = ((64, 16, 1), (128, 16, 2), (256, 16, 2), (512, 32, 2))
     deep_fc_units: tuple = (128, 64)
-    
-    # Output configuration
-    num_output_classes: int = 2  # classifier: signal+noise vs noise-only
+    pool_size: int = 4
+
+    num_output_classes: int = 2
+
+    @classmethod
+    def cpu(cls) -> "GeorgeHuerta2017Config":
+        """
+        The paper's settings at 2048 Hz, for the shallow network. The deep
+        network's receptive field needs the paper's 8192 samples.
+        """
+        return replace(cls(), sample_rate_hertz=2048.0)
+
+    def snr(self, curriculum: bool, first_step: int = 0) -> "gf.Distribution | gf.Curriculum":
+        """
+        The SNR distribution: the curriculum for training, the target range
+        otherwise. ``first_step`` is the training step the curriculum starts
+        at, so that a resumed run continues it rather than starting it again.
+        """
+        target = gf.Distribution(min_=self.snr_min, max_=self.snr_max, type_=gf.DistributionType.UNIFORM)
+        if not curriculum:
+            return target
+        return gf.Curriculum(
+            start=gf.Distribution(min_=self.snr_curriculum_start_min, max_=self.snr_curriculum_start_max,
+                                  type_=gf.DistributionType.UNIFORM),
+            end=target,
+            num_epochs=self.snr_curriculum_num_epochs,
+            schedule=gf.CurriculumSchedule.LINEAR,
+            verbose=self.snr_curriculum_verbose,
+            name="SNR",
+            _current_step=first_step,
+        )
 
 
-class GeorgeHuerta2017Shallow(ExampleModel):
+def curriculum_epochs(epochs: int) -> int:
     """
-    George & Huerta 2017 Shallow Network (Fig. 5)
-    
-    3 convolutional layers with dilated convolutions, followed by
-    2 fully connected layers. Outputs 2 classes (signal vs noise)
-    or 2 parameters (component masses) depending on task.
-    
-    Size: ~2MB
-    Speed: 6.7ms CPU, 106μs GPU per 1-second input
-    
-    Usage:
-        >>> model = gf.examples.GeorgeHuerta2017Shallow.model()
-        >>> dataset = gf.examples.GeorgeHuerta2017Shallow.dataset()
-    
-    References:
-        D. George & E.A. Huerta, "Deep Neural Networks to Enable 
-        Real-time Multimessenger Astrophysics", Phys. Rev. D 97, 044039.
-        arXiv:1701.00008v3, Fig. 5
+    Curriculum length for a run of ``epochs``: the first half, so that the
+    second half trains at the target SNR range the model is validated on.
+
+    Raises:
+        ValueError: fewer than 4 epochs leave no room for a curriculum.
     """
-    
+    if epochs < 4:
+        raise ValueError(f"A curriculum needs a run of at least 4 epochs, got {epochs}; "
+                         "train without the curriculum instead.")
+    return epochs // 2
+
+
+class _GeorgeHuerta2017(ExampleModel):
+    """The two networks' shared data and training; subclasses give the layers."""
+
     config = GeorgeHuerta2017Config()
-    
+    _conv_attr: str
+    _fc_attr: str
+    _name: str
+
     @classmethod
     def model(
         cls,
-        input_shape_onsource: Optional[Tuple[int, int]] = None,
-        input_shape_offsource: Optional[Tuple[int, int]] = None,
         config: Optional[GeorgeHuerta2017Config] = None,
-        task: str = "classification"  # or "regression"
+        num_ifos: int = 1,
+        task: str = "classification",
     ) -> keras.Model:
         """
-        Create the George & Huerta 2017 shallow CNN architecture.
-        
-        Architecture from Fig. 5:
-        - 3 Convolutional layers with ReLU, dilated convolutions
-        - MaxPooling (size 4, stride 4) after each conv
-        - 2 Fully connected layers
-        - Softmax output for classification, linear for regression
-        
-        Args:
-            input_shape_onsource: Shape of onsource input (samples, channels).
-            input_shape_offsource: Shape of offsource input for whitening.
-            config: Model configuration. Uses paper defaults if None.
-            task: "classification" (2-class softmax) or "regression" (mass prediction)
-        
-        Returns:
-            Keras model ready for compilation.
+        ``WHITENED_ONSOURCE`` in; two logits (``task="classification"``) or two
+        component masses (``task="regression"``) out.
         """
+        if task not in ("classification", "regression"):
+            raise ValueError(f"task must be 'classification' or 'regression', got {task!r}.")
         cfg = config or cls.config
-        
-        # Default shapes based on paper specs (1 second @ 8192 Hz, 1 channel)
-        if input_shape_onsource is None:
-            num_samples = int(cfg.onsource_duration_seconds * cfg.sample_rate_hertz)
-            input_shape_onsource = (num_samples, 1)
-        
-        if input_shape_offsource is None:
-            num_samples = int(cfg.offsource_duration_seconds * cfg.sample_rate_hertz)
-            input_shape_offsource = (num_samples, 1)
-        
-        # Input layers
-        onsource_input = Input(shape=input_shape_onsource, name="ONSOURCE")
-        offsource_input = Input(shape=input_shape_offsource, name="OFFSOURCE")
-        
-        # Whitening layer
-        # Paper: "whitened the signals using aLIGO's PSD"
-        x = gf.Whiten(
-            sample_rate_hertz=cfg.sample_rate_hertz,
-            onsource_duration_seconds=cfg.onsource_duration_seconds
-        )([onsource_input, offsource_input])
-        
-        # Permute to (batch, channels, samples) for Conv1D
-        x = Permute((2, 1))(x)
-        
-        # 3 Convolutional blocks from Fig. 5
-        for i, (filters, kernel_size, dilation) in enumerate(cfg.shallow_conv_configs):
-            layer_num = i + 1
-            
-            x = Conv1D(
-                filters, 
-                kernel_size, 
-                dilation_rate=dilation,
-                name=f"Conv1D_{layer_num}"
-            )(x)
-            
-            # MaxPooling
-            x = MaxPooling1D(
-                pool_size=cfg.shallow_pool_size, 
-                strides=cfg.shallow_pool_size,
-                name=f"MaxPool_{layer_num}"
-            )(x)
-            
-            # ReLU activation
-            x = Activation('relu', name=f"ReLU_{layer_num}")(x)
-        
-        # Flatten
+        inputs = model_input(cfg.sample_rate_hertz, cfg.onsource_duration_seconds, num_ifos)
+        x = Permute((2, 1), name="permute")(inputs)  # (samples, detectors) for Conv1D
+        for number, (filters, kernel_size, dilation) in enumerate(getattr(cfg, cls._conv_attr), start=1):
+            x = Conv1D(filters, kernel_size, dilation_rate=dilation, name=f"Conv1D_{number}")(x)
+            x = MaxPooling1D(pool_size=cfg.pool_size, strides=cfg.pool_size, name=f"MaxPool_{number}")(x)
+            x = Activation("relu", name=f"ReLU_{number}")(x)
         x = Flatten(name="Flatten")(x)
-        
-        # FC layer 1
-        x = Dense(cfg.shallow_fc_units, name="Dense_1")(x)
-        x = Activation('relu', name="ReLU_FC_1")(x)
-        
-        # Output layer
-        if task == "classification":
-            # 2-class softmax for detection
-            output = Dense(cfg.num_output_classes, activation='softmax', 
-                          name="output")(x)
-        else:
-            # Linear output for mass prediction (regression)
-            output = Dense(2, activation='linear', name="output")(x)
-        
-        model = Model(
-            inputs=[onsource_input, offsource_input],
-            outputs=output,
-            name="GeorgeHuerta2017Shallow"
+        for number, units in enumerate(getattr(cfg, cls._fc_attr), start=1):
+            x = Dense(units, name=f"Dense_{number}")(x)
+            x = Activation("relu", name=f"ReLU_FC_{number}")(x)
+        outputs = Dense(cfg.num_output_classes if task == "classification" else 2, name="output")(x)
+        return Model(inputs={inputs.name: inputs}, outputs=outputs, name=cls._name)
+
+    @classmethod
+    def _dataset(cls, config, seed, group, steps_per_epoch, regression: bool, curriculum: bool,
+                 first_epoch: int = 0, **kwargs):
+        cfg = config or cls.config
+        labels = ([gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN]
+                  if regression else [gf.ReturnVariables.INJECTION_MASKS])
+        return gf.GravyflowDataset(
+            **cbc_dataset_args(
+                sample_rate_hertz=cfg.sample_rate_hertz,
+                onsource_duration_seconds=cfg.onsource_duration_seconds,
+                offsource_duration_seconds=cfg.offsource_duration_seconds,
+                mass_distribution_type=gf.DistributionType.UNIFORM,
+                mass_range_msun=(cfg.mass_1_min_msun, cfg.mass_1_max_msun),
+                snr=cfg.snr(curriculum, first_step=first_epoch * steps_per_epoch),
+                injection_chance=1.0 if regression else cfg.injection_chance,
+                batch_size=cfg.batch_size,
+                output_variables=labels,
+            ),
+            seed=seed,
+            group=group,
+            steps_per_epoch=steps_per_epoch,
+            **kwargs,
         )
-        
-        return model
-    
+
     @classmethod
     def dataset(
         cls,
@@ -238,136 +180,22 @@ class GeorgeHuerta2017Shallow(ExampleModel):
         config: Optional[GeorgeHuerta2017Config] = None,
         seed: Optional[int] = None,
         group: str = "train",
-        steps_per_epoch: int = 7000,  # ~2500 templates * 2.8 noise realizations
+        steps_per_epoch: int = 1000,
+        curriculum: bool = False,
+        first_epoch: int = 0,
         **kwargs
     ) -> gf.GravyflowDataset:
         """
-        Create a dataset matching George & Huerta 2017 specifications.
-        
-        Dataset Configuration from paper:
-        - Component masses 5-75 M☉ with mass ratio 1-10
-        - ~2500 templates with multiple noise realizations
-        - 50% signal+noise, 50% noise-only
-        
-        Curriculum Learning:
-            Enable via config.use_curriculum=True to match the paper's 
-            "gradual noise increase training scheme" where SNR decreases
-            from 100 to 5-15 over the training epochs.
-        
-        Args:
-            noise_type: Type of noise. Paper used Gaussian.
-            config: Dataset configuration. Uses paper defaults if None.
-                Set config.use_curriculum=True to enable curriculum learning.
-            seed: Random seed for reproducibility.
-            group: Dataset group ("train", "validate", "test").
-            steps_per_epoch: Number of batches per epoch.
-            **kwargs: Additional arguments passed to GravyflowDataset.
-        
-        Returns:
-            GravyflowDataset configured to match paper specifications.
+        Detection data with ``INJECTION_MASKS`` labels; with ``curriculum``
+        (and ``config.use_curriculum``), the SNR follows the training scheme
+        from ``first_epoch``. Coloured noise only, for now.
         """
+        if noise_type is not gf.NoiseType.COLORED:
+            raise ValueError(f"{cls.__name__}.dataset supports coloured noise only.")
         cfg = config or cls.config
-        
-        # Mass distributions
-        mass_1_distribution = gf.Distribution(
-            min_=cfg.mass_1_min_msun,
-            max_=cfg.mass_1_max_msun,
-            type_=gf.DistributionType.UNIFORM
-        )
-        
-        mass_2_distribution = gf.Distribution(
-            min_=cfg.mass_2_min_msun,
-            max_=cfg.mass_2_max_msun,
-            type_=gf.DistributionType.UNIFORM
-        )
-        
-        # Inclination uniform in [0, pi]
-        inclination_distribution = gf.Distribution(
-            min_=0.0,
-            max_=np.pi,
-            type_=gf.DistributionType.UNIFORM
-        )
-        
-        # SNR scaling - use curriculum if enabled
-        if cfg.use_curriculum:
-            # Curriculum learning as described in paper:
-            # "trains with SNR gradually decreasing from 100 to 5-15"
-            schedule = cfg.snr_curriculum_schedule or gf.CurriculumSchedule.LINEAR
-            
-            snr_curriculum = gf.Curriculum(
-                start=gf.Distribution(
-                    min_=cfg.snr_curriculum_start_min,
-                    max_=cfg.snr_curriculum_start_max,
-                    type_=gf.DistributionType.UNIFORM
-                ),
-                end=gf.Distribution(
-                    min_=cfg.snr_min,
-                    max_=cfg.snr_max,
-                    type_=gf.DistributionType.UNIFORM
-                ),
-                num_epochs=cfg.snr_curriculum_num_epochs,
-                schedule=schedule,
-                verbose=cfg.snr_curriculum_verbose,
-                name="SNR"
-            )
-            
-            scaling_method = gf.ScalingMethod(
-                value=snr_curriculum,
-                type_=gf.ScalingTypes.SNR
-            )
-        else:
-            # Fixed SNR range (default for inference/testing)
-            scaling_method = gf.ScalingMethod(
-                value=gf.Distribution(
-                    min_=cfg.snr_min,
-                    max_=cfg.snr_max,
-                    type_=gf.DistributionType.UNIFORM
-                ),
-                type_=gf.ScalingTypes.SNR
-            )
-        
-        # Waveform generator
-        # Paper: "EOB waveforms... non-spinning BBHs"
-        waveform_generator = gf.CBCGenerator(
-            mass_1_msun=mass_1_distribution,
-            mass_2_msun=mass_2_distribution,
-            inclination_radians=inclination_distribution,
-            scaling_method=scaling_method,
-            injection_chance=cfg.injection_chance,
-            # Zero spin as per paper
-            spin_1_in=(0.0, 0.0, 0.0),
-            spin_2_in=(0.0, 0.0, 0.0),
-        )
-        
-        # Noise configuration
-        noise_obtainer = gf.NoiseObtainer(
-            noise_type=noise_type,
-            ifos=gf.IFO.L1
-        )
-        
-        # Create dataset
-        dataset = gf.GravyflowDataset(
-            sample_rate_hertz=cfg.sample_rate_hertz,
-            onsource_duration_seconds=cfg.onsource_duration_seconds,
-            offsource_duration_seconds=cfg.offsource_duration_seconds,
-            noise_obtainer=noise_obtainer,
-            waveform_generators=waveform_generator,
-            num_examples_per_batch=cfg.batch_size,
-            seed=seed,
-            group=group,
-            steps_per_epoch=steps_per_epoch,
-            input_variables=[
-                gf.ReturnVariables.ONSOURCE,
-                gf.ReturnVariables.OFFSOURCE
-            ],
-            output_variables=[
-                gf.ReturnVariables.INJECTION_MASKS
-            ],
-            **kwargs
-        )
-        
-        return dataset
-    
+        return cls._dataset(cfg, seed, group, steps_per_epoch, regression=False,
+                            curriculum=curriculum and cfg.use_curriculum, first_epoch=first_epoch, **kwargs)
+
     @classmethod
     def dataset_regression(
         cls,
@@ -375,343 +203,62 @@ class GeorgeHuerta2017Shallow(ExampleModel):
         config: Optional[GeorgeHuerta2017Config] = None,
         seed: Optional[int] = None,
         group: str = "train",
-        steps_per_epoch: int = 7000,
+        steps_per_epoch: int = 1000,
+        curriculum: bool = False,
+        first_epoch: int = 0,
         **kwargs
     ) -> gf.GravyflowDataset:
-        """
-        Create a dataset for mass regression pre-training.
-        
-        This follows the paper's transfer learning strategy where models
-        are first trained to predict component masses (regression), then
-        transferred to classification.
-        
-        Output Variables:
-            - MASS_1_MSUN: Primary component mass
-            - MASS_2_MSUN: Secondary component mass
-        
-        Note:
-            For regression, injection_chance is set to 1.0 (always inject)
-            since we need signal parameters to predict.
-        
-        Args:
-            noise_type: Type of noise. Paper used Gaussian.
-            config: Dataset configuration.
-            seed: Random seed for reproducibility.
-            group: Dataset group ("train", "validate", "test").
-            steps_per_epoch: Number of batches per epoch.
-            **kwargs: Additional arguments.
-        
-        Returns:
-            GravyflowDataset configured for mass regression.
-        """
+        """Every example injected, with ``MASS_1_MSUN`` and ``MASS_2_MSUN`` labels."""
+        if noise_type is not gf.NoiseType.COLORED:
+            raise ValueError(f"{cls.__name__}.dataset_regression supports coloured noise only.")
         cfg = config or cls.config
-        
-        # Mass distributions
-        mass_1_distribution = gf.Distribution(
-            min_=cfg.mass_1_min_msun,
-            max_=cfg.mass_1_max_msun,
-            type_=gf.DistributionType.UNIFORM
-        )
-        
-        mass_2_distribution = gf.Distribution(
-            min_=cfg.mass_2_min_msun,
-            max_=cfg.mass_2_max_msun,
-            type_=gf.DistributionType.UNIFORM
-        )
-        
-        inclination_distribution = gf.Distribution(
-            min_=0.0,
-            max_=np.pi,
-            type_=gf.DistributionType.UNIFORM
-        )
-        
-        # For regression pre-training, use higher SNR (as per paper)
-        # Paper trains predictor at high SNR first
-        if cfg.use_curriculum:
-            schedule = cfg.snr_curriculum_schedule or gf.CurriculumSchedule.LINEAR
-            snr_curriculum = gf.Curriculum(
-                start=gf.Distribution(
-                    min_=cfg.snr_curriculum_start_min,
-                    max_=cfg.snr_curriculum_start_max,
-                    type_=gf.DistributionType.UNIFORM
-                ),
-                end=gf.Distribution(
-                    min_=cfg.snr_min,
-                    max_=cfg.snr_max,
-                    type_=gf.DistributionType.UNIFORM
-                ),
-                num_epochs=cfg.snr_curriculum_num_epochs,
-                schedule=schedule,
-                verbose=cfg.snr_curriculum_verbose,
-                name="SNR"
-            )
-            scaling_method = gf.ScalingMethod(
-                value=snr_curriculum,
-                type_=gf.ScalingTypes.SNR
-            )
-        else:
-            scaling_method = gf.ScalingMethod(
-                value=gf.Distribution(
-                    min_=cfg.snr_min,
-                    max_=cfg.snr_max,
-                    type_=gf.DistributionType.UNIFORM
-                ),
-                type_=gf.ScalingTypes.SNR
-            )
-        
-        # For regression we ALWAYS inject (need signals to predict masses)
-        waveform_generator = gf.CBCGenerator(
-            mass_1_msun=mass_1_distribution,
-            mass_2_msun=mass_2_distribution,
-            inclination_radians=inclination_distribution,
-            scaling_method=scaling_method,
-            injection_chance=1.0,  # Always inject for regression
-            spin_1_in=(0.0, 0.0, 0.0),
-            spin_2_in=(0.0, 0.0, 0.0),
-        )
-        
-        noise_obtainer = gf.NoiseObtainer(
-            noise_type=noise_type,
-            ifos=gf.IFO.L1
-        )
-        
-        dataset = gf.GravyflowDataset(
-            sample_rate_hertz=cfg.sample_rate_hertz,
-            onsource_duration_seconds=cfg.onsource_duration_seconds,
-            offsource_duration_seconds=cfg.offsource_duration_seconds,
-            noise_obtainer=noise_obtainer,
-            waveform_generators=waveform_generator,
-            num_examples_per_batch=cfg.batch_size,
-            seed=seed,
-            group=group,
-            steps_per_epoch=steps_per_epoch,
-            input_variables=[
-                gf.ReturnVariables.ONSOURCE,
-                gf.ReturnVariables.OFFSOURCE
-            ],
-            output_variables=[
-                gf.WaveformParameters.MASS_1_MSUN,
-                gf.WaveformParameters.MASS_2_MSUN
-            ],
-            **kwargs
-        )
-        
-        return dataset
-    
+        return cls._dataset(cfg, seed, group, steps_per_epoch, regression=True,
+                            curriculum=curriculum and cfg.use_curriculum, first_epoch=first_epoch, **kwargs)
+
     @classmethod
     def compile_model(
         cls,
         model: keras.Model,
-        learning_rate: float = 0.0001,
-        task: str = "classification"
-    ) -> keras.Model:
-        """
-        Compile model with training configuration from paper.
-        
-        Training Configuration:
-        - Optimizer: Adam
-        - Loss: Cross-entropy (classification) or MAE (regression)
-        
-        Args:
-            model: Keras model to compile.
-            learning_rate: Learning rate.
-            task: "classification" or "regression"
-        
-        Returns:
-            Compiled model.
-        """
-        # Paper: "ADAM method as our learning algorithm"
-        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
-        
-        if task == "classification":
-            model.compile(
-                optimizer=optimizer,
-                loss='categorical_crossentropy',
-                metrics=['accuracy']
-            )
-        else:
-            # Paper: "mean absolute relative error loss function"
-            model.compile(
-                optimizer=optimizer,
-                loss='mae',
-                metrics=['mse']
-            )
-        return model
-
-
-class GeorgeHuerta2017Deep(ExampleModel):
-    """
-    George & Huerta 2017 Deep Network (Fig. 6)
-    
-    4 convolutional layers with dilated convolutions, followed by
-    3 fully connected layers. More accurate but 5x slower than shallow.
-    
-    Size: ~23MB
-    Speed: 85ms CPU, 535μs GPU per 1-second input
-    
-    Usage:
-        >>> model = gf.examples.GeorgeHuerta2017Deep.model()
-        >>> dataset = gf.examples.GeorgeHuerta2017Deep.dataset()
-    
-    References:
-        D. George & E.A. Huerta, "Deep Neural Networks to Enable 
-        Real-time Multimessenger Astrophysics", Phys. Rev. D 97, 044039.
-        arXiv:1701.00008v3, Fig. 6
-    """
-    
-    config = GeorgeHuerta2017Config()
-    
-    @classmethod
-    def model(
-        cls,
-        input_shape_onsource: Optional[Tuple[int, int]] = None,
-        input_shape_offsource: Optional[Tuple[int, int]] = None,
         config: Optional[GeorgeHuerta2017Config] = None,
-        task: str = "classification"
+        task: str = "classification",
     ) -> keras.Model:
-        """
-        Create the George & Huerta 2017 deep CNN architecture.
-        
-        Architecture from Fig. 6:
-        - 4 Convolutional layers with ReLU, dilated convolutions
-        - MaxPooling (size 4, stride 4) after each conv
-        - 3 Fully connected layers (128, 64, 2)
-        - Softmax output for classification, linear for regression
-        
-        Args:
-            input_shape_onsource: Shape of onsource input (samples, channels).
-            input_shape_offsource: Shape of offsource input for whitening.
-            config: Model configuration. Uses paper defaults if None.
-            task: "classification" (2-class softmax) or "regression" (mass prediction)
-        
-        Returns:
-            Keras model ready for compilation.
-        """
+        """Adam; cross-entropy of logits (classification) or mean absolute error (regression)."""
         cfg = config or cls.config
-        
-        # Default shapes based on paper specs
-        if input_shape_onsource is None:
-            num_samples = int(cfg.onsource_duration_seconds * cfg.sample_rate_hertz)
-            input_shape_onsource = (num_samples, 1)
-        
-        if input_shape_offsource is None:
-            num_samples = int(cfg.offsource_duration_seconds * cfg.sample_rate_hertz)
-            input_shape_offsource = (num_samples, 1)
-        
-        # Input layers
-        onsource_input = Input(shape=input_shape_onsource, name="ONSOURCE")
-        offsource_input = Input(shape=input_shape_offsource, name="OFFSOURCE")
-        
-        # Whitening layer
-        x = gf.Whiten(
-            sample_rate_hertz=cfg.sample_rate_hertz,
-            onsource_duration_seconds=cfg.onsource_duration_seconds
-        )([onsource_input, offsource_input])
-        
-        # Permute to (batch, channels, samples) for Conv1D
-        x = Permute((2, 1))(x)
-        
-        # 4 Convolutional blocks from Fig. 6
-        for i, (filters, kernel_size, dilation) in enumerate(cfg.deep_conv_configs):
-            layer_num = i + 1
-            
-            x = Conv1D(
-                filters, 
-                kernel_size, 
-                dilation_rate=dilation,
-                name=f"Conv1D_{layer_num}"
-            )(x)
-            
-            # MaxPooling
-            x = MaxPooling1D(
-                pool_size=cfg.deep_pool_size, 
-                strides=cfg.deep_pool_size,
-                name=f"MaxPool_{layer_num}"
-            )(x)
-            
-            # ReLU activation
-            x = Activation('relu', name=f"ReLU_{layer_num}")(x)
-        
-        # Flatten
-        x = Flatten(name="Flatten")(x)
-        
-        # FC layers (128, 64)
-        for i, units in enumerate(cfg.deep_fc_units):
-            layer_num = i + 1
-            x = Dense(units, name=f"Dense_{layer_num}")(x)
-            x = Activation('relu', name=f"ReLU_FC_{layer_num}")(x)
-        
-        # Output layer
+        optimizer = keras.optimizers.Adam(learning_rate=cfg.learning_rate)
         if task == "classification":
-            output = Dense(cfg.num_output_classes, activation='softmax', 
-                          name="output")(x)
+            model.compile(optimizer=optimizer,
+                          loss=keras.losses.CategoricalCrossentropy(from_logits=True),
+                          metrics=[keras.metrics.CategoricalAccuracy(name="accuracy")])
         else:
-            output = Dense(2, activation='linear', name="output")(x)
-        
-        model = Model(
-            inputs=[onsource_input, offsource_input],
-            outputs=output,
-            name="GeorgeHuerta2017Deep"
-        )
-        
+            model.compile(optimizer=optimizer, loss="mae", metrics=["mse"])
         return model
-    
-    @classmethod
-    def dataset(
-        cls,
-        noise_type: gf.NoiseType = gf.NoiseType.COLORED,
-        config: Optional[GeorgeHuerta2017Config] = None,
-        seed: Optional[int] = None,
-        group: str = "train",
-        steps_per_epoch: int = 7000,
-        **kwargs
-    ) -> gf.GravyflowDataset:
+
+    @staticmethod
+    def transfer_weights(source: keras.Model, target: keras.Model) -> int:
         """
-        Create a dataset matching George & Huerta 2017 specifications.
-        Same configuration as shallow model.
+        Copy every weighted layer but the output from ``source`` (the mass
+        predictor) to ``target`` (the classifier), by layer name. Returns the
+        number of layers copied.
+
+        Raises:
+            ValueError: the two networks' layers differ.
         """
-        # Delegate to shallow model's dataset method
-        return GeorgeHuerta2017Shallow.dataset(
-            noise_type=noise_type,
-            config=config,
-            seed=seed,
-            group=group,
-            steps_per_epoch=steps_per_epoch,
-            **kwargs
-        )
-    
-    @classmethod
-    def dataset_regression(
-        cls,
-        noise_type: gf.NoiseType = gf.NoiseType.COLORED,
-        config: Optional[GeorgeHuerta2017Config] = None,
-        seed: Optional[int] = None,
-        group: str = "train",
-        steps_per_epoch: int = 7000,
-        **kwargs
-    ) -> gf.GravyflowDataset:
-        """
-        Create a dataset for mass regression pre-training.
-        Same configuration as shallow model.
-        """
-        return GeorgeHuerta2017Shallow.dataset_regression(
-            noise_type=noise_type,
-            config=config,
-            seed=seed,
-            group=group,
-            steps_per_epoch=steps_per_epoch,
-            **kwargs
-        )
-    
-    @classmethod
-    def compile_model(
-        cls,
-        model: keras.Model,
-        learning_rate: float = 0.001,
-        task: str = "classification"
-    ) -> keras.Model:
-        """
-        Compile model with training configuration from paper.
-        Same configuration as shallow model.
-        """
-        return GeorgeHuerta2017Shallow.compile_model(model, learning_rate, task)
+        copied = 0
+        for layer in source.layers:
+            if layer.name == "output" or not layer.weights:
+                continue
+            target.get_layer(layer.name).set_weights(layer.get_weights())
+            copied += 1
+        return copied
+
+
+class GeorgeHuerta2017Shallow(_GeorgeHuerta2017):
+    """The shallow network (Fig. 5): three dilated convolutions, one 64-unit dense layer."""
+    _conv_attr, _fc_attr, _name = "shallow_conv_configs", "shallow_fc_units", "GeorgeHuerta2017Shallow"
+    weights_name = "georgehuerta2017shallow_classification.keras"
+
+
+class GeorgeHuerta2017Deep(_GeorgeHuerta2017):
+    """The deep network (Fig. 6): four dilated convolutions, dense layers of 128 and 64."""
+    _conv_attr, _fc_attr, _name = "deep_conv_configs", "deep_fc_units", "GeorgeHuerta2017Deep"
+    weights_name = "georgehuerta2017deep_classification.keras"

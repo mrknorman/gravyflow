@@ -4,12 +4,12 @@ os.environ['KERAS_BACKEND'] = 'jax'
 import unittest
 import numpy as np
 import gravyflow as gf
-from gravyflow.src.model.examples.base import validation_dataset_args, ValidationConfig
+from gravyflow.src.model.examples.base import validation_dataset_args, ValidationDatasetConfig
 
 class TestArrayScaling(unittest.TestCase):
     def test_array_scaling(self):
         # Setup configuration
-        validation_config = ValidationConfig(
+        validation_config = ValidationDatasetConfig(
             sample_rate_hertz=2048.0,
             onsource_duration_seconds=1.0,
             offsource_duration_seconds=1.0,

@@ -1,38 +1,84 @@
-from typing import Any, Dict, List, Tuple, Optional, Union
+"""
+Scores a model on validation data: a noise background (for false-alarm rates),
+injections (for efficiency) and, optionally, real GW events.
+
+Scores are logits (see `metrics`). The validator draws its own data: each stage
+builds its dataset from a seed derived from ``ValidationConfig.seed`` and the
+stage's name, in the held-out ``ValidationConfig.group``.
+"""
+
+from __future__ import annotations
+
+import hashlib
 import heapq
 import logging
 import math
-import random
-import sys
 from copy import deepcopy
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from scipy.optimize import curve_fit
 from tqdm import tqdm
 
 import gravyflow as gf
 from .config import ValidationConfig
-from .utils import calculate_far_score_thresholds, roc_curve_and_auc, _extract_sample_data
+from .metrics import Background, logit_scores
+from .utils import _extract_sample_data
 
 logger = logging.getLogger(__name__)
 
+# Per-example labels of the injection set, by attribute name.
+_INJECTION_LABELS = {
+    "snrs": gf.ScalingTypes.SNR,
+    "hpeak": gf.ScalingTypes.HPEAK,
+    "hrss": gf.ScalingTypes.HRSS,
+    "mass1": gf.WaveformParameters.MASS_1_MSUN,
+    "mass2": gf.WaveformParameters.MASS_2_MSUN,
+    "central_times": gf.ReturnVariables.CENTRAL_TIME,
+}
+
+
+def derived_seed(root: int, *path: str) -> int:
+    """
+    A seed for one stage of a run, derived from its root and a name.
+
+    Different names give independent seeds from one root. (The library's seed
+    tree, when it lands, replaces this with streams keyed by split and consumer.)
+    """
+    words = np.frombuffer(hashlib.sha256("/".join(path).encode()).digest()[:16], dtype=np.uint32)
+    return int(np.random.SeedSequence(int(root), spawn_key=tuple(int(w) for w in words))
+               .generate_state(1)[0])
+
+
+def require_logit_model(model) -> None:
+    """Refuse a model whose output is a probability: saturated probabilities tie."""
+    last = model.layers[-1]
+    activation = getattr(getattr(last, "activation", None), "__name__", None)
+    if activation in ("softmax", "sigmoid") or type(last).__name__ == "Softmax":
+        raise ValueError(
+            f"Model {model.name!r} outputs probabilities ({activation or 'Softmax'}). The "
+            "validator ranks logits: build the output layer without an activation, and train "
+            "with a loss that takes logits (from_logits=True)."
+        )
+
+
+def per_example(value, n: int, name: str, per_detector: bool = False) -> np.ndarray:
+    """
+    One float64 value per example, from a label array of any singleton layout.
+
+    ``per_detector`` labels, shaped (examples, detectors), give the first
+    detector's value. Anything else that is not one value per example raises.
+    """
+    array = np.asarray(value, dtype=np.float64)
+    squeezed = np.squeeze(array)
+    if squeezed.shape == (n,) or (n == 1 and squeezed.ndim == 0):
+        return squeezed.reshape(n)
+    if per_detector and squeezed.ndim == 2 and squeezed.shape[0] == n:
+        return squeezed[:, 0]
+    raise ValueError(f"Label {name}: expected one value per example ({n}), got shape {array.shape}.")
+
 
 class ValidationBank:
-    """Generate/store validation data: noise (FAR), injections (efficiency), and real events."""
-
-    _NOISE_OUTPUTS = (gf.ReturnVariables.WHITENED_ONSOURCE, gf.ReturnVariables.START_GPS_TIME)
-    _INJ_OUTPUTS = (
-        gf.ReturnVariables.WHITENED_ONSOURCE,
-        gf.ReturnVariables.WHITENED_INJECTIONS,
-        gf.ReturnVariables.INJECTION_MASKS,
-        gf.ReturnVariables.START_GPS_TIME,
-        gf.ReturnVariables.CENTRAL_TIME,
-        gf.ScalingTypes.SNR,
-        gf.ScalingTypes.HPEAK,
-        gf.ScalingTypes.HRSS,
-        gf.WaveformParameters.MASS_1_MSUN,
-        gf.WaveformParameters.MASS_2_MSUN,
-    )
+    """Generates and stores a model's validation scores, one stage at a time."""
 
     def __init__(
         self,
@@ -41,545 +87,231 @@ class ValidationBank:
         config: Optional[ValidationConfig] = None,
         heart: Optional[gf.Heart] = None,
     ):
-        self.model, self.dataset_args = model, dataset_args
-        self.config, self.heart = config or ValidationConfig(), heart
+        require_logit_model(model)
+        if not dataset_args.get("input_variables"):
+            raise ValueError("dataset_args must name the model's input_variables.")
+        self.model = model
+        self.dataset_args = dataset_args
+        self.config = config or ValidationConfig()
+        self.heart = heart
 
-        self.model, self.dataset_args = model, dataset_args
-        self.config, self.heart = config or ValidationConfig(), heart
+        self.far_scores: Optional[np.ndarray] = None
+        self.noise_gps_times: Optional[np.ndarray] = None
+        self.efficiency: Optional[Dict[str, np.ndarray]] = None
+        self.real_events: Optional[List[Dict[str, Any]]] = None
+        self._worst_false_positives: List[Dict[str, Any]] = []
+        self._worst_false_negatives: Dict[str, List[Dict[str, Any]]] = {}
 
-        self.__dict__.update(
-            {
-                k: None
-                for k in (
-                    "far_scores",
-                    "noise_gps_times",
-                    "_worst_false_positives",
-                    "snrs",
-                    "scores",
-                    "injection_masks",
-                    "mass1",
-                    "mass2",
-                    "gps_times",
-                    "central_times",
-                    "hpeak",
-                    "hrss",
-                    "_worst_false_negatives",
-                    "real_events",
-                )
-            }
+    # ------------------------------------------------------------ helpers
+
+    @property
+    def window_seconds(self) -> float:
+        return float(self.dataset_args.get("onsource_duration_seconds", gf.Defaults.onsource_duration_seconds))
+
+    @property
+    def _real_noise(self) -> bool:
+        noise = self.dataset_args.get("noise_obtainer")
+        return getattr(noise, "noise_type", None) is gf.NoiseType.REAL
+
+    def _num_batches(self) -> int:
+        return math.ceil(self.config.num_examples / self.config.batch_size)
+
+    def _dataset(self, stage: str, waveform_generators: list, outputs: list) -> gf.Dataset:
+        args = deepcopy(self.dataset_args)
+        args.update(
+            waveform_generators=waveform_generators,
+            num_examples_per_batch=self.config.batch_size,
+            steps_per_epoch=self._num_batches(),
+            output_variables=outputs,
+            group=self.config.group,
+            seed=derived_seed(self.config.seed, "validator", stage),
         )
+        if self._real_noise:
+            args["output_variables"] = [*outputs, gf.ReturnVariables.START_GPS_TIME]
+        return gf.Dataset(**args)
 
-    @staticmethod
-    def _extract_scores(predictions) -> np.ndarray:
-        """Extract scores from model predictions, handling common output shapes."""
-        p = np.asarray(predictions)
-        # Shape check: predictions = (Batch,) for 1D or (Batch, NumClasses) for 2D
-        if p.ndim == 2:
-            # Shape: (Batch, NumClasses) - classification output
-            # Axis 0 = Batch, Axis 1 = Classes (typically 2 for binary)
-            return p[:, 1] if p.shape[1] == 2 else p[:, 0]  # shape[1] = NumClasses
-        # Shape: (Batch,) - regression or single-class output
-        return p.reshape(-1)
-
-    @staticmethod
-    def _as_1d(arr, n: int) -> np.ndarray:
-        """Flatten to 1D and crop to length n."""
-        a = np.asarray(arr)
-        # Shape: flatten any multi-dim array to 1D
-        return (a.reshape(-1) if a.ndim > 1 else a)[:n]
-
-    def _beat(self) -> None:
+    def _score(self, x) -> np.ndarray:
         if self.heart:
             self.heart.beat()
+        return logit_scores(self.model.predict_on_batch(x))
 
-    def _prefetch_valid_segments(self) -> None:
-        """Pre-fetch valid segments before deepcopy so any internal cache persists."""
-        noise_obt = self.dataset_args.get("noise_obtainer")
-        obt = getattr(noise_obt, "ifo_data_obtainer", None) if noise_obt else None
-        if not obt:
-            return
-        try:
-            if getattr(obt, "valid_segments", None) is not None:
-                return
-            logger.info("Pre-fetching valid segments for cache consistency...")
-            ifos = getattr(noise_obt, "ifos", None)
-            if ifos:
-                obt.get_valid_segments(
-                    ifos=ifos,
-                    seed=self.dataset_args.get("seed", 42),
-                    group_name=self.dataset_args.get("group", "test"),
-                )
-        except Exception as e:
-            logger.warning(f"Failed to pre-fetch segments: {e}")
+    def _gps(self, y, n: int) -> Optional[np.ndarray]:
+        if not self._real_noise:
+            return None
+        return per_example(y[gf.ReturnVariables.START_GPS_TIME.name], n, "START_GPS_TIME", per_detector=True)
 
-    def _build_dataset(self, dataset_args: dict, num_batches: int, outputs: tuple) -> gf.Dataset:
-        dataset_args.update(
-            num_examples_per_batch=self.config.batch_size,
-            steps_per_epoch=num_batches,
-            output_variables=list(outputs),
-            group="test",
-        )
-        return gf.Dataset(**dataset_args)
+    # ------------------------------------------------------------- stages
 
     def generate_noise(self) -> None:
-        """Generate noise scores for FAR calculation, plus worst false positives."""
-        self._prefetch_valid_segments()
-        cfg = self.config
-        num_batches = math.ceil(cfg.num_examples / cfg.batch_size)
-
-        dataset_args = deepcopy(self.dataset_args)
-        dataset_args["waveform_generators"] = []  # noise-only
-        dataset = self._build_dataset(dataset_args, num_batches, self._NOISE_OUTPUTS)
-
-        score_chunks: List[np.ndarray] = []
-        gps_list: List[float] = []
-        fp_heap: List[Tuple[float, float, Any]] = []
-        keep = cfg.num_worst_per_bin * 5
-        gps_key = gf.ReturnVariables.START_GPS_TIME.name
-
-        for b in tqdm(range(num_batches), desc="Scoring noise", unit="batch"):
-            self._beat()
+        """Score noise-only examples: the background for false-alarm rates."""
+        dataset = self._dataset("far", [], [gf.ReturnVariables.WHITENED_ONSOURCE])
+        keep = self.config.num_worst_per_bin * 5
+        scores, gps, heap = [], [], []
+        for b in tqdm(range(self._num_batches()), desc="Scoring noise", unit="batch"):
             x, y = dataset[b]
             y = y or {}
-
-            scores = self._extract_scores(self.model.predict_on_batch(x))
-            score_chunks.append(scores)
-
-            if gps_key in y:
-                gps_list.extend(np.asarray(y[gps_key]).reshape(-1).tolist())
-
-            for i, s in enumerate(scores):
-                sv, tie = float(s), random.random()
-                if len(fp_heap) < keep:
-                    heapq.heappush(fp_heap, (sv, tie, _extract_sample_data(x, y, i, sv)))
-                else:
-                    lo_s, lo_t = fp_heap[0][0], fp_heap[0][1]
-                    if sv > lo_s or (sv == lo_s and tie > lo_t):
-                        heapq.heapreplace(fp_heap, (sv, tie, _extract_sample_data(x, y, i, sv)))
-
-        self.far_scores = np.concatenate(score_chunks, axis=0)
-        self.noise_gps_times = np.asarray(gps_list) if gps_list else None
-        self._worst_false_positives = [t[2] for t in sorted(fp_heap, key=lambda x: -x[0])]
+            batch_scores = self._score(x)
+            scores.append(batch_scores)
+            batch_gps = self._gps(y, batch_scores.size)
+            if batch_gps is not None:
+                gps.append(batch_gps)
+            for i, s in enumerate(batch_scores):
+                key = (float(s), -(b * self.config.batch_size + i))  # ties: earliest example
+                if len(heap) < keep:
+                    heapq.heappush(heap, (key, _extract_sample_data(x, y, i, float(s))))
+                elif key > heap[0][0]:
+                    heapq.heapreplace(heap, (key, _extract_sample_data(x, y, i, float(s))))
+        self.far_scores = np.concatenate(scores)[: self.config.num_examples]
+        self.noise_gps_times = np.concatenate(gps)[: self.config.num_examples] if gps else None
+        self._worst_false_positives = [sample for _, sample in sorted(heap, key=lambda t: t[0], reverse=True)]
 
     def generate(self) -> None:
-        """Generate injection scores for efficiency calculation (injection_chance=1, Uniform SNR)."""
+        """Score injections (every example injected, SNR uniform over the range)."""
         cfg = self.config
-        min_snr, max_snr = cfg.snr_range
+        generators = self.dataset_args.get("waveform_generators")
+        generators = generators if isinstance(generators, list) else [generators]
+        if len(generators) != 1 or generators[0] is None:
+            raise ValueError("The injection set takes exactly one waveform generator.")
+        generator = deepcopy(generators[0])
+        generator.scaling_method.value = gf.Distribution(
+            min_=cfg.snr_range[0], max_=cfg.snr_range[1], type_=gf.DistributionType.UNIFORM
+        )
+        generator.injection_chance = 1.0
+        outputs = [gf.ReturnVariables.WHITENED_ONSOURCE, gf.ReturnVariables.WHITENED_INJECTIONS,
+                   *_INJECTION_LABELS.values()]
+        dataset = self._dataset("injections", [generator], outputs)
 
-        dataset_args = deepcopy(self.dataset_args)
-        if "waveform_generators" not in dataset_args:
-            raise ValueError("dataset_args must contain waveform_generators")
+        edges = cfg.snr_bin_edges
+        worst: List[list] = [[] for _ in range(edges.size - 1)]
+        columns: Dict[str, list] = {k: [] for k in ("scores", "gps_times", *_INJECTION_LABELS)}
+        for b in tqdm(range(self._num_batches()), desc="Scoring injections", unit="batch"):
+            x, y = dataset[b]
+            batch_scores = self._score(x)
+            n = batch_scores.size
+            columns["scores"].append(batch_scores)
+            for key, label in _INJECTION_LABELS.items():
+                columns[key].append(per_example(y[label.name], n, label.name))
+            batch_gps = self._gps(y, n)
+            if batch_gps is not None:
+                columns["gps_times"].append(batch_gps)
+            bins = np.clip(np.searchsorted(edges, columns["snrs"][-1], side="right") - 1, 0, len(worst) - 1)
+            for i, (bin_index, s) in enumerate(zip(bins, batch_scores)):
+                key = (-float(s), -(b * cfg.batch_size + i))  # lowest scores are the worst
+                heap = worst[bin_index]
+                if len(heap) < cfg.num_worst_per_bin:
+                    heapq.heappush(heap, (key, _extract_sample_data(x, y, i, float(s))))
+                elif key > heap[0][0]:
+                    heapq.heapreplace(heap, (key, _extract_sample_data(x, y, i, float(s))))
 
-        wfs = dataset_args["waveform_generators"]
-        dataset_args["waveform_generators"] = wfs if isinstance(wfs, list) else [wfs]
-        for gen in dataset_args["waveform_generators"]:
-            gen.scaling_method.value = gf.Distribution(
-                min_=min_snr, max_=max_snr, type_=gf.DistributionType.UNIFORM
-            )
-            gen.injection_chance = 1.0
-
-        num_batches = math.ceil(cfg.num_examples / cfg.batch_size)
-        dataset = self._build_dataset(dataset_args, num_batches, self._INJ_OUTPUTS)
-
-        acc = {k: [] for k in ("snrs", "scores", "mass1", "mass2", "gps", "ct", "hpeak", "hrss")}
-        n_bins = int((max_snr - min_snr) / cfg.snr_bin_width)
-        worst: List[List[Tuple[float, int, Any]]] = [[] for _ in range(n_bins)]
-
-        keys = {
-            "snrs": "SNR",
-            "mass1": gf.WaveformParameters.MASS_1_MSUN.name,
-            "mass2": gf.WaveformParameters.MASS_2_MSUN.name,
-            "gps": gf.ReturnVariables.START_GPS_TIME.name,
-            "ct": gf.ReturnVariables.CENTRAL_TIME.name,
-            "hpeak": gf.ScalingTypes.HPEAK.name,
-            "hrss": gf.ScalingTypes.HRSS.name,
+        n_total = cfg.num_examples
+        self.efficiency = {k: np.concatenate(v)[:n_total] for k, v in columns.items() if v}
+        self._worst_false_negatives = {
+            f"{edges[i]:g}-{edges[i + 1]:g}": [s for _, s in sorted(heap, key=lambda t: t[0], reverse=True)]
+            for i, heap in enumerate(worst)
         }
 
-        for b in tqdm(range(num_batches), desc="Scoring injections", unit="batch"):
-            self._beat()
-            x, y = dataset[b]
-            y = y or {}
-
-            batch_scores = self._extract_scores(self.model.predict_on_batch(x))
-            n = len(batch_scores)
-
-            batch = {
-                "snrs": self._as_1d(y.get(keys["snrs"], np.zeros(n)), n),
-                "mass1": self._as_1d(y.get(keys["mass1"], np.zeros(n)), n),
-                "mass2": self._as_1d(y.get(keys["mass2"], np.zeros(n)), n),
-                "gps": self._as_1d(y.get(keys["gps"], np.zeros(n)), n),
-                "hpeak": self._as_1d(y.get(keys["hpeak"], np.zeros(n)), n),
-                "hrss": self._as_1d(y.get(keys["hrss"], np.zeros(n)), n),
-            }
-
-            ct = np.asarray(y.get(keys["ct"], np.zeros(n)))
-            # Shape check: ct could be (Batch,) or (Batch, NumGenerators)
-            if ct.ndim > 1 and ct.shape[-1] > 1:
-                # Shape: (Batch, NumGenerators) - take mean across generators
-                ct = ct.mean(axis=-1)  # -> (Batch,)
-            batch["ct"] = self._as_1d(ct, n)
-            batch["scores"] = np.asarray(batch_scores).reshape(-1)
-
-            for k, v in batch.items():
-                acc[k].extend(np.asarray(v).tolist())
-
-            for i, (sv, sc) in enumerate(zip(batch["snrs"], batch_scores)):
-                score_val = float(sc)
-                bin_idx = min(int((float(sv) - min_snr) / cfg.snr_bin_width), n_bins - 1)
-                bin_idx = max(0, bin_idx)
-
-                heap = worst[bin_idx]
-                if len(heap) < cfg.num_worst_per_bin:
-                    heapq.heappush(
-                        heap,
-                        (-score_val, b * cfg.batch_size + i, _extract_sample_data(x, y, i, score_val)),
-                    )
-                elif score_val < -heap[0][0]:
-                    heapq.heapreplace(
-                        heap,
-                        (-score_val, b * cfg.batch_size + i, _extract_sample_data(x, y, i, score_val)),
-                    )
-
-        self.snrs = np.asarray(acc["snrs"])
-        self.scores = np.asarray(acc["scores"])
-        self.injection_masks = np.ones_like(self.scores)
-        self.mass1, self.mass2 = np.asarray(acc["mass1"]), np.asarray(acc["mass2"])
-        self.gps_times, self.central_times = np.asarray(acc["gps"]), np.asarray(acc["ct"])
-        self.hpeak, self.hrss = np.asarray(acc["hpeak"]), np.asarray(acc["hrss"])
-
-        self._worst_false_negatives = {}
-        for i, heap in enumerate(worst):
-            start = min_snr + i * cfg.snr_bin_width
-            key = f"{start:.0f}-{(start + cfg.snr_bin_width):.0f}"
-            self._worst_false_negatives[key] = [t[2] for t in sorted(heap, key=lambda x: -x[0])]
-
     def generate_real_events(self, observing_runs: List = None) -> None:
-        """Score real GW events from GWTC catalogs via TransientDataObtainer."""
+        """
+        Score real GW events from the GWTC catalogues, for evaluation only.
+
+        Needs network access. Each event is prepared as the dataset prepares
+        its examples (whitened by its offsource, cropped to the onsource), so
+        its score is comparable with the background's, and its FAR is read
+        from that background.
+        """
         from gravyflow.src.dataset.features.event import EventConfidence, get_events_with_params
         from gravyflow.src.dataset.conditioning.whiten import whiten
 
+        if self.far_scores is None:
+            raise ValueError("Score the noise background (generate_noise) before real events.")
         if observing_runs is None:
             observing_runs = [gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3]
+        noise_obtainer = self.dataset_args.get("noise_obtainer")
+        ifos = getattr(noise_obtainer, "ifos", None) or [gf.IFO.H1, gf.IFO.L1]
+        letters = {ifo.name[0] for ifo in ifos}
 
-        logger.info("Fetching real GW events from GWTC catalogs...")
-        events = get_events_with_params(
-            observing_runs, event_types=[EventConfidence.CONFIDENT, EventConfidence.MARGINAL]
-        )
-        for e in events:
-            e["event_type"] = (
-                "MARGINAL" if "marginal" in str(e.get("catalog", "")).lower() else "CONFIDENT"
-            )
-
-        seen, unique = set(), []
-        for e in events:
-            k = round(e["gps"], 1)
-            if k not in seen:
-                seen.add(k)
-                unique.append(e)
-        unique.sort(key=lambda x: x["gps"])
-
-        conf = sum(1 for e in unique if e["event_type"] == "CONFIDENT")
-        logger.info(
-            f"Found {len(unique)} unique events ({conf} confident, {len(unique) - conf} marginal)"
-        )
-
-        noise_obt = self.dataset_args.get("noise_obtainer")
-        if not noise_obt:
-            logger.warning("No noise_obtainer in dataset_args - cannot score events")
-            self.real_events = unique
-            return
-
-        ifos = getattr(noise_obt, "ifos", [gf.IFO.H1, gf.IFO.L1])
-        
-        # Filter events by detector availability - only keep events where requested IFOs were active
-        # Network format: "HL", "HLV", "LV", etc. - single letter per detector
-        ifo_letters = set(ifo.name[0] for ifo in ifos)  # e.g., {"H", "L"}
-        logger.info(f"Required detectors: {ifo_letters}")
-        
-        filtered = []
-        no_network_count = 0
-        for e in unique:
+        events, seen = [], set()
+        for e in sorted(get_events_with_params(
+                observing_runs, event_types=[EventConfidence.CONFIDENT, EventConfidence.MARGINAL]),
+                key=lambda e: e["gps"]):
+            key = round(e["gps"], 1)
             network = e.get("network", "")
-            if not network:
-                # No network info - log warning and include anyway
-                no_network_count += 1
-                logger.debug(f"No network info for {e['name']} (GPS={e['gps']:.1f}, run={e.get('observing_run', '?')})")
-                filtered.append(e)
+            if key in seen or (network and not letters <= set(network)):
                 continue
-            # Check if all requested IFOs were active for this event
-            if all(letter in network for letter in ifo_letters):
-                filtered.append(e)
-            else:
-                logger.info(f"Skipping {e['name']}: network={network}, need={ifo_letters}")
-        
-        if no_network_count > 0:
-            logger.warning(f"{no_network_count} events have no network info in catalog (will attempt fetch)")
-        
-        skipped = len(unique) - len(filtered)
-        if skipped > 0:
-            logger.info(f"Filtered out {skipped} events (detectors not in network)")
-        unique = filtered
-        
-        names = [e["name"] for e in unique]
-        logger.info(f"Creating TransientDataObtainer for {len(names)} events...")
+            seen.add(key)
+            e["event_type"] = "MARGINAL" if "marginal" in str(e.get("catalog", "")).lower() else "CONFIDENT"
+            events.append(e)
+        logger.info(f"Scoring {len(events)} real events.")
 
-        sample_rate = self.dataset_args.get("sample_rate_hertz", 2048.0)
-        on_dur = self.dataset_args.get("onsource_duration_seconds", 1.0)
-        off_dur = self.dataset_args.get("offsource_duration_seconds", 16.0)
-
-        try:
-            # Use TransientDataObtainer directly with event_names filter
-            ifo_data_obtainer = gf.TransientDataObtainer(
-                observing_runs=observing_runs,
-                data_quality=gf.DataQuality.BEST,
-                data_labels=[gf.DataLabel.EVENTS],
-                event_names=names,  # Filter to specific events
-            )
-
-            gen = ifo_data_obtainer.get_onsource_offsource_chunks(
-                sample_rate_hertz=sample_rate,
-                onsource_duration_seconds=on_dur,
-                offsource_duration_seconds=off_dur,
-                num_examples_per_batch=min(len(names), 256),
-                ifos=ifos,
-                scale_factor=gf.Defaults.scale_factor,
-            )
-
-            logger.info("Phase 1: Collecting event data...")
-            all_ons, all_offs, all_gps = [], [], []
-            collected = 0
-            missing_segment_count = 0
-
-            # Suppress gwdatafind "Missing segments" warnings - these are expected
-            # for events with data gaps. We'll count and log them separately.
-            import warnings
-            with warnings.catch_warnings(record=True) as caught_warnings:
-                warnings.filterwarnings("always", message="Missing segments")
-                
-                for batch in gen:
-                    if collected >= len(names):
-                        break
-                    self._beat()
-
-                    # Handle dict format
-                    onsource = batch[gf.ReturnVariables.ONSOURCE]
-                    offsource = batch[gf.ReturnVariables.OFFSOURCE]
-                    gps_times = batch.get(gf.ReturnVariables.TRANSIENT_GPS_TIME, 
-                                         batch.get(gf.ReturnVariables.START_GPS_TIME))
-                    
-                    onsource, offsource, gps_times = map(np.asarray, (onsource, offsource, gps_times))
-                    # Shape: onsource = (Batch, IFO, Samples) for 3D, or (IFO, Samples) for 2D
-                    # Axis 0 = Batch (if 3D), Axis 1 = IFO, Axis 2 = Samples
-                    batch_len = onsource.shape[0] if onsource.ndim > 2 else 1  # shape[0] = Batch
-
-                    for j in range(batch_len):
-                        if collected >= len(names):
-                            break
-                        all_ons.append(np.array(onsource[j : j + 1] if batch_len > 1 else onsource))
-                        all_offs.append(np.array(offsource[j : j + 1] if batch_len > 1 else offsource))
-                        # Shape: gps_times = (Batch, IFO) for 2D or (Batch,) for 1D
-                        all_gps.append(float(gps_times[j, 0] if gps_times.ndim > 1 else gps_times[j]))
-                        collected += 1
-
-                    if collected and collected % 20 == 0:
-                        logger.info(f"Data collection: {collected}/{len(names)} events")
-                
-                # Count missing segment warnings
-                missing_segment_count = sum(1 for w in caught_warnings if "Missing segments" in str(w.message))
-            
-            if missing_segment_count > 0:
-                logger.info(f"Note: {missing_segment_count} events had data gaps (expected for some O1/O2 events)")
-
-            logger.info(f"Collected {len(all_ons)} events for batch scoring")
-
-            if all_ons:
-                logger.info("Phase 2: Running batched model inference...")
-                x = {
-                    "ONSOURCE": np.concatenate(all_ons, axis=0),
-                    "OFFSOURCE": np.concatenate(all_offs, axis=0),
-                }
-                scores = self._extract_scores(self.model.predict(x, verbose=0))
-                logger.info(f"Batch inference complete: {len(scores)} scores")
-
-                logger.info("Phase 3: Matching scores to events...")
-                for i, (gps, score) in enumerate(zip(all_gps, scores)):
-                    ev = next((e for e in unique if abs(e["gps"] - gps) < 20.0), None)
-                    if not ev:
-                        continue
-                    ev["score"], ev["status"] = float(score), "scored"
-                    try:
-                        whitened = whiten(all_ons[i], all_offs[i], sample_rate_hertz=sample_rate)
-                        ev["whitened_strain"] = np.array(
-                            gf.crop_samples(
-                                whitened,
-                                sample_rate_hertz=sample_rate,
-                                onsource_duration_seconds=on_dur,
-                            )
-                        )[0]
-                    except Exception as e:
-                        logger.warning(f"Whitening failed for event at {gps}: {e}")
-
-        except StopIteration:
-            pass
-        except Exception as e:
-            logger.warning(f"TransientDataObtainer failed: {e}")
-            logger.info("Events stored without scores")
-
-        if self.far_scores is not None and len(self.far_scores) > 0:
-            thresholds = calculate_far_score_thresholds(
-                self.far_scores,
-                self.dataset_args.get("onsource_duration_seconds", 1.0),
-                np.array([1e-1, 1e-2, 1e-3, 1e-4, 1e-5]),
-            )
-            for ev in unique:
-                if ev.get("score") is None:
-                    continue
-                for far in sorted(thresholds):
-                    if ev["score"] >= thresholds[far][1]:
-                        ev["min_far"] = far
-                        break
-
-        self.real_events = unique
-        logger.info(
-            f"Real events scoring complete: "
-            f"{sum(1 for e in unique if e.get('score') is not None)}/{len(unique)} scored"
+        sample_rate = self.dataset_args.get("sample_rate_hertz", gf.Defaults.sample_rate_hertz)
+        onsource_seconds = self.window_seconds
+        obtainer = gf.TransientDataObtainer(
+            observing_runs=observing_runs,
+            data_quality=gf.DataQuality.BEST,
+            data_labels=[gf.DataLabel.EVENTS],
+            event_names=[e["name"] for e in events],
         )
+        chunks = obtainer.get_onsource_offsource_chunks(
+            sample_rate_hertz=sample_rate,
+            onsource_duration_seconds=onsource_seconds,
+            offsource_duration_seconds=self.dataset_args.get("offsource_duration_seconds", 16.0),
+            num_examples_per_batch=min(len(events), 256) or 1,
+            ifos=ifos,
+            scale_factor=gf.Defaults.scale_factor,
+        )
+        onsource, offsource, gps = [], [], []
+        for batch in chunks:
+            on = np.asarray(batch[gf.ReturnVariables.ONSOURCE])
+            off = np.asarray(batch[gf.ReturnVariables.OFFSOURCE])
+            times = np.asarray(batch.get(gf.ReturnVariables.TRANSIENT_GPS_TIME,
+                                         batch.get(gf.ReturnVariables.START_GPS_TIME)))
+            on, off = (on, off) if on.ndim == 3 else (on[None], off[None])
+            onsource.append(on)
+            offsource.append(off)
+            gps.extend(per_example(times, on.shape[0], "event GPS", per_detector=True))
+            if len(gps) >= len(events):
+                break
 
-    def get_efficiency_data(self) -> Dict:
-        """Return injection scatter + binned means/stds and a fitted sigmoid curve."""
-        if self.snrs is None:
-            raise ValueError("Must call generate() first")
+        background = self.background()
+        if onsource:
+            on, off = np.concatenate(onsource), np.concatenate(offsource)
+            whitened = np.asarray(gf.crop_samples(whiten(on, off, sample_rate), onsource_seconds, sample_rate))
+            available = {
+                gf.ReturnVariables.WHITENED_ONSOURCE.name: whitened,
+                gf.ReturnVariables.ONSOURCE.name: np.asarray(gf.crop_samples(on, onsource_seconds, sample_rate)),
+                gf.ReturnVariables.OFFSOURCE.name: off,
+            }
+            x = {t.name: available[t.name].astype(np.float32) for t in self.model.inputs}
+            for i, (t, s) in enumerate(zip(gps, logit_scores(self.model.predict(x, verbose=0)))):
+                event = next((e for e in events if abs(e["gps"] - t) < 20.0), None)
+                if event is None:
+                    continue
+                far = background.far(float(s), self.config.confidence)
+                event.update(score=float(s), status="scored", far_hz=far.rate_hz,
+                             far_upper_hz=far.upper_hz, whitened_strain=whitened[i])
+        self.real_events = events
 
-        cfg = self.config
-        snrs, scores = self.snrs, self.scores
-        min_snr, max_snr = cfg.snr_range
-        num_bins = max(1, int((max_snr - min_snr) / cfg.snr_bin_width))
+    # ------------------------------------------------------------- results
 
-        centers, means, stds = [], [], []
-        for i in range(num_bins):
-            lo = min_snr + i * cfg.snr_bin_width
-            hi = lo + cfg.snr_bin_width
-            m = (snrs >= lo) & (snrs < hi)
-            if np.sum(m) > 10:
-                centers.append((lo + hi) / 2)
-                means.append(float(np.mean(scores[m])))
-                stds.append(float(np.std(scores[m])))
+    def background(self) -> Background:
+        """The noise scores as a background of independently drawn windows."""
+        if self.far_scores is None:
+            raise ValueError("Call generate_noise() first.")
+        return Background.independent_windows(self.far_scores, self.window_seconds)
 
-        bin_centers, bin_means, bin_stds = map(np.asarray, (centers, means, stds))
-
-        def sigmoid(x, x0, k, L, b):
-            return L / (1 + np.exp(-k * (x - x0))) + b
-
-        try:
-            popt, _ = curve_fit(
-                sigmoid,
-                bin_centers,
-                bin_means,
-                p0=[10.0, 0.5, 0.8, 0.1],
-                bounds=([0, 0.01, 0, 0], [30, 5, 1, 0.5]),
-                maxfev=5000,
-            )
-            fit_snrs = np.linspace(min_snr, max_snr, 100)
-            fit_efficiency = sigmoid(fit_snrs, *popt)
-        except Exception:
-            fit_snrs, fit_efficiency = bin_centers, bin_means
-
-        def arr(x):
-            return x if x is not None else np.array([])
-
-        return {
-            "snrs": snrs,
-            "scores": scores,
-            "fit_snrs": fit_snrs,
-            "fit_efficiency": fit_efficiency,
-            "bin_centers": bin_centers,
-            "bin_means": bin_means,
-            "bin_stds": bin_stds,
-            "mass1": arr(self.mass1),
-            "mass2": arr(self.mass2),
-            "gps_times": arr(self.gps_times),
-            "central_times": arr(self.central_times),
-            "hpeak": arr(self.hpeak),
-            "hrss": arr(self.hrss),
-        }
+    def get_efficiency_data(self) -> Dict[str, np.ndarray]:
+        """The injection set's scores and labels, one entry per example."""
+        if self.efficiency is None:
+            raise ValueError("Call generate() first.")
+        return dict(self.efficiency)
 
     def get_worst_performers(self) -> Dict[str, Any]:
-        """Worst samples: false negatives (per SNR bin) and false positives (noise)."""
-        return {
-            "false_negatives": self._worst_false_negatives or {},
-            "false_positives": self._worst_false_positives or [],
-        }
+        """Lowest-scoring injections per SNR bin, and highest-scoring noise."""
+        return {"false_negatives": self._worst_false_negatives,
+                "false_positives": self._worst_false_positives}
 
-    def get_real_events(self) -> List[Dict]:
-        """Return real events data (CONFIDENT first, then MARGINAL)."""
-        if self.real_events is None:
-            return []
-        confident = [e for e in self.real_events if e.get("event_type") == "CONFIDENT"]
-        marginal = [e for e in self.real_events if e.get("event_type") == "MARGINAL"]
-        return confident + marginal
-
-    def get_roc_curves(self, scaling_ranges: List[Union[Tuple[float, float], float]] = None) -> Dict:
-        """Calculate ROC curves using generated noise + injection data."""
-        if self.far_scores is None or self.scores is None:
-            raise ValueError("Must call generate_noise() and generate() first")
-
-        noise = self.far_scores
-        if len(noise) == 0:
-            logger.warning("No noise scores found. ROC calculation requires noise data.")
-            return {}
-
-        def roc_for(signal_scores: np.ndarray) -> Dict[str, Union[np.ndarray, float]]:
-            y_scores = np.concatenate([noise, signal_scores])
-            y_true = np.concatenate([np.zeros(len(noise)), np.ones(len(signal_scores))])
-            fpr, tpr, auc = roc_curve_and_auc(y_true, y_scores)
-            return {"fpr": np.asarray(fpr), "tpr": np.asarray(tpr), "roc_auc": float(auc)}
-
-        results: Dict[str, Any] = {}
-
-        # Default balanced ROC pool
-        min_snr = self.config.default_roc_min_snr
-        sig = self.scores[(self.snrs >= min_snr) & (self.injection_masks > 0.5)]
-        if len(sig):
-            n = min(len(noise), len(sig))
-            balanced_noise, balanced_sig = noise, sig
-            if len(noise) > n:
-                rng = np.random.default_rng(42)
-                balanced_noise = noise[rng.choice(len(noise), n, replace=False)]
-            if len(sig) > n:
-                rng = np.random.default_rng(42)
-                balanced_sig = sig[rng.choice(len(sig), n, replace=False)]
-
-            y_scores = np.concatenate([balanced_noise, balanced_sig])
-            y_true = np.concatenate([np.zeros(len(balanced_noise)), np.ones(len(balanced_sig))])
-            fpr, tpr, auc = roc_curve_and_auc(y_true, y_scores)
-
-            results[f"SNR≥{min_snr} (balanced)"] = {
-                "fpr": np.asarray(fpr),
-                "tpr": np.asarray(tpr),
-                "roc_auc": float(auc),
-            }
-            logger.info(f"Default ROC pool: {n} balanced samples (SNR≥{min_snr})")
-
-        # Extra ROC pools
-        pools = scaling_ranges if scaling_ranges is not None else self.config.extra_roc_pools
-        for scaling in pools:
-            if isinstance(scaling, (tuple, list)):
-                lo, hi = scaling
-                mask = (self.snrs >= lo) & (self.snrs < hi) & (self.injection_masks > 0.5)
-                key = f"SNR {lo}-{hi}"
-            else:
-                center, width = float(scaling), 0.5
-                mask = (
-                    (self.snrs >= center - width)
-                    & (self.snrs < center + width)
-                    & (self.injection_masks > 0.5)
-                )
-                key = f"SNR={center}"
-
-            pool_sig = self.scores[mask]
-            if len(pool_sig) == 0:
-                logger.warning(f"No signal samples found for ROC pool {key}")
-                continue
-            results[key] = roc_for(pool_sig)
-
-        return results
+    def get_real_events(self) -> List[Dict[str, Any]]:
+        """Real events, CONFIDENT first, then MARGINAL."""
+        events = self.real_events or []
+        return ([e for e in events if e.get("event_type") == "CONFIDENT"]
+                + [e for e in events if e.get("event_type") == "MARGINAL"])
