@@ -1335,24 +1335,23 @@ class TransientCache:
 def generate_transient_cache_path(data_directory: Optional[Path] = None, prefix: str = "transient") -> Path:
     """
     Generate standardized cache file path.
-    
-    Creates cache files in ~/.gravyflow/cache/ by default. Different prefixes
-    are used for different transient types (e.g., "glitch" for glitches, 
-    "event" for GW events), resulting in separate cache files.
-    
-    The default location is ~/.gravyflow/cache/ to ensure the same cache
-    is used regardless of current working directory.
-    
+
+    Different prefixes are used for different transient types (e.g., "glitch" for
+    glitches, "event" for GW events), resulting in separate cache files.
+
     Args:
-        data_directory: Base directory for cache files. If None, uses ~/.gravyflow/cache/
+        data_directory: Base directory for cache files. If None, the user cache
+            (``gwosc_data.user_cache_dir``: ``GRAVYFLOW_CACHE_DIR``, else
+            ``~/.gravyflow/cache``), the one root every gravyflow cache uses, so
+            the same cache is found whatever the working directory.
         prefix: Filename prefix (e.g. "transient", "glitch", "event")
-        
+
     Returns:
         Path like: data_directory/{prefix}_cache.h5
     """
     if data_directory is None:
-        # Use absolute path in home directory to ensure consistent cache location
-        data_directory = Path.home() / ".gravyflow" / "cache"
-        data_directory.mkdir(parents=True, exist_ok=True)
-    
-    return data_directory / f"{prefix}_cache.h5"
+        from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
+
+        data_directory = user_cache_dir()
+
+    return Path(data_directory) / f"{prefix}_cache.h5"

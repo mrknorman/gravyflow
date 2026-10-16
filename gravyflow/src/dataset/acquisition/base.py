@@ -38,7 +38,7 @@ from gravyflow.src.utils.gps import as_gps_times
 from gravyflow.src.utils.shapes import ShapeEnforcer
 from .gwosc_data import (
     GWOSC_RUNS, DEFAULT_GWOSC_FLAGS, UpsamplingRefused, coalesce_segments,
-    get_gwosc_segments, gwosc_sample_rate_hertz, subtract_segments,
+    get_gwosc_segments, gwosc_sample_rate_hertz, subtract_segments, user_cache_dir,
 )
 
 
@@ -948,7 +948,8 @@ class BaseDataObtainer(ABC):
             return None
 
         if data_directory_path is None:
-            data_directory_path = gf.PATH.parent
+            # The one user cache root; never beside the installed package.
+            data_directory_path = user_cache_dir("segments")
         
         segment_parameters = [
                 self.frame_types, 

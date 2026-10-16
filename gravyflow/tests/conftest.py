@@ -25,6 +25,10 @@ os.environ["KERAS_BACKEND"] = "jax"
 import gravyflow as gf
 
 import warnings
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
 import pytest
 
 def _global_rng_state():
@@ -110,21 +114,34 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_network)
 
 
-def refuse_internet(monkeypatch) -> None:
+#: Environment variables through which a client would send traffic to a proxy.
+PROXY_VARIABLES = tuple(
+    name for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY")
+    for name in (base, base.lower())
+)
+
+
+def refuse_internet(monkeypatch, refusals: Optional[List[str]] = None) -> None:
     """
-    Refuse every internet connection (loopback stays open), by name. Every network
-    source the library uses
+    Refuse every internet connection (loopback stays open), by name, and record each
+    refusal in ``refusals`` when given. Every network source the library uses
     (the GWOSC APIs, timeline, event list and strain files, Zenodo) connects through a
     socket, whatever client it goes through (requests, urllib, gwosc, gwpy), so one
-    refusal covers them all, and any source added later.
+    refusal covers them all, and any source added later. Proxy settings are removed,
+    since a client would otherwise reach the internet through a loopback proxy.
     """
     import socket
+
+    for name in PROXY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
 
     original_connect, original_connect_ex = socket.socket.connect, socket.socket.connect_ex
 
     def refuse(sock, address):
         loopback = str(address[0]) in ("localhost", "::1") or str(address[0]).startswith("127.")
         if sock.family in (socket.AF_INET, socket.AF_INET6) and not loopback:
+            if refusals is not None:
+                refusals.append(f"connection to {address}")
             raise ConnectionRefusedError(
                 f"Offline test: refused a connection to {address}; the network is "
                 "reachable only in test runs with --network."
@@ -142,24 +159,66 @@ def refuse_internet(monkeypatch) -> None:
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
 
 
+def tree_snapshot(root: Path) -> Dict[str, Tuple[int, int]]:
+    """{relative path: (size, mtime_ns)} of every file under ``root`` but bytecode."""
+    snapshot = {}
+    if not root.is_dir():
+        return snapshot
+    for path in root.rglob("*"):
+        if "__pycache__" in path.parts or path.suffix == ".pyc" or not path.is_file():
+            continue
+        stat = path.stat()
+        snapshot[str(path.relative_to(root))] = (stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
+def tree_changes(before: Dict, after: Dict) -> List[str]:
+    """What was added, removed or changed between two ``tree_snapshot`` results."""
+    changes = [f"added {p}" for p in sorted(set(after) - set(before))]
+    changes += [f"removed {p}" for p in sorted(set(before) - set(after))]
+    changes += [f"changed {p}" for p in sorted(set(before) & set(after)) if before[p] != after[p]]
+    return changes
+
+
+@dataclass
+class OfflineGuard:
+    """The default suite's offline state: every refused connection, in order."""
+
+    refusals: List[str] = field(default_factory=list)
+
+
 @pytest.fixture(autouse=True, scope="session")
 def offline_unless_network_option(request):
     """
-    Without --network, every internet connection is refused and the user cache starts
-    empty, so no test depends on the network, or on what this machine downloaded
-    before, unless it is marked 'network'.
-    """
-    if request.config.getoption("--network"):
-        yield
-        return
+    Without --network, every internet connection is refused (and recorded), proxies
+    are unset, and the user cache starts empty, so no test depends on the network, or
+    on what this machine downloaded before, unless it is marked 'network'.
 
+    In every run, the installed package and the user's own cache
+    (``~/.gravyflow``) must be unchanged when the suite ends: tests write only
+    temporary roots.
+    """
     import tempfile
 
-    with tempfile.TemporaryDirectory(prefix="gravyflow-test-cache-") as cache_dir, \
-            pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", cache_dir)
-        refuse_internet(monkeypatch)
-        yield
+    watched = {"the package": Path(gf.PATH), "~/.gravyflow": Path.home() / ".gravyflow"}
+    before = {name: tree_snapshot(root) for name, root in watched.items()}
+
+    if request.config.getoption("--network"):
+        yield None
+    else:
+        with tempfile.TemporaryDirectory(prefix="gravyflow-test-cache-") as cache_dir, \
+                pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", cache_dir)
+            guard = OfflineGuard()
+            refuse_internet(monkeypatch, guard.refusals)
+            yield guard
+
+    changed = {
+        name: changes for name, root in watched.items()
+        if (changes := tree_changes(before[name], tree_snapshot(root)))
+    }
+    if changed:
+        pytest.fail(f"The test suite changed files outside its temporary roots: {changed}")
 
 
 @pytest.fixture

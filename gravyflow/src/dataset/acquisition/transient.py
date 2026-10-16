@@ -1148,7 +1148,7 @@ class TransientDataObtainer(BaseDataObtainer):
             CACHE_SAMPLE_RATE_HERTZ, CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION
         )
         
-        # Determine data directory (None = use default in ~/.gravyflow/cache/)
+        # Determine data directory (None = the user cache, gwosc_data.user_cache_dir)
         data_dir = getattr(self, 'data_directory', None)
         
         # Separate cache files for glitches and events (both use same format)

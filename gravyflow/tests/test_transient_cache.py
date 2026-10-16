@@ -267,11 +267,15 @@ class TestCachePathGeneration:
         assert glitch_path.name == "glitch_cache.h5"
         assert event_path.name == "event_cache.h5"
     
-    def test_default_directory_is_gravyflow_cache(self):
-        """Default directory should be ~/.gravyflow/cache/."""
-        path = generate_transient_cache_path()
-        assert path.parent.name == "cache"
-        assert path.parent.parent.name == ".gravyflow"
+    def test_default_directory_is_the_user_cache(self, monkeypatch, tmp_path):
+        """The default is the one user cache root: GRAVYFLOW_CACHE_DIR, else ~/.gravyflow/cache."""
+        monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path / "override"))
+        assert generate_transient_cache_path(prefix="glitch") == tmp_path / "override" / "glitch_cache.h5"
+
+        monkeypatch.delenv("GRAVYFLOW_CACHE_DIR")
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        path = generate_transient_cache_path(prefix="event")
+        assert path == tmp_path / "home" / ".gravyflow" / "cache" / "event_cache.h5"
 
 
 if __name__ == "__main__":

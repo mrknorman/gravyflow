@@ -14,7 +14,7 @@ When initialized, the `TransientObtainer` performs three main steps:
 1.  **Identify**: It queries a metadata source (GWOSC event catalogues for events, the public Gravity Spy release for glitches) to find a list of GPS times and labels.
 2.  **Cluster**: It groups improved segments that are close together (within `max_segment_seconds`) into single continuous blocks. This is efficient for fetching multiple events that occur in quick succession.
 3.  **Cache**: 
-    *   **Full Precache**: If `precache_cap` is set (default behavior), it downloads *all* identified segments immediately and stores them in the transient cache (`~/.gravyflow/cache/glitch_cache.h5` or `event_cache.h5`).
+    *   **Full Precache**: If `precache_cap` is set (default behavior), it downloads *all* identified segments immediately and stores them in the transient cache (`glitch_cache.h5` or `event_cache.h5` in the user cache: `$GRAVYFLOW_CACHE_DIR`, else `~/.gravyflow/cache`).
     *   **Lazy Loading**: If `precache_cap=0`, it skips the immediate download. Segments are fetched on-the-fly during generation.
 
 ### 2. Balancing (`balanced_glitch_types`)

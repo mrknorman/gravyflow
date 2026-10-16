@@ -62,7 +62,24 @@ class TestEventTimeFunctions:
 
 class TestGetConfidentEventsWithParams:
     """Tests for get_confident_events_with_params function."""
-    
+
+    def test_the_table_is_cached_in_the_user_cache_never_the_package(self, monkeypatch, tmp_path):
+        """A fetched table is written under GRAVYFLOW_CACHE_DIR; the package is untouched."""
+        from pathlib import Path
+        from gravyflow.tests.conftest import tree_changes, tree_snapshot
+
+        monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path))
+        before = tree_snapshot(Path(gf.PATH))
+        row = {"commonName": "GW150914", "GPS": 1126259462.4, "mass_1_source": 35.6,
+               "mass_2_source": 30.6, "luminosity_distance": 430.0}
+        with patch("gwpy.table.EventTable.fetch_open_data", return_value=[row]):
+            events = event_module.get_events_with_params(
+                event_types=[gf.EventConfidence.MARGINAL]
+            )
+        assert [e["name"] for e in events] == ["GW150914"]
+        assert tree_changes(before, tree_snapshot(Path(gf.PATH))) == []
+        assert len(list((tmp_path / "event_params").glob("events_*.json"))) == 1
+
     def test_function_exists_and_exported(self):
         """Test function is exported at top level."""
         assert hasattr(gf, 'get_confident_events_with_params')
