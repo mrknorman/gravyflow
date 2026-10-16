@@ -432,8 +432,8 @@ def test_scaling_method_scale_snr():
     injection = np.stack([signal, signal * 0.5], axis=0)[np.newaxis, :, :]
     injection = ops.convert_to_tensor(injection.astype(np.float32))
     
-    # Create noise-like onsource
-    onsource = np.random.randn(1, 1, 1024).astype(np.float32) * 0.1
+    # Four seconds of noise-like background: the PSD needs three Welch segments.
+    onsource = np.random.randn(1, 1, 4096).astype(np.float32) * 0.1
     onsource = ops.convert_to_tensor(onsource)
     
     # Target SNR distribution

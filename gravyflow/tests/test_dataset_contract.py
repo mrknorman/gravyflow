@@ -139,6 +139,24 @@ def test_outputs_are_float32():
         assert np.asarray(value).dtype == np.float32, name
 
 
+def test_snr_labels_of_hrss_scaled_injections_match_their_whitened_norm():
+    generator = sine_gaussian_generator()
+    generator.scaling_method = gf.ScalingMethod(
+        value=gf.Distribution(value=2e-22, type_=gf.DistributionType.CONSTANT),
+        type_=gf.ScalingTypes.HRSS,
+    )
+    ds = dataset(waveform_generators=[generator], num_examples_per_batch=8,
+                 input_variables=[gf.ReturnVariables.WHITENED_INJECTIONS],
+                 output_variables=[gf.ScalingTypes.SNR])
+    inputs, outputs = ds[0]
+    whitened = np.asarray(inputs["WHITENED_INJECTIONS"], dtype=np.float64)
+    whitened = whitened[0] if whitened.ndim == 4 else whitened
+    norm = np.sqrt(np.sum(whitened ** 2, axis=(-1, -2)))
+    label = np.ravel(np.asarray(outputs["SNR"]))
+    assert np.all(norm > 1.0)
+    np.testing.assert_allclose(label, norm, rtol=0.02)
+
+
 def test_iteration_stops_after_len_batches():
     ds = dataset(steps_per_epoch=2, input_variables=[gf.ReturnVariables.ONSOURCE])
     assert sum(1 for _ in itertools.islice(iter(ds), 5)) == 2
