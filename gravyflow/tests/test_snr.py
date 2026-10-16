@@ -15,8 +15,6 @@ from bokeh.models import ColumnDataSource, HoverTool, Legend
 from _pytest.config import Config
 import pytest
 
-# Its tests draw their data from global RNGs (see conftest's guard).
-pytestmark = pytest.mark.global_rng
 
 # Local imports:
 
@@ -420,6 +418,7 @@ def test_find_closest():
     idx = gf_snr.find_closest(tensor, scalar)
     assert idx == 1 
 
+@pytest.mark.global_rng
 def test_snr_calculation():
     # Create a signal and background
     sample_rate = 100.0
@@ -451,6 +450,7 @@ def test_snr_calculation():
     assert ops.shape(snr_val)[0] == 1
     assert snr_val[0] > 0.0
 
+@pytest.mark.global_rng
 def test_scale_to_snr():
     sample_rate = 100.0
     duration = 4.0
@@ -493,6 +493,7 @@ def test_scale_to_snr():
     # SNR and measuring it again agrees to float32 rounding, not to 1e-7.
     np.testing.assert_allclose(new_snr, desired_snr, rtol=1e-06)
 
+@pytest.mark.global_rng
 def test_snr_theoretical_sine():
     # Verify SNR matches theoretical expectation for a sine wave in white noise
     sample_rate = 1024.0
@@ -537,6 +538,7 @@ def test_snr_theoretical_sine():
     )
     assert np.isclose(estimated_snr[0], expected_snr, rtol=0.2)
 
+@pytest.mark.global_rng
 def test_scale_to_snr_chirp():
     # Verify scaling works for a broadband chirp signal
     sample_rate = 1024.0
@@ -582,6 +584,7 @@ def test_scale_to_snr_chirp():
 # EDGE CASE TESTS FOR COVERAGE
 # ============================================================================
 
+@pytest.mark.global_rng
 def test_snr_1d_psd_branch():
     """Test SNR calculation with 1D background that produces 1D PSD (covers line 96)."""
     sample_rate = 256.0
@@ -611,6 +614,7 @@ def test_snr_1d_psd_branch():
     assert float(snr_val) > 0.0
 
 
+@pytest.mark.global_rng
 def test_scale_to_snr_2d_input():
     """Test scale_to_snr with 2D injection input (batch, time) - covers line 238."""
     sample_rate = 256.0
@@ -643,6 +647,7 @@ def test_scale_to_snr_2d_input():
     assert ops.shape(scaled) == (2, int(sample_rate * duration))
 
 
+@pytest.mark.global_rng
 def test_scale_to_snr_with_cropping():
     """Test scale_to_snr with onsource_duration_seconds parameter (line 197-202)."""
     sample_rate = 256.0
@@ -698,6 +703,7 @@ def test_find_closest_edge_cases():
 # TESTS USING SIMPLE WAVEFORM GENERATORS
 # ============================================================================
 
+@pytest.mark.global_rng
 def test_snr_with_sine_gaussian():
     """Test SNR calculation using SineGaussianGenerator."""
     gen = gf.SineGaussianGenerator(
@@ -834,6 +840,7 @@ def test_snr_with_ringdown():
     assert snr_val[1] > 0.0
 
 
+@pytest.mark.global_rng
 def test_snr_with_periodic_wave():
     """Test SNR calculation using PeriodicWaveGenerator with different shapes."""
     for wave_shape in [gf.WaveShape.SINE, gf.WaveShape.SQUARE, gf.WaveShape.TRIANGLE]:

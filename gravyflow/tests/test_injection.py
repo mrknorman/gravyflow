@@ -513,23 +513,20 @@ def test_waveform_generator_get_max_generated_duration():
     assert max_dur >= 0.0  # Just verify it returns a valid duration
 
 
-def test_reseed():
-    """Test WaveformGenerator.reseed method (covers lines 365-373)."""
+def test_reseed_and_generate_seed_are_deprecated():
+    """reseed holds no state now, and generate(seed=) draws the direct streams of that root."""
     gen = gf_inj.WNBGenerator(
         duration_seconds=gf.Distribution(value=0.5, type_=gf.DistributionType.CONSTANT),
         min_frequency_hertz=gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT),
         max_frequency_hertz=gf.Distribution(value=50.0, type_=gf.DistributionType.CONSTANT)
     )
-    
-    # Generate with seed 1
-    gen.reseed(42)
-    waveforms1, _ = gen.generate(2, 100.0, 1.0, seed=42)
-    
-    # Generate again with same seed - should be identical
-    gen.reseed(42)
-    waveforms2, _ = gen.generate(2, 100.0, 1.0, seed=42)
-    
-    np.testing.assert_allclose(waveforms1, waveforms2)
+    with pytest.warns(DeprecationWarning, match="reseed"):
+        gen.reseed(42)
+    with pytest.warns(DeprecationWarning, match="generate"):
+        waveforms, _ = gen.generate(2, 100.0, 1.0, seed=42)
+    np.testing.assert_array_equal(
+        waveforms, gen.generate(2, 100.0, 1.0, gf.SeedTree(42).direct().sub("wave/WNBGenerator"))[0]
+    )
 
 
 def test_cbc_generator_with_various_distributions():
@@ -896,8 +893,8 @@ def test_cbc_generator_injection_chance_zero():
     assert float(ops.sum(ops.abs(waveforms))) == 0.0
 
 
-def test_incoherent_generator_reseed():
-    """Test IncoherentGenerator.reseed method (covers lines 854-858)."""
+def test_incoherent_generator_reseed_is_deprecated():
+    """IncoherentGenerator.reseed holds no state now."""
     gen1 = gf_inj.WNBGenerator(
         duration_seconds=gf.Distribution(value=0.5, type_=gf.DistributionType.CONSTANT),
         min_frequency_hertz=gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT),
@@ -912,16 +909,8 @@ def test_incoherent_generator_reseed():
     )
     
     incoherent_gen = gf_inj.IncoherentGenerator([gen1, gen2])
-    
-    # Reseed should work
-    incoherent_gen.reseed(123)
-    waveforms1, _ = incoherent_gen.generate(2, 100.0, 1.0, seed=123)
-    
-    # Same seed should give same result
-    incoherent_gen.reseed(123)
-    waveforms2, _ = incoherent_gen.generate(2, 100.0, 1.0, seed=123)
-    
-    np.testing.assert_allclose(waveforms1, waveforms2)
+    with pytest.warns(DeprecationWarning, match="reseed"):
+        incoherent_gen.reseed(123)
 
 
 def test_return_variables_comparison():

@@ -4,8 +4,6 @@ import logging
 
 import pytest
 
-# Its tests draw their data from global RNGs (see conftest's guard).
-pytestmark = pytest.mark.global_rng
 import gravyflow as gf
 
 import numpy as np
@@ -221,6 +219,7 @@ def test_antenna_pattern(
         )
 
 # Test for Time Delay
+@pytest.mark.global_rng
 def test_time_delay(
         network : gf.Network, 
         num_tests : Optional[int] = int(100)
@@ -449,6 +448,7 @@ def _test_antenna_pattern(
             verbose=True
         )
 
+@pytest.mark.global_rng
 def test_antenna_pattern(
         pytestconfig : Config
     ) -> None:

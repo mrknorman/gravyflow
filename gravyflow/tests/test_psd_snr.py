@@ -1,7 +1,5 @@
 import pytest
 
-# Its tests draw their data from global RNGs (see conftest's guard).
-pytestmark = pytest.mark.global_rng
 import gravyflow as gf
 import numpy as np
 from keras import ops
@@ -51,6 +49,7 @@ def test_find_closest():
     idx = gf_snr.find_closest(tensor, scalar)
     assert idx == 1 
 
+@pytest.mark.global_rng
 def test_snr_calculation():
     # Create a signal and background
     sample_rate = 100.0
@@ -80,6 +79,7 @@ def test_snr_calculation():
     assert float(snr_val[0]) > 0.0
 
 
+@pytest.mark.global_rng
 def test_scale_to_snr():
     sample_rate = 100.0
     duration = 4.0

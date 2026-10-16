@@ -49,9 +49,11 @@ def global_rng_guard(request):
     The library draws only from its seed tree, never from a global RNG: fail a
     test whose run changed NumPy's, Python's or Keras' global random state.
 
-    A test module that draws its own test data from the global RNG declares
-    it with ``pytestmark = pytest.mark.global_rng``; its tests start from a
-    fixed global state instead, and are not checked.
+    A test that draws its own data from a global RNG (or builds a Keras model,
+    whose initialisers draw from Keras' global seed) declares it with
+    ``@pytest.mark.global_rng``: it starts from a fixed global state instead,
+    and is not checked. The mark is per test, never per module, so the guard
+    still covers the library code every other test runs.
     """
     import gravyflow as gf
     if request.node.get_closest_marker("global_rng") is not None:

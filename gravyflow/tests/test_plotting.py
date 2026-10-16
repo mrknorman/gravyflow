@@ -1,12 +1,11 @@
 
 import pytest
 
-# Its tests draw their data from global RNGs (see conftest's guard).
-pytestmark = pytest.mark.global_rng
 import numpy as np
 import gravyflow as gf
 from bokeh.models import Plot
 
+@pytest.mark.global_rng
 def test_generate_strain_plot():
     """Verify that calling with dummy data returns a valid Bokeh object."""
     
@@ -30,6 +29,7 @@ def test_generate_strain_plot():
     assert isinstance(plot, Plot)
     assert plot.title.text == "Test Plot"
 
+@pytest.mark.global_rng
 def test_generate_spectrogram():
     """Verify that calling with dummy data returns a valid Bokeh object."""
     

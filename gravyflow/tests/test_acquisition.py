@@ -17,8 +17,6 @@ Run with visual plots:
 
 import pytest
 
-# Its tests draw their data from global RNGs (see conftest's guard).
-pytestmark = pytest.mark.global_rng
 import numpy as np
 import tempfile
 import hashlib
@@ -821,6 +819,7 @@ def test_segment_processing_visualization(pytestconfig: Config) -> None:
     )
 
 
+@pytest.mark.global_rng
 def test_random_subsection_visualization(pytestconfig: Config) -> None:
     """Test random subsection extraction with optional visualization."""
     _test_random_subsection_visualization(
@@ -835,6 +834,7 @@ def test_random_subsection_visualization(pytestconfig: Config) -> None:
 class TestGetOnsourceOffsourceChunks:
     """Tests for get_onsource_offsource_chunks generator method."""
     
+    @pytest.mark.global_rng
     def test_get_chunks_defaults_applied(self):
         """Test that defaults are applied when parameters are None (lines 1101-1111)."""
         obtainer = gf.IFODataObtainer(

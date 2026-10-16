@@ -3,8 +3,6 @@ os.environ["KERAS_BACKEND"] = "jax"
 
 import pytest
 
-# Its tests draw their data from global RNGs (see conftest's guard).
-pytestmark = pytest.mark.global_rng
 import gravyflow as gf
 import numpy as np
 import keras
@@ -46,6 +44,7 @@ def test_psd():
     peak_freq = freqs[peak_idx]
     assert np.isclose(peak_freq, freq, atol=1.0)
 
+@pytest.mark.global_rng
 def test_psd_vs_scipy():
     import scipy.signal
     
@@ -171,6 +170,7 @@ def test_psd_1d_input():
     assert np.isclose(peak_freq, freq, atol=1.0)
 
 
+@pytest.mark.global_rng
 def test_psd_median_mode():
     """Test PSD with median mode instead of mean."""
     sample_rate = 1024.0
@@ -245,6 +245,7 @@ def test_psd_pure_sine_peak_location():
         assert np.isclose(peak_freq, freq, atol=1.0), f"Expected {freq}Hz, got {peak_freq}Hz"
 
 
+@pytest.mark.global_rng
 def test_psd_white_noise_flatness():
     """Verify PSD of white noise is approximately flat."""
     sample_rate = 1024.0

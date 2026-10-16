@@ -398,9 +398,8 @@ def test_numerical_stability(basic_dataset_config):
     """Check for NaNs or Infs in the generated data."""
     dataset = GravyflowDataset(**basic_dataset_config, seed=555)
     
-    for _ in range(3):
-        batch = next(iter(dataset))
-        X = batch[0][gf.ReturnVariables.WHITENED_ONSOURCE.name]
+    for k in range(3):
+        X = dataset[k][0][gf.ReturnVariables.WHITENED_ONSOURCE.name]
         assert np.all(np.isfinite(X)), "Input data contains NaNs or Infs."
 
 @pytest.mark.global_rng
@@ -601,14 +600,15 @@ def test_signal_variation(basic_noise_obtainer):
     
     dataset = GravyflowDataset(**config, seed=456)
     
-    batch1 = next(iter(dataset))
-    inj1 = batch1[0][gf.ReturnVariables.INJECTIONS.name]
-    
-    batch2 = next(iter(dataset))
-    inj2 = batch2[0][gf.ReturnVariables.INJECTIONS.name]
-    
-    # Check they are different
-    assert not np.allclose(inj1, inj2), "Injections identical across batches."
+    # next(iter(dataset)) is always batch 0: compare two batches by index.
+    inj1 = np.asarray(dataset[0][0][gf.ReturnVariables.INJECTIONS.name])
+    inj2 = np.asarray(dataset[1][0][gf.ReturnVariables.INJECTIONS.name])
+
+    # Different by far more than float noise: no example of batch 1 repeats one of batch 0.
+    scale = np.max(np.abs(inj1))
+    for a in inj1:
+        for b in inj2:
+            assert np.max(np.abs(a - b)) > 1e-3 * scale, "An injection repeats across batches."
     
     # Check they are not all zeros (assuming injection chance 1.0 default)
     assert np.max(np.abs(inj1)) > 0.0, "Injections are all zeros."

@@ -10,8 +10,6 @@ import keras
 import numpy as np
 import pytest
 
-# Its tests draw their data from global RNGs (see conftest's guard).
-pytestmark = pytest.mark.global_rng
 
 import gravyflow as gf
 from gravyflow.src.model.examples import (
@@ -31,6 +29,7 @@ from gravyflow.src.validate import StaleCheckpointError
     (GeorgeHuerta2017Shallow, GeorgeHuerta2017Config.cpu()),
     (GeorgeHuerta2017Deep, GeorgeHuerta2017Config()),
 ])
+@pytest.mark.global_rng
 def test_examples_take_whitened_onsource_and_return_logits(model_class, config):
     model = model_class.model(config)
     assert [t.name for t in model.inputs] == ["WHITENED_ONSOURCE"]
@@ -41,15 +40,18 @@ def test_examples_take_whitened_onsource_and_return_logits(model_class, config):
     assert out.shape == (3, 2) and out.dtype == np.float32
 
 
+@pytest.mark.global_rng
 def test_gabbard_cpu_preset_size():
     assert Gabbard2017.model(Gabbard2017Config.cpu()).count_params() == 41_842
 
 
+@pytest.mark.global_rng
 def test_shipped_weights_for_the_old_contract_are_refused():
     with pytest.raises(ValueError, match="older input contract"):
         Gabbard2017.pretrained()
 
 
+@pytest.mark.global_rng
 def test_george_huerta_transfer_copies_every_layer_but_the_output():
     config = GeorgeHuerta2017Config.cpu()
     predictor = GeorgeHuerta2017Shallow.model(config, task="regression")
@@ -187,6 +189,7 @@ class EpochBatches(CountingBatches):
         return super().__getitem__(index)
 
 
+@pytest.mark.global_rng
 def test_training_resumes_from_the_last_epoch(tmp_path):
     builds, served = [], []
 
@@ -217,6 +220,7 @@ def test_training_resumes_from_the_last_epoch(tmp_path):
                    zip(last_weights, directory.load_model("last").get_weights()))
 
 
+@pytest.mark.global_rng
 def test_resume_refuses_another_configuration(tmp_path):
     validation = materialise(CountingBatches(99), 2)
     make_run(tmp_path, 1).train(tiny_model, CountingBatches, validation, verbose=0)
@@ -224,6 +228,7 @@ def test_resume_refuses_another_configuration(tmp_path):
         make_run(tmp_path, 2, seed=8).train(tiny_model, CountingBatches, validation, verbose=0)
 
 
+@pytest.mark.global_rng
 def test_a_replaced_checkpoint_is_refused(tmp_path):
     validation = materialise(CountingBatches(99), 2)
     run = make_run(tmp_path, 1)

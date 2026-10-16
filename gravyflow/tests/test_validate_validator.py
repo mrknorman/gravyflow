@@ -9,8 +9,6 @@ import keras
 import numpy as np
 import pytest
 
-# Its tests draw their data from global RNGs (see conftest's guard).
-pytestmark = pytest.mark.global_rng
 
 import gravyflow as gf
 from gravyflow.src.model.examples.base import ValidationDatasetConfig, validation_dataset_args
@@ -94,6 +92,7 @@ def test_checkpoint_resumes_for_the_same_model(validated, dataset_args, small_co
     np.testing.assert_array_equal(again.far_scores, v.far_scores)
 
 
+@pytest.mark.global_rng
 def test_checkpoint_refuses_another_model(validated, dataset_args, small_config):
     # GF-B67: checkpoints were reused by path alone.
     _, path, _ = validated
@@ -121,6 +120,7 @@ def test_checkpoint_of_another_format_is_refused(validated, dataset_args, small_
         Validator.validate(model, "tiny", dataset_args, small_config, old)
 
 
+@pytest.mark.global_rng
 def test_checkpoint_without_provenance_is_refused(tmp_path, dataset_args, small_config):
     path = tmp_path / "old.h5"
     with h5py.File(path, "w") as f:

@@ -5,6 +5,7 @@ import logging
 
 #Library imports
 import numpy as np
+import pytest
 import scipy
 from gwpy.timeseries import TimeSeries
 from bokeh.plotting import output_file, save
@@ -393,6 +394,7 @@ def _test_whitening_real_noise(
         save(grid)
 
 
+@pytest.mark.global_rng
 def test_whiten_functions(
         pytestconfig : Config
     ) -> None:
@@ -443,6 +445,7 @@ def test_fftconvolve():
     expected_same = np.convolve([1.0, 2.0, 3.0], [0.0, 1.0, 0.5], mode='same')
     np.testing.assert_allclose(conv_same, expected_same, atol=1e-5)
 
+@pytest.mark.global_rng
 def test_whiten_runs():
     sample_rate = 100.0
     duration = 4.0
@@ -466,6 +469,7 @@ def test_whiten_runs():
     
     assert ops.shape(whitened) == ops.shape(signal)
 
+@pytest.mark.global_rng
 def test_whiten_colored_noise():
     # Verify that whitening colored noise results in white noise (flat PSD)
     sample_rate = 1024.0
@@ -532,11 +536,6 @@ def test_whiten_colored_noise():
 # ============================================================================
 # NEW TESTS FOR 100% COVERAGE
 # ============================================================================
-
-import pytest
-
-# Its tests draw their data from global RNGs (see conftest's guard).
-pytestmark = pytest.mark.global_rng
 
 
 def test_truncate_transfer_ncorner_validation():
@@ -652,6 +651,7 @@ def test_whiten_1d_input():
     assert len(ops.shape(whitened)) == 1
     assert ops.shape(whitened)[0] == len(t)
 
+@pytest.mark.global_rng
 def test_whiten_with_highpass():
     """Test whiten with highpass filtering enabled."""
     sample_rate = 1024.0

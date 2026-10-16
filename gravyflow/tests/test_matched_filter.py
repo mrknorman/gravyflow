@@ -7,8 +7,6 @@ test_matched_filter_search.py.
 
 import pytest
 
-# Its tests draw their data from global RNGs (see conftest's guard).
-pytestmark = pytest.mark.global_rng
 import numpy as np
 import jax.numpy as jnp
 
@@ -347,6 +345,7 @@ def test_matched_filter_with_chirplet():
     assert best_idx == 1, f"Expected 50-200Hz chirplet (index 1) to be best, got {best_idx}"
 
 
+@pytest.mark.global_rng
 def test_matched_filter_with_periodic_waves():
     """Test matched filter can distinguish between periodic wave shapes."""
     sample_rate = 2048.0
