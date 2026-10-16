@@ -71,8 +71,8 @@ class OfflineNoiseObtainer(gf.NoiseDataObtainer):
         starts = np.arange(start, end - 1000.0, 1500.0)
         return np.stack([starts, starts + 1000.0], axis=-1)
 
-    def remove_unwanted_segments(self, ifo, valid_segments, get_times=None):
-        return valid_segments, None
+    def remove_unwanted_segments(self, ifo, valid_segments):
+        return valid_segments
 
 
 def offline_noise_obtainer():
