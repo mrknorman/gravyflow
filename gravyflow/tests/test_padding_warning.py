@@ -2,6 +2,12 @@ import pytest
 import gravyflow as gf
 from warnings import catch_warnings
 
+# A dataset refuses generators without a scaling method.
+SNR_SCALING = gf.ScalingMethod(
+    value=gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT),
+    type_=gf.ScalingTypes.SNR
+)
+
 def test_padding_warning():
     """
     Verify that a warning is issued when padding exceeds half of onsource duration.
@@ -11,7 +17,7 @@ def test_padding_warning():
         import warnings
         warnings.simplefilter("always")
         
-        # Default padding is back=0.3.
+        # Padding back=0.3 (the default is None: as far as the window allows).
         # Set onsource=0.4. Limit = 0.2.
         # 0.3 > 0.2 -> Should warn.
         
@@ -19,7 +25,10 @@ def test_padding_warning():
             onsource_duration_seconds=0.4,
             crop_duration_seconds=0.5,
             waveform_generators=[
-                gf.WNBGenerator()
+                gf.WNBGenerator(
+                    scaling_method=SNR_SCALING,
+                    back_padding_duration_seconds=0.3,
+                )
             ],
             input_variables=[gf.ReturnVariables.INJECTIONS],
             noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE)
@@ -42,7 +51,7 @@ def test_no_padding_warning():
         import warnings
         warnings.simplefilter("always")
         
-        # Default padding is back=0.3.
+        # Padding back=0.3 (the default is None: as far as the window allows).
         # Set onsource=1.0. Limit = 0.5.
         # 0.3 <= 0.5 -> Should NOT warn.
         
@@ -50,7 +59,10 @@ def test_no_padding_warning():
             onsource_duration_seconds=1.0,
             crop_duration_seconds=0.5,
             waveform_generators=[
-                gf.WNBGenerator()
+                gf.WNBGenerator(
+                    scaling_method=SNR_SCALING,
+                    back_padding_duration_seconds=0.3,
+                )
             ],
             input_variables=[gf.ReturnVariables.INJECTIONS],
             noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE)

@@ -7,8 +7,8 @@
         "type_": "uniform"
     },
     "injection_chance": 1.0,
-    "front_padding_duration_seconds": 0.3,
-    "back_padding_duration_seconds": 0.0,
+    "front_padding_duration_seconds": null,
+    "back_padding_duration_seconds": null,
     "duration_seconds" : {
         "min_": 0.1,
         "max_": 1.0,

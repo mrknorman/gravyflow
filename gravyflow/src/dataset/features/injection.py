@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # Built-In imports:
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import Tuple, Optional, ClassVar
 import logging
 from pathlib import Path
 from enum import Enum, auto
@@ -237,20 +237,47 @@ class ReturnVariables(Enum):
 
 @dataclass
 class WaveformGenerator:
+    """
+    Base of the waveform generators.
+
+    Placement: each waveform's reference time (its peak, or a CBC's merger) is
+    placed at an offset from the onsource window's centre drawn uniformly from
+    [-front_padding_duration_seconds, +back_padding_duration_seconds]; None
+    means as far as the window allows. Unless allow_partially_out_of_window is
+    True, the range is narrowed per example so that the whole signal (its
+    ``get_signal_extent_seconds``), delayed to any detector, stays inside the
+    window.
+
+    Sky: right_ascension_radians, declination_radians and polarization_radians
+    are LAL's equatorial angles and polarisation angle, defined at
+    reference_gps_time_seconds. Each is a float, a gf.Distribution, or None for
+    an isotropic draw (polarisation uniform in [0, pi)).
+    """
     scaling_method : Union[ScalingMethod, None] = None
     injection_chance : float = 1.0
-    front_padding_duration_seconds : float = 0.0
-    back_padding_duration_seconds : float = 0.3
+    front_padding_duration_seconds : Optional[float] = None
+    back_padding_duration_seconds : Optional[float] = None
     network : Union[List[gf.IFO], gf.Network, Path, None] = None
+    allow_partially_out_of_window : bool = False
+    right_ascension_radians : Union[float, gf.Distribution, None] = None
+    declination_radians : Union[float, gf.Distribution, None] = None
+    polarization_radians : Union[float, gf.Distribution, None] = None
+    reference_gps_time_seconds : Optional[float] = None
 
     distributed_attributes : Union[Tuple, None] = None
-        
+
+    # Sky attributes; reseeded after the distributed attributes, so adding them
+    # leaves every other attribute's random stream as it was.
+    sky_attributes : ClassVar[Tuple[str, ...]] = (
+        "right_ascension_radians",
+        "declination_radians",
+        "polarization_radians",
+    )
+
     def __post_init__(self):
         self.network = self.init_network(self.network)
         self.convert_all_distributions()
-        
-        # Deep copy all distributed attributes to ensure they are independent instances
-        # This prevents shared state if the same Distribution object was passed to multiple arguments
+
         # Deep copy all distributed attributes to ensure they are independent instances
         # This prevents shared state if the same Distribution object was passed to multiple arguments
         if self.distributed_attributes is not None:
@@ -258,12 +285,49 @@ class WaveformGenerator:
                 val = getattr(self, attribute)
                 if isinstance(val, gf.Distribution):
                     setattr(self, attribute, deepcopy(val))
-                
+                elif isinstance(val, (tuple, list)):
+                    setattr(self, attribute, type(val)(deepcopy(element) for element in val))
+
+        for attribute in self.sky_attributes:
+            value = getattr(self, attribute, None)
+            if value is None:
+                continue
+            if isinstance(value, gf.Distribution):
+                setattr(self, attribute, deepcopy(value))
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                setattr(self, attribute, gf.Distribution(
+                    value=float(value), type_=gf.DistributionType.CONSTANT
+                ))
+            else:
+                raise TypeError(
+                    f"{attribute} should be a float, a gf.Distribution or None."
+                )
+
         # Ensure attributes are decorrelated by default
         self.reseed(gf.Defaults.seed)
 
     def get_max_generated_duration(self):
         return 0.0
+
+    def get_signal_extent_seconds(self, parameters):
+        """
+        How far each waveform extends before and after its reference time, in
+        seconds: a pair of scalars or (batch,) arrays. By default, half the
+        maximum generated duration either side.
+        """
+        half = 0.5 * float(self.get_max_generated_duration())
+        return half, half
+
+    def placement_range_seconds(self, window_seconds : float):
+        """
+        The configured range of the reference time's offset from the window's
+        centre, (low, high) in seconds, before any per-example narrowing.
+        """
+        low = self.front_padding_duration_seconds
+        high = self.back_padding_duration_seconds
+        low = window_seconds / 2.0 if low is None else float(low)
+        high = window_seconds / 2.0 if high is None else float(high)
+        return -low, high
 
     @classmethod
     def init_network(cls, network):
@@ -367,9 +431,12 @@ class WaveformGenerator:
             if isinstance(attribute, list) or isinstance(attribute, tuple): 
                 value = []
                 for element in attribute:
-                    value.append(
-                        gf.Distribution(value=element, type_=gf.DistributionType.CONSTANT)
-                    )
+                    if isinstance(element, gf.Distribution):
+                        value.append(element)
+                    else:
+                        value.append(
+                            gf.Distribution(value=element, type_=gf.DistributionType.CONSTANT)
+                        )
                 return value
             else:
                 return gf.Distribution(value=attribute, type_=gf.DistributionType.CONSTANT)
@@ -394,7 +461,20 @@ class WaveformGenerator:
                 if isinstance(distribution, gf.Distribution):
                     distribution.reseed(seed)
                     setattr(self, attribute, distribution)
-                
+                elif isinstance(distribution, (tuple, list)):
+                    # Each component of a vector attribute gets its own stream.
+                    component_seeds = default_rng(seed).integers(
+                        1000000000, size=len(distribution)
+                    )
+                    for element, component_seed in zip(distribution, component_seeds):
+                        if isinstance(element, gf.Distribution):
+                            element.reseed(int(component_seed))
+        for attribute in self.sky_attributes:
+            seed = rng.integers(1000000000)
+            distribution = getattr(self, attribute, None)
+            if isinstance(distribution, gf.Distribution):
+                distribution.reseed(seed)
+
     def apply_injection_chance(self, waveforms, seed):
         """
         Randomly zeros out waveforms based on injection_chance.
@@ -508,7 +588,14 @@ class WaveformParameters(Enum):
     END_FREQUENCY_HERTZ = WaveformParameter(307)
     CHIRP_RATE = WaveformParameter(308)
     DAMPING_TIME_SECONDS = WaveformParameter(309)
-    
+    # LAL's polarisation-ellipse eccentricity: 1 linear, 0 circular.
+    POLARIZATION_ECCENTRICITY = WaveformParameter(310)
+
+    # Sky and polarisation (LAL conventions), per generator:
+    RIGHT_ASCENSION_RADIANS = WaveformParameter(401)
+    DECLINATION_RADIANS = WaveformParameter(402)
+    POLARIZATION_RADIANS = WaveformParameter(403)
+
     @classmethod
     def get(cls, key):
         member = cls.__members__.get(key.upper()) 
@@ -524,33 +611,154 @@ class WaveformParameters(Enum):
 def is_not_inherited(obj, attribute):
     return attribute in obj.__dict__ or attribute in obj.__class__.__annotations__
 
+def get_support_bounds(value, name : str = "value"):
+    """
+    The (low, high) support of a float or gf.Distribution, as floats.
+
+    CONSTANT gives its value twice and CHOICE the extremes of its values; the
+    bounded types give min_ and max_. A NORMAL without bounds gives -inf and
+    +inf, so a caller that needs a finite bound can say which parameter lacks
+    one.
+    """
+    if not isinstance(value, gf.Distribution):
+        if isinstance(value, (tuple, list)):
+            raise TypeError(f"{name} is a vector; take the bounds of each component.")
+        return float(value), float(value)
+
+    type_ = value.type_
+    if isinstance(type_, str):
+        type_ = gf.DistributionType[type_.upper()]
+
+    match type_:
+        case gf.DistributionType.CONSTANT:
+            return float(value.value), float(value.value)
+        case gf.DistributionType.CHOICE:
+            if not value.possible_values:
+                raise ValueError(f"{name} is a CHOICE distribution with no possible_values.")
+            return float(np.min(value.possible_values)), float(np.max(value.possible_values))
+        case gf.DistributionType.NORMAL:
+            low = -np.inf if value.min_ is None else float(value.min_)
+            high = np.inf if value.max_ is None else float(value.max_)
+            return low, high
+        case _:
+            if value.min_ is None or value.max_ is None:
+                raise ValueError(f"{name} is a {type_.name} distribution without min_ and max_.")
+            return float(value.min_), float(value.max_)
+
+
+def _finite_support(generator, name):
+    low, high = get_support_bounds(getattr(generator, name), name)
+    if not (np.isfinite(low) and np.isfinite(high)):
+        raise ValueError(
+            f"{type(generator).__name__}.{name} has unbounded support; give its "
+            "NORMAL distribution explicit min_ and max_ bounds."
+        )
+    return low, high
+
+
+# A WNB's duration times its bandwidth must reach this, or its Hann envelope
+# spreads the burst's energy well outside the labelled band.
+WNB_MIN_TIME_BANDWIDTH = 4.0
+# Rounds of redrawing below-floor time-bandwidth products before giving up.
+_WNB_MAX_REDRAWS = 100
+
 @dataclass
 class WNBGenerator(WaveformGenerator):
+    """
+    White noise bursts: Gaussian noise band-limited to [min, max] frequency
+    under a Hann envelope of full width ``duration_seconds`` (see gf.wnb).
+
+    The band of each burst is the sampled min and max frequencies in order,
+    with the top clipped to Nyquist; the labels are that realised band. Draws
+    whose duration times bandwidth is below ``min_time_bandwidth`` are redrawn,
+    so the population is the configured one conditioned on
+    duration * bandwidth >= min_time_bandwidth.
+
+    ``polarization_eccentricity`` is LAL's polarisation-ellipse eccentricity:
+    0 (the default) gives two independent, equal-power polarisations, 1 plus
+    only.
+    """
     duration_seconds : Union[float, gf.Distribution] = 0.5
     min_frequency_hertz: Union[float, gf.Distribution] = 16.0
     max_frequency_hertz: Union[float, gf.Distribution] = 1024.0
+    polarization_eccentricity: Union[float, gf.Distribution] = 0.0
+    min_time_bandwidth : float = WNB_MIN_TIME_BANDWIDTH
 
     distributed_attributes : Tuple[str] = (
         "duration_seconds",
         "min_frequency_hertz",
-        "max_frequency_hertz"
+        "max_frequency_hertz",
+        "polarization_eccentricity"
     )
 
     def __post_init__(self):
-        
+
         self.duration_seconds = self.ensure_float("duration_seconds", self.duration_seconds)
         self.min_frequency_hertz = self.ensure_float("min_frequency_hertz", self.min_frequency_hertz)
         self.max_frequency_hertz = self.ensure_float("max_frequency_hertz", self.max_frequency_hertz)
+        self.polarization_eccentricity = self.ensure_float(
+            "polarization_eccentricity", self.polarization_eccentricity
+        )
 
         super().__post_init__()
-    
+        self._validate_parameters()
+
+    def _validate_parameters(self):
+        name = type(self).__name__
+        duration_low, duration_high = _finite_support(self, "duration_seconds")
+        if duration_low <= 0.0:
+            raise ValueError(f"{name}.duration_seconds must be positive; its support reaches {duration_low}.")
+        frequencies = [
+            _finite_support(self, "min_frequency_hertz"),
+            _finite_support(self, "max_frequency_hertz"),
+        ]
+        if min(low for low, _ in frequencies) < 0.0:
+            raise ValueError(f"{name} frequencies must not be negative.")
+        eccentricity_low, eccentricity_high = _finite_support(self, "polarization_eccentricity")
+        if eccentricity_low < 0.0 or eccentricity_high > 1.0:
+            raise ValueError(f"{name}.polarization_eccentricity must lie in [0, 1].")
+        widest = max(high for _, high in frequencies) - min(low for low, _ in frequencies)
+        if duration_high * widest < self.min_time_bandwidth:
+            raise ValueError(
+                f"{name}: no draw can reach duration * bandwidth >= "
+                f"{self.min_time_bandwidth} (at most {duration_high} s x {widest} Hz)."
+            )
+
     def get_max_generated_duration(self):
-        if isinstance(self.duration_seconds, gf.Distribution):
-            if self.duration_seconds.type_ == gf.DistributionType.CONSTANT:
-                return self.duration_seconds.value
-            return self.duration_seconds.max_
-        return self.duration_seconds
-    
+        return float(_finite_support(self, "duration_seconds")[1])
+
+    def get_signal_extent_seconds(self, parameters):
+        half = np.asarray(parameters[WaveformParameters.DURATION_SECONDS]) / 2.0
+        return half, half
+
+    def _draw(self, num_waveforms, nyquist):
+        """Durations and realised bands, redrawn until each meets the floor."""
+        def sample(attribute, count):
+            return np.asarray(getattr(self, attribute).sample(count), dtype=np.float64)
+
+        duration = sample("duration_seconds", num_waveforms)
+        first = sample("min_frequency_hertz", num_waveforms)
+        second = sample("max_frequency_hertz", num_waveforms)
+
+        def band():
+            return np.minimum(first, second), np.minimum(np.maximum(first, second), nyquist)
+
+        for _ in range(_WNB_MAX_REDRAWS):
+            low, high = band()
+            short = duration * (high - low) < self.min_time_bandwidth
+            count = int(np.sum(short))
+            if count == 0:
+                return duration, low, high
+            duration[short] = sample("duration_seconds", count)
+            first[short] = sample("min_frequency_hertz", count)
+            second[short] = sample("max_frequency_hertz", count)
+
+        raise ValueError(
+            f"{type(self).__name__}: after {_WNB_MAX_REDRAWS} redraws, {count} bursts "
+            f"still have duration * bandwidth < {self.min_time_bandwidth}; widen the "
+            "duration or frequency distributions."
+        )
+
     def generate(
         self,
         num_waveforms: int,
@@ -558,80 +766,64 @@ class WNBGenerator(WaveformGenerator):
         duration_seconds: float,
         seed : int
     ):
-        
+
         if (num_waveforms > 0):
-            
+
             if seed is not None:
                 self.reseed(seed)
-            
-            if self.duration_seconds.type_ is not gf.DistributionType.CONSTANT:
-                if self.duration_seconds.max_ > duration_seconds:                
-                    warn("Max duration distibution is greater than requested "
-                         "injection duration. Adjusting", UserWarning)
-                    self.duration_seconds.max_ = duration_seconds
 
-                if self.duration_seconds.min_ < 0.0 and self.duration_seconds.type_ is not gf.DistributionType.CONSTANT:
-
-                    warn("Min duration distibution is less than zero "
-                         "injection duration. Adjusting", UserWarning)
-
-                    self.duration_seconds.min_ = 0.0
-            
-            parameters = {}
-            for attribute in self.distributed_attributes:
-                value = getattr(self, attribute)
-                
-                parameter = None
-                try:
-                    parameter = WaveformParameters.get(attribute)
-                except:
-                    try:
-                        parameter = ScalingTypes.get(attribute)
-                    except:
-                        continue # Skip if not found
-                
-                shape = parameter.value.shape[-1]                
-                parameters[attribute] = ops.convert_to_tensor(
-                    value.sample(num_waveforms * shape)
+            name = type(self).__name__
+            nyquist = sample_rate_hertz / 2.0
+            if _finite_support(self, "min_frequency_hertz")[0] >= nyquist \
+                    and _finite_support(self, "max_frequency_hertz")[0] >= nyquist:
+                raise ValueError(
+                    f"{name}: every band starts at or above the Nyquist frequency "
+                    f"{nyquist} Hz, so the bursts would be empty."
                 )
-                    
-            parameters["max_frequency_hertz"] = ops.maximum(
-                parameters["max_frequency_hertz"], 
-                parameters["min_frequency_hertz"]
+            if max(_finite_support(self, "min_frequency_hertz")[1],
+                   _finite_support(self, "max_frequency_hertz")[1]) > nyquist:
+                warn(
+                    f"{name}: band edges above the Nyquist frequency {nyquist} Hz are "
+                    "clipped to it, and labelled as clipped.", UserWarning
+                )
+
+            duration, low, high = self._draw(num_waveforms, nyquist)
+            eccentricity = np.asarray(
+                self.polarization_eccentricity.sample(num_waveforms), dtype=np.float64
             )
-            parameters["min_frequency_hertz"] = ops.minimum(
-                parameters["max_frequency_hertz"],
-                parameters["min_frequency_hertz"]
-            )
-                                    
+
+            if np.any(duration > duration_seconds):
+                warn(
+                    f"{name}: durations above the {duration_seconds} s buffer are "
+                    "clipped to it.", UserWarning
+                )
+                duration = np.minimum(duration, duration_seconds)
+
+            parameters = {
+                "duration_seconds" : ops.convert_to_tensor(duration, dtype="float32"),
+                "min_frequency_hertz" : ops.convert_to_tensor(low, dtype="float32"),
+                "max_frequency_hertz" : ops.convert_to_tensor(high, dtype="float32"),
+                "polarization_eccentricity" : ops.convert_to_tensor(eccentricity, dtype="float32"),
+            }
+
             waveforms = gf.wnb(
                 num_waveforms,
-                sample_rate_hertz, 
-                duration_seconds, 
+                sample_rate_hertz,
+                duration_seconds,
                 **parameters,
                 seed=int(seed)
             )
-            
+
             waveforms = ensure_last_dim_even(waveforms)
-            
+
             # Apply injection chance (randomly zero out waveforms)
             if seed is not None:
                 waveforms = self.apply_injection_chance(waveforms, seed)
-            
-            # Convert parameters to Enum keys for return
-            enum_parameters = {}
-            for key, value in parameters.items():
-                try:
-                    enum_key = WaveformParameters.get(key)
-                    enum_parameters[enum_key] = value
-                except ValueError:
-                    try:
-                        enum_key = ScalingTypes.get(key)
-                        enum_parameters[enum_key] = value
-                    except ValueError:
-                        # Fallback for keys that don't map to Enums
-                        enum_parameters[key] = value
-            
+
+            enum_parameters = {
+                WaveformParameters.get(key) : value for key, value in parameters.items()
+            }
+
             return waveforms, enum_parameters
 
 def ensure_last_dim_even(tensor):
@@ -701,13 +893,11 @@ class CBCGenerator(WaveformGenerator):
     def _validate_parameters(self):
         """Validate CBC parameters and warn if outside sensible ranges."""
         def get_range(val):
-            """Get min/max from a value or distribution."""
-            if isinstance(val, gf.Distribution):
-                if val.type_ == gf.DistributionType.CONSTANT:
-                    return val.value, val.value
-                return val.min_, val.max_
-            return val, val
-        
+            """Get min/max from a value or distribution (+-inf if unbounded)."""
+            return get_support_bounds(val)
+
+        self._validate_source_model()
+
         # Mass validation (sensible range: 1-200 Msun for CBC)
         m1_min, m1_max = get_range(self.mass_1_msun)
         m2_min, m2_max = get_range(self.mass_2_msun)
@@ -759,7 +949,72 @@ class CBCGenerator(WaveformGenerator):
                 f"CBCGenerator: min_frequency <5 Hz may require very long waveforms. "
                 f"min_frequency range: [{f_min}, {f_max}] Hz"
             )
-    
+
+    # Approximants whose spins may point out of the orbital plane's normal,
+    # and those that read the tidal deformabilities.
+    PRECESSING_APPROXIMANTS : ClassVar[Tuple] = (Approximant.IMRPhenomPv2,)
+    TIDAL_APPROXIMANTS : ClassVar[Tuple] = (
+        Approximant.TaylorF2, Approximant.IMRPhenomD_NRTidalv2
+    )
+
+    def _validate_source_model(self):
+        """
+        Refuse parameters the chosen approximant would ignore or could not
+        represent, so that every label describes the waveform generated.
+
+        - No offered approximant models eccentricity, the ascending-node
+          longitude or the mean periastron anomaly: each must be 0.
+        - Tidal deformabilities must be 0 unless the approximant is tidal.
+        - Spins: a single Distribution is the aligned component (z) with no
+          in-plane spin; a tuple is (x, y, z). In-plane components must be 0
+          for an aligned-spin approximant, and every spin the supports allow
+          must satisfy |chi| <= 1.
+        """
+        name = type(self).__name__
+        approximant = Approximant(self.approximant) \
+            if not isinstance(self.approximant, Approximant) else self.approximant
+
+        def is_zero(value, attribute):
+            return get_support_bounds(value, attribute) == (0.0, 0.0)
+
+        for attribute in ("eccentricity", "ascending_node_longitude", "mean_periastron_anomaly"):
+            if not is_zero(getattr(self, attribute), attribute):
+                raise ValueError(
+                    f"{name}.{attribute} must be 0: no offered approximant models it, "
+                    "so it would be labelled but not generated."
+                )
+        if approximant not in self.TIDAL_APPROXIMANTS:
+            for attribute in ("lambda_1", "lambda_2"):
+                if not is_zero(getattr(self, attribute), attribute):
+                    raise ValueError(
+                        f"{name}.{attribute} must be 0 for {approximant.value}, which "
+                        "has no tidal deformability; use a tidal approximant."
+                    )
+
+        for attribute in ("spin_1_in", "spin_2_in"):
+            value = getattr(self, attribute)
+            if isinstance(value, gf.Distribution):
+                components = (0.0, 0.0, value)
+            else:
+                components = tuple(value)
+            bounds = [
+                get_support_bounds(component, f"{attribute}[{index}]")
+                for index, component in enumerate(components)
+            ]
+            if approximant not in self.PRECESSING_APPROXIMANTS and \
+                    any(bound != (0.0, 0.0) for bound in bounds[:2]):
+                raise ValueError(
+                    f"{name}.{attribute} has in-plane (x, y) components, which "
+                    f"{approximant.value} ignores; give only the aligned component, or "
+                    "use a precessing approximant."
+                )
+            largest = np.sqrt(sum(max(abs(low), abs(high)) ** 2 for low, high in bounds))
+            if not largest <= 1.0:
+                raise ValueError(
+                    f"{name}.{attribute} can exceed the Kerr bound |chi| <= 1 (its "
+                    f"components' supports reach |chi| = {largest:.3g})."
+                )
+
     def get_max_generated_duration(self):
         """
         The window length a CBC source needs beyond the one requested: none.
@@ -798,24 +1053,43 @@ class CBCGenerator(WaveformGenerator):
                     except:
                         continue
 
-                shape = parameter.value.shape[-1]         
-                
-                if not isinstance(value, tuple) and  not isinstance(value, list): 
-                    parameters[attribute] = value.sample(num_waveforms * shape)
+                if attribute in ("spin_1_in", "spin_2_in"):
+                    # (num_waveforms, 3): one row per source. A single
+                    # Distribution is the aligned (z) component.
+                    if isinstance(value, gf.Distribution):
+                        components = [
+                            np.zeros(num_waveforms),
+                            np.zeros(num_waveforms),
+                            np.asarray(value.sample(num_waveforms), dtype=np.float64),
+                        ]
+                    else:
+                        components = [
+                            np.asarray(element.sample(num_waveforms), dtype=np.float64)
+                            for element in value
+                        ]
+                    parameters[attribute] = np.stack(components, axis=-1)
                 else:
-                    combined_array = []
-                    for element in value:
-                        combined_array += element.sample(num_waveforms)
-                    parameters[attribute] = combined_array
+                    parameters[attribute] = np.asarray(
+                        value.sample(num_waveforms), dtype=np.float64
+                    )
 
             waveforms = None
-            
-            mass_1 = parameters["mass_1_msun"]
-            mass_2 = parameters["mass_2_msun"]
-            
-            parameters["mass_1_msun"] = ops.maximum(mass_1, mass_2)
-            parameters["mass_2_msun"] = ops.minimum(mass_1, mass_2)
-            
+
+            # Label the heavier body 1, and carry each body's spin and tidal
+            # deformability with its mass.
+            swap = parameters["mass_1_msun"] < parameters["mass_2_msun"]
+            for first, second in (
+                ("mass_1_msun", "mass_2_msun"),
+                ("spin_1_in", "spin_2_in"),
+                ("lambda_1", "lambda_2"),
+            ):
+                one, two = parameters[first], parameters[second]
+                mask = swap[:, None] if one.ndim == 2 else swap
+                parameters[first] = np.where(mask, two, one)
+                parameters[second] = np.where(mask, one, two)
+            for key in list(parameters):
+                parameters[key] = ops.convert_to_tensor(parameters[key], dtype="float32")
+
             # Wrap inclination to [0, pi] to avoid LAL waveform issues with values like 20.0
             if "inclination_radians" in parameters:
                 inc = parameters["inclination_radians"]
@@ -1084,58 +1358,45 @@ class InjectionGenerator:
             )
             total_duration = window_spec.total_onsource_duration_seconds
             
-            # Calculate max padding and delay across generators
-            max_front_padding = 0.0
-            max_back_padding = 0.0
+            # Placement. Each generator puts its waveforms' reference time (the
+            # peak, or a CBC's merger) at sample N / 2 of the buffer it
+            # generates. The window kept from that buffer is chosen so that the
+            # reference time lands at an offset from the onsource window's
+            # centre drawn uniformly from the generator's placement range,
+            # narrowed per example unless the generator allows partial signals
+            # (see WaveformGenerator). "shift" records the realised offset, in
+            # samples.
+            ranges = [
+                generator.placement_range_seconds(onsource_duration_seconds)
+                for generator in self.waveform_generators
+            ]
+            max_shift = max((max(abs(low), abs(high)) for low, high in ranges), default=0.0)
             max_delay = 0.0
-            
             for generator in self.waveform_generators:
-                max_front_padding = max(max_front_padding, generator.front_padding_duration_seconds)
-                max_back_padding = max(max_back_padding, generator.back_padding_duration_seconds)
                 if generator.network is not None:
                      max_delay = max(max_delay, float(generator.network.max_arrival_time_difference_seconds))
-            
-            # Add safety buffer
-            # We need enough extra duration to cover the random shifts (padding) and detector delays
-            # The shift can be up to max_back_padding (or max_front_padding in negative direction).
-            # To be safe, we need the valid signal to be larger than the crop window by at least 2 * max_shift.
-            # extra_duration = 2.0 * (max(max_front_padding, max_back_padding) + max_delay) + 1.0
-            
-            max_shift = max(max_front_padding, max_back_padding)
+
+            # Room for the shifts and the detector delays either side.
             extra_duration = 2.0 * (max_shift + max_delay) + 1.0
-            
+
             # Calculate max signal duration required by generators
             max_signal_duration = 0.0
             for generator in self.waveform_generators:
                 max_signal_duration = max(max_signal_duration, generator.get_max_generated_duration())
-            
-            # We need to generate at least enough to cover the signal + extra buffer
-            # But we also need to cover the requested total_duration (analysis window)
-            # Actually, total_duration is the analysis window + crop buffers.
-            # If the signal is longer than total_duration, we need to generate the full signal length
-            # to avoid cropping the start.
-            
-            gen_duration = max(total_duration, max_signal_duration) + extra_duration
-            
-            for generator in self.waveform_generators:
+
+            for generator, (range_low, range_high) in zip(self.waveform_generators, ranges):
                 seed = self.rng.integers(1000000000)
-                
-                min_shift = -int(generator.front_padding_duration_seconds * sample_rate_hertz)
-                max_shift = int(generator.back_padding_duration_seconds * sample_rate_hertz)
-                
-                # Calculate required extended duration to allow centering the merger
-                # We need enough room on both sides to shift the window.
-                # extended_duration = total_duration + 2 * max(|min_shift|, |max_shift|)
-                max_abs_shift = max(abs(min_shift), abs(max_shift))
+
+                max_abs_shift = int(max(abs(range_low), abs(range_high)) * sample_rate_hertz)
                 extended_duration = max(total_duration, max_signal_duration) + extra_duration + 2.0 * max_abs_shift / sample_rate_hertz
-                
+
                 waveforms, params = generator.generate(
                     num_waveforms=num_examples_per_batch,
                     sample_rate_hertz=sample_rate_hertz,
                     duration_seconds=extended_duration,
                     seed=seed
                 )
-                
+
                 mask = generate_mask(waveforms)
 
                 # The source's hrss and hpeak, on the whole generated buffer,
@@ -1143,7 +1404,7 @@ class InjectionGenerator:
                 finite = ops.where(ops.isfinite(waveforms), waveforms, 0.0)
                 params[SOURCE_HRSS] = calculate_hrss(finite, sample_rate_hertz)
                 params[SOURCE_HPEAK] = calculate_hpeak(finite)
-                
+
                 # Check for NaN injections that silently zero the mask
                 num_nan_injections = int(ops.sum(ops.any(ops.isnan(waveforms), axis=(1, 2))))
                 if num_nan_injections > 0:
@@ -1152,39 +1413,27 @@ class InjectionGenerator:
                         f"waveforms contain NaN values and will have mask=0. "
                         f"This may indicate an issue with waveform parameters."
                     )
-                
+
                 # Reduce mask to a single boolean flag per example (0.0 or 1.0)
                 mask = ops.max(mask, axis=(1, 2))
                 masks_list.append(mask)
 
-                # Ensure min < max
-                if min_shift >= max_shift:
-                    shifts = jnp.zeros((num_examples_per_batch,), dtype="int32")
-                else:
-                    # Generate random shifts for each example in the batch
-                    shifts = self.rng.integers(min_shift, max_shift, size=(num_examples_per_batch,))
-                    shifts = jnp.array(shifts, dtype="int32")
-                
-                # Apply shift by slicing
-                # We generated a waveform of length `extended_duration`.
-                # The merger is centered in this waveform (at extended_duration / 2).
-                # We want to slice a window of length `total_duration` such that the merger ends up at `total_duration / 2 + shift`.
-                # Let `start` be the slice start index.
-                # `tc_sliced = tc_gen - start`.
-                # `tc_gen = extended_duration / 2`.
-                # `tc_sliced = total_duration / 2 + shift`.
-                # `extended_duration / 2 - start = total_duration / 2 + shift`.
-                # `start = extended_duration / 2 - total_duration / 2 - shift`.
-                # `start = (extended_duration - total_duration) / 2 - shift`.
-                
+                offsets = self._draw_offsets_seconds(
+                    generator, params, range_low, range_high,
+                    onsource_duration_seconds, num_examples_per_batch
+                )
+
+                # Slice so the reference sample, N_ext / 2, lands at
+                # target_length / 2 + offset of the kept window.
                 extended_samples = waveforms.shape[-1]
                 target_length = int(total_duration * sample_rate_hertz)
-                
-                # Center offset
-                center_offset = (extended_samples - target_length) // 2
-                
-                slice_starts = center_offset - shifts
-                
+                slice_starts = np.rint(
+                    extended_samples / 2.0 - target_length / 2.0 - offsets * sample_rate_hertz
+                )
+                slice_starts = np.clip(slice_starts, 0, extended_samples - target_length)
+                shifts = extended_samples / 2.0 - slice_starts - target_length / 2.0
+                slice_starts = jnp.asarray(slice_starts, dtype="int32")
+
                 def slice_one(w, s):
                     # w: (..., Time)
                     # s: scalar int
@@ -1192,13 +1441,13 @@ class InjectionGenerator:
                     rank = len(w.shape)
                     zeros = [jnp.array(0, dtype="int32")] * (rank - 1)
                     start_indices = tuple(zeros + [s.astype("int32")])
-                    
+
                     slice_sizes = w.shape[:-1] + (target_length,)
-                    
+
                     return jax.lax.dynamic_slice(w, start_indices, slice_sizes)
 
                 waveforms = jax.vmap(slice_one)(waveforms, slice_starts)
-                
+
                 # Update coalescence time
                 # The merger time in the generated waveform is `coalescence_time`.
                 # In the sliced waveform, the time axis is shifted.
@@ -1209,8 +1458,8 @@ class InjectionGenerator:
                     # params["coalescence_time"] is (Batch,)
                     # slice_starts is (Batch,)
                     params["coalescence_time"] -= slice_starts / sample_rate_hertz
-                
-                params["shift"] = shifts
+
+                params["shift"] = jnp.asarray(shifts, dtype="float32")
                 injections_list.append(waveforms)
                 parameters_list.append(params)
 
@@ -1234,6 +1483,56 @@ class InjectionGenerator:
             batched_params = batch_injection_parameters(parameters_list)
             
             yield injections, masks, batched_params
+
+    def _draw_offsets_seconds(
+        self,
+        generator,
+        parameters,
+        range_low : float,
+        range_high : float,
+        window_seconds : float,
+        num_examples : int
+    ):
+        """
+        Each example's reference-time offset from the window's centre, seconds.
+
+        Uniform over [range_low, range_high]. Unless the generator allows
+        partial signals, each example's range is narrowed so that its signal,
+        from ``before`` seconds ahead of its reference time to ``after``
+        seconds behind it, delayed by up to the largest detector-to-geocentre
+        delay, lies inside the window. A signal too long for that is centred,
+        with a warning.
+        """
+        uniform = self.rng.random(num_examples)
+        low = np.full(num_examples, float(range_low))
+        high = np.full(num_examples, float(range_high))
+
+        if not getattr(generator, "allow_partially_out_of_window", False):
+            before, after = generator.get_signal_extent_seconds(parameters)
+            before = np.broadcast_to(np.asarray(before, dtype=np.float64), (num_examples,))
+            after = np.broadcast_to(np.asarray(after, dtype=np.float64), (num_examples,))
+            margin = 0.0
+            if generator.network is not None:
+                locations = np.asarray(generator.network.location, dtype=np.float64)
+                margin = float(np.max(np.linalg.norm(locations, axis=-1))) / 299792458.0
+            fits_low = before + margin - window_seconds / 2.0
+            fits_high = window_seconds / 2.0 - after - margin
+            low = np.maximum(low, fits_low)
+            high = np.minimum(high, fits_high)
+
+            too_long = low > high
+            if np.any(too_long):
+                warn(
+                    f"{type(generator).__name__}: {int(np.sum(too_long))} of "
+                    f"{num_examples} signals are longer than the {window_seconds} s "
+                    "window allows; they are centred and extend outside it.",
+                    UserWarning
+                )
+                centre = np.clip(0.5 * (fits_low + fits_high), range_low, range_high)
+                low = np.where(too_long, centre, low)
+                high = np.where(too_long, centre, high)
+
+        return low + (high - low) * uniform
 
     def add_injections_to_onsource(
         self,
@@ -1273,8 +1572,10 @@ class InjectionGenerator:
         if scale_factor is None:
             scale_factor = gf.Defaults.scale_factor
 
+        # A generator without a scaling method is refused, by name, below.
         label_types = {
             generator.scaling_method.type_ for generator in self.waveform_generators
+            if getattr(generator, "scaling_method", None) is not None
         }
         if parameters_to_return is None:
             label_types |= set(ScalingTypes)
@@ -1312,126 +1613,96 @@ class InjectionGenerator:
                     # Fallback if only 1 generator or not stacked as expected
                     current_shifts = shifts_all
             
-            # Generate or Retrieve Direction Vectors
-            input_ra = None
-            input_dec = None
-            input_pol = None
-            
-            # Check if RA/Dec/Pol are in injection_parameters
-            # Keys: WaveformParameters.ASCENDING_NODE_LONGITUDE ?? No, RA/Dec are usually implicit or specific params.
-            # If they are not in params, we generate them.
-            
-            # Use seed logic consistent with project_wave or generate
-            # project_wave uses self.rng.integers to get a seed for JAX
-            # We can do the same here to ensure deterministic behavior relative to the generator state
+            # Sky position and polarisation, LAL conventions, defined at the
+            # generator's reference GPS time. In order of precedence: values
+            # the generator returned among its parameters, the generator's own
+            # distributions, then an isotropic draw from the network's stream.
+            if scaling_method is None:
+                raise ValueError(
+                    f"{type(generator).__name__} has no scaling_method; give it a "
+                    "gf.ScalingMethod before injecting it."
+                )
+            if network is None:
+                raise ValueError(
+                    f"{type(generator).__name__} has no network to project onto."
+                )
+
+            # The network's stream is drawn as before, so isotropic skies are
+            # unchanged by the sky parameters.
             proj_seed = network.rng.integers(1000000000, size=2)
-            
-            # We generate RA/Dec/Pol explicitly so we can calculate time delays
-            # Using the same logic as project_wave ensures consistency if we pass them in.
-            
-            # project_wave expects tensor inputs or None.
-            # If we pass None, it generates them inside. But then we don't know them.
-            # So we MUST generate them here and pass them.
-            
-            # Use JAX/Ops generation matching `generate_direction_vectors`
-            # But we are in python methods here. 
-            # We can use the helper function from detector.py if we import it, or just call network.project_wave with our own values.
-            # To generate them, we need to call `generate_direction_vectors` or similar?
-            # Actually, `detector.py` exposes `generate_direction_vectors`.
-            # But it uses JAX keys.
-            # Let's check if parameters have them.
-            
-            # If we are calculating injection times, we force generation here.
-            
-            # RA
-            if injection_parameters and "right_ascension" in injection_parameters:
-                 # Ensure shape
-                 input_ra = injection_parameters["right_ascension"]
-                 # Index if needed
-                 if len(ops.shape(input_ra)) > 1 and ops.shape(input_ra)[0] == len(self.waveform_generators):
-                     input_ra = input_ra[i]
-            
-            # Dec
-            if injection_parameters and "declination" in injection_parameters:
-                 input_dec = injection_parameters["declination"]
-                 if len(ops.shape(input_dec)) > 1 and ops.shape(input_dec)[0] == len(self.waveform_generators):
-                     input_dec = input_dec[i]
-
-            # Pol
-            if injection_parameters and "polarization" in injection_parameters:
-                 input_pol = injection_parameters["polarization"]
-                 if len(ops.shape(input_pol)) > 1 and ops.shape(input_pol)[0] == len(self.waveform_generators):
-                     input_pol = input_pol[i]
-
-            # If missing, generate utilizing the seed we just drew.
-            # Note: project_wave takes `seed` argument (tensor).
-            # We can use that seed to generate them using JAX functions if we want to be 100% consistent with implicit generation.
-            # `gf.generate_direction_vectors` is available? It's in detector.py.
-            # It's not imported in injection.py. 
-            # But we can import it or use `network` methods?
-            # `network` doesn't have generation methods exposed easily.
-            # Let's import it or re-implement simply since we want to pass explicit values.
-            
-            # Actually, simplest way: let's stick to randomness driven by `proj_seed`.
-            # We need to use JAX random to match `project_wave`'s internal logic?
-            # Or just generate using `network.rng` (numpy) and convert to tensor.
-            # `project_wave` uses JAX random.
-            # If we use numpy `network.rng`, it will be deterministic given the seed.
-            # And since we pass explicit values to `project_wave`, it won't re-generate.
-            # So let's use numpy generation.
-            
             num_inj = ops.shape(raw_waveforms)[0]
-            
+            gps_time_seconds = getattr(generator, "reference_gps_time_seconds", None)
+
+            def given(key):
+                if not injection_parameters or key not in injection_parameters:
+                    return None
+                value = injection_parameters[key]
+                if len(ops.shape(value)) > 1 and ops.shape(value)[0] == len(self.waveform_generators):
+                    value = value[i]
+                return ops.convert_to_tensor(value, dtype="float32")
+
+            def configured(attribute):
+                distribution = getattr(generator, attribute, None)
+                if distribution is None:
+                    return None
+                return ops.convert_to_tensor(
+                    np.asarray(distribution.sample(num_inj), dtype=np.float32)
+                )
+
+            input_ra = given(WaveformParameters.RIGHT_ASCENSION_RADIANS)
+            input_dec = given(WaveformParameters.DECLINATION_RADIANS)
+            input_pol = given(WaveformParameters.POLARIZATION_RADIANS)
+            if input_ra is None:
+                input_ra = configured("right_ascension_radians")
+            if input_dec is None:
+                input_dec = configured("declination_radians")
+            if input_pol is None:
+                input_pol = configured("polarization_radians")
+
             if input_ra is None or input_dec is None:
-                # Uniform sphere
-                # u, v ~ U(0, 1)
-                # ra = 2pi * u
-                # dec = arcsin(2v - 1)
+                # Isotropic: right ascension uniform in [0, 2 pi), sin(declination)
+                # uniform in [-1, 1).
                 u = network.rng.random(num_inj).astype("float32")
                 v = network.rng.random(num_inj).astype("float32")
-                
+
                 if input_ra is None:
                     input_ra = ops.convert_to_tensor(2.0 * np.pi * u)
                 if input_dec is None:
                     input_dec = ops.arcsin(2.0 * v - 1.0)
-            
+
             if input_pol is None:
+                # The polarisation angle is defined modulo pi.
                 p = network.rng.random(num_inj).astype("float32")
-                input_pol = ops.convert_to_tensor(2.0 * np.pi * p)
-            
-            # Calculate Time Delays
-            # network.get_time_delay returns (Batch, NumDetectors)
-            time_delays = network.get_time_delay(input_ra, input_dec)
-            
-            # Calculate Injection Time
+                input_pol = ops.convert_to_tensor(np.pi * p)
+
+            scaling_params_list.append({
+                WaveformParameters.RIGHT_ASCENSION_RADIANS: input_ra,
+                WaveformParameters.DECLINATION_RADIANS: input_dec,
+                WaveformParameters.POLARIZATION_RADIANS: input_pol,
+            })
+
+            # Arrival time at each detector minus at the geocentre, (Batch, NumDetectors)
+            time_delays = network.get_time_delay(
+                input_ra, input_dec, gps_time_seconds=gps_time_seconds
+            )
+
+            # The peak-time label: the reference time's position in the
+            # onsource window at each detector, as a fraction of the window.
             if return_injection_times and current_shifts is not None:
-                # t0_raw = target_duration / 2 + shift
-                # Final time = t0_raw + delay
-                # target_duration is `onsource_duration_seconds`? 
-                # Wait, onsource passed to this method is raw onsource data. 
-                # `onsource_duration_seconds` arg is available.
-                
                 dur = onsource_duration_seconds
                 if dur is None:
                     # Fallback to calculating from samples
                      dur = ops.shape(onsource)[-1] / self.sample_rate_hertz
-                
-                # Convert everything to seconds
-                # shift is in samples? Yes, `shifts = self.rng.integers(...)` in generate
-                
+
+                # The realised offset from the window's centre, in samples.
                 shift_seconds = ops.cast(current_shifts, "float32") / self.sample_rate_hertz
-                center_seconds = dur / 2.0
-                
-                t_geocenter = center_seconds + shift_seconds
-                
-                # Broadcast t_geocenter (Batch,) to (Batch, NumDetectors)
-                t_geocenter = ops.expand_dims(t_geocenter, -1)
-                
+                t_geocenter = ops.expand_dims(dur / 2.0 + shift_seconds, -1)
+
                 final_time = t_geocenter + time_delays
-                
+
                 # Normalize by duration (0 to 1)
                 normalized_time = final_time / dur
-                
+
                 scaling_params_list.append({ReturnVariables.CENTRAL_TIME: normalized_time})
 
 
@@ -1470,7 +1741,8 @@ class InjectionGenerator:
                     sample_rate_hertz=sample_rate,
                     right_ascension=input_ra,
                     declination=input_dec,
-                    polarization=input_pol
+                    polarization=input_pol,
+                    gps_time_seconds=gps_time_seconds
                 )
                 start = (ops.shape(projected)[-1] - target_num_samples) // 2
                 return projected[..., start:start + target_num_samples]

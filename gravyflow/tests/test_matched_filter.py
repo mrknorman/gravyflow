@@ -465,6 +465,10 @@ class TestMatchedFilterValidation:
             mass_1_msun=gf.Distribution(value=30.0, type_=gf.DistributionType.CONSTANT),
             mass_2_msun=gf.Distribution(value=25.0, type_=gf.DistributionType.CONSTANT),
             injection_chance=1.0,
+            # With no crop, the window's edges carry the whitening's edge
+            # effects: keep the merger within 0.3 s of the centre.
+            front_padding_duration_seconds=0.3,
+            back_padding_duration_seconds=0.3,
         )
         
         noise_obtainer = gf.NoiseObtainer(

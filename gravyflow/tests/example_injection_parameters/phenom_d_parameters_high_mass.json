@@ -7,8 +7,8 @@
         "type_": "uniform"
     },
     "injection_chance": 1.0,
-    "front_padding_duration_seconds": 0.3,
-    "back_padding_duration_seconds": 0.0,
+    "front_padding_duration_seconds": null,
+    "back_padding_duration_seconds": null,
     "mass_1_msun": {
         "min_": 50,
         "max_": 95,
@@ -29,21 +29,6 @@
         "type_": "constant"
     },
     "reference_orbital_phase_in": {
-        "min_": 0,
-        "max_": "2*pi",
-        "type_": "uniform"
-    },
-    "ascending_node_longitude": {
-        "min_": 0,
-        "max_": "pi",
-        "type_": "uniform"
-    },
-    "eccentricity": {
-        "min_": 0,
-        "max_": 0.1,
-        "type_": "uniform"
-    },
-    "mean_periastron_anomaly": {
         "min_": 0,
         "max_": "2*pi",
         "type_": "uniform"

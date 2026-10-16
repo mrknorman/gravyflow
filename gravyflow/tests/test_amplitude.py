@@ -146,12 +146,24 @@ def _whitened_norm(batch):
     return np.sqrt(np.sum(whitened ** 2, axis=(-2, -1)))
 
 
-def _sine_gaussian_shape_ratio(frequency_hertz=200.0, quality_factor=9.0):
-    """hrss / hpeak of gravyflow's linearly polarised sine-Gaussian, in float64."""
-    t = (np.arange(-16384, 16384)) / FS
+def _sine_gaussian_shape_ratio(frequency_hertz=200.0, quality_factor=9.0, offset_samples=0.0):
+    """hrss / hpeak of gravyflow's linearly polarised sine-Gaussian (LAL's form,
+    cos(2 pi f t) exp(-t^2 / tau^2)), sampled with its peak ``offset_samples``
+    off the sample grid, in float64."""
+    t = (np.arange(-16384, 16384) + offset_samples) / FS
     tau = quality_factor / (frequency_hertz * np.sqrt(2.0) * np.pi)
-    h = np.sin(2.0 * np.pi * frequency_hertz * t) * np.exp(-t ** 2 / (2.0 * tau ** 2))
+    h = np.cos(2.0 * np.pi * frequency_hertz * t) * np.exp(-t ** 2 / tau ** 2)
     return np.sqrt(np.sum(h ** 2) / FS) / np.max(np.abs(h))
+
+
+def _assert_sine_gaussian_shape_ratio(ratio, rtol=1e-3):
+    """``ratio`` is the sampled shape's hrss / hpeak. A generated buffer of odd
+    length puts the peak, at sample N / 2, half a sample off the grid, which
+    lowers the sampled hpeak; both placements are the source's measures."""
+    ratio = np.asarray(ratio, dtype=np.float64)
+    candidates = [_sine_gaussian_shape_ratio(offset_samples=o) for o in (0.0, 0.5)]
+    errors = [np.max(np.abs(ratio / c - 1.0)) for c in candidates]
+    assert min(errors) <= rtol, (ratio, candidates)
 
 
 # ---------------------------------------------------------------------------
@@ -327,9 +339,7 @@ def test_hpeak_scaled_dataset():
         _sine_gaussian_generator(gf.ScalingTypes.HPEAK, _constant(1e-21)), WAVES + LABELS
     )
     np.testing.assert_array_equal(batch["HPEAK"], np.float32(1e-21))
-    np.testing.assert_allclose(
-        batch["HRSS"] / batch["HPEAK"], _sine_gaussian_shape_ratio(), rtol=1e-3
-    )
+    _assert_sine_gaussian_shape_ratio(batch["HRSS"] / batch["HPEAK"])
     np.testing.assert_allclose(batch["SNR"], _whitened_norm(batch), rtol=0.05)
 
 
@@ -343,9 +353,7 @@ def test_derived_labels_agree_across_scaling_types():
     hrss_batch = _batch(
         _sine_gaussian_generator(gf.ScalingTypes.HRSS, _constant(1e-21)), WAVES + LABELS
     )
-    np.testing.assert_allclose(
-        snr_batch["HRSS"] / snr_batch["HPEAK"], _sine_gaussian_shape_ratio(), rtol=1e-3
-    )
+    _assert_sine_gaussian_shape_ratio(snr_batch["HRSS"] / snr_batch["HPEAK"])
     snr_per_hrss = hrss_batch["SNR"] / hrss_batch["HRSS"]
     np.testing.assert_allclose(snr_batch["HRSS"] * snr_per_hrss, 10.0, rtol=0.02)
 
@@ -401,6 +409,12 @@ def test_internal_units_are_applied_once(scaling_type):
         "declination": ops.convert_to_tensor([-0.9, 0.1, 0.6, 1.2], "float32"),
         "polarization": ops.convert_to_tensor([0.2, 2.0, 4.1, 5.9], "float32"),
     }
+    # The injection layer reads a given sky from these parameters.
+    given_sky = {
+        gf.WaveformParameters.RIGHT_ASCENSION_RADIANS: sky["right_ascension"],
+        gf.WaveformParameters.DECLINATION_RADIANS: sky["declination"],
+        gf.WaveformParameters.POLARIZATION_RADIANS: sky["polarization"],
+    }
     num_samples = int(2.0 * FS)
     rng = np.random.default_rng(2)
     noise = rng.normal(size=(num_examples, 2, num_samples)).astype(np.float32)
@@ -408,7 +422,7 @@ def test_internal_units_are_applied_once(scaling_type):
 
     onsource, _, _ = injection_generator.add_injections_to_onsource(
         injections, mask, noise, offsource, parameters_to_return=[scaling_type],
-        onsource_duration_seconds=1.0, injection_parameters={**parameters, **sky},
+        onsource_duration_seconds=1.0, injection_parameters={**parameters, **given_sky},
     )
 
     raw = np.asarray(injections[0], np.float64)

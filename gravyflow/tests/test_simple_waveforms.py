@@ -392,15 +392,18 @@ def test_ringdown_exponential_decay() -> None:
     )
     
     h_plus = np.abs(np.array(waveform[0, 0, :]))
-    
-    # Signal should decay: amplitude at t=0 > amplitude at t=0.5s
-    sample_mid = int(0.5 * 2048)
-    
-    # Use envelope approximation
-    start_amp = np.max(h_plus[:100])
-    mid_amp = np.max(h_plus[sample_mid:sample_mid+100])
-    
-    assert start_amp > mid_amp * 2  # Should have decayed significantly
+
+    # The ringdown starts at its reference time, the buffer's centre, and is
+    # zero before it.
+    start = len(h_plus) // 2
+    assert np.all(h_plus[:start] == 0.0)
+
+    # Signal should decay: after 0.3 s (3 tau) the envelope is e^-3 of its start.
+    later = start + int(0.3 * 2048)
+    start_amp = np.max(h_plus[start:start + 100])
+    later_amp = np.max(h_plus[later:later + 100])
+
+    assert start_amp > later_amp * 10  # Should have decayed significantly
 
 
 def test_ringdown_max_duration() -> None:
@@ -411,9 +414,10 @@ def test_ringdown_max_duration() -> None:
     )
     
     max_dur = gen.get_max_generated_duration()
-    
-    # Should be ~5*tau = 0.25s
-    assert abs(max_dur - 0.25) < 0.01
+
+    # The ringdown starts at the buffer's centre and decays to 1e-3 of its
+    # start after ln(1000) tau, so the buffer needs 2 ln(1000) tau = 0.69 s.
+    assert abs(max_dur - 2.0 * np.log(1000.0) * 0.05) < 1e-6
 
 
 # =============================================================================

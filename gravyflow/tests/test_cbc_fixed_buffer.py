@@ -83,7 +83,8 @@ def test_the_dataset_path_asks_for_the_padded_window(monkeypatch):
 
     # The window the injection generator keeps, its shift and delay room, and the
     # room for the random shift: nothing depends on the masses.
-    padding = generator.back_padding_duration_seconds
+    # The placement range's widest reach (the whole window by default).
+    padding = max(abs(bound) for bound in generator.placement_range_seconds(ONSOURCE))
     delay = float(gf.Network(network).max_arrival_time_difference_seconds)
     shift_samples = int(padding * SAMPLE_RATE)
     window = (ONSOURCE + 2.0 * CROP) + (2.0 * (padding + delay) + 1.0) + 2.0 * shift_samples / SAMPLE_RATE

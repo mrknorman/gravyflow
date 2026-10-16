@@ -384,9 +384,15 @@ class GravyflowDataset(keras.utils.PyDataset):
                 generators = [g["generator"] for g in self.waveform_generators.values()]
             
             for generator in generators:
-                front = generator.front_padding_duration_seconds
-                back = generator.back_padding_duration_seconds
-                
+                if getattr(generator, "scaling_method", None) is None:
+                    raise ValueError(
+                        f"{type(generator).__name__} has no scaling_method; give it a "
+                        "gf.ScalingMethod to inject it into a dataset."
+                    )
+                # None means "as far as the window allows".
+                front = generator.front_padding_duration_seconds or 0.0
+                back = generator.back_padding_duration_seconds or 0.0
+
                 # Condition: padding <= onsource / 2
                 # If padding is larger, the signal center (placed at center of window)
                 # could be shifted outside the cropped onsource window.

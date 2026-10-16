@@ -1016,23 +1016,19 @@ def test_scale_to_hpeak_batch():
     assert np.max(np.abs(scaled_np)) == pytest.approx(6.0, rel=1e-3)
 
 
-def test_wnb_generator_negative_duration_warning():
-    """Test WNBGenerator handles negative min duration (covers lines 544-547)."""
-    import warnings
-    
-    # Create generator with invalid min duration that will be clamped
-    gen = gf_inj.WNBGenerator(
-        duration_seconds=gf.Distribution(min_=-0.5, max_=1.0, type_=gf.DistributionType.UNIFORM),
-        min_frequency_hertz=gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT),
-        max_frequency_hertz=gf.Distribution(value=50.0, type_=gf.DistributionType.CONSTANT)
-    )
-    
-    with warnings.catch_warnings(record=True):
-        warnings.simplefilter("always")
-        waveforms, _ = gen.generate(2, 100.0, 1.0, seed=42)
-    
+def test_wnb_generator_negative_duration_raises():
+    """
+    A duration distribution reaching below zero is refused at construction.
 
-    assert waveforms is not None
+    It used to be clamped inside generate(), which rewrote the user's
+    distribution for every later call.
+    """
+    with pytest.raises(ValueError, match="duration_seconds must be positive"):
+        gf_inj.WNBGenerator(
+            duration_seconds=gf.Distribution(min_=-0.5, max_=1.0, type_=gf.DistributionType.UNIFORM),
+            min_frequency_hertz=gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT),
+            max_frequency_hertz=gf.Distribution(value=50.0, type_=gf.DistributionType.CONSTANT)
+        )
 
 # ==============================================================================
 # Coverage Tests
