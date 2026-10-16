@@ -35,6 +35,7 @@ import gravyflow as gf
 from gravyflow.src.utils.tensor import resample_fft
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
 from gravyflow.src.utils.gps import as_gps_times
+from gravyflow.src.utils.shapes import ShapeEnforcer
 from .gwosc_data import (
     GWOSC_RUNS, DEFAULT_GWOSC_FLAGS, UpsamplingRefused, coalesce_segments,
     get_gwosc_segments, gwosc_sample_rate_hertz, subtract_segments,
@@ -629,6 +630,9 @@ class BaseDataObtainer(ABC):
         return {
             # The split the served state was built for (see _serve_split).
             "_served_split": None,
+            # This build of the served state: a generator serves only while it
+            # is unchanged (see _while_served).
+            "_served_build": object(),
             "rng": None,
             "ifos": None,
             "file_path": None,
@@ -658,6 +662,43 @@ class BaseDataObtainer(ABC):
         self.__dict__.update(self._served_state())
         self._served_split = split
         return True
+
+    @property
+    def _served_group(self) -> Optional[str]:
+        """The name of the split served, or None before one is built."""
+        return self._served_split[1] if self._served_split is not None else None
+
+    def _serve_group(self, ifos: List[gf.IFO], seed: int, group: str) -> None:
+        """
+        Serve split ``group`` to a call: the split already served is kept, with
+        the order get_valid_segments gave it; any other is built afresh, so a
+        call for one split never serves another's records.
+        """
+        if group != self._served_group:
+            self.get_valid_segments(ifos=ifos, seed=seed, group_name=group)
+
+    def _while_served(self, batches: Generator) -> Generator:
+        """
+        ``batches`` while the obtainer still serves the state they started
+        from. A generator's position (its cursors, its order over the split's
+        records) lives in that state, so once the obtainer is called for
+        another split, resuming it would read the new split's records by the
+        old split's position: it refuses instead, before touching anything.
+        """
+        built = None
+        while True:
+            if built is not None and self._served_build is not built:
+                raise RuntimeError(
+                    "This generator's obtainer now serves another split; call the "
+                    "obtainer again for a generator of the split it serves."
+                )
+            try:
+                batch = next(batches)
+            except StopIteration:
+                return
+            # The first batch builds the split's state, or reads the state built.
+            built = self._served_build
+            yield batch
 
     def override_attributes(
         self,
@@ -1625,14 +1666,8 @@ class BaseDataObtainer(ABC):
         self._zero_filled_segments_count = 0
 
     def clear_valid_segments(self) -> None:
-        self._served_split = None
-        self.valid_segments = None
-        self.sampling_plan = None
-        self.ifos = None
-        self._current_segment_index = 0
-        self._current_batch_index = 0
-        self._segment_exhausted = True
-        self.reset_acquisition_stats()
+        """Drop every split's served state (see _served_state)."""
+        self.__dict__.update(self._served_state())
 
     @abstractmethod
     def get_valid_segments(
@@ -1684,13 +1719,12 @@ class BaseDataObtainer(ABC):
             group=group
         )
 
-    @abstractmethod
     def get_onsource_offsource_chunks(
             self,
-            sample_rate_hertz: float,
-            onsource_duration_seconds: float,
-            crop_duration_seconds: float,
-            offsource_duration_seconds: float,
+            sample_rate_hertz: float = None,
+            onsource_duration_seconds: float = None,
+            crop_duration_seconds: float = None,
+            offsource_duration_seconds: float = None,
             num_examples_per_batch: int = None,
             ifos: List[gf.IFO] = None,
             scale_factor: float = None,
@@ -1699,10 +1733,12 @@ class BaseDataObtainer(ABC):
             whiten: bool = False,
             crop: bool = False,
             group: str = None
-        ):
+        ) -> Generator[Dict, None, None]:
         """
-        Generate onsource/offsource data chunks.
-        
+        Batches of onsource and offsource strain from split ``group``, each
+        checked against the shape contracts. The generator serves only while
+        the obtainer serves its split (see _while_served).
+
         Args:
             sample_rate_hertz: Sample rate in Hz
             onsource_duration_seconds: Final onsource window duration
@@ -1713,7 +1749,41 @@ class BaseDataObtainer(ABC):
             scale_factor: Amplitude scaling factor
             seed: Random seed
             sampling_mode: RANDOM or GRID sampling
-            
-        Must be implemented by subclasses.
+            whiten: Whether to whiten each batch
+            crop: Whether to crop each batch to its onsource duration
+            group: The split served; None serves the split already served
         """
-        pass
+        batches = self._yield_onsource_offsource_chunks(
+            sample_rate_hertz,
+            onsource_duration_seconds,
+            crop_duration_seconds,
+            offsource_duration_seconds,
+            num_examples_per_batch,
+            ifos,
+            scale_factor,
+            seed,
+            sampling_mode,
+            whiten,
+            crop,
+            group
+        )
+        num_ifos = len(ensure_list(ifos) or [gf.IFO.L1])
+        return ShapeEnforcer.wrap_generator(self._while_served(batches), num_ifos=num_ifos)
+
+    @abstractmethod
+    def _yield_onsource_offsource_chunks(
+            self,
+            sample_rate_hertz: float,
+            onsource_duration_seconds: float,
+            crop_duration_seconds: float,
+            offsource_duration_seconds: float,
+            num_examples_per_batch: int,
+            ifos: List[gf.IFO],
+            scale_factor: float,
+            seed: int,
+            sampling_mode: SamplingMode,
+            whiten: bool,
+            crop: bool,
+            group: str
+        ) -> Generator[Dict, None, None]:
+        """The unchecked batches of get_onsource_offsource_chunks, for this acquisition mode."""

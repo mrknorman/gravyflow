@@ -282,24 +282,120 @@ class TestEveryRouteSplitsAlike:
         assert gf.NoiseObtainer().groups == dict(gf.DEFAULT_SPLIT_FRACTIONS)
 
 
-class TestOneObtainerCalledForTwoSplits:
+#: One obtainer's calls, in order: each must serve exactly its own split.
+CALLS = ("train", "validate", "train", "test")
+
+#: A small window at 64 Hz, for batches drawn from fake strain.
+WINDOW = dict(
+    sample_rate_hertz=64.0,
+    onsource_duration_seconds=1.0,
+    crop_duration_seconds=0.5,
+    offsource_duration_seconds=1.75,
+    num_examples_per_batch=4,
+    scale_factor=1.0,
+)
+
+
+def noise_split(split):
+    """The segments of ``split``, from a fresh obtainer: the reference membership."""
+    segments = offline_noise_obtainer().get_valid_segments([gf.IFO.L1], seed=1000, group_name=split)
+    return set(map(tuple, segments[:, 0]))
+
+
+def served_noise(call, split):
     """
-    An obtainer's served state belongs to the split that built it: called
-    again for another split, it rebuilds rather than serving the first.
+    The segments a real-noise call for ``split`` serves: those of the reader
+    when it first acquires strain, where reading data would begin (stopped
+    there, offline).
+    """
+    served = {}
+
+    def stop(self, *args, **kwargs):
+        served["members"] = set(map(tuple, self.valid_segments[:, 0]))
+        raise Served
+
+    with mock.patch.object(OfflineNoiseObtainer, "acquire", stop):
+        with pytest.raises(Served):
+            call(split)
+    return served["members"]
+
+
+def fake_strain(self, sample_rate_hertz, valid_segments, ifos, scale_factor, **kwargs):
+    """Zero strain for each row of segments, as the loader yields it."""
+    for row in valid_segments:
+        data = [np.zeros(int((end - start) * sample_rate_hertz), np.float32) for start, end in row]
+        yield gf.IFOData(data, sample_rate_hertz, [start for start, _ in row])
+
+
+def cached_glitch(self, cache, gps_time, sample_rate_hertz, onsource_duration, offsource_duration,
+                  *args, **kwargs):
+    """A cache hit of zeros for every record."""
+    return (
+        np.zeros((1, int(onsource_duration * sample_rate_hertz)), np.float32),
+        np.zeros((1, int(offsource_duration * sample_rate_hertz)), np.float32),
+        "memory",
+    )
+
+
+class TestOneObtainerCalledForEachSplit:
+    """
+    An obtainer's served state belongs to the split that built it: one
+    obtainer called for train, validate, train and test serves exactly each
+    split in turn, on every route, and a generator it gave out for one split
+    refuses once the obtainer serves another.
     """
 
-    def test_a_transient_obtainer_called_for_another_split(self, catalogue):
-        def train_then(obtainer, split):
-            with pytest.raises(Served):
-                through_a_direct_call(obtainer, "train")
-            through_a_direct_call(obtainer, split)
+    def test_a_transient_obtainer_called_directly(self, catalogue):
+        obtainer = glitch_obtainer()
+        for split in CALLS:
+            reference = served_members(through_a_direct_call, split)
+            assert served_members(lambda _, split: through_a_direct_call(obtainer, split), split) \
+                == reference, f"the {split} call served another split"
 
-        assert served_members(train_then, "validate") == served_members(through_a_direct_call, "validate")
-
-    def test_a_noise_obtainer_called_for_another_split(self):
+    def test_a_noise_obtainer_called_directly(self):
         obtainer = offline_noise_obtainer()
-        train = obtainer.get_valid_segments([gf.IFO.L1], seed=1000, group_name="train")
-        validate = obtainer.get_valid_segments([gf.IFO.L1], seed=1000, group_name="validate")
-        fresh = offline_noise_obtainer().get_valid_segments([gf.IFO.L1], seed=1000, group_name="validate")
-        np.testing.assert_array_equal(validate, fresh)
-        assert not set(map(tuple, validate[:, 0])) & set(map(tuple, train[:, 0]))
+        for split in CALLS:
+            served = served_noise(lambda split: next(obtainer(ifos=[gf.IFO.L1], group=split)), split)
+            assert served == noise_split(split), f"the {split} call served another split"
+
+    @pytest.mark.parametrize("noise_type", [gf.NoiseType.REAL, gf.NoiseType.PSEUDO_REAL])
+    def test_one_noise_obtainer_for_each_split(self, noise_type):
+        obtainer = offline_noise_obtainer()
+        noise = gf.NoiseObtainer(noise_type=noise_type, ifo_data_obtainer=obtainer, ifos=[gf.IFO.L1])
+        for split in CALLS:
+            served = served_noise(lambda split: next(noise(group=split, **WINDOW)), split)
+            assert served == noise_split(split), f"the {split} call served another split"
+        assert obtainer._served_split is None, "the caller's obtainer was changed"
+
+    def test_hand_set_segments_are_served_when_no_split_is_named(self):
+        obtainer = offline_noise_obtainer()
+        rows = np.array([[[1238170000.0, 1238171000.0]]])
+        obtainer.valid_segments = rows.copy()
+        served = served_noise(lambda _: next(obtainer(ifos=[gf.IFO.L1])), None)
+        assert served == {(1238170000.0, 1238171000.0)}
+
+    def test_a_noise_generator_refuses_once_its_obtainer_serves_another_split(self):
+        obtainer = offline_noise_obtainer()
+        obtainer.augmentations = []
+        with mock.patch.object(OfflineNoiseObtainer, "acquire", fake_strain):
+            train = obtainer(ifos=[gf.IFO.L1], group="train", seed=7, **WINDOW)
+            next(train)
+            validate = obtainer(ifos=[gf.IFO.L1], group="validate", seed=7, **WINDOW)
+            next(validate)
+            with pytest.raises(RuntimeError, match="another split"):
+                next(train)
+            next(validate)
+
+    def test_a_transient_generator_refuses_once_its_obtainer_serves_another_split(self, catalogue):
+        obtainer = glitch_obtainer()
+        obtainer.augmentations = []
+        with mock.patch.object(gf.TransientDataObtainer, "_initialize_transient_cache",
+                               lambda self, *args, **kwargs: (object(), None)), \
+             mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", cached_glitch):
+            train = obtainer(ifos=[gf.IFO.L1], group="train", seed=7, **WINDOW)
+            next(train)
+            validate = obtainer(ifos=[gf.IFO.L1], group="validate", seed=7, **WINDOW)
+            next(validate)
+            with pytest.raises(RuntimeError, match="another split"):
+                next(train)
+            next(validate)

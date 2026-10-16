@@ -24,7 +24,6 @@ from .base import (
 from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
-from gravyflow.src.utils.shapes import ShapeEnforcer
 
 
 def couple_pieces(measures: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
@@ -505,55 +504,6 @@ class NoiseDataObtainer(BaseDataObtainer):
         
         return SegmentCollection.from_array(segments_2d, ifo=ifo)
 
-    def get_onsource_offsource_chunks(
-            self,
-            sample_rate_hertz: float = None,
-            onsource_duration_seconds: float = None,
-            crop_duration_seconds: float = None,
-            offsource_duration_seconds: float = None,
-            num_examples_per_batch: int = None,
-            ifos: List[gf.IFO] = None,
-            scale_factor: float = None,
-            seed: int = None,
-            sampling_mode: SamplingMode = SamplingMode.RANDOM,
-            whiten: bool = False,
-            crop: bool = False,
-            group: str = None
-        ):
-        """
-        Wrapper to enforce shape contracts on generator.
-        
-        Args:
-            sample_rate_hertz: Sample rate in Hz
-            onsource_duration_seconds: Final onsource window duration
-            crop_duration_seconds: Cropping duration on each side (for edge effects)
-            offsource_duration_seconds: Background window duration
-            num_examples_per_batch: Batch size
-            ifos: List of interferometers
-            scale_factor: Amplitude scaling factor
-            seed: Random seed
-            sampling_mode: RANDOM or GRID sampling
-        """
-        gen = self._yield_onsource_offsource_chunks(
-            sample_rate_hertz,
-            onsource_duration_seconds,
-            crop_duration_seconds,
-            offsource_duration_seconds,
-            num_examples_per_batch,
-            ifos,
-            scale_factor,
-            seed,
-            sampling_mode,
-            whiten,
-            crop,
-            group
-        )
-
-        # Normalize ifos to list
-        ifos = ensure_list(ifos) or [gf.IFO.L1]
-
-        return ShapeEnforcer.wrap_generator(gen, num_ifos=len(ifos))
-
     def _yield_onsource_offsource_chunks(
             self,
             sample_rate_hertz: float = None,
@@ -584,6 +534,8 @@ class NoiseDataObtainer(BaseDataObtainer):
             scale_factor: Amplitude scaling factor
             seed: Random seed
             sampling_mode: RANDOM or GRID sampling
+            group: The split served (see _serve_group); None serves the
+                segments already held, built or set by hand
         """
         # Create WindowSpec for consistent parameter handling
         window_spec = WindowSpec.from_params(
@@ -610,6 +562,9 @@ class NoiseDataObtainer(BaseDataObtainer):
                 crop
             )
 
+        # With no group, the segments already held: built, or set by hand.
+        if group is not None:
+            self._serve_group(ifos, seed, group)
         if self.rng is None:
             self.rng = default_rng(seed)
         

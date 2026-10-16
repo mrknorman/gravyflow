@@ -57,7 +57,8 @@ Data is deterministically assigned to `train`, `validate`, or `test` groups to e
     record in one split whichever route reads it (`gravyflow/src/dataset/splits.py`).
 -   **Result**: A filtered list of segments that belong *only* to the requested group (e.g., "train").
 -   **Transients**: Each glitch or event record is assigned by a hash of its GPS key alone. A seed only orders or
-    shuffles a split, never decides its members, so every split of every run sees the same partition.
+    shuffles a split, never decides its members, so every split of every run sees the same partition. A record's
+    split is that of its own key, not of the noise block it lies in: the two are hashed apart and need not agree.
 
 ### 4. Vetoing Unwanted Times (`remove_unwanted_segments`)
 Unless the data labels include them, every event GWOSC publishes (see the event catalogue above) and every Gravity Spy glitch is removed from noise, over every configured run.

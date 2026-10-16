@@ -74,7 +74,9 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
   by another. A transient record's split is now a hash of its GPS key alone; it was the key and the seed. Records
   have moved between splits: do not evaluate a model trained on an earlier release's split on this release's
   validate or test split.
-- An obtainer called again for another split rebuilds its segments; it served the first split's.
+- An obtainer called for a split serves that split, called directly or through a `NoiseObtainer`; called again for
+  another, it rebuilds its segments (it served the first split's, and a fresh real-noise obtainer called directly
+  served nothing). A generator it gave out for the first split then raises `RuntimeError`.
 - `TransientIndex.assign_groups` and `TransientDataObtainer.build_feature_index` take no seed.
 - The model recipes take one root seed: `TrainingRun.train`'s `training_data` is called with the seed alone (it
   took the seed and the first epoch), and `split_seeds`, `TrainingRun.train_seed` and

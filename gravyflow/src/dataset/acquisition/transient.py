@@ -27,7 +27,6 @@ from .base import (
     AcquisitionMode, SamplingMode, ObservingRun, IFOData
 )
 from gravyflow.src.utils.numerics import ensure_list
-from gravyflow.src.utils.shapes import ShapeEnforcer
 from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys, as_gps_times
 from gravyflow.src.dataset.features.transient_index import TransientIndex
 from .transient_segment import TransientSegment
@@ -1211,55 +1210,6 @@ class TransientDataObtainer(BaseDataObtainer):
         
         return cache, CACHE_SAMPLE_RATE_HERTZ
 
-    def get_onsource_offsource_chunks(
-            self,
-            sample_rate_hertz: float = None,
-            onsource_duration_seconds: float = None,
-            crop_duration_seconds: float = None,
-            offsource_duration_seconds: float = None,
-            num_examples_per_batch: int = None,
-            ifos: List[gf.IFO] = None,
-            scale_factor: float = None,
-            seed: int = None,
-            sampling_mode: SamplingMode = SamplingMode.RANDOM,
-            whiten: bool = False,
-            crop: bool = False,
-            group: str = None
-        ):
-        """
-        Wrapper to enforce shape contracts on generator.
-        
-        Args:
-            sample_rate_hertz: Sample rate in Hz
-            onsource_duration_seconds: Final onsource window duration
-            crop_duration_seconds: Cropping duration on each side (for edge effects)
-            offsource_duration_seconds: Background window duration
-            num_examples_per_batch: Batch size
-            ifos: List of interferometers
-            scale_factor: Amplitude scaling factor
-            seed: Random seed
-            sampling_mode: RANDOM or GRID sampling
-        """
-        gen = self._yield_onsource_offsource_chunks(
-            sample_rate_hertz,
-            onsource_duration_seconds,
-            crop_duration_seconds,
-            offsource_duration_seconds,
-            num_examples_per_batch,
-            ifos,
-            scale_factor,
-            seed,
-            sampling_mode,
-            whiten,
-            crop,
-            group
-        )
-
-        # Normalize ifos to list
-        ifos = ensure_list(ifos) or [gf.IFO.L1]
-
-        return ShapeEnforcer.wrap_generator(gen, num_ifos=len(ifos))
-
     def _yield_onsource_offsource_chunks(
             self,
             sample_rate_hertz: float = None,
@@ -1324,20 +1274,10 @@ class TransientDataObtainer(BaseDataObtainer):
         num_onsource_samples = window_spec.num_onsource_samples
         num_offsource_samples = window_spec.num_offsource_samples
 
-        # Serve the split asked for: one already served (by get_valid_segments,
-        # with its fractions) is kept; any other is built afresh, so a call
-        # for another split never serves this one's records. With no group,
-        # the split served, else train (all for specific event names).
-        served = self._served_split[1] if self._served_split is not None else None
-        group_name = group if group is not None else (
-            served or ("all" if self.event_names else "train")
-        )
-        if group_name != served:
-            self.get_valid_segments(
-                ifos=ifos,
-                seed=seed,
-                group_name=group_name,
-            )
+        # With no group, the split served, else train (all for specific event names).
+        self._serve_group(ifos, seed, group if group is not None else (
+            self._served_group or ("all" if self.event_names else "train")
+        ))
         if self.rng is None:
             self.rng = default_rng(seed)
         
