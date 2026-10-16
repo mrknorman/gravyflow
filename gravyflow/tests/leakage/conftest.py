@@ -1,13 +1,14 @@
 """
 Hermetic ground for the leakage tests.
 
-The suite's own guard (``tests/conftest.py``) already refuses and records every
-internet connection, unsets proxies, gives the suite a temporary
-``GRAVYFLOW_CACHE_DIR``, and fails the run if the package or ``~/.gravyflow``
-changes. On top of it, for this package (unless the run passes ``--network``):
+The suite's own guard (``tests/conftest.py``) already gives every test temporary
+``HOME``, ``XDG_CACHE_HOME``, ``GRAVYFLOW_CACHE_DIR`` and working directory,
+refuses and records every internet connection, switches proxies off, and fails the
+run if this process writes into the package or the user cache. On top of it, for
+this package (unless the run passes ``--network``):
 
-- ``HOME``, ``XDG_CACHE_HOME``, ``GRAVYFLOW_CACHE_DIR`` and the working directory
-  are temporary, so no user file or ``./generator_data`` is read or written;
+- connections to this machine are refused too, and every name lookup of another
+  host, so no socket opens at all, a proxy on this machine included;
 - a test that causes a refused connection it did not declare (through the
   ``refusals`` fixture) fails, since the library would have zero-filled it silently;
 - ``gf.Defaults`` is restored after every test.
@@ -17,32 +18,23 @@ changes. On top of it, for this package (unless the run passes ``--network``):
 
 from __future__ import annotations
 
-import os
 from typing import Dict, List
 
 import pytest
 
 import gravyflow as gf
+from gravyflow.tests.conftest import refuse_internet
 
 
 @pytest.fixture(scope="package", autouse=True)
-def hermetic(request, tmp_path_factory, offline_unless_network_option):
-    """The package's temporary roots; yields the suite's offline guard (None with --network)."""
-    if offline_unless_network_option is None:
+def hermetic(suite_guard):
+    """The package's stricter socket guard; yields the suite's guard (None with --network)."""
+    if not suite_guard.offline:
         yield None
         return
-    root = tmp_path_factory.mktemp("leakage-home")
-    previous_cwd = os.getcwd()
     with pytest.MonkeyPatch.context() as mp:
-        mp.setenv("HOME", str(root / "home"))
-        mp.setenv("XDG_CACHE_HOME", str(root / "xdg-cache"))
-        mp.setenv("GRAVYFLOW_CACHE_DIR", str(root / "gravyflow-cache"))
-        (root / "work").mkdir()
-        os.chdir(root / "work")
-        try:
-            yield offline_unless_network_option
-        finally:
-            os.chdir(previous_cwd)
+        refuse_internet(mp, suite_guard.refusals, loopback=False)
+        yield suite_guard
 
 
 class Refusals:

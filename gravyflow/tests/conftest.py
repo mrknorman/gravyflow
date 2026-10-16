@@ -120,55 +120,88 @@ PROXY_VARIABLES = tuple(
     for name in (base, base.lower())
 )
 
+#: The hosts a name lookup may ask for when even loopback is refused: this machine.
+LOCAL_HOSTS = frozenset({None, "", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
-def refuse_internet(monkeypatch, refusals: Optional[List[str]] = None) -> None:
+
+def refuse_internet(monkeypatch, refusals: Optional[List[str]] = None,
+                    loopback: bool = True) -> None:
     """
-    Refuse every internet connection (loopback stays open), by name, and record each
-    refusal in ``refusals`` when given. Every network source the library uses
-    (the GWOSC APIs, timeline, event list and strain files, Zenodo) connects through a
-    socket, whatever client it goes through (requests, urllib, gwosc, gwpy), so one
-    refusal covers them all, and any source added later. Proxy settings are removed,
-    since a client would otherwise reach the internet through a loopback proxy.
+    Refuse every internet connection, by name, and record each refusal in
+    ``refusals`` when given. Every network source the library uses (the GWOSC APIs,
+    timeline, event list and strain files, Zenodo) connects through a socket,
+    whatever client it goes through (requests, urllib, gwosc, gwpy), so one refusal
+    covers them all, and any source added later.
+
+    Proxies are switched off, since a client would otherwise reach the internet
+    through a proxy on this machine: the proxy variables are removed, and
+    ``NO_PROXY=*`` is set, which urllib and requests read before the system's own
+    proxy settings (macOS, Windows), so those are never consulted either.
+
+    With ``loopback=False`` connections to this machine are refused too, and so is
+    every name lookup of another host: nothing leaves through a socket at all.
     """
     import socket
 
     for name in PROXY_VARIABLES:
         monkeypatch.delenv(name, raising=False)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "*")
 
     original_connect, original_connect_ex = socket.socket.connect, socket.socket.connect_ex
+    original_getaddrinfo = socket.getaddrinfo
 
-    def refuse(sock, address):
-        loopback = str(address[0]) in ("localhost", "::1") or str(address[0]).startswith("127.")
-        if sock.family in (socket.AF_INET, socket.AF_INET6) and not loopback:
-            if refusals is not None:
-                refusals.append(f"connection to {address}")
-            raise ConnectionRefusedError(
-                f"Offline test: refused a connection to {address}; the network is "
-                "reachable only in test runs with --network."
-            )
+    def refuse(what):
+        if refusals is not None:
+            refusals.append(what)
+        raise ConnectionRefusedError(
+            f"Offline test: refused {what}; the network is reachable only in test runs "
+            "with --network."
+        )
+
+    def check(sock, address):
+        host = str(address[0])
+        local = host in ("localhost", "::1") or host.startswith("127.")
+        if sock.family in (socket.AF_INET, socket.AF_INET6) and not (loopback and local):
+            refuse(f"connection to {address}")
 
     def connect(sock, address, *args, **kwargs):
-        refuse(sock, address)
+        check(sock, address)
         return original_connect(sock, address, *args, **kwargs)
 
     def connect_ex(sock, address, *args, **kwargs):
-        refuse(sock, address)
+        check(sock, address)
         return original_connect_ex(sock, address, *args, **kwargs)
+
+    def getaddrinfo(host, *args, **kwargs):
+        if host not in LOCAL_HOSTS:
+            refuse(f"name lookup of {host!r}")
+        return original_getaddrinfo(host, *args, **kwargs)
 
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    if not loopback:
+        monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
 
 
 def tree_snapshot(root: Path) -> Dict[str, Tuple[int, int]]:
-    """{relative path: (size, mtime_ns)} of every file under ``root`` but bytecode."""
+    """
+    {relative path: (size, mtime_ns)} of every file under ``root`` but bytecode. A
+    file that vanishes while the tree is read (a writer's temporary file, renamed
+    into place) is left out.
+    """
     snapshot = {}
     if not root.is_dir():
         return snapshot
     for path in root.rglob("*"):
-        if "__pycache__" in path.parts or path.suffix == ".pyc" or not path.is_file():
+        if "__pycache__" in path.parts or path.suffix == ".pyc":
             continue
-        stat = path.stat()
-        snapshot[str(path.relative_to(root))] = (stat.st_size, stat.st_mtime_ns)
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        if path.is_file():
+            snapshot[str(path.relative_to(root))] = (stat.st_size, stat.st_mtime_ns)
     return snapshot
 
 
@@ -180,45 +213,117 @@ def tree_changes(before: Dict, after: Dict) -> List[str]:
     return changes
 
 
-@dataclass
-class OfflineGuard:
-    """The default suite's offline state: every refused connection, in order."""
+class WriteAudit:
+    """
+    The writes this process makes under watched roots, seen through Python's audit
+    hooks (PEP 578): a file opened to write, and a path made, renamed or removed.
+    Another process's writes (a notebook filling the user cache meanwhile) are not
+    this run's and are not seen. C code that opens files itself (HDF5) raises no
+    audit event, so the package is also snapshotted.
+    """
 
+    #: Path-changing events, with the argument positions that hold the changed paths.
+    EVENTS = {
+        "os.mkdir": (0,), "os.remove": (0,), "os.rmdir": (0,), "os.rename": (0, 1),
+        "os.truncate": (0,), "os.symlink": (1,), "os.link": (1,), "shutil.rmtree": (0,),
+    }
+    WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+
+    def __init__(self, roots: Dict[str, Path]):
+        self.roots = {
+            name: tuple({os.path.abspath(root), os.path.realpath(root)})
+            for name, root in roots.items()
+        }
+        self.writes: Dict[str, List[str]] = {}
+
+    def __call__(self, event, args):
+        if event == "open":
+            if args[2] & self.WRITE_FLAGS:
+                self._record(event, args[0])
+        elif event in self.EVENTS:
+            for index in self.EVENTS[event]:
+                self._record(event, args[index])
+
+    def _record(self, event, path):
+        if isinstance(path, int):
+            return
+        try:
+            path = os.path.abspath(os.fsdecode(path))
+        except (TypeError, ValueError, OSError):  # a hook must never fail the operation
+            return
+        for name, roots in self.roots.items():
+            if any(path == root or path.startswith(root + os.sep) for root in roots):
+                self.writes.setdefault(name, []).append(f"{event} {path}")
+
+    def __enter__(self):
+        _ACTIVE_AUDITS.append(self)
+        return self
+
+    def __exit__(self, *exc):
+        _ACTIVE_AUDITS.remove(self)
+
+
+#: The WriteAudits in force. An audit hook cannot be removed once added, so one hook,
+#: added when this file is imported, serves them all.
+_ACTIVE_AUDITS: List[WriteAudit] = []
+
+
+def _audit_hook(event, args):
+    for audit in tuple(_ACTIVE_AUDITS):
+        audit(event, args)
+
+
+sys.addaudithook(_audit_hook)
+
+
+@dataclass
+class SuiteGuard:
+    """
+    The suite's hermetic state: its temporary roots, whether it is offline, and,
+    offline, every refused connection in order.
+    """
+
+    root: Path
+    offline: bool
     refusals: List[str] = field(default_factory=list)
 
 
 @pytest.fixture(autouse=True, scope="session")
-def offline_unless_network_option(request):
+def suite_guard(request, tmp_path_factory):
     """
-    Without --network, every internet connection is refused (and recorded), proxies
-    are unset, and the user cache starts empty, so no test depends on the network, or
-    on what this machine downloaded before, unless it is marked 'network'.
+    The whole suite runs in temporary roots: ``HOME``, ``XDG_CACHE_HOME``,
+    ``GRAVYFLOW_CACHE_DIR`` and the working directory, in every run (with --network
+    too), so no test reads or writes a user cache, or a ``./generator_data``, and
+    the user cache starts empty. Without --network, every internet connection is
+    refused (and recorded) and proxies are off, so no test depends on the network
+    unless it is marked 'network'.
 
-    In every run, the installed package and the user's own cache
-    (``~/.gravyflow``) must be unchanged when the suite ends: tests write only
-    temporary roots.
+    When the suite ends, it fails if this process wrote into the installed package
+    or the user's own cache (``~/.gravyflow``), or if the package changed.
     """
-    import tempfile
-
     watched = {"the package": Path(gf.PATH), "~/.gravyflow": Path.home() / ".gravyflow"}
-    before = {name: tree_snapshot(root) for name, root in watched.items()}
-
-    if request.config.getoption("--network"):
-        yield None
-    else:
-        with tempfile.TemporaryDirectory(prefix="gravyflow-test-cache-") as cache_dir, \
-                pytest.MonkeyPatch.context() as monkeypatch:
-            monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", cache_dir)
-            guard = OfflineGuard()
+    package_before = tree_snapshot(watched["the package"])
+    root = tmp_path_factory.mktemp("suite")
+    guard = SuiteGuard(root, offline=not request.config.getoption("--network"))
+    previous_cwd = os.getcwd()
+    with WriteAudit(watched) as audit, pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("HOME", str(root / "home"))
+        monkeypatch.setenv("XDG_CACHE_HOME", str(root / "xdg-cache"))
+        monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(root / "gravyflow-cache"))
+        (root / "work").mkdir()
+        os.chdir(root / "work")
+        if guard.offline:
             refuse_internet(monkeypatch, guard.refusals)
+        try:
             yield guard
+        finally:
+            os.chdir(previous_cwd)
 
-    changed = {
-        name: changes for name, root in watched.items()
-        if (changes := tree_changes(before[name], tree_snapshot(root)))
-    }
+    changed = dict(audit.writes)
+    if changes := tree_changes(package_before, tree_snapshot(watched["the package"])):
+        changed.setdefault("the package", []).extend(changes)
     if changed:
-        pytest.fail(f"The test suite changed files outside its temporary roots: {changed}")
+        pytest.fail(f"The test suite wrote outside its temporary roots: {changed}")
 
 
 @pytest.fixture

@@ -16,7 +16,6 @@ import gravyflow as gf
 
 from . import audit
 from . import fixtures as fx
-from gravyflow.tests.conftest import PROXY_VARIABLES, tree_changes, tree_snapshot
 from .fakes import EventRecord, GlitchRecord, StrainSource
 from .provenance import (
     CODE_CEILING, DecodeRefused, Encoding, OutsideFixture, decode_row, decode_rows,
@@ -401,16 +400,21 @@ def test_catalogues_reach_every_consumer(world):
     audit.assert_avoids({"L1": served["L1"]}, [glitch.extent])
 
 
-def test_the_guard_refuses_and_records_connections(refusals):
-    with pytest.raises(ConnectionRefusedError):
-        socket.create_connection(("203.0.113.9", 80), timeout=1)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        with pytest.raises(ConnectionRefusedError):
-            sock.connect(("203.0.113.9", 80))
-    finally:
-        sock.close()
-    assert len(refusals.seen) == 2
+def test_the_guard_refuses_and_records_every_socket(refusals):
+    """Remote and loopback connections, and lookups of another host, are refused by name."""
+    with pytest.raises(ConnectionRefusedError, match="name lookup of 'gwosc.org'"):
+        socket.getaddrinfo("gwosc.org", 443)
+    for address in (("203.0.113.9", 80), ("127.0.0.1", 9)):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            with pytest.raises(ConnectionRefusedError, match="refused connection to"):
+                sock.connect(address)
+            with pytest.raises(ConnectionRefusedError, match="refused connection to"):
+                sock.connect_ex(address)
+        finally:
+            sock.close()
+    socket.getaddrinfo("localhost", 80)  # this machine's own name still resolves
+    assert len(refusals.seen) == 5, refusals.seen
 
 
 def test_without_the_fake_real_noise_is_refused_and_zero(world, tmp_path, refusals):
@@ -423,28 +427,6 @@ def test_without_the_fake_real_noise_is_refused_and_zero(world, tmp_path, refusa
     assert onsource.size and np.all(onsource == 0)
     with pytest.raises(DecodeRefused, match="zero samples"):
         decode_rows(onsource, IFOS, fixture.encoding)
-
-
-def test_tree_snapshot_sees_every_change(tmp_path):
-    """The suite's package and user-cache check sees an added and a changed file."""
-    (tmp_path / "a.npy").write_bytes(b"1")
-    (tmp_path / "__pycache__").mkdir()
-    before = tree_snapshot(tmp_path)
-    (tmp_path / "__pycache__" / "x.pyc").write_bytes(b"ignored")
-    assert tree_changes(before, tree_snapshot(tmp_path)) == []
-    (tmp_path / "res").mkdir()
-    (tmp_path / "res" / "cached_event_times.npy").write_bytes(b"2")
-    (tmp_path / "a.npy").write_bytes(b"12")
-    changes = tree_changes(before, tree_snapshot(tmp_path))
-    assert changes == ["added res/cached_event_times.npy", "changed a.npy"]
-
-
-def test_the_package_roots_are_temporary_and_proxies_unset():
-    for name in ("HOME", "XDG_CACHE_HOME", "GRAVYFLOW_CACHE_DIR"):
-        assert "leakage-home" in os.environ[name], name
-    assert "leakage-home" in os.getcwd()
-    assert str(Path.home()).startswith(os.environ["HOME"])
-    assert not [name for name in PROXY_VARIABLES if name in os.environ]
 
 
 def test_every_cache_lives_under_the_one_cache_root():
