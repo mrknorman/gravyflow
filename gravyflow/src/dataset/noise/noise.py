@@ -210,6 +210,46 @@ def colored_noise_batcher(
     return batch
 
 
+def white_noise_generator(
+    num_examples_per_batch: int,
+    ifos: List["gf.IFO"],
+    onsource_duration_seconds: float,
+    crop_duration_seconds: float,
+    offsource_duration_seconds: float,
+    sample_rate_hertz: float,
+    seed: int
+) -> Iterator:
+    """Deprecated: white_noise_batcher, iterated over the direct streams of ``seed``."""
+    warn_deprecated("white_noise_generator", "call white_noise_batcher(...) with each batch's streams")
+    batch = white_noise_batcher(
+        num_examples_per_batch, ifos, onsource_duration_seconds, crop_duration_seconds,
+        offsource_duration_seconds, sample_rate_hertz,
+    )
+    tree = SeedTree(seed)
+    return (batch(tree.direct(k)) for k in count())
+
+
+def colored_noise_generator(
+    num_examples_per_batch: int,
+    onsource_duration_seconds: float,
+    crop_duration_seconds: float,
+    offsource_duration_seconds: float,
+    ifos: List["gf.IFO"],
+    sample_rate_hertz: float,
+    scale_factor: float,
+    seed: int,
+    noise_profile: "gf.NoiseProfile" = None
+) -> Iterator:
+    """Deprecated: colored_noise_batcher, iterated over the direct streams of ``seed``."""
+    warn_deprecated("colored_noise_generator", "call colored_noise_batcher(...) with each batch's streams")
+    batch = colored_noise_batcher(
+        num_examples_per_batch, onsource_duration_seconds, crop_duration_seconds,
+        offsource_duration_seconds, ifos, sample_rate_hertz, scale_factor, noise_profile=noise_profile,
+    )
+    tree = SeedTree(seed)
+    return (batch(tree.direct(k)) for k in count())
+
+
 def sequential_batcher(iterator: Iterator) -> NoiseBatcher:
     """
     A batcher over a sequential reader: each call takes the reader's next

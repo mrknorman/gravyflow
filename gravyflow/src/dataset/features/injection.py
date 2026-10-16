@@ -551,8 +551,15 @@ class WaveformGenerator:
     def apply_injection_chance(self, waveforms, streams : BatchStreams):
         """
         Zero each waveform with probability 1 - injection_chance, drawn from
-        the generator's ``chance`` stream.
+        the generator's ``chance`` stream. An integer seed for ``streams`` is
+        deprecated: it draws the direct streams of that root.
         """
+        if isinstance(streams, (int, np.integer)) and not isinstance(streams, bool):
+            warn_deprecated(
+                f"{type(self).__name__}.apply_injection_chance(waveforms, seed)",
+                "pass the batch's streams"
+            )
+            streams = self.resolve_streams(None, int(streams))
         if self.injection_chance >= 1.0:
             return waveforms
             

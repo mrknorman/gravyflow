@@ -54,6 +54,8 @@ Data is deterministically assigned to `train`, `validate`, or `test` groups to e
 -   **Logic**: The timeline is divided into 8192 s blocks. Each block is hashed or assigned based on its time to a specific group.
 -   **Example**: If the split is 98% train, 1% validate, 1% test, then for every 100 blocks, 98 go to training.
 -   **Result**: A filtered list of segments that belong *only* to the requested group (e.g., "train").
+-   **Transients**: Each glitch or event record is assigned by a hash of its GPS key alone. A seed only orders or
+    shuffles a split, never decides its members, so every split of every run sees the same partition.
 
 ### 4. Vetoing Unwanted Times (`remove_unwanted_segments`)
 Unless the data labels include them, every event GWOSC publishes (see the event catalogue above) and every Gravity Spy glitch is removed from noise, over every configured run.

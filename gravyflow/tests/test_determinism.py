@@ -308,6 +308,30 @@ class TestDeprecations:
             assert f"{name} is deprecated" in out.stderr, name
             assert "user_script.py" in out.stderr
 
+    def test_renamed_functions_warn_and_still_run(self):
+        import jax
+        from gravyflow.src.dataset.noise import noise as gf_noise
+
+        args = (2, SAMPLE_RATE, 1.0, np.full(2, 0.3), np.full(2, 40.0), np.full(2, 120.0))
+        with pytest.warns(DeprecationWarning, match="gf.wnb"):
+            by_seed = gf.wnb(*args, 5)
+        np.testing.assert_array_equal(by_seed, gf.wnb(*args, key=jax.random.PRNGKey(5)))
+
+        generator = wnb(injection_chance=0.5)
+        waveforms = np.ones((16, 2, 8), np.float32)
+        with pytest.warns(DeprecationWarning, match="apply_injection_chance"):
+            masked = generator.apply_injection_chance(waveforms, 3)
+        np.testing.assert_array_equal(
+            masked, generator.apply_injection_chance(waveforms, generator.resolve_streams(None, 3))
+        )
+
+        with pytest.warns(DeprecationWarning, match="white_noise_generator"):
+            white = next(gf_noise.white_noise_generator(BATCH, [gf.IFO.L1], 1.0, 0.5, 2.0, SAMPLE_RATE, 1))
+        with pytest.warns(DeprecationWarning, match="colored_noise_generator"):
+            colored = next(gf_noise.colored_noise_generator(BATCH, 1.0, 0.5, 2.0, [gf.IFO.L1], SAMPLE_RATE, 1.0, 1))
+        for batch in (white, colored):
+            assert np.shape(batch[gf.ReturnVariables.ONSOURCE]) == (BATCH, 1, int(2.0 * SAMPLE_RATE))
+
     def test_deprecated_curriculum_sampling_keeps_its_old_meaning(self):
         # It drew the end distribution, the same values every call.
         curriculum = gf.Curriculum(

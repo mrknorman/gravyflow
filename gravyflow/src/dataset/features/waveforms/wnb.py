@@ -4,6 +4,8 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 
+from gravyflow.src.rng.legacy import warn_deprecated
+
 
 def time_axis(num_samples: int, sample_rate_hertz: float):
     """Sample times in seconds, with t = 0 at sample num_samples / 2 (float32)."""
@@ -57,8 +59,10 @@ def wnb(
     duration_seconds,
     min_frequency_hertz,
     max_frequency_hertz,
-    key,
-    polarization_eccentricity = None
+    key = None,
+    polarization_eccentricity = None,
+    *,
+    seed = None
 ):
     """
     White noise bursts: band-limited Gaussian noise under a Hann envelope.
@@ -70,13 +74,21 @@ def wnb(
     ``duration_seconds`` centred on the same sample. Returns (num_waveforms, 2,
     floor(max_duration_seconds * sample_rate_hertz)), float32.
 
-    ``key`` is the JAX random key of the Gaussian noise.
+    ``key`` is the JAX random key of the Gaussian noise. An integer seed, in
+    its place or as ``seed=``, is deprecated: it becomes PRNGKey(seed), as
+    before.
 
     ``polarization_eccentricity`` (LAL's polarisation-ellipse eccentricity,
     per waveform) scales the plus and cross polarisations by sqrt(2) a and
     sqrt(2) b, with a = 1/sqrt(2 - e^2) and b = a sqrt(1 - e^2): e = 0 (the
     default) leaves two equal-power polarisations, e = 1 is plus only.
     """
+    if seed is not None or isinstance(key, (int, np.integer)):
+        warn_deprecated("gf.wnb with an integer seed", "pass a JAX key: key=")
+        key = jax.random.PRNGKey(int(seed if seed is not None else key))
+    if key is None:
+        raise TypeError("gf.wnb needs a JAX random key: key=.")
+
     min_frequency_hertz = jnp.asarray(min_frequency_hertz, dtype="float32")
     max_frequency_hertz = jnp.asarray(max_frequency_hertz, dtype="float32")
     duration_seconds = jnp.asarray(duration_seconds, dtype="float32")
