@@ -52,10 +52,15 @@ GWOSC_DATA_FLAGS: Tuple[str, ...] = ("DATA",)
 GWOSC_BURST_FLAGS: Tuple[str, ...] = ("DATA", "BURST_CAT1", "BURST_CAT2")
 #: Data present, passing the CBC category 1 and 2 vetoes.
 GWOSC_CBC_FLAGS: Tuple[str, ...] = ("DATA", "CBC_CAT1", "CBC_CAT2")
-#: Times with no CBC and no burst hardware injection. GWOSC names these flags for the
-#: times that pass ("H1: no cbc injection", "H1: no burst injections"), so they are
-#: intersected like the others.
-GWOSC_NO_HW_INJECTION_FLAGS: Tuple[str, ...] = ("NO_CBC_HW_INJ", "NO_BURST_HW_INJ")
+#: Times with no CBC, burst, stochastic or detector-characterisation hardware injection.
+#: GWOSC names these flags for the times that pass ("H1: no cbc injection", "H1: no
+#: stoch injections"), so they are intersected like the others. The stochastic
+#: injections are coherent between H1 and L1. ``NO_CW_HW_INJ`` is left out: the
+#: continuous-wave injections run through nearly all of every run, so excluding them
+#: would leave almost no data.
+GWOSC_NO_HW_INJECTION_FLAGS: Tuple[str, ...] = (
+    "NO_CBC_HW_INJ", "NO_BURST_HW_INJ", "NO_STOCH_HW_INJ", "NO_DETCHAR_HW_INJ",
+)
 #: The default real-noise selection: the burst vetoes, without hardware injections.
 DEFAULT_GWOSC_FLAGS: Tuple[str, ...] = GWOSC_BURST_FLAGS + GWOSC_NO_HW_INJECTION_FLAGS
 

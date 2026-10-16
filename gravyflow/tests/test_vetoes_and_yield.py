@@ -230,20 +230,26 @@ class TestEventsNotGlitches:
 class TestHardwareInjections:
 
     def test_default_flags_exclude_hardware_injections(self):
-        assert "NO_CBC_HW_INJ" in gf.DEFAULT_GWOSC_FLAGS
-        assert "NO_BURST_HW_INJ" in gf.DEFAULT_GWOSC_FLAGS
-        obtainer = _noise_obtainer(gf.ObservingRun.O1)
-        assert obtainer.state_flags[0] == (
-            "DATA", "BURST_CAT1", "BURST_CAT2", "NO_CBC_HW_INJ", "NO_BURST_HW_INJ"
+        # Every kind of hardware injection but the continuous-wave one, which runs
+        # through nearly all of each run.
+        assert gf.GWOSC_NO_HW_INJECTION_FLAGS == (
+            "NO_CBC_HW_INJ", "NO_BURST_HW_INJ", "NO_STOCH_HW_INJ", "NO_DETCHAR_HW_INJ"
         )
+        assert "NO_CW_HW_INJ" not in gf.DEFAULT_GWOSC_FLAGS
+        assert gf.DEFAULT_GWOSC_FLAGS == gf.GWOSC_BURST_FLAGS + gf.GWOSC_NO_HW_INJECTION_FLAGS
+        obtainer = _noise_obtainer(gf.ObservingRun.O1)
+        assert obtainer.state_flags[0] == gf.DEFAULT_GWOSC_FLAGS
 
-    def test_injection_times_are_removed(self, offline_public_sources, monkeypatch):
+    @pytest.mark.parametrize("flag", [
+        "NO_CBC_HW_INJ", "NO_BURST_HW_INJ", "NO_STOCH_HW_INJ", "NO_DETCHAR_HW_INJ",
+    ])
+    def test_injection_times_are_removed(self, offline_public_sources, monkeypatch, flag):
         entry = public.TIMELINE["O1"]
         start, end = entry["window"]
         data = public._fixture_intersection("O1", "H1", ["DATA", "BURST_CAT1", "BURST_CAT2"])
         a, b = data[np.argmax(data[:, 1] - data[:, 0])]
         injection = [a + 100.0, a + 110.0]
-        monkeypatch.setitem(entry, "H1_NO_CBC_HW_INJ", [[start, injection[0]], [injection[1], end]])
+        monkeypatch.setitem(entry, f"H1_{flag}", [[start, injection[0]], [injection[1], end]])
 
         segments = _noise_obtainer(gf.ObservingRun.O1).get_all_segment_times(gf.IFO.H1)
 

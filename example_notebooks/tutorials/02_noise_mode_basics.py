@@ -41,7 +41,7 @@ print("=" * 70)
 #   - data_quality: BEST = calibrated science data (almost always use this)
 #   - gwosc_flags (optional): GWOSC timeline flags defining usable times; the
 #     default is DATA with the BURST_CAT1 and BURST_CAT2 vetoes applied and no
-#     CBC or burst hardware injections
+#     CBC, burst, stochastic or detchar hardware injections
 #   - data_labels: What to acquire - NOISE means random sampling from segments
 #   - segment_order: How to iterate through available segments
 

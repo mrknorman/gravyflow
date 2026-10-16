@@ -6,8 +6,10 @@ and public-data defaults.
 The default run is offline. Network access is replaced by small committed fixtures in
 ``fixtures/public_sources``:
 
-- ``gwosc_timeline.json``: GWOSC timeline segments (DATA, BURST_CAT1, BURST_CAT2 for H1
-  and L1) over one day in each of O1, O2, O3a and O3b, from https://gwosc.org.
+- ``gwosc_timeline.json``: GWOSC timeline segments over one day in each of O1, O2, O3a
+  and O3b, from https://gwosc.org: DATA, BURST_CAT1 and BURST_CAT2, and the
+  hardware-injection flags NO_CBC_HW_INJ, NO_BURST_HW_INJ, NO_STOCH_HW_INJ and
+  NO_DETCHAR_HW_INJ, for H1 and L1.
 - ``gravityspy_{IFO}_{RUN}.csv``: a few hundred rows of the Gravity Spy machine-learning
   classifications (Glanzer et al. 2023, Class. Quantum Grav. 40 065004; Zenodo,
   doi:10.5281/zenodo.5649212, v1.0.0, CC-BY-4.0), restricted to the columns gravyflow
@@ -564,7 +566,8 @@ class TestPublicDefaults:
         assert noise.ifo_data_obtainer is not None
         assert gf.DataLabel.NOISE in noise.ifo_data_obtainer.data_labels
         assert noise.ifo_data_obtainer.state_flags[0] == (
-            "DATA", "BURST_CAT1", "BURST_CAT2", "NO_CBC_HW_INJ", "NO_BURST_HW_INJ"
+            "DATA", "BURST_CAT1", "BURST_CAT2",
+            "NO_CBC_HW_INJ", "NO_BURST_HW_INJ", "NO_STOCH_HW_INJ", "NO_DETCHAR_HW_INJ",
         )
 
     def test_example_model_real_noise_builds_offline(self, offline_public_sources):

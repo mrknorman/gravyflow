@@ -571,8 +571,9 @@ class BaseDataObtainer(ABC):
             gwosc_flags: GWOSC timeline flags whose intersection defines usable
                 times, e.g. ``gf.GWOSC_DATA_FLAGS`` or ``gf.GWOSC_CBC_FLAGS``. Each
                 flag lists the times that pass it. None uses each run's default:
-                ``DATA`` with ``BURST_CAT1`` and ``BURST_CAT2`` applied, and no CBC or
-                burst hardware injections (``NO_CBC_HW_INJ``, ``NO_BURST_HW_INJ``).
+                ``DATA`` with ``BURST_CAT1`` and ``BURST_CAT2`` applied, and no CBC,
+                burst, stochastic or detchar hardware injections
+                (``gf.GWOSC_NO_HW_INJECTION_FLAGS``).
         """
 
         # Initiate logging for ifo_data:
