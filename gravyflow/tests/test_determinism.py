@@ -463,6 +463,17 @@ class TestIndexedDatasets:
         meta = dataset(seed=0, group="test").seed_metadata
         assert (meta["root"], meta["source"], meta["split"], meta["epoch_mode"]) == (0, "user", "test", "REPEAT")
 
+    def test_metadata_says_which_noise_is_read_by_address(self):
+        # Real, pseudo-real and transient noise are still read in order.
+        from gravyflow.src.dataset.noise.noise import index_addressed
+        assert dataset().seed_metadata["index_addressed"] is True
+        for noise_type in (gf.NoiseType.WHITE, gf.NoiseType.COLORED):
+            assert index_addressed(gf.NoiseObtainer(noise_type=noise_type))
+        for noise_type in (gf.NoiseType.PSEUDO_REAL, gf.NoiseType.REAL):
+            assert not index_addressed(gf.NoiseObtainer(noise_type=noise_type))
+        assert not index_addressed(gf.TransientDataObtainer(
+            data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES]))
+
     def test_library_draws_no_deprecated_paths(self):
         with warnings.catch_warnings():
             warnings.simplefilter("error", DeprecationWarning)
