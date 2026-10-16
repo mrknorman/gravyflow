@@ -19,9 +19,9 @@ from gravyflow.src.validate.utils import _extract_sample_data
 SAMPLES = 2048
 
 
-def logit_model(seed: int, activation=None) -> keras.Model:
+def logit_model(seed: int, activation=None, detectors: int = 1) -> keras.Model:
     keras.utils.set_random_seed(seed)
-    inputs = keras.Input(shape=(1, SAMPLES), name="WHITENED_ONSOURCE")
+    inputs = keras.Input(shape=(detectors, SAMPLES), name="WHITENED_ONSOURCE")
     x = keras.layers.Flatten()(inputs)
     outputs = keras.layers.Dense(2, activation=activation, name="output")(x)
     return keras.Model({"WHITENED_ONSOURCE": inputs}, outputs)
@@ -142,6 +142,11 @@ def test_per_example_labels_are_strict():
     np.testing.assert_array_equal(per_example(np.ones((1, 4, 1)), 4, "x"), np.ones(4))
     np.testing.assert_array_equal(per_example(np.arange(8.0).reshape(4, 2), 4, "gps", per_detector=True),
                                   [0.0, 2.0, 4.0, 6.0])
+    # A per-generator label of one generator, (B, G=1, I): the first detector's value.
+    np.testing.assert_array_equal(per_example(np.arange(8.0).reshape(4, 1, 2), 4, "ct", per_detector=True),
+                                  [0.0, 2.0, 4.0, 6.0])
+    with pytest.raises(ValueError, match="two generators"):
+        per_example(np.ones((4, 2, 2)), 4, "two generators", per_detector=True)
     with pytest.raises(ValueError):
         per_example(np.ones((2, 4)), 4, "two generators")
     with pytest.raises(ValueError):
@@ -182,3 +187,15 @@ def test_the_waveform_plot_takes_the_first_detector():
     assert first_detector({"WHITENED_ONSOURCE": onsource})[1] is None
     with pytest.raises(ValueError, match="WHITENED_INJECTIONS"):
         first_detector({"WHITENED_ONSOURCE": onsource, "WHITENED_INJECTIONS": injection[0]})
+
+
+def test_the_validator_scores_injections_on_two_detectors(tmp_path):
+    # The injection stage read CENTRAL_TIME, (B, G, I), as one value per example.
+    config = ValidationConfig(num_examples=32, batch_size=32, snr_range=(0.0, 15.0))
+    args = validation_dataset_args(config=ValidationDatasetConfig(
+        sample_rate_hertz=2048.0, ifos=[gf.IFO.H1, gf.IFO.L1]))
+    v = Validator.validate(logit_model(1, detectors=2), "two", args, config, tmp_path / "v.h5")
+    assert all(a.shape == (32,) and np.all(np.isfinite(a)) for a in v.efficiency_data.values())
+    samples = [s for bin_samples in v.worst_performers["false_negatives"].values() for s in bin_samples]
+    assert samples and all(np.shape(s["WHITENED_INJECTIONS"]) == (1, 2, SAMPLES) for s in samples)
+    v.plot(tmp_path / "report.html")

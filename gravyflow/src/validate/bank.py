@@ -93,17 +93,16 @@ def per_example(value, n: int, name: str, per_detector: bool = False) -> np.ndar
     """
     One float64 value per example, from a label array of any singleton layout.
 
-    ``per_detector`` labels, shaped (examples, detectors), give the first
-    detector's value. Anything else that is not one value per example raises.
+    ``per_detector`` labels are batch-first, (B, I), or (B, G, I) from one
+    generator, and give the first detector's value. Anything else that is not
+    one value per example raises: two generators' values are never merged.
     """
     array = np.asarray(value, dtype=np.float64)
-    if per_detector and array.ndim >= 2 and array.shape[0] == n:
-        return array.reshape(n, -1)[:, 0]
+    if per_detector and array.ndim in (2, 3) and array.shape[0] == n and array.shape[1:-1] in ((), (1,)):
+        return array[..., 0].reshape(n)
     squeezed = np.squeeze(array)
     if squeezed.shape == (n,) or (n == 1 and squeezed.ndim == 0):
         return squeezed.reshape(n)
-    if per_detector and squeezed.ndim == 2 and squeezed.shape[0] == n:
-        return squeezed[:, 0]
     raise ValueError(f"Label {name}: expected one value per example ({n}), got shape {array.shape}.")
 
 
@@ -223,7 +222,7 @@ class ValidationBank:
             n = batch_scores.size
             columns["scores"].append(batch_scores)
             for key, label in labels.items():
-                # The central time is per detector (the arrival time at each): keep the first's.
+                # The central time is per detector, (B, G=1, I): keep the first detector's.
                 columns[key].append(per_example(y[label.name], n, label.name,
                                                 per_detector=key == "central_times"))
             batch_gps = self._gps(y, n)

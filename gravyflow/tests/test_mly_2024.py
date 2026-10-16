@@ -236,11 +236,10 @@ def logit_scores_of(model, x):
 
 
 @pytest.mark.parametrize("shape,n,expected", [
-    ((1, 1, 2), 1, [0.0]),      # one example, two detectors
+    ((1, 1, 2), 1, [0.0]),      # one example, one generator, two detectors
     ((1, 2), 1, [0.0]),
-    ((4, 2), 4, [0, 2, 4, 6]),
-    ((1, 4, 2), 4, [0, 2, 4, 6]),
-    ((4, 1, 2), 4, [0, 2, 4, 6]),
+    ((4, 2), 4, [0, 2, 4, 6]),   # (B, I)
+    ((4, 1, 2), 4, [0, 2, 4, 6]),  # (B, G, I)
 ])
 def test_per_detector_labels_give_the_first_detector(shape, n, expected):
     from gravyflow.src.validate.bank import per_example
