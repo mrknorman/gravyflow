@@ -40,7 +40,8 @@ print("=" * 70)
 #   - observing_runs: Which LIGO/Virgo science runs to use (O1, O2, O3, O4)
 #   - data_quality: BEST = calibrated science data (almost always use this)
 #   - gwosc_flags (optional): GWOSC timeline flags defining usable times; the
-#     default is DATA with the BURST_CAT1 and BURST_CAT2 vetoes applied
+#     default is DATA with the BURST_CAT1 and BURST_CAT2 vetoes applied and no
+#     CBC or burst hardware injections
 #   - data_labels: What to acquire - NOISE means random sampling from segments
 #   - segment_order: How to iterate through available segments
 
