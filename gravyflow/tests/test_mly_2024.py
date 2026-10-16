@@ -73,6 +73,7 @@ def test_rolling_pearson_lags_do_not_depend_on_the_generators(ifos, sample_rate_
 
 # ------------------------------------------------------------ the networks
 
+@pytest.mark.global_rng
 @pytest.mark.parametrize("model_class", [MLyCoincidence, MLyCoherence])
 @pytest.mark.parametrize("ifos", [HL, HLV])
 def test_mly_takes_whitened_onsource_and_returns_logits(model_class, ifos):
@@ -98,6 +99,7 @@ def test_mly_takes_whitened_onsource_and_returns_logits(model_class, ifos):
 #   Model 2: strain convs 56×32/4, 128×24/2, 214×16/2; correlation convs 64×8,
 #     64×5, each followed by batch normalisation; dense 256 with batch
 #     normalisation; 2.
+@pytest.mark.global_rng
 def test_coincidence_layers_match_the_paper():
     model = MLyCoincidence.model(small(HLV))
     assert model.count_params() == 2_471_938
@@ -112,6 +114,7 @@ def test_coincidence_layers_match_the_paper():
         assert any(t is convs[2 * block].output for t in add.input)
 
 
+@pytest.mark.global_rng
 def test_coherence_layers_match_the_paper():
     config = small(HLV)
     model = MLyCoherence.model(config)
@@ -152,6 +155,7 @@ def test_cyclic_learning_rate_is_triangular_and_serialises():
 
 # ---------------------------------------------------------------- data
 
+@pytest.mark.global_rng
 @pytest.mark.parametrize("model_class", [MLyCoincidence, MLyCoherence])
 def test_mly_trains_on_its_dataset(model_class, tmp_path):
     # The networks read an input named "strain" shaped (samples, detectors),
@@ -185,6 +189,7 @@ def test_mly_dataset_follows_the_paper():
         assert list(dataset.noise_obtainer.ifos) == list(HLV)
 
 
+@pytest.mark.global_rng
 def test_validator_scores_a_burst_model():
     # The validator asked every injection set for CBC masses, which a WNB set lacks.
     config = small(HL)
@@ -213,6 +218,7 @@ def test_train_script_settings():
 
 # ------------------------------------------------------------ real events
 
+@pytest.mark.global_rng
 def test_real_event_inputs_feed_the_coherence_network():
     # Real events were given only the whitened onsource, the onsource and the offsource,
     # so a model reading ROLLING_PEARSON_ONSOURCE raised KeyError.

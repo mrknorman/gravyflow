@@ -61,7 +61,7 @@ def parse_args(argv=None):
     parser.add_argument("--validation-batches", type=int, help="Override the preset's validation batches")
     parser.add_argument("--patience", type=int, help="Override the preset's early-stopping patience")
     parser.add_argument("--seed", type=int, default=gf.Defaults.seed,
-                        help="Root seed; each split derives its own")
+                        help="Root seed; each split draws its own streams from it")
     parser.add_argument("--validate", type=int, default=0, metavar="N",
                         help="Validate the trained model on N noise and N injection examples (0: skip)")
     parser.add_argument("--validation-batch-size", type=int, default=256)
@@ -98,13 +98,13 @@ def train(args, model_class, config, schedule) -> keras.Model:
     print(f"Run directory: {run.directory.path}")
     validation = materialise(
         DetectionBatches(model_class.dataset(
-            config=config, seed=run.seeds["validate"], group="validate",
+            config=config, seed=run.seed, group="validate",
             steps_per_epoch=schedule.validation_batches)),
         schedule.validation_batches,
     )
     model = run.train(
         build_model=lambda: model_class.compile_model(model_class.model(config), config),
-        training_data=lambda seed, first_epoch: DetectionBatches(model_class.dataset(
+        training_data=lambda seed: DetectionBatches(model_class.dataset(
             config=config, seed=seed, group="train", steps_per_epoch=schedule.steps_per_epoch)),
         validation_data=validation,
         verbose=args.verbose,
