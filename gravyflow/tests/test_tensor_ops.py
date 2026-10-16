@@ -3,6 +3,7 @@ os.environ["KERAS_BACKEND"] = "jax"
 
 import pytest
 import gravyflow as gf
+import jax
 import numpy as np
 import keras
 from keras import ops
@@ -21,6 +22,13 @@ def test_replace_nan_and_inf_with_zero_is_silent_on_finite_data():
         warnings.simplefilter("error", gf.NonFiniteWarning)
         y = gf_tensor.replace_nan_and_inf_with_zero(ops.convert_to_tensor([1.0, 2.0]))
     np.testing.assert_allclose(y, [1.0, 2.0])
+
+@pytest.mark.parametrize("transform", [jax.jit, jax.vmap], ids=["jit", "vmap"])
+def test_replace_nan_and_inf_with_zero_refuses_traced_input_by_name(transform):
+    # It counts what it replaces, so it runs eagerly; traced code is refused.
+    x = ops.convert_to_tensor([[1.0, np.nan], [np.inf, 2.0]])
+    with pytest.raises(TypeError, match="replace_nan_and_inf_with_zero"):
+        transform(lambda t: gf.replace_nan_and_inf_with_zero(t, "traced"))(x)
 
 def test_expand_tensor():
     mask = ops.convert_to_tensor([True, False, True])

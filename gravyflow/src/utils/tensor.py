@@ -217,7 +217,19 @@ def replace_nan_and_inf_with_zero(tensor, name: str = None):
     and counts the values replaced. A non-finite value past acquisition is a
     failure upstream, so make the warning an error to find it:
     ``warnings.simplefilter("error", gf.NonFiniteWarning)``.
+
+    It runs eagerly, since it reports how many values it replaced: under
+    ``jax.jit``, ``jax.vmap`` or another transformation it raises a TypeError
+    naming itself. Traced code that must zero non-finite values silently uses
+    ``jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)``.
     """
+    if isinstance(tensor, jax.core.Tracer):
+        raise TypeError(
+            "replace_nan_and_inf_with_zero runs eagerly (it reports what it replaces), "
+            f"but was called on a traced value ({name or 'unnamed'}) under a JAX "
+            "transformation such as jax.jit or jax.vmap. Call it outside the "
+            "transformation, or use jnp.nan_to_num in traced code."
+        )
     tensor = ops.convert_to_tensor(tensor)
     cleaned, count = _zero_non_finite(tensor)
     count = int(count)
