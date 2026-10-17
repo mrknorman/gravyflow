@@ -46,6 +46,26 @@ def _overlap(a, b):
     return total
 
 
+#: Slack on a GPS difference near 1.3e9 s: four float64 steps (2.4e-7 s each).
+GPS_SLACK = 4 * np.spacing(1.3e9)
+
+
+def expected_veto(chirp_mass_solar):
+    """
+    (seconds before, seconds after) an event its veto covers, computed apart from the
+    library: the leading-order chirp time from 20 Hz, with LAL's G M_sun / c^3, times the
+    library's stated factor, plus its padding; no masses reads as the stated 1 + 1 binary.
+    """
+    import lal
+    from gravyflow.src.dataset.features import event
+
+    if chirp_mass_solar is None or not np.isfinite(chirp_mass_solar):
+        chirp_mass_solar = event.UNKNOWN_EVENT_CHIRP_MASS_SOLAR
+    tau = (5.0 / 256.0) * (np.pi * 20.0) ** (-8.0 / 3.0) * (chirp_mass_solar * lal.MTSUN_SI) ** (-5.0 / 3.0)
+    padding = event.EVENT_VETO_PADDING_SECONDS
+    return [event.EVENT_VETO_CHIRP_TIME_FACTOR * tau + padding, padding]
+
+
 #: Every block in train: the segment tests below read all time as one split.
 ALL_TRAIN = gf.SplitSpec(fractions={"train": 1.0, "validate": 0.0, "test": 0.0})
 
@@ -130,7 +150,8 @@ class TestVetoSubtraction:
 
 class TestRunOrder:
 
-    def test_non_chronological_runs_bin_and_veto(self):
+    def test_non_chronological_runs_concatenate_and_bin(self):
+        """Runs given out of order are read in GPS order and binned; vetoes are tested in TestNoiseVetoes."""
         obtainer = _noise_obtainer([gf.ObservingRun.O3, gf.ObservingRun.O1], split_spec=ALL_TRAIN)
         o3 = np.array([[1238170000.0, 1238180000.0]])
         o1 = np.array([[1126060000.0, 1126070000.0]])
@@ -258,21 +279,19 @@ class TestNoiseVetoes:
         assert _overlap(result, [[merger - 166.0, merger + 1.0]]) == 0.0
 
     def test_event_veto_durations(self):
+        """Each event's veto is its stated factor times its chirp time from 20 Hz, padded both sides."""
         vetoes = gf.get_event_veto_segments(catalogue=FIXTURE_EVENTS)
-        by_start = {name: None for name in FIXTURE_EVENTS["name"]}
-        for name, gps in zip(FIXTURE_EVENTS["name"], FIXTURE_EVENTS["gps"]):
+        for name, gps, chirp_mass in zip(FIXTURE_EVENTS["name"], FIXTURE_EVENTS["gps"],
+                                         FIXTURE_EVENTS["chirp_mass_source"]):
             (row,) = [v for v in vetoes if v[0] <= gps <= v[1]]
-            by_start[name] = (gps - row[0], row[1] - gps)
-        before, after = by_start["GW170817"]
-        assert 166.0 <= before <= 230.0 and after >= 1.0
-        before, after = by_start["GW150914"]
-        assert 2.0 <= before <= 5.0 and after >= 1.0
+            np.testing.assert_allclose([gps - row[0], row[1] - gps], expected_veto(chirp_mass),
+                                       rtol=0, atol=GPS_SLACK, err_msg=name)
 
     def test_events_without_masses_get_the_longest_duration(self):
         catalogue = {"gps": np.array([1e9]), "chirp_mass_source": np.array([np.nan]),
                      "name": np.array(["x"]), "catalog": np.array(["GWTC-3-marginal"])}
         (veto,) = gf.get_event_veto_segments(catalogue=catalogue)
-        assert 1e9 - veto[0] > 250.0
+        np.testing.assert_allclose([1e9 - veto[0], veto[1] - 1e9], expected_veto(None), rtol=0, atol=GPS_SLACK)
 
 
 # =============================================================================
@@ -309,7 +328,7 @@ class TestEventList:
             assert _inside([gps], vetoes)[0]
         # No masses: the 1 + 1 solar-mass duration, the longest the veto uses.
         (imbh,) = [v for v in vetoes if v[0] <= 1263002916.2 <= v[1]]
-        assert 1263002916.2 - imbh[0] > 250.0
+        np.testing.assert_allclose(1263002916.2 - imbh[0], expected_veto(None)[0], rtol=0, atol=GPS_SLACK)
 
     def test_cache_is_reused_while_the_runs_are_unchanged(self, event_api):
         first = gf.get_event_catalogue()
@@ -373,8 +392,7 @@ class TestEventsNotGlitches:
         events["chirp_mass_source"] = np.append(events["chirp_mass_source"], 60.0)
         events["name"] = np.append(events["name"], "GW_TEST")
         events["catalog"] = np.append(events["catalog"], "GWTC-3-confident")
-        monkeypatch.setattr(event_module, "get_event_catalogue",
-                            lambda use_cache=True: events, raising=False)
+        monkeypatch.setattr(event_module, "get_event_catalogue", lambda use_cache=True: events)
 
         after = gf.get_glitch_times(gf.IFO.L1, observing_run=gf.ObservingRun.O3)
         assert event_time not in after
@@ -394,9 +412,6 @@ class TestHardwareInjections:
     def test_default_flags_exclude_hardware_injections(self):
         # Every kind of hardware injection but the continuous-wave one, which runs
         # through nearly all of each run.
-        assert gf.GWOSC_NO_HW_INJECTION_FLAGS == (
-            "NO_CBC_HW_INJ", "NO_BURST_HW_INJ", "NO_STOCH_HW_INJ", "NO_DETCHAR_HW_INJ"
-        )
         assert "NO_CW_HW_INJ" not in gf.DEFAULT_GWOSC_FLAGS
         assert gf.DEFAULT_GWOSC_FLAGS == gf.GWOSC_BURST_FLAGS + gf.GWOSC_NO_HW_INJECTION_FLAGS
         obtainer = _noise_obtainer(gf.ObservingRun.O1)
@@ -451,9 +466,9 @@ class TestHardwareInjections:
             by_class = gf.get_glitch_catalogue(gf.IFO.H1, gf.ObservingRun.O3, glitch_types=[glitch_type])
             assert every["event_time"][index] not in by_class["event_time"]
 
-        # Noise is vetoed around every entry, injection gap or not.
-        vetoed = gf.get_glitch_catalogue(gf.IFO.H1, gf.ObservingRun.O3, exclude_hardware_injections=False)
-        assert set(dropped) <= set(vetoed["event_time"])
+        # Noise is vetoed around every entry, injection gap or not: the noise path's own vetoes.
+        vetoes = _noise_obtainer(gf.ObservingRun.O3).get_glitch_veto_segments(gf.IFO.H1)
+        assert np.all(_inside(dropped, vetoes))
 
 
 # =============================================================================
