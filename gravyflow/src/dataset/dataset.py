@@ -22,7 +22,7 @@ from gravyflow.src.utils.tensor import (
 from gravyflow.src.utils.shapes import BatchContract
 from gravyflow.src.dataset.config import Defaults
 from gravyflow.src.dataset.noise.noise import index_addressed, obtainer_batcher
-from gravyflow.src.rng import BatchStreams, SeedTree, check_coordinate, check_split
+from gravyflow.src.rng import BatchStreams, SeedTree, check_coordinate, check_name, check_split
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
@@ -204,8 +204,12 @@ class IndexedBatches:
     yet fixed across epochs or runs.
     """
 
-    def _init_batches(self, seed, group: str, steps_per_epoch: int, epoch_mode: Optional[EpochMode]):
+    def _init_batches(self, seed, group: str, steps_per_epoch: int, epoch_mode: Optional[EpochMode],
+                      name: Optional[str] = None):
+        self.name = None if name is None else check_name(name, "dataset name")
         self.tree = SeedTree.of(seed)
+        if self.name is not None:
+            self.tree = self.tree.sub(f"dataset/{self.name}")
         self.seed = self.tree.root
         self.group = check_split(group)
         self.steps_per_epoch = steps_per_epoch
@@ -317,7 +321,14 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
     see IndexedBatches, which also says which noise is not yet read by
     address. Under ``model.fit``, pass ``callbacks=[ds.epoch_callback()]`` for
     a training split. Different splits never share a stream, so train,
-    validate and test built from one seed are independent. The dataset works
+    validate and test built from one seed are independent.
+
+    Within one split, datasets of one seed draw the same streams (common
+    random numbers): a noise-only dataset and a signal dataset share their
+    noise, so an ablation compares like with like. Datasets that must be
+    independent, such as the classes of a classifier, take distinct
+    ``name``s, each a scope of the seed tree, or are the pools of one
+    ComposedDataset. The dataset works
     on its own copies of the obtainer and generators it is given, so the
     caller's objects are never changed and can serve other datasets.
     """
@@ -342,10 +353,14 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         steps_per_epoch: int = 1000,
         sampling_mode: Optional["gf.SamplingMode"] = None,
         spectral_config: Optional[SpectralConfig] = None,
-        epoch_mode: Optional[EpochMode] = None
+        epoch_mode: Optional[EpochMode] = None,
+        name: Optional[str] = None,
     ):
         """
         seed: the root of the seed tree, an integer >= 0 or a gf.SeedTree.
+        name: the dataset's scope in the seed tree (letters, digits and
+            _.:+-). Datasets of one seed and split with different names draw
+            independent streams; unnamed, they share them.
         epoch_mode: EpochMode.FRESH (default for group="train") or REPEAT.
         spectral_config: the band, PSD estimator and whitening filter shared by
             SNR scaling, SNR labels and whitening (gf.SpectralConfig; default
@@ -355,7 +370,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         """
         # Initialize PyDataset (single-threaded to avoid JAX/fork deadlocks)
         super().__init__(workers=0)
-        self._init_batches(seed, group, steps_per_epoch, epoch_mode)
+        self._init_batches(seed, group, steps_per_epoch, epoch_mode, name)
 
         # Set default values
         self.sample_rate_hertz = sample_rate_hertz if sample_rate_hertz is not None else gf.Defaults.sample_rate_hertz

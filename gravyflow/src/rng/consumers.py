@@ -39,9 +39,10 @@ _LEAVES = tuple(re.compile(pattern) for pattern in (
     rf"search(/{_SEGMENT})+",
 ))
 
-#: Scopes a consumer may sit under: a pool of a composed dataset, and a stage
-#: of the validator.
+#: Scopes a consumer may sit under: a named dataset, a pool of a composed
+#: dataset, and a stage of the validator.
 _SCOPES = (
+    re.compile(rf"dataset/{_SEGMENT}/"),
     re.compile(rf"pool/{_SEGMENT}/"),
     re.compile(r"validator/(far|inj)/"),
 )

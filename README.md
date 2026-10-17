@@ -51,7 +51,10 @@ Real noise and glitches use public data only; no credentials are needed:
 
 Every random draw comes from one seed tree, rooted at a dataset's `seed` (default `gf.Defaults.seed`) and addressed
 by the split (`group`), the epoch, the batch index and what the draw is for. A batch is rebuilt from its address alone,
-and the splits never share a stream. Old seeds give new data. Every draw is bit-identical between rebuilds; on CPU,
+and the splits never share a stream. Within a split, datasets of one seed draw the same streams (common random
+numbers), so a noise-only dataset and a signal dataset share their noise, as an ablation wants. Datasets that must be
+independent, such as the classes of a classifier, take distinct names (`gf.Dataset(..., name="noise")`), each a
+scope of the tree, or are the pools of one `gf.ComposedDataset`. Old seeds give new data. Every draw is bit-identical between rebuilds; on CPU,
 XLA's multi-threaded kernels can still round the projected strain differently from one call to the next, in the last
 bits of float32. For bit-identical batches, set `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false` before importing
 gravyflow (the results then differ, also in the last bits, from multi-threaded ones). The replaced seed arguments (`Distribution(seed=)`,

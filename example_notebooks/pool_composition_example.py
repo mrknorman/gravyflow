@@ -15,6 +15,10 @@ This demonstrates key features:
 1. Multiple pools with different probabilities
 2. Multiple pools sharing the same class label
 3. Mixing of noise, injection, and transient (glitch) pools
+4. Independent classes: each pool draws its own streams from the one seed.
+   Separate gf.Dataset objects of one seed and split share their noise
+   (common random numbers), so classes built that way need distinct names:
+   gf.Dataset(..., name="noise") and gf.Dataset(..., name="signal").
 """
 
 import logging
