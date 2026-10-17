@@ -271,14 +271,17 @@ print("""
 
 3. GlitchType enum has the 24 Gravity Spy classes
 
-4. Output includes additional metadata:
-   - GLITCH_TYPE: Integer label (GlitchType value, 0-23)
+4. Output includes additional metadata, every label per detector:
+   - GLITCH_TYPE: Integer label (GlitchType value, 0-23), -1 on a partner
    - START_GPS_TIME: GPS time of the first onsource sample, per detector
-   - TRANSIENT_GPS_TIME: Event center time
+   - TRANSIENT_GPS_TIME: Each detector's window centre
    - DATA_LABEL: What type (NOISE=0, GLITCHES=1, EVENTS=2)
 
 5. Glitches are at the CENTER of the onsource window
-   (t=0 relative to window midpoint)
+   (t=0 relative to window midpoint) of the detector they were seen in.
+   A glitch is seen in one detector: asked for more, each other detector
+   is read at a partner time of its own, away from the glitch and in the
+   same split, and labelled NOISE, so no two detectors share noise.
 """)
 
 print("\n✓ Tutorial 04 complete!")

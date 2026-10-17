@@ -361,6 +361,18 @@ def usable_over_its_runs(obtainer, ifo):
     return np.array([[min(obtainer.start_gps_times), max(obtainer.end_gps_times)]])
 
 
+def no_glitch_vetoes():
+    """
+    Offline glitch vetoes: no detector has a catalogued glitch to keep a partner
+    window from (a patch of ``get_glitch_veto_segments``, which reads Gravity Spy).
+    """
+    from unittest import mock
+    import numpy as np
+
+    return mock.patch.object(gf.TransientDataObtainer, "get_glitch_veto_segments",
+                             lambda self, ifo: np.empty((0, 2)))
+
+
 def catalogued_events(events=()):
     """
     Serve ``events`` (rows with ``name``, ``gps`` and ``catalog``) as the one event

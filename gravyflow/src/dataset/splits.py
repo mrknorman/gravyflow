@@ -36,11 +36,19 @@ SPLIT_NAMES: Tuple[str, ...] = ("test", "validate", "train")
 EXCLUDED = "excluded"
 
 
+def hash_uniform(*parts) -> float:
+    """
+    sha256 of ``parts`` joined by ``":"`` as a uniform number in [0, 1), from its
+    first 8 bytes: a draw that depends on nothing but its parts.
+    """
+    digest = hashlib.sha256(":".join(str(part) for part in parts).encode()).digest()
+    return int.from_bytes(digest[:8], "big") / 2.0**64
+
+
 @lru_cache(maxsize=1 << 16)
 def _block_uniform(version: str, block: int) -> float:
     """sha256 of ``"{version}:{block}"`` as a uniform number in [0, 1)."""
-    digest = hashlib.sha256(f"{version}:{block}".encode()).digest()
-    return int.from_bytes(digest[:8], "big") / 2.0**64
+    return hash_uniform(version, block)
 
 
 def _canonical_fractions(fractions) -> Tuple[Tuple[str, float], ...]:

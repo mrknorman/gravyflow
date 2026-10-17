@@ -139,49 +139,6 @@ class NoiseDataObtainer(BaseDataObtainer):
     # NOISE-SPECIFIC SEGMENT PROCESSING
     # =========================================================================
 
-    def _glitch_catalogues(self, ifo: gf.IFO, **kwargs) -> List[Dict]:
-        """
-        The Gravity Spy catalogue of ``ifo`` over every configured run. Runs that the
-        public release does not cover (O4) give a warning and no glitches.
-        """
-        from gravyflow.src.dataset.features.glitch import get_glitch_catalogue
-
-        catalogues = []
-        for start, end in zip(self.start_gps_times, self.end_gps_times):
-            try:
-                catalogues.append(get_glitch_catalogue(
-                    ifo, start_gps_time=start, end_gps_time=end, **kwargs
-                ))
-            except ValueError as error:
-                logging.warning(
-                    f"No glitch veto for {ifo.name} over GPS {start}-{end}: {error}"
-                )
-        return catalogues
-
-    def get_glitch_veto_segments(self, ifo: gf.IFO) -> np.ndarray:
-        """
-        Veto segments for the Gravity Spy entries of ``ifo`` over every configured run:
-        each entry's whole extent plus its class's padding on each side
-        (``glitch.glitch_veto_padding``). The entries vetoed are
-        ``NOISE_VETO_GLITCH_TYPES`` at ``NOISE_VETO_MIN_ML_CONFIDENCE`` or above.
-        """
-        from gravyflow.src.dataset.features.glitch import (
-            NOISE_VETO_GLITCH_TYPES, glitch_veto_padding,
-            NOISE_VETO_MIN_ML_CONFIDENCE, glitch_extents,
-        )
-        catalogues = self._glitch_catalogues(
-            ifo,
-            glitch_types=NOISE_VETO_GLITCH_TYPES,
-            min_ml_confidence=NOISE_VETO_MIN_ML_CONFIDENCE,
-            exclude_events=False,
-            exclude_hardware_injections=False,
-        )
-        if not catalogues:
-            return np.empty((0, 2))
-        return np.concatenate(
-            [glitch_extents(catalogue, glitch_veto_padding(catalogue)) for catalogue in catalogues]
-        )
-
     def remove_unwanted_segments(
             self,
             ifo: gf.IFO,

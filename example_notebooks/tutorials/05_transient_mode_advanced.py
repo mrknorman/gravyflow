@@ -154,13 +154,13 @@ the acquisition pipeline. Use these as keys to access batch data.
 ║  GPS Times:                                                           ║
 ║  ───────────────────────────────────────────────────────────────────  ║
 ║  START_GPS_TIME        │  Start of onsource window                    ║
-║  TRANSIENT_GPS_TIME    │  Event/glitch center time                    ║
+║  TRANSIENT_GPS_TIME    │  Each detector's window centre               ║
 ╠═══════════════════════════════════════════════════════════════════════╣
-║  Labels:                                                              ║
+║  Labels (per detector; a partner detector is NOISE, type -1):         ║
 ║  ───────────────────────────────────────────────────────────────────  ║
 ║  DATA_LABEL            │  0=NOISE, 1=GLITCHES, 2=EVENTS              ║
 ║  GLITCH_TYPE           │  GlitchType.value (0-19) or -1              ║
-║  SOURCE_TYPE           │  For injected signals                       ║
+║  SOURCE_TYPE           │  SourceType.value of an event, or -1        ║
 ╚═══════════════════════════════════════════════════════════════════════╝
 """)
 

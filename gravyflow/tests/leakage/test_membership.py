@@ -15,7 +15,7 @@ from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.transient_index import TransientIndex, transient_footprint
 from gravyflow.src.utils.gps import gps_to_key
-from gravyflow.tests.conftest import catalogued_events, usable_over_its_runs
+from gravyflow.tests.conftest import catalogued_events, no_glitch_vetoes, usable_over_its_runs
 
 SPLITS = ("train", "validate", "test")
 O3_START = gf.ObservingRun.O3.value.start_gps_time
@@ -41,7 +41,7 @@ def catalogue():
     with mock.patch("gravyflow.src.dataset.features.segment_builders.build_glitch_segments",
                     return_value=rows), \
          mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs), \
-         catalogued_events():
+         catalogued_events(), no_glitch_vetoes():
         yield rows
 
 

@@ -23,7 +23,7 @@ from gravyflow.src.dataset.features.transient_index import TransientIndex
 from gravyflow.src.dataset.noise.noise import sequential_seed
 from gravyflow.src.dataset.splits import EXCLUDED
 from gravyflow.src.utils.gps import gps_to_key
-from gravyflow.tests.conftest import catalogued_events, usable_over_its_runs
+from gravyflow.tests.conftest import catalogued_events, no_glitch_vetoes, usable_over_its_runs
 
 SPLITS = ("train", "validate", "test")
 O3_START = 1238166018.0
@@ -489,7 +489,7 @@ def two_detector_catalogue():
         "gravyflow.src.dataset.features.segment_builders.build_glitch_segments",
         return_value=records,
     ), mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs), \
-            catalogued_events():
+            catalogued_events(), no_glitch_vetoes():
         yield {ifo: {r.gps_key for r in records if ifo in r.seen_in} for ifo in (gf.IFO.L1, gf.IFO.H1)}
 
 

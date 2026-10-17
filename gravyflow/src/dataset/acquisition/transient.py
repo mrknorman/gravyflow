@@ -8,8 +8,7 @@ specific transient events (GW events, glitches) in TRANSIENT mode.
 import itertools
 import logging
 from collections import Counter
-from typing import Any, List, Dict, Optional, Union, Tuple
-from pathlib import Path
+from typing import Any, List, Dict, NamedTuple, Optional, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
@@ -30,15 +29,29 @@ from .base import (
 )
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.utils.gps import as_gps_times
-from gravyflow.src.dataset.features.transient_index import TransientIndex
+from gravyflow.src.dataset.features.transient_index import TransientIndex, transient_footprint
 from .transient_segment import TransientSegment
 from .gwosc_data import within_segments
+from .partners import partner_time
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
 from gravyflow.src.dataset.splits import SplitSpec
 
 
-# The transient caches an obtainer may open, one per prefix (`_initialize_transient_cache`).
-TRANSIENT_CACHE_PREFIXES = ("transient", "glitch", "event")
+# The transient caches an obtainer may open, one per prefix (`_initialize_transient_cache`):
+# records' own detectors in "glitch" and "event", partners in "partner".
+TRANSIENT_CACHE_PREFIXES = ("transient", "glitch", "event", "partner")
+
+
+class DetectorRead(NamedTuple):
+    """
+    Where an example of one record reads one detector: the centre of its window,
+    and whether it is a partner (``partners``), read away from the transient and
+    labelled noise, or the record's own detector, read at the transient's time.
+    """
+
+    ifo: "gf.IFO"
+    centre: float
+    partner: bool
 
 
 class TransientDataObtainer(BaseDataObtainer):
@@ -125,24 +138,25 @@ class TransientDataObtainer(BaseDataObtainer):
             **super()._served_state(),
             # TransientIndex - canonical source of truth for transient examples
             "_feature_index": None,
-            # TransientSegment objects (replaces raw numpy segments)
+            # The split's records, in serving order, and each record's reads, one
+            # per requested detector in order (_plan_reads)
             "transient_segments": [],
+            "transient_reads": [],
             # Records not served, by reason: a census of the split (_passing_data_quality,
-            # _reject_for_no_data)
+            # _plan_reads, _reject_for_no_data)
             "_rejections": Counter(),
             # The exact GPS times of records found without a requested detector's
             # strain: not served, nor fetched again, while this state stands
             "_unavailable": set(),
-            "_cache_hit_count": 0,
-            "_cache_miss_count": 0,
-            "_last_log_count": 0,
             **caches,
         }
 
     #: Why a record is not served: its window leaves the usable segments of a
-    #: requested detector, or a requested detector has no finite strain for it.
+    #: detector it is read on at its own time; a requested detector has no finite
+    #: strain for it; or a detector it was not seen in has no partner time.
     REJECTED_BY_DATA_QUALITY = "data quality"
     REJECTED_FOR_NO_DATA = "no data"
+    REJECTED_FOR_NO_PARTNER = "no partner"
 
     def _reject_for_no_data(self, segment: TransientSegment) -> None:
         """
@@ -176,29 +190,109 @@ class TransientDataObtainer(BaseDataObtainer):
         super().reset_acquisition_stats()
         self._rejections = Counter()
 
+    @staticmethod
+    def _own_detectors(record: TransientSegment, ifos: List[gf.IFO]) -> List[gf.IFO]:
+        """
+        The requested detectors ``record`` is read on at its own time: a glitch's
+        detectors are those it was seen in; an event is read on every detector.
+        The others are read at partner times (``_plan_reads``).
+        """
+        if record.is_event:
+            return list(ifos)
+        return [ifo for ifo in ifos if ifo in record.seen_in]
+
+    def _count_rejections(self, reason: str, rejected: int, total: int, why: str) -> None:
+        """Record ``rejected`` of ``total`` records as the split's ``reason`` count."""
+        self._rejections.pop(reason, None)
+        if rejected:
+            self._rejections[reason] = rejected
+            logger.info(f"{rejected} of {total} transients rejected: {why}.")
+
     def _passing_data_quality(
         self, segments: List[TransientSegment], ifos: List[gf.IFO]
     ) -> List[TransientSegment]:
         """
-        The records whose acquired span lies, on every requested detector, inside one
-        usable segment (``get_all_segment_times``: the obtainer's GWOSC flags, so by
-        default no hardware injection either). The others are rejected, and their
-        number is the split's ``REJECTED_BY_DATA_QUALITY`` count.
+        The records whose acquired span lies, on every detector read at their own
+        time (``_own_detectors``), inside one usable segment
+        (``get_all_segment_times``: the obtainer's GWOSC flags, so by default no
+        hardware injection either). The others are rejected, and their number is the
+        split's ``REJECTED_BY_DATA_QUALITY`` count. A partner's data quality is its
+        own (``_partner_segments``).
         """
         keep = np.ones(len(segments), dtype=bool)
         if segments:
             spans = np.array([[s.start_gps_time, s.end_gps_time] for s in segments], dtype=np.float64)
             for ifo in ifos:
-                keep &= within_segments(spans, self.get_all_segment_times(ifo))
-        rejected = int(np.sum(~keep))
-        self._rejections.pop(self.REJECTED_BY_DATA_QUALITY, None)
-        if rejected:
-            self._rejections[self.REJECTED_BY_DATA_QUALITY] = rejected
-            logger.info(
-                f"{rejected} of {len(segments)} transients rejected: their windows leave "
-                f"the usable data of {[ifo.name for ifo in ifos]}."
-            )
+                read_here = np.array([ifo in self._own_detectors(s, ifos) for s in segments])
+                keep &= ~read_here | within_segments(spans, self.get_all_segment_times(ifo))
+        self._count_rejections(
+            self.REJECTED_BY_DATA_QUALITY, int(np.sum(~keep)), len(segments),
+            f"their windows leave the usable data of {[ifo.name for ifo in ifos]}",
+        )
         return list(itertools.compress(segments, keep))
+
+    def _partner_segments(self, ifo: gf.IFO, group_name: str) -> np.ndarray:
+        """
+        Where a partner of ``ifo`` may read: its usable data in split
+        ``group_name`` (``SplitSpec.admissible``), less every event's footprint and
+        guard and every one of its catalogued glitches, as noise is vetoed.
+        """
+        vetoes = np.concatenate([
+            np.reshape(self.get_event_veto_segments(), (-1, 2)),
+            np.reshape(self.get_glitch_veto_segments(ifo), (-1, 2)),
+        ])
+        admissible = self.split_spec.admissible(self.get_all_segment_times(ifo), group_name)
+        return self.veto_time_segments(admissible, vetoes)
+
+    def _plan_reads(
+        self, segments: List[TransientSegment], ifos: List[gf.IFO], group_name: str
+    ) -> Tuple[List[TransientSegment], List[Tuple[DetectorRead, ...]]]:
+        """
+        Each record's reads, one per requested detector in order: its own detectors
+        at its own time, every other at a partner time (``partners.partner_time``)
+        in that detector's partner segments and the record's block, its centre at
+        least twice the record's footprint from the transient, keyed by the split's
+        fingerprint, the transient's time and the detector. The records with no
+        partner time on a detector they need are rejected, and their number is the
+        split's ``REJECTED_FOR_NO_PARTNER`` count.
+        """
+        from gravyflow.src.dataset.features.glitch_cache import CACHE_SAMPLE_RATE_HERTZ
+
+        spec = self.split_spec
+        fingerprint = spec.fingerprint()
+        allowed: Dict[gf.IFO, np.ndarray] = {}
+        planned, plans = [], []
+        for record in segments:
+            t = float(record.transient_gps_time)
+            own = self._own_detectors(record, ifos)
+            footprint_start, footprint_end = transient_footprint(record)
+            block = spec.block_of(t) * spec.block_seconds
+            reads = []
+            for ifo in ifos:
+                if ifo in own:
+                    reads.append(DetectorRead(ifo, t, False))
+                    continue
+                if ifo not in allowed:
+                    allowed[ifo] = self._partner_segments(ifo, group_name)
+                centre = partner_time(
+                    allowed[ifo], t,
+                    before=t - record.start_gps_time, after=record.end_gps_time - t,
+                    block=(block, block + spec.block_seconds),
+                    separation=2.0 * (footprint_end - footprint_start),
+                    key=(fingerprint, repr(t), ifo.name),
+                    sample_rate_hertz=CACHE_SAMPLE_RATE_HERTZ,
+                )
+                if centre is None:
+                    break
+                reads.append(DetectorRead(ifo, centre, True))
+            else:
+                planned.append(record)
+                plans.append(tuple(reads))
+        self._count_rejections(
+            self.REJECTED_FOR_NO_PARTNER, len(segments) - len(planned), len(segments),
+            "a detector they were not seen in has no partner time",
+        )
+        return planned, plans
 
     def _apply_augmentation(self, data):
         """
@@ -384,87 +478,50 @@ class TransientDataObtainer(BaseDataObtainer):
         self,
         batch_subarrays: list,
         batch_backgrounds: list,
-        batch_segments: list,  # List of TransientSegments
+        batch_segments: List[TransientSegment],
+        batch_reads: List[Tuple[DetectorRead, ...]],
         window_spec: WindowSpec,
     ) -> dict:
         """
-        Prepare batch tensors from accumulated lists.
-        
+        The batch of the examples accumulated, each one record's reads.
+
+        Every label is per detector, from the record and that detector's read: a
+        partner is noise, with no type.
+
         Returns:
             Dict with ReturnVariables keys:
             - ONSOURCE: (Batch, IFO, Samples) = BIS
-            - OFFSOURCE: (Batch, IFO, Samples) = BIS  
+            - OFFSOURCE: (Batch, IFO, Samples) = BIS
             - START_GPS_TIME: (Batch, IFO) = BI, float64: the GPS time of the first
               onsource sample returned after cropping, as for noise
               (``WindowSpec.onsource_start_gps``), the window centred on the
-              transient's sample (``WindowSpec.transient_window_start_gps``).
-            - TRANSIENT_GPS_TIME: (Batch, IFO) = BI
-              The GPS time of the event or glitch, the window's centre.
-            - DATA_LABEL: (Batch, IFO) = BI (1 for GLITCHES, 2 for EVENTS)
-            - SUB_TYPE: (Batch, IFO) = BI (GlitchType.value or SourceType.value)
-            - GLITCH_TYPE: (Batch, IFO) = BI (GlitchType.value if glitch, -1 otherwise)
-            - SOURCE_TYPE: (Batch, IFO) = BI (SourceType.value if event, -1 otherwise)
+              detector's read (``WindowSpec.transient_window_start_gps``).
+            - TRANSIENT_GPS_TIME: (Batch, IFO) = BI, float64: the centre of each
+              detector's window: the transient's time, or a partner's.
+            - DATA_LABEL: (Batch, IFO) = BI: GLITCHES or EVENTS, NOISE on a partner
+            - SUB_TYPE: (Batch, IFO) = BI: GlitchType or SourceType value, -1 on a partner
+            - GLITCH_TYPE: (Batch, IFO) = BI: GlitchType value on a glitch's own
+              detector, -1 otherwise
+            - SOURCE_TYPE: (Batch, IFO) = BI: SourceType value on an event's own
+              detector, -1 otherwise
         """
-        # Shape validation - identify mismatched arrays before stacking
-        if batch_subarrays:
-            shapes = [np.asarray(arr).shape for arr in batch_subarrays]
-            unique_shapes = set(shapes)
-            if len(unique_shapes) > 1:
-                # Log which segments have which shapes for debugging
-                logger.error(f"Shape mismatch in batch_subarrays! Unique shapes: {unique_shapes}")
-                for i, (arr, seg) in enumerate(zip(batch_subarrays, batch_segments)):
-                    logger.error(f"  Index {i}: shape={np.asarray(arr).shape}, GPS={seg.transient_gps_time:.3f}")
-                # Filter to most common shape to avoid crash
-                from collections import Counter
-                shape_counts = Counter(shapes)
-                most_common_shape = shape_counts.most_common(1)[0][0]
-                valid_indices = [i for i, s in enumerate(shapes) if s == most_common_shape]
-                batch_subarrays = [batch_subarrays[i] for i in valid_indices]
-                batch_backgrounds = [batch_backgrounds[i] for i in valid_indices]
-                batch_segments = [batch_segments[i] for i in valid_indices]
-                logger.warning(f"Filtered batch to {len(valid_indices)} samples with shape {most_common_shape}")
-        
         final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
         final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
-        
-        # Get dimensions from subarrays shape: (Batch, IFO, Samples)
-        batch_size = int(ops.shape(final_subarrays)[0])
-        num_ifos = int(ops.shape(final_subarrays)[1])
-        
-        # Extract GPS times from segments
-        batch_gps_times = [seg.transient_gps_time for seg in batch_segments]
-        gps_1d = as_gps_times(batch_gps_times)
-        transient_gps = np.tile(np.expand_dims(gps_1d, axis=-1), (1, num_ifos))
-        
-        # Compute DATA_LABEL per-segment based on segment type
-        # DataLabel.GLITCHES = 1, DataLabel.EVENTS = 2
-        batch_data_labels_1d = np.array([
-            DataLabel.GLITCHES.value if seg.is_glitch else DataLabel.EVENTS.value
-            for seg in batch_segments
-        ], dtype=np.int32)
-        data_label = ops.tile(ops.expand_dims(batch_data_labels_1d, axis=-1), (1, num_ifos))
-        
-        # SUB_TYPE: Generic type value (GlitchType or SourceType)
-        batch_sub_type_1d = np.array([
-            seg.kind.value if (seg.is_glitch or seg.is_event) else -1
-            for seg in batch_segments
-        ], dtype=np.int32)
-        sub_type = ops.tile(ops.expand_dims(batch_sub_type_1d, axis=-1), (1, num_ifos))
-        
-        # GLITCH_TYPE: Only filled for glitches, -1 for events
-        batch_glitch_type_1d = np.array([
-            seg.kind.value if seg.is_glitch else -1
-            for seg in batch_segments
-        ], dtype=np.int32)
-        glitch_type = ops.tile(ops.expand_dims(batch_glitch_type_1d, axis=-1), (1, num_ifos))
-        
-        # SOURCE_TYPE: Only filled for events, -1 for glitches
-        batch_source_type_1d = np.array([
-            seg.kind.value if seg.is_event else -1
-            for seg in batch_segments
-        ], dtype=np.int32)
-        source_type = ops.tile(ops.expand_dims(batch_source_type_1d, axis=-1), (1, num_ifos))
-        
+
+        transient_gps = as_gps_times([[read.centre for read in reads] for reads in batch_reads])
+        own = np.array([[not read.partner for read in reads] for reads in batch_reads])
+
+        def per_detector(value_of) -> np.ndarray:
+            values = np.array([value_of(segment) for segment in batch_segments], dtype=np.int32)
+            return np.where(own, values[:, None], -1).astype(np.int32)
+
+        data_label = np.where(
+            own,
+            np.array([DataLabel.GLITCHES.value if s.is_glitch else DataLabel.EVENTS.value
+                      for s in batch_segments], dtype=np.int32)[:, None],
+            DataLabel.NOISE.value,
+        ).astype(np.int32)
+
         return {
             RV.ONSOURCE: self._apply_augmentation(final_subarrays),
             RV.OFFSOURCE: self._apply_augmentation(final_background),
@@ -472,12 +529,11 @@ class TransientDataObtainer(BaseDataObtainer):
                 window_spec.transient_window_start_gps(transient_gps)
             ),
             RV.TRANSIENT_GPS_TIME: transient_gps,
-            RV.DATA_LABEL: data_label,     # Per-segment: GLITCHES=1 or EVENTS=2
-            RV.SUB_TYPE: sub_type,         # Per-segment: GlitchType.value or SourceType.value
-            RV.GLITCH_TYPE: glitch_type,   # Per-segment: GlitchType.value or -1
-            RV.SOURCE_TYPE: source_type,   # Per-segment: SourceType.value or -1
+            RV.DATA_LABEL: data_label,
+            RV.SUB_TYPE: per_detector(lambda s: s.kind.value),
+            RV.GLITCH_TYPE: per_detector(lambda s: s.kind.value if s.is_glitch else -1),
+            RV.SOURCE_TYPE: per_detector(lambda s: s.kind.value if s.is_event else -1),
         }
-
     @staticmethod
     def _extract_feature_event(
         channels: List[Optional[Tuple[np.ndarray, float]]],
@@ -517,82 +573,6 @@ class TransientDataObtainer(BaseDataObtainer):
         return onsource, offsource
 
 
-    def _cluster_transients(
-        self, 
-        segments: np.ndarray, 
-        request_overhead_seconds: float = None,
-        data_download_rate: float = None,
-        max_segment_seconds: float = None
-    ) -> np.ndarray:
-        """
-        Cluster nearby transients using a greedy cost-optimized algorithm.
-        Limits max segment size to prevent OOM errors during download.
-        """
-        from gravyflow.src.dataset.config import TransientDefaults
-        if request_overhead_seconds is None:
-            request_overhead_seconds = TransientDefaults.REQUEST_OVERHEAD_SECONDS
-        if data_download_rate is None:
-            data_download_rate = TransientDefaults.DATA_DOWNLOAD_RATE
-        if max_segment_seconds is None:
-            max_segment_seconds = TransientDefaults.MAX_SEGMENT_SECONDS
-        if len(segments) == 0:
-            return segments
-        
-        if len(segments) == 1:
-            return segments
-        
-        gap_threshold = request_overhead_seconds / data_download_rate
-            
-        sorted_idx = np.argsort(segments[:, 0])
-        sorted_segs = segments[sorted_idx]
-        
-        merged = []
-        current_start, current_end = sorted_segs[0]
-        
-        for start, end in sorted_segs[1:]:
-            gap = start - current_end
-            
-            segment_duration = current_end - current_start
-            if (gap <= 0 or gap <= gap_threshold) and segment_duration < max_segment_seconds:
-                current_end = max(current_end, end)
-            else:
-                merged.append([current_start, current_end])
-                current_start, current_end = start, end
-        
-        merged.append([current_start, current_end])
-        
-        merged_array = np.array(merged)
-        
-        original_count = len(segments)
-        merged_count = len(merged_array)
-        if merged_count < original_count:
-            logger.info(
-                f"Greedy clustering: {original_count} transients -> "
-                f"{merged_count} download segments (gap threshold: {gap_threshold:.0f}s)"
-            )
-        
-        return merged_array
-
-    def _get_segment_boundaries(self, indices: List[int]) -> np.ndarray:
-        """
-        Get GPS boundaries for specified segment indices.
-        
-        Directly accesses transient_segments instead of valid_segments array,
-        providing cleaner access to segment boundaries.
-        
-        Args:
-            indices: List of segment indices
-            
-        Returns:
-            Array of shape (N, 2) with [start, end] GPS times
-        """
-        if not indices:
-            return np.empty((0, 2), dtype=np.float64)
-        return np.array([
-            [self.transient_segments[i].start_gps_time, 
-             self.transient_segments[i].end_gps_time]
-            for i in indices
-        ], dtype=np.float64)
 
     # =========================================================================
     # ABSTRACT METHOD IMPLEMENTATIONS
@@ -634,340 +614,203 @@ class TransientDataObtainer(BaseDataObtainer):
         if self._feature_index is None:
             self.build_feature_index(ifos=ifos)
         
-        # Get segments for this group, filtered by requested IFOs
-        # Segments with seen_in overlapping requested IFOs will be included
-        self.transient_segments = self._passing_data_quality(
-            list(self._feature_index.iter(group=group_name, ifos_filter=ifos)), ifos
+        # The split's records seen in a requested detector, each read on every
+        # requested detector: its own at its time, the others at partner times.
+        records, reads = self._plan_reads(
+            self._passing_data_quality(
+                list(self._feature_index.iter(group=group_name, ifos_filter=ifos)), ifos
+            ),
+            ifos, group_name,
         )
-        
-        if len(self.transient_segments) == 0:
-            logger.warning(f"No segments found for group '{group_name}'")
-            return np.empty((0, len(ifos), 2), dtype=np.float64)
-        
-        # Shuffle if needed
+        planned = list(zip(records, reads))
         if segment_order == SegmentOrder.RANDOM:
-            rng = default_rng(seed)
-            rng.shuffle(self.transient_segments)
+            default_rng(seed).shuffle(planned)
         elif segment_order == SegmentOrder.SHORTEST_FIRST:
-            self.transient_segments.sort(key=lambda s: s.duration)
-        
-        logger.info(
-            f"TRANSIENT MODE: {len(self.transient_segments)} segments for '{group_name}'"
-        )
-        
-        # Return segments array for interface compatibility
-        # Shape: (num_segments, num_ifos, 2) where [:, :, 0]=start, [:, :, 1]=end
-        num_ifos = len(ifos)
-        segments_2d = np.array([
-            [seg.start_gps_time, seg.end_gps_time]
-            for seg in self.transient_segments
-        ], dtype=np.float64)
-        
-        expanded = np.expand_dims(segments_2d, axis=1)
-        return np.repeat(expanded, num_ifos, axis=1)
+            planned.sort(key=lambda pair: pair[0].duration)
+        self.transient_segments = [record for record, _ in planned]
+        self.transient_reads = [plan for _, plan in planned]
+
+        if not planned:
+            logger.warning(f"No segments found for group '{group_name}'")
+        logger.info(f"TRANSIENT MODE: {len(planned)} segments for '{group_name}'")
+
+        # (records, detectors, 2): the span each detector of each record is read over.
+        return np.array([
+            [[read.centre - (record.transient_gps_time - record.start_gps_time),
+              read.centre + (record.end_gps_time - record.transient_gps_time)] for read in plan]
+            for record, plan in planned
+        ], dtype=np.float64).reshape(len(planned), len(ifos), 2)
 
 
-    def _process_cache_misses(
-        self,
-        miss_indices: List[int],
-        ifos: List,
+    @staticmethod
+    def _cache_prefix(record: TransientSegment, read: DetectorRead) -> str:
+        """The cache a read is stored in: partners', or its record's kind's."""
+        if read.partner:
+            return "partner"
+        return "event" if record.is_event else "glitch"
+
+    def _cached_windows(
+        self, caches: Dict[str, Any], record: TransientSegment, reads: Tuple[DetectorRead, ...],
         window_spec: WindowSpec,
-        cache,
-        batch_subarrays: List,
-        batch_backgrounds: List,
-        batch_segments: List,
-        num_examples_per_batch: int
-    ):
+    ) -> List[Optional[Tuple[np.ndarray, np.ndarray]]]:
         """
-        Download, extract, cache and prepare batches for cache misses.
-        
-        Uses parallel downloads with ThreadPoolExecutor for improved performance.
-        Consolidates duplicated logic for processing segments that weren't in cache.
-        Yields batches whenever batch_size is reached.
-        
-        Args:
-            miss_indices: List of segment indices that need downloading
-            ifos: List of IFOs to download
-            window_spec: The windows requested
-            cache: DiskCache instance for storing/retrieving
-            batch_subarrays: Accumulated onsource arrays (mutated)
-            batch_backgrounds: Accumulated offsource arrays (mutated)
-            batch_segments: Accumulated TransientSegments (mutated)
-            num_examples_per_batch: Batch size threshold
-            max_workers: Number of parallel download threads (default 8)
-            
-        Yields:
-            Batch dicts when batch_size is reached
+        Each read's (onsource, offsource) row from its cache, or None where the cache
+        does not hold its detector's strain (a row without it, or no row): a miss,
+        fetched by ``_fetch_windows``.
+        """
+        windows = []
+        for read in reads:
+            onsource, offsource, source = None, None, "miss"
+            if not self.force_acquisition:
+                onsource, offsource, source = self._get_sample_from_cache(
+                    caches[self._cache_prefix(record, read)],
+                    read.centre,
+                    window_spec.sample_rate_hertz,
+                    window_spec.total_onsource_duration_seconds,
+                    window_spec.offsource_duration_seconds,
+                    target_ifos=[read.ifo.name],
+                )
+            held = (source != "miss" and onsource is not None
+                    and np.all(np.isfinite(onsource)) and np.all(np.isfinite(offsource)))
+            windows.append((np.asarray(onsource)[0], np.asarray(offsource)[0]) if held else None)
+        return windows
+
+    def _download(self, spans: Dict[Tuple, Tuple[gf.IFO, float, float]], sample_rate_hertz: float) -> Dict:
+        """
+        Each span's strain, {key: (samples, GPS time of the first)} at
+        ``sample_rate_hertz``, downloaded in parallel; a span whose strain could not
+        be had is left out (never zeros). ``spans`` is {key: (ifo, start, end)}.
+        """
+        def download(key):
+            ifo, start, end = spans[key]
+            frame_type, channel = BaseDataObtainer.get_frame_channel_for_gps_static(
+                start, self.frame_types, self.channels, self.start_gps_times, self.end_gps_times
+            )
+            try:
+                strain = BaseDataObtainer.get_segment_data_static(
+                    start, end, ifo, frame_type, channel, sample_rate_hertz=sample_rate_hertz,
+                )
+                if strain.sample_rate.value < sample_rate_hertz:
+                    raise ValueError("source rate below the download rate")
+                if strain.sample_rate.value != sample_rate_hertz:
+                    strain = strain.resample(sample_rate_hertz)
+                return key, (np.asarray(strain.value), float(strain.t0.value))
+            except Exception as error:
+                logger.debug(f"No {ifo.name} strain over GPS {start:.3f}-{end:.3f}: {error}")
+                return key, None
+
+        downloaded = {}
+        if not spans:
+            return downloaded
+        workers = min(32, len(spans))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(download, key) for key in spans]
+            for future in tqdm(as_completed(futures), total=len(futures), desc=f"Downloading ({workers}w)",
+                               unit="read", leave=False, dynamic_ncols=True):
+                key, channel = future.result()
+                if channel is not None:
+                    downloaded[key] = channel
+        logger.info(f"Downloaded {len(downloaded)}/{len(spans)} detector windows ({workers} workers)")
+        return downloaded
+
+    def _store_read(
+        self, cache, record: TransientSegment, read: DetectorRead, channel, download_rate: float,
+        window_spec: WindowSpec,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """
+        Store one read's downloaded strain in its cache, as a row of the universal
+        detectors holding only the read's (a detector not held is NaN, ``_fill_row``),
+        and return its (onsource, offsource) windows of the request; None when the
+        strain does not hold them, finite.
         """
         from gravyflow.src.dataset.features.glitch_cache import (
-            CACHE_SAMPLE_RATE_HERTZ, CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION
+            CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION,
         )
-        
-        if len(miss_indices) == 0:
-            return
+        from .transient_segment import ifos_to_bitmask
 
-        sample_rate_hertz = window_spec.sample_rate_hertz
-        # Download at higher of requested or cache sample rate (can downsample but not upsample)
-        download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
-        # Refuse rates no public source holds, before any download.
-        from .gwosc_data import gwosc_sample_rate_hertz
-        gwosc_sample_rate_hertz(download_sample_rate)
-
-        # Define universal IFO names for cache indexing
-        universal_ifo_names = list(TransientDefaults.UNIVERSAL_IFOS)
-        download_ifos_universal = [gf.IFO[name] for name in universal_ifo_names]
-        
-        # Pre-calculate extraction parameters
-        num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
-        num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * download_sample_rate)
-        
-        # Calculate output indices once
-        try:
-            output_indices = [universal_ifo_names.index(ifo.name) for ifo in ifos]
-        except ValueError as e:
-            logger.error(f"Requested IFO not found in universal set! Request: {[i.name for i in ifos]}, Universal: {universal_ifo_names}")
-            raise e
-        
-        # ==============================================================
-        # PARALLEL DOWNLOAD: Thread-safe stateless download function
-        # ==============================================================
-        # Uses stateless function to avoid race conditions with self.acquire()
-        # which mutates shared state (_current_segment_index, etc.)
-        # ==============================================================
-        
-        def download_segment_stateless(miss_idx: int) -> Tuple[int, List[Optional[Tuple[np.ndarray, float]]]]:
-            """
-            Thread-safe download for a single segment.
-            
-            Uses only static methods and captured local variables.
-            Does NOT call self.acquire() to avoid race conditions.
-            
-            Args:
-                miss_idx: Index into self.transient_segments
-                
-            Returns:
-                (miss_idx, channels): per universal IFO, its samples at the download
-                rate and the GPS time of the first as the source returned it, or None
-                when it could not be had (never zeros).
-            """
-            segment = self.transient_segments[miss_idx]
-            channels = []
-            
-            for ifo in download_ifos_universal:
-                frame_type, channel = BaseDataObtainer.get_frame_channel_for_gps_static(
-                    segment.start_gps_time,
-                    self.frame_types,
-                    self.channels,
-                    self.start_gps_times,
-                    self.end_gps_times
-                )
-                
-                try:
-                    segment_data = BaseDataObtainer.get_segment_data_static(
-                        segment.start_gps_time,
-                        segment.end_gps_time,
-                        ifo,
-                        frame_type,
-                        channel,
-                        sample_rate_hertz=download_sample_rate,
-                    )
-                    if segment_data.sample_rate.value < download_sample_rate:
-                        raise ValueError("source rate below the download rate")
-                    if segment_data.sample_rate.value != download_sample_rate:
-                        segment_data = segment_data.resample(download_sample_rate)
-                    channels.append((np.asarray(segment_data.value), float(segment_data.t0.value)))
-                except Exception as error:
-                    logger.debug(f"No {ifo.name} strain for GPS {segment.transient_gps_time:.3f}: {error}")
-                    channels.append(None)
-            
-            return miss_idx, channels
-        
-        # Execute parallel downloads
-        max_workers = min(32, len(miss_indices))
-        downloaded_segments = {}
-        failed_count = 0
-        
-        # Detect if running in interactive terminal
-        import sys
-        is_interactive = sys.stdout.isatty()
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(download_segment_stateless, idx): idx 
-                for idx in miss_indices
-            }
-            
-            pending = set(futures.keys())
-            
-            if is_interactive and len(futures) > 1:
-                # Multi-progress bar mode for interactive terminals
-                # Main progress bar at position 0
-                main_pbar = tqdm(
-                    total=len(futures),
-                    desc=f"Downloads ({max_workers}w)",
-                    unit="seg",
-                    position=0,
-                    leave=True,
-                    dynamic_ncols=True
-                )
-                # Worker status bars (show up to 8 active workers)
-                worker_pbars = {}
-                next_worker_slot = 0
-                max_worker_bars = min(8, max_workers)
-                
-                for future in as_completed(futures):
-                    pending.discard(future)
-                    idx = futures[future]
-                    
-                    # Clean up worker bar if it exists
-                    if idx in worker_pbars:
-                        slot = worker_pbars.pop(idx)
-                        # Don't close - just mark as done in main bar
-                    
-                    try:
-                        result_idx, event_segment = future.result(timeout=30)
-                        if event_segment is not None:
-                            downloaded_segments[result_idx] = event_segment
-                        else:
-                            failed_count += 1
-                    except Exception as e:
-                        failed_count += 1
-                        logger.debug(f"Download failed for segment {idx}: {e}")
-                    
-                    main_pbar.update(1)
-                    total_done = len(downloaded_segments) + failed_count
-                    success_rate = len(downloaded_segments) / total_done * 100 if total_done > 0 else 0
-                    main_pbar.set_postfix({
-                        'ok': len(downloaded_segments),
-                        'fail': failed_count,
-                        'rate': f'{success_rate:.0f}%',
-                        'active': len(pending)
-                    }, refresh=True)
-                
-                main_pbar.close()
-            else:
-                # Simple single progress bar (for nohup/logs)
-                pbar = tqdm(
-                    total=len(futures),
-                    desc=f"Downloading ({max_workers}w)",
-                    unit="seg",
-                    leave=False,
-                    dynamic_ncols=True
-                )
-                
-                for future in as_completed(futures):
-                    pending.discard(future)
-                    try:
-                        idx, event_segment = future.result(timeout=30)
-                        if event_segment is not None:
-                            downloaded_segments[idx] = event_segment
-                        else:
-                            failed_count += 1
-                    except Exception as e:
-                        idx = futures[future]
-                        failed_count += 1
-                        logger.debug(f"Download failed for segment {idx}: {e}")
-                    
-                    pbar.update(1)
-                    total_done = len(downloaded_segments) + failed_count
-                    success_rate = len(downloaded_segments) / total_done * 100 if total_done > 0 else 0
-                    pbar.set_postfix({
-                        'ok': len(downloaded_segments),
-                        'fail': failed_count,
-                        'rate': f'{success_rate:.0f}%',
-                        'active': len(pending)
-                    }, refresh=True)
-                
-                pbar.close()
-        
-        logger.info(
-            f"Downloaded {len(downloaded_segments)}/{len(miss_indices)} segments "
-            f"({max_workers} workers, {failed_count} failed)"
+        universal = list(TransientDefaults.UNIVERSAL_IFOS)
+        row = universal.index(read.ifo.name)
+        channels = [None] * len(universal)
+        channels[row] = channel
+        onsource_full, offsource_full = self._extract_feature_event(
+            channels, download_rate,
+            int(CACHE_ONSOURCE_DURATION * download_rate), int(CACHE_OFFSOURCE_DURATION * download_rate),
+            read.centre,
         )
-        
-        # ==============================================================
-        # SEQUENTIAL PROCESSING: Extract, cache, and batch results
-        # ==============================================================
-        
-        for miss_idx in miss_indices:
-            segment = self.transient_segments[miss_idx]
-            channels = downloaded_segments.get(miss_idx)
-            if channels is None:
-                self._reject_for_no_data(segment)
-                continue
-
-            # The stored windows, a channel without finite strain stored as NaN: not
-            # held, so a request naming its detector fetches it again (_fill_row).
-            onsource_full, offsource_full = self._extract_feature_event(
-                channels,
-                download_sample_rate,
-                num_cache_onsource,
-                num_cache_offsource,
-                segment.transient_gps_time,
-            )
-            # Get label and append to cache (buffered)
-            label = segment.kind.value if segment.is_glitch else -1
-            
-            # Build metadata dict from segment
-            from .transient_segment import ifos_to_bitmask
-            from ..acquisition.base import DataLabel
+        if not (np.all(np.isfinite(onsource_full[row])) and np.all(np.isfinite(offsource_full[row]))):
+            return None
+        if read.partner:
+            label, metadata = -1, {"data_label": DataLabel.NOISE.value, "seen_in": 0}
+        else:
+            label = record.kind.value if record.is_glitch else -1
             metadata = {
-                'data_label': DataLabel.GLITCHES.value if segment.is_glitch else DataLabel.EVENTS.value,
-                'seen_in': ifos_to_bitmask(segment.seen_in) if segment.seen_in else 0,
-                'snr': segment.snr,
-                'peak_freq': segment.peak_freq,
-                'duration': segment.duration,
-                'ml_confidence': segment.ml_confidence,
-                'mass1': segment.mass1,
-                'mass2': segment.mass2,
-                'distance': segment.distance,
-                'p_astro': segment.p_astro,
+                "data_label": DataLabel.GLITCHES.value if record.is_glitch else DataLabel.EVENTS.value,
+                "seen_in": ifos_to_bitmask(record.seen_in) if record.seen_in else 0,
+                "snr": record.snr,
+                "peak_freq": record.peak_freq,
+                "duration": record.duration,
+                "ml_confidence": record.ml_confidence,
+                "mass1": record.mass1,
+                "mass2": record.mass2,
+                "distance": record.distance,
+                "p_astro": record.p_astro,
             }
-            
-            try:
-                cache.append_single(
-                    np.array(onsource_full),
-                    np.array(offsource_full),
-                    segment.transient_gps_time,
-                    label,
-                    metadata=metadata
-                )
-            except Exception as e:
-                logger.warning(f"Failed to append sample to cache (GPS={segment.transient_gps_time:.3f}): {e}")
+        try:
+            cache.append_single(onsource_full, offsource_full, read.centre, label, metadata=metadata)
+        except Exception as error:
+            logger.warning(f"Failed to store {read.ifo.name} at GPS {read.centre:.3f} in the cache: {error}")
+        onsource, offsource = TransientCache.read_windows(
+            onsource_full[row:row + 1], offsource_full[row:row + 1], download_rate,
+            window_spec.sample_rate_hertz, window_spec.total_onsource_duration_seconds,
+            window_spec.offsource_duration_seconds,
+        )
+        return onsource[0], offsource[0]
 
-            if not (np.all(np.isfinite(onsource_full[output_indices]))
-                    and np.all(np.isfinite(offsource_full[output_indices]))):
-                self._reject_for_no_data(segment)
+    def _fetch_windows(
+        self, caches: Dict[str, Any], pending: List[Tuple[int, List]], window_spec: WindowSpec,
+    ):
+        """
+        Complete the windows of the ``pending`` records ([(index, windows)], each
+        read's cached window or None): download every missing read's span in
+        parallel, store it in its cache, and yield (index, onsource, offsource) for
+        each record whose every read now holds strain. A record with a read that
+        does not is rejected for no data (``_reject_for_no_data``).
+        """
+        from gravyflow.src.dataset.features.glitch_cache import CACHE_SAMPLE_RATE_HERTZ
+        from .gwosc_data import gwosc_sample_rate_hertz
+
+        # Download at the higher of the requested and stored rates (a cache can
+        # downsample, never upsample), refusing a rate no public source holds.
+        download_rate = max(window_spec.sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
+        gwosc_sample_rate_hertz(download_rate)
+
+        def key(record, read):
+            return self._cache_prefix(record, read), read.ifo.name, read.centre
+
+        spans = {}
+        for index, windows in pending:
+            record = self.transient_segments[index]
+            before = record.transient_gps_time - record.start_gps_time
+            after = record.end_gps_time - record.transient_gps_time
+            for read, window in zip(self.transient_reads[index], windows):
+                if window is None:
+                    spans[key(record, read)] = (read.ifo, read.centre - before, read.centre + after)
+        downloaded = self._download(spans, download_rate)
+
+        for index, windows in pending:
+            record = self.transient_segments[index]
+            for d, read in enumerate(self.transient_reads[index]):
+                if windows[d] is None and key(record, read) in downloaded:
+                    windows[d] = self._store_read(
+                        caches[self._cache_prefix(record, read)], record, read,
+                        downloaded[key(record, read)], download_rate, window_spec,
+                    )
+            if any(window is None for window in windows):
+                self._reject_for_no_data(record)
                 continue
-            
-            # This request's windows, as every cache read takes them
-            onsource_cropped, offsource_cropped = TransientCache.read_windows(
-                np.asarray(onsource_full),
-                np.asarray(offsource_full),
-                download_sample_rate,
-                sample_rate_hertz,
-                window_spec.total_onsource_duration_seconds,
-                window_spec.offsource_duration_seconds,
-            )
-            
-            # Slice to requested IFOs
-            onsource_output = onsource_cropped[output_indices, :]
-            offsource_output = offsource_cropped[output_indices, :]
-
-            batch_subarrays.append(onsource_output)
-            batch_backgrounds.append(offsource_output)
-            batch_segments.append(segment)
-            
-            if len(batch_subarrays) >= num_examples_per_batch:
-                # A batch served is cached first: the caller may never resume.
-                cache.flush_write_buffer()
-                yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments, window_spec)
-                batch_subarrays.clear()
-                batch_backgrounds.clear()
-                batch_segments.clear()
-
-        cache.flush_write_buffer()
-
+            yield index, np.stack([on for on, _ in windows]), np.stack([off for _, off in windows])
+        for cache in caches.values():
+            cache.flush_write_buffer()
     def _initialize_transient_cache(
         self,
         ifos: List,
@@ -1114,14 +957,6 @@ class TransientDataObtainer(BaseDataObtainer):
                 crop
             )
         
-        # Use WindowSpec for sample counts (centralized calculation)
-        total_onsource_duration_seconds = window_spec.total_onsource_duration_seconds
-        sample_rate_hertz = window_spec.sample_rate_hertz
-        onsource_duration_seconds = window_spec.onsource_duration_seconds
-        offsource_duration_seconds = window_spec.offsource_duration_seconds
-        num_onsource_samples = window_spec.num_onsource_samples
-        num_offsource_samples = window_spec.num_offsource_samples
-
         # With no group, the split served; a first call names one.
         if group is None and self._served_group is None:
             raise ValueError("Name the split to serve: group='train', 'validate' or 'test'.")
@@ -1129,33 +964,27 @@ class TransientDataObtainer(BaseDataObtainer):
         if self.rng is None:
             self.rng = default_rng(seed)
         
-        # Initialize or retrieve transient caches based on what segments we have
-        # Optimization: if sparse request (few segments), disable chunked mode
+        # The caches the split's reads are stored in. A sparse request (few records)
+        # reads rows from disk rather than loading chunks into memory.
         is_sparse_request = (len(self.transient_segments) < 100) or (self.event_names is not None)
-        enable_chunking = (not is_sparse_request)
-        
-        # Helper to init a specific cache type
-        def ensure_cache(prefix):
-             return self._initialize_transient_cache(
-                ifos, 
-                sample_rate_hertz, 
-                total_onsource_duration_seconds, 
-                offsource_duration_seconds,
-                enable_chunked_mode=enable_chunking,
-                prefix=prefix
-            )
+        caches = {
+            prefix: self._initialize_transient_cache(
+                ifos,
+                window_spec.sample_rate_hertz,
+                window_spec.total_onsource_duration_seconds,
+                window_spec.offsource_duration_seconds,
+                enable_chunked_mode=not is_sparse_request,
+                prefix=prefix,
+            )[0]
+            for prefix in sorted({
+                self._cache_prefix(record, read)
+                for record, reads in zip(self.transient_segments, self.transient_reads)
+                for read in reads
+            })
+        }
 
-        # We might need glitch cache, event cache, or both
-        has_glitches = any(s.is_glitch for s in self.transient_segments)
-        has_events = any(s.is_event for s in self.transient_segments)
-
-        glitch_cache, _ = ensure_cache("glitch") if has_glitches else (None, None)
-        event_cache, _ = ensure_cache("event") if has_events else (None, None)
-        
-        # Build batches: cache hits served instantly, misses downloaded in parallel
         rng = default_rng(seed)
         n_segments = len(self.transient_segments)
-        
         if n_segments == 0:
             raise ValueError("No transient segments available for iteration.")
 
@@ -1173,6 +1002,36 @@ class TransientDataObtainer(BaseDataObtainer):
         else:
             rng.shuffle(order)
 
+        batch_subarrays, batch_backgrounds, batch_indices = [], [], []
+
+        def add(index, onsource, offsource):
+            """Add one example; the batch, once full."""
+            batch_subarrays.append(onsource)
+            batch_backgrounds.append(offsource)
+            batch_indices.append(index)
+            if len(batch_subarrays) < num_examples_per_batch:
+                return None
+            batch = self._prepare_batch(
+                batch_subarrays, batch_backgrounds,
+                [self.transient_segments[i] for i in batch_indices],
+                [self.transient_reads[i] for i in batch_indices],
+                window_spec,
+            )
+            batch_subarrays.clear()
+            batch_backgrounds.clear()
+            batch_indices.clear()
+            return _post_process(batch)
+
+        def fetch(pending):
+            """The batches the pending records complete, each cached before it is served."""
+            for index, onsource, offsource in self._fetch_windows(caches, pending, window_spec):
+                batch = add(index, onsource, offsource)
+                if batch is not None:
+                    # A batch served is cached first: the caller may never resume.
+                    for cache in caches.values():
+                        cache.flush_write_buffer()
+                    yield batch
+
         while True:
             servable = np.array([
                 index for index in order
@@ -1189,133 +1048,36 @@ class TransientDataObtainer(BaseDataObtainer):
                 probs = weights[servable] / weights[servable].sum()
                 segment_indices = rng.choice(servable, size=len(servable), replace=True, p=probs)
 
-            # DON'T shuffle here - keep deterministic order for cache hits
-            batch_subarrays = []
-            batch_backgrounds = []
-            batch_segments = []
-            
-            # Track which indices need downloading
-            miss_indices = []
-            
-            # Progress bar for batch assembly
-            pbar = tqdm(
-                segment_indices, 
-                desc="Assembling batches",
-                unit="seg",
-                leave=False,
-                dynamic_ncols=True
-            )
-            
-            for seg_idx in pbar:
-                # Update progress bar description with cache stats
-                total = self._cache_hit_count + self._cache_miss_count
-                if total > 0:
-                    hit_rate = self._cache_hit_count / total * 100
-                    pbar.set_postfix({
-                        'hits': self._cache_hit_count,
-                        'misses': self._cache_miss_count,
-                        'hit%': f'{hit_rate:.0f}'
-                    })
-                # Get TransientSegment (has GPS key and times)
-                segment = self.transient_segments[seg_idx]
-                if segment.transient_gps_time in self._unavailable:  # found unavailable earlier this pass
+            # Cache hits are served at once, in order; records with a read the
+            # caches do not hold are fetched a batch at a time.
+            pending = []
+            for index in tqdm(segment_indices, desc="Assembling batches", unit="seg",
+                              leave=False, dynamic_ncols=True):
+                record = self.transient_segments[index]
+                if record.transient_gps_time in self._unavailable:  # found unavailable this pass
                     continue
-                
-                # Select appropriate cache
-                active_cache = event_cache if segment.is_event else glitch_cache
-                
-                # Cache lookup (memory -> disk -> miss) using appropriate cache
-                # Skip if force_acquisition is True or cache is not initialized
-                onsource, offsource, source = None, None, 'miss'
-                
-                if active_cache is not None and not self.force_acquisition:
-                    # Use GPS time from segment (no recalculation!)
-                    onsource, offsource, source = self._get_sample_from_cache(
-                        active_cache,
-                        segment.transient_gps_time,
-                        sample_rate_hertz,
-                        total_onsource_duration_seconds,
-                        offsource_duration_seconds,
-                        target_ifos=[i.name for i in ifos]  # Select specific IFOs from cache
-                    )
-
-                # A row without a requested detector's strain does not hold it (a
-                # fetch failed, or it was never requested): a miss, fetched again.
-                if (source != 'miss' and onsource is not None
-                        and np.all(np.isfinite(onsource)) and np.all(np.isfinite(offsource))):
-                    # Cache hit (chunk or disk) with valid data
-                    batch_subarrays.append(onsource)
-                    batch_backgrounds.append(offsource)
-                    batch_segments.append(segment)
-                    self._cache_hit_count += 1
-                    
-                    # Log periodically (every 1000 samples)
-                    total_samples = self._cache_hit_count + self._cache_miss_count
-                    if total_samples - self._last_log_count >= 1000:
-                        hit_rate = self._cache_hit_count / total_samples * 100
-                        logger.info(f"Cache stats: {self._cache_hit_count} hits, {self._cache_miss_count} misses ({hit_rate:.1f}% hit rate)")
-                        self._last_log_count = total_samples
-                    
-                    if len(batch_subarrays) >= num_examples_per_batch:
-                        yield _post_process(self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments, window_spec))
-                        batch_subarrays = []
-                        batch_backgrounds = []
-                        batch_segments = []
+                windows = self._cached_windows(caches, record, self.transient_reads[index], window_spec)
+                if all(window is not None for window in windows):
+                    batch = add(index, np.stack([on for on, _ in windows]),
+                                np.stack([off for _, off in windows]))
+                    if batch is not None:
+                        yield batch
                     continue
-                
-                # Cache miss, or a row not holding a requested detector - download
-                miss_indices.append(seg_idx)
-                self._cache_miss_count += 1
-                
-                # Download in batches for efficiency
-                if len(miss_indices) >= num_examples_per_batch:
-                    # Determine cache to use for this batch (assuming mixed types handled by helpers)
-                    # NOTE: The _process_cache_misses helper takes a single 'cache' arg.
-                    # Since we might have mixed types in miss_indices, we need to handle that.
-                    # Simplification: Splitting miss_indices by type is complex inside the loop.
-                    # HOWEVER, _process_cache_misses writes to 'cache'.
-                    # Solution: Call process twice? Or make process handle it?
-                    # For now, let's group miss_indices by type.
-                    
-                    # Group indices by type (event vs glitch)
-                    event_misses = [idx for idx in miss_indices if self.transient_segments[idx].is_event]
-                    glitch_misses = [idx for idx in miss_indices if self.transient_segments[idx].is_glitch]
-                    
-                    if event_misses and event_cache:
-                         for batch in self._process_cache_misses(
-                            event_misses, ifos, window_spec, event_cache, 
-                            batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
-                        ):
-                            yield _post_process(batch)
-                         
-                    if glitch_misses and glitch_cache:
-                         for batch in self._process_cache_misses(
-                            glitch_misses, ifos, window_spec, glitch_cache, 
-                            batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
-                        ):
-                            yield _post_process(batch)
-                    
-                    miss_indices = []
+                pending.append((index, windows))
+                if len(pending) >= num_examples_per_batch:
+                    yield from fetch(pending)
+                    pending = []
+            yield from fetch(pending)
 
-            # Handle remaining miss_indices after for loop ends
-            if len(miss_indices) > 0:
-                    event_misses = [idx for idx in miss_indices if self.transient_segments[idx].is_event]
-                    glitch_misses = [idx for idx in miss_indices if self.transient_segments[idx].is_glitch]
-                    
-                    if event_misses and event_cache:
-                         for batch in self._process_cache_misses(
-                            event_misses, ifos, window_spec, event_cache, 
-                            batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
-                        ):
-                            yield _post_process(batch)
-
-                    if glitch_misses and glitch_cache:
-                         for batch in self._process_cache_misses(
-                            glitch_misses, ifos, window_spec, glitch_cache, 
-                            batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
-                        ):
-                            yield _post_process(batch)
-
-            # Yield any remaining partial batch at end of epoch
-            if len(batch_subarrays) > 0:
-                yield _post_process(self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments, window_spec))
+            # The partial batch left at the end of a pass
+            if batch_subarrays:
+                batch = self._prepare_batch(
+                    batch_subarrays, batch_backgrounds,
+                    [self.transient_segments[i] for i in batch_indices],
+                    [self.transient_reads[i] for i in batch_indices],
+                    window_spec,
+                )
+                batch_subarrays.clear()
+                batch_backgrounds.clear()
+                batch_indices.clear()
+                yield _post_process(batch)

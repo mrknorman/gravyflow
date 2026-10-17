@@ -90,11 +90,29 @@ def test_each_window_once(world, tmp_path, layout):
     assert separation >= 2 * FOOTPRINT_SECONDS, f"H1 and L1 read {separation} s apart in GRID"
 
 
-def _glitch_world(tmp_path, glitch_ifo="L1"):
+#: The span a transient's record reads, each side of its centre.
+TRANSIENT_HALF_SPAN_SECONDS = 48.2
+#: How far a partner's centre lies from the transient's at least: two spans.
+PARTNER_SEPARATION_SECONDS = 4 * TRANSIENT_HALF_SPAN_SECONDS
+
+
+def _glitch_world(glitch_ifo="L1"):
+    """
+    A ``glitch_ifo``-only glitch at ``peak``, both detectors in data over
+    [peak - 400, peak + 400] of one train block; the other detector has a 60 s gap
+    and a glitch of its own where a partner could otherwise go.
+    """
+    other = "H1" if glitch_ifo == "L1" else "L1"
     edge = fx.boundary("O3", "train", "train", skip=3)
     peak = edge + 1000.0
     fixture = fx._fixture([(peak - 400.0, peak + 400.0)], 4096.0, "O3", ("O3",))
-    rows = [GlitchRecord(glitch_ifo, peak, peak - 0.5, 1.0, "Blip", 0.95)]
+    segments = dict(fixture.segments)
+    segments[other] = np.array([(peak - 400.0, peak + 200.0), (peak + 260.0, peak + 400.0)])
+    fixture = fx.Fixture(fixture.encoding, segments, "O3", ("O3",))
+    rows = [
+        GlitchRecord(glitch_ifo, peak, peak - 0.5, 1.0, "Blip", 0.95),
+        GlitchRecord(other, peak - 260.0, peak - 260.5, 1.0, "Blip", 0.95),
+    ]
     return fixture.with_catalogues(glitches=rows), peak
 
 
@@ -130,25 +148,53 @@ def _glitch_batch(world, tmp_path, fixture):
 
 def test_glitch_detectors_never_coincide(world, tmp_path):
     """An L1-only glitch over [H1, L1]: H1 is read at least two footprints away."""
-    fixture, peak = _glitch_world(tmp_path)
+    fixture, peak = _glitch_world()
     record, _, _ = _glitch_batch(world, tmp_path, fixture)
-    separation = float(np.abs(np.diff(record.footprints[0, :, 0])) / 4096.0)
+    separation = float(np.abs(np.diff(record.footprints[0, :, 0]))[0] / 4096.0)
     assert separation >= 2 * FOOTPRINT_SECONDS, f"H1 and L1 read {separation} s apart"
 
 
-def test_partner_windows(world, tmp_path):
+def _inside(span, segments):
+    return any(a <= span[0] and span[1] <= b for a, b in segments)
+
+
+def _meets(span, extents):
+    return any(span[0] < b and a < span[1] for a, b in extents)
+
+
+@pytest.mark.parametrize("glitch_ifo", ["L1", "H1"])
+def test_partner_windows(world, tmp_path, glitch_ifo):
     """
-    An L1-only glitch over [H1, L1]: H1 gets a partner window away from the glitch,
-    labelled NOISE, with L1 labelled GLITCH; no H1 fetch overlaps the L1 window; and
-    two builds choose the same partner.
+    A one-detector glitch over [H1, L1]: the other detector gets a partner window,
+    read whole in its own data and the record's split, away from the glitch and from
+    the other detector's own glitches, labelled NOISE beside the GLITCH; each
+    detector's START_GPS_TIME is its own decoded window; and two builds (separate
+    caches) choose the same partner.
     """
-    fixture, peak = _glitch_world(tmp_path)
-    first, labels, fetches = _glitch_batch(world, tmp_path, fixture)
-    second, _, _ = _glitch_batch(world, tmp_path, fixture)
-    h1_start = first.footprints[0, 0, 0] / 4096.0
-    l1 = first.footprints[0, 1] / 4096.0
-    assert abs(h1_start - l1[0]) >= 2 * FOOTPRINT_SECONDS, "H1 is read at the glitch's time"
-    assert labels.tolist() == [[0.0, 1.0]], f"labels {labels.tolist()}, expected [NOISE, GLITCH]"
-    assert np.array_equal(first.footprints, second.footprints)
-    h1_fetches = [(f.first / 4096.0, f.stop / 4096.0) for f in fetches if f.ifo == "H1"]
-    assert all(b <= l1[0] or a >= l1[1] for a, b in h1_fetches), "an H1 fetch covers the L1 window"
+    fixture, peak = _glitch_world(glitch_ifo)
+    other = "H1" if glitch_ifo == "L1" else "L1"
+    g, p = IFOS.index(glitch_ifo), IFOS.index(other)
+    first, labels, fetches = _glitch_batch(world, tmp_path / "first", fixture)
+    second, _, _ = _glitch_batch(world, tmp_path / "second", fixture)
+
+    seconds = first.seconds()[0]
+    assert abs(seconds[p, 0] - seconds[g, 0]) >= 2 * FOOTPRINT_SECONDS, f"{other} is read at the glitch's time"
+    expected = [0.0, 0.0]
+    expected[g] = 1.0
+    assert labels.tolist() == [expected], f"labels {labels.tolist()}, expected {expected} (NOISE, GLITCH)"
+    decoded_start = seconds[:, 0] + fx.OFFSOURCE_SECONDS + fx.CROP_SECONDS
+    np.testing.assert_allclose(first.start_labels[0], decoded_start, atol=1 / 256.0,
+                               err_msg="START_GPS_TIME is not each detector's own window")
+    assert np.array_equal(first.footprints, second.footprints), "two builds chose different partners"
+
+    glitch_span = (peak - TRANSIENT_HALF_SPAN_SECONDS, peak + TRANSIENT_HALF_SPAN_SECONDS)
+    reads = [(f.start, f.end) for f in fetches if f.ifo == other]
+    assert reads, f"no {other} fetch"
+    own_glitches = [row.extent for row in fixture.glitches if row.ifo == other]
+    for span in reads:
+        assert not _meets(span, [glitch_span]), f"an {other} fetch {span} meets the glitch's span"
+        assert _inside(span, fixture.segments[other]), f"the {other} fetch {span} leaves its data"
+        assert not _meets(span, own_glitches), f"the {other} fetch {span} meets an {other} glitch"
+        assert gf.DEFAULT_SPLIT.assign(*span) == "train", f"the {other} fetch {span} leaves the split"
+        centre = (span[0] + span[1]) / 2.0
+        assert abs(centre - peak) >= PARTNER_SEPARATION_SECONDS, f"{other} read at {centre - peak:+.1f} s"

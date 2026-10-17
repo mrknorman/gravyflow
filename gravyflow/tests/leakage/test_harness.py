@@ -64,11 +64,12 @@ def _train_record_time(start):
 def test_transient_round_trip_decodes_every_sample(world, tmp_path):
     """
     Glitch windows, fetched at 4096 Hz and thinned by stride to 256 Hz, decode
-    exactly, and each padded onsource is centred on its own glitch.
+    exactly; the padded onsource of the detector a glitch was seen in is centred on
+    it, and the other detector's on a partner time away from it.
     """
     edge = fx.boundary("O3", "train", "train", skip=3)
     peaks = np.array([_train_record_time(edge + 1000.0), _train_record_time(edge + 3000.0)])
-    fixture = fx._fixture([(t - 50.0, t + 50.0) for t in peaks], 4096.0, "O3", ("O3",))
+    fixture = fx._fixture([(t - 400.0, t + 400.0) for t in peaks], 4096.0, "O3", ("O3",))
     fixture = fixture.with_catalogues(glitches=[
         GlitchRecord("H1", peaks[0], peaks[0] - 0.5, 1.0, "Blip", 0.95),
         GlitchRecord("L1", peaks[1], peaks[1] - 0.5, 1.0, "Blip", 0.95),
@@ -97,9 +98,11 @@ def test_transient_round_trip_decodes_every_sample(world, tmp_path):
     padded_end = record.footprints[..., 1] / 4096.0
     centres = padded_end - (fx.ONSOURCE_SECONDS / 2 + fx.CROP_SECONDS)
     assert record.num_examples == 2
-    assert sorted(np.unique(centres)) == sorted(peaks)
-    # Both detectors of one example are read over the same window.
-    assert np.all(centres[:, 0] == centres[:, 1])
+    # The H1 glitch on H1 (column 0), the L1 glitch on L1 (column 1).
+    seen = [int(np.argmin(np.abs(centres[:, 0] - peaks[0]))), int(np.argmin(np.abs(centres[:, 1] - peaks[1])))]
+    assert sorted([centres[seen[0], 0], centres[seen[1], 1]]) == sorted(peaks)
+    # The other detector of each example is read two record spans away.
+    assert np.all(np.abs(centres[:, 0] - centres[:, 1]) >= 4 * 48.2)
 
 
 # =============================================================================

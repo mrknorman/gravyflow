@@ -231,7 +231,6 @@ class TransientDefaults:
     
     These constants are used throughout the transient pipeline:
     - Cache storage parameters
-    - Download clustering limits
     - Segment padding
     - Batch save thresholds
     - Logging intervals
@@ -259,18 +258,6 @@ class TransientDefaults:
     
     # Epsilon buffer for segment boundary trimming
     SEGMENT_BOUNDARY_BUFFER: float = 0.2
-    
-    # ==========================================================================
-    # DOWNLOAD CLUSTERING
-    # ==========================================================================
-    # Maximum segment duration for clustered downloads (prevents OOM)
-    MAX_SEGMENT_SECONDS: float = 512.0
-    
-    # Network download overhead estimate (seconds per request)
-    REQUEST_OVERHEAD_SECONDS: float = 15.0
-    
-    # Data download rate for estimation (seconds per second of data)
-    DATA_DOWNLOAD_RATE: float = 0.01
     
     # ==========================================================================
     # BATCH THRESHOLDS
