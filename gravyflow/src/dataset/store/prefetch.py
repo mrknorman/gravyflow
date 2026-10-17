@@ -6,7 +6,7 @@ split ever waits on, or is served, another's reads. It computes the same pure fu
 of an address that the caller would, only earlier: a batch is equal at depth 0 or any
 depth, on one thread or eight, and a read that fails in the background fails again,
 by the same name, when its batch is asked for. Its threads are ``gfstore-prefetch-*``
-(``store.pools``), so ``gf.store.shutdown()`` stops them, as it does at exit; every
+(``store.pools``), so ``store.shutdown()`` stops them, as it does at exit; every
 wait for a read ahead is bounded and refuses by name.
 """
 
@@ -34,7 +34,7 @@ class Prefetcher(Generic[T]):
     ``compute(address)``, read ahead: ``get(address, ahead)`` returns it, from the read
     started for it when there was one, and starts the reads of the first ``depth`` of
     ``ahead``. Reads started for addresses no longer ahead are cancelled, so at most
-    ``depth`` run or wait at once. Once ``gf.store.shutdown()`` has stopped its threads
+    ``depth`` run or wait at once. Once ``store.shutdown()`` has stopped its threads
     it reads nothing ahead, and computes each address when it is asked for.
     """
 

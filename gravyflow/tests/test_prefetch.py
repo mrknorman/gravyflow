@@ -3,7 +3,7 @@ Reading ahead (``store.prefetch``): a ``Prefetcher`` computes the same pure func
 an address the caller would, only earlier, on ``gfstore-prefetch-*`` threads. Its result
 is equal at any depth and on any number of threads; a read ahead that fails fails again,
 by the same name, when its address is asked for; reads no longer ahead are cancelled;
-every wait is bounded; and once ``gf.store.shutdown()`` stops its threads it reads each
+every wait is bounded; and once ``store.shutdown()`` stops its threads it reads each
 address when asked, starting none.
 """
 
