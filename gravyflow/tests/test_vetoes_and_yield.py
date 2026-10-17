@@ -639,15 +639,6 @@ class TestSamplingDensity:
         assert separable([(0.0, 6.0)] * 3, 3.0)
         assert not separable([(0.0, 5.0)] * 3, 3.0)
 
-    def test_a_tight_row_draws_separated_windows_without_end(self):
-        # Pieces whose starts can be separated only near their ends: rejection alone
-        # rarely finds a pair; the constructive draw always does when one exists.
-        from gravyflow.src.dataset.acquisition.base import separated_starts
-        rng = np.random.default_rng(1)
-        starts = separated_starts(rng, [(0, 100), (0, 100)], [0.0, 0.0], 95.0, 1000)
-        assert len(starts) > 0
-        assert np.all(np.abs(starts[:, 0] - starts[:, 1]) >= 95)
-
 
 class _RecordingFetch:
     """Fake fetch_open_data: records the requested span; returns a ramp."""

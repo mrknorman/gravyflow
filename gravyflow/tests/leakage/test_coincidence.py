@@ -90,6 +90,44 @@ def test_each_window_once(world, tmp_path, layout):
     assert separation >= 2 * FOOTPRINT_SECONDS, f"H1 and L1 read {separation} s apart in GRID"
 
 
+#: Rows for the constructive draw, as (bounds, origins in samples, separation in samples):
+#: two detectors on one piece whose starts can be separated only near its ends (rejection
+#: alone rarely finds a pair), and three detectors on offset pieces.
+TIGHT_ROWS = {
+    "one piece": ([(0, 100), (0, 100)], [0.0, 0.0], 95.0),
+    "offset pieces": ([(0, 1000), (0, 1000), (0, 1000)], [0.0, 250.0, -130.0], 300.0),
+}
+
+
+@pytest.mark.parametrize("draws", [0, None], ids=["constructed only", "after rejection draws"])
+@pytest.mark.parametrize("row", list(TIGHT_ROWS))
+def test_constructed_starts_keep_the_separation(monkeypatch, row, draws):
+    """
+    RANDOM places a detector's start constructively, from the starts far enough from
+    the others', once its rejection draws keep conflicting; those starts keep the
+    whole separation. Driven directly: with no rejection draws (every conflicting
+    example constructed), and after the library's draws on tight rows.
+    """
+    from gravyflow.src.dataset.acquisition import base
+
+    constructed = []
+    allowed_draw = base._allowed_draw
+
+    def counting(*args):
+        constructed.append(allowed_draw(*args))
+        return constructed[-1]
+
+    monkeypatch.setattr(base, "_allowed_draw", counting)
+    if draws is not None:
+        monkeypatch.setattr(base, "SEPARATION_DRAWS", draws)
+    bounds, origins, separation = TIGHT_ROWS[row]
+    starts = base.separated_starts(np.random.default_rng(1), bounds, origins, separation, 2000)
+    assert len(starts) > 0 and sum(start is not None for start in constructed) >= 50
+    clock = starts + np.asarray(origins)
+    gaps = [np.min(np.abs(clock[:, i] - clock[:, j])) for i, j in itertools.combinations(range(len(bounds)), 2)]
+    assert min(gaps) >= separation, f"constructed starts {min(gaps)} samples apart, under {separation}"
+
+
 #: The span a transient's record reads, each side of its centre.
 TRANSIENT_HALF_SPAN_SECONDS = 48.2
 #: How far a partner's centre lies from the transient's at least: two spans.

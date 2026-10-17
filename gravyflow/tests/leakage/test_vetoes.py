@@ -121,17 +121,42 @@ def _footprints(found, guard=0.0):
             for e in found]
 
 
+def _in_a_split(t):
+    """Whether a glitch at ``t`` is in a split by the golden table: its footprint half the guard from any other."""
+    reach = FOOTPRINT_AFTER + fx.GUARD_SECONDS / 2.0
+    table = fx.golden_blocks("O3")
+    return len({table[k] for k in range(fx.block_of("O3", t - reach), fx.block_of("O3", t + reach) + 1)}) == 1
+
+
+def _guard_neighbours(found):
+    """
+    The times of Blips just outside events' footprints, in a split: each Blip's
+    footprint (48.2 s each side) lies within the guard of an event's footprint and
+    meets none.
+    """
+    footprints = _footprints(found)
+    times = []
+    for start, end in footprints:
+        for t in (end + 2 * FOOTPRINT_AFTER + 30.0, start - 2 * FOOTPRINT_AFTER - 30.0):
+            if _in_a_split(t) and not any(t - FOOTPRINT_AFTER < b and a < t + FOOTPRINT_AFTER
+                                          for a, b in footprints):
+                times.append(t)
+    return times
+
+
 def _event_world():
     """
-    Events and their companion glitches around each edge (``fx.events``), noise beyond
-    them (each event's footprint and guard reach 985 s from the edge), and Blips there,
-    1150 s and 1250 s from each edge in each detector.
+    Events and their companion glitches around each edge (``fx.events``); Blips in the
+    guard of the events' footprints (``_guard_neighbours``); noise beyond them (each
+    event's footprint and guard reach 985 s from the edge), and Blips there, 1150 s
+    and 1250 s from each edge. Each Blip is in both detectors.
     """
     fixture, edges = fx.two_splits_per_run(("O3",), half_width=1400.0, origin="O3")
     found, companions = fx.events(edges)
-    far = [GlitchRecord(ifo, edge + side * distance, edge + side * distance - 0.5, 1.0, "Blip", 0.95)
-           for edge in edges for side in (-1.0, 1.0) for distance in (1150.0, 1250.0) for ifo in IFOS]
-    return fixture.with_catalogues(glitches=companions + tuple(far), events=found), found
+    times = _guard_neighbours(found) + [edge + side * distance for edge in edges for side in (-1.0, 1.0)
+                                        for distance in (1150.0, 1250.0)]
+    blips = [GlitchRecord(ifo, t, t - 0.5, 1.0, "Blip", 0.95) for t in times for ifo in IFOS]
+    return fixture.with_catalogues(glitches=companions + tuple(blips), events=found), found
 
 
 def _glitch_footprints(fixture, split):
@@ -151,6 +176,8 @@ def test_events_vetoed_with_their_guard(world, tmp_path):
     no glitch served outside test comes within it, and none served in test meets it.
     """
     fixture, found = _event_world()
+    neighbours = [fx.golden_split("O3", t - FOOTPRINT_AFTER, t + FOOTPRINT_AFTER) for t in _guard_neighbours(found)]
+    assert {"train", "validate", "test"} <= set(neighbours), "a split has no glitch in an event's guard"
     _check_noise_avoids(world, tmp_path, fixture, _footprints(found, fx.GUARD_SECONDS))
     with world(fixture):
         glitches = {split: _glitch_footprints(fixture, split) for split in SPLITS}
