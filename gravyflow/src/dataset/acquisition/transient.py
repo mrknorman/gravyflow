@@ -219,7 +219,8 @@ class TransientDataObtainer(BaseDataObtainer):
                 # Add noise perturbation
                 data_np = ops.convert_to_numpy(data)
                 noise = self.rng.normal(0, aug.amplitude, data_np.shape)
-                std = np.std(data_np)
+                # In float64: the square of strain (~1e-42) is below float32's normal range.
+                std = np.std(data_np, dtype=np.float64)
                 noise = noise * std if std > 0 else noise
                 data = ops.convert_to_tensor(data_np + noise, dtype=data.dtype)
         
@@ -320,7 +321,6 @@ class TransientDataObtainer(BaseDataObtainer):
         sample_rate_hertz: float,
         onsource_duration: float,
         offsource_duration: float,
-        scale_factor: float = 1.0,
         target_ifos: Optional[List[str]] = None,
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
         """
@@ -344,7 +344,7 @@ class TransientDataObtainer(BaseDataObtainer):
             result = cache.get_from_chunk(idx, target_ifos=target_ifos)
             if result is not None:
                 onsource, offsource, _, _ = result
-                return onsource * scale_factor, offsource * scale_factor, 'chunk'
+                return onsource, offsource, 'chunk'
 
         try:
             ons, off, _, _ = cache.get_batch(
@@ -354,7 +354,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 offsource_duration=offsource_duration,
                 target_ifos=target_ifos
             )
-            return ons[0] * scale_factor, off[0] * scale_factor, 'disk'
+            return ons[0], off[0], 'disk'
         except (ValueError, KeyError):
             # Request parameters incompatible or IFO missing
             return None, None, 'miss'
@@ -646,7 +646,6 @@ class TransientDataObtainer(BaseDataObtainer):
         miss_indices: List[int],
         ifos: List,
         window_spec: WindowSpec,
-        scale_factor: float,
         cache,
         batch_subarrays: List,
         batch_backgrounds: List,
@@ -664,7 +663,6 @@ class TransientDataObtainer(BaseDataObtainer):
             miss_indices: List of segment indices that need downloading
             ifos: List of IFOs to download
             window_spec: The windows requested
-            scale_factor: Amplitude scale factor
             cache: DiskCache instance for storing/retrieving
             batch_subarrays: Accumulated onsource arrays (mutated)
             batch_backgrounds: Accumulated offsource arrays (mutated)
@@ -930,8 +928,8 @@ class TransientDataObtainer(BaseDataObtainer):
             onsource_output = onsource_cropped[output_indices, :]
             offsource_output = offsource_cropped[output_indices, :]
 
-            batch_subarrays.append(onsource_output * scale_factor)
-            batch_backgrounds.append(offsource_output * scale_factor)
+            batch_subarrays.append(onsource_output)
+            batch_backgrounds.append(offsource_output)
             batch_segments.append(segment)
             
             if len(batch_subarrays) >= num_examples_per_batch:
@@ -1046,7 +1044,6 @@ class TransientDataObtainer(BaseDataObtainer):
             offsource_duration_seconds: float = None,
             num_examples_per_batch: int = None,
             ifos: List[gf.IFO] = None,
-            scale_factor: float = None,
             seed: int = None,
             sampling_mode: SamplingMode = SamplingMode.RANDOM,
             whiten: bool = False,
@@ -1065,7 +1062,6 @@ class TransientDataObtainer(BaseDataObtainer):
             offsource_duration_seconds: Background window duration
             num_examples_per_batch: Batch size
             ifos: List of interferometers
-            scale_factor: Amplitude scaling factor
             seed: Random seed
             sampling_mode: RANDOM or GRID sampling
         """
@@ -1080,7 +1076,6 @@ class TransientDataObtainer(BaseDataObtainer):
         # Apply remaining defaults (not in WindowSpec)
         ifos = ensure_list(ifos) or [gf.IFO.L1]
         num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
-        scale_factor = scale_factor or gf.Defaults.scale_factor
         seed = gf.src.rng.check_root(seed if seed is not None else gf.Defaults.seed)
 
         # Use shared post-processing from base class
@@ -1089,7 +1084,6 @@ class TransientDataObtainer(BaseDataObtainer):
                 batch, 
                 window_spec.sample_rate_hertz, 
                 window_spec.onsource_duration_seconds,
-                scale_factor,
                 whiten, 
                 crop
             )
@@ -1216,7 +1210,6 @@ class TransientDataObtainer(BaseDataObtainer):
                         sample_rate_hertz,
                         total_onsource_duration_seconds,
                         offsource_duration_seconds,
-                        scale_factor,
                         target_ifos=[i.name for i in ifos]  # Select specific IFOs from cache
                     )
 
@@ -1264,14 +1257,14 @@ class TransientDataObtainer(BaseDataObtainer):
                     
                     if event_misses and event_cache:
                          for batch in self._process_cache_misses(
-                            event_misses, ifos, window_spec, scale_factor, event_cache, 
+                            event_misses, ifos, window_spec, event_cache, 
                             batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
                         ):
                             yield _post_process(batch)
                          
                     if glitch_misses and glitch_cache:
                          for batch in self._process_cache_misses(
-                            glitch_misses, ifos, window_spec, scale_factor, glitch_cache, 
+                            glitch_misses, ifos, window_spec, glitch_cache, 
                             batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
                         ):
                             yield _post_process(batch)
@@ -1285,14 +1278,14 @@ class TransientDataObtainer(BaseDataObtainer):
                     
                     if event_misses and event_cache:
                          for batch in self._process_cache_misses(
-                            event_misses, ifos, window_spec, scale_factor, event_cache, 
+                            event_misses, ifos, window_spec, event_cache, 
                             batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
                         ):
                             yield _post_process(batch)
 
                     if glitch_misses and glitch_cache:
                          for batch in self._process_cache_misses(
-                            glitch_misses, ifos, window_spec, scale_factor, glitch_cache, 
+                            glitch_misses, ifos, window_spec, glitch_cache, 
                             batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
                         ):
                             yield _post_process(batch)

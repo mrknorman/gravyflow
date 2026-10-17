@@ -255,7 +255,6 @@ class NoiseDataObtainer(BaseDataObtainer):
             batches_per_start_second: float,
             sample_rate_hertz: float,
             ifos: List[gf.IFO],
-            scale_factor: float,
         ):
         """
         Passes over ``plan``, without end: each due row's pieces, its loaded segment
@@ -281,7 +280,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             for row, num_batches in zip(plan.rows, due):
                 if num_batches == 0:
                     continue
-                for segment in self.acquire(sample_rate_hertz, row[None], ifos, scale_factor):
+                for segment in self.acquire(sample_rate_hertz, row[None], ifos):
                     loaded = True
                     yield row, segment, num_batches
             if not loaded:
@@ -512,7 +511,6 @@ class NoiseDataObtainer(BaseDataObtainer):
             offsource_duration_seconds: float = None,
             num_examples_per_batch: int = None,
             ifos: List[gf.IFO] = None,
-            scale_factor: float = None,
             seed: int = None,
             sampling_mode: SamplingMode = SamplingMode.RANDOM,
             whiten: bool = False,
@@ -531,7 +529,6 @@ class NoiseDataObtainer(BaseDataObtainer):
             offsource_duration_seconds: Background window duration
             num_examples_per_batch: Batch size
             ifos: List of interferometers
-            scale_factor: Amplitude scaling factor
             seed: Random seed
             sampling_mode: RANDOM or GRID sampling
             group: The split served (see _serve_group); None serves the
@@ -548,7 +545,6 @@ class NoiseDataObtainer(BaseDataObtainer):
         # Apply remaining defaults (not in WindowSpec)
         ifos = ensure_list(ifos) or [gf.IFO.L1]
         num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
-        scale_factor = scale_factor or gf.Defaults.scale_factor
         seed = gf.src.rng.check_root(seed if seed is not None else gf.Defaults.seed)
 
         # Use shared post-processing from base class
@@ -557,7 +553,6 @@ class NoiseDataObtainer(BaseDataObtainer):
                 batch, 
                 window_spec.sample_rate_hertz, 
                 window_spec.onsource_duration_seconds,
-                scale_factor,
                 whiten, 
                 crop
             )
@@ -611,8 +606,7 @@ class NoiseDataObtainer(BaseDataObtainer):
                         self.sampling_plan,
                         batches_per_start_second,
                         window_spec.sample_rate_hertz,
-                        ifos,
-                        scale_factor
+                        ifos
                     )
                 
                 try:

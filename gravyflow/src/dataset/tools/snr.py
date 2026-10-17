@@ -27,6 +27,7 @@ from gravyflow.src.dataset.tools.psd import (
     PowerSpectrum, SpectralConfig, estimate_psd
 )
 from gravyflow.src.utils.tensor import crop_samples, replace_nan_and_inf_with_zero
+from gravyflow.src.rng.legacy import warn_deprecated
 
 
 @jax.jit(static_argnames=["scalar"])
@@ -156,7 +157,8 @@ def scale_to_snr(
         onsource_duration_seconds: Optional[float] = None,
         upper_frequency_cutoff: Optional[float] = None,
         psd_method: Optional[str] = None,
-        return_scale_factor: bool = False,
+        return_factor: bool = False,
+        return_scale_factor: Optional[bool] = None,
     ):
     """
     Scale each example of `injection` to `desired_snr`, measured with `snr()` on
@@ -165,9 +167,13 @@ def scale_to_snr(
 
     Each example is scaled by its own factor: (B, I, T) and (B, T) inputs take
     (B,) targets. An example with no power in the band gets the factor 0, never
-    a division by zero. With return_scale_factor, returns (scaled, factor) with
+    a division by zero. With return_factor, returns (scaled, factor) with
     the factor k applied to each example, shaped like the SNR (for example (B,)).
+    ``return_scale_factor`` is its deprecated name.
     """
+    if return_scale_factor is not None:
+        warn_deprecated("scale_to_snr(return_scale_factor=)", "pass return_factor=")
+        return_factor = return_scale_factor
     spectrum = _spectrum_for(
         background, sample_rate_hertz, fft_duration_seconds, overlap_duration_seconds,
         lower_frequency_cutoff, upper_frequency_cutoff, psd_method,
@@ -189,7 +195,7 @@ def scale_to_snr(
     factor = ops.where(current_snr > 0, desired_snr / ops.where(current_snr > 0, current_snr, 1.0), 0.0)
 
     scaled = injection * factor if rank == 1 else injection * _expand_like(factor, rank)
-    if return_scale_factor:
+    if return_factor:
         return scaled, factor
     return scaled
 

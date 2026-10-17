@@ -52,8 +52,10 @@ def test_networks_are_built_from_the_datasets_detectors():
     injections = np.asarray(inputs["INJECTIONS"])
     injections = injections[:, 0]  # (B, G, I, T): the one generator
     assert injections.shape[1] == 2 == np.asarray(inputs["WHITENED_ONSOURCE"]).shape[1]
-    # Two detectors see different projections, never one broadcast copy.
-    assert not np.allclose(injections[:, 0], injections[:, 1])
+    # Two detectors see different projections, never one broadcast copy (relative:
+    # the injections are strain).
+    peak = np.abs(injections).max()
+    assert peak > 0 and not np.allclose(injections[:, 0] / peak, injections[:, 1] / peak)
 
 
 def test_building_a_dataset_leaves_the_callers_objects_unchanged():

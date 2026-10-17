@@ -41,7 +41,9 @@ class Validator:
 
     # 3: worst performers are batch-first examples; an injection is
     # (generators, detectors, samples).
-    FORMAT_VERSION = 3
+    # 4: every stored array and score is of physical strain; format 3 could
+    # hold internally scaled strain (a raw ONSOURCE input) and its scores.
+    FORMAT_VERSION = 4
 
     def __init__(self, name: str = "model", config: Optional[ValidationConfig] = None,
                  dataset_args: Optional[dict] = None):

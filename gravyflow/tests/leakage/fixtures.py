@@ -341,7 +341,6 @@ def noise_batches(fixture: Fixture, directory, split: str, rate: float = 256.0,
         crop_duration_seconds=CROP_SECONDS,
         offsource_duration_seconds=OFFSOURCE_SECONDS,
         num_examples_per_batch=batch,
-        scale_factor=1.0,
         group=split,
         seed=seed,
         sampling_mode=mode or gf.SamplingMode.RANDOM,
@@ -351,7 +350,7 @@ def noise_batches(fixture: Fixture, directory, split: str, rate: float = 256.0,
 def dataset(fixture: Fixture, directory, split: str, rate: float = 256.0, mode=None,
             batch: int = 8, seed: int = 7, ifos=("H1", "L1"), input_variables=None,
             output_variables=None, waveform_generators=None, **overrides):
-    """A Dataset of the fixture's REAL noise (cropped onsource, unit scale)."""
+    """A Dataset of the fixture's REAL noise (cropped onsource, as strain)."""
     import gravyflow as gf
 
     return gf.Dataset(
@@ -361,7 +360,6 @@ def dataset(fixture: Fixture, directory, split: str, rate: float = 256.0, mode=N
         crop_duration_seconds=CROP_SECONDS,
         offsource_duration_seconds=OFFSOURCE_SECONDS,
         num_examples_per_batch=batch,
-        scale_factor=1.0,
         group=split,
         seed=seed,
         ifos=[gf.IFO[name] for name in ifos],

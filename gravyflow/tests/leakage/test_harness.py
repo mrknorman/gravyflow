@@ -89,7 +89,7 @@ def test_transient_round_trip_decodes_every_sample(world, tmp_path):
             noise_obtainer=noise, sample_rate_hertz=256.0,
             onsource_duration_seconds=fx.ONSOURCE_SECONDS, crop_duration_seconds=fx.CROP_SECONDS,
             offsource_duration_seconds=fx.OFFSOURCE_SECONDS, num_examples_per_batch=2,
-            scale_factor=1.0, group="train", seed=7, ifos=[gf.IFO.H1, gf.IFO.L1],
+            group="train", seed=7, ifos=[gf.IFO.H1, gf.IFO.L1],
             input_variables=[RV.ONSOURCE, RV.OFFSOURCE], output_variables=[RV.START_GPS_TIME],
         )
         # The transient path takes its offsource from earlier in the cached window,

@@ -28,6 +28,7 @@ from gravyflow.src.utils.shapes import (
 from gravyflow.src.utils.tensor import replace_nan_and_inf_with_zero
 from gravyflow.src.rng import BatchStreams, SeedTree, check_name, resolve_streams
 from gravyflow.src.rng.legacy import warn_deprecated
+from gravyflow.src.dataset.config import ignore_scale_factor
 from gravyflow.src.dataset.features.waveforms.cbc import (
     _generate_cbc_window,
     Approximant
@@ -98,7 +99,7 @@ class ScalingMethod:
                     scaling_parameters,
                     sample_rate_hertz,
                     onsource_duration_seconds=onsource_duration_seconds,
-                    return_scale_factor=True
+                    return_factor=True
                 )
 
             case ScalingTypes.HRSS:
@@ -209,16 +210,6 @@ def scale_to_hpeak(
     """
     factor = _ratio(desired_hpeak, calculate_hpeak(injection))
     return injection * _per_example(factor, injection)
-
-def to_internal(strain, scale_factor : float = None):
-    """
-    Convert physical strain to internal units, strain x S, where S is
-    ``scale_factor`` (default ``gf.Defaults.scale_factor``). Every stream of
-    physical strain passes through this once.
-    """
-    if scale_factor is None:
-        scale_factor = gf.Defaults.scale_factor
-    return strain * np.float32(scale_factor)
 
 @dataclass 
 class ReturnVariable:
@@ -1440,7 +1431,7 @@ class InjectionGenerator:
         waveform_generators: List[WaveformGenerator],
         parameters_to_return: List = None,
         seed: int = None,
-        scale_factor: float = None
+        scale_factor: None = None
     ):
         """
         Randomness: ``generate(streams, ...)`` and
@@ -1459,12 +1450,9 @@ class InjectionGenerator:
         Args:
             seed: Deprecated. The root of the streams of the iterator
                 ``__call__`` returns (default ``gf.Defaults.seed``).
-            scale_factor: S, the internal unit of strain (internal = strain x S).
-                Injections scaled to a physical HRSS or HPEAK are multiplied
-                by S once; the noise must carry the same S. Default:
-                ``gf.Defaults.scale_factor``.
+            scale_factor: Deprecated and ignored: injections are physical strain.
         """
-        self.scale_factor = scale_factor
+        ignore_scale_factor(scale_factor)
         self.waveform_generators = waveform_generators
         if not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
             self.waveform_generators = [self.waveform_generators]
@@ -1721,7 +1709,7 @@ class InjectionGenerator:
         parameters_to_return,
         onsource_duration_seconds: float = None,
         injection_parameters: Optional[Dict] = None,
-        scale_factor: float = None,
+        scale_factor: None = None,
         streams: Optional[BatchStreams] = None,
         epoch: Optional[int] = None,
         steps_per_epoch: Optional[int] = None,
@@ -1739,17 +1727,14 @@ class InjectionGenerator:
         ``streams(k)`` for the direct iterator's batch k. Leaving them out is
         deprecated: it draws every call from the same direct streams.
 
-        Units: ``onsource`` and ``offsource`` are in internal units, strain x S
-        (``scale_factor``; default this InjectionGenerator's, then
-        ``gf.Defaults.scale_factor``). Each example's polarisations are first
-        normalised to unit hpeak. HRSS and HPEAK: scaled to the physical
-        target, converted to internal units once (``to_internal``), projected
-        and cropped. SNR: projected, cropped and scaled against ``offsource``,
-        so they take the noise's units.
+        Units: everything is physical strain. Each example's polarisations
+        are first normalised to unit hpeak. HRSS and HPEAK: scaled to the
+        target, projected and cropped. SNR: projected, cropped and scaled
+        against ``offsource``. ``scale_factor`` is deprecated and ignored.
 
         Returns:
             onsource: with the injections added.
-            scaled_injections: (Generators, Batch, IFOs, Time), internal units.
+            scaled_injections: (Generators, Batch, IFOs, Time), strain.
             labels: every label of every generator, generator-first,
                 (Generators, Batch) + the label's own shape, float32, and NaN
                 where the generator injected nothing into the example:
@@ -1768,10 +1753,7 @@ class InjectionGenerator:
         """
         if injection_parameters:
             refuse_renamed_sky_keys(injection_parameters)
-        if scale_factor is None:
-            scale_factor = self.scale_factor
-        if scale_factor is None:
-            scale_factor = gf.Defaults.scale_factor
+        ignore_scale_factor(scale_factor)
         if streams is None:
             warn_deprecated(
                 "add_injections_to_onsource without streams",
@@ -1962,14 +1944,14 @@ class InjectionGenerator:
 
             type_ = scaling_method.type_
             if type_.value.ordinality == ScalingOrdinality.BEFORE_PROJECTION:
-                # 2. Physical target; 3. internal units, once; 4-5. project, crop.
+                # 2. Physical target; 3-4. project, crop.
                 measure = unit_hrss if type_ == ScalingTypes.HRSS else unit_hpeak
-                physical, physical_factor = scaling_method.scale(
+                physical, factor = scaling_method.scale(
                     unit, None, target_val, sample_rate, measure=measure
                 )
-                projected = project_and_crop(to_internal(physical, scale_factor))
+                projected = project_and_crop(physical)
             else:
-                # 4-5. Project, crop; 6. scale to the SNR against the noise.
+                # 3-4. Project, crop; 5. scale to the SNR against the noise.
                 projected, factor = scaling_method.scale(
                     project_and_crop(unit),
                     scaling_background, 
@@ -1977,9 +1959,8 @@ class InjectionGenerator:
                     sample_rate,
                     onsource_duration_seconds=onsource_duration_seconds
                 )
-                physical_factor = factor / np.float32(scale_factor)
 
-            # 7. Sum into the noise.
+            # 6. Sum into the noise.
             final_onsource = final_onsource + projected
             scaled_injections_list.append(projected)
 
@@ -1992,7 +1973,7 @@ class InjectionGenerator:
             # The gain from the generated strain to the injected physical
             # strain: every parameter the amplitude depends on is labelled
             # with the value the injected amplitude implies.
-            gain = normalisation * physical_factor
+            gain = normalisation * factor
             for key, value in generator_labels.items():
                 if isinstance(key, WaveformParameters) and value is not None:
                     generator_labels[key] = _at_gain(value, gain, key.value.amplitude_power)
@@ -2001,9 +1982,9 @@ class InjectionGenerator:
                 if label_type == type_:
                     value = target_val
                 elif label_type == ScalingTypes.HRSS:
-                    value = unit_hrss * physical_factor
+                    value = unit_hrss * factor
                 elif label_type == ScalingTypes.HPEAK:
-                    value = unit_hpeak * physical_factor
+                    value = unit_hpeak * factor
                 else:
                     value = gf.snr(
                         projected if onsource_duration_seconds is None else gf.crop_samples(

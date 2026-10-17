@@ -300,7 +300,7 @@ axes[1, 0].grid(True, alpha=0.3)
 axes[1, 0].legend(fontsize=8)
 
 # Add noise (simulate)
-noise = np.random.normal(0, 0.1 * np.std(sample), len(sample))
+noise = np.random.normal(0, 0.1 * np.std(sample, dtype=np.float64), len(sample))  # float64: strain squared underflows float32
 axes[1, 1].plot(time, sample + noise, 'c-', lw=0.5)
 axes[1, 1].set_title("AddNoise: Small perturbation")
 axes[1, 1].set_xlabel("Time (s)")

@@ -510,7 +510,7 @@ FOOTPRINT, OFFSOURCE = 4.0, 1.75
 def _draw(obtainer, rows, num_batches, mode=gf.SamplingMode.RANDOM, offsource_seconds=OFFSOURCE,
           batch=BATCH, seed=7):
     """START_GPS_TIME of ``num_batches`` batches drawn from ``rows`` with fake strain."""
-    def fake_acquire(sample_rate_hertz, valid_segments, ifos, scale_factor, **kwargs):
+    def fake_acquire(sample_rate_hertz, valid_segments, ifos, **kwargs):
         # As the loader does: each piece is kept to whole seconds (kept_seconds).
         for row in valid_segments:
             data = [np.zeros(int(kept_seconds(end - start) * sample_rate_hertz), np.float32)
@@ -524,7 +524,7 @@ def _draw(obtainer, rows, num_batches, mode=gf.SamplingMode.RANDOM, offsource_se
         generator = obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=RATE, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
             offsource_duration_seconds=offsource_seconds, num_examples_per_batch=batch, ifos=ifos,
-            scale_factor=1.0, seed=seed, sampling_mode=mode,
+            seed=seed, sampling_mode=mode,
         )
         starts = [np.asarray(next(generator)[gf.ReturnVariables.START_GPS_TIME])
                   for _ in range(num_batches)]

@@ -47,7 +47,7 @@ from .gwosc_data import (
 # =============================================================================
 
 # Imported from TransientDefaults for consistency (canonical source)
-from gravyflow.src.dataset.config import TransientDefaults
+from gravyflow.src.dataset.config import TransientDefaults, ignore_scale_factor
 from gravyflow.src.dataset.splits import split_fractions
 
 # GPS time precision is 10ms (0.01s) - defined in gravyflow.src.utils.gps
@@ -475,11 +475,6 @@ class IFOData:
         # To implement
         return self
 
-    def scale(self, scale_factor: Union[int, float]):
-        # Scale the data by the given factor
-        self.data = [data * scale_factor for data in self.data]
-        return self
-
     def numpy(self):
         # Converts the data to a numpy array, handling different data types
         return [ops.convert_to_numpy(data) for data in self.data]
@@ -865,7 +860,6 @@ class BaseDataObtainer(ABC):
         batch: dict,
         sample_rate_hertz: float,
         onsource_duration_seconds: float,
-        scale_factor: float = 1.0,
         whiten: bool = False,
         crop: bool = False
     ) -> dict:
@@ -873,23 +867,18 @@ class BaseDataObtainer(ABC):
         Apply post-processing to a batch dictionary.
         
         Shared implementation for both NOISE and TRANSIENT modes.
-        Handles whitening (with correct scale management), cropping, and NaN cleanup.
+        Handles whitening, cropping, and NaN cleanup.
         
         Args:
             batch: Dict containing at least ONSOURCE and OFFSOURCE tensors
             sample_rate_hertz: Sample rate for cropping/whitening
             onsource_duration_seconds: Target onsource duration for cropping
-            scale_factor: Current amplitude scale factor applied to data
             whiten: Whether to apply whitening
             crop: Whether to crop to onsource_duration_seconds
             
         Returns:
             The batch dict, its entries replaced; the arrays it held are never written.
-
-        Note:
-            Whitening works on copies scaled to O(1e21), for numerical stability; the
-            offsource is served unscaled. Whitened onsource stays at unit variance -
-            this is intentional for model training.
+            Whitening is scale free (see gf.whiten), so the strain is whitened as it is.
         """
         RV = gf.ReturnVariables
         
@@ -897,16 +886,9 @@ class BaseDataObtainer(ABC):
             return None
             
         if whiten:
-            # Whiten at O(1e21) amplitude, to avoid underflow with raw strain.
-            # The scaled arrays are new values, never the batch's buffers scaled
-            # in place: on CPU, JAX may read a numpy array without copying it,
-            # and whitens asynchronously, so a write after the call can change
-            # what the whitening reads. The offsource is served as it came.
-            target_scale = gf.Defaults.scale_factor
-            temp_scale = target_scale / (scale_factor if scale_factor > 0 else 1.0)
             batch[RV.ONSOURCE] = gf.whiten(
-                batch[RV.ONSOURCE] * temp_scale,
-                batch[RV.OFFSOURCE] * temp_scale,
+                batch[RV.ONSOURCE],
+                batch[RV.OFFSOURCE],
                 sample_rate_hertz
             )
 
@@ -1491,7 +1473,6 @@ class BaseDataObtainer(ABC):
         ifos: List[gf.IFO],
         strains: List[Optional["SegmentStrain"]],
         sample_rate_hertz: float,
-        scale_factor: float,
         quiet_zero_fill: bool,
     ) -> IFOData:
         """
@@ -1516,14 +1497,13 @@ class BaseDataObtainer(ABC):
             num_samples = int(kept_seconds(end - start) * sample_rate_hertz)
             data.append(ops.zeros((num_samples,), dtype="float32"))
             first_sample_gps.append(float(start))
-        return IFOData(data, sample_rate_hertz, first_sample_gps).scale(scale_factor)
+        return IFOData(data, sample_rate_hertz, first_sample_gps)
 
     def acquire(
         self,
         sample_rate_hertz: Optional[float] = None,
         valid_segments: Optional[np.ndarray] = None,
         ifos: List[gf.IFO] = [gf.IFO.L1],
-        scale_factor: float = 1.0,
         quiet_zero_fill: bool = False  # Suppress zero-fill warnings (for batch cache downloads)
     ) -> Generator[IFOData, None, None]:
         """
@@ -1547,7 +1527,7 @@ class BaseDataObtainer(ABC):
 
         def row(segment_times, strains):
             return self._row_data(
-                segment_times, ifos, strains, sample_rate_hertz, scale_factor, quiet_zero_fill
+                segment_times, ifos, strains, sample_rate_hertz, quiet_zero_fill
             )
 
         if valid_segments is not self.valid_segments:
@@ -1640,7 +1620,7 @@ class BaseDataObtainer(ABC):
             offsource_duration_seconds: float = None,
             num_examples_per_batch: int = None,
             ifos: List[gf.IFO] = None,
-            scale_factor: float = None,
+            scale_factor: None = None,
             seed: int = None,
             sampling_mode: SamplingMode = None,
             whiten: bool = False,
@@ -1675,7 +1655,7 @@ class BaseDataObtainer(ABC):
             offsource_duration_seconds: float = None,
             num_examples_per_batch: int = None,
             ifos: List[gf.IFO] = None,
-            scale_factor: float = None,
+            scale_factor: None = None,
             seed: int = None,
             sampling_mode: SamplingMode = SamplingMode.RANDOM,
             whiten: bool = False,
@@ -1694,13 +1674,14 @@ class BaseDataObtainer(ABC):
             offsource_duration_seconds: Background window duration
             num_examples_per_batch: Batch size
             ifos: List of interferometers
-            scale_factor: Amplitude scaling factor
+            scale_factor: Deprecated and ignored: the strain is served as it is.
             seed: Random seed
             sampling_mode: RANDOM or GRID sampling
             whiten: Whether to whiten each batch
             crop: Whether to crop each batch to its onsource duration
             group: The split served; None serves the split already served
         """
+        ignore_scale_factor(scale_factor)
         batches = self._yield_onsource_offsource_chunks(
             sample_rate_hertz,
             onsource_duration_seconds,
@@ -1708,7 +1689,6 @@ class BaseDataObtainer(ABC):
             offsource_duration_seconds,
             num_examples_per_batch,
             ifos,
-            scale_factor,
             seed,
             sampling_mode,
             whiten,
@@ -1727,7 +1707,6 @@ class BaseDataObtainer(ABC):
             offsource_duration_seconds: float,
             num_examples_per_batch: int,
             ifos: List[gf.IFO],
-            scale_factor: float,
             seed: int,
             sampling_mode: SamplingMode,
             whiten: bool,

@@ -17,7 +17,7 @@ import jax
 import gravyflow as gf
 
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
-from gravyflow.src.dataset.config import WindowSpec
+from gravyflow.src.dataset.config import WindowSpec, ignore_scale_factor
 from gravyflow.src.dataset.splits import split_fractions
 from gravyflow.src.rng import BatchStreams, SeedTree
 from gravyflow.src.rng.legacy import warn_deprecated
@@ -152,15 +152,13 @@ def colored_noise_batcher(
     offsource_duration_seconds: float,
     ifos : List["gf.IFO"],
     sample_rate_hertz: float,
-    scale_factor : float,
     noise_profile : "gf.NoiseProfile" = None
 ) -> NoiseBatcher:
     """
-    Colored Gaussian noise, one batch per address.
+    Colored Gaussian noise, one batch per address, in strain.
 
     Each detector's noise has the one-sided PSD of its curve in
-    ``noise_profile`` (default: each IFO's ``optimal_psd_path``), times
-    ``scale_factor ** 2``.
+    ``noise_profile`` (default: each IFO's ``optimal_psd_path``).
     """
     window_spec = WindowSpec.from_params(
         sample_rate_hertz=sample_rate_hertz,
@@ -185,7 +183,7 @@ def colored_noise_batcher(
             num_samples_list,
             sample_rate_hertz,
             jnp.array(frequencies, dtype=jnp.float32),
-            jnp.array(asd, dtype=jnp.float32) * scale_factor
+            jnp.array(asd, dtype=jnp.float32)
         )
         onsource_asds.append(onsource_asd)
         offsource_asds.append(offsource_asd)
@@ -237,15 +235,19 @@ def colored_noise_generator(
     offsource_duration_seconds: float,
     ifos: List["gf.IFO"],
     sample_rate_hertz: float,
-    scale_factor: float,
+    scale_factor: None,
     seed: int,
     noise_profile: "gf.NoiseProfile" = None
 ) -> Iterator:
-    """Deprecated: colored_noise_batcher, iterated over the direct streams of ``seed``."""
+    """
+    Deprecated: colored_noise_batcher, iterated over the direct streams of
+    ``seed``. ``scale_factor`` is ignored: the noise is strain.
+    """
     warn_deprecated("colored_noise_generator", "call colored_noise_batcher(...) with each batch's streams")
+    ignore_scale_factor(scale_factor)
     batch = colored_noise_batcher(
         num_examples_per_batch, onsource_duration_seconds, crop_duration_seconds,
-        offsource_duration_seconds, ifos, sample_rate_hertz, scale_factor, noise_profile=noise_profile,
+        offsource_duration_seconds, ifos, sample_rate_hertz, noise_profile=noise_profile,
     )
     tree = SeedTree(seed)
     return (batch(tree.direct(k)) for k in count())
@@ -309,8 +311,8 @@ class NoiseObtainer(Obtainer):
     DATA with the BURST_CAT1 and BURST_CAT2 vetoes, with known events and Gravity Spy
     glitches removed.
 
-    Noise is returned in internal units, strain x ``scale_factor`` (default
-    ``gf.Defaults.scale_factor``). COLORED noise follows ``noise_profile``
+    Noise is returned in strain (WHITE noise, which has no detector, in unit
+    variance). COLORED noise follows ``noise_profile``
     (default: ``gf.NoiseProfile.O3_LOW``, each IFO's ``optimal_psd_path``).
 
     An obtainer is a specification: building batches never changes it, so one
@@ -337,7 +339,7 @@ class NoiseObtainer(Obtainer):
             offsource_duration_seconds : float = None,
             num_examples_per_batch : int = None,
             ifos: List[gf.IFO] = None,
-            scale_factor : float = None,
+            scale_factor : None = None,
             sampling_mode : "gf.SamplingMode" = None
         ) -> NoiseBatcher:
         """
@@ -346,7 +348,9 @@ class NoiseObtainer(Obtainer):
         WHITE and COLORED noise is a pure function of the batch's streams.
         PSEUDO_REAL and REAL noise is read sequentially, from readers seeded
         from ``tree`` and ``group``, until it is addressed by index.
+        ``scale_factor`` is deprecated and ignored.
         """
+        ignore_scale_factor(scale_factor)
         if sample_rate_hertz is None:
             sample_rate_hertz = gf.Defaults.sample_rate_hertz
         if onsource_duration_seconds is None:
@@ -355,8 +359,6 @@ class NoiseObtainer(Obtainer):
             offsource_duration_seconds = gf.Defaults.offsource_duration_seconds
         if crop_duration_seconds is None:
             crop_duration_seconds = gf.Defaults.crop_duration_seconds
-        if scale_factor is None:
-            scale_factor = gf.Defaults.scale_factor
         if num_examples_per_batch is None:
             num_examples_per_batch = gf.Defaults.num_examples_per_batch
         if sampling_mode is None:
@@ -384,7 +386,6 @@ class NoiseObtainer(Obtainer):
                     offsource_duration_seconds,
                     ifos,
                     sample_rate_hertz,
-                    scale_factor,
                     noise_profile=self.noise_profile
                 )
 
@@ -396,7 +397,6 @@ class NoiseObtainer(Obtainer):
                     offsource_duration_seconds,
                     sample_rate_hertz,
                     group,
-                    scale_factor,
                     tree=tree,
                     ifos=ifos
                 ))
@@ -410,7 +410,6 @@ class NoiseObtainer(Obtainer):
                     offsource_duration_seconds,
                     num_examples_per_batch,
                     ifos,
-                    scale_factor,
                     seed=sequential_seed(tree, group, "noise/real"),
                     sampling_mode=sampling_mode,
                     group=group
@@ -457,7 +456,7 @@ class NoiseObtainer(Obtainer):
             offsource_duration_seconds : float = None,
             num_examples_per_batch : float = None,
             ifos: List[gf.IFO] = None,
-            scale_factor : float = None,
+            scale_factor : None = None,
             group : str = "train",
             seed : int = None,
             sampling_mode : "gf.SamplingMode" = None
@@ -465,7 +464,9 @@ class NoiseObtainer(Obtainer):
         """
         An iterator over the batches k = 0, 1, ... of split ``group`` (epoch
         0) of the seed tree rooted at ``seed`` (default ``gf.Defaults.seed``).
+        ``scale_factor`` is deprecated and ignored.
         """
+        ignore_scale_factor(scale_factor)
         tree = SeedTree.of(seed)
         batch = self.batcher(
             tree,
@@ -476,7 +477,6 @@ class NoiseObtainer(Obtainer):
             offsource_duration_seconds=offsource_duration_seconds,
             num_examples_per_batch=num_examples_per_batch,
             ifos=ifos,
-            scale_factor=scale_factor,
             sampling_mode=sampling_mode,
         )
         return (batch(tree.batch(group, 0, k)) for k in count())
@@ -489,13 +489,13 @@ class NoiseObtainer(Obtainer):
         offsource_duration_seconds: float,
         sample_rate_hertz: float,
         group : str,
-        scale_factor : float,
         tree : SeedTree,
         ifos : List[gf.IFO] = None
     ):
         """
-        Gaussian noise coloured by the PSDs of real segments, read in order.
-        Batch b of the reader draws from the streams of (group, epoch 0, b).
+        Gaussian noise coloured by the PSDs of real segments, read in order,
+        in strain. Batch b of the reader draws from the streams of (group,
+        epoch 0, b).
         """
         ifos = list(self.ifos) if ifos is None else ifos
 
@@ -522,13 +522,17 @@ class NoiseObtainer(Obtainer):
         for segment in reader.acquire(
             sample_rate_hertz,
             reader.valid_segments,
-            ifos,
-            scale_factor
+            ifos
         ):
-            onsource_psds, offsource_psds = [], []
+            onsource_asds, offsource_asds = [], []
             for data in segment.data:
+                # The PSD of strain (~1e-46) underflows float32, so the
+                # spectrum is taken of the segment over its peak, and the
+                # peak returns on the ASD.
+                peak = ops.max(ops.abs(data))
+                peak = ops.where(peak > 0, peak, 1.0)
                 frequencies, psd = gf.psd(
-                    data,
+                    data / peak,
                     nperseg=1024,
                     sample_rate_hertz=sample_rate_hertz
                 )
@@ -539,11 +543,12 @@ class NoiseObtainer(Obtainer):
                     ops.squeeze(frequencies),
                     ops.squeeze(psd)
                 )
-                onsource_psds.append(onsource_psd)
-                offsource_psds.append(offsource_psd)
+                peak = ops.cast(peak, "complex64")
+                onsource_asds.append(ops.sqrt(onsource_psd) * peak)
+                offsource_asds.append(ops.sqrt(offsource_psd) * peak)
 
-            onsource_asds = ops.sqrt(ops.expand_dims(ops.stack(onsource_psds, axis=0), 0))
-            offsource_asds = ops.sqrt(ops.expand_dims(ops.stack(offsource_psds, axis=0), 0))
+            onsource_asds = ops.expand_dims(ops.stack(onsource_asds, axis=0), 0)
+            offsource_asds = ops.expand_dims(ops.stack(offsource_asds, axis=0), 0)
 
             for _ in range(num_batches_in_segment):
                 streams = tree.batch(group, 0, next(batch_index))

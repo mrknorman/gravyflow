@@ -120,8 +120,7 @@ def plot_whiten_functions(
             gf.generate_strain_plot(
                 strain={key : value},
                 sample_rate_hertz=sample_rate_hertz,
-                title=key,
-                scale_factor=1.0
+                title=key
             )
         ] for key, value in time_results.items()
     ]

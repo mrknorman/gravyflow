@@ -20,7 +20,7 @@ from gravyflow.src.utils.tensor import (
     crop_samples, replace_nan_and_inf_with_zero, window_samples
 )
 from gravyflow.src.utils.shapes import BatchContract
-from gravyflow.src.dataset.config import Defaults
+from gravyflow.src.dataset.config import Defaults, ignore_scale_factor
 from gravyflow.src.dataset.noise.noise import index_addressed, obtainer_batcher
 from gravyflow.src.rng import BatchStreams, SeedTree, check_coordinate, check_name, check_split
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
@@ -340,7 +340,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         onsource_duration_seconds: Optional[float] = None,
         offsource_duration_seconds: Optional[float] = None,
         crop_duration_seconds: Optional[float] = None,
-        scale_factor: Optional[float] = None,
+        scale_factor: None = None,
         noise_obtainer: Optional[gf.NoiseObtainer] = None,
         group: str = "train",
         waveform_generators: Optional[List[Union[gf.CBCGenerator, gf.WNBGenerator]]] = None,
@@ -367,7 +367,10 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             band 20 Hz to Nyquist, 1 s / 0.5 s median Welch PSD, 1 s filter).
             One PSD is estimated per batch from the offsource and reused by all
             three.
+        scale_factor: deprecated and ignored. Every input, output and label is
+            physical strain (or derived from it: whitened data, SNRs).
         """
+        ignore_scale_factor(scale_factor)
         # Initialize PyDataset (single-threaded to avoid JAX/fork deadlocks)
         super().__init__(workers=0)
         self._init_batches(seed, group, steps_per_epoch, epoch_mode, name)
@@ -377,7 +380,6 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         self.onsource_duration_seconds = onsource_duration_seconds if onsource_duration_seconds is not None else gf.Defaults.onsource_duration_seconds
         self.offsource_duration_seconds = offsource_duration_seconds if offsource_duration_seconds is not None else gf.Defaults.offsource_duration_seconds
         self.crop_duration_seconds = crop_duration_seconds if crop_duration_seconds is not None else gf.Defaults.crop_duration_seconds
-        self.scale_factor = scale_factor if scale_factor is not None else gf.Defaults.scale_factor
         self.num_examples_per_generation_batch = num_examples_per_generation_batch if num_examples_per_generation_batch is not None else gf.Defaults.num_examples_per_generation_batch
         self.num_examples_per_batch = num_examples_per_batch if num_examples_per_batch is not None else gf.Defaults.num_examples_per_batch
         
@@ -576,7 +578,6 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             'crop_duration_seconds': self.crop_duration_seconds,
             'offsource_duration_seconds': self.offsource_duration_seconds,
             'num_examples_per_batch': self.num_examples_per_batch,
-            'scale_factor': self.scale_factor,
             'sampling_mode': self.sampling_mode,
         }
         # Add ifos to noise_kwargs if provided
@@ -653,7 +654,6 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                 parameters_to_return=self.variables_to_return,
                 onsource_duration_seconds=self.onsource_duration_seconds,
                 injection_parameters=parameters,
-                scale_factor=self.scale_factor,
                 streams=streams,
                 epoch=self._schedule_epoch,
                 steps_per_epoch=len(self),
@@ -966,7 +966,7 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
         onsource_duration_seconds: Optional[float] = None,
         offsource_duration_seconds: Optional[float] = None,
         crop_duration_seconds: Optional[float] = None,
-        scale_factor: Optional[float] = None,
+        scale_factor: None = None,
         num_examples_per_generation_batch: Optional[int] = None,
         num_examples_per_batch: Optional[int] = None,
         ifos: Optional[List[gf.IFO]] = None,
@@ -986,7 +986,7 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
             onsource_duration_seconds: Duration of onsource window.
             offsource_duration_seconds: Duration of offsource window.
             crop_duration_seconds: Duration to crop from onsource edges.
-            scale_factor: Scaling factor for data.
+            scale_factor: Deprecated and ignored: the data are physical strain.
             num_examples_per_generation_batch: Batch size for waveform generation.
             num_examples_per_batch: Batch size for returned data.
             input_variables: Variables to include in input dict.
@@ -1006,7 +1006,7 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
         self.onsource_duration_seconds = onsource_duration_seconds if onsource_duration_seconds is not None else Defaults.onsource_duration_seconds
         self.offsource_duration_seconds = offsource_duration_seconds if offsource_duration_seconds is not None else Defaults.offsource_duration_seconds
         self.crop_duration_seconds = crop_duration_seconds if crop_duration_seconds is not None else Defaults.crop_duration_seconds
-        self.scale_factor = scale_factor if scale_factor is not None else Defaults.scale_factor
+        ignore_scale_factor(scale_factor)
         self.num_examples_per_generation_batch = num_examples_per_generation_batch if num_examples_per_generation_batch is not None else Defaults.num_examples_per_generation_batch
         self.num_examples_per_batch = num_examples_per_batch if num_examples_per_batch is not None else Defaults.num_examples_per_batch
         self.ifos = ifos if ifos is not None else [gf.IFO.L1]
@@ -1037,7 +1037,6 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
                 'offsource_duration_seconds': self.offsource_duration_seconds,
                 'num_examples_per_batch': self.num_examples_per_batch,
                 'ifos': self.ifos,
-                'scale_factor': self.scale_factor,
                 'sampling_mode': gf.SamplingMode.RANDOM,
             }
             self._pool_generators[i] = obtainer_batcher(

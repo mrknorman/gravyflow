@@ -20,7 +20,6 @@ def verify_dataset_shapes():
         min_frequency_hertz=50.0,
         max_frequency_hertz=100.0,
         injection_chance=1.0,
-        scale_factor=1.0,
         scaling_method=gf.ScalingMethod(
             value=gf.Distribution(min_=10.0, max_=10.0, type_=gf.DistributionType.UNIFORM),
             type_=gf.ScalingTypes.SNR

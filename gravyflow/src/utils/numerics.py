@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Union, List, Any, Optional
 
 import gravyflow as gf
+from gravyflow.src.dataset.config import ignore_scale_factor
 
 
 def ensure_even(number: int) -> int:
@@ -70,12 +71,13 @@ class BatchConfig:
     
     Attributes:
         num_examples_per_batch: Number of examples in each batch
-        scale_factor: Amplitude scaling factor for data
+        scale_factor: Deprecated and ignored (data are physical strain); kept
+            for one release so that positional arguments keep their places.
         seed: Random seed for reproducibility
         ifos: List of interferometers to use
     """
     num_examples_per_batch: int = None
-    scale_factor: float = None
+    scale_factor: None = None
     seed: int = None
     ifos: List = None
     
@@ -83,8 +85,8 @@ class BatchConfig:
         """Apply defaults from gf.Defaults for any None values."""
         if self.num_examples_per_batch is None:
             self.num_examples_per_batch = gf.Defaults.num_examples_per_batch
-        if self.scale_factor is None:
-            self.scale_factor = gf.Defaults.scale_factor
+        ignore_scale_factor(self.scale_factor)
+        self.scale_factor = None
         if self.seed is None:
             self.seed = gf.Defaults.seed
         if self.ifos is None:

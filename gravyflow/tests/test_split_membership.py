@@ -302,7 +302,6 @@ WINDOW = dict(
     crop_duration_seconds=0.5,
     offsource_duration_seconds=1.75,
     num_examples_per_batch=4,
-    scale_factor=1.0,
 )
 
 
@@ -333,7 +332,7 @@ def served_noise(call, split):
     return served["members"]
 
 
-def fake_strain(self, sample_rate_hertz, valid_segments, ifos, scale_factor, **kwargs):
+def fake_strain(self, sample_rate_hertz, valid_segments, ifos, **kwargs):
     """Zero strain for each row of segments, as the loader yields it."""
     for row in valid_segments:
         data = [np.zeros(int((end - start) * sample_rate_hertz), np.float32) for start, end in row]
@@ -355,7 +354,7 @@ def cached_glitch(self, cache, gps_time, sample_rate_hertz, onsource_duration, o
 DETECTOR_STRAIN = {gf.IFO.L1: 1.0, gf.IFO.H1: 2.0}
 
 
-def detector_strain(self, sample_rate_hertz, valid_segments, ifos, scale_factor, **kwargs):
+def detector_strain(self, sample_rate_hertz, valid_segments, ifos, **kwargs):
     """Constant strain for each row of segments: each detector's DETECTOR_STRAIN."""
     for row in valid_segments:
         data = [np.full(int((end - start) * sample_rate_hertz), DETECTOR_STRAIN[ifo], np.float32)

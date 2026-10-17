@@ -1,7 +1,7 @@
 """
 Amplitude of simulated (coloured) noise: its PSD is its profile's, on the
-right frequency grid, in internal units (strain x ``gf.Defaults.scale_factor``)
-by default, from per-detector profiles that name their source. The reference
+right frequency grid, in strain, from per-detector profiles that name their
+source. The reference
 is scipy's Welch estimate.
 """
 import numpy as np
@@ -11,7 +11,6 @@ import scipy.signal
 import gravyflow as gf
 from gravyflow.src.dataset.noise import noise as gf_noise
 
-S = gf.Defaults.scale_factor
 FS = 2048.0
 ALL_IFOS = [gf.IFO.H1, gf.IFO.L1, gf.IFO.V1]
 
@@ -57,7 +56,6 @@ def test_colored_noise_psd_matches_its_profile(sample_rate_hertz):
         offsource_duration_seconds=duration,
         ifos=ALL_IFOS,
         sample_rate_hertz=sample_rate_hertz,
-        scale_factor=1.0,
     )
     x = batch(gf.SeedTree(7).batch("train", 0, 0))[gf.ReturnVariables.ONSOURCE]
     ratio, f = _welch_ratio(x, ALL_IFOS, sample_rate_hertz)
@@ -95,8 +93,8 @@ def test_psd_interpolation_uses_the_rfft_grid():
     assert onsource[grid > 5000.0].min() == pytest.approx(1.0)
 
 
-def test_noise_obtainer_defaults_to_internal_units():
-    """A NoiseObtainer called without a scale factor returns internal units."""
+def test_noise_obtainer_returns_strain():
+    """A NoiseObtainer returns strain: its PSD is the profile's, unscaled."""
     obtainer = gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED, ifos=[gf.IFO.H1])
     batch = next(obtainer(
         sample_rate_hertz=FS, onsource_duration_seconds=16.0,
@@ -104,7 +102,7 @@ def test_noise_obtainer_defaults_to_internal_units():
         num_examples_per_batch=8, seed=11,
     ))
     ratio, f = _welch_ratio(
-        np.asarray(batch[gf.ReturnVariables.ONSOURCE], np.float64) / S, [gf.IFO.H1], FS
+        np.asarray(batch[gf.ReturnVariables.ONSOURCE], np.float64), [gf.IFO.H1], FS
     )
     band = (f >= 30.0) & (f <= 900.0)
     assert abs(np.median(ratio[:, 0, band].mean(axis=0)) - 1.0) < 0.02
@@ -143,7 +141,7 @@ def test_colored_noise_uses_the_named_profile():
     batch = next(obtainer(
         sample_rate_hertz=FS, onsource_duration_seconds=16.0,
         crop_duration_seconds=0.0, offsource_duration_seconds=16.0,
-        num_examples_per_batch=8, scale_factor=1.0, seed=5,
+        num_examples_per_batch=8, seed=5,
     ))
     ratio, f = _welch_ratio(
         batch[gf.ReturnVariables.ONSOURCE], [gf.IFO.H1], FS, gf.NoiseProfile.DESIGN

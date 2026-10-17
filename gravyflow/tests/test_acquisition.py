@@ -154,18 +154,6 @@ class TestIFOData:
         result = ifo_data.downsample(50.0)
         assert result is ifo_data
     
-    def test_ifo_data_scale(self):
-        """Test scale method multiplies data by factor."""
-        data = np.ones(100, dtype=np.float32)
-        ifo_data = gf_acq.IFOData(
-            data=[data],
-            sample_rate_hertz=100.0,
-            start_gps_time=[0.0]
-        )
-        
-        ifo_data.scale(2.5)
-        np.testing.assert_allclose(ifo_data.data[0], 2.5 * np.ones(100))
-    
     def test_ifo_data_numpy_method(self):
         """Test numpy() method converts to numpy arrays (lines 281-284)."""
         data = np.arange(100, dtype=np.float32)
@@ -903,7 +891,6 @@ class TestGetOnsourceOffsourceChunks:
             offsource_duration_seconds=1.0,
             num_examples_per_batch=None,  # Use default
             ifos=gf.IFO.L1,
-            scale_factor=None,  # Use default
             seed=None  # Use default
         )
         
@@ -946,8 +933,7 @@ class TestAcquireGenerator:
         gen = obtainer.acquire(
             sample_rate_hertz=1024.0,
             valid_segments=empty_segments,
-            ifos=[gf.IFO.L1],
-            scale_factor=1.0
+            ifos=[gf.IFO.L1]
         )
         
         # With empty segments, should immediately stop
@@ -1570,8 +1556,7 @@ class TestAcquireGenerator:
         gen = obtainer.acquire(
             sample_rate_hertz=1024.0,
             valid_segments=test_segments,
-            ifos=[gf.IFO.L1],
-            scale_factor=1.0
+            ifos=[gf.IFO.L1]
         )
         
         # Get first segment
@@ -1704,7 +1689,6 @@ class TestGetOnsourceOffsourceChunksReal:
             offsource_duration_seconds=1.0,
             num_examples_per_batch=2,
             ifos=gf.IFO.L1,
-            scale_factor=1.0,
             seed=42
         )
         
@@ -1940,7 +1924,6 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
             offsource_duration_seconds=16.0,
             num_examples_per_batch=32,
             ifos=[gf.IFO.L1, gf.IFO.H1],
-            scale_factor=1.0,
             seed=42
         )
         
@@ -2350,16 +2333,14 @@ class TestPostProcessWhitening:
         identical input matches a whitening of untouched copies. The match allows
         1e-5 of the peak: XLA on CPU rarely differs in the last few bits between
         identical calls (about 6e-7 of a 3.7 peak, about once in a thousand
-        calls), while a whitening that read a half-scaled buffer is off by up to
-        1e21.
+        calls), while a whitening that read a rewritten buffer is off by far more.
         """
         RV = gf.ReturnVariables
         rng = np.random.default_rng(0)
         onsource = (rng.standard_normal((8, 2, 512)) * 1e-21).astype(np.float32)
         offsource = (rng.standard_normal((8, 2, 4096)) * 1e-21).astype(np.float32)
-        scale = gf.Defaults.scale_factor
         expected = np.asarray(gf.replace_nan_and_inf_with_zero(
-            gf.whiten(onsource * scale, offsource * scale, 256.0)
+            gf.whiten(onsource, offsource, 256.0)
         ))
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST,
@@ -2371,7 +2352,7 @@ class TestPostProcessWhitening:
         calls, wrong, written = 300, 0, 0
         for _ in range(calls):
             given = {RV.ONSOURCE: onsource.copy(), RV.OFFSOURCE: offsource.copy()}
-            served = obtainer._post_process_batch(dict(given), 256.0, 1.0, 1.0, whiten=True)
+            served = obtainer._post_process_batch(dict(given), 256.0, 1.0, whiten=True)
             wrong += not np.allclose(np.asarray(served[RV.ONSOURCE]), expected, rtol=0, atol=tolerance)
             written += not (np.array_equal(given[RV.ONSOURCE], onsource)
                             and np.array_equal(given[RV.OFFSOURCE], offsource)

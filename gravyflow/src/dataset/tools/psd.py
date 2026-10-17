@@ -12,8 +12,8 @@ Conventions:
   as `scipy.signal.welch` does. `mode="median"` divides by the median bias of
   the number of segments, as scipy and pycbc do.
 - Scale free: the estimate is computed on data divided by its own peak
-  amplitude, so data in physical strain (~1e-21) and in scaled units give the
-  same normalised spectrum. A PSD of physical strain (~1e-46) is not
+  amplitude, so physical strain (~1e-21) and the same data at any other
+  amplitude give the same normalised spectrum. A PSD of physical strain (~1e-46) is not
   representable in float32 (the smallest normal float32 is 1.2e-38), so
   `psd()` underflows for such inputs; `PowerSpectrum` keeps the normalised
   spectrum and the amplitude scale apart, and its consumers never form the

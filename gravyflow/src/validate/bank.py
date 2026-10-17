@@ -279,7 +279,6 @@ class ValidationBank:
             offsource_duration_seconds=self.dataset_args.get("offsource_duration_seconds", 16.0),
             num_examples_per_batch=min(len(events), 256) or 1,
             ifos=ifos,
-            scale_factor=gf.Defaults.scale_factor,
         )
         onsource, offsource, gps = [], [], []
         for batch in chunks:

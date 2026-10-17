@@ -483,7 +483,6 @@ def test_noise_obtainer_colored_type():
         crop_duration_seconds=0.5,
         offsource_duration_seconds=1.0,
         num_examples_per_batch=2,
-        scale_factor=1.0,
         seed=42
     )
     
@@ -495,27 +494,26 @@ def test_noise_obtainer_colored_type():
     assert ops.shape(onsource)[0] == 2  # batch
 
 
-def test_noise_obtainer_scale_factor_none():
-    """Test NoiseObtainer with scale_factor=None to use default."""
+def test_noise_obtainer_scale_factor_is_deprecated_and_ignored():
+    """A scale_factor passed to a NoiseObtainer warns and changes nothing: noise is strain."""
     noise = gf.NoiseObtainer(
-        noise_type=gf.NoiseType.WHITE,
+        noise_type=gf.NoiseType.COLORED,
         ifos=gf.IFO.L1
     )
-    
-    # Explicitly pass scale_factor=None to trigger default
-    gen = noise(
+    window = dict(
         sample_rate_hertz=1024.0,
         onsource_duration_seconds=1.0,
-        crop_duration_seconds=0.0,
-        offsource_duration_seconds=1.0,
+        crop_duration_seconds=0.5,
+        offsource_duration_seconds=2.0,
         num_examples_per_batch=2,
-        scale_factor=None,  # Triggers default
         seed=42
     )
-    
-    batch = next(gen)
-    onsource = batch[RV.ONSOURCE]
-    assert ops.shape(onsource)[0] == 2
+    expected = next(noise(**window))[RV.ONSOURCE]
+    with pytest.warns(DeprecationWarning, match="scale_factor is deprecated.*physical strain"):
+        served = next(noise(scale_factor=3.0, **window))[RV.ONSOURCE]
+    np.testing.assert_array_equal(np.asarray(served), np.asarray(expected))
+    # Strain: the O3 curves give a raw onsource std of order 1e-18 to 1e-21.
+    assert 1e-23 < float(np.std(np.asarray(expected, np.float64))) < 1e-16
 
 
 def test_noise_obtainer_pseudo_real_without_obtainer():
@@ -711,7 +709,7 @@ def test_noise_batchers_shapes_and_addresses(kind):
     if kind == "white":
         batch = gf_noise.white_noise_batcher(4, ifos, 1.0, 0.5, 4.0, 1024.0)
     else:
-        batch = gf_noise.colored_noise_batcher(4, 1.0, 0.5, 4.0, ifos, 1024.0, 1.0)
+        batch = gf_noise.colored_noise_batcher(4, 1.0, 0.5, 4.0, ifos, 1024.0)
     first = batch(_streams())
     onsource = np.asarray(first[gf.ReturnVariables.ONSOURCE])
     offsource = np.asarray(first[gf.ReturnVariables.OFFSOURCE])

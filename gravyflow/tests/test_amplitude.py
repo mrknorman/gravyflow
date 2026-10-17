@@ -1,10 +1,8 @@
 """
 Amplitude, units and labels of injections.
 
-Units: noise and injections are physical strain at their source and are carried
-in internal units, strain x ``gf.Defaults.scale_factor`` (S), from the point
-where they enter the pipeline. S is applied once per stream. HRSS and HPEAK
-targets and labels are physical strain; SNR is a ratio and has no unit.
+Units: noise, injections, HRSS and HPEAK targets and labels are physical strain
+throughout; SNR is a ratio and has no unit.
 
 The references are independent of gravyflow: lalsimulation's burst measures
 and pycbc's ``sigma``.
@@ -21,7 +19,6 @@ lalsim = pytest.importorskip("lalsimulation")
 pycbc_types = pytest.importorskip("pycbc.types")
 pycbc_filter = pytest.importorskip("pycbc.filter")
 
-S = gf.Defaults.scale_factor
 FS = 2048.0
 
 
@@ -254,7 +251,7 @@ def test_scale_to_snr_can_return_its_factor():
     scaled, factor = gf.scale_to_snr(
         injection, background, target, FS,
         fft_duration_seconds=1.0, overlap_duration_seconds=0.5,
-        return_scale_factor=True,
+        return_factor=True,
     )
     expected = injection * np.asarray(factor)[:, None, None]
     np.testing.assert_allclose(
@@ -279,7 +276,7 @@ WAVES = [
 def test_hrss_injection_has_its_physical_snr():
     """An hrss 1e-21 sine-Gaussian is injected at its physical size: each
     detector's whitened injection matches pycbc's SNR of that detector's strain
-    (INJECTIONS / S) within 10 %, and the network SNR lies between 5 % and
+    (INJECTIONS) within 10 %, and the network SNR lies between 5 % and
     sqrt(2) of the optimally oriented SNR of an hrss 1e-21 source."""
     batch = _batch(
         _sine_gaussian_generator(gf.ScalingTypes.HRSS, _constant(1e-21)),
@@ -290,7 +287,7 @@ def test_hrss_injection_has_its_physical_snr():
     ifos = [gf.IFO.H1, gf.IFO.L1]
 
     expected = np.array([
-        [_pycbc_snr(injections[b, i] / S, ifo, FS) for i, ifo in enumerate(ifos)]
+        [_pycbc_snr(injections[b, i], ifo, FS) for i, ifo in enumerate(ifos)]
         for b in range(len(injections))
     ])
     measured = np.sqrt(np.sum(whitened ** 2, axis=-1))
@@ -389,9 +386,9 @@ def test_labels_of_two_generators_are_batch_by_generator():
 
 
 @pytest.mark.parametrize("scaling_type", [gf.ScalingTypes.HRSS, gf.ScalingTypes.HPEAK])
-def test_internal_units_are_applied_once(scaling_type):
-    """(onsource - noise) / S is the projection of the physical polarisations,
-    scaled to the physical target: the injection is multiplied by S once."""
+def test_injection_is_the_projected_physical_strain(scaling_type):
+    """onsource - noise is the projection of the polarisations scaled to the
+    physical target, in strain: no other factor reaches the injection."""
     num_examples = 4
     target = np.float32(1e-21)
     generator = _sine_gaussian_generator(scaling_type, _constant(float(target)))
@@ -416,8 +413,9 @@ def test_internal_units_are_applied_once(scaling_type):
     }
     num_samples = int(2.0 * FS)
     rng = np.random.default_rng(2)
-    noise = rng.normal(size=(num_examples, 2, num_samples)).astype(np.float32)
-    offsource = rng.normal(size=(num_examples, 2, int(16 * FS))).astype(np.float32)
+    # Strain-sized noise, so the injection is resolved in float32 beside it.
+    noise = (rng.normal(size=(num_examples, 2, num_samples)) * 1e-21).astype(np.float32)
+    offsource = (rng.normal(size=(num_examples, 2, int(16 * FS))) * 1e-21).astype(np.float32)
 
     onsource, _, _ = injection_generator.add_injections_to_onsource(
         injections, mask, noise, offsource, parameters_to_return=[scaling_type],
@@ -437,7 +435,7 @@ def test_internal_units_are_applied_once(scaling_type):
     start = (projected.shape[-1] - num_samples) // 2
     projected = projected[..., start:start + num_samples]
 
-    injected = (np.asarray(onsource, np.float64) - noise) / S
+    injected = np.asarray(onsource, np.float64) - noise
     scale = np.max(np.abs(projected))
     assert scale > 1e-23
     np.testing.assert_allclose(injected / scale, projected / scale, atol=2e-4)
@@ -445,7 +443,7 @@ def test_internal_units_are_applied_once(scaling_type):
 
 def test_generators_have_no_scale_factor():
     """Waveform generators take no scale factor: injections are scaled to their
-    targets, and to internal units by the InjectionGenerator alone."""
+    targets by the InjectionGenerator alone."""
     with pytest.raises(TypeError, match="scale_factor"):
         _sine_gaussian_generator(gf.ScalingTypes.SNR, _constant(10.0), scale_factor=3.0)
     with pytest.raises(TypeError, match="scale_factor"):

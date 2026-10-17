@@ -381,7 +381,7 @@ def offline_events():
     import numpy as np
 
     def cached_strain(self, cache, gps_time, sample_rate_hertz, onsource_duration,
-                      offsource_duration, scale_factor=1.0, target_ifos=None):
+                      offsource_duration, target_ifos=None):
         rng = np.random.default_rng(int(gps_time))
         detectors = len(target_ifos or [None])
         return (

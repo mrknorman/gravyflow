@@ -21,10 +21,10 @@ CROP = int(0.5 * FS)   # the dataset's default crop
 
 
 def coloured_noise(rng, shape, seconds):
-    """Gaussian noise with L1's bundled noise curve, x 1e21 (the dataset's internal units)."""
+    """Gaussian noise with L1's bundled noise curve, in strain."""
     n = int(seconds * FS)
     f = np.fft.rfftfreq(n, 1 / FS)
-    amp = np.sqrt(noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0)) * n * FS / 4.0) * 1e21
+    amp = np.sqrt(noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0)) * n * FS / 4.0)
     spec = amp * (rng.standard_normal(shape + (len(f),)) + 1j * rng.standard_normal(shape + (len(f),)))
     spec[..., 0] = 0.0
     return np.fft.irfft(spec, n=n)
@@ -36,7 +36,7 @@ def raw_onsource(m1, m2, merger_seconds, phase=0.0):
     h = np.asarray(_generate_cbc_window(
         num_waveforms=1, sample_rate_hertz=FS, window_seconds=8.0, min_frequency_hertz=np.array([20.0]),
         mass_1_msun=np.array([m1]), mass_2_msun=np.array([m2]), reference_orbital_phase_in=np.array([phase]),
-        distance_mpc=np.array([100.0]))[0, 0], dtype=np.float64) * 1e21
+        distance_mpc=np.array([100.0]))[0, 0], dtype=np.float64)
     p = CROP + int(round(merger_seconds * FS))
     c = len(h) // 2
     return h[c - p: c - p + N + 2 * CROP]
@@ -102,7 +102,7 @@ def test_whitened_noise_gives_unit_noise_statistics(spectrum):
     # Coloured noise whitened by the data path with the true PSD, against
     # templates whitened with the same filter: still chi-squared(2).
     f = np.arange(N // 2 + 1, dtype=np.float64)
-    true = noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0)) * 1e42 * FS
+    true = noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0)) * FS
     exact = gf.PowerSpectrum(np.asarray(true / true.max(), np.float32)[None],
                              np.array([[np.sqrt(true.max())]], np.float32), FS,
                              gf.SpectralConfig(correct_inverse_bias=False), 1.0, 31)

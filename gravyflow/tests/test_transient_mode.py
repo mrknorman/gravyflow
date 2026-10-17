@@ -374,7 +374,6 @@ class TestSpecificEventAcquisition:
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=1,
                 ifos=[gf.IFO.H1, gf.IFO.L1],
-                scale_factor=1.0,
             )
             batch = next(batch_gen)
             
@@ -421,7 +420,6 @@ class TestSpecificEventAcquisition:
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=2,
                 ifos=[gf.IFO.L1],
-                scale_factor=1.0,
             )
             batch = next(batch_gen)
             
@@ -457,7 +455,6 @@ class TestSpecificEventAcquisition:
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=1,
                 ifos=[gf.IFO.H1],
-                scale_factor=1.0,
             )
             batch = next(batch_gen)
             
@@ -465,10 +462,10 @@ class TestSpecificEventAcquisition:
             onsource = batch[gf.ReturnVariables.ONSOURCE]
             offsource = batch[gf.ReturnVariables.OFFSOURCE]
             
-            # Apply whitening
+            # Apply whitening, to the strain as it is (whitening is scale free)
             whitened = gf.whiten(
-                onsource * 1e21,  # Scale up for precision
-                offsource * 1e21,
+                onsource,
+                offsource,
                 sample_rate_hertz=2048.0
             )
             

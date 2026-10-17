@@ -12,6 +12,7 @@ from bokeh.models import Div
 from bokeh.layouts import column, gridplot
 
 import gravyflow as gf
+from gravyflow.src.dataset.config import ignore_scale_factor
 from keras import ops
 
 
@@ -110,7 +111,7 @@ def generate_strain_plot(
         title : Union[str, List[str]] = "",
         colors : Union[List, None] = None,
         has_legend : bool = True,
-        scale_factor : Union[float, None] = None,
+        scale_factor : None = None,
         height : int = 400,
         width : Union[int, None] = None
     ):
@@ -150,9 +151,8 @@ def generate_strain_plot(
     if not isinstance(title, list):
         title = [title] * len(strains)
 
-    y_axis_label = f"Strain"
-    if scale_factor is not None and scale_factor != 1:
-        y_axis_label += f" (scaled by {scale_factor})"
+    ignore_scale_factor(scale_factor)
+    y_axis_label = "Strain"
 
     tooltips = [
         ("Name", "@name"),

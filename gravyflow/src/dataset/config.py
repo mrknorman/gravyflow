@@ -2,6 +2,24 @@ import logging
 from dataclasses import dataclass
 from typing import Tuple
 
+from gravyflow.src.rng.legacy import warn_deprecated
+
+#: Why a ``scale_factor`` is no longer taken: every array gravyflow reads,
+#: returns or caches is strain.
+PHYSICAL_STRAIN = (
+    "gravyflow works in physical strain: inputs, outputs, labels and caches are strain, "
+    "and the internal x1e21 scale (Defaults.scale_factor) is gone"
+)
+
+
+def ignore_scale_factor(scale_factor) -> None:
+    """
+    The one-release shim for a ``scale_factor=`` argument: a value passed is
+    ignored, with a DeprecationWarning (see PHYSICAL_STRAIN).
+    """
+    if scale_factor is not None:
+        warn_deprecated("scale_factor", f"it is ignored: {PHYSICAL_STRAIN}; remove the argument")
+
 
 @dataclass(frozen=True)
 class WindowSpec:
@@ -157,8 +175,7 @@ class Defaults:
     onsource_duration_seconds: float = 1.0
     offsource_duration_seconds: float = 16.0
     crop_duration_seconds: float = 0.5
-    scale_factor: float = 1.0E21
-    
+
     # Standard tiers for JIT graph optimization
     # Using these values reduces the number of unique JAX graph compilations
     STANDARD_DURATIONS = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
@@ -168,6 +185,8 @@ class Defaults:
     @classmethod
     def set(cls, **kwargs):
         for key, value in kwargs.items():
+            if key == "scale_factor":
+                raise AttributeError(f"Defaults.scale_factor is removed: {PHYSICAL_STRAIN}.")
             if hasattr(cls, key):
                 setattr(cls, key, value)
             else:

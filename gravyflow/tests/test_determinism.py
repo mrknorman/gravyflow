@@ -338,7 +338,7 @@ class TestDeprecations:
         with pytest.warns(DeprecationWarning, match="white_noise_generator"):
             white = next(gf_noise.white_noise_generator(BATCH, [gf.IFO.L1], 1.0, 0.5, 2.0, SAMPLE_RATE, 1))
         with pytest.warns(DeprecationWarning, match="colored_noise_generator"):
-            colored = next(gf_noise.colored_noise_generator(BATCH, 1.0, 0.5, 2.0, [gf.IFO.L1], SAMPLE_RATE, 1.0, 1))
+            colored = next(gf_noise.colored_noise_generator(BATCH, 1.0, 0.5, 2.0, [gf.IFO.L1], SAMPLE_RATE, None, 1))
         for batch in (white, colored):
             assert np.shape(batch[gf.ReturnVariables.ONSOURCE]) == (BATCH, 1, int(2.0 * SAMPLE_RATE))
 

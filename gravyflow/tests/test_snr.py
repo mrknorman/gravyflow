@@ -272,10 +272,6 @@ def _test_snr(
             approximant="IMRPhenomD"
         )
 
-        # Scale injection to avoid precision error when converting to 32 bit 
-        # float for tensorflow compatability:
-        injection *= 1.0E21
-
         injection = ops.convert_to_tensor(injection[:, 0], dtype = "float32")
         injection = ops.expand_dims(injection, 0)
         

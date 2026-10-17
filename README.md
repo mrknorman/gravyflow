@@ -135,7 +135,29 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
   `ValidationConfig` and returns the `Validator`. A checkpoint that exists but cannot be loaded raises `ValueError`;
   `Model.load` returned an untrained model in its place.
 
-## 7. Test Gravyflow (optional)
+## 7. Units: physical strain
+
+Every array gravyflow reads, returns or caches is physical strain: noise of every type but white (which has no
+detector, and unit variance), injections, `ONSOURCE`, `OFFSOURCE` and `INJECTIONS`, the HRSS and HPEAK targets and
+labels, and the transient caches. Whitened outputs and SNRs are dimensionless, as before. The square of strain
+(about 1e-42) is below float32's normal range, so each step that squares data (PSD estimation, whitening, the SNR,
+the matched filter, HRSS and HPEAK) divides by the data's peak first and restores it after; whitened data and SNRs
+are identical, to float32 rounding, at any input amplitude. `gf.psd()`, which returns the PSD itself, still
+underflows for strain: use `gf.estimate_psd`, whose `PowerSpectrum` keeps the normalised PSD and its scale apart.
+
+Earlier releases multiplied strain by an internal scale, `gf.Defaults.scale_factor`. It is gone:
+
+- `ONSOURCE`, `OFFSOURCE` and `INJECTIONS` are no longer multiplied by that scale. A model trained on raw `ONSOURCE`
+  must be retrained, or fed its input times the old scale; models on whitened inputs, such as the shipped examples,
+  are unaffected.
+- `scale_factor=` arguments (`gf.Dataset`, `gf.ComposedDataset`, `gf.NoiseObtainer`, an obtainer called directly,
+  `gf.InjectionGenerator` and its `add_injections_to_onsource`, `gf.generate_strain_plot`, `gf.BatchConfig`,
+  `colored_noise_generator`) are ignored for one release, with a `DeprecationWarning`. `gf.scale_to_snr(return_scale_factor=)` is `return_factor=`, with the same warning.
+- `gf.Defaults.scale_factor` is removed: reading it raises `AttributeError`, and `gf.Defaults.set(scale_factor=)`
+  raises one that says why. `IFOData.scale` is removed.
+- A validator checkpoint of format 3 is refused (format 4 holds physical strain); validate the model again.
+
+## 8. Test Gravyflow (optional)
 
 GravyFlow includes PyTest for testing its functionality. To run tests:
 
