@@ -339,30 +339,84 @@ def test_the_default_bank_covers_the_search(spectrum):
     assert np.all(np.abs(bank["time_seconds"] - mergers) <= 0.01)
 
 
+VISIBLE_SECONDS = 1.5  # what the default search sees of a signal: the window plus half the filter
+PYCBC_SEGMENT = int(4 * FS)
+
+
+def visible_spectra(mass_1, mass_2):
+    """
+    pycbc frequency series of what the default search sees of each waveform,
+    built here rather than by the bank's MatchSpace: the VISIBLE_SECONDS before
+    merger, Hann-ramped over their first tenth, and everything after.
+    """
+    import pycbc.types
+    h = cbc_templates(mass_1, mass_2, FS, 2 * VISIBLE_SECONDS, 20.0).astype(np.float64)
+    h = h[:, h.shape[-1] // 2 - int(VISIBLE_SECONDS * FS):]
+    width = int(round(0.1 * VISIBLE_SECONDS * FS))
+    h[:, :width] *= 0.5 - 0.5 * np.cos(np.pi * np.arange(width) / width)
+    return [pycbc.types.TimeSeries(np.pad(row, (0, PYCBC_SEGMENT - len(row))), delta_t=1 / FS)
+            .to_frequencyseries() for row in h]
+
+
+def chirp_times(mass_1, mass_2, f_low=20.0):
+    """(tau0, tau3) in seconds at f_low: the Newtonian and 1.5PN chirp times."""
+    m1, m2 = np.asarray(mass_1, dtype=np.float64), np.asarray(mass_2, dtype=np.float64)
+    eta = m1 * m2 / (m1 + m2) ** 2
+    x = np.pi * (m1 + m2) * 4.925490947e-6 * f_low
+    return 5.0 / (256.0 * np.pi * f_low * eta) * x ** (-5.0 / 3.0), 1.0 / (8.0 * f_low * eta) * x ** (-2.0 / 3.0)
+
+
+def pycbc_fitting_factors(bank, mass_1, mass_2, nearest=None):
+    """
+    Each signal's best pycbc.filter.match (phase and time maximised, with
+    LALSimulation's analytic aLIGOO3LowT1800545 from 20 Hz) with a template of
+    `bank`: an overlap independent of the metric the bank is placed with. With
+    `nearest`, each signal is matched only against that many templates nearest
+    to it in chirp times, which can only lower its fitting factor.
+    """
+    import pycbc.filter
+    import pycbc.psd
+    psd = pycbc.psd.from_string("aLIGOO3LowT1800545", PYCBC_SEGMENT // 2 + 1, FS / PYCBC_SEGMENT, 10.0)
+    templates = visible_spectra(bank.mass_1, bank.mass_2)
+    t0, t3 = chirp_times(bank.mass_1, bank.mass_2)
+    s0, s3 = chirp_times(mass_1, mass_2)
+    ff = []
+    for signal, a0, a3 in zip(visible_spectra(mass_1, mass_2), s0, s3):
+        candidates = np.argsort(np.hypot(t0 / a0 - 1.0, t3 / a3 - 1.0))[:nearest]
+        ff.append(max(pycbc.filter.match(signal, templates[j], psd=psd, low_frequency_cutoff=20.0)[0]
+                      for j in candidates))
+    return np.array(ff)
+
+
 def test_the_bank_metric_is_pycbcs_overlap():
     # pycbc's match (its own overlap, LALSimulation's analytic noise curve) on
     # the search's waveforms equals the fitting factor the bank is placed with.
-    import pycbc.filter
-    import pycbc.psd
-    import pycbc.types
     from gravyflow.src.detection.template_grid import MatchSpace
-    space = MatchSpace()
-    n = int(4 * FS)
-    psd = pycbc.psd.from_string("aLIGOO3LowT1800545", n // 2 + 1, FS / n, 10.0)
-
-    def visible(m1, m2):
-        h = cbc_templates(m1, m2, FS, space.window_seconds, 20.0).astype(np.float64) * space._ramp()
-        h = h[:, h.shape[-1] // 2 - int(space.visible_seconds * FS):]
-        return [pycbc.types.TimeSeries(np.pad(row, (0, n - len(row))), delta_t=1 / FS) for row in h]
-
-    signals = visible([51.7, 12.2, 26.7], [10.4, 9.1, 8.3])
-    templates = visible([50.0, 13.0, 28.0, 30.0], [11.0, 8.5, 8.0, 25.0])
-    pycbc_ff = [max(pycbc.filter.match(s, t, psd=psd, low_frequency_cutoff=20.0)[0] for t in templates)
-                for s in signals]
     bank = TemplateBank.from_masses([50.0, 13.0, 28.0, 30.0], [11.0, 8.5, 8.0, 25.0])
-    own = bank.fitting_factors([51.7, 12.2, 26.7], [10.4, 9.1, 8.3], space)
-    np.testing.assert_allclose(own, pycbc_ff, atol=1e-3)
+    signals = ([51.7, 12.2, 26.7], [10.4, 9.1, 8.3])
+    own = bank.fitting_factors(*signals, MatchSpace())
+    np.testing.assert_allclose(own, pycbc_fitting_factors(bank, *signals), atol=1e-3)
     assert np.min(own) < 0.97  # the comparison spans matches either side of the minimal match
+
+
+def coverage_injections(n):
+    """n log-uniform (m1, m2) over 5-95, the measure the bank is placed in, from a fixed seed."""
+    m = np.exp(np.random.default_rng(187).uniform(np.log(5.0), np.log(95.0), size=(n, 2)))
+    return m.max(axis=1), m.min(axis=1)
+
+
+def test_the_bundled_bank_covers_its_range_by_an_independent_overlap():
+    # The shipped bank's coverage, measured with pycbc's match rather than the
+    # placement metric. Placement stops when about 1% of the space is left
+    # below the minimal match; the full bank puts 0.5% of these injections
+    # there. Random subsets with 20% or 30% of the templates removed put 8-22%
+    # there, so at n = 1000 a degraded bank passes the 3% bound with
+    # probability below 1e-9, and a sound one (1.3% of its space below) fails
+    # with probability about 1e-5.
+    bank = MatchedFilter(sample_rate_hertz=FS).bank
+    ff = pycbc_fitting_factors(bank, *coverage_injections(1000), nearest=48)
+    below = np.mean(ff < 0.97)
+    assert below <= 0.03 and ff.min() >= 0.94, (below, ff.min())
 
 
 def test_the_bundled_bank_is_the_default_filters_and_names_what_it_depends_on():
