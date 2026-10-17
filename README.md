@@ -313,9 +313,9 @@ Earlier releases multiplied strain by an internal scale, `gf.Defaults.scale_fact
 - `gf.Defaults.scale_factor` is removed: reading it raises `AttributeError`, and `gf.Defaults.set(scale_factor=)`
   raises one that says why. `IFOData.scale` is removed.
 - A validator checkpoint of format 3 is refused (format 4 holds physical strain); validate the model again.
-- A waveform's reference time (t = 0: a burst's peak, a CBC's merger) is always on a sample, sample N // 2 of its
-  buffer, as in LAL's burst waveforms. A buffer of odd length put it half a sample off the grid, which lowered a
-  sampled peak by cos(pi f / fs) (0.953 at 200 Hz and 2048 Hz).
+- A waveform's reference time (t = 0: a burst's peak, a CBC's merger, the peak of its envelope) is always on a
+  sample, sample N // 2 of its buffer, as in LAL's burst waveforms. A buffer of odd length put it half a sample off
+  the grid, which lowered a sampled peak by cos(pi f / fs) (0.953 at 200 Hz and 2048 Hz).
 
 ## 9. Test Gravyflow (optional)
 

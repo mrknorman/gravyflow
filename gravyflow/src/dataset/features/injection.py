@@ -275,9 +275,9 @@ class ReturnVariables(Enum):
     # The event time: the time most recognised as the event's, chosen per
     # source type, as it arrives at each detector, as a fraction of the
     # onsource window. It is each waveform's reference time:
-    # - a CBC: its merger (coalescence) time, as its waveform model defines
-    #   it, which lies after the strain's peak (IMRPhenomD: 1.5 ms for 10+10
-    #   Msun, 3.4 ms for 30+30, 5.9 ms for 60+40);
+    # - a CBC: its merger, the peak of its envelope (|analytic h+|^2 +
+    #   |analytic hx|^2), for every approximant; not the model's own
+    #   coalescence time, which lies up to tens of milliseconds from it;
     # - a supernova, once a supernova generator exists: its explosion;
     # - a generic burst: its peak, the envelope's centre for a sine-Gaussian,
     #   chirplet, WNB or periodic wave, and a ringdown's start.

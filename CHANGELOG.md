@@ -24,6 +24,12 @@ repository before it may need the changes below.
   `Defaults.quantize_duration` and `Defaults.STANDARD_DURATIONS`: it rounded the duration up to a tier and kept the
   last samples, so between tiers its merger moved or was cut off. `gf.CBCGenerator` is the one CBC path; its merger is
   at the window's centre.
+- **A CBC's merger is the peak of its envelope**, |analytic h+|² + |analytic h×|², for every approximant. It used to
+  be each model's own coalescence time, which sits up to tens of milliseconds from the peak, by a convention that
+  differs between models (18 ms for IMRPhenomD at 95 + 95 solar masses). Every label that names the merger moves with
+  it: the central time, the GPS times and the onsource placement. For IMRPhenomD the merger is LALSimulation's
+  `SimInspiralChooseTDWaveform` t = 0, to the sample. For IMRPhenomXAS it is within the jitter of LAL's t = 0, the
+  peak of h+² + h×². For IMRPhenomPv2 and the tidal model LAL keeps the model's own time, so the two differ.
 - **Dependencies.** The core install no longer brings gwpy, gwdatafind, pycbc, bokeh, panel, holoviews, GitPython,
   SQLAlchemy, psycopg2-binary or ipykernel. Real data needs `gravyflow[realdata]`; plots, the validator and the example
   models need `gravyflow[viz]`; the notebooks need `gravyflow[notebooks]` and the tests `gravyflow[test]`. The `metal`
@@ -45,6 +51,8 @@ repository before it may need the changes below.
 
 ### Fixed
 
+- The chirp-time helpers took the solar mass in seconds as G·1.98855e30/c³, 7.05e-5 above LALSimulation's
+  `MTSUN_SI`, so their times to merger were 1.2e-4 short. They now use ripple's value, which is LAL's.
 - `import gravyflow` failed after a clean install: it imported datashader, which no requirement named.
 - A wheel or non-editable install lacked the package's data files, so coloured noise (its noise profiles), the bundled
   template bank and the shipped models were missing. The wheel no longer ships the tests or their data.

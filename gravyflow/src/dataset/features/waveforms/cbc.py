@@ -210,8 +210,10 @@ def _frequency_domain_polarisations(
     Plus and cross polarisations of one source from ripple, on ``frequencies``.
 
     ``frequencies`` is a uniform grid starting at 0 Hz. The model is evaluated
-    above 0 Hz only, and the 0 Hz bin is zero. Ripple's models place the merger
-    at t = 0; a linear phase moves it to ``coalescence_time`` seconds.
+    above 0 Hz only, and the 0 Hz bin is zero. A linear phase moves each model's
+    own t = 0 (its coalescence time, which is not where the signal peaks) to
+    ``coalescence_time`` seconds; the merger is placed after the inverse
+    transform (see ``_envelope_power``).
     """
     model = ripplegw.waveform(approximant.value, f_ref=f_ref)
     missing = [name for name in model.parameter_names if name not in parameters]
@@ -240,6 +242,25 @@ def _frequency_domain_polarisations(
     return hp, hc
 
 
+def _envelope_power(spectrum, num_samples: int):
+    """
+    The squared envelope, |analytic signal|^2, of the real series of
+    ``num_samples`` samples whose ``rfft`` is ``spectrum`` (last axis).
+
+    The analytic signal keeps the positive frequencies, doubled, so its modulus
+    is the envelope with no oscillation at twice the phase. Summed over the two
+    polarisations it is a CBC's envelope, whose peak is gravyflow's merger time
+    for every approximant: it does not depend on the phase, and for an
+    aligned-spin model it does not depend on the inclination either.
+    """
+    weights = jnp.full(spectrum.shape[-1], 2.0).at[0].set(1.0)
+    if num_samples % 2 == 0:
+        weights = weights.at[-1].set(1.0)  # the Nyquist bin is its own conjugate
+    padding = [(0, 0)] * (spectrum.ndim - 1) + [(0, num_samples - spectrum.shape[-1])]
+    analytic = jnp.fft.ifft(jnp.pad(spectrum * weights, padding), axis=-1)
+    return jnp.abs(analytic) ** 2
+
+
 @_in_x64
 @jax.jit(static_argnames=["num_waveforms", "sample_rate_hertz", "duration_seconds", "approximant", "f_ref"])
 def _generate_cbc_waveform_jit(
@@ -266,6 +287,9 @@ def _generate_cbc_waveform_jit(
     """
     Generates time-domain waveforms using ripple.
     Returns array of shape (num_waveforms, 2, num_samples).
+
+    Each waveform's merger, the peak of its envelope (``_envelope_power`` of
+    both polarisations), is on the sample nearest ``coalescence_time``.
 
     Each waveform is whole from its band edge, ``min_frequency_hertz`` when that
     is given, and tapered below it (see ``_taper_band``). The taper starts no
@@ -313,7 +337,7 @@ def _generate_cbc_waveform_jit(
     lambda2_jax = ensure_jax(lambda_2, num_waveforms)
     
     if coalescence_time is None:
-        # Default to placing merger at 90% of duration to maximize inspiral visibility
+        # Default to placing the merger at 90% of duration to maximize inspiral visibility
         # while leaving room for ringdown.
         coalescence_time = duration_seconds * 0.9
 
@@ -354,15 +378,27 @@ def _generate_cbc_waveform_jit(
 
     hp_freq, hc_freq = jax.vmap(gen_one)(parameters, taper_starts, band_edges, tc_jax)
     
-    # IFFT
-    # jnp.fft.irfft
-    
     hp_time = jax.vmap(lambda x: jnp.fft.irfft(x, n=num_samples))(hp_freq)
     hc_time = jax.vmap(lambda x: jnp.fft.irfft(x, n=num_samples))(hc_freq)
-    
+
     hp_time = hp_time * sample_rate_hertz
     hc_time = hc_time * sample_rate_hertz
-    
+
+    # The merger is the envelope's peak. Each model's own t = 0 sits up to
+    # about 20 ms from it (18 ms for IMRPhenomD at 95 + 95 solar masses), by a
+    # convention that differs between models, and LAL's time-domain waveforms
+    # move it to the peak for some models and not others. So the peak is found
+    # in the conditioned waveform and rolled, by whole samples, onto the
+    # sample nearest coalescence_time. The roll wraps only the buffer's ends:
+    # its start, which no kept window reaches, and its end, which the
+    # post-merger mask below zeroes.
+    envelope = _envelope_power(hp_freq, num_samples) + _envelope_power(hc_freq, num_samples)
+    peaks = jnp.argmax(envelope, axis=-1)
+    merger_samples = jnp.round(tc_jax * sample_rate_hertz).astype(peaks.dtype)
+    roll = jax.vmap(jnp.roll)
+    hp_time = roll(hp_time, merger_samples - peaks)
+    hc_time = roll(hc_time, merger_samples - peaks)
+
     # Zero out signal after merger + ringdown buffer to prevent wrapping artifacts
     # tc_jax is time to merger.
     # We add a generous buffer for ringdown.
@@ -421,9 +457,9 @@ def _generate_cbc_window(
     **source
 ):
     """
-    CBC waveforms of ``window_seconds``, each with its merger at the window's
-    centre, sample K // 2 of its K samples (on a sample, as every generator's
-    reference time).
+    CBC waveforms of ``window_seconds``, each with its merger, the peak of its
+    envelope, at the window's centre: sample K // 2 of its K samples (on a
+    sample, as every generator's reference time).
 
     The waveforms are generated on the fixed buffer of ``_cbc_buffer_seconds``
     and the last ``window_seconds`` are kept. Each is whole from
