@@ -15,10 +15,26 @@ import numpy as np
 import pytest
 import requests
 
+import gravyflow
+
 from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
 from gravyflow.tests.conftest import (
     PROXY_VARIABLES, WriteAudit, refuse_internet, tree_changes, tree_snapshot,
 )
+
+#: Run in a fresh interpreter, where no event module is imported yet: the offline
+#: catalogue is entered and left, and only then are the event lookups imported.
+FIRST_IMPORT_INSIDE_THE_CATALOGUE = """
+import sys
+from gravyflow.tests.conftest import offline_event_catalogue
+assert "gravyflow.src.dataset.features.segment_builders" not in sys.modules
+with offline_event_catalogue():
+    pass
+from gravyflow.src.dataset.features import event, segment_builders
+assert segment_builders.get_events_with_params is event.get_events_with_params, (
+    "a patched event lookup outlived the offline catalogue")
+print("RESTORED")
+"""
 
 #: A documentation address (RFC 5737): never a real host.
 REMOTE = "http://203.0.113.9/"
@@ -78,6 +94,15 @@ def test_tree_snapshot_sees_every_change_and_skips_vanished_files(tmp_path, monk
 
     monkeypatch.setattr(Path, "stat", vanishing)
     assert ".tmp-renamed" not in tree_snapshot(tmp_path)
+
+
+def test_the_offline_catalogue_restores_every_event_lookup_it_patched():
+    child = subprocess.run(
+        [sys.executable, "-c", FIRST_IMPORT_INSIDE_THE_CATALOGUE],
+        capture_output=True, text=True, timeout=300,
+        env={**os.environ, "PYTHONPATH": str(Path(gravyflow.__file__).resolve().parents[1])},
+    )
+    assert child.returncode == 0 and child.stdout.strip() == "RESTORED", child.stderr[-2000:]
 
 
 def test_write_audit_sees_this_process_writes_and_no_one_elses(tmp_path):

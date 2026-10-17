@@ -437,15 +437,21 @@ OFFLINE_EVENTS = [
 ]
 
 
-@pytest.fixture
-def offline_events():
+@contextmanager
+def offline_event_catalogue():
     """
-    The event catalogue, its data quality and its strain, offline: the catalogue
-    lists OFFLINE_EVENTS, every record passes data quality, and every example reads
-    unit Gaussian strain, seeded by its record's time. Yields the events.
+    The event catalogue, its data quality and its strain, offline, for the block:
+    the catalogue lists OFFLINE_EVENTS, every record passes data quality, and every
+    example reads unit Gaussian strain, seeded by its record's time. Yields the events.
+
+    ``segment_builders`` copies ``get_events_with_params`` from ``event`` when it is
+    first imported, so both modules are imported before either is patched: a first
+    import inside the block would copy the fake, which would then outlive it.
     """
     from unittest import mock
     import numpy as np
+    from gravyflow.src.dataset.features import event as event_module
+    from gravyflow.src.dataset.features import segment_builders
 
     def gaussian_strain(self, record, reads, window_spec):
         rng = np.random.default_rng(int(record.transient_gps_time))
@@ -458,9 +464,16 @@ def offline_events():
     def listed(observing_runs=None, event_types=None, event_names=None, **kwargs):
         return [dict(e) for e in OFFLINE_EVENTS if event_names is None or e["name"] in event_names]
 
-    with mock.patch("gravyflow.src.dataset.features.event.get_events_with_params", listed), \
-         mock.patch("gravyflow.src.dataset.features.segment_builders.get_events_with_params", listed), \
+    with mock.patch.object(event_module, "get_events_with_params", listed), \
+         mock.patch.object(segment_builders, "get_events_with_params", listed), \
          mock.patch.object(gf.TransientDataObtainer, "_read_example", gaussian_strain), \
          mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs), \
          catalogued_events(OFFLINE_EVENTS):
         yield [dict(e) for e in OFFLINE_EVENTS]
+
+
+@pytest.fixture
+def offline_events():
+    """The ``offline_event_catalogue`` for the test. Yields the events."""
+    with offline_event_catalogue() as events:
+        yield events
