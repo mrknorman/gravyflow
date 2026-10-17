@@ -55,6 +55,12 @@ repository before it may need the changes below.
   epoch and range; `ds.load_materialised(set)` serves `ds[k]` from it, verified on every read (README §7). The
   fingerprint records the versions of Python and of every library that makes batch bytes
   (`gravyflow.src.utils.fingerprint.library_versions`). A dataset read in order is refused (`NotIndexAddressed`).
+- **The platform record and a `tpu` extra.** `ds.seed_metadata["platform"]` and every materialised manifest record
+  the backend and device kind, `XLA_FLAGS`, JAX's matmul precision, the CBC stage's device and flag, and the host's
+  CPU architecture, so a set resumed on another architecture is a set of its own. Training and `ds.materialise`
+  warn on any backend whose determinism flag is missing (CPU, GPU) or unknown (TPU). A dataset's CBC waveforms are
+  generated on the host's CPU; a process without a CPU backend refuses the first CBC batch (`NoHostBackend`)
+  (README, "Platforms").
 
 - `gravyflow.__version__`.
 - `docs/api.md`, the public API, which a test holds equal to `gravyflow.__all__`.

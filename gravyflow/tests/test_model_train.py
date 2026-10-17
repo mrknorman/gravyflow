@@ -121,6 +121,6 @@ class TestPlatform:
             warnings.simplefilter("always")
             assert tiny_model(tmp_path / "single").train(validate_args=validate)
         assert not [w for w in caught if "XLA_FLAGS" in str(w.message)]
-        monkeypatch.setattr(platform, "multi_threaded_cpu", lambda: True)
+        monkeypatch.setattr(platform, "pure", lambda backend=None: False)
         with pytest.warns(UserWarning, match="XLA_FLAGS=--xla_cpu_multi_thread_eigen=false"):
             assert tiny_model(tmp_path / "multi").train(validate_args=validate)

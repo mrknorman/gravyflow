@@ -468,13 +468,17 @@ class IndexedBatches:
 
     @property
     def seed_metadata(self) -> dict:
-        """Where the data's randomness came from, to record beside a model."""
+        """
+        Where the data's randomness came from, to record beside a model, with
+        the platform that turned it into bits (`platform.platform_record`).
+        """
         return {
             **self.tree.metadata(),
             "split": self.group,
             "split_fingerprint": None if self.split_spec is None else self.split_spec.fingerprint(),
             "epoch_mode": self.epoch_mode.name,
             "index_addressed": self.index_addressed,
+            "platform": platform.platform_record(),
             "materialised": None if self._materialised is None else {
                 "set_id": self._materialised.set_id, "epoch": self._materialised.epoch,
                 "k_range": [self._materialised.k_range.start, self._materialised.k_range.stop]},
@@ -576,9 +580,8 @@ class IndexedBatches:
         Writers agree only on bit-reproducible kernels (`platform`); writers
         that disagree are refused, never merged.
 
-        Like training, it warns on multi-threaded CPU kernels
-        (`platform.warn_if_multi_threaded_cpu`), whose bytes no other writer
-        reproduces.
+        Like training, it warns on kernels not known to be pure
+        (`platform.warn_if_not_pure`), whose bytes no other writer reproduces.
 
         Raises:
             NotIndexAddressed: a dataset read in order (``index_addressed`` False).
@@ -600,7 +603,7 @@ class IndexedBatches:
             raise IndexError(f"Batches {k_range} are outside the {len(self)} batches of an epoch.")
         if check_coordinate(shard_size, "shard_size") < 1:
             raise ValueError(f"shard_size must be at least 1, got {shard_size}.")
-        platform.warn_if_multi_threaded_cpu()
+        platform.warn_if_not_pure()
         manifest = {
             **self._set_identity(),
             "format": FORMAT,

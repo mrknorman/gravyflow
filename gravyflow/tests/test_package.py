@@ -261,12 +261,13 @@ def test_the_wheel_declares_the_extras(wheel):
     text = archive.read(metadata).decode()
     assert re.search(rf"^Version: {re.escape(gf.__version__)}$", text, re.MULTILINE)
     extras = set(re.findall(r"^Provides-Extra: (\S+)$", text, re.MULTILINE))
-    assert extras == {"realdata", "viz", "test", "notebooks", "cuda"}, extras
+    assert extras == {"realdata", "viz", "test", "notebooks", "cuda", "tpu"}, extras
     requirements = re.findall(r"^Requires-Dist: (.+)$", text, re.MULTILINE)
     core = {re.split(r"[ <>=!;\[]", r)[0].lower() for r in requirements if "extra ==" not in r}
     assert core.isdisjoint({"gitpython", "sqlalchemy", "psycopg2-binary", "pycbc", "jax-metal"}), core
     assert core.isdisjoint(p.lower() for p in EXTRA_PACKAGES), core
     assert any(r.startswith("datashader") and 'extra == "viz"' in r for r in requirements), requirements
+    assert any(r.startswith("jax[tpu]") and 'extra == "tpu"' in r for r in requirements), requirements
 
 
 def test_large_weights_are_release_downloads(tmp_path, monkeypatch):

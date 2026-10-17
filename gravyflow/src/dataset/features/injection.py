@@ -27,6 +27,7 @@ from gravyflow.src.utils.shapes import (
 )
 from gravyflow.src.utils.tensor import replace_nan_and_inf_with_zero
 from gravyflow.src.rng import BatchStreams, SeedTree, check_name, resolve_streams
+from gravyflow.src.rng import platform
 from gravyflow.src.rng.legacy import warn_deprecated
 from gravyflow.src.dataset.config import batch_size, ignore_scale_factor
 from gravyflow.src.dataset.features.waveforms.cbc import (
@@ -1228,15 +1229,18 @@ class CBCGenerator(WaveformGenerator):
             if "duration_seconds" in cbc_kwargs:
                 cbc_kwargs.pop("duration_seconds")
 
-            # The merger is at the centre of the window.
-            waveforms = _generate_cbc_window(
-                    num_waveforms=num_waveforms, 
-                    sample_rate_hertz=sample_rate_hertz, 
-                    window_seconds=duration_seconds,
-                    min_frequency_hertz=f_min,
-                    approximant=self.approximant,
-                    **cbc_kwargs
-            )
+            # The merger is at the centre of the window. The waveforms are
+            # generated on the host's CPU, whatever the default backend
+            # (`platform.cbc_device`, which refuses a process without one).
+            with jax.default_device(platform.cbc_device()):
+                waveforms = _generate_cbc_window(
+                        num_waveforms=num_waveforms,
+                        sample_rate_hertz=sample_rate_hertz,
+                        window_seconds=duration_seconds,
+                        min_frequency_hertz=f_min,
+                        approximant=self.approximant,
+                        **cbc_kwargs
+                )
             
             waveforms = ensure_last_dim_even(waveforms)
             waveforms = self.apply_injection_chance(waveforms, streams)

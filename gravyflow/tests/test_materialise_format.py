@@ -518,12 +518,6 @@ def test_the_fingerprint_follows_the_spec_not_the_platform(monkeypatch):
     assert dataset().fingerprint == base
 
 
-def test_the_platform_record_is_backend_and_flags(monkeypatch):
-    import jax
-    monkeypatch.setenv("XLA_FLAGS", "--a --b")
-    assert platform.platform_record() == {"backend": jax.default_backend(), "xla_flags": "--a --b"}
-
-
 def test_materialise_refuses_addresses_outside_the_epoch(tmp_path):
     ds = dataset()
     with pytest.raises(IndexError, match="outside the 4 batches"):
@@ -535,8 +529,8 @@ def test_materialise_refuses_addresses_outside_the_epoch(tmp_path):
 
 
 def test_materialise_warns_on_multi_threaded_kernels(tmp_path, monkeypatch):
-    monkeypatch.setattr(platform, "multi_threaded_cpu", lambda: True)
-    with pytest.warns(UserWarning, match="multi-threaded"):
+    monkeypatch.setattr(platform, "pure", lambda backend=None: False)
+    with pytest.warns(UserWarning, match="not deterministic"):
         dataset().materialise(tmp_path, batches=1)
 
 

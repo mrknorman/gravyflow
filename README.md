@@ -26,6 +26,7 @@ extras add the rest:
 | `notebooks` | `realdata`, `viz`, ipykernel, matplotlib | the notebooks and tutorials in `example_notebooks/` |
 | `test` | `realdata`, `viz`, pytest, pytest-cov, lalsuite, pycbc | the test suite |
 | `cuda` | JAX's CUDA 12 plugin and NVIDIA's libraries (Linux x86_64) | NVIDIA GPUs |
+| `tpu` | JAX's TPU runtime, libtpu (Linux) | Google Cloud TPUs |
 
 To work on GravyFlow itself, install a clone in editable mode with the test extra:
 
@@ -60,6 +61,33 @@ import gravyflow as gf
 Using a GravyFlow name without it raises an `ImportError` that says so. JAX chooses its own platform (a GPU when the
 `cuda` extra finds one). Set `JAX_PLATFORMS=cpu` to force the CPU, and `XLA_PYTHON_CLIENT_PREALLOCATE=false` when
 several processes share a GPU: GravyFlow no longer sets either.
+
+### Platforms: CPU, GPU or TPU
+
+GravyFlow chooses no platform and sets no XLA flag; JAX picks the backend (`jax.default_backend()`). Two things
+follow from the platform:
+
+- **A dataset's CBC waveforms are generated on the host's CPU**, whatever the backend, because their phase needs float64. A
+  process must therefore keep JAX's CPU backend: on a TPU, set `JAX_PLATFORMS=tpu,cpu`, not `tpu`. Without it the
+  first CBC batch raises `NoHostBackend`, which says so.
+- **Bit-reproducibility needs a flag per backend**, set in `XLA_FLAGS` before starting Python (JAX reads it once,
+  when it starts, and importing GravyFlow starts it):
+
+  | Backend | Flag | Bit-identical between calls |
+  |---|---|---|
+  | CPU | `--xla_cpu_multi_thread_eigen=false` | yes (also needed on a GPU or TPU host for CBC waveforms) |
+  | GPU | `--xla_gpu_deterministic_ops=true` | expected; not yet verified on a GPU with this JAX |
+  | TPU | none known | unknown |
+
+  Training and `ds.materialise` warn when the backend's flag is missing, or unknown. Without the flag, a backend's
+  kernels can round whitened strain and Welch spectra differently from one call to the next, in the last bits.
+
+What decides a batch's bits besides its address, `platform_record()` in `gravyflow.src.rng.platform` (the backend
+and its device kind, `XLA_FLAGS`, JAX's matmul precision, the CBC stage's device and flag, and the host's CPU
+architecture), is recorded in `ds.seed_metadata["platform"]` and in every materialised set's manifest. It is never
+part of the dataset's fingerprint, so a spec draws the same streams on every device; the bits after the arithmetic
+agree across devices only within float32 rounding. A materialised set's batches all come from one platform: a set
+resumed on a host of another architecture or device is written as a set of its own, never merged.
 
 `import gravyflow` is instant: each name imports its module when it is first used. The public names are listed in
 [`docs/api.md`](docs/api.md); everything under `gravyflow.src` is internal.
@@ -177,7 +205,7 @@ independent, such as the classes of a classifier, take distinct names (`gf.Datas
 scope of the tree, or are the pools of one `gf.ComposedDataset`. Old seeds give new data. Every draw is bit-identical between rebuilds; on CPU,
 XLA's multi-threaded kernels can still round whitened and projected strain and Welch spectra differently from one call
 to the next, in the last bits of float32. For bit-identical batches, set `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false`
-before starting Python: importing gravyflow starts JAX, which reads the flag then (the results differ, also in the last
+(on other backends, see [Platforms](#platforms-cpu-gpu-or-tpu)) before starting Python: importing gravyflow starts JAX, which reads the flag then (the results differ, also in the last
 bits, from multi-threaded ones). The test suite sets it itself, and a recipe training run warns without it. The remaining replaced seed arguments
 (`generate(seed=)`, `InjectionGenerator(seed=)`, `PoolSampler(seed=)` and the like) still work for one release, with
 a `DeprecationWarning`. These changes have no such period:

@@ -83,6 +83,10 @@ cuda = [
 
   "nvidia-nccl-cu12>=2.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
+# Google Cloud TPUs (Linux only): JAX's TPU runtime, libtpu.
+tpu = [
+  "jax[tpu]>=0.8.1; sys_platform == 'linux'",
+]
 
 [project.urls]
 Homepage = "https://github.com/mrknorman/gravyflow"

@@ -172,8 +172,7 @@ class TestBitReproducibleKernels:
     def test_the_session_runs_single_threaded_kernels(self):
         # The deterministic catch: the flag is in effect, so every kernel runs
         # on the calling thread.
-        assert platform.single_threaded_cpu(), platform.xla_flags()
-        assert not platform.multi_threaded_cpu()
+        assert platform.pure("cpu"), platform.xla_flags()
 
     def test_whitening_is_bit_reproducible_between_calls(self):
         """

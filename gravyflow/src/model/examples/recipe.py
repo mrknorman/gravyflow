@@ -436,7 +436,7 @@ class TrainingRun:
                 configuration, or of data split otherwise; or the model built
                 records another split.
         """
-        platform.warn_if_multi_threaded_cpu()
+        platform.warn_if_not_pure()
         data = training_data(self.seed)
         split = split_record(data, validation_data)
         run = self.directory.run

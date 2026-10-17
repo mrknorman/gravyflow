@@ -324,7 +324,7 @@ def test_a_run_on_multi_threaded_cpu_kernels_warns(tmp_path, monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
         make_run(tmp_path / "single", 1).train(tiny_model, lambda seed: CountingBatches(seed), validation, verbose=0)
-    monkeypatch.setattr(platform, "multi_threaded_cpu", lambda: True)
+    monkeypatch.setattr(platform, "pure", lambda backend=None: False)
     with pytest.warns(UserWarning, match="XLA_FLAGS=--xla_cpu_multi_thread_eigen=false"):
         make_run(tmp_path / "multi", 1).train(tiny_model, lambda seed: CountingBatches(seed), validation, verbose=0)
 
