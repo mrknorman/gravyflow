@@ -33,6 +33,32 @@ pip install -e .[cuda]
 
 Note that GravyFlow is under active development, and you may encounter issues during installation. Ensure TensorFlow can recognize GPUs in your environment, as GravyFlow is optimized for GPU use and relies on vectorized GPU functions.
 
+## 3. Quick start: a CNN on a laptop CPU
+
+One command trains the CNN of Gabbard *et al.* (2017) on simulated binary black hole signals (IMRPhenomD, masses
+5–95 M☉, optimal SNR 8–15) in whitened coloured Gaussian noise, then validates it. It runs offline, on a CPU:
+
+```bash
+python -m gravyflow.src.model.examples.train_gabbard_2017 --output-dir ~/gravyflow_runs/gabbard_2017_cpu --preset cpu \
+  && python -m gravyflow.src.model.examples.validate_gabbard_2017 --run-dir ~/gravyflow_runs/gabbard_2017_cpu
+```
+
+- **Training** (about 3 minutes on an Apple M-series CPU): the paper's network at 2048 Hz (41,842 weights), 10 epochs of
+  300 batches of 32 one-second windows, Nadam at 0.002; the best epoch by validation loss is saved as `model.keras`.
+  The run directory keeps a checkpoint per epoch: the same command resumes an interrupted run, and refuses a
+  directory holding a run of another configuration.
+- **Validation** (about 3 minutes): 100,000 noise windows (100,000 s of background) and 100,000 injections at SNR
+  0–15, from the validator's own seeds. It prints the score threshold for each false-alarm rate (in Hz, with its
+  achieved rate), the efficiency by SNR bin at that threshold, and the ROC AUC, and writes the dashboard
+  `validation/validation.html` in the run directory. Expect an AUC near 0.976 and, at a false-alarm rate of 1e-3 Hz,
+  an efficiency near 0.69 at SNR 7–8 and 0.96 at SNR 9–10.
+- **Reproducible from the seed** (`--seed`): the same seed gives the same batches, in the same order, from the same
+  initial weights. For bit-identical weights from run to run, set `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false`:
+  with XLA's multi-threaded CPU kernels the whitened strain differs in its last bits between calls (see section 6),
+  and training amplifies the difference.
+
+Notebooks 07 and 08 in `example_notebooks/` walk through the same run.
+
 ## 4. Setup permissions:
 
 Follow these guides for setting up permissions to access real data:
@@ -96,6 +122,18 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
 - The model recipes take one root seed: `TrainingRun.train`'s `training_data` is called with the seed alone (it
   took the seed and the first epoch), and `split_seeds`, `TrainingRun.train_seed` and
   `GeorgeHuerta2017.dataset(first_epoch=)` / `dataset_regression(first_epoch=)` are gone; resume sets `ds.epoch`.
+- A recipe run is reproducible from its seed: `fit` serves each epoch's batches in index order (`shuffle=False`;
+  Keras' shuffle drew from Python's unseeded global random), and `TrainingRun.train` builds the model under
+  `keras_draws`, so its initial weights and dropout seeds come from the seed tree. Each checkpoint's record keeps its
+  dropout seed state, which Keras does not save, so a resumed run trains as an uninterrupted one (bit for bit with
+  the single-threaded `XLA_FLAGS` above; otherwise the whitened strain's last bits differ). A model with dropout
+  saved in a run directory before this release records no seed state, and loading it (to resume or to validate) is
+  refused by name: train it again.
+- `gf.Model`'s binary output is a logit, not a sigmoid probability: it trains with
+  `BinaryCrossentropy(from_logits=True)` and reports `BinaryAccuracy` at a threshold of 0, and the validator (which
+  refused a probability output) scores it. `Model.validate(validate_args, config, model_path)` takes a
+  `ValidationConfig` and returns the `Validator`. A checkpoint that exists but cannot be loaded raises `ValueError`;
+  `Model.load` returned an untrained model in its place.
 
 ## 7. Test Gravyflow (optional)
 

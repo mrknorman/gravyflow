@@ -13,8 +13,11 @@ and evaluated.
   each epoch's batches in index order (Keras' shuffle would draw from Python's
   unseeded global random), and the model's initial weights and dropout seeds
   come from the seed tree (`keras_draws`). Two runs of one seed train the same
-  batches in the same order into the same weights, and a resumed run trains as
-  an uninterrupted one.
+  batches in the same order from the same weights, and a resumed run trains as
+  an uninterrupted one: bit for bit when XLA runs single-threaded on a CPU
+  (``XLA_FLAGS=--xla_cpu_multi_thread_eigen=false``). Its multi-threaded
+  kernels round the whitened strain differently from call to call, in the last
+  bits, and training amplifies the difference.
 - **A run directory outside the package.** `RunDirectory` refuses any path
   inside the installed library, so a run can never overwrite shipped files.
 - **Resume.** Each epoch ends with the model and its optimiser saved
