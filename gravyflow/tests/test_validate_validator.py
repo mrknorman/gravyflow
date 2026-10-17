@@ -41,7 +41,7 @@ def dataset_args():
 
 @pytest.fixture(scope="module")
 def small_config():
-    return ValidationConfig(num_examples=64, batch_size=32, snr_range=(0.0, 15.0))
+    return ValidationConfig(num_examples=64, batch_size=32, snr_range=(0.0, 15.0), volume_num_injections=64)
 
 
 @pytest.fixture(scope="module")
@@ -56,9 +56,9 @@ def test_validator_runs_offline_on_synthetic_noise(validated, tmp_path):
     _, path, v = validated
     assert v.far_scores.shape == (64,) and np.all(np.isfinite(v.far_scores))
     assert v.noise_gps_times is None
-    assert set(v.efficiency_data) == {"snrs", "scores", "mass1", "mass2", "distances", "central_times", "hpeak",
-                                      "hrss"}
+    assert set(v.efficiency_data) == {"snrs", "scores", "mass1", "mass2", "central_times", "hpeak", "hrss"}
     assert all(a.shape == (64,) for a in v.efficiency_data.values())
+    assert set(v.volume_data) == {"scores", "distances", "snrs", "mass1", "mass2", "max_distance_mpc"}
     assert path.exists()
     report = tmp_path / "report.html"
     v.plot(report)
@@ -88,31 +88,40 @@ def test_checkpoint_round_trip(validated):
     _, path, v = validated
     loaded = Validator.load(path)
     np.testing.assert_array_equal(loaded.far_scores, v.far_scores)
-    for k in v.efficiency_data:
-        np.testing.assert_array_equal(loaded.efficiency_data[k], v.efficiency_data[k])
+    for data in ("efficiency_data", "volume_data"):
+        assert set(getattr(loaded, data)) == set(getattr(v, data))
+        for k in getattr(v, data):
+            np.testing.assert_array_equal(getattr(loaded, data)[k], getattr(v, data)[k])
     assert loaded.model_sha256 == v.model_sha256 and loaded.config_sha256 == v.config_sha256
     assert loaded.config == v.config
 
 
 def test_the_sensitive_volume_is_recorded_and_plotted(validated, small_config):
-    # The default run's injections carry the distance their scaled amplitude implies, so
-    # the volume curve follows from the record alone, with its three intervals, and the
-    # record read back gives the same curve.
+    # The volume set: sources at physical distances, uniform in volume out to the
+    # population's reach; the curve follows from the record alone, with its three
+    # intervals and noise floor, and the record read back gives the same curve.
     _, path, v = validated
-    distances, snrs = v.efficiency_data["distances"], v.efficiency_data["snrs"]
-    assert np.all(np.isfinite(distances)) and np.all(distances > 0) and np.ptp(snrs) > 5.0
+    data = v.volume_data
+    max_distance = float(data["max_distance_mpc"])
+    assert np.all((data["distances"] > 0) & (data["distances"] <= max_distance))
+    # Each source's SNR goes as one over its distance: its SNR at the reach is at most
+    # the loudest source's, the horizon SNR (the loudest sky of one batch, so to a margin).
+    assert np.all(data["snrs"] * data["distances"] / max_distance <= small_config.volume_horizon_snr * 1.1)
     curve = v.sensitive_volume_curve()
     assert curve.far_hz.tolist() == small_config.far_thresholds
     resolved = curve.resolved
     assert resolved.any() and not resolved.all()  # 64 s of background resolves only the higher FARs
     assert np.all(np.isnan(curve.volume_gpc3[~resolved]))
     for lower, upper in ((curve.injection_lower_gpc3, curve.injection_upper_gpc3),
-                         (curve.background_lower_gpc3, curve.background_upper_gpc3),
-                         (curve.joint_lower_gpc3, curve.joint_upper_gpc3)):
+                         (curve.background_lower_gpc3, curve.background_upper_gpc3)):
         assert np.all(lower[resolved] <= curve.volume_gpc3[resolved])
         assert np.all(curve.volume_gpc3[resolved] <= upper[resolved])
+    complete = resolved & (curve.joint_unresolved == 0)
+    assert np.all(curve.joint_lower_gpc3[complete] <= curve.joint_upper_gpc3[complete])
+    assert np.all(np.isnan(curve.joint_lower_gpc3[resolved & ~complete]))
     assert np.all(curve.volume_gpc3[resolved] <= curve.reference_volume_gpc3)
-    assert curve.num_injections == small_config.num_examples
+    assert curve.max_distance_mpc == max_distance
+    assert curve.num_injections == small_config.volume_num_injections
     assert curve.num_bootstrap == small_config.volume_bootstrap_samples
     loaded = Validator.load(path).sensitive_volume_curve()
     for field in dataclasses.fields(curve):
@@ -124,32 +133,67 @@ def test_the_sensitive_volume_is_recorded_and_plotted(validated, small_config):
     assert all(child.renderers for child in plot.children)
 
 
-def test_a_sources_snr_times_its_distance_does_not_depend_on_the_snr_drawn(dataset_args):
-    # The volume weighs each injection by D = SNR x distance, its source's SNR at 1 Mpc.
-    # Drawn over twice the SNR range, from the same seeds, the same sources are scaled to
-    # twice the SNR, so each lies at half the distance, with the same D.
-    def injected(snr_range):
-        bank = ValidationBank(logit_model(1), dataset_args,
-                              ValidationConfig(num_examples=32, batch_size=32, snr_range=snr_range))
-        bank.generate()
-        return bank.get_efficiency_data()
-
-    near, far = injected((0.0, 30.0)), injected((0.0, 15.0))
-    np.testing.assert_allclose(near["snrs"], 2 * far["snrs"], rtol=1e-6)
-    np.testing.assert_allclose(near["mass1"], far["mass1"], rtol=0)
-    # float32 labels: the SNR, its scale factor and the distance each carry a rounding.
-    np.testing.assert_allclose(near["snrs"] * near["distances"], far["snrs"] * far["distances"], rtol=1e-5)
-    assert np.ptp(far["snrs"] * far["distances"]) > 0  # sources differ: sky, orientation, masses
+def volume_set(dataset_args, **settings):
+    config = ValidationConfig(**{"num_examples": 32, "batch_size": 32, "volume_num_injections": 32, **settings})
+    bank = ValidationBank(logit_model(1), dataset_args, config)
+    bank.generate_volume()
+    return bank.get_volume_data()
 
 
-def test_injections_without_distances_have_no_sensitive_volume(validated):
-    # A burst set has no distance: it has efficiency, but no volume.
+def test_the_sensitive_volume_does_not_depend_on_the_efficiency_snr_range(dataset_args):
+    # The volume set draws distances, not SNRs: the efficiency's SNR range plays no part.
+    low, high = volume_set(dataset_args, snr_range=(0.0, 15.0)), volume_set(dataset_args, snr_range=(8.0, 30.0))
+    assert set(low) == set(high)
+    for key in low:
+        np.testing.assert_array_equal(low[key], high[key], err_msg=key)
+
+
+def test_the_reach_is_the_populations_and_can_be_set(dataset_args):
+    # The reach reads the population's bounds and the noise, never the injections drawn:
+    # another number of injections has the same reach, and a configured one is used as given.
+    assert volume_set(dataset_args)["max_distance_mpc"] == volume_set(
+        dataset_args, volume_num_injections=64)["max_distance_mpc"]
+    given = volume_set(dataset_args, volume_max_distance_mpc=250.0)
+    assert given["max_distance_mpc"] == 250.0 and np.all(given["distances"] <= 250.0)
+    with pytest.raises(ValueError, match="volume_max_distance_mpc"):
+        ValidationConfig(volume_max_distance_mpc=0.0)
+
+
+def test_a_source_placed_at_a_distance_is_the_generated_source_scaled_by_it(dataset_args):
+    # ScalingMethod(type_=DISTANCE_MPC) places each generated source at its target distance:
+    # labelled there, and the same sources twice as far have half the SNR.
+    def placed(distances):
+        generator = deepcopy(dataset_args["waveform_generators"])
+        generator.scaling_method = gf.ScalingMethod(value=distances, type_=gf.WaveformParameters.DISTANCE_MPC)
+        generator.injection_chance = 1.0
+        args = {**dataset_args, "waveform_generators": [generator], "num_examples_per_batch": 32,
+                "steps_per_epoch": 1, "group": "test", "seed": gf.SeedTree(7).sub("validator/vol"),
+                "output_variables": [gf.WaveformParameters.DISTANCE_MPC, gf.ScalingTypes.SNR]}
+        _, y = gf.Dataset(**args)[0]
+        return (per_example(y["DISTANCE_MPC"], 32, "DISTANCE_MPC"), per_example(y["SNR"], 32, "SNR"))
+
+    d = np.linspace(100.0, 800.0, 32)
+    (near, near_snr), (far, far_snr) = placed(d), placed(2 * d)
+    np.testing.assert_allclose(near, d, rtol=1e-6)
+    np.testing.assert_allclose(far, 2 * d, rtol=1e-6)
+    np.testing.assert_allclose(near_snr, 2 * far_snr, rtol=1e-5)
+    # A physical distance in dimensionless WHITE noise is refused, as a strain target is.
+    generator = deepcopy(dataset_args["waveform_generators"])
+    generator.scaling_method = gf.ScalingMethod(value=d, type_=gf.WaveformParameters.DISTANCE_MPC)
+    from gravyflow.src.dataset.features.injection import check_scaling_matches_noise
+    with pytest.raises(ValueError, match="DISTANCE_MPC, a strain amplitude"):
+        check_scaling_matches_noise(gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]), [generator])
+
+
+def test_injections_without_a_volume_set_have_no_sensitive_volume(validated, dataset_args):
+    # A burst set, or one in WHITE noise, has efficiency, but no volume.
     _, _, v = validated
     burst = Validator("burst", v.config, v.dataset_args)
-    burst.far_scores = v.far_scores
-    burst.efficiency_data = {k: x for k, x in v.efficiency_data.items() if k != "distances"}
+    burst.far_scores, burst.efficiency_data = v.far_scores, v.efficiency_data
     assert burst.sensitive_volume_curve() is None
     assert all(not child.renderers for child in generate_sensitive_volume_plot([burst]).children)
+    white = {**dataset_args, "noise_obtainer": gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1])}
+    assert not ValidationBank(logit_model(1), white).has_volume
 
 
 def test_checkpoint_resumes_for_the_same_model(validated, dataset_args, small_config, monkeypatch):
@@ -160,6 +204,7 @@ def test_checkpoint_resumes_for_the_same_model(validated, dataset_args, small_co
 
     monkeypatch.setattr(ValidationBank, "generate_noise", fail)
     monkeypatch.setattr(ValidationBank, "generate", fail)
+    monkeypatch.setattr(ValidationBank, "generate_volume", fail)
     again = Validator.validate(model, "tiny", dataset_args, small_config, path)
     np.testing.assert_array_equal(again.far_scores, v.far_scores)
 
@@ -177,17 +222,19 @@ def test_checkpoint_refuses_other_settings(validated, dataset_args):
         Validator.validate(model, "tiny", dataset_args, ValidationConfig(num_examples=32, batch_size=32), path)
 
 
-def test_checkpoint_of_another_format_is_refused(validated, dataset_args, small_config, tmp_path):
-    # A worst performer's injection was (detectors, samples) before format 3.
+def test_a_record_of_another_format_is_refused(validated, dataset_args, small_config, tmp_path):
+    # Format 4 had no volume set: it is refused by name, read or resumed, never converted.
     model, path, _ = validated
+    assert Validator.FORMAT_VERSION == 5
     old = tmp_path / "format.h5"
     old.write_bytes(path.read_bytes())
     with h5py.File(old, "a") as f:
-        f.attrs["format_version"] = Validator.FORMAT_VERSION - 1
-    assert Validator.load(old).far_scores is None
+        f.attrs["format_version"] = 4
+    refusal = "is in validation format 4; this version reads only format 5.*Validate the model again"
+    with pytest.raises(StaleCheckpointError, match=refusal):
+        Validator.load(old)
     # Refused for its format, by name: not as written for another model.
-    with pytest.raises(StaleCheckpointError, match=f"format {Validator.FORMAT_VERSION - 1}, not "
-                                                   f"{Validator.FORMAT_VERSION}"):
+    with pytest.raises(StaleCheckpointError, match=refusal):
         Validator.validate(model, "tiny", dataset_args, small_config, old)
 
 
@@ -196,7 +243,7 @@ def test_checkpoint_without_provenance_is_refused(tmp_path, dataset_args, small_
     with h5py.File(path, "w") as f:
         f.create_group("far_scores").create_dataset("scores", data=np.zeros(64))
     # Written before checkpoints had formats: refused, and said so.
-    with pytest.raises(StaleCheckpointError, match="has no checkpoint format version"):
+    with pytest.raises(StaleCheckpointError, match="has no format version"):
         Validator.validate(logit_model(1), "tiny", dataset_args, small_config, path)
 
 

@@ -121,16 +121,16 @@ class ScalingMethod:
 
 def check_scaling_matches_noise(noise_obtainer, generators) -> None:
     """
-    Refuse a strain-amplitude target (HRSS or HPEAK) for injections into WHITE
-    noise. WHITE noise is dimensionless (unit variance, no detector), so a strain
-    target (~1e-21) would be invisible in it, with every example still labelled
-    as injected. SNR targets are measured against the noise itself and are fine.
+    Refuse a strain-amplitude target (HRSS, HPEAK, or a physical distance) for
+    injections into WHITE noise. WHITE noise is dimensionless (unit variance, no
+    detector), so a strain target (~1e-21) would be invisible in it, with every
+    example still labelled as injected. SNR targets are measured against the noise itself and are fine.
     """
     if getattr(noise_obtainer, "noise_type", None) is not gf.NoiseType.WHITE:
         return
     for generator in generators or []:
         type_ = getattr(getattr(generator, "scaling_method", None), "type_", None)
-        if type_ is not None and type_.value.ordinality == ScalingOrdinality.BEFORE_PROJECTION:
+        if type_ is not None and type_ is not ScalingTypes.SNR:
             raise ValueError(
                 f"{type(generator).__name__} scales to {type_.name}, a strain amplitude, but "
                 "WHITE noise is dimensionless (unit variance), so the injection would be "
@@ -2118,7 +2118,23 @@ class InjectionGenerator:
             unit_hpeak = ops.where(normalisation > 0, 1.0, 0.0)
 
             type_ = scaling_method.type_
-            if type_.value.ordinality == ScalingOrdinality.BEFORE_PROJECTION:
+            if isinstance(type_, WaveformParameters):
+                # 2. A target value of a parameter the amplitude depends on
+                # (DISTANCE_MPC: the source placed at a physical distance): the
+                # generated strain times the gain that gives the drawn value the
+                # target, value x gain ** amplitude_power; 3-4. project, crop.
+                power = type_.value.amplitude_power
+                drawn = self._generator_parameter(injection_parameters, type_, i)
+                if power == 0 or drawn is None:
+                    raise ValueError(
+                        f"{type(generator).__name__} cannot be scaled to {type_.name}: the amplitude "
+                        "depends on no such parameter of it."
+                    )
+                ratio = _ratio(target_val, drawn) if power > 0 else _ratio(drawn, target_val)
+                # From the unit-hpeak strain: the gain over the normalisation.
+                factor = ratio ** (1.0 / abs(power)) * _ratio(1.0, normalisation)
+                projected = project_and_crop(unit * _per_example(factor, unit))
+            elif type_.value.ordinality == ScalingOrdinality.BEFORE_PROJECTION:
                 # 2. Physical target; 3-4. project, crop.
                 measure = unit_hrss if type_ == ScalingTypes.HRSS else unit_hpeak
                 physical, factor = scaling_method.scale(

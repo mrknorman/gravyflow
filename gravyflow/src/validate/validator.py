@@ -24,11 +24,12 @@ logger = logging.getLogger(__name__)
 
 
 def _other_format(path, found: Optional[int], current: int) -> str:
-    """What a checkpoint of another checkpoint format, or of none, is: the start of its refusal."""
-    if found is None:
-        return (f"{path} has no checkpoint format version (it was written before checkpoints had one; "
-                f"this version reads format {current})")
-    return f"{path} is in checkpoint format {found}, not {current}"
+    """The refusal of a record of another format, or of none."""
+    what = ("has no format version (it was written before records had one)" if found is None
+            else f"is in validation format {found}")
+    return (f"{path} {what}; this version reads only format {current}, and converts none. Validate "
+            "the model again (Validator.validate) to write a record of this format, at a new path or "
+            "after deleting this one.")
 
 
 class Validator:
@@ -45,7 +46,9 @@ class Validator:
     # (generators, detectors, samples).
     # 4: every stored array and score is of physical strain; format 3 could
     # hold internally scaled strain (a raw ONSOURCE input) and its scores.
-    FORMAT_VERSION = 4
+    # 5: the sensitive-volume set (``volume_data``): injections at physical
+    # distances drawn uniformly in volume out to its recorded reach.
+    FORMAT_VERSION = 5
 
     def __init__(self, name: str = "model", config: Optional[ValidationConfig] = None,
                  dataset_args: Optional[dict] = None):
@@ -61,12 +64,13 @@ class Validator:
         self.noise_gps_times: Optional[np.ndarray] = None
         self.noise_streams: Optional[Dict[str, np.ndarray]] = None  # time slides (`noise_background`)
         self.efficiency_data: Optional[Dict[str, np.ndarray]] = None
+        # The sensitive-volume set: its scores, distances, labels and reach (`generate_volume`).
+        self.volume_data: Optional[Dict[str, np.ndarray]] = None
         self.worst_performers: Dict[str, Any] = {"false_negatives": {}, "false_positives": []}
         self.real_events: Optional[List[Dict[str, Any]]] = None
 
         self.model_sha256: Optional[str] = None
         self.config_sha256: Optional[str] = None
-        self.format_version: Optional[int] = self.FORMAT_VERSION  # as loaded, by `load`
         self.bank: Optional[ValidationBank] = None
 
     # --------------------------------------------------------------- run
@@ -97,6 +101,9 @@ class Validator:
         run resumes from the stages already saved there, provided the file was
         written for this model and these settings.
 
+        A CBC population in noise of physical strain also gets a sensitive-volume
+        set (`ValidationBank.generate_volume`); any other has none.
+
         Raises:
             StaleCheckpointError: the checkpoint is in another format, or belongs
                 to another model or to other settings.
@@ -109,15 +116,10 @@ class Validator:
         path = Path(checkpoint_file_path) if checkpoint_file_path else None
         if path is not None and path.exists():
             saved = cls.load(path)
-            if saved.format_version != cls.FORMAT_VERSION:
-                raise StaleCheckpointError(
-                    f"{_other_format(path, saved.format_version, cls.FORMAT_VERSION)}, and cannot be "
-                    "resumed. Use a new path, or delete it to start again."
-                )
             require_match("model", saved.model_sha256, v.model_sha256, path)
             require_match("validation configuration", saved.config_sha256, v.config_sha256, path)
-            for attr in ("far_scores", "noise_gps_times", "noise_streams", "efficiency_data", "worst_performers",
-                         "real_events"):
+            for attr in ("far_scores", "noise_gps_times", "noise_streams", "efficiency_data", "volume_data",
+                         "worst_performers", "real_events"):
                 setattr(v, attr, getattr(saved, attr))
             logger.info(f"Resuming validation from {path}.")
 
@@ -137,6 +139,11 @@ class Validator:
             bank.generate()
             v.efficiency_data = bank.get_efficiency_data()
             v.worst_performers["false_negatives"] = bank.get_worst_performers()["false_negatives"]
+            checkpoint()
+
+        if v.volume_data is None and bank.has_volume:
+            bank.generate_volume()
+            v.volume_data = bank.get_volume_data()
             checkpoint()
 
         if v.config.score_real_events and v.real_events is None:
@@ -174,26 +181,21 @@ class Validator:
     def sensitive_volume_curve(self, fars_hz=None) -> Optional[SensitiveVolumeCurve]:
         """
         Sensitive volume (Gpc^3) and distance (Mpc) at each target FAR (Hz), with their
-        injection, background and joint intervals (`volume`). The injections are
-        weighted by the distance their scaled amplitude implies, so a set without
-        distances (a burst set) has no volume: None. The joint interval's bootstrap
-        draws from the validator's own seed, so a record gives the same curve
-        whenever it is read.
+        injection, background and joint intervals and noise floor (`volume`), from the
+        sensitive-volume set; None without one (a burst population, or WHITE noise).
+        The joint interval's bootstrap draws from the validator's own seed, so a record
+        gives the same curve whenever it is read.
         """
-        data = self.efficiency_data
-        if self.far_scores is None or data is None or "distances" not in data:
+        data = self.volume_data
+        if self.far_scores is None or data is None:
             return None
         cfg = self.config
-        if cfg.snr_range[0] > 0:
-            logger.warning(f"The injections start at SNR {cfg.snr_range[0]:g}: the sensitive volume counts "
-                           "every quieter source as missed.")
-        injections = InjectionVolumes.from_snr_scaled(
-            data["scores"], data["snrs"], data["distances"], cfg.snr_range,
-            min(cfg.snr_bin_width, cfg.snr_range[1] - cfg.snr_range[0]), cfg.volume_horizon_snr)
         return sensitive_volume_curve(
-            injections, self.background(), cfg.far_thresholds if fars_hz is None else fars_hz,
+            InjectionVolumes(data["scores"], float(data["max_distance_mpc"])), self.background(),
+            cfg.far_thresholds if fars_hz is None else fars_hz,
             gf.SeedTree(cfg.seed).stream(cfg.group, "validator/volume"),
-            cfg.volume_bootstrap_samples, cfg.confidence, cfg.efficiency_interval)
+            cfg.volume_bootstrap_samples, cfg.confidence, cfg.efficiency_interval,
+            cfg.volume_noise_floor_fraction)
 
     def roc_curves(self) -> Dict[str, Dict[str, Any]]:
         """Exact ROC curves of noise against injection populations, keyed by population."""
@@ -262,10 +264,12 @@ class Validator:
                     streams = g.create_group("streams")
                     for k, v in self.noise_streams.items():
                         streams.create_dataset(k, data=v)
-            if self.efficiency_data is not None:
-                g = f.create_group("efficiency_data")
-                for k, v in self.efficiency_data.items():
-                    g.create_dataset(k, data=v)
+            for key in ("efficiency_data", "volume_data"):
+                data = getattr(self, key)
+                if data is not None:
+                    g = f.create_group(key)
+                    for k, v in data.items():
+                        g.create_dataset(k, data=v)
 
             worst = f.create_group("worst_performers")
             fn = worst.create_group("false_negatives")
@@ -282,15 +286,15 @@ class Validator:
         """
         Read saved results. Provenance is checked by `validate`, not here, so
         that results can be loaded for comparison plots.
+
+        Raises:
+            StaleCheckpointError: the record is of another format: nothing in it is read.
         """
         with h5py.File(file_path, "r") as f:
             found = f.attrs.get("format_version")
             if found != cls.FORMAT_VERSION:
-                v = cls()  # another format: nothing in it is read, or reused
-                v.format_version = None if found is None else int(found)
-                logger.warning(f"{_other_format(file_path, v.format_version, cls.FORMAT_VERSION)}; "
-                               "it cannot be reused.")
-                return v
+                raise StaleCheckpointError(
+                    _other_format(file_path, None if found is None else int(found), cls.FORMAT_VERSION))
             config = ValidationConfig(**json.loads(f.attrs["config"]))
             v = cls(str(f.attrs["name"]), config, {
                 "onsource_duration_seconds": float(f.attrs["input_duration_seconds"]),
@@ -303,8 +307,9 @@ class Validator:
                 v.noise_gps_times = f["far_scores/gps_times"][:] if "gps_times" in f["far_scores"] else None
                 if "streams" in f["far_scores"]:
                     v.noise_streams = {k: f["far_scores/streams"][k][:] for k in f["far_scores/streams"]}
-            if "efficiency_data" in f:
-                v.efficiency_data = {k: f["efficiency_data"][k][:] for k in f["efficiency_data"]}
+            for key in ("efficiency_data", "volume_data"):
+                if key in f:
+                    setattr(v, key, {k: f[key][k][()] for k in f[key]})
             worst = f["worst_performers"]
             v.worst_performers = {
                 "false_negatives": {k: cls._read_samples(worst["false_negatives"][k])

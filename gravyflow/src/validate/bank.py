@@ -4,7 +4,7 @@ injections (for efficiency) and, optionally, real GW events.
 
 Scores are logits (see `metrics`). The validator draws its own data: each stage
 builds its dataset from the seed tree rooted at ``ValidationConfig.seed``,
-scoped to ``validator/{stage}`` (``far`` or ``inj``), in the held-out
+scoped to ``validator/{stage}`` (``far``, ``inj``, ``vol`` or ``horizon``), in the held-out
 ``ValidationConfig.group``. Training never draws under ``validator/``, so the
 validator's streams cannot coincide with training's, whatever the seeds.
 
@@ -30,6 +30,7 @@ import gravyflow as gf
 from .config import ValidationConfig
 from .metrics import Background, ScoreStream, logit_scores
 from .slides import TimeSlideBackground, TimeSlides
+from .volume import uniform_in_volume
 from .utils import _extract_sample_data
 
 logger = logging.getLogger(__name__)
@@ -41,12 +42,16 @@ _INJECTION_LABELS = {
     "hrss": gf.ScalingTypes.HRSS,
     "mass1": gf.WaveformParameters.MASS_1_MSUN,
     "mass2": gf.WaveformParameters.MASS_2_MSUN,
-    # The distance (Mpc) the scaled amplitude implies: with the SNR, the source's
-    # SNR at a fixed distance, which the sensitive volume weighs it by.
-    "distances": gf.WaveformParameters.DISTANCE_MPC,
     "central_times": gf.ReturnVariables.CENTRAL_TIME,
 }
-_CBC_LABELS = ("mass1", "mass2", "distances")
+_CBC_LABELS = ("mass1", "mass2")
+# Per-example labels of the sensitive-volume set (`generate_volume`).
+_VOLUME_LABELS = {
+    "distances": gf.WaveformParameters.DISTANCE_MPC,
+    "snrs": gf.ScalingTypes.SNR,
+    "mass1": gf.WaveformParameters.MASS_1_MSUN,
+    "mass2": gf.WaveformParameters.MASS_2_MSUN,
+}
 
 
 def require_logit_model(model) -> None:
@@ -133,6 +138,7 @@ class ValidationBank:
         # Time slides' streams: their windows, slides and blocks (`noise_background`).
         self.noise_streams: Optional[Dict[str, np.ndarray]] = None
         self.efficiency: Optional[Dict[str, np.ndarray]] = None
+        self.volume: Optional[Dict[str, np.ndarray]] = None
         self.real_events: Optional[List[Dict[str, Any]]] = None
         self._worst_false_positives: List[Dict[str, Any]] = []
         self._worst_false_negatives: Dict[str, List[Dict[str, Any]]] = {}
@@ -153,17 +159,21 @@ class ValidationBank:
         noise = self.dataset_args.get("noise_obtainer")
         return getattr(noise, "noise_type", None) is gf.NoiseType.REAL
 
-    def _num_batches(self) -> int:
-        return math.ceil(self.config.num_examples / self.config.batch_size)
+    def _num_batches(self, num_examples: Optional[int] = None) -> int:
+        return math.ceil((num_examples or self.config.num_examples) / self.config.batch_size)
 
     def stage_dataset(self, stage: str, waveform_generators=(),
-                      outputs=(gf.ReturnVariables.WHITENED_ONSOURCE,)) -> gf.Dataset:
-        """Stage ``stage``'s dataset (``far`` or ``inj``): its own seeds, in the held-out split."""
+                      outputs=(gf.ReturnVariables.WHITENED_ONSOURCE,),
+                      num_examples: Optional[int] = None) -> gf.Dataset:
+        """
+        Stage ``stage``'s dataset (``far``, ``inj``, ``vol`` or ``horizon``) of
+        ``num_examples`` (default ``num_examples``): its own seeds, in the held-out split.
+        """
         args = deepcopy(self.dataset_args)
         args.update(
             waveform_generators=list(waveform_generators),
             num_examples_per_batch=self.config.batch_size,
-            steps_per_epoch=self._num_batches(),
+            steps_per_epoch=self._num_batches(num_examples),
             output_variables=list(outputs),
             group=self.config.group,
             seed=gf.SeedTree(self.config.seed).sub(f"validator/{stage}"),
@@ -287,14 +297,18 @@ class ValidationBank:
         self.noise_gps_times = np.concatenate(gps)[: self.config.num_examples] if gps else None
         self._worst_false_positives = [sample for _, sample in sorted(heap, key=lambda t: t[0], reverse=True)]
 
-    def generate(self) -> None:
-        """Score injections (every example injected, SNR uniform over the range)."""
-        cfg = self.config
+    def _generator(self):
+        """A copy of the one waveform generator the injection sets draw from."""
         generators = self.dataset_args.get("waveform_generators")
         generators = generators if isinstance(generators, list) else [generators]
         if len(generators) != 1 or generators[0] is None:
             raise ValueError("The injection set takes exactly one waveform generator.")
-        generator = deepcopy(generators[0])
+        return deepcopy(generators[0])
+
+    def generate(self) -> None:
+        """Score injections (every example injected, SNR uniform over the range)."""
+        cfg = self.config
+        generator = self._generator()
         # At network SNR over the range, whatever the generator was trained to scale by.
         generator.scaling_method = gf.ScalingMethod(
             value=gf.Distribution(min_=cfg.snr_range[0], max_=cfg.snr_range[1],
@@ -339,6 +353,87 @@ class ValidationBank:
             f"{edges[i]:g}-{edges[i + 1]:g}": [s for _, s in sorted(heap, key=lambda t: t[0], reverse=True)]
             for i, heap in enumerate(worst)
         }
+
+    # ------------------------------------------------------- sensitive volume
+
+    @property
+    def has_volume(self) -> bool:
+        """
+        Whether the injections have a sensitive volume: a CBC population (whose
+        amplitude goes as one over a physical distance) in noise of physical strain
+        (not WHITE, which is dimensionless).
+        """
+        noise = self.dataset_args.get("noise_obtainer")
+        return (isinstance(self._generator(), gf.CBCGenerator)
+                and getattr(noise, "noise_type", None) is not gf.NoiseType.WHITE)
+
+    def horizon_distance(self) -> float:
+        """
+        The population's reach (Mpc): the distance at which its loudest source has
+        optimal network SNR ``volume_horizon_snr``, so that every source beyond it is
+        quieter. The loudest source is taken as the population's heaviest binary
+        (each component mass at its upper bound: louder at a fixed distance for any
+        masses whose merger is in a ground-based detector's band), face-on, at the
+        best of one batch of sky positions; its other parameters are the
+        population's. It reads the population's bounds and the noise, never the
+        injections drawn; ``volume_max_distance_mpc`` overrides it.
+        """
+        from gravyflow.src.dataset.features.injection import get_support_bounds
+
+        cfg = self.config
+        generator = self._generator()
+        for attribute in ("mass_1_msun", "mass_2_msun"):
+            _, high = get_support_bounds(getattr(generator, attribute), attribute)
+            if not np.isfinite(high):
+                raise ValueError(
+                    f"The population's {attribute} is unbounded, so it has no loudest source: set "
+                    "ValidationConfig.volume_max_distance_mpc."
+                )
+            setattr(generator, attribute, gf.Distribution(value=high, type_=gf.DistributionType.CONSTANT))
+        generator.inclination_radians = gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
+        generator.scaling_method = gf.ScalingMethod(
+            value=gf.Distribution(value=cfg.volume_horizon_snr, type_=gf.DistributionType.CONSTANT),
+            type_=gf.ScalingTypes.SNR,
+        )
+        generator.injection_chance = 1.0
+        label = gf.WaveformParameters.DISTANCE_MPC
+        dataset = self.stage_dataset("horizon", [generator], (gf.ReturnVariables.WHITENED_ONSOURCE, label),
+                                     num_examples=cfg.batch_size)
+        _, y = dataset[0]
+        return float(np.nanmax(per_example(y[label.name], cfg.batch_size, label.name)))
+
+    def generate_volume(self) -> None:
+        """
+        Score the sensitive-volume set: ``num_volume_injections`` sources from the
+        population, each at a physical distance drawn uniformly in volume out to the
+        population's reach (``volume_max_distance_mpc``, else `horizon_distance`):
+        the generated source placed at that distance, never scaled to an SNR.
+        """
+        cfg = self.config
+        if not self.has_volume:
+            raise ValueError("Only a CBC population in noise of physical strain has a sensitive volume.")
+        n = cfg.num_volume_injections
+        max_distance = cfg.volume_max_distance_mpc or self.horizon_distance()
+        targets = uniform_in_volume(n, max_distance, gf.SeedTree(cfg.seed).stream(cfg.group, "validator/distance"))
+        generator = self._generator()
+        generator.scaling_method = gf.ScalingMethod(value=targets, type_=gf.WaveformParameters.DISTANCE_MPC)
+        generator.injection_chance = 1.0
+        outputs = [gf.ReturnVariables.WHITENED_ONSOURCE, *_VOLUME_LABELS.values()]
+        dataset = self.stage_dataset("vol", [generator], outputs, num_examples=n)
+        columns: Dict[str, list] = {k: [] for k in ("scores", *_VOLUME_LABELS)}
+        for b in tqdm(range(self._num_batches(n)), desc="Scoring the volume set", unit="batch"):
+            x, y = dataset[b]
+            batch_scores = self._score(x)
+            columns["scores"].append(batch_scores)
+            for key, label in _VOLUME_LABELS.items():
+                columns[key].append(per_example(y[label.name], batch_scores.size, label.name))
+        volume = {k: np.concatenate(v)[:n] for k, v in columns.items()}
+        # Each source is where it was drawn for: the dataset reads the targets in order.
+        if not np.allclose(volume["distances"], targets, rtol=1e-5, atol=0):
+            raise RuntimeError("The volume set's injections are not at the distances drawn for them.")
+        volume["distances"] = targets
+        volume["max_distance_mpc"] = np.float64(max_distance)
+        self.volume = volume
 
     def generate_real_events(self, observing_runs: List = None) -> None:
         """
@@ -448,6 +543,12 @@ class ValidationBank:
         if self.efficiency is None:
             raise ValueError("Call generate() first.")
         return dict(self.efficiency)
+
+    def get_volume_data(self) -> Dict[str, np.ndarray]:
+        """The volume set's scores, distances and labels, and its reach (``max_distance_mpc``)."""
+        if self.volume is None:
+            raise ValueError("Call generate_volume() first.")
+        return dict(self.volume)
 
     def get_worst_performers(self) -> Dict[str, Any]:
         """Lowest-scoring injections per SNR bin, and highest-scoring noise."""

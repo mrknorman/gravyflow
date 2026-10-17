@@ -40,12 +40,18 @@ class ValidationConfig:
     confidence: float = 0.9
     efficiency_interval: str = "clopper-pearson"
 
-    # Sensitive volume against FAR (`volume`), at the same targets: the population
-    # is uniform in volume out to the distance at which the loudest source injected
-    # has this optimal network SNR (beyond it every source is quieter); the joint
-    # interval bootstraps this many replicates of the injections and background.
+    # Sensitive volume against FAR (`volume`), at the same targets, from a set of
+    # this many injections of its own (default num_examples), each at a physical distance drawn uniformly
+    # in volume out to volume_max_distance_mpc: by default the distance at which
+    # the population's loudest source has this optimal network SNR, so that every
+    # source beyond it is quieter (`ValidationBank.horizon_distance`). The joint
+    # interval bootstraps this many replicates of the injections and background. A
+    # target where noise alone finds more than this fraction of V is marked.
+    volume_num_injections: Optional[int] = None
+    volume_max_distance_mpc: Optional[float] = None
     volume_horizon_snr: float = 4.0
     volume_bootstrap_samples: int = 1000
+    volume_noise_floor_fraction: float = 0.1
 
     # ROC populations: injections at SNR >= default_roc_min_snr, plus extra
     # pools given as (min_snr, max_snr) or a centre with a width of 1.
@@ -80,10 +86,21 @@ class ValidationConfig:
         lo, hi = self.snr_range
         if not hi > lo:
             raise ValueError(f"snr_range must be increasing, got {self.snr_range}.")
+        if self.volume_num_injections is not None and self.volume_num_injections < 1:
+            raise ValueError(f"volume_num_injections must be >= 1, got {self.volume_num_injections}.")
+        if self.volume_max_distance_mpc is not None and not self.volume_max_distance_mpc > 0:
+            raise ValueError(f"volume_max_distance_mpc must be > 0, got {self.volume_max_distance_mpc}.")
+        if not 0 < self.volume_noise_floor_fraction:
+            raise ValueError(f"volume_noise_floor_fraction must be > 0, got {self.volume_noise_floor_fraction}.")
         if not self.volume_horizon_snr > 0:
             raise ValueError(f"volume_horizon_snr must be > 0, got {self.volume_horizon_snr}.")
         if self.volume_bootstrap_samples < 1:
             raise ValueError(f"volume_bootstrap_samples must be >= 1, got {self.volume_bootstrap_samples}.")
+
+    @property
+    def num_volume_injections(self) -> int:
+        """The size of the sensitive-volume set: ``volume_num_injections``, else ``num_examples``."""
+        return self.num_examples if self.volume_num_injections is None else self.volume_num_injections
 
     @property
     def snr_bin_edges(self) -> np.ndarray:

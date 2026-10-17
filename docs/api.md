@@ -136,7 +136,8 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 - `IncoherentGenerator`: a different waveform in each detector.
 - `WaveformParameter`: one waveform parameter and its label.
 - `WaveformParameters`: the waveform parameters a dataset can return.
-- `ScalingMethod`: how injections are scaled (SNR, HRSS or HPEAK).
+- `ScalingMethod`: how injections are scaled (SNR, HRSS or HPEAK), or placed at a physical distance
+  (`WaveformParameters.DISTANCE_MPC`).
 - `ScalingType`: one scaling quantity.
 - `ScalingTypes`: the scaling quantities.
 - `ScalingOrdinality`: whether a scaling is measured before or after projection onto the detectors.
@@ -225,7 +226,8 @@ validates as it trains: they need the `viz` extra.
 ## Validation (the `viz` extra)
 
 - `Validator`: validate a model: efficiency, false-alarm rate, sensitive volume and distance against false-alarm
-  rate (with injection, background and joint intervals), ROC and the dashboard.
+  rate (on injections at physical distances uniform in volume, with injection, background and joint intervals and
+  the noise floor), ROC and the dashboard.
 - `ValidationConfig`: the settings of a validation.
 
 ## Plotting (the `viz` extra)

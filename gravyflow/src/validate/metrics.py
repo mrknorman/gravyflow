@@ -300,6 +300,15 @@ class Background:
             confidence=confidence,
         )
 
+    def window_exceedance(self, threshold) -> np.ndarray:
+        """
+        The chance that a window of noise scores ``>= threshold``: the fraction of the
+        background's windows that do, each counted on its own, clustered or not.
+        """
+        if self.num_windows == 0:
+            raise ValueError("The background has no windows.")
+        return _count_at_or_above(self._opens, threshold) / self.num_windows
+
     def far(self, threshold: float, confidence: float = DEFAULT_CONFIDENCE) -> FarEstimate:
         """FAR (Hz) of detections at ``score >= threshold``, with its Poisson interval."""
         self._require_livetime()
@@ -378,7 +387,7 @@ class Background:
             groups.setdefault(stream.block, []).append(stream)
         return groups
 
-    def resample(self, rng: np.random.Generator) -> "Background":
+    def bootstrap(self, rng: np.random.Generator) -> "Background":
         """
         A bootstrap replicate of this background: its blocks (the ``block`` labels of
         `by_block`) drawn with replacement, as many as it has, each with all its streams;

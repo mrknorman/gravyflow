@@ -174,11 +174,22 @@ repository before it may need the changes below.
   (LIGO-T0900288-v3, aLIGOZeroDetHighPower), for H1 and L1 only; a profile refuses a detector it does not cover, by
   name.
 - **Sensitive volume and distance.** `Validator.sensitive_volume_curve()` gives the sensitive volume (Gpc³) and
-  distance (Mpc) at each target FAR, with three intervals: the injections' Monte Carlo, the background's livetime,
-  and a joint bootstrap over both. The dashboard plots them beside efficiency. The injection set records each
-  injection's distance (`distances`, CBC only), so a validation written before it has no volume; its settings
-  (`volume_horizon_snr`, `volume_bootstrap_samples`) change the validation's fingerprint, so its checkpoints are
-  not resumed.
+  distance (Mpc) at each target FAR, with three intervals: the injections' (exact binomial), the background's
+  livetime, and a joint bootstrap over both whose lower end is at most the background's (so it covers where the
+  background allows only a trigger or two). It is measured, as an injection campaign measures it, on a set of its own
+  (`volume_num_injections`, by default `num_examples`): CBC sources at physical distances drawn uniformly in volume
+  out to the population's reach, by default the horizon of its loudest source at SNR `volume_horizon_snr` (4), or
+  `volume_max_distance_mpc`; the reach is recorded. The volume noise alone finds (the chance a noise window passes,
+  times the reference volume) is recorded at each target, and a point where it exceeds `volume_noise_floor_fraction`
+  (0.1) of V is marked. The dashboard plots them beside efficiency. A burst population, or WHITE noise, has none.
+- **Injections at a physical distance.** `ScalingMethod(value=distances, type_=WaveformParameters.DISTANCE_MPC)`
+  places each generated CBC source at a target distance (Mpc), scaling it by the ratio of its drawn distance to the
+  target, and no other measure; WHITE noise refuses it, as it refuses HRSS and HPEAK.
+- **Validation records are format 5.** A record holds the sensitive-volume set (`volume_data`). `Validator.load`
+  refuses a record of any other format by name (`StaleCheckpointError`), and converts none: validate the model again.
+  The new settings change the validation's fingerprint, so older checkpoints are not resumed.
+- **`Background.bootstrap`** draws a bootstrap replicate of a background (its blocks, or its independent windows),
+  and `Background.window_exceedance` the chance that a noise window passes a threshold.
 
 - `gravyflow.__version__`.
 - `docs/api.md`, the public API, which a test holds equal to `gravyflow.__all__`.
