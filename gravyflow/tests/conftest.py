@@ -101,6 +101,15 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "network: needs internet access to GWOSC or Zenodo (opt-in: --network)"
     )
+    # Past acquisition (where data gaps are expected), a NaN or inf the sanitiser
+    # replaces is a failure upstream: tests fail on it. Added here rather than in
+    # the ini, which pytest reads before the root conftest.py sets XLA's flags:
+    # naming the class there imports gravyflow, which starts JAX's backend.
+    config.addinivalue_line(
+        "filterwarnings",
+        "error::gravyflow.src.utils.numerics.NonFiniteWarning:"
+        "gravyflow\\.src\\.dataset\\.(dataset|features\\.injection|tools\\.snr)",
+    )
 
 def pytest_collection_modifyitems(config, items):
     if config.getoption("--runsize") == "small":

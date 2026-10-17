@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
-from gravyflow.src.rng import DIRECT_SPLIT, resolve_streams
+from gravyflow.src.rng import DIRECT_SPLIT, platform, resolve_streams
 
 SAMPLE_RATE = 512.0
 BATCH = 4
@@ -159,6 +159,30 @@ class TestSeedTree:
         """)
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
         assert out.stdout.strip().splitlines()[-1] == str(here)
+
+
+class TestBitReproducibleKernels:
+    """
+    The suite's oracles compare bits, which needs XLA's CPU kernels to give the
+    same bits for the same inputs: the session runs them single-threaded
+    (conftest), as the documented CPU run does.
+    """
+
+    def test_the_session_runs_single_threaded_kernels(self):
+        assert platform.single_threaded_cpu(), platform.xla_flags()
+        assert platform.platform_record()["single_threaded_cpu"]
+
+    def test_whitening_is_bit_reproducible_between_calls(self):
+        # Multi-threaded kernels whiten these arrays to one of two results,
+        # differing by up to 1e-5 of the peak, about once in 500 calls.
+        rng = np.random.default_rng(26)
+        offsource = rng.normal(size=(4, 2, 16 * 2048)).astype(np.float32)
+        onsource = rng.normal(size=(4, 2, 2 * 2048)).astype(np.float32)
+        digests = {
+            hashlib.sha256(np.asarray(gf.whiten(onsource, offsource, 2048.0)).tobytes()).hexdigest()
+            for _ in range(1000)
+        }
+        assert len(digests) == 1
 
 
 class TestStatelessObjects:

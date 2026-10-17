@@ -23,6 +23,12 @@ def test_replace_nan_and_inf_with_zero_is_silent_on_finite_data():
         y = gf_tensor.replace_nan_and_inf_with_zero(ops.convert_to_tensor([1.0, 2.0]))
     np.testing.assert_allclose(y, [1.0, 2.0])
 
+def test_the_session_fails_on_non_finite_data_past_acquisition(request):
+    # The filter is added by conftest.py, not the ini (see the root conftest.py).
+    assert any(line.startswith("error::gravyflow.src.utils.numerics.NonFiniteWarning:")
+               for line in request.config.getini("filterwarnings"))
+
+
 @pytest.mark.parametrize("transform", [jax.jit, jax.vmap], ids=["jit", "vmap"])
 def test_replace_nan_and_inf_with_zero_refuses_traced_input_by_name(transform):
     # It counts what it replaces, so it runs eagerly; traced code is refused.
