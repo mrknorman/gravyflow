@@ -51,7 +51,7 @@ def validated(tmp_path_factory, dataset_args, small_config):
 
 
 def test_validator_runs_offline_on_synthetic_noise(validated, tmp_path):
-    # GF-B64: the GPS label of synthetic noise broke the injection stage.
+    # The GPS label of synthetic noise broke the injection stage.
     _, path, v = validated
     assert v.far_scores.shape == (64,) and np.all(np.isfinite(v.far_scores))
     assert v.noise_gps_times is None
@@ -105,7 +105,7 @@ def test_checkpoint_resumes_for_the_same_model(validated, dataset_args, small_co
 
 
 def test_checkpoint_refuses_another_model(validated, dataset_args, small_config):
-    # GF-B67: checkpoints were reused by path alone.
+    # Checkpoints were reused by path alone.
     _, path, _ = validated
     with pytest.raises(StaleCheckpointError, match="another model"):
         Validator.validate(logit_model(2), "tiny", dataset_args, small_config, path)
@@ -141,7 +141,7 @@ def test_checkpoint_without_provenance_is_refused(tmp_path, dataset_args, small_
 
 
 def test_probability_models_are_refused(dataset_args):
-    # GF-B69's root: softmax outputs saturate at 1.0 and tie.
+    # The root of tied scores: softmax outputs saturate at 1.0 and tie.
     with pytest.raises(ValueError, match="probabilities"):
         ValidationBank(logit_model(1, activation="softmax"), dataset_args)
 

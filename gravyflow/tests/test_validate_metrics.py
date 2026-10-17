@@ -97,7 +97,7 @@ def test_roc_points_are_exact_counts():
 
 
 def test_roc_auc_is_one_for_separable_saturated_scores():
-    # The case a fixed threshold grid reports as AUC 0.000 (GF-B71).
+    # The case a fixed threshold grid reports as AUC 0.000.
     rng = np.random.default_rng(1)
     noise = rng.uniform(0.998, 0.9999, 4000).astype(np.float32)
     signal = np.ones(4000, dtype=np.float32)
@@ -198,7 +198,7 @@ def test_threshold_for_far_inverts_the_far(seed):
 
 
 def test_unreachable_far_is_unresolved_never_a_rate():
-    # GF-B70: the old code returned a rate as the score threshold.
+    # The old code returned a rate as the score threshold.
     scores = np.random.default_rng(0).normal(size=1000)
     bg = Background.independent_windows(scores, 1.0)
     low = bg.threshold_for_far(1e-4)
@@ -208,7 +208,7 @@ def test_unreachable_far_is_unresolved_never_a_rate():
 
 
 def test_ties_above_the_allowance_move_the_threshold_above_them():
-    # GF-B69: 50 noise windows tie at the top; at 1e-3 Hz over 10^4 s only 10 may pass.
+    # 50 noise windows tie at the top; at 1e-3 Hz over 10^4 s only 10 may pass.
     noise = np.zeros(10_000)
     noise[:50] = 1.0
     bg = Background.independent_windows(noise, 1.0)

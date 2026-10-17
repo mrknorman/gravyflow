@@ -50,7 +50,7 @@ def predict(m, seed=0):
 
 @pytest.mark.global_rng
 def test_a_binary_model_outputs_a_logit(tmp_path):
-    # GF-B205: the output was a sigmoid probability, which the validator refuses
+    # The output was a sigmoid probability, which the validator refuses
     # (and which saturates, so scores tie).
     m = model(tmp_path, [gf.DenseLayer(4)])
     require_logit_model(m.model)
@@ -100,7 +100,7 @@ def test_the_validator_scores_a_gf_model(tmp_path):
     ([gf.WhitenPassLayer(), gf.DenseLayer(4)], BINARY),  # gf.Reshape
 ], ids=["binary", "normal", "whitenpass"])
 def test_a_saved_model_loads_with_its_weights(tmp_path, layers, output_config):
-    # GF-B206: the custom layers and the loss were unregistered, so the load
+    # The custom layers and the loss were unregistered, so the load
     # failed, and Model.load returned an untrained model instead.
     trained = model(tmp_path, layers, output_config)
     save(trained, tmp_path)
@@ -115,7 +115,7 @@ def test_a_saved_model_loads_with_its_weights(tmp_path, layers, output_config):
 
 @pytest.mark.global_rng
 def test_a_checkpoint_that_cannot_load_is_an_error(tmp_path):
-    # GF-B206: a failed load logged an error and returned the untrained blueprint.
+    # A failed load logged an error and returned the untrained blueprint.
     gf.ensure_directory_exists(tmp_path / "tiny")
     gf.model_file(tmp_path / "tiny").write_bytes(b"not a keras archive")
     with pytest.raises(Exception) as raised:
@@ -124,7 +124,7 @@ def test_a_checkpoint_that_cannot_load_is_an_error(tmp_path):
 
 
 def test_every_gravyflow_keras_object_is_registered():
-    # The class of GF-B206: a custom Keras object without registration saves
+    # The class of this defect: a custom Keras object without registration saves
     # but cannot load.
     import gravyflow.src.model.examples  # noqa: F401 (defines the examples' layers)
 

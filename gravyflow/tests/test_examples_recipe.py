@@ -88,7 +88,7 @@ def test_george_huerta_transfer_copies_every_layer_but_the_output():
 # ------------------------------------------------------- the scripts' settings
 
 def test_train_script_leaves_the_platform_alone():
-    # GF-B65: the script forced JAX_PLATFORMS=cuda, which fails on a Mac.
+    # The script forced JAX_PLATFORMS=cuda, which fails on a Mac.
     before = {k: os.environ.get(k) for k in ("JAX_PLATFORMS", "XLA_FLAGS")}
     module = importlib.import_module("gravyflow.src.model.examples.train_gabbard_2017")
     try:
@@ -103,7 +103,7 @@ def test_train_script_leaves_the_platform_alone():
 
 
 def test_train_scripts_need_an_output_directory():
-    # GF-B66: checkpoints went to the shipped weights in the package.
+    # Checkpoints went to the shipped weights in the package.
     for name in ("train_gabbard_2017", "train_george_huerta_2017"):
         module = importlib.import_module(f"gravyflow.src.model.examples.{name}")
         with pytest.raises(SystemExit):
@@ -119,7 +119,7 @@ def test_run_directory_refuses_the_package(tmp_path):
 
 @pytest.mark.parametrize("epochs", [4, 5, 10, 20, 81])
 def test_curriculum_reaches_the_target_before_the_run_ends(epochs):
-    # GF-B77: an 80-epoch curriculum in a 20-epoch run ended training at SNR 62-80.
+    # An 80-epoch curriculum in a 20-epoch run ended training at SNR 62-80.
     train = importlib.import_module("gravyflow.src.model.examples.train_george_huerta_2017")
     args = train.parse_args(["--output-dir", "unused", "--epochs", str(epochs)])
     config, schedule = train.configure(args)
@@ -398,7 +398,7 @@ def dropout_model():
 
 
 def test_training_is_reproducible_from_the_seed(tmp_path):
-    # GF-B215: fit shuffled each epoch with Python's unseeded global random, and
+    # Fit shuffled each epoch with Python's unseeded global random, and
     # Keras seeded the initialisers and dropout from it too: neither the order
     # nor the weights followed from the run's seed. No global_rng mark: the
     # recipe must leave the global random state alone.
@@ -430,7 +430,7 @@ RESUME_ATOL = float(np.finfo(np.float32).eps)
 
 
 def test_a_resumed_run_trains_as_an_uninterrupted_one(tmp_path):
-    # GF-B215: a resumed run's epochs came in another order.
+    # A resumed run's epochs came in another order.
     validation = held(AddressedBatches(99, [], group="validate"), 2)
     whole = make_run(tmp_path / "whole", 3).train(
         dropout_model, lambda seed: AddressedBatches(seed, []), validation, verbose=0)
