@@ -167,6 +167,24 @@ class WindowSpec:
         )
 
 
+class _DefaultSource:
+    """
+    ``Defaults.source`` until it is first read: then ``GWOSC()``, which replaces this
+    descriptor on the class, so every later read returns that one source.
+
+    It is made on first read because ``acquisition.sources`` imports this module, and
+    ``import gravyflow`` imports neither. Assigning ``Defaults.source`` (``Defaults.set``,
+    or a test's monkeypatch) replaces the descriptor too.
+    """
+
+    def __get__(self, instance, owner):
+        from gravyflow.src.dataset.acquisition.sources import GWOSC
+
+        source = GWOSC()
+        setattr(owner, "source", source)
+        return source
+
+
 class Defaults:
     seed : int = 1000
     num_examples_per_generation_batch: int = 2048
@@ -176,8 +194,8 @@ class Defaults:
     offsource_duration_seconds: float = 16.0
     crop_duration_seconds: float = 0.5
     #: Where an obtainer built without a ``source`` reads real strain: ``GWOSC()``,
-    #: set by ``acquisition.sources`` as it is imported (it imports this module).
-    source = None
+    #: made on first read.
+    source = _DefaultSource()
 
     # Standard tiers for JIT graph optimization
     # Using these values reduces the number of unique JAX graph compilations

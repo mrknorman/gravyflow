@@ -165,6 +165,22 @@ def test_core_runs_without_any_extra():
     assert "batches [(2, 1, " in output, output
 
 
+def test_the_default_source_is_gwosc_on_first_read():
+    # Defaults.source is made as it is first read, so it is GWOSC() even when
+    # nothing has imported the acquisition package that defines GWOSC.
+    output = run_python("""
+        import os, sys
+        os.environ["KERAS_BACKEND"] = "jax"
+        import gravyflow as gf
+        defaults = gf.Defaults
+        before = "gravyflow.src.dataset.acquisition.sources" in sys.modules
+        source = defaults.source
+        from gravyflow.src.dataset.acquisition.sources import GWOSC
+        print("default", before, type(source) is GWOSC, source == GWOSC(), defaults.source is source)
+    """, env=without_keras_backend())
+    assert "default False True True True" in output, output
+
+
 def test_version():
     assert re.fullmatch(r"\d+\.\d+\.\d+((a|b|rc)\d+)?(\.dev\d+)?", gf.__version__), gf.__version__
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())

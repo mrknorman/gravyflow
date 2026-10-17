@@ -34,7 +34,6 @@ from typing import Any, Dict, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
-from gravyflow.src.dataset.config import Defaults
 from gravyflow.src.utils.resample import whole_hertz
 from .gwosc_data import (
     GWOSC_RUNS, GWOSC_SAMPLE_RATES_HERTZ, GWOSC_STRAIN_DATASETS, UpsamplingRefused,
@@ -363,10 +362,6 @@ class LocalFrames(DataSource):
     def __repr__(self) -> str:
         return (f"LocalFrames(frametypes={self.frametypes}, channels={self.channels}, "
                 f"sample_rate_hertz={self.sample_rate_hertz:g})")
-
-
-#: The default source: an obtainer built without one reads GWOSC.
-Defaults.source = GWOSC()
 
 
 __all__ = [
