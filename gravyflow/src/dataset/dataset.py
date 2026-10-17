@@ -30,7 +30,7 @@ from gravyflow.src.dataset.acquisition.versions import DATA_VERSIONS
 from gravyflow.src.dataset.materialise import (
     DEFAULT_SHARD_SIZE, FORMAT, ContractMismatch, MaterialisedSet, json_bytes, sha256, write_set,
 )
-from gravyflow.src.validate.provenance import canonical
+from gravyflow.src.utils.fingerprint import canonical
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
@@ -569,7 +569,7 @@ class IndexedBatches:
         Raises:
             IndexError: a batch outside the epoch.
             MaterialiseConflict: a file of the set exists with other bytes.
-            gravyflow.src.validate.provenance.UnfingerprintableError: a part of
+            gravyflow.src.utils.fingerprint.UnfingerprintableError: a part of
                 the spec that has no content to fingerprint.
         """
         if k_range is not None and batches is not None:

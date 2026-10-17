@@ -3,7 +3,7 @@ The versions of the numerics that turn fetched strain into the samples gravyflow
 
 ``DATA_VERSIONS`` is their one home, with the version of the plan that draws real
 noise's windows. Every data obtainer's ``specification()`` carries
-it, so a content fingerprint (``validate.provenance.config_fingerprint``), and every
+it, so a content fingerprint (``utils.fingerprint.config_fingerprint``), and every
 check that compares one, changes when any of them does: a checkpoint or a validation
 written under other numerics is refused. Real noise is read from the store, which
 keeps raw strain, so a change of the resampler cuts no tile; the store's format names

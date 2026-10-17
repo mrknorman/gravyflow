@@ -24,7 +24,7 @@ import gravyflow as gf
 from gravyflow.src.dataset.acquisition.sources import SegmentStrain
 from gravyflow.src.dataset.store import Store
 from gravyflow.src.dataset.store.tile import key_from_path
-from gravyflow.src.validate.provenance import UnfingerprintableError, canonical, config_fingerprint
+from gravyflow.src.utils.fingerprint import UnfingerprintableError, canonical, config_fingerprint
 from gravyflow.tests.conftest import gwosc_serving
 
 RATE = 256.0

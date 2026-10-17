@@ -298,7 +298,7 @@ class Obtainer:
 
     def specification(self) -> dict:
         """
-        What determines the noise served (``validate.provenance.canonical`` reads it):
+        What determines the noise served (``utils.fingerprint.canonical`` reads it):
         every field.
         """
         return {f.name: getattr(self, f.name) for f in fields(self)}

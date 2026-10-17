@@ -13,7 +13,8 @@ import gravyflow as gf
 from .bank import ValidationBank, noise_background
 from .config import ValidationConfig, check_held_out, run_record_of
 from .metrics import Background, EfficiencyCurve, FarThreshold, efficiency_curve, roc_curve
-from .provenance import StaleCheckpointError, config_fingerprint, model_fingerprint, require_match
+from .provenance import StaleCheckpointError, model_fingerprint, require_match
+from gravyflow.src.utils.fingerprint import config_fingerprint
 
 if TYPE_CHECKING:  # avoids importing keras at runtime
     import keras

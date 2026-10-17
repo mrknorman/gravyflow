@@ -910,7 +910,7 @@ def test_availability_is_frozen_and_fingerprinted_when_the_dataset_is_built(worl
     timeline changed afterwards moves none of its batches; a dataset built after the
     change has another fingerprint.
     """
-    from gravyflow.src.validate.provenance import config_fingerprint
+    from gravyflow.src.utils.fingerprint import config_fingerprint
     from .fakes import write_timelines
 
     fixture = fx.odd_pieces()

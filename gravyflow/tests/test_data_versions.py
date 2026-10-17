@@ -25,7 +25,8 @@ from gravyflow.src.model.examples.recipe import RunDirectory, TrainingRun, Train
 from gravyflow.src.validate import StaleCheckpointError, ValidationConfig, Validator
 from gravyflow.src.validate.bank import ValidationBank
 from gravyflow.src.validate.config import with_run_record
-from gravyflow.src.validate.provenance import config_fingerprint, model_fingerprint
+from gravyflow.src.utils.fingerprint import config_fingerprint
+from gravyflow.src.validate.provenance import model_fingerprint
 from gravyflow.tests import test_examples_recipe as recipe_tests
 from gravyflow.tests.conftest import refuse_internet
 from gravyflow.tests import test_segment_provenance as noise_reads

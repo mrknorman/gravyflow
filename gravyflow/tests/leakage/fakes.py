@@ -105,7 +105,7 @@ class FakeSource(gf.GWOSC):
         return self.TILE_SECONDS
 
     def source_id(self, gps, sample_rate_hertz) -> str:
-        from gravyflow.src.validate.provenance import config_fingerprint
+        from gravyflow.src.utils.fingerprint import config_fingerprint
 
         return f"fake-{config_fingerprint(self.encoding)[:16]}"
 

@@ -429,7 +429,7 @@ class TestDataSource:
             _noise_obtainer("GWOSC")
 
     def test_the_source_enters_the_fingerprint(self):
-        from gravyflow.src.validate.provenance import canonical, config_fingerprint
+        from gravyflow.src.utils.fingerprint import canonical, config_fingerprint
 
         obtainer = _noise_obtainer()
         assert obtainer.specification()["source"] == gf.GWOSC()

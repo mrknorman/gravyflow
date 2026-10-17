@@ -636,7 +636,7 @@ class BaseDataObtainer(ABC):
         """
         Everything that determines the data this obtainer serves: every attribute but
         its served state (``_served_state``) and ``_NOT_SPECIFICATION``. Content
-        fingerprints (``validate.provenance.canonical``) read it, so changing any
+        fingerprints (``utils.fingerprint.canonical``) read it, so changing any
         parameter that changes the data changes the fingerprint.
         """
         excluded = set(self._served_state()) | set(self._NOT_SPECIFICATION)

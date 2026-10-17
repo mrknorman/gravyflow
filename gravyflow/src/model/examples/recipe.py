@@ -60,9 +60,8 @@ import gravyflow as gf
 from gravyflow.src.rng import platform
 from gravyflow.src.validate.bank import per_example
 from gravyflow.src.validate.config import require_same_split, run_record_of, split_record, with_run_record
-from gravyflow.src.validate.provenance import (
-    StaleCheckpointError, canonical, config_fingerprint, model_fingerprint, require_match,
-)
+from gravyflow.src.utils.fingerprint import canonical, config_fingerprint
+from gravyflow.src.validate.provenance import StaleCheckpointError, model_fingerprint, require_match
 
 SPLITS = ("train", "validate", "test")
 

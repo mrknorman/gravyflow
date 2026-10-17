@@ -16,7 +16,8 @@ from .metrics import (
     poisson_interval,
     roc_curve,
 )
-from .provenance import StaleCheckpointError, config_fingerprint, model_fingerprint
+from .provenance import StaleCheckpointError, model_fingerprint
+from gravyflow.src.utils.fingerprint import config_fingerprint
 from .plotting import (
     generate_efficiency_plot,
     generate_far_curves,

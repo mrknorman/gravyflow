@@ -586,7 +586,7 @@ class Network:
 
     def specification(self) -> Dict:
         """
-        The network's geometry by content (``validate.provenance.canonical`` reads
+        The network's geometry by content (``utils.fingerprint.canonical`` reads
         it): every attribute, its arrays as NumPy arrays. A network is stateless
         geometry, so this is all a projection depends on.
         """
