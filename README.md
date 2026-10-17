@@ -112,8 +112,10 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
   A model's split is its data's: `gf.Model.train` and the recipes' `TrainingRun.train` read it from their
   training and validation data (a gravyflow dataset names its `split_spec` and `group`), refuse data that names
   none or is split by two specs, and record the fingerprint and the split that selected the model in `run.json`
-  beside the model. `Model.validate` passes that record to the validator, which refuses a model split by another
-  spec and the split that selected it.
+  beside the model. The record belongs to the weights: every model gravyflow trains or loads carries it
+  (`TrainingRun.train`'s, `RunDirectory.load_model`'s, a `gf.Model`'s), weights that carry one never train on
+  another split, whatever `force_retrain` says, and the validator reads it from the model, refusing a model split
+  by another spec and the split that selected it.
 - Every entry point needs a named split: `group='train'`, `'validate'` or `'test'`. `'all'` and any other name raise
   `KeyError`. `gf.DEFAULT_SPLIT_FRACTIONS`, `NoiseObtainer(groups=)`, `get_valid_segments(groups=)` and
   `TransientIndex.assign_groups` are gone: give the data obtainer `split_spec=gf.SplitSpec(fractions=...)`, or another

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import json
 import logging
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -65,20 +66,14 @@ class ValidationConfig:
         return lo + self.snr_bin_width * np.arange(num_bins + 1)
 
 
-def dataset_split_spec(dataset_args: dict) -> "gf.SplitSpec":
-    """The split of the real data ``dataset_args`` read: its IFO obtainer's, else the default."""
-    noise = dataset_args.get("noise_obtainer")
-    obtainer = getattr(noise, "ifo_data_obtainer", None)
-    return getattr(obtainer, "split_spec", None) or gf.DEFAULT_SPLIT
-
-
 def split_record(training, validation) -> Dict[str, str]:
     """
     The split record of a model trained on ``training`` and selected on
     ``validation``, read from that data and never declared beside it: the
     fingerprint of the ``SplitSpec`` both read, and the split that selects the
-    model (``validation``'s ``group``). A training run keeps it beside the model
-    (``run.json``'s ``split``), and the validator checks it (``check_held_out``).
+    model (``validation``'s ``group``). It is the ``split`` of the weights'
+    training record (`with_run_record`, kept on disk as the run's
+    ``run.json``), which the validator checks (``check_held_out``).
 
     ``training`` and ``validation`` are gravyflow datasets, or anything naming
     one's ``split_spec`` and ``group`` (the run recipe's batches do).
@@ -110,11 +105,38 @@ def split_record(training, validation) -> Dict[str, str]:
     return {"fingerprint": spec.fingerprint(), "selection_split": selection}
 
 
+#: Where a Keras model keeps the training record of its weights: JSON, so that
+#: Keras tracks nothing in it and nothing changes it in place.
+_RUN_RECORD = "_gravyflow_run_record"
+
+
+def with_run_record(model, record: Optional[dict]):
+    """
+    Give ``model`` (a Keras model) the training record of its weights, and
+    return it. The record is the ``run.json`` of the run that trained them: its
+    ``split`` is their data's split record (`split_record`). It belongs to the
+    weights, so gravyflow gives one only to weights it trains or loads with
+    theirs: weights built afresh carry none, and a Keras file holds none (on
+    disk, the record is the run's ``run.json``).
+    """
+    setattr(model, _RUN_RECORD, None if record is None else json.dumps(record, sort_keys=True))
+    return model
+
+
+def run_record_of(model) -> Optional[dict]:
+    """
+    The training record ``model``'s weights carry (`with_run_record`): None for
+    weights gravyflow never trained or loaded with a record.
+    """
+    record = getattr(model, _RUN_RECORD, None)
+    return None if record is None else json.loads(record)
+
+
 def require_same_split(recorded: Optional[dict], live: Dict[str, str], where) -> None:
     """
-    Refuse to continue the training recorded in ``where``, whose record's split
-    is ``recorded`` (None when it records none), on data whose split record
-    (`split_record`) is ``live``.
+    Refuse to train further what ``where`` holds (trained weights, or a run's
+    directory), whose record's split is ``recorded`` (None when it records
+    none), on data whose split record (`split_record`) is ``live``.
 
     Raises:
         StaleCheckpointError: the record names another split, or none.
@@ -122,17 +144,19 @@ def require_same_split(recorded: Optional[dict], live: Dict[str, str], where) ->
     if recorded != live:
         raise StaleCheckpointError(
             f"{where} records the split {recorded or 'none'}, but this data's split is {live}: "
-            "continuing would train or select the model on another split. Use a new directory."
+            "continuing would train or select the model on another split. Train new weights, "
+            "in a new directory."
         )
 
 
 def check_held_out(group: str, spec: "gf.SplitSpec", run_record: Optional[dict]) -> None:
     """
     Refuse to score split ``group`` for a model whose training record
-    (``run_record``: its ``run.json``) names another split spec than ``spec``,
-    names ``group`` as the split that selected the model, or names no split. A
-    model with no gravyflow record at all (an external one) is scored with a
-    warning: the split it trained on is unknown.
+    (``run_record``, the record its weights carry: `run_record_of`) names
+    another split spec than ``spec``, names ``group`` as the split that selected
+    the model, or names no split. A model with no record at all, one gravyflow
+    never trained (an external one), is scored with a warning: the split it
+    trained on is unknown.
     """
     from gravyflow.src.dataset.splits import require_split_fingerprint
 

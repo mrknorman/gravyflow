@@ -11,7 +11,7 @@ import numpy as np
 
 import gravyflow as gf
 from .bank import ValidationBank
-from .config import ValidationConfig, check_held_out, dataset_split_spec
+from .config import ValidationConfig, check_held_out, run_record_of
 from .metrics import Background, EfficiencyCurve, FarThreshold, efficiency_curve, roc_curve
 from .provenance import StaleCheckpointError, config_fingerprint, model_fingerprint, require_match
 
@@ -77,17 +77,18 @@ class Validator:
         config: Optional[ValidationConfig] = None,
         checkpoint_file_path: Optional[Path] = None,
         heart: Optional[gf.Heart] = None,
-        run_record: Optional[dict] = None,
     ) -> "Validator":
         """
         Score ``model`` and return its results.
 
-        ``run_record`` is the model's training record, the ``run.json`` gravyflow
-        writes beside a model it trains (``RunDirectory.run``, ``Model.run_record``).
-        The validator refuses a model whose data was split by another spec than
-        its own, whose selection split is the one it would score, or whose record
-        names no split (`check_held_out`). A model with no gravyflow record at all
-        (an external one) is scored with a warning: the split it saw is unknown.
+        The validator reads the training record ``model``'s weights carry
+        (`run_record_of`; every model gravyflow trains or loads carries its own:
+        ``TrainingRun.train``'s, ``RunDirectory.load_model``'s, a ``gf.Model``'s).
+        It refuses a model whose data was split by another spec than the data it
+        scores, whose selection split is the one it would score, or whose record
+        names no split (`check_held_out`). A model with no record at all, one
+        gravyflow never trained (an external one), is scored with a warning: the
+        split it saw is unknown.
 
         With ``checkpoint_file_path``, results are saved after each stage, and a
         run resumes from the stages already saved there, provided the file was
@@ -98,7 +99,8 @@ class Validator:
                 to another model or to other settings.
         """
         v = cls(name, config, dataset_args)
-        check_held_out(v.config.group, dataset_split_spec(dataset_args), run_record)
+        bank = ValidationBank(model, dataset_args, v.config, heart)
+        check_held_out(v.config.group, bank.split_spec, run_record_of(model))
         v.model_sha256 = model_fingerprint(model)
         v.config_sha256 = config_fingerprint(v.config, dataset_args)
         path = Path(checkpoint_file_path) if checkpoint_file_path else None
@@ -119,7 +121,6 @@ class Validator:
             if path is not None:
                 v.save(path)
 
-        bank = ValidationBank(model, dataset_args, v.config, heart)
         if v.far_scores is None:
             bank.generate_noise()
             v.far_scores, v.noise_gps_times = bank.far_scores, bank.noise_gps_times

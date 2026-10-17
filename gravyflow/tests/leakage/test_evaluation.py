@@ -26,6 +26,7 @@ from gravyflow.src.model.examples import recipe
 from gravyflow.src.model.examples.recipe import RunDirectory
 from gravyflow.src.validate import StaleCheckpointError, ValidationConfig, Validator
 from gravyflow.src.validate.bank import ValidationBank
+from gravyflow.src.validate.config import run_record_of, with_run_record
 from gravyflow.tests.leakage import fixtures as fx
 from gravyflow.tests.leakage.fingerprints import (
     assert_noise_independent, assert_rows_disjoint, assert_streams_independent, strain_prints,
@@ -98,9 +99,8 @@ def validate(run_directory, num_examples):
     ])
     run_record = RunDirectory(run_directory).run
     dataset_args, config = validate_script.build_validation(args, run_record)
-    model = stub_model(samples_of(run_record["description"]["config"]))
-    return Validator.validate(model=model, name="leakage", dataset_args=dataset_args, config=config,
-                              run_record=run_record)
+    model = with_run_record(stub_model(samples_of(run_record["description"]["config"])), run_record)
+    return Validator.validate(model=model, name="leakage", dataset_args=dataset_args, config=config)
 
 
 def by_split(taken, stages=(), batches_per_stage=None, epochs=False):
@@ -343,10 +343,12 @@ def _scores(call):
 
 
 def _scores_split(group, run_record, dataset_args=None):
-    """Whether the validator goes on to score ``group`` for a model with ``run_record``."""
-    dataset_args = dataset_args or {"onsource_duration_seconds": 1.0}
-    return _scores(lambda: Validator.validate(None, "model", dataset_args, ValidationConfig(group=group),
-                                              run_record=run_record))
+    """Whether the validator goes on to score ``group`` for a model whose weights carry ``run_record``."""
+    dataset_args = dataset_args or {"noise_obtainer": gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
+                                    "onsource_duration_seconds": 1.0,
+                                    "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE]}
+    model = with_run_record(stub_model(256), run_record)
+    return _scores(lambda: Validator.validate(model, "model", dataset_args, ValidationConfig(group=group)))
 
 
 FOLD_2 = gf.SplitSpec(version="fold-2")
@@ -371,12 +373,12 @@ def tiny_model():
     return model
 
 
-def _train_and_validate_world(specs):
-    """O3 data inside one block of each spec's train and validate splits, away from its edges."""
+def _split_world(specs):
+    """O3 data inside one block of each spec's train, validate and test splits, away from its edges."""
     first = gf.DEFAULT_SPLIT.block_of(fx.origin_gps("O3")) + 2
     blocks = set()
     for spec in specs:
-        for split in ("train", "validate"):
+        for split in ("train", "validate", "test"):
             blocks.add(next(k for k in range(first, first + 1000) if spec.block_split(k) == split))
     intervals = [(k * fx.BLOCK_SECONDS + 1024.0, k * fx.BLOCK_SECONDS + 4096.0) for k in sorted(blocks)]
     return fx._fixture(intervals, 256.0, "O3", ("O3",))
@@ -385,11 +387,11 @@ def _train_and_validate_world(specs):
 def test_a_run_records_the_split_its_data_reads(world, tmp_path):
     """
     A run records the split its data reads, never one declared beside it: a default run
-    on fold-2 data records fold-2's fingerprint (in run.json and the model's record), so
+    on fold-2 data records fold-2's fingerprint (in run.json, which its models carry), so
     the validator refuses the default test split, which shares time with fold-2's training
     split, and scores fold-2's. Resuming the run on data split otherwise is refused.
     """
-    fixture = _train_and_validate_world([FOLD_2, gf.DEFAULT_SPLIT])
+    fixture = _split_world([FOLD_2, gf.DEFAULT_SPLIT])
     with world(fixture):
         def data(split, spec=FOLD_2):
             return StandingBatches(fx.dataset(fixture, tmp_path / "data", split, steps_per_epoch=2,
@@ -403,11 +405,11 @@ def test_a_run_records_the_split_its_data_reads(world, tmp_path):
         directory = RunDirectory(tmp_path / "run")
         record = directory.run
         assert record["split"] == {"fingerprint": FOLD_2.fingerprint(), "selection_split": "validate"}
-        assert directory._read(directory.path / "model.json")["split"] == record["split"]
+        assert run_record_of(directory.load_model("model")) == record
 
         def args(spec):
             return {"noise_obtainer": fx.noise_obtainer(fixture, tmp_path / "scored", split_spec=spec),
-                    "onsource_duration_seconds": 1.0}
+                    "onsource_duration_seconds": 1.0, "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE]}
 
         with pytest.raises(ValueError, match="SplitSpec"):
             _scores_split("test", record, args(gf.DEFAULT_SPLIT))
@@ -427,9 +429,9 @@ def test_a_run_records_the_split_its_data_reads(world, tmp_path):
 @pytest.mark.global_rng  # gf.Model builds its Keras model from Keras' global seed
 def test_a_gf_model_records_its_split_for_the_validator(tmp_path):
     """
-    gf.Model records the split its data reads and the split that selected it, beside the
-    model, and Model.validate hands that record to the validator: it refuses to score
-    the selection split ('validate') and scores 'test'.
+    gf.Model records the split its data reads and the split that selected it, and its
+    weights carry that record to the validator through Model.validate: it refuses to
+    score the selection split ('validate') and scores 'test'.
     """
     from gravyflow.tests.test_model_train import dataset_args, tiny_model as model_of
 
@@ -463,3 +465,252 @@ def test_selection_check_sees_a_validator_that_scores_it(monkeypatch):
     monkeypatch.setattr("gravyflow.src.validate.validator.check_held_out", lambda *args: None)
     record = {"split": {"fingerprint": gf.DEFAULT_SPLIT.fingerprint(), "selection_split": "validate"}}
     assert _scores_split("validate", record)
+
+
+def _selected_on_validate(spec):
+    """The record of a model trained on ``spec``'s train split and selected on its validate split."""
+    return {"split": {"fingerprint": spec.fingerprint(), "selection_split": "validate"}}
+
+
+def test_the_validator_reads_the_split_of_the_data_it_scores():
+    """
+    The validator checks a model's record against the split of the data it scores,
+    whatever obtainer reads that data. With fold-2 glitches as its noise (a transient
+    obtainer, not a NoiseObtainer) it refuses a model trained on the default split, whose
+    training time fold-2's test split shares, and scores a model trained on fold-2.
+    """
+    glitches = gf.TransientDataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
+                                        observing_runs=gf.ObservingRun.O3, split_spec=FOLD_2)
+    args = {"noise_obtainer": glitches, "onsource_duration_seconds": 1.0,
+            "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE]}
+    with pytest.raises(ValueError, match="SplitSpec"):
+        _scores_split("test", _selected_on_validate(gf.DEFAULT_SPLIT), args)
+    assert _scores_split("test", _selected_on_validate(FOLD_2), args)
+
+
+def _split_spec_reads():
+    """
+    Where gravyflow's source reads a ``split_spec`` from another object than itself
+    (``x.split_spec`` or ``getattr(x, "split_spec", ...)``, x not ``self``), as
+    (module, enclosing class and function, whether x names an obtainer).
+    """
+    import ast
+    from pathlib import Path
+
+    source = Path(gf.__file__).parent / "src"
+    reads = set()
+
+    def names_an_obtainer(receiver):
+        return any("obtainer" in (getattr(node, "id", None) or getattr(node, "attr", None)
+                                  or (node.value if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                                      else ""))
+                   for node in ast.walk(receiver))
+
+    def visit(node, scope, module):
+        for child in ast.iter_child_nodes(node):
+            inner = scope
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                inner = f"{scope}.{child.name}" if scope else child.name
+            receiver = None
+            if isinstance(child, ast.Attribute) and child.attr == "split_spec" and isinstance(child.ctx, ast.Load):
+                receiver = child.value
+            elif (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                  and child.func.id in ("getattr", "hasattr") and len(child.args) >= 2
+                  and isinstance(child.args[1], ast.Constant) and child.args[1].value == "split_spec"):
+                receiver = child.args[0]
+            if receiver is not None and not (isinstance(receiver, ast.Name) and receiver.id == "self"):
+                reads.add((module, inner, names_an_obtainer(receiver)))
+            visit(child, inner, module)
+
+    for path in sorted(source.rglob("*.py")):
+        visit(ast.parse(path.read_text()), "", path.relative_to(source).as_posix())
+    return reads
+
+
+#: Every place that reads another object's split, and why it may. Only a dataset
+#: derives its split from its obtainers; everything else reads it from data.
+SPLIT_READERS = {
+    ("dataset/dataset.py", "IndexedBatches.split_spec"): "the one computation: a dataset's obtainers' spec",
+    ("validate/bank.py", "ValidationBank.split_spec"): "the validator's data: its own dataset's",
+    ("validate/validator.py", "Validator.validate"): "the validator's check: its data's (the bank's)",
+    ("validate/config.py", "split_record"): "a training run's: its training and validation data's",
+    ("model/examples/recipe.py", "_DatasetBatches.split_spec"): "a recipe's batches: their dataset's",
+    ("model/examples/recipe.py", "materialise"): "a fixed validation set: the batches it was drawn from",
+}
+
+
+def test_only_a_dataset_derives_its_split_from_its_obtainers():
+    """
+    A dataset's split has one computation, `Dataset.split_spec`, over its obtainers. The
+    validator and the training runs read the split of their data, never computing it
+    again: a second computation could see other obtainers, or the same ones otherwise
+    (one ignored a transient obtainer used as noise), and score a model on the time it
+    trained on.
+    """
+    reads = _split_spec_reads()
+    readers = {(module, scope) for module, scope, _ in reads}
+    assert readers == set(SPLIT_READERS), (
+        f"split read outside the known readers: {sorted(readers - set(SPLIT_READERS))}; "
+        f"known readers gone: {sorted(set(SPLIT_READERS) - readers)}"
+    )
+    from_obtainers = {(module, scope) for module, scope, obtainer in reads if obtainer}
+    assert from_obtainers == {("dataset/dataset.py", "IndexedBatches.split_spec")}, (
+        f"a split derived from an obtainer outside Dataset.split_spec: {sorted(from_obtainers)}"
+    )
+
+
+class _ModelBatches(recipe.DetectionBatches):
+    """A gravyflow dataset's split, served as the small gf.Model's batches: training reads its split."""
+
+    def __getitem__(self, index):
+        rng = np.random.default_rng(index)
+        x = rng.normal(size=(4, 1, 256)).astype(np.float32)
+        return {"ONSOURCE": x}, {"INJECTION_PRESENT": rng.integers(0, 2, (4, 1)).astype(np.float32)}
+
+
+def _gf_model(path, load=False):
+    """A small gf.Model in ``path`` with no dataset of its own (each `train` names its data), or loaded from it."""
+    from gravyflow.tests.test_model_train import BATCH as MODEL_BATCH, ONSOURCE, SAMPLE_RATE, TRAINING
+
+    shape = dict(input_configs=[{"name": "ONSOURCE", "shape": (1, int(SAMPLE_RATE * ONSOURCE))}],
+                 output_config={"name": "INJECTION_PRESENT", "type": "binary"},
+                 training_config=dict(TRAINING), optimizer="sgd", loss=None)
+    if load:
+        return gf.Model.load("tiny", path, hidden_layers=[gf.DenseLayer(4)], **shape)
+    return gf.Model(name="tiny", layers=[gf.DenseLayer(4)], batch_size=MODEL_BATCH, model_path=path, **shape)
+
+
+def _default_data():
+    """A gf.Model's training data and validation arguments on synthetic noise: the default split."""
+    from gravyflow.tests.test_model_train import dataset_args
+
+    return {"training_dataset": gf.Dataset(**dataset_args(steps_per_epoch=3)),
+            "validate_args": {**dataset_args(steps_per_epoch=2), "group": "validate"}}
+
+
+def _fold_2_data(fixture, directory):
+    """A gf.Model's training data and validation arguments on the fixture's real noise, split by fold-2."""
+    from gravyflow.tests.test_model_train import dataset_args
+
+    real = dict(dataset_args(), noise_obtainer=fx.noise_obtainer(fixture, directory, ifos=("L1",), split_spec=FOLD_2),
+                ifos=[gf.IFO.L1], waveform_generators=None)
+    return {"training_dataset": _ModelBatches(gf.Dataset(**{**real, "steps_per_epoch": 3})),
+            "validate_args": {**real, "steps_per_epoch": 2, "group": "validate"}}
+
+
+@pytest.mark.global_rng  # gf.Model builds its Keras model from Keras' global seed
+@pytest.mark.parametrize("force_retrain", [True, False])
+def test_trained_weights_keep_to_their_split(world, tmp_path, force_retrain):
+    """
+    A gf.Model's split record belongs to its weights. Weights trained on the default
+    split, still in memory or loaded from their checkpoint, are never trained on fold-2's
+    data, whatever force_retrain says: their record would then name fold-2, and the
+    validator would score fold-2's test, which their first training read.
+    """
+    fixture = _split_world([FOLD_2, gf.DEFAULT_SPLIT])
+    trained = _gf_model(tmp_path / "model")
+    trained.train(**_default_data())
+    loaded = _gf_model(tmp_path / "model", load=True)
+    with world(fixture):
+        for model in (trained, loaded):
+            with pytest.raises(StaleCheckpointError, match="records the split"):
+                model.train(**_fold_2_data(fixture, tmp_path / "fold-2"), force_retrain=force_retrain)
+            assert model.run_record == _selected_on_validate(gf.DEFAULT_SPLIT)
+
+
+@pytest.mark.global_rng
+def test_a_resumed_gf_model_keeps_to_its_directorys_split(world, tmp_path):
+    """
+    Resuming (force_retrain=False) continues the run saved in the model's directory,
+    whose best weights it may restore: new weights resumed there on another split's data
+    are refused, as weights carrying that run's record would be.
+    """
+    fixture = _split_world([FOLD_2, gf.DEFAULT_SPLIT])
+    _gf_model(tmp_path / "model").train(**_default_data())
+    fresh = _gf_model(tmp_path / "model")
+    with world(fixture):
+        with pytest.raises(StaleCheckpointError, match="records the split"):
+            fresh.train(**_fold_2_data(fixture, tmp_path / "fold-2"), force_retrain=False)
+
+
+class _Interrupted(Exception):
+    pass
+
+
+class _InterruptTraining(keras.callbacks.Callback):
+    def on_train_begin(self, logs=None):
+        raise _Interrupted
+
+
+@pytest.mark.global_rng
+def test_a_new_run_never_leaves_an_earlier_runs_weights_beside_its_record(world, tmp_path):
+    """
+    New weights trained in a directory holding a run of another split start a new run
+    there: the earlier run's checkpoint goes before the new record is written, so a run
+    interrupted before its first checkpoint never leaves default-split weights beside a
+    fold-2 record, for a load to label fold-2's.
+    """
+    fixture = _split_world([FOLD_2, gf.DEFAULT_SPLIT])
+    _gf_model(tmp_path / "model").train(**_default_data())
+    with world(fixture):
+        with pytest.raises(_Interrupted):
+            _gf_model(tmp_path / "model").train(**_fold_2_data(fixture, tmp_path / "fold-2"),
+                                                callbacks=[_InterruptTraining()])
+    assert _gf_model(tmp_path / "model", load=True).run_record is None, "loaded an earlier run's weights"
+
+
+@pytest.mark.global_rng
+def test_gravyflow_models_carry_their_record(world, tmp_path):
+    """
+    Every model gravyflow trains or loads carries its training record, so the validator
+    refuses the split that selected it without being handed the record: a run's model
+    (TrainingRun.train's, and RunDirectory.load_model's), and a gf.Model's.
+    """
+    from gravyflow.tests.test_model_train import dataset_args
+
+    fixture = _split_world([FOLD_2, gf.DEFAULT_SPLIT])
+
+    def selected_on_validate_is_refused(model, scored_args):
+        with pytest.raises(ValueError, match="selected on the 'validate' split"):
+            _scores(lambda: Validator.validate(model, "model", scored_args, ValidationConfig(group="validate")))
+
+    with world(fixture):
+        def data(split):
+            return StandingBatches(fx.dataset(fixture, tmp_path / "data", split, steps_per_epoch=2,
+                                              split_spec=FOLD_2))
+
+        run = recipe.TrainingRun(RunDirectory(tmp_path / "run"), seed=1, schedule=recipe.TrainingSchedule(
+            epochs=1, steps_per_epoch=2, validation_batches=1, patience=1))
+        model = run.train(tiny_model, lambda seed: data("train"), recipe.materialise(data("validate"), 1),
+                          verbose=0)
+        args = {"noise_obtainer": fx.noise_obtainer(fixture, tmp_path / "scored", split_spec=FOLD_2),
+                "onsource_duration_seconds": 1.0, "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE]}
+        for loaded in (model, *(run.directory.load_model(name) for name in ("model", "best", "last"))):
+            selected_on_validate_is_refused(loaded, args)
+
+    trained = _gf_model(tmp_path / "gf-model")
+    trained.train(**_default_data())
+    selected_on_validate_is_refused(trained.model, {k: v for k, v in dataset_args().items() if k != "group"})
+
+
+def test_a_run_never_relabels_the_weights_it_is_given(world, tmp_path):
+    """
+    A run whose build_model returns weights already trained (another run's model, or
+    one's weights transferred) keeps to their split: trained on the default split, they
+    are never trained again on fold-2's and recorded as fold-2's.
+    """
+    fixture = _split_world([FOLD_2, gf.DEFAULT_SPLIT])
+    with world(fixture):
+        def data(split, spec):
+            return StandingBatches(fx.dataset(fixture, tmp_path / "data", split, steps_per_epoch=2,
+                                              split_spec=spec))
+
+        def train_run(directory, spec, build):
+            run = recipe.TrainingRun(RunDirectory(tmp_path / directory), seed=1, schedule=recipe.TrainingSchedule(
+                epochs=1, steps_per_epoch=2, validation_batches=1, patience=1))
+            return run.train(build, lambda seed: data("train", spec), recipe.materialise(data("validate", spec), 1),
+                             verbose=0)
+
+        trained = train_run("default", gf.DEFAULT_SPLIT, tiny_model)
+        with pytest.raises(StaleCheckpointError, match="records the split"):
+            train_run("fold-2", FOLD_2, lambda: trained)

@@ -310,21 +310,19 @@ class IndexedBatches:
 
     @property
     def split_spec(self) -> "gf.SplitSpec":
-        """How the real data this dataset reads is split: its IFO obtainers' spec, else the default."""
-        specs = {getattr(obtainer, "split_spec", None) for obtainer in self._ifo_data_obtainers()}
+        """
+        How the real data this dataset reads is split: the spec of the IFO data
+        obtainers it reads through (a NoiseObtainer's, or a transient obtainer
+        itself), else the default. This is the one computation of a split:
+        everything else that needs one, the validator and the training runs
+        included, reads it from data.
+        """
+        specs = {getattr(getattr(obtainer, "ifo_data_obtainer", obtainer), "split_spec", None)
+                 for obtainer in self._obtainers()}
         specs.discard(None)
         if len(specs) > 1:
             raise ValueError(f"A dataset's obtainers split time differently: {sorted(s.fingerprint() for s in specs)}.")
         return specs.pop() if specs else gf.DEFAULT_SPLIT
-
-    def _ifo_data_obtainers(self) -> list:
-        """The IFO data obtainers this dataset reads real data through."""
-        found = []
-        for obtainer in [getattr(self, "noise_obtainer", None),
-                         *[getattr(pool, name, None) for pool in getattr(self, "pools", None) or []
-                           for name in ("noise_obtainer", "transient_obtainer")]]:
-            found.append(getattr(obtainer, "ifo_data_obtainer", obtainer))
-        return [obtainer for obtainer in found if obtainer is not None]
 
     @property
     def index_addressed(self) -> bool:

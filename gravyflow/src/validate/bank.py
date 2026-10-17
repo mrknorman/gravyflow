@@ -15,13 +15,14 @@ import heapq
 import logging
 import math
 from copy import deepcopy
+from functools import cached_property
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
 
 import gravyflow as gf
-from .config import ValidationConfig, dataset_split_spec
+from .config import ValidationConfig
 from .metrics import Background, logit_scores
 from .utils import _extract_sample_data
 
@@ -148,6 +149,20 @@ class ValidationBank:
             args["output_variables"] = [*outputs, gf.ReturnVariables.START_GPS_TIME]
         return gf.Dataset(**args)
 
+    @cached_property
+    def _noise_dataset(self) -> gf.Dataset:
+        """The noise background's data, built once per bank: its split is the bank's, and `generate_noise` scores it."""
+        return self._dataset("far", [], [gf.ReturnVariables.WHITENED_ONSOURCE])
+
+    @property
+    def split_spec(self) -> gf.SplitSpec:
+        """
+        How the data the bank scores is split: its own dataset's split
+        (`Dataset.split_spec`), never computed again here. Every stage reads
+        the same obtainers, so the noise background's dataset speaks for all.
+        """
+        return self._noise_dataset.split_spec
+
     def _score(self, x) -> np.ndarray:
         if self.heart:
             self.heart.beat()
@@ -162,7 +177,7 @@ class ValidationBank:
 
     def generate_noise(self) -> None:
         """Score noise-only examples: the background for false-alarm rates."""
-        dataset = self._dataset("far", [], [gf.ReturnVariables.WHITENED_ONSOURCE])
+        dataset = self._noise_dataset
         keep = self.config.num_worst_per_bin * 5
         scores, gps, heap = [], [], []
         for b in tqdm(range(self._num_batches()), desc="Scoring noise", unit="batch"):
@@ -276,7 +291,7 @@ class ValidationBank:
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS],
             event_names=[e["name"] for e in events],
-            split_spec=dataset_split_spec(self.dataset_args),
+            split_spec=self.split_spec,
         )
         chunks = obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=sample_rate,

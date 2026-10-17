@@ -31,9 +31,11 @@ and evaluated.
 - **The split.** A run records the split its data reads, never one declared
   beside it: the fingerprint of the training and validation data's
   ``SplitSpec`` and the validation data's split, which selects the model
-  (``run.json``'s ``split``, also in the final model's record). Data split by
-  two specs, or a resumed run's data split otherwise, is refused; the
-  validator reads the record (``Validator.validate``'s ``run_record``).
+  (``run.json``'s ``split``). The record belongs to the weights: every model
+  the run returns or its directory loads carries it (`with_run_record`), and
+  the validator reads it there. Data split by two specs, a resumed run's data
+  split otherwise, or a model to train whose weights record another split, is
+  refused.
 - **A fixed validation set.** `materialise` draws the validation batches once,
   so every epoch, and every resumed run, scores the same data. Anything that
   serves the same batches each epoch fits the same place; a dataset that
@@ -55,7 +57,7 @@ import numpy as np
 
 import gravyflow as gf
 from gravyflow.src.validate.bank import per_example
-from gravyflow.src.validate.config import require_same_split, split_record
+from gravyflow.src.validate.config import require_same_split, run_record_of, split_record, with_run_record
 from gravyflow.src.validate.provenance import (
     StaleCheckpointError, canonical, config_fingerprint, model_fingerprint, require_match,
 )
@@ -285,7 +287,9 @@ class RunDirectory:
         """
         Load a saved model and verify its provenance: its file must still hold
         the recorded weights and, given ``config_sha256``, it must belong to
-        that configuration. Its seed generators resume from their saved state.
+        that configuration. Its seed generators resume from their saved state,
+        and it carries the run's record (``run.json``; an empty one when the
+        directory has none), which the validator reads.
 
         Raises:
             StaleCheckpointError: a mismatch.
@@ -300,7 +304,7 @@ class RunDirectory:
             model = keras.models.load_model(target)
         require_match("model", record["weights_sha256"], model_fingerprint(model), target)
         _restore_seed_states(model, record.get("seed_states", []), target)
-        return model
+        return with_run_record(model, self.run or {})
 
 
 # --------------------------------------------------------------- training
@@ -346,8 +350,8 @@ class TrainingRun:
 
     The run's split is its data's, never declared beside it: ``train`` reads
     it from the training and validation data (`split_record`) and records it
-    in ``run.json`` and the final model's record, so a validator never reports
-    on data that trained or selected the model.
+    in ``run.json``, which every model of the run carries, so a validator never
+    reports on data that trained or selected the model.
     """
     directory: RunDirectory
     schedule: TrainingSchedule
@@ -378,12 +382,14 @@ class TrainingRun:
     ) -> keras.Model:
         """
         Train, or resume the run in ``directory``, and return the best model
-        (also saved as ``model.keras`` with its provenance).
+        (also saved as ``model.keras`` with its provenance), carrying the run's
+        record.
 
         Args:
             build_model: a new compiled model. It is built under `keras_draws`,
                 so its initial weights and dropout seeds follow from the run's
-                seed.
+                seed. Weights that already carry a record (another run's, say)
+                keep to its split.
             training_data: the training batches, given the run's root seed:
                 the training split of gravyflow data (`DetectionBatches`, say).
                 Its ``epoch_callback()``, when it has one, gives it Keras'
@@ -396,7 +402,8 @@ class TrainingRun:
             ValueError: data that names no split, or splits disagreeing
                 (`split_record`).
             StaleCheckpointError: the directory holds a run of another
-                configuration, or of data split otherwise.
+                configuration, or of data split otherwise; or the model built
+                records another split.
         """
         data = training_data(self.seed)
         split = split_record(data, validation_data)
@@ -407,9 +414,12 @@ class TrainingRun:
             require_match("run configuration", run["config_sha256"], sha, self.directory.path)
             require_same_split(run.get("split"), split, self.directory.path)
         if state is None:
-            self.directory.start(self._full_description(), split)
             with keras_draws(self.model_seed):
                 model = build_model()
+            given = run_record_of(model)
+            if given is not None:
+                require_same_split(given.get("split"), split, "The model build_model returned")
+            self.directory.start(self._full_description(), split)
             state = {"epoch": -1, "best_val_loss": None, "best_epoch": None, "wait": 0,
                      "stopped_early": False, "history": []}
         else:
@@ -431,7 +441,7 @@ class TrainingRun:
         best = self.directory.load_model("best", sha)
         state = self.directory.state
         self.directory.save_model(best, "model", sha, epoch=state["best_epoch"],
-                                  val_loss=state["best_val_loss"], split=split)
+                                  val_loss=state["best_val_loss"])
         return best
 
 

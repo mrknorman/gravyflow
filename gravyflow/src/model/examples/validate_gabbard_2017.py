@@ -82,7 +82,6 @@ def main(argv=None) -> Validator:
         dataset_args=dataset_args,
         config=config,
         checkpoint_file_path=output_dir / "validation.h5",
-        run_record=run,
     )
     validator.plot(output_dir / "validation.html")
 

@@ -953,7 +953,7 @@ class Model:
         if os.path.exists(checkpoint) and not force_overwrite:
             logger.info(f"Loading model from {model_path}")
             try:
-                model.model = keras.models.load_model(checkpoint)
+                model.model = model._load_checkpoint()
             except Exception as error:
                 raise ValueError(
                     f"The checkpoint {checkpoint} exists but cannot be loaded. Pass "
@@ -1148,10 +1148,24 @@ class Model:
     ):
         """
         Trains the model.
-        
+
+        The split the model trains and is selected on is its data's
+        (``split_record``), and belongs to its weights (``run_record``): weights
+        that carry a record keep to its split, and only weights the model
+        initialised itself start a new one.
+
         Args:
         training_dataset: Dataset to train on.
-        num_epochs: Number of epochs to train for.
+        force_retrain: True starts the run in ``model_path`` again (its history
+            is cleared); False resumes it. Either way training continues from
+            the weights in memory: neither reinitialises them, so neither lets
+            weights that carry a record train on another split. Train such data
+            from new weights: a new model, or ``Model.load`` with
+            ``force_overwrite=True``.
+
+        Raises:
+            StaleCheckpointError: the weights, or the run resumed, record
+                another split, or none.
         """ 
 
         if validation_dataset is None and validate_args is None:
@@ -1196,12 +1210,14 @@ class Model:
         if callbacks is None:
             callbacks = []
 
-        from gravyflow.src.validate.config import require_same_split, split_record
+        from gravyflow.src.validate.config import require_same_split, split_record, with_run_record
 
         gf.ensure_directory_exists(self.model_path)
-        # The split the model trains and is selected on is its data's: recorded
-        # beside it (run_record), and never changed under a resumed model.
         split = split_record(training_dataset, validation_dataset)
+        weights = self.run_record
+        if weights is not None:
+            require_same_split(weights.get("split"), split, f"Model {self.name!r}'s weights")
+        saved = self._saved_run_record()
 
         checkpoint_monitor = "val_loss"
         if not force_retrain:
@@ -1209,7 +1225,8 @@ class Model:
 
             history_data = gf.load_history(self.model_path)
             if history_data != {}:
-                require_same_split((self.run_record or {}).get("split"), split, self.model_path)
+                # Resuming continues the run saved here, whose best weights it may restore.
+                require_same_split((saved or {}).get("split"), split, self.model_path)
                 best_metric = min(history_data[checkpoint_monitor]) #assuming loss for now
                 best_epoch = np.argmin(history_data[checkpoint_monitor])
                 initial_epoch = len(history_data[checkpoint_monitor])
@@ -1218,9 +1235,7 @@ class Model:
                     logger.info(
                         f"Model already completed training. Skipping! Current epoch {initial_epoch}, best epoch {best_epoch}."
                     )
-                    self.model = keras.models.load_model(
-                        gf.model_file(self.model_path)
-                    )
+                    self.model = self._load_checkpoint()
                     self.metrics.append(history_data)
                     
                     return False
@@ -1234,7 +1249,13 @@ class Model:
             best_metric = None
             gf.save_dict_to_hdf5({}, self.model_path / "history.hdf5", True)
 
-        self._write_run_record({"split": split})
+        record = {"split": split}
+        if saved != record:
+            # A new run starts here: an earlier run's checkpoint, of another split or
+            # of none, goes first, so run.json always describes the weights beside it.
+            gf.model_file(self.model_path).unlink(missing_ok=True)
+        self._write_run_record(record)
+        with_run_record(self.model, record)
         if self.genome is not None:
             self.genome.save(self.model_path / "genome")
 
@@ -1329,12 +1350,31 @@ class Model:
     @property
     def run_record(self) -> Optional[dict]:
         """
-        The model's training record, ``run.json`` beside it (as a run recipe's
-        run directory keeps): its ``split`` is the split record its training
-        data gave (``split_record``). None for a model gravyflow never trained.
+        The training record of the model's weights (``run_record_of``): its
+        ``split`` is the split record of the data they trained and were selected
+        on (``split_record``). None for weights the model initialised and never
+        trained; weights loaded from a checkpoint carry the record saved beside
+        it (``run.json``, as a run recipe's run directory keeps), or an empty one.
         """
+        from gravyflow.src.validate.config import run_record_of
+
+        return run_record_of(self.model)
+
+    def _saved_run_record(self) -> Optional[dict]:
+        """The training record saved in the model's directory (``run.json``), or None."""
         path = Path(self.model_path) / "run.json"
         return json.loads(path.read_text()) if path.exists() else None
+
+    def _load_checkpoint(self) -> keras.Model:
+        """
+        The checkpoint in the model's directory, carrying the record saved beside
+        it: an empty one when none was, so loaded weights never pass for weights
+        the model initialised, which may start any split's record.
+        """
+        from gravyflow.src.validate.config import with_run_record
+
+        return with_run_record(keras.models.load_model(gf.model_file(self.model_path)),
+                               self._saved_run_record() or {})
 
     def _write_run_record(self, record: dict) -> None:
         path = Path(self.model_path) / "run.json"
@@ -1353,8 +1393,9 @@ class Model:
         Score the model with the validator (its logit output is the score),
         saving ``validation_data.h5`` and ``validation_plots.html`` in
         ``model_path`` (the model's own directory by default). The validator
-        reads the model's training record (``run_record``), so it refuses to
-        score the split that selected the model or data split by another spec.
+        reads the record the model's weights carry (``run_record``), so it
+        refuses to score the split that selected them or data split by another
+        spec.
         """
         model_path = Path(model_path if model_path is not None else self.model_path)
         validation_file_path : Path = model_path / "validation_data.h5"
@@ -1377,7 +1418,6 @@ class Model:
                 config=config,
                 checkpoint_file_path=validation_file_path,
                 heart=heart,
-                run_record=self.run_record,
             )
 
         validator.plot(

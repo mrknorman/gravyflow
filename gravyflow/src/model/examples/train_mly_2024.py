@@ -126,7 +126,6 @@ def validate(args, model_class, config, model) -> Validator:
                                 batch_size=args.validation_batch_size, snr_range=(0.0, 30.0),
                                 snr_bin_width=2.0),
         checkpoint_file_path=output_dir / "validation.h5",
-        run_record=RunDirectory(args.output_dir).run,
     )
     validator.plot(output_dir / "validation.html")
     background = validator.background()
