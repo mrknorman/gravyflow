@@ -19,6 +19,7 @@ import pytest
 from scipy.signal import freqz
 
 import gravyflow as gf
+from gravyflow.tests._helpers import representation_tolerance, statistical_bound
 from gravyflow.src.dataset.acquisition.sources import SegmentStrain
 from gravyflow.src.utils.resample import (
     PASSBAND_FRACTION, resample, resample_filter, resample_margin, resample_ratio, whole_hertz,
@@ -28,8 +29,11 @@ from gravyflow.tests import test_transient_windows as transient_reads
 
 #: Rate pairs: integer and rational ratios down, and one up.
 RATES = [(4096, 2048), (16384, 2048), (8192, 2048), (16384, 4096), (4096, 1000), (2048, 4096)]
+#: The resampler's contract (kind: reference, the filter's own design): its stopband and passband.
 SUPPRESSION_DB = 100.0
 RIPPLE = 1e-3
+#: The amplitude a unit tone above the new Nyquist frequency may keep: SUPPRESSION_DB as a ratio.
+STOPBAND_AMPLITUDE = 10 ** (-SUPPRESSION_DB / 20)
 #: The tone the reads must suppress, and the rate they serve it at. A whole number of
 #: seconds holds no whole number of its cycles, which an FFT resampler would pass by luck.
 TONE_HERTZ, RATE = 1500.1, 2048.0
@@ -63,7 +67,8 @@ class TestContract:
         edge = interior(rate_in, rate_out)
         for tone in np.linspace(rate_out / 2, rate_in / 2, 7)[1:-1]:
             resampled, _ = resample(np.sin(2 * np.pi * tone * times + 0.4), 0.0, rate_in, rate_out)
-            assert rms(resampled[edge:-edge]) <= 1e-5, f"{tone:.1f} Hz at {rate_in}->{rate_out}"
+            kept = np.max(np.abs(resampled[edge:-edge]))
+            assert kept <= STOPBAND_AMPLITUDE, f"{tone:.1f} Hz at {rate_in}->{rate_out}: kept {kept:.2e}"
 
     @pytest.mark.parametrize("extra", [0, 1, 3])
     @pytest.mark.parametrize("rate_in, rate_out", RATES)
@@ -89,7 +94,9 @@ class TestContract:
         times = np.arange(int(rate_in) + 3) / rate_in
         resampled, _ = resample(2.5 - 40.0 * times, 0.0, rate_in, rate_out)
         expected = 2.5 - 40.0 * np.arange(len(resampled)) / rate_out
-        np.testing.assert_allclose(resampled, expected, rtol=0, atol=1e-5)
+        # Representation: the float32 output of values up to 40 (the ramp's peak), c = 2 for the filter's sum.
+        atol = representation_tolerance(np.float32, 40.0, c=2)
+        np.testing.assert_allclose(resampled, expected, rtol=0, atol=atol)
 
     def test_equal_rates_return_the_input(self):
         x = np.random.default_rng(1).normal(size=(2, 999)).astype(np.float32)
@@ -103,8 +110,17 @@ class TestContract:
         from_double, _ = resample(x, 0.0, 4096, 2048)
         from_single, _ = resample(x.astype(np.float32), 0.0, 4096, 2048)
         assert from_double.dtype == from_single.dtype == np.float32
-        assert np.all(np.isfinite(from_double)) and rms(from_double) > 0.5e-21
-        assert np.max(np.abs(from_double - from_single)) <= 1e-6 * np.max(np.abs(from_double))
+        assert np.all(np.isfinite(from_double))
+        # Statistical: white noise of 1e-21 keeps the power below the new Nyquist frequency, between
+        # 0.9 (the flat passband) and 1.0 of half of it; the rms of 2048 outputs has relative sigma
+        # 1 / sqrt(2 * 2048). A float32 computation flushing 1e-21 values would not fit.
+        sigma = 1e-21 / np.sqrt(2 * len(from_double))
+        low, high = 1e-21 * np.sqrt(0.5 * PASSBAND_FRACTION ** 2), 1e-21 * np.sqrt(0.5)
+        assert low - statistical_bound(sigma) <= rms(from_double) <= high + statistical_bound(sigma)
+        # Representation: the single input rounds each sample by eps / 2; the filter sums at most
+        # 2 peaks' worth (c = 2).
+        tolerance = representation_tolerance(np.float32, np.max(np.abs(from_double)), c=2)
+        assert np.max(np.abs(from_double - from_single)) <= tolerance
 
     def test_interior_samples_do_not_depend_on_the_read(self):
         """Beyond the margin, an output is bit for bit what any longer read gives."""
@@ -136,7 +152,7 @@ class TestContract:
         assert resample_ratio(4096, 1000) == (125, 512)
         taps = resample_filter(*resample_ratio(4096, 2048))
         assert taps is resample_filter(*resample_ratio(16384, 8192))
-        assert len(taps) % 2 == 1 and taps.sum() == pytest.approx(1.0, abs=1e-12)
+        assert len(taps) % 2 == 1 and taps.sum() == pytest.approx(1.0, abs=representation_tolerance(np.float64, 1.0, c=np.sqrt(len(taps))))
         with pytest.raises(ValueError):
             taps[0] = 0.0
 
@@ -182,7 +198,7 @@ def test_noise_segments_are_resampled(served_rate):
     assert start <= first / RATE and first / RATE + len(data) / RATE <= end
     assert len(data) % int(RATE) == 0 and len(data) >= (int(end - start) - 1) * RATE
     # Every sample is exact: the read reaches the margin past each end of the piece.
-    assert rms(data) <= 1e-5, f"{TONE_HERTZ} Hz served at {RATE} Hz from {served_rate} Hz"
+    assert np.max(np.abs(data)) <= STOPBAND_AMPLITUDE, f"{TONE_HERTZ} Hz served at {RATE} Hz from {served_rate} Hz"
 
 
 def small_tiles(fetch):
@@ -205,7 +221,7 @@ def test_transient_and_partner_windows_are_resampled(served_rate, tone):
     for column, read in enumerate(("partner", "transient")):
         for key in (gf.ReturnVariables.ONSOURCE, gf.ReturnVariables.OFFSOURCE):
             windows = np.asarray(batch[key])[:, column]
-            assert rms(windows) <= 1e-5, f"{read} {key.name}: {tone} Hz from {served_rate} Hz"
+            assert np.max(np.abs(windows)) <= STOPBAND_AMPLITUDE, f"{read} {key.name}: {tone} Hz from {served_rate} Hz"
 
 
 def test_transient_windows_at_a_rate_that_does_not_divide_the_native_one():
@@ -217,10 +233,15 @@ def test_transient_windows_at_a_rate_that_does_not_divide_the_native_one():
     offsource = np.asarray(batch[gf.ReturnVariables.OFFSOURCE], dtype=np.float64)
     error = np.abs(np.sort(transient_reads.transient_times(batch)[:, 0])
                    - transient_reads.nearest_sample(transient_reads.TIMES, rate))
+    # Exact up to the grid: the transient sits on its nearest sample (half a sample), and a quarter
+    # of one is the contract the windows' decode shares (``transient_reads.DECODE``).
     assert np.max(error) <= 0.25 / rate, f"centre minus the transient's sample: {error} s"
+    # Representation: float32 samples valued their time in seconds from the reference (c = 4: a
+    # difference of two rounded values, through the filter), so a shift of 0.15 sample would not fit.
+    atol = representation_tolerance(np.float32, max(np.max(np.abs(onsource)), np.max(np.abs(offsource))), c=4)
     for window in (onsource, offsource):
-        np.testing.assert_allclose(np.diff(window, axis=-1), 1.0 / rate, atol=1e-4)
-    np.testing.assert_allclose(onsource[..., 0] - offsource[..., -1], 1.0 / rate, atol=1e-4)
+        np.testing.assert_allclose(np.diff(window, axis=-1), 1.0 / rate, rtol=0, atol=atol)
+    np.testing.assert_allclose(onsource[..., 0] - offsource[..., -1], 1.0 / rate, rtol=0, atol=atol)
 
 
 # ------------------------------------------------------------- the census
