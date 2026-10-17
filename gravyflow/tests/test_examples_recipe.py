@@ -22,6 +22,7 @@ from gravyflow.src.model.examples.george_huerta_2017 import curriculum_epochs
 from gravyflow.src.model.examples.recipe import (
     DetectionBatches, FixedBatches, RegressionBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise,
 )
+from gravyflow.src.dataset.dataset import split_neutral
 from gravyflow.src.validate import StaleCheckpointError
 
 
@@ -171,34 +172,81 @@ class CountingBatches(keras.utils.PyDataset):
         return {"WHITENED_ONSOURCE": x}, y
 
 
-def test_materialise_serves_identical_batches():
-    source, reference = CountingBatches(0), CountingBatches(0)
-    expected = [reference[0], reference[1]]       # the same seed, drawn in order
-    fixed = materialise(source, 2)
-    assert isinstance(fixed, FixedBatches) and len(fixed) == 2 and source.calls == 2
-    for index in (0, 1, 0):                        # served again and out of order: the same draws
+class HeldBatches(keras.utils.PyDataset):
+    """
+    Batches held in memory, naming a split (or none) and the dataset they were
+    drawn from (if any): a stand-in for any fixed validation data.
+    """
+
+    def __init__(self, batches, split_spec, group, dataset=None):
+        super().__init__()
+        self.batches, self.split_spec, self.group, self.dataset = batches, split_spec, group, dataset
+
+    def __len__(self):
+        return len(self.batches)
+
+    def __getitem__(self, index):
+        return self.batches[index]
+
+
+def held(source, n):
+    """The first ``n`` batches of ``source``, drawn once, with its split."""
+    return HeldBatches([source[k] for k in range(n)], source.split_spec, source.group,
+                       getattr(source, "dataset", source))
+
+
+def white_detection(group):
+    """A small gravyflow dataset of white noise as detection batches."""
+    return DetectionBatches(gf.Dataset(
+        seed=5, group=group, steps_per_epoch=3, sample_rate_hertz=256.0, num_examples_per_batch=4,
+        noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
+        input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
+        output_variables=[gf.ReturnVariables.INJECTION_PRESENT],
+    ))
+
+
+def test_materialise_serves_its_set(tmp_path, monkeypatch):
+    # The fixed validation set is its dataset's materialised set: the bytes the
+    # dataset computes, read back verified every epoch, and read, never drawn,
+    # when a resumed run asks for it again.
+    expected = [white_detection("validate")[k] for k in range(2)]
+    source = white_detection("validate")
+    fixed = materialise(source, 2, tmp_path)
+    assert isinstance(fixed, FixedBatches) and len(fixed) == 2
+    served = source.dataset.seed_metadata["materialised"]
+    assert served["k_range"] == [0, 2] and (tmp_path / served["set_id"] / "manifest.json").exists()
+    for index in (0, 1, 0):                        # served again and out of order: the same bytes
         (x, y), (expected_x, expected_y) = fixed[index], expected[index]
         np.testing.assert_array_equal(x["WHITENED_ONSOURCE"], expected_x["WHITENED_ONSOURCE"])
         np.testing.assert_array_equal(y, expected_y)
-    assert source.calls == 2                       # serving never draws again
+    with pytest.raises(IndexError):
+        fixed[2]
+    monkeypatch.setattr(gf.GravyflowDataset, "_compute_batch", lambda self, k: pytest.fail(f"drew batch {k}"))
+    again = materialise(white_detection("validate"), 2, tmp_path)
+    np.testing.assert_array_equal(again[1][0]["WHITENED_ONSOURCE"], expected[1][0]["WHITENED_ONSOURCE"])
 
 
-def test_batches_name_their_datasets_split():
+def test_materialise_needs_a_gravyflow_dataset(tmp_path):
+    with pytest.raises(TypeError, match="gravyflow dataset's batches"):
+        materialise(CountingBatches(0, group="validate"), 1, tmp_path)
+
+
+def test_batches_name_their_datasets_split(tmp_path):
     fold = gf.SplitSpec(version="fold-3")
     dataset = SimpleNamespace(split_spec=fold, group="validate")  # a dataset of real data split by fold
     for batches in (DetectionBatches(dataset), RegressionBatches(dataset, []),
-                    FixedBatches([], dataset.split_spec, dataset.group)):
+                    FixedBatches(DetectionBatches(dataset), 0)):
         assert (batches.split_spec, batches.group) == (fold, "validate")
-    fixed = materialise(CountingBatches(0, group="test"), 1)
-    assert (fixed.split_spec, fixed.group) == (gf.DEFAULT_SPLIT, "test")
+    fixed = materialise(white_detection("test"), 1, tmp_path)
+    assert (fixed.split_spec, fixed.group) == (None, "test") and split_neutral(fixed)  # synthetic data
 
 
 @pytest.mark.parametrize("training,validation,refusal", [
-    (FixedBatches([], None, None), CountingBatches(0, group="validate"), "training data .* names no split"),
-    (CountingBatches(0), materialise(range(1), 1), "validation data .* names no split"),
+    (HeldBatches([], None, None), CountingBatches(0, group="validate"), "training data .* names no split"),
+    (CountingBatches(0), HeldBatches([], None, None), "validation data .* names no split"),
     (CountingBatches(0, group="validate"), CountingBatches(0, group="validate"), "training data is the 'validate'"),
     (CountingBatches(0), CountingBatches(0), "validation data is the 'train'"),
-    (CountingBatches(0), FixedBatches([], gf.SplitSpec(version="fold-3"), "validate"), "split by SplitSpec"),
+    (CountingBatches(0), HeldBatches([], gf.SplitSpec(version="fold-3"), "validate"), "split by SplitSpec"),
 ], ids=["training unnamed", "validation unnamed", "training held out", "selection on train", "two specs"])
 def test_a_run_refuses_data_that_does_not_name_one_split(tmp_path, training, validation, refusal):
     with pytest.raises(ValueError, match=refusal):
@@ -249,7 +297,7 @@ def test_a_run_on_multi_threaded_cpu_kernels_warns(tmp_path, monkeypatch):
     # CPU preset sometimes fails to train. The test session runs single-threaded.
     from gravyflow.src.rng import platform
 
-    validation = materialise(CountingBatches(99, group="validate"), 2)
+    validation = held(CountingBatches(99, group="validate"), 2)
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
         make_run(tmp_path / "single", 1).train(tiny_model, lambda seed: CountingBatches(seed), validation, verbose=0)
@@ -268,7 +316,7 @@ def test_training_resumes_from_the_last_epoch(tmp_path):
     def data(seed):
         return EpochBatches(seed, served)
 
-    validation = materialise(CountingBatches(99, group="validate"), 2)
+    validation = held(CountingBatches(99, group="validate"), 2)
     make_run(tmp_path, 2).train(build, data, validation, verbose=0)
     directory = RunDirectory(tmp_path)
     assert directory.state["epoch"] == 1 and len(directory.state["history"]) == 2
@@ -334,7 +382,7 @@ def test_training_is_reproducible_from_the_seed(tmp_path):
     runs = []
     for name in ("a", "b"):
         served = []
-        validation = materialise(AddressedBatches(99, [], group="validate"), 2)
+        validation = held(AddressedBatches(99, [], group="validate"), 2)
         run = make_run(tmp_path / name, 3)
         model = run.train(dropout_model, lambda seed: AddressedBatches(seed, served), validation, verbose=0)
         runs.append((served, model.get_weights()))
@@ -348,7 +396,7 @@ def test_training_is_reproducible_from_the_seed(tmp_path):
 
     another = make_run(tmp_path / "c", 1, seed=8).train(
         dropout_model, lambda seed: AddressedBatches(seed, []),
-        materialise(AddressedBatches(99, [], group="validate"), 2), verbose=0)
+        held(AddressedBatches(99, [], group="validate"), 2), verbose=0)
     assert not np.array_equal(another.get_weights()[0], weights_a[0])
 
 
@@ -360,7 +408,7 @@ RESUME_ATOL = float(np.finfo(np.float32).eps)
 
 def test_a_resumed_run_trains_as_an_uninterrupted_one(tmp_path):
     # GF-B215: a resumed run's epochs came in another order.
-    validation = materialise(AddressedBatches(99, [], group="validate"), 2)
+    validation = held(AddressedBatches(99, [], group="validate"), 2)
     whole = make_run(tmp_path / "whole", 3).train(
         dropout_model, lambda seed: AddressedBatches(seed, []), validation, verbose=0)
     make_run(tmp_path / "parts", 2).train(dropout_model, lambda seed: AddressedBatches(seed, []), validation, verbose=0)
@@ -377,7 +425,7 @@ def test_a_resumed_run_trains_as_an_uninterrupted_one(tmp_path):
 
 
 def test_resume_refuses_another_configuration(tmp_path):
-    validation = materialise(CountingBatches(99, group="validate"), 2)
+    validation = held(CountingBatches(99, group="validate"), 2)
     make_run(tmp_path, 1).train(tiny_model, CountingBatches, validation, verbose=0)
     with pytest.raises(StaleCheckpointError, match="run configuration"):
         make_run(tmp_path, 2, seed=8).train(tiny_model, CountingBatches, validation, verbose=0)
@@ -385,7 +433,7 @@ def test_resume_refuses_another_configuration(tmp_path):
 
 @pytest.mark.global_rng
 def test_a_replaced_checkpoint_is_refused(tmp_path):
-    validation = materialise(CountingBatches(99, group="validate"), 2)
+    validation = held(CountingBatches(99, group="validate"), 2)
     run = make_run(tmp_path, 1)
     run.train(tiny_model, CountingBatches, validation, verbose=0)
     keras.utils.set_random_seed(123)

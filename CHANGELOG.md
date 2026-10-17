@@ -41,8 +41,16 @@ repository before it may need the changes below.
   fetch one once with `gravyflow.src.resources.download_weights(name)`.
 - `NonFiniteWarning` is defined in `gravyflow.src.utils.numerics` (still `gf.NonFiniteWarning`): a warnings filter
   can name it there without importing Keras.
+- **The recipe's `materialise(batches, num_batches, root)`** writes a gravyflow dataset's batches as a materialised
+  set under `root` and serves them from it; it refuses batches that are not a gravyflow dataset's (`TypeError`).
+  `FixedBatches(batches, num_batches)` is the first batches of a dataset that serves them from its set; it no longer
+  holds a list.
 
 ### Added
+
+- **Materialised sets.** `ds.materialise(root, batches=N)` (or `k_range=`) writes a dataset's batches once, as
+  content-named files under a manifest that records its fingerprint (`ds.fingerprint`), platform, contract, split,
+  epoch and range; `ds.load_materialised(set)` serves `ds[k]` from it, verified on every read (README §7).
 
 - `gravyflow.__version__`.
 - `docs/api.md`, the public API, which a test holds equal to `gravyflow.__all__`.

@@ -103,6 +103,7 @@ def train(args, model_class, config, schedule) -> keras.Model:
             config=config, seed=run.seed, group="validate",
             steps_per_epoch=schedule.validation_batches)),
         schedule.validation_batches,
+        run.directory.path / "validation",
     )
     model = run.train(
         build_model=lambda: model_class.compile_model(model_class.model(config), config),

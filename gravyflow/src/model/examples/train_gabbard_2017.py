@@ -86,6 +86,7 @@ def build_datasets(config: Gabbard2017Config, run: TrainingRun) -> tuple:
             config=config, seed=run.seed, group="validate",
             steps_per_epoch=schedule.validation_batches)),
         schedule.validation_batches,
+        run.directory.path / "validation",
     )
 
     def training_data(seed):

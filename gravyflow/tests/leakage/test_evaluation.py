@@ -445,7 +445,8 @@ def test_a_run_records_the_split_its_data_reads(world, tmp_path):
             return recipe.TrainingRun(RunDirectory(tmp_path / "run"), seed=1, schedule=recipe.TrainingSchedule(
                 epochs=epochs, steps_per_epoch=2, validation_batches=1, patience=1))
 
-        run(1).train(tiny_model, lambda seed: data("train"), recipe.materialise(data("validate"), 1), verbose=0)
+        validation = recipe.materialise(data("validate"), 1, tmp_path / "validation")
+        run(1).train(tiny_model, lambda seed: data("train"), validation, verbose=0)
         directory = RunDirectory(tmp_path / "run")
         record = directory.run
         assert record["split"] == {"fingerprint": FOLD_2.fingerprint(), "selection_split": "validate"}
@@ -460,7 +461,8 @@ def test_a_run_records_the_split_its_data_reads(world, tmp_path):
         assert _scores_split("test", record, args(FOLD_2))
 
         def resume(spec):
-            run(2).train(tiny_model, lambda seed: data("train", spec), recipe.materialise(data("validate", spec), 1),
+            run(2).train(tiny_model, lambda seed: data("train", spec),
+                         recipe.materialise(data("validate", spec), 1, tmp_path / "validation"),
                          verbose=0)
 
         with pytest.raises(StaleCheckpointError, match="records the split"):
@@ -568,7 +570,7 @@ def test_synthetic_data_is_split_neutral(world):
         _scores_split("validate", _selected_on_validate(FOLD_2))
 
 
-def test_only_gravyflow_data_that_reads_no_real_data_is_split_neutral():
+def test_only_gravyflow_data_that_reads_no_real_data_is_split_neutral(tmp_path):
     """
     A run took a split_spec of None from any object as split-neutral data. Only
     gravyflow data none of whose obtainers reads real data is (`split_neutral`): a
@@ -586,7 +588,7 @@ def test_only_gravyflow_data_that_reads_no_real_data_is_split_neutral():
 
     training = synthetic("train")
     for data in (training, recipe.DetectionBatches(training),
-                 recipe.materialise(StandingBatches(synthetic("validate")), 1)):
+                 recipe.materialise(StandingBatches(synthetic("validate")), 1, tmp_path)):
         assert data.split_spec is None and split_neutral(data)
     assert split_record(training, synthetic("validate")) == {
         "fingerprint": gf.DEFAULT_SPLIT.fingerprint(), "selection_split": "validate"}
@@ -720,7 +722,6 @@ SPLIT_READERS = {
     ("validate/validator.py", "Validator.validate"): "the validator's check: its data's (the bank's)",
     ("validate/config.py", "split_record"): "a training run's: its training and validation data's",
     ("model/examples/recipe.py", "_DatasetBatches.split_spec"): "a recipe's batches: their dataset's",
-    ("model/examples/recipe.py", "materialise"): "a fixed validation set: the batches it was drawn from",
 }
 
 
@@ -931,7 +932,8 @@ def test_gravyflow_models_carry_their_record(world, tmp_path):
 
         run = recipe.TrainingRun(RunDirectory(tmp_path / "run"), seed=1, schedule=recipe.TrainingSchedule(
             epochs=1, steps_per_epoch=2, validation_batches=1, patience=1))
-        model = run.train(tiny_model, lambda seed: data("train"), recipe.materialise(data("validate"), 1),
+        model = run.train(tiny_model, lambda seed: data("train"),
+                          recipe.materialise(data("validate"), 1, tmp_path / "validation"),
                           verbose=0)
         args = {"noise_obtainer": fx.noise_obtainer(fixture, split_spec=FOLD_2),
                 "onsource_duration_seconds": 1.0, "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE]}
@@ -958,7 +960,8 @@ def test_a_run_never_relabels_the_weights_it_is_given(world, tmp_path):
         def train_run(directory, spec, build):
             run = recipe.TrainingRun(RunDirectory(tmp_path / directory), seed=1, schedule=recipe.TrainingSchedule(
                 epochs=1, steps_per_epoch=2, validation_batches=1, patience=1))
-            return run.train(build, lambda seed: data("train", spec), recipe.materialise(data("validate", spec), 1),
+            return run.train(build, lambda seed: data("train", spec),
+                             recipe.materialise(data("validate", spec), 1, tmp_path / directory / "validation"),
                              verbose=0)
 
         trained = train_run("default", gf.DEFAULT_SPLIT, tiny_model)

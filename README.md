@@ -282,6 +282,16 @@ a `DeprecationWarning`. These changes have no such period:
   the single-threaded `XLA_FLAGS` above; otherwise the whitened strain's last bits differ). A model with dropout
   saved in a run directory before this release records no seed state, and loading it (to resume or to validate) is
   refused by name: train it again.
+- A dataset's batches can be written once and read back: `ds.materialise(root, batches=N)` (or `k_range=`) writes
+  them under `root` as a set named by its manifest's sha256, which records `ds.fingerprint` (the sha256 of the
+  dataset's canonical spec, seed root, split spec, seed-tree and data versions, and the gravyflow, numpy, jax and
+  scipy versions), the platform (`XLA_FLAGS` and the backend, recorded, never hashed), the batch contract, the split,
+  the epoch and the range. Each batch is an uncompressed `.npz` named by its sha256; files are created once and never
+  replaced, so an interrupted run resumes and writers that disagree are refused (`MaterialiseConflict`).
+  `ds.load_materialised(set)` serves `ds[k]` from the set wherever it holds the address, verifying every read, and
+  `seed_metadata["materialised"]` names it; another spec, split or contract, a missing shard, an edited or foreign
+  file is refused by name. The recipe's `materialise(batches, n, root)` is this: a fixed validation set read from
+  disk, so a resumed run reads it rather than drawing it again.
 - `gf.Model`'s binary output is a logit, not a sigmoid probability: it trains with
   `BinaryCrossentropy(from_logits=True)` and reports `BinaryAccuracy` at a threshold of 0, and the validator (which
   refused a probability output) scores it. `Model.validate(validate_args, config, model_path)` takes a

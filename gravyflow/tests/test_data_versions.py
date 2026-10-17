@@ -164,7 +164,7 @@ def test_training_run_refuses_a_checkpoint_from_before_the_cut(tmp_path):
                                             patience=100),
                            seed=7, description={"model": "tiny", "noise": real_noise()})
 
-    validation = recipe_tests.materialise(recipe_tests.CountingBatches(99, group="validate"), 2)
+    validation = recipe_tests.held(recipe_tests.CountingBatches(99, group="validate"), 2)
     run(tmp_path / "now", 1).train(recipe_tests.tiny_model, recipe_tests.CountingBatches, validation, verbose=0)
     run(tmp_path / "now", 2).train(recipe_tests.tiny_model, recipe_tests.CountingBatches, validation, verbose=0)
     assert RunDirectory(tmp_path / "now").state["epoch"] == 1  # the control: resumed

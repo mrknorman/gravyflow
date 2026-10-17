@@ -37,10 +37,11 @@ and evaluated.
   the validator reads it there. Data split by two specs, a resumed run's data
   split otherwise, or a model to train whose weights record another split, is
   refused.
-- **A fixed validation set.** `materialise` draws the validation batches once,
-  so every epoch, and every resumed run, scores the same data. Anything that
-  serves the same batches each epoch fits the same place; a dataset that
-  addresses its batches by index can replace it.
+- **A fixed validation set.** `materialise` writes the validation batches
+  once, as their dataset's materialised set in a directory of the caller's
+  (the run directory's ``validation``, say), and serves them from it: every
+  epoch, and every resumed run, scores the same verified bytes, and a resumed
+  run reads the set rather than drawing it again.
 """
 
 from __future__ import annotations
@@ -194,37 +195,46 @@ class RegressionBatches(_DatasetBatches):
         return x, targets.astype(np.float32)
 
 
-class FixedBatches(keras.utils.PyDataset):
+class FixedBatches(_DatasetBatches):
     """
-    Batches held in memory, served identically every epoch, with the split they
-    were drawn from, and the gravyflow dataset they were drawn from (``dataset``,
-    if any), which alone can make that split split-neutral (`split_neutral`).
+    The first ``num_batches`` of ``batches`` (a gravyflow dataset's, converted
+    for Keras), served identically every epoch from their dataset's
+    materialised set (`materialise`), with their dataset's split.
     """
 
-    def __init__(self, batches: List, split_spec: Optional[gf.SplitSpec], group: Optional[str], dataset=None):
-        super().__init__()
-        self.batches = batches
-        self.split_spec, self.group, self.dataset = split_spec, group, dataset
+    def __init__(self, batches, num_batches: int):
+        super().__init__(getattr(batches, "dataset", batches))
+        self.batches, self._length = batches, num_batches
 
     def __len__(self) -> int:
-        return len(self.batches)
+        return self._length
 
     def __getitem__(self, index):
+        if not 0 <= index < self._length:
+            raise IndexError(f"Batch {index} is outside the {self._length} fixed batches.")
         return self.batches[index]
 
 
-def materialise(batches, num_batches: int) -> FixedBatches:
+def materialise(batches, num_batches: int, root) -> FixedBatches:
     """
-    Draw ``num_batches`` batches once: a fixed validation set, naming the split
-    of ``batches`` (its spec None for split-neutral, synthetic, data) and the
-    dataset they serve (theirs, or themselves). Batches that name no split give
-    neither spec nor group, which a run refuses.
+    A fixed validation set: the first ``num_batches`` of ``batches`` (a
+    gravyflow dataset, or the recipe's batches of one), written once as their
+    dataset's materialised set under the directory ``root``
+    (``GravyflowDataset.materialise``) and served from it. The dataset then
+    serves those batches from the set (``load_materialised``), each read
+    verified; a set already complete is read, never drawn again.
+
+    Raises:
+        TypeError: batches that are not a gravyflow dataset's: only its batches
+            have the fingerprint a set is written for.
     """
-    named = hasattr(batches, "split_spec")
-    return FixedBatches([batches[k] for k in range(num_batches)],
-                        batches.split_spec if named else None,
-                        getattr(batches, "group", None) if named else None,
-                        getattr(batches, "dataset", batches))
+    dataset = getattr(batches, "dataset", batches)
+    if not isinstance(dataset, gf.GravyflowDataset):
+        raise TypeError(
+            f"materialise writes a gravyflow dataset's batches as a fingerprinted set; got "
+            f"{type(dataset).__name__}.")
+    dataset.load_materialised(dataset.materialise(root, batches=num_batches))
+    return FixedBatches(batches, num_batches)
 
 
 # ---------------------------------------------------------- run directory
