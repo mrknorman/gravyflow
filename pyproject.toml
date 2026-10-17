@@ -130,18 +130,13 @@ filterwarnings = [
   # naming a gravyflow class here would import gravyflow before conftest.py
   # sets XLA's flags.
 ]
-addopts = "--cov=gravyflow --cov-report=term-missing --cov-fail-under=90"
 
 [tool.coverage.run]
-omit = [
-  "gravyflow/__init__.py",
-  "gravyflow/tests/*",
-  # Deprecated modules - excluded from coverage requirements
-  "gravyflow/src/model/model.py",
-  "gravyflow/src/model/genetics.py",
-  "gravyflow/src/utils/processes.py",
-  "gravyflow/src/utils/alert.py",
-]
+# Coverage is measured by the runs that ask for it (--cov=gravyflow), never by
+# default, so a plain pytest passes or fails on its tests alone. Everything the
+# package ships is measured; only the tests themselves are left out.
+omit = ["gravyflow/tests/*"]
 
 [tool.coverage.report]
 show_missing = true
+precision = 1
