@@ -98,7 +98,12 @@ def test_noise_rho_squared_has_two_degrees_of_freedom():
     mf = MatchedFilter(bank=TemplateBank.from_masses([30.0, 10.0], [25.0, 6.0]), sample_rate_hertz=FS)
     series = np.asarray(mf.snr_series(rng.standard_normal((96, N)).astype(np.float32)))
     assert series.shape == (96, 2, N)
-    assert abs(np.mean(series ** 2) / 2.0 - 1.0) < 0.03
+    # Statistical: rho^2 / 2 has mean 1 and variance 1 per independent bin, so the mean over
+    # n_eff bins is within 4 / sqrt(n_eff). The series are correlated in time (a template is
+    # band-limited) and across templates; n_eff is measured from the spread of this statistic
+    # over 30 seeds (std 0.0109, so n_eff = 1 / 0.0109^2 = 8.5e3 of 393216 samples), rounded down.
+    n_eff = 8000
+    assert abs(np.mean(series ** 2) / 2.0 - 1.0) < 4 / np.sqrt(n_eff)
 
 
 def test_whitened_noise_gives_unit_noise_statistics(spectrum):
@@ -113,11 +118,15 @@ def test_whitened_noise_gives_unit_noise_statistics(spectrum):
     raw = coloured_noise(rng, (64,), 2.0).astype(np.float32)
     mf = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS)
     w = np.asarray(whiten(raw, exact, FS))[:, CROP:-CROP]
-    assert abs(np.mean(np.asarray(mf.snr_series(w, exact)) ** 2) / 2.0 - 1.0) < 0.04
+    # Statistical, as above: n_eff = 1.4e4 of 131072 samples measured over 20 seeds (std 0.0085), rounded down.
+    n_eff = 13000
+    assert abs(np.mean(np.asarray(mf.snr_series(w, exact)) ** 2) / 2.0 - 1.0) < 4 / np.sqrt(n_eff)
     # With an estimated PSD the noise is a few per cent louder: the templates'
-    # weights and the noise's excess both follow the estimate's low bins.
+    # weights and the noise's excess both follow the estimate's low bins. Measured:
+    # the excess is 0.053 for this spectrum and noise (host of the author, gravyflow e909339);
+    # the bound is 3x that, which still fails a mean that is off by a factor of 1.2.
     w = np.asarray(whiten(raw, spectrum, FS))[:, CROP:-CROP]
-    assert abs(np.mean(np.asarray(mf.snr_series(w, spectrum)) ** 2) / 2.0 - 1.0) < 0.15
+    assert abs(np.mean(np.asarray(mf.snr_series(w, spectrum)) ** 2) / 2.0 - 1.0) < 0.16
 
 
 def test_reported_time_is_the_merger_time(spectrum):
@@ -162,10 +171,12 @@ def test_one_spectrum_per_example(spectrum):
 
 def test_a_psd_array_is_not_mistaken_for_a_spectrum():
     mf = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS)
+    # A bare array is background noise to estimate a spectrum from, never a spectrum: this one is
+    # too short to estimate from, and the refusal names its length.
     psd = np.ones((1, N // 2 + 1), dtype=np.float32)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="signal has only 1025 samples"):
         mf.max_snr(np.zeros((1, N), dtype=np.float32), psd)
-    with pytest.raises(ValueError):  # a raw onsource (with its crops) is not a window
+    with pytest.raises(ValueError, match="The window has 4096 samples; this filter takes 2048"):  # a raw onsource (with its crops) is not a window
         mf.max_snr(np.zeros((1, N + 2 * CROP), dtype=np.float32))
 
 
@@ -192,7 +203,7 @@ def test_network_snr_is_coincident_not_averaged():
     # Beyond the light travel time the second detector's peak is not coincident.
     far = np.stack([10.0 * at(1000), -8.0 * at(1000 + int(0.05 * FS))])[None].astype(np.float32)
     assert float(mf.max_snr(far)["snr"][0]) < 10.6
-    with pytest.raises(ValueError):  # two channels need the detectors' geometry
+    with pytest.raises(ValueError, match="Multi-detector data need `ifos`"):  # two channels need the detectors' geometry
         MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS).max_snr(x)
 
 
