@@ -169,12 +169,18 @@ class TestBitReproducibleKernels:
     """
 
     def test_the_session_runs_single_threaded_kernels(self):
+        # The deterministic catch: the flag is in effect, so every kernel runs
+        # on the calling thread.
         assert platform.single_threaded_cpu(), platform.xla_flags()
         assert not platform.multi_threaded_cpu()
 
     def test_whitening_is_bit_reproducible_between_calls(self):
-        # Multi-threaded kernels whiten these arrays to one of two results,
-        # differing by up to 1e-5 of the peak, about once in 500 calls.
+        """
+        A probabilistic witness, not the catch: multi-threaded kernels whiten
+        these arrays to one of two results, differing by up to 1e-5 of the peak,
+        about once in 500 calls, so 1000 calls see the second only most of the
+        time. The flag's assertion above is the deterministic catch.
+        """
         rng = np.random.default_rng(26)
         offsource = rng.normal(size=(4, 2, 16 * 2048)).astype(np.float32)
         onsource = rng.normal(size=(4, 2, 2 * 2048)).astype(np.float32)
