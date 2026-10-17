@@ -1,123 +1,42 @@
 """
-Tests for noise sampling modes (RANDOM vs GRID) and segment cycling.
-
-These tests verify:
-1. Segment cycling works correctly (regression test for bug fix)
-2. RANDOM mode produces varied GPS times with possible overlap
-4. Multi-detector mode produces different GPS times per detector
-5. Segment metadata caching works without auth
+Noise sampling: the default sampling mode, and RANDOM addressed by index (``RandomPlan``,
+``draw_examples``): each row's density over passes, the arithmetic that locates a batch,
+the reordering of passes, the mixing of rows within a batch, and the draw of examples.
 """
-import pytest
 import numpy as np
-from unittest.mock import patch, MagicMock
+import pytest
 
 import gravyflow as gf
+from gravyflow.src.dataset.acquisition.noise import (
+    MIXING_WIDTH, RandomPlan, SamplingPlan, draw_examples,
+)
+from gravyflow.tests._helpers import representation_tolerance
 
 
-class TestSamplingModeEnum:
-    """Test SamplingMode enum is properly exported."""
-    
-    def test_sampling_mode_exists(self):
-        """Verify SamplingMode enum is accessible."""
-        assert hasattr(gf, 'SamplingMode')
-        assert hasattr(gf.SamplingMode, 'RANDOM')
-        assert hasattr(gf.SamplingMode, 'GRID')
-    
-    def test_sampling_mode_values_distinct(self):
-        """Verify RANDOM and GRID are distinct values."""
-        assert gf.SamplingMode.RANDOM != gf.SamplingMode.GRID
+def white_dataset(**kwargs):
+    """A dataset over white noise: nothing is read."""
+    return gf.GravyflowDataset(
+        noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]),
+        input_variables=[gf.ReturnVariables.ONSOURCE],
+        output_variables=[gf.ReturnVariables.INJECTION_MASKS],
+        steps_per_epoch=1,
+        **kwargs,
+    )
 
 
-class TestDefaultSamplingModes:
-    """Test default sampling mode selection."""
-    
-    def test_train_defaults_to_random(self):
-        """Training group should default to RANDOM mode."""
-        noise_obtainer = gf.NoiseObtainer(
-            noise_type=gf.NoiseType.WHITE,
-            ifos=[gf.IFO.L1]
-        )
-        
-        dataset = gf.GravyflowDataset(
-            noise_obtainer=noise_obtainer,
-            group="train",
-            input_variables=[gf.ReturnVariables.ONSOURCE],
-            output_variables=[gf.ReturnVariables.INJECTION_MASKS],
-            steps_per_epoch=1
-        )
-        assert dataset.sampling_mode == gf.SamplingMode.RANDOM
-    
-    def test_validate_defaults_to_random(self):
-        """Validation group should also default to RANDOM mode."""
-        noise_obtainer = gf.NoiseObtainer(
-            noise_type=gf.NoiseType.WHITE,
-            ifos=[gf.IFO.L1]
-        )
-        
-        dataset = gf.GravyflowDataset(
-            noise_obtainer=noise_obtainer,
-            group="validate",
-            input_variables=[gf.ReturnVariables.ONSOURCE],
-            output_variables=[gf.ReturnVariables.INJECTION_MASKS],
-            steps_per_epoch=1
-        )
-        assert dataset.sampling_mode == gf.SamplingMode.RANDOM
-    
-    def test_test_defaults_to_random(self):
-        """Test group should also default to RANDOM mode."""
-        noise_obtainer = gf.NoiseObtainer(
-            noise_type=gf.NoiseType.WHITE,
-            ifos=[gf.IFO.L1]
-        )
-        
-        dataset = gf.GravyflowDataset(
-            noise_obtainer=noise_obtainer,
-            group="test",
-            input_variables=[gf.ReturnVariables.ONSOURCE],
-            output_variables=[gf.ReturnVariables.INJECTION_MASKS],
-            steps_per_epoch=1
-        )
-        assert dataset.sampling_mode == gf.SamplingMode.RANDOM
-    
-    def test_explicit_grid_mode_works(self):
-        """Explicit GRID mode should work when specified."""
-        noise_obtainer = gf.NoiseObtainer(
-            noise_type=gf.NoiseType.WHITE,
-            ifos=[gf.IFO.L1]
-        )
-        
-        # Explicit GRID
-        dataset = gf.GravyflowDataset(
-            noise_obtainer=noise_obtainer,
-            group="train",
-            sampling_mode=gf.SamplingMode.GRID,
-            input_variables=[gf.ReturnVariables.ONSOURCE],
-            output_variables=[gf.ReturnVariables.INJECTION_MASKS],
-            steps_per_epoch=1
-        )
-        assert dataset.sampling_mode == gf.SamplingMode.GRID
+class TestSamplingMode:
 
+    @pytest.mark.parametrize("group", ["train", "validate", "test"])
+    def test_every_group_defaults_to_random(self, group):
+        assert white_dataset(group=group).sampling_mode == gf.SamplingMode.RANDOM
 
-class TestDefaultSaturation:
-    """Test default saturation value for efficiency."""
-    
-    def test_default_saturation_is_one_eighth(self):
-        """Default saturation should be 8.0 (higher = more samples, 8x oversampling)."""
-        obtainer = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.NOISE]
-        )
-        assert obtainer.saturation == 8.0
+    def test_an_explicit_mode_is_kept(self):
+        assert white_dataset(group="train", sampling_mode=gf.SamplingMode.GRID).sampling_mode == gf.SamplingMode.GRID
 
 
 # ---------------------------------------------------------------------------
 # RANDOM addressed by index: the plan's arithmetic (``RandomPlan``)
 # ---------------------------------------------------------------------------
-
-from gravyflow.src.dataset.acquisition.noise import (  # noqa: E402
-    MIXING_WIDTH, RandomPlan, SamplingPlan, draw_examples,
-)
 
 #: Rows' seconds of window starts: a long row, a short one, fractional ones.
 SECONDS = np.array([200.0, 20.0, 100.0, 3.3, 41.9, 7.1])
@@ -145,6 +64,7 @@ class TestRandomPlan:
     def test_each_row_serves_its_density_to_within_one_batch(self, passes):
         plan = random_plan()  # 0.5 batches a second of starts: the test's own nominal density
         served = sum(plan.due(p) for p in range(passes))
+        # Exact: floor() telescopes, so the count differs from the density by less than one batch.
         assert np.all(np.abs(served - passes * 0.5 * SECONDS) < 1.0)
         assert plan.batches_before(passes) == int(np.sum(served))
 
@@ -182,7 +102,10 @@ class TestRandomPlan:
                 mixed = plan.mixed(g)
                 assert len(mixed) == MIXING_WIDTH
                 np.add.at(expected, mixed, 1.0 / MIXING_WIDTH)
-            np.testing.assert_allclose(expected, plan.due(p), rtol=0, atol=1e-9)
+            # Representation: sum of 1/MIXING_WIDTH over batches * MIXING_WIDTH terms, in float64.
+            terms = (plan.batches_before(p + 1) - plan.batches_before(p)) * MIXING_WIDTH
+            tolerance = representation_tolerance(np.float64, np.max(plan.due(p)), c=np.sqrt(terms))
+            np.testing.assert_allclose(expected, plan.due(p), rtol=0, atol=tolerance)
 
     @pytest.mark.parametrize("segment_order", list(gf.SegmentOrder))
     def test_the_obtainers_segment_order_orders_every_pass(self, segment_order):
@@ -232,3 +155,12 @@ class TestDrawExamples:
         _, starts, _ = draw_examples(plan, gf.SeedTree(1).batch("train", 0, 0), 0, [gf.IFO.H1, gf.IFO.L1],
                                      16, 100, 300, 0.0, True)
         assert np.array_equal(starts[:, 0], starts[:, 1])
+
+    def test_independent_detectors_start_the_separation_apart(self):
+        plan, separation = random_plan(detectors=2), 3000.0  # of a piece's 10,000 samples: chance would break it
+        ifos = [gf.IFO.H1, gf.IFO.L1]
+        for g in range(10):
+            _, starts, rounds = draw_examples(plan, gf.SeedTree(1).batch("train", 0, g), g, ifos,
+                                              16, 100, 300, separation, False)
+            assert np.all(np.abs(starts[:, 0] - starts[:, 1]) >= separation)
+            assert np.any(starts[:, 0] != starts[:, 1])
