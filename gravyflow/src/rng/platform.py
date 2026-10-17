@@ -16,6 +16,7 @@ it in the environment before importing gravyflow.
 """
 
 import os
+import warnings
 
 #: The XLA flag that runs CPU kernels single-threaded, so results are bit-reproducible.
 SINGLE_THREADED_CPU_FLAG = "--xla_cpu_multi_thread_eigen=false"
@@ -39,3 +40,20 @@ def multi_threaded_cpu() -> bool:
     import jax
 
     return jax.default_backend() == "cpu" and not single_threaded_cpu()
+
+
+def warn_if_multi_threaded_cpu() -> None:
+    """
+    Warn a training call (the caller of the caller) that runs on multi-threaded
+    CPU kernels (`multi_threaded_cpu`): training amplifies their last-bit
+    differences, so the run is not reproducible from its seed, and a small model
+    may not train. Every training entry point warns through this one check.
+    """
+    if multi_threaded_cpu():
+        warnings.warn(
+            "XLA's CPU kernels are multi-threaded here: the whitened strain differs in its last bits "
+            "from call to call, and training amplifies the difference, so this run is not "
+            "reproducible from its seed, and a small model may not train. Set "
+            f"XLA_FLAGS={SINGLE_THREADED_CPU_FLAG} before starting Python.",
+            UserWarning, stacklevel=3,
+        )

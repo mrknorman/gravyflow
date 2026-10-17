@@ -1211,9 +1211,11 @@ class Model:
         if callbacks is None:
             callbacks = []
 
+        from gravyflow.src.rng import platform
         from gravyflow.src.validate.config import require_same_split, split_record, with_run_record
         from gravyflow.src.validate.provenance import StaleCheckpointError
 
+        platform.warn_if_multi_threaded_cpu()
         gf.ensure_directory_exists(self.model_path)
         split = split_record(training_dataset, validation_dataset)
         weights = self.run_record

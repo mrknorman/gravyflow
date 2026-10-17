@@ -3,6 +3,8 @@ gf.Model trains on its dataset with one definition of an epoch's length: the
 training dataset's, which the model sizes from its training config.
 """
 
+import warnings
+
 import pytest
 
 import gravyflow as gf
@@ -104,3 +106,21 @@ class TestResume:
             tiny_model(tmp_path).train(validate_args=validate, force_retrain=False)
         assert checkpoint.read_bytes() == saved
         assert tiny_model(tmp_path).train(validate_args=validate, force_retrain=True)
+
+
+class TestPlatform:
+
+    @pytest.mark.global_rng
+    def test_training_on_multi_threaded_cpu_kernels_warns(self, tmp_path, monkeypatch):
+        # gf.Model.train ran on multi-threaded CPU kernels without a word, unlike
+        # a recipe run: such a run is not reproducible from its seed.
+        from gravyflow.src.rng import platform
+
+        validate = {**dataset_args(steps_per_epoch=2), "group": "validate"}
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert tiny_model(tmp_path / "single").train(validate_args=validate)
+        assert not [w for w in caught if "XLA_FLAGS" in str(w.message)]
+        monkeypatch.setattr(platform, "multi_threaded_cpu", lambda: True)
+        with pytest.warns(UserWarning, match="XLA_FLAGS=--xla_cpu_multi_thread_eigen=false"):
+            assert tiny_model(tmp_path / "multi").train(validate_args=validate)

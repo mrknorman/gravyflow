@@ -48,7 +48,6 @@ from __future__ import annotations
 import json
 import os
 import random
-import warnings
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -417,14 +416,7 @@ class TrainingRun:
                 configuration, or of data split otherwise; or the model built
                 records another split.
         """
-        if platform.multi_threaded_cpu():
-            warnings.warn(
-                "XLA's CPU kernels are multi-threaded here: the whitened strain differs in its last bits "
-                "from call to call, and training amplifies the difference, so this run is not "
-                "reproducible from its seed, and a small model may not train. Set "
-                f"XLA_FLAGS={platform.SINGLE_THREADED_CPU_FLAG} before starting Python.",
-                UserWarning, stacklevel=2,
-            )
+        platform.warn_if_multi_threaded_cpu()
         data = training_data(self.seed)
         split = split_record(data, validation_data)
         run = self.directory.run
