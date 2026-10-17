@@ -125,7 +125,8 @@ def test_checkpoint_without_provenance_is_refused(tmp_path, dataset_args, small_
     path = tmp_path / "old.h5"
     with h5py.File(path, "w") as f:
         f.create_group("far_scores").create_dataset("scores", data=np.zeros(64))
-    with pytest.raises(StaleCheckpointError):
+    # Written before checkpoints had formats: refused, and said so.
+    with pytest.raises(StaleCheckpointError, match="has no checkpoint format version"):
         Validator.validate(logit_model(1), "tiny", dataset_args, small_config, path)
 
 

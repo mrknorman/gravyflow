@@ -20,6 +20,15 @@ if TYPE_CHECKING:  # avoids importing keras at runtime
 
 logger = logging.getLogger(__name__)
 
+
+def _other_format(path, found: Optional[int], current: int) -> str:
+    """What a checkpoint of another checkpoint format, or of none, is: the start of its refusal."""
+    if found is None:
+        return (f"{path} has no checkpoint format version (it was written before checkpoints had one; "
+                f"this version reads format {current})")
+    return f"{path} is in checkpoint format {found}, not {current}"
+
+
 class Validator:
     """
     A model's validation results: scores of a noise background, of injections
@@ -86,9 +95,8 @@ class Validator:
             saved = cls.load(path)
             if saved.format_version != cls.FORMAT_VERSION:
                 raise StaleCheckpointError(
-                    f"{path} is in checkpoint format {saved.format_version}, not "
-                    f"{cls.FORMAT_VERSION}, and cannot be resumed. Use a new path, or delete "
-                    "it to start again."
+                    f"{_other_format(path, saved.format_version, cls.FORMAT_VERSION)}, and cannot be "
+                    "resumed. Use a new path, or delete it to start again."
                 )
             require_match("model", saved.model_sha256, v.model_sha256, path)
             require_match("validation configuration", saved.config_sha256, v.config_sha256, path)
@@ -231,7 +239,7 @@ class Validator:
             if found != cls.FORMAT_VERSION:
                 v = cls()  # another format: nothing in it is read, or reused
                 v.format_version = None if found is None else int(found)
-                logger.warning(f"{file_path} is in format {found}, not {cls.FORMAT_VERSION}; "
+                logger.warning(f"{_other_format(file_path, v.format_version, cls.FORMAT_VERSION)}; "
                                "it cannot be reused.")
                 return v
             config = ValidationConfig(**json.loads(f.attrs["config"]))
