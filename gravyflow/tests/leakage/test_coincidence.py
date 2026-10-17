@@ -411,6 +411,24 @@ def test_coincident_noise_carries_the_flag(world, tmp_path, mode):
     assert _min_separation(record.footprints, 256.0) >= 2 * FOOTPRINT_SECONDS
 
 
+@pytest.mark.parametrize("coincidence", [gf.Coincidence.COINCIDENT, gf.Coincidence.SEPARATED],
+                         ids=lambda c: c.name)
+def test_a_dataset_batch_carries_the_flag(world, tmp_path, coincidence):
+    """
+    A gf.Dataset's batch carries its noise's COINCIDENT flag, (B,) float32: 1 for
+    every example under the opt-in, 0 for every one by default.
+    """
+    fixture = offset_pieces()
+    with world(fixture):
+        ds = fx.dataset(fixture, tmp_path / "data", "train", output_variables=[RV.COINCIDENT],
+                        coincidence=coincidence)
+        _, output = ds[0]
+    flags = np.asarray(output[RV.COINCIDENT.name])
+    expected = 1.0 if coincidence == gf.Coincidence.COINCIDENT else 0.0
+    assert flags.shape == (8,) and str(flags.dtype) == "float32", (flags.shape, flags.dtype)
+    np.testing.assert_array_equal(flags, expected)
+
+
 def _coincident_world():
     """
     L1-only glitches in one train block, both detectors in data about each: at

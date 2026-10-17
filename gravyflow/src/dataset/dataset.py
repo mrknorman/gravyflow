@@ -736,13 +736,17 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                 pool_label = batch_data.get(gf.ReturnVariables.POOL_LABEL)
                 # The augmentations each example's noise had as it was read.
                 augmentations = batch_data.get(gf.ReturnVariables.AUGMENTATIONS)
+                # Whether each example's detectors were read at one time.
+                coincident = batch_data.get(gf.ReturnVariables.COINCIDENT)
             elif len(batch_data) == 4:
                 onsource, offsource, gps_times, feature_labels = batch_data
                 glitch_type, source_type, data_label, pool_label, augmentations = None, None, None, None, None
+                coincident = None
             else:
                 onsource, offsource, gps_times = batch_data
                 feature_labels = None
                 glitch_type, source_type, data_label, pool_label, augmentations = None, None, None, None, None
+                coincident = None
         except Exception as e:
             logger.info(f"Noise generation failed: {e}\nTraceback: {traceback.format_exc()}")
             raise Exception(f"Noise generation failed: {e}")
@@ -796,6 +800,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             data_label=self._process_transient_label(data_label),
             pool_label=self._process_transient_label(pool_label),
             augmentations=augmentations,
+            coincident=self._process_transient_label(coincident),
         )
         self.batch_contract.check(
             (self.input_variables, self.output_variables), input_dict, output_dict
@@ -1001,6 +1006,7 @@ def create_variable_dictionary(
     data_label = None,
     pool_label = None,
     augmentations = None,
+    coincident = None,
     ) -> Dict:
     """
     Create dictionary of requested return variables.
@@ -1017,6 +1023,7 @@ def create_variable_dictionary(
         data_label: DATA_LABEL values (from TransientObtainer).
         pool_label: POOL_LABEL values (a ComposedDataset's pools).
         augmentations: AUGMENTATIONS, each example's augmentation flags.
+        coincident: COINCIDENT, 1 where an example's detectors were read at one time.
     """
     from keras import ops
     
@@ -1037,6 +1044,7 @@ def create_variable_dictionary(
         gf.ReturnVariables.DATA_LABEL: data_label,
         gf.ReturnVariables.POOL_LABEL: pool_label,
         gf.ReturnVariables.AUGMENTATIONS: augmentations,
+        gf.ReturnVariables.COINCIDENT: coincident,
     }
 
     # Add WaveformParameters from injection_parameters
@@ -1066,7 +1074,8 @@ def _noise_defaults() -> Dict:
     """
     What an example carries in a composed batch where its pool's source gives
     no such output (synthetic noise): no GPS time, and the labels a transient
-    obtainer gives a partner detector, noise with no type.
+    obtainer gives a partner detector, noise with no type, its detectors read
+    apart.
     """
     return {
         gf.ReturnVariables.START_GPS_TIME: (np.nan, np.float64),
@@ -1074,6 +1083,7 @@ def _noise_defaults() -> Dict:
         gf.ReturnVariables.SUB_TYPE: (-1, np.int32),
         gf.ReturnVariables.GLITCH_TYPE: (-1, np.int32),
         gf.ReturnVariables.SOURCE_TYPE: (-1, np.int32),
+        gf.ReturnVariables.COINCIDENT: (0, np.int32),
     }
 
 
@@ -1316,7 +1326,8 @@ class ComposedDataset(GravyflowDataset):
                     value = np.asarray(batch[key])
                 else:
                     fill, dtype = defaults[key]
-                    value = np.full(per_detector, fill, dtype=dtype)
+                    # Per example, or per example and detector, as the key's contract is.
+                    value = np.full(per_detector[:len(key.value.shape)], fill, dtype=dtype)
                 if key not in mixed:
                     mixed[key] = np.empty((len(assignment),) + value.shape[1:], dtype=value.dtype)
                 mixed[key][rows] = value[rows]

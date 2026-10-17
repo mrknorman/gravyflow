@@ -65,7 +65,7 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `SegmentOrder`: the order segments are served in.
 - `AcquisitionMode`: noise windows or transients.
 - `SamplingMode`: how windows are drawn from segments.
-- `Coincidence`: whether an example's detectors are read at one time: never by default (`SEPARATED`), or under the opt-in `COINCIDENT`; every real-noise batch says which examples are (`ReturnVariables.COINCIDENT`).
+- `Coincidence`: whether an example's detectors are read at one time: never by default (`SEPARATED`), or under the opt-in `COINCIDENT`; every real-noise batch says which examples are (`ReturnVariables.COINCIDENT`), and a dataset returns it when asked (0 for simulated noise).
 - `SignReversal`: an augmentation that flips the sign of the strain.
 - `TimeReversal`: an augmentation that reverses the strain in time.
 - `RandomShift`: an augmentation that shifts the strain in time.

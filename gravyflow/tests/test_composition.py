@@ -74,7 +74,7 @@ DATA = [RV.ONSOURCE, RV.WHITENED_ONSOURCE, RV.OFFSOURCE, RV.INJECTIONS, RV.WHITE
         RV.START_GPS_TIME]
 LABELS = [RV.POOL_LABEL, RV.INJECTION_MASKS, RV.INJECTION_PRESENT, RV.CENTRAL_TIME, ST.SNR, ST.HRSS,
           ST.HPEAK, WP.DURATION_SECONDS, WP.FREQUENCY_HERTZ, WP.RIGHT_ASCENSION_RADIANS, RV.DATA_LABEL,
-          RV.SUB_TYPE, RV.GLITCH_TYPE, RV.SOURCE_TYPE]
+          RV.SUB_TYPE, RV.GLITCH_TYPE, RV.SOURCE_TYPE, RV.COINCIDENT]
 
 
 def mixed_pools():
@@ -94,7 +94,7 @@ def documented_shape(key, g=2, i=len(IFOS)):
         RV.INJECTIONS: (B, g, i, T), RV.WHITENED_INJECTIONS: (B, g, i, T), RV.START_GPS_TIME: (B, i),
         RV.INJECTION_MASKS: (B, g), RV.INJECTION_PRESENT: (B,), RV.POOL_LABEL: (B,),
         RV.CENTRAL_TIME: (B, g, i), RV.DATA_LABEL: (B, i), RV.SUB_TYPE: (B, i), RV.GLITCH_TYPE: (B, i),
-        RV.SOURCE_TYPE: (B, i),
+        RV.SOURCE_TYPE: (B, i), RV.COINCIDENT: (B,),
     }
     return shapes.get(key, (B, g))
 
@@ -111,6 +111,8 @@ def test_a_composed_batch_meets_the_batch_contract():
     np.testing.assert_array_equal(y["DATA_LABEL"], 0.0)
     for key in (RV.SUB_TYPE, RV.GLITCH_TYPE, RV.SOURCE_TYPE):
         np.testing.assert_array_equal(y[key.name], -1.0)
+    # Simulated noise reads no detectors at one time.
+    np.testing.assert_array_equal(y["COINCIDENT"], 0.0)
 
 
 def test_every_label_row_is_its_examples():
