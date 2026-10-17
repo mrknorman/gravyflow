@@ -48,6 +48,10 @@ print("=" * 70)
 #     CBC, burst, stochastic or detchar hardware injections
 #   - data_labels: What to acquire - NOISE means random sampling from segments
 #   - segment_order: How to iterate through available segments
+#   - source (optional): where strain comes from; the default, gf.GWOSC(), is
+#     public GWOSC strain. On a cluster with LVK frames, pass
+#     source=gf.LocalFrames() (or name the frame types and channels per run).
+#     Nothing falls back from one source to another.
 
 obtainer = gf.IFODataObtainer(
     observing_runs=[gf.ObservingRun.O3],  # Use O3 data (2019-2020)

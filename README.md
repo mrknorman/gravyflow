@@ -129,19 +129,35 @@ Notebooks 07 and 08 in `example_notebooks/` walk through the same run.
 
 ## 5. Setup permissions
 
-Follow these guides for setting up permissions to access real data:
+Public data (the default, section 5) needs no credentials. Reading local frames (`gf.LocalFrames`, section 5) needs
+the credentials of the cluster that holds them; follow these guides:
 
 https://computing.docs.ligo.org/guide/auth/scitokens/
 https://computing.docs.ligo.org/guide/auth/kerberos/
 
 ## 6. Public data sources
 
-Real noise and glitches use public data only; no credentials are needed:
+Real noise and glitches use public data only by default; no credentials are needed:
 
+- Strain comes from the obtainer's data source, named explicitly (`source=`, default `gf.Defaults.source`):
+  `gf.GWOSC()`, each run's bulk GWOSC strain release, by default, or `gf.LocalFrames(frametypes=..., channels=...)`
+  for frames found by gwdatafind. A source never falls back to another, and never switches the frame type it names:
+  a fetch that fails raises `gf.StrainUnavailable`, naming the source and the cause. On a LIGO cluster, pass
+  `source=gf.LocalFrames(...)` to read its frames; without it, strain is the public GWOSC release.
 - Segments and observing-run bounds come from the GWOSC timeline and run API (https://gwosc.org). The default selection is `DATA` with the `BURST_CAT1` and `BURST_CAT2` vetoes applied, without CBC, burst, stochastic or detchar hardware injections (continuous-wave injections, which run throughout, are kept). Real noise also excludes every GW event GWOSC publishes (its whole signal in band; see `docs/acquisition.md`) and every Gravity Spy glitch (its whole extent).
 - Glitches come from the Gravity Spy machine-learning classifications: Glanzer et al. 2023, *Class. Quantum Grav.* 40 065004, released on Zenodo (doi:10.5281/zenodo.5649212, v1.0.0, CC-BY-4.0). Please cite both if you use them. Each file is downloaded on first use and cached in `~/.gravyflow/cache` (override with `GRAVYFLOW_CACHE_DIR`).
 
-Every cache gravyflow keeps lives under that one root, `GRAVYFLOW_CACHE_DIR` if it is set, else `~/.gravyflow/cache`: GWOSC timelines and events, Gravity Spy files, the glitch, event and partner caches (`glitch_cache_v4.h5`, `event_cache_v4.h5`, `partner_cache_v4.h5`), real-noise segment caches (`segments/`) and the GWOSC strain downloads (`astropy/`). Earlier versions kept noise segment caches in `./generator_data` or beside the package. gravyflow does not move them; it warns once when it finds one there, naming where to move it to reuse it. Glitch and event caches of an earlier format (`glitch_cache.h5`, `event_cache.h5`) are never read, nor deleted.
+Every cache gravyflow keeps lives under that one root, `GRAVYFLOW_CACHE_DIR` if it is set, else `~/.gravyflow/cache`: GWOSC timelines and events, Gravity Spy files, the glitch, event and partner caches (`glitch_cache_v4_<source>.h5`, `event_cache_v4_<source>.h5`, `partner_cache_v4_<source>.h5`, `<source>` the data source's fingerprint, so two sources never share a file), real-noise segment caches (`segments/`) and the GWOSC strain downloads (`astropy/`). Earlier versions kept noise segment caches in `./generator_data` or beside the package. gravyflow does not move them; it warns once when it finds one there, naming where to move it to reuse it. Glitch and event caches of an earlier format (`glitch_cache.h5`, `event_cache.h5`) are never read, nor deleted.
+
+The data source changes these, with no transition period:
+
+- Strain no longer comes from local frames when gwdatafind finds them, with GWOSC as the fallback: it comes from the
+  source alone. On a host with local frames, the default is now public GWOSC strain; pass `gf.LocalFrames(...)` for
+  the frames.
+- `ObservingRunData` takes no channels or frame types (`ObservingRunData(name, start, end, state_flags, gwosc_runs)`),
+  and obtainers have no `frame_types` or `channels`: `gf.LocalFrames` names them, per GWOSC run.
+- The source is in every obtainer's fingerprint, so a checkpoint or validation written before is refused as stale,
+  and caches written before (real-noise segments, and glitch, event and partner caches) are not read again.
 
 ## 7. Randomness: one seed tree
 
@@ -215,7 +231,7 @@ bits, from multi-threaded ones). The test suite sets it itself, and a recipe tra
 - A glitch's example reads each requested detector the glitch was not seen in at a partner time of its own, in the
   record's split and block, never at the glitch's time, and labels that detector noise (`docs/acquisition.md`,
   Transient detectors and partners); it read every detector over the glitch's window. A record with no partner time
-  is not served, and is counted under `"no partner"`. Partners have their own cache, `partner_cache_v4.h5`.
+  is not served, and is counted under `"no partner"`. Partners have their own cache, `partner_cache_v4_<source>.h5`.
 - The model recipes take one root seed: `TrainingRun.train`'s `training_data` is called with the seed alone (it
   took the seed and the first epoch), and `split_seeds`, `TrainingRun.train_seed` and
   `GeorgeHuerta2017.dataset(first_epoch=)` / `dataset_regression(first_epoch=)` are gone; resume sets `ds.epoch`.
