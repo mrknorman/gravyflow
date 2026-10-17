@@ -502,6 +502,43 @@ def test_augmentation_stays_in_split(world, tmp_path, monkeypatch):
                                    augmentations=[augmentation])
 
 
+def test_composed_pools_augment_only_their_own_training_examples(world, tmp_path):
+    """
+    A composed dataset augments each pool's noise by that pool's own source, for
+    the dataset's split. In train, every example carries its own pool's
+    augmentations, drawn per example and flagged in AUGMENTATIONS bit for bit; in
+    validate and test, every row is the strain as recorded, flagged 0.
+    """
+    fixture = augmented_world()
+    specs = {  # POOL_LABEL: (probability, the pool's augmentations)
+        0: (0.4, list(REVERSALS)),
+        1: (0.3, [gf.SignReversal(probability=0.5), gf.TimeReversal(probability=0.5)]),
+        2: (0.3, None),
+    }
+    with world(fixture):
+        pools = [gf.FeaturePool(name=f"pool_{label}", label=label, probability=probability,
+                                noise_obtainer=fx.noise_obtainer(fixture, tmp_path / "data", augmentations=spec))
+                 for label, (probability, spec) in specs.items()]
+        for split in SPLITS:
+            ds = gf.ComposedDataset(pools=pools, seed=7, group=split, input_variables=STRAIN,
+                                    output_variables=[RV.POOL_LABEL, RV.AUGMENTATIONS], **world_settings(16))
+            seen = {label: set() for label in specs}
+            for k in range(3):
+                x, y = ds[k]
+                flags, labels = np.asarray(y[RV.AUGMENTATIONS.name]), np.asarray(y[RV.POOL_LABEL.name])
+                assert flags.dtype == np.float32 and flags.shape == (16,), (split, flags.dtype, flags.shape)
+                for b in range(16):
+                    bits = {reversals_of(x[key.name][b, d], name, fixture)
+                            for key in STRAIN for d, name in enumerate(WORLD_IFOS)}
+                    assert bits == {int(flags[b])}, (split, k, b, bits, flags[b])
+                    seen[int(labels[b])].add(int(flags[b]))
+            if split == "train":
+                assert seen[0] == {3} and seen[2] == {0}, seen
+                assert len(seen[1]) > 1, f"pool 1 drew one choice for every example: {seen}"
+            else:
+                assert seen == {0: {0}, 1: {0}, 2: {0}}, (split, seen)
+
+
 def test_a_default_batch_is_unaugmented(world, tmp_path):
     """No augmentation by default: a training batch is the strain as recorded, flagged 0."""
     fixture = augmented_world()
