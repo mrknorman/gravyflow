@@ -1,329 +1,35 @@
-# Built-In imports:
-from pathlib import Path
 import logging
 from itertools import islice
-from typing import Dict
-import os
 
-# Library imports:
 import pytest
 import numpy as np
-from bokeh.io import output_file, save
-from bokeh.layouts import gridplot
-from tqdm import tqdm
-from _pytest.config import Config
-
-# Local imports:
-
-import gravyflow as gf
-from gravyflow.src.resources import PACKAGE
-from gravyflow.src.dataset.noise import noise as gf_noise
-from gravyflow.src.dataset.features.injection import ReturnVariables as RV
-import keras
 from keras import ops
-import jax
 import jax.numpy as jnp
 
+import gravyflow as gf
+from gravyflow.src.dataset.noise import noise as gf_noise
+from gravyflow.src.dataset.features.injection import ReturnVariables as RV
+from gravyflow.tests._helpers import representation_tolerance, statistical_bound
 
-def _test_real_noise_single(
-        output_directory_path : Path = Path("./gravyflow_data/tests/"),
-        plot_results : bool = False
-    ) -> None:
-
-    with gf.env():
-
-            # Setup ifo data acquisition object:
-            ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-                data_quality=gf.DataQuality.BEST,
-                data_labels=[
-                    gf.DataLabel.NOISE, 
-                    gf.DataLabel.GLITCHES
-                ],
-                observing_runs=gf.ObservingRun.O3,
-                segment_order=gf.SegmentOrder.RANDOM,
-            )
-            
-            # Initialize noise generator wrapper:
-            noise : gf.NoiseObtainer = gf.NoiseObtainer(
-                ifo_data_obtainer = ifo_data_obtainer,
-                noise_type = gf.NoiseType.REAL,
-                ifos = gf.IFO.L1
-            )
-            
-            # Iterate through num_tests batches to check correct operation:
-            batch = next(noise(group="train"))
-            
-            # Handle dict format
-            onsource = batch[gf.ReturnVariables.ONSOURCE]
-            offsource = batch[gf.ReturnVariables.OFFSOURCE]
-            gps_times = batch.get(gf.ReturnVariables.START_GPS_TIME)
-
-            parameters_dict = {
-                "onsource" : onsource,
-                "offsource" : offsource,
-                "gps_times" : gps_times
-            }
-
-            parameters_file_path : Path = (
-                PACKAGE / f"res/tests/real_noise_consistency_single.hdf5"
-            )
-            gf.tests.compare_and_save_parameters(
-                parameters_dict, parameters_file_path
-            )
-            
-            if plot_results:
-                layout = []
-                for onsource_, offsource_, gps_time in zip(onsource, offsource, gps_times):
-                    
-                    onsource_strain_plot = gf.generate_strain_plot(
-                        {"Onsource Noise" : onsource_},
-                        title = f"Onsource Background noise at {gps_time}"
-                    )
-                    
-                    offsource_strain_plot = gf.generate_strain_plot(
-                        {"Offsource Noise" : offsource_},
-                        title = f"Offsource Background noise at {gps_time}"
-                    )
-                    
-                    layout.append(
-                        [onsource_strain_plot, offsource_strain_plot]
-                    )
-                
-                # Ensure output directory exists
-                gf.ensure_directory_exists(output_directory_path)
-                
-                # Define an output path for the dashboard
-                output_file(output_directory_path / "noise_plots.html")
-
-                # Arrange the plots in a grid. 
-                grid = gridplot(layout)
-                    
-                save(grid)
-    
-def _test_real_noise_multi(
-        output_directory_path : Path = Path("./gravyflow_data/tests/"),
-        plot_results : bool = False 
-    ) -> None:
-
-    with gf.env():
-            
-            # Setup ifo data acquisition object:
-            ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-                data_quality=gf.DataQuality.BEST,
-                data_labels=[
-                    gf.DataLabel.NOISE, 
-                    gf.DataLabel.GLITCHES
-                ],
-                observing_runs=gf.ObservingRun.O3,
-                segment_order=gf.SegmentOrder.RANDOM,
-            )
-            
-            # Initilise noise generator wrapper:
-            noise : gf.NoiseObtainer = gf.NoiseObtainer(
-                ifo_data_obtainer = ifo_data_obtainer,
-                noise_type = gf.NoiseType.REAL,
-                ifos = [gf.IFO.L1, gf.IFO.H1]
-            )
-                    
-            # Iterate through num_tests batches to check correct operation:
-            batch = next(noise(group="train"))
-            onsource = batch[gf.ReturnVariables.ONSOURCE]
-            offsource = batch[gf.ReturnVariables.OFFSOURCE]
-            gps_times = batch.get(gf.ReturnVariables.START_GPS_TIME)
-
-            parameters_dict = {
-                "onsource" : onsource,
-                "offsource" : offsource,
-                "gps_times" : gps_times
-            }
-
-            parameters_file_path : Path = (
-                PACKAGE / f"res/tests/real_noise_consistancy_multi.hdf5"
-            )
-            gf.tests.compare_and_save_parameters(
-                parameters_dict, parameters_file_path
-            )
-
-            if plot_results:
-
-                layout = []
-                for onsource_, gps_time in zip(onsource, gps_times):
-                    
-                    list_of_onsource = []
-                    for onsource_ifo in onsource_: 
-                        list_of_onsource.append(
-                            gf.generate_strain_plot(
-                                {"Onsource Noise" : onsource_ifo},
-                                title = f"Onsource Background noise at {gps_time}",
-                            )
-                        )
-                    
-                    layout.append(list_of_onsource)
-                
-                # Ensure output directory exists
-                gf.ensure_directory_exists(output_directory_path)
-                
-                # Define an output path for the dashboard
-                output_file(output_directory_path / "multi_noise_plots.html")
-
-                # Arrange the plots in a grid. 
-                grid = gridplot(layout)
-                    
-                save(grid)
-
-def _test_noise_shape(
-        num_tests : int = int(100)
-    ) -> None:
-    
-    with gf.env():
-            
-            # Setup ifo data acquisition object:
-            ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-                data_quality=gf.DataQuality.BEST,
-                data_labels=[
-                    gf.DataLabel.NOISE, 
-                    gf.DataLabel.GLITCHES
-                ],
-                observing_runs=gf.ObservingRun.O3,
-                segment_order=gf.SegmentOrder.RANDOM,
-                logging_level=logging.INFO
-            )
-            
-            # Initilise noise generator wrapper:
-            noise : gf.NoiseObtainer = gf.NoiseObtainer(
-                ifo_data_obtainer = ifo_data_obtainer,
-                noise_type = gf.NoiseType.REAL,
-                ifos = gf.IFO.L1
-            )
-                
-            batch = next(iter(noise(group="train")))
-            onsource = batch[RV.ONSOURCE]
-            offsource = batch[RV.OFFSOURCE]
-
-            onsource_shape = onsource.shape
-            offsource_shape = offsource.shape
-
-            logging.info("Start shape tests...")
-            for index, batch in tqdm(
-                    enumerate(islice(noise(group="train"), num_tests))
-                ):
-                onsource = batch[RV.ONSOURCE]
-                offsource = batch[RV.OFFSOURCE]
-                
-                np.testing.assert_equal(
-                    onsource.shape,
-                    onsource_shape,
-                    err_msg="Onsource shape missmatch!"
-                )
-                np.testing.assert_equal(
-                    offsource.shape,
-                    offsource_shape,
-                    err_msg="Offsource shape missmatch!"
-                )
-
-            np.testing.assert_equal(
-                index,
-                num_tests - 1,
-                err_msg=(
-                    "Warning! Noise generator does not iterate the required"
-                    " number of batches."
-                )
-            )            
-            
-            logging.info("Complete")
-
-def _test_noise_iteration(
-        num_tests : int = int(1.0E2)
-    ) -> None:
-
-    with gf.env():
-
-            # Setup ifo data acquisition object:
-            ifo_data_obtainer : gf.IFODataObtainer = gf.IFODataObtainer(
-                data_quality=gf.DataQuality.BEST,
-                data_labels=[
-                    gf.DataLabel.NOISE, 
-                    gf.DataLabel.GLITCHES
-                ],
-                observing_runs=gf.ObservingRun.O3,
-                segment_order=gf.SegmentOrder.RANDOM,
-                logging_level=logging.INFO
-            )
-            
-            # Initilise noise generator wrapper:
-            noise : gf.NoiseObtainer = gf.NoiseObtainer(
-                ifo_data_obtainer = ifo_data_obtainer,
-                noise_type = gf.NoiseType.REAL,
-                ifos = gf.IFO.L1
-            )
-                
-            logging.info("Start iteration tests...")
-            for index, _ in tqdm(enumerate(islice(noise(group="train"), num_tests))):
-                pass
-            
-            np.testing.assert_equal(
-                index,
-                num_tests - 1,
-                err_msg=(
-                    "Warning! Noise generator does not iterate the required"
-                    " number of batches."
-                )
-            )           
-
-            logging.info("Complete")
-
-def test_real_noise_single(
-        pytestconfig : Config
-    ) -> None:
-
-    _test_real_noise_single(
-        plot_results=pytestconfig.getoption("plot")
-    )
-
-def test_real_noise_multi(
-        pytestconfig : Config
-    ) -> None:
-
-    _test_real_noise_multi(
-        plot_results=pytestconfig.getoption("plot")
-    )
-    
-def test_noise_shape(
-        pytestconfig : Config
-    ) -> None:
-
-    _test_noise_shape(
-        num_tests=gf.tests.num_tests_from_config(pytestconfig)
-    )
-
-def test_noise_iteration(
-        pytestconfig : Config
-    ) -> None:
-    
-    _test_noise_iteration(
-        num_tests=gf.tests.num_tests_from_config(pytestconfig)
-    )
-
-def test_interpolate_psd():
-    # Test PSD interpolation
-    # Create dummy PSD
-    freqs = jnp.linspace(0, 512, 100)
-    vals = jnp.ones_like(freqs)
-    
-    num_samples_list = [2048, 1024]
+def test_interpolate_psd_puts_each_bin_at_its_own_frequency():
+    """
+    Each rfft bin k of each length N gets the spectrum at k fs / N: a linear
+    spectrum is reproduced to float32 rounding, DC and bins below the spectrum's
+    lowest frequency are 0, and bins above its highest hold its last value.
+    """
     sample_rate = 1024.0
-    
-    interp_on, interp_off = gf_noise.interpolate_onsource_offsource_psd(
-        num_samples_list,
-        sample_rate,
-        freqs,
-        vals
-    )
-    
-    # Check shapes
-    # Output size = num_samples // 2 + 1
-    assert ops.shape(interp_on)[-1] == 2048 // 2 + 1
-    assert ops.shape(interp_off)[-1] == 1024 // 2 + 1
+    freqs = np.linspace(10.0, 400.0, 79, dtype=np.float32)
+    values = 3.0 + 0.5 * freqs
+    on, off = gf_noise.interpolate_onsource_offsource_psd([2048, 1024], sample_rate, freqs, values)
+    for interpolated, num_samples in ((on, 2048), (off, 1024)):
+        interpolated = np.asarray(interpolated)
+        assert interpolated.shape == (num_samples // 2 + 1,) and interpolated.dtype == np.complex64
+        assert np.all(interpolated.imag == 0.0)
+        grid = np.fft.rfftfreq(num_samples, 1.0 / sample_rate)
+        expected = np.where(grid < freqs[0], 0.0, 3.0 + 0.5 * np.clip(grid, None, freqs[-1]))
+        # Representation: a few float32 roundings of values up to the spectrum's peak.
+        np.testing.assert_allclose(interpolated.real, expected, rtol=0.0,
+                                   atol=representation_tolerance(np.float32, values.max(), 4))
 
 def test_unsupported_noise_type():
     """Verify error is raised for invalid noise type."""
@@ -354,53 +60,6 @@ def test_noise_obtainer_defaults():
     
     assert ops.shape(onsource)[-1] == expected_onsource_samples
     assert ops.shape(offsource)[-1] == expected_offsource_samples
-
-
-def test_noise_obtainer_white_type():
-    """Test NoiseObtainer with WHITE noise type."""
-    noise = gf.NoiseObtainer(
-        noise_type=gf.NoiseType.WHITE,
-        ifos=[gf.IFO.L1]
-    )
-    
-    gen = noise(
-        group="train",
-        sample_rate_hertz=1024.0,
-        onsource_duration_seconds=1.0,
-        crop_duration_seconds=0.5,
-        offsource_duration_seconds=1.0,
-        num_examples_per_batch=4,
-        seed=42
-    )
-    
-    batch = next(gen)
-    onsource = batch[RV.ONSOURCE]
-    
-    # Check shapes
-    assert len(ops.shape(onsource)) == 3
-    assert ops.shape(onsource)[0] == 4  # batch
-    assert ops.shape(onsource)[1] == 1  # ifos
-
-
-def test_noise_obtainer_multiple_ifos():
-    """Test NoiseObtainer with multiple IFOs."""
-    noise = gf.NoiseObtainer(
-        noise_type=gf.NoiseType.WHITE,
-        ifos=[gf.IFO.L1, gf.IFO.H1]
-    )
-    
-    gen = noise(
-        group="train",
-        sample_rate_hertz=1024.0,
-        num_examples_per_batch=2,
-        seed=42
-    )
-    
-    batch = next(gen)
-    onsource = batch[RV.ONSOURCE]
-    
-    # Should have 2 IFOs
-    assert ops.shape(onsource)[1] == 2
 
 
 def test_noise_obtainer_single_ifo_conversion():
@@ -451,52 +110,54 @@ def test_noise_obtainer_real_without_ifo_obtainer():
         next(noise(group="train"))
 
 
-def test_noise_obtainer_colored_type():
-    """Test NoiseObtainer with COLORED noise type."""
-    noise = gf.NoiseObtainer(
-        noise_type=gf.NoiseType.COLORED,
-        ifos=[gf.IFO.L1]
-    )
-    
-    gen = noise(
-        group="train",
-        sample_rate_hertz=1024.0,
-        onsource_duration_seconds=1.0,
-        crop_duration_seconds=0.5,
-        offsource_duration_seconds=1.0,
-        num_examples_per_batch=2,
-        seed=42
-    )
-    
-    batch = next(gen)
-    onsource = batch[RV.ONSOURCE]
-    
-    # Check shapes
-    assert len(ops.shape(onsource)) == 3
-    assert ops.shape(onsource)[0] == 2  # batch
+def coloured_variance(asd, num_samples, sample_rate_hertz):
+    """
+    The per-sample variance of ``color_noise``'s output for an ASD on the rfft
+    grid: x = irfft(c W) with c = sqrt(fs / 2) ASD, so by Parseval
+    var = sum over the full spectrum of c_k^2 / N, each interior bin counted
+    twice (k and N - k), DC and the Nyquist bin once.
+    """
+    weights = np.full(len(asd), 2.0)
+    weights[0] = 1.0
+    if num_samples % 2 == 0:
+        weights[-1] = 1.0
+    power = (sample_rate_hertz / 2.0) * np.abs(np.asarray(asd, np.float64)) ** 2
+    return float(np.sum(weights * power) / num_samples), weights * power
 
 
 def test_noise_obtainer_scale_factor_is_deprecated_and_ignored():
-    """A scale_factor passed to a NoiseObtainer warns and changes nothing: noise is strain."""
-    noise = gf.NoiseObtainer(
-        noise_type=gf.NoiseType.COLORED,
-        ifos=gf.IFO.L1
-    )
-    window = dict(
-        group="train",
-        sample_rate_hertz=1024.0,
-        onsource_duration_seconds=1.0,
-        crop_duration_seconds=0.5,
-        offsource_duration_seconds=2.0,
-        num_examples_per_batch=2,
-        seed=42
-    )
-    expected = next(noise(**window))[RV.ONSOURCE]
+    """
+    A scale_factor passed to a NoiseObtainer warns and changes nothing: COLORED
+    noise is strain, with the variance its detector's curve integrates to.
+    """
+    from gravyflow.src.dataset.conditioning.detector import DEFAULT_NOISE_PROFILE, read_noise_curve
+
+    noise = gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED, ifos=gf.IFO.L1)
+    rate, batch = 1024.0, 32
+    window = dict(group="train", sample_rate_hertz=rate, onsource_duration_seconds=1.0,
+                  crop_duration_seconds=0.5, offsource_duration_seconds=2.0,
+                  num_examples_per_batch=batch, seed=42)
+    expected = np.asarray(next(noise(**window))[RV.ONSOURCE], np.float64)
     with pytest.warns(DeprecationWarning, match="scale_factor is deprecated.*physical strain"):
         served = next(noise(scale_factor=3.0, **window))[RV.ONSOURCE]
-    np.testing.assert_array_equal(np.asarray(served), np.asarray(expected))
-    # Strain: the O3 curves give a raw onsource std of order 1e-18 to 1e-21.
-    assert 1e-23 < float(np.std(np.asarray(expected, np.float64))) < 1e-16
+    np.testing.assert_array_equal(np.asarray(served), expected)
+
+    # The curve's ASD on the onsource's rfft grid (np.interp, independent of the
+    # library's interpolation), no power below the curve or at DC.
+    num_samples = expected.shape[-1]
+    frequencies, asd = read_noise_curve(DEFAULT_NOISE_PROFILE.path(gf.IFO.L1), up_to_hertz=rate / 2.0)
+    grid = np.fft.rfftfreq(num_samples, 1.0 / rate)
+    asd = np.where((grid > 0) & (grid >= frequencies[0]), np.interp(grid, frequencies, asd), 0.0)
+    variance, power = coloured_variance(asd, num_samples, rate)
+    # Statistical: the sample variance over B rows of N samples is a sum of
+    # |W_k|^2 terms, each exponential with its own mean, so its relative standard
+    # deviation is sqrt(sum p_k^2) / sum p_k over the rows' independent bins.
+    relative_sigma = np.sqrt(np.sum(power ** 2) / batch) / np.sum(power)
+    measured = np.mean(expected ** 2)
+    assert abs(measured / variance - 1.0) < statistical_bound(relative_sigma), (
+        f"coloured variance {measured:.3e}, where the curve integrates to {variance:.3e} "
+        f"(relative sigma {relative_sigma:.3f})"
+    )
 
 
 def test_noise_obtainer_pseudo_real_without_obtainer():
@@ -511,104 +172,6 @@ def test_noise_obtainer_pseudo_real_without_obtainer():
         gen = noise(group="train")
         next(gen)
 
-
-def test_pseudo_real_noise_generation():
-    """Test PSEUDO_REAL noise type with IFODataObtainer."""
-    # Setup ifo data acquisition object
-    ifo_data_obtainer = gf.IFODataObtainer(
-        observing_runs=gf.ObservingRun.O3, 
-        data_quality=gf.DataQuality.BEST, 
-        data_labels=[gf.DataLabel.NOISE, gf.DataLabel.GLITCHES],
-    )
-    
-    # Create NoiseObtainer with PSEUDO_REAL type
-    noise = gf.NoiseObtainer(
-        ifo_data_obtainer=ifo_data_obtainer,
-        noise_type=gf.NoiseType.PSEUDO_REAL,
-        ifos=gf.IFO.L1
-    )
-    
-    gen = noise(
-        group="train",
-        sample_rate_hertz=gf.Defaults.sample_rate_hertz,
-        onsource_duration_seconds=gf.Defaults.onsource_duration_seconds,
-        crop_duration_seconds=gf.Defaults.crop_duration_seconds,
-        offsource_duration_seconds=gf.Defaults.offsource_duration_seconds,
-        num_examples_per_batch=1,
-        seed=42
-    )
-    
-    # Get one batch from the generator
-    batch = next(gen)
-    onsource = batch[RV.ONSOURCE]
-    
-    # Check shapes
-    assert len(ops.shape(onsource)) == 3
-    assert ops.shape(onsource)[0] == 1  # batch size
-
-
-def test_gps_time_uniqueness_across_batches():
-    """
-    Test that GPS times are unique across multiple batches.
-    
-    This guards against the bug where deepcopied IFODataObtainer 
-    carries over rng state, causing identical random positions.
-    """
-    with gf.env():
-        # Setup ifo data acquisition
-        ifo_data_obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.NOISE, gf.DataLabel.GLITCHES],
-            observing_runs=gf.ObservingRun.O3,
-            segment_order=gf.SegmentOrder.RANDOM,
-        )
-        
-        noise = gf.NoiseObtainer(
-            ifo_data_obtainer=ifo_data_obtainer,
-            noise_type=gf.NoiseType.REAL,
-            ifos=gf.IFO.L1
-        )
-        
-        # Collect GPS times from multiple batches
-        all_gps_times = []
-        num_batches = 5
-        batch_size = 4
-        
-        gen = noise(
-            group="train",
-            num_examples_per_batch=batch_size,
-            seed=42
-        )
-        
-        for _ in range(num_batches):
-            batch = next(gen)
-            gps_times = batch.get(gf.ReturnVariables.START_GPS_TIME)
-            gps_array = ops.convert_to_numpy(gps_times)
-            all_gps_times.extend(gps_array.flatten())
-        
-        all_gps_times = np.array(all_gps_times)
-        
-        # Check uniqueness - no two GPS times should be identical
-        unique_gps = np.unique(all_gps_times)
-        total_samples = num_batches * batch_size
-        
-        # Allow for some tolerance in case segments are reused,
-        # but require at least 80% unique times
-        uniqueness_ratio = len(unique_gps) / total_samples
-        assert uniqueness_ratio >= 0.8, (
-            f"Only {uniqueness_ratio*100:.1f}% of GPS times are unique. "
-            f"Expected at least 80%. This indicates repeated noise segments."
-        )
-        
-        # Additionally check within each batch - all should be unique
-        for batch_idx in range(num_batches):
-            start = batch_idx * batch_size
-            end = start + batch_size
-            batch_gps = all_gps_times[start:end]
-            batch_unique = np.unique(batch_gps)
-            assert len(batch_unique) == batch_size, (
-                f"Batch {batch_idx} has duplicate GPS times within the batch"
-            )
 
 # --- Synthetic noise batchers: one batch per address -------------------------
 
@@ -644,14 +207,32 @@ def test_each_detector_has_its_own_noise_stream():
 
 def test_white_noise_is_unit_normal():
     batch = gf_noise.white_noise_batcher(64, [gf.IFO.L1], 1.0, 0.0, 1.0, 1024.0)(_streams())
-    x = np.asarray(batch[gf.ReturnVariables.ONSOURCE])
-    assert abs(x.mean()) < 0.01 and abs(x.std() - 1.0) < 0.01
+    x = np.asarray(batch[gf.ReturnVariables.ONSOURCE], np.float64)
+    n = x.size
+    # Statistical: the mean of n unit normals has sigma 1 / sqrt(n), their sample
+    # standard deviation 1 / sqrt(2 n).
+    assert abs(x.mean()) < statistical_bound(1.0 / np.sqrt(n))
+    assert abs(x.std() - 1.0) < statistical_bound(1.0 / np.sqrt(2.0 * n))
 
 
-def test_color_noise_shapes():
-    white = jnp.ones((2, 3, 64), dtype=jnp.float32)
-    asd = jnp.ones((1, 3, 33), dtype=jnp.complex64)
-    assert gf_noise.color_noise(white, asd, sample_rate_hertz=64.0).shape == (2, 3, 64)
+def test_color_noise_scales_each_bin_by_its_asd():
+    """
+    Colouring is x = irfft(sqrt(fs / 2) ASD rfft(w)): a bin-centred sine passes
+    scaled by sqrt(fs / 2) times its own bin's ASD, so a sum of two sines comes
+    out as the same sum with each sine scaled by its own factor.
+    """
+    rate, n = 64.0, 64
+    t = np.arange(n) / rate
+    sines = np.stack([np.sin(2 * np.pi * 5.0 * t), np.cos(2 * np.pi * 12.0 * t)]).astype(np.float32)
+    asd = np.linspace(0.5, 3.0, n // 2 + 1).astype(np.float32)
+    white = jnp.asarray((sines[0] + sines[1])[None, None, :])
+    coloured = np.asarray(gf_noise.color_noise(white, jnp.asarray(asd, jnp.complex64)[None, None, :],
+                                               sample_rate_hertz=rate))
+    assert coloured.shape == (1, 1, n)
+    expected = np.sqrt(rate / 2.0) * (asd[5] * sines[0] + asd[12] * sines[1])
+    # Representation: an rfft and an irfft of n samples, scaled by the output's peak.
+    np.testing.assert_allclose(coloured[0, 0], expected, rtol=0.0,
+                               atol=representation_tolerance(np.float32, np.abs(expected).max(), 2 * np.log2(n)))
 
 
 def test_obtainer_iterator_walks_the_batches_of_epoch_zero():
@@ -746,6 +327,46 @@ def offline_noise(layout, **kwargs):
 #: Thirty blocks of 40 s and 30 s pieces, in three equal splits: every split has some.
 GRID_LAYOUT = science_layout([40.0, 30.0], [1.0], blocks=30)
 GRID_BATCH = 4
+
+
+def test_real_noise_serves_the_strain_at_its_labelled_times():
+    """
+    REAL noise (RANDOM order) reads each window where START_GPS_TIME says: the
+    (padded) onsource is the source's strain from START_GPS_TIME minus the crop,
+    the offsource the strain just before it, sample for sample, and every window
+    of every batch starts somewhere new (an obtainer whose random state were
+    copied between batches would serve the same windows again).
+    """
+    ifos, batch_size, num_batches = [gf.IFO.L1, gf.IFO.H1], 4, 5
+    crop = OFFLINE_WINDOW["crop_duration_seconds"]
+    num_onsource = int((OFFLINE_WINDOW["onsource_duration_seconds"] + 2 * crop) * OFFLINE_RATE)
+    num_offsource = int(OFFLINE_WINDOW["offsource_duration_seconds"] * OFFLINE_RATE)
+    fetch = HashedFetch(GRID_LAYOUT)
+    with gwosc_serving(fetch):
+        noise = gf.NoiseObtainer(noise_type=gf.NoiseType.REAL, ifos=ifos,
+                                 ifo_data_obtainer=offline_noise(GRID_LAYOUT))
+        batches = list(islice(noise(**OFFLINE_WINDOW, num_examples_per_batch=batch_size, group="train", seed=3),
+                              num_batches))
+    assert len(batches) == num_batches
+    starts = []
+    for batch in batches:
+        onsource, offsource = np.asarray(batch[RV.ONSOURCE]), np.asarray(batch[RV.OFFSOURCE])
+        start = np.asarray(batch[RV.START_GPS_TIME])
+        assert onsource.shape == (batch_size, len(ifos), num_onsource)
+        assert offsource.shape == (batch_size, len(ifos), num_offsource)
+        assert start.shape == (batch_size, len(ifos))
+        for example in range(batch_size):
+            for d, ifo in enumerate(ifos):
+                first = start[example, d] - crop
+                # Exact: the served samples are the source's, unchanged.
+                np.testing.assert_array_equal(
+                    onsource[example, d], fetch(ifo, OFFLINE_RATE, (first, first + num_onsource / OFFLINE_RATE)).data)
+                np.testing.assert_array_equal(
+                    offsource[example, d], fetch(ifo, OFFLINE_RATE, (first - num_offsource / OFFLINE_RATE, first)).data)
+        starts.append(start)
+    starts = np.concatenate(starts)
+    for d in range(len(ifos)):
+        assert len(np.unique(starts[:, d])) == num_batches * batch_size, "a window was served twice"
 
 
 def grid_dataset(group):

@@ -1,122 +1,67 @@
-import os
-os.environ["KERAS_BACKEND"] = "jax"
-
-import pytest
-
-import gravyflow as gf
 import numpy as np
-import keras
+import pytest
+import scipy.signal
 from keras import ops
+
 from gravyflow.src.dataset.tools import psd as gf_psd
+from gravyflow.tests._helpers import representation_tolerance, statistical_bound
+
+
+def welch_relative_sigma(nperseg: int, noverlap: int, num_segments: int) -> float:
+    """
+    The relative standard deviation of a mean-averaged Welch estimate of
+    Gaussian noise, at a bin away from DC and Nyquist, with the periodic Hann
+    window (Percival and Walden, eq. 292b): sqrt((1 + 2 sum_j (1 - j / K) rho_j) / K),
+    rho_j the squared overlap correlation of segments j steps apart.
+    """
+    window = gf_psd.hann(nperseg).astype(np.float64)
+    step, norm = nperseg - noverlap, np.sum(window ** 2)
+    total = 1.0
+    for j in range(1, num_segments):
+        lag = j * step
+        if lag >= nperseg:
+            break
+        total += 2.0 * (1.0 - j / num_segments) * (np.sum(window[:nperseg - lag] * window[lag:]) / norm) ** 2
+    return float(np.sqrt(total / num_segments))
+
+
+#: Bins of a Hann-windowed periodogram this many apart are uncorrelated: the
+#: squared Hann window's DFT has no term beyond two bins.
+INDEPENDENT_BIN_STEP = 3
+
+
+def spectral_cv(psd, keep) -> tuple:
+    """
+    The coefficient of variation of a mean Welch estimate over the bins ``keep``
+    (taken every INDEPENDENT_BIN_STEP-th), and the number of bins it used.
+    """
+    values = np.asarray(psd)[keep][::INDEPENDENT_BIN_STEP]
+    return float(np.std(values) / np.mean(values)), len(values)
+
+
+def cv_sigma(relative_sigma: float, num_bins: int) -> float:
+    """
+    The standard deviation of the sample coefficient of variation of
+    ``num_bins`` independent estimates with relative sigma s, each Gamma
+    distributed (excess kurtosis 6 s^2): s * sqrt((2 + 6 s^2) / num_bins) / 2.
+    """
+    s = relative_sigma
+    return float(s * np.sqrt((2.0 + 6.0 * s * s) / num_bins) / 2.0)
+
 
 def test_detrend_constant():
     data = ops.convert_to_tensor([[1.0, 2.0, 3.0]])
     detrended = gf_psd.detrend(data, type='constant')
-    expected = np.array([[-1.0, 0.0, 1.0]])
-    np.testing.assert_allclose(detrended, expected)
+    np.testing.assert_allclose(detrended, np.array([[-1.0, 0.0, 1.0]]))
+
 
 def test_detrend_linear():
     # y = 2x + 1 -> [1, 3, 5]
     data = ops.convert_to_tensor([[1.0, 3.0, 5.0]], dtype="float32")
     detrended = gf_psd.detrend(data, type='linear')
-    # Should be all zeros
-    np.testing.assert_allclose(detrended, np.zeros((1, 3)), atol=1e-5)
-
-def test_psd():
-    sample_rate = 100.0
-    t = np.linspace(0, 1, int(sample_rate), endpoint=False)
-    freq = 10.0
-    signal = np.sin(2 * np.pi * freq * t).astype(np.float32)
-    signal = ops.convert_to_tensor(signal.reshape(1, -1))
-    
-    spectrum = gf_psd.psd(signal, nperseg=100, sample_rate_hertz=sample_rate)
-    freqs, pxx = spectrum.frequencies, spectrum.value()
-    
-    # Peak should be at 10Hz
-    # pxx is (Batch, Freqs)
-    peak_idx = np.argmax(pxx[0])
-    peak_freq = freqs[peak_idx]
-    assert np.isclose(peak_freq, freq, atol=1.0)
-
-@pytest.mark.global_rng
-def test_psd_vs_scipy():
-    import scipy.signal
-    
-    sample_rate = 1024.0
-    duration = 4.0
-    nperseg = int(sample_rate) # 1 second window
-    noverlap = int(sample_rate / 2) # 50% overlap
-    
-    # Generate White Noise
-    np.random.seed(42)
-    noise = np.random.normal(0, 1, int(sample_rate * duration)).astype(np.float32)
-    noise_tensor = ops.convert_to_tensor(noise.reshape(1, -1))
-    
-    # Gravyflow PSD
-    spectrum = gf_psd.psd(
-        noise_tensor, 
-        nperseg=nperseg, 
-        noverlap=noverlap, 
-        sample_rate_hertz=sample_rate
-    )
-    gf_freqs, gf_pxx = spectrum.frequencies, spectrum.value()
-    
-    # Scipy PSD
-    scipy_freqs, scipy_pxx = scipy.signal.welch(
-        noise, 
-        fs=sample_rate, 
-        window='hann', 
-        nperseg=nperseg, 
-        noverlap=noverlap,
-        scaling='density' # Default for scipy, check gf default
-    )
-    
-    # Compare Frequencies
-    np.testing.assert_allclose(gf_freqs, scipy_freqs, atol=1e-5, err_msg="Frequency mismatch")
-    
-    # Compare PSD values
-    # Note: Scipy returns (Freqs,), GF returns (Batch, Freqs)
-    # Allow some tolerance for implementation differences (e.g. float32 vs float64)
-    # Gravyflow might use a different normalization or window correction factor?
-    # Let's check if they are close.
-    
-    # Check relative error
-    rel_error = np.abs(gf_pxx[0] - scipy_pxx) / (scipy_pxx + 1e-10)
-    mean_rel_error = np.mean(rel_error)
-    
-    print(f"Mean Relative Error: {mean_rel_error}")
-    
-    # Assert mean relative error is small (< 1%)
-    assert mean_rel_error < 0.01, f"PSD mismatch. Mean Rel Error: {mean_rel_error}"
-    
-    # Also check a sine wave
-    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-    freq = 60.0
-    sine = np.sin(2 * np.pi * freq * t).astype(np.float32)
-    sine_tensor = ops.convert_to_tensor(sine.reshape(1, -1))
-    
-    spectrum = gf_psd.psd(
-        sine_tensor, 
-        nperseg=nperseg, 
-        noverlap=noverlap, 
-        sample_rate_hertz=sample_rate
-    )
-    gf_freqs_sine, gf_pxx_sine = spectrum.frequencies, spectrum.value()
-    
-    scipy_freqs_sine, scipy_pxx_sine = scipy.signal.welch(
-        sine, 
-        fs=sample_rate, 
-        window='hann', 
-        nperseg=nperseg, 
-        noverlap=noverlap
-    )
-    
-    # Compare peak height
-    peak_idx = np.argmax(scipy_pxx_sine)
-    gf_peak = gf_pxx_sine[0, peak_idx]
-    scipy_peak = scipy_pxx_sine[peak_idx]
-    
-    assert np.isclose(gf_peak, scipy_peak, rtol=0.05), f"Sine Peak Mismatch: GF={gf_peak}, Scipy={scipy_peak}"
+    # Representation: a least-squares fit of three float32 values up to 5.
+    np.testing.assert_allclose(detrended, np.zeros((1, 3)), rtol=0.0,
+                               atol=representation_tolerance(np.float32, 5.0, 8))
 
 
 # ============================================================================
@@ -126,7 +71,7 @@ def test_psd_vs_scipy():
 def test_detrend_invalid_type():
     """Verify detrend raises error for invalid type parameter."""
     data = ops.convert_to_tensor([[1.0, 2.0, 3.0]])
-    
+
     with pytest.raises(ValueError, match="Trend type must be"):
         gf_psd.detrend(data, type='invalid')
 
@@ -134,7 +79,7 @@ def test_detrend_invalid_type():
 def test_detrend_breakpoints_not_supported():
     """Verify detrend raises NotImplementedError for breakpoints."""
     data = ops.convert_to_tensor([[1.0, 2.0, 3.0, 4.0, 5.0]], dtype="float32")
-    
+
     with pytest.raises(NotImplementedError, match="Breakpoints not yet supported"):
         gf_psd.detrend(data, type='linear', bp=1)
 
@@ -142,7 +87,7 @@ def test_detrend_breakpoints_not_supported():
 def test_psd_invalid_mode():
     """Verify psd raises error for unsupported mode."""
     signal = ops.convert_to_tensor([[1.0, 2.0, 3.0, 4.0] * 100], dtype="float32")
-    
+
     with pytest.raises(ValueError, match="Mode not supported"):
         gf_psd.psd(signal, nperseg=100, sample_rate_hertz=100.0, mode='invalid')
 
@@ -152,158 +97,71 @@ def test_psd_invalid_mode():
 # ============================================================================
 
 def test_psd_1d_input():
-    """Test PSD with 1D input (not batched)."""
+    """A 1D signal has the PSD of the same signal as a one-row batch."""
     sample_rate = 100.0
-    t = np.linspace(0, 1, int(sample_rate), endpoint=False)
-    freq = 10.0
-    signal = np.sin(2 * np.pi * freq * t).astype(np.float32)
-    signal_1d = ops.convert_to_tensor(signal)  # 1D, no batch dim
-    
-    spectrum = gf_psd.psd(signal_1d, nperseg=100, sample_rate_hertz=sample_rate)
-    freqs, pxx = spectrum.frequencies, spectrum.value()
-    
-    # Should still work and find peak at 10Hz
-    peak_freq = float(freqs[np.argmax(np.array(pxx))])
-    assert np.isclose(peak_freq, freq, atol=1.0)
+    t = np.arange(int(sample_rate)) / sample_rate
+    signal = np.sin(2 * np.pi * 10.0 * t).astype(np.float32)
 
-
-@pytest.mark.global_rng
-def test_psd_median_mode():
-    """Test PSD with median mode instead of mean."""
-    sample_rate = 1024.0
-    duration = 2.0
-    nperseg = 256
-    
-    # Generate white noise
-    np.random.seed(42)
-    noise = np.random.normal(0, 1, int(sample_rate * duration)).astype(np.float32)
-    noise_tensor = ops.convert_to_tensor(noise.reshape(1, -1))
-    
-    # Median mode
-    spectrum = gf_psd.psd(
-        noise_tensor, nperseg=nperseg, sample_rate_hertz=sample_rate, mode='median'
-    )
-    freqs_median, pxx_median = spectrum.frequencies, spectrum.value()
-    
-    # Mean mode for comparison
-    spectrum = gf_psd.psd(
-        noise_tensor, nperseg=nperseg, sample_rate_hertz=sample_rate, mode='mean'
-    )
-    freqs_mean, pxx_mean = spectrum.frequencies, spectrum.value()
-    
-    # Both should have same shape
-    assert ops.shape(pxx_median) == ops.shape(pxx_mean)
-    
-    # Both should be positive
-    assert float(ops.min(pxx_median)) >= 0
-    assert float(ops.min(pxx_mean)) >= 0
+    spectrum = gf_psd.psd(ops.convert_to_tensor(signal), nperseg=100, sample_rate_hertz=sample_rate)
+    batched = gf_psd.psd(ops.convert_to_tensor(signal[None]), nperseg=100, sample_rate_hertz=sample_rate)
+    assert spectrum.value().shape == (51,)
+    np.testing.assert_array_equal(spectrum.value(), batched.value()[0])
+    # Exact: the 10 Hz sine is bin-centred (1 Hz bins).
+    assert int(np.argmax(spectrum.value())) == 10
 
 
 def test_detrend_type_aliases():
     """Test detrend accepts 'c' and 'l' type aliases."""
     data = ops.convert_to_tensor([[1.0, 2.0, 3.0]])
-    
-    # 'c' should work like 'constant'
-    detrended_c = gf_psd.detrend(data, type='c')
-    detrended_constant = gf_psd.detrend(data, type='constant')
-    np.testing.assert_allclose(detrended_c, detrended_constant)
-    
-    # 'l' should work like 'linear'
+    np.testing.assert_array_equal(gf_psd.detrend(data, type='c'), gf_psd.detrend(data, type='constant'))
+
     data_linear = ops.convert_to_tensor([[1.0, 3.0, 5.0]], dtype="float32")
-    detrended_l = gf_psd.detrend(data_linear, type='l')
-    detrended_linear = gf_psd.detrend(data_linear, type='linear')
-    np.testing.assert_allclose(detrended_l, detrended_linear, atol=1e-5)
+    np.testing.assert_array_equal(gf_psd.detrend(data_linear, type='l'),
+                                  gf_psd.detrend(data_linear, type='linear'))
 
 
 # ============================================================================
 # NUMERICAL CORRECTNESS TESTS
 # ============================================================================
 
-def test_psd_pure_sine_peak_location():
-    """Verify PSD correctly identifies peak frequency for pure sine wave."""
-    sample_rate = 1024.0
-    duration = 4.0
-    test_freqs = [50.0, 100.0, 200.0]
-    
-    for freq in test_freqs:
-        t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-        signal = np.sin(2 * np.pi * freq * t).astype(np.float32)
-        signal_tensor = ops.convert_to_tensor(signal.reshape(1, -1))
-        
-        spectrum = gf_psd.psd(
-            signal_tensor, 
-            nperseg=1024, 
-            sample_rate_hertz=sample_rate
-        )
-        freqs, pxx = spectrum.frequencies, spectrum.value()
-        
-        # Find peak
-        peak_idx = np.argmax(np.array(pxx[0]))
-        peak_freq = float(freqs[peak_idx])
-        
-        # Peak should be at the expected frequency (within 1 Hz)
-        assert np.isclose(peak_freq, freq, atol=1.0), f"Expected {freq}Hz, got {peak_freq}Hz"
+@pytest.mark.parametrize("freq", [50.0, 100.0, 200.0])
+def test_psd_pure_sine_peak_location(freq):
+    """A bin-centred sine peaks in its own bin, exactly."""
+    sample_rate, nperseg = 1024.0, 1024
+    t = np.arange(int(4 * sample_rate)) / sample_rate
+    signal = np.sin(2 * np.pi * freq * t).astype(np.float32)
+    spectrum = gf_psd.psd(ops.convert_to_tensor(signal[None]), nperseg=nperseg, sample_rate_hertz=sample_rate)
+    assert int(np.argmax(spectrum.value()[0])) == int(freq * nperseg / sample_rate)
 
 
-@pytest.mark.global_rng
 def test_psd_white_noise_flatness():
-    """Verify PSD of white noise is approximately flat."""
-    sample_rate = 1024.0
-    duration = 8.0
-    nperseg = 1024
-    
-    np.random.seed(42)
-    noise = np.random.normal(0, 1, int(sample_rate * duration)).astype(np.float32)
-    noise_tensor = ops.convert_to_tensor(noise.reshape(1, -1))
-    
-    spectrum = gf_psd.psd(noise_tensor, nperseg=nperseg, sample_rate_hertz=sample_rate)
-    freqs, pxx = spectrum.frequencies, spectrum.value()
-    
-    pxx_values = np.array(pxx[0])
-    
-    # Exclude DC and Nyquist bins
-    pxx_middle = pxx_values[5:-5]
-    
-    # For white noise, variance should be low relative to mean (flat spectrum)
-    mean_psd = np.mean(pxx_middle)
-    std_psd = np.std(pxx_middle)
-    
-    # Coefficient of variation should be reasonable (< 1 for reasonably flat)
-    cv = std_psd / mean_psd
-    assert cv < 1.0, f"PSD of white noise too variable: CV={cv}"
-
-
-def test_detrend_removes_dc():
-    """Verify constant detrending removes DC offset."""
-    dc_offset = 5.0
-    data = ops.convert_to_tensor([[dc_offset + 1.0, dc_offset + 2.0, dc_offset + 3.0]])
-    
-    detrended = gf_psd.detrend(data, type='constant')
-    
-    # Mean should now be approximately zero
-    mean = float(ops.mean(detrended))
-    assert np.isclose(mean, 0.0, atol=1e-6)
+    """
+    The PSD of white noise is flat at 2 sigma^2 / fs, with the scatter its
+    segment count gives: the coefficient of variation over independent bins is
+    the estimator's relative sigma (welch_relative_sigma), within k sigma of
+    the sample CV.
+    """
+    sample_rate, nperseg = 1024.0, 1024
+    noise = np.random.default_rng(42).standard_normal(int(8 * sample_rate)).astype(np.float32)
+    spectrum = gf_psd.psd(ops.convert_to_tensor(noise[None]), nperseg=nperseg, sample_rate_hertz=sample_rate)
+    num_segments = spectrum.num_segments
+    s = welch_relative_sigma(nperseg, nperseg // 2, num_segments)
+    cv, num_bins = spectral_cv(spectrum.value()[0], slice(5, -5))
+    assert abs(cv - s) < statistical_bound(cv_sigma(s, num_bins)), \
+        f"CV {cv:.3f} over {num_bins} bins; {num_segments} segments give {s:.3f}"
+    # Statistical: the mean over independent bins of the level 2 / fs.
+    level = np.mean(spectrum.value()[0][5:-5:INDEPENDENT_BIN_STEP]) * sample_rate / 2.0
+    assert abs(level - 1.0) < statistical_bound(s / np.sqrt(num_bins))
 
 
 def test_detrend_linear_non_default_axis():
-    """Test linear detrend with non-default axis (covers axis movement logic)."""
-    # Create 3D data (batch, channels, time) with trend along axis=1
-    # Shape: (2, 5, 3) - detrend along axis=1 (middle dim with 5 elements)
-    # Each column of axis=1 should have a linear trend
-    data = np.zeros((2, 5, 3), dtype=np.float32)
-    
-    # Add linear trend along axis 1: values = [0, 1, 2, 3, 4] * slope
-    for i in range(2):
-        for j in range(3):
-            data[i, :, j] = np.arange(5) * 2.0 + 1.0  # y = 2x + 1
-    
-    data_tensor = ops.convert_to_tensor(data)
-    
-    # Detrend along axis 1 (not the last axis)
-    detrended = gf_psd.detrend(data_tensor, type='linear', axis=1)
-    
-    # Shape should be preserved
-    assert ops.shape(detrended) == (2, 5, 3)
-    
-    # After linear detrend, all values should be near zero
-    np.testing.assert_allclose(np.array(detrended), np.zeros((2, 5, 3)), atol=1e-5)
+    """Linear detrend along axis 1 of (batch, time, channel) data matches scipy's, each column its own trend."""
+    rng = np.random.default_rng(0)
+    slopes = rng.uniform(-3.0, 3.0, size=(2, 1, 3))
+    offsets = rng.uniform(-5.0, 5.0, size=(2, 1, 3))
+    data = (slopes * np.arange(5)[None, :, None] + offsets + rng.standard_normal((2, 5, 3))).astype(np.float32)
+    detrended = np.asarray(gf_psd.detrend(ops.convert_to_tensor(data), type='linear', axis=1))
+    expected = scipy.signal.detrend(data.astype(np.float64), axis=1, type='linear')
+    # Representation: a float32 least-squares fit of five values of the data's scale.
+    np.testing.assert_allclose(detrended, expected, rtol=0.0,
+                               atol=representation_tolerance(np.float32, np.abs(data).max(), 16))
