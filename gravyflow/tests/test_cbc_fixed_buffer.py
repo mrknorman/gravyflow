@@ -154,12 +154,14 @@ def test_the_kept_window_matches_a_long_buffer(monkeypatch, approximant, mass_ra
     # hold every source's whole inspiral from F_MIN.
     inspiral = np.asarray(cbc.calc_duration_from_f_min(source["mass_1_msun"], source["mass_2_msun"], F_MIN))
     long_buffer = float(2.0 ** np.ceil(np.log2(max(4.0 * window, inspiral.max() + window / 2.0 + 2.0))))
+    kept_samples = int(window * SAMPLE_RATE)
     reference = cbc._generate_cbc_waveform_jit(
         num_waveforms=count,
         sample_rate_hertz=SAMPLE_RATE,
         duration_seconds=long_buffer,
         approximant=cbc.Approximant(approximant),
-        coalescence_time=long_buffer - window / 2.0,
+        # The merger on sample K // 2 of the K kept samples.
+        coalescence_time=long_buffer - (kept_samples - kept_samples // 2) / SAMPLE_RATE,
         min_frequency_hertz=f_min,
         **source,
     )[..., -int(window * SAMPLE_RATE):]

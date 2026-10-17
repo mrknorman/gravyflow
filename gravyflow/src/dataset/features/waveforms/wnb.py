@@ -8,8 +8,13 @@ from gravyflow.src.rng.legacy import warn_deprecated
 
 
 def time_axis(num_samples: int, sample_rate_hertz: float):
-    """Sample times in seconds, with t = 0 at sample num_samples / 2 (float32)."""
-    return (jnp.arange(num_samples, dtype="float32") - num_samples / 2.0) / sample_rate_hertz
+    """
+    Sample times in seconds, float32, with t = 0 on sample num_samples // 2.
+
+    t = 0 is always a sample, as in LAL's burst waveforms: of an odd-length
+    buffer it is the centre sample, never the point half a sample between two.
+    """
+    return (jnp.arange(num_samples, dtype="float32") - float(num_samples // 2)) / sample_rate_hertz
 
 
 def hann_envelope(t, duration_seconds):
@@ -68,7 +73,7 @@ def wnb(
     White noise bursts: band-limited Gaussian noise under a Hann envelope.
 
     Each polarisation is independent unit Gaussian noise, kept inside
-    |t| < duration / 2 of the buffer's centre (sample N / 2), filtered to the
+    |t| < duration / 2 of the buffer's centre (sample N // 2), filtered to the
     rfft bins whose frequencies lie in [min_frequency_hertz,
     max_frequency_hertz], and multiplied by a Hann envelope of full width
     ``duration_seconds`` centred on the same sample. Returns (num_waveforms, 2,

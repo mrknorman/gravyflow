@@ -153,13 +153,11 @@ def _sine_gaussian_shape_ratio(frequency_hertz=200.0, quality_factor=9.0, offset
 
 
 def _assert_sine_gaussian_shape_ratio(ratio, rtol=1e-3):
-    """``ratio`` is the sampled shape's hrss / hpeak. A generated buffer of odd
-    length puts the peak, at sample N / 2, half a sample off the grid, which
-    lowers the sampled hpeak; both placements are the source's measures."""
+    """``ratio`` is the sampled shape's hrss / hpeak, with the peak on a sample
+    (t = 0 is always a sample of the generated buffer, as in LAL)."""
     ratio = np.asarray(ratio, dtype=np.float64)
-    candidates = [_sine_gaussian_shape_ratio(offset_samples=o) for o in (0.0, 0.5)]
-    errors = [np.max(np.abs(ratio / c - 1.0)) for c in candidates]
-    assert min(errors) <= rtol, (ratio, candidates)
+    expected = _sine_gaussian_shape_ratio(offset_samples=0.0)
+    assert np.max(np.abs(ratio / expected - 1.0)) <= rtol, (ratio, expected)
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +193,28 @@ def test_hrss_and_hpeak_match_lal(quality_factor, frequency, eccentricity, phase
     assert hrss.shape == (1,) and hpeak.shape == (1,)
     np.testing.assert_allclose(hrss[0], hrss_lal, rtol=1e-3)
     np.testing.assert_allclose(hpeak[0], hpeak_lal, rtol=1e-3)
+
+
+@pytest.mark.parametrize("num_samples", [8192, 8193])
+def test_sine_gaussian_peaks_on_a_sample_as_lal(num_samples):
+    """t = 0 is a sample of every generated buffer, of odd length as of even, as
+    in LAL's burst waveforms: the peak is at sample N // 2, and the sampled
+    hpeak is LAL's, not cos(pi f / fs) of it (0.953 at 200 Hz and 2048 Hz)."""
+    frequency, quality_factor, hrss = 200.0, 9.0, 1e-21
+    generator = gf.SineGaussianGenerator(
+        frequency_hertz=frequency, quality_factor=quality_factor, amplitude=hrss,
+        phase_radians=0.0, polarization_eccentricity=1.0,
+    )
+    streams = gf.SeedTree(1).direct(0).sub(f"wave/{generator.stream_label}")
+    waveform, _ = generator.generate(1, FS, num_samples / FS, streams)
+    waveform = np.asarray(waveform, np.float64)
+    assert waveform.shape == (1, 2, num_samples)
+    assert np.argmax(np.abs(waveform[0, 0])) == num_samples // 2
+
+    hp, hc = lalsim.SimBurstSineGaussian(quality_factor, frequency, hrss, 1.0, 0.0, 1.0 / FS)
+    np.testing.assert_allclose(
+        np.asarray(gf.calculate_hpeak(waveform.astype(np.float32)))[0], _lal_hpeak(hp, hc), rtol=1e-4
+    )
 
 
 def test_scale_to_hrss_gives_physical_hrss_in_float32():

@@ -13,7 +13,8 @@ Generators:
 
 Conventions, shared by every generator here:
 - Each waveform's reference time, the time its ``get_signal_extent_seconds``
-  is measured from, is sample ``N / 2`` of the generated buffer (t = 0). It is
+  is measured from, is sample ``N // 2`` of the generated buffer (t = 0), so it
+  is always on a sample, as in LAL's burst waveforms. It is
   the envelope's centre for the sine-Gaussian, chirplet and periodic wave, and
   the start of the ringdown.
 - The burst generators (sine-Gaussian, chirplet, ringdown) return both

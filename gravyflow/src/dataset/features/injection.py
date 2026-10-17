@@ -1533,7 +1533,7 @@ class InjectionGenerator:
         total_duration = window_spec.total_onsource_duration_seconds
 
         # Placement. Each generator puts its waveforms' reference time (the
-        # peak, or a CBC's merger) at sample N / 2 of the buffer it
+        # peak, or a CBC's merger) at sample N // 2 of the buffer it
         # generates. The window kept from that buffer is chosen so that the
         # reference time lands at an offset from the onsource window's
         # centre drawn uniformly from the generator's placement range,
@@ -1591,15 +1591,16 @@ class InjectionGenerator:
                 streams.stream(f"inject/{label}/shift")
             )
 
-            # Slice so the reference sample, N_ext / 2, lands at
+            # Slice so the reference sample, N_ext // 2, lands at
             # target_length / 2 + offset of the kept window.
             extended_samples = waveforms.shape[-1]
+            reference_sample = extended_samples // 2
             target_length = int(total_duration * sample_rate_hertz)
             slice_starts = np.rint(
-                extended_samples / 2.0 - target_length / 2.0 - offsets * sample_rate_hertz
+                reference_sample - target_length / 2.0 - offsets * sample_rate_hertz
             )
             slice_starts = np.clip(slice_starts, 0, extended_samples - target_length)
-            shifts = extended_samples / 2.0 - slice_starts - target_length / 2.0
+            shifts = reference_sample - slice_starts - target_length / 2.0
             slice_starts = jnp.asarray(slice_starts, dtype="int32")
 
             def slice_one(w, s):

@@ -398,7 +398,9 @@ def _generate_cbc_window(
     **source
 ):
     """
-    CBC waveforms of ``window_seconds``, each with its merger at the window's centre.
+    CBC waveforms of ``window_seconds``, each with its merger at the window's
+    centre, sample K // 2 of its K samples (on a sample, as every generator's
+    reference time).
 
     The waveforms are generated on the fixed buffer of ``_cbc_buffer_seconds``
     and the last ``window_seconds`` are kept. Each starts at the higher of
@@ -407,17 +409,17 @@ def _generate_cbc_window(
     Returns an array of shape (num_waveforms, 2, int(window_seconds * sample_rate_hertz)).
     """
     buffer_seconds = _cbc_buffer_seconds(window_seconds)
+    num_samples_keep = int(window_seconds * sample_rate_hertz)
     waveforms = _generate_cbc_waveform_jit(
         num_waveforms=num_waveforms,
         sample_rate_hertz=sample_rate_hertz,
         duration_seconds=buffer_seconds,
         approximant=approximant,
         f_ref=float(f_ref),
-        coalescence_time=buffer_seconds - window_seconds / 2.0,
+        coalescence_time=buffer_seconds - (num_samples_keep - num_samples_keep // 2) / sample_rate_hertz,
         min_frequency_hertz=min_frequency_hertz,
         **source
     )
-    num_samples_keep = int(window_seconds * sample_rate_hertz)
     return waveforms[..., -num_samples_keep:]
 
 
