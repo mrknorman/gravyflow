@@ -252,9 +252,8 @@ class ReturnVariables(Enum):
     WaveformParameter and ScalingType) are NaN where generator g injected
     nothing into example b, except INJECTION_MASKS, which is 0 there.
 
-    GravyflowDataset checks every batch against this contract. ComposedDataset
-    is outside it for now and unchecked: its class labels are int32, and its
-    per-generator labels have rows only for the examples whose pool injected.
+    GravyflowDataset and ComposedDataset check every batch against this
+    contract; a composed dataset's generators G are every pool's.
     """
     # Core data outputs
     ONSOURCE = ReturnVariable(0, (BATCH, IFO, SAMPLES))
@@ -1543,7 +1542,8 @@ class InjectionGenerator:
         waveform_generators: List[WaveformGenerator],
         parameters_to_return: List = None,
         seed: int = None,
-        scale_factor: None = None
+        scale_factor: None = None,
+        scopes: Optional[List[str]] = None,
     ):
         """
         Randomness: ``generate(streams, ...)`` and
@@ -1551,8 +1551,11 @@ class InjectionGenerator:
         batch's streams: each generator's own draws under ``wave/{g}``, its
         placement from ``inject/{g}/shift``, its sky from ``sky/{g}`` and
         ``pol/{g}``, and its scaling targets from ``scale/{g}``, where {g} is
-        its ``name`` or "{index}:{class}". Nothing is drawn from state kept
-        between calls.
+        its ``name`` or "{index}:{class}", its index counted within its
+        scope. Each generator draws from its scope of the streams (``scopes``,
+        one per generator; default the streams themselves): a composed
+        dataset scopes each pool's generators to ``pool/{name}``. Nothing is
+        drawn from state kept between calls.
 
         Called directly, ``__call__`` iterates over batches k = 0, 1, ...;
         batch k is drawn from ``streams(k)``, which its
@@ -1577,11 +1580,18 @@ class InjectionGenerator:
         if seed is not None:
             warn_deprecated("InjectionGenerator(seed=)", "pass streams to generate()")
         self._tree = SeedTree(seed)
-        self.labels = [
-            generator.name or f"{index}:{type(generator).__name__}"
-            for index, generator in enumerate(self.waveform_generators)
-        ]
-        if len(set(self.labels)) != len(self.labels):
+        self.scopes = [""] * len(self.waveform_generators) if scopes is None else list(scopes)
+        if len(self.scopes) != len(self.waveform_generators):
+            raise ValueError(
+                f"{len(self.scopes)} scopes were given for {len(self.waveform_generators)} generators."
+            )
+        in_scope = {}
+        self.labels = []
+        for generator, scope in zip(self.waveform_generators, self.scopes):
+            index = in_scope.get(scope, 0)
+            in_scope[scope] = index + 1
+            self.labels.append(generator.name or f"{index}:{type(generator).__name__}")
+        if len(set(zip(self.scopes, self.labels))) != len(self.labels):
             raise ValueError(f"Waveform generator names must be unique, got {self.labels}.")
         self.sample_rate_hertz = gf.Defaults.sample_rate_hertz # Default
         
@@ -1616,6 +1626,10 @@ class InjectionGenerator:
     def streams(self, k: Optional[int] = None) -> BatchStreams:
         """The streams of the direct iterator's batch ``k`` (None: one direct batch)."""
         return self._tree.direct(k)
+
+    def _generator_streams(self, streams: BatchStreams, index: int) -> BatchStreams:
+        """Generator ``index``'s view of a batch's streams: its scope of them."""
+        return streams.sub(self.scopes[index]) if self.scopes[index] else streams
 
     def generate(
         self,
@@ -1674,7 +1688,10 @@ class InjectionGenerator:
         for generator in self.waveform_generators:
             max_signal_duration = max(max_signal_duration, generator.get_max_generated_duration())
 
-        for generator, label, (range_low, range_high) in zip(self.waveform_generators, self.labels, ranges):
+        for index, (generator, label, (range_low, range_high)) in enumerate(
+            zip(self.waveform_generators, self.labels, ranges)
+        ):
+            generator_streams = self._generator_streams(streams, index)
             max_abs_shift = int(max(abs(range_low), abs(range_high)) * sample_rate_hertz)
             extended_duration = max(total_duration, max_signal_duration) + extra_duration + 2.0 * max_abs_shift / sample_rate_hertz
 
@@ -1682,7 +1699,7 @@ class InjectionGenerator:
                 num_examples_per_batch,
                 sample_rate_hertz,
                 extended_duration,
-                streams.sub(f"wave/{label}")
+                generator_streams.sub(f"wave/{label}")
             )
             # Non-finite samples (a waveform model failing at some
             # parameters) are reported and count as no signal.
@@ -1704,7 +1721,7 @@ class InjectionGenerator:
             offsets = self._draw_offsets_seconds(
                 generator, params, range_low, range_high,
                 onsource_duration_seconds, num_examples_per_batch,
-                streams.stream(f"inject/{label}/shift")
+                generator_streams.stream(f"inject/{label}/shift")
             )
 
             # Slice so the reference sample, N_ext // 2, lands at
@@ -1949,8 +1966,9 @@ class InjectionGenerator:
             # Isotropic: right ascension uniform in [0, 2 pi), sin(declination)
             # uniform in [-1, 1), polarisation uniform in [0, pi) (it is
             # defined modulo pi).
-            sky_rng = streams.stream(f"sky/{label}")
-            pol_rng = streams.stream(f"pol/{label}")
+            generator_streams = self._generator_streams(streams, i)
+            sky_rng = generator_streams.stream(f"sky/{label}")
+            pol_rng = generator_streams.stream(f"pol/{label}")
             input_ra = given(WaveformParameters.RIGHT_ASCENSION_RADIANS)
             input_dec = given(WaveformParameters.DECLINATION_RADIANS)
             input_pol = given(WaveformParameters.POLARIZATION_RADIANS)
@@ -2009,7 +2027,7 @@ class InjectionGenerator:
                 indices = (first + np.arange(num_examples)) % len(scaling_dist)
                 target_val = np.asarray(scaling_dist)[indices]
             else:
-                target_val = scaling_dist.sample(num_examples, streams.stream(f"scale/{label}"))
+                target_val = scaling_dist.sample(num_examples, generator_streams.stream(f"scale/{label}"))
             target_val = ops.convert_to_tensor(target_val, dtype="float32")
             
             sample_rate = self.sample_rate_hertz

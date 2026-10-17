@@ -102,6 +102,15 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
 - `ds[k]` and `ds.epoch` take integers only; a float, bool or string was truncated to an integer batch.
 - `gf.project_wave` takes no seed and needs every sky angle; nothing is drawn there.
 - `Curriculum` has no progress counter: `current_epoch` is gone, and `at(epoch)` gives the distribution of an epoch.
+- A `gf.ComposedDataset` builds its batches as `gf.Dataset` does, so they meet the batch contract: example b is row b
+  of its pool's batch (it was the pool's next unused row, so a seed's batches have changed); `POOL_LABEL` and the
+  transient labels are float32, the transient labels per detector, with noise's (`DATA_LABEL` NOISE, -1 for the
+  types) for a pool of synthetic noise, which took the pool's label; `START_GPS_TIME` is NaN for synthetic noise; and
+  masks, injections and every label have a row per example, for every pool's generators. Given no `ifos`, it takes
+  the detectors its pools' sources share (it took L1).
+- An `IncoherentGenerator` labels each parameter with its components' common value, NaN where they differ (it gave
+  component 0's), and has one mask value per example; with it, `InjectionGenerator.generate` gives (G, B, I, 2, S)
+  injections, a coherent generator's repeated in each detector.
 - `Distribution.sample(n, rng)` returns an ndarray.
 - Splits are repartitioned by one `gf.SplitSpec` (`docs/acquisition.md`, section 2): GPS time is cut into absolute
   8192 s blocks from GPS 0, each hashed to test (10%), validate (10%) or train (80%), with 128 s between splits. Every

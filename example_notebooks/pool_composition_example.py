@@ -22,6 +22,7 @@ This demonstrates key features:
 """
 
 import logging
+import numpy as np
 import gravyflow as gf
 from pathlib import Path
 
@@ -159,13 +160,14 @@ def main():
         for i in range(n_batches):
             inputs, outputs = dataset[i]
             
-            labels = outputs['POOL_LABEL']
+            # Labels are float32, like every output; the class ids are integers.
+            labels = np.asarray(outputs['POOL_LABEL']).astype(int)
             
             for label in labels:
-                label_counts[int(label)] += 1
+                label_counts[label] += 1
             
             logger.info(f"  Batch {i+1}: shape={inputs['WHITENED_ONSOURCE'].shape}, "
-                       f"labels={list(labels)}")
+                       f"labels={labels.tolist()}")
         
         total = sum(label_counts.values())
         logger.info(f"\nLabel distribution across {n_batches} batches:")

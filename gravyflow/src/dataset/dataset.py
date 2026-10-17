@@ -22,7 +22,7 @@ from gravyflow.src.utils.tensor import (
 from gravyflow.src.utils.shapes import BatchContract
 from gravyflow.src.dataset.config import Defaults, ignore_scale_factor
 from gravyflow.src.dataset.noise.noise import index_addressed, obtainer_batcher
-from gravyflow.src.dataset.features.injection import check_scaling_matches_noise
+from gravyflow.src.dataset.features.injection import InjectionGenerator, check_scaling_matches_noise
 from gravyflow.src.rng import BatchStreams, SeedTree, check_coordinate, check_name, check_split
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
@@ -638,13 +638,15 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                 glitch_type = batch_data.get(gf.ReturnVariables.GLITCH_TYPE)
                 source_type = batch_data.get(gf.ReturnVariables.SOURCE_TYPE)
                 data_label = batch_data.get(gf.ReturnVariables.DATA_LABEL)
+                # A composed dataset's noise names each example's pool.
+                pool_label = batch_data.get(gf.ReturnVariables.POOL_LABEL)
             elif len(batch_data) == 4:
                 onsource, offsource, gps_times, feature_labels = batch_data
-                glitch_type, source_type, data_label = None, None, None
+                glitch_type, source_type, data_label, pool_label = None, None, None, None
             else:
                 onsource, offsource, gps_times = batch_data
                 feature_labels = None
-                glitch_type, source_type, data_label = None, None, None
+                glitch_type, source_type, data_label, pool_label = None, None, None, None
         except Exception as e:
             logger.info(f"Noise generation failed: {e}\nTraceback: {traceback.format_exc()}")
             raise Exception(f"Noise generation failed: {e}")
@@ -698,7 +700,8 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             feature_labels=self._process_transient_label(feature_labels),
             glitch_type=self._process_transient_label(glitch_type),
             source_type=self._process_transient_label(source_type),
-            data_label=self._process_transient_label(data_label)
+            data_label=self._process_transient_label(data_label),
+            pool_label=self._process_transient_label(pool_label),
         )
         self.batch_contract.check(
             (self.input_variables, self.output_variables), input_dict, output_dict
@@ -805,7 +808,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
 
     @staticmethod
     def _process_transient_label(label):
-        """A transient label (class ids per detector) as float32, like every label."""
+        """A class label (a transient's ids per detector, a pool's) as float32, like every label."""
         return None if label is None else ops.cast(label, "float32")
 
     def _batch_labels(self, labels, mask):
@@ -829,21 +832,9 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                     ops.full(self.batch_contract.shape(key), np.nan, dtype="float32")
         return batch
 
-    def _create_output_dictionaries(self, *args, feature_labels=None, glitch_type=None, source_type=None, data_label=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        input_dict = create_variable_dictionary(
-            self.input_variables, *args, 
-            feature_labels=feature_labels,
-            glitch_type=glitch_type,
-            source_type=source_type,
-            data_label=data_label
-        )
-        output_dict = create_variable_dictionary(
-            self.output_variables, *args,
-            feature_labels=feature_labels,
-            glitch_type=glitch_type,
-            source_type=source_type,
-            data_label=data_label
-        )
+    def _create_output_dictionaries(self, *args, **labels) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        input_dict = create_variable_dictionary(self.input_variables, *args, **labels)
+        output_dict = create_variable_dictionary(self.output_variables, *args, **labels)
         
         # Remove keys with None values
         input_dict = {k: v for k, v in input_dict.items() if v is not None}
@@ -871,7 +862,8 @@ def create_variable_dictionary(
     feature_labels = None,
     glitch_type = None,
     source_type = None,
-    data_label = None
+    data_label = None,
+    pool_label = None
     ) -> Dict:
     """
     Create dictionary of requested return variables.
@@ -886,6 +878,7 @@ def create_variable_dictionary(
         glitch_type: GLITCH_TYPE labels (from TransientObtainer).
         source_type: SOURCE_TYPE labels (from TransientObtainer).
         data_label: DATA_LABEL values (from TransientObtainer).
+        pool_label: POOL_LABEL values (a ComposedDataset's pools).
     """
     from keras import ops
     
@@ -904,6 +897,7 @@ def create_variable_dictionary(
         gf.ReturnVariables.GLITCH_TYPE: glitch_type,
         gf.ReturnVariables.SOURCE_TYPE: source_type,
         gf.ReturnVariables.DATA_LABEL: data_label,
+        gf.ReturnVariables.POOL_LABEL: pool_label,
     }
 
     # Add WaveformParameters from injection_parameters
@@ -932,18 +926,66 @@ data = GravyflowDataset
 # COMPOSED DATASET
 # =============================================================================
 
-class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
+def _noise_defaults() -> Dict:
     """
-    A dataset composed of multiple FeaturePools with different probabilities and labels.
+    What an example carries in a composed batch where its pool's source gives
+    no such output (synthetic noise): no GPS time, and the labels a transient
+    obtainer gives a partner detector, noise with no type.
+    """
+    return {
+        gf.ReturnVariables.START_GPS_TIME: (np.nan, np.float64),
+        gf.ReturnVariables.DATA_LABEL: (gf.DataLabel.NOISE.value, np.int32),
+        gf.ReturnVariables.SUB_TYPE: (-1, np.int32),
+        gf.ReturnVariables.GLITCH_TYPE: (-1, np.int32),
+        gf.ReturnVariables.SOURCE_TYPE: (-1, np.int32),
+    }
 
-    Randomness: as GravyflowDataset (see IndexedBatches). Each example's pool
-    is drawn from ``pool/assign``, and every draw of a pool sits under
-    ``pool/{name}/``, so pools never share a stream.
-    
-    Each pool can be a different data source (noise, glitches, events, injections)
-    with its own class label and sampling probability. Multiple pools can share
-    the same label for hierarchical classification.
-    
+
+class _PoolInjections(InjectionGenerator):
+    """
+    A composed dataset's injection layer: the generators of every pool, in
+    pool order, each drawing from its pool's streams (``pool/{name}/``) and
+    injecting only into the examples assigned to its pool. Elsewhere its
+    waveform is zero and its mask 0, so its labels there are NaN.
+    """
+
+    def __init__(self, pools, pool_of, generators, assignment, parameters_to_return):
+        super().__init__(
+            waveform_generators=generators,
+            parameters_to_return=parameters_to_return,
+            scopes=[f"pool/{pools[index].name}" for index in pool_of],
+        )
+        self._pool_of = np.asarray(pool_of, dtype=int)
+        self._assignment = assignment
+
+    def generate(self, streams, **window):
+        injections, masks, parameters = super().generate(streams, **window)
+        # (G, B): generator g's pool holds example b.
+        assigned = (self._pool_of[:, None] == self._assignment(streams)[None, :]).astype(np.float32)
+        rows = assigned.reshape(assigned.shape + (1,) * (len(ops.shape(injections)) - 2))
+        return injections * rows, masks * assigned, parameters
+
+
+class ComposedDataset(GravyflowDataset):
+    """
+    A dataset composed of FeaturePools, each a source of examples with its
+    own class label (POOL_LABEL) and sampling probability.
+
+    Each example's pool is drawn from the batch's ``pool/assign`` stream, and
+    example b is row b of its pool's batch. Every draw of a pool sits under
+    ``pool/{name}/``, so pools never share a stream, and a pool's injection
+    generators inject into its own examples only.
+
+    Otherwise a composed batch is a GravyflowDataset's, built by the same code
+    (see GravyflowDataset and IndexedBatches): one PSD per batch for scaling,
+    labels and whitening, and the batch contract, where the generators G are
+    every pool's, in pool order; a generator is absent (mask 0, labels NaN)
+    from the other pools' examples. Where a pool's source gives no GPS time or
+    transient labels (synthetic noise), its examples have NaN, DATA_LABEL
+    NOISE and -1 for the types, as a transient obtainer labels a partner
+    detector. With one pool, a composed dataset serves exactly what a
+    GravyflowDataset of seed ``gf.SeedTree(seed).sub(f"pool/{name}")`` does.
+
     Example:
         pools = [
             gf.FeaturePool(
@@ -966,7 +1008,7 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
                 injection_generators=[cbc_generator]
             ),
         ]
-        
+
         dataset = gf.ComposedDataset(
             pools=pools,
             sample_rate_hertz=2048.0,
@@ -976,7 +1018,7 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
             output_variables=[gf.ReturnVariables.POOL_LABEL]
         )
     """
-    
+
     def __init__(
         self,
         pools: List["gf.FeaturePool"],
@@ -993,13 +1035,12 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
         output_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         steps_per_epoch: int = 1000,
         group: str = None,
-        epoch_mode: Optional[EpochMode] = None
+        epoch_mode: Optional[EpochMode] = None,
+        spectral_config: Optional[SpectralConfig] = None,
     ):
         """
-        Initialize the composed dataset.
-        
         Args:
-            pools: List of FeaturePool objects defining data sources and labels.
+            pools: the FeaturePools the examples are drawn from.
             seed: The root of the seed tree (an integer >= 0 or a gf.SeedTree).
             sample_rate_hertz: Sample rate in Hz.
             onsource_duration_seconds: Duration of onsource window.
@@ -1008,76 +1049,49 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
             scale_factor: Deprecated and ignored: the data are physical strain.
             num_examples_per_generation_batch: Batch size for waveform generation.
             num_examples_per_batch: Batch size for returned data.
+            ifos: the detectors of every pool; default the detectors the
+                pools' sources share, else L1.
             input_variables: Variables to include in input dict.
             output_variables: Variables to include in output dict.
             steps_per_epoch: Number of batches per epoch.
             group: Dataset split (train/val/test).
             epoch_mode: EpochMode.FRESH (default for group="train") or REPEAT.
+            spectral_config: as GravyflowDataset's.
         """
-        super().__init__(workers=0)
-
         from gravyflow.src.dataset.pools import PoolSampler
 
+        ignore_scale_factor(scale_factor)
+        # PyDataset's own initialiser: GravyflowDataset's builds from one obtainer.
+        keras.utils.PyDataset.__init__(self, workers=0)
         self._init_batches(seed, group, steps_per_epoch, epoch_mode)
 
-        # Set default values
         self.sample_rate_hertz = sample_rate_hertz if sample_rate_hertz is not None else Defaults.sample_rate_hertz
         self.onsource_duration_seconds = onsource_duration_seconds if onsource_duration_seconds is not None else Defaults.onsource_duration_seconds
         self.offsource_duration_seconds = offsource_duration_seconds if offsource_duration_seconds is not None else Defaults.offsource_duration_seconds
         self.crop_duration_seconds = crop_duration_seconds if crop_duration_seconds is not None else Defaults.crop_duration_seconds
-        ignore_scale_factor(scale_factor)
         self.num_examples_per_generation_batch = num_examples_per_generation_batch if num_examples_per_generation_batch is not None else Defaults.num_examples_per_generation_batch
         self.num_examples_per_batch = num_examples_per_batch if num_examples_per_batch is not None else Defaults.num_examples_per_batch
-        self.ifos = ifos if ifos is not None else [gf.IFO.L1]
-        
+        self.ifos = ensure_list(ifos) if ifos is not None else None
+        self.sampling_mode = gf.SamplingMode.RANDOM
         self.input_variables = input_variables if input_variables is not None else []
         self.output_variables = output_variables if output_variables is not None else []
-        self.variables_to_return = set(self.input_variables + self.output_variables)
-        
-        if not self.variables_to_return:
-            raise ValueError("No return variables requested. What's the point?")
-        
+        self.mask_history = None
+        self.spectral_config = spectral_config if spectral_config is not None else SpectralConfig()
+
         # The dataset's own copies: the caller's pools are never changed.
         self.pools = copy.deepcopy(pools)
         self.pool_sampler = PoolSampler(self.pools)
+        self._generator_pools = [
+            index for index, pool in enumerate(self.pools) for _ in pool.injection_generators or []
+        ]
+        self.waveform_generators = [
+            generator for pool in self.pools for generator in pool.injection_generators or []
+        ]
 
-        # Initialize generators for each pool
-        self._pool_generators = {}
-        self._pool_injection_generators = {}
-        self._initialize_pool_generators()
-    
-    def _initialize_pool_generators(self):
-        """Initialize data generators for each pool."""
-        for i, (pool, obtainer) in enumerate(zip(self.pools, self._obtainers())):
-            generator_kwargs = {
-                'sample_rate_hertz': self.sample_rate_hertz,
-                'onsource_duration_seconds': self.onsource_duration_seconds,
-                'crop_duration_seconds': self.crop_duration_seconds,
-                'offsource_duration_seconds': self.offsource_duration_seconds,
-                'num_examples_per_batch': self.num_examples_per_batch,
-                'ifos': self.ifos,
-                'sampling_mode': gf.SamplingMode.RANDOM,
-            }
-            self._pool_generators[i] = obtainer_batcher(
-                obtainer, self.tree.sub(f"pool/{pool.name}"), self.group, **generator_kwargs
-            )
-                        
-            # Initialize injection generator if pool has injections
-            if pool.has_injections:
-                waveform_parameters_to_return = [
-                    item for item in self.variables_to_return 
-                    if isinstance(item.value, gf.WaveformParameter)
-                ]
-                
-                # Set network for generators if not set
-                for gen in pool.injection_generators:
-                    if gen.network is None:
-                        gen.network = gf.Network(pool.noise_obtainer.ifos)
-                
-                self._pool_injection_generators[i] = gf.InjectionGenerator(
-                    waveform_generators=pool.injection_generators,
-                    parameters_to_return=waveform_parameters_to_return,
-                )
+        self._set_generator_networks()
+        self._validate_settings()
+        self.batch_contract = self._batch_contract()
+        self._create_generators()
 
     def _obtainers(self) -> List:
         return [
@@ -1085,180 +1099,87 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
             for pool in self.pools
         ]
 
-    def __getitem__(self, index) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    def _noise_ifos(self) -> List:
         """
-        Batch ``index`` of the current epoch, from multiple pools: a pure
-        function of its address when every pool's noise is (see IndexedBatches).
+        The detectors of every pool's noise: the dataset's ``ifos``, else the
+        detectors the pools' sources share, else L1.
         """
-        streams = self.streams(index)
-        pool_assignments = self.pool_sampler.get_pool_batch_sizes(
+        if self.ifos is not None:
+            return self.ifos
+        sources = {}
+        for obtainer in self._obtainers():
+            ifos = getattr(obtainer, "ifos", None)
+            if ifos is not None:
+                sources[tuple(_ifo_names(ifos))] = ensure_list(ifos)
+        if len(sources) > 1:
+            raise ValueError(
+                f"The pools' sources have different detectors, {sorted(sources)}: give the "
+                "dataset the ifos every pool should have."
+            )
+        return next(iter(sources.values()), [gf.IFO.L1])
+
+    def _validate_settings(self):
+        """GravyflowDataset's checks, with each pool's source checked as its noise."""
+        self.variables_to_return = set(self.input_variables + self.output_variables)
+        if not self.variables_to_return:
+            raise ValueError("No return variables requested. What's the point?")
+        for obtainer in self._obtainers():
+            validate_noise_settings(obtainer, self.variables_to_return)
+        self._validate_padding_settings()
+        self._validate_spectral_settings()
+
+    def _create_generators(self):
+        """Each pool's noise batcher, the mixture of them, and the pools' injection layer."""
+        window = {
+            'sample_rate_hertz': self.sample_rate_hertz,
+            'onsource_duration_seconds': self.onsource_duration_seconds,
+            'crop_duration_seconds': self.crop_duration_seconds,
+            'offsource_duration_seconds': self.offsource_duration_seconds,
+            'num_examples_per_batch': self.num_examples_per_batch,
+            'ifos': self._noise_ifos(),
+            'sampling_mode': self.sampling_mode,
+        }
+        self._pool_noise = [
+            obtainer_batcher(obtainer, self.tree.sub(f"pool/{pool.name}"), self.group, **window)
+            for pool, obtainer in zip(self.pools, self._obtainers())
+        ]
+        self.noise = self._mixed_noise
+        self.injection_generator = _PoolInjections(
+            self.pools, self._generator_pools, self.waveform_generators, self._assignment,
+            parameters_to_return=[
+                item for item in self.variables_to_return if isinstance(item.value, gf.WaveformParameter)
+            ],
+        )
+
+    def _assignment(self, streams: BatchStreams) -> np.ndarray:
+        """Each example's pool index, drawn from the batch's ``pool/assign`` stream."""
+        return self.pool_sampler.sample_pool_indices(
             self.num_examples_per_batch, streams.stream("pool/assign")
         )
-        
-        # Storage for batch data
-        batch_onsource = []
-        batch_offsource = []
-        batch_pool_labels = []
-        batch_gps_times = []
-        batch_glitch_type = []
-        batch_source_type = []
-        batch_data_label = []
-        batch_scaled_injections = []
-        batch_parameters = {}
-        
-        # Collect per-position data
-        position_data = {}
-        
-        for pool_idx, (count, positions) in pool_assignments.items():
-            pool = self.pools[pool_idx]
-            pool_streams = streams.sub(f"pool/{pool.name}")
 
-            # Generate data from this pool
-            try:
-                batch_data = self._pool_generators[pool_idx](pool_streams)
-                
-                # Handle dict format (new) or tuple format (legacy)
-                if isinstance(batch_data, dict):
-                    onsource = batch_data[gf.ReturnVariables.ONSOURCE]
-                    offsource = batch_data[gf.ReturnVariables.OFFSOURCE]
-                    gps_times = batch_data.get(gf.ReturnVariables.START_GPS_TIME)
-                    glitch_type = batch_data.get(gf.ReturnVariables.GLITCH_TYPE)
-                    source_type = batch_data.get(gf.ReturnVariables.SOURCE_TYPE)
-                    data_label = batch_data.get(gf.ReturnVariables.DATA_LABEL)
+    def _mixed_noise(self, streams: BatchStreams) -> Dict:
+        """
+        The batch's noise, as an obtainer's batch: example b is row b of its
+        pool's batch (drawn from ``pool/{name}/``), with its pool's label.
+        Only the pools the batch holds are read.
+        """
+        assignment = self._assignment(streams)
+        defaults = _noise_defaults()
+        mixed = {}
+        for index in np.unique(assignment):
+            pool = self.pools[index]
+            batch = self._pool_noise[index](streams.sub(f"pool/{pool.name}"))
+            rows = assignment == index
+            per_detector = tuple(np.shape(batch[gf.ReturnVariables.ONSOURCE])[:2])
+            for key in (gf.ReturnVariables.ONSOURCE, gf.ReturnVariables.OFFSOURCE, *defaults):
+                if key in batch:
+                    value = np.asarray(batch[key])
                 else:
-                    if len(batch_data) >= 3:
-                        onsource, offsource, gps_times = batch_data[:3]
-                    else:
-                        onsource, offsource = batch_data[:2]
-                        gps_times = None
-                    glitch_type, source_type, data_label = None, None, None
-            except Exception as e:
-                logger.error(f"Data generation failed for pool '{pool.name}': {e}")
-                raise
-            
-            # Apply injections if pool has them
-            scaled_injections = None
-            parameters = {}
-            if pool.has_injections and pool_idx in self._pool_injection_generators:
-                try:
-                    injection_gen = self._pool_injection_generators[pool_idx]
-                    injections, mask, parameters = injection_gen.generate(
-                        pool_streams,
-                        sample_rate_hertz=self.sample_rate_hertz,
-                        onsource_duration_seconds=self.onsource_duration_seconds,
-                        crop_duration_seconds=self.crop_duration_seconds,
-                        num_examples_per_batch=self.num_examples_per_batch,
-                    )
-                    onsource, scaled_injections, labels = injection_gen.add_injections_to_onsource(
-                        injections,
-                        mask,
-                        onsource,
-                        offsource,
-                        parameters_to_return=self.variables_to_return,
-                        onsource_duration_seconds=self.onsource_duration_seconds,
-                        injection_parameters=parameters,
-                        streams=pool_streams,
-                        epoch=self._schedule_epoch,
-                        steps_per_epoch=len(self),
-                    )
-                    # Batch-first, so each position takes its own example.
-                    parameters = {key: _batch_first(value) for key, value in labels.items()}
-                except Exception as e:
-                    logger.error(f"Injection generation failed for pool '{pool.name}': {e}")
-                    raise
-            
-            # Map data to positions
-            for local_idx, global_pos in enumerate(positions):
-                if local_idx < ops.shape(onsource)[0]:
-                    position_data[global_pos] = {
-                        'onsource': onsource[local_idx],
-                        'offsource': offsource[local_idx],
-                        'pool_label': pool.label,
-                        'gps_time': gps_times[local_idx] if gps_times is not None else -1.0,
-                        'glitch_type': glitch_type[local_idx] if glitch_type is not None else -1,
-                        'source_type': source_type[local_idx] if source_type is not None else -1,
-                        'data_label': data_label[local_idx] if data_label is not None else pool.label,
-                        'scaled_injections': scaled_injections[..., local_idx, :, :] if scaled_injections is not None else None,
-                        'parameters': {k: v[local_idx] if ops.is_tensor(v) else v for k, v in parameters.items()}
-                    }
-        
-        # Assemble final batch in order
-        for pos in range(self.num_examples_per_batch):
-            if pos in position_data:
-                data = position_data[pos]
-                batch_onsource.append(data['onsource'])
-                batch_offsource.append(data['offsource'])
-                batch_pool_labels.append(data['pool_label'])
-                batch_gps_times.append(data['gps_time'])
-                batch_glitch_type.append(data['glitch_type'])
-                batch_source_type.append(data['source_type'])
-                batch_data_label.append(data['data_label'])
-                if data['scaled_injections'] is not None:
-                    batch_scaled_injections.append(data['scaled_injections'])
-                for k, v in data['parameters'].items():
-                    if k not in batch_parameters:
-                        batch_parameters[k] = []
-                    batch_parameters[k].append(v)
-        
-        # Stack into tensors
-        onsource = ops.stack(batch_onsource, axis=0)
-        offsource = ops.stack(batch_offsource, axis=0)
-        pool_labels = ops.convert_to_tensor(batch_pool_labels, dtype="int32")
-        gps_times = as_gps_times(batch_gps_times)
-        glitch_type = ops.convert_to_tensor(batch_glitch_type, dtype="int32")
-        source_type = ops.convert_to_tensor(batch_source_type, dtype="int32")
-        data_label = ops.convert_to_tensor(batch_data_label, dtype="int32")
-        
-        scaled_injections = None
-        if batch_scaled_injections:
-            try:
-                scaled_injections = ops.stack(batch_scaled_injections, axis=0)
-            except:
-                scaled_injections = None
-        
-        # Stack parameters
-        for k, v in batch_parameters.items():
-            try:
-                batch_parameters[k] = ops.stack(v, axis=0)
-            except:
-                pass
-        
-        # Process data (whitening, etc.)
-        whitened_onsource = None
-        if gf.ReturnVariables.WHITENED_ONSOURCE in self.variables_to_return:
-            whitened_onsource = whiten(onsource, offsource, self.sample_rate_hertz)
-            whitened_onsource = gf.crop_samples(
-                whitened_onsource,
-                self.onsource_duration_seconds,
-                self.sample_rate_hertz
-            )
-            # float32, scrubbed before any cast (float16 overflowed to inf, then 0).
-            whitened_onsource = gf.replace_nan_and_inf_with_zero(
-                ops.cast(whitened_onsource, "float32"), gf.ReturnVariables.WHITENED_ONSOURCE.name
-            )
-        
-        # Build return dictionaries
-        operations = {
-            gf.ReturnVariables.ONSOURCE: gf.crop_samples(onsource, self.onsource_duration_seconds, self.sample_rate_hertz) if gf.ReturnVariables.ONSOURCE in self.variables_to_return else None,
-            gf.ReturnVariables.WHITENED_ONSOURCE: whitened_onsource,
-            gf.ReturnVariables.OFFSOURCE: offsource if gf.ReturnVariables.OFFSOURCE in self.variables_to_return else None,
-            gf.ReturnVariables.START_GPS_TIME: gps_times if gf.ReturnVariables.START_GPS_TIME in self.variables_to_return else None,
-            gf.ReturnVariables.POOL_LABEL: pool_labels,
-            gf.ReturnVariables.GLITCH_TYPE: glitch_type if gf.ReturnVariables.GLITCH_TYPE in self.variables_to_return else None,
-            gf.ReturnVariables.SOURCE_TYPE: source_type if gf.ReturnVariables.SOURCE_TYPE in self.variables_to_return else None,
-            gf.ReturnVariables.DATA_LABEL: data_label if gf.ReturnVariables.DATA_LABEL in self.variables_to_return else None,
-        }
-        
-        # Add waveform parameters
-        operations.update(batch_parameters)
-        
-        input_dict = {
-            key.name: operations[key] for key in self.input_variables
-            if key in operations and operations[key] is not None
-        }
-        output_dict = {
-            key.name: operations[key] for key in self.output_variables
-            if key in operations and operations[key] is not None
-        }
-        
-        return input_dict, output_dict
+                    fill, dtype = defaults[key]
+                    value = np.full(per_detector, fill, dtype=dtype)
+                if key not in mixed:
+                    mixed[key] = np.empty((len(assignment),) + value.shape[1:], dtype=value.dtype)
+                mixed[key][rows] = value[rows]
+        labels = np.array([pool.label for pool in self.pools], dtype=np.float32)
+        mixed[gf.ReturnVariables.POOL_LABEL] = labels[assignment]
+        return mixed
