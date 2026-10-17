@@ -56,7 +56,8 @@ def IFODataObtainer(
         segment_order: How to order segments (RANDOM, CHRONOLOGICAL, SHORTEST_FIRST)
         max_segment_duration_seconds: Maximum segment length
         saturation: Oversampling factor for random sampling
-        overrides: Dictionary of attribute overrides
+        overrides: One span's observing-run attributes (start_gps_times, end_gps_times,
+            state_flags), each replacing the runs' values
         event_types: Filter events by type (for TRANSIENT mode)
         logging_level: Logging verbosity
         augmentations: Augmentations a dataset applies to its training split only, per

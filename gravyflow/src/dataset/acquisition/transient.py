@@ -213,9 +213,6 @@ class TransientDataObtainer(BaseDataObtainer):
             "rejections": dict(self._rejections),
         }
 
-    def reset_acquisition_stats(self) -> None:
-        self._rejections = Counter()
-
     def _own_detectors(self, record: TransientSegment, ifos: List[gf.IFO]) -> List[gf.IFO]:
         """
         The requested detectors ``record`` is read on at its own time: those it was

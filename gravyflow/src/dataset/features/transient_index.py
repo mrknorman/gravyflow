@@ -244,32 +244,6 @@ class TransientIndex:
             records_iter = (r for r in records_iter if r.label == label)
         yield from records_iter
 
-    def to_segments(
-        self, 
-        padding_seconds: float,
-        num_ifos: int = 1
-    ) -> np.ndarray:
-        """
-        Convert records to segment array for existing download API.
-        
-        Args:
-            padding_seconds: Padding around center time.
-            num_ifos: Number of IFOs (for shape).
-            
-        Returns:
-            Array of shape (N, num_ifos, 2) with [start, end] bounds.
-        """
-        n = len(self.records)
-        segments = np.zeros((n, num_ifos, 2), dtype=np.float64)
-        
-        for i, record in enumerate(self.records):
-            start = record.transient_gps_time - padding_seconds
-            end = record.transient_gps_time + padding_seconds
-            segments[i, :, 0] = start
-            segments[i, :, 1] = end
-        
-        return segments
-    
     def filter_by_names(self, names: List[str]) -> "TransientIndex":
         """
         Filter to only segments matching event names.
@@ -295,65 +269,12 @@ class TransientIndex:
         new_index.excluded = dict(self.excluded)
         return new_index
     
-    def to_numpy_segments(self, num_ifos: int = 1) -> np.ndarray:
-        """
-        Lazy conversion to numpy format with caching.
-        
-        Returns numpy array format compatible with valid_segments API.
-        Cached to avoid recomputation on repeated calls.
-        
-        Args:
-            num_ifos: Number of IFOs to expand to.
-            
-        Returns:
-            Array of shape (N, num_ifos, 2) with [start_gps, end_gps] bounds.
-        """
-        # Check cache
-        cache_key = f"numpy_segments_{num_ifos}"
-        if hasattr(self, '_numpy_cache') and cache_key in self._numpy_cache:
-            return self._numpy_cache[cache_key]
-        
-        # Initialize cache if needed
-        if not hasattr(self, '_numpy_cache'):
-            self._numpy_cache = {}
-        
-        # Build numpy array
-        n = len(self)
-        segments_2d = np.zeros((n, 2), dtype=np.float64)
-        
-        for i in range(n):
-            seg = self[i]
-            segments_2d[i, 0] = seg.start_gps_time
-            segments_2d[i, 1] = seg.end_gps_time
-        
-        # Expand for IFOs: (N, 2) -> (N, 1, 2) -> (N, num_ifos, 2)
-        expanded = np.expand_dims(segments_2d, axis=1)
-        result = np.repeat(expanded, num_ifos, axis=1)
-        
-        # Cache
-        self._numpy_cache[cache_key] = result
-        return result
-    
-    def invalidate_cache(self) -> None:
-        """Invalidate cached numpy representations after modifications."""
-        if hasattr(self, '_numpy_cache'):
-            self._numpy_cache.clear()
-    
-    def to_gps_array(self) -> np.ndarray:
-        """Get array of all GPS times."""
-        return np.array([r.transient_gps_time for r in self.records], dtype=np.float64)
-    
     def get_group_counts(self) -> Dict[str, int]:
         """Get count of records per group."""
         from collections import Counter
         if not self._groups:
             return {}
         return dict(Counter(self._groups.values()))
-    
-    def get_kind_counts(self) -> Dict[str, int]:
-        """Get count of records per kind."""
-        from collections import Counter
-        return dict(Counter(str(r.kind) for r in self.records))
     
     # =========================================================================
     # Serialization

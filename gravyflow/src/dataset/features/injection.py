@@ -721,9 +721,6 @@ class WaveformParameters(Enum):
     def __lt__(self, other):
         return self.value.index < other.value.index
 
-def is_not_inherited(obj, attribute):
-    return attribute in obj.__dict__ or attribute in obj.__class__.__annotations__
-
 def get_support_bounds(value, name : str = "value"):
     """
     The (low, high) support of a float or gf.Distribution, as floats.
@@ -1382,29 +1379,6 @@ def _common_values(parameters_list):
         common[key] = np.where(np.all(values == values[0], axis=0), values[0], np.nan)
     return common
 
-def roll_vector_zero_padding(vector, shift):
-    """
-    Rolls a vector by shift, filling with zeros instead of wrapping.
-    vector: (Batch, Time) or (Batch, Channels, Time)
-    shift: (Batch,) or int
-    """
-    def roll_one(vec, s):
-        s = s.astype("int32")
-        length = vec.shape[-1]
-        indices = jnp.arange(length)
-        shifted_indices = indices - s
-        valid = (shifted_indices >= 0) & (shifted_indices < length)
-        clamped_indices = jnp.clip(shifted_indices, 0, length - 1)
-        # jnp.take is slightly different from ops.take?
-        # ops.take(vec, indices, axis=-1)
-        # jnp.take(vec, indices, axis=-1)
-        val = jnp.take(vec, clamped_indices, axis=-1)
-        if len(vec.shape) > 1:
-            valid = jnp.expand_dims(valid, 0)
-        return val * valid.astype(vec.dtype)
-
-    return jax.vmap(roll_one)(vector, shift)
-
 def generate_mask(vector):
     """
     Generates a mask where vector is non-zero.
@@ -1768,17 +1742,6 @@ class InjectionGenerator:
                 return jax.lax.dynamic_slice(w, start_indices, slice_sizes)
 
             waveforms = jax.vmap(slice_one)(waveforms, slice_starts)
-
-            # Update coalescence time
-            # The merger time in the generated waveform is `coalescence_time`.
-            # In the sliced waveform, the time axis is shifted.
-            # `t_sliced = t_gen - slice_start`.
-            # So `tc_sliced = tc_gen - slice_start`.
-            # slice_start is in samples. Convert to seconds.
-            if "coalescence_time" in params:
-                # params["coalescence_time"] is (Batch,)
-                # slice_starts is (Batch,)
-                params["coalescence_time"] -= slice_starts / sample_rate_hertz
 
             params["shift"] = jnp.asarray(shifts, dtype="float32")
             injections_list.append(waveforms)

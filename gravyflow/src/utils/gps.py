@@ -22,11 +22,6 @@ def key_to_gps(key: int) -> float:
     return key / 100.0
 
 
-def gps_array_to_keys(gps_times: np.ndarray) -> np.ndarray:
-    """Vectorized GPS to integer key conversion."""
-    return np.round(np.asarray(gps_times) * 100).astype(np.int64)
-
-
 def as_gps_times(gps_times) -> np.ndarray:
     """
     GPS times as a NumPy float64 array.

@@ -294,10 +294,6 @@ class MatchedFilter:
     def num_templates(self) -> int:
         return self.bank.num_templates
 
-    @property
-    def template_masses(self) -> Tuple[np.ndarray, np.ndarray]:
-        return self.bank.mass_1, self.bank.mass_2
-
     def generate_templates(self) -> np.ndarray:
         """
         The raw templates (T, template_samples), float32, unit peak: the plus

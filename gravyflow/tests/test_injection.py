@@ -209,19 +209,6 @@ def test_generate_mask():
     assert mask.dtype == "float32"
 
 
-def test_roll_vector_zero_padding():
-    """Each row shifts right by its own count, zero-filled, never wrapped."""
-    vector = np.array([[1.0, 2.0, 3.0, 4.0, 5.0], [1.0, 2.0, 3.0, 4.0, 5.0]], np.float32)
-    rolled = gf_inj.roll_vector_zero_padding(vector, np.array([2, -1]))
-    np.testing.assert_array_equal(rolled, [[0.0, 0.0, 1.0, 2.0, 3.0], [2.0, 3.0, 4.0, 5.0, 0.0]])
-
-    # (Batch, Channels, Time): every channel of a row by that row's shift.
-    channels = np.stack([vector, 10 * vector], axis=1)
-    rolled = gf_inj.roll_vector_zero_padding(channels, np.array([1, 0]))
-    np.testing.assert_array_equal(rolled[0], [[0, 1, 2, 3, 4], [0, 10, 20, 30, 40]])
-    np.testing.assert_array_equal(rolled[1], channels[1])
-
-
 def test_batch_injection_parameters():
     """Per-generator parameters stacked generator-first; a key a generator lacks is NaN for it."""
     assert gf_inj.batch_injection_parameters([]) == {}
@@ -264,14 +251,6 @@ def test_enumerations_order_by_index(enumeration):
     assert sorted(reversed(members)) == by_index
     assert (by_index[0] < by_index[1]) is True
     assert (by_index[1] < by_index[0]) is False
-
-
-def test_is_not_inherited():
-    """True for an attribute the instance or its own class declares."""
-    generator = wnb()
-    assert gf_inj.is_not_inherited(generator, "duration_seconds") is True
-    # A class variable of the base class is neither.
-    assert gf_inj.is_not_inherited(generator, "sky_attributes") is False
 
 
 # --------------------------------------------------------------------------

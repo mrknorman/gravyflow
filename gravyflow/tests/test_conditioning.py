@@ -90,31 +90,6 @@ def test_pearson_correlation_logic():
                                atol=representation_tolerance(np.float32, 1.0, t.size - 2 * max_lag))
 
 
-def test_create_spectrogram_apply():
-    """Test CreateSpectrogram.apply() method (covers line 41)."""
-    # Create a simple signal
-    sample_rate = 100.0
-    duration = 4.0
-    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-    signal = np.sin(2 * np.pi * 10.0 * t).astype(np.float32)
-    signal = ops.convert_to_tensor(signal.reshape(1, -1))
-    
-    # CreateSpectrogram requires type_ argument from parent dataclass
-    spectrogram_creator = gf_cond.CreateSpectrogram(
-        type_=gf_cond.ConditioningMethods.SPECTROGRM
-    )
-    spectrogram_creator.num_frame_samples = 100
-    spectrogram_creator.num_step_samples = 50
-    spectrogram_creator.num_fft_samples = 100
-    
-    spec = spectrogram_creator.apply(signal)
-    
-    # Verify shape
-    # Frames: 1 + (400 - 100) // 50 = 7
-    # Freqs: 100 // 2 + 1 = 51
-    assert ops.shape(spec) == (1, 7, 51)
-
-
 def test_spectrogram_1d_input():
     """Test spectrogram with 1D input (covers line 75 and 103)."""
     # Create a 1D signal (no batch dimension)

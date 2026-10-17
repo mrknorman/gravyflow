@@ -15,7 +15,7 @@ from keras import ops
 import gravyflow as gf
 from gravyflow.src.dataset import acquisition as gf_acq
 from gravyflow.src.dataset.acquisition.base import label_kinds
-from gravyflow.src.dataset.acquisition.gwosc_data import DEFAULT_GWOSC_FLAGS, GWOSC_RUNS
+from gravyflow.src.dataset.acquisition.gwosc_data import DEFAULT_GWOSC_FLAGS, GWOSC_RUNS, coalesce_segments
 from gravyflow.src.dataset.acquisition.sources import SegmentStrain
 from gravyflow.tests.conftest import gwosc_serving
 
@@ -62,17 +62,6 @@ def obtainer():
 # CORE UTILITIES AND IFOData
 # =============================================================================
 
-def test_concatenate_batches_stacks_detectors():
-    """Each detector's (batch, 1, samples) block is stacked on axis 1, its start times beside it."""
-    first = np.arange(20, dtype=np.float32).reshape(2, 1, 10)
-    second = first + 100.0
-    onsource, offsource, starts = gf_acq.concatenate_batches(
-        [first, second], [first + 1000.0, second + 1000.0], [np.array([[1.0], [2.0]]), np.array([[3.0], [4.0]])])
-    np.testing.assert_array_equal(np.asarray(onsource), np.concatenate([first, second], axis=1))
-    np.testing.assert_array_equal(np.asarray(offsource), np.concatenate([first, second], axis=1) + 1000.0)
-    np.testing.assert_array_equal(starts, [[1.0, 3.0], [2.0, 4.0]])
-
-
 class TestIFOData:
 
     def test_a_bare_array_is_one_piece(self):
@@ -108,13 +97,14 @@ class TestIFODataObtainerInit:
         assert built.end_gps_times == [GWOSC_RUNS["O2"]["gps_end"], GWOSC_RUNS["O3b"]["gps_end"]]
         assert built.state_flags == [DEFAULT_GWOSC_FLAGS, DEFAULT_GWOSC_FLAGS]
 
-    def test_override_attributes_valid(self):
-        """Pins today's wrapping of an override in a list (see the open question on scalar overrides)."""
-        assert noise_obtainer(overrides={"saturation": 0.5}).saturation == [0.5]
+    def test_an_override_replaces_the_runs_with_one_span(self):
+        built = noise_obtainer(overrides={"start_gps_times": 1.0e9, "end_gps_times": 1.1e9})
+        assert built.start_gps_times == [1.0e9] and built.end_gps_times == [1.1e9]
 
-    def test_override_attributes_invalid_raises(self):
-        with pytest.raises(ValueError, match="Invalide override value"):
-            noise_obtainer(overrides={"nonexistent_attribute": 123})
+    @pytest.mark.parametrize("key", ["saturation", "nonexistent_attribute"])
+    def test_an_override_of_anything_but_a_run_attribute_is_refused(self, key):
+        with pytest.raises(ValueError, match=f"Override '{key}' is not an observing-run attribute"):
+            noise_obtainer(overrides={key: 0.5})
 
     def test_built_in_runs_are_gwoscs_bounds_and_default_flags(self):
         """O3 is GWOSC's O3a and O3b together; leap seconds are tested in test_public_sources."""
@@ -169,33 +159,6 @@ class TestVetoes:
             obtainer.veto_time_segments(np.array(segments, float), np.array(vetoes, float)), expected)
 
 
-class TestCompressSegments:
-
-    def test_overlapping_segments_merge(self, obtainer):
-        compressed = obtainer.compress_segments(np.array([[0, 10], [5, 15], [20, 30]]))
-        np.testing.assert_array_equal(compressed, [[0, 15], [20, 30]])
-
-    def test_empty_input(self, obtainer):
-        assert obtainer.compress_segments(np.empty((0, 2))).size == 0
-
-    @pytest.mark.parametrize("segments, expected", [
-        ([[0, 10], [5, 15], [10, 20]], [[0, 20]]),
-        ([[0, 50], [40, 120], [110, 200], [250, 300], [290, 400], [500, 520], [600, 800]],
-         [[0, 200], [250, 400], [500, 520], [600, 800]]),
-    ], ids=["chain_of_three", "chains"])
-    def test_a_chain_of_overlaps_merges_into_one(self, obtainer, segments, expected):
-        """Each segment overlaps the next: their union is one segment, none of it lost."""
-        np.testing.assert_array_equal(obtainer.compress_segments(np.array(segments, float)), expected)
-
-
-def test_calculate_bin_indices(obtainer):
-    """A segment's first bin is the floor of its start, its end bin the ceiling of its end."""
-    start_bins, end_bins = obtainer.calculate_bin_indices(
-        np.array([[100.0, 200.0], [300.0, 400.0], [550.0, 601.0]]), 100.0, 0.0)
-    np.testing.assert_array_equal(start_bins, [1, 3, 5])
-    np.testing.assert_array_equal(end_bins, [2, 4, 7])
-
-
 class TestPlanSampling:
 
     def test_short_pieces_are_dropped(self, obtainer):
@@ -238,10 +201,10 @@ class TestSegmentOrdering:
         np.testing.assert_array_equal(ordered, segments[[0, 2, 1]])  # 10, 20, 30 s in the first
 
     def test_order_segments_chronological(self, obtainer):
-        """CHRONOLOGICAL keeps the order given (see the open question on whether it should sort)."""
-        segments = np.array([[[100, 200]], [[0, 50]], [[300, 400]]])
+        """CHRONOLOGICAL sorts by time: by the first detector's piece, then the next."""
+        segments = np.array([[[100, 200], [0, 9]], [[0, 50], [5, 9]], [[300, 400], [0, 9]], [[0, 50], [1, 9]]])
         result = obtainer.order_segments(segments.copy(), gf.SegmentOrder.CHRONOLOGICAL, seed=42)
-        np.testing.assert_array_equal(result, segments)
+        np.testing.assert_array_equal(result, segments[[3, 1, 0, 2]])
 
 
 class TestCutSegments:
@@ -336,11 +299,11 @@ class TestSplits:
 
 
 class TestSegmentPipeline:
-    """Compress, cut at the grid, and share out: the segment arithmetic in sequence."""
+    """Coalesce, cut at the grid, and share out: the segment arithmetic in sequence."""
 
-    def test_compressed_segments_are_cut_at_the_grid(self, obtainer):
+    def test_coalesced_segments_are_cut_at_the_grid(self, obtainer):
         original = np.array([[0.0, 100.0], [50.0, 150.0], [200.0, 300.0], [250.0, 350.0], [400.0, 450.0]])
-        compressed = obtainer.compress_segments(original)
+        compressed = coalesce_segments(original)
         np.testing.assert_array_equal(compressed, [[0, 150], [200, 350], [400, 450]])
         np.testing.assert_array_equal(obtainer.cut_segments(compressed, 100.0, 0.0),
                                       [[0, 100], [100, 150], [200, 300], [300, 350], [400, 450]])

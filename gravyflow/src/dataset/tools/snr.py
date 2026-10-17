@@ -30,15 +30,6 @@ from gravyflow.src.utils.tensor import crop_samples, replace_nan_and_inf_with_ze
 from gravyflow.src.rng.legacy import warn_deprecated
 
 
-@jax.jit(static_argnames=["scalar"])
-def find_closest(
-        tensor,
-        scalar : float
-    ):
-    tensor = ops.convert_to_tensor(tensor)
-    return ops.argmin(ops.abs(tensor - scalar))
-
-
 def _spectrum_for(
         background,
         sample_rate_hertz: float,

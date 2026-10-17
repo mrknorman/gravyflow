@@ -35,11 +35,6 @@ def closed_form_snr(h, sample_rate, lower_frequency_hertz):
     return np.sqrt(4.0 * df * np.sum(power, axis=-1) / (2.0 / sample_rate))
 
 
-def test_find_closest():
-    tensor = ops.convert_to_tensor([1.0, 2.0, 5.0])
-    assert gf_snr.find_closest(tensor, 2.1) == 1
-
-
 def test_snr_theoretical_sine():
     """A sine of amplitude A in unit white noise has SNR A sqrt(T fs / 2)."""
     sample_rate, duration, freq = 1024.0, 64.0, 100.0
@@ -174,13 +169,3 @@ def test_scale_to_snr_gives_the_target_when_measured_again(case):
     # Representation: float32 rounding of the SNR's sum of N squares, twice (scale, measure).
     np.testing.assert_allclose(measured, expected,
                                rtol=representation_tolerance(np.float32, 1.0, 2 * np.sqrt(injection.shape[-1])))
-
-
-def test_find_closest_edge_cases():
-    """Test find_closest with various edge cases."""
-    tensor = ops.convert_to_tensor([1.0, 5.0, 10.0])
-    assert int(gf_snr.find_closest(tensor, 5.0)) == 1
-    assert int(gf_snr.find_closest(tensor, 0.5)) == 0
-    assert int(gf_snr.find_closest(tensor, 12.0)) == 2
-    # A tie goes to the first of the closest (argmin).
-    assert int(gf_snr.find_closest(tensor, 3.0)) == 0

@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 # Local imports:
 import gravyflow as gf
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
-from gravyflow.src.utils.gps import as_gps_times
 from gravyflow.src.utils.shapes import ShapeEnforcer
 from gravyflow.src.dataset.store import read as store_read
 from .gwosc_data import (
@@ -119,21 +118,6 @@ class Availability:
             f"The availability frozen for {[name for name, _ in self.detectors]} holds no "
             f"{ifo.name}: freeze it for every detector read (freeze_availability)."
         )
-
-
-def ifo_canonical_key(ifos) -> tuple:
-    """
-    Generate a canonical key for a list of IFOs.
-    
-    Creates a consistent, hashable representation for caching and comparison.
-    
-    Args:
-        ifos: List of IFO objects or IFO enum values
-        
-    Returns:
-        Tuple of sorted IFO names, e.g., ('H1', 'L1')
-    """
-    return tuple(sorted(ifo.name for ifo in ifos))
 
 
 # =============================================================================
@@ -439,15 +423,10 @@ def gather_windows(tensor_data, starts, num_onsource_samples: int, num_offsource
     return onsource, offsource
 
 
-def concatenate_batches(subarrays, background_chunks, start_times):
-    """
-    Concatenates batches of subarrays, background chunks, and start times.
-    """
-    stacked_subarrays = ops.concatenate(subarrays, axis=1)
-    stacked_background_chunks = ops.concatenate(background_chunks, axis=1)
-    stacked_start_times = np.concatenate([as_gps_times(times) for times in start_times], axis=1)
-
-    return stacked_subarrays, stacked_background_chunks, stacked_start_times
+def time_order(rows: np.ndarray) -> np.ndarray:
+    """The order that sorts ``rows`` ((M, I, 2) GPS pieces) by time: by each detector's piece in turn."""
+    rows = np.asarray(rows)
+    return np.lexsort(np.reshape(rows, (len(rows), int(np.prod(rows.shape[1:])))).T[::-1])
 
 
 # =============================================================================
@@ -709,18 +688,25 @@ class BaseDataObtainer(ABC):
             built = self._served_build
             yield batch
 
+    #: The observing-run attributes an override may set: each holds one value per run.
+    OVERRIDABLE_RUN_ATTRIBUTES = ("start_gps_times", "end_gps_times", "state_flags")
+
     def override_attributes(
         self,
         overrides : Dict
     ) -> None:
-        for key, value in overrides.items():    
-            if hasattr(self, key):
-                setattr(self, key, [value])
-            else:
+        """
+        Replace the observing runs' spans or flags with one span of ``overrides``'
+        values: each key is one of ``OVERRIDABLE_RUN_ATTRIBUTES``, set to a one-run
+        list. Any other key is refused by name.
+        """
+        for key, value in overrides.items():
+            if key not in self.OVERRIDABLE_RUN_ATTRIBUTES:
                 raise ValueError(
-                    f"Invalide override value {key} not attribute of "
-                    "IFODataObtainer"
+                    f"Override {key!r} is not an observing-run attribute; "
+                    f"overrides set one of {self.OVERRIDABLE_RUN_ATTRIBUTES}."
                 )
+            setattr(self, key, [value])
 
     def unpack_observing_runs(
         self,
@@ -958,10 +944,6 @@ class BaseDataObtainer(ABC):
             np.reshape(np.asarray(veto_segments, dtype=np.float64), (-1, 2)),
         )
 
-    def compress_segments(self, segments: np.ndarray) -> np.ndarray:
-        """The union of ``segments``: sorted, disjoint, merged where they overlap or touch."""
-        return coalesce_segments(segments)
-    
     def order_segments(
         self,
         valid_segments : np.ndarray,
@@ -980,7 +962,7 @@ class BaseDataObtainer(ABC):
                 ]
                 valid_segments = sort_by_duration(valid_segments)
             case SegmentOrder.CHRONOLOGICAL:
-                pass
+                valid_segments = valid_segments[time_order(valid_segments)]
             case _:
                 raise ValueError(
                     f"""

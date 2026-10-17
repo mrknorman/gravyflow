@@ -49,8 +49,6 @@ _MODULES = {
     "StrainUnavailable": "sources",
     # Utility functions
     "ensure_even": "base",
-    "ifo_canonical_key": "base",
-    "concatenate_batches": "base",
     # Classes
     "BaseDataObtainer": "base",
     "NoiseDataObtainer": "noise",
@@ -58,8 +56,6 @@ _MODULES = {
     "IFODataObtainer": "obtainer",
     # Segment classes
     "Segment": "segment",
-    "NoiseSegment": "segment",
-    "SegmentCollection": "segment",
     "TransientSegment": "transient_segment",
     # Augmentations
     "SignReversal": "augmentations",

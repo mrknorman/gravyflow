@@ -312,45 +312,6 @@ def project_wave(
 
     return shifted_waveoform
 
-def rotation_matrix_x(angle):
-    c = ops.cos(angle)
-    s = ops.sin(angle)
-
-    ones = ops.ones_like(c)
-    zeros = ops.zeros_like(c)
-
-    row1 = ops.stack([ones, zeros, zeros], axis=-1)
-    row2 = ops.stack([zeros, c, -s], axis=-1)
-    row3 = ops.stack([zeros, s, c], axis=-1)
-    
-    return ops.stack([row1, row2, row3], axis=-2)
-
-def rotation_matrix_y(angle):
-    c = ops.cos(angle)
-    s = ops.sin(angle)
-
-    ones = ops.ones_like(c)
-    zeros = ops.zeros_like(c)
-
-    row1 = ops.stack([c, zeros, -s], axis=-1)
-    row2 = ops.stack([zeros, ones, zeros], axis=-1)
-    row3 = ops.stack([s, zeros, c], axis=-1)
-
-    return ops.stack([row1, row2, row3], axis=-2)
-
-def rotation_matrix_z(angle):
-    c = ops.cos(angle)
-    s = ops.sin(angle)
-
-    ones = ops.ones_like(c)
-    zeros = ops.zeros_like(c)
-
-    row1 = ops.stack([c, s, zeros], axis=-1)
-    row2 = ops.stack([-s, c, zeros], axis=-1)
-    row3 = ops.stack([zeros, zeros, ones], axis=-1)
-
-    return ops.stack([row1, row2, row3], axis=-2)
-
 @dataclass
 class IFO_:
     """Data class to represent information about an Interferometer."""

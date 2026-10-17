@@ -1,51 +1,9 @@
-from dataclasses import dataclass
-from enum import Enum, auto
-
 import keras
 from keras import ops
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-@dataclass 
-class ConditioningMethod:
-    index : str
-    shape: tuple = (1,)
-    
-class ConditioningMethods(Enum):
-    WHITEN = ConditioningMethod(0)
-    ROLLING_PEARSON = ConditioningMethod(1)
-    SPECTROGRM = ConditioningMethod(2)
-    
-class DataStreams(Enum):
-    ONSOURCE = auto()
-    OFFSOURCE = auto()
-
-@dataclass
-class DataConditioner():
-    type_ : ConditioningMethods
-    data_stream : DataStreams = DataStreams.ONSOURCE
-    
-class DataWhitener(DataConditioner):
-    None
-    
-class PearsonCorrelator(DataConditioner):
-    None
-    
-class CreateSpectrogram(DataConditioner):
-    num_frame_samples : int = 256
-    num_step_samples : int = 128
-    num_fft_samples : int = 256
-    
-    def apply(self, timeseries):
-        
-        return spectrogram(
-            timeseries,
-            self.num_frame_samples,
-            self.num_step_samples,
-            self.num_fft_samples
-        )
-    
 # The smallest normal float32. XLA on CPU flushes anything below it to zero.
 FLOAT32_TINY = float(np.finfo(np.float32).tiny)
 

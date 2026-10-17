@@ -22,7 +22,6 @@ from pycbc.detector import _ground_detectors, add_detector_on_earth
 import lal
 
 import gravyflow as gf
-from gravyflow.src.dataset.conditioning import detector as detector_module
 from gravyflow.tests._helpers import representation_tolerance
 
 FLOAT32_EPS = float(np.finfo(np.float32).eps)
@@ -57,23 +56,6 @@ def isotropic_sky(rng, count):
 @pytest.fixture
 def network() -> gf.Network:
     return gf.Network(list(IFOS))
-
-
-def test_rotation_matrices():
-    angle = ops.convert_to_tensor([0.0, np.pi / 2.0])
-    # Representation: cos(fl(pi/2)) is at most |pi/2 - fl(pi/2)| < eps from 0.
-    tolerance = representation_tolerance(np.float32, 1.0, c=1)
-    expected = {
-        # Rows (1, 0, 0), (0, c, -s), (0, s, c) at c = 0, s = 1.
-        detector_module.rotation_matrix_x: [[1, 0, 0], [0, 0, -1], [0, 1, 0]],
-        detector_module.rotation_matrix_y: [[0, 0, -1], [0, 1, 0], [1, 0, 0]],
-        detector_module.rotation_matrix_z: [[0, 1, 0], [-1, 0, 0], [0, 0, 1]],
-    }
-    for rotation, at_right_angle in expected.items():
-        matrices = np.asarray(rotation(angle))
-        assert matrices.shape == (2, 3, 3)
-        np.testing.assert_allclose(matrices[0], np.eye(3), rtol=0, atol=tolerance)
-        np.testing.assert_allclose(matrices[1], at_right_angle, rtol=0, atol=tolerance)
 
 
 def test_network_locations_and_baselines_match_lal(network):

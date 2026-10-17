@@ -8,7 +8,6 @@ from bokeh.plotting import figure
 from bokeh.models import (ColumnDataSource, ColorBar, LogTicker, LinearColorMapper, 
                           HoverTool, BoxAnnotation, Span, Range1d, Label, CustomJSTickFormatter)
 from bokeh.palettes import Bright, Category10
-from bokeh.models import Div
 from bokeh.layouts import column, gridplot
 
 import gravyflow as gf
@@ -23,39 +22,6 @@ def gps_to_datetime(gps_time: float) -> str:
     dt = gps_epoch + timedelta(seconds=gps_time + leap_seconds)
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
-
-def create_info_panel(params: dict, height = 200) -> Div:
-    style = """
-        <style>
-            .centered-content {
-                display: flex;
-                flex-direction: column;
-                justify-content: center;
-                height: 100%;
-                font-family: Arial, sans-serif;
-                background-color: #f4f4f4;
-                padding: 10px;
-                border-radius: 5px;
-                border: 1px solid #ddd;
-
-                width: 190px;             /* Set the fixed width */
-                max-width: 190px;         /* Ensure it doesn't grow beyond this width */
-                min-width: 190px;         /* Ensure it doesn't shrink below this width */
-                overflow-wrap: break-word; /* Wrap overflowing text */
-            }
-            li {
-                margin-bottom: 5px;
-            }
-            strong {
-                color: #2c3e50;
-            }
-        </style>
-    """
-    html_content = "<div class='centered-content'><ul>" + "".join(
-        [f"<li><strong>{key}:</strong> {value}</li>" for key, value in params.items()]
-    ) + "</ul></div>"
-
-    return Div(text=style + html_content, width=190, height=height)
 
 def check_ndarrays_same_length(
         my_dict : Dict[str, Union[np.ndarray, object]]

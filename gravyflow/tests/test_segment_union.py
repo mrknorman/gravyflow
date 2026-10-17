@@ -9,7 +9,6 @@ sorted, and is disjoint with a gap between neighbours (touching intervals are me
 import numpy as np
 import pytest
 
-import gravyflow as gf
 from gravyflow.src.dataset.acquisition.gwosc_data import (
     coalesce_segments, intersect_segments, subtract_segments, within_segments,
 )
@@ -18,14 +17,6 @@ from gravyflow.src.dataset.features.glitch import overlaps_segments
 SPAN = 60
 MIDPOINTS = np.arange(SPAN) + 0.5
 TRIALS = 300
-
-
-def obtainer():
-    return gf.IFODataObtainer(
-        data_quality=gf.DataQuality.BEST,
-        data_labels=gf.DataLabel.NOISE,
-        observing_runs=gf.ObservingRun.O3,
-    )
 
 
 def random_segments(rng, most=8):
@@ -53,13 +44,11 @@ def trials(seed):
     return (rng for _ in range(TRIALS))
 
 
-@pytest.mark.parametrize("union", ["coalesce_segments", "compress_segments"])
-def test_the_union_is_preserved_sorted_and_disjoint(union):
-    union = coalesce_segments if union == "coalesce_segments" else obtainer().compress_segments
+def test_the_union_is_preserved_sorted_and_disjoint():
     for rng in trials(1):
         segments = random_segments(rng)
         rng.shuffle(segments)
-        assert_canonical(union(segments), covered(segments))
+        assert_canonical(coalesce_segments(segments), covered(segments))
 
 
 @pytest.mark.parametrize("segments, expected", [
@@ -71,7 +60,6 @@ def test_the_union_is_preserved_sorted_and_disjoint(union):
 ], ids=["chain_of_three", "chains", "touching", "contained"])
 def test_a_chain_merges_into_one_segment(segments, expected):
     """Each segment meets the next: their union is one segment, none of it lost."""
-    np.testing.assert_array_equal(obtainer().compress_segments(np.array(segments, float)), expected)
     np.testing.assert_array_equal(coalesce_segments(np.array(segments, float)), expected)
 
 

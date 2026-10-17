@@ -15,16 +15,31 @@ repository before it may need the changes below.
 - **The top level is a curated API**, listed in `docs/api.md`, and each name imports its module on first use. These
   left the top level; they are internal, importable from their modules under `gravyflow.src`:
   `estimate_psd` (`gf.psd` is the one public PSD), `PATH` (package paths are in `gravyflow.src.resources`),
-  `data` (use `gf.Dataset`), `expand_tensor`, `batch_tensor`, `ensure_even`, `ensure_list`, `ShapeContract`,
-  `ShapeEnforcer`, `explain_exit_code`, `calculate_fitness`, `roll_vector_zero_padding`, `generate_mask`,
-  `is_not_inherited`, `batch_injection_parameters`, `RENAMED_SKY_KEYS` and `generate_transient_cache_path`. These are
-  deleted: `get_current_repo`, `get_file_parent_path`, `transform_string`, `randomise_arguments` (it called a function
-  that did not exist), `get_element_shape`, `calculate_sample_counts`, `Axis_BIS` and `Axis_BI`.
+  `data` (use `gf.Dataset`), `ensure_even`, `ensure_list`, `ShapeContract`, `ShapeEnforcer`, `explain_exit_code`,
+  `calculate_fitness`, `generate_mask`, `batch_injection_parameters`, `RENAMED_SKY_KEYS` and
+  `generate_transient_cache_path`. These are deleted: `get_current_repo`, `get_file_parent_path`, `transform_string`,
+  `randomise_arguments` (it called a function that did not exist), `get_element_shape`, `calculate_sample_counts`,
+  `Axis_BIS`, `Axis_BI`, and, since nothing in GravyFlow used them, `expand_tensor`, `batch_tensor`,
+  `roll_vector_zero_padding` and `is_not_inherited`.
 - **The CUDA-cluster tooling moved to its own project, GravEvolve.** `gf.env`, `gf.setup_cuda`,
   `gf.find_available_GPUs` and `gf.get_tf_memory_usage` left the public API, with the GPU monitor script
   (`gravyflow/src/tools/gpu_checker.py`, which called two functions that did not exist). GravEvolve, built on
   GravyFlow, selects free GPUs and runs on CUDA clusters. `gf.get_gpu_memory_info` stays: `gf.Manager` places its
   processes by it. A `with gf.env():` block needs nothing in its place: GravyFlow runs on whatever devices JAX sees.
+- **Unused code is deleted** (none of it had a caller in GravyFlow): from `gravyflow.src.dataset.acquisition`,
+  `concatenate_batches`, `ifo_canonical_key`, `NoiseSegment`, `SegmentCollection` and the obtainers'
+  `compress_segments` (use `coalesce_segments` in `gravyflow.src.dataset.acquisition.gwosc_data`),
+  `calculate_bin_indices`, `get_segments_as_collection` and `reset_acquisition_stats`; `DataLabelSpec`; the
+  compressed-segment helpers; `TransientIndex.to_segments`, `to_numpy_segments`, `invalidate_cache`, `to_gps_array`
+  and `get_kind_counts`; `MatchedFilter.template_masses`; `Defaults.quantize_batch_size`, `quantize_sample_rate` and
+  their tiers; the rotation matrices; the conditioning classes (`DataConditioner` and its subclasses); the Gamma,
+  truncated-normal and beta-prime output layers and losses; and the tensor helpers `pad_if_odd`, `round_to_even`,
+  `pad_to_power_of_two`, `check_tensor_integrity` and `print_active_gpu_memory_info`.
+- **`SegmentOrder.CHRONOLOGICAL` sorts.** An obtainer's segments in that order are sorted by time, each detector's
+  piece in turn; they used to keep the order they were found in.
+- **An obtainer's `overrides` set observing-run attributes only** (`start_gps_times`, `end_gps_times`,
+  `state_flags`), each to one span. Any other key is refused by name: a scalar setting such as `saturation` used to be
+  wrapped in a list, which broke its first use.
 - **One CBC path.** `generate_cbc_waveform` (in `gravyflow.src.dataset.features.waveforms.cbc`) is deleted, with
   `Defaults.quantize_duration` and `Defaults.STANDARD_DURATIONS`: it rounded the duration up to a tier and kept the
   last samples, so between tiers its merger moved or was cut off. `gf.CBCGenerator` is the one CBC path; its merger is

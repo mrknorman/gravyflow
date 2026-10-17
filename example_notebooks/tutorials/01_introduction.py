@@ -210,9 +210,8 @@ gravyflow/
     ├── noise.py             # NoiseDataObtainer (NOISE mode)
     ├── transient.py         # TransientDataObtainer (TRANSIENT mode)
     ├── augmentations.py     # SignReversal, TimeReversal, etc.
-    ├── segment.py           # Segment, NoiseSegment, SegmentCollection
-    ├── transient_segment.py # TransientSegment (event/glitch metadata)
-    └── cache.py             # Caching utilities
+    ├── segment.py           # Segment, the base of TransientSegment
+    └── transient_segment.py # TransientSegment (event/glitch metadata)
 
 Key imports available directly from gravyflow:
 """)

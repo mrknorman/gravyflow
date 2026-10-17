@@ -23,13 +23,10 @@ from keras import layers
 from keras import losses
 from keras.layers import Layer
 import jax.numpy as jnp
-import jax.scipy.stats as jstats
-from jax import lax
 
 import gravyflow as gf
+from gravyflow.src.model.genetics import search_stream
 
-def gamma_log_prob(x, concentration, rate):
-    return jstats.gamma.logpdf(x, a=concentration, scale=1/rate)
 
 def folded_normal_log_prob(x, loc, scale):
     # Folded normal distribution: |Y| where Y ~ N(loc, scale)
@@ -48,62 +45,11 @@ def folded_normal_log_prob(x, loc, scale):
     
     return log_sum - log_sigma - log_sqrt_2pi
 
-def trunc_normal_log_prob(x, loc, scale, low, high):
-    return jstats.truncnorm.logpdf(x, a=(low - loc) / scale, b=(high - loc) / scale, loc=loc, scale=scale)
-
-def beta_prime_log_prob(x, alpha, beta):
-    # Beta prime: f(x) = x^(alpha-1) * (1+x)^(-alpha-beta) / B(alpha, beta)
-    # log f(x) = (alpha-1)log(x) - (alpha+beta)log(1+x) - log B(alpha, beta)
-    # log B(alpha, beta) = lgamma(alpha) + lgamma(beta) - lgamma(alpha+beta)
-    
-    log_prob = (alpha - 1) * jnp.log(x) - (alpha + beta) * jnp.log(1 + x)
-    log_beta_func = lax.lgamma(alpha) + lax.lgamma(beta) - lax.lgamma(alpha + beta)
-    return log_prob - log_beta_func
-
-@keras.saving.register_keras_serializable(package="gravyflow")
-def gamma_nll(y_true, y_pred):
-    alpha, beta = ops.split(y_pred, 2, axis=-1)
-    return -gamma_log_prob(y_true, alpha, beta)
-
 @keras.saving.register_keras_serializable(package="gravyflow")
 def folded_normal_nll(y_true, y_pred):
     loc, scale = ops.split(y_pred, 2, axis=-1)
     return -folded_normal_log_prob(y_true, loc, scale)
 
-@keras.saving.register_keras_serializable(package="gravyflow")
-def trunc_normal_nll(y_true, y_pred, low=0.0, high=100.0):
-    loc, scale = ops.split(y_pred, 2, axis=-1)
-    return -trunc_normal_log_prob(y_true, loc, scale, low, high)
-
-@keras.saving.register_keras_serializable(package="gravyflow")
-def beta_prime_nll(y_true, y_pred):
-    alpha, beta = ops.split(y_pred, 2, axis=-1)
-    return -beta_prime_log_prob(y_true, alpha, beta)
-
-
-
-import gravyflow as gf
-from gravyflow.src.model.genetics import search_stream
-
-
-@keras.saving.register_keras_serializable(package="gravyflow")
-class IndependentGamma(layers.Layer):
-    """An independent Gamma Keras layer that outputs parameters."""
-
-    def __init__(self, event_shape=(), **kwargs):
-        super().__init__(**kwargs)
-        self.event_shape = event_shape
-
-    def call(self, inputs):
-        alpha, beta = ops.split(inputs, 2, axis=-1)
-        alpha = ops.softplus(alpha) + 1.0e-5
-        beta = ops.softplus(beta) + 1.0e-5
-        return ops.concatenate([alpha, beta], axis=-1)
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({"event_shape": self.event_shape})
-        return config
 
 @keras.saving.register_keras_serializable(package="gravyflow")
 class IndependentFoldedNormal(layers.Layer):
@@ -115,70 +61,9 @@ class IndependentFoldedNormal(layers.Layer):
 
     def call(self, inputs):
         loc, scale = ops.split(inputs, 2, axis=-1)
-        loc = loc + 1.0e-6
-        scale = scale + 1.0e-6
-        
-        # In original code:
-        # loc = tf.math.softplus(loc)
-        # scale = tf.math.softplus(scale)
-        # But wait, original code:
-        # loc_params = tf.cast(loc_params, dtype = tf.float32)  + 1.0E-6
-        # scale_params = tf.cast(scale_params, dtype = tf.float32) + 1.0E-6
-        # return tfd.Normal(loc=tf.math.softplus(loc), scale=tf.math.softplus(scale))
-        # So yes, softplus is applied.
-        
-        loc = ops.softplus(loc)
-        scale = ops.softplus(scale)
+        loc = ops.softplus(loc + 1.0e-6)
+        scale = ops.softplus(scale + 1.0e-6)
         return ops.concatenate([loc, scale], axis=-1)
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({"event_shape": self.event_shape})
-        return config
-
-@keras.saving.register_keras_serializable(package="gravyflow")
-class IndependentTruncNormal(layers.Layer):
-    """An independent truncated normal Keras layer that outputs parameters."""
-
-    def __init__(self, event_shape=(), low=0.0, high=100.0, **kwargs):
-        super().__init__(**kwargs)
-        self.event_shape = event_shape
-        self.low = low
-        self.high = high
-
-    def call(self, inputs):
-        loc, scale = ops.split(inputs, 2, axis=-1)
-        loc = loc + 1.0e-5
-        # Fixing the bug from original code where scale used loc_params
-        scale = scale + 1.0e-5 
-        
-        # Original: scale=tf.math.softplus(scale)
-        scale = ops.softplus(scale)
-        
-        return ops.concatenate([loc, scale], axis=-1)
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            "event_shape": self.event_shape,
-            "low": self.low,
-            "high": self.high
-        })
-        return config
-
-@keras.saving.register_keras_serializable(package="gravyflow")
-class IndependentBetaPrime(layers.Layer):
-    """An independent Beta prime Keras layer that outputs parameters."""
-
-    def __init__(self, event_shape=(), **kwargs):
-        super().__init__(**kwargs)
-        self.event_shape = event_shape
-
-    def call(self, inputs):
-        alpha, beta = ops.split(inputs, 2, axis=-1)
-        alpha = ops.softplus(alpha)
-        beta = ops.softplus(beta)
-        return ops.concatenate([alpha, beta], axis=-1)
 
     def get_config(self):
         config = super().get_config()
@@ -498,9 +383,6 @@ class WhitenPassLayer(BaseLayer):
         self.rng = search_stream(self.seed, "layer")
         self.layer_type = "WhitenPass"
         self.mutable_attributes = []
-
-def cap_value(x):
-    return ops.clip(x, 1.0e-5, 1000)  # values will be constrained to [-1, 1]
 
 from gravyflow.src.utils.numerics import ensure_even
 
@@ -1888,16 +1770,3 @@ def calculate_fitness(valid_scores: List[float], score_threshold : float, histor
         return 0.0
 
     return fitness
-
-def snake_case_to_capitalised_first_with_spaces(text):
-    """
-    Convert a string from snake_case to Capitalised First With Spaces format.
-    """
-
-    text.replace('val', 'validate') if 'val' in text else text
-    # Split the string at underscores
-    words = text.split('_')
-    
-    # Capitalise the first letter of each word and join them with spaces
-    return ' '.join(word.capitalize() for word in words)
-

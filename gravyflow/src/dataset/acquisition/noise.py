@@ -18,14 +18,13 @@ from gravyflow.src.dataset.config import WindowSpec, batch_size
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, Coincidence,
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS,
-    WINDOW_EDGE_BUFFER_SAMPLES, label_kinds, separable, grid_slots, grid_starts, window_start_bounds,
+    WINDOW_EDGE_BUFFER_SAMPLES, label_kinds, separable, grid_slots, grid_starts, time_order, window_start_bounds,
 )
 from .gwosc_data import intersect_segments
 from gravyflow.src.dataset.store import read as store_read
 from gravyflow.src.dataset.store.read import interiors
 from gravyflow.src.dataset.store.prefetch import Prefetcher
 from gravyflow.src.rng import DIRECT_SPLIT, BatchStreams, SeedTree
-from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 
@@ -251,12 +250,6 @@ def draw_examples(
     return rows, starts, rounds
 
 
-def time_order(rows: np.ndarray) -> np.ndarray:
-    """The order that sorts ``rows`` ((M, I, 2) GPS pieces) by time: by each detector's piece in turn."""
-    rows = np.asarray(rows)
-    return np.lexsort(np.reshape(rows, (len(rows), int(np.prod(rows.shape[1:])))).T[::-1])
-
-
 @dataclass(frozen=True, eq=False)
 class GridPlan:
     """
@@ -476,16 +469,6 @@ class NoiseDataObtainer(BaseDataObtainer):
             return SamplingPlan(np.empty((0, num_ifos, 2)), np.empty(0), inseparable)
         return SamplingPlan(np.concatenate(rows), np.concatenate(start_seconds), inseparable)
 
-    def calculate_bin_indices(self, segments, interval, start_period):
-        """Calculate bin indices for segments based on time interval."""
-        relative_starts = (segments[:, 0] - start_period) / interval
-        relative_ends = (segments[:, 1] - start_period) / interval
-
-        start_bins = np.floor(relative_starts).astype(int)
-        end_bins = np.ceil(relative_ends).astype(int)
-
-        return start_bins, end_bins
-
     def merge_bins(self, new_segments_list, interval):
         """
         Group each IFO's segments into absolute bins of ``interval`` seconds
@@ -646,35 +629,6 @@ class NoiseDataObtainer(BaseDataObtainer):
             )
 
         return self.valid_segments
-
-    def get_segments_as_collection(
-        self, 
-        ifo_index: int = 0,
-        ifo: gf.IFO = None
-    ) -> SegmentCollection:
-        """
-        Get valid_segments as a SegmentCollection for unified access.
-        
-        Converts the internal np.ndarray representation to SegmentCollection,
-        providing object-oriented access to segment properties.
-        
-        Args:
-            ifo_index: Index of IFO to extract (if valid_segments is 3D)
-            ifo: Optional IFO to associate with segments
-            
-        Returns:
-            SegmentCollection with NoiseSegment objects
-        """
-        if self.valid_segments is None or len(self.valid_segments) == 0:
-            return SegmentCollection()
-        
-        # valid_segments can be (N, IFO, 2) or (N, 2)
-        if self.valid_segments.ndim == 3:
-            segments_2d = self.valid_segments[:, ifo_index, :]
-        else:
-            segments_2d = self.valid_segments
-        
-        return SegmentCollection.from_array(segments_2d, ifo=ifo)
 
     def _yield_onsource_offsource_chunks(
             self,
