@@ -600,6 +600,20 @@ class TestDataSource:
         with pytest.raises(ValueError, match="publishes 4096 and 16384 Hz"):
             gf.GWOSC().fetch(gf.IFO.L1, 2048.0, (O3A_GPS, O3A_GPS + 32.0))
 
+    def test_every_gwosc_run_names_its_strain_release_at_every_rate(self):
+        assert set(sources.GWOSC_STRAIN_DATASETS) == set(sources.GWOSC_RUNS)
+        for run, releases in sources.GWOSC_STRAIN_DATASETS.items():
+            assert tuple(sorted(releases)) == sources.GWOSC_SAMPLE_RATES_HERTZ, run
+            # The 4096 Hz release is the dataset the run's timeline flags are published under.
+            assert releases[4096.0] == sources.GWOSC_RUNS[run]["dataset"], run
+
+    def test_a_run_without_a_named_release_is_refused_by_name(self, monkeypatch):
+        releases = {run: dict(rates) for run, rates in sources.GWOSC_STRAIN_DATASETS.items()}
+        del releases["O3a"][16384.0]
+        monkeypatch.setattr(sources, "GWOSC_STRAIN_DATASETS", releases)
+        with pytest.raises(ValueError, match="No GWOSC strain release is named for run O3a at 16384 Hz"):
+            gf.GWOSC().source_id(O3A_GPS, 16384.0)
+
 
 class TestSampleRate:
 

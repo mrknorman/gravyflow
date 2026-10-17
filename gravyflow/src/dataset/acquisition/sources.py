@@ -223,7 +223,11 @@ class GWOSC(DataSource):
                 f"GWOSC publishes {' and '.join(f'{r:g}' for r in self.rates())} Hz strain, "
                 f"not {rate:g} Hz: fetch at a native rate (fetch_rate)."
             )
-        return GWOSC_STRAIN_DATASETS[_one_run(start, end)][rate]
+        run = _one_run(start, end)
+        release = GWOSC_STRAIN_DATASETS.get(run, {}).get(rate)
+        if release is None:
+            raise ValueError(f"No GWOSC strain release is named for run {run} at {rate:g} Hz.")
+        return release
 
     def fetch(self, detector, sample_rate_hertz, interval) -> SegmentStrain:
         start, end = float(interval[0]), float(interval[1])
