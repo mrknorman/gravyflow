@@ -1,8 +1,8 @@
 """
 Tests of the matched-filter building blocks: the SNR module's matched_filter_fft,
-template_sigma and optimal_snr, the template grid, and trigger clustering. The
-search itself (MatchedFilter, its layer and the baseline model) is tested in
-test_matched_filter_search.py.
+template_sigma and optimal_snr, and the template grid. The search itself
+(MatchedFilter, its layer, trigger clustering and the baseline model) is tested
+in test_matched_filter_search.py.
 """
 
 import pytest
@@ -11,7 +11,7 @@ import numpy as np
 import jax.numpy as jnp
 
 import gravyflow as gf
-from gravyflow.src.detection import MatchedFilter, TemplateGrid, matched_filter_fft, template_sigma
+from gravyflow.src.detection import TemplateGrid, matched_filter_fft, template_sigma
 
 
 class TestTemplateGrid:
