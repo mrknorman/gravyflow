@@ -1,5 +1,5 @@
 """
-A transient record's split is its footprint's (L14): ``spec.assign`` of the time the
+A transient record's split is its footprint's: ``spec.assign`` of the time the
 library may read for it, whatever the seed, the runs, the detectors, the window or
 the route. Records whose footprint is in no split are left out and counted.
 """

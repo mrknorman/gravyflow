@@ -103,7 +103,7 @@ def test_catalogue_caches(offline_public_sources, tmp_path):
 
 
 # =============================================================================
-# THE SPLIT FINGERPRINT (L35)
+# THE SPLIT FINGERPRINT
 # =============================================================================
 
 SPEC_A = gf.SplitSpec()

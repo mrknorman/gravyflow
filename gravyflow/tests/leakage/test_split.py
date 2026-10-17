@@ -1,6 +1,6 @@
 """
-Split assignment in absolute time, the guard between splits, the fractions (L2), and
-split names: checked (L4) and required (L5).
+Split assignment in absolute time, the guard between splits, the fractions, and
+split names: checked and required.
 """
 
 from collections import Counter
@@ -108,7 +108,7 @@ def test_guard_between_splits(world, tmp_path, pair, mode):
 
 
 # =============================================================================
-# FRACTIONS (L2)
+# FRACTIONS
 # =============================================================================
 
 #: About 10k absolute blocks, around O3.
@@ -189,7 +189,7 @@ def test_fractions_check_sees_a_cumulative_layout():
 
 
 # =============================================================================
-# NAMES (L4) AND A SPLIT NAMED EVERYWHERE (L5)
+# NAMES, AND A SPLIT NAMED EVERYWHERE
 # =============================================================================
 
 WINDOW = dict(sample_rate_hertz=256.0, onsource_duration_seconds=1.0, offsource_duration_seconds=4.0,

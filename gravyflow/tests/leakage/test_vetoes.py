@@ -106,7 +106,7 @@ def test_no_hardware_injections(world, tmp_path):
 
 
 # =============================================================================
-# EVENTS: THEIR FOOTPRINT AND THE GUARD (L18), AND EVALUATION ONLY (L19)
+# EVENTS: THEIR FOOTPRINT AND THE GUARD, AND EVALUATION ONLY
 # =============================================================================
 
 #: Each fixture event's footprint before its merger, by its in-band seconds, blessed
