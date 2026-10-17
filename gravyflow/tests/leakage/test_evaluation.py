@@ -391,7 +391,7 @@ def _split_world(specs):
 @pytest.mark.parametrize("split", ["validate", "test"])
 def test_a_grid_evaluation_set_is_finite_and_the_same_every_epoch(world, split):
     """
-    L12 (GRID): a GRID evaluation set is floor(N / B) batches of its N windows, each
+    A GRID evaluation set is floor(N / B) batches of its N windows, each
     window served at most once, and every epoch serves the same batches, in whatever
     order they are asked for.
     """
