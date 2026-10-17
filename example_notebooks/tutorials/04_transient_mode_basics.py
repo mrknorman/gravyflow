@@ -20,6 +20,8 @@ RUNTIME: ~3-4 minutes (downloads the public Gravity Spy catalogue from Zenodo, a
 # IMPORTS
 # =============================================================================
 
+import os
+os.environ.setdefault("KERAS_BACKEND", "jax")  # gravyflow runs on Keras's JAX backend
 import gravyflow as gf
 import numpy as np
 import matplotlib.pyplot as plt

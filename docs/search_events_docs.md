@@ -11,7 +11,7 @@ def search_events(
     total_mass_range: tuple = None,
     distance_range: tuple = None,
     observing_runs: List[gf.ObservingRun] = None,
-    event_types: List[gf.EventType] = None,
+    event_types: List[gf.EventConfidence] = None,
     source_type: Union[gf.SourceType, str] = None,
     name_contains: str = None,
 ) -> List[str]
@@ -33,11 +33,11 @@ def search_events(
 - `observing_runs` : `List[gf.ObservingRun]` = `None`:
   > Filter by specific observing runs (e.g., `[gf.ObservingRun.O3]`).
 
-- `event_types` : `List[gf.EventType]` = `[gf.EventType.CONFIDENT]`:
+- `event_types` : `List[gf.EventConfidence]` = `[gf.EventConfidence.CONFIDENT]`:
   > Filter by event confidence.
   > **Options:**
-  > - `gf.EventType.CONFIDENT`: Confirmed detections (Default).
-  > - `gf.EventType.MARGINAL`: Marginal triggers/candidates.
+  > - `gf.EventConfidence.CONFIDENT`: Confirmed detections (Default).
+  > - `gf.EventConfidence.MARGINAL`: Marginal triggers/candidates.
 
 - `mass1_range` : `tuple` = `None`:
   > (min, max) range for primary mass in solar masses. Use `None` for unbounded limits. 
@@ -77,7 +77,7 @@ print(bns_events)
 #### 2. Include Marginal Events
 ```python
 # Find marginal/candidate events
-marginal_events = gf.search_events(event_types=[gf.EventType.MARGINAL])
+marginal_events = gf.search_events(event_types=[gf.EventConfidence.MARGINAL])
 ```
 
 #### 3. Complex Physical Queries

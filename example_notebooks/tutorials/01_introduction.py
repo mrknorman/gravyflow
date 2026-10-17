@@ -21,6 +21,8 @@ RUNTIME: < 30 seconds (no data download)
 # IMPORTS
 # =============================================================================
 
+import os
+os.environ.setdefault("KERAS_BACKEND", "jax")  # gravyflow runs on Keras's JAX backend
 import gravyflow as gf
 
 # =============================================================================

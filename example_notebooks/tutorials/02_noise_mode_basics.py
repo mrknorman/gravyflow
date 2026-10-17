@@ -24,6 +24,8 @@ NOTE: This requires network access to GWOSC (Gravitational Wave Open Science).
 
 from pathlib import Path
 
+import os
+os.environ.setdefault("KERAS_BACKEND", "jax")  # gravyflow runs on Keras's JAX backend
 import gravyflow as gf
 import numpy as np
 import matplotlib.pyplot as plt

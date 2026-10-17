@@ -15,6 +15,7 @@ from pathlib import Path
 import os
 
 # Import the GravyFlow module
+os.environ.setdefault("KERAS_BACKEND", "jax")  # gravyflow runs on Keras's JAX backend
 import gravyflow as gf
 
 # Dependency imports

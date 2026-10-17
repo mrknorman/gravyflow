@@ -23,6 +23,8 @@ This demonstrates key features:
 
 import logging
 import numpy as np
+import os
+os.environ.setdefault("KERAS_BACKEND", "jax")  # gravyflow runs on Keras's JAX backend
 import gravyflow as gf
 from pathlib import Path
 

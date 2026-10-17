@@ -20,6 +20,8 @@ RUNTIME: ~2-3 minutes
 # IMPORTS
 # =============================================================================
 
+import os
+os.environ.setdefault("KERAS_BACKEND", "jax")  # gravyflow runs on Keras's JAX backend
 import gravyflow as gf
 import numpy as np
 import matplotlib.pyplot as plt

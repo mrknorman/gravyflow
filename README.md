@@ -1,42 +1,108 @@
 # GravyFlow
 
-TensorFlow tools to facilitate machine learning for gravitational-wave data analysis. 
+JAX and Keras 3 tools for gravitational-wave data science: simulated and real detector noise, waveform injections,
+whitening and SNR, datasets for training, matched filtering, and example models with their validation.
 
 # Installation Guide
 
-## 1. Clone the Repository
-GravyFlow can be installed by cloning the Git repository:
+## 1. Install GravyFlow
+
+GravyFlow needs Python 3.13 or later. It is not yet on PyPI: install it from the repository, into a new environment
+(a virtual environment, or conda):
+
+```bash
+python3.13 -m venv gravyflow-env
+source gravyflow-env/bin/activate
+pip install "gravyflow[realdata,viz] @ git+https://github.com/mrknorman/gravyflow"
+```
+
+The core install (`gravyflow` alone) simulates noise and injections, builds datasets and trains models, offline. The
+extras add the rest:
+
+| Extra | Adds | For |
+|---|---|---|
+| `realdata` | gwpy, gwdatafind, gwosc, requests, pandas | real noise, glitches and events (GWOSC, Gravity Spy, GWDataFind) |
+| `viz` | bokeh, panel, holoviews, datashader | plots, the validator and its dashboard, and the example models' recipe |
+| `notebooks` | `realdata`, `viz`, ipykernel, matplotlib | the notebooks and tutorials in `example_notebooks/` |
+| `test` | `realdata`, `viz`, pytest, pytest-cov, lalsuite, pycbc | the test suite |
+| `cuda` | JAX's CUDA 12 plugin and NVIDIA's libraries (Linux x86_64) | NVIDIA GPUs |
+
+To work on GravyFlow itself, install a clone in editable mode with the test extra:
 
 ```bash
 git clone https://github.com/mrknorman/gravyflow
+cd gravyflow
+pip install -e ".[test]"
 ```
 
-## 2. Install Gravyflow
-It is recommended to install GravyFlow within a new conda environment. GravyFlow requires Python 3.11:
+The package ships the bundled noise curves, template banks and the smaller trained models. The two deep models of
+George and Huerta (2017), 66 MB each, are attached to each release instead: fetch one once with
+`gravyflow.src.resources.download_weights(name)`, which checks it against its recorded SHA-256 and keeps it in the
+cache (below); `pretrained()` finds it there.
+
+## 2. Choose Keras's JAX backend
+
+GravyFlow runs on Keras 3's JAX backend. `import gravyflow` changes nothing in your process (no environment
+variable, warnings filter, log level or library setting), so choose the backend yourself, before Keras is imported:
 
 ```bash
-conda create --name gravyflow python=3.13
-conda activate gravyflow
+export KERAS_BACKEND=jax
 ```
 
-Next, ensure pip is installed by running:
+or, in Python, before importing Keras or GravyFlow:
 
-```bash
-conda install pip 
+```python
+import os
+os.environ.setdefault("KERAS_BACKEND", "jax")
+import gravyflow as gf
 ```
 
-Then, install GravyFlow and its requirements into your conda environment:
+Using a GravyFlow name without it raises an `ImportError` that says so. JAX chooses its own platform (a GPU when the
+`cuda` extra finds one). Set `JAX_PLATFORMS=cpu` to force the CPU, and `XLA_PYTHON_CLIENT_PREALLOCATE=false` when
+several processes share a GPU: GravyFlow no longer sets either.
 
-```bash
-pip install -e .[cuda]
+`import gravyflow` is instant: each name imports its module when it is first used. The public names are listed in
+[`docs/api.md`](docs/api.md); everything under `gravyflow.src` is internal.
+
+## 3. Quick start: a synthetic dataset
+
+Two detectors' coloured noise with binary black hole injections (IMRPhenomD, masses 5–95 M☉, optimal SNR 8–15, in
+half the examples), whitened. It needs no extra and no network:
+
+```python
+import os
+os.environ.setdefault("KERAS_BACKEND", "jax")  # gravyflow runs on Keras's JAX backend
+
+import gravyflow as gf
+
+uniform = lambda low, high: gf.Distribution(min_=low, max_=high, type_=gf.DistributionType.UNIFORM)
+
+dataset = gf.Dataset(
+    seed=1,
+    group="train",
+    noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED, ifos=[gf.IFO.L1, gf.IFO.H1]),
+    waveform_generators=[gf.CBCGenerator(
+        mass_1_msun=uniform(5.0, 95.0),
+        mass_2_msun=uniform(5.0, 95.0),
+        scaling_method=gf.ScalingMethod(uniform(8.0, 15.0), gf.ScalingTypes.SNR),
+        injection_chance=0.5,
+    )],
+    input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
+    output_variables=[gf.ReturnVariables.INJECTION_PRESENT],
+    num_examples_per_batch=32,
+    steps_per_epoch=100,
+)
+inputs, outputs = dataset[0]
+print(inputs["WHITENED_ONSOURCE"].shape)  # (32, 2, 2048): examples, detectors, samples (1 s at 2048 Hz)
 ```
 
-Note that GravyFlow is under active development, and you may encounter issues during installation. Ensure TensorFlow can recognize GPUs in your environment, as GravyFlow is optimized for GPU use and relies on vectorized GPU functions.
+A dataset is a Keras `PyDataset`: pass it to `model.fit`. Each batch is a pure function of its seed and index.
 
-## 3. Quick start: a CNN on a laptop CPU
+## 4. Quick start: a CNN on a laptop CPU
 
 One command trains the CNN of Gabbard *et al.* (2017) on simulated binary black hole signals (IMRPhenomD, masses
-5–95 M☉, optimal SNR 8–15) in whitened coloured Gaussian noise, then validates it. It runs offline, on a CPU:
+5–95 M☉, optimal SNR 8–15) in whitened coloured Gaussian noise, then validates it. It runs offline, on a CPU, and
+needs the `viz` extra:
 
 ```bash
 python -m gravyflow.src.model.examples.train_gabbard_2017 --output-dir ~/gravyflow_runs/gabbard_2017_cpu --preset cpu \
@@ -54,19 +120,19 @@ python -m gravyflow.src.model.examples.train_gabbard_2017 --output-dir ~/gravyfl
   an efficiency near 0.69 at SNR 7–8 and 0.96 at SNR 9–10.
 - **Reproducible from the seed** (`--seed`): the same seed gives the same batches, in the same order, from the same
   initial weights. For bit-identical weights from run to run, set `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false`:
-  with XLA's multi-threaded CPU kernels the whitened strain differs in its last bits between calls (see section 6),
+  with XLA's multi-threaded CPU kernels the whitened strain differs in its last bits between calls (see section 7),
   and training amplifies the difference.
 
 Notebooks 07 and 08 in `example_notebooks/` walk through the same run.
 
-## 4. Setup permissions:
+## 5. Setup permissions
 
 Follow these guides for setting up permissions to access real data:
 
 https://computing.docs.ligo.org/guide/auth/scitokens/
 https://computing.docs.ligo.org/guide/auth/kerberos/
 
-## 5. Public data sources
+## 6. Public data sources
 
 Real noise and glitches use public data only; no credentials are needed:
 
@@ -75,7 +141,7 @@ Real noise and glitches use public data only; no credentials are needed:
 
 Every cache gravyflow keeps lives under that one root, `GRAVYFLOW_CACHE_DIR` if it is set, else `~/.gravyflow/cache`: GWOSC timelines and events, Gravity Spy files, the glitch, event and partner caches (`glitch_cache_v4.h5`, `event_cache_v4.h5`, `partner_cache_v4.h5`), real-noise segment caches (`segments/`) and the GWOSC strain downloads (`astropy/`). Earlier versions kept noise segment caches in `./generator_data` or beside the package. gravyflow does not move them; it warns once when it finds one there, naming where to move it to reuse it. Glitch and event caches of an earlier format (`glitch_cache.h5`, `event_cache.h5`) are never read, nor deleted.
 
-## 6. Randomness: one seed tree
+## 7. Randomness: one seed tree
 
 Every random draw comes from one seed tree, rooted at a dataset's `seed` (default `gf.Defaults.seed`) and addressed
 by the split (`group`), the epoch, the batch index and what the draw is for. A batch is rebuilt from its address alone,
@@ -155,7 +221,7 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
   `ValidationConfig` and returns the `Validator`. A checkpoint that exists but cannot be loaded raises `ValueError`;
   `Model.load` returned an untrained model in its place.
 
-## 7. Units: physical strain
+## 8. Units: physical strain
 
 Every array gravyflow reads, returns or caches is physical strain: noise of every type but white (which has no
 detector, and unit variance), injections, `ONSOURCE`, `OFFSOURCE` and `INJECTIONS`, the HRSS and HPEAK targets and
@@ -168,7 +234,7 @@ float64: a float32 PSD of strain has already underflowed, and is refused.
 
 Where the result itself is a square of strain, float32 cannot hold it:
 
-- `gf.psd()` and `gf.estimate_psd()` return a `PowerSpectrum`, which keeps the normalised PSD and its amplitude scale
+- `gf.psd()`, the one public PSD, returns a `PowerSpectrum`, which keeps the normalised PSD and its amplitude scale
   apart; `.value()` gives the PSD in float64 NumPy, and `.frequencies` its grid.
 - `gf.spectrogram()` and `gf.generate_spectrogram()` refuse an input whose power would underflow, such as raw strain,
   with a `ValueError`: take the spectrogram of whitened data (`SPECTROGRAM_ONSOURCE` does).
@@ -195,12 +261,14 @@ Earlier releases multiplied strain by an internal scale, `gf.Defaults.scale_fact
   buffer, as in LAL's burst waveforms. A buffer of odd length put it half a sample off the grid, which lowered a
   sampled peak by cos(pi f / fs) (0.953 at 200 Hz and 2048 Hz).
 
-## 8. Test Gravyflow (optional)
+## 9. Test Gravyflow (optional)
 
-GravyFlow includes PyTest for testing its functionality. To run tests:
+The suite needs the `test` extra (`pip install -e ".[test]"` in a clone) and runs offline, in temporary roots: it
+never reads or writes your cache. From the clone:
 
 ```bash
 pytest gravyflow
 ```
 
-Note: Tests may fail due to unavailable GPU memory if GPUs are currently under heavy use.
+Tests that need GWOSC or Zenodo are marked `network` and run only with `--network`. Tests may fail for lack of GPU
+memory when GPUs are under heavy use.
