@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import numpy as np
+from gwpy.table import EventTable
 
 import gravyflow as gf
 from gravyflow.src.resources import PACKAGE
@@ -97,7 +98,7 @@ class TestEventsWithParams:
     def catalogue(self, monkeypatch):
         monkeypatch.setattr(event_module, "get_event_catalogue",
                             lambda use_cache=True: _PE_CATALOGUE)
-        monkeypatch.setattr(event_module.EventTable, "fetch_open_data", _refuse_table_fetch)
+        monkeypatch.setattr(EventTable, "fetch_open_data", _refuse_table_fetch)
 
     def test_confident_events_from_the_one_list(self):
         events = event_module.get_events_with_params()
@@ -180,10 +181,10 @@ class TestEventCatalogueParameters:
                              "mass_2_source", "luminosity_distance", "p_astro"))
         monkeypatch.setattr(gwosc_api, "fetch_cataloglist_json",
                             lambda *args, **kwargs: {"GWTC-1-confident": {}})
-        monkeypatch.setattr(event_module.EventTable, "fetch_open_data",
+        monkeypatch.setattr(EventTable, "fetch_open_data",
                             lambda catalog, *args, **kwargs: table)
         fetched = event_module.get_event_catalogue(use_cache=False)
-        monkeypatch.setattr(event_module.EventTable, "fetch_open_data", _refuse_table_fetch)
+        monkeypatch.setattr(EventTable, "fetch_open_data", _refuse_table_fetch)
         cached = event_module.get_event_catalogue()
         assert event_module.event_catalogue_cache_path().name == "event_catalogue_v3.json"
         for catalogue in (fetched, cached):

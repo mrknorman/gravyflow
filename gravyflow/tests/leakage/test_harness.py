@@ -463,6 +463,7 @@ def test_every_cache_lives_under_the_one_cache_root():
 def test_strain_downloads_are_cached_under_the_one_cache_root(monkeypatch):
     """gwpy's GWOSC strain download goes to astropy's cache, which is moved under the root."""
     from astropy.config import get_cache_dir_path
+    import gwdatafind
     from gwpy.timeseries import TimeSeries
 
     from gravyflow.src.dataset.acquisition import base
@@ -476,7 +477,7 @@ def test_strain_downloads_are_cached_under_the_one_cache_root(monkeypatch):
         seen.append((get_cache_dir_path(), kwargs.get("cache")))
         return TimeSeries(np.ones(16), t0=args[1], sample_rate=16)
 
-    monkeypatch.setattr(base, "find_urls", no_local_frames)
+    monkeypatch.setattr(gwdatafind, "find_urls", no_local_frames)
     monkeypatch.setattr(TimeSeries, "fetch_open_data", fetch_open_data)
     base.BaseDataObtainer.get_segment_data_static(1238166018.0, 1238166019.0, gf.IFO.L1, "HOFT_C01",
                                                    "DCS-CALIB_STRAIN_CLEAN_C01", 4096.0)
