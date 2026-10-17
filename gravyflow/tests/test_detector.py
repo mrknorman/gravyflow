@@ -1,531 +1,200 @@
-from typing import Optional, Dict, Tuple
-from pathlib import Path
-import logging
+"""
+Detector geometry and projection: the Network against lal and pycbc.
+
+Antenna patterns and the response tensor of the three cached detectors are
+checked against lal in test_waveform_physics.py; here: the rotation helpers,
+the network's locations and baselines, a network built from a geometry dict,
+time delays, projection of polarisations onto one and three detectors, and the
+Network's construction and input checks.
+
+lal is a required input of these tests: if it cannot be imported, they fail.
+"""
+import json
 import warnings
 
-import pytest
-
-import gravyflow as gf
-from gravyflow.src.resources import PACKAGE
-
 import numpy as np
-import keras
-from keras import ops
-import jax.numpy as jnp
-from pycbc.detector import add_detector_on_earth, _ground_detectors, Detector
+import pytest
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
-from timeit import Timer
-from _pytest.config import Config
+from keras import ops
+from pycbc.detector import _ground_detectors, add_detector_on_earth
+
+import lal
+
+import gravyflow as gf
+from gravyflow.src.dataset.conditioning import detector as detector_module
+from gravyflow.tests._helpers import representation_tolerance
+
+FLOAT32_EPS = float(np.finfo(np.float32).eps)
+
+IFOS = (gf.IFO.L1, gf.IFO.H1, gf.IFO.V1)
+LAL_DETECTORS = (lal.LLO_4K_DETECTOR, lal.LHO_4K_DETECTOR, lal.VIRGO_DETECTOR)
+LAL_LOCATIONS = np.array([lal.CachedDetectors[name].location for name in LAL_DETECTORS])
+
+#: The largest detector distance from the geocentre, in light seconds.
+EARTH_RADIUS_LIGHT_SECONDS = float(np.max(np.linalg.norm(LAL_LOCATIONS, axis=-1))) / lal.C_SI
+
+#: Representation: a delay changes by at most R/c per radian of hour angle, and
+#: the float32 hour angle (GMST minus RA, each up to 2 pi) and its trig carry
+#: four roundings.
+DELAY_TOLERANCE_SECONDS = representation_tolerance(
+    np.float32, 2.0 * np.pi * EARTH_RADIUS_LIGHT_SECONDS, c=4
+)
+
+#: Representation: an antenna pattern changes by at most 2 per radian of hour
+#: angle, which carries the four float32 roundings above.
+PATTERN_TOLERANCE = representation_tolerance(np.float32, 2.0 * 2.0 * np.pi, c=4)
 
 
+def isotropic_sky(rng, count):
+    """Right ascension, declination and polarisation, float32, isotropic."""
+    right_ascension = rng.uniform(0.0, 2.0 * np.pi, count).astype(np.float32)
+    declination = np.arcsin(rng.uniform(-1.0, 1.0, count)).astype(np.float32)
+    polarization = rng.uniform(0.0, np.pi, count).astype(np.float32)
+    return right_ascension, declination, polarization
 
-def zombie_antenna_pattern(
-        right_ascension : float, 
-        declination : float, 
-        polarization : float
-    ) -> Tuple[np.ndarray, np.ndarray]:
 
-        d = Detector("L1")
-        
-        cosgha = np.cos(right_ascension)
-        singha = np.sin(right_ascension)
-        cosdec = np.cos(declination)
-        sindec = np.sin(declination)
-        cospsi = np.cos(polarization)
-        sinpsi = np.sin(polarization)
-
-        resp = d.response
-        ttype = np.float64
-        
-        x0 = -cospsi * singha - sinpsi * cosgha * sindec
-        x1 = -cospsi * cosgha + sinpsi * singha * sindec
-        x2 =  sinpsi * cosdec
-
-        x = np.array([x0, x1, x2], dtype=object)
-        dx = resp.dot(x)
-
-        y0 =  sinpsi * singha - cospsi * cosgha * sindec
-        y1 =  sinpsi * cosgha + cospsi * singha * sindec
-        y2 =  cospsi * cosdec
-
-        y = np.array([y0, y1, y2], dtype=object)
-        dy = resp.dot(y)
-
-        if hasattr(dx, 'shape'):
-            fplus = (x * dx - y * dy).sum(axis=0).astype(ttype)
-            fcross = (x * dy + y * dx).sum(axis=0).astype(ttype)
-        else:
-            fplus = (x * dx - y * dy).sum()
-            fcross = (x * dy + y * dx).sum()
-        return fplus, fcross
-
-# Network Fixture
 @pytest.fixture
 def network() -> gf.Network:
-    return gf.Network([gf.IFO.L1, gf.IFO.H1, gf.IFO.V1])
+    return gf.Network(list(IFOS))
+
 
 def test_rotation_matrices():
-    angle = ops.convert_to_tensor([0.0, np.pi/2.0])
-    
-    # Z-rotation
-    rm_z = gf.src.dataset.conditioning.detector.rotation_matrix_z(angle)
-    assert ops.shape(rm_z) == (2, 3, 3)
-    np.testing.assert_allclose(rm_z[0], np.eye(3), atol=1e-6)
-    # At pi/2: c=0, s=1 -> [[0,1,0],[-1,0,0],[0,0,1]]
-    expected_z = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]])
-    np.testing.assert_allclose(rm_z[1], expected_z, atol=1e-6)
-    
-    # X-rotation: row1=[1,0,0], row2=[0,c,-s], row3=[0,s,c]
-    # At pi/2: c=0, s=1 -> [[1,0,0],[0,0,-1],[0,1,0]]
-    rm_x = gf.src.dataset.conditioning.detector.rotation_matrix_x(angle)
-    assert ops.shape(rm_x) == (2, 3, 3)
-    np.testing.assert_allclose(rm_x[0], np.eye(3), atol=1e-6)
-    expected_x = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
-    np.testing.assert_allclose(rm_x[1], expected_x, atol=1e-6)
-    
-    # Y-rotation: row1=[c,0,-s], row2=[0,1,0], row3=[s,0,c]
-    # At pi/2: c=0, s=1 -> [[0,0,-1],[0,1,0],[1,0,0]]
-    rm_y = gf.src.dataset.conditioning.detector.rotation_matrix_y(angle)
-    assert ops.shape(rm_y) == (2, 3, 3)
-    np.testing.assert_allclose(rm_y[0], np.eye(3), atol=1e-6)
-    expected_y = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])
-    np.testing.assert_allclose(rm_y[1], expected_y, atol=1e-6)
-
-def test_network_init():
-    # Initialize a simple network (L1)
-    network = gf.Network([gf.IFO.L1])
-    
-    assert network.num_detectors == 1
-    assert ops.shape(network.location) == (1, 3)
-    
-    # Check location (approximate check to ensure astropy ran)
-    # L1 is in Louisiana, USA.
-    loc = network.location[0]
-    assert loc[0] != 0.0
-
-# Test for Detector
-def test_detector() -> None:
-
-    with gf.env():
-        latitude = 0.3
-        longitude = 0.5
-        network = gf.Network({
-            "longitude_radians": latitude, 
-            "latitude_radians": longitude,
-            "y_angle_radians": 0.0,  
-            "x_angle_radians": None,  
-            "height_meters": 0.0,  
-            "x_length_meters": 4000.0,  
-            "y_length_meters": 4000.0
-        })
-
-        add_detector_on_earth("test", latitude, longitude)
-
-        # Convert to numpy for comparison if it's a tensor
-        x_vector = network.x_vector
-        if hasattr(x_vector, "numpy"):
-            x_vector = x_vector.numpy()
-        else:
-            x_vector = np.array(x_vector)
-
-        np.testing.assert_allclose(
-            x_vector[0], 
-            _ground_detectors["test"]["xvec"],
-            rtol=0, 
-            atol=1e-07, 
-            equal_nan=True, 
-            err_msg="Gravyflow gf.Network construction does not equal pycbc method.", 
-            verbose=True
-        )
-
-def test_response() -> None:
-
-    with gf.env():
-
-        test_detectors = [gf.IFO.L1, gf.IFO.H1, gf.IFO.V1]
-        # Create from Enum:
-        network = gf.Network(
-            test_detectors
-        )
-
-        tolerance : float = 0.01
-
-        l1 = Detector("L1")
-        # Convert response to numpy
-        response = network.response
-        if hasattr(response, "numpy"):
-            response = response.numpy()
-        else:
-            response = np.array(response)
-
-        np.testing.assert_allclose(
-            l1.response, 
-            response[0], 
-            atol=tolerance, 
-            err_msg="L1 response check failed."
-        )
-
-        h1 = Detector("H1")
-        np.testing.assert_allclose(
-            h1.response, 
-            response[1], 
-            atol=tolerance, 
-            err_msg="H1 response check failed."
-        )
-
-        v1 = Detector("V1")
-        np.testing.assert_allclose(
-            v1.response, 
-            response[2], 
-            atol=tolerance, 
-            err_msg="V1 response check failed."
-        )
-
-# Test for Antenna Pattern
-@pytest.mark.parametrize("num_tests", [int(100)])
-def test_antenna_pattern(
-        network : gf.Network, 
-        num_tests : int
-    ) -> None:
-
-    with gf.env():
-        right_ascension = ops.convert_to_tensor(
-            np.random.uniform(0, 2 * np.pi, size=(num_tests,)), 
-            dtype="float32"
-        )
-        declination = ops.convert_to_tensor(
-            np.random.uniform(-np.pi / 2, np.pi / 2, size=(num_tests,)), 
-            dtype="float32"
-        )
-        polarization = ops.convert_to_tensor(
-            np.random.uniform(0, 2 * np.pi, size=(num_tests,)), 
-            dtype="float32"
-        )
-
-        antenna_pattern = network.get_antenna_pattern(
-            right_ascension, declination, polarization
-        )
-        f_plus = antenna_pattern[..., 0]
-        f_cross = antenna_pattern[..., 1]
-
-        np.testing.assert_equal(
-            f_plus.shape,
-            (num_tests, network.num_detectors), 
-            err_msg=f"Unexpected shape for f_plus: {f_plus.shape}"
-        )
-        np.testing.assert_equal(
-            f_cross.shape, 
-            (num_tests, network.num_detectors), 
-            err_msg=f"Unexpected shape for f_cross: {f_cross.shape}"
-        )
-
-# Test for Time Delay
-@pytest.mark.global_rng
-def test_time_delay(
-        network : gf.Network, 
-        num_tests : Optional[int] = int(100)
-    ) -> None:
-
-    with gf.env():
-        right_ascension = ops.convert_to_tensor(
-            np.random.uniform(0, 2 * np.pi, size=(num_tests,)), dtype="float32"
-        )
-        declination = ops.convert_to_tensor(
-            np.random.uniform(-np.pi / 2, np.pi / 2, size=(num_tests,)), dtype="float32"
-        )
-
-        gps = 1126259462.4
-        delay = np.array(network.get_time_delay(
-            right_ascension, declination, gps_time_seconds=gps
-        ))
-        # L1-H1 is 10 ms of light travel, L1-V1 27 ms.
-        np.testing.assert_allclose(delay[:, 0], delay[:, 1], atol=0.011)
-        np.testing.assert_allclose(delay[:, 0], delay[:, 2], atol=0.032)
-
-        # Against lal: the arrival time at the detector minus at the geocentre,
-        # negative for a detector displaced towards the source.
-        import lal
-        detectors = (lal.LLO_4K_DETECTOR, lal.LHO_4K_DETECTOR, lal.VIRGO_DETECTOR)
-        for index, detector in enumerate(detectors):
-            location = lal.CachedDetectors[detector].location
-            expected = [
-                lal.TimeDelayFromEarthCenter(location, float(ra), float(dec), gps)
-                for ra, dec in zip(np.array(right_ascension), np.array(declination))
-            ]
-            np.testing.assert_allclose(delay[:, index], expected, atol=1e-7)
+    angle = ops.convert_to_tensor([0.0, np.pi / 2.0])
+    # Representation: cos(fl(pi/2)) is at most |pi/2 - fl(pi/2)| < eps from 0.
+    tolerance = representation_tolerance(np.float32, 1.0, c=1)
+    expected = {
+        # Rows (1, 0, 0), (0, c, -s), (0, s, c) at c = 0, s = 1.
+        detector_module.rotation_matrix_x: [[1, 0, 0], [0, 0, -1], [0, 1, 0]],
+        detector_module.rotation_matrix_y: [[0, 0, -1], [0, 1, 0], [1, 0, 0]],
+        detector_module.rotation_matrix_z: [[0, 1, 0], [-1, 0, 0], [0, 0, 1]],
+    }
+    for rotation, at_right_angle in expected.items():
+        matrices = np.asarray(rotation(angle))
+        assert matrices.shape == (2, 3, 3)
+        np.testing.assert_allclose(matrices[0], np.eye(3), rtol=0, atol=tolerance)
+        np.testing.assert_allclose(matrices[1], at_right_angle, rtol=0, atol=tolerance)
 
 
+def test_network_locations_and_baselines_match_lal(network):
+    assert network.num_detectors == 3
+    location = np.asarray(network.location, np.float64)
+    # Representation: the geodetic angles and each coordinate are rounded to
+    # float32, about one half-ulp each at the Earth's radius.
+    tolerance = representation_tolerance(np.float32, np.max(np.abs(LAL_LOCATIONS)), c=2)
+    np.testing.assert_allclose(location, LAL_LOCATIONS, rtol=0, atol=tolerance)
 
-def _test_projection(
-        name : str,
-        network : gf.Network, 
-        output_directory_path : Path, 
-        plot_file_name : str, 
-        single_ifo : bool = False, 
-        should_plot : bool = False
-    ) -> None:
-
-    injection_directory_path = Path(
-        gf.tests.PATH / "example_injection_parameters"
+    # The longest baseline carries both ends' errors and its float32 norm's
+    # rounding, a baseline being shorter than two radii.
+    baselines = np.linalg.norm(LAL_LOCATIONS[:, None] - LAL_LOCATIONS[None], axis=-1)
+    np.testing.assert_allclose(
+        float(network.max_arrival_time_difference_seconds),
+        np.max(baselines) / lal.C_SI,
+        rtol=0, atol=3.0 * tolerance / lal.C_SI,
     )
 
-    if single_ifo:
-        test_network = gf.Network([gf.IFO.L1])
-    else:
-        test_network = gf.Network([gf.IFO.L1, gf.IFO.H1, gf.IFO.V1])
 
-    phenom_d_generator = gf.WaveformGenerator.load(
-        injection_directory_path / "phenom_d_parameters.json"
+def test_network_from_geometry_matches_pycbc():
+    longitude, latitude = 0.5, 0.3
+    network = gf.Network({
+        "longitude_radians": longitude,
+        "latitude_radians": latitude,
+        "y_angle_radians": 0.0,
+        "x_angle_radians": None,
+        "height_meters": 0.0,
+        "x_length_meters": 4000.0,
+        "y_length_meters": 4000.0,
+    })
+    add_detector_on_earth("gravyflow-test", longitude, latitude)
+    reference = _ground_detectors["gravyflow-test"]
+
+    # Representation: the x arm's angle (y + fl(pi/2)) and each component are
+    # rounded to float32, unit-scale values.
+    tolerance = representation_tolerance(np.float32, 1.0, c=2)
+    for name, mine in (("xvec", network.x_vector), ("yvec", network.y_vector), ("response", network.response)):
+        np.testing.assert_allclose(
+            np.asarray(mine)[0], reference[name], rtol=0, atol=tolerance, err_msg=name
+        )
+
+
+def test_time_delay_matches_lal(network):
+    right_ascension, declination, _ = isotropic_sky(np.random.default_rng(11), 100)
+    gps = 1126259462.4
+    delay = np.asarray(network.get_time_delay(
+        ops.convert_to_tensor(right_ascension), ops.convert_to_tensor(declination), gps_time_seconds=gps
+    ))
+    assert delay.shape == (100, 3)
+
+    # The arrival time at the detector minus at the geocentre, negative for a
+    # detector displaced towards the source.
+    for index, name in enumerate(LAL_DETECTORS):
+        location = lal.CachedDetectors[name].location
+        expected = [
+            lal.TimeDelayFromEarthCenter(location, float(ra), float(dec), gps)
+            for ra, dec in zip(right_ascension, declination)
+        ]
+        np.testing.assert_allclose(delay[:, index], expected, rtol=0, atol=DELAY_TOLERANCE_SECONDS)
+
+
+def _polarisations(sample_rate_hertz, num_samples):
+    """A centred circularly polarised sine-Gaussian, (2, T) float32, zero at the edges."""
+    t = np.arange(num_samples) / sample_rate_hertz - 0.5 * num_samples / sample_rate_hertz
+    envelope = np.exp(-(t / 0.02) ** 2)
+    phase = 2.0 * np.pi * 150.0 * t
+    return np.stack([envelope * np.sin(phase), envelope * np.cos(phase)]).astype(np.float32)
+
+
+@pytest.mark.parametrize("ifos", [IFOS[:1], IFOS], ids=["one_detector", "three_detectors"])
+def test_project_wave_matches_lal(ifos, pytestconfig, tmp_path):
+    sample_rate_hertz, num_samples, num_sources = 2048.0, 2048, 16
+    gps = 1187008882.4
+    polarisations = _polarisations(sample_rate_hertz, num_samples)
+    strain = np.broadcast_to(polarisations, (num_sources, 2, num_samples)).copy()
+    sky = isotropic_sky(np.random.default_rng(7), num_sources)
+
+    projected = np.asarray(gf.Network(list(ifos)).project_wave(
+        strain, sample_rate_hertz, *(ops.convert_to_tensor(angle) for angle in sky), gps_time_seconds=gps
+    ), np.float64)
+    assert projected.shape == (num_sources, len(ifos), num_samples)
+
+    # lal's pattern and delay applied in float64; the delay is a phase ramp,
+    # exact for a signal that is zero at the window's edges.
+    gmst = lal.GreenwichMeanSiderealTime(gps)
+    frequencies = np.fft.rfftfreq(num_samples, 1.0 / sample_rate_hertz)
+    plus, cross = polarisations.astype(np.float64)
+    expected = np.empty_like(projected)
+    for source, (ra, dec, psi) in enumerate(zip(*sky)):
+        for index, ifo in enumerate(ifos):
+            detector = lal.CachedDetectors[LAL_DETECTORS[IFOS.index(ifo)]]
+            f_plus, f_cross = lal.ComputeDetAMResponse(
+                detector.response, float(ra), float(dec), float(psi), gmst
+            )
+            delay = lal.TimeDelayFromEarthCenter(detector.location, float(ra), float(dec), gps)
+            spectrum = np.fft.rfft(f_plus * plus + f_cross * cross)
+            expected[source, index] = np.fft.irfft(
+                spectrum * np.exp(-2j * np.pi * frequencies * delay), n=num_samples
+            )
+
+    # The pattern's and the delay's float32 errors, and the FFT's rounding.
+    peak = float(np.max(np.abs(polarisations)))
+    rate = float(np.max(np.abs(np.gradient(polarisations, 1.0 / sample_rate_hertz, axis=-1))))
+    tolerance = (
+        PATTERN_TOLERANCE * 2.0 * peak
+        + DELAY_TOLERANCE_SECONDS * 2.0 * rate
+        + representation_tolerance(np.float32, 2.0 * peak, c=np.log2(num_samples))
     )
-    phenom_d_generator.injection_chance = 1.0
+    np.testing.assert_allclose(projected, expected, rtol=0, atol=tolerance)
 
-    injection_generator = gf.InjectionGenerator([phenom_d_generator])
-    injections, _, _ = next(injection_generator())
+    if pytestconfig.getoption("plot"):
+        output_file(tmp_path / f"projection_{len(ifos)}.html")
+        save(gridplot([[
+            gf.generate_strain_plot({"Projected": row}, sample_rate_hertz, title=f"{ifo.name} projection")
+            for row, ifo in zip(projected[0], ifos)
+        ]]))
 
-    # An isotropic sky, drawn from the default tree's direct streams.
-    num = injections.shape[1]
-    sky = gf.SeedTree().direct().stream("sky/test")
-    projected_injections = test_network.project_wave(
-        injections[0],
-        right_ascension=ops.convert_to_tensor(2.0 * np.pi * sky.random(num), dtype="float32"),
-        declination=ops.convert_to_tensor(np.arcsin(2.0 * sky.random(num) - 1.0), dtype="float32"),
-        polarization=ops.convert_to_tensor(np.pi * sky.random(num), dtype="float32"),
-    )
-
-    # Verify output shape and content
-    projected_injections = np.array(projected_injections)
-    assert len(projected_injections) > 0, "Projected injections should not be empty"
-    assert len(projected_injections.shape) == 3, f"Expected 3D output (batch, ifo, time), got {projected_injections.shape}"
-
-    injection_one = np.array(projected_injections)[0]
-
-    layout = [[gf.generate_strain_plot(
-        {"Injection Test": injection}, title="WNB injection example"
-    ) for injection in injection_one]]
-
-    if not should_plot:
-        gf.ensure_directory_exists(output_directory_path)
-        output_file(output_directory_path / plot_file_name)
-        grid = gridplot(layout)
-        save(grid)
-
-def test_project_wave(
-        network : gf.Network, 
-        pytestconfig : Config
-    ) -> None:
-
-    output_directory_path : Path = PACKAGE.parent.parent / "gravyflow_data/tests"
-
-    with gf.env():
-        _test_projection(
-            "multi",
-            network, 
-            output_directory_path, 
-            "projection_plots.html", 
-            should_plot=pytestconfig.getoption("plot")
-        )
-
-def test_project_wave_single(
-        network : gf.Network, 
-        pytestconfig : Config
-    ) -> None:
-    
-    output_directory_path : Path = PACKAGE.parent.parent / "gravyflow_data/tests"
-    
-    with gf.env():
-        _test_projection(
-            "single",
-            network, 
-            output_directory_path, 
-            "projection_plots_single.html", 
-            single_ifo=True, 
-            should_plot=pytestconfig.getoption("plot")
-        )
-
-def _test_antenna_pattern(
-        num_tests : int = int(100)
-    ) -> None:
-    
-    # Set logging level:
-    logging.basicConfig(level=logging.INFO)
-    
-    with gf.env():
-    
-        test_detectors = [gf.IFO.L1]
-        # Create from Enum:
-        network = gf.Network(
-            test_detectors
-        )
-
-        # Generating random values for our function
-        right_ascension = ops.convert_to_tensor(
-            np.random.uniform(0, 2 * np.pi, size=(num_tests,)), 
-            dtype="float32"
-        )
-        declination = ops.convert_to_tensor(
-            np.random.uniform(-np.pi / 2, np.pi / 2, size=(num_tests,)), 
-            dtype="float32"
-        )
-        polarization = ops.convert_to_tensor(
-            np.random.uniform(0, 2 * np.pi, size=(num_tests,)), 
-            dtype="float32"
-        )
-
-        # Sky angles are equatorial, at a GPS time; the reference
-        # implementations below take the Greenwich hour angle, GMST - RA.
-        gps_reference = 1126259462
-        d = Detector("L1")
-        hour_angle = gf.greenwich_mean_sidereal_time(gps_reference) - np.array(right_ascension)
-
-        # Compute the output
-        antenna_pattern = network.get_antenna_pattern(
-            right_ascension,
-            declination,
-            polarization,
-            gps_time_seconds=gps_reference
-        )
-
-        f_plus = ops.squeeze(antenna_pattern[...,0])
-        f_cross = ops.squeeze(antenna_pattern[...,1])
-
-        f_plus_zomb, f_cross_zomb = zombie_antenna_pattern(
-            hour_angle,
-            np.array(declination),
-            np.array(polarization)
-        )
-
-        import lal
-        gmst = lal.GreenwichMeanSiderealTime(gps_reference)
-        response = lal.CachedDetectors[lal.LLO_4K_DETECTOR].response
-        f_lal = np.array([
-            lal.ComputeDetAMResponse(response, float(ra), float(dec), float(psi), gmst)
-            for ra, dec, psi in zip(
-                np.array(right_ascension), np.array(declination), np.array(polarization)
-            )
-        ])
-        np.testing.assert_allclose(f_plus, f_lal[:, 0], atol=1e-5)
-        np.testing.assert_allclose(f_cross, f_lal[:, 1], atol=1e-5)
-
-        f_plus_pycbc, f_cross_pycbc = d.antenna_pattern(
-            np.array(right_ascension),
-            np.array(declination), 
-            np.array(polarization),
-            gps_reference
-        )
-        
-        np.testing.assert_allclose(
-            f_plus, 
-            f_plus_zomb,
-            atol=0.001, 
-            equal_nan=True, 
-            err_msg="Gravyflow antenna pattern does not equal zombie method.", 
-            verbose=True
-        )
-
-        np.testing.assert_allclose(
-            f_cross, 
-            f_cross_zomb,
-            atol=0.001, 
-            equal_nan=True, 
-            err_msg="Gravyflow antenna pattern does not equal zombie method.", 
-            verbose=True
-        )
-
-        np.testing.assert_allclose(
-            f_cross, 
-            f_cross_pycbc,
-            atol=0.001, 
-            equal_nan=True, 
-            err_msg="Gravyflow antenna pattern does not equal pycbc method.", 
-            verbose=True
-        )
-
-        np.testing.assert_allclose(
-            f_plus,
-            f_plus_pycbc,
-            atol=0.001, 
-            equal_nan=True, 
-            err_msg="Gravyflow antenna pattern does not equal pycbc method.", 
-            verbose=True
-        )
-
-@pytest.mark.global_rng
-def test_antenna_pattern(
-        pytestconfig : Config
-    ) -> None:
-
-    _test_antenna_pattern(
-        num_tests=gf.tests.num_tests_from_config(pytestconfig)
-    )
-
-def profile_antenna_pattern(num_tests: int = 100) -> None:
-    
-    with gf.env():
-    
-        test_detectors = [gf.IFO.L1]
-        # Create from Enum:
-        network = gf.Network(
-            test_detectors
-        )
-
-        # Generating random values for our function
-        right_ascension = ops.convert_to_tensor(
-            np.random.uniform(0, 2 * np.pi, size=(num_tests,)), 
-            dtype="float32"
-        )
-        declination = ops.convert_to_tensor(
-            np.random.uniform(-np.pi / 2, np.pi / 2, size=(num_tests,)), 
-            dtype="float32"
-        )
-        polarization = ops.convert_to_tensor(
-            np.random.uniform(0, 2 * np.pi, size=(num_tests,)), 
-            dtype="float32"
-        )
-
-        gps_reference = 0
-        d = Detector("L1")
-                
-        # Measure the time for network.get_antenna_pattern
-        timer = Timer(
-            lambda: network.get_antenna_pattern(
-                right_ascension,
-                declination, 
-                polarization
-            )
-        )
-        print(
-            (f"Time for network.get_antenna_pattern: {timer.timeit(number=1)}"
-             " seconds")
-        )
-
-        # Measure the time for zombie_antenna_pattern
-        d = Detector("L1")
-        timer = Timer(
-            lambda: zombie_antenna_pattern(
-                np.array(right_ascension), 
-                np.array(declination), 
-                np.array(polarization)
-            )
-        )
-        print(f"Time for zombie_antenna_pattern: {timer.timeit(number=1)} seconds")
-
-        # Measure the time for d.antenna_pattern using PyCBC
-        timer = Timer(
-            lambda: d.antenna_pattern(
-                np.array(right_ascension), 
-                np.array(declination), 
-                np.array(polarization),
-                630763213)
-            )
-        print(
-            (f"Time for PyCBC's d.antenna_pattern: {timer.timeit(number=1)} "
-             " seconds")
-        )
 
 def test_network_load(tmp_path):
-    """Test Network.load() from JSON config file."""
-    # Create a test config file
+    """A JSON config gives the network its geometry dict gives."""
     config = {
         "num_detectors": 1,
         "latitude_radians": 0.5,
@@ -534,46 +203,44 @@ def test_network_load(tmp_path):
         "y_angle_radians": 0.2,
         "x_length_meters": 4000.0,
         "y_length_meters": 4000.0,
-        "height_meters": 0.0
+        "height_meters": 0.0,
     }
-    
     config_path = tmp_path / "network_config.json"
-    import json
-    with open(config_path, 'w') as f:
-        json.dump(config, f)
-    
-    # Load network from config
-    network = gf.Network.load(config_path)
-    
-    assert network.num_detectors == 1
-    assert ops.shape(network.location) == (1, 3)
+    config_path.write_text(json.dumps(config))
+
+    loaded = gf.Network.load(config_path)
+    direct = gf.Network({key: value for key, value in config.items() if key != "num_detectors"})
+    assert loaded.num_detectors == 1
+    for attribute in ("location", "x_vector", "y_vector", "response"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(loaded, attribute)), np.asarray(getattr(direct, attribute)), err_msg=attribute
+        )
+
 
 def test_check_and_convert_list_input():
-    """Test check_and_convert with list input (covers lines 720-725)."""
     network = gf.Network([gf.IFO.L1])
-    
-    # Test with list input
     result = network.check_and_convert([1.0, 2.0], "test_param", tensor_length=2)
     assert ops.shape(result) == (2,)
-    np.testing.assert_allclose(result, [1.0, 2.0])
+    np.testing.assert_array_equal(result, [1.0, 2.0])
+
 
 def test_check_and_convert_tensor_dtype_cast():
-    """Test check_and_convert with non-float32 tensor (covers lines 716-717)."""
     network = gf.Network([gf.IFO.L1])
-    
-    # Test with float64 tensor - should be cast to float32
-    tensor_f64 = ops.convert_to_tensor([1.0, 2.0], dtype="float64")
-    result = network.check_and_convert(tensor_f64, "test_param", tensor_length=2)
+
+    # A tensor of another dtype is cast to float32 (an integer one: without
+    # x64, jax holds no float64 tensor).
+    tensor_int = ops.convert_to_tensor([1, 2], dtype="int32")
+    result = network.check_and_convert(tensor_int, "test_param", tensor_length=2)
     assert result.dtype == "float32"
-    
-    # Test with float32 tensor - should pass through unchanged (covers line 718)
+    np.testing.assert_array_equal(result, [1.0, 2.0])
+
+    # A float32 tensor passes through unchanged.
     tensor_f32 = ops.convert_to_tensor([1.0, 2.0], dtype="float32")
     result = network.check_and_convert(tensor_f32, "test_param", tensor_length=2)
-    assert result.dtype == "float32"
-    assert result is tensor_f32  # Should be the same object
+    assert result is tensor_f32
+
 
 def test_network_load_distribution(tmp_path):
-    """Test Network.load() with distribution parameters (covers line 687)."""
     config = {
         "num_detectors": 1,
         "latitude_radians": {
@@ -581,7 +248,6 @@ def test_network_load_distribution(tmp_path):
             "min_": 0.0,
             "max_": 1.0
         },
-        # Minimal other required params
         "longitude_radians": 0.0,
         "x_angle_radians": 0.0,
         "y_angle_radians": 0.0,
@@ -589,12 +255,9 @@ def test_network_load_distribution(tmp_path):
         "y_length_meters": 4000.0,
         "height_meters": 0.0
     }
-    
     config_path = tmp_path / "network_dist_config.json"
-    import json
-    with open(config_path, 'w') as f:
-        json.dump(config, f)
-    
+    config_path.write_text(json.dumps(config))
+
     # Random geometry is drawn from the rng given, with no deprecated path.
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
@@ -638,32 +301,26 @@ def test_project_wave_has_no_seed():
     with pytest.raises(TypeError, match="seed"):
         network.project_wave(strain, 512.0, 0.1, 0.2, 0.3, seed=1)
 
+
 def test_check_and_convert_errors():
-    """Test error conditions in check_and_convert."""
     network = gf.Network([gf.IFO.L1])
-    
-    # Tensor shape mismatch
+
     tensor = ops.convert_to_tensor([1.0, 2.0, 3.0], dtype="float32")
     with pytest.raises(ValueError, match="must be equal to num injections"):
         network.check_and_convert(tensor, "test", tensor_length=2)
-        
-    # List length mismatch
+
     with pytest.raises(ValueError, match="must be equal to num injections"):
         network.check_and_convert([1.0, 2.0, 3.0], "test", tensor_length=2)
-        
-    # Invalid type
+
     with pytest.raises(TypeError, match="must be a float, list, tuple, or tensor"):
         network.check_and_convert("invalid", "test", tensor_length=2)
 
+
 def test_check_and_convert_scalar_none():
-    """Test check_and_convert with scalar and None inputs."""
     network = gf.Network([gf.IFO.L1])
-    
-    # Scalar input
+
     result = network.check_and_convert(5.0, "test", tensor_length=3)
     assert ops.shape(result) == (3,)
-    np.testing.assert_allclose(result, [5.0, 5.0, 5.0])
-    
-    # None input
-    result = network.check_and_convert(None, "test", tensor_length=3)
-    assert result is None
+    np.testing.assert_array_equal(result, [5.0, 5.0, 5.0])
+
+    assert network.check_and_convert(None, "test", tensor_length=3) is None
