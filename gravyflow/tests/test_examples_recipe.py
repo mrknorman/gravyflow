@@ -43,12 +43,30 @@ def test_examples_take_whitened_onsource_and_return_logits(model_class, config):
     assert out.shape == (3, 2) and out.dtype == np.float32
 
 
-@pytest.mark.global_rng
+def gabbard_weights(config):
+    """The weights of Table I's network, counted from the layer sizes alone (exact integers)."""
+    length, channels, total = int(config.sample_rate_hertz * config.onsource_duration_seconds), 1, 0
+    for filters, kernel, pool in config.conv_configs:
+        total += kernel * channels * filters + filters          # kernels and biases
+        length, channels = length - kernel + 1, filters          # "valid" convolution
+        if pool is not None:
+            length = -(-length // pool)                          # "same" pooling: ceil(length / pool)
+    width = length * channels
+    for units_in, units_out in ((width, config.dense_units), (config.dense_units, config.dense_units),
+                                (config.dense_units, config.num_output_classes)):
+        total += units_in * units_out + units_out
+    return total
+
+
+@pytest.mark.global_rng  # building a Keras model draws its initialisers from Keras' global seed
 def test_gabbard_cpu_preset_size():
-    assert Gabbard2017.model(Gabbard2017Config.cpu()).count_params() == 41_842
+    config = Gabbard2017Config.cpu()
+    assert Gabbard2017.model(config).count_params() == gabbard_weights(config)
+    # The documented size of the preset: a change to the layers must change the docstring too.
+    assert gabbard_weights(config) == 41_842
 
 
-@pytest.mark.global_rng
+@pytest.mark.global_rng  # pretrained() builds the network first: its initialisers draw from Keras' global seed
 def test_shipped_weights_for_the_old_contract_are_refused():
     with pytest.raises(ValueError, match="older input contract"):
         Gabbard2017.pretrained()
@@ -113,7 +131,7 @@ def test_curriculum_reaches_the_target_before_the_run_ends(epochs):
 
 
 def test_curriculum_needs_room():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="at least 4 epochs, got 3"):
         curriculum_epochs(3)
 
 
@@ -154,11 +172,15 @@ class CountingBatches(keras.utils.PyDataset):
 
 
 def test_materialise_serves_identical_batches():
-    source = CountingBatches(0)
+    source, reference = CountingBatches(0), CountingBatches(0)
+    expected = [reference[0], reference[1]]       # the same seed, drawn in order
     fixed = materialise(source, 2)
     assert isinstance(fixed, FixedBatches) and len(fixed) == 2 and source.calls == 2
-    np.testing.assert_array_equal(fixed[0][0]["WHITENED_ONSOURCE"], fixed[0][0]["WHITENED_ONSOURCE"])
-    assert fixed[1] is fixed[1]
+    for index in (0, 1, 0):                        # served again and out of order: the same draws
+        (x, y), (expected_x, expected_y) = fixed[index], expected[index]
+        np.testing.assert_array_equal(x["WHITENED_ONSOURCE"], expected_x["WHITENED_ONSOURCE"])
+        np.testing.assert_array_equal(y, expected_y)
+    assert source.calls == 2                       # serving never draws again
 
 
 def test_batches_name_their_datasets_split():
@@ -330,6 +352,12 @@ def test_training_is_reproducible_from_the_seed(tmp_path):
     assert not np.array_equal(another.get_weights()[0], weights_a[0])
 
 
+# Representation: the same float32 arithmetic replayed from a saved checkpoint; the weights
+# are O(1), so 8 * eps(float32) relative and 1 eps absolute.
+RESUME_RTOL = 8 * float(np.finfo(np.float32).eps)
+RESUME_ATOL = float(np.finfo(np.float32).eps)
+
+
 def test_a_resumed_run_trains_as_an_uninterrupted_one(tmp_path):
     # GF-B215: a resumed run's epochs came in another order.
     validation = materialise(AddressedBatches(99, [], group="validate"), 2)
@@ -343,9 +371,9 @@ def test_a_resumed_run_trains_as_an_uninterrupted_one(tmp_path):
     assert whole_state["best_epoch"] == parts_state["best_epoch"]
     for a, b in zip(RunDirectory(tmp_path / "whole").load_model("last").get_weights(),
                     RunDirectory(tmp_path / "parts").load_model("last").get_weights()):
-        np.testing.assert_allclose(a, b, rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(a, b, rtol=RESUME_RTOL, atol=RESUME_ATOL)
     for a, b in zip(whole.get_weights(), resumed.get_weights()):
-        np.testing.assert_allclose(a, b, rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(a, b, rtol=RESUME_RTOL, atol=RESUME_ATOL)
 
 
 def test_resume_refuses_another_configuration(tmp_path):
