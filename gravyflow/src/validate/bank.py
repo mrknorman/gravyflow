@@ -373,12 +373,15 @@ class ValidationBank:
             events.append(e)
         logger.info(f"Scoring {len(events)} real events.")
 
+        noise = self.dataset_args.get("noise_obtainer")
         obtainer = gf.TransientDataObtainer(
             observing_runs=observing_runs,
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS],
             event_names=[e["name"] for e in events],
             split_spec=split_spec,
+            # The background's source (a NoiseObtainer's reader's, or a transient obtainer's own).
+            source=getattr(getattr(noise, "ifo_data_obtainer", noise), "source", None),
         )
         dataset = self._noise_dataset
         window = dataset.window_spec

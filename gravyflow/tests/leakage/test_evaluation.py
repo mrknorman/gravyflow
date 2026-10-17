@@ -732,6 +732,43 @@ def test_the_banks_split_is_its_datasets(noise, spec):
         assert bank.split_spec == bank._noise_dataset.split_spec == spec
 
 
+class _EventsObtainerBuilt(Exception):
+    pass
+
+
+@pytest.mark.parametrize("noise,source", [
+    (lambda: {}, None),
+    (lambda: {"noise_obtainer": gf.NoiseObtainer(noise_type=gf.NoiseType.REAL, ifo_data_obtainer=gf.IFODataObtainer(
+        data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE], source=gf.LocalFrames()))},
+     gf.LocalFrames()),
+    (lambda: {"noise_obtainer": gf.TransientDataObtainer(
+        data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
+        observing_runs=gf.ObservingRun.O3, source=gf.LocalFrames())}, gf.LocalFrames()),
+], ids=["the default noise", "real noise", "glitches as noise"])
+def test_the_banks_events_read_its_backgrounds_source(noise, source, monkeypatch):
+    """
+    Real events are read from the source the noise background reads, so an event's
+    score and the background its FAR comes from are measured on the same strain; with
+    synthetic noise, from the default source.
+    """
+    args = {"onsource_duration_seconds": 1.0, "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE], **noise()}
+    built = []
+
+    def events_obtainer(**kwargs):
+        built.append(kwargs.get("source"))
+        raise _EventsObtainerBuilt
+
+    from gravyflow.src.dataset.features import event
+    monkeypatch.setattr(event, "get_events_with_params",
+                        lambda *args, **kwargs: [{"name": "GW190521", "gps": 1242442967.4}])
+    monkeypatch.setattr(gf, "TransientDataObtainer", events_obtainer)
+    bank = ValidationBank(stub_model(256), args)
+    bank.far_scores = np.zeros(1)
+    with pytest.raises(_EventsObtainerBuilt):
+        bank.generate_real_events()
+    assert built == [source]
+
+
 class _ModelBatches(recipe.DetectionBatches):
     """A gravyflow dataset's split, served as the small gf.Model's batches: training reads its split."""
 
