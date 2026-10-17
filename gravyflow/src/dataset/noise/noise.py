@@ -467,7 +467,7 @@ class NoiseObtainer(Obtainer):
                     offsource_duration_seconds,
                     num_examples_per_batch,
                     ifos,
-                    seed=sequential_seed(tree, group, "noise/real"),
+                    seed=sequential_seed(tree, group, "noise/reader"),
                     sampling_mode=sampling_mode,
                     group=group
                 ))

@@ -251,6 +251,12 @@ def draw_examples(
     return rows, starts, rounds
 
 
+def time_order(rows: np.ndarray) -> np.ndarray:
+    """The order that sorts ``rows`` ((M, I, 2) GPS pieces) by time: by each detector's piece in turn."""
+    rows = np.asarray(rows)
+    return np.lexsort(np.reshape(rows, (len(rows), int(np.prod(rows.shape[1:])))).T[::-1])
+
+
 @dataclass(frozen=True, eq=False)
 class GridPlan:
     """
@@ -786,7 +792,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             if len(sampling.rows) == 0:
                 raise ValueError(f"The {split!r} split has no row long enough for a window "
                                  f"of {window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds} s.")
-            order = np.lexsort(np.reshape(sampling.rows, (len(sampling.rows), -1)).T[::-1])
+            order = time_order(sampling.rows)
             sampling = SamplingPlan(sampling.rows[order], sampling.start_seconds[order], sampling.inseparable)
             firsts, counts = interiors(self.source, window_spec.sample_rate_hertz, np.reshape(sampling.rows, (-1, 2)))
             shape = sampling.rows.shape[:2]
@@ -827,7 +833,6 @@ class NoiseDataObtainer(BaseDataObtainer):
         separation = self._separation_seconds(window_spec) * rate
         quantum = store_read.geometry(self.source, rate).up
         coincident = self.coincidence == Coincidence.COINCIDENT
-        stream = self._served_split
 
         def windows(address):
             streams = BatchStreams(*address)
@@ -850,24 +855,14 @@ class NoiseDataObtainer(BaseDataObtainer):
             return self._emit(window_spec, ops.convert_to_tensor(onsource), ops.convert_to_tensor(offsource), gps,
                               whiten, crop)
 
-        def held(ifo, start: int) -> None:
-            """Commit every tile one window's read needs, refusing as its read would, without reading it."""
-            store_read.ensure(self.source, ifo, rate, start - off, off + on, stream=stream)
+        def starts_of(streams: BatchStreams) -> np.ndarray:
+            g = (streams.epoch or 0) * (steps_per_epoch or 0) + streams.k
+            return draw_examples(plan, streams, g, ifos, num_examples_per_batch, on, off, separation,
+                                 coincident, quantum)[1]
 
         def prepare(addresses: Sequence[BatchStreams]) -> List[store_read.TimelineContradiction]:
-            """Every contradiction the windows of ``addresses`` meet, each tile committed once."""
-            met = {}
-            for streams in addresses:
-                g = (streams.epoch or 0) * (steps_per_epoch or 0) + streams.k
-                _, starts, _ = draw_examples(plan, streams, g, ifos, num_examples_per_batch, on, off, separation,
-                                             coincident, quantum)
-                for example in starts:
-                    for ifo, start in zip(ifos, example):
-                        try:
-                            held(ifo, int(start))
-                        except store_read.TimelineContradiction as error:
-                            met.setdefault(error.exclusion, error)
-            return list(met.values())
+            """Every contradiction the windows of ``addresses`` meet (``prepare_windows``)."""
+            return self.prepare_windows(ifos, rate, map(starts_of, addresses), on, off)
 
         batch.prefetcher = prefetcher
         batch.plan = plan
@@ -883,7 +878,7 @@ class NoiseDataObtainer(BaseDataObtainer):
         """
         split = self._served_group or DIRECT_SPLIT
         rows = self.build_sampling_plan(window_spec).rows
-        rows = rows[np.lexsort(np.reshape(rows, (len(rows), int(np.prod(rows.shape[1:])))).T[::-1])]
+        rows = rows[time_order(rows)]
         rate = window_spec.sample_rate_hertz
         firsts, counts = interiors(self.source, rate, np.reshape(rows, (-1, 2)))
         plan = GridPlan(split, grid_examples(
@@ -933,10 +928,35 @@ class NoiseDataObtainer(BaseDataObtainer):
             return self._emit(window_spec, ops.convert_to_tensor(onsource), ops.convert_to_tensor(offsource), gps,
                               whiten, crop)
 
+        def prepare(addresses: Sequence[BatchStreams]) -> List[store_read.TimelineContradiction]:
+            """Every contradiction the windows of ``addresses`` meet (``prepare_windows``)."""
+            return self.prepare_windows(ifos, rate, (plan.examples(streams.k) for streams in addresses), on, off)
+
         batch.prefetcher = prefetcher
         batch.plan = plan
         batch.batches = plan.batches
+        batch.prepare = prepare
         return batch
+
+    def prepare_windows(self, ifos: List[gf.IFO], sample_rate_hertz: float, batches,
+                        num_onsource_samples: int, num_offsource_samples: int
+                        ) -> List[store_read.TimelineContradiction]:
+        """
+        Commit every tile the windows of ``batches`` (each (B, I) onsource starts, absolute
+        sample indices) read, without reading them (``store.read.ensure``), and return every
+        contradiction met, one per exclusion: the one place a batcher's ``prepare`` meets
+        the store.
+        """
+        met = {}
+        for starts in batches:
+            for example in starts:
+                for ifo, start in zip(ifos, example):
+                    try:
+                        store_read.ensure(self.source, ifo, sample_rate_hertz, int(start) - num_offsource_samples,
+                                          num_offsource_samples + num_onsource_samples, stream=self._served_split)
+                    except store_read.TimelineContradiction as error:
+                        met.setdefault(error.exclusion, error)
+        return list(met.values())
 
     def read_windows(self, ifos: List[gf.IFO], sample_rate_hertz: float, starts: np.ndarray,
                      num_onsource_samples: int, num_offsource_samples: int) -> Tuple[np.ndarray, np.ndarray]:

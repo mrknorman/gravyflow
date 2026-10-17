@@ -415,6 +415,19 @@ def test_a_grid_evaluation_set_is_finite_and_the_same_every_epoch(world, split):
         assert len(np.unique(served[:, d])) == len(served), f"detector {d} served a window twice"
 
 
+def test_a_grid_evaluation_set_is_prepared_once(world):
+    """``prepare`` commits every tile a GRID set reads, once for all epochs; its batches then fetch nothing."""
+    fixture = _split_world([gf.DEFAULT_SPLIT])
+    with world(fixture) as harness:
+        ds = fx.dataset(fixture, "test", mode=gf.SamplingMode.GRID, batch=8)
+        assert ds.prepare(epochs=3) == len(ds) > 0
+        prepared = len(harness.source.snapshot()[0])
+        assert prepared > 0
+        for k in range(len(ds)):
+            ds[k]
+        assert len(harness.source.snapshot()[0]) == prepared, "a prepared GRID batch fetched"
+
+
 def test_a_run_records_the_split_its_data_reads(world, tmp_path):
     """
     A run records the split its data reads, never one declared beside it: a default run

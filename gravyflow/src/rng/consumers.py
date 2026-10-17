@@ -22,9 +22,8 @@ _LEAVES = tuple(re.compile(pattern) for pattern in (
     # window starts.
     r"noise/(segment_order|accrual|row)",
     rf"noise/start/{_SEGMENT}",
-    # The sequential real-noise (GRID) reader, until it is addressed by index,
-    # and a reader of the caller's own, read in order.
-    r"noise/(real|reader)",
+    # A reader of the caller's own, read in order: its seed.
+    r"noise/reader",
     # A transient split's passes: pass p's order and balance, at epoch p.
     r"transient/(order|balance)",
     rf"augment/{_SEGMENT}",
