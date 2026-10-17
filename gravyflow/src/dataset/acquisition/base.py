@@ -660,8 +660,6 @@ class BaseDataObtainer(ABC):
             # This build of the served state: a generator serves only while it
             # is unchanged (see _while_served).
             "_served_build": object(),
-            # The transient reader's draws, until transients are addressed by index.
-            "rng": None,
             "ifos": None,
             "valid_segments": None,
             "sampling_plan": None,

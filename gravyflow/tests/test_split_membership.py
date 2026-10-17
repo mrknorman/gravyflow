@@ -175,13 +175,12 @@ class TestTransientMembership:
 class TestObtainerCopies:
     """
     An obtainer is a specification: a copy, which every split reads from,
-    never carries what serving data built (segments, index, rng).
+    never carries what serving data built (segments, index).
     """
 
     def used_glitch_obtainer(self):
         obtainer = glitch_obtainer()
         obtainer.get_valid_segments([gf.IFO.L1], seed=1000, group_name="train")
-        obtainer.rng = np.random.default_rng(1)
         return obtainer
 
     def test_a_copy_of_a_used_transient_obtainer_is_fresh(self, catalogue):
@@ -190,7 +189,6 @@ class TestObtainerCopies:
         fresh = copy.deepcopy(used)
         assert fresh.transient_segments == []
         assert fresh._feature_index is None
-        assert fresh.rng is None
         assert not members(fresh, "test", 1000) & train
 
     def test_a_dataset_builds_from_a_used_transient_obtainer(self, catalogue):
@@ -211,9 +209,8 @@ class TestObtainerCopies:
         noise = gf.NoiseObtainer(ifo_data_obtainer=used, noise_type=gf.NoiseType.REAL, ifos=[gf.IFO.L1])
         train = used.get_valid_segments([gf.IFO.L1], seed=1000, group_name="train")
 
-        used.rng = np.random.default_rng(1)
         fresh = copy.deepcopy(used)
-        assert fresh.valid_segments is None and fresh.rng is None
+        assert fresh.valid_segments is None
 
         reader = noise._reader([gf.IFO.L1], gf.SeedTree(gf.Defaults.seed), "validate", 2048.0)
         validate = reader.valid_segments
