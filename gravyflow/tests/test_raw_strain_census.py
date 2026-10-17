@@ -18,6 +18,8 @@ the modules that compute on data (PSD, SNR, whitening, Pearson, spectrogram, the
 matched filter, plotting and the augmentations): a new public function there
 fails until it joins CENSUS, or EXEMPT with the reason it takes no raw strain.
 """
+import functools
+
 import numpy as np
 import pytest
 
@@ -30,12 +32,8 @@ from gravyflow.src.dataset.tools.snr import template_sigma
 from gravyflow.src.detection import MatchedFilter, TemplateBank
 
 FS = 2048.0
-SCALES = [1e-23, 1e-22, 1e-21, 1e-20, 1e-18, 1e-15, 1e-10, 1e-5, 1e-2, 1.0]
-#: Scaling O(1) data by k rounds each sample (relative 6e-8), which whitening and
-#: PSD weighting amplify in quiet bands.
-TOLERANCE = 1e-5
-#: Element-wise tolerance of a power or PSD: its quiet bins are compared too.
-ELEMENT_TOLERANCE = 1e-3
+#: Every k but 1, the reference itself.
+SCALES = [1e-23, 1e-22, 1e-21, 1e-20, 1e-18, 1e-15, 1e-10, 1e-5, 1e-2]
 
 
 def _coloured(seed, shape, seconds):
@@ -54,9 +52,6 @@ OFFSOURCE = _coloured(2, (2, 2), 16.0)
 _t = (np.arange(int(2 * FS)) - FS) / FS
 TEMPLATE = np.exp(-(_t / 0.01) ** 2) * np.sin(2 * np.pi * 150.0 * _t)
 INJECTION = np.tile(TEMPLATE, (2, 2, 1))
-#: A one-sided PSD of OFFSOURCE[0, 0] on ONSOURCE's rfft grid, float64.
-_spectrum = gf.psd(OFFSOURCE[0, 0].astype(np.float32), nperseg=int(FS), sample_rate_hertz=FS)
-PSD = np.interp(np.fft.rfftfreq(int(2 * FS), 1.0 / FS), _spectrum.frequencies, _spectrum.value())
 WHITE_WINDOW = np.random.default_rng(3).standard_normal((1, int(FS))).astype(np.float32)
 
 
@@ -77,7 +72,16 @@ def _spectrogram_image(k):
     return np.asarray(plot.renderers[0].data_source.data["image"][0], np.float64) / k ** 2
 
 
-_matched_filter = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS)
+@functools.cache
+def _psd():
+    """A one-sided PSD of OFFSOURCE[0, 0] on ONSOURCE's rfft grid, float64."""
+    spectrum = gf.psd(OFFSOURCE[0, 0].astype(np.float32), nperseg=int(FS), sample_rate_hertz=FS)
+    return np.interp(np.fft.rfftfreq(int(2 * FS), 1.0 / FS), spectrum.frequencies, spectrum.value())
+
+
+@functools.cache
+def _matched_filter():
+    return MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS)
 
 ELEMENT, PEAK = "element", "peak"
 
@@ -100,25 +104,57 @@ CENSUS = {
     "gf.scale_to_snr": (lambda k: np.asarray(gf.scale_to_snr(at(INJECTION, k), at(OFFSOURCE, k), 8.0, FS)) / k,
                         PEAK, False),
     "gf.matched_filter_fft (PSD array)": (lambda k: gf.matched_filter_fft(
-        at(ONSOURCE[:, 0], k), TEMPLATE[None], psd=PSD * k ** 2, sample_rate_hertz=FS), PEAK, False),
+        at(ONSOURCE[:, 0], k), TEMPLATE[None], psd=_psd() * k ** 2, sample_rate_hertz=FS), PEAK, False),
     "gf.matched_filter_fft (PowerSpectrum)": (lambda k: gf.matched_filter_fft(
         at(ONSOURCE[:, 0], k), TEMPLATE[None], psd=estimate_psd(at(OFFSOURCE[:, 0], k), FS),
         sample_rate_hertz=FS), PEAK, False),
     "gf.matched_filter_fft (white)": (lambda k: np.asarray(gf.matched_filter_fft(
         at(ONSOURCE[:, 0], k), TEMPLATE[None], sample_rate_hertz=FS)) / k, PEAK, False),
-    "gf.optimal_snr": (lambda k: gf.optimal_snr(at(TEMPLATE, k), psd=PSD * k ** 2, sample_rate_hertz=FS),
+    "gf.optimal_snr": (lambda k: gf.optimal_snr(at(TEMPLATE, k), psd=_psd() * k ** 2, sample_rate_hertz=FS),
                        PEAK, False),
-    "template_sigma": (lambda k: template_sigma(at(TEMPLATE[None], k), psd=PSD * k ** 2, sample_rate_hertz=FS),
+    "template_sigma": (lambda k: template_sigma(at(TEMPLATE[None], k), psd=_psd() * k ** 2, sample_rate_hertz=FS),
                        PEAK, False),
     "gf.calculate_hrss": (lambda k: np.asarray(gf.calculate_hrss(at(INJECTION, k), FS)) / k, PEAK, False),
     "gf.calculate_hpeak": (lambda k: np.asarray(gf.calculate_hpeak(at(INJECTION, k))) / k, PEAK, False),
-    "gf.MatchedFilter": (lambda k: _matched_filter.snr_series(WHITE_WINDOW, background=at(OFFSOURCE[:1, 0], k)),
+    "gf.MatchedFilter": (lambda k: _matched_filter().snr_series(WHITE_WINDOW, background=at(OFFSOURCE[:1, 0], k)),
                          PEAK, False),
     "gf.SignReversal": (lambda k: _augmented(SignReversal(probability=1.0), k), PEAK, False),
     "gf.TimeReversal": (lambda k: _augmented(TimeReversal(probability=1.0), k), PEAK, False),
     "gf.RandomShift": (lambda k: _augmented(RandomShift(probability=1.0), k), PEAK, False),
     "gf.AddNoise": (lambda k: _augmented(AddNoise(probability=1.0, amplitude=0.1), k), PEAK, False),
 }
+
+#: Measured: each case's worst error over SCALES, by its comparison's metric (relative
+#: to each element of the k = 1 result, or to its peak), on CPU (macOS arm64) at gravyflow
+#: df4acab, rounded up. Scaling by k rounds each sample once (relative 6e-8); a case's
+#: error is that rounding as it amplifies it: PSD weighting and whitening most, in quiet
+#: bands, and the spectrogram most of all, element by element in its quietest pixels.
+WORST_ERROR = {
+    "estimate_psd": 6.4e-5,
+    "gf.AddNoise": 1.1e-7,
+    "gf.MatchedFilter": 3.4e-7,
+    "gf.RandomShift": 1.1e-7,
+    "gf.SignReversal": 1.1e-7,
+    "gf.TimeReversal": 1.1e-7,
+    "gf.Whiten": 1.1e-6,
+    "gf.WhitenPass": 2.4e-7,
+    "gf.calculate_hpeak": 8.8e-8,
+    "gf.calculate_hrss": 6.7e-8,
+    "gf.generate_spectrogram": 3.1e-4,
+    "gf.matched_filter_fft (PSD array)": 7.4e-7,
+    "gf.matched_filter_fft (PowerSpectrum)": 1.2e-6,
+    "gf.matched_filter_fft (white)": 7.0e-7,
+    "gf.optimal_snr": 6.3e-8,
+    "gf.psd": 7.6e-7,
+    "gf.rolling_pearson": 2.8e-7,
+    "gf.scale_to_snr": 3.4e-7,
+    "gf.snr": 1.8e-7,
+    "gf.spectrogram": 9.0e-5,
+    "gf.whiten": 1.1e-6,
+    "template_sigma": 6.3e-8,
+}
+#: The margin each case's bound keeps over its measured worst error.
+MARGIN = 3.0
 
 #: Public names of the numeric modules that take no raw strain, and why.
 EXEMPT = {
@@ -147,23 +183,24 @@ NUMERIC_MODULES = (
 )
 
 
-def _compare(name, comparison, got, reference):
+def _compare(name, comparison, got, reference, tolerance):
     got, reference = np.asarray(got, np.float64), np.asarray(reference, np.float64)
     assert got.shape == reference.shape, name
     assert np.all(np.isfinite(got)), f"{name}: not finite"
     if comparison == ELEMENT:
         assert np.all(reference > 0), f"{name}: the k = 1 reference has empty bins"
-        np.testing.assert_allclose(got, reference, rtol=ELEMENT_TOLERANCE, err_msg=name)
+        error = np.max(np.abs(got - reference) / reference)
     else:
         peak = np.max(np.abs(reference))
         assert peak > 0, f"{name}: the k = 1 reference is zero"
         error = np.max(np.abs(got - reference)) / peak
-        assert error <= TOLERANCE, f"{name}: relative difference {error:.3g} > {TOLERANCE:.3g}"
+    assert error <= tolerance, f"{name}: relative difference {error:.3g} > {tolerance:.3g}"
 
 
 @pytest.mark.parametrize("name", sorted(CENSUS))
 def test_f_of_k_x_relates_to_f_of_x_as_its_units_require_or_refuses(name):
     case, comparison, may_refuse = CENSUS[name]
+    tolerance = MARGIN * WORST_ERROR[name]
     reference = case(1.0)
     refused = []
     for k in SCALES:
@@ -174,7 +211,7 @@ def test_f_of_k_x_relates_to_f_of_x_as_its_units_require_or_refuses(name):
             assert "float32" in str(error), f"{name} refused k = {k:g} without naming why: {error}"
             refused.append(k)
             continue
-        _compare(f"{name} at k = {k:g}", comparison, got, reference)
+        _compare(f"{name} at k = {k:g}", comparison, got, reference, tolerance)
     if may_refuse:
         # It refuses physical strain, and only below some amplitude.
         assert 1e-21 in refused
