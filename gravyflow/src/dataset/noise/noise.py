@@ -17,7 +17,7 @@ import gravyflow as gf
 
 from gravyflow.src.dataset.conditioning.detector import DEFAULT_NOISE_PROFILE, read_noise_curve
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
-from gravyflow.src.dataset.config import WindowSpec, ignore_scale_factor
+from gravyflow.src.dataset.config import WindowSpec, batch_size, ignore_scale_factor
 from gravyflow.src.rng import BatchStreams, SeedTree
 from gravyflow.src.rng.legacy import warn_deprecated
 from gravyflow.src.utils.shapes import ShapeEnforcer
@@ -368,29 +368,24 @@ class NoiseObtainer(Obtainer):
         ``scale_factor`` is deprecated and ignored.
         """
         ignore_scale_factor(scale_factor)
-        if sample_rate_hertz is None:
-            sample_rate_hertz = gf.Defaults.sample_rate_hertz
-        if onsource_duration_seconds is None:
-            onsource_duration_seconds = gf.Defaults.onsource_duration_seconds
-        if offsource_duration_seconds is None:
-            offsource_duration_seconds = gf.Defaults.offsource_duration_seconds
-        if crop_duration_seconds is None:
-            crop_duration_seconds = gf.Defaults.crop_duration_seconds
-        if num_examples_per_batch is None:
-            num_examples_per_batch = gf.Defaults.num_examples_per_batch
+        # The window and the batch size are checked here, as the batcher is built: a
+        # configuration that can serve nothing is refused by name before any read.
+        window = WindowSpec.from_params(
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration_seconds=onsource_duration_seconds,
+            offsource_duration_seconds=offsource_duration_seconds,
+            crop_duration_seconds=crop_duration_seconds,
+        )
+        sample_rate_hertz = window.sample_rate_hertz
+        onsource_duration_seconds = window.onsource_duration_seconds
+        offsource_duration_seconds = window.offsource_duration_seconds
+        crop_duration_seconds = window.crop_duration_seconds
+        num_examples_per_batch = batch_size(num_examples_per_batch)
         if sampling_mode is None:
             sampling_mode = gf.SamplingMode.RANDOM
         # The detectors for this call only: the obtainer's own `ifos` is never
         # overwritten, so one obtainer can serve datasets with different detectors.
         ifos = gf.src.utils.numerics.ensure_list(ifos) if ifos is not None else list(self.ifos)
-
-        def window_spec() -> WindowSpec:
-            return WindowSpec.from_params(
-                sample_rate_hertz=sample_rate_hertz,
-                onsource_duration_seconds=onsource_duration_seconds,
-                offsource_duration_seconds=offsource_duration_seconds,
-                crop_duration_seconds=crop_duration_seconds,
-            )
 
         match self.noise_type:
             case NoiseType.WHITE:
@@ -427,7 +422,7 @@ class NoiseObtainer(Obtainer):
                 batch = pseudo_real_batcher(
                     reader,
                     tree,
-                    window_spec(),
+                    window,
                     num_examples_per_batch,
                     ifos,
                     steps_per_epoch=steps_per_epoch,
@@ -449,13 +444,13 @@ class NoiseObtainer(Obtainer):
 
             case NoiseType.REAL if addressed_by_index(self, sampling_mode) and sampling_mode == gf.SamplingMode.GRID:
                 batch = self._reader(ifos, tree, group, sample_rate_hertz).grid_batcher(
-                    window_spec(), num_examples_per_batch, ifos,
+                    window, num_examples_per_batch, ifos,
                 )
 
             case NoiseType.REAL if addressed_by_index(self, sampling_mode):
                 batch = self._reader(ifos, tree, group, sample_rate_hertz).random_batcher(
                     tree,
-                    window_spec(),
+                    window,
                     num_examples_per_batch,
                     ifos,
                     steps_per_epoch=steps_per_epoch,

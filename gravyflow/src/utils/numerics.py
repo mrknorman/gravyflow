@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Union, List, Any, Optional
 
 import gravyflow as gf
-from gravyflow.src.dataset.config import ignore_scale_factor
+from gravyflow.src.dataset.config import batch_size, ignore_scale_factor
 
 
 class NonFiniteWarning(UserWarning):
@@ -64,9 +64,8 @@ class BatchConfig:
     ifos: List = None
     
     def __post_init__(self):
-        """Apply defaults from gf.Defaults for any None values."""
-        if self.num_examples_per_batch is None:
-            self.num_examples_per_batch = gf.Defaults.num_examples_per_batch
+        """Apply defaults from gf.Defaults for any None values; refuse an empty batch by name."""
+        self.num_examples_per_batch = batch_size(self.num_examples_per_batch)
         ignore_scale_factor(self.scale_factor)
         self.scale_factor = None
         if self.seed is None:

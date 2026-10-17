@@ -12,7 +12,7 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 ## Configuration and randomness
 
 - `Defaults`: the defaults every dataset takes (sample rate, durations, seed, batch size).
-- `WindowSpec`: the onsource, offsource and crop durations of one window.
+- `WindowSpec`: the sample rate and the onsource, offsource and crop durations of one window. A rate or onsource that is not above zero, or an offsource or crop below zero, is refused by name as it is built.
 - `SplitSpec`: how GPS time is split into train, validate and test.
 - `DEFAULT_SPLIT`: the default `SplitSpec`.
 - `EXCLUDED`: the label of time that belongs to no split.
@@ -37,7 +37,7 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `DiversityCallback`: the Keras callback that tracks how diverse training batches are.
 - `LabelTrackingDataset`: a dataset wrapper that records the labels it serves.
 - `compute_diversity_score`: the diversity of a set of labels.
-- `BatchConfig`: the settings of batch generation.
+- `BatchConfig`: the settings of batch generation. A batch size that is not a whole number of one or more is refused by name, as it is everywhere a batch size is taken.
 - `BatchContract`: the shape and dtype of every output of a dataset's batches.
 - `BatchContractError`: raised when a batch breaks its contract.
 - `ReturnVariables`: the arrays a dataset can return.

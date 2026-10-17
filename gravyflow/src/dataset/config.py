@@ -1,4 +1,5 @@
 import logging
+import operator
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -21,6 +22,40 @@ def ignore_scale_factor(scale_factor) -> None:
     """
     if scale_factor is not None:
         warn_deprecated("scale_factor", f"it is ignored: {PHYSICAL_STRAIN}; remove the argument")
+
+
+def require_positive(name: str, value) -> None:
+    """Refuse, by ``name``, a configuration value that is not a finite number above zero."""
+    if not (np.isfinite(value) and value > 0):
+        raise ValueError(f"{name} must be a finite number above zero, got {value!r}.")
+
+
+def require_non_negative(name: str, value) -> None:
+    """Refuse, by ``name``, a configuration value that is not a finite number of zero or more."""
+    if not (np.isfinite(value) and value >= 0):
+        raise ValueError(f"{name} must be a finite number of zero or more, got {value!r}.")
+
+
+def require_count(name: str, value) -> int:
+    """``value`` as an int, refused by ``name`` unless it is a whole number of one or more."""
+    try:
+        count = operator.index(value)
+    except TypeError:
+        raise ValueError(f"{name} must be a whole number of one or more, got {value!r}.") from None
+    if isinstance(value, bool) or count < 1:
+        raise ValueError(f"{name} must be a whole number of one or more, got {value!r}.")
+    return count
+
+
+def batch_size(num_examples_per_batch=None) -> int:
+    """
+    The examples per batch: ``num_examples_per_batch``, or ``Defaults``' when it is None.
+    Every reader takes its batch size here, so one that can hold no example is refused by
+    name as it is built.
+    """
+    if num_examples_per_batch is None:
+        num_examples_per_batch = Defaults.num_examples_per_batch
+    return require_count("num_examples_per_batch", num_examples_per_batch)
 
 
 @dataclass(frozen=True)
@@ -66,7 +101,14 @@ class WindowSpec:
     onsource_duration_seconds: float
     offsource_duration_seconds: float
     crop_duration_seconds: float
-    
+
+    def __post_init__(self):
+        """A window that holds no sample, or runs backwards, is refused by name."""
+        require_positive("sample_rate_hertz", self.sample_rate_hertz)
+        require_positive("onsource_duration_seconds", self.onsource_duration_seconds)
+        require_non_negative("offsource_duration_seconds", self.offsource_duration_seconds)
+        require_non_negative("crop_duration_seconds", self.crop_duration_seconds)
+
     @classmethod
     def default(cls) -> "WindowSpec":
         """Create WindowSpec from Defaults values."""
@@ -218,15 +260,29 @@ class Defaults:
 
     @classmethod
     def set(cls, **kwargs):
-        for key, value in kwargs.items():
+        """
+        Set defaults by name. The values are checked together before any is set, by the
+        rules every configuration built from them applies, so a refused call changes none.
+        """
+        for key in kwargs:
             if key == "scale_factor":
                 raise AttributeError(f"Defaults.scale_factor is removed: {PHYSICAL_STRAIN}.")
-            if hasattr(cls, key):
-                setattr(cls, key, value)
-            else:
+            if not hasattr(cls, key):
                 raise AttributeError(
                     f"{cls.__name__} has no attribute named '{key}'"
                 )
+        candidate = {name: kwargs.get(name, getattr(cls, name)) for name in (
+            "sample_rate_hertz", "onsource_duration_seconds",
+            "offsource_duration_seconds", "crop_duration_seconds",
+        )}
+        WindowSpec(**candidate)
+        for name in ("num_examples_per_batch", "num_examples_per_generation_batch"):
+            if name in kwargs:
+                require_count(name, kwargs[name])
+        if "memory_bytes" in kwargs:
+            require_count("memory_bytes", kwargs["memory_bytes"])
+        for key, value in kwargs.items():
+            setattr(cls, key, value)
     
     @staticmethod
     def quantize_batch_size(batch_size: int) -> int:

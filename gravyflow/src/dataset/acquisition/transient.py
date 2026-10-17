@@ -43,7 +43,7 @@ from gravyflow.src.dataset.store.pools import thread_pool
 from gravyflow.src.dataset.store.read import TimelineContradiction
 from .augmentations import augmented
 from .partners import PARTNER_GRID_HERTZ, partner_time
-from gravyflow.src.dataset.config import WindowSpec
+from gravyflow.src.dataset.config import WindowSpec, batch_size
 from gravyflow.src.dataset.splits import SplitSpec
 from gravyflow.src.rng import BatchStreams, SeedTree
 
@@ -707,7 +707,7 @@ class TransientDataObtainer(BaseDataObtainer):
         )
         rate = window_spec.sample_rate_hertz
         ifos = ensure_list(ifos) or [gf.IFO.L1]
-        size = int(num_examples_per_batch or gf.Defaults.num_examples_per_batch)
+        size = batch_size(num_examples_per_batch)
         training = group == "train"
         # A RandomShift moves a read exactly where ``augment`` flags it: one rule decides both.
         random_shift = self._shift(shift and augmented(group, sampling_mode))
@@ -798,7 +798,7 @@ class TransientDataObtainer(BaseDataObtainer):
             raise ValueError("Name the split to serve: group='train', 'validate' or 'test'.")
         group = group if group is not None else self._served_group
         tree = SeedTree(gf.src.rng.check_root(seed if seed is not None else gf.Defaults.seed))
-        size = num_examples_per_batch or gf.Defaults.num_examples_per_batch
+        size = batch_size(num_examples_per_batch)
         with thread_pool("transient", min(READ_THREADS, size)) as pool:
             batch = self._batches(
                 tree, group, shift=False, sample_rate_hertz=sample_rate_hertz,

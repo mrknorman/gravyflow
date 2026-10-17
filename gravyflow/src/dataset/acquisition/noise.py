@@ -14,7 +14,7 @@ import numpy as np
 from keras import ops
 
 import gravyflow as gf
-from gravyflow.src.dataset.config import WindowSpec
+from gravyflow.src.dataset.config import WindowSpec, batch_size
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, Coincidence,
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS,
@@ -717,7 +717,7 @@ class NoiseDataObtainer(BaseDataObtainer):
         
         # Apply remaining defaults (not in WindowSpec)
         ifos = ensure_list(ifos) or [gf.IFO.L1]
-        num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
+        num_examples_per_batch = batch_size(num_examples_per_batch)
         seed = gf.src.rng.check_root(seed if seed is not None else gf.Defaults.seed)
 
         # With no group, the segments already held: built, or set by hand.

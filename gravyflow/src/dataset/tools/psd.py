@@ -29,6 +29,8 @@ from keras import ops
 import jax.numpy as jnp
 import jax
 
+from gravyflow.src.dataset.config import require_positive
+
 # Smallest number of Welch segments `estimate_psd` accepts. Fewer segments give
 # an estimate whose inverse (used by whitening and the SNR) has a huge or
 # unbounded variance; one segment has no finite inverse mean at all.
@@ -267,6 +269,7 @@ class SpectralConfig:
         return kmin, kmax
 
     def validate_band(self, sample_rate_hertz: float):
+        require_positive("sample_rate_hertz", sample_rate_hertz)
         nyquist = sample_rate_hertz / 2.0
         if self.lower_frequency_hertz is not None and self.lower_frequency_hertz >= nyquist:
             raise ValueError(

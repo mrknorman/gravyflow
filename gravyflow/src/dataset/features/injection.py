@@ -28,7 +28,7 @@ from gravyflow.src.utils.shapes import (
 from gravyflow.src.utils.tensor import replace_nan_and_inf_with_zero
 from gravyflow.src.rng import BatchStreams, SeedTree, check_name, resolve_streams
 from gravyflow.src.rng.legacy import warn_deprecated
-from gravyflow.src.dataset.config import ignore_scale_factor
+from gravyflow.src.dataset.config import batch_size, ignore_scale_factor
 from gravyflow.src.dataset.features.waveforms.cbc import (
     _generate_cbc_window,
     Approximant
@@ -1627,8 +1627,7 @@ class InjectionGenerator:
             crop_duration_seconds = gf.Defaults.crop_duration_seconds
         if num_examples_per_generation_batch is None:
             num_examples_per_generation_batch = gf.Defaults.num_examples_per_generation_batch
-        if num_examples_per_batch is None:
-            num_examples_per_batch = gf.Defaults.num_examples_per_batch
+        num_examples_per_batch = batch_size(num_examples_per_batch)
 
         for k in count():
             yield self.generate(
