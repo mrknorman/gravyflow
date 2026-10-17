@@ -18,8 +18,8 @@ The default run is offline. Network access is replaced by small committed fixtur
   2026-10-16 (https://gwosc.org/eventapi/json/), as gravyflow reads them: 1,062 rows
   of 18 catalogues, with their GPS times and source-frame chirp masses.
 
-Tests marked ``network`` query GWOSC and Zenodo for real; they run only with
-``--network``.
+That the live sources still agree with these fixtures is checked apart, in
+``tests/online``.
 """
 import csv
 import hashlib
@@ -35,7 +35,7 @@ import gravyflow as gf
 from gravyflow.src.resources import PACKAGE
 from gravyflow.src.dataset.acquisition import sources
 from gravyflow.src.dataset.acquisition.base import ObservingRunData
-from gravyflow.tests.conftest import refuse_internet
+from gravyflow.tests.conftest import gwosc_serving, refuse_internet
 
 FIXTURES = Path(__file__).parent / "fixtures" / "public_sources"
 TIMELINE = json.loads((FIXTURES / "gwosc_timeline.json").read_text())
@@ -155,7 +155,6 @@ def offline_public_sources(monkeypatch, tmp_path):
     monkeypatch.setattr(
         event_module, "get_event_catalogue",
         lambda use_cache=True: {key: value.copy() for key, value in FIXTURE_EVENTS.items()},
-        raising=False,
     )
     # Glitch queries retry with sleeps in older code; never sleep in tests.
     import time
@@ -659,9 +658,7 @@ class TestGravitySpyCatalogue:
                 if float(r["ml_confidence"]) >= 0.9 and r["ml_label"] != "No_Glitch"]
         assert len(times) == len(kept)
         names = {gf.GlitchType(int(v)).name for v in labels}
-        assert "CHIRP" in names or not any(r["ml_label"] == "Chirp" for r in kept)
-        assert "WANDERING_LINE" in names or not any(r["ml_label"] == "Wandering_Line" for r in kept)
-        assert {"BLIP_LOW_FREQUENCY", "FAST_SCATTERING"} & names
+        assert names == {gf.GlitchType.from_gravity_spy_label(r["ml_label"]).name for r in kept}
         # A lower floor keeps more.
         loose, _ = gf.get_glitch_times_with_labels(
             gf.IFO.L1, observing_run=gf.ObservingRun.O3, min_ml_confidence=0.5
@@ -681,8 +678,9 @@ class TestGravitySpyCatalogue:
         assert gf.GlitchType.BLIP.value == 1 and gf.GlitchType.WHISTLE.value == 19
         # Every label in every fixture era maps.
         for path in FIXTURES.glob("gravityspy_*.csv"):
-            for row in csv.DictReader(open(path, newline="")):
-                gf.GlitchType.from_gravity_spy_label(row["ml_label"])
+            with open(path, newline="") as handle:
+                for row in csv.DictReader(handle):
+                    gf.GlitchType.from_gravity_spy_label(row["ml_label"])
 
     def test_metadata_is_populated(self, offline_public_sources):
         from gravyflow.src.dataset.features.segment_builders import build_glitch_segments
@@ -743,50 +741,42 @@ class TestPublicDefaults:
             "NO_CBC_HW_INJ", "NO_BURST_HW_INJ", "NO_STOCH_HW_INJ", "NO_DETCHAR_HW_INJ",
         )
 
-    def test_example_model_real_noise_builds_offline(self, offline_public_sources):
-        dataset = gf.Gabbard2017.dataset(
-            noise_type=gf.NoiseType.REAL, seed=42, group="train", steps_per_epoch=1
-        )
-        assert dataset is not None
+    @pytest.mark.parametrize("build", [
+        lambda: gf.Gabbard2017.dataset(noise_type=gf.NoiseType.REAL, seed=42, group="train",
+                                       steps_per_epoch=1),
+        lambda: gf.GravyflowDataset(input_variables=[gf.ReturnVariables.ONSOURCE], group="train"),
+    ], ids=["example_model_real_noise", "default_dataset"])
+    def test_builds_and_serves_a_batch_offline(self, offline_public_sources, build):
+        """
+        A batch is drawn from GWOSC's timeline and strain (both served offline), the
+        segments planned from the default flags and the glitch vetoes from Gravity Spy.
+        """
+        with gwosc_serving(GaussianTiles()) as fetch:
+            inputs, _ = build()[0]
+        [strain] = [np.asarray(value) for value in inputs.values()]  # one input each
+        assert strain.ndim == 3 and np.all(np.isfinite(strain)) and np.any(strain != 0)
+        assert fetch.calls, "no strain was read"
+        requested = offline_public_sources.requests
+        flags = {url.split("/timeline/segments/json/")[1].split("/")[1].split("_", 1)[1]
+                 for url in requested if "/timeline/segments/json/" in url}
+        assert flags == set(gf.DEFAULT_GWOSC_FLAGS)
+        assert any("zenodo.org/api/records/5649212/files/" in url for url in requested)
 
-    def test_default_dataset_builds_offline(self, offline_public_sources):
-        dataset = gf.GravyflowDataset(input_variables=[gf.ReturnVariables.ONSOURCE], group="train")
-        assert dataset is not None
 
+class GaussianTiles:
+    """A GWOSC strain fetch, offline: unit Gaussian samples seeded by the interval, in 64 s tiles."""
 
-# =============================================================================
-# ONLINE (opt-in: --network)
-# =============================================================================
+    rates = (4096.0, 16384.0)
+    tile_seconds = 64.0
 
-@pytest.mark.network
-class TestOnline:
+    def __init__(self):
+        self.calls = []
 
-    def test_run_bounds_match_live_api(self):
-        from gravyflow.src.dataset.acquisition.gwosc_data import fetch_gwosc_runs, GWOSC_RUNS
-        live = fetch_gwosc_runs()
-        for name, run in GWOSC_RUNS.items():
-            assert live[name] == (run["gps_start"], run["gps_end"])
+    def __call__(self, ifo, sample_rate_hertz, interval):
+        from gravyflow.src.dataset.acquisition.sources import SegmentStrain
 
-    def test_default_configuration_builds_from_gwosc(self):
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.NOISE],  # events and glitches vetoed
-        )
-        segments = obtainer.get_valid_segments(
-            ifos=[gf.IFO.H1, gf.IFO.L1], seed=1, group_name="train"
-        )
-        assert segments.ndim == 3 and len(segments) > 100
-
-    def test_release_md5s_match_zenodo(self):
-        import requests
-        from gravyflow.src.dataset.features.gravity_spy import RELEASE_FILES, ZENODO_RECORD
-        record = requests.get(f"https://zenodo.org/api/records/{ZENODO_RECORD}", timeout=60).json()
-        files = {f["key"]: (f["checksum"].split(":")[1], f["size"]) for f in record["files"]}
-        assert record["metadata"]["license"]["id"] == "cc-by-4.0"
-        assert len(files) == len(RELEASE_FILES) == 8
-        for key, md5, size in RELEASE_FILES.values():
-            assert files[key] == (md5, size)
-
-    def test_smallest_release_file_downloads(self):
-        times = gf.get_glitch_times(gf.IFO.H1, observing_run=gf.ObservingRun.O1)
-        assert len(times) > 1000
+        start, end = interval
+        self.calls.append((ifo.name, start, end))
+        rng = np.random.default_rng([int(start), sum(map(ord, ifo.name))])
+        samples = rng.standard_normal(int(round((end - start) * sample_rate_hertz))).astype(np.float32)
+        return SegmentStrain(samples * 1e-21, float(start), float(sample_rate_hertz), "gwosc-test")
