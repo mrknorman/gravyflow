@@ -288,8 +288,8 @@ print("=" * 70)
 print("""
 # Production training configuration with optimal caching
 
-# Training obtainer
-train_obtainer = gf.IFODataObtainer(
+# One obtainer for every split
+obtainer = gf.IFODataObtainer(
     observing_runs=[gf.ObservingRun.O3],
     data_quality=gf.DataQuality.BEST,
     data_labels=[gf.DataLabel.GLITCHES],
@@ -297,7 +297,7 @@ train_obtainer = gf.IFODataObtainer(
     cache_segments=True,        # ← Enable segment caching
     prefetch_segments=64,       # ← High prefetch for TRANSIENT
     balanced_glitch_types=True, # ← Class balancing
-    augmentations=[
+    augmentations=[             # ← Applied to the training split only
         gf.SignReversal(probability=0.5),
         gf.TimeReversal(probability=0.5),
         gf.RandomShift(probability=0.5, shift_fraction=0.2),
@@ -305,19 +305,7 @@ train_obtainer = gf.IFODataObtainer(
     ],
 )
 
-# Validation obtainer (no augmentation)
-val_obtainer = gf.IFODataObtainer(
-    observing_runs=[gf.ObservingRun.O3],
-    data_quality=gf.DataQuality.BEST,
-    data_labels=[gf.DataLabel.GLITCHES],
-    segment_order=gf.SegmentOrder.RANDOM,
-    cache_segments=True,
-    prefetch_segments=64,
-    balanced_glitch_types=True,
-    augmentations=[],  # ← No augmentation for validation
-)
-
-# One dataset per split, each obtainer wrapped in a NoiseObtainer; every route
+# One dataset per split, the obtainer wrapped in a NoiseObtainer; every route
 # reads the data obtainer's split, gf.SplitSpec (the default here)
 dataset_settings = dict(
     sample_rate_hertz=2048.0,
@@ -326,12 +314,12 @@ dataset_settings = dict(
     input_variables=[gf.ReturnVariables.ONSOURCE],
 )
 train_data = gf.Dataset(
-    noise_obtainer=gf.NoiseObtainer(ifo_data_obtainer=train_obtainer, ifos=[gf.IFO.L1, gf.IFO.H1]),
+    noise_obtainer=gf.NoiseObtainer(ifo_data_obtainer=obtainer, ifos=[gf.IFO.L1, gf.IFO.H1]),
     group="train",
     **dataset_settings,
 )
 val_data = gf.Dataset(
-    noise_obtainer=gf.NoiseObtainer(ifo_data_obtainer=val_obtainer, ifos=[gf.IFO.L1, gf.IFO.H1]),
+    noise_obtainer=gf.NoiseObtainer(ifo_data_obtainer=obtainer, ifos=[gf.IFO.L1, gf.IFO.H1]),
     group="validate",
     **dataset_settings,
 )

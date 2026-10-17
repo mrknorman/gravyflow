@@ -151,48 +151,32 @@ class GlitchAdapterDataset(keras.utils.PyDataset):
             raise ValueError(f"GLITCH_TYPE not in labels: {list(labels.keys())}")
 
 # =============================================================================
-# Create Data Obtainers (Separate for Train and Validation)
+# Create the Data Obtainer (One for Train and Validation)
 # =============================================================================
 
-print("\nSetting up data obtainers...")
+print("\nSetting up the data obtainer...")
 
-# TRAINING: IFODataObtainer with augmentation and class balancing
-train_ifo_obtainer = gf.IFODataObtainer(
+# One IFODataObtainer serves both splits. Its augmentations apply to the
+# training dataset only: validation data is never augmented. The split (group)
+# gives each dataset its own records and random streams.
+ifo_obtainer = gf.IFODataObtainer(
     observing_runs=[gf.ObservingRun.O3],
     data_quality=gf.DataQuality.BEST,
     data_labels=[gf.DataLabel.GLITCHES],
     segment_order=gf.SegmentOrder.RANDOM,
-    # Augmentations (new dataclass-based API)
+    # Augmentations (dataclass-based API), training only
     augmentations=[
         gf.SignReversal(probability=0.5),
         gf.TimeReversal(probability=0.5),
         gf.RandomShift(probability=0.5, shift_fraction=0.2),
         gf.AddNoise(probability=0.5, amplitude=0.05),
     ],
-    # Class balancing
+    # Class balancing, in training and for fair evaluation
     balanced_glitch_types=True,
 )
 
-train_noise_obtainer = gf.NoiseObtainer(
-    ifo_data_obtainer=train_ifo_obtainer,
-    ifos=[gf.IFO.L1]
-)
-
-# VALIDATION: Separate obtainer with NO augmentation. The split (group) gives
-# it its own random streams; no separate seed is needed.
-val_ifo_obtainer = gf.IFODataObtainer(
-    observing_runs=[gf.ObservingRun.O3],
-    data_quality=gf.DataQuality.BEST,
-    data_labels=[gf.DataLabel.GLITCHES],
-    segment_order=gf.SegmentOrder.RANDOM,
-    # NO augmentation for validation (empty list)
-    augmentations=[],
-    # Class balancing still on for fair evaluation
-    balanced_glitch_types=True,
-)
-
-val_noise_obtainer = gf.NoiseObtainer(
-    ifo_data_obtainer=val_ifo_obtainer,
+noise_obtainer = gf.NoiseObtainer(
+    ifo_data_obtainer=ifo_obtainer,
     ifos=[gf.IFO.L1]
 )
 
@@ -203,7 +187,7 @@ val_noise_obtainer = gf.NoiseObtainer(
 print("\nCreating datasets...")
 
 training_dataset = gf.Dataset(
-    noise_obtainer=train_noise_obtainer,
+    noise_obtainer=noise_obtainer,
     input_variables=[
         gf.ReturnVariables.ONSOURCE,
         gf.ReturnVariables.OFFSOURCE,
@@ -216,7 +200,7 @@ training_dataset = gf.Dataset(
 )
 
 validation_dataset = gf.Dataset(
-    noise_obtainer=val_noise_obtainer,
+    noise_obtainer=noise_obtainer,
     group="validate",
     input_variables=[
         gf.ReturnVariables.ONSOURCE,

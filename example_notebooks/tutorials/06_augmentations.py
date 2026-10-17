@@ -4,16 +4,18 @@
 TUTORIAL 06: Data Augmentations
 =============================================================================
 
-This tutorial explains the dataclass-based augmentation system, which allows
-flexible per-augmentation configuration.
+This tutorial explains the dataclass-based augmentation system: each
+augmentation is an object with its own probability and parameters, applied
+per example to training data only.
 
 LEARNING OBJECTIVES:
-1. Understand the new dataclass-based augmentation API
+1. Understand the dataclass-based augmentation API
 2. Configure each augmentation type independently
-3. See augmentation effects visually
-4. Learn mode-specific augmentations
+3. Know where augmentation applies, and where it never does
+4. Read which augmentations each example had (AUGMENTATIONS)
+5. See augmentation effects visually
 
-RUNTIME: ~2-3 minutes
+RUNTIME: ~2-3 minutes (Section 4 needs network access to GWOSC)
 """
 
 # =============================================================================
@@ -22,12 +24,13 @@ RUNTIME: ~2-3 minutes
 
 import os
 os.environ.setdefault("KERAS_BACKEND", "jax")  # gravyflow runs on Keras's JAX backend
+
 import gravyflow as gf
 import numpy as np
 import matplotlib.pyplot as plt
 
 # =============================================================================
-# SECTION 1: THE NEW AUGMENTATION API
+# SECTION 1: THE AUGMENTATION API
 # =============================================================================
 
 print("=" * 70)
@@ -36,18 +39,9 @@ print("=" * 70)
 
 print("""
 GravyFlow uses a flexible dataclass-based augmentation system.
-Each augmentation is a separate object with its own parameters.
+Each augmentation is a separate object with its own parameters, given to the
+IFO data obtainer:
 
-OLD API (deprecated):
-    obtainer = gf.IFODataObtainer(
-        random_sign_reversal=True,    # Boolean flags
-        random_time_reversal=True,
-        random_shift=True,
-        shift_fraction=0.2,
-        # ... the other settings
-    )
-
-NEW API:
     obtainer = gf.IFODataObtainer(
         augmentations=[
             gf.SignReversal(probability=0.5),
@@ -57,11 +51,17 @@ NEW API:
         # ... the other settings
     )
 
-Benefits of new API:
-  ✓ Per-augmentation probability control
-  ✓ Clearer parameter organization
-  ✓ Easier to add custom augmentations
-  ✓ No augmentations = empty list []
+Where augmentation applies:
+  - Nowhere by default: augmentations=None (or []) is none.
+  - Training data only. A dataset applies its obtainer's augmentations to
+    its group="train" batches; the validate and test splits, the
+    validator and a GRID pass are never augmented, so one obtainer can
+    serve every split. An obtainer called directly never augments.
+  - Per example: each example draws each augmentation once, and the draw
+    applies alike to its onsource and offsource, on every detector.
+  - Before injection and whitening: an injected signal is never transformed.
+  - The draws have their own random streams: adding or removing an
+    augmentation never changes which windows are drawn.
 """)
 
 # =============================================================================
@@ -79,14 +79,14 @@ print("""
 Flips the sign of all data: x → -x
 
 Physics justification:
-  - GW signals have + and × polarizations
-  - Both are physically valid, just different orientation
+  - A wave with both polarizations negated is the same source with its
+    polarization angle turned by 90 degrees
   - Noise is symmetric under sign flip
 
 Usage:
     gf.SignReversal(probability=0.5)  # 50% chance
 
-Applicable modes: NOISE, TRANSIENT
+Applies to: noise, glitches and real events
 """)
 
 # --- TimeReversal ---
@@ -102,34 +102,34 @@ Physics justification:
 Usage:
     gf.TimeReversal(probability=0.5)  # 50% chance
 
-Applicable modes: NOISE, TRANSIENT
+Applies to: noise and glitches. Refused with real events: a chirp reversed
+is no longer a chirp.
 """)
 
 # --- RandomShift ---
-print("\n2.3 RandomShift (TRANSIENT mode only)")
+print("\n2.3 RandomShift (glitches only)")
 print("-" * 40)
 print("""
-Shifts the event off-center by a random amount.
-
-Physics justification:
-  - Events aren't always perfectly centered in real detections
-  - Prevents model from assuming event is always at t=0
+Rolls both windows by a random number of samples, so the glitch is
+off-center. Samples rolled out of one end come back at the other.
 
 Parameters:
   - probability: Chance of applying shift
-  - shift_fraction: Max shift as fraction of window (0.25 = ±25%)
+  - shift_fraction: Max shift as fraction of the window, in [0, 0.5]
+    (0.25 = ±25%)
 
 Usage:
     gf.RandomShift(probability=0.5, shift_fraction=0.25)
 
-Applicable modes: TRANSIENT only
+Applies to: glitches. Refused with real events, and with noise, whose
+windows are drawn uniformly in time already.
 """)
 
 # --- AddNoise ---
-print("\n2.4 AddNoise (TRANSIENT mode only)")
+print("\n2.4 AddNoise")
 print("-" * 40)
 print("""
-Adds small random noise perturbation to the data.
+Adds Gaussian noise to the data.
 
 Physics justification:
   - Helps prevent overfitting to specific noise realizations
@@ -137,12 +137,13 @@ Physics justification:
 
 Parameters:
   - probability: Chance of adding noise
-  - amplitude: Noise level as fraction of data std (0.1 = 10%)
+  - amplitude: Noise level as a fraction of the example's own offsource
+    std, per detector (0.1 = 10%); the same level on both windows
 
 Usage:
     gf.AddNoise(probability=0.5, amplitude=0.1)
 
-Applicable modes: TRANSIENT only
+Applies to: noise, glitches and real events
 """)
 
 # =============================================================================
@@ -158,35 +159,41 @@ print("Example configurations:")
 print()
 
 # Training with all augmentations
-print("1. Training with strong augmentation:")
-train_augs = [
+print("1. Glitches, strong augmentation:")
+glitch_augs = [
     gf.SignReversal(probability=0.5),
     gf.TimeReversal(probability=0.5),
     gf.RandomShift(probability=0.5, shift_fraction=0.25),
     gf.AddNoise(probability=0.5, amplitude=0.1),
 ]
-print(f"   augmentations={train_augs}")
-print()
-
-# Validation with no augmentation
-print("2. Validation with no augmentation:")
-val_augs = []  # Empty list = no augmentations
-print(f"   augmentations={val_augs}")
+print(f"   augmentations={glitch_augs}")
 print()
 
 # Conservative augmentation
-print("3. Conservative augmentation (low probability):")
-conservative_augs = [
+print("2. Noise, conservative augmentation (low probability):")
+noise_augs = [
     gf.SignReversal(probability=0.2),
     gf.TimeReversal(probability=0.2),
 ]
-print(f"   augmentations={conservative_augs}")
+print(f"   augmentations={noise_augs}")
 print()
 
-# Default augmentations
-print("4. Default augmentations (if None or not specified):")
-default_augs = gf.default_augmentations()
-print(f"   default_augmentations() = {default_augs}")
+# Refused combinations
+print("3. Refused at configuration:")
+for labels, augmentation in (([gf.DataLabel.EVENTS], gf.TimeReversal()),
+                             ([gf.DataLabel.NOISE], gf.RandomShift())):
+    try:
+        gf.IFODataObtainer(
+            data_quality=gf.DataQuality.BEST,
+            data_labels=labels,
+            augmentations=[augmentation],
+        )
+    except ValueError as error:
+        print(f"   {labels[0].name} with {type(augmentation).__name__}: {error}")
+print()
+
+print("4. No augmentation (the default):")
+print(f"   augmentations={gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE]).augmentations}")
 
 # =============================================================================
 # SECTION 4: DEMONSTRATION WITH LIVE DATA
@@ -196,58 +203,36 @@ print("\n" + "=" * 70)
 print("SECTION 4: Demonstration with Live Data")
 print("=" * 70)
 
-print("Creating obtainers with different augmentation settings...")
+print("Creating one obtainer for both splits...")
 
-# No augmentation obtainer
-no_aug_obtainer = gf.IFODataObtainer(
-    observing_runs=[gf.ObservingRun.O3],
-    data_quality=gf.DataQuality.BEST,
-    data_labels=[gf.DataLabel.GLITCHES],
-    augmentations=[],  # No augmentations
-)
-
-# Full augmentation obtainer
-full_aug_obtainer = gf.IFODataObtainer(
+obtainer = gf.IFODataObtainer(
     observing_runs=[gf.ObservingRun.O3],
     data_quality=gf.DataQuality.BEST,
     data_labels=[gf.DataLabel.GLITCHES],
     augmentations=[
-        gf.SignReversal(probability=1.0),  # Always apply for demonstration
-        gf.TimeReversal(probability=1.0),
+        gf.SignReversal(probability=0.5),
+        gf.TimeReversal(probability=0.5),
     ],
 )
 
-print("Fetching data with and without augmentations...")
-
-# Get data without augmentations
-no_aug_transient = gf.NoiseObtainer(
-    ifo_data_obtainer=no_aug_obtainer,
-    ifos=[gf.IFO.L1],
-)
-
-data_gen_no_aug = no_aug_transient(
+dataset_settings = dict(
+    noise_obtainer=gf.NoiseObtainer(ifo_data_obtainer=obtainer, ifos=[gf.IFO.L1]),
     sample_rate_hertz=2048.0,
     onsource_duration_seconds=1.0,
     offsource_duration_seconds=16.0,
-    num_examples_per_batch=4,
+    num_examples_per_batch=8,
     seed=42,
-)
-batch_no_aug = next(data_gen_no_aug)
-
-# Get data with augmentations
-full_aug_transient = gf.NoiseObtainer(
-    ifo_data_obtainer=full_aug_obtainer,
-    ifos=[gf.IFO.L1],
+    input_variables=[gf.ReturnVariables.ONSOURCE],
+    # Which augmentations each example had: SignReversal adds 1, TimeReversal 2.
+    output_variables=[gf.ReturnVariables.AUGMENTATIONS],
 )
 
-data_gen_full_aug = full_aug_transient(
-    sample_rate_hertz=2048.0,
-    onsource_duration_seconds=1.0,
-    offsource_duration_seconds=16.0,
-    num_examples_per_batch=4,
-    seed=42,
-)
-batch_full_aug = next(data_gen_full_aug)
+print("Fetching a training batch and a validation batch...")
+train_x, train_y = gf.Dataset(group="train", **dataset_settings)[0]
+validate_x, validate_y = gf.Dataset(group="validate", **dataset_settings)[0]
+
+print(f"  train AUGMENTATIONS:    {np.asarray(train_y['AUGMENTATIONS']).astype(int)}")
+print(f"  validate AUGMENTATIONS: {np.asarray(validate_y['AUGMENTATIONS']).astype(int)}  (never augmented)")
 
 # =============================================================================
 # SECTION 5: VISUALIZING AUGMENTATION EFFECTS
@@ -257,15 +242,15 @@ print("\n" + "=" * 70)
 print("SECTION 5: Visualizing Augmentation Effects")
 print("=" * 70)
 
-onsource_no_aug = batch_no_aug[gf.ReturnVariables.ONSOURCE]
-onsource_full_aug = batch_full_aug[gf.ReturnVariables.ONSOURCE]
+# A validation example is the strain as recorded.
+onsource = np.asarray(validate_x["ONSOURCE"])
 
 # Create demonstration of transformations on sample data
 fig, axes = plt.subplots(2, 3, figsize=(14, 8))
 fig.suptitle("Augmentation Effects Demonstration", fontsize=14)
 
 # Use first sample
-sample = onsource_no_aug[0, 0, :]
+sample = onsource[0, 0, :]
 time = np.arange(len(sample)) / 2048.0
 
 # Original
@@ -318,8 +303,9 @@ axes[1, 2].set_ylabel("Strain")
 axes[1, 2].grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig("/home/michael.norman/gravyflow/example_notebooks/tutorials/06_augmentations.png", dpi=100)
-print("Saved plot to: tutorials/06_augmentations.png")
+plot_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "06_augmentations.png")
+plt.savefig(plot_path, dpi=100)
+print(f"Saved plot to: {plot_path}")
 plt.close()
 
 # =============================================================================
@@ -332,22 +318,24 @@ print("=" * 70)
 
 print("""
 1. TRAINING vs VALIDATION:
-   - Training: Use augmentations to increase diversity
-   - Validation: Use augmentations=[] for consistent evaluation
+   - Give the augmentations to the obtainer; the training dataset applies
+     them, and validation, test and the validator never do
+   - One obtainer can serve every split
 
 2. PROBABILITY CHOICES:
    - 0.5 is a good default (symmetric exploration)
    - Lower (0.2-0.3) for more conservative augmentation
    - 1.0 only for debugging/visualization
 
-3. MODE-SPECIFIC AUGMENTATIONS:
-   - NOISE mode: SignReversal, TimeReversal work well
-   - TRANSIENT mode: Add RandomShift, AddNoise for robustness
+3. WHAT EACH DATA TYPE ACCEPTS:
+   - Noise: SignReversal, TimeReversal, AddNoise
+   - Glitches: all four
+   - Real events: SignReversal, AddNoise
 
-4. WHEN NOT TO AUGMENT:
-   - Final inference on real data
-   - When analyzing specific events
-   - When comparing to published results
+4. READING A BATCH:
+   - AUGMENTATIONS says which augmentations each example had
+     (SignReversal 1, TimeReversal 2, RandomShift 4, AddNoise 8, summed)
+   - START_GPS_TIME is still the start of the window read
 
 5. COMBINING WITH CACHING:
    - Augmentations are applied AFTER cache retrieval
@@ -363,25 +351,25 @@ print("SUMMARY: Data Augmentations")
 print("=" * 70)
 
 print("""
-1. NEW DATACLASS-BASED API:
+1. DATACLASS-BASED API:
    - Each augmentation is a separate object
    - Per-augmentation probability and parameters
 
 2. FOUR AUGMENTATION TYPES:
    - SignReversal(probability): x → -x
-   - TimeReversal(probability): x[t] → x[T-t]
-   - RandomShift(probability, shift_fraction): TRANSIENT only
-   - AddNoise(probability, amplitude): TRANSIENT only
+   - TimeReversal(probability): x[t] → x[T-t]; never real events
+   - RandomShift(probability, shift_fraction): glitches only
+   - AddNoise(probability, amplitude): relative to each example's offsource
 
-3. CONFIGURATION:
-   - Training: augmentations=[gf.SignReversal(0.5), ...]
-   - Validation: augmentations=[]
-   - Default: gf.default_augmentations()
+3. WHERE THEY APPLY:
+   - None by default
+   - Training data only, per example, before injection and whitening
+   - AUGMENTATIONS flags what each example had
 
 4. BEST PRACTICES:
    - Use 0.5 probability as default
-   - Different augments for different modes
-   - Always disable for final inference
+   - Different augments for different data
+   - One obtainer for every split
 """)
 
 print("\n✓ Tutorial 06 complete!")

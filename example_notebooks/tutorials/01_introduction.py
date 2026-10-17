@@ -169,17 +169,19 @@ print("=" * 70)
 
 print("""
 GravyFlow uses a flexible dataclass-based augmentation system.
-Each augmentation type has its own probability and parameters:
+Each augmentation type has its own probability and parameters.
+None is applied by default; a dataset applies its obtainer's augmentations
+to training data only, per example, and never to validation or test data.
 """)
 
 print("Available augmentation types:")
 print("-" * 50)
 
 augmentation_types = [
-    ("gf.SignReversal", "Flip sign (x → -x)", "All modes", "probability"),
-    ("gf.TimeReversal", "Reverse time axis", "All modes", "probability"),
-    ("gf.RandomShift", "Shift event off-center", "TRANSIENT only", "probability, shift_fraction"),
-    ("gf.AddNoise", "Add noise perturbation", "TRANSIENT only", "probability, amplitude"),
+    ("gf.SignReversal", "Flip sign (x → -x)", "Noise, glitches, events", "probability"),
+    ("gf.TimeReversal", "Reverse time axis", "Noise, glitches (never events)", "probability"),
+    ("gf.RandomShift", "Shift glitch off-center", "Glitches only", "probability, shift_fraction"),
+    ("gf.AddNoise", "Add noise perturbation", "Noise, glitches, events", "probability, amplitude"),
 ]
 
 for name, desc, mode, params in augmentation_types:
