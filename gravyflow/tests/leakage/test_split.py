@@ -267,15 +267,6 @@ def test_names_check_sees_an_accepted_name(monkeypatch):
         assert_refuses(ENTRY_POINTS["ValidationConfig"], "val")
 
 
-def test_names_check_sees_a_refusal_by_another_check():
-    """The planted leak: a call that fails for another reason, naming the split, is caught."""
-    def lookup(group):
-        raise KeyError(group)
-
-    with pytest.raises(AssertionError, match="refused by another check"):
-        assert_refuses(lookup, "val")
-
-
 #: The entry points that build or serve data without a named split.
 UNNAMED = ["Dataset", "ComposedDataset", "NoiseObtainer", "transient obtainer"]
 

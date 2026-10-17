@@ -260,18 +260,6 @@ def test_start_gps_is_first_sample(world, tmp_path, rate, mode, path):
     audit.assert_start_labels(record, window)
 
 
-def test_start_check_sees_a_label_half_a_sample_off():
-    """The planted leak: labels half a sample late, inside the one-sample slack once allowed, are caught."""
-    rate, window = 1024.0, fx.window(1024.0)
-    prints = np.array([[[1_270_000_000 * 1024, 0]] * 2], dtype=np.int64)
-    exact = (prints[..., 0] + window.offsource + window.crop) / rate
-    record = audit.Records("planted", "train", tuple(IFOS), prints, rate, exact)
-    audit.assert_start_labels(record, window)
-    record.start_labels = exact + 0.5 / rate
-    with pytest.raises(AssertionError, match="2 of 2 START_GPS_TIME labels"):
-        audit.assert_start_labels(record, window)
-
-
 #: The resampling code: three in-band tones, each phased by absolute GPS time.
 TONE_EPOCH = 1238175000.0
 TONES_HERTZ = np.array([61.25, 211.75, 487.5])

@@ -679,7 +679,14 @@ def test_injections_are_never_augmented(world):
     np.testing.assert_array_equal(injection, same_injection)
     signal = injection[:, 0].astype(np.float64)
     # The strain cancels; the signal, injected into both as it is, doubles.
-    np.testing.assert_allclose(negated + plain, 2.0 * signal, atol=0.01 * np.max(np.abs(signal)))
+    # Exact but for float32 rounding: the injection is added to each strain (one rounding of that
+    # sum each) and the two sums are added (a third), each rounding at most half an ulp of the
+    # peak, so four machine epsilons of the largest value involved bound the difference.
+    peak = max(np.max(np.abs(plain)), np.max(np.abs(negated)))
+    bound = 4 * np.finfo(np.float32).eps * peak
+    np.testing.assert_allclose(negated + plain, 2.0 * signal, rtol=0, atol=bound)
+    # A planted defect of a few per cent (a signal 3% weaker in one sum) is far outside the bound.
+    assert 0.03 * np.max(np.abs(signal)) > 10 * bound, "the bound is too loose to see a 3% defect"
 
 
 def test_toggling_an_augmentation_moves_no_window(world):
