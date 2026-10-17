@@ -496,6 +496,10 @@ def test_augmentation_stays_in_split(world, tmp_path, monkeypatch):
             with pytest.raises(ValueError, match="real events"):
                 gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=labels,
                                    augmentations=[augmentation])
+            # Events by number are refused too: a number names no kind (GlitchType.CHIRP is 2 as well).
+            with pytest.raises(ValueError, match="not a data label"):
+                gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.EVENTS.value],
+                                   augmentations=[augmentation])
 
 
 def test_a_default_batch_is_unaugmented(world, tmp_path):

@@ -270,7 +270,7 @@ class IndexedBatches:
         if self.name is not None:
             self.tree = self.tree.sub(f"dataset/{self.name}")
         self.seed = self.tree.root
-        self.group = check_split(group)
+        self._group = check_split(group)
         self.steps_per_epoch = steps_per_epoch
         if epoch_mode is None:
             epoch_mode = EpochMode.FRESH if group == "train" else EpochMode.REPEAT
@@ -279,6 +279,15 @@ class IndexedBatches:
         self._cursor = 0
         self._epoch_from_keras = False
         self._warned_keras_epoch = False
+
+    @property
+    def group(self) -> str:
+        """
+        The split this dataset serves, fixed at construction: its batchers are
+        bound to it, and augmentation asks it whether a batch is training data,
+        so a split set later would leave the two disagreeing.
+        """
+        return self._group
 
     @property
     def epoch(self) -> int:

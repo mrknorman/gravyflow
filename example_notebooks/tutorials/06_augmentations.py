@@ -139,6 +139,8 @@ Parameters:
   - probability: Chance of adding noise
   - amplitude: Noise level as a fraction of the example's own offsource
     std, per detector (0.1 = 10%); the same level on both windows
+    (an example with no variance gets none and is not flagged; one whose
+    offsource is not finite is refused)
 
 Usage:
     gf.AddNoise(probability=0.5, amplitude=0.1)
@@ -329,8 +331,10 @@ print("""
 
 3. WHAT EACH DATA TYPE ACCEPTS:
    - Noise: SignReversal, TimeReversal, AddNoise
-   - Glitches: all four
+   - Glitches: all four (gf.GlitchType.CHIRP is a glitch, not a real event)
    - Real events: SignReversal, AddNoise
+   - A label is read by its kind, so give gf.DataLabel, gf.GlitchType or
+     gf.EventConfidence members: a bare number is refused
 
 4. READING A BATCH:
    - AUGMENTATIONS says which augmentations each example had

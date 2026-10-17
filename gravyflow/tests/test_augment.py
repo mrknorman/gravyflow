@@ -108,7 +108,7 @@ def test_add_noise_scales_each_example_by_its_own_background():
     """
     AddNoise adds noise of ``amplitude`` times each example's own offsource std,
     per detector, alike to both windows: an example's noise never depends on the
-    batch, and an example with no variance gets none.
+    batch, and an example with no variance gets none, so is not flagged.
     """
     rng = np.random.default_rng(3)
     scales = np.array([1e-21, 1e-18, 0.0, 1e-21])
@@ -116,13 +116,44 @@ def test_add_noise_scales_each_example_by_its_own_background():
     off = (rng.standard_normal((4, I, 4 * T_OFF)) * scales[:, None, None]).astype(np.float32)
     out = augment((on, off), gf.SeedTree(5).batch("train", 0, 0), [gf.AddNoise(probability=1.0, amplitude=0.1)],
                   "train", GLITCHES)
-    np.testing.assert_array_equal(out.applied, np.full(4, gf.AddNoise.bit, np.float32))
     varied = scales > 0
+    np.testing.assert_array_equal(out.applied, np.where(varied, gf.AddNoise.bit, 0).astype(np.float32))
     for windows, original in ((out.onsource, on), (out.offsource, off)):
         added = np.asarray(windows, np.float64) - original
         assert np.all(added[~varied] == 0.0)
         ratio = np.std(added[varied], axis=-1) / np.std(off[varied].astype(np.float64), axis=-1)
         np.testing.assert_allclose(ratio, 0.1, rtol=0.2)
+
+
+def test_add_noise_refuses_a_non_finite_offsource():
+    """
+    A non-finite offsource has no noise level to scale by: AddNoise refuses the
+    example by its index rather than turning its whole onsource to NaN. An
+    example it does not choose is not its to refuse.
+    """
+    on, off = ramps()
+    off[3, 1, 7] = np.nan
+    with pytest.raises(ValueError, match=r"AddNoise.*example 3\b.*not finite"):
+        augment((on, off), streams(), [gf.AddNoise(probability=1.0)], "train", GLITCHES)
+    out = augment((on, off), streams(), [gf.AddNoise(probability=0.0)], "train", GLITCHES)
+    np.testing.assert_array_equal(out.applied, np.zeros(B, np.float32))
+
+
+def test_a_dataset_split_is_fixed_at_construction():
+    """
+    A dataset's split is read only: the batcher bound to it and the augmentation
+    that asks it could never disagree about which split a batch is.
+    """
+    noise = gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1])
+    settings = dict(seed=3, group="validate", sample_rate_hertz=256.0, num_examples_per_batch=2, ifos=[gf.IFO.L1],
+                    steps_per_epoch=2, input_variables=[gf.ReturnVariables.ONSOURCE])
+    pool = gf.FeaturePool(name="noise", label=0, probability=1.0, noise_obtainer=noise)
+    for dataset in (gf.Dataset(noise_obtainer=noise, **settings),
+                    gf.ComposedDataset(pools=[pool], output_variables=[gf.ReturnVariables.POOL_LABEL],
+                                       **settings)):
+        with pytest.raises(AttributeError, match="group"):
+            dataset.group = "train"
+        assert dataset.group == "validate"
 
 
 def test_random_shift_rolls_both_windows_alike():
@@ -153,6 +184,32 @@ def test_real_events_are_never_reversed_or_shifted(labels):
     obtainer = gf.TransientDataObtainer(data_quality=gf.DataQuality.BEST, data_labels=labels,
                                         augmentations=allowed)
     assert obtainer.augmentations == tuple(allowed)
+
+
+@pytest.mark.parametrize("labels", [[2], [gf.DataLabel.EVENTS.value], 2])
+def test_a_bare_number_is_not_a_data_label(labels):
+    """
+    A number names no kind of data (2 is DataLabel.EVENTS and GlitchType.CHIRP
+    alike), so it is refused by name, never read as real events or not.
+    """
+    for augmentation in (gf.TimeReversal(), gf.RandomShift()):
+        with pytest.raises(ValueError, match="not a data label"):
+            gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=labels,
+                               augmentations=[augmentation])
+        with pytest.raises(ValueError, match="not a data label"):
+            augment(ramps(), streams(), [augmentation], "train", labels)
+    with pytest.raises(ValueError, match="not a data label"):
+        gf.TransientDataObtainer(data_quality=gf.DataQuality.BEST, data_labels=labels)
+
+
+def test_a_chirp_glitch_is_not_a_real_event():
+    """GlitchType.CHIRP equals DataLabel.EVENTS as a number; it is a glitch, which may be reversed and shifted."""
+    labels = [gf.GlitchType.CHIRP]
+    spec = [gf.TimeReversal(probability=1.0), gf.RandomShift(probability=1.0)]
+    obtainer = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=labels, augmentations=spec)
+    assert obtainer.augmentations == tuple(spec)
+    out = augment(ramps(), streams(), spec, "train", labels)
+    np.testing.assert_array_equal(out.applied, np.full(B, gf.TimeReversal.bit | gf.RandomShift.bit, np.float32))
 
 
 def test_noise_refuses_random_shift():

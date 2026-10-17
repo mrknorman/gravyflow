@@ -68,7 +68,7 @@ def IFODataObtainer(
         split_spec: How GPS time is split into train, validate and test
             (``gf.SplitSpec``); None is the default split.
         train_on_real_events: Real events are evaluation data, all in ``test``;
-            True puts each in its footprint's split (TRANSIENT only).
+            True is refused for now (TRANSIENT only; see TransientDataObtainer).
 
     Returns:
         NoiseDataObtainer or TransientDataObtainer instance

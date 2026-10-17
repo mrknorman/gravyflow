@@ -18,7 +18,7 @@ from gravyflow.src.dataset.config import WindowSpec
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder,
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS,
-    WINDOW_EDGE_BUFFER_SAMPLES, kept_seconds, separable,
+    WINDOW_EDGE_BUFFER_SAMPLES, kept_seconds, label_kinds, separable,
 )
 from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
@@ -147,15 +147,17 @@ class NoiseDataObtainer(BaseDataObtainer):
         """
         Remove every published GW event and Gravity Spy glitch from noise segments.
 
-        Unless the obtainer's labels include EVENTS, each event's in-band signal is
-        vetoed (``get_event_veto_segments``); unless they include GLITCHES, each
-        glitch's whole extent is vetoed (``get_glitch_veto_segments``). Both cover
-        every configured run. Returns the vetoed segments, sorted and coalesced.
+        Unless the obtainer's labels ask for real events, each event's in-band signal
+        is vetoed (``get_event_veto_segments``); unless they ask for glitches, each
+        glitch's whole extent is vetoed (``get_glitch_veto_segments``). What they ask
+        for is read by kind (``label_kinds``). Both cover every configured run.
+        Returns the vetoed segments, sorted and coalesced.
         """
+        asked = label_kinds(self.data_labels)
         veto_segments = []
-        if DataLabel.EVENTS not in self.data_labels:
+        if DataLabel.EVENTS not in asked:
             veto_segments.append(self.get_event_veto_segments())
-        if DataLabel.GLITCHES not in self.data_labels:
+        if DataLabel.GLITCHES not in asked:
             veto_segments.append(self.get_glitch_veto_segments(ifo))
         if not veto_segments:
             return valid_segments

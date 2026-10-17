@@ -191,6 +191,34 @@ class TestNoiseVetoes:
                             glitches["start_time"] + glitches["duration"]], axis=1)
         assert _overlap(result, extents[in_data]) == 0.0
 
+    @pytest.mark.parametrize("asked, vetoed", [
+        ([], {"events", "glitches"}),
+        ([gf.DataLabel.EVENTS], {"glitches"}),
+        ([gf.EventConfidence.CONFIDENT], {"glitches"}),
+        ([gf.DataLabel.GLITCHES], {"events"}),
+        # Equal to DataLabel.EVENTS as a number, but glitches.
+        ([gf.GlitchType.CHIRP], {"events"}),
+    ])
+    def test_vetoes_follow_the_kinds_of_data_asked_for(self, asked, vetoed):
+        """
+        Noise keeps out every event and glitch it does not ask for, by each label's
+        kind, never its number (the label enums' values overlap).
+        """
+        obtainer = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE, *asked],
+                                      observing_runs=gf.ObservingRun.O3, cache_segments=False, prefetch_segments=0)
+        applied = set()
+
+        def veto(kind):
+            def segments(*args):
+                applied.add(kind)
+                return np.empty((0, 2))
+            return segments
+
+        with patch.object(obtainer, "get_event_veto_segments", veto("events")), \
+                patch.object(obtainer, "get_glitch_veto_segments", veto("glitches")):
+            obtainer.remove_unwanted_segments(gf.IFO.L1, np.array([[0.0, 100.0]]))
+        assert applied == vetoed
+
     def test_glitch_veto_padding(self):
         """Each glitch's extent is widened by 1 s, and by 3 s for Extremely_Loud."""
         from gravyflow.src.dataset.features.glitch import GlitchType

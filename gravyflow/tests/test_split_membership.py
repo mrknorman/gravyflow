@@ -474,6 +474,29 @@ class TestNoAllSplit:
         with pytest.raises(ValueError, match="evaluation data"):
             next(obtainer(ifos=[gf.IFO.H1, gf.IFO.L1], group="train", **WINDOW))
 
+    @pytest.mark.parametrize("labels", [[gf.DataLabel.EVENTS], [gf.DataLabel.GLITCHES]])
+    def test_training_on_real_events_is_refused(self, labels):
+        """Until a flag marks a real event as coincident, real events are never trained on."""
+        for build in (gf.IFODataObtainer, gf.TransientDataObtainer):
+            with pytest.raises(ValueError, match="train_on_real_events=True is refused"):
+                build(data_quality=gf.DataQuality.BEST, data_labels=labels, train_on_real_events=True)
+
+    def test_a_chirp_glitch_obtainer_serves_no_real_events(self, offline_events):
+        """
+        GlitchType.CHIRP equals DataLabel.EVENTS as a number; it asks for chirp
+        glitches alone, so its index holds no event and every split is served.
+        """
+        with mock.patch("gravyflow.src.dataset.features.segment_builders.build_glitch_segments",
+                        return_value=[]) as glitches:
+            obtainer = gf.TransientDataObtainer(observing_runs=gf.ObservingRun.O3,
+                                                data_quality=gf.DataQuality.BEST,
+                                                data_labels=[gf.GlitchType.CHIRP])
+            for split in SPLITS:
+                obtainer.get_valid_segments([gf.IFO.H1, gf.IFO.L1], seed=1000, group_name=split)
+                assert obtainer.transient_segments == [], split
+        assert len(obtainer._feature_index) == 0
+        assert glitches.call_args.kwargs["glitch_types"] == [gf.GlitchType.CHIRP]
+
 
 @pytest.fixture
 def two_detector_catalogue():

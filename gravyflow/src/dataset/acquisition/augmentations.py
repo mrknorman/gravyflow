@@ -36,8 +36,7 @@ from typing import Any, ClassVar, Iterable, NamedTuple, Optional, Tuple
 import numpy as np
 from keras import ops
 
-from gravyflow.src.dataset.acquisition.base import DataLabel, SamplingMode
-from gravyflow.src.dataset.features.event import EventConfidence
+from gravyflow.src.dataset.acquisition.base import DataLabel, SamplingMode, label_kinds
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +59,14 @@ class Augmentation(ABC):
 
     @abstractmethod
     def apply(self, onsource: np.ndarray, offsource: np.ndarray, chosen: np.ndarray,
-              rng: np.random.Generator) -> Tuple[np.ndarray, np.ndarray]:
+              rng: np.random.Generator) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         New ``onsource`` and ``offsource`` (B, I, T), the examples ``chosen`` (B,)
-        transformed alike in both. Any parameter is drawn from ``rng`` for every
-        example, chosen or not, so no example's draw depends on another's.
+        transformed alike in both, and the examples it applied to (B,), which
+        AUGMENTATIONS flags: those chosen, less any it has nothing to apply to
+        (AddNoise on an example with no variance). Any parameter is drawn from
+        ``rng`` for every example, chosen or not, so no example's draw depends on
+        another's.
         """
 
 
@@ -78,7 +80,7 @@ class SignReversal(Augmentation):
     bit: ClassVar[int] = 1
 
     def apply(self, onsource, offsource, chosen, rng):
-        return _where(chosen, -onsource, onsource), _where(chosen, -offsource, offsource)
+        return _where(chosen, -onsource, onsource), _where(chosen, -offsource, offsource), chosen
 
 
 @dataclass
@@ -90,7 +92,8 @@ class TimeReversal(Augmentation):
     bit: ClassVar[int] = 2
 
     def apply(self, onsource, offsource, chosen, rng):
-        return _where(chosen, onsource[..., ::-1], onsource), _where(chosen, offsource[..., ::-1], offsource)
+        return (_where(chosen, onsource[..., ::-1], onsource), _where(chosen, offsource[..., ::-1], offsource),
+                chosen)
 
 
 @dataclass
@@ -118,7 +121,7 @@ class RandomShift(Augmentation):
     def apply(self, onsource, offsource, chosen, rng):
         limit = int(self.shift_fraction * onsource.shape[-1])
         shifts = np.where(chosen, rng.integers(-limit, limit + 1, size=chosen.size), 0)
-        return _roll(onsource, shifts), _roll(offsource, shifts)
+        return _roll(onsource, shifts), _roll(offsource, shifts), chosen
 
 
 @dataclass
@@ -127,7 +130,8 @@ class AddNoise(Augmentation):
     Add Gaussian noise of ``amplitude`` times the example's own offsource
     standard deviation, per detector, to both windows. One scale for both keeps
     the onsource's noise level the offsource's, whose PSD whitens it. An example
-    with no variance gets none.
+    with no variance gets none, so it is not flagged; one whose offsource is not
+    finite has no level to scale by and is refused.
     """
     amplitude: float = 0.1
 
@@ -140,9 +144,16 @@ class AddNoise(Augmentation):
 
     def apply(self, onsource, offsource, chosen, rng):
         # In float64: the square of strain (~1e-42) is below float32's normal range.
-        scale = self.amplitude * np.std(offsource, axis=-1, dtype=np.float64, keepdims=True)
-        scale = np.where(chosen[:, None, None], scale, 0.0)
-        return tuple((x + rng.standard_normal(x.shape) * scale).astype(x.dtype) for x in (onsource, offsource))
+        std = np.std(offsource, axis=-1, dtype=np.float64, keepdims=True)
+        unscalable = chosen & ~np.all(np.isfinite(std), axis=(1, 2))
+        if np.any(unscalable):
+            raise ValueError(
+                f"AddNoise refuses example {', '.join(map(str, np.flatnonzero(unscalable)))} of the batch: "
+                "its offsource is not finite, so it has no noise level to scale by."
+            )
+        scale = np.where(chosen[:, None, None], self.amplitude * std, 0.0)
+        noised = ((x + rng.standard_normal(x.shape) * scale).astype(x.dtype) for x in (onsource, offsource))
+        return (*noised, np.any(scale > 0.0, axis=(1, 2)))
 
 
 def _where(chosen: np.ndarray, transformed: np.ndarray, original: np.ndarray) -> np.ndarray:
@@ -161,9 +172,10 @@ def check_augmentations(augmentations: Optional[Iterable], data_labels=()) -> Tu
     ``augmentations`` (None is none) as a tuple, checked for an obtainer of
     ``data_labels``: each an Augmentation, each kind at most once, since each
     draws from the stream its kind names. Refused: TimeReversal and RandomShift
-    where the labels include real events, which keep the time order and
+    where the labels ask for real events, which keep the time order and
     placement they were observed with; and RandomShift on noise, whose windows
-    are drawn uniformly in time already.
+    are drawn uniformly in time already. What the labels ask for is read by
+    their kinds (``label_kinds``), which refuses anything but a label.
     """
     spec = tuple(augmentations or ())
     kinds = set()
@@ -179,16 +191,15 @@ def check_augmentations(augmentations: Optional[Iterable], data_labels=()) -> Tu
             )
         kinds.add(type(augmentation))
 
-    labels = data_labels if isinstance(data_labels, (list, tuple)) else [data_labels]
-    # By identity: the label enums are IntEnums, so == would match another enum's equal value.
-    if any(label is DataLabel.EVENTS or isinstance(label, EventConfidence) for label in labels):
+    served = label_kinds(data_labels)
+    if DataLabel.EVENTS in served:
         moved = [type(a).__name__ for a in spec if isinstance(a, (TimeReversal, RandomShift))]
         if moved:
             raise ValueError(
                 f"{' and '.join(moved)} cannot be applied to real events: an event keeps the time "
                 "order and placement it was observed with. SignReversal and AddNoise may be."
             )
-    if any(label is DataLabel.NOISE for label in labels) and RandomShift in kinds:
+    if DataLabel.NOISE in served and RandomShift in kinds:
         raise ValueError("RandomShift is refused on noise: noise windows are drawn uniformly in time already.")
     return spec
 
@@ -239,7 +250,7 @@ def augment(strain, streams, spec, split: str, labels=(), sampling_mode: Optiona
     for augmentation in spec:
         rng = streams.stream(f"augment/{type(augmentation).__name__}")
         chosen = rng.random(applied.size) < augmentation.probability
-        onsource, offsource = augmentation.apply(onsource, offsource, chosen, rng)
-        applied |= np.where(chosen, augmentation.bit, 0).astype(np.int32)
+        onsource, offsource, changed = augmentation.apply(onsource, offsource, chosen, rng)
+        applied |= np.where(changed, augmentation.bit, 0).astype(np.int32)
     return Augmented(ops.convert_to_tensor(onsource), ops.convert_to_tensor(offsource),
                      applied.astype(np.float32))

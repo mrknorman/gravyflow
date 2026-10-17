@@ -197,7 +197,10 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
   `TransientIndex.assign_groups` are gone: give the data obtainer `split_spec=gf.SplitSpec(fractions=...)`, or another
   `version` for an independent split (cross-validation).
 - Real events are evaluation data: every confident event is in `test`, named events too, and an obtainer of events
-  alone refuses `'train'` and `'validate'` unless it is built with `train_on_real_events=True`.
+  alone refuses `'train'` and `'validate'`. `train_on_real_events=True` is refused for now. Data labels are read by
+  their kind, never their number: give `gf.DataLabel`, `gf.GlitchType` or `gf.EventConfidence` members (a bare number
+  is refused, since 2 is `DataLabel.EVENTS` and `GlitchType.CHIRP` alike), and `GlitchType.CHIRP` asks for chirp
+  glitches, never events.
 - An obtainer called for a split serves that split, called directly or through a `NoiseObtainer`; called again for
   another, it rebuilds its segments (it served the first split's, and a fresh real-noise obtainer called directly
   served nothing). A generator it gave out for the first split then raises `RuntimeError`.

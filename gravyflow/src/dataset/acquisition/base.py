@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, IntEnum, auto
 from contextlib import closing
-from typing import TYPE_CHECKING, List, Tuple, Union, Dict, Any, Optional, Generator, NamedTuple, Sequence
+from typing import TYPE_CHECKING, List, Tuple, Union, Dict, Any, Optional, Generator, NamedTuple, Sequence, FrozenSet
 from pathlib import Path
 from .cache import MemoryCache
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -47,6 +47,7 @@ from .versions import DATA_VERSIONS
 # Imported from TransientDefaults for consistency (canonical source)
 from gravyflow.src.dataset.config import TransientDefaults, ignore_scale_factor
 from gravyflow.src.dataset.splits import SplitSpec, as_split_spec
+from gravyflow.src.dataset.features.event import EventConfidence
 
 # GPS time precision is 10ms (0.01s) - defined in gravyflow.src.utils.gps
 # GPS_PRECISION_DECIMALS was 3 (1ms) which was stale - now using GPS_KEY_PRECISION
@@ -111,7 +112,46 @@ class DataLabel(IntEnum):
     NOISE = 0
     GLITCHES = 1
     EVENTS = 2
-    
+
+
+def label_kinds(data_labels) -> FrozenSet[DataLabel]:
+    """
+    The kinds of data ``data_labels`` (one label or a list) ask for, each read
+    from its label's type: a DataLabel is its own kind, a GlitchType asks for
+    glitches and an EventConfidence for real events.
+
+    Every question of what an obtainer serves (real events above all, since they
+    are evaluation data) is asked of this, never of the labels' numbers: the three
+    are IntEnums whose values overlap (GlitchType.CHIRP and DataLabel.EVENTS are
+    both 2), so ``==`` across them, and ``in`` a list of them, cannot tell one
+    kind from another. Anything else, a bare number included, names no kind and
+    is refused.
+    """
+    from gravyflow.src.dataset.features.glitch import GlitchType  # Here: glitch imports this module.
+
+    kinds = set()
+    for label in ensure_list(data_labels):
+        if isinstance(label, DataLabel):
+            kinds.add(label)
+        elif isinstance(label, GlitchType):
+            kinds.add(DataLabel.GLITCHES)
+        elif isinstance(label, EventConfidence):
+            kinds.add(DataLabel.EVENTS)
+        else:
+            raise ValueError(
+                f"{label!r} is not a data label: give gf.DataLabel, gf.GlitchType or gf.EventConfidence "
+                "members. A number names no kind of data: 2 is DataLabel.EVENTS and GlitchType.CHIRP alike."
+            )
+    return frozenset(kinds)
+
+
+def check_data_labels(data_labels) -> list:
+    """``data_labels`` (one label or a list) as a list of label members; ``label_kinds`` refuses any other."""
+    labels = ensure_list(data_labels)
+    label_kinds(labels)
+    return labels
+
+
 class SegmentOrder(Enum):
     RANDOM = auto()
     SHORTEST_FIRST = auto()
@@ -640,11 +680,10 @@ class BaseDataObtainer(ABC):
 
         # Default to all observing runs (O1, O2, O3) if not specified
         observing_runs = ensure_list(observing_runs) or [ObservingRun.O1, ObservingRun.O2, ObservingRun.O3]
-        data_labels = ensure_list(data_labels)
-        
+
         # Set class attributes with parameters:
         self.data_quality = data_quality
-        self.data_labels = data_labels
+        self.data_labels = check_data_labels(data_labels)
         self.segment_order = segment_order
         self.max_segment_duration_seconds = max_segment_duration_seconds
         self.saturation = saturation
@@ -653,7 +692,7 @@ class BaseDataObtainer(ABC):
         self.split_spec = as_split_spec(split_spec)
             
         from gravyflow.src.dataset.acquisition.augmentations import check_augmentations
-        self.augmentations = check_augmentations(augmentations, data_labels)
+        self.augmentations = check_augmentations(augmentations, self.data_labels)
             
         # Unpack parameters from input observing runs:
         self.unpack_observing_runs(observing_runs, data_quality)

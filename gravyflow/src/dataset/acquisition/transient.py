@@ -25,7 +25,7 @@ from .cache import DiskCache
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
-    AcquisitionMode, SamplingMode, ObservingRun
+    AcquisitionMode, SamplingMode, ObservingRun, label_kinds
 )
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.utils.resample import resample, whole_hertz
@@ -88,9 +88,17 @@ class TransientDataObtainer(BaseDataObtainer):
         """
         Args (split):
             split_spec: How GPS time is split (``gf.SplitSpec``); None is the default.
-            train_on_real_events: Real events are evaluation data, all in ``test``;
-                True puts each in its footprint's split instead, training on some.
+            train_on_real_events: Real events are evaluation data, all in ``test``.
+                True, which would put each in its footprint's split and train on
+                some, is refused for now: an event is read on every detector at its
+                own time, unlike a glitch, and no flag yet marks it as coincident.
         """
+        if train_on_real_events:
+            raise ValueError(
+                "train_on_real_events=True is refused for now: an event is read on every detector at its own "
+                "time, unlike a glitch, and no flag yet marks it as coincident, so real events are evaluation "
+                "data, served only in 'test'."
+            )
         
         # Default observing runs matching BaseDataObtainer behavior
         if observing_runs is None:
@@ -297,9 +305,8 @@ class TransientDataObtainer(BaseDataObtainer):
         return planned, plans
 
     def _events_only(self) -> bool:
-        """Whether the obtainer serves real events and nothing else."""
-        labels = self.data_labels if isinstance(self.data_labels, list) else [self.data_labels]
-        return all(label == DataLabel.EVENTS or isinstance(label, EventConfidence) for label in labels)
+        """Whether the obtainer serves real events and nothing else (by its labels' kinds)."""
+        return label_kinds(self.data_labels) == {DataLabel.EVENTS}
 
     def build_feature_index(self, ifos: List[gf.IFO]) -> "TransientIndex":
         """
@@ -315,36 +322,19 @@ class TransientDataObtainer(BaseDataObtainer):
         from gravyflow.src.dataset.features.event import SourceType
         
         all_segments = []
-        
-        # Check what types of data are requested
-        data_labels_list = self.data_labels if isinstance(self.data_labels, list) else [self.data_labels]
-        
-        # Check for specific glitch types or general GLITCHES label
-        has_specific_glitches = any(isinstance(label, GlitchType) for label in data_labels_list)
-        has_glitches_label = DataLabel.GLITCHES in data_labels_list
-        
-        if has_glitches_label or has_specific_glitches:
-            # If specific types requested, pass them to build_glitch_segments
-            glitch_types_to_fetch = None
-            if has_specific_glitches:
-                glitch_types_to_fetch = [label for label in data_labels_list if isinstance(label, GlitchType)]
-            
+        # What is asked for, by each label's kind, never its number (label_kinds).
+        asked = label_kinds(self.data_labels)
+
+        if DataLabel.GLITCHES in asked:
+            # Specific glitch types, if any are named; otherwise every type.
             glitch_segments = build_glitch_segments(
                 ifos=ifos,
                 observing_runs=self.observing_runs,
-                glitch_types=glitch_types_to_fetch  # Pass specific types if requested
+                glitch_types=[label for label in self.data_labels if isinstance(label, GlitchType)] or None,
             )
             all_segments.extend(glitch_segments)
-        
-        
-        # Fetch event segments if requested (reuse data_labels_list from above)
-        has_events = any(isinstance(et, EventConfidence) for et in data_labels_list)
-        # Check for EVENTS label - handle both enum and integer value comparisons
-        has_events_label = any(
-            l == DataLabel.EVENTS or (hasattr(l, 'value') and l.value == DataLabel.EVENTS.value) or l == DataLabel.EVENTS.value
-            for l in data_labels_list
-        )
-        if has_events_label or has_events:
+
+        if DataLabel.EVENTS in asked:
             # Determine observing runs to query: if specific event names are requested, 
             # we should broaden the search (e.g., check all runs) to ensure they are found.
             # Otherwise, respect the strict observing_runs filter.
@@ -569,8 +559,7 @@ class TransientDataObtainer(BaseDataObtainer):
         split = self._split(ifos, group_name)
         if group_name != "test" and not self.train_on_real_events and self._events_only():
             raise ValueError(
-                f"Real events are evaluation data, served only in 'test', not {group_name!r}: "
-                "pass train_on_real_events=True to train on them."
+                f"Real events are evaluation data, served only in 'test', not {group_name!r}."
             )
 
         # The served state is one split's, on its detectors: another rebuilds

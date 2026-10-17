@@ -194,14 +194,14 @@ OBTAINER_PERTURBATIONS = {
     "event_names": ["GW150914"],
     "gwosc_flags": gf.GWOSC_DATA_FLAGS,
     "split_spec": gf.SplitSpec(version="fold-1"),
-    "train_on_real_events": True,
 }
-#: Data-determining parameters with one buildable value (public runs publish BEST only).
-SINGLE_VALUED = {"data_quality"}
+#: Data-determining parameters with one buildable value (public runs publish BEST only;
+#: training on real events is refused for now).
+SINGLE_VALUED = {"data_quality", "train_on_real_events"}
 #: Parameters that change how data is fetched or logged, never the data.
 NOT_DATA = {"force_acquisition", "cache_segments", "logging_level", "prefetch_segments"}
 #: Parameters a NOISE obtainer ignores (they select transients).
-TRANSIENT_ONLY = {"event_types", "balanced_glitch_types", "event_names", "train_on_real_events"}
+TRANSIENT_ONLY = {"event_types", "balanced_glitch_types", "event_names"}
 
 
 class TestFingerprint:
@@ -213,7 +213,8 @@ class TestFingerprint:
     def test_every_obtainer_parameter_is_classified(self):
         parameters = set(inspect.signature(gf.IFODataObtainer).parameters)
         assert parameters == set(OBTAINER_PERTURBATIONS) | SINGLE_VALUED | NOT_DATA
-        assert SINGLE_VALUED <= set(gf.IFODataObtainer(**self.base_arguments()).specification())
+        transient = {**self.base_arguments(), "data_labels": [gf.DataLabel.GLITCHES]}
+        assert SINGLE_VALUED <= set(gf.IFODataObtainer(**transient).specification())
 
     @pytest.mark.parametrize("name", sorted(OBTAINER_PERTURBATIONS))
     def test_changes_with_every_data_parameter(self, name):
