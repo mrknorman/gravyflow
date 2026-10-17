@@ -28,6 +28,7 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `GravyflowDataset`: the class `Dataset` returns, a Keras `PyDataset` of batches.
 - `ComposedDataset`: examples drawn from feature pools by a composition.
 - `EpochMode`: how a dataset's batches are addressed across epochs.
+- `Unprepared`: raised by `Dataset.prepare`, naming every contradiction between the timeline and the source, and the `exclusions` that plan around them.
 - `FeaturePool`: a pool of one kind of example for a `ComposedDataset`.
 - `PoolSampler`: how a `ComposedDataset` draws from its pools.
 - `Curriculum`: parameters that change over training.
