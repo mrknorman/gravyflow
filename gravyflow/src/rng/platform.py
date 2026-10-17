@@ -1,6 +1,5 @@
 """
-What decides a batch's bits besides its address: the library versions, the
-JAX backend, and XLA's CPU threading.
+XLA's CPU threading, which decides a batch's bits besides its address.
 
 The seed tree makes every draw a pure function of its address. The arithmetic
 that turns draws into strain is not always: XLA's multi-threaded CPU kernels
@@ -17,7 +16,6 @@ it in the environment before importing gravyflow.
 """
 
 import os
-from typing import Dict
 
 #: The XLA flag that runs CPU kernels single-threaded, so results are bit-reproducible.
 SINGLE_THREADED_CPU_FLAG = "--xla_cpu_multi_thread_eigen=false"
@@ -33,29 +31,11 @@ def single_threaded_cpu() -> bool:
     return SINGLE_THREADED_CPU_FLAG in xla_flags().split()
 
 
-def bit_reproducible() -> bool:
+def multi_threaded_cpu() -> bool:
     """
-    Whether a batch's bytes are a pure function of its address in this
-    process: on a CPU backend, only with single-threaded kernels. Other
-    backends are not claimed.
+    Whether XLA runs here on a CPU with multi-threaded kernels, so results vary
+    in their last bits from call to call (other backends are not judged).
     """
     import jax
 
-    return jax.default_backend() == "cpu" and single_threaded_cpu()
-
-
-def platform_record() -> Dict[str, object]:
-    """Everything besides the specification and address that decides a batch's bits."""
-    from importlib.metadata import version
-
-    import jax
-    import numpy
-
-    return {
-        "gravyflow": version("gravyflow"),
-        "numpy": numpy.__version__,
-        "jax": jax.__version__,
-        "backend": jax.default_backend(),
-        "xla_flags": xla_flags(),
-        "single_threaded_cpu": single_threaded_cpu(),
-    }
+    return jax.default_backend() == "cpu" and not single_threaded_cpu()

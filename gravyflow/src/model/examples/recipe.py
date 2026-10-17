@@ -15,9 +15,10 @@ and evaluated.
   come from the seed tree (`keras_draws`). Two runs of one seed train the same
   batches in the same order from the same weights, and a resumed run trains as
   an uninterrupted one: bit for bit when XLA runs single-threaded on a CPU
-  (``XLA_FLAGS=--xla_cpu_multi_thread_eigen=false``). Its multi-threaded
-  kernels round the whitened strain differently from call to call, in the last
-  bits, and training amplifies the difference.
+  (``XLA_FLAGS=--xla_cpu_multi_thread_eigen=false``, as the documented CPU run
+  sets). Its multi-threaded kernels round the whitened strain differently from
+  call to call, in the last bits, and training amplifies the difference, so a
+  run warns without the flag (`gravyflow.src.rng.platform`).
 - **A run directory outside the package.** `RunDirectory` refuses any path
   inside the installed library, so a run can never overwrite shipped files.
 - **Resume.** Each epoch ends with the model and its optimiser saved
@@ -47,6 +48,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import warnings
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -56,6 +58,7 @@ import keras
 import numpy as np
 
 import gravyflow as gf
+from gravyflow.src.rng import platform
 from gravyflow.src.validate.bank import per_example
 from gravyflow.src.validate.config import require_same_split, run_record_of, split_record, with_run_record
 from gravyflow.src.validate.provenance import (
@@ -408,6 +411,14 @@ class TrainingRun:
                 configuration, or of data split otherwise; or the model built
                 records another split.
         """
+        if platform.multi_threaded_cpu():
+            warnings.warn(
+                "XLA's CPU kernels are multi-threaded here: the whitened strain differs in its last bits "
+                "from call to call, and training amplifies the difference, so this run is not "
+                "reproducible from its seed, and a small model may not train. Set "
+                f"XLA_FLAGS={platform.SINGLE_THREADED_CPU_FLAG} before starting Python.",
+                UserWarning, stacklevel=2,
+            )
         data = training_data(self.seed)
         split = split_record(data, validation_data)
         run = self.directory.run

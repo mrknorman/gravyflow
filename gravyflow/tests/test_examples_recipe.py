@@ -5,6 +5,7 @@ resume with checkpoint provenance, and the training scripts' settings.
 
 import importlib
 import os
+import warnings
 from types import SimpleNamespace
 
 import keras
@@ -218,6 +219,21 @@ class EpochBatches(CountingBatches):
     def __getitem__(self, index):
         self.served.append(self.dataset.epoch)
         return super().__getitem__(index)
+
+
+def test_a_run_on_multi_threaded_cpu_kernels_warns(tmp_path, monkeypatch):
+    # Multi-threaded kernels round the whitened strain differently from call to
+    # call, and training amplifies it: such a run is not reproducible, and the
+    # CPU preset sometimes fails to train. The test session runs single-threaded.
+    from gravyflow.src.rng import platform
+
+    validation = materialise(CountingBatches(99, group="validate"), 2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        make_run(tmp_path / "single", 1).train(tiny_model, lambda seed: CountingBatches(seed), validation, verbose=0)
+    monkeypatch.setattr(platform, "multi_threaded_cpu", lambda: True)
+    with pytest.warns(UserWarning, match="XLA_FLAGS=--xla_cpu_multi_thread_eigen=false"):
+        make_run(tmp_path / "multi", 1).train(tiny_model, lambda seed: CountingBatches(seed), validation, verbose=0)
 
 
 def test_training_resumes_from_the_last_epoch(tmp_path):

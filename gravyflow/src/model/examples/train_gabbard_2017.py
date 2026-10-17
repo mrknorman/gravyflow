@@ -2,7 +2,13 @@
 """
 Train the Gabbard et al. 2017 CNN (arXiv:1712.06041v2) with the run recipe.
 
-    python -m gravyflow.src.model.examples.train_gabbard_2017 --output-dir RUN_DIR [--preset cpu]
+    XLA_FLAGS=--xla_cpu_multi_thread_eigen=false \
+        python -m gravyflow.src.model.examples.train_gabbard_2017 --output-dir RUN_DIR [--preset cpu]
+
+On a CPU, the single-threaded XLA kernels make the run bit-reproducible from
+its seed (`TrainingRun.train` warns without them): multi-threaded kernels
+round the whitened strain differently from call to call, and the CPU preset
+then sometimes fails to train.
 
 The run directory must be outside the package. Running the same command again
 resumes the run from its last epoch; a run directory holding a run of another

@@ -170,7 +170,7 @@ class TestBitReproducibleKernels:
 
     def test_the_session_runs_single_threaded_kernels(self):
         assert platform.single_threaded_cpu(), platform.xla_flags()
-        assert platform.platform_record()["single_threaded_cpu"]
+        assert not platform.multi_threaded_cpu()
 
     def test_whitening_is_bit_reproducible_between_calls(self):
         # Multi-threaded kernels whiten these arrays to one of two results,

@@ -101,11 +101,12 @@ A dataset is a Keras `PyDataset`: pass it to `model.fit`. Each batch is a pure f
 ## 4. Quick start: a CNN on a laptop CPU
 
 One command trains the CNN of Gabbard *et al.* (2017) on simulated binary black hole signals (IMRPhenomD, masses
-5–95 M☉, optimal SNR 8–15) in whitened coloured Gaussian noise, then validates it. It runs offline, on a CPU, and
-needs the `viz` extra:
+5–95 M☉, optimal SNR 8–15) in whitened coloured Gaussian noise, then validates it. It runs offline, on a CPU, with
+XLA's CPU kernels single-threaded, and needs the `viz` extra:
 
 ```bash
 export KERAS_BACKEND=jax
+export XLA_FLAGS=--xla_cpu_multi_thread_eigen=false
 python -m gravyflow.src.model.examples.train_gabbard_2017 --output-dir ~/gravyflow_runs/gabbard_2017_cpu --preset cpu \
   && python -m gravyflow.src.model.examples.validate_gabbard_2017 --run-dir ~/gravyflow_runs/gabbard_2017_cpu
 ```
@@ -120,9 +121,9 @@ python -m gravyflow.src.model.examples.train_gabbard_2017 --output-dir ~/gravyfl
   `validation/validation.html` in the run directory. Expect an AUC near 0.976 and, at a false-alarm rate of 1e-3 Hz,
   an efficiency near 0.69 at SNR 7–8 and 0.96 at SNR 9–10.
 - **Reproducible from the seed** (`--seed`): the same seed gives the same batches, in the same order, from the same
-  initial weights. For bit-identical weights from run to run, set `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false`:
-  with XLA's multi-threaded CPU kernels the whitened strain differs in its last bits between calls (see section 7),
-  and training amplifies the difference.
+  initial weights, and with the single-threaded kernels above the same weights, epoch by epoch. XLA's multi-threaded
+  CPU kernels round the whitened strain differently in its last bits from call to call (see section 7); training
+  amplifies the difference, so a run without the flag is not reproducible, sometimes fails to train at all, and warns.
 
 Notebooks 07 and 08 in `example_notebooks/` walk through the same run.
 
@@ -150,9 +151,10 @@ and the splits never share a stream. Within a split, datasets of one seed draw t
 numbers), so a noise-only dataset and a signal dataset share their noise, as an ablation wants. Datasets that must be
 independent, such as the classes of a classifier, take distinct names (`gf.Dataset(..., name="noise")`), each a
 scope of the tree, or are the pools of one `gf.ComposedDataset`. Old seeds give new data. Every draw is bit-identical between rebuilds; on CPU,
-XLA's multi-threaded kernels can still round the projected strain differently from one call to the next, in the last
-bits of float32. For bit-identical batches, set `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false` before importing
-gravyflow (the results then differ, also in the last bits, from multi-threaded ones). The replaced seed arguments (`Distribution(seed=)`,
+XLA's multi-threaded kernels can still round whitened and projected strain and Welch spectra differently from one call
+to the next, in the last bits of float32. For bit-identical batches, set `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false`
+before starting Python: importing gravyflow starts JAX, which reads the flag then (the results differ, also in the last
+bits, from multi-threaded ones). The test suite sets it itself, and a recipe training run warns without it. The replaced seed arguments (`Distribution(seed=)`,
 `generate(seed=)`, `reseed`, `Network(seed=)`, `Curriculum(seed=)` and the like) still work for one release, with a
 `DeprecationWarning`. These changes have no such period:
 
@@ -187,7 +189,9 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
   splits: do not evaluate a model trained on an earlier release's split on this release's validate or test split.
   A model's split is its data's: `gf.Model.train` and the recipes' `TrainingRun.train` read it from their
   training and validation data (a gravyflow dataset names its `split_spec` and `group`), refuse data that names
-  none or is split by two specs, and record the fingerprint and the split that selected the model in `run.json`
+  none or is split by two specs (synthetic noise, WHITE or COLORED, reads no real data: its `split_spec` is None, it
+  is split-neutral, and it combines with real data of any spec; a model of synthetic data alone records the
+  default spec), and record the fingerprint and the split that selected the model in `run.json`
   beside the model. The record belongs to the weights: every model gravyflow trains or loads carries it
   (`TrainingRun.train`'s, `RunDirectory.load_model`'s, a `gf.Model`'s), weights that carry one never train on
   another split, whatever `force_retrain` says, and the validator reads it from the model, refusing a model split
@@ -223,7 +227,10 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
   `BinaryCrossentropy(from_logits=True)` and reports `BinaryAccuracy` at a threshold of 0, and the validator (which
   refused a probability output) scores it. `Model.validate(validate_args, config, model_path)` takes a
   `ValidationConfig` and returns the `Validator`. A checkpoint that exists but cannot be loaded raises `ValueError`;
-  `Model.load` returned an untrained model in its place.
+  `Model.load` returned an untrained model in its place. `Model.train(force_retrain=False)` resumes the run in the
+  model's directory: a checkpoint there with no history is refused by name, never discarded (only
+  `force_retrain=True` starts a new run over it). The model search scores a generation from its validators' saved
+  results and draws from `search/` streams of the seed tree, so its draws (and a seed's genomes) have changed.
 
 ## 8. Units: physical strain
 
