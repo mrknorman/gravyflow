@@ -126,17 +126,19 @@ class TestCurriculumAt:
 
 class TestCurriculumDatasetIntegration:
 
-    def dataset(self, c, group="train", **kwargs):
-        generator = gf.WNBGenerator(
-            scaling_method=gf.ScalingMethod(c, gf.ScalingTypes.SNR),
-            duration_seconds=gf.Distribution(min_=0.1, max_=0.3, type_=gf.DistributionType.UNIFORM),
-            min_frequency_hertz=gf.Distribution(min_=40.0, max_=60.0, type_=gf.DistributionType.UNIFORM),
-            max_frequency_hertz=gf.Distribution(min_=100.0, max_=150.0, type_=gf.DistributionType.UNIFORM),
-        )
+    def dataset(self, c, group="train", generators=1, **kwargs):
+        def generator():
+            return gf.WNBGenerator(
+                scaling_method=gf.ScalingMethod(c, gf.ScalingTypes.SNR),
+                duration_seconds=gf.Distribution(min_=0.1, max_=0.3, type_=gf.DistributionType.UNIFORM),
+                min_frequency_hertz=gf.Distribution(min_=40.0, max_=60.0, type_=gf.DistributionType.UNIFORM),
+                max_frequency_hertz=gf.Distribution(min_=100.0, max_=150.0, type_=gf.DistributionType.UNIFORM),
+            )
         return gf.Dataset(
             seed=1, group=group,
             noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]),
-            waveform_generators=[generator], sample_rate_hertz=512.0, offsource_duration_seconds=4.0,
+            waveform_generators=[generator() for _ in range(generators)], sample_rate_hertz=512.0,
+            offsource_duration_seconds=4.0,
             num_examples_per_batch=8, steps_per_epoch=2,
             input_variables=[gf.ReturnVariables.ONSOURCE], output_variables=[gf.ScalingTypes.SNR],
             **kwargs,
@@ -166,6 +168,28 @@ class TestCurriculumDatasetIntegration:
         for k in range(2):
             val[k]
         np.testing.assert_array_equal(np.asarray(train[1][1]["SNR"]), reference)
+
+    def test_a_shared_curriculum_is_read_at_the_epoch_by_every_generator(self):
+        # A Curriculum shared by several generators advanced once per
+        # generator per batch.
+        c = curriculum(start=uniform(80.0, 100.0), end=uniform(5.0, 15.0), num_epochs=3)
+        ds = self.dataset(c, generators=2)
+        first = np.asarray(ds[0][1]["SNR"])
+        assert first.shape == (8, 2) and np.all((first >= 80.0) & (first <= 100.0))
+        np.testing.assert_array_equal(np.asarray(ds[0][1]["SNR"]), first)
+        ds.on_epoch_end()
+        middle = np.asarray(ds[1][1]["SNR"])
+        assert np.all((middle >= 42.5) & (middle <= 57.5))
+
+    def test_draws_do_not_move_the_schedule(self):
+        # Progress counted sample() calls, so Keras' build peek and shape
+        # probes advanced it.
+        c = curriculum(num_epochs=3)
+        probed, fresh = self.dataset(c), self.dataset(c)
+        for _ in range(10):
+            probed[0], probed[1]
+        np.testing.assert_array_equal(np.asarray(probed[1][1]["SNR"]), np.asarray(fresh[1][1]["SNR"]))
+        assert probed.epoch == 0
 
     def test_resumed_run_sets_the_epoch(self):
         c = curriculum(start=uniform(80.0, 100.0), end=uniform(5.0, 15.0), num_epochs=3)
