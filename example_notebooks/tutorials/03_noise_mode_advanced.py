@@ -50,8 +50,8 @@ GravyFlow supports two sampling strategies for NOISE mode:
 ║  SamplingMode.RANDOM │  Pick random positions within each segment.   ║
 ║                      │  Good for: training (max diversity)           ║
 ╠══════════════════════════════════════════════════════════════════════╣
-║  SamplingMode.GRID   │  Systematically step through segments.        ║
-║                      │  Good for: inference (full coverage)          ║
+║  SamplingMode.GRID   │  Step through each segment once, then end.    ║
+║                      │  Good for: inference (each window once)       ║
 ╚══════════════════════════════════════════════════════════════════════╝
 
 RANDOM mode (default):

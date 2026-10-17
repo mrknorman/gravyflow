@@ -252,16 +252,34 @@ def colored_noise_generator(
     return (batch(tree.direct(k)) for k in count())
 
 
+class ReaderExhausted(Exception):
+    """A sequential reader has no batch left: a GRID pass has ended, or no segment loaded."""
+
+
 def sequential_batcher(iterator: Iterator) -> NoiseBatcher:
     """
     A batcher over a sequential reader: each call takes the reader's next
     batch, whatever the address. Real noise and transients are read this way
-    until they are addressed by index.
+    until they are addressed by index. A reader that ends raises
+    ``ReaderExhausted``, by name: a bare StopIteration would end, or break,
+    whatever generator called the batcher.
     """
     def batch(streams: BatchStreams) -> Dict:
-        return next(iterator)
+        try:
+            return next(iterator)
+        except StopIteration:
+            raise ReaderExhausted("The noise reader has no batch left: a GRID pass has ended, "
+                                  "or no segment could be loaded.") from None
 
     return batch
+
+
+def _until_exhausted(batches: Iterator) -> Iterator:
+    """``batches`` until its reader is exhausted (``ReaderExhausted``), then the end."""
+    try:
+        yield from batches
+    except ReaderExhausted:
+        return
 
 
 def enforce_shapes(batch: Dict, num_ifos: int) -> Dict:
@@ -476,7 +494,7 @@ class NoiseObtainer(Obtainer):
             ifos=ifos,
             sampling_mode=sampling_mode,
         )
-        return (batch(tree.batch(group, 0, k)) for k in count())
+        return _until_exhausted(batch(tree.batch(group, 0, k)) for k in count())
 
     def pseudo_real_noise_generator(
         self,

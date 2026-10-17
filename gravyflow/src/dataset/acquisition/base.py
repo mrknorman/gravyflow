@@ -379,6 +379,58 @@ def separated_starts(
     return starts[alive]
 
 
+def grid_slots(bounds: Tuple[int, int], stride: int) -> int:
+    """The number of GRID slots, ``stride`` apart from ``lo``, among the window starts [lo, hi)."""
+    lo, hi = bounds
+    return max(-(-(hi - lo) // stride), 0)
+
+
+def grid_starts(
+        bounds: Sequence[Tuple[int, int]],
+        origins_samples: Sequence[float],
+        stride: int,
+        separation_samples: float,
+        used: Sequence[np.ndarray],
+    ) -> np.ndarray:
+    """
+    GRID window starts, one per detector, for every example a row can still serve.
+
+    Detector i's starts are its slots ``lo_i + stride * s`` (``grid_slots``), each
+    served at most once: ``used[i]`` marks the slots already served, and is updated
+    in place. Detector 0's free slots are taken in order; for each, detector k takes
+    the first free slot, scanning cyclically from half its slots on, that lies at
+    least ``separation_samples`` from the example's other starts in absolute time
+    (``origins_samples``, each detector's first sample on a common clock). A slot of
+    detector 0 with no such partner is left free. Nothing is drawn: the pass is a
+    pure function of the row and what was served before it.
+
+    Returns an (M, detectors) int64 array of start indices.
+    """
+    times = [origin + lo + stride * np.arange(len(free), dtype=np.float64)
+             for origin, (lo, _), free in zip(np.asarray(origins_samples, np.float64), bounds, used)]
+    starts = []
+    for slot in np.flatnonzero(~used[0]):
+        chosen, picks = [times[0][slot]], [slot]
+        for k in range(1, len(bounds)):
+            n = len(used[k])
+            if n == 0:
+                break
+            order = (slot + -(-n // 2) + np.arange(n)) % n
+            fits = ~used[k][order]
+            for t in chosen:
+                fits &= np.abs(times[k][order] - t) >= separation_samples
+            if not fits.any():
+                break
+            pick = int(order[np.argmax(fits)])
+            chosen.append(times[k][pick])
+            picks.append(pick)
+        else:
+            for k, pick in enumerate(picks):
+                used[k][pick] = True
+            starts.append([lo + stride * pick for (lo, _), pick in zip(bounds, picks)])
+    return np.asarray(starts, dtype=np.int64).reshape(-1, len(bounds))
+
+
 def gather_windows(tensor_data, starts, num_onsource_samples: int, num_offsource_samples: int):
     """The onsource ``[s, s + on)`` and offsource ``[s - off, s)`` of ``tensor_data`` at each start s."""
     starts = np.asarray(starts, dtype=np.int64)[:, None]
@@ -499,60 +551,39 @@ class IFOData:
             min_separation_seconds,
         )
     
-    def grid_subsection(
+    def grid_windows(
         self,
         num_onsource_samples: int,
         num_offsource_samples: int,
-        num_examples_per_batch: int,
-        cursors: Sequence[Optional[int]],
+        min_separation_seconds: float,
+        used: Sequence[Optional[np.ndarray]],
     ):
         """
-        Sequential windows, one onsource apart, from each detector's piece.
+        Every GRID window of this row's pieces not yet served this pass (``grid_starts``),
+        one padded onsource apart.
 
-        Detector i walks its piece's window starts (``window_start_bounds``) from
-        ``cursors[i]``, an offset into them, wrapping at their end. A cursor of None
-        starts a piece not walked before, at i / n of its starts, so that detectors
-        on one stretch of time take different windows.
-
-        Returns: (subarrays, background_chunks, gps_times, new_cursors), or Nones
-        when a piece is too short for one window.
+        ``used[i]`` marks detector i's slots already served this pass, or is None for a
+        piece not walked before. Returns (onsource, offsource, start GPS times) as
+        ``random_subsection`` does, with as many examples as the row has separated
+        slots left (perhaps none), and the updated marks.
         """
-        all_subarrays = []
-        all_background_chunks = []
-        all_gps_times = []
-        new_cursors = []
-
-        num_detectors = max(len(self.data), 1)
-        steps = num_onsource_samples * np.arange(num_examples_per_batch)
-
-        for ifo_idx, (tensor_data, start_gps_time) in enumerate(zip(self.data, self.start_gps_time)):
-            lo, hi = window_start_bounds(
-                int(ops.shape(tensor_data)[0]), num_onsource_samples, num_offsource_samples
-            )
-            span = hi - lo
-            if span <= 0:
-                return None, None, None, cursors
-            cursor = cursors[ifo_idx]
-            if cursor is None:
-                cursor = ifo_idx * (span // num_detectors)
-            positions = lo + (cursor + steps) % span
-            new_cursors.append(int((cursor + num_examples_per_batch * num_onsource_samples) % span))
-
-            onsource = ops.stack([tensor_data[pos:pos + num_onsource_samples] for pos in positions])
-            offsource = ops.stack(
-                [tensor_data[pos - num_offsource_samples:pos] for pos in positions]
-            )
-            gps_times = float(start_gps_time) + window_offsets_seconds(positions, self.time_interval_seconds)
-
-            all_subarrays.append(ops.expand_dims(onsource, axis=1))
-            all_background_chunks.append(ops.expand_dims(offsource, axis=1))
-            all_gps_times.append(np.expand_dims(as_gps_times(gps_times), axis=1))
-
-        stacked_subarrays = ops.concatenate(all_subarrays, axis=1)
-        stacked_background = ops.concatenate(all_background_chunks, axis=1)
-        stacked_gps = np.concatenate(all_gps_times, axis=1)
-
-        return stacked_subarrays, stacked_background, stacked_gps, new_cursors
+        first_gps = as_gps_times(np.asarray(self.start_gps_time, dtype=np.float64))
+        interval = self.time_interval_seconds
+        bounds = [window_start_bounds(int(ops.shape(tensor)[0]), num_onsource_samples, num_offsource_samples)
+                  for tensor in self.data]
+        used = [np.zeros(grid_slots(b, num_onsource_samples), dtype=bool) if marks is None else marks
+                for b, marks in zip(bounds, used)]
+        starts = grid_starts(
+            bounds,
+            (first_gps - first_gps[0]) / interval,
+            num_onsource_samples,
+            min_separation_seconds / interval,
+            used,
+        )
+        onsource, offsource = zip(*(gather_windows(tensor, starts[:, i], num_onsource_samples, num_offsource_samples)
+                                    for i, tensor in enumerate(self.data)))
+        gps_times = first_gps[None, :] + window_offsets_seconds(starts, interval)
+        return ops.stack(onsource, axis=1), ops.stack(offsource, axis=1), gps_times, used
 
 
 # =============================================================================
@@ -666,7 +697,6 @@ class BaseDataObtainer(ABC):
             "_current_batch_index": 0,
             "_segment_exhausted": True,
             "_num_batches_in_current_segment": 0,
-            "_grid_cursors": {},  # GRID's position in each piece it walks
             "_segment_cache": MemoryCache(maxsize=self._segment_cache_maxsize),
             "_prefetch_futures": {},
             "_dropped_segments_count": 0,

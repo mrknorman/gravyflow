@@ -112,46 +112,48 @@ class TestDefaultSaturation:
         assert obtainer.saturation == 8.0
 
 
-class TestIFODataGridSubsection:
-    """Test IFOData.grid_subsection method."""
-    
-    def test_grid_subsection_returns_correct_format(self):
-        """Grid subsection should return (subarrays, background, gps_times, new_cursors)."""
+class TestIFODataGridWindows:
+    """IFOData.grid_windows: each slot once a pass, detectors kept apart."""
+
+    SAMPLE_RATE = 64.0
+    ONSOURCE, OFFSOURCE = 64, 256  # 1 s and 4 s
+
+    def _row(self, durations, starts):
         from keras import ops
-        
-        # Create mock IFOData with fake data
-        sample_rate = 2048.0
-        duration = 100.0  # 100 seconds
-        num_samples = int(sample_rate * duration)
-        
-        fake_data = [ops.zeros((num_samples,), dtype="float32")]
-        fake_gps = [1000000000.0]  # Fake GPS start time
-        
-        ifo_data = gf.IFOData(
-            data=fake_data,
-            sample_rate_hertz=sample_rate,
-            start_gps_time=fake_gps
+
+        return gf.IFOData(
+            data=[ops.zeros((int(self.SAMPLE_RATE * d),), dtype="float32") for d in durations],
+            sample_rate_hertz=self.SAMPLE_RATE,
+            start_gps_time=list(starts),
         )
-        
-        num_onsource = int(sample_rate * 1.0)  # 1 second
-        num_offsource = int(sample_rate * 16.0)  # 16 seconds
-        batch_size = 8
-        
-        result = ifo_data.grid_subsection(
-            num_onsource,
-            num_offsource,
-            batch_size,
-            cursors=[None],
-        )
-        
-        # Should return 4-tuple
-        assert len(result) == 4
-        subarrays, background, gps_times, new_cursors = result
-        
-        # Check shapes if not None
-        if subarrays is not None:
-            assert len(ops.shape(subarrays)) == 3  # (batch, detectors, samples)
-            assert new_cursors[0] > 0  # The cursor advances
+
+    def test_every_slot_once_then_none(self):
+        """A pass serves each detector's slot at most once; a second call on the marks serves nothing."""
+        row = self._row([100.0, 100.0], [1e9, 1e9])
+        onsource, offsource, gps, used = row.grid_windows(self.ONSOURCE, self.OFFSOURCE, 10.0, [None, None])
+        assert onsource.shape[:2] == offsource.shape[:2] == gps.shape == (len(gps), 2)
+        assert len(gps) > 0
+        for d in range(2):
+            assert len(np.unique(gps[:, d])) == len(gps)
+        assert np.min(np.abs(gps[:, 0] - gps[:, 1])) >= 10.0
+        again = row.grid_windows(self.ONSOURCE, self.OFFSOURCE, 10.0, used)[2]
+        assert len(again) == 0
+
+    @pytest.mark.parametrize("durations, starts", [
+        ([40.0, 40.0], [1e9, 1e9]),            # equal short pieces
+        ([1024.0, 2048.0], [1e9 + 1024, 1e9]),  # one piece inside the other
+    ])
+    def test_adversarial_layouts_stay_apart(self, durations, starts):
+        """Equal short pieces and a piece inside another: no example's detectors closer than the separation."""
+        row = self._row(durations, starts)
+        gps = row.grid_windows(self.ONSOURCE, self.OFFSOURCE, 12.0, [None, None])[2]
+        assert len(gps) > 0
+        assert np.min(np.abs(gps[:, 0] - gps[:, 1])) >= 12.0
+
+    def test_inseparable_row_serves_nothing(self):
+        """Pieces too short to hold two windows 2S apart give no example, never a coincident one."""
+        row = self._row([8.0, 8.0], [1e9, 1e9])
+        assert len(row.grid_windows(self.ONSOURCE, self.OFFSOURCE, 12.0, [None, None])[2]) == 0
 
 
 class TestSegmentCyclingRegression:

@@ -568,9 +568,8 @@ class NoiseDataObtainer(BaseDataObtainer):
         if not self._current_batch_index and not self._current_segment_index:
             window_seconds = \
                 window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds
-            # A new plan starts new passes, and GRID walks its pieces afresh.
+            # A new plan starts new passes.
             self._segment_generator = None
-            self._grid_cursors = {}
             self.sampling_plan = self.plan_sampling(
                 self.valid_segments,
                 minimum_duration_seconds=2.0 * window_seconds,
@@ -584,6 +583,24 @@ class NoiseDataObtainer(BaseDataObtainer):
         
         if self.sampling_plan is None or len(self.sampling_plan.rows) == 0:
             logging.warning("No valid segments available in NOISE mode. Generator will be empty.")
+            return
+
+        def emit(subarrays, background_chunks, start_gps_times):
+            # Shapes: ONSOURCE/OFFSOURCE = (Batch, IFO, Samples) = BIS
+            #         START_GPS_TIME = (Batch, IFO) = BI
+            #         DATA_LABEL = (Batch, IFO) = BI (all NOISE = 0)
+            batch_size, num_ifos = subarrays.shape[:2]
+            return _post_process({
+                RV.ONSOURCE: self._apply_augmentation(subarrays),
+                RV.OFFSOURCE: self._apply_augmentation(background_chunks),
+                # The windows' first samples, as the first returned onsource sample.
+                RV.START_GPS_TIME: window_spec.onsource_start_gps(start_gps_times),
+                RV.DATA_LABEL: ops.full((batch_size, num_ifos), 0, dtype="int32"),  # NOISE = 0
+            })
+
+        if sampling_mode == SamplingMode.GRID:
+            yield from self._grid_pass(
+                window_spec, num_examples_per_batch, separation_seconds, ifos, emit)
             return
 
         # Nominal density: saturation examples per onsource duration of window starts.
@@ -622,34 +639,17 @@ class NoiseDataObtainer(BaseDataObtainer):
                     self._segment_exhausted = False
             
             while self._current_batch_index < self._num_batches_in_current_segment and not self._segment_exhausted:
+                subarrays, background_chunks, start_gps_times = self.current_segment.random_subsection(
+                    num_onsource_samples,
+                    num_offsource_samples,
+                    num_examples_per_batch,
+                    self.rng.integers(1E10),
+                    min_separation_seconds=separation_seconds,
+                )
 
-                if sampling_mode == SamplingMode.RANDOM:
-                    subarrays, background_chunks, start_gps_times = self.current_segment.random_subsection(
-                        num_onsource_samples,
-                        num_offsource_samples,
-                        num_examples_per_batch,
-                        self.rng.integers(1E10),
-                        min_separation_seconds=separation_seconds,
-                    )
-                else:
-                    # GRID walks each detector's piece on from where its last row left
-                    # it, across rows and passes, so a piece's windows repeat only once
-                    # the whole piece has been walked.
-                    keys = [(i, float(start), float(end))
-                            for i, (start, end) in enumerate(self._current_row)]
-                    subarrays, background_chunks, start_gps_times, cursors = \
-                        self.current_segment.grid_subsection(
-                            num_onsource_samples,
-                            num_offsource_samples,
-                            num_examples_per_batch,
-                            [self._grid_cursors.get(key) for key in keys],
-                        )
-                    if subarrays is not None:
-                        self._grid_cursors.update(zip(keys, cursors))
-
-                if subarrays is None or background_chunks is None or start_gps_times is None:
-                    # The row cannot hold a batch (of separated windows, in RANDOM). Once
-                    # every row has failed since the last batch, none will serve one.
+                if subarrays is None:
+                    # The row cannot hold a batch of separated windows. Once every row
+                    # has failed since the last batch, none will serve one.
                     self._segment_exhausted = True
                     failed_rows.add(np.asarray(self._current_row).tobytes())
                     if len(failed_rows) == len(self.sampling_plan.rows):
@@ -666,16 +666,36 @@ class NoiseDataObtainer(BaseDataObtainer):
                     self._segment_exhausted = True
                     self._current_batch_index = 0
 
-                # Yield dict for real noise
-                # Shapes: ONSOURCE/OFFSOURCE = (Batch, IFO, Samples) = BIS
-                #         START_GPS_TIME = (Batch, IFO) = BI
-                #         DATA_LABEL = (Batch, IFO) = BI (all NOISE = 0)
-                num_ifos = subarrays.shape[1]
-                batch_size = subarrays.shape[0]
-                yield _post_process({
-                    RV.ONSOURCE: self._apply_augmentation(subarrays),
-                    RV.OFFSOURCE: self._apply_augmentation(background_chunks),
-                    # The windows' first samples, as the first returned onsource sample.
-                    RV.START_GPS_TIME: window_spec.onsource_start_gps(start_gps_times),
-                    RV.DATA_LABEL: ops.full((batch_size, num_ifos), 0, dtype="int32"),  # NOISE = 0
-                })
+                yield emit(subarrays, background_chunks, start_gps_times)
+
+    def _grid_pass(self, window_spec, num_examples_per_batch: int, separation_seconds: float,
+                   ifos: List[gf.IFO], emit):
+        """
+        One GRID pass over the sampling plan, then the end: each row, in order, serves
+        every window its pieces still hold whose detectors start ``separation_seconds``
+        apart (``IFOData.grid_windows``). A window is served at most once a pass, though
+        its piece is in several rows, so the pass is finite and repeats nothing. The
+        examples are batched across rows; the last, partial batch is not served.
+        """
+        used, held = {}, []
+        for row in self.sampling_plan.rows:
+            for segment in self.acquire(window_spec.sample_rate_hertz, row[None], ifos):
+                keys = [(i, float(start), float(end)) for i, (start, end) in enumerate(row)]
+                onsource, offsource, gps, marks = segment.grid_windows(
+                    window_spec.num_onsource_samples,
+                    window_spec.num_offsource_samples,
+                    separation_seconds,
+                    [used.get(key) for key in keys],
+                )
+                used.update(zip(keys, marks))
+                held.append((ops.convert_to_numpy(onsource), ops.convert_to_numpy(offsource), gps))
+                onsource, offsource, gps = (np.concatenate(parts) for parts in zip(*held))
+                served = len(gps) - len(gps) % num_examples_per_batch
+                for first in range(0, served, num_examples_per_batch):
+                    batch = slice(first, first + num_examples_per_batch)
+                    yield emit(ops.convert_to_tensor(onsource[batch]), ops.convert_to_tensor(offsource[batch]),
+                               gps[batch])
+                held = [(onsource[served:], offsource[served:], gps[served:])]
+        if held and len(held[0][2]):
+            logging.info(f"The GRID pass ends with {len(held[0][2])} windows, short of a batch of "
+                         f"{num_examples_per_batch}.")

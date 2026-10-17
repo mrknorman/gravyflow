@@ -4,6 +4,8 @@ get partner windows.
 
 """
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -52,6 +54,40 @@ def test_detectors_never_coincide(world, tmp_path, layout, mode):
         f"{overlapping} of {record.num_examples} examples read H1 and L1 within "
         f"{2 * FOOTPRINT_SECONDS} s; closest {separation} s"
     )
+
+
+#: More batches than one GRID pass over any layout here serves: a pass that has not
+#: ended by then never ends.
+GRID_PASS_BOUND = 2000
+
+
+def _grid_pass_length(world, fixture, directory):
+    """The number of batches one GRID pass serves, refusing a pass that does not end."""
+    with world(fixture):
+        batches = fx.noise_batches(fixture, directory, "train", mode=gf.SamplingMode.GRID)
+        length = sum(1 for _ in itertools.islice(batches, GRID_PASS_BOUND + 1))
+    assert length <= GRID_PASS_BOUND, f"a GRID pass served more than {GRID_PASS_BOUND} batches: it never ends"
+    return length
+
+
+@pytest.mark.parametrize("layout", list(LAYOUTS))
+def test_each_window_once(world, tmp_path, layout):
+    """
+    One GRID pass ends, serves each detector's window at most once, and keeps every
+    example's detectors two footprints apart.
+    """
+    fixture = LAYOUTS[layout]()
+    length = _grid_pass_length(world, fixture, tmp_path / "count")
+    assert length > 0, "a GRID pass served nothing"
+    with world(fixture) as harness:
+        batches = fx.noise_batches(fixture, tmp_path / "pass", "train", mode=gf.SamplingMode.GRID)
+        record = audit.collect(harness, {"grid": ("train", batches)}, length, IFOS, fx.window(), False)["grid"]
+    starts = record.footprints[..., 0]
+    for d, ifo in enumerate(IFOS):
+        repeats = record.num_examples - len(np.unique(starts[:, d]))
+        assert repeats == 0, f"{ifo}: {repeats} of {record.num_examples} windows served twice in one pass"
+    separation = _min_separation(record.footprints, 256.0)
+    assert separation >= 2 * FOOTPRINT_SECONDS, f"H1 and L1 read {separation} s apart in GRID"
 
 
 def _glitch_world(tmp_path, glitch_ifo="L1"):

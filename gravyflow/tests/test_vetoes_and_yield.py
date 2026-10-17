@@ -517,7 +517,10 @@ FOOTPRINT, OFFSOURCE = 4.0, 1.75
 
 def _draw(obtainer, rows, num_batches, mode=gf.SamplingMode.RANDOM, offsource_seconds=OFFSOURCE,
           batch=BATCH, seed=7):
-    """START_GPS_TIME of ``num_batches`` batches drawn from ``rows`` with fake strain."""
+    """
+    START_GPS_TIME of ``num_batches`` batches drawn from ``rows`` with fake strain, or of
+    every batch the generator serves when ``num_batches`` is None.
+    """
     def fake_acquire(sample_rate_hertz, valid_segments, ifos, **kwargs):
         # As the loader does: each piece is kept to whole seconds (kept_seconds).
         for row in valid_segments:
@@ -534,8 +537,8 @@ def _draw(obtainer, rows, num_batches, mode=gf.SamplingMode.RANDOM, offsource_se
             offsource_duration_seconds=offsource_seconds, num_examples_per_batch=batch, ifos=ifos,
             seed=seed, sampling_mode=mode,
         )
-        starts = [np.asarray(next(generator)[gf.ReturnVariables.START_GPS_TIME])
-                  for _ in range(num_batches)]
+        batches = generator if num_batches is None else (next(generator) for _ in range(num_batches))
+        starts = [np.asarray(batch[gf.ReturnVariables.START_GPS_TIME]) for batch in batches]
     return np.concatenate(starts)
 
 
@@ -603,20 +606,20 @@ class TestSamplingDensity:
         plan = obtainer.plan_sampling(np.array([[[0.0, 30.6]]]), 8.0, FOOTPRINT)
         np.testing.assert_allclose(plan.start_seconds, [30.0 - FOOTPRINT])
 
-    def test_grid_walks_each_piece_once_across_its_rows(self):
-        # Saturation 0.5: a 2 s stride visits each start once. One H1 piece shares five
-        # rows with five L1 pieces, each due about 1.6 batches a pass. GRID wrapped inside
-        # each row's share, overlapping that row's own windows.
+    def test_grid_serves_each_window_once_a_pass_then_ends(self):
+        # One H1 piece shares five rows with five L1 pieces. GRID wrapped inside each
+        # row's share and never ended; one pass now serves each window at most once
+        # across the rows, keeps the detectors two footprints apart, and ends.
         obtainer = _noise_obtainer(gf.ObservingRun.O3, saturation=0.5)
         h1 = np.array([[0.0, FOOTPRINT + 256.0]])
         l1 = np.array([[k * 100.0, k * 100.0 + FOOTPRINT + 51.0] for k in range(5)])
         rows = np.stack([np.repeat(h1, 5, axis=0), l1], axis=1)
-        # 16 batches of 16 windows walk the piece's 128 two-second positions twice over,
-        # across rows and passes.
-        starts = _draw(obtainer, rows, num_batches=16, mode=gf.SamplingMode.GRID)[:, 0]
-        positions, visits = np.unique(starts, return_counts=True)
-        assert len(positions) == 128 and np.all(visits == 2)
-        assert np.min(np.diff(positions)) >= 2.0 - 1e-9  # no window overlaps another
+        starts = _draw(obtainer, rows, num_batches=None, mode=gf.SamplingMode.GRID)
+        assert len(starts) > 0
+        for detector in range(2):
+            assert len(np.unique(starts[:, detector])) == len(starts)
+        assert np.min(np.diff(np.sort(starts[:, 0]))) >= 2.0 - 1e-9  # no window overlaps another
+        assert np.min(np.abs(starts[:, 0] - starts[:, 1])) >= 2 * (2.0 + OFFSOURCE) - 1e-9
 
     def test_a_row_whose_detectors_cannot_be_separated_is_left_out(self):
         # Both detectors on one 40 s piece: window starts span 36 s, so they can be 36 s
