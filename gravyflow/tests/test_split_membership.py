@@ -475,11 +475,13 @@ class TestNoAllSplit:
             next(obtainer(ifos=[gf.IFO.H1, gf.IFO.L1], group="train", **WINDOW))
 
     @pytest.mark.parametrize("labels", [[gf.DataLabel.EVENTS], [gf.DataLabel.GLITCHES]])
-    def test_training_on_real_events_is_refused(self, labels):
-        """Until a flag marks a real event as coincident, real events are never trained on."""
+    def test_training_on_real_events_needs_the_opt_in(self, labels):
+        """Real events are trained on only under the coincident opt-in, whose flag marks them."""
         for build in (gf.IFODataObtainer, gf.TransientDataObtainer):
-            with pytest.raises(ValueError, match="train_on_real_events=True is refused"):
+            with pytest.raises(ValueError, match="coincidence=Coincidence.COINCIDENT"):
                 build(data_quality=gf.DataQuality.BEST, data_labels=labels, train_on_real_events=True)
+            build(data_quality=gf.DataQuality.BEST, data_labels=labels, train_on_real_events=True,
+                  coincidence=gf.Coincidence.COINCIDENT)
 
     def test_a_chirp_glitch_obtainer_serves_no_real_events(self, offline_events):
         """
