@@ -164,14 +164,32 @@ class LabelTrackingDataset(keras.utils.PyDataset):
     
     def __getitem__(self, index):
         features, labels = self.dataset[index]
-        
+
         # Track labels for diversity monitoring
         if self.label_key in labels:
-            label_data = labels[self.label_key]
-            # Convert one-hot to class indices if needed
-            if len(label_data.shape) > 1 and label_data.shape[-1] > 1:
-                self._last_labels = np.argmax(label_data, axis=-1)
-            else:
-                self._last_labels = np.array(label_data).flatten()
-        
+            self._last_labels = example_classes(self.label_key, labels[self.label_key])
+
         return features, labels
+
+
+def example_classes(label_key: str, label_data) -> np.ndarray:
+    """
+    One class per example from a batch's labels under ``label_key``.
+
+    The layout is the one the batch contract documents for the key, never
+    guessed from the shape: a per-detector class label, (Batch, IFO) (SUB_TYPE,
+    GLITCH_TYPE, SOURCE_TYPE, DATA_LABEL), holds the transient's class on its
+    own detectors and a partner's -1 (or NOISE, 0) elsewhere, so the class is
+    the largest value over the detectors. A key the contract does not
+    document is read as one-hot when it has a class axis.
+    """
+    from gravyflow.src.dataset.features.injection import ReturnVariables
+    from gravyflow.src.utils.shapes import BATCH, IFO
+
+    label_data = np.asarray(label_data)
+    key = ReturnVariables.__members__.get(label_key)
+    if key is not None and tuple(key.value.shape) == (BATCH, IFO):
+        return label_data.max(axis=1)
+    if key is None and label_data.ndim > 1 and label_data.shape[-1] > 1:
+        return np.argmax(label_data, axis=-1)
+    return label_data.reshape(-1)
