@@ -258,8 +258,8 @@ class ReaderExhausted(Exception):
 def sequential_batcher(iterator: Iterator) -> NoiseBatcher:
     """
     A batcher over a sequential reader: each call takes the reader's next
-    batch, whatever the address. Real noise and transients are read this way
-    until they are addressed by index. A reader that ends raises
+    batch, whatever the address. PSEUDO_REAL and GRID noise (until it is
+    addressed by index) and a reader of the caller's own are read this way. A reader that ends raises
     ``ReaderExhausted``, by name: a bare StopIteration would end, or break,
     whatever generator called the batcher.
     """
@@ -361,8 +361,10 @@ class NoiseObtainer(Obtainer):
         WHITE and COLORED noise, and REAL noise drawn at random, is a pure
         function of the batch's streams: REAL batch k of epoch e is batch
         e * ``steps_per_epoch`` + k of the split's passes (``random_batcher``).
-        PSEUDO_REAL and GRID noise is read sequentially, from readers seeded
-        from ``tree`` and ``group``, until it is addressed by index.
+        REAL noise read by a transient obtainer is that obtainer's own batcher,
+        addressed by index too. PSEUDO_REAL and GRID noise is read sequentially,
+        from readers seeded from ``tree`` and ``group``, until it is addressed by
+        index.
         ``scale_factor`` is deprecated and ignored.
         """
         ignore_scale_factor(scale_factor)
@@ -416,6 +418,19 @@ class NoiseObtainer(Obtainer):
                     ifos=ifos
                 ))
 
+            case NoiseType.REAL if isinstance(self.ifo_data_obtainer, gf.TransientDataObtainer):
+                batch = self.ifo_data_obtainer.batcher(
+                    tree,
+                    group,
+                    sample_rate_hertz=sample_rate_hertz,
+                    onsource_duration_seconds=onsource_duration_seconds,
+                    crop_duration_seconds=crop_duration_seconds,
+                    offsource_duration_seconds=offsource_duration_seconds,
+                    num_examples_per_batch=num_examples_per_batch,
+                    ifos=ifos,
+                    steps_per_epoch=steps_per_epoch,
+                )
+
             case NoiseType.REAL if addressed_by_index(self, sampling_mode):
                 batch = self._reader(ifos, tree, group, sample_rate_hertz).random_batcher(
                     tree,
@@ -454,8 +469,10 @@ class NoiseObtainer(Obtainer):
         def checked(streams: BatchStreams) -> Dict:
             return enforce_shapes(batch(streams), num_ifos=len(ifos))
 
-        # Noise addressed by index can be prepared ahead of a run (``Dataset.prepare``).
+        # Noise addressed by index can be prepared ahead of a run (``Dataset.prepare``);
+        # an evaluation set of transients has a length of its own (``batch.batches``).
         checked.prepare = getattr(batch, "prepare", None)
+        checked.batches = getattr(batch, "batches", None)
         return checked
 
     def _reader(self, ifos, tree : SeedTree, group : str, sample_rate_hertz : float):
@@ -597,14 +614,18 @@ class NoiseObtainer(Obtainer):
 def addressed_by_index(obtainer, sampling_mode=None) -> bool:
     """
     Whether ``obtainer``'s batches are a pure function of their address: simulated
-    noise (WHITE, COLORED), and real noise drawn at random (``SamplingMode.RANDOM``)
-    through a noise obtainer (``random_batcher``). The rest is read in order.
+    noise (WHITE, COLORED), transients, bare or read as REAL noise (their own
+    ``batcher``), and real noise drawn at random (``SamplingMode.RANDOM``) through a
+    noise obtainer (``random_batcher``). The rest is read in order.
     """
     if not reads_real_data(obtainer):
         return True
-    return (isinstance(obtainer, NoiseObtainer) and obtainer.noise_type == NoiseType.REAL
-            and sampling_mode in (None, gf.SamplingMode.RANDOM)
-            and isinstance(obtainer.ifo_data_obtainer, gf.NoiseDataObtainer))
+    real = isinstance(obtainer, NoiseObtainer) and obtainer.noise_type == NoiseType.REAL
+    reader = obtainer.ifo_data_obtainer if real else obtainer
+    if isinstance(reader, gf.TransientDataObtainer):
+        return True
+    return (real and sampling_mode in (None, gf.SamplingMode.RANDOM)
+            and isinstance(reader, gf.NoiseDataObtainer))
 
 
 def reads_real_data(obtainer) -> bool:
@@ -622,6 +643,12 @@ def obtainer_batcher(obtainer, tree: SeedTree, group: str, **kwargs) -> NoiseBat
     """
     The batcher of any obtainer, its own: a NoiseObtainer's, or a transient
     obtainer's, addressed by index. The tree orders and balances the split; the
-    split's members never depend on it.
+    split's members never depend on it. A reader of the caller's own (no
+    ``batcher``) is read in order from a fresh copy, seeded from its own stream.
     """
-    return obtainer.batcher(tree, group, **kwargs)
+    if hasattr(obtainer, "batcher"):
+        return obtainer.batcher(tree, group, **kwargs)
+    kwargs.pop("sampling_mode", None)
+    kwargs.pop("steps_per_epoch", None)
+    reader = deepcopy(obtainer)
+    return sequential_batcher(reader(**kwargs, group=group, seed=sequential_seed(tree, group, "noise/reader")))

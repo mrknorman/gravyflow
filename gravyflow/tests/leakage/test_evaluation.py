@@ -950,9 +950,13 @@ def test_a_transient_evaluation_set_is_served_at_most_once(world):
         for _ in range(2):
             epochs.append([np.asarray(ds[k][1][gf.ReturnVariables.START_GPS_TIME.name])[:, 0] for k in range(2)])
             ds.on_epoch_end()
-        # The batcher refuses by name (IndexError); the dataset wraps what its noise raises.
-        with pytest.raises(Exception, match="never are"):
+        # The set is the dataset's length: a batch past it is refused by the dataset, and
+        # by the batcher itself, by name.
+        assert len(ds) == 2
+        with pytest.raises(IndexError, match="outside the 2 batches"):
             ds[2]
+        with pytest.raises(IndexError, match="never are"):
+            ds.noise(ds.tree.batch("test", 0, 2))
     served = np.concatenate(epochs[0])
     assert len(set(served.tolist())) == len(served) == 4
     assert all(min(abs(start - t) for t in peaks) < 2.0 for start in served), "a window is no record's"

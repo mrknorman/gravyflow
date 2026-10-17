@@ -1042,3 +1042,35 @@ def test_transient_batches_are_addressed_by_index(world):
     assert len(set(np.concatenate(train_times[:2]))) == 4, "a pass serves a record twice"
     assert solo["train"][:2] != solo["train"][2:], "a training epoch repeats the last"
     assert solo["test"][:2] == solo["test"][2:], "an evaluation epoch differs from the last"
+
+
+def test_a_transient_dataset_draws_each_training_epoch_and_fixes_evaluation(world):
+    """
+    A dataset of transients read as REAL noise is addressed by index: a training epoch
+    of one pass serves every record once, in an order of its own each epoch, and an
+    evaluation split is its whole batches, the same at every epoch, and no more.
+    """
+    fixture, peaks = transient_world()
+
+    def served(split, steps):
+        ds = fx.dataset(fixture, split, batch=2, steps_per_epoch=steps, data_labels=[gf.DataLabel.GLITCHES])
+        assert ds.index_addressed, f"the {split} split is not addressed by index"
+        epochs = []
+        for epoch in range(2):
+            ds.epoch = epoch
+            # Each example's start times, one row per example, in the order served.
+            epochs.append([tuple(row) for k in range(len(ds))
+                           for row in np.asarray(ds[k][1][RV.START_GPS_TIME.name]).round(4)])
+        return ds, epochs
+
+    with world(fixture):
+        _, train = served("train", len(peaks["train"]) // 2)
+        test, evaluation = served("test", 1000)
+        with pytest.raises(IndexError):
+            test[len(test)]
+    assert len(test) == len(peaks["test"]) // 2, f"an evaluation split of {len(test)} batches"
+    first, second = train
+    assert len(first) == len(set(first)) == len(peaks["train"]), f"a pass serves a record twice: {first}"
+    assert sorted(first) == sorted(second), "a training epoch serves records the last did not"
+    assert first != second, "a training epoch repeats the order of the last"
+    assert evaluation[0] == evaluation[1], "an evaluation epoch differs from the last"
