@@ -1162,30 +1162,22 @@ def test_incoherent_generator_init_mismatch():
     # Network with 1 detector
     gen1.network = gf.Network([gf.IFO.L1])
     
-    with pytest.raises(ValueError, match="When using component generators num ifos must equal num generators"):
+    with pytest.raises(ValueError, match="components need a network of as many detectors"):
         gf_inj.IncoherentGenerator([gen1, gen2])
 
-def test_incoherent_generator_stack_failure():
-    """Test generate handles stacking failure."""
-    # Create two generators that return different shapes
-    gen1 = MagicMock()
-    gen1.generate.return_value = (ops.zeros((2, 1, 100)), {})
-    gen1.network = None
-    gen1.scaling_method = None
-    gen1.injection_chance = 1.0
-    gen1.front_padding_duration_seconds = 0.0
-    gen1.back_padding_duration_seconds = 0.0
-    
-    gen2 = MagicMock()
-    gen2.generate.return_value = (ops.zeros((2, 1, 200)), {}) # Different length
-    
-    incoherent = gf_inj.IncoherentGenerator([gen1, gen2])
-    
-    with patch("logging.error") as mock_error:
-        waveforms, params = incoherent.generate(2, 1024.0, 1.0)
-        mock_error.assert_called_with("Failed to stack waveforms!")
-        assert waveforms is None
-        assert params is None
+def test_incoherent_generator_refuses_components_of_different_shapes():
+    """Components whose waveforms differ in shape cannot be one injection."""
+    class Fixed(gf_inj.WaveformGenerator):
+        def __init__(self, samples):
+            super().__init__()
+            self.samples = samples
+
+        def generate(self, num_waveforms, sample_rate_hertz, duration_seconds, streams=None, *, seed=None):
+            return ops.zeros((num_waveforms, 2, self.samples)), {}
+
+    incoherent = gf_inj.IncoherentGenerator([Fixed(100), Fixed(200)])
+    with pytest.raises(ValueError, match="different shapes"):
+        incoherent.generate(2, 1024.0, 1.0)
 
 # --- InjectionGenerator Edge Cases ---
 
@@ -1462,10 +1454,8 @@ def test_incoherent_injection_slicing_regression():
     # Channels=2 (default)
     # Time = (onsource + 2*crop) * sample_rate = (1.0 + 1.0) * 1024 = 2048
     assert ops.shape(injections) == (1, 2, 2, 2, 2048)
-    # Mask reduction on (Batch, Components, Channels, Time) with axis=(1,2) leaves (Batch, Time)
-    # Stacked -> (NumGenerators, Batch, Time)
-    # Note: Masks are currently returned for the *extended* duration (unsliced), so we only check rank.
-    assert len(ops.shape(masks)) == 3
+    # One mask value per example, (NumGenerators, Batch), whatever the waveform's layout.
+    assert ops.shape(masks) == (1, 2)
 
 
 

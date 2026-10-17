@@ -175,8 +175,10 @@ def calculate_hrss(
     """
     The root-sum-square strain of each example: sqrt(sum_t (h+^2 + hx^2) dt).
 
-    ``injection`` is (Batch, 2, Time) polarisations, or (Batch, Time); every
-    axis but the first is summed. The LAL/burst convention, as
+    ``injection`` is (Batch, 2, Time) polarisations, (Batch, Detectors, 2,
+    Time) per-detector polarisations (an IncoherentGenerator's, whose hrss is
+    the root-sum-square over its detectors), or (Batch, Time); every axis but
+    the first is summed. The LAL/burst convention, as
     ``XLALMeasureHrss``. Computed as m * hrss(h / m), with m = max |h|, so
     physical strain (~1e-21) does not underflow in float32.
 
@@ -194,15 +196,17 @@ def calculate_hpeak(
     """
     The peak strain of each example: max_t sqrt(h+^2 + hx^2).
 
-    ``injection`` is (Batch, 2, Time) polarisations, or (Batch, Time). The
-    LAL/burst convention, as ``XLALMeasureHPeak``; float32-safe as
-    ``calculate_hrss``.
+    ``injection`` is (Batch, 2, Time) polarisations, (Batch, Detectors, 2,
+    Time) per-detector polarisations (the loudest detector's peak), or
+    (Batch, Time). The LAL/burst convention, as ``XLALMeasureHPeak``;
+    float32-safe as ``calculate_hrss``.
 
     Returns: (Batch,), in the units of ``injection``.
     """
     normalised, peak = _peak_normalise(injection)
     if len(ops.shape(normalised)) > 2:
-        magnitude = ops.sqrt(ops.sum(normalised * normalised, axis=1))
+        # The polarisations are always the second-last axis.
+        magnitude = ops.sqrt(ops.sum(normalised * normalised, axis=-2))
     else:
         magnitude = ops.abs(normalised)
     axes = tuple(range(1, len(ops.shape(magnitude))))
@@ -1240,20 +1244,65 @@ class CBCGenerator(WaveformGenerator):
 
 
 class IncoherentGenerator(WaveformGenerator):
+    """
+    One injection with its own waveform in each detector: component j's
+    polarisations are projected onto detector j alone, so its network has
+    as many detectors as it has components.
+
+    The components are one signal: one presence (drawn once, from this
+    generator's ``chance`` stream, with component 0's injection_chance), one
+    placement, sky and scaling (component 0's scaling method, padding and
+    allow_partially_out_of_window), one mask value per example. HRSS and
+    HPEAK measure the whole injection: the root-sum-square over the
+    detectors, and the loudest detector's peak. Each component draws its
+    waveform from its own streams (``comp/{j}``).
+
+    ``generate`` returns (Batch, Detectors, 2, Time) polarisations and one
+    value per example for each parameter: the components' common value, NaN
+    where they differ or a component does not draw it (an injection whose
+    detectors hold bursts of different durations has no one duration).
+    """
     component_generators : List[WaveformGenerator]
-    
+
     def __init__(self, component_generators, name : Optional[str] = None):
-        self.component_generators = component_generators
+        self.component_generators = list(component_generators)
+        if not self.component_generators:
+            raise ValueError("An IncoherentGenerator needs a component generator for each detector.")
         self.name = None if name is None else check_name(name, "generator name")
-        self.scaling_method = component_generators[0].scaling_method
-        self.injection_chance = component_generators[0].injection_chance
-        self.front_padding_duration_seconds = component_generators[0].front_padding_duration_seconds
-        self.back_padding_duration_seconds = component_generators[0].back_padding_duration_seconds
-        self.network = component_generators[0].network
-        
-        if self.network is not None:
-            if self.network.num_detectors != len(self.component_generators):
-                raise ValueError("When using component generators num ifos must equal num generators!")
+        first = self.component_generators[0]
+        self.scaling_method = first.scaling_method
+        self.injection_chance = first.injection_chance
+        self.front_padding_duration_seconds = first.front_padding_duration_seconds
+        self.back_padding_duration_seconds = first.back_padding_duration_seconds
+        self.allow_partially_out_of_window = first.allow_partially_out_of_window
+        self.network = first.network
+
+    @property
+    def network(self):
+        return self._network
+
+    @network.setter
+    def network(self, network):
+        # Checked on every assignment, a dataset's binding included: a network
+        # of another size would broadcast components onto the wrong detectors.
+        network = self.init_network(network)
+        if network is not None:
+            num_detectors = int(np.asarray(network.num_detectors).ravel()[0])
+            if num_detectors != len(self.component_generators):
+                raise ValueError(
+                    f"An IncoherentGenerator projects component j onto detector j: its "
+                    f"{len(self.component_generators)} components need a network of as many "
+                    f"detectors, not {num_detectors}."
+                )
+        self._network = network
+
+    def get_max_generated_duration(self):
+        return max(float(component.get_max_generated_duration()) for component in self.component_generators)
+
+    def get_signal_extent_seconds(self, parameters):
+        """The extent every component's signal reaches, recorded by ``generate``."""
+        extent = np.asarray(parameters[SIGNAL_EXTENT])
+        return extent[..., 0], extent[..., 1]
 
     def generate(
         self,
@@ -1264,36 +1313,55 @@ class IncoherentGenerator(WaveformGenerator):
         *,
         seed : Optional[int] = None
     ):
-                    
-        if len(self.component_generators) > 0:
-            
-            streams = self.resolve_streams(streams, seed)
-            waveforms, parameters = [], []
-            # Each component draws its waveform from its own streams, but an
-            # example is present in every component or none: the presence is
-            # drawn once, from this generator's own chance stream.
-            for j, generator in enumerate(self.component_generators):
-                unconditional = copy(generator)
-                unconditional.injection_chance = 1.0
-                waveforms_, parameters_ = unconditional.generate(
-                    num_waveforms,
-                    sample_rate_hertz, 
-                    duration_seconds,
-                    streams.sub(f"comp/{j}")
-                )
+        """
+        ``num_waveforms`` incoherent injections: (Batch, Detectors, 2, Time)
+        polarisations and their parameters (see the class).
+        """
+        streams = self.resolve_streams(streams, seed)
+        waveforms, parameters, before, after = [], [], [], []
+        for j, component in enumerate(self.component_generators):
+            unconditional = copy(component)
+            unconditional.injection_chance = 1.0
+            component_waveforms, component_parameters = unconditional.generate(
+                num_waveforms, sample_rate_hertz, duration_seconds, streams.sub(f"comp/{j}")
+            )
+            # The presence is this generator's chance stream, so it is shared.
+            waveforms.append(self.apply_injection_chance(component_waveforms, streams))
+            parameters.append(component_parameters)
+            extent = component.get_signal_extent_seconds(component_parameters)
+            before.append(np.broadcast_to(np.asarray(extent[0], dtype=np.float64), (num_waveforms,)))
+            after.append(np.broadcast_to(np.asarray(extent[1], dtype=np.float64), (num_waveforms,)))
 
-                waveforms.append(self.apply_injection_chance(waveforms_, streams))
-                parameters.append(parameters_)
-        
-        try:
-            waveforms = ops.stack(waveforms, axis = 1)
-        except: 
-            logging.error("Failed to stack waveforms!")
-            return None, None
-        
-        parameters = parameters[0]
+        shapes = sorted({tuple(ops.shape(waveform)) for waveform in waveforms})
+        if len(shapes) != 1:
+            raise ValueError(
+                f"An IncoherentGenerator's components generated waveforms of different shapes, "
+                f"{shapes}; they cannot be one injection."
+            )
+        common = _common_values(parameters)
+        common[SIGNAL_EXTENT] = np.stack([np.max(before, axis=0), np.max(after, axis=0)], axis=-1)
+        return ops.stack(waveforms, axis=1), common
 
-        return waveforms, parameters
+
+def _common_values(parameters_list):
+    """
+    One value per example of every parameter in ``parameters_list`` (one dict
+    per component): the components' common value, NaN where they differ or a
+    component lacks the parameter.
+    """
+    keys = []
+    for parameters in parameters_list:
+        keys.extend(key for key in parameters if key not in keys)
+    common = {}
+    for key in keys:
+        values = [parameters.get(key) for parameters in parameters_list]
+        if any(value is None for value in values):
+            like = np.asarray(next(value for value in values if value is not None), dtype=np.float64)
+            common[key] = np.full(like.shape, np.nan)
+            continue
+        values = np.stack([np.asarray(value, dtype=np.float64) for value in values])
+        common[key] = np.where(np.all(values == values[0], axis=0), values[0], np.nan)
+    return common
 
 def roll_vector_zero_padding(vector, shift):
     """
@@ -1404,6 +1472,28 @@ def refuse_renamed_sky_keys(injection_parameters):
                 "give the sky under that key."
             )
 
+def _common_layout(waveforms_list):
+    """
+    Each generator's waveforms, (Batch, 2, Time) polarisations or (Batch,
+    Detectors, 2, Time) per-detector ones, in one layout to stack: the
+    first, unless a generator has a waveform per detector, when every
+    coherent generator's polarisations are repeated in each detector (which
+    projects exactly as they do).
+    """
+    detectors = sorted({ops.shape(waveforms)[1] for waveforms in waveforms_list
+                        if len(ops.shape(waveforms)) == 4})
+    if not detectors:
+        return waveforms_list
+    if len(detectors) > 1:
+        raise ValueError(f"Generators with a waveform per detector disagree on the detectors: {detectors}.")
+    return [
+        waveforms if len(ops.shape(waveforms)) == 4 else ops.broadcast_to(
+            ops.expand_dims(waveforms, 1),
+            (ops.shape(waveforms)[0], detectors[0]) + tuple(ops.shape(waveforms)[1:])
+        )
+        for waveforms in waveforms_list
+    ]
+
 def _absent_as_nan(labels, present, num_examples):
     """
     One generator's labels as float32 (Batch, ...) arrays, NaN where it
@@ -1444,6 +1534,8 @@ def _stack_generator_labels(labels_list):
 # Keys of the source measures InjectionGenerator records with each batch.
 SOURCE_HRSS = "source_hrss"
 SOURCE_HPEAK = "source_hpeak"
+# An IncoherentGenerator's per-example (before, after) extent, (Batch, 2) seconds.
+SIGNAL_EXTENT = "signal_extent_seconds"
 
 class InjectionGenerator:
     def __init__(
@@ -1537,7 +1629,11 @@ class InjectionGenerator:
         One batch of unscaled injections, drawn from ``streams``: a pure
         function of the batch's address.
 
-        Returns (injections (G, B, 2, S), masks (G, B), parameters).
+        Returns (injections, masks (G, B), parameters). The injections are
+        (G, B, 2, S) polarisations; when a generator has a waveform per
+        detector (an IncoherentGenerator), (G, B, I, 2, S), every coherent
+        generator's repeated in each detector, which projects exactly as its
+        own polarisations do.
         """
         self.sample_rate_hertz = sample_rate_hertz
         injections_list = []
@@ -1601,8 +1697,8 @@ class InjectionGenerator:
             params[SOURCE_HRSS] = calculate_hrss(waveforms, sample_rate_hertz)
             params[SOURCE_HPEAK] = calculate_hpeak(waveforms)
 
-            # Reduce mask to a single boolean flag per example (0.0 or 1.0)
-            mask = ops.max(mask, axis=(1, 2))
+            # One flag per example (0.0 or 1.0), whatever the waveform's layout.
+            mask = ops.max(mask, axis=tuple(range(1, len(ops.shape(mask)))))
             masks_list.append(mask)
 
             offsets = self._draw_offsets_seconds(
@@ -1653,21 +1749,13 @@ class InjectionGenerator:
             parameters_list.append(params)
 
         if injections_list:
-            injections = ops.stack(injections_list, axis=0)
+            injections = ops.stack(_common_layout(injections_list), axis=0)
             masks = ops.stack(masks_list, axis=0)
         else:
             # No generators: no injections, and every example is noise.
             target_length = int(total_duration * sample_rate_hertz)
             injections = ops.zeros((0, num_examples_per_batch, 2, target_length), "float32")
             masks = ops.zeros((0, num_examples_per_batch), "float32")
-
-        # (Generators, Batch, 2, Time) polarisations, unless a generator
-        # stacks more (IncoherentGenerator).
-        if len(ops.shape(injections)) != 4:
-            logging.warning(
-                "Injection shape mismatch: expected (Generators, Batch, 2, Time), "
-                f"got {ops.shape(injections)}"
-            )
 
         batched_params = batch_injection_parameters(parameters_list)
 
