@@ -355,9 +355,13 @@ def suite_guard(request, tmp_path_factory):
 def empty_store():
     """
     Every test starts with an empty store under the suite's cache root, so no test
-    reads tiles another test's fake source committed under the same source id.
+    reads tiles another test's fake source committed under the same source id. The
+    reads ahead a test left running are stopped when it ends (``store.shutdown``),
+    so none of them fetches through, or commits into, the next test's patched sources.
     """
     import shutil
+
+    from gravyflow.src.dataset.store import pools
 
     def clear():
         root = os.environ.get("GRAVYFLOW_CACHE_DIR")
@@ -366,6 +370,8 @@ def empty_store():
 
     clear()
     yield
+    if pools.background_threads():
+        pools.shutdown()
     clear()
 
 
