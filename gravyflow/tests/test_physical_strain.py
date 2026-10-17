@@ -55,7 +55,7 @@ def _rounding_tolerance(offsource):
     steeply below 20 Hz. On both, the largest difference of any output here is
     at most 5 of these; the bound takes 10.
     """
-    normalised = np.asarray(gf.estimate_psd(offsource, FS).normalised, np.float64)[..., 1:]
+    normalised = np.asarray(estimate_psd(offsource, FS).normalised, np.float64)[..., 1:]
     dynamic_range = np.sqrt(np.mean(normalised, axis=-1) * np.mean(1.0 / normalised, axis=-1))
     return 10.0 * INPUT_ROUNDING * float(np.max(dynamic_range))
 
