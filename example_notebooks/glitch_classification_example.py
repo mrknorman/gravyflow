@@ -34,7 +34,6 @@ ONSOURCE_DURATION = 1.0
 OFFSOURCE_DURATION = 16.0
 BATCH_SIZE = 32
 STEPS_PER_EPOCH = 5000 # ~160K samples per epoch
-VALIDATION_STEPS = 1000 # ~32K validation samples
 EPOCHS = 100
 NUM_CLASSES = len(gf.GlitchType)
 
@@ -209,7 +208,8 @@ validation_dataset = gf.Dataset(
     output_variables=[
         gf.ReturnVariables.GLITCH_TYPE
     ],
-    steps_per_epoch=VALIDATION_STEPS,
+    # A transient validation split is its whole batches, floor(N / B), served once
+    # per epoch: its length is the set, so it takes no steps_per_epoch.
 )
 
 # =============================================================================
