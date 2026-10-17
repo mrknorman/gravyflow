@@ -15,7 +15,6 @@ used to build event examples.
 
 from enum import Enum, IntEnum, auto
 from typing import List, Optional, Union
-from pathlib import Path
 import logging
 
 import numpy as np
@@ -75,7 +74,17 @@ EVENT_VETO_PADDING_SECONDS = 2.0
 UNKNOWN_EVENT_CHIRP_MASS_SOLAR = 0.87
 
 #: Version of the cached event table's format; bumping it re-fetches every cache.
-_EVENT_CATALOGUE_FORMAT = 2
+#: 3 added the parameter-estimation columns (``EVENT_PARAMETER_COLUMNS``).
+_EVENT_CATALOGUE_FORMAT = 3
+
+#: Parameter-estimation columns the event list carries, as GWOSC names them (NaN
+#: where a catalogue gives none), and the keys ``get_events_with_params`` gives them.
+EVENT_PARAMETER_COLUMNS = {
+    "mass_1_source": "mass1",
+    "mass_2_source": "mass2",
+    "luminosity_distance": "distance",
+    "p_astro": "p_astro",
+}
 
 _SOLAR_MASS_SECONDS = 4.925490947e-6  # G M_sun / c^3
 
@@ -150,7 +159,8 @@ def get_event_catalogue(use_cache: bool = True) -> dict:
     The catalogues are discovered from the API (``fetch_event_catalogue_names``), so a
     list GWOSC adds is vetoed without a code change. Returns arrays ``gps``,
     ``chirp_mass_source`` (solar masses; NaN when the catalogue gives no masses),
-    ``name`` and ``catalog``.
+    ``name``, ``catalog`` and the parameter estimates ``EVENT_PARAMETER_COLUMNS``
+    (NaN where the catalogue gives none).
 
     The table is cached in the user cache (``~/.gravyflow/cache/gwosc_events``) with
     the catalogue names and the GWOSC runs it was fetched under (``GWOSC_RUNS``). It
@@ -185,12 +195,17 @@ def get_event_catalogue(use_cache: bool = True) -> dict:
                 continue
             chirp_mass = _row_chirp_mass(row)
             name = row["commonName"] if "commonName" in table.colnames else row["name"]
+            parameters = {column: _row_value(row, column) for column in EVENT_PARAMETER_COLUMNS}
             events.append({
                 "gps": gps,
-                "chirp_mass_source": chirp_mass if np.isfinite(chirp_mass) else None,
+                "chirp_mass_source": chirp_mass,
                 "name": str(name),
                 "catalog": catalog,
+                **parameters,
             })
+            # JSON has no NaN: a missing value is stored as null.
+            events[-1] = {key: (None if isinstance(value, float) and not np.isfinite(value) else value)
+                          for key, value in events[-1].items()}
 
     _atomic_write_text(
         cache_file,
@@ -200,14 +215,16 @@ def get_event_catalogue(use_cache: bool = True) -> dict:
 
 
 def _event_rows_to_arrays(events: List[dict]) -> dict:
+    def numbers(key):
+        # A value a row lacks (null, or absent) reads as NaN.
+        return np.array([np.nan if e.get(key) is None else e[key] for e in events], dtype=np.float64)
+
     return {
         "gps": np.array([e["gps"] for e in events], dtype=np.float64),
-        "chirp_mass_source": np.array(
-            [np.nan if e["chirp_mass_source"] is None else e["chirp_mass_source"] for e in events],
-            dtype=np.float64,
-        ),
+        "chirp_mass_source": numbers("chirp_mass_source"),
         "name": np.array([e["name"] for e in events], dtype=str),
         "catalog": np.array([e["catalog"] for e in events], dtype=str),
+        **{column: numbers(column) for column in EVENT_PARAMETER_COLUMNS},
     }
 
 
@@ -281,162 +298,74 @@ def get_event_times_by_type(
     return _event_times(catalogs, use_cache)
 
 
+def _observing_run_name(gps: float) -> str:
+    """The name of the ``ObservingRun`` whose bounds hold ``gps``, or "Unknown"."""
+    from gravyflow.src.dataset.acquisition.base import ObservingRun
+
+    for run in ObservingRun:
+        if run.value.start_gps_time <= gps <= run.value.end_gps_time:
+            return run.name
+    return "Unknown"
+
+
 def get_events_with_params(
     observing_runs: List = None,
     event_types: List[EventConfidence] = None,
     event_names: List[str] = None
 ) -> List[dict]:
     """
-    Fetch GW events with full parameter estimation data.
-    
-    Returns a list of dictionaries containing event metadata and PE parameters.
-    
+    GW events of the GWTC catalogues with their parameter estimates, from the one
+    event list (``get_event_catalogue``).
+
     Args:
         observing_runs: Optional list of ObservingRun enums to filter by.
-                       If None, returns all O1/O2/O3/O4 events.
-        event_types: Optional list of EventConfidence (CONFIDENT, MARGINAL).
+                       If None, returns events of every run.
+        event_types: Optional list of EventConfidence (CONFIDENT, MARGINAL), whose
+                    catalogues (``CONFIDENT_CATALOGS``, ``MARGINAL_CATALOGS``) are read.
                     Defaults to [EventConfidence.CONFIDENT].
-    
+        event_names: Optional list of event names to keep.
+
     Returns:
-        List of dicts with keys: name, gps, mass1, mass2, distance, catalog, observing_run...
+        One dict per event, sorted by GPS time, with keys name, gps, catalog,
+        observing_run and the parameter estimates mass1, mass2, distance and p_astro
+        (NaN where the catalogue gives none). An event listed by several catalogues
+        (within 0.1 s) is given once, from the first catalogue in the order above.
     """
     if event_types is None:
         event_types = [EventConfidence.CONFIDENT]
-    
-    events = []
-    
-    # Map catalogs to observing runs
-    # Define observing run GPS ranges (approximate)
-    O1_START, O1_END = 1126051217, 1137254417
-    O2_START, O2_END = 1164556817, 1187733618
-    O3_START, O3_END = 1238166018, 1269363618
-    # O4: May 24 2023 - Jan 16 2024 (O4a) + ...
-    O4_START, O4_END = 1368000000, 1400000000
-
-    def get_run_from_gps(gps):
-        if O1_START <= gps <= O1_END:
-            return "O1"
-        elif O2_START <= gps <= O2_END:
-            return "O2"
-        elif O3_START <= gps <= O3_END:
-            return "O3"
-        elif O4_START <= gps <= O4_END:
-            return "O4"
-        return "Unknown"
-
-    # Determine which catalogs to fetch
-    catalogs_to_fetch = []
+    catalogs = []
     if EventConfidence.CONFIDENT in event_types:
-        catalogs_to_fetch.extend(CONFIDENT_CATALOGS)
+        catalogs += CONFIDENT_CATALOGS
     if EventConfidence.MARGINAL in event_types:
-        catalogs_to_fetch.extend(MARGINAL_CATALOGS)
-    
-    # Remove duplicates by GPS time (some events appear in multiple catalogs)
-    seen_gps = set()
-    unique_events = []
-    
-    # Simple caching implementation to avoid repeated catalog fetching
-    import json
-    import os
-    from hashlib import md5
-    
-    # The table is cached in the user cache (gwosc_data.user_cache_dir), never inside
-    # the package.
-    from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
+        catalogs += MARGINAL_CATALOGS
+    runs = {run.name for run in observing_runs} if observing_runs else None
 
-    cache_key = md5(str(sorted(event_types, key=lambda x: x.value)).encode('utf-8')).hexdigest()
-    cache_file = user_cache_dir("event_params") / f"events_{cache_key}.json"
+    catalogue = get_event_catalogue()
+    missing = np.full(len(catalogue["gps"]), np.nan)
+    parameters = {key: catalogue.get(column, missing) for column, key in EVENT_PARAMETER_COLUMNS.items()}
 
-    if cache_file.exists():
-        try:
-            with open(cache_file, 'r') as f:
-                events = json.load(f)
-            if len(events) < 10:
-                logging.warning(
-                    f"Event cache has only {len(events)} events (expected many more). "
-                    f"Discarding stale cache at {cache_file}"
-                )
-                events = []
-        except Exception as e:
-            logging.warning(f"Failed to load event cache: {e}. Re-fetching.")
-            events = []
-            
-    if not events: # Fetch if no cache or empty
-        for catalog in catalogs_to_fetch:
-            try:
-                table = EventTable.fetch_open_data(catalog)
-                
-                for row in table:
-                    try:
-                        run_name = get_run_from_gps(float(row["GPS"]))
-                        
-                        event = {
-                            "name": str(row.get("commonName", row.get("name", "Unknown"))),
-                            "gps": float(row["GPS"]),
-                            "mass1": float(row.get("mass_1_source", row.get("m1", np.nan))),
-                            "mass2": float(row.get("mass_2_source", row.get("m2", np.nan))),
-                            "distance": float(row.get("luminosity_distance", row.get("distance", np.nan))),
-                            # Source classification probabilities
-                            "p_bbh": float(row.get("p_astro", row.get("pastro", np.nan))),
-                            "p_bns": float(row.get("p_BNS", np.nan)),
-                            "p_nsbh": float(row.get("p_NSBH", np.nan)),
-                            "catalog": catalog,
-                            "observing_run": run_name,
-                        }
-                        
-                        # Only add if GPS is valid
-                        if not np.isnan(event["gps"]):
-                             # Convert np.nan to None for JSON serialization
-                            for k, v in event.items():
-                                if isinstance(v, float) and np.isnan(v):
-                                    event[k] = None
-                                    
-                            events.append(event)
-                            
-                    except (KeyError, ValueError, TypeError) as e:
-                        logging.debug(f"Skipping event row: {e}")
-                        continue
-                        
-            except Exception as e:
-                logging.warning(f"Failed to fetch catalog {catalog}: {e}")
+    events, seen = [], set()
+    for catalog in catalogs:
+        for index in np.flatnonzero(catalogue["catalog"] == catalog):
+            gps = float(catalogue["gps"][index])
+            event = {
+                "name": str(catalogue["name"][index]),
+                "gps": gps,
+                "catalog": catalog,
+                "observing_run": _observing_run_name(gps),
+                **{key: float(values[index]) for key, values in parameters.items()},
+            }
+            if runs is not None and event["observing_run"] not in runs:
                 continue
-        
-        # Save cache
-        try:
-            with open(cache_file, 'w') as f:
-                json.dump(events, f)
-        except Exception as e:
-             logging.warning(f"Failed to save event cache: {e}")
-    
-    # Filter by observing run if requested
-    target_runs = set()
-    if observing_runs:
-        for run in observing_runs:
-            if hasattr(run, 'value'):
-                target_runs.add(run.value.name if hasattr(run.value, 'name') else str(run))
-            else:
-                target_runs.add(str(run))
-                
-    for event in events:
-        gps_key = round(event["gps"], 1)  # Round to 0.1s for deduplication
-        
-        # Check if event belongs to requested run
-        if target_runs and event["observing_run"] not in target_runs:
-            continue
-            
-        # Check if event matches requested names
-        if event_names and event["name"] not in event_names:
-            continue
-            
-        if gps_key not in seen_gps:
-            seen_gps.add(gps_key)
-            unique_events.append(event)
-    
-    # Sort by GPS time
-    unique_events.sort(key=lambda x: x["gps"])
-    
-    logging.info(f"Fetched {len(unique_events)} events with PE parameters")
-    return unique_events
+            if event_names and event["name"] not in event_names:
+                continue
+            if round(gps, 1) not in seen:
+                seen.add(round(gps, 1))
+                events.append(event)
+
+    events.sort(key=lambda event: event["gps"])
+    logging.info(f"{len(events)} events with parameter estimates")
+    return events
 
 
 def get_confident_events_with_params(observing_runs: List = None) -> List[dict]:

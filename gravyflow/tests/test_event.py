@@ -1,12 +1,14 @@
 """
 Tests for event.py module.
 
-Tests EventConfidence enum, event time functions, and PE parameter fetching.
+Tests EventConfidence enum, event time functions, and the events with their
+parameter estimates.
 """
+
+from pathlib import Path
 
 import pytest
 import numpy as np
-from unittest.mock import patch, MagicMock
 
 import gravyflow as gf
 from gravyflow.src.dataset.features import event as event_module
@@ -60,122 +62,104 @@ class TestEventTimeFunctions:
         assert len(times) == 0
 
 
-class TestGetConfidentEventsWithParams:
-    """Tests for get_confident_events_with_params function."""
+_NAN = np.nan
 
-    def test_the_table_is_cached_in_the_user_cache_never_the_package(self, monkeypatch, tmp_path):
-        """A fetched table is written under GRAVYFLOW_CACHE_DIR; the package is untouched."""
-        from pathlib import Path
-        from gravyflow.tests.conftest import tree_changes, tree_snapshot
+#: The one event list with its parameter-estimation columns: GW150914 twice (the
+#: cumulative GWTC table and GWTC-1), a confident O3 event without masses, a marginal
+#: and an IAS candidate.
+_PE_CATALOGUE = {
+    "gps": np.array([1126259462.4, 1126259462.43, 1187008882.4, 1240000000.2,
+                     1200000000.0, 1250000000.0]),
+    "chirp_mass_source": np.array([28.6, 28.6, 1.186, _NAN, _NAN, _NAN]),
+    "name": np.array(["GW150914", "GW150914", "GW170817", "GW-NO-MASSES", "marginal", "ias"]),
+    "catalog": np.array(["GWTC", "GWTC-1-confident", "GWTC-1-confident", "GWTC-3-confident",
+                         "GWTC-1-marginal", "IAS-O3a"]),
+    "mass_1_source": np.array([35.6, 36.2, 1.46, _NAN, 20.0, 30.0]),
+    "mass_2_source": np.array([30.6, 29.1, 1.27, _NAN, 10.0, 25.0]),
+    "luminosity_distance": np.array([440.0, 430.0, 40.0, _NAN, 1000.0, 2000.0]),
+    "p_astro": np.array([1.0, 1.0, 1.0, _NAN, 0.5, 0.9]),
+}
 
-        monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path))
-        before = tree_snapshot(Path(gf.PATH))
-        row = {"commonName": "GW150914", "GPS": 1126259462.4, "mass_1_source": 35.6,
-               "mass_2_source": 30.6, "luminosity_distance": 430.0}
-        with patch("gwpy.table.EventTable.fetch_open_data", return_value=[row]):
-            events = event_module.get_events_with_params(
-                event_types=[gf.EventConfidence.MARGINAL]
-            )
-        assert [e["name"] for e in events] == ["GW150914"]
-        assert tree_changes(before, tree_snapshot(Path(gf.PATH))) == []
-        assert len(list((tmp_path / "event_params").glob("events_*.json"))) == 1
 
-    def test_function_exists_and_exported(self):
-        """Test function is exported at top level."""
-        assert hasattr(gf, 'get_confident_events_with_params')
-        assert callable(gf.get_confident_events_with_params)
-    
-    def test_returns_list_of_dicts(self):
-        """Test function returns list of dictionaries."""
-        # Mock EventTable.fetch_open_data
-        mock_table = MagicMock()
-        mock_row = {
-            "commonName": "GW150914",
-            "GPS": 1126259462.0,
-            "mass_1_source": 35.6,
-            "mass_2_source": 30.6,
-            "luminosity_distance": 430.0,
-        }
-        mock_table.__iter__ = MagicMock(return_value=iter([mock_row]))
-        
-        with patch('gwpy.table.EventTable.fetch_open_data', return_value=mock_table):
-            events = gf.get_confident_events_with_params()
-            assert isinstance(events, list)
-            if events:  # May be empty if mock doesn't work perfectly
-                assert isinstance(events[0], dict)
-    
-    def test_event_dict_has_required_keys(self):
-        """Test each event dict has required keys."""
-        mock_table = MagicMock()
-        mock_row = MagicMock()
-        mock_row.get = lambda key, default=None: {
-            "commonName": "GW150914",
-            "mass_1_source": 35.6,
-            "mass_2_source": 30.6,
-            "luminosity_distance": 430.0,
-        }.get(key, default)
-        mock_row.__getitem__ = lambda self, key: {"GPS": 1126259462.0}[key]
-        mock_table.__iter__ = MagicMock(return_value=iter([mock_row]))
-        
-        with patch('gwpy.table.EventTable.fetch_open_data', return_value=mock_table):
-            events = gf.get_confident_events_with_params()
-            
-            required_keys = {'name', 'gps', 'mass1', 'mass2', 'distance', 'catalog', 'observing_run'}
-            for event in events:
-                assert required_keys.issubset(event.keys()), f"Missing keys: {required_keys - set(event.keys())}"
-    
-    def test_deduplication_by_gps(self):
-        """Test that duplicate GPS times are removed."""
-        # Create two events with same GPS (rounded to 0.1s)
-        mock_table = MagicMock()
-        mock_row1 = MagicMock()
-        mock_row1.get = lambda key, default=None: {
-            "commonName": "Event1",
-            "mass_1_source": 35.0,
-            "mass_2_source": 30.0,
-            "luminosity_distance": 400.0,
-        }.get(key, default)
-        mock_row1.__getitem__ = lambda self, key: {"GPS": 1126259462.0}[key]
-        
-        mock_row2 = MagicMock()
-        mock_row2.get = lambda key, default=None: {
-            "commonName": "Event2",
-            "mass_1_source": 35.0,
-            "mass_2_source": 30.0,
-            "luminosity_distance": 400.0,
-        }.get(key, default)
-        mock_row2.__getitem__ = lambda self, key: {"GPS": 1126259462.05}[key]  # Within 0.1s
-        
-        mock_table.__iter__ = MagicMock(return_value=iter([mock_row1, mock_row2]))
-        
-        with patch('gwpy.table.EventTable.fetch_open_data', return_value=mock_table):
-            events = gf.get_confident_events_with_params()
-            # Should only have 1 event due to deduplication
-            gps_times = [e['gps'] for e in events]
-            unique_gps = len(set(round(g, 1) for g in gps_times))
-            assert unique_gps == len(events)
-    
-    def test_sorted_by_gps_time(self):
-        """Test events are sorted by GPS time."""
-        mock_table = MagicMock()
-        mock_rows = []
-        for gps in [1200000000.0, 1100000000.0, 1150000000.0]:
-            row = MagicMock()
-            row.get = lambda key, default=None, g=gps: {
-                "commonName": f"Event_{g}",
-                "mass_1_source": 30.0,
-                "mass_2_source": 25.0,
-                "luminosity_distance": 300.0,
-            }.get(key, default)
-            row.__getitem__ = lambda self, key, g=gps: {"GPS": g}[key]
-            mock_rows.append(row)
-        
-        mock_table.__iter__ = MagicMock(return_value=iter(mock_rows))
-        
-        with patch('gwpy.table.EventTable.fetch_open_data', return_value=mock_table):
-            events = gf.get_confident_events_with_params()
-            gps_times = [e['gps'] for e in events]
-            assert gps_times == sorted(gps_times)
+def _refuse_table_fetch(*args, **kwargs):
+    raise AssertionError("get_events_with_params fetched a catalogue table itself")
+
+
+class TestEventsWithParams:
+    """
+    ``get_events_with_params`` reads the one event list, ``get_event_catalogue``, with
+    its parameter-estimation columns: no second list, no fetch of its own and no
+    file inside the package.
+    """
+
+    @pytest.fixture(autouse=True)
+    def catalogue(self, monkeypatch):
+        monkeypatch.setattr(event_module, "get_event_catalogue",
+                            lambda use_cache=True: _PE_CATALOGUE)
+        monkeypatch.setattr(event_module.EventTable, "fetch_open_data", _refuse_table_fetch)
+
+    def test_confident_events_from_the_one_list(self):
+        events = event_module.get_events_with_params()
+        assert [e["name"] for e in events] == ["GW150914", "GW170817", "GW-NO-MASSES"]
+        assert [e["gps"] for e in events] == sorted(e["gps"] for e in events)
+        # A duplicate keeps its first catalogue's row: the cumulative GWTC table.
+        gw150914 = events[0]
+        assert (gw150914["catalog"], gw150914["mass1"], gw150914["mass2"],
+                gw150914["distance"], gw150914["p_astro"]) == ("GWTC", 35.6, 30.6, 440.0, 1.0)
+        assert [e["observing_run"] for e in events] == ["O1", "O2", "O3"]
+
+    def test_marginal_events(self):
+        events = event_module.get_events_with_params(event_types=[gf.EventConfidence.MARGINAL])
+        assert [e["name"] for e in events] == ["marginal"]
+
+    def test_runs_and_names_select(self):
+        assert [e["name"] for e in event_module.get_events_with_params([gf.ObservingRun.O2])] == ["GW170817"]
+        named = event_module.get_events_with_params(event_names=["GW-NO-MASSES"])
+        assert [e["name"] for e in named] == ["GW-NO-MASSES"]
+
+    def test_missing_parameters_read_as_nan(self, monkeypatch):
+        (event,) = event_module.get_events_with_params(event_names=["GW-NO-MASSES"])
+        assert all(np.isnan(event[key]) for key in ("mass1", "mass2", "distance", "p_astro"))
+        # A table without the columns at all (an older list) reads the same way.
+        bare = {key: _PE_CATALOGUE[key] for key in ("gps", "chirp_mass_source", "name", "catalog")}
+        monkeypatch.setattr(event_module, "get_event_catalogue", lambda use_cache=True: bare)
+        (event,) = event_module.get_events_with_params(event_names=["GW170817"])
+        assert np.isnan(event["mass1"]) and event["name"] == "GW170817"
+
+    def test_search_reads_the_parameters(self):
+        assert gf.search_events(source_type=gf.SourceType.BNS) == ["GW170817"]
+        assert gf.search_events(distance_range=(None, 100.0)) == ["GW170817"]
+
+    def test_nothing_is_written_inside_the_package(self):
+        package = Path(gf.PATH)
+        before = sorted(str(p) for p in package.rglob("*") if "__pycache__" not in p.parts)
+        event_module.get_events_with_params()
+        event_module.get_events_with_params(event_types=[gf.EventConfidence.MARGINAL])
+        after = sorted(str(p) for p in package.rglob("*") if "__pycache__" not in p.parts)
+        assert after == before
+
+
+class TestEventCatalogueParameters:
+    """The cached event list carries the parameter-estimation columns (format 3)."""
+
+    def test_columns_are_fetched_cached_and_read_back(self, monkeypatch):
+        from astropy.table import Table
+        from gwosc import api as gwosc_api
+
+        table = Table(rows=[("GW150914", 1126259462.4, 28.6, 35.6, 30.6, 440.0, 1.0)],
+                      names=("commonName", "GPS", "chirp_mass_source", "mass_1_source",
+                             "mass_2_source", "luminosity_distance", "p_astro"))
+        monkeypatch.setattr(gwosc_api, "fetch_cataloglist_json",
+                            lambda *args, **kwargs: {"GWTC-1-confident": {}})
+        monkeypatch.setattr(event_module.EventTable, "fetch_open_data",
+                            lambda catalog, *args, **kwargs: table)
+        fetched = event_module.get_event_catalogue(use_cache=False)
+        monkeypatch.setattr(event_module.EventTable, "fetch_open_data", _refuse_table_fetch)
+        cached = event_module.get_event_catalogue()
+        assert event_module.event_catalogue_cache_path().name == "event_catalogue_v3.json"
+        for catalogue in (fetched, cached):
+            assert catalogue["mass_1_source"][0] == 35.6 and catalogue["mass_2_source"][0] == 30.6
+            assert catalogue["luminosity_distance"][0] == 440.0 and catalogue["p_astro"][0] == 1.0
 
 
 class TestCatalogMappings:
