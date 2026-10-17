@@ -63,7 +63,8 @@ def _require_same(first: Batch, again: Batch, group: str, address: Address) -> N
 class DatasetTap:
     """
     Records the batches every `GravyflowDataset` built while it is installed
-    serves, and the raw windows each conditions for its caller (`prepare`).
+    serves, a subclass's (`ComposedDataset`) included, and the raw windows each
+    conditions for its caller (`prepare`).
 
     Each dataset is built asking for ``outputs`` besides its caller's own.
     Asking for an output selects it and draws nothing more. Every batch served
@@ -119,9 +120,19 @@ class DatasetTap:
                                               RV.OFFSOURCE.name: np.asarray(offsource)})
                 return super().prepare(onsource, offsource)
 
-        # Example models build `gf.GravyflowDataset`; `gf.Dataset` builds the module's.
-        monkeypatch.setattr(dataset_module, "GravyflowDataset", Dataset)
-        monkeypatch.setattr(gf, "GravyflowDataset", Dataset)
+        # Every dataset class is tapped, each subclass as its own: example models build
+        # `gf.GravyflowDataset`, `gf.Dataset` builds the module's, and composed data
+        # `gf.ComposedDataset`, which a tap of the base class alone never saw. gravyflow
+        # imports its names lazily, so its dataset names are read from the dataset
+        # module, and patched under the same name where gravyflow exports one.
+        base, tapped = dataset_module.GravyflowDataset, {}
+        for name, cls in list(vars(dataset_module).items()):
+            if isinstance(cls, type) and issubclass(cls, base):
+                if cls not in tapped:
+                    tapped[cls] = Dataset if cls is base else type(cls.__name__, (Dataset, cls), {})
+                monkeypatch.setattr(dataset_module, name, tapped[cls])
+                if name in gf.__all__:
+                    monkeypatch.setattr(gf, name, tapped[cls])
 
     def take(self) -> List[Tapped]:
         """
