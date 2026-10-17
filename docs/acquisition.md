@@ -83,6 +83,9 @@ Each segment keeps the GPS time of its first sample as the source returned it, a
 
 Transient windows follow the same rule. A transient's padded onsource is centred on the transient's sample, the sample nearest its catalogue time, counted from the first sample the source returned, so `START_GPS_TIME` is within one sample of the truth (`WindowSpec.transient_window_start_gps`); `TRANSIENT_GPS_TIME` is the transient's own time. Its offsource ends where the padded onsource begins, as for noise. Every read, from the download or from any cache path, takes both windows from one stretch of stored strain by one function (`TransientCache.read_windows`).
 
+### Transient data quality
+A transient is served only when its acquired span lies, on every requested detector, inside one of the detector's usable segments (`get_all_segment_times`: the obtainer's GWOSC flags, by default with no hardware injections), and only when every requested detector's strain in its windows is finite. Nothing is zero-filled: a transient that fails either check is not served, and `get_acquisition_stats()["rejections"]` counts it by reason (`"data quality"`, `"no data"`). A detector the request did not name that has no strain is stored in the transient cache as NaN, so a later request that names it rejects the transient rather than serving zeros.
+
 ### 6. Final Ordering (`order_segments`)
 Finally, the segments are ordered based on the user's preference:
 -   **Random**: Shuffled for training variety.

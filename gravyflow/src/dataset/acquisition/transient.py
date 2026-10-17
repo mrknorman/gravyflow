@@ -5,7 +5,9 @@ This module provides TransientDataObtainer for acquiring data around
 specific transient events (GW events, glitches) in TRANSIENT mode.
 """
 
+import itertools
 import logging
+from collections import Counter
 from typing import Any, List, Dict, Optional, Union, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,12 +26,13 @@ from .cache import DiskCache
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
-    AcquisitionMode, SamplingMode, ObservingRun, IFOData
+    AcquisitionMode, SamplingMode, ObservingRun
 )
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys, as_gps_times
 from gravyflow.src.dataset.features.transient_index import TransientIndex
 from .transient_segment import TransientSegment
+from .gwosc_data import within_segments
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
 from gravyflow.src.dataset.splits import ALL, split_fractions
 
@@ -114,12 +117,66 @@ class TransientDataObtainer(BaseDataObtainer):
             "_feature_index": None,
             # TransientSegment objects (replaces raw numpy segments)
             "transient_segments": [],
-            "_current_selected_ifo_indices": None,
+            # Records not served, by reason (see _reject)
+            "_rejections": Counter(),
             "_cache_hit_count": 0,
             "_cache_miss_count": 0,
             "_last_log_count": 0,
             **caches,
         }
+
+    #: Why a record is not served: its window leaves the usable segments of a
+    #: requested detector, or a requested detector has no finite strain for it.
+    REJECTED_BY_DATA_QUALITY = "data quality"
+    REJECTED_FOR_NO_DATA = "no data"
+
+    def _reject(self, segment: TransientSegment, reason: str) -> None:
+        """Count a record not served, and say why: it is never zero-filled."""
+        self._rejections[reason] += 1
+        logger.info(
+            f"Transient at GPS {segment.transient_gps_time:.3f} not served ({reason}); "
+            f"rejected so far: {dict(self._rejections)}"
+        )
+
+    def get_acquisition_stats(self) -> Dict[str, Any]:
+        """
+        As for noise, with ``rejections``: the records not served, by reason
+        (``REJECTED_BY_DATA_QUALITY``, ``REJECTED_FOR_NO_DATA``); ``dropped_segments``
+        is their total.
+        """
+        return {
+            **super().get_acquisition_stats(),
+            "dropped_segments": sum(self._rejections.values()),
+            "rejections": dict(self._rejections),
+        }
+
+    def reset_acquisition_stats(self) -> None:
+        super().reset_acquisition_stats()
+        self._rejections = Counter()
+
+    def _passing_data_quality(
+        self, segments: List[TransientSegment], ifos: List[gf.IFO]
+    ) -> List[TransientSegment]:
+        """
+        The records whose acquired span lies, on every requested detector, inside one
+        usable segment (``get_all_segment_times``: the obtainer's GWOSC flags, so by
+        default no hardware injection either). The others are rejected, and their
+        number is the split's ``REJECTED_BY_DATA_QUALITY`` count.
+        """
+        keep = np.ones(len(segments), dtype=bool)
+        if segments:
+            spans = np.array([[s.start_gps_time, s.end_gps_time] for s in segments], dtype=np.float64)
+            for ifo in ifos:
+                keep &= within_segments(spans, self.get_all_segment_times(ifo))
+        rejected = int(np.sum(~keep))
+        self._rejections.pop(self.REJECTED_BY_DATA_QUALITY, None)
+        if rejected:
+            self._rejections[self.REJECTED_BY_DATA_QUALITY] = rejected
+            logger.info(
+                f"{rejected} of {len(segments)} transients rejected: their windows leave "
+                f"the usable data of {[ifo.name for ifo in ifos]}."
+            )
+        return list(itertools.compress(segments, keep))
 
     def _apply_augmentation(self, data):
         """
@@ -467,52 +524,43 @@ class TransientDataObtainer(BaseDataObtainer):
             RV.SOURCE_TYPE: source_type,   # Per-segment: SourceType.value or -1
         }
 
+    @staticmethod
     def _extract_feature_event(
-        self,
-        event_segment: IFOData,
+        channels: List[Optional[Tuple[np.ndarray, float]]],
+        sample_rate_hertz: float,
         num_onsource_samples: int,
         num_offsource_samples: int,
         transient_gps_time: float,
-    ) -> tuple:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        The stored windows of one transient from its downloaded segment, one row per
-        channel: the onsource centred on the transient's sample (``centre_index``), the
-        sample nearest ``transient_gps_time`` counted from the channel's first returned
-        sample, and the offsource of the samples just before it (the layout
+        The stored windows of one transient, one row per channel: the onsource
+        centred on the transient's sample (``centre_index``), the sample nearest
+        ``transient_gps_time`` counted from the channel's first returned sample, and
+        the offsource of the samples just before it (the layout
         ``TransientCache.read_windows`` reads).
 
-        Returns:
-            (onsource, offsource), or (None, None) when a selected channel lacks them.
+        ``channels`` holds, per channel, its samples and the GPS time of the first, or
+        None. A channel that is None, does not hold both windows, or has any
+        non-finite sample in them is a row of NaN: missing, never zero-filled.
         """
         from gravyflow.src.utils.tensor import centre_index
 
-        rate = float(event_segment.sample_rate_hertz)
-        selected_ifo_indices = self._current_selected_ifo_indices
-        temp_onsource, temp_offsource = [], []
-
-        for channel_idx, (channel_data, first_gps) in enumerate(
-                zip(event_segment.data, event_segment.start_gps_time)):
-            is_selected = selected_ifo_indices is None or channel_idx in selected_ifo_indices
+        onsource = np.full((len(channels), num_onsource_samples), np.nan, dtype=np.float32)
+        offsource = np.full((len(channels), num_offsource_samples), np.nan, dtype=np.float32)
+        for row, channel in enumerate(channels):
+            if channel is None:
+                continue
+            samples, first_gps = channel
             # The transient's sample, from the true first-sample time, in float64.
-            transient = int(np.round((float(transient_gps_time) - float(first_gps)) * rate))
+            transient = int(np.round((float(transient_gps_time) - float(first_gps)) * sample_rate_hertz))
             start = transient - centre_index(num_onsource_samples)
             off_start = start - num_offsource_samples
-            fits = (
-                channel_data is not None and off_start >= 0
-                and start + num_onsource_samples <= int(ops.shape(channel_data)[0])
-            )
-            if not fits:
-                if is_selected:
-                    logger.debug(f"Channel {channel_idx} does not hold the windows of GPS {transient_gps_time:.3f}")
-                    return None, None
-                # Non-selected IFO - silently zero-fill
-                temp_onsource.append(np.zeros(num_onsource_samples, dtype=np.float32))
-                temp_offsource.append(np.zeros(num_offsource_samples, dtype=np.float32))
+            if off_start < 0 or start + num_onsource_samples > len(samples):
                 continue
-            temp_onsource.append(channel_data[start:start + num_onsource_samples])
-            temp_offsource.append(channel_data[off_start:start])
-
-        return ops.stack(temp_onsource), ops.stack(temp_offsource)
+            on, off = samples[start:start + num_onsource_samples], samples[off_start:start]
+            if np.all(np.isfinite(on)) and np.all(np.isfinite(off)):
+                onsource[row], offsource[row] = on, off
+        return onsource, offsource
 
 
     def _cluster_transients(
@@ -629,10 +677,9 @@ class TransientDataObtainer(BaseDataObtainer):
         
         # Get segments for this group, filtered by requested IFOs
         # Segments with seen_in overlapping requested IFOs will be included
-        self.transient_segments = list(self._feature_index.iter(
-            group=group_name,
-            ifos_filter=ifos
-        ))
+        self.transient_segments = self._passing_data_quality(
+            list(self._feature_index.iter(group=group_name, ifos_filter=ifos)), ifos
+        )
         
         if len(self.transient_segments) == 0:
             logger.warning(f"No segments found for group '{group_name}'")
@@ -695,7 +742,6 @@ class TransientDataObtainer(BaseDataObtainer):
         Yields:
             Batch dicts when batch_size is reached
         """
-        from gravyflow.src.dataset.features.glitch import GlitchType
         from gravyflow.src.dataset.features.glitch_cache import (
             CACHE_SAMPLE_RATE_HERTZ, CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION
         )
@@ -706,7 +752,7 @@ class TransientDataObtainer(BaseDataObtainer):
         sample_rate_hertz = window_spec.sample_rate_hertz
         # Download at higher of requested or cache sample rate (can downsample but not upsample)
         download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
-        # Refuse rates no public source holds, before the zero-fill fallback below.
+        # Refuse rates no public source holds, before any download.
         from .gwosc_data import gwosc_sample_rate_hertz
         gwosc_sample_rate_hertz(download_sample_rate)
 
@@ -717,12 +763,6 @@ class TransientDataObtainer(BaseDataObtainer):
         # Pre-calculate extraction parameters
         num_cache_onsource = int(CACHE_ONSOURCE_DURATION * download_sample_rate)
         num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * download_sample_rate)
-        
-        # Set selected IFO indices for extraction
-        selected_ifo_indices = set()
-        for ifo in ifos:
-            if ifo.name in universal_ifo_names:
-                selected_ifo_indices.add(universal_ifo_names.index(ifo.name))
         
         # Calculate output indices once
         try:
@@ -738,7 +778,7 @@ class TransientDataObtainer(BaseDataObtainer):
         # which mutates shared state (_current_segment_index, etc.)
         # ==============================================================
         
-        def download_segment_stateless(miss_idx: int) -> Tuple[int, Optional[IFOData]]:
+        def download_segment_stateless(miss_idx: int) -> Tuple[int, List[Optional[Tuple[np.ndarray, float]]]]:
             """
             Thread-safe download for a single segment.
             
@@ -749,11 +789,12 @@ class TransientDataObtainer(BaseDataObtainer):
                 miss_idx: Index into self.transient_segments
                 
             Returns:
-                Tuple of (miss_idx, IFOData) or (miss_idx, None) on failure
+                (miss_idx, channels): per universal IFO, its samples at the download
+                rate and the GPS time of the first as the source returned it, or None
+                when it could not be had (never zeros).
             """
             segment = self.transient_segments[miss_idx]
-            data_list = []
-            start_gps_list = []
+            channels = []
             
             for ifo in download_ifos_universal:
                 frame_type, channel = BaseDataObtainer.get_frame_channel_for_gps_static(
@@ -775,24 +816,14 @@ class TransientDataObtainer(BaseDataObtainer):
                     )
                     if segment_data.sample_rate.value < download_sample_rate:
                         raise ValueError("source rate below the download rate")
-                    resampled = segment_data.resample(download_sample_rate)
-                    data_list.append(resampled.value)
-                    # The first sample's time as the source returned it.
-                    start_gps_list.append(float(resampled.t0.value))
-                except Exception:
-                    # Zero-fill failed IFOs to maintain consistent array shape
-                    num_samples = int((segment.end_gps_time - segment.start_gps_time) * download_sample_rate)
-                    data_list.append(np.zeros(num_samples, dtype=np.float32))
-                    start_gps_list.append(float(segment.start_gps_time))
+                    if segment_data.sample_rate.value != download_sample_rate:
+                        segment_data = segment_data.resample(download_sample_rate)
+                    channels.append((np.asarray(segment_data.value), float(segment_data.t0.value)))
+                except Exception as error:
+                    logger.debug(f"No {ifo.name} strain for GPS {segment.transient_gps_time:.3f}: {error}")
+                    channels.append(None)
             
-            try:
-                return (miss_idx, IFOData(
-                    data=data_list,
-                    sample_rate_hertz=download_sample_rate,
-                    start_gps_time=start_gps_list
-                ))
-            except Exception:
-                return (miss_idx, None)
+            return miss_idx, channels
         
         # Execute parallel downloads
         max_workers = min(32, len(miss_indices))
@@ -901,56 +932,25 @@ class TransientDataObtainer(BaseDataObtainer):
         # SEQUENTIAL PROCESSING: Extract, cache, and batch results
         # ==============================================================
         
-        self._current_selected_ifo_indices = selected_ifo_indices
-        
         for miss_idx in miss_indices:
-            event_segment = downloaded_segments.get(miss_idx)
-            if event_segment is None:
-                self._dropped_segments_count += 1
-                continue
-            
             segment = self.transient_segments[miss_idx]
-            
-            # PRIMARY IFO PRE-VALIDATION
-            primary_ifo_data_valid = True
-            for ifo in segment.seen_in:
-                try:
-                    ifo_idx = universal_ifo_names.index(ifo.name)
-                    channel_data = event_segment.data[ifo_idx]
-                    if channel_data is None or (hasattr(channel_data, '__len__') and len(channel_data) == 0):
-                        primary_ifo_data_valid = False
-                        break
-                    channel_np = np.asarray(channel_data)
-                    if np.all(channel_np == 0):
-                        primary_ifo_data_valid = False
-                        break
-                except (ValueError, IndexError) as e:
-                    logger.debug(f"Could not validate primary IFO {ifo.name}: {e}")
-                    primary_ifo_data_valid = False
-                    break
-            
-            if not primary_ifo_data_valid:
-                self._dropped_segments_count += 1
-                logger.warning(
-                    f"Dropped segment (primary IFO {[ifo.name for ifo in segment.seen_in]} has no data): "
-                    f"GPS={segment.transient_gps_time:.3f}, total dropped={self._dropped_segments_count}"
-                )
+            channels = downloaded_segments.get(miss_idx)
+            if channels is None:
+                self._reject(segment, self.REJECTED_FOR_NO_DATA)
                 continue
-            
-            # Extract windows
+
+            # The stored windows, a channel without finite strain stored as NaN.
             onsource_full, offsource_full = self._extract_feature_event(
-                event_segment,
+                channels,
+                download_sample_rate,
                 num_cache_onsource,
                 num_cache_offsource,
                 segment.transient_gps_time,
             )
-            
-            if onsource_full is None:
-                self._dropped_segments_count += 1
-                logger.warning(
-                    f"Dropped segment (extraction failed): GPS={segment.transient_gps_time:.3f}, "
-                    f"total dropped={self._dropped_segments_count}"
-                )
+            if not (np.all(np.isfinite(onsource_full[output_indices]))
+                    and np.all(np.isfinite(offsource_full[output_indices]))):
+                # Not cached, so a later request fetches it again.
+                self._reject(segment, self.REJECTED_FOR_NO_DATA)
                 continue
             
             # Get label and append to cache (buffered)
@@ -998,9 +998,6 @@ class TransientDataObtainer(BaseDataObtainer):
             onsource_output = onsource_cropped[output_indices, :]
             offsource_output = offsource_cropped[output_indices, :]
 
-            if np.isnan(onsource_output).any():
-                logger.error(f"NAN DETECTED: In onsource_output! GPS: {segment.transient_gps_time}")
-            
             batch_subarrays.append(onsource_output * scale_factor)
             batch_backgrounds.append(offsource_output * scale_factor)
             batch_segments.append(segment)
@@ -1282,7 +1279,11 @@ class TransientDataObtainer(BaseDataObtainer):
                     )
                 
                 if source != 'miss' and onsource is not None:
-                    # Cache hit (memory or disk) with valid data
+                    if not (np.all(np.isfinite(onsource)) and np.all(np.isfinite(offsource))):
+                        # Stored without a requested detector's strain: never filled.
+                        self._reject(segment, self.REJECTED_FOR_NO_DATA)
+                        continue
+                    # Cache hit (chunk or disk) with valid data
                     batch_subarrays.append(onsource)
                     batch_backgrounds.append(offsource)
                     batch_segments.append(segment)

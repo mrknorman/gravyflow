@@ -23,6 +23,7 @@ from gravyflow.src.dataset.features.transient_index import TransientIndex
 from gravyflow.src.dataset.noise.noise import sequential_seed
 from gravyflow.src.dataset.splits import split_fractions
 from gravyflow.src.utils.gps import gps_to_key
+from gravyflow.tests.conftest import usable_over_its_runs
 
 SPLITS = ("train", "validate", "test")
 O3_START = 1238166018.0
@@ -49,12 +50,15 @@ def glitch_records(count=3000):
 
 @pytest.fixture
 def catalogue():
-    """The glitch catalogue, offline: every index is built from these records."""
+    """
+    The glitch catalogue and its data quality, offline: every index is built from
+    these records, and every record passes data quality.
+    """
     records = glitch_records()
     with mock.patch(
         "gravyflow.src.dataset.features.segment_builders.build_glitch_segments",
         return_value=records,
-    ):
+    ), mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs):
         yield {record.gps_key for record in records}
 
 
@@ -463,7 +467,10 @@ class TestTheAllSplit:
 
 @pytest.fixture
 def two_detector_catalogue():
-    """Glitches offline, alternately seen in L1 and in H1. Yields their keys by detector."""
+    """
+    Glitches offline, alternately seen in L1 and in H1, every one passing data
+    quality. Yields their keys by detector.
+    """
     records = [
         replace(record, seen_in=[(gf.IFO.L1, gf.IFO.H1)[i % 2]])
         for i, record in enumerate(glitch_records())
@@ -471,7 +478,7 @@ def two_detector_catalogue():
     with mock.patch(
         "gravyflow.src.dataset.features.segment_builders.build_glitch_segments",
         return_value=records,
-    ):
+    ), mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs):
         yield {ifo: {r.gps_key for r in records if ifo in r.seen_in} for ifo in (gf.IFO.L1, gf.IFO.H1)}
 
 

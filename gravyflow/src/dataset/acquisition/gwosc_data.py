@@ -299,6 +299,20 @@ def intersect_segments(first: np.ndarray, second: np.ndarray) -> np.ndarray:
     return _as_segment_array(out)
 
 
+def within_segments(intervals: np.ndarray, segments: np.ndarray) -> np.ndarray:
+    """Boolean mask: which (N, 2) ``intervals`` lie wholly inside one of ``segments``."""
+    intervals = _as_segment_array(intervals)
+    segments = coalesce_segments(segments)
+    if len(segments) == 0 or len(intervals) == 0:
+        return np.zeros(len(intervals), dtype=bool)
+    # Coalesced segments are disjoint and sorted: only the last one starting at or
+    # before an interval's start can hold it.
+    index = np.searchsorted(segments[:, 0], intervals[:, 0], side="right") - 1
+    inside = index >= 0
+    inside[inside] = segments[index[inside], 1] >= intervals[inside, 1]
+    return inside
+
+
 def subtract_segments(segments: np.ndarray, vetoes: np.ndarray) -> np.ndarray:
     """
     The times in ``segments`` that lie in no veto, as a sorted, coalesced (N, 2) array.

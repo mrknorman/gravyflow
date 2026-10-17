@@ -351,6 +351,16 @@ def data_obtainer():
     )
 
 
+def usable_over_its_runs(obtainer, ifo):
+    """
+    Offline data quality: every detector usable over the obtainer's whole runs, so
+    every transient record passes it (a stand-in for ``get_all_segment_times``).
+    """
+    import numpy as np
+
+    return np.array([[min(obtainer.start_gps_times), max(obtainer.end_gps_times)]])
+
+
 #: Three O3 events seen by H1 and L1, as the GWTC catalogue lists them.
 OFFLINE_EVENTS = [
     {"name": name, "gps": gps, "network": "H1L1", "catalog": "GWTC-3-confident",
@@ -363,9 +373,9 @@ OFFLINE_EVENTS = [
 @pytest.fixture
 def offline_events():
     """
-    The event catalogue and the transient cache, offline: the catalogue lists
-    OFFLINE_EVENTS, and every record is a cache hit of unit Gaussian strain.
-    Yields the events.
+    The event catalogue, its data quality and the transient cache, offline: the
+    catalogue lists OFFLINE_EVENTS, every record passes data quality, and every
+    record is a cache hit of unit Gaussian strain. Yields the events.
     """
     from unittest import mock
     import numpy as np
@@ -387,5 +397,6 @@ def offline_events():
          mock.patch("gravyflow.src.dataset.features.segment_builders.get_events_with_params", listed), \
          mock.patch.object(gf.TransientDataObtainer, "_initialize_transient_cache",
                            lambda self, *args, **kwargs: (object(), None)), \
-         mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", cached_strain):
+         mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", cached_strain), \
+         mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs):
         yield [dict(e) for e in OFFLINE_EVENTS]
