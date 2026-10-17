@@ -48,17 +48,18 @@ def random_streams(rng, num_streams=4):
 
 def test_logit_scores_read_two_class_and_single_logits():
     two = np.array([[0.0, 2.0], [1.0, -1.0]])
-    np.testing.assert_allclose(logit_scores(two), [2.0, -2.0])
-    np.testing.assert_allclose(logit_scores(np.array([[3.0], [-1.0]])), [3.0, -1.0])
-    np.testing.assert_allclose(logit_scores(np.array([0.5, 1.5])), [0.5, 1.5])
-    with pytest.raises(ValueError):
+    # Exact: a difference or a copy of small dyadic values has no rounding.
+    np.testing.assert_array_equal(logit_scores(two), [2.0, -2.0])
+    np.testing.assert_array_equal(logit_scores(np.array([[3.0], [-1.0]])), [3.0, -1.0])
+    np.testing.assert_array_equal(logit_scores(np.array([0.5, 1.5])), [0.5, 1.5])
+    with pytest.raises(ValueError, match=r"shape \(2, 3\)"):
         logit_scores(np.zeros((2, 3)))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="1 non-finite"):
         logit_scores(np.array([np.nan, 1.0]))
 
 
 def test_logit_scores_read_one_named_output():
-    np.testing.assert_allclose(logit_scores({"INJECTION_PRESENT": np.array([[3.0], [-1.0]])}), [3.0, -1.0])
+    np.testing.assert_array_equal(logit_scores({"INJECTION_PRESENT": np.array([[3.0], [-1.0]])}), [3.0, -1.0])
     with pytest.raises(ValueError, match="2 named outputs"):
         logit_scores({"a": np.zeros((2, 1)), "b": np.zeros((2, 1))})
 
@@ -80,6 +81,8 @@ def test_roc_auc_matches_mann_whitney_with_ties(seed):
     pos = rng.integers(2, 10, 200).astype(float)
     roc = roc_curve(neg, pos)
     u = stats.mannwhitneyu(pos, neg).statistic / (pos.size * neg.size)
+    # Representation: both are ratios of integer counts of at most 6e4 pairs, so 1e-12 is
+    # a few hundred float64 ulp of a value near 1.
     assert roc.auc == pytest.approx(u, abs=1e-12)
 
 
@@ -110,6 +113,7 @@ def test_roc_auc_is_one_for_separable_saturated_scores():
 def test_poisson_interval_is_garwood(count, confidence):
     lower, upper = poisson_interval(count, confidence)
     alpha = 1 - confidence
+    # rel=1e-9 is the reference kind: the interval is a root of this cdf, solved to ~1e-10.
     # Upper bound: P(X <= k | mu = upper) = alpha / 2.
     assert stats.poisson.cdf(count, upper) == pytest.approx(alpha / 2, rel=1e-9)
     if count == 0:
@@ -124,6 +128,7 @@ def test_poisson_interval_is_garwood(count, confidence):
 def test_binomial_interval_matches_scipy(method, scipy_method, k, n):
     lower, upper = binomial_interval(k, n, 0.9, method)
     reference = stats.binomtest(k, n).proportion_ci(confidence_level=0.9, method=scipy_method)
+    # Reference: scipy's own root solves are good to ~1e-12 on probabilities.
     assert lower == pytest.approx(reference.low, abs=1e-12)
     assert upper == pytest.approx(reference.high, abs=1e-12)
 
@@ -229,15 +234,15 @@ def test_far_curve_matches_point_queries():
 
 @pytest.mark.parametrize("rate_hz", [0.02, 0.1])
 def test_known_rate_streams_recover_the_rate_and_cover_it(rate_hz):
-    """Excursions arriving as a Poisson process are counted one each, and the
-    90% interval covers the true mean in at least 90% of runs (Garwood is
-    conservative)."""
+    """Excursions arriving as a Poisson process are counted one each (exactly),
+    and the 90% interval covers the true mean in about 90% of runs or more
+    (Garwood is conservative)."""
     rng = np.random.default_rng(11)
     stride, cluster, duration = 0.25, 1.0, 2000.0
     n = int(duration / stride)
     slot = 12                       # 3 s slots: longer than an excursion plus the cluster window
     mean = rate_hz * duration       # the true expected number of triggers
-    runs, covered, counts = 300, 0, []
+    runs, covered = 300, 0
     for _ in range(runs):
         scores = rng.uniform(-5.0, 0.0, n)                      # quiet background below 0
         k = rng.poisson(mean)
@@ -245,10 +250,13 @@ def test_known_rate_streams_recover_the_rate_and_cover_it(rate_hz):
             scores[s:s + int(rng.integers(1, 7))] = rng.uniform(5.0, 9.0)   # 1-6 windows above 5
         far = Background([ScoreStream(scores, stride, 1.0)], cluster).far(5.0)
         assert far.count == k
-        counts.append(k)
         covered += far.lower_hz * far.livetime_seconds <= mean <= far.upper_hz * far.livetime_seconds
-    assert np.mean(counts) / duration == pytest.approx(rate_hz, rel=0.1)
-    assert 0.88 <= covered / runs <= 0.99
+    # Statistical: the nominal coverage is 0.9 and Garwood is conservative, so the
+    # observed fraction falls below 0.9 - 4 sigma (sigma = sqrt(0.9 * 0.1 / runs)) only
+    # for a broken interval. The upper bound only rules out an interval so wide it
+    # always covers (measured: 0.877-0.947 over seeds 0-9 at both rates).
+    sigma = np.sqrt(0.9 * 0.1 / runs)
+    assert 0.9 - 4 * sigma <= covered / runs <= 0.99
 
 
 def test_by_block_partitions_the_livetime():
