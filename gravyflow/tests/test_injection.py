@@ -644,8 +644,11 @@ def test_injection_generator_batches():
     injections, masks = np.asarray(injections), np.asarray(masks)
     np.testing.assert_array_equal(masks, np.any(injections != 0.0, axis=(2, 3)).astype(np.float32))
     assert 0 < masks.sum() < masks.size
-    # Two generators of one configuration draw their own waveforms.
-    assert not np.array_equal(injections[0], injections[1])
+    # Two generators of one configuration draw their own waveforms: their
+    # sources, measured before placement, differ.
+    source_hrss = np.asarray(parameters[gf_inj.SOURCE_HRSS])
+    assert np.all(source_hrss[masks > 0] > 0)
+    assert not np.array_equal(source_hrss[0], source_hrss[1])
     np.testing.assert_array_equal(parameters[gf_inj.WaveformParameters.DURATION_SECONDS], np.full((2, 16), 0.5))
 
 
