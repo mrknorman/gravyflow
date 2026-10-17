@@ -1,116 +1,81 @@
 import math
 
-import keras
 from keras import ops
 import jax.numpy as jnp
 import jax
 
+
 @jax.jit
 def pearson(x, y):
     # x, y: (Batch, Time)
-    
+
     mean_x = ops.mean(x, axis=-1, keepdims=True)
     mean_y = ops.mean(y, axis=-1, keepdims=True)
-    
+
     numerator = ops.sum((x - mean_x) * (y - mean_y), axis=-1)
-    
+
     var_x = ops.sum(ops.square(x - mean_x), axis=-1)
     var_y = ops.sum(ops.square(y - mean_y), axis=-1)
-    
+
     denominator = ops.sqrt(var_x * var_y)
-    
+
     return numerator / (denominator + 1e-5)
 
-def max_lag_samples(max_arrival_time_difference_seconds: float, sample_rate_hertz: float) -> int:
+
+def max_lag_samples(max_lag_seconds: float, sample_rate_hertz: float) -> int:
     """
-    The largest lag `rolling_pearson` computes, in samples: the largest arrival-time
-    difference rounded up, so that every physically allowed delay is sampled.
+    The largest lag `rolling_pearson` computes, in samples: the lag range rounded up,
+    so that every delay within it is sampled.
     """
-    return math.ceil(float(max_arrival_time_difference_seconds) * float(sample_rate_hertz))
+    return math.ceil(float(max_lag_seconds) * float(sample_rate_hertz))
 
 
-def num_lags(max_arrival_time_difference_seconds: float, sample_rate_hertz: float) -> int:
+def num_lags(max_lag_seconds: float, sample_rate_hertz: float) -> int:
     """
     The number of lags `rolling_pearson` computes for each detector pair: every lag
     from -M to +M samples, ``2 M + 1``, where M is ``max_lag_samples``.
     """
-    return 2 * max_lag_samples(max_arrival_time_difference_seconds, sample_rate_hertz) + 1
+    return 2 * max_lag_samples(max_lag_seconds, sample_rate_hertz) + 1
 
 
-@jax.jit(static_argnames=["max_arrival_time_difference_seconds", "sample_rate_hertz"])
-def rolling_pearson(
-        tensor, 
-        max_arrival_time_difference_seconds: float,
-        sample_rate_hertz: float
-    ):
-    
+@jax.jit(static_argnames=["max_lag_seconds", "sample_rate_hertz"])
+def rolling_pearson(tensor, max_lag_seconds: float, sample_rate_hertz: float):
     """
     The Pearson correlation of every detector pair at every lag from -M to +M
-    samples (``num_lags``), shape (Batch, Pairs, 2 M + 1). Lag index i compares the
-    first detector with the second rolled by M - i samples.
+    samples (``num_lags``), shape (Batch, Pairs, 2 M + 1).
+
+    Lag index i compares the first detector's centre, its samples [M, N - M), with
+    the second detector's samples ``i - M`` later. Every lag therefore correlates
+    the same N - 2M samples, and none wraps around the window: the largest delay is
+    measured the same way in both directions.
 
     Scale free: the correlation does not depend on a row's scale, so each row is
     divided by its peak first, and the sums of squares of physical strain (~1e-42
     per sample) stay inside float32's range.
+
+    Raises:
+        ValueError: a window of no more than 2 M samples, which leaves no centre.
     """
     tensor = ops.convert_to_tensor(tensor)
     peak = ops.max(ops.abs(tensor), axis=-1, keepdims=True)
     tensor = tensor / ops.where(peak > 0, peak, ops.ones_like(peak))
-    # tensor: (Batch, Channels, Time)
-    max_samples = max_lag_samples(max_arrival_time_difference_seconds, sample_rate_hertz)
 
-    num_batches, num_arrays, array_size = ops.shape(tensor)
-    
-    # Create pairs
-    # Use triu_indices for upper triangle (k=1 excludes diagonal)
-    i_idxs, j_idxs = jnp.triu_indices(num_arrays, k=1)
-    
-    # Extract pairs
-    # x_all: (NumPairs, Batch, Time) -> Transpose to (Batch, NumPairs, Time)
-    # tensor is (Batch, Channels, Time)
-    # We want to gather channels.
-    # tensor_transposed: (Channels, Batch, Time)
-    tensor_t = ops.transpose(tensor, (1, 0, 2))
-    
-    x_all = ops.take(tensor_t, i_idxs, axis=0) # (NumPairs, Batch, Time)
-    y_all = ops.take(tensor_t, j_idxs, axis=0) # (NumPairs, Batch, Time)
-    
-    x_all = ops.transpose(x_all, (1, 0, 2)) # (Batch, NumPairs, Time)
-    y_all = ops.transpose(y_all, (1, 0, 2)) # (Batch, NumPairs, Time)
-    
-    # Lags +M down to -M, inclusive.
-    offsets = jnp.arange(2 * max_samples + 1)
-    
-    def compute_for_offset(offset, x, y):
-        # offset is scalar; x, y are (Batch, Time).
-        shift = max_samples - offset
-        
-        # tf.roll(y, shift, axis=-1)
-        # jnp.roll
-        y_shifted = jnp.roll(y, shift, axis=-1)
-        
-        return pearson(x, y_shifted)
-        
-    # vmap over offsets
-    # We want to apply this to each pair.
-    
-    def compute_pair_corrs(x, y):
-        # x, y: (Batch, Time)
-        # vmap over offsets
-        # return shape: (N_offsets, Batch) -> Transpose to (Batch, N_offsets)
-        
-        corrs = jax.vmap(lambda o: compute_for_offset(o, x, y))(offsets)
-        return ops.transpose(corrs, (1, 0))
-        
-    # vmap over pairs
-    # x_all: (Batch, NumPairs, Time)
-    # We want to map over axis 1 (NumPairs).
-    # But x, y arguments to compute_pair_corrs are (Batch, Time).
-    # So we map over axis 1 of inputs, and stack results on axis 1.
-    
-    # jax.vmap(fun, in_axes=1, out_axes=1)
-    
-    all_correlations = jax.vmap(compute_pair_corrs, in_axes=1, out_axes=1)(x_all, y_all)
-    # Result: (Batch, NumPairs, N_offsets)
-    
-    return all_correlations
+    max_samples = max_lag_samples(max_lag_seconds, sample_rate_hertz)
+    num_arrays, num_samples = ops.shape(tensor)[1], ops.shape(tensor)[2]
+    centre = num_samples - 2 * max_samples
+    if centre <= 0:
+        raise ValueError(
+            f"A lag range of {max_lag_seconds} s ({max_samples} samples each way) leaves no "
+            f"samples to correlate in a window of {num_samples}."
+        )
+
+    # Pairs (i, j), i < j: (Batch, Pairs, Time).
+    first, second = jnp.triu_indices(num_arrays, k=1)
+    x = ops.take(tensor, first, axis=1)[..., max_samples:max_samples + centre]
+    y = ops.take(tensor, second, axis=1)
+
+    def at_lag(start):
+        return pearson(x, jax.lax.dynamic_slice_in_dim(y, start, centre, axis=-1))
+
+    # Lag l = start - M, from -M to +M: (Lags, Batch, Pairs) -> (Batch, Pairs, Lags).
+    return jnp.moveaxis(jax.vmap(at_lag)(jnp.arange(2 * max_samples + 1)), 0, -1)

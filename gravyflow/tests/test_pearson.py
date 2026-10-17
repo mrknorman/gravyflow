@@ -22,7 +22,7 @@ def test_pearson_basic():
 
 def test_rolling_pearson():
     sample_rate = 1.0
-    max_diff = 2.0 # 2 samples. N_offsets = 2 * int(2*1) + 1 = 5
+    max_diff = 2.0  # 2 samples: lags -2 to +2
     
     # Create two correlated signals with a known shift
     # Channel 0: sine wave
@@ -38,7 +38,7 @@ def test_rolling_pearson():
     
     corrs = gf_pearson.rolling_pearson(
         tensor,
-        max_arrival_time_difference_seconds=max_diff,
+        max_lag_seconds=max_diff,
         sample_rate_hertz=sample_rate
     )
     
@@ -66,3 +66,32 @@ def test_rolling_pearson_lags_are_symmetric_and_inclusive():
         assert corrs.shape == (9,) and corrs.max() > 0.99
         found.append(int(np.argmax(corrs)))
     assert sorted(found) == list(range(9))
+
+
+@pytest.mark.parametrize("direction", [+1, -1])
+def test_the_largest_lag_is_compared_in_both_directions(direction):
+    # The lags wrapped around the window (jnp.roll): at the largest lag the samples rolled
+    # in from the other end were unrelated, so a pure delay of M samples never correlated
+    # fully, in either direction.
+    rate, max_lag = 64.0, 0.5
+    M = gf_pearson.max_lag_samples(max_lag, rate)
+    N = 384
+    z = np.random.default_rng(0).normal(size=N + 2 * M).astype(np.float32)
+    x = z[M:M + N]
+    y = z[M + direction * M:M + direction * M + N]  # y[t] = x[t + direction M]
+    corrs = np.asarray(gf_pearson.rolling_pearson(np.stack([x, y])[None], max_lag, rate))[0, 0]
+    assert corrs.shape == (2 * M + 1,)
+    # Index i compares x[t] with y[t + i - M]: the delay is at lag -direction M.
+    np.testing.assert_allclose(corrs[M - direction * M], 1.0, atol=1e-5)
+
+
+def test_every_lag_compares_the_same_samples_of_the_first_detector():
+    # Every lag correlates the first detector's centre, N - 2M samples, with the second's
+    # samples l later, so every lag has the same number of samples and none wraps.
+    rate, max_lag, N = 64.0, 0.25, 256
+    M = gf_pearson.max_lag_samples(max_lag, rate)
+    x, y = np.random.default_rng(1).normal(size=(2, N)).astype(np.float32)
+    corrs = np.asarray(gf_pearson.rolling_pearson(np.stack([x, y])[None], max_lag, rate))[0, 0]
+    for i, lag in enumerate(range(-M, M + 1)):
+        expected = np.corrcoef(x[M:N - M], y[M + lag:N - M + lag])[0, 1]
+        np.testing.assert_allclose(corrs[i], expected, atol=1e-4)

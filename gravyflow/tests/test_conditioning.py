@@ -119,7 +119,7 @@ def test_pearson_correlation_logic():
     # Calculate
     pearson = rolling_pearson(
         strain,
-        max_arrival_time_difference_seconds=max_shift_seconds,
+        max_lag_seconds=max_shift_seconds,
         sample_rate_hertz=sample_rate
     )
     
