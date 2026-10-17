@@ -986,8 +986,9 @@ def transient_digest(batch):
     return h.hexdigest()
 
 
-#: The addresses read of each split: two epochs of two batches.
-TRANSIENT_ADDRESSES = [(0, 0), (0, 1), (1, 0), (1, 1)]
+#: The addresses read of each split: three epochs of two batches, so the six training
+#: batches of three records' pairs are two whole passes (batches 0-2 and 3-5).
+TRANSIENT_ADDRESSES = [(epoch, k) for epoch in range(3) for k in range(2)]
 
 
 def transient_reads(obtainer, order, call=lambda read, addresses: [read(*a) for a in addresses]):
@@ -1009,8 +1010,8 @@ def test_transient_batches_are_addressed_by_index(world):
     """
     A transient split's batches depend on their address alone: whatever order the
     splits' batchers are built in, whatever order and threads they are read in, and
-    one shared obtainer is never changed. Each training epoch is its own pass, and
-    each evaluation epoch the same set.
+    one shared obtainer is never changed. Each training pass serves every record once,
+    in an order of its own, and each evaluation epoch is the same set.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1039,9 +1040,11 @@ def test_transient_batches_are_addressed_by_index(world):
     assert not mismatches, f"Batches that depend on build order: {mismatches}"
     assert set(np.concatenate(train_times)) <= set(peaks["train"])
     assert set(np.concatenate(test_times)) <= set(peaks["test"])
-    assert len(set(np.concatenate(train_times[:2]))) == 4, "a pass serves a record twice"
-    assert solo["train"][:2] != solo["train"][2:], "a training epoch repeats the last"
-    assert solo["test"][:2] == solo["test"][2:], "an evaluation epoch differs from the last"
+    first, second = (np.concatenate(train_times[3 * p:3 * p + 3]) for p in (0, 1))
+    assert sorted(first) == sorted(second) == sorted(peaks["train"]), "a pass does not serve every record once"
+    assert not np.array_equal(first, second), "a pass repeats the order of the last"
+    assert solo["train"][:2] != solo["train"][2:4], "a training epoch repeats the last"
+    assert solo["test"][:2] == solo["test"][2:4] == solo["test"][4:], "an evaluation epoch differs from the last"
 
 
 def test_a_transient_dataset_draws_each_training_epoch_and_fixes_evaluation(world):
