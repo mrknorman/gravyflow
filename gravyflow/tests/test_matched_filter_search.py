@@ -413,17 +413,19 @@ def coverage_injections(n):
 
 
 def test_the_bundled_bank_covers_its_range_by_an_independent_overlap():
-    # The shipped bank's coverage, measured with pycbc's match rather than the
-    # placement metric. Placement stops when about 1% of the space is left
-    # below the minimal match; the full bank puts 0.5% of these injections
-    # there. Random subsets with 20% or 30% of the templates removed put 8-22%
-    # there, so at n = 1000 a degraded bank passes the 3% bound with
-    # probability below 1e-9, and a sound one (1.3% of its space below) fails
-    # with probability about 1e-5.
+    # The shipped bank's coverage of its interior, measured with pycbc's match
+    # rather than the placement metric; its boundary is the next test's.
+    # Placement stops when about 1% of the space is left below the minimal
+    # match: three placements with different seeds leave 0.72-1.05% of 20,000
+    # log-uniform injections there, so a sound bank puts more than 22 of these
+    # 1000 below it with probability 2e-6 to 5e-4 (binomial; 3e-2 at 1.5%).
+    # Removing 10% of the templates leaves 3.9% below, which passes with
+    # probability 2e-3; removing 25% leaves 10%, which passes with probability
+    # below 1e-21. The minimum is not bounded: it is the deepest of a few
+    # random holes, so it depends on where the injections fall.
     bank = MatchedFilter(sample_rate_hertz=FS).bank
     ff = pycbc_fitting_factors(bank, *coverage_injections(1000), nearest=48)
-    below = np.mean(ff < 0.97)
-    assert below <= 0.03 and ff.min() >= 0.94, (below, ff.min())
+    assert np.sum(ff < 0.97) <= 22, (np.sum(ff < 0.97), ff.min())
 
 
 def test_the_bundled_bank_covers_the_boundary_of_its_range():
