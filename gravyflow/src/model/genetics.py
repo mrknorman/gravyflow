@@ -10,7 +10,6 @@ import os
 import logging
 
 import numpy as np
-from numpy.random import default_rng  
 import keras
 from keras.layers import Lambda
 from keras import backend as K
@@ -23,12 +22,20 @@ import pickle
 
 import gravyflow as gf
 
-def mutate_value(value, A, B, std_dev_fraction):
+def search_stream(seed: int, consumer: str) -> np.random.Generator:
+    """
+    The model search's stream ``search/{consumer}`` of the seed tree rooted at
+    ``seed`` (None: the default root, ``gf.Defaults.seed``).
+    """
+    return gf.SeedTree(None if seed is None else int(seed)).direct().stream(f"search/{consumer}")
+
+
+def mutate_value(value, A, B, std_dev_fraction, rng: np.random.Generator):
     # Calculate the standard deviation as a fraction of the range
     std_dev = std_dev_fraction * (B - A)
 
     # Mutate the value
-    mutated_value = value + np.random.normal(0, std_dev)
+    mutated_value = value + rng.normal(0, std_dev)
 
     # Clamp the result to be within [A, B]
     mutated_value = max(min(mutated_value, B), A)
@@ -47,7 +54,7 @@ class HyperParameter:
         if self.seed is None:
             self.seed = gf.Defaults.seed
 
-        self.rng = default_rng(self.seed)
+        self.rng = search_stream(self.seed, "hyperparameter")
         
         if isinstance(self.distribution, HyperParameter):
             self.distribution = self.distribution.distribution
@@ -55,19 +62,12 @@ class HyperParameter:
         elif not isinstance(self.distribution, gf.Distribution):
             self.distribution = gf.Distribution(value=self.distribution, type_=gf.DistributionType.CONSTANT)
 
-        self.distribution.reseed(
-            self.rng.integers(1E10)
-        )
-        
         self.randomize()
 
     def reseed(self, seed):
+        """Draw from the stream of ``seed``; the distribution, a specification, is never changed."""
         self.seed = seed
-        self.rng = default_rng(self.seed)
-
-        self.distribution.reseed(
-            self.rng.integers(1E10)
-        )
+        self.rng = search_stream(self.seed, "hyperparameter")
 
     def randomize(self):
         """
@@ -80,7 +80,7 @@ class HyperParameter:
         One value of the distribution, as a Python value: a sample is a NumPy
         scalar, which Keras refuses for an integer setting (Dense units).
         """
-        value = self.distribution.sample()[0]
+        value = self.distribution.sample(1, self.rng)[0]
         return value.item() if isinstance(value, np.generic) else value
 
     def mutate(self, mutation_rate: float, mutation_strength : float = 0.1):
@@ -99,23 +99,23 @@ class HyperParameter:
                     pass     
                 case gf.DistributionType.UNIFORM:
                     self.value = mutate_value(
-                        self.value, self.distribution.min_, self.distribution.max_, mutation_strength
+                        self.value, self.distribution.min_, self.distribution.max_, mutation_strength, self.rng
                     )
                 case gf.DistributionType.NORMAL:
                     self.value = mutate_value(
-                        self.value, self.distribution.min_, self.distribution.max_, mutation_strength
+                        self.value, self.distribution.min_, self.distribution.max_, mutation_strength, self.rng
                     )
                 case gf.DistributionType.CHOICE:
                     self.value = self._draw()
                 case gf.DistributionType.LOG:
                     log_value = mutate_value(
-                        np.log(self.value), self.distribution.min_, self.distribution.max_, mutation_strength
+                        np.log(self.value), self.distribution.min_, self.distribution.max_, mutation_strength, self.rng
                     )
                     self.value = 10 ** log_value
                 case gf.DistributionType.POW_TWO:
                     power_low, power_high = map(int, np.log2((self.distribution.min_, self.distribution.max_)))
                     log_value = mutate_value(
-                        np.log2(self.value), power_low, power_high, mutation_strength
+                        np.log2(self.value), power_low, power_high, mutation_strength, self.rng
                     )
                     self.value = 2**log_value
             
@@ -170,7 +170,7 @@ class HyperInjectionGenerator:
 
     def reseed(self, seed):
         self.seed = seed
-        self.rng = default_rng(seed)
+        self.rng = search_stream(seed, "injection")
         
         for gene in self.genes:
             gene.reseed(self.rng.integers(1E10))
@@ -262,7 +262,7 @@ class ModelGenome:
 
         # Randomisation:
         self.seed = seed
-        self.rng = default_rng(self.seed)
+        self.rng = search_stream(self.seed, "genome")
 
         for gene in self.genes:
             gene.reseed(self.rng.integers(1E10))

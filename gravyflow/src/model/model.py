@@ -81,9 +81,9 @@ def beta_prime_nll(y_true, y_pred):
     return -beta_prime_log_prob(y_true, alpha, beta)
 
 
-from numpy.random import default_rng  
 
 import gravyflow as gf
+from gravyflow.src.model.genetics import search_stream
 
 
 @keras.saving.register_keras_serializable(package="gravyflow")
@@ -195,7 +195,7 @@ class BaseLayer:
 
     def reseed(self, seed):
         
-        rng = default_rng(seed)
+        rng = search_stream(seed, "layer")
         for attribute in self.mutable_attributes:
             attribute.reseed(rng.integers(1E10))
     
@@ -285,7 +285,7 @@ class DenseLayer(BaseLayer):
             gf.HyperParameter specifying the activation function for this layer.
         """
 
-        self.rng = default_rng(self.seed)
+        self.rng = search_stream(self.seed, "layer")
 
         self.layer_type = "Dense"
         self.activation = gf.HyperParameter(
@@ -327,7 +327,7 @@ class FlattenLayer(BaseLayer):
         activation : Union[gf.HyperParameter, int]
             gf.HyperParameter specifying the activation function for this layer.
         """
-        self.rng = default_rng(self.seed)
+        self.rng = search_stream(self.seed, "layer")
         self.layer_type = "Flatten"
         self.mutable_attributes = []
 
@@ -366,7 +366,7 @@ class ConvLayer(BaseLayer):
         activation: gf.HyperParameter specifying the activation function for this layer.
         strides: gf.HyperParameter specifying the stride length for this layer.
         """
-        self.rng = default_rng(self.seed)
+        self.rng = search_stream(self.seed, "layer")
         self.layer_type = "Convolutional"
         self.activation = gf.HyperParameter(
             activation, seed=self.rng.integers(1E10)
@@ -434,7 +434,7 @@ class PoolLayer(BaseLayer):
         pool_size: gf.HyperParameter specifying the size of the pooling window.
         strides: gf.HyperParameter specifying the stride length for moving the pooling window.
         """
-        self.rng = default_rng(self.seed)
+        self.rng = search_stream(self.seed, "layer")
         self.layer_type = "Pooling"
         self.pool_size = gf.HyperParameter(pool_size, seed=self.rng.integers(1E10))
         
@@ -456,7 +456,7 @@ class DropLayer(BaseLayer):
         Args:
         rate: gf.HyperParameter specifying the dropout rate for this layer.
         """
-        self.rng = default_rng(self.seed)
+        self.rng = search_stream(self.seed, "layer")
         self.layer_type = "Dropout"
         self.rate = gf.HyperParameter(rate, seed=self.rng.integers(1E10))
         self.mutable_attributes = [self.rate]
@@ -470,7 +470,7 @@ class BatchNormLayer(BaseLayer):
         Args:
         rate: gf.HyperParameter specifying the dropout rate for this layer.
         """
-        self.rng = default_rng(self.seed)
+        self.rng = search_stream(self.seed, "layer")
         self.layer_type = "BatchNorm"
 
 class WhitenLayer(BaseLayer):
@@ -482,7 +482,7 @@ class WhitenLayer(BaseLayer):
         Args:
         rate: gf.HyperParameter specifying the whitening for this layer.
         """
-        self.rng = default_rng(self.seed)
+        self.rng = search_stream(self.seed, "layer")
         self.layer_type = "Whiten"
         self.mutable_attributes = []
 
@@ -495,7 +495,7 @@ class WhitenPassLayer(BaseLayer):
         Args:
         rate: gf.HyperParameter specifying the whitening for this layer.
         """
-        self.rng = default_rng(self.seed)
+        self.rng = search_stream(self.seed, "layer")
         self.layer_type = "WhitenPass"
         self.mutable_attributes = []
 
@@ -565,7 +565,7 @@ class Model:
         self.name = name
         self.path = model_path
         self.genome = genome
-        self.rng = default_rng(seed)
+        self.rng = search_stream(seed, "model")
 
         if batch_size is None:
             batch_size = gf.Defaults.num_examples_per_batch
@@ -1563,7 +1563,7 @@ class Population:
         if seed == None:
             seed = gf.Defaults.seed
 
-        self.rng = default_rng(seed)
+        self.rng = search_stream(seed, "population")
 
         self.initilize()
         self.save()
@@ -1654,7 +1654,7 @@ class Population:
         cumulative_probs = np.cumsum(prob)
 
         # Generate a random number in the range [0, 1).
-        r = np.random.rand()
+        r = self.rng.random()
 
         # Find the index of the individual to select.
         for i in range(len(fitnesses)):
@@ -1816,47 +1816,33 @@ class Population:
 
     def load_and_calculate_fitness(
             self,
-            generation, 
-            scaling_threshold = 8
+            generation,
+            scaling_threshold = 8,
+            far_hz = 1e-3
         ):
-
-        self.population_directory_path = Path(self.population_directory_path)
-
-        directory_path = self.population_directory_path / f"generation_{generation}/"
-
-        model_indices = []
-        for entry in directory_path.iterdir():
-            if entry.name.startswith(f"model_"):
-                model_indices.append(int(entry.name.split("_")[-1]))
-
+        """
+        The fitness of each model of ``generation`` (`calculate_fitness`), from
+        the files its training left: the share of its injections above SNR
+        ``scaling_threshold`` that score above its threshold at ``far_hz`` (its
+        validator's results, ``validation_data.h5``), and its best validation
+        loss (its history). A model with no results yet scores 0, logged by
+        name; a result that cannot be read raises.
+        """
+        directory_path = Path(self.population_directory_path) / f"generation_{generation}"
         fitnesses = np.zeros(self.num_population_members)
-
-        for entry in directory_path.iterdir():
-            if entry.name.startswith(f"model_"):
-                
-                model_index = int(entry.name.split("_")[-1]) - self.num_population_members*generation
-                try:
-                    history = gf.load_history(entry)
-                    validator = gf.validate.Validator.load(entry / "validation_data.h5")
-                    genome = gf.ModelGenome.load(entry / "genome")
-                    
-                    score_threshold = list(gf.validate.calculate_far_score_thresholds(
-                        validator.far_scores, 
-                        genome.onsource_duration_seconds.value,
-                        [10E-4]
-                    ).values())[0][1]
-
-                    efficiency_data = validator.efficiency_data
-
-                    valid_scores = np.array([])
-                    for scaling, scores in zip(efficiency_data["scalings"], efficiency_data["scores"]):
-                        if scaling > scaling_threshold:
-                            valid_scores = np.append(valid_scores, scores.flatten())
-                    
-                    fitnesses[model_index] = calculate_fitness(valid_scores, score_threshold, history)
-                except Exception as e:
-                    logger.error(e)
-                    pass
+        for entry in sorted(directory_path.iterdir()):
+            if not entry.name.startswith("model_"):
+                continue
+            model_index = int(entry.name.split("_")[-1]) - self.num_population_members * generation
+            results = entry / "validation_data.h5"
+            if not results.exists():
+                logger.warning(f"{entry.name} of generation {generation} has no validation results: fitness 0.")
+                continue
+            validator = gf.Validator.load(results)
+            threshold = validator.background().threshold_for_far(far_hz).threshold
+            efficiency = validator.efficiency_data
+            valid_scores = efficiency["scores"][efficiency["snrs"] > scaling_threshold]
+            fitnesses[model_index] = calculate_fitness(valid_scores, threshold, gf.load_history(entry))
 
         return list(fitnesses)
 
