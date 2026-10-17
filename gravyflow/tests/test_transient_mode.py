@@ -1,446 +1,101 @@
-"""Tests for TRANSIENT mode data acquisition.
-
-These tests verify that the TRANSIENT mode correctly:
-1. Identifies event segments from GWTC catalogs
-2. Returns multiple segments (not just 1)
-3. Returns data with correct shape for model inference
-4. Returns unique GPS times for each batch
+"""
+TRANSIENT mode, offline: the event list as GWOSC's event API serves it (the committed
+snapshot), and datasets of real events read from the catalogue fake ``offline_events``
+(``conftest``), whose strain is unit Gaussian noise seeded by each event's time.
 """
 
-import pytest
+import csv
+
 import numpy as np
+import pytest
+
 import gravyflow as gf
-from gravyflow.tests.test_public_sources import offline_event_api  # noqa: F401  (pytest fixture)
+# Imported before ``offline_events`` patches the event module: a first import inside that
+# patch would bind the patched function here as the original, outliving the fixture.
+from gravyflow.src.dataset.features import segment_builders  # noqa: F401
+from gravyflow.tests.test_public_sources import FIXTURES, offline_event_api  # noqa: F401  (pytest fixture)
 
-
-class TestTransientModeCoreSetup:
-    """Test that TRANSIENT mode correctly configures IFODataObtainer."""
-    
-    def test_events_data_label_stored(self):
-        """Verify EVENTS data_label is stored correctly."""
-        ifo = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],
-            saturation=1.0
-        )
-        
-        assert gf.DataLabel.EVENTS in ifo.data_labels
-    
-    def test_noise_data_label_stored(self):
-        """Verify NOISE data_label is stored correctly."""
-        ifo = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.NOISE],
-            saturation=1.0
-        )
-        
-        assert gf.DataLabel.NOISE in ifo.data_labels
+RV = gf.ReturnVariables
+RATE, ONSOURCE, OFFSOURCE = 2048.0, 1.0, 16.0
 
 
 class TestTransientSegmentRetrieval:
-    """
-    Test that TRANSIENT mode retrieves correct number of segments, from GWOSC's event
-    API as served by the committed snapshot (``test_public_sources``).
-    """
+    """Every row of every catalogue the event API lists is an event time."""
 
     @pytest.fixture(autouse=True)
     def _events(self, offline_event_api):
         return offline_event_api
 
-    def test_get_all_event_times_returns_many_events(self):
-        """Verify get_all_event_times returns substantial number of events."""
-        event_times = gf.get_all_event_times()
+    @staticmethod
+    def snapshot_times():
+        with open(FIXTURES / "gwosc_events.csv", newline="") as handle:
+            return np.array([float(row["gps"]) for row in csv.DictReader(handle) if row["gps"]])
 
-        # Should have at least 100 events from GWTC catalogs
-        assert len(event_times) >= 100, f"Expected >=100 events, got {len(event_times)}"
+    def test_every_listed_row_is_an_event_time(self):
+        np.testing.assert_array_equal(np.sort(gf.get_all_event_times()), np.sort(self.snapshot_times()))
 
-    def test_o3_has_many_events(self):
-        """Verify O3 observing run contains many events by GPS range."""
-        O3_START_GPS = 1238166018
-        O3_END_GPS = 1269363618
-        
-        event_times = gf.get_all_event_times()
-        o3_events = [t for t in event_times if O3_START_GPS <= t <= O3_END_GPS]
-        
-        # O3 should have at least 50 events
-        assert len(o3_events) >= 50, f"Expected >=50 O3 events, got {len(o3_events)}"
+    def test_o3_events_are_those_in_its_bounds(self):
+        run = gf.ObservingRun.O3.value
+        times = gf.get_all_event_times()
+        in_o3 = lambda t: t[(t >= run.start_gps_time) & (t <= run.end_gps_time)]
+        expected = in_o3(self.snapshot_times())
+        assert len(expected) > 0
+        np.testing.assert_array_equal(np.sort(in_o3(times)), np.sort(expected))
 
 
-@pytest.mark.network
+def events_dataset(ifos, batch, input_variable=RV.WHITENED_ONSOURCE):
+    """A test-split dataset of real events, one batch of ``batch`` examples."""
+    obtainer = gf.IFODataObtainer(observing_runs=gf.ObservingRun.O3, data_quality=gf.DataQuality.BEST,
+                                  data_labels=[gf.DataLabel.EVENTS])
+    obtainer.augmentations = []
+    noise = gf.NoiseObtainer(ifo_data_obtainer=obtainer, ifos=ifos, noise_type=gf.NoiseType.REAL)
+    return gf.Dataset(
+        noise_obtainer=noise, sample_rate_hertz=RATE, onsource_duration_seconds=ONSOURCE,
+        offsource_duration_seconds=OFFSOURCE, num_examples_per_batch=batch, steps_per_epoch=1,
+        group="test", input_variables=[input_variable],
+        output_variables=[RV.START_GPS_TIME],
+    )
+
+
 class TestTransientDatasetOutput:
-    """Test that Dataset in TRANSIENT mode returns correct data.
 
-    These request 8192 Hz real data, which needs GWOSC's 16 kHz strain files.
-    """
-    
-    def test_dataset_creation_with_transient_mode(self):
-        """Verify Dataset can be created with TRANSIENT mode config."""
-        ifo = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],
-            saturation=1.0
-        )
-        noise = gf.NoiseObtainer(
-            ifo_data_obtainer=ifo,
-            ifos=[gf.IFO.L1],
-            noise_type=gf.NoiseType.REAL
-        )
-        
-        dataset = gf.Dataset(
-            noise_obtainer=noise,
-            sample_rate_hertz=8192.0,
-            onsource_duration_seconds=1.0,
-            offsource_duration_seconds=16.0,
-            num_examples_per_batch=1,
-            steps_per_epoch=5,
-            group='test',
-            input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-            output_variables=[gf.ReturnVariables.START_GPS_TIME]
-        )
-        
-        assert dataset is not None
-        
-    
-    def test_dataset_returns_whitened_onsource_in_input(self):
-        """Verify Dataset returns WHITENED_ONSOURCE in x batch."""
-        ifo = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],
-            saturation=1.0
-        )
-        noise = gf.NoiseObtainer(
-            ifo_data_obtainer=ifo,
-            ifos=[gf.IFO.L1],
-            noise_type=gf.NoiseType.REAL
-        )
-        
-        dataset = gf.Dataset(
-            noise_obtainer=noise,
-            sample_rate_hertz=8192.0,
-            onsource_duration_seconds=1.0,
-            offsource_duration_seconds=16.0,
-            num_examples_per_batch=1,
-            steps_per_epoch=1,
-            group='test',
-            input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-            output_variables=[gf.ReturnVariables.START_GPS_TIME]
-        )
-        
-        x_batch, y_batch = dataset[0]
-        
-        # x_batch should be dict with WHITENED_ONSOURCE
-        assert isinstance(x_batch, dict), f"x_batch is {type(x_batch)}, expected dict"
-        assert gf.ReturnVariables.WHITENED_ONSOURCE.name in x_batch, \
-            f"WHITENED_ONSOURCE not in x_batch keys: {x_batch.keys()}"
-        
-        # Check shape: [batch, ifos, samples]
-        data = x_batch[gf.ReturnVariables.WHITENED_ONSOURCE.name]
-        assert data.shape[0] == 1, f"Expected batch size 1, got {data.shape[0]}"
-        assert data.shape[2] == 8192, f"Expected 8192 samples, got {data.shape[2]}"
-        
-    
-    def test_dataset_returns_gps_time_in_output(self):
-        """Verify Dataset returns START_GPS_TIME in y batch."""
-        ifo = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],
-            saturation=1.0
-        )
-        noise = gf.NoiseObtainer(
-            ifo_data_obtainer=ifo,
-            ifos=[gf.IFO.L1],
-            noise_type=gf.NoiseType.REAL
-        )
-        
-        dataset = gf.Dataset(
-            noise_obtainer=noise,
-            sample_rate_hertz=8192.0,
-            onsource_duration_seconds=1.0,
-            offsource_duration_seconds=16.0,
-            num_examples_per_batch=1,
-            steps_per_epoch=1,
-            group='test',
-            input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-            output_variables=[gf.ReturnVariables.START_GPS_TIME]
-        )
-        
-        x_batch, y_batch = dataset[0]
-        
-        # y_batch should have START_GPS_TIME
-        assert gf.ReturnVariables.START_GPS_TIME.name in y_batch, \
-            f"START_GPS_TIME not in y_batch keys: {y_batch.keys()}"
-        
-        gps = y_batch[gf.ReturnVariables.START_GPS_TIME.name]
-        # GPS should be valid O3 time range
-        O3_START_GPS = 1238166018
-        O3_END_GPS = 1269363618
-        gps_value = float(np.array(gps).flatten()[0])
-        assert O3_START_GPS <= gps_value <= O3_END_GPS, \
-            f"GPS {gps_value} outside O3 range"
-        
-    
-    def test_dataset_returns_unique_gps_for_each_batch(self):
-        """CRITICAL: Verify each batch returns a UNIQUE GPS time."""
-        ifo = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],
-            saturation=1.0
-        )
-        noise = gf.NoiseObtainer(
-            ifo_data_obtainer=ifo,
-            ifos=[gf.IFO.L1],
-            noise_type=gf.NoiseType.REAL
-        )
-        
-        dataset = gf.Dataset(
-            noise_obtainer=noise,
-            sample_rate_hertz=8192.0,
-            onsource_duration_seconds=1.0,
-            offsource_duration_seconds=16.0,
-            num_examples_per_batch=1,
-            steps_per_epoch=5,  # Request 5 batches
-            group='test',
-            input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-            output_variables=[gf.ReturnVariables.START_GPS_TIME]
-        )
-        
-        gps_times = []
-        for i in range(5):
-            x_batch, y_batch = dataset[i]
-            gps = y_batch[gf.ReturnVariables.START_GPS_TIME.name]
-            gps_value = float(np.array(gps).flatten()[0])
-            gps_times.append(gps_value)
-        
-        # All GPS times should be unique
-        unique_gps = set(gps_times)
-        assert len(unique_gps) == 5, \
-            f"Expected 5 unique GPS times, got {len(unique_gps)}: {gps_times}"
-        
+    def test_a_batch_holds_each_event_once_centred_in_its_window(self, offline_events):
+        x, y = events_dataset([gf.IFO.L1], batch=len(offline_events))[0]
+        whitened = np.asarray(x[RV.WHITENED_ONSOURCE.name])
+        assert whitened.shape == (len(offline_events), 1, int(ONSOURCE * RATE))
+        assert np.all(np.isfinite(whitened)) and np.any(whitened != 0)
+        starts = np.sort(np.asarray(y[RV.START_GPS_TIME.name], dtype=np.float64)[:, 0])
+        # Each window is centred on its event: it starts at the sample at or before the
+        # event less half the window. GPS near 1.3e9 holds 2.4e-7 s steps in float64: a
+        # few of them, never a sample (4.9e-4 s), separate the label from the formula.
+        events = np.array(sorted(e["gps"] for e in offline_events))
+        expected = np.floor((events - ONSOURCE / 2) * RATE) / RATE
+        np.testing.assert_allclose(starts, expected, rtol=0, atol=4 * np.spacing(events.max()))
+
+    def test_an_events_detectors_are_read_at_one_time(self, offline_events):
+        """A real event is the stated exception to separated detectors: every detector at its time."""
+        x, y = events_dataset([gf.IFO.H1, gf.IFO.L1], batch=len(offline_events), input_variable=RV.ONSOURCE)[0]
+        assert np.shape(x[RV.ONSOURCE.name]) == (len(offline_events), 2, int(ONSOURCE * RATE))
+        gps = np.asarray(y[RV.START_GPS_TIME.name], dtype=np.float64)
+        np.testing.assert_array_equal(gps[:, 0], gps[:, 1])
 
 
-@pytest.mark.network
-class TestTransientModeBatching:
-    """
-    Test transient mode batching and multi-IFO alignment.
-
-    These download events' strain and parameters from GWOSC.
-    """
-
-            
-    def test_transient_mode_batch_unique_events(self):
-        """Verify that TRANSIENT mode returns unique events in a batch (Batch Size > 1)."""
-        
-        # Setup specific request that SHOULD return distinct events
-        batch_size = 4
-        
-        ifo = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],
-            saturation=1.0
-        )
-        noise = gf.NoiseObtainer(
-            ifo_data_obtainer=ifo,
-            ifos=[gf.IFO.L1],
-            noise_type=gf.NoiseType.REAL
-        )
-        
-        dataset = gf.Dataset(
-            noise_obtainer=noise,
-            sample_rate_hertz=2048.0,
-            onsource_duration_seconds=1.0,
-            offsource_duration_seconds=2.0,
-            num_examples_per_batch=batch_size,
-            steps_per_epoch=1,
-            group='test',
-            input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
-            output_variables=[gf.ReturnVariables.START_GPS_TIME]
-        )
-        
-        x_batch, y_batch = dataset[0]
-        
-        gps_times = y_batch[gf.ReturnVariables.START_GPS_TIME.name]
-        # Shape should be (Batch, 1) or (Batch,)
-        # Convert to numpy and flatten to ensure we have standard floats
-        gps_values = np.array(gps_times).flatten()
-        
-        assert len(gps_values) == batch_size, f"Expected {batch_size} GPS times, got {len(gps_values)}"
-        
-        # Check uniqueness
-        # Convert to float to ensure hashability (if they were 0-d arrays)
-        unique_gps = set([float(g) for g in gps_values])
-        assert len(unique_gps) == batch_size, \
-            f"Expected {batch_size} unique events in batch, got {len(unique_gps)}: {gps_values}"
-            
-
-    def test_transient_mode_multi_ifo_alignment(self):
-        """Verify multi-IFO batch returns synchronized data."""
-        ifos_list = [gf.IFO.H1, gf.IFO.L1]
-        
-        ifo = gf.IFODataObtainer(
-            observing_runs=gf.ObservingRun.O3,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],
-            saturation=1.0
-        )
-        noise = gf.NoiseObtainer(
-            ifo_data_obtainer=ifo,
-            ifos=ifos_list,
-            noise_type=gf.NoiseType.REAL
-        )
-        
-        dataset = gf.Dataset(
-            noise_obtainer=noise,
-            sample_rate_hertz=2048.0,
-            onsource_duration_seconds=1.0,
-            offsource_duration_seconds=0.0,
-            num_examples_per_batch=2,
-            steps_per_epoch=1,
-            group='test',
-            input_variables=[gf.ReturnVariables.ONSOURCE], # Raw data to check correlation/alignment if needed
-            output_variables=[gf.ReturnVariables.START_GPS_TIME]
-        )
-        
-        x_batch, _ = dataset[0]
-        data = x_batch[gf.ReturnVariables.ONSOURCE.name]
-        
-        # Shape: (Batch, IFO, Samples)
-        assert data.shape[1] == 2, f"Expected 2 IFOs, got {data.shape[1]}"
-        assert data.shape[0] == 2, f"Expected batch size 2, got {data.shape[0]}"
-        
-        # Just basic structure check; precise synchronization hard to test 
-        # without known injection templates or specific event properties.
-        # But ensure not all zeros.
-        assert not np.allclose(data, 0.0), "Data should not be all zeros"
-        
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-s"])
-
-
-@pytest.mark.network
 class TestSpecificEventAcquisition:
-    """
-    Test acquisition of specific named events (direct download path).
 
-    These download events' strain and parameters from GWOSC.
-    """
-    
-    def test_specific_event_names_returns_proper_structure(self):
-        """Test that specific event names path returns proper TransientSegment objects."""
-        # Now use TransientDataObtainer directly with event_names
-        transient_obtainer = gf.TransientDataObtainer(
-            observing_runs=gf.ObservingRun.O1,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],
-            event_names=["GW150914"]  # Specific event
+    def test_named_events_are_the_events_served(self, offline_events):
+        names = [offline_events[0]["name"], offline_events[2]["name"]]
+        obtainer = gf.TransientDataObtainer(
+            observing_runs=gf.ObservingRun.O3, data_quality=gf.DataQuality.BEST,
+            data_labels=[gf.DataLabel.EVENTS], event_names=names,
         )
-        
-        # Get a batch
-        batch_gen = transient_obtainer.get_onsource_offsource_chunks(
-            sample_rate_hertz=2048.0,
-            onsource_duration_seconds=1.0,
-            crop_duration_seconds=0.5,
-            offsource_duration_seconds=16.0,
-            num_examples_per_batch=1,
-            ifos=[gf.IFO.H1, gf.IFO.L1],
-            group="test",
-        )
-        batch = next(batch_gen)
-        
-        # Verify batch structure
-        assert isinstance(batch, dict), "Batch should be a dictionary"
-        assert gf.ReturnVariables.ONSOURCE in batch, "Should have ONSOURCE key"
-        assert gf.ReturnVariables.OFFSOURCE in batch, "Should have OFFSOURCE key"
-        assert gf.ReturnVariables.TRANSIENT_GPS_TIME in batch, "Should have TRANSIENT_GPS_TIME key"
-        
-        # Verify shapes
-        onsource = batch[gf.ReturnVariables.ONSOURCE]
-        offsource = batch[gf.ReturnVariables.OFFSOURCE]
-        gps_times = batch[gf.ReturnVariables.TRANSIENT_GPS_TIME]
-        
-        assert onsource.ndim == 3, f"Onsource should be 3D (Batch, IFO, Samples), got {onsource.ndim}D"
-        assert onsource.shape[1] == 2, f"Should have 2 IFOs, got {onsource.shape[1]}"
-        assert offsource.shape[0] == onsource.shape[0] and offsource.shape[1] == onsource.shape[1], "Offsource batch and IFO dims should match onsource"
-        assert gps_times.ndim == 2, f"GPS times should be 2D (Batch, IFO), got {gps_times.ndim}D"
-        
-        # Verify data is not all zeros
-        assert not np.all(onsource == 0.0), "Onsource data should not be all zeros"
-        
-    
-    def test_multiple_specific_events(self):
-        """Test acquiring multiple specific events."""
-        # Now use TransientDataObtainer directly with event_names
-        transient_obtainer = gf.TransientDataObtainer(
-            observing_runs=gf.ObservingRun.O1,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],
-            event_names=["GW150914", "GW151012"]  # Multiple events
-        )
-        
-        # Get a batch
-        batch_gen = transient_obtainer.get_onsource_offsource_chunks(
-            sample_rate_hertz=2048.0,
-            onsource_duration_seconds=1.0,
-            crop_duration_seconds=0.5,
-            offsource_duration_seconds=16.0,
-            num_examples_per_batch=2,
-            ifos=[gf.IFO.L1],
-            group="test",
-        )
-        batch = next(batch_gen)
-        
-        # Should get a batch (even if some events might not be available)
-        assert isinstance(batch, dict), "Should return a dictionary"
-        assert gf.ReturnVariables.ONSOURCE in batch
-        
-        # Verify batch size (may be less than 2 if some events unavailable)
-        onsource = batch[gf.ReturnVariables.ONSOURCE]
-        assert onsource.shape[0] > 0, "Should have at least one event in batch"
-        
-    
-    def test_specific_events_with_whitening(self):
-        """Test that whitening works with specific events."""
-        # Now use TransientDataObtainer directly with event_names
-        transient_obtainer = gf.TransientDataObtainer(
-            observing_runs=gf.ObservingRun.O1,
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.EVENTS],
-            event_names=["GW150914"]
-        )
-        
-        # Get batch with whitening applied via post-processing
-        batch_gen = transient_obtainer.get_onsource_offsource_chunks(
-            sample_rate_hertz=2048.0,
-            onsource_duration_seconds=1.0,
-            crop_duration_seconds=0.5,
-            offsource_duration_seconds=16.0,
-            num_examples_per_batch=1,
-            ifos=[gf.IFO.H1],
-            group="test",
-        )
-        batch = next(batch_gen)
-        
-        # Whiten manually (since TransientDataObtainer doesn't have whiten param)
-        onsource = batch[gf.ReturnVariables.ONSOURCE]
-        offsource = batch[gf.ReturnVariables.OFFSOURCE]
-        
-        # Apply whitening, to the strain as it is (whitening is scale free)
-        whitened = gf.whiten(
-            onsource,
-            offsource,
-            sample_rate_hertz=2048.0
-        )
-        
-        # Should successfully whiten
-        assert not np.all(whitened == 0.0), "Whitened data should not be all zeros"
-        assert not np.isnan(whitened).any(), "Whitened data should not have NaNs"
-        
-
+        obtainer.augmentations = []
+        batch = next(obtainer.get_onsource_offsource_chunks(
+            sample_rate_hertz=RATE, onsource_duration_seconds=ONSOURCE, crop_duration_seconds=0.5,
+            offsource_duration_seconds=OFFSOURCE, num_examples_per_batch=2,
+            ifos=[gf.IFO.H1, gf.IFO.L1], group="test",
+        ))
+        assert np.shape(batch[RV.ONSOURCE])[:2] == np.shape(batch[RV.OFFSOURCE])[:2] == (2, 2)
+        served = np.asarray(batch[RV.TRANSIENT_GPS_TIME], dtype=np.float64)
+        assert served.shape == (2, 2)
+        np.testing.assert_array_equal(np.sort(served[:, 0]),
+                                      sorted(e["gps"] for e in offline_events if e["name"] in names))

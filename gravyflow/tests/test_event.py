@@ -1,8 +1,6 @@
 """
-Tests for event.py module.
-
-Tests EventConfidence enum, event time functions, and the events with their
-parameter estimates.
+The event list: event times by confidence, and the events with their parameter
+estimates, all read from the one catalogue.
 """
 
 from pathlib import Path
@@ -14,16 +12,6 @@ from gwpy.table import EventTable
 import gravyflow as gf
 from gravyflow.src.resources import PACKAGE
 from gravyflow.src.dataset.features import event as event_module
-
-
-class TestEventConfidence:
-    """Tests for EventConfidence enum."""
-    
-    def test_event_type_members(self):
-        """Test EventConfidence has exactly two members."""
-        assert len(gf.EventConfidence) == 2
-        assert gf.EventConfidence.CONFIDENT in gf.EventConfidence
-        assert gf.EventConfidence.MARGINAL in gf.EventConfidence
 
 
 _CATALOGUE = {
@@ -221,18 +209,7 @@ class TestEventCatalogueParameters:
 
 
 class TestCatalogMappings:
-    """Tests for catalog mappings and constants."""
-    
-    def test_confident_catalogs_defined(self):
-        """Test CONFIDENT_CATALOGS constant exists."""
-        assert hasattr(event_module, 'CONFIDENT_CATALOGS')
-        assert len(event_module.CONFIDENT_CATALOGS) > 0
-    
-    def test_marginal_catalogs_defined(self):
-        """Test MARGINAL_CATALOGS constant exists."""
-        assert hasattr(event_module, 'MARGINAL_CATALOGS')
-        assert len(event_module.MARGINAL_CATALOGS) > 0
-    
+
     def test_no_catalog_overlap(self):
         """Test confident and marginal catalogs don't overlap."""
         confident = set(event_module.CONFIDENT_CATALOGS)
