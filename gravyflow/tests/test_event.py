@@ -108,6 +108,21 @@ class TestEventsWithParams:
                 gw150914["distance"], gw150914["p_astro"]) == ("GWTC", 35.6, 30.6, 440.0, 1.0)
         assert [e["observing_run"] for e in events] == ["O1", "O2", "O3"]
 
+    def test_one_event_under_three_catalogues_is_one_record(self, monkeypatch):
+        # One name, its GPS times across a 0.1 s rounding edge: rounding kept two.
+        listed = dict(_PE_CATALOGUE)
+        listed.update(
+            gps=np.array([1126259462.44, 1126259462.46, 1126259462.49]),
+            chirp_mass_source=np.array([28.6, 28.6, 28.6]),
+            name=np.array(["GW150914"] * 3),
+            catalog=np.array(["GWTC", "GWTC-1-confident", "GWTC-2.1-confident"]),
+            **{key: _PE_CATALOGUE[key][:3] for key in
+               ("mass_1_source", "mass_2_source", "luminosity_distance", "p_astro")},
+        )
+        monkeypatch.setattr(event_module, "get_event_catalogue", lambda use_cache=True: listed)
+        events = event_module.get_events_with_params()
+        assert [(e["name"], e["catalog"]) for e in events] == [("GW150914", "GWTC")]
+
     def test_marginal_events(self):
         events = event_module.get_events_with_params(event_types=[gf.EventConfidence.MARGINAL])
         assert [e["name"] for e in events] == ["marginal"]

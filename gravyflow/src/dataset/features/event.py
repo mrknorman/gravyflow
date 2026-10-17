@@ -329,7 +329,9 @@ def get_events_with_params(
         One dict per event, sorted by GPS time, with keys name, gps, catalog,
         observing_run and the parameter estimates mass1, mass2, distance and p_astro
         (NaN where the catalogue gives none). An event listed by several catalogues
-        (within 0.1 s) is given once, from the first catalogue in the order above.
+        is given once, by its catalogue name (``commonName``), from the first
+        catalogue in the order above: one physical event is one record, though its
+        catalogues' GPS times differ.
     """
     if event_types is None:
         event_types = [EventConfidence.CONFIDENT]
@@ -359,8 +361,8 @@ def get_events_with_params(
                 continue
             if event_names and event["name"] not in event_names:
                 continue
-            if round(gps, 1) not in seen:
-                seen.add(round(gps, 1))
+            if event["name"] not in seen:
+                seen.add(event["name"])
                 events.append(event)
 
     events.sort(key=lambda event: event["gps"])
