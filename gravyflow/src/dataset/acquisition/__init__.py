@@ -54,7 +54,6 @@ from .augmentations import (
     RandomShift,
     AddNoise,
     Augmentation,
-    default_augmentations,
 )
 
 # Import the factory function
@@ -103,5 +102,4 @@ __all__ = [
     'RandomShift',
     'AddNoise',
     'Augmentation',
-    'default_augmentations',
 ]

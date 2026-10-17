@@ -609,13 +609,20 @@ class BaseDataObtainer(ABC):
             cache_segments : bool = True,
             overrides : dict = None,
             logging_level : int = logging.WARNING,
-            augmentations: List = None,  # List of augmentation instances
+            augmentations: List = None,  # Training only; None is none
             prefetch_segments : int = 16,
             gwosc_flags : Optional[Tuple[str, ...]] = None,
             split_spec : Optional[SplitSpec] = None,
         ):
         """
         Args (selection):
+            augmentations: Augmentations a dataset applies to its training
+                split's raw strain, per example (``gf.SignReversal``,
+                ``gf.TimeReversal``, ``gf.RandomShift``, ``gf.AddNoise``); none by
+                default. Evaluation data, and the obtainer's own batches, are
+                never augmented. Real events refuse TimeReversal and
+                RandomShift, and noise refuses RandomShift (see
+                ``acquisition.augmentations``).
             split_spec: How GPS time is split into train, validate and test
                 (``gf.SplitSpec``); None is the default split.
             gwosc_flags: GWOSC timeline flags whose intersection defines usable
@@ -645,9 +652,8 @@ class BaseDataObtainer(ABC):
         self.cache_segments = cache_segments
         self.split_spec = as_split_spec(split_spec)
             
-        # Data augmentation settings - list of augmentation instances
-        from gravyflow.src.dataset.acquisition.augmentations import default_augmentations
-        self.augmentations = augmentations if augmentations is not None else default_augmentations()
+        from gravyflow.src.dataset.acquisition.augmentations import check_augmentations
+        self.augmentations = check_augmentations(augmentations, data_labels)
             
         # Unpack parameters from input observing runs:
         self.unpack_observing_runs(observing_runs, data_quality)
@@ -851,37 +857,6 @@ class BaseDataObtainer(ABC):
             self._prefetch_executor.shutdown(wait=True)
             self._prefetch_executor = None
     
-    def _apply_augmentation(self, data):
-        """
-        Apply augmentations to data based on configured augmentation list.
-        
-        Each augmentation instance carries its own probability and parameters.
-        
-        Args:
-            data: Tensor of shape (Batch, IFOs, Samples)
-            
-        Returns:
-            Augmented tensor with same shape
-        """
-        from gravyflow.src.dataset.acquisition.augmentations import (
-            SignReversal, TimeReversal
-        )
-        
-        if self.rng is None or not self.augmentations:
-            return data
-        
-        for aug in self.augmentations:
-            if self.rng.random() >= aug.probability:
-                continue
-                
-            if isinstance(aug, SignReversal):
-                data = -data
-            elif isinstance(aug, TimeReversal):
-                data = ops.flip(data, axis=-1)
-            # Subclasses handle their specific augmentation types
-            
-        return data
-    
     def _post_process_batch(
         self,
         batch: dict,
@@ -930,15 +905,6 @@ class BaseDataObtainer(ABC):
         batch[RV.OFFSOURCE] = gf.replace_nan_and_inf_with_zero(batch[RV.OFFSOURCE])
         
         return batch
-    
-    def _get_effective_saturation(self):
-        """
-        Calculate effective saturation accounting for augmentation.
-        """
-        effective = self.saturation
-        for aug in (self.augmentations or []):
-            effective *= (1 + aug.probability)
-        return effective
     
     def _prefetch_segment_for_index(
         self,

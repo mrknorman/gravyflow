@@ -290,6 +290,11 @@ class ReturnVariables(Enum):
     SOURCE_TYPE = ReturnVariable(12, (BATCH, IFO))        # SourceType.value if event, -1 otherwise
     EVENT_TYPE = ReturnVariable(15, (BATCH, IFO))         # EventConfidence enum value (if event)
     POOL_LABEL = ReturnVariable(17, (BATCH,))  # FeaturePool class label (ComposedDataset)
+    # The augmentations each example had, as a bitmask: the sum of the bit of
+    # each one applied (SignReversal 1, TimeReversal 2, RandomShift 4,
+    # AddNoise 8; ``gf.SignReversal.bit``). 0 for every example of evaluation
+    # data, which is never augmented. START_GPS_TIME still gives the window read.
+    AUGMENTATIONS = ReturnVariable(19, (BATCH,))
     
     def __lt__(self, other):
         return self.value.index < other.value.index

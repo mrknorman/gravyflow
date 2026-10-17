@@ -8,6 +8,10 @@ as common random numbers allow, by name.
 Synthetic noise has no GPS time, so every check here reads the content
 (`fingerprints`): 64-sample windows for strain, rank correlation at every
 offset and exact values for labels, and a recursive state digest for caller objects.
+
+Augmentation reaches only the training split: those checks read the fake
+world's coded strain (`provenance`), whose every row says whether it was
+sign-flipped or time-reversed, and where it was read.
 """
 
 import hashlib
@@ -18,10 +22,12 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.tests.leakage import fixtures as fx
 from gravyflow.tests.leakage.fingerprints import (
     assert_rows_disjoint, assert_streams_independent, assert_unchanged, concatenate_streams,
     label_streams, state_items, strain_prints,
 )
+from gravyflow.tests.leakage.provenance import DecodeRefused, decode_row, footprints
 from gravyflow.tests.leakage.tap import DatasetTap, EpochWindows
 
 RV, WP, ST = gf.ReturnVariables, gf.WaveformParameters, gf.ScalingTypes
@@ -394,3 +400,183 @@ def test_common_random_numbers():
 
     with pytest.raises(ValueError, match="dataset name"):
         noise_only("noise/signal")
+
+
+# --------------------------------------------------------------- augmentation
+
+#: Sign and time reversal on every example: any row they reach is visibly reversed.
+REVERSALS = (gf.SignReversal(probability=1.0), gf.TimeReversal(probability=1.0))
+WORLD_IFOS = ("H1", "L1")
+
+
+def world_settings(batch=8):
+    """The fake world's window and detectors, at its 256 Hz."""
+    return dict(
+        sample_rate_hertz=256.0, onsource_duration_seconds=fx.ONSOURCE_SECONDS,
+        crop_duration_seconds=fx.CROP_SECONDS, offsource_duration_seconds=fx.OFFSOURCE_SECONDS,
+        num_examples_per_batch=batch, ifos=[gf.IFO[name] for name in WORLD_IFOS], steps_per_epoch=16,
+    )
+
+
+def augmented_world():
+    """Real noise in every split: one O3 piece across a train|test edge, one across validate|train."""
+    fixture, _ = fx.two_splits_per_run(("O3",), origin="O3")
+    return fixture
+
+
+def world_dataset(obtainer, split, outputs=(), batch=8):
+    """A dataset of the world's real noise, read through ``obtainer``."""
+    return gf.Dataset(noise_obtainer=obtainer, group=split, seed=7, input_variables=STRAIN,
+                      output_variables=[RV.START_GPS_TIME, *outputs], **world_settings(batch))
+
+
+def pool_dataset(obtainer, split):
+    """A composed dataset whose one pool reads the world's real noise through ``obtainer``."""
+    pool = gf.FeaturePool(name="noise", label=0, probability=1.0, noise_obtainer=obtainer)
+    return gf.ComposedDataset(pools=[pool], seed=7, group=split, input_variables=STRAIN,
+                              output_variables=[RV.POOL_LABEL], **world_settings())
+
+
+def recorded(onsource, offsource, fixture):
+    """The footprints of rows of the world's strain as recorded: refuses a reversed or negated row."""
+    return footprints(np.asarray(onsource), np.asarray(offsource), WORLD_IFOS, fixture.encoding,
+                      fx.window(), onsource_cropped=True)
+
+
+def reversals_of(row, ifo_name, fixture) -> int:
+    """The SignReversal and TimeReversal bits a row of the world's strain carries."""
+    row = np.asarray(row, np.float64)
+    bits = 0
+    if np.all(row < 0):
+        row, bits = -row, bits | gf.SignReversal.bit
+    try:
+        decode_row(row, ifo_name, fixture.encoding)
+    except DecodeRefused:
+        decode_row(row[::-1], ifo_name, fixture.encoding)
+        bits |= gf.TimeReversal.bit
+    return bits
+
+
+def test_augmentation_stays_in_split(world, tmp_path, monkeypatch):
+    """
+    Augmentation never reaches evaluation data. One obtainer, with sign and time
+    reversal at probability 1, serves train, validate and test, through a dataset
+    and a composed dataset's pool, and the validator: every evaluation row is the
+    strain as recorded, forward and positive, and every training row is that
+    strain negated and reversed. Real events refuse time reversal and random shift.
+    """
+    from gravyflow.src.validate import ValidationConfig
+    from gravyflow.src.validate.bank import ValidationBank
+
+    fixture = augmented_world()
+    with world(fixture):
+        noise = fx.noise_obtainer(fixture, tmp_path / "data", augmentations=list(REVERSALS))
+        for split in SPLITS:
+            for build in (world_dataset, pool_dataset):
+                x, _ = build(noise, split)[0]
+                onsource, offsource = (np.asarray(x[key.name]) for key in STRAIN)
+                if split == "train":
+                    with pytest.raises(DecodeRefused, match="sign-flipped"):
+                        recorded(onsource, offsource, fixture)
+                    onsource, offsource = (-rows[..., ::-1] for rows in (onsource, offsource))
+                recorded(onsource, offsource, fixture)
+
+        tap = DatasetTap(monkeypatch, STRAIN)
+        args = dict(noise_obtainer=noise, input_variables=[RV.WHITENED_ONSOURCE], **world_settings())
+        for group in ("validate", "test"):
+            config = ValidationConfig(group=group, num_examples=16, batch_size=8)
+            ValidationBank(logit_model(), args, config).generate_noise()
+            (stage,) = tap.take()
+            assert stage.group == group and stage.batches
+            for batch in stage.batches:
+                recorded(batch[RV.ONSOURCE.name], batch[RV.OFFSOURCE.name], fixture)
+
+    for labels in ([gf.DataLabel.EVENTS], [gf.DataLabel.GLITCHES, gf.EventConfidence.CONFIDENT]):
+        for augmentation in (gf.TimeReversal(), gf.RandomShift()):
+            with pytest.raises(ValueError, match="real events"):
+                gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=labels,
+                                   augmentations=[augmentation])
+
+
+def test_a_default_batch_is_unaugmented(world, tmp_path):
+    """No augmentation by default: a training batch is the strain as recorded, flagged 0."""
+    fixture = augmented_world()
+    with world(fixture):
+        noise = fx.noise_obtainer(fixture, tmp_path / "data", augmentations=None)
+        ds = world_dataset(noise, "train")
+        for k in range(4):
+            x, _ = ds[k]
+            recorded(x[RV.ONSOURCE.name], x[RV.OFFSOURCE.name], fixture)
+        _, y = world_dataset(noise, "train", outputs=[RV.AUGMENTATIONS])[0]
+        np.testing.assert_array_equal(y[RV.AUGMENTATIONS.name], np.zeros(8, np.float32))
+
+
+def test_each_example_draws_once_for_both_windows_and_is_flagged(world, tmp_path):
+    """
+    Each example draws each augmentation once, from its own stream: its onsource
+    and offsource, on every detector, are reversed together or not at all;
+    examples of one batch differ; and AUGMENTATIONS flags exactly what was applied.
+    """
+    fixture = augmented_world()
+    with world(fixture):
+        noise = fx.noise_obtainer(fixture, tmp_path / "data", augmentations=[
+            gf.SignReversal(probability=0.5), gf.TimeReversal(probability=0.5)])
+        ds = world_dataset(noise, "train", outputs=[RV.AUGMENTATIONS], batch=16)
+        seen = []
+        for k in range(2):
+            x, y = ds[k]
+            flags = np.asarray(y[RV.AUGMENTATIONS.name])
+            assert flags.dtype == np.float32 and flags.shape == (16,)
+            for b in range(16):
+                bits = {reversals_of(x[key.name][b, d], name, fixture)
+                        for key in STRAIN for d, name in enumerate(WORLD_IFOS)}
+                assert bits == {int(flags[b])}, (k, b, bits, flags[b])
+                seen.append(int(flags[b]))
+        assert set(seen) == {0, 1, 2, 3}, seen
+
+
+def test_injections_are_never_augmented(world, tmp_path):
+    """
+    Augmentation transforms the raw strain before injection: a signal injected
+    into negated strain is the same signal, never negated with it.
+    """
+    fixture = augmented_world()
+    outputs = [RV.INJECTIONS]
+    with world(fixture):
+        drawn = {}
+        for name, spec in (("plain", []), ("negated", [gf.SignReversal(probability=1.0)])):
+            noise = fx.noise_obtainer(fixture, tmp_path / "data", augmentations=spec)
+            ds = gf.Dataset(noise_obtainer=noise, group="train", seed=7, input_variables=STRAIN,
+                            output_variables=outputs, waveform_generators=[burst()], **world_settings())
+            x, y = ds[0]
+            drawn[name] = np.asarray(x[RV.ONSOURCE.name], np.float64), np.asarray(y[RV.INJECTIONS.name])
+    (plain, injection), (negated, same_injection) = drawn["plain"], drawn["negated"]
+    np.testing.assert_array_equal(injection, same_injection)
+    signal = injection[:, 0].astype(np.float64)
+    # The strain cancels; the signal, injected into both as it is, doubles.
+    np.testing.assert_allclose(negated + plain, 2.0 * signal, atol=0.01 * np.max(np.abs(signal)))
+
+
+def test_toggling_an_augmentation_moves_no_window(world, tmp_path):
+    """
+    Augmentation is drawn apart from sampling, and does not change how densely
+    windows are drawn: adding augmentations changes no window drawn.
+    """
+    fixture = augmented_world()
+    specs = {
+        "none": [],
+        "sign": [gf.SignReversal(probability=0.5)],
+        "sign and noise": [gf.SignReversal(probability=0.5), gf.AddNoise(probability=0.5, amplitude=0.1)],
+    }
+    with world(fixture):
+        starts = {}
+        for name, spec in specs.items():
+            # A low saturation, so a row serves a few batches and the reader moves between rows.
+            noise = fx.noise_obtainer(fixture, tmp_path / "data", augmentations=spec, saturation=0.125)
+            ds = world_dataset(noise, "train")
+            starts[name] = [np.asarray(ds[k][1][RV.START_GPS_TIME.name]) for k in range(12)]
+    rows = {tuple(np.floor(start[0] / fx.BLOCK_SECONDS)) for start in starts["none"]}
+    assert len(rows) > 1, "the batches compared must come from more than one row"
+    for name in specs:
+        for k, start in enumerate(starts[name]):
+            np.testing.assert_array_equal(start, starts["none"][k], err_msg=f"{name}, batch {k}")

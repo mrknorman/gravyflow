@@ -21,7 +21,9 @@ from gravyflow.src.utils.tensor import (
 )
 from gravyflow.src.utils.shapes import BatchContract
 from gravyflow.src.dataset.config import Defaults, WindowSpec, ignore_scale_factor
-from gravyflow.src.dataset.noise.noise import index_addressed, obtainer_batcher
+from gravyflow.src.dataset.noise.noise import NoiseBatcher, index_addressed, obtainer_batcher
+from gravyflow.src.dataset.acquisition.augmentations import Augmented, augment
+from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
 from gravyflow.src.dataset.features.injection import InjectionGenerator, check_scaling_matches_noise
 from gravyflow.src.rng import BatchStreams, SeedTree, check_coordinate, check_name, check_split
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
@@ -100,6 +102,44 @@ def split_spec_of(obtainers) -> "gf.SplitSpec":
     if len(specs) > 1:
         raise ValueError(f"A dataset's obtainers split time differently: {sorted(s.fingerprint() for s in specs)}.")
     return specs.pop() if specs else gf.DEFAULT_SPLIT
+
+
+def augment_batch(onsource, offsource, streams: BatchStreams, obtainer, split: str,
+                  sampling_mode: Optional["gf.SamplingMode"] = None) -> Augmented:
+    """
+    A batch's raw strain with the augmentations of the IFO data obtainer it was
+    read through applied (``augment``): training data only, before injection
+    and whitening. Simulated noise (WHITE, COLORED) reads through none, and a
+    reader of the caller's own carries none, so neither is augmented.
+    """
+    if isinstance(obtainer, gf.NoiseObtainer):
+        real = obtainer.noise_type in (gf.NoiseType.REAL, gf.NoiseType.PSEUDO_REAL)
+        obtainer = obtainer.ifo_data_obtainer if real else None
+    if not isinstance(obtainer, BaseDataObtainer):
+        return augment((onsource, offsource), streams, (), split)
+    return augment((onsource, offsource), streams, obtainer.augmentations, split, obtainer.data_labels,
+                   sampling_mode)
+
+
+def augmented_batcher(obtainer, tree: SeedTree, group: str, **window) -> NoiseBatcher:
+    """
+    The batcher of ``obtainer`` (``obtainer_batcher``), each batch's raw strain
+    augmented for its split ``group`` (``augment_batch``) and flagged in
+    AUGMENTATIONS. A dataset reads its noise through one, and a composed dataset
+    one per pool, so every example is augmented once, by its own source and from
+    its own streams, after its noise is read and before injection.
+    """
+    read = obtainer_batcher(obtainer, tree, group, **window)
+    sampling_mode = window.get("sampling_mode")
+
+    def batch(streams: BatchStreams) -> Dict:
+        data = dict(read(streams))
+        RV = gf.ReturnVariables
+        data[RV.ONSOURCE], data[RV.OFFSOURCE], data[RV.AUGMENTATIONS] = augment_batch(
+            data[RV.ONSOURCE], data[RV.OFFSOURCE], streams, obtainer, group, sampling_mode)
+        return data
+
+    return batch
 
 
 def get_max_arrival_time_difference(ifos: List[gf.IFO]) -> float:
@@ -356,6 +396,11 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
     ComposedDataset. The dataset works
     on its own copies of the obtainer and generators it is given, so the
     caller's objects are never changed and can serve other datasets.
+
+    Augmentation: a training split drawn at random applies its IFO data
+    obtainer's augmentations to each batch's raw strain, per example, before
+    injection and whitening, as its noise is read (``augmented_batcher``);
+    evaluation data never does. AUGMENTATIONS gives what each example had.
     """
 
     def __init__(
@@ -620,7 +665,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         if self.ifos is not None:
             noise_kwargs['ifos'] = self.ifos
 
-        self.noise = obtainer_batcher(self.noise_obtainer, self.tree, self.group, **noise_kwargs)
+        self.noise = augmented_batcher(self.noise_obtainer, self.tree, self.group, **noise_kwargs)
 
         waveform_parameters_to_return = [
             item for item in self.variables_to_return if isinstance(
@@ -657,13 +702,15 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                 data_label = batch_data.get(gf.ReturnVariables.DATA_LABEL)
                 # A composed dataset's noise names each example's pool.
                 pool_label = batch_data.get(gf.ReturnVariables.POOL_LABEL)
+                # The augmentations each example's noise had as it was read.
+                augmentations = batch_data.get(gf.ReturnVariables.AUGMENTATIONS)
             elif len(batch_data) == 4:
                 onsource, offsource, gps_times, feature_labels = batch_data
-                glitch_type, source_type, data_label, pool_label = None, None, None, None
+                glitch_type, source_type, data_label, pool_label, augmentations = None, None, None, None, None
             else:
                 onsource, offsource, gps_times = batch_data
                 feature_labels = None
-                glitch_type, source_type, data_label, pool_label = None, None, None, None
+                glitch_type, source_type, data_label, pool_label, augmentations = None, None, None, None, None
         except Exception as e:
             logger.info(f"Noise generation failed: {e}\nTraceback: {traceback.format_exc()}")
             raise Exception(f"Noise generation failed: {e}")
@@ -716,6 +763,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             source_type=self._process_transient_label(source_type),
             data_label=self._process_transient_label(data_label),
             pool_label=self._process_transient_label(pool_label),
+            augmentations=augmentations,
         )
         self.batch_contract.check(
             (self.input_variables, self.output_variables), input_dict, output_dict
@@ -919,7 +967,8 @@ def create_variable_dictionary(
     glitch_type = None,
     source_type = None,
     data_label = None,
-    pool_label = None
+    pool_label = None,
+    augmentations = None,
     ) -> Dict:
     """
     Create dictionary of requested return variables.
@@ -935,6 +984,7 @@ def create_variable_dictionary(
         source_type: SOURCE_TYPE labels (from TransientObtainer).
         data_label: DATA_LABEL values (from TransientObtainer).
         pool_label: POOL_LABEL values (a ComposedDataset's pools).
+        augmentations: AUGMENTATIONS, each example's augmentation flags.
     """
     from keras import ops
     
@@ -954,6 +1004,7 @@ def create_variable_dictionary(
         gf.ReturnVariables.SOURCE_TYPE: source_type,
         gf.ReturnVariables.DATA_LABEL: data_label,
         gf.ReturnVariables.POOL_LABEL: pool_label,
+        gf.ReturnVariables.AUGMENTATIONS: augmentations,
     }
 
     # Add WaveformParameters from injection_parameters
@@ -1027,7 +1078,10 @@ class ComposedDataset(GravyflowDataset):
     Each example's pool is drawn from the batch's ``pool/assign`` stream, and
     example b is row b of its pool's batch. Every draw of a pool sits under
     ``pool/{name}/``, so pools never share a stream, and a pool's injection
-    generators inject into its own examples only.
+    generators inject into its own examples only. A pool's noise is augmented
+    as a GravyflowDataset's is, by its own source, for the dataset's split, as
+    it is read: example b has its pool's augmentation of row b, and
+    AUGMENTATIONS says so.
 
     Otherwise a composed batch is a GravyflowDataset's, built by the same code
     (see GravyflowDataset and IndexedBatches): one PSD per batch for scaling,
@@ -1193,7 +1247,7 @@ class ComposedDataset(GravyflowDataset):
             'sampling_mode': self.sampling_mode,
         }
         self._pool_noise = [
-            obtainer_batcher(obtainer, self.tree.sub(f"pool/{pool.name}"), self.group, **window)
+            augmented_batcher(obtainer, self.tree.sub(f"pool/{pool.name}"), self.group, **window)
             for pool, obtainer in zip(self.pools, self._obtainers())
         ]
         self.noise = self._mixed_noise
@@ -1213,8 +1267,8 @@ class ComposedDataset(GravyflowDataset):
     def _mixed_noise(self, streams: BatchStreams) -> Dict:
         """
         The batch's noise, as an obtainer's batch: example b is row b of its
-        pool's batch (drawn from ``pool/{name}/``), with its pool's label.
-        Only the pools the batch holds are read.
+        pool's batch (drawn from ``pool/{name}/``, augmented), with its pool's
+        label. Only the pools the batch holds are read.
         """
         assignment = self._assignment(streams)
         defaults = _noise_defaults()
@@ -1224,7 +1278,8 @@ class ComposedDataset(GravyflowDataset):
             batch = self._pool_noise[index](streams.sub(f"pool/{pool.name}"))
             rows = assignment == index
             per_detector = tuple(np.shape(batch[gf.ReturnVariables.ONSOURCE])[:2])
-            for key in (gf.ReturnVariables.ONSOURCE, gf.ReturnVariables.OFFSOURCE, *defaults):
+            for key in (gf.ReturnVariables.ONSOURCE, gf.ReturnVariables.OFFSOURCE,
+                        gf.ReturnVariables.AUGMENTATIONS, *defaults):
                 if key in batch:
                     value = np.asarray(batch[key])
                 else:

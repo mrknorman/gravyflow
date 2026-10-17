@@ -69,7 +69,6 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `TimeReversal`: an augmentation that reverses the strain in time.
 - `RandomShift`: an augmentation that shifts the strain in time.
 - `AddNoise`: an augmentation that adds Gaussian noise.
-- `default_augmentations`: the augmentations a transient dataset applies when asked for some.
 - `GWOSC_DATA_FLAGS`: GWOSC's data-quality flags for usable data.
 - `GWOSC_BURST_FLAGS`: GWOSC's burst vetoes.
 - `GWOSC_CBC_FLAGS`: GWOSC's CBC vetoes.

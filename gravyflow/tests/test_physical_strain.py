@@ -228,14 +228,13 @@ def test_snr_targets_are_accepted_in_white_noise():
     np.testing.assert_allclose(np.asarray(y["SNR"]), 12.0, rtol=1e-5)
 
 
-def test_add_noise_adds_none_to_a_batch_without_variance():
-    """AddNoise is relative to the batch's std; a batch with none has no scale for it."""
-    import types
-    from gravyflow.src.dataset.acquisition.transient import TransientDataObtainer
-    fake = types.SimpleNamespace(rng=np.random.default_rng(0),
-                                 augmentations=[gf.AddNoise(probability=1.0, amplitude=0.1)])
-    out = np.asarray(TransientDataObtainer._apply_augmentation(fake, np.zeros((2, 1, 64), np.float32)))
-    assert np.all(out == 0.0)
+def test_add_noise_adds_none_to_an_example_without_variance():
+    """AddNoise is relative to each example's std; an example with none has no scale for it."""
+    from gravyflow.src.dataset.acquisition.augmentations import augment
+    zeros = np.zeros((2, 1, 64), np.float32)
+    out = augment((zeros, zeros), gf.SeedTree(0).batch("train", 0, 0),
+                  [gf.AddNoise(probability=1.0, amplitude=0.1)], "train", [gf.DataLabel.GLITCHES])
+    assert np.all(np.asarray(out.onsource) == 0.0) and np.all(np.asarray(out.offsource) == 0.0)
 
 
 # --- Raw-strain consumers (every public one: test_raw_strain_census) ---------

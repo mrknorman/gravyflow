@@ -27,7 +27,7 @@ def IFODataObtainer(
         overrides: dict = None,
         event_types: List[EventConfidence] = None,
         logging_level: int = logging.WARNING,
-        augmentations: List = None,  # List of augmentation instances
+        augmentations: List = None,  # Training only; None is none
         prefetch_segments: int = 16,
         # Class balancing
         balanced_glitch_types: bool = False,
@@ -57,7 +57,8 @@ def IFODataObtainer(
         overrides: Dictionary of attribute overrides
         event_types: Filter events by type (for TRANSIENT mode)
         logging_level: Logging verbosity
-        augmentations: List of augmentation instances (SignReversal, TimeReversal, etc.)
+        augmentations: Augmentations a dataset applies to its training split only, per
+            example (SignReversal, TimeReversal, RandomShift, AddNoise); none by default
         prefetch_segments: Number of segments to prefetch
         balanced_glitch_types: Enable balanced sampling of glitch types
         event_names: Specific event names to acquire (TRANSIENT only)

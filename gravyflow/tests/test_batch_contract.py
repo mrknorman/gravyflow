@@ -50,7 +50,7 @@ def wnb(chance=1.0):
 
 DATA = [RV.ONSOURCE, RV.WHITENED_ONSOURCE, RV.OFFSOURCE, RV.INJECTIONS, RV.WHITENED_INJECTIONS,
         RV.START_GPS_TIME]
-LABELS = [RV.INJECTION_MASKS, RV.INJECTION_PRESENT, RV.CENTRAL_TIME, ST.SNR, ST.HRSS, ST.HPEAK,
+LABELS = [RV.INJECTION_MASKS, RV.INJECTION_PRESENT, RV.AUGMENTATIONS, RV.CENTRAL_TIME, ST.SNR, ST.HRSS, ST.HPEAK,
           WP.MASS_1_MSUN, WP.DISTANCE_MPC, WP.SPIN_1_IN, WP.FREQUENCY_HERTZ, WP.DURATION_SECONDS,
           WP.RIGHT_ASCENSION_RADIANS, WP.DECLINATION_RADIANS, WP.POLARIZATION_RADIANS]
 
@@ -89,7 +89,7 @@ def documented_shape(key, g, i):
         RV.ONSOURCE: (B, i, T), RV.WHITENED_ONSOURCE: (B, i, T), RV.OFFSOURCE: (B, i, T_OFF),
         RV.INJECTIONS: (B, g, i, T), RV.WHITENED_INJECTIONS: (B, g, i, T),
         RV.START_GPS_TIME: (B, i), RV.INJECTION_MASKS: (B, g), RV.INJECTION_PRESENT: (B,),
-        RV.CENTRAL_TIME: (B, g, i), WP.SPIN_1_IN: (B, g, 3),
+        RV.AUGMENTATIONS: (B,), RV.CENTRAL_TIME: (B, g, i), WP.SPIN_1_IN: (B, g, 3),
     }
     return shapes.get(key, (B, g))
 
@@ -107,8 +107,9 @@ def test_every_output_is_batch_first_float32_in_its_documented_shape(name):
         assert tuple(np.shape(value)) == documented_shape(key, g, i), key.name
         assert str(value.dtype) == ("float64" if key is RV.START_GPS_TIME else "float32"), key.name
 
-    # Simulated noise has no GPS time.
+    # Simulated noise has no GPS time, and no augmentation.
     assert np.all(np.isnan(x["START_GPS_TIME"]))
+    np.testing.assert_array_equal(y["AUGMENTATIONS"], np.zeros(B, np.float32))
 
     masks = np.asarray(y["INJECTION_MASKS"])
     np.testing.assert_array_equal(y["INJECTION_PRESENT"], np.any(masks > 0, axis=1).astype(np.float32))
@@ -117,7 +118,7 @@ def test_every_output_is_batch_first_float32_in_its_documented_shape(name):
     else:
         assert not np.any(np.asarray(x["INJECTIONS"]).size)
 
-    for key in [k for k in LABELS if k not in (RV.INJECTION_MASKS, RV.INJECTION_PRESENT)]:
+    for key in [k for k in LABELS if k not in (RV.INJECTION_MASKS, RV.INJECTION_PRESENT, RV.AUGMENTATIONS)]:
         label = np.asarray(y[key.name])
         for generator_index, generator in enumerate(generators):
             values = label[:, generator_index].reshape(B, -1)

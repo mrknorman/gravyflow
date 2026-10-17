@@ -18,16 +18,13 @@ the modules that compute on data (PSD, SNR, whitening, Pearson, spectrogram, the
 matched filter, plotting and the augmentations): a new public function there
 fails until it joins CENSUS, or EXEMPT with the reason it takes no raw strain.
 """
-import types
-
 import numpy as np
 import pytest
 
 import gravyflow as gf
 from gravyflow.src.dataset.acquisition.augmentations import (
-    AddNoise, RandomShift, SignReversal, TimeReversal
+    AddNoise, RandomShift, SignReversal, TimeReversal, augment
 )
-from gravyflow.src.dataset.acquisition.transient import TransientDataObtainer
 from gravyflow.src.dataset.tools.psd import estimate_psd
 from gravyflow.src.dataset.tools.snr import template_sigma
 from gravyflow.src.detection import MatchedFilter, TemplateBank
@@ -69,8 +66,10 @@ def at(x, k):
 
 
 def _augmented(augmentation, k):
-    fake = types.SimpleNamespace(rng=np.random.default_rng(0), augmentations=[augmentation])
-    return np.asarray(TransientDataObtainer._apply_augmentation(fake, at(ONSOURCE, k))) / k
+    strain = (at(ONSOURCE, k), at(OFFSOURCE, k))
+    augmented = augment(strain, gf.SeedTree(0).batch("train", 0, 0), [augmentation], "train",
+                        [gf.DataLabel.GLITCHES])
+    return np.asarray(augmented.onsource) / k
 
 
 def _spectrogram_image(k):
@@ -83,7 +82,7 @@ _matched_filter = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), s
 ELEMENT, PEAK = "element", "peak"
 
 #: name -> (f(k x) taken back to k = 1, comparison, whether it may refuse). The
-#: augmentations run as TransientDataObtainer applies them.
+#: augmentations run as a dataset applies them (``augment``), to glitches.
 CENSUS = {
     "gf.psd": (lambda k: gf.psd(at(OFFSOURCE, k), nperseg=1024, sample_rate_hertz=FS).value() / k ** 2,
                ELEMENT, False),
@@ -134,7 +133,6 @@ EXEMPT = {
     "generate_correlation_plot": "plots gf.rolling_pearson's output",
     "generate_segment_timeline_plot": "plots segment times",
     "generate_example_extraction_plot": "plots the values it is given; forms no square",
-    "default_augmentations": "returns augmentation settings",
 }
 
 NUMERIC_MODULES = (

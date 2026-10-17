@@ -78,7 +78,6 @@ _MODULES = {
     "TimeReversal": "gravyflow.src.dataset.acquisition",
     "RandomShift": "gravyflow.src.dataset.acquisition",
     "AddNoise": "gravyflow.src.dataset.acquisition",
-    "default_augmentations": "gravyflow.src.dataset.acquisition",
     "GWOSC_DATA_FLAGS": "gravyflow.src.dataset.acquisition",
     "GWOSC_BURST_FLAGS": "gravyflow.src.dataset.acquisition",
     "GWOSC_CBC_FLAGS": "gravyflow.src.dataset.acquisition",

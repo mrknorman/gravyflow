@@ -76,7 +76,7 @@ class TransientDataObtainer(BaseDataObtainer):
             overrides: dict = None,
             event_types: List[EventConfidence] = None,
             logging_level: int = logging.WARNING,
-            augmentations: List = None,  # List of augmentation instances
+            augmentations: List = None,  # Training only; None is none
             prefetch_segments: int = 64,  # Higher for smaller TRANSIENT segments
             # Class balancing
             balanced_glitch_types: bool = False,
@@ -296,43 +296,6 @@ class TransientDataObtainer(BaseDataObtainer):
         )
         return planned, plans
 
-    def _apply_augmentation(self, data):
-        """
-        Apply augmentations including TRANSIENT-specific ones (RandomShift, AddNoise).
-        """
-        from gravyflow.src.dataset.acquisition.augmentations import (
-            SignReversal, TimeReversal, RandomShift, AddNoise
-        )
-        
-        if self.rng is None or not self.augmentations:
-            return data
-        
-        for aug in self.augmentations:
-            if self.rng.random() >= aug.probability:
-                continue
-            
-            if isinstance(aug, SignReversal):
-                data = -data
-            elif isinstance(aug, TimeReversal):
-                data = ops.flip(data, axis=-1)
-            elif isinstance(aug, RandomShift):
-                # Shift event off-center
-                num_samples = int(ops.shape(data)[-1])
-                max_shift = int(aug.shift_fraction * num_samples)
-                shift = self.rng.integers(-max_shift, max_shift + 1)
-                data = ops.roll(data, shift, axis=-1)
-            elif isinstance(aug, AddNoise):
-                # Noise of aug.amplitude times the batch's std, in the data's units.
-                # A batch with no variance has no scale to add noise in, so it gets
-                # none. In float64: the square of strain (~1e-42) is below float32's
-                # normal range.
-                data_np = ops.convert_to_numpy(data)
-                noise = self.rng.normal(0, aug.amplitude, data_np.shape)
-                std = np.std(data_np, dtype=np.float64)
-                data = ops.convert_to_tensor(data_np + noise * std, dtype=data.dtype)
-        
-        return data
-
     def _events_only(self) -> bool:
         """Whether the obtainer serves real events and nothing else."""
         labels = self.data_labels if isinstance(self.data_labels, list) else [self.data_labels]
@@ -525,8 +488,8 @@ class TransientDataObtainer(BaseDataObtainer):
         ).astype(np.int32)
 
         return {
-            RV.ONSOURCE: self._apply_augmentation(final_subarrays),
-            RV.OFFSOURCE: self._apply_augmentation(final_background),
+            RV.ONSOURCE: final_subarrays,
+            RV.OFFSOURCE: final_background,
             RV.START_GPS_TIME: window_spec.onsource_start_gps(
                 window_spec.transient_window_start_gps(transient_gps)
             ),

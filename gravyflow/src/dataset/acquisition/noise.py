@@ -102,7 +102,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             cache_segments: bool = True,
             overrides: dict = None,
             logging_level: int = logging.WARNING,
-            augmentations: List = None,  # List of augmentation instances
+            augmentations: List = None,  # Training only; None is none
             prefetch_segments: int = 16,
             gwosc_flags: Optional[Tuple[str, ...]] = None,
             split_spec=None,
@@ -555,8 +555,8 @@ class NoiseDataObtainer(BaseDataObtainer):
             #         DATA_LABEL = (Batch, IFO) = BI (all NOISE = 0)
             batch_size, num_ifos = subarrays.shape[:2]
             return _post_process({
-                RV.ONSOURCE: self._apply_augmentation(subarrays),
-                RV.OFFSOURCE: self._apply_augmentation(background_chunks),
+                RV.ONSOURCE: subarrays,
+                RV.OFFSOURCE: background_chunks,
                 # The windows' first samples, as the first returned onsource sample.
                 RV.START_GPS_TIME: window_spec.onsource_start_gps(start_gps_times),
                 RV.DATA_LABEL: ops.full((batch_size, num_ifos), 0, dtype="int32"),  # NOISE = 0
@@ -568,7 +568,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             return
 
         # Nominal density: saturation examples per onsource duration of window starts.
-        batches_per_start_second = self._get_effective_saturation() / (
+        batches_per_start_second = self.saturation / (
             num_examples_per_batch * window_spec.onsource_duration_seconds
         )
 
