@@ -10,7 +10,7 @@ GPS grid, shared safely by every process on one root.
 
 from .budget import BudgetRefused, BudgetTimeout, ByteBudget
 from .commit import (
-    Commit, Fetched, Store, StoreConflict, StoreWriteError, TileWaitTimeout, reap,
+    Commit, Fetched, ForgetRaced, Store, StoreConflict, StoreWriteError, TileWaitTimeout, reap,
 )
 from .tile import (
     STORE_FORMAT, StoreError, TileIncomplete, TileKey, TileMissing, TileRecord, TileRefused,
@@ -20,7 +20,7 @@ from .view import Tile, UnheldSamples, open_tile, read_window, verify
 
 __all__ = [
     "STORE_FORMAT", "BudgetRefused", "BudgetTimeout", "ByteBudget", "Commit", "Fetched",
-    "Store", "StoreConflict", "StoreError", "StoreWriteError", "Tile", "TileIncomplete",
-    "TileKey", "TileMissing", "TileRecord", "TileRefused", "TileWaitTimeout", "Unheld",
-    "UnheldSamples", "covering", "open_tile", "read_window", "reap", "seal", "verify",
+    "ForgetRaced", "Store", "StoreConflict", "StoreError", "StoreWriteError", "Tile",
+    "TileIncomplete", "TileKey", "TileMissing", "TileRecord", "TileRefused", "TileWaitTimeout",
+    "Unheld", "UnheldSamples", "covering", "open_tile", "read_window", "reap", "seal", "verify",
 ]

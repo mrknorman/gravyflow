@@ -68,16 +68,16 @@ class Tile:
 def open_tile(root: Path, key: TileKey, *, verify: bool = False) -> Tile:
     """
     The committed tile ``key``, checked: its record names this key (a renamed or moved
-    record is refused), its samples file has the tile's shape and dtype, and its
-    samples are the very file committed (``tile.identity``), or else hash to the
-    record's sha256 (a swapped samples file is refused). ``verify`` checks the hash in
-    every case.
+    record is refused), the samples file the record's sha256 names has the tile's shape
+    and dtype, and it is the very file committed (``tile.identity``), or else hashes to
+    that sha256 (a file altered or put there from outside is refused). ``verify``
+    checks the hash in every case. No other samples file is ever read.
 
     Raises ``TileMissing`` when the tile is not committed, ``TileIncomplete`` when its
-    record has no samples, and ``TileRefused`` when a check fails.
+    record's samples file is absent, and ``TileRefused`` when a check fails.
     """
     record = read_record(root, key)
-    path = key.samples_path(root)
+    path = key.samples_path(root, record.sha256)
     try:
         handle = open(path, "rb")
     except FileNotFoundError:
@@ -102,7 +102,7 @@ def open_tile(root: Path, key: TileKey, *, verify: bool = False) -> Tile:
         if (verify or identity(stat) != record.samples_identity) and file_sha256(handle) != record.sha256:
             raise TileRefused(
                 f"{path} is not {key.describe()}'s samples: its sha256 differs from its "
-                "record's. A swapped or altered samples file is never served."
+                "record's. An altered samples file is never served."
             )
         samples = np.memmap(handle, dtype=SAMPLE_DTYPE, mode="r", offset=offset, shape=(key.length,))
     return Tile(record, samples)

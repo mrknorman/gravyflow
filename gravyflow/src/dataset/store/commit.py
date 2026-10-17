@@ -5,22 +5,28 @@ extended or merged.
 The commit, for one tile:
 
 1. Seal the whole fetched tile (``tile.seal``) and write it to a temporary file in the
-   tile's directory, fsync'd and read-only.
+   tile's directory, fsync'd and read-only; its sha256 names it.
 2. When the tile has a record, its sha256 must be this writer's, or the commit is
-   ``StoreConflict`` (the source changed under the store) before anything is linked:
-   samples are never linked under a record that names others.
-3. ``os.link`` the temporary to ``k.npy``. The link fails if ``k.npy`` exists; then the
-   committed samples are hashed against this writer's: equal is a no-op, different is
-   ``StoreConflict``. Nothing is overwritten. The temporary is removed, and the
-   committed file's identity (``tile.identity``) read from an open handle on it.
+   ``StoreConflict`` (the source changed under the store) before anything is linked.
+3. ``os.link`` the temporary to ``k.<sha256>.npy``. The link fails if that file
+   exists; then it is hashed against its name: equal is a no-op, different is
+   ``StoreConflict`` (the file was altered). Nothing is overwritten. The temporary is
+   removed, and the committed file's identity (``tile.identity``) read from an open
+   handle on it.
 4. Write the record the same way and link it to ``k.json``, with the same check over
    the record's content (every field but the commit metadata).
 
-A tile exists only when its record does, and a record implies complete samples. A
-writer stopped between the two links leaves samples without a record: the tile is
-absent, and its next writer finds the samples, verifies them and links the record.
-Every error writing, linking or removing raises ``StoreWriteError`` naming the path
-and the errno; none is swallowed, and no committed file is ever opened to write.
+A record can only name the samples file of the bytes it hashed, so no race leaves a
+record over other samples. A tile exists only when its record does, and a record
+implies complete samples, unless a ``forget`` raced the commit: then the record may
+lack its samples file, the one incomplete state, which open refuses by name and the
+next writer of the record's content repairs. A writer stopped between the two links,
+or one that lost the race for the record, leaves a samples file no record names: the
+tile's next writer of the same bytes adopts it, and ``forget`` removes it. A commit
+whose check finds the file it is checking removed by a ``forget`` raises
+``ForgetRaced``. Every error writing, linking or removing raises ``StoreWriteError``
+naming the path and the errno; none is swallowed, and no committed file is ever opened
+to write.
 
 Temporary files are reaped by name and age, once per directory, when a process first
 writes there. ``forget`` is the store's only deletion.
@@ -61,6 +67,9 @@ REAP_AGE_SECONDS = 86400.0
 #: How long a caller waits for another caller's fetch of the same tile, by default.
 DEFAULT_WAIT_SECONDS = 600.0
 
+#: How many times ``ensure`` fetches and commits a tile that a ``forget`` keeps removing.
+RACE_ATTEMPTS = 3
+
 
 class StoreWriteError(StoreError):
     """Writing, linking or removing a store file failed. Nothing committed was changed."""
@@ -78,7 +87,15 @@ class StoreWriteError(StoreError):
 class StoreConflict(StoreError):
     """
     A tile's committed content differs from what this writer fetched for it: the
-    source changed under the store. Nothing is overwritten.
+    source changed under the store, or a committed file was altered. Nothing is
+    overwritten.
+    """
+
+
+class ForgetRaced(StoreError):
+    """
+    A ``forget`` removed a tile's file while a commit was checking it: a lost race, not
+    an I/O failure. The tile is left absent or incomplete, never mixed; commit it again.
     """
 
 
@@ -97,10 +114,14 @@ class Fetched:
 
 @dataclass(frozen=True)
 class Commit:
-    """What one writer's commit of a tile did."""
+    """
+    What one writer's commit of a tile did. A ``forget`` may remove either file after
+    the commit linked or found it, so a commit never promises the tile is still whole;
+    ``Store.ensure`` opens it and commits again when a forget won.
+    """
 
     key: TileKey
-    linked_samples: bool  # this writer's link made k.npy
+    linked_samples: bool  # this writer's link made k.<sha256>.npy
     linked_record: bool  # this writer's link made k.json
 
     @property
@@ -155,6 +176,13 @@ def _changed(key: TileKey, path: Path, committed: str, fetched: str) -> str:
         f"{key.describe()} is committed at {path} with sha256 {committed}, but this writer "
         f"fetched sha256 {fetched}: the source changed under the store. Nothing was "
         "overwritten; Store.forget the tile to fetch it again."
+    )
+
+
+def _forgotten(key: TileKey, path: Path) -> str:
+    return (
+        f"{key.describe()} lost a race with Store.forget: {path} was removed while this "
+        "writer checked it. The tile is absent or incomplete, never mixed; commit it again."
     )
 
 
@@ -232,7 +260,10 @@ class Store:
         return Commit(key, linked_samples, linked_record)
 
     def _check_committed(self, key: TileKey, sha256: str) -> None:
-        """Refuse, before anything is linked, a tile whose record names other samples."""
+        """
+        Refuse, before anything is linked, a tile whose record names other samples, so
+        a writer that comes after a conflicting commit leaves no samples file behind.
+        """
         record_path = key.record_path(self.root)
         try:
             with _named("read the committed record", record_path):
@@ -244,24 +275,38 @@ class Store:
 
     def _link_samples(self, key: TileKey, temporary: Path, sha256: str) -> Tuple[bool, Identity]:
         """
-        Link ``temporary`` as the tile's samples, or check the samples another writer
-        linked: whether this call made the link, and the committed file's identity.
-        The identity is read from a handle on that very file once the temporary is
-        removed, so the file's links, and with them its ctime, are final.
+        Link ``temporary`` as the samples file its sha256 names, or check the one another
+        writer linked: whether this call made the link, and the committed file's
+        identity. The identity is read from a handle on that very file once the
+        temporary is removed, so the file's links, and with them its ctime, are final.
         """
-        samples_path = key.samples_path(self.root)
+        samples_path = key.samples_path(self.root, sha256)
         linked = _link(temporary, samples_path)
         committed = temporary if linked else samples_path
-        with _named("verify the committed samples", committed), open(committed, "rb") as handle:
-            if not linked and (found := file_sha256(handle)) != sha256:
-                raise StoreConflict(_changed(key, samples_path, found, sha256))
-            _remove_temporary(temporary)
-            return linked, identity(os.fstat(handle.fileno()))
+        with _named("verify the committed samples", committed):
+            try:
+                handle = open(committed, "rb")
+            except FileNotFoundError:
+                if linked:  # this writer's own temporary: no race removes it
+                    raise
+                raise ForgetRaced(_forgotten(key, samples_path)) from None
+            with handle:
+                if not linked and (found := file_sha256(handle)) != sha256:
+                    raise StoreConflict(
+                        f"{samples_path} holds bytes with sha256 {found}, not the sha256 its name "
+                        f"states: {key.describe()}'s committed samples were altered. Nothing was "
+                        "overwritten; Store.forget the tile to fetch it again."
+                    )
+                _remove_temporary(temporary)
+                return linked, identity(os.fstat(handle.fileno()))
 
     @staticmethod
     def _check_record(key: TileKey, record_path: Path, encoded: bytes) -> None:
         with _named("read the committed record", record_path):
-            committed = record_path.read_bytes()
+            try:
+                committed = record_path.read_bytes()
+            except FileNotFoundError:
+                raise ForgetRaced(_forgotten(key, record_path)) from None
         try:
             same = content(json.loads(committed)) == content(json.loads(encoded))
         except ValueError:
@@ -291,6 +336,10 @@ class Store:
         raised to every caller waiting on it; each retries under its own budget.
         Across processes a duplicate fetch costs bandwidth, never correctness. The
         fetch and its commit hold ``nbytes`` of the byte budget.
+
+        A ``forget`` that removes the tile while it is committed wins the race, and the
+        bytes fetched may predate it, so the tile is fetched and committed again, at
+        most ``RACE_ATTEMPTS`` times in all before ``ForgetRaced`` is raised.
         """
         try:
             return self.open(key)
@@ -312,9 +361,7 @@ class Store:
         try:
             admission = self.budget.admit(nbytes, timeout) if self.budget else contextlib.nullcontext()
             with admission:
-                fetched = fetch()
-                self.commit(key, fetched.samples, fetched.not_in_file, fetched.tools)
-            tile = self.open(key)
+                tile = self._fetch_and_commit(key, fetch)
         except BaseException as error:
             future.set_exception(error)
             raise
@@ -324,17 +371,38 @@ class Store:
         future.set_result(tile)
         return tile
 
+    def _fetch_and_commit(self, key: TileKey, fetch: Callable[[], Fetched]) -> Tile:
+        """The tile fetched, committed and opened, again when a ``forget`` races it."""
+        for _ in range(RACE_ATTEMPTS):
+            fetched = fetch()
+            try:
+                self.commit(key, fetched.samples, fetched.not_in_file, fetched.tools)
+                return self.open(key)
+            except (ForgetRaced, TileMissing, TileIncomplete) as error:  # a forget won
+                lost = error
+        raise ForgetRaced(
+            f"{key.describe()} was forgotten while this caller committed it, {RACE_ATTEMPTS} "
+            "times running; the last race is chained below."
+        ) from lost
+
     def forget(self, keys: Iterable[TileKey]) -> Tuple[TileKey, ...]:
         """
         Delete the tiles ``keys``: the store's only deletion, always explicit. Each
-        record goes first, then its samples, so a commit racing this leaves at worst a
-        record without samples, which is refused by name and repaired by its next
-        writer. Readers keep their maps until they reopen. Returns the keys found.
+        record goes first, then every samples file of its tile, so a commit racing this
+        leaves at worst a record without its samples, which is refused by name and
+        repaired by its next writer. Readers keep their maps until they reopen.
+        Returns the keys found.
         """
         removed = []
         for key in keys:
             found = False
-            for path in (key.record_path(self.root), key.samples_path(self.root)):
+            record_path = key.record_path(self.root)
+            with _named("remove", record_path), contextlib.suppress(FileNotFoundError):
+                record_path.unlink()
+                found = True
+            with _named("list the samples files in", key.directory(self.root)):
+                samples_files = key.samples_files(self.root)
+            for path in samples_files:
                 with _named("remove", path), contextlib.suppress(FileNotFoundError):
                     path.unlink()
                     found = True

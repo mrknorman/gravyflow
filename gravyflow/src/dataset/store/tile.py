@@ -8,19 +8,25 @@ one download is one tile. The path names the whole key, so a key on another grid
 another tile. On disk a tile is two files in
 ``<root>/v<STORE_FORMAT>/<source_id>/<detector>/<rate>/<T>/``:
 
-- ``k.npy``, the samples: float32, one dimension, ``rate * T`` long, memory-mapped by
-  readers;
+- ``k.<sha256>.npy``, the samples: float32, one dimension, ``rate * T`` long,
+  memory-mapped by readers, and named by the sha256 of the whole file;
 - ``k.json``, the commit record: the key, ``t0``, the unheld sample intervals with
-  their reasons, the sha256 of ``k.npy``, the identity of the file committed as
-  ``k.npy`` (``identity``), and the fetch metadata.
+  their reasons, the sha256 of the samples, the identity of the samples file it was
+  committed with (``identity``), and the fetch metadata.
+
+The record binds the tile's samples by name: the sha256 it states is the name of the
+only file it can be served from. A writer names its samples by the hash of its own
+bytes, so samples another writer fetched can never sit under the name a record states,
+whatever races the commit; a record whose samples file is absent is the one
+incomplete state, refused by name and repaired by its next writer.
 
 Opening a tile checks its identity, belt and braces: the record must name the key its
-path names, and the samples must be the very file committed (one ``fstat``) or else
-hash to the record's sha256, so a renamed, moved or swapped file is refused by name.
-The full hash is otherwise checked at commit and by ``verify``. A record is written
-once, so a tile whose samples are not the file its record names (a copied or restored
-store, or a tile repaired after its samples were lost) is hashed on every open until
-it is forgotten and committed again.
+path names, and its samples file must be the very file committed (one ``fstat``) or
+else hash to the record's sha256, so a renamed, moved or altered file is refused by
+name. The full hash is otherwise checked at commit and by ``verify``. A record is
+written once, so a tile whose samples are not the file its record was committed with
+(a copied or restored store, or a tile repaired after its samples were lost) is hashed
+on every open until it is forgotten and committed again.
 
 A tile exists only when its record exists. The record is the authority on which
 samples are held: unheld samples are NaN in ``k.npy`` as poison only, and no reader
@@ -33,6 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 import operator
+import os
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -55,6 +62,9 @@ COMMIT_METADATA = ("fetch", "samples_identity")
 #: A source id or detector is one plain path component.
 _COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
 
+#: A sha256 as the store writes it, and so as it names a samples file.
+_DIGEST = re.compile(r"[0-9a-f]{64}")
+
 _HASH_CHUNK = 1 << 23
 
 
@@ -72,8 +82,9 @@ class TileRefused(StoreError):
 
 class TileIncomplete(TileRefused):
     """
-    A tile's record exists without its samples (a ``forget`` raced a commit). It is
-    never served; the next writer of the tile links the samples and repairs it.
+    A tile's record exists without the samples file it names (a ``forget`` raced a
+    commit). It is never served; the next writer of the record's content links the
+    samples and repairs it.
     """
 
 
@@ -90,6 +101,12 @@ def _component(name: str, value) -> str:
             f"A tile's {name} must be one plain path component (letters, digits, '.', "
             f"'_', '+', '-', not starting with a symbol); got {value!r}."
         )
+    return value
+
+
+def _digest(value) -> str:
+    if not isinstance(value, str) or not _DIGEST.fullmatch(value):
+        raise ValueError(f"A tile's samples are named by a sha256 in lowercase hex; got {value!r}.")
     return value
 
 
@@ -146,8 +163,21 @@ class TileKey:
         return (Path(root) / f"v{STORE_FORMAT}" / self.source_id / self.detector / str(self.rate)
                 / str(self.tile_seconds))
 
-    def samples_path(self, root: Path) -> Path:
-        return self.directory(root) / f"{self.index}.npy"
+    def samples_path(self, root: Path, sha256: str) -> Path:
+        """The samples file whose bytes hash to ``sha256``."""
+        return self.directory(root) / f"{self.index}.{_digest(sha256)}.npy"
+
+    def samples_files(self, root: Path) -> Tuple[Path, ...]:
+        """
+        Every samples file of this tile: the one its record names, and any that a writer
+        which lost a race to commit the tile left beside it.
+        """
+        name = re.compile(rf"{self.index}\.{_DIGEST.pattern}\.npy")
+        try:
+            with os.scandir(self.directory(root)) as entries:
+                return tuple(Path(entry.path) for entry in entries if name.fullmatch(entry.name))
+        except FileNotFoundError:
+            return ()
 
     def record_path(self, root: Path) -> Path:
         return self.directory(root) / f"{self.index}.json"
@@ -226,10 +256,12 @@ Identity = Tuple[int, int, int]
 def identity(stat) -> Identity:
     """
     The identity of the file ``stat`` describes: its device, inode and status-change
-    time. A freed inode can be reused by the next file made, but that file's ctime is
-    its own and no call sets a ctime directly, so a different file matches only if
-    both were made within one tick of the filesystem's clock. A change of a file's
-    links or mode changes its ctime too; that costs a full hash, never a wrong tile.
+    time, which lets an open skip the hash of the file its record was committed with.
+    Every file the store links under a samples name holds the bytes that name states,
+    so a reused inode there holds them too; the identity guards against a file put or
+    altered there from outside, which changes its ctime (no call sets a ctime directly).
+    A change of a file's links or mode changes its ctime too; that costs a full hash,
+    never a wrong tile.
     """
     return (stat.st_dev, stat.st_ino, stat.st_ctime_ns)
 
@@ -309,7 +341,7 @@ def parse_record(text: bytes, key: TileKey, path: Path) -> TileRecord:
         record = TileRecord(
             key=TileKey(fields["source_id"], fields["detector"], fields["rate"],
                         fields["tile_seconds"], fields["index"]),
-            sha256=str(fields["sha256"]),
+            sha256=_digest(fields["sha256"]),
             unheld=unheld,
             samples_identity=_identity_field(fields["samples_identity"]),
             fetch=dict(fields["fetch"]),
