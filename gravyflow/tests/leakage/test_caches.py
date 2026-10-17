@@ -362,3 +362,56 @@ def test_transient_warm_equals_cold():
         np.testing.assert_array_equal(np.asarray(cold[key]), np.asarray(warm[key]), err_msg=str(key))
     written = {path for path in root.rglob("*") if path.is_file()} - before
     assert written and all((root / "store") in path.parents for path in written), sorted(written)
+
+
+def test_alternating_splits_on_one_pseudo_real_obtainer_share_no_reading_state(world, monkeypatch):
+    """
+    PSEUDO_REAL: train and validate drawn in turn from one obtainer serve exactly
+    what each serves alone, and every strain row that reaches a PSD decodes to its
+    own split's time. Each split's batcher reads through its own copy of the reader,
+    with its own plan and spectra, so no reading state passes between them.
+    """
+    from gravyflow.tests.leakage.provenance import DecodeRefused, as_seconds, decode_row
+
+    fixture = fx.straddle("validate", "train", half_width=512.0)
+    splits = ("train", "validate")
+    drawing, estimated = [None], []
+    psd = gf.psd
+
+    def spied(strain, *args, **kwargs):
+        estimated.append((drawing[0], np.asarray(strain)))
+        return psd(strain, *args, **kwargs)
+
+    def obtainer():
+        return gf.NoiseObtainer(ifo_data_obtainer=fx.ifo_data_obtainer(fixture), ifos=[gf.IFO.H1, gf.IFO.L1],
+                                noise_type=gf.NoiseType.PSEUDO_REAL)
+
+    def streams(noise):
+        return {split: noise(
+            sample_rate_hertz=fixture.encoding.sample_rate_hertz, onsource_duration_seconds=fx.ONSOURCE_SECONDS,
+            crop_duration_seconds=fx.CROP_SECONDS, offsource_duration_seconds=fx.OFFSOURCE_SECONDS,
+            num_examples_per_batch=8, group=split, seed=7,
+        ) for split in splits}
+
+    with world(fixture) as harness:
+        alone = {split: _draw(stream, 3) for split, stream in streams(obtainer()).items()}
+        monkeypatch.setattr(gf, "psd", spied)
+        shared = streams(obtainer())
+        turns = {split: [] for split in splits}
+        for _ in range(3):
+            for split in splits:
+                drawing[0] = split
+                turns[split] += _draw(shared[split], 1)
+    for split in splits:
+        assert _same(turns[split], alone[split]), split
+    assert {split for split, _ in estimated} == set(splits), "a split estimated no PSD"
+    for split, strain in estimated:
+        spans = []
+        for ifo in ("H1", "L1"):
+            try:
+                spans.append(decode_row(strain, ifo, harness.encoding))
+            except DecodeRefused:
+                continue
+        assert len(spans) == 1, f"a {split} PSD's strain decodes as {len(spans)} detectors' rows"
+        start, end = as_seconds([spans[0].first, spans[0].end], harness.encoding)
+        assert fx.golden_split(fixture.origin, start, end) == split, f"a {split} PSD read [{start}, {end})"
