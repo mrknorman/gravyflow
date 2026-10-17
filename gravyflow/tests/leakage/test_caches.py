@@ -369,8 +369,10 @@ def test_alternating_splits_on_one_pseudo_real_obtainer_share_no_reading_state(w
     PSEUDO_REAL: train and validate drawn in turn from one obtainer serve exactly
     what each serves alone, and every strain row that reaches a PSD decodes to its
     own split's time. Each split's batcher reads through its own copy of the reader,
-    with its own plan and spectra, so no reading state passes between them.
+    with its own plan and spectra, and every tile it fetches is keyed by its split, so
+    no in-flight fetch is shared between splits at any block length.
     """
+    from gravyflow.src.dataset.store.commit import Store
     from gravyflow.tests.leakage.provenance import DecodeRefused, as_seconds, decode_row
 
     fixture = fx.straddle("validate", "train", half_width=512.0)
@@ -382,8 +384,16 @@ def test_alternating_splits_on_one_pseudo_real_obtainer_share_no_reading_state(w
         estimated.append((drawing[0], np.asarray(strain)))
         return psd(strain, *args, **kwargs)
 
+    ensure, fetched = Store.ensure, []
+
+    def keyed(store, key, fetch, *, stream=None, **kwargs):
+        fetched.append((drawing[0], stream))
+        return ensure(store, key, fetch, stream=stream, **kwargs)
+
     def obtainer():
-        return gf.NoiseObtainer(ifo_data_obtainer=fx.ifo_data_obtainer(fixture), ifos=[gf.IFO.H1, gf.IFO.L1],
+        # Read on demand, so every fetch is made by the split being drawn.
+        return gf.NoiseObtainer(ifo_data_obtainer=fx.ifo_data_obtainer(fixture, prefetch_depth=0),
+                                ifos=[gf.IFO.H1, gf.IFO.L1],
                                 noise_type=gf.NoiseType.PSEUDO_REAL)
 
     def streams(noise):
@@ -396,6 +406,7 @@ def test_alternating_splits_on_one_pseudo_real_obtainer_share_no_reading_state(w
     with world(fixture) as harness:
         alone = {split: _draw(stream, 3) for split, stream in streams(obtainer()).items()}
         monkeypatch.setattr(gf, "psd", spied)
+        monkeypatch.setattr(Store, "ensure", keyed)
         shared = streams(obtainer())
         turns = {split: [] for split in splits}
         for _ in range(3):
@@ -405,6 +416,9 @@ def test_alternating_splits_on_one_pseudo_real_obtainer_share_no_reading_state(w
     for split in splits:
         assert _same(turns[split], alone[split]), split
     assert {split for split, _ in estimated} == set(splits), "a split estimated no PSD"
+    # A fetch's stream is its reader's served split: (detectors, split, the spec's fingerprint).
+    keyed_by = {(split, stream[1] if stream else None) for split, stream in fetched}
+    assert fetched and all(split == by for split, by in keyed_by), f"fetches keyed by another split: {keyed_by}"
     for split, strain in estimated:
         spans = []
         for ifo in ("H1", "L1"):
