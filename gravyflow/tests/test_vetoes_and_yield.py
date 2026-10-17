@@ -191,10 +191,15 @@ class TestNoiseVetoes:
                             glitches["start_time"] + glitches["duration"]], axis=1)
         assert _overlap(result, extents[in_data]) == 0.0
 
+    @pytest.mark.parametrize("asked", [[gf.DataLabel.EVENTS], [gf.EventConfidence.CONFIDENT]])
+    def test_noise_refuses_to_serve_events(self, asked):
+        """Real events are never noise: asking noise for them is refused by name."""
+        with pytest.raises(ValueError, match="Real events are not noise"):
+            gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE, *asked],
+                               observing_runs=gf.ObservingRun.O3)
+
     @pytest.mark.parametrize("asked, vetoed", [
         ([], {"events", "glitches"}),
-        ([gf.DataLabel.EVENTS], {"glitches"}),
-        ([gf.EventConfidence.CONFIDENT], {"glitches"}),
         ([gf.DataLabel.GLITCHES], {"events"}),
         # Equal to DataLabel.EVENTS as a number, but glitches.
         ([gf.GlitchType.CHIRP], {"events"}),
