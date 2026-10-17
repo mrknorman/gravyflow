@@ -21,7 +21,7 @@ from gravyflow.src.utils.tensor import (
 )
 from gravyflow.src.utils.shapes import BatchContract
 from gravyflow.src.dataset.config import Defaults, WindowSpec, ignore_scale_factor
-from gravyflow.src.dataset.noise.noise import NoiseBatcher, index_addressed, obtainer_batcher
+from gravyflow.src.dataset.noise.noise import NoiseBatcher, obtainer_batcher, reads_real_data
 from gravyflow.src.dataset.acquisition.augmentations import Augmented, augment
 from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
 from gravyflow.src.dataset.features.injection import InjectionGenerator, check_scaling_matches_noise
@@ -91,9 +91,10 @@ def split_spec_of(obtainers) -> Optional["gf.SplitSpec"]:
     How the real data read through ``obtainers`` is split: the spec of the IFO
     data obtainers they read through (a NoiseObtainer's, or a transient obtainer
     itself); None (no obtainer named) is the default obtainer, real noise split
-    by the default spec. Synthetic noise (WHITE, COLORED) reads no real data, so
-    it is split-neutral: data read through it alone names no spec (None), and
-    combines with real data of any spec.
+    by the default spec. An obtainer that reads no real data (`reads_real_data`:
+    synthetic noise) is split-neutral: data read through such obtainers alone
+    names no spec (None, `split_neutral`), and combines with real data of any
+    spec.
 
     This is the one computation of a split, a dataset's
     (`IndexedBatches.split_spec`) and the validator's alike, and it reads only
@@ -102,15 +103,22 @@ def split_spec_of(obtainers) -> Optional["gf.SplitSpec"]:
     reads it from data.
     """
     specs = {getattr(getattr(obtainer, "ifo_data_obtainer", obtainer), "split_spec", None) or gf.DEFAULT_SPLIT
-             for obtainer in obtainers if not _synthetic(obtainer)}
+             for obtainer in obtainers if reads_real_data(obtainer)}
     if len(specs) > 1:
         raise ValueError(f"A dataset's obtainers split time differently: {sorted(s.fingerprint() for s in specs)}.")
     return specs.pop() if specs else None
 
 
-def _synthetic(obtainer) -> bool:
-    """Whether ``obtainer`` makes its noise without reading real data."""
-    return isinstance(obtainer, gf.NoiseObtainer) and obtainer.noise_type in (gf.NoiseType.WHITE, gf.NoiseType.COLORED)
+def split_neutral(data) -> bool:
+    """
+    Whether ``data`` is split-neutral: gravyflow data none of whose obtainers
+    reads real data (`reads_real_data`), which is why its ``split_spec`` is
+    None. Only gravyflow's own data is: a dataset (`IndexedBatches`), or batches
+    that name the dataset they serve as their ``dataset`` (the run recipe's do).
+    Anything else whose ``split_spec`` is None names no split.
+    """
+    dataset = getattr(data, "dataset", data)
+    return isinstance(dataset, IndexedBatches) and not any(map(reads_real_data, dataset._obtainers()))
 
 
 def augment_batch(onsource, offsource, streams: BatchStreams, obtainer, split: str,
@@ -122,8 +130,7 @@ def augment_batch(onsource, offsource, streams: BatchStreams, obtainer, split: s
     reader of the caller's own carries none, so neither is augmented.
     """
     if isinstance(obtainer, gf.NoiseObtainer):
-        real = obtainer.noise_type in (gf.NoiseType.REAL, gf.NoiseType.PSEUDO_REAL)
-        obtainer = obtainer.ifo_data_obtainer if real else None
+        obtainer = obtainer.ifo_data_obtainer if reads_real_data(obtainer) else None
     if not isinstance(obtainer, BaseDataObtainer):
         return augment((onsource, offsource), streams, (), split)
     return augment((onsource, offsource), streams, obtainer.augmentations, split, obtainer.data_labels,
@@ -388,14 +395,18 @@ class IndexedBatches:
     def split_spec(self) -> Optional["gf.SplitSpec"]:
         """
         How the real data this dataset reads is split: `split_spec_of` its
-        obtainers; None for synthetic noise alone, which is split-neutral.
+        obtainers; None for synthetic noise alone, which is split-neutral
+        (`split_neutral`).
         """
         return split_spec_of(self._obtainers())
 
     @property
     def index_addressed(self) -> bool:
-        """Whether every batch is a pure function of its address (see the class docstring)."""
-        return all(index_addressed(obtainer) for obtainer in self._obtainers())
+        """
+        Whether every batch is a pure function of its address (see the class
+        docstring): so is data that reads no real data (`reads_real_data`).
+        """
+        return not any(map(reads_real_data, self._obtainers()))
 
 
 class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):

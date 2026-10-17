@@ -343,13 +343,16 @@ def _scores(call):
     return False
 
 
-def _scores_split(group, run_record, dataset_args=None):
-    """Whether the validator goes on to score ``group`` for a model whose weights carry ``run_record``."""
+def _scores_split(group, run_record, dataset_args=None, **config):
+    """
+    Whether the validator goes on to score ``group`` for a model whose weights carry
+    ``run_record``, with the validation settings ``config``.
+    """
     dataset_args = dataset_args or {"noise_obtainer": gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
                                     "onsource_duration_seconds": 1.0,
                                     "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE]}
     model = with_run_record(stub_model(256), run_record)
-    return _scores(lambda: Validator.validate(model, "model", dataset_args, ValidationConfig(group=group)))
+    return _scores(lambda: Validator.validate(model, "model", dataset_args, ValidationConfig(group=group, **config)))
 
 
 FOLD_2 = gf.SplitSpec(version="fold-2")
@@ -523,6 +526,100 @@ def test_synthetic_data_is_split_neutral(world, tmp_path):
     assert _scores_split("test", _selected_on_validate(FOLD_2))
     with pytest.raises(ValueError, match="selected on the 'validate' split"):
         _scores_split("validate", _selected_on_validate(FOLD_2))
+
+
+def test_only_gravyflow_data_that_reads_no_real_data_is_split_neutral():
+    """
+    A run took a split_spec of None from any object as split-neutral data. Only
+    gravyflow data none of whose obtainers reads real data is (`split_neutral`): a
+    synthetic dataset, the recipe's batches of one, and a fixed set drawn from them.
+    Anything else whose split_spec is None names no split, and a run refuses it.
+    """
+    from types import SimpleNamespace
+
+    from gravyflow.src.dataset.dataset import split_neutral
+    from gravyflow.src.validate.config import split_record
+    from gravyflow.tests.test_model_train import dataset_args
+
+    def synthetic(group):  # white noise
+        return gf.Dataset(**{**dataset_args(), "group": group, "steps_per_epoch": 1})
+
+    training = synthetic("train")
+    for data in (training, recipe.DetectionBatches(training),
+                 recipe.materialise(StandingBatches(synthetic("validate")), 1)):
+        assert data.split_spec is None and split_neutral(data)
+    assert split_record(training, synthetic("validate")) == {
+        "fingerprint": gf.DEFAULT_SPLIT.fingerprint(), "selection_split": "validate"}
+    for role, impostor in (("training", SimpleNamespace(split_spec=None, group="train")),
+                           ("validation", SimpleNamespace(split_spec=None, group="validate"))):
+        assert not split_neutral(impostor)
+        pair = (impostor, synthetic("validate")) if role == "training" else (training, impostor)
+        with pytest.raises(ValueError, match=f"The {role} data .* names no split"):
+            split_record(*pair)
+
+
+def test_real_events_beside_synthetic_noise_are_checked_against_the_model():
+    """
+    Real events are real data, whatever the noise beside them. Beside synthetic
+    noise, which names no split, the validator read them under the default split but
+    checked the model against none, so a model trained on fold-2, whose training time
+    the default test split shares, was scored on real events it may have trained on.
+    The bank's split counts its real-events stage, which beside synthetic noise reads
+    under the default split: that model is refused before any data is read, a model
+    of the default split is scored, and with no real events the noise is
+    split-neutral again.
+    """
+    first = gf.DEFAULT_SPLIT.block_of(fx.origin_gps("O3"))
+    assert any(gf.DEFAULT_SPLIT.block_split(k) == "test" and FOLD_2.block_split(k) == "train"
+               for k in range(first, first + 1000))
+    with pytest.raises(ValueError, match="SplitSpec"):
+        _scores_split("test", _selected_on_validate(FOLD_2), score_real_events=True)
+    assert _scores_split("test", _selected_on_validate(gf.DEFAULT_SPLIT), score_real_events=True)
+    assert _scores_split("test", _selected_on_validate(FOLD_2))
+
+
+class _Read(Exception):
+    pass
+
+
+def _events_split(bank):
+    """The split the bank's real-event stage reads its events under, stopped before it reads them."""
+    asked = {}
+
+    class Recording(gf.TransientDataObtainer):
+        def __init__(self, *args, split_spec=None, **kwargs):
+            asked["split_spec"] = split_spec
+            raise _Read
+
+    bank.far_scores = np.zeros(4)
+    with mock.patch.object(gf, "TransientDataObtainer", Recording), pytest.raises(_Read):
+        bank.generate_real_events([gf.ObservingRun.O3])
+    return asked["split_spec"]
+
+
+@pytest.mark.parametrize("noise,real_events,spec", [
+    (gf.NoiseType.WHITE, True, gf.DEFAULT_SPLIT),
+    (gf.NoiseType.WHITE, False, None),
+    (gf.NoiseType.REAL, True, FOLD_2),
+    (gf.NoiseType.REAL, False, FOLD_2),
+], ids=["synthetic noise", "synthetic noise, real events off", "real noise", "real noise, real events off"])
+def test_the_real_events_stage_reads_under_the_banks_split(offline_events, noise, real_events, spec):
+    """
+    The real-event stage reads its events under the bank's split, the one the model is
+    checked against: real noise's, or the default beside synthetic noise. A bank whose
+    split names none (synthetic noise, real events off) refuses to read them by name.
+    """
+    reader = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
+                                split_spec=FOLD_2) if noise is gf.NoiseType.REAL else None
+    args = {"noise_obtainer": gf.NoiseObtainer(noise_type=noise, ifo_data_obtainer=reader),
+            "onsource_duration_seconds": 1.0, "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE]}
+    bank = ValidationBank(stub_model(256), args, ValidationConfig(score_real_events=real_events))
+    assert bank.split_spec == spec
+    if spec is None:
+        with pytest.raises(ValueError, match="this bank's names none"):
+            _events_split(bank)
+    else:
+        assert _events_split(bank) == spec
 
 
 #: The one computation of a split, where gravyflow's source defines it.

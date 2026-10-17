@@ -574,9 +574,15 @@ class NoiseObtainer(Obtainer):
                 }
 
 
-def index_addressed(obtainer) -> bool:
-    """Whether the obtainer's batches are pure functions of their address (else read in order)."""
-    return isinstance(obtainer, NoiseObtainer) and obtainer.noise_type in (NoiseType.WHITE, NoiseType.COLORED)
+def reads_real_data(obtainer) -> bool:
+    """
+    Whether ``obtainer`` reads real data. Every obtainer does but simulated noise
+    (WHITE, COLORED), which is made from its batch's streams alone; None, the
+    default obtainer, is real noise, and a reader of the caller's own is taken to
+    read real data. Data that reads none is split-neutral (``split_spec_of``)
+    and a pure function of its address; real data is read in order, under a split.
+    """
+    return not (isinstance(obtainer, NoiseObtainer) and obtainer.noise_type in (NoiseType.WHITE, NoiseType.COLORED))
 
 
 def obtainer_batcher(obtainer, tree: SeedTree, group: str, **kwargs) -> NoiseBatcher:

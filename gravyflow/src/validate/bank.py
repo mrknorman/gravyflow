@@ -168,16 +168,25 @@ class ValidationBank:
     @property
     def split_spec(self) -> Optional[gf.SplitSpec]:
         """
-        How the data the bank scores is split: the one computation of a split
-        (`split_spec_of`, which `Dataset.split_spec` makes) over the noise
-        obtainer every stage's dataset reads (none named, the default noise,
-        whose split is the default; synthetic noise, None, split-neutral). It reads the obtainer's specification, not
-        its data, so a model is refused before any dataset is built or any
-        strain fetched.
+        How the real data the bank reads is split: the split every stage that
+        reads real data reads under, and so the one a model is checked against
+        (`check_held_out`). The noise stages read the noise obtainer, split by the
+        one computation of a split (`split_spec_of`, which `Dataset.split_spec`
+        makes; none named, the default noise, whose split is the default). The
+        real-events stage, when it is on (`score_real_events`), reads real events
+        under the noise's split; beside synthetic noise, which reads no real data
+        and names none, they are the bank's only real data, and are split by the
+        default, as real data that names no split is. None therefore means only
+        that no stage reads real data (synthetic noise alone, split-neutral), never
+        real data left unchecked. It reads specifications, not data, so a model is
+        refused before any dataset is built or any strain fetched.
         """
         from gravyflow.src.dataset.dataset import split_spec_of
 
-        return split_spec_of([self.dataset_args.get("noise_obtainer")])
+        spec = split_spec_of([self.dataset_args.get("noise_obtainer")])
+        if spec is None and self.config.score_real_events:
+            return gf.DEFAULT_SPLIT
+        return spec
 
     def _score(self, x) -> np.ndarray:
         if self.heart:
@@ -326,6 +335,11 @@ class ValidationBank:
         read in the background's window geometry and conditioned by the
         background's dataset (`score_windows`), so its score is comparable with
         the background's, and its FAR is read from that background.
+
+        The events are read under the bank's split (`split_spec`), the one the
+        model is checked against. A bank whose split counts no real events
+        (``score_real_events`` off) beside synthetic noise names none, and refuses
+        by name before it reads any.
         """
         from gravyflow.src.dataset.features.event import EventConfidence, get_events_with_params
         from gravyflow.src.dataset.dataset import noise_ifos
@@ -341,6 +355,13 @@ class ValidationBank:
             logger.info(f"No real events are in the '{self.config.group}' split: they are all test data.")
             self.real_events = []
             return
+        split_spec = self.split_spec
+        if split_spec is None:
+            raise ValueError(
+                "Real events are real data, read under the split the model is checked against, and this "
+                "bank's names none: its noise is synthetic and it scores no real events "
+                "(ValidationConfig.score_real_events is False)."
+            )
         events, seen = [], set()
         for e in sorted(get_events_with_params(observing_runs, event_types=[EventConfidence.CONFIDENT]),
                         key=lambda e: e["gps"]):
@@ -357,7 +378,7 @@ class ValidationBank:
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS],
             event_names=[e["name"] for e in events],
-            split_spec=self.split_spec,
+            split_spec=split_spec,
         )
         dataset = self._noise_dataset
         window = dataset.window_spec

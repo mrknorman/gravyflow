@@ -225,7 +225,8 @@ def test_the_validator_scores_injections_on_two_detectors(tmp_path):
 @pytest.mark.global_rng
 def test_the_validator_scores_real_events(dataset_args, offline_events):
     # The real-event stage scores every confident event, once: real events are test data.
-    bank = ValidationBank(logit_model(1), dataset_args, ValidationConfig(num_examples=32, batch_size=32))
+    config = ValidationConfig(num_examples=32, batch_size=32, score_real_events=True)
+    bank = ValidationBank(logit_model(1), dataset_args, config)
     bank.far_scores = np.random.default_rng(3).standard_normal(64)
     bank.generate_real_events(observing_runs=[gf.ObservingRun.O3])
     assert sorted(e["name"] for e in bank.real_events) == sorted(e["name"] for e in offline_events)
@@ -271,7 +272,7 @@ def test_real_events_are_read_in_the_backgrounds_window(offline_events):
                         target_ifos)
 
     args = _scoring_args()
-    bank = ValidationBank(logit_model(1), args, ValidationConfig(num_examples=8, batch_size=8))
+    bank = ValidationBank(logit_model(1), args, ValidationConfig(num_examples=8, batch_size=8, score_real_events=True))
     bank.far_scores = np.random.default_rng(3).standard_normal(64)
     with mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", recording):
         bank.generate_real_events(observing_runs=[gf.ObservingRun.O3])

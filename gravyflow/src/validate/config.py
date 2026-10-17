@@ -91,25 +91,28 @@ def split_record(training, validation) -> Dict[str, str]:
     ``run.json``), which the validator checks (``check_held_out``).
 
     ``training`` and ``validation`` are gravyflow datasets, or anything naming
-    one's ``split_spec`` and ``group`` (the run recipe's batches do). Data whose
-    ``split_spec`` is None reads no real data (synthetic noise): it is
-    split-neutral, and takes the spec of the real data beside it; a model of
-    split-neutral data alone records the default spec.
+    one's ``split_spec`` and ``group`` (the run recipe's batches do). Only
+    gravyflow data that reads no real data (synthetic noise) names no spec
+    (None): it is split-neutral (`split_neutral`), and takes the spec of the
+    real data beside it; a model of split-neutral data alone records the
+    default spec. Anything else whose ``split_spec`` is None names no split.
 
     Raises:
         ValueError: data that names no split; training data outside the
             training split, or validation data inside it; or training and
             validation data split by different specs.
     """
+    from gravyflow.src.dataset.dataset import split_neutral
+
     named = {}
     for role, data in (("training", training), ("validation", validation)):
-        group = getattr(data, "group", None)
-        if not hasattr(data, "split_spec") or group is None:
+        spec, group = getattr(data, "split_spec", None), getattr(data, "group", None)
+        if group is None or (spec is None and not split_neutral(data)):
             raise ValueError(
                 f"The {role} data ({type(data).__name__}) names no split: a model records the "
                 "split of gravyflow data, which names its split_spec and group."
             )
-        named[role] = (data.split_spec, gf.SplitSpec.check_name(group))
+        named[role] = (spec, gf.SplitSpec.check_name(group))
     (spec, group), (selection_spec, selection) = named["training"], named["validation"]
     if group != "train":
         raise ValueError(f"The training data is the {group!r} split; a model trains on 'train'.")
@@ -173,8 +176,9 @@ def check_held_out(group: str, spec: Optional["gf.SplitSpec"], run_record: Optio
     Refuse to score split ``group`` for a model whose training record
     (``run_record``, the record its weights carry: `run_record_of`) names
     another split spec than ``spec``, names ``group`` as the split that selected
-    the model, or names no split. ``spec`` None is split-neutral data
-    (synthetic noise), which no record's spec can share time with. A model with
+    the model, or names no split. ``spec`` None is data none of which is real
+    (the validator's split is None only when no stage reads real data): it is
+    split-neutral, and no record's spec can share time with it. A model with
     no record at all, one gravyflow never trained (an external one), is scored
     with a warning: the split it trained on is unknown.
     """

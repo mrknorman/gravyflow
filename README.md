@@ -189,13 +189,16 @@ bits, from multi-threaded ones). The test suite sets it itself, and a recipe tra
   splits: do not evaluate a model trained on an earlier release's split on this release's validate or test split.
   A model's split is its data's: `gf.Model.train` and the recipes' `TrainingRun.train` read it from their
   training and validation data (a gravyflow dataset names its `split_spec` and `group`), refuse data that names
-  none or is split by two specs (synthetic noise, WHITE or COLORED, reads no real data: its `split_spec` is None, it
-  is split-neutral, and it combines with real data of any spec; a model of synthetic data alone records the
-  default spec), and record the fingerprint and the split that selected the model in `run.json`
+  none or is split by two specs (synthetic noise, WHITE or COLORED, reads no real data: a gravyflow dataset of it
+  alone, or the recipe's batches of one, has `split_spec` None, is split-neutral, and combines with real data of
+  any spec; a model of synthetic data alone records the default spec; anything else with `split_spec` None names
+  no split), and record the fingerprint and the split that selected the model in `run.json`
   beside the model. The record belongs to the weights: every model gravyflow trains or loads carries it
   (`TrainingRun.train`'s, `RunDirectory.load_model`'s, a `gf.Model`'s), weights that carry one never train on
   another split, whatever `force_retrain` says, and the validator reads it from the model, refusing a model split
-  by another spec and the split that selected it.
+  by another spec and the split that selected it. The validator's split is that of every stage that reads real
+  data: its noise's, and with `score_real_events=True` the real events', read under the noise's split, or beside
+  synthetic noise under the default spec, so a model of another spec is refused before any data is read.
 - Every entry point needs a named split: `group='train'`, `'validate'` or `'test'`. `'all'` and any other name raise
   `KeyError`. `gf.DEFAULT_SPLIT_FRACTIONS`, `NoiseObtainer(groups=)`, `get_valid_segments(groups=)` and
   `TransientIndex.assign_groups` are gone: give the data obtainer `split_spec=gf.SplitSpec(fractions=...)`, or another

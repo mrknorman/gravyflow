@@ -197,12 +197,16 @@ class RegressionBatches(_DatasetBatches):
 
 
 class FixedBatches(keras.utils.PyDataset):
-    """Batches held in memory, served identically every epoch, with the split they were drawn from."""
+    """
+    Batches held in memory, served identically every epoch, with the split they
+    were drawn from, and the gravyflow dataset they were drawn from (``dataset``,
+    if any), which alone can make that split split-neutral (`split_neutral`).
+    """
 
-    def __init__(self, batches: List, split_spec: Optional[gf.SplitSpec], group: Optional[str]):
+    def __init__(self, batches: List, split_spec: Optional[gf.SplitSpec], group: Optional[str], dataset=None):
         super().__init__()
         self.batches = batches
-        self.split_spec, self.group = split_spec, group
+        self.split_spec, self.group, self.dataset = split_spec, group, dataset
 
     def __len__(self) -> int:
         return len(self.batches)
@@ -214,13 +218,15 @@ class FixedBatches(keras.utils.PyDataset):
 def materialise(batches, num_batches: int) -> FixedBatches:
     """
     Draw ``num_batches`` batches once: a fixed validation set, naming the split
-    of ``batches`` (its spec None for split-neutral, synthetic, data). Batches
-    that name no split give neither spec nor group, which a run refuses.
+    of ``batches`` (its spec None for split-neutral, synthetic, data) and the
+    dataset they serve (theirs, or themselves). Batches that name no split give
+    neither spec nor group, which a run refuses.
     """
     named = hasattr(batches, "split_spec")
     return FixedBatches([batches[k] for k in range(num_batches)],
                         batches.split_spec if named else None,
-                        getattr(batches, "group", None) if named else None)
+                        getattr(batches, "group", None) if named else None,
+                        getattr(batches, "dataset", batches))
 
 
 # ---------------------------------------------------------- run directory

@@ -510,15 +510,17 @@ class TestIndexedDatasets:
         assert (meta["root"], meta["source"], meta["split"], meta["epoch_mode"]) == (0, "user", "test", "REPEAT")
 
     def test_metadata_says_which_noise_is_read_by_address(self):
-        # Real, pseudo-real and transient noise are still read in order.
-        from gravyflow.src.dataset.noise.noise import index_addressed
+        # Real, pseudo-real and transient noise are still read in order: only
+        # data that reads no real data is addressed by index.
+        from gravyflow.src.dataset.noise.noise import reads_real_data
         assert dataset().seed_metadata["index_addressed"] is True
         for noise_type in (gf.NoiseType.WHITE, gf.NoiseType.COLORED):
-            assert index_addressed(gf.NoiseObtainer(noise_type=noise_type))
+            assert not reads_real_data(gf.NoiseObtainer(noise_type=noise_type))
         for noise_type in (gf.NoiseType.PSEUDO_REAL, gf.NoiseType.REAL):
-            assert not index_addressed(gf.NoiseObtainer(noise_type=noise_type))
-        assert not index_addressed(gf.TransientDataObtainer(
+            assert reads_real_data(gf.NoiseObtainer(noise_type=noise_type))
+        assert reads_real_data(gf.TransientDataObtainer(
             data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES]))
+        assert reads_real_data(None)  # the default noise, real
 
     def test_library_draws_no_deprecated_paths(self):
         with warnings.catch_warnings():
