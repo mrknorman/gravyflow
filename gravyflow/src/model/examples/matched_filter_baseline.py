@@ -93,14 +93,20 @@ class MatchedFilterBaseline(ExampleModel):
         The merger times a dataset's placement can produce in any of its
         detectors, (start, end) in seconds from the window's start: the union
         over its waveform generators of each one's placement range, widened by
-        its detectors' delays from the geocentre.
+        its detectors' delays from the geocentre. A noise-only dataset (no
+        waveform generators) places nothing, so it is refused: the search
+        window must then be set in the config.
         """
         window = float(dataset_args["onsource_duration_seconds"])
-        generators = dataset_args["waveform_generators"]
+        generators = dataset_args.get("waveform_generators") or []
         if isinstance(generators, dict):
             generators = [entry["generator"] for entry in generators.values()]
         elif not isinstance(generators, (list, tuple)):
             generators = [generators]
+        if not generators:
+            raise ValueError(
+                "The dataset has no waveform generators, so no placement range to search: set "
+                "MatchedFilterBaselineConfig.search_window_seconds.")
         noise_network = gf.Network(list(dataset_args["noise_obtainer"].ifos))
         ranges = [g.reference_time_window_seconds(window, noise_network if g.network is None else g.network)
                   for g in generators]

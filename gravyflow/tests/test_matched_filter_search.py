@@ -544,6 +544,18 @@ def test_the_baseline_searches_the_datasets_placement_range():
     assert layer.search_window_seconds == (lo, hi)
 
 
+def test_a_noise_only_dataset_has_no_placement_range_to_search():
+    # Without waveform generators (none, an empty list, or no entry: gf.Dataset
+    # takes all three) there is no placement range, so the window must be set.
+    from gravyflow.src.model.examples.matched_filter_baseline import (
+        MatchedFilterBaseline, MatchedFilterBaselineConfig)
+    args = MatchedFilterBaseline.dataset_args(config=MatchedFilterBaselineConfig(mass_range_msun=(25.0, 35.0)))
+    missing = {k: v for k, v in args.items() if k != "waveform_generators"}
+    for noise_only in (missing, {**args, "waveform_generators": []}, {**args, "waveform_generators": None}):
+        with pytest.raises(ValueError, match="no waveform generators.*search_window_seconds"):
+            MatchedFilterBaseline.search_window_seconds(noise_only)
+
+
 def test_layer_round_trips_through_its_config_and_a_saved_model(tmp_path):
     import keras
     from gravyflow.src.detection import MatchedFilterLayer
