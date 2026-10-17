@@ -106,8 +106,9 @@ def cbc_templates(
     """
     Plus polarisations of face-on, non-spinning binaries at reference phase 0,
     from the CBC generator the dataset injects with (`_generate_cbc_window`), with
-    the merger at the centre of a `window_seconds` buffer and no content below
-    `lower_frequency_hertz`. Unit-peak rows, float32, shape (n, samples).
+    the merger at the centre of a `window_seconds` buffer, whole from
+    `lower_frequency_hertz` and tapered below it. Unit-peak rows, float32, shape
+    (n, samples).
     """
     from gravyflow.src.dataset.features.waveforms.cbc import Approximant, _generate_cbc_window
     approximant = Approximant.IMRPhenomD if approximant is None else approximant

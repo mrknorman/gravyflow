@@ -2,8 +2,9 @@
 CBC waveforms are generated on a buffer sized from the requested window alone.
 
 - The buffer does not depend on the masses: one window length, one generator shape.
-- Each waveform starts at the higher of ``min_frequency_hertz`` and its frequency
-  at the buffer's start, so the kept window matches a long-buffer reference.
+- Each waveform is whole from ``min_frequency_hertz``, tapered below it, and
+  begins no earlier than the buffer, so the kept window matches a long-buffer
+  reference.
 - The dataset path asks CBC generation for the padded window, not for the whole
   inspiral from ``min_frequency_hertz``.
 - The merger stays at the centre of the injection window, moved by its random shift.

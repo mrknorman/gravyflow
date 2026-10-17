@@ -10,8 +10,9 @@ two reports compare like with like. Writes ``validation.h5`` and
 ``validation.html`` to DIR; running it again resumes from ``validation.h5`` if
 that file belongs to this model and these settings.
 
-The matched filter costs about 45 ms per example on a CPU with the default bank
-(776 templates), so the defaults score fewer examples than the network's script.
+The matched filter costs tens of milliseconds per example on a CPU with the
+default bank (about a thousand templates; the cost grows with their number), so
+the defaults score fewer examples than the network's script.
 """
 
 import os

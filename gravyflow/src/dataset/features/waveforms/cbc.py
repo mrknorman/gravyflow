@@ -100,6 +100,42 @@ def calc_duration_from_f_min(
 
     return 5.0 * chirp_mass * (8.0 * np.pi * chirp_mass * f_min) ** (-8.0 / 3.0)
 
+
+# Each waveform is conditioned below its band edge, where LAL conditions its
+# time-domain waveforms (lalsimulation.SimInspiralTD): the model is whole from the
+# edge up, and a Hann taper runs over [_TAPER_START_RATIO * edge, edge], with
+# nothing below. A taper above the edge would remove content inside the band.
+#
+# The taper must be wide enough in frequency to be short in time, since it rings
+# for about the inverse of its width. Where the edge is near merger (95 + 95
+# solar masses at 20 Hz), a taper over [0.9, 1] of it rings past the post-merger
+# mask below, which then truncates a step of 2% of the peak; over [0.75, 1], the
+# step is at most 0.25% for 1.4 to 95 solar masses and spins to 0.8. LAL starts
+# its own taper lower for heavier binaries (0.92 of the edge for 6 + 6 solar
+# masses, 0.71 for 95 + 95). By the leading-order chirp relation the taper takes
+# the first 1 - 0.75 ** (8 / 3) = 54% of the time to merger from its start, so
+# where the buffer limits it the edge still comes more than 0.7 of the kept
+# window before merger.
+_TAPER_START_RATIO = 0.75
+
+
+def _taper_band(mass_1_msun, mass_2_msun, coalescence_time, min_frequency_hertz=None):
+    """
+    The frequencies each waveform's low-frequency taper starts and ends at,
+    ``(start, edge)``: the model is zero below ``start`` and whole from ``edge``.
+
+    ``edge`` is ``min_frequency_hertz`` (LAL's f_lower), raised where the buffer
+    cannot hold the taper below it: ``start`` is never below the frequency the
+    binary has ``coalescence_time`` before merger, at the buffer's first sample,
+    so no waveform begins before the buffer and wraps around.
+    """
+    at_buffer_start = calc_minimum_frequency(mass_1_msun, mass_2_msun, coalescence_time)
+    edge = at_buffer_start / _TAPER_START_RATIO
+    if min_frequency_hertz is not None:
+        edge = jnp.maximum(edge, min_frequency_hertz)
+    return _TAPER_START_RATIO * edge, edge
+
+
 class Approximant(Enum):
     """Supported CBC approximants. Each value is the name ripple registers the model under."""
     IMRPhenomD = "IMRPhenomD"
@@ -234,9 +270,10 @@ def _generate_cbc_waveform_jit(
     Generates time-domain waveforms using ripple.
     Returns array of shape (num_waveforms, 2, num_samples).
 
-    Each waveform starts at the frequency it has at the start of the buffer,
-    ``coalescence_time`` before merger, or at ``min_frequency_hertz`` when that is
-    given and higher, with an 8 Hz sine-squared taper above its start.
+    Each waveform is whole from its band edge, ``min_frequency_hertz`` when that
+    is given, and tapered below it (see ``_taper_band``). The taper starts no
+    lower than the frequency the binary has at the buffer's start,
+    ``coalescence_time`` before merger, which raises the edge when needed.
     """
     approximant = _as_approximant(approximant)
 
@@ -285,15 +322,11 @@ def _generate_cbc_waveform_jit(
 
     tc_jax = ensure_jax(coalescence_time, num_waveforms)
     
-    # Calculate f_min for each waveform
-    # Vectorized calculation
-    # Use tc_jax (time to merger) to calculate the starting frequency at t=0
-    # This prevents the waveform from starting before the buffer and wrapping around.
-    f_mins = calc_minimum_frequency(m1_jax, m2_jax, tc_jax)
-    if min_frequency_hertz is not None:
-        # No content below the requested minimum frequency (the f_lower of LAL).
-        f_mins = jnp.maximum(f_mins, ensure_jax(min_frequency_hertz, num_waveforms))
-    
+    taper_starts, band_edges = _taper_band(
+        m1_jax, m2_jax, tc_jax,
+        None if min_frequency_hertz is None else ensure_jax(min_frequency_hertz, num_waveforms),
+    )
+
     f_u = sample_rate_hertz / 2.0
     num_samples = int(sample_rate_hertz * duration_seconds)
     num_freqs = num_samples // 2 + 1
@@ -307,29 +340,22 @@ def _generate_cbc_waveform_jit(
         dist_jax, phi_jax, inc_jax
     )
 
-    def gen_one(parameters_i, f_min_i, tc_i):
+    def gen_one(parameters_i, taper_start_i, band_edge_i, tc_i):
         hp, hc = _frequency_domain_polarisations(approximant, fs, parameters_i, f_ref, tc_i)
 
-        # Apply taper to avoid ringing from hard frequency cut
-        taper_width = 8.0 # Hz
-        f_taper_end = f_min_i + taper_width
-        
-        mask_zero = fs < f_min_i
-        mask_one = fs >= f_taper_end
-        mask_taper = (fs >= f_min_i) & (fs < f_taper_end)
-        
-        # Sine-squared taper
-        taper_factor = jnp.sin( (jnp.pi / 2.0) * (fs - f_min_i) / (f_taper_end - f_min_i) )**2
-        
-        final_mask = jnp.where(mask_zero, 0.0, jnp.where(mask_one, 1.0, taper_factor))
+        # A Hann taper below the band edge: no hard cut in frequency to ring in
+        # time, and the band itself untouched.
+        rise = jnp.clip((fs - taper_start_i) / (band_edge_i - taper_start_i), 0.0, 1.0)
+        taper = 0.5 - 0.5 * jnp.cos(jnp.pi * rise)
 
-        # Use jnp.where to avoid NaN propagation from masked regions
-        hp = jnp.where(mask_zero, 0.0, hp * final_mask)
-        hc = jnp.where(mask_zero, 0.0, hc * final_mask)
-        
+        # jnp.where, not a product, so that a non-finite model value below the
+        # taper's start cannot leak into the output.
+        below = fs <= taper_start_i
+        hp = jnp.where(below, 0.0, hp * taper)
+        hc = jnp.where(below, 0.0, hc * taper)
         return hp, hc
 
-    hp_freq, hc_freq = jax.vmap(gen_one)(parameters, f_mins, tc_jax)
+    hp_freq, hc_freq = jax.vmap(gen_one)(parameters, taper_starts, band_edges, tc_jax)
     
     # IFFT
     # jnp.fft.irfft
@@ -403,9 +429,11 @@ def _generate_cbc_window(
     reference time).
 
     The waveforms are generated on the fixed buffer of ``_cbc_buffer_seconds``
-    and the last ``window_seconds`` are kept. Each starts at the higher of
-    ``min_frequency_hertz`` and its frequency at the buffer's start, so the kept
-    window does not depend on the buffer or on the other sources in the batch.
+    and the last ``window_seconds`` are kept. Each is whole from
+    ``min_frequency_hertz`` and tapered below it, as LAL's time-domain waveforms
+    are, with the band edge raised only where the buffer's start cannot hold the
+    taper (``_taper_band``), so the kept window does not depend on the buffer or
+    on the other sources in the batch.
     Returns an array of shape (num_waveforms, 2, int(window_seconds * sample_rate_hertz)).
     """
     buffer_seconds = _cbc_buffer_seconds(window_seconds)

@@ -1117,9 +1117,10 @@ class CBCGenerator(WaveformGenerator):
         The window length a CBC source needs beyond the one requested: none.
 
         CBC waveforms are generated on a buffer sized from the requested window
-        alone, and each starts at the higher of ``min_frequency_hertz`` and its
-        frequency at the buffer's start, so any window holds its source's merger
-        and the inspiral within it. The whole inspiral from
+        alone, and each begins no earlier than the buffer's start (tapered
+        below its band edge, ``min_frequency_hertz`` or, where the buffer is
+        shorter than the inspiral, a higher frequency), so any window holds its
+        source's merger and the inspiral within it. The whole inspiral from
         ``min_frequency_hertz`` is never generated.
         """
         return 0.0

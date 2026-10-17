@@ -11,6 +11,7 @@ import pytest
 
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.whiten import whiten
+from gravyflow.src.dataset.features.waveforms.cbc import _TAPER_START_RATIO
 from gravyflow.src.dataset.tools import snr as gf_snr
 from gravyflow.src.detection import MatchedFilter, TemplateBank, find_triggers
 from gravyflow.src.detection.template_grid import cbc_templates, noise_curve_psd
@@ -243,13 +244,15 @@ def test_a_spectrum_is_refused_only_when_it_would_change_the_search():
         assert (out["snr"][0], out["time_seconds"][0]) == (own["snr"][0], own["time_seconds"][0]), config
 
 
-def test_band_and_templates_start_at_f_low():
+def test_band_starts_at_f_low_and_templates_taper_below_it():
+    # A template is whole from f_low and tapered below it, from _TAPER_START_RATIO
+    # times f_low, as LAL's time-domain waveforms are; the filter's band starts at f_low.
     for f_low in (20.0, 30.0):
         t = cbc_templates([95.0], [95.0], FS, 3.0, f_low)[0]
         a = np.abs(np.fft.rfft(t))
         f = np.fft.rfftfreq(len(t), 1 / FS)
         lowest = f[np.argmax(a > 1e-2 * a.max())]
-        assert f_low - 3.0 <= lowest <= f_low + 8.0, (f_low, lowest)
+        assert _TAPER_START_RATIO * f_low - 1.0 <= lowest <= f_low, (f_low, lowest)
     mf = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS,
                        spectral_config=gf.SpectralConfig(lower_frequency_hertz=30.0))
     f = np.fft.rfftfreq(mf.n_fft, 1 / FS)
