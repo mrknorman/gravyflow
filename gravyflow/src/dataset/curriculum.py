@@ -147,7 +147,7 @@ class CurriculumProgressCallback:
     Usage:
         >>> curriculum = gf.Curriculum(...)
         >>> callback = gf.CurriculumProgressCallback(curriculum, name="SNR")
-        >>> model.fit(dataset, epochs=20, callbacks=[dataset.epoch_callback(), callback])
+        >>> model.fit(dataset, epochs=20, callbacks=[dataset.epoch_callback(), callback], shuffle=False)
 
     Output example:
         Epoch 1: SNR range [80.0, 100.0] (progress: 0.0%)

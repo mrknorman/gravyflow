@@ -107,7 +107,7 @@ def _one_row_plan(counts, firsts):
     firsts, counts = np.asarray([firsts], np.int64), np.asarray([counts], np.int64)
     return RandomPlan(gf.SeedTree(1), "train", rows=np.zeros(firsts.shape + (2,)), firsts=firsts,
                       counts=counts, expected=np.ones(1), accrual=np.zeros(1),
-                      reorder=False)
+                      fixed_order=np.arange(1))
 
 
 @pytest.mark.parametrize("row", list(TIGHT_ROWS))

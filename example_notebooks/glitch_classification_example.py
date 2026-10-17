@@ -294,7 +294,8 @@ history = model.fit(
     verbose=1,
     validation_data=validation_batches,
     epochs=EPOCHS,
-    callbacks=callbacks
+    callbacks=callbacks,
+    shuffle=False,  # the dataset owns the order: each batch is addressed by (epoch, index)
 )
 
 # =============================================================================

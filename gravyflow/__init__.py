@@ -39,6 +39,7 @@ _MODULES = {
     "GravyflowDataset": "gravyflow.src.dataset.dataset",
     "ComposedDataset": "gravyflow.src.dataset.dataset",
     "EpochMode": "gravyflow.src.dataset.dataset",
+    "Unprepared": "gravyflow.src.dataset.dataset",
     "FeaturePool": "gravyflow.src.dataset.pools",
     "PoolSampler": "gravyflow.src.dataset.pools",
     "Curriculum": "gravyflow.src.dataset.curriculum",

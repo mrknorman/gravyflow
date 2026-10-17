@@ -188,8 +188,8 @@ OBTAINER_PERTURBATIONS = {
 }
 #: Data-determining parameters with one buildable value (public runs publish BEST only).
 SINGLE_VALUED = {"data_quality"}
-#: Parameters that change how data is logged, never the data.
-NOT_DATA = {"logging_level"}
+#: Parameters that change how data is fetched or logged, never the data.
+NOT_DATA = {"logging_level", "prefetch_depth", "prefetch_workers"}
 #: Parameters a NOISE obtainer ignores (they select transients).
 TRANSIENT_ONLY = {"event_types", "balanced_glitch_types", "event_names", "train_on_real_events"}
 
@@ -220,7 +220,7 @@ class TestFingerprint:
 
     @pytest.mark.parametrize("name", sorted(NOT_DATA))
     def test_ignores_how_data_is_fetched(self, name):
-        changed = {"logging_level": logging.DEBUG}
+        changed = {"logging_level": logging.DEBUG, "prefetch_depth": 0, "prefetch_workers": 8}
         reference = config_fingerprint(gf.IFODataObtainer(**self.base_arguments()))
         arguments = {**self.base_arguments(), name: changed[name]}
         assert config_fingerprint(gf.IFODataObtainer(**arguments)) == reference

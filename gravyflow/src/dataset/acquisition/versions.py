@@ -1,7 +1,8 @@
 """
 The versions of the numerics that turn fetched strain into the samples gravyflow serves.
 
-``DATA_VERSIONS`` is their one home. Every data obtainer's ``specification()`` carries
+``DATA_VERSIONS`` is their one home, with the version of the plan that draws real
+noise's windows. Every data obtainer's ``specification()`` carries
 it, so a content fingerprint (``validate.provenance.config_fingerprint``), and every
 check that compares one, changes when any of them does: a checkpoint or a validation
 written under other numerics is refused. Real noise is read from the store, which
@@ -23,4 +24,7 @@ DATA_VERSIONS = MappingProxyType({
     "scipy": scipy.__version__,
     # The store's tiles and records (``dataset/store/tile.py``).
     "store": STORE_FORMAT,
+    # The plan that addresses real noise by index (``acquisition/noise.py``, ``RandomPlan``
+    # and ``draw_examples``): bump it when a batch's windows change for one address.
+    "plan": 1,
 })

@@ -672,3 +672,262 @@ def test_toggling_an_augmentation_moves_no_window(world):
     for name in specs:
         for k, start in enumerate(starts[name]):
             np.testing.assert_array_equal(start, starts["none"][k], err_msg=f"{name}, batch {k}")
+
+
+# ------------------------------------------------ real noise, addressed by index
+
+#: A low saturation, so the odd pieces' pass is about twenty batches and passes turn over.
+REAL_SATURATION = 0.05
+REAL_STEPS = 6
+#: Two training epochs' addresses, as (epoch, k).
+REAL_ADDRESSES = [(epoch, k) for epoch in range(2) for k in range(REAL_STEPS)]
+
+
+def real_dataset(fixture, split="train", steps=REAL_STEPS, **overrides):
+    """A dataset of the fixture's real noise, drawn at random."""
+    return fx.dataset(fixture, split, steps_per_epoch=steps, saturation=REAL_SATURATION, **overrides)
+
+
+def outcomes(ds, addresses):
+    """Each address's batch digest, or its refusal by type and message, in the order given."""
+    served = {}
+    for epoch, k in addresses:
+        ds.epoch = epoch
+        try:
+            served[(epoch, k)] = ("served", batch_digest(ds[k]))
+        except gf.StrainUnavailable as error:
+            served[(epoch, k)] = ("refused", type(error).__name__, str(error))
+    return served
+
+
+def slow_fetches(harness):
+    """Each fetch of the world's source waits a few milliseconds, by its tile."""
+    import time
+
+    fetch = harness.source.fetch
+
+    def slow(detector, sample_rate_hertz, interval):
+        time.sleep(0.002 * (int(interval[0]) // 64 % 5))
+        return fetch(detector, sample_rate_hertz, interval)
+
+    harness.monkeypatch.setattr(harness.source, "fetch", slow)
+
+
+def refuse_tiles(harness, starts):
+    """The world's source refuses every fetch of the tiles from GPS ``starts`` (all, if None)."""
+    from gravyflow.src.dataset.store import read
+
+    fetch = harness.source.fetch
+
+    def refusing(detector, sample_rate_hertz, interval):
+        if starts is None or float(interval[0]) in starts:
+            raise gf.StrainUnavailable(harness.source, detector, interval, "planted outage")
+        return fetch(detector, sample_rate_hertz, interval)
+
+    harness.monkeypatch.setattr(harness.source, "fetch", refusing)
+    harness.monkeypatch.setattr(read, "FETCH_BACKOFF_SECONDS", 0.0)
+
+
+def tile_at(gps, tile_seconds=64.0):
+    """The GPS start of the world's tile holding ``gps``."""
+    return float(np.floor(gps / tile_seconds) * tile_seconds)
+
+
+#: The orders a variant asks for the addresses in.
+ORDERS = {
+    "in order": lambda addresses: list(addresses),
+    "reversed": lambda addresses: list(reversed(addresses)),
+    "shuffled": lambda addresses: [addresses[i] for i in np.random.default_rng(5).permutation(len(addresses))],
+}
+#: A fresh dataset, asked in an order, reading ahead as set (the obtainer's prefetch knobs).
+PURITY_VARIANTS = {
+    "reversed": ("reversed", {}),
+    "shuffled": ("shuffled", {}),
+    "read on demand": ("in order", dict(prefetch_depth=0)),
+    "one thread": ("in order", dict(prefetch_workers=1)),
+    "deep on eight threads": ("shuffled", dict(prefetch_depth=4, prefetch_workers=8)),
+}
+
+
+def purity_mismatches(world, fixture, refused_starts=()):
+    """
+    The variants whose batches differ from the reference's: each a fresh dataset in its
+    own cold world, with slow fetches (and ``refused_starts``' tiles refused), asked
+    for ``REAL_ADDRESSES`` in its order. Returns the reference outcomes and the mismatches.
+    """
+    def run(order, knobs):
+        with world(fixture) as harness:
+            slow_fetches(harness)
+            if refused_starts:
+                refuse_tiles(harness, set(refused_starts))
+            served = outcomes(real_dataset(fixture, **knobs), ORDERS[order](REAL_ADDRESSES))
+            return served, harness.source.snapshot()[0]
+
+    reference, fetches = run("in order", {})
+    mismatches = {}
+    for name, (order, knobs) in PURITY_VARIANTS.items():
+        served, _ = run(order, knobs)
+        differ = [address for address in REAL_ADDRESSES if served[address] != reference[address]]
+        if differ:
+            mismatches[name] = differ
+    return reference, fetches, mismatches
+
+
+def test_real_batches_are_pure_functions_of_their_address(world):
+    """
+    Real noise drawn at random is addressed by index: ``ds[k]`` at epoch e is the same
+    bytes from a fresh object, in any call order, read on demand or ahead at any depth
+    on one thread or eight, with fetch latency; and reading ahead runs, on the
+    prefetch threads.
+    """
+    reference, fetches, mismatches = purity_mismatches(world, fx.odd_pieces())
+    assert not mismatches, f"batches that depend on how they were asked for: {mismatches}"
+    assert all(outcome[0] == "served" for outcome in reference.values())
+    ahead = [fetch for fetch in fetches if fetch.thread.startswith("gfstore-prefetch-")]
+    assert ahead, f"nothing was read ahead: fetch threads {sorted({fetch.thread for fetch in fetches})}"
+
+
+def test_real_refusals_are_pure_functions_of_their_address(world):
+    """
+    With tiles that the source refuses, every address is the same batch or the same
+    named refusal however it is asked for: a read ahead that fails refuses its batch
+    by the same name when it is asked for, and never moves another batch.
+    """
+    fixture = fx.odd_pieces()
+    long_piece = fixture.segments["H1"][2]
+    refused = [tile_at(long_piece[0] + 640.0), tile_at(long_piece[0] + 1280.0)]
+    reference, _, mismatches = purity_mismatches(world, fixture, refused)
+    assert not mismatches, f"batches that depend on how they were asked for: {mismatches}"
+    kinds = [outcome[0] for outcome in reference.values()]
+    assert "served" in kinds and "refused" in kinds, f"the planted outage must refuse some batches only: {kinds}"
+    for outcome in reference.values():
+        if outcome[0] == "refused":
+            assert outcome[1] == "TimelineContradiction" and "planted outage" in outcome[2]
+
+
+def _pieces_of(gps, pieces):
+    """The index of the piece each GPS time lies in."""
+    index = np.searchsorted(pieces[:, 0], gps, side="right") - 1
+    assert np.all((index >= 0) & (gps < pieces[np.maximum(index, 0), 1])), "a window outside every piece"
+    return index
+
+
+#: The longest run of consecutive batches one piece may feed alone.
+LONGEST_LONE_RUN = 2
+
+
+def test_real_batches_mix_their_rows(world):
+    """
+    Every batch has exactly B examples, drawn across the split's rows: no piece feeds
+    a run of more than ``LONGEST_LONE_RUN`` consecutive batches alone (one segment fed
+    hundreds), and every piece due a batch a pass is served.
+    """
+    fixture = fx.odd_pieces()
+    pieces = fixture.segments["H1"]
+    with world(fixture):
+        ds = real_dataset(fixture, steps=60)
+        batches = [np.asarray(ds[k][1][RV.START_GPS_TIME.name]) for k in range(60)]
+    assert all(batch.shape == (8, len(WORLD_IFOS)) for batch in batches)
+    alone = [set(_pieces_of(batch[:, 0], pieces).tolist()) for batch in batches]
+    run = longest = 0
+    for k, used in enumerate(alone):
+        run = run + 1 if len(used) == 1 and k and used == alone[k - 1] else int(len(used) == 1)
+        longest = max(longest, run)
+    assert longest <= LONGEST_LONE_RUN, f"one piece fed {longest} consecutive batches alone"
+    assert set().union(*alone) >= {0, 1, 2}, f"pieces served: {sorted(set().union(*alone))}"
+
+
+def test_training_epochs_differ_and_evaluation_epochs_repeat(world):
+    """
+    Each training epoch draws its own batches; validate and test serve the same
+    batches every epoch, whatever came before.
+    """
+    fixture = augmented_world()
+    with world(fixture):
+        train = outcomes(real_dataset(fixture, "train"), REAL_ADDRESSES)
+        same = [k for k in range(REAL_STEPS) if train[(0, k)] == train[(1, k)]]
+        assert not same, f"training batches {same} repeat in the next epoch"
+        for split in ("validate", "test"):
+            ds = real_dataset(fixture, split)
+            first = [batch_digest(ds[k]) for k in range(REAL_STEPS)]
+            ds.on_epoch_end()
+            ds.on_epoch_end()
+            assert [batch_digest(ds[k]) for k in reversed(range(REAL_STEPS))][::-1] == first, split
+
+
+def test_a_refusal_reaches_the_caller_by_type_and_exclusion(world):
+    """
+    A dataset passes a read's refusal on as it was raised: a ``TimelineContradiction``
+    keeps its type and names the ``exclusions`` entry that plans around it.
+    """
+    fixture = fx.odd_pieces()
+    with world(fixture) as harness:
+        refuse_tiles(harness, None)
+        with pytest.raises(gf.StrainUnavailable) as refused:
+            real_dataset(fixture)[0]
+    assert type(refused.value).__name__ == "TimelineContradiction"
+    detector, span, reason = refused.value.exclusion
+    assert detector in WORLD_IFOS and span[1] - span[0] == 64.0 and "could not deliver" in reason
+    assert "planted outage" in str(refused.value)
+
+
+def test_availability_is_frozen_and_fingerprinted_when_the_dataset_is_built(world):
+    """
+    A dataset freezes its noise's readable and noise-admissible time as it is built:
+    the frozen sets are in the obtainer's specification, so in its fingerprint, and a
+    timeline changed afterwards moves none of its batches; a dataset built after the
+    change has another fingerprint.
+    """
+    from gravyflow.src.validate.provenance import config_fingerprint
+    from .fakes import write_timelines
+
+    fixture = fx.odd_pieces()
+    addresses = [(0, k) for k in range(REAL_STEPS)]
+    without_long_piece = {ifo: np.delete(segments, 2, axis=0) for ifo, segments in fixture.segments.items()}
+    with world(fixture):
+        built = real_dataset(fixture)
+        reference = outcomes(real_dataset(fixture), addresses)
+        write_timelines(without_long_piece, fixture.flag_gaps)
+        assert outcomes(built, addresses) == reference
+        after = real_dataset(fixture)
+        moved = outcomes(after, addresses)
+    reader = built.noise_obtainer.ifo_data_obtainer
+    frozen = reader.specification()["availability"]
+    np.testing.assert_array_equal(frozen.of(gf.IFO.H1).readable, fixture.segments["H1"])
+    assert config_fingerprint(reader) != config_fingerprint(after.noise_obtainer.ifo_data_obtainer)
+    assert moved != reference
+
+
+def test_prepare_reads_ahead_then_the_batches_read_nothing(world):
+    """
+    ``ds.prepare(epochs=E)`` commits every tile the first E epochs need; those batches
+    then fetch nothing. It names its one argument.
+    """
+    fixture = fx.odd_pieces()
+    with world(fixture) as harness:
+        ds = real_dataset(fixture)
+        assert ds.prepare(epochs=2) == len(REAL_ADDRESSES)
+        prepared = len(harness.source.snapshot()[0])
+        assert prepared > 0
+        outcomes(ds, REAL_ADDRESSES)
+        assert len(harness.source.snapshot()[0]) == prepared
+        with pytest.raises(ValueError, match="one of batches=N or epochs=E"):
+            ds.prepare()
+
+
+def test_prepare_lists_every_contradiction_at_once(world):
+    """
+    ``ds.prepare`` meets every contradiction its batches would, and refuses once,
+    naming each with the ``exclusions`` entries that plan around them all.
+    """
+    fixture = fx.odd_pieces()
+    long_piece = fixture.segments["H1"][2]
+    refused = {tile_at(long_piece[0] + 640.0), tile_at(long_piece[0] + 1280.0)}
+    with world(fixture) as harness:
+        refuse_tiles(harness, refused)
+        with pytest.raises(gf.Unprepared) as unprepared:
+            real_dataset(fixture).prepare(epochs=2)
+    spans = {exclusion[1][0] for exclusion in unprepared.value.exclusions}
+    assert spans == refused, f"contradictions named: {unprepared.value.exclusions}"
+    assert len(unprepared.value.contradictions) == len(unprepared.value.exclusions) >= 2
+    assert "exclusions=" in str(unprepared.value)

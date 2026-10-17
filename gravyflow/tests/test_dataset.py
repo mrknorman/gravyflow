@@ -908,59 +908,39 @@ def test_gravyflow_dataset_processing():
 from unittest.mock import MagicMock, patch
 
 def test_dataset_empty_segment_list():
-    """Verify behavior when no segments are available with REAL noise.
-    
-    This test creates a mock NoiseDataObtainer subclass that returns empty
-    segments, testing that the dataset handles this gracefully without
-    hanging or crashing.
     """
-    
-    # Create a mock NoiseDataObtainer subclass that survives deepcopy
-    # Note: IFODataObtainer is now a factory function, so we subclass NoiseDataObtainer
+    REAL noise with no readable time is refused by name, offline, rather than hang or
+    serve nothing: the timeline (``get_all_segment_times``) holds nothing.
+    """
+
     class EmptySegmentsObtainer(gf.NoiseDataObtainer):
-        """Mock NoiseDataObtainer that always returns empty segments."""
-        
-        def get_valid_segments(self, *args, **kwargs):
-            # Return empty 3D array with correct shape [N, IFOs, 2] where N=0
-            self.valid_segments = np.empty((0, 1, 2))
-            self.acquisition_mode = gf.AcquisitionMode.NOISE
-            return self.valid_segments
-        
-        def acquire(self, *args, **kwargs):
-            # Empty generator
-            return iter([])
+        """A noise obtainer whose timeline holds no data."""
+
+        def get_all_segment_times(self, ifo):
+            return np.empty((0, 2))
+
+        def remove_unwanted_segments(self, ifo, valid_segments):
+            return valid_segments  # nothing to veto: no catalogue is read
 
     ifo_obtainer = EmptySegmentsObtainer(
         observing_runs=gf.ObservingRun.O3,
         data_quality=gf.DataQuality.BEST,
         data_labels=[gf.DataLabel.NOISE],
     )
-    
     noise_obtainer = gf.NoiseObtainer(
         ifo_data_obtainer=ifo_obtainer,
         noise_type=gf.NoiseType.REAL,
         ifos=[gf.IFO.L1]
     )
-    
-    dataset = GravyflowDataset(
-        noise_obtainer=noise_obtainer,
-        input_variables=[gf.ReturnVariables.ONSOURCE],
-        output_variables=[gf.ReturnVariables.OFFSOURCE],
-        steps_per_epoch=1,
-        group="train"
-    )
-    
-    # Iterating should raise StopIteration or Exception (empty generator), not hang
-    try:
-        next(iter(dataset))
-        # If we get here, the test failed - we expected an exception
-        pytest.fail("Expected StopIteration or Exception for empty segments, but iteration succeeded")
-    except StopIteration:
-        pass  # Expected: generator is empty
-    except Exception as e:
-        # Any exception is acceptable as long as it doesn't hang
-        # Common: "Noise generation failed" from dataset.__getitem__
-        assert "Noise generation failed" in str(e) or "No valid segments" in str(e), f"Unexpected exception: {e}"
+    # Refused as the dataset is built, when its availability is frozen, or at its first batch.
+    with pytest.raises(ValueError, match="no valid segments|no row long enough"):
+        GravyflowDataset(
+            noise_obtainer=noise_obtainer,
+            input_variables=[gf.ReturnVariables.ONSOURCE],
+            output_variables=[gf.ReturnVariables.OFFSOURCE],
+            steps_per_epoch=1,
+            group="train"
+        )[0]
 
 def test_dataset_invalid_config():
     """Verify error handling for invalid config parameters."""

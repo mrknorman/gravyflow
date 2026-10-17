@@ -183,10 +183,24 @@ bits, from multi-threaded ones). The test suite sets it itself, and a recipe tra
 a `DeprecationWarning`. These changes have no such period:
 
 - `ds[k]` is batch k, and `next(iter(ds))` is always batch 0. Step through batches with `next(ds)`, or index them.
-- Under `model.fit`, a training split takes Keras' epoch: pass `callbacks=[ds.epoch_callback()]`. Without it, Keras
-  epoch e would draw the batches of epoch e + 1, and a warning says so. With it, `fit(steps_per_epoch=)` must be
-  unset or the dataset's length (it is refused otherwise), and a second `fit` continues only with `initial_epoch`:
-  without it, it starts again at epoch 0 and serves the first's batches.
+- Under `model.fit`, a training split takes Keras' epoch: pass `callbacks=[ds.epoch_callback()]` and
+  `shuffle=False`. Without the callback, Keras epoch e would draw the batches of epoch e + 1, and a warning says so.
+  With it, `fit(steps_per_epoch=)` must be unset or the dataset's length (it is refused otherwise), a second `fit`
+  continues only with `initial_epoch` (without it, it starts again at epoch 0 and serves the first's batches), and a
+  batch asked for out of order is refused: `fit`'s default shuffle reorders batches with Python's unseeded global
+  random, which no seed repeats. Every batch is already a fresh seeded draw.
+- Real noise drawn at random (`NoiseType.REAL`, `SamplingMode.RANDOM`) is addressed by index too: batch k of epoch
+  e is the same bytes however and in whatever order it is asked for, so validate and test serve the same batches
+  every epoch, and each training epoch its own. Its batches are a plan over the split's segments, from the
+  availability frozen when the dataset is built (part of every fingerprint): each pass visits the segments in a new
+  order, each for its share of batches, and each batch draws its examples from eight batches' segments of the pass,
+  so no segment feeds a run of batches alone (one fed hundreds). Every batch has exactly its size: an example whose
+  detectors' windows cannot be separated is refused by name (`SeparationRefused`), never dropped. The batches after
+  the one asked for are read ahead on background threads (`prefetch_depth=2`, `prefetch_workers=2` on the obtainer;
+  they never change a batch). `ds.prepare(epochs=E)` (or `batches=N`) fetches everything those batches read before a
+  long run, and lists every contradiction between the timeline and the source at once (`gf.Unprepared`, with the
+  `exclusions` that plan around them); a refusal from a batch reaches the caller with its own type, not a bare
+  `Exception`. The old `ds.prepare(onsource, offsource)`, the model inputs of raw windows, is `ds.model_inputs`.
 - `gf.Model` gives its training dataset `steps_per_epoch = num_examples_per_epoc // num_examples_per_batch` from its
   training config, and refuses `dataset_args` with another `steps_per_epoch`; `Model.train` passes `fit` no
   `steps_per_epoch` for a dataset with a length. Its Keras model's output is named (a dict, as the dataset's targets

@@ -378,7 +378,9 @@ class IndexedBatches:
     def epoch_callback(self) -> keras.callbacks.Callback:
         """
         The callback that gives this dataset Keras' epoch:
-        ``model.fit(ds, ..., callbacks=[ds.epoch_callback()])``.
+        ``model.fit(ds, ..., callbacks=[ds.epoch_callback()], shuffle=False)``.
+        Under it, a batch Keras asks for out of order is refused: ``fit``'s
+        default shuffle draws from Python's unseeded global random.
 
         Keras also calls ``on_epoch_end`` when ``fit`` starts, before its
         first epoch, so counting those calls would serve Keras epoch e the
@@ -420,7 +422,7 @@ class IndexedBatches:
                 f"The '{self.group}' split draws fresh batches each epoch, but Keras "
                 "is driving it without its epoch: Keras calls on_epoch_end once "
                 "before the first epoch, so each Keras epoch would serve the next "
-                "epoch's batches. Pass callbacks=[dataset.epoch_callback()] to fit.",
+                "epoch's batches. Pass callbacks=[dataset.epoch_callback()] and shuffle=False to fit.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -511,7 +513,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
     Randomness: one seed tree, rooted at ``seed`` (default ``gf.Defaults.seed``),
     with every draw addressed by (split ``group``, epoch, batch k, consumer);
     see IndexedBatches, which also says which noise is not yet read by
-    address. Under ``model.fit``, pass ``callbacks=[ds.epoch_callback()]`` for
+    address. Under ``model.fit``, pass ``callbacks=[ds.epoch_callback()]`` and ``shuffle=False`` for
     a training split. Different splits never share a stream, so train,
     validate and test built from one seed are independent.
 

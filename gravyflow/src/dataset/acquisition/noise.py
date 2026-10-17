@@ -24,9 +24,6 @@ from .gwosc_data import intersect_segments
 from gravyflow.src.dataset.store import read as store_read
 from gravyflow.src.dataset.store.read import interiors
 from gravyflow.src.dataset.store.prefetch import Prefetcher
-from gravyflow.src.dataset.store.tile import TileKey
-from gravyflow.src.dataset.store.view import UnheldSamples
-from gravyflow.src.utils.resample import whole_hertz
 from gravyflow.src.rng import DIRECT_SPLIT, BatchStreams, SeedTree
 from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
@@ -109,8 +106,9 @@ class RandomPlan:
     density, and serves floor((p + 1) e_j + u_j) - floor(p e_j + u_j) of them in pass p,
     u_j drawn once (``noise/accrual``), so over any number of passes it serves its
     density to within one batch. Pass p visits its due rows in its own order
-    (``noise/segment_order`` at epoch p, a new one every pass, unless the obtainer's
-    ``segment_order`` fixes it), each for its batches; the passes run on without end.
+    (``noise/segment_order`` at epoch p, a new one every pass), or in ``fixed_order``
+    when the obtainer's ``segment_order`` fixes one, each row for its batches; the
+    passes run on without end.
     Batch g lies in the pass p whose earlier batches, sum_j floor(p e_j + u_j), number
     at most g. Every count is arithmetic on piece lengths: nothing is read to address a
     batch, and the epoch of the order streams counts passes, not training epochs.
@@ -128,17 +126,17 @@ class RandomPlan:
     counts: np.ndarray  # (M, I) samples read of each piece
     expected: np.ndarray  # (M,) batches due a pass
     accrual: np.ndarray  # (M,) u_j
-    reorder: bool  # a new order every pass
+    fixed_order: Optional[np.ndarray]  # (M,) every pass's order; None draws a new one every pass
     _orders: Dict[int, np.ndarray] = field(default_factory=dict, repr=False)
 
     @classmethod
     def build(cls, tree: SeedTree, split: str, plan: SamplingPlan, firsts, counts,
-              batches_per_start_second: float, reorder: bool) -> "RandomPlan":
+              batches_per_start_second: float, fixed_order: Optional[np.ndarray] = None) -> "RandomPlan":
         expected = plan.start_seconds * batches_per_start_second
         if not np.sum(expected) > 0:
             raise ValueError(f"The {split!r} split's RANDOM plan has no row with window starts to draw.")
         accrual = tree.stream(split, "noise/accrual", epoch=0).random(len(expected))
-        return cls(tree, split, plan.rows, firsts, counts, expected, accrual, reorder)
+        return cls(tree, split, plan.rows, firsts, counts, expected, accrual, fixed_order)
 
     def batches_before(self, p: int) -> int:
         """The batches of the passes before pass ``p``."""
@@ -159,9 +157,10 @@ class RandomPlan:
 
     def order(self, p: int) -> np.ndarray:
         """The order pass ``p`` visits the rows in."""
+        if self.fixed_order is not None:
+            return self.fixed_order
         if p not in self._orders:
-            self._orders[p] = (self.tree.stream(self.split, "noise/segment_order", epoch=p).permutation(len(self.rows))
-                               if self.reorder else np.arange(len(self.rows)))
+            self._orders[p] = self.tree.stream(self.split, "noise/segment_order", epoch=p).permutation(len(self.rows))
         return self._orders[p]
 
     def mixed(self, g: int, width: int = MIXING_WIDTH) -> np.ndarray:
@@ -708,7 +707,10 @@ class NoiseDataObtainer(BaseDataObtainer):
         The served split's RANDOM plan (``RandomPlan``) for windows of ``window_spec``
         and batches of ``num_examples_per_batch``: its rows in time order, each piece
         measured as it is read, each row due its start-seconds at the nominal density
-        of ``saturation`` examples per onsource duration of window starts.
+        of ``saturation`` examples per onsource duration of window starts, visited in
+        a new order every pass (``SegmentOrder.RANDOM``), or in time order
+        (``CHRONOLOGICAL``) or shortest first (``SHORTEST_FIRST``, by the first
+        detector's piece) every pass.
         """
         split = self._served_group or DIRECT_SPLIT
         key = (tree, split, window_spec, num_examples_per_batch)
@@ -721,10 +723,15 @@ class NoiseDataObtainer(BaseDataObtainer):
             sampling = SamplingPlan(sampling.rows[order], sampling.start_seconds[order], sampling.inseparable)
             firsts, counts = interiors(self.source, window_spec.sample_rate_hertz, np.reshape(sampling.rows, (-1, 2)))
             shape = sampling.rows.shape[:2]
+            fixed_order = {
+                SegmentOrder.RANDOM: None,
+                SegmentOrder.CHRONOLOGICAL: np.arange(len(sampling.rows)),
+                SegmentOrder.SHORTEST_FIRST: np.argsort(sampling.rows[:, 0, 1] - sampling.rows[:, 0, 0], kind="stable"),
+            }[self.segment_order]
             self._random_plans[key] = RandomPlan.build(
                 tree, split, sampling, np.reshape(firsts, shape), np.reshape(counts, shape),
                 self.saturation / (num_examples_per_batch * window_spec.onsource_duration_seconds),
-                reorder=self.segment_order == SegmentOrder.RANDOM,
+                fixed_order,
             )
         return self._random_plans[key]
 
@@ -777,20 +784,8 @@ class NoiseDataObtainer(BaseDataObtainer):
                               whiten, crop)
 
         def held(ifo, start: int) -> None:
-            """Commit every tile one window's read needs; refuse, as its read would, if it is not held."""
-            g = store_read.geometry(self.source, rate)
-            span_start, span_stop = store_read.read_span(g, start - off, off + on)
-            seconds = whole_hertz(self.source.tile_seconds(g.native))
-            length = g.native * seconds
-            store = store_read.process_store()
-            for index in range(span_start // length, (span_stop - 1) // length + 1):
-                key = TileKey(self.source.source_id(index * seconds, g.native), ifo.name, g.native, seconds, index)
-                tile = store_read._tile(store, self.source, ifo, key, stream)
-                try:
-                    tile.view(max(span_start, key.start), min(span_stop, key.start + key.length))
-                except UnheldSamples:
-                    # The read itself names the contradiction and the exclusion around it.
-                    store_read.read(self.source, ifo, rate, start - off, off + on, stream=stream)
+            """Commit every tile one window's read needs, refusing as its read would (the store's own read)."""
+            store_read.read(self.source, ifo, rate, start - off, off + on, stream=stream)
 
         def prepare(addresses: Sequence[BatchStreams]) -> List[store_read.TimelineContradiction]:
             """Every contradiction the windows of ``addresses`` meet, each tile committed once."""

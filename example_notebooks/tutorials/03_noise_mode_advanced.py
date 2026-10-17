@@ -214,7 +214,7 @@ The segment_order parameter controls how segments are processed:
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║  ORDER            │  DESCRIPTION                                      ║
 ╠═══════════════════════════════════════════════════════════════════════╣
-║  RANDOM           │  Shuffle segments randomly each epoch.            ║
+║  RANDOM           │  A new segment order every pass over them.        ║
 ║                   │  Best for: training (prevents order bias)         ║
 ╠═══════════════════════════════════════════════════════════════════════╣
 ║  CHRONOLOGICAL    │  Process segments in GPS time order.              ║

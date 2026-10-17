@@ -51,7 +51,8 @@ def real_noise():
 
 
 def test_every_obtainer_specification_carries_the_data_versions():
-    assert dict(DATA_VERSIONS) == {"resampler": "fir-1", "scipy": scipy.__version__, "store": STORE_FORMAT}
+    assert dict(DATA_VERSIONS) == {"resampler": "fir-1", "scipy": scipy.__version__, "store": STORE_FORMAT,
+                                   "plan": 1}
     with pytest.raises(TypeError):
         DATA_VERSIONS["resampler"] = "another"  # one home, read-only
     transient = gf.TransientDataObtainer(data_quality=gf.DataQuality.BEST,
