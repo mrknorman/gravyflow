@@ -49,6 +49,33 @@ def _welch_ratio(x, ifos, sample_rate_hertz, profile=None):
         return p / reference[None], f
 
 
+#: Examples a NoiseObtainer test draws: 16 s each, 7 Welch segments, 224 in all.
+OBTAINER_EXAMPLES = 32
+
+
+def median_bound(segments, bins, k=4.0):
+    """
+    Statistical: the bound on |median over ``bins`` bins of Welch/profile - 1|, each
+    bin the mean over ``segments`` half-overlapping Hann segments. A bin is about
+    chi-square with nu = 2 segments / 1.056 degrees of freedom over nu (1.056: the
+    variance excess of 50 %-overlapped Hann windows), whose median lies 2 / (3 nu)
+    below its mean; the median of n independent bins has a standard error of
+    1.2533 sigma / sqrt(n), and Hann's equivalent noise bandwidth of 1.5 bins
+    leaves bins / 1.5 independent ones. The bound is the bias plus k such errors.
+    """
+    nu = 2.0 * segments / 1.056
+    sigma = np.sqrt(1.056 / segments)
+    return 2.0 / (3.0 * nu) + k * 1.2533 * sigma / np.sqrt(bins / 1.5)
+
+
+def _assert_median_matches_the_profile(ratio, f, examples, duration):
+    band = (f >= 30.0) & (f <= 900.0)
+    segments = examples * (int((duration - 4.0) / 2.0) + 1)
+    bound = median_bound(segments, int(band.sum()))
+    median = np.median(ratio[:, 0, band].mean(axis=0))
+    assert abs(median - 1.0) < bound, f"median Welch/profile = {median:.5g}, bound {bound:.4f}"
+
+
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("sample_rate_hertz", [2048.0, 16384.0])
@@ -174,13 +201,12 @@ def test_noise_obtainer_returns_strain():
     batch = next(obtainer(
         group="train", sample_rate_hertz=FS, onsource_duration_seconds=16.0,
         crop_duration_seconds=0.0, offsource_duration_seconds=16.0,
-        num_examples_per_batch=8, seed=11,
+        num_examples_per_batch=OBTAINER_EXAMPLES, seed=11,
     ))
     ratio, f = _welch_ratio(
         np.asarray(batch[gf.ReturnVariables.ONSOURCE], np.float64), [gf.IFO.H1], FS
     )
-    band = (f >= 30.0) & (f <= 900.0)
-    assert abs(np.median(ratio[:, 0, band].mean(axis=0)) - 1.0) < 0.02
+    _assert_median_matches_the_profile(ratio, f, OBTAINER_EXAMPLES, 16.0)
 
 
 def _header(path):
@@ -236,10 +262,9 @@ def test_colored_noise_uses_the_named_profile():
     batch = next(obtainer(
         group="train", sample_rate_hertz=FS, onsource_duration_seconds=16.0,
         crop_duration_seconds=0.0, offsource_duration_seconds=16.0,
-        num_examples_per_batch=8, seed=5,
+        num_examples_per_batch=OBTAINER_EXAMPLES, seed=5,
     ))
     ratio, f = _welch_ratio(
         batch[gf.ReturnVariables.ONSOURCE], [gf.IFO.H1], FS, gf.NoiseProfile.DESIGN
     )
-    band = (f >= 30.0) & (f <= 900.0)
-    assert abs(np.median(ratio[:, 0, band].mean(axis=0)) - 1.0) < 0.02
+    _assert_median_matches_the_profile(ratio, f, OBTAINER_EXAMPLES, 16.0)
