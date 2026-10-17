@@ -55,7 +55,7 @@ print("=" * 70)
 
 obtainer = gf.IFODataObtainer(
     observing_runs=[gf.ObservingRun.O3],  # Use O3 data (2019-2020)
-    data_quality=gf.DataQuality.BEST,      # Calibrated science-quality
+    data_quality=gf.DataQuality.BEST,      # Timeline flags: burst vetoes, no injections
     data_labels=[gf.DataLabel.NOISE],      # ← NOISE mode
     segment_order=gf.SegmentOrder.RANDOM,  # Shuffle segments
 )
