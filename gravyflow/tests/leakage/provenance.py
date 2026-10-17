@@ -35,8 +35,7 @@ import numpy as np
 
 #: The detectors the code distinguishes, in the order of their indices.
 CODE_DETECTORS: Tuple[str, ...] = ("H1", "L1")
-#: Samples per block, digit base and digits per block number. The digit count is odd,
-#: so a row thinned by any power-of-two stride still meets every digit in a block.
+#: Samples per block, digit base and digits per block number.
 BLOCK_SAMPLES, DIGIT_BASE, NUM_DIGITS = 256, 16, 7
 #: The values a fake sample can take: [1, CODE_CEILING).
 CODE_CEILING = 1 + BLOCK_SAMPLES * DIGIT_BASE * len(CODE_DETECTORS)
@@ -152,17 +151,16 @@ class Encoding:
 
 @dataclass(frozen=True)
 class Span:
-    """A decoded row: its detector, first absolute sample index, length and stride."""
+    """A decoded row: its detector, first absolute sample index and length."""
 
     ifo: str
     first: int
     num_samples: int
-    stride: int = 1
 
     @property
     def end(self) -> int:
         """One past the last sample's index, at the served rate."""
-        return self.first + self.num_samples * self.stride
+        return self.first + self.num_samples
 
 
 def _blocks(position: np.ndarray, digit: np.ndarray) -> np.ndarray:
@@ -200,7 +198,6 @@ def decode_row(
     row,
     ifo_name: str,
     encoding: Encoding,
-    stride: int = 1,
 ) -> Span:
     """
     The span of one row of fake strain.
@@ -208,7 +205,7 @@ def decode_row(
     Refuses, by name: an empty, non-finite, zero-filled or sign-flipped row; values
     that are not integer codes (for example a rescaled row) or outside the code; a
     row carrying another detector's code; samples outside the fixture; a reversed
-    row; and any step other than ``stride`` samples (reported as a dropped,
+    row; and any step other than one sample (reported as a dropped,
     duplicated or displaced sample, at its first position).
     """
     values = np.asarray(row, dtype=np.float64).reshape(-1)
@@ -250,31 +247,30 @@ def decode_row(
         raise DecodeRefused("the row is time-reversed") from None
     samples = encoding.origin + blocks * BLOCK_SAMPLES + position
     steps = np.diff(samples)
-    if steps.size and np.all(steps == -stride):
+    if steps.size and np.all(steps == -1):
         raise DecodeRefused("the row is time-reversed")
-    bad = np.flatnonzero(steps != stride)
+    bad = np.flatnonzero(steps != 1)
     if bad.size:
         at = int(bad[0])
         step = int(steps[at])
         if step == 0:
             kind = "duplicated sample"
-        elif 0 < step and step % stride == 0:
-            kind = f"{step // stride - 1} dropped sample(s)"
+        elif step > 1:
+            kind = f"{step - 1} dropped sample(s)"
         elif step < 0:
             kind = "samples out of order"
         else:
             kind = "displaced sample"
-        raise DecodeRefused(f"{kind} after position {at} (step {step}, expected {stride})")
+        raise DecodeRefused(f"{kind} after position {at} (step {step}, expected 1)")
     if not np.all(encoding.inside(samples)):
         raise DecodeRefused("samples outside the fixture's islands")
-    return Span(ifo_name, int(samples[0]), int(samples.size), int(stride))
+    return Span(ifo_name, int(samples[0]), int(samples.size))
 
 
 def decode_rows(
     rows,
     ifo_names: Sequence[str],
     encoding: Encoding,
-    stride: int = 1,
     what: str = "row",
 ) -> np.ndarray:
     """
@@ -290,7 +286,7 @@ def decode_rows(
     for b in range(rows.shape[0]):
         for d, ifo_name in enumerate(ifo_names):
             try:
-                span = decode_row(rows[b, d], ifo_name, encoding, stride)
+                span = decode_row(rows[b, d], ifo_name, encoding)
             except DecodeRefused as error:
                 raise DecodeRefused(f"{what} [{b}, {d}] ({ifo_name}): {error}") from None
             out[b, d] = (span.first, span.end)
@@ -318,7 +314,6 @@ def footprints(
     encoding: Encoding,
     window: Window,
     onsource_cropped: bool,
-    stride: int = 1,
     adjacent: bool = True,
 ) -> np.ndarray:
     """
@@ -328,17 +323,17 @@ def footprints(
     Also refuses rows of the wrong length and, when ``adjacent`` (the noise path's
     geometry), an offsource whose end is not the padded onsource's start.
     """
-    on = decode_rows(onsource, ifo_names, encoding, stride, "ONSOURCE")
-    off = decode_rows(offsource, ifo_names, encoding, stride, "OFFSOURCE")
-    pad = window.crop * stride if onsource_cropped else 0
-    expected_on = (window.onsource if onsource_cropped else window.onsource + 2 * window.crop) * stride
+    on = decode_rows(onsource, ifo_names, encoding, "ONSOURCE")
+    off = decode_rows(offsource, ifo_names, encoding, "OFFSOURCE")
+    pad = window.crop if onsource_cropped else 0
+    expected_on = window.onsource if onsource_cropped else window.onsource + 2 * window.crop
     on_len = on[..., 1] - on[..., 0]
     off_len = off[..., 1] - off[..., 0]
     if np.any(on_len != expected_on):
         raise DecodeRefused(f"ONSOURCE rows hold {np.unique(on_len)} samples, expected {expected_on}")
-    if np.any(off_len != window.offsource * stride):
+    if np.any(off_len != window.offsource):
         raise DecodeRefused(
-            f"OFFSOURCE rows hold {np.unique(off_len)} samples, expected {window.offsource * stride}"
+            f"OFFSOURCE rows hold {np.unique(off_len)} samples, expected {window.offsource}"
         )
     padded_start = on[..., 0] - pad
     seam = off[..., 1] - padded_start

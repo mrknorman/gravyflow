@@ -64,7 +64,6 @@ def collect(
     ifos: Sequence,
     window: Window,
     onsource_cropped: bool,
-    stride: int = 1,
     warm: bool = False,
     adjacent: bool = True,
 ) -> Dict[str, Records]:
@@ -105,7 +104,7 @@ def collect(
             raise AssertionError(f"{name}: a warm build fetched {fetched} time(s); it should read its cache")
         prints = footprints(
             np.concatenate(rows_on), np.concatenate(rows_off), names, harness.encoding,
-            window, onsource_cropped, stride, adjacent,
+            window, onsource_cropped, adjacent,
         )
         out[name] = Records(
             name, split, names, prints, harness.encoding.sample_rate_hertz,

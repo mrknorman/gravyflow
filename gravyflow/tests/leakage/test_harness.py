@@ -169,13 +169,6 @@ def test_decoder_refuses_values_outside_the_fixture(code):
         decode_row(_row(code, n=4), "H1", code)
 
 
-def test_decoder_reads_an_exact_stride_only(code):
-    row = code.encode("H1", 1000 * 256, 640)[::16]
-    assert decode_row(row, "H1", code, stride=16).end == 1000 * 256 + 640
-    with pytest.raises(DecodeRefused, match="expected 8"):
-        decode_row(row, "H1", code, stride=8)
-
-
 def test_the_fake_refuses_requests_outside_the_fixture(code):
     source = StrainSource(code)
     with pytest.raises(OutsideFixture):
