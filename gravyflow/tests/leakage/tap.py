@@ -105,8 +105,7 @@ class DatasetTap:
                 address = (streams.epoch, streams.k)
                 serves.append((self.group, *address))
                 served = {name: np.asarray(value) for name, value in {**y, **x}.items()}
-                digest = _digest(served)
-                key = address if self.index_addressed else digest
+                key = address if self.index_addressed else _digest(served)
                 if key not in self._seen:
                     self._seen[key] = len(self._record.batches)
                     self._record.batches.append(served)
