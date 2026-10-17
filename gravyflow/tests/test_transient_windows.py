@@ -676,6 +676,17 @@ class TestPasses:
             assert sorted(kinds[8 * p:8 * p + 8]) == [GlitchType.BLIP.value] * 4 + [GlitchType.KOI_FISH.value] * 4
             assert sorted(t for t in times[8 * p:8 * p + 8] if t != rare) == rounded(PASS_TIMES[:4])
 
+    def test_each_split_draws_its_own_order(self):
+        """Splits of equal size, one seed: each pass order is its split's own draw."""
+        with offline(catalogue=records(np.concatenate([PASS_TIMES[:5], TEST_TIMES])), science=WIDE_SCIENCE):
+            train, test = (direct(1, group=group, num_examples_per_batch=5)[0] for group in (SPLIT, "test"))
+
+        def ranks(batch):
+            return np.argsort(np.argsort(times_of(batch))).tolist()
+
+        assert sorted(times_of(train)) == rounded(PASS_TIMES[:5]) and sorted(times_of(test)) == rounded(TEST_TIMES)
+        assert ranks(train) != ranks(test), "two splits share one order stream"
+
     def test_no_batch_is_partial(self):
         with offline():
             batches = direct(3, num_examples_per_batch=2)
