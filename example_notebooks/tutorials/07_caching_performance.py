@@ -8,9 +8,9 @@ This tutorial covers caching mechanisms and performance optimization
 strategies for the gravyflow acquisition pipeline.
 
 LEARNING OBJECTIVES:
-1. Understand segment caching
+1. Understand the strain store, where real noise is kept
 2. Learn about TransientCache for glitches/events
-3. Configure prefetching for better performance
+3. Bound memory with the store's cap
 4. Best practices for large-scale training
 
 RUNTIME: ~1 minute (mostly informational)
@@ -35,59 +35,73 @@ print("SECTION 1: Caching Overview")
 print("=" * 70)
 
 print("""
-GravyFlow uses multiple levels of caching to minimize data download time:
+GravyFlow keeps what it downloads, so each piece of strain is fetched once:
 
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                         CACHING HIERARCHY                               │
+│                          WHAT IS KEPT, AND WHERE                        │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│   Level 1: MEMORY CACHE (fastest)                                       │
-│   ├── Recently accessed segments                                        │
-│   ├── Configurable size via prefetch settings                          │
-│   └── Lost on program exit                                              │
+│   THE STRAIN STORE (real noise)                                         │
+│   ├── The source's own files (GWOSC: 4096 s each), raw, at the rate     │
+│   │   the source publishes, each written once and never changed         │
+│   ├── Read as memory-mapped views: no process holds a whole file        │
+│   └── Shared by every rate, split and configuration of one source       │
 │                                                                         │
-│   Level 2: DISK CACHE (persistent)                                      │
-│   ├── Segment metadata files                                            │
-│   ├── TransientCache HDF5 files (for glitches/events)                  │
+│   TRANSIENT CACHE (glitches and events)                                 │
+│   ├── TransientCache HDF5 files                                         │
 │   └── Survives restarts                                                 │
 │                                                                         │
-│   Level 3: GWOSC (network, slowest)                                     │
-│   ├── Original data source                                              │
-│   └── Download on cache miss                                            │
+│   THE SOURCE (network, slowest)                                         │
+│   └── GWOSC by default; fetched only what is not yet kept               │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 
-Cache hit order: Memory → Disk → GWOSC (network)
+The operating system's page cache is the only memory cache of the store.
 """)
 
 # =============================================================================
-# SECTION 2: SEGMENT CACHING
+# SECTION 2: THE STRAIN STORE
 # =============================================================================
 
 print("\n" + "=" * 70)
-print("SECTION 2: Segment Caching (cache_segments)")
+print("SECTION 2: The Strain Store (real noise)")
 print("=" * 70)
 
 print("""
-Segment caching stores metadata about available data segments.
-This avoids querying GWOSC segment databases repeatedly.
+Every read of real noise goes through the store:
 
-Enable with:
+  1. the source's files that the read needs are fetched whole, once, and kept
+     under ~/.gravyflow/cache/store/ (GRAVYFLOW_CACHE_DIR moves it);
+  2. the read is a view of them, resampled by gravyflow's one resampler
+     to the sample rate asked for;
+  3. the resampler's margin at each end is cut away, so every sample served
+     is exact.
+
+There is nothing to switch on or off. A second pass, another sample rate,
+another split, or another dataset over the same source reads only the disk.
+
+The source's timeline is the authority on which time holds data. When it
+says a time holds data and the source cannot deliver it (an outage, a missing
+file, non-finite samples), the read is refused by name, never zero-filled:
+
+    gf.StrainUnavailable: ... to plan around it, add
+    exclusions=(('H1', (1238170000.0, 1238174096.0), '...'),) to the obtainer.
+
+Pass that entry as the obtainer's exclusions= to plan around the time:
+
     obtainer = gf.IFODataObtainer(
-        cache_segments=True,  # ← Enable segment caching (default)
-        # ... the other settings
+        observing_runs=gf.ObservingRun.O3,
+        data_quality=gf.DataQuality.BEST,
+        data_labels=[gf.DataLabel.NOISE],
+        exclusions=[("H1", (1238170000.0, 1238174096.0), "GWOSC outage")],
     )
 
-What gets cached:
-  - Valid segment GPS times
-  - Segment durations
-  - Data quality flags
+Exclusions are part of the obtainer's fingerprint, so a run made with them is
+told apart from one made without.
 
-Cache location:
-  ~/.gravyflow/cache/segments/
-
-First run: Queries segment database (slow)
-Subsequent runs: Uses cached metadata (fast)
+Segment caches of earlier gravyflow versions (~/.gravyflow/cache/segments/)
+are never read; gravyflow names them once, with their sizes. Delete them to
+reclaim the space.
 """)
 
 # =============================================================================
@@ -122,35 +136,23 @@ Cache benefits:
 """)
 
 # =============================================================================
-# SECTION 4: PREFETCHING
+# SECTION 4: MEMORY
 # =============================================================================
 
 print("\n" + "=" * 70)
-print("SECTION 4: Prefetching for Performance")
+print("SECTION 4: Memory and the Store's Cap")
 print("=" * 70)
 
 print("""
-Prefetching downloads upcoming segments in advance while processing
-current data, hiding network latency.
+Stored files are memory-mapped and never held whole, so what a process holds
+is what is in flight: the downloads being decoded and the windows being
+resampled. One accountant per process bounds them:
 
-Configure with:
-    obtainer = gf.IFODataObtainer(
-        prefetch_segments=16,  # Number of segments to prefetch
-        # ... the other settings
-    )
+    gf.Defaults.memory_bytes = 2 * 1024**3   # the default: 2 GiB per process
 
-Recommended values:
-  - NOISE mode: 8-16 segments (larger segments)
-  - TRANSIENT mode: 32-64 segments (smaller, more numerous)
-
-Trade-offs:
-  Higher prefetch → More memory usage, less waiting
-  Lower prefetch  → Less memory, possible stalls
-
-Visual:
-    Current segment       Prefetched            Not yet fetched
-    ════════════════     ════════════════════  ═══════════════════
-    [Processing...]      [Ready] [Ready] ...   [Not downloaded...]
+A download or read waits until its bytes fit; one larger than the whole cap
+is refused before anything is fetched. Each worker process has a cap of its
+own, so N workers use up to N times it.
 """)
 
 # =============================================================================
@@ -238,14 +240,17 @@ else:
 
 print("""
 Clearing cache:
-  # Clear all cache (careful!)
+  # Clear all cache (careful!), when no gravyflow process is running
   rm -rf ~/.gravyflow/cache/
-  
+
   # Clear only transient cache
   rm -rf ~/.gravyflow/cache/transient/
-  
-  # Clear only segment metadata
+
+  # Old segment caches, which this gravyflow never reads
   rm -rf ~/.gravyflow/cache/segments/
+
+  # Stored strain: forget the files of one source, detector and interval
+  # (gf.src.dataset.store.Store.forget), or delete store/ when nothing reads it
 """)
 
 # =============================================================================
@@ -262,7 +267,7 @@ print("""
 ╠═══════════════════════════════════════════════════════════════════════╣
 ║  1. Pre-cache before training  │  Avoid network during training       ║
 ╠═══════════════════════════════════════════════════════════════════════╣
-║  2. Use appropriate prefetch   │  NOISE: 16, TRANSIENT: 64           ║
+║  2. Size the memory cap        │  gf.Defaults.memory_bytes (2 GiB)   ║
 ╠═══════════════════════════════════════════════════════════════════════╣
 ║  3. Match cache parameters     │  Same sample_rate, durations         ║
 ╠═══════════════════════════════════════════════════════════════════════╣
@@ -294,8 +299,6 @@ obtainer = gf.IFODataObtainer(
     data_quality=gf.DataQuality.BEST,
     data_labels=[gf.DataLabel.GLITCHES],
     segment_order=gf.SegmentOrder.RANDOM,
-    cache_segments=True,        # ← Enable segment caching
-    prefetch_segments=64,       # ← High prefetch for TRANSIENT
     balanced_glitch_types=True, # ← Class balancing
     augmentations=[             # ← Applied to the training split only
         gf.SignReversal(probability=0.5),
@@ -334,20 +337,19 @@ print("SUMMARY: Caching and Performance")
 print("=" * 70)
 
 print("""
-1. CACHING HIERARCHY:
-   Memory → Disk → Network (GWOSC)
+1. WHAT IS KEPT:
+   The strain store (real noise), the transient cache, then the source
 
-2. SEGMENT CACHING:
-   - cache_segments=True (default)
-   - Stores segment metadata
+2. THE STRAIN STORE:
+   - The source's own files, raw, fetched once, read as views
+   - Refusals name the exclusions entry that plans around them
 
 3. TRANSIENT CACHE:
    - Stores pre-extracted windows
    - HDF5 files in ~/.gravyflow/cache/transient/
 
-4. PREFETCHING:
-   - prefetch_segments=16-64
-   - Higher for TRANSIENT, lower for NOISE
+4. MEMORY:
+   - gf.Defaults.memory_bytes: 2 GiB per process by default
 
 5. PRE-CACHING:
    - Draw the training dataset before large runs: each pass caches
