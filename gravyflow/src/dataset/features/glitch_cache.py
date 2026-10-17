@@ -19,9 +19,11 @@ File Format (HDF5), ``TRANSIENT_CACHE_FORMAT``:
             version: int                 # TRANSIENT_CACHE_FORMAT
 """
 
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Tuple, Union
 import logging
+import numbers
 import threading
 
 logger = logging.getLogger(__name__)
@@ -197,13 +199,34 @@ class TransientCache:
         self._gps_index = None
         self._metadata = None
     
+    @contextmanager
+    def _open(self, mode: str = 'r') -> Iterator[h5py.Group]:
+        """
+        The file's ``glitches`` group, open in ``mode``: the one way every read, index
+        and write reaches the file, so none meets a file of another format.
+
+        Raises:
+            ValueError: if the file is not of ``TRANSIENT_CACHE_FORMAT`` exactly: its
+                ``version`` an integer equal to it, never one coerced to it (3.7).
+        """
+        with h5py.File(self.path, mode) as f:
+            if 'glitches' not in f:
+                raise ValueError(f"{self.path} is not a transient cache: no 'glitches' group.")
+            grp = f['glitches']
+            version = grp.attrs.get('version')
+            if not (isinstance(version, numbers.Integral) and version == TRANSIENT_CACHE_FORMAT):
+                raise ValueError(
+                    f"{self.path} is a transient cache of format {version}; this gravyflow "
+                    f"reads only format {TRANSIENT_CACHE_FORMAT}."
+                )
+            yield grp
+
     def get_metadata(self) -> Dict:
         """
         Load and cache metadata from file.
 
         Raises:
-            ValueError: if the file is not of ``TRANSIENT_CACHE_FORMAT``, so no read
-                serves another format's rows.
+            ValueError: if the file is not of ``TRANSIENT_CACHE_FORMAT`` (``_open``).
         """
         if self._metadata is not None:
             return self._metadata
@@ -211,17 +234,7 @@ class TransientCache:
         if not self.exists:
             raise FileNotFoundError(f"Cache file not found: {self.path}")
 
-        with h5py.File(self.path, 'r') as f:
-            if 'glitches' not in f:
-                raise ValueError(f"Invalid cache format: 'glitches' group not found")
-
-            grp = f['glitches']
-            version = int(grp.attrs.get('version', 0))
-            if version != TRANSIENT_CACHE_FORMAT:
-                raise ValueError(
-                    f"{self.path} is a transient cache of format {version}; this gravyflow "
-                    f"reads only format {TRANSIENT_CACHE_FORMAT}."
-                )
+        with self._open('r') as grp:
             self._metadata = {
                 'sample_rate_hertz': float(grp.attrs.get('sample_rate_hertz', CACHE_SAMPLE_RATE_HERTZ)),
                 'onsource_duration': float(grp.attrs.get('onsource_duration', CACHE_ONSOURCE_DURATION)),
@@ -241,12 +254,9 @@ class TransientCache:
         if not self.exists:
             return {}
 
-        with h5py.File(self.path, 'r') as f:
-            if 'glitches' not in f or 'gps_times' not in f['glitches']:
-                return {}
-
-            gps_times = f['glitches']['gps_times'][:]
-            return {float(gps): i for i, gps in enumerate(gps_times)}
+        with self._open('r') as grp:
+            gps_times = grp['gps_times'][:]
+        return {float(gps): i for i, gps in enumerate(gps_times)}
 
     def index_of(self, gps_time: float) -> Optional[int]:
         """The row of the transient at exactly ``gps_time``, or None."""
@@ -370,8 +380,7 @@ class TransientCache:
         never stored as absent: its NaN means only that the cache does not hold it.
         """
         onsource, offsource = np.asarray(onsource), np.asarray(offsource)
-        with h5py.File(self.path, 'a') as f:
-            grp = f['glitches']
+        with self._open('a') as grp:
             stored_onsource, stored_offsource = grp['onsource'][index], grp['offsource'][index]
             fill = ~self._held(stored_onsource, stored_offsource) & self._held(onsource, offsource)
             if not fill.any():
@@ -544,8 +553,7 @@ class TransientCache:
         target_off_dur = self._chunk_off_dur or meta['offsource_duration']
         
         # Read this chunk's windows (read_windows)
-        with h5py.File(self.path, 'r') as f:
-            grp = f['glitches']
+        with self._open('r') as grp:
             chunk_onsource, chunk_offsource = self.read_windows(
                 grp['onsource'], grp['offsource'], stored_rate, target_rate,
                 target_ons_dur, target_off_dur, rows=slice(start, end),
@@ -861,9 +869,7 @@ class TransientCache:
             if key not in metadata:
                 metadata[key] = default_metadata[key]
             
-        with h5py.File(self.path, 'a') as f:
-            grp = f['glitches']
-            
+        with self._open('a') as grp:
             n_current = grp['gps_times'].shape[0]
             n_total = n_current + n_new
             
@@ -944,8 +950,7 @@ class TransientCache:
                 except ValueError as e:
                     raise ValueError(f"Requested IFO not in cache (Cache: {stored_ifos}, Request: {target_ifos})") from e
 
-        with h5py.File(self.path, 'r') as f:
-            grp = f['glitches']
+        with self._open('r') as grp:
             onsource, offsource = self.read_windows(
                 grp['onsource'], grp['offsource'], stored_rate,
                 sample_rate_hertz or stored_rate,

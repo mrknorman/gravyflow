@@ -25,6 +25,7 @@ from gwpy.timeseries import TimeSeries
 
 import gravyflow as gf
 from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
+from gravyflow.src.dataset.acquisition.cache import DiskCache
 from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
 from gravyflow.src.dataset.features.glitch import GlitchType
@@ -448,7 +449,7 @@ class TestRecordIdentity:
             np.testing.assert_array_equal(by_time(warm, key), by_time(cold, key), err_msg=key.name)
 
 
-def write_format_2_cache(path, times, zero_ifo="H1"):
+def write_format_2_cache(path, times, zero_ifo="H1", version=2):
     """
     A transient cache as gravyflow wrote it before format 3 (``version`` 2): every
     detector's strain in one row, a detector without strain stored as zeros.
@@ -474,7 +475,7 @@ def write_format_2_cache(path, times, zero_ifo="H1"):
             onsource_duration=TransientDefaults.CACHE_ONSOURCE_DURATION,
             offsource_duration=TransientDefaults.CACHE_OFFSOURCE_DURATION,
             ifo_names=ifos,
-            version=2,
+            version=version,
         )
 
 
@@ -493,12 +494,28 @@ class TestCacheFormat:
         assert_never_filled(batch)
         assert reader.get_acquisition_stats()["rejections"] == {"no data": 1}
 
-    def test_every_read_refuses_an_older_format(self, tmp_path):
+    @pytest.mark.parametrize("version", [2, 3.7], ids=["format 2", "version 3.7"])
+    def test_every_read_index_and_write_refuses_another_format(self, tmp_path, version):
         path = tmp_path / "old.h5"
-        write_format_2_cache(path, TIMES)
-        cache = TransientCache(path, mode="r")
-        with pytest.raises(ValueError, match="format 2"):
-            cache.validate_request(RATE, 2.0, 16.0)
-        with pytest.raises(ValueError, match="format 2"):
-            cache.get_batch(np.array([0]), sample_rate_hertz=RATE, onsource_duration=2.0,
-                            offsource_duration=16.0)
+        write_format_2_cache(path, TIMES, version=version)
+        before = path.read_bytes()
+        cache = TransientCache(path, mode="a")
+        window = np.ones((len(TransientDefaults.UNIVERSAL_IFOS), 8), dtype=np.float32)
+        refused = {
+            "validate_request": lambda: cache.validate_request(RATE, 2.0, 16.0),
+            "get_batch": lambda: cache.get_batch(np.array([0]), sample_rate_hertz=RATE,
+                                                 onsource_duration=2.0, offsource_duration=16.0),
+            "index_of": lambda: cache.index_of(TIMES[0]),
+            "has_gps": lambda: cache.has_gps(TIMES[0]),
+            "get_all_gps_times": cache.get_all_gps_times,
+            "DiskCache.has": lambda: DiskCache(path).has(TIMES[0]),
+            "DiskCache.get": lambda: DiskCache(path).get(TIMES[0]),
+            "append_single (fill)": lambda: cache.append_single(window, window, TIMES[0], 0),
+            "append": lambda: cache.append(window[None], window[None], np.array([REF]), np.array([0])),
+        }
+        for name, call in refused.items():
+            with pytest.raises(ValueError, match=f"format {version}"):
+                call()
+                pytest.fail(f"{name} did not refuse")
+        assert path.read_bytes() == before, "a write reached a file of another format"
+
