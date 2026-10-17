@@ -33,12 +33,9 @@ with jax.enable_x64(True):
 jax.config.update("jax_enable_x64", _x64_before_ripplegw)
 del _x64_before_ripplegw
 
-# Constants
-G_SI = 6.67430e-11
-C_SI = 299792458.0
-M_SOLAR_SI = 1.98855e30
-# The solar mass in seconds, G * M_sun / c^3 (about 4.93e-6 s).
-M_SOLAR_SECONDS = G_SI * M_SOLAR_SI / C_SI**3
+# The solar mass in seconds, G * M_sun / c^3: the value ripple's models use,
+# which is LALSimulation's MTSUN_SI.
+from ripplegw.constants import MTSUN
 
 
 def _chirp_mass_seconds(mass_1_msun, mass_2_msun):
@@ -54,7 +51,7 @@ def _chirp_mass_seconds(mass_1_msun, mass_2_msun):
         (mass_1_msun * mass_2_msun) ** (3.0 / 5.0)
         / (mass_1_msun + mass_2_msun) ** (1.0 / 5.0)
     )
-    return chirp_mass_msun * M_SOLAR_SECONDS
+    return chirp_mass_msun * MTSUN
 
 
 # Both functions below use the leading-order (Newtonian) chirp relation between a
