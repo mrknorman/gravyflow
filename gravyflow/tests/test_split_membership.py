@@ -471,8 +471,11 @@ class TestNoAllSplit:
                               **{**WINDOW, "num_examples_per_batch": 3}))
         assert np.shape(batch[gf.ReturnVariables.ONSOURCE])[:2] == (3, 2)
         assert {segment.name for segment in obtainer.transient_segments} == set(names)
-        with pytest.raises(ValueError, match="evaluation data"):
+        with pytest.raises(ValueError, match="evaluation data") as refusal:
             next(obtainer(ifos=[gf.IFO.H1, gf.IFO.L1], group="train", **WINDOW))
+        # It names the whole opt-in that would train on them.
+        assert "train_on_real_events=True" in str(refusal.value)
+        assert "coincidence=Coincidence.COINCIDENT" in str(refusal.value)
 
     @pytest.mark.parametrize("labels", [[gf.DataLabel.EVENTS], [gf.DataLabel.GLITCHES]])
     def test_training_on_real_events_needs_the_opt_in(self, labels):
@@ -482,6 +485,18 @@ class TestNoAllSplit:
                 build(data_quality=gf.DataQuality.BEST, data_labels=labels, train_on_real_events=True)
             build(data_quality=gf.DataQuality.BEST, data_labels=labels, train_on_real_events=True,
                   coincidence=gf.Coincidence.COINCIDENT)
+
+    def test_a_noise_obtainer_refuses_events_by_kind(self):
+        """
+        A noise obtainer refuses real events however they are named, and never a
+        chirp glitch, which equals DataLabel.EVENTS as a number.
+        """
+        for events in (gf.DataLabel.EVENTS, gf.EventConfidence.CONFIDENT):
+            with pytest.raises(ValueError, match="Real events are not noise"):
+                gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE, events])
+        chirps = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST,
+                                    data_labels=[gf.DataLabel.NOISE, gf.GlitchType.CHIRP])
+        assert isinstance(chirps, gf.NoiseDataObtainer)
 
     def test_a_chirp_glitch_obtainer_serves_no_real_events(self, offline_events):
         """

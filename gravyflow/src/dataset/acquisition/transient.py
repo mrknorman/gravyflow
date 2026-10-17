@@ -634,7 +634,9 @@ class TransientDataObtainer(BaseDataObtainer):
         split = self._split(ifos, group_name)
         if group_name != "test" and not self.train_on_real_events and self._events_only():
             raise ValueError(
-                f"Real events are evaluation data, served only in 'test', not {group_name!r}."
+                f"Real events are evaluation data, served only in 'test', not {group_name!r}: "
+                "to train on them, pass train_on_real_events=True with "
+                "coincidence=Coincidence.COINCIDENT."
             )
 
         # The served state is one split's, on its detectors: another rebuilds
@@ -1050,9 +1052,11 @@ class TransientDataObtainer(BaseDataObtainer):
             rng.shuffle(order)
 
         batch_subarrays, batch_backgrounds, batch_indices = [], [], []
+        served = [0]  # Examples served this pass
 
         def add(index, onsource, offsource):
             """Add one example; the batch, once full."""
+            served[0] += 1
             batch_subarrays.append(onsource)
             batch_backgrounds.append(offsource)
             batch_indices.append(index)
@@ -1080,6 +1084,7 @@ class TransientDataObtainer(BaseDataObtainer):
                     yield batch
 
         while True:
+            served[0] = 0
             servable = np.array([
                 index for index in order
                 if self.transient_segments[index].transient_gps_time not in self._unavailable
@@ -1128,5 +1133,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 batch_backgrounds.clear()
                 batch_indices.clear()
                 yield _post_process(batch)
-            if evaluation:
+            # An evaluation pass ends once it has served. One that served nothing
+            # found every record it drew unavailable, so the next check refuses it.
+            if evaluation and served[0]:
                 return

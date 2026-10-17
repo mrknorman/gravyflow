@@ -682,3 +682,21 @@ def test_an_evaluation_pass_serves_each_transient_once(world, split, balanced):
     assert len(batches) < EVALUATION_PASS_BOUND, "an evaluation pass never ends"
     centres = np.concatenate([np.asarray(b[RV.TRANSIENT_GPS_TIME])[:, 1] for b in batches])
     assert sorted(centres.tolist()) == sorted(peaks), f"served {sorted(centres.tolist())}"
+
+
+@pytest.mark.parametrize("split", ["validate", "test"])
+def test_an_evaluation_pass_that_serves_nothing_is_refused(world, monkeypatch, split):
+    """
+    An evaluation pass none of whose records can be fetched is refused by name, as a
+    training split is, never ended after zero batches.
+    """
+    block = _golden_block("train", split, "train") + 1
+    middle = fx.block_start("O3", block) + fx.BLOCK_SECONDS / 2
+    peaks = [middle + 400.0 * k for k in range(-2, 3)]
+    fixture = fx._fixture([(middle - 2000.0, middle + 2000.0)], 4096.0, "O3", ("O3",)).with_catalogues(
+        glitches=[GlitchRecord("L1", t, t - 0.5, 1.0, "Blip", 0.95) for t in peaks])
+    monkeypatch.setattr(gf.TransientDataObtainer, "_download", lambda self, spans, rate: {})
+    with world(fixture):
+        obtainer = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES])
+        with pytest.raises(ValueError, match=f"None of the 5 transients of split '{split}' can be served"):
+            list(itertools.islice(_transient_batches(obtainer, split, batch=2), EVALUATION_PASS_BOUND))
