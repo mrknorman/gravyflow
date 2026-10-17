@@ -1,10 +1,11 @@
 """
-The chirp-time helpers of the CBC generator in float32.
+The chirp-time helpers of the CBC generator.
 
-``calc_minimum_frequency`` and ``calc_duration_from_f_min`` must give finite,
-correct values when JAX computes in float32 (64-bit types disabled), the
-precision every gravyflow array has outside waveform generation. The reference
-is the leading-order chirp relation evaluated in SI units with NumPy float64.
+``calc_minimum_frequency`` and ``calc_duration_from_f_min`` are the leading-order
+(Newtonian) chirp relation, solved for the frequency and for the time to merger.
+They must give finite values in float32 (64-bit types disabled), the precision
+every gravyflow array has outside waveform generation, equal to their float64
+values to float32's precision.
 """
 import os
 
@@ -16,9 +17,6 @@ import numpy as np
 import pytest
 
 from gravyflow.src.dataset.features.waveforms.cbc import (
-    C_SI,
-    G_SI,
-    M_SOLAR_SI,
     calc_duration_from_f_min,
     calc_minimum_frequency,
 )
@@ -28,46 +26,43 @@ MASS_1 = np.array([1.2, 1.4, 2.5, 3.0, 10.0, 30.0, 60.0, 100.0])
 MASS_2 = np.array([1.2, 1.3, 1.4, 3.0, 5.0, 25.0, 60.0, 80.0])
 DURATIONS = np.array([0.25, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0, 256.0])
 FREQUENCIES = np.array([10.0, 16.0, 20.0, 30.0, 50.0, 100.0, 200.0, 400.0])
-RTOL = 1e-5
 
-
-def _chirp_mass_seconds_si(m1, m2):
-    m1_kg = np.asarray(m1, dtype=np.float64) * M_SOLAR_SI
-    m2_kg = np.asarray(m2, dtype=np.float64) * M_SOLAR_SI
-    chirp_mass_kg = (m1_kg * m2_kg) ** 0.6 / (m1_kg + m2_kg) ** 0.2
-    return G_SI * chirp_mass_kg / C_SI**3
-
-
-def _reference_frequency(m1, m2, duration):
-    m = _chirp_mass_seconds_si(m1, m2)
-    return np.maximum((duration / 5.0) ** (-3.0 / 8.0) / (8.0 * np.pi) * m ** (-5.0 / 8.0), 1.0)
-
-
-def _reference_duration(m1, m2, frequency):
-    m = _chirp_mass_seconds_si(m1, m2)
-    return 5.0 * m * (8.0 * np.pi * m * frequency) ** (-8.0 / 3.0)
+# Representation tolerances, c * eps * |value|. Each helper is a chirp mass
+# (two powers, a product, a sum, a quotient) and one further power with
+# exponent -8/3 or 3/8. A relative error e in the chirp mass becomes 5/3 e in the
+# duration and 5/8 e in the frequency, and each operation rounds by up to half an
+# ulp: about 4 ulp for the duration and 2 for the frequency, doubled for margin.
+DURATION_ULPS = 8
+FREQUENCY_ULPS = 4
+# The round trip: a frequency error e becomes 8/3 e in the recovered duration,
+# on top of that duration's own rounding.
+ROUND_TRIP_ULPS = int(np.ceil(8.0 / 3.0 * FREQUENCY_ULPS)) + DURATION_ULPS
 
 
 def _float32(values):
     return jnp.asarray(np.asarray(values, dtype=np.float32))
 
 
-def test_minimum_frequency_is_correct_in_float32():
+def _float64_values():
+    with jax.enable_x64(True):
+        f_min = np.asarray(calc_minimum_frequency(MASS_1, MASS_2, DURATIONS))
+        duration = np.asarray(calc_duration_from_f_min(MASS_1, MASS_2, FREQUENCIES))
+    assert f_min.dtype == np.float64 and duration.dtype == np.float64
+    return f_min, duration
+
+
+def test_float32_values_are_the_float64_values_to_float32_precision():
     with jax.enable_x64(False):
         f_min = calc_minimum_frequency(_float32(MASS_1), _float32(MASS_2), _float32(DURATIONS))
-        assert f_min.dtype == jnp.float32
-        f_min = np.asarray(f_min)
-    assert np.all(np.isfinite(f_min)), f_min
-    np.testing.assert_allclose(f_min, _reference_frequency(MASS_1, MASS_2, DURATIONS), rtol=RTOL)
-
-
-def test_duration_from_frequency_is_correct_in_float32():
-    with jax.enable_x64(False):
         duration = calc_duration_from_f_min(_float32(MASS_1), _float32(MASS_2), _float32(FREQUENCIES))
-        assert duration.dtype == jnp.float32
-        duration = np.asarray(duration)
-    assert np.all(np.isfinite(duration)) and np.all(duration > 0.0), duration
-    np.testing.assert_allclose(duration, _reference_duration(MASS_1, MASS_2, FREQUENCIES), rtol=RTOL)
+        assert f_min.dtype == jnp.float32 and duration.dtype == jnp.float32
+        f_min, duration = np.asarray(f_min), np.asarray(duration)
+    assert np.all(np.isfinite(f_min)) and np.all(np.isfinite(duration)), (f_min, duration)
+
+    eps = np.finfo(np.float32).eps
+    reference_f_min, reference_duration = _float64_values()
+    np.testing.assert_allclose(f_min, reference_f_min, rtol=FREQUENCY_ULPS * eps)
+    np.testing.assert_allclose(duration, reference_duration, rtol=DURATION_ULPS * eps)
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
@@ -76,13 +71,18 @@ def test_duration_and_frequency_are_inverse(dtype):
     with jax.enable_x64(dtype == np.float64):
         f_min = calc_minimum_frequency(MASS_1.astype(dtype), MASS_2.astype(dtype), durations)
         recovered = np.asarray(calc_duration_from_f_min(MASS_1.astype(dtype), MASS_2.astype(dtype), f_min))
-    keep = np.asarray(f_min) > 1.0  # the 1 Hz floor breaks the inverse
-    np.testing.assert_allclose(recovered[keep], durations[keep], rtol=10 * np.finfo(dtype).eps ** 0.5)
+    assert recovered.dtype == dtype
+    assert np.all(np.asarray(f_min) > 1.0), f_min  # the 1 Hz floor would break the inverse
+    np.testing.assert_allclose(recovered, durations, rtol=ROUND_TRIP_ULPS * np.finfo(dtype).eps)
 
 
 def test_python_floats_are_accepted():
     with jax.enable_x64(False):
-        f_min = float(calc_minimum_frequency(30.0, 25.0, 4.0))
-        duration = float(calc_duration_from_f_min(30.0, 25.0, 20.0))
-    np.testing.assert_allclose(f_min, _reference_frequency(30.0, 25.0, 4.0), rtol=RTOL)
-    np.testing.assert_allclose(duration, _reference_duration(30.0, 25.0, 20.0), rtol=RTOL)
+        f_min = calc_minimum_frequency(30.0, 25.0, 4.0)
+        duration = calc_duration_from_f_min(30.0, 25.0, 20.0)
+    with jax.enable_x64(True):
+        reference_f_min = float(calc_minimum_frequency(30.0, 25.0, 4.0))
+        reference_duration = float(calc_duration_from_f_min(30.0, 25.0, 20.0))
+    eps = np.finfo(np.float32).eps
+    np.testing.assert_allclose(float(f_min), reference_f_min, rtol=FREQUENCY_ULPS * eps)
+    np.testing.assert_allclose(float(duration), reference_duration, rtol=DURATION_ULPS * eps)

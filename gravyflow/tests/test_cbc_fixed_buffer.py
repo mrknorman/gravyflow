@@ -119,6 +119,14 @@ def _sources(mass_range, spins, seed, count):
     )
 
 
+# A reference bound. The buffer is invisible beside gravyflow's agreement with
+# LALSimulation: the time-domain parity test (test_cbc_lal_parity.py) finds a
+# worst match of 0.99992 against SimInspiralTD and ChooseTDWaveform over 248
+# sources, so the buffer may move a kept window by no more than that residual,
+# 8e-5, and never decides parity.
+MINIMUM_BUFFER_OVERLAP = 1.0 - 8e-5
+
+
 def _overlap(a, b):
     """Normalised time-domain inner product per polarisation; the worse of the two."""
     a = np.asarray(a, dtype=np.float64)
@@ -168,10 +176,15 @@ def test_the_kept_window_matches_a_long_buffer(monkeypatch, approximant, mass_ra
     )[..., -int(window * SAMPLE_RATE):]
 
     assert kept.shape == reference.shape
-    assert _overlap(kept, reference).min() >= 0.9999
+    assert _overlap(kept, reference).min() >= MINIMUM_BUFFER_OVERLAP
 
 
 def test_the_merger_is_at_the_window_centre_plus_its_shift():
+    """
+    Each injection is its source's own window moved by its shift: the peak sits
+    ``shift`` samples from where it sits in the source generated alone, centred.
+    Where that is relative to the merger is test_cbc.py's.
+    """
     generator = gf.CBCGenerator(
         mass_1_msun=_uniform(20.0, 40.0), mass_2_msun=_uniform(20.0, 40.0), network=[gf.IFO.L1]
     )
@@ -179,8 +192,27 @@ def test_the_merger_is_at_the_window_centre_plus_its_shift():
     injections = np.asarray(injections[0], dtype=np.float64)
     shifts = np.asarray(parameters["shift"][0])
     assert np.any(shifts != 0)
+    assert np.all(shifts == np.round(shifts))
+
+    def source(parameter):
+        return np.asarray(parameters[parameter][0], dtype=np.float64)
+
+    P = gf.WaveformParameters
+    window = injections.shape[-1]
+    alone = np.asarray(cbc._generate_cbc_window(
+        len(shifts), SAMPLE_RATE, window / SAMPLE_RATE, source(P.MIN_FREQUENCY_HERTZ),
+        approximant=generator.approximant,
+        mass_1_msun=source(P.MASS_1_MSUN),
+        mass_2_msun=source(P.MASS_2_MSUN),
+        spin_1_in=source(P.SPIN_1_IN),
+        spin_2_in=source(P.SPIN_2_IN),
+        inclination_radians=source(P.INCLINATION_RADIANS),
+        distance_mpc=source(P.DISTANCE_MPC),
+        reference_orbital_phase_in=source(P.REFERENCE_ORBITAL_PHASE_IN),
+    ), dtype=np.float64)
 
     peaks = np.argmax(np.sum(injections ** 2, axis=1), axis=-1)
-    centre = injections.shape[-1] // 2
-    # The amplitude peaks within a few milliseconds of the merger time.
-    assert np.all(np.abs(peaks - (centre + shifts)) <= int(0.01 * SAMPLE_RATE))
+    peaks_alone = np.argmax(np.sum(alone ** 2, axis=1), axis=-1)
+    # Exact: a shift is a whole number of samples, and the window does not
+    # depend on the buffer it was cut from.
+    np.testing.assert_array_equal(peaks - shifts.astype(int), peaks_alone)

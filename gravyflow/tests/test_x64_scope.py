@@ -10,6 +10,7 @@ import sys
 import textwrap
 
 import jax
+import lal
 import numpy as np
 import pytest
 from keras import ops
@@ -86,6 +87,8 @@ def _sources(approximant, count, seed):
     )
 
 
+# The 64-bit path is the one test_cbc_lal_parity.py matches against LALSimulation,
+# so this match carries that parity over to the float32 inputs the dataset uses.
 @pytest.mark.parametrize("approximant", ["IMRPhenomD", "IMRPhenomXAS", "IMRPhenomPv2"])
 def test_cbc_waveforms_match_a_64_bit_reference(approximant):
     source = _sources(approximant, count=8, seed=7)
@@ -114,7 +117,28 @@ def test_cbc_waveforms_match_a_64_bit_reference(approximant):
     a = np.asarray(waveforms, dtype=np.float64)
     b = np.asarray(reference, dtype=np.float64)
     overlap = np.sum(a * b, axis=-1) / np.sqrt(np.sum(a * a, axis=-1) * np.sum(b * b, axis=-1))
-    assert overlap.min() >= 0.99999
+    mismatch = 1.0 - overlap.min()
+    assert mismatch <= _float32_input_mismatch_bound(source, window_seconds=2.0), mismatch
+
+
+def _float32_input_mismatch_bound(source, window_seconds):
+    """
+    The largest mismatch float32 inputs can cause (a representation bound).
+
+    The 64-bit reference differs only in its inputs, each rounded to float32 by
+    at most half an ulp, so the chirp mass moves by a relative e of a few eps.
+    At leading order the gravitational-wave phase tau seconds before merger is
+    2 (tau / 5 m) ** (5 / 8), m the chirp mass in seconds, so it moves by
+    5 / 8 of the phase times e; over the window's half before the merger,
+    N = (tau / 5 m) ** (5 / 8) / pi cycles, that is 2 pi N (5 / 8) e, and the
+    mismatch is about half its square. e = 4 eps covers both masses and the
+    spins, which enter the phase at higher order with smaller coefficients.
+    """
+    m1, m2 = source["mass_1_msun"], source["mass_2_msun"]
+    chirp_mass_seconds = (m1 * m2) ** 0.6 / (m1 + m2) ** 0.2 * lal.MTSUN_SI
+    cycles = (window_seconds / 2.0 / (5.0 * chirp_mass_seconds)) ** (5.0 / 8.0) / np.pi
+    phase_error = 2.0 * np.pi * cycles.max() * (5.0 / 8.0) * 4.0 * np.finfo(np.float32).eps
+    return 0.5 * phase_error ** 2
 
 
 def test_matched_filter_templates_are_float32_and_leave_x64_off():

@@ -1,219 +1,80 @@
-"""Tests for gravyflow CBC waveform generation."""
-import os
-os.environ["KERAS_BACKEND"] = "jax"
+"""
+CBC windows from ``_generate_cbc_window``: batching, input forms, refusal, and
+where the merger sits.
 
-import pytest
+How the waveforms match LALSimulation's is ``test_cbc_lal_parity.py``'s, and
+the chirp-time helpers are ``test_cbc_units.py``'s.
+"""
 import numpy as np
-import jax.numpy as jnp
+import pytest
 from keras import ops
 
-from gravyflow.src.dataset.features.waveforms.cbc import (
-    _generate_cbc_window,
-    calc_minimum_frequency,
-    calc_duration_from_f_min,
-    Approximant
-)
+from gravyflow.src.dataset.features.waveforms.cbc import _generate_cbc_window
+
+SAMPLE_RATE = 2048.0
 
 
-# ============================================================================
-# HELPER FUNCTION TESTS
-# ============================================================================
+def test_each_row_of_a_batch_is_its_source_generated_alone():
+    """
+    Row i of a batch is source i generated on its own, whatever form each input
+    takes: per-row arrays, a flat spin list, a (num_waveforms, 3) spin array, a
+    tensor, a Python float.
+    """
+    mass_1 = np.array([30.0, 12.0, 45.0])
+    mass_2 = np.array([25.0, 8.0, 20.0])
+    spin_1 = np.array([[0.1, 0.0, 0.3], [0.0, 0.2, -0.4], [0.3, -0.1, 0.5]])
+    spin_2 = np.array([[0.0, 0.0, 0.2], [0.1, 0.0, 0.0], [-0.2, 0.2, 0.1]])
+    inclination = np.array([0.3, 1.1, 2.0])
+    distance = np.array([300.0, 500.0, 900.0])
+    phase = np.array([0.1, 2.0, 4.0])
 
-def test_calc_minimum_frequency():
-    """Test minimum frequency calculation."""
-    m1 = 30.0
-    m2 = 30.0
-    duration = 4.0
-    
-    f_min = calc_minimum_frequency(m1, m2, duration)
-    
-    # Should return a positive frequency
-    assert float(f_min) > 0.0
-    # For heavy masses and long duration, should be low
-    assert float(f_min) < 50.0
-
-
-def test_calc_minimum_frequency_float32():
-    """Test calc_minimum_frequency with float32 dtype (covers line 66)."""
-    m1 = jnp.array(30.0, dtype=jnp.float32)
-    m2 = jnp.array(30.0, dtype=jnp.float32)
-    duration = jnp.array(4.0, dtype=jnp.float32)
-    
-    f_min = calc_minimum_frequency(m1, m2, duration)
-    
-    assert float(f_min) > 0.0
-
-
-def test_calc_duration_from_f_min():
-    """Test duration calculation from minimum frequency (covers lines 83-107)."""
-    m1 = 30.0
-    m2 = 30.0
-    f_min = 20.0
-    
-    duration = calc_duration_from_f_min(m1, m2, f_min)
-    
-    # Should return positive duration
-    assert float(duration) > 0.0
-
-
-def test_calc_duration_from_f_min_inverse():
-    """Verify calc_duration_from_f_min is inverse of calc_minimum_frequency."""
-    m1 = 30.0
-    m2 = 30.0
-    original_duration = 8.0
-    
-    # Calculate f_min from duration
-    f_min = calc_minimum_frequency(m1, m2, original_duration)
-    
-    # Calculate duration back from f_min
-    recovered_duration = calc_duration_from_f_min(m1, m2, f_min)
-    
-    # Should match
-    np.testing.assert_allclose(float(recovered_duration), original_duration, rtol=0.01)
-
-
-def test_calc_duration_from_f_min_float32():
-    """Test calc_duration_from_f_min with float32 dtype (covers lines 97-99)."""
-    m1 = jnp.array(30.0, dtype=jnp.float32)
-    m2 = jnp.array(30.0, dtype=jnp.float32)
-    f_min = jnp.array(20.0, dtype=jnp.float64)  # Different dtype to trigger cast
-    
-    duration = calc_duration_from_f_min(m1, m2, f_min)
-    
-    # Duration should be positive
-    assert float(duration) > 0.0
-
-
-
-# WAVEFORM GENERATION TESTS
-# ============================================================================
-
-def test_generate_cbc_window_imrphenomd():
-    """Test basic IMRPhenomD waveform generation."""
-    waveforms = _generate_cbc_window(
-        num_waveforms=2,
-        sample_rate_hertz=2048.0,
+    batch = np.asarray(_generate_cbc_window(
+        num_waveforms=3,
+        sample_rate_hertz=SAMPLE_RATE,
         window_seconds=2.0,
         min_frequency_hertz=None,
-        mass_1_msun=30.0,
-        mass_2_msun=30.0,
-        approximant="IMRPhenomD"
-    )
-    
-    # Shape: (num_waveforms, 2, num_samples)
-    expected_samples = int(2048.0 * 2.0)
-    assert waveforms.shape == (2, 2, expected_samples)
-    
-    # Should have non-zero values (actual waveform)
-    assert float(jnp.max(jnp.abs(waveforms))) > 0.0
+        approximant="IMRPhenomPv2",
+        mass_1_msun=mass_1,
+        mass_2_msun=mass_2,
+        spin_1_in=spin_1.ravel().tolist(),
+        spin_2_in=spin_2,
+        inclination_radians=inclination,
+        distance_mpc=distance,
+        reference_orbital_phase_in=phase,
+    ))
+    assert batch.shape == (3, 2, int(2.0 * SAMPLE_RATE))
+
+    for i in range(3):
+        alone = np.asarray(_generate_cbc_window(
+            num_waveforms=1,
+            sample_rate_hertz=SAMPLE_RATE,
+            window_seconds=2.0,
+            min_frequency_hertz=None,
+            approximant="IMRPhenomPv2",
+            mass_1_msun=ops.convert_to_tensor(mass_1[i]),
+            mass_2_msun=float(mass_2[i]),
+            spin_1_in=spin_1[i].tolist(),
+            spin_2_in=spin_2[i],
+            inclination_radians=float(inclination[i]),
+            distance_mpc=float(distance[i]),
+            reference_orbital_phase_in=float(phase[i]),
+        ))[0]
+        # Representation: one float32 result through an inverse FFT of
+        # 2 ** 12 bins, so a few ulp per log2 N of the peak. Rows mixed up, or a
+        # spin or scalar broadcast wrongly, differ at order the peak itself.
+        tolerance = 4 * np.log2(alone.shape[-1]) * np.finfo(np.float32).eps * np.abs(alone).max()
+        np.testing.assert_allclose(batch[i], alone, rtol=0.0, atol=tolerance, err_msg=f"row {i}")
 
 
-def test_generate_cbc_window_imrphenomxas():
-    """Test IMRPhenomXAS approximant."""
-    waveforms = _generate_cbc_window(
-        num_waveforms=1,
-        sample_rate_hertz=2048.0,
-        window_seconds=2.0,
-        min_frequency_hertz=None,
-        mass_1_msun=30.0,
-        mass_2_msun=30.0,
-        approximant="IMRPhenomXAS"
-    )
-    
-    assert waveforms.shape[0] == 1
-    assert waveforms.shape[1] == 2
-
-
-def test_generate_cbc_window_imrphenompv2():
-    """Test IMRPhenomPv2 approximant (covers lines 252-264)."""
-    waveforms = _generate_cbc_window(
-        num_waveforms=1,
-        sample_rate_hertz=2048.0,
-        window_seconds=2.0,
-        min_frequency_hertz=None,
-        mass_1_msun=30.0,
-        mass_2_msun=30.0,
-        spin_1_in=[0.1, 0.1, 0.3],  # Precessing spins
-        spin_2_in=[0.0, 0.0, 0.2],
-        approximant="IMRPhenomPv2"
-    )
-    
-    assert waveforms.shape[0] == 1
-    assert waveforms.shape[1] == 2
-
-
-def test_generate_cbc_window_taylorf2():
-    """Test TaylorF2 approximant with tidal parameters (covers lines 266-274)."""
-    waveforms = _generate_cbc_window(
-        num_waveforms=1,
-        sample_rate_hertz=2048.0,
-        window_seconds=4.0,
-        min_frequency_hertz=None,
-        mass_1_msun=1.4,  # Neutron star masses
-        mass_2_msun=1.4,
-        lambda_1=400.0,  # Tidal deformability
-        lambda_2=400.0,
-        approximant="TaylorF2"
-    )
-    
-    assert waveforms.shape[0] == 1
-    assert waveforms.shape[1] == 2
-
-
-def test_generate_cbc_window_nrtidalv2():
-    """Test IMRPhenomD_NRTidalv2 approximant."""
-    waveforms = _generate_cbc_window(
-        num_waveforms=1,
-        sample_rate_hertz=2048.0,
-        window_seconds=4.0,
-        min_frequency_hertz=None,
-        mass_1_msun=1.4,
-        mass_2_msun=1.4,
-        lambda_1=300.0,
-        lambda_2=300.0,
-        approximant="IMRPhenomD_NRTidalv2"
-    )
-    
-    assert waveforms.shape[0] == 1
-
-
-def test_generate_cbc_window_invalid_approximant():
-    """Test error handling for invalid approximant (covers line 172)."""
+def test_an_unknown_approximant_is_refused():
     with pytest.raises(ValueError, match="not supported"):
         _generate_cbc_window(
             num_waveforms=1,
-            sample_rate_hertz=2048.0,
+            sample_rate_hertz=SAMPLE_RATE,
             window_seconds=1.0,
             min_frequency_hertz=None,
-            approximant="InvalidApproximant"
+            approximant="InvalidApproximant",
         )
-
-
-# ============================================================================
-# SPIN RESHAPING TESTS
-# ============================================================================
-
-def test_generate_cbc_window_batch_spins():
-    """Test waveform generation with batch spin inputs (covers lines 199-200, 204-205)."""
-    num_waveforms = 3
-    
-    # Batch spins: (num_waveforms * 3,) flattened
-    spin_1_flat = [0.1, 0.0, 0.3] * num_waveforms  # Will be reshaped to (3, 3)
-    spin_2_flat = [0.0, 0.0, 0.2] * num_waveforms
-    
-    waveforms = _generate_cbc_window(
-        num_waveforms=num_waveforms,
-        sample_rate_hertz=2048.0,
-        window_seconds=2.0,
-        min_frequency_hertz=None,
-        mass_1_msun=30.0,
-        mass_2_msun=30.0,
-        spin_1_in=spin_1_flat,
-        spin_2_in=spin_2_flat,
-        approximant="IMRPhenomD"
-    )
-    
-    assert waveforms.shape[0] == num_waveforms
 
 
 def test_generate_cbc_window_puts_the_merger_at_the_centre():
@@ -232,21 +93,3 @@ def test_generate_cbc_window_puts_the_merger_at_the_centre():
         assert waveforms.shape == (1, 2, num_samples)
         peak = int(np.argmax(np.sum(waveforms[0] ** 2, axis=0)))
         assert abs(peak - num_samples // 2) <= 10, (window_seconds, peak, num_samples // 2)
-
-
-def test_generate_cbc_window_tensor_input():
-    """Test waveform generation with tensor inputs (covers line 375)."""
-    # Use ops tensors as inputs
-    mass = ops.convert_to_tensor(30.0)
-    
-    waveforms = _generate_cbc_window(
-        num_waveforms=1,
-        sample_rate_hertz=2048.0,
-        window_seconds=2.0,
-        min_frequency_hertz=None,
-        mass_1_msun=mass,
-        mass_2_msun=mass,
-        approximant="IMRPhenomD"
-    )
-    
-    assert waveforms.shape[0] == 1
