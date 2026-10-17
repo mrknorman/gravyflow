@@ -94,8 +94,8 @@ def _snr_from_spectrum(injection, spectrum: PowerSpectrum, band, network: bool):
     peak = ops.where(peak > 0, peak, ops.ones_like(peak))
     h_fft = jnp.fft.rfft(h / peak)[..., kmin:kmax]
     power = ops.real(h_fft) ** 2 + ops.imag(h_fft) ** 2
-    psd_n = spectrum.interpolate(num_samples)[..., kmin:kmax] * spectrum.inverse_bias
-    rho = peak[..., 0] * ops.sqrt((4.0 / num_samples) * ops.sum(power / psd_n, axis=-1))
+    inverse_psd_n = spectrum.inverse(num_samples)[..., kmin:kmax]
+    rho = peak[..., 0] * ops.sqrt((4.0 / num_samples) * ops.sum(power * inverse_psd_n, axis=-1))
     if network:
         largest = ops.max(rho, axis=-1, keepdims=True)
         largest = ops.where(largest > 0, largest, ops.ones_like(largest))
@@ -224,8 +224,8 @@ def _weight_on_grid(psd, num_samples: int, sample_rate_hertz: float):
         if psd.sample_rate_hertz != float(sample_rate_hertz):
             raise ValueError("sample_rate_hertz differs from the PowerSpectrum's.")
         # S = normalised * scale^2 / fs: with the data divided by scale, the
-        # weight is normalised / 2.
-        return psd.interpolate(num_samples) * (psd.inverse_bias / 2.0), psd.scale
+        # weight is normalised / 2, from the bias-free inverse (see inverse).
+        return 0.5 / psd.inverse(num_samples), psd.scale
     given = np.asarray(psd)
     weight = given.astype(np.float64) * (sample_rate_hertz / 2.0)
     if weight.shape[-1] != num_freqs:

@@ -359,6 +359,29 @@ def test_target_snr_is_unbiased_against_the_true_psd():
     assert abs(np.mean(true) / 10.0 - 1.0) < 0.015, np.mean(true)
 
 
+@pytest.mark.parametrize("offsource", [4.0, 8.0, 16.0, 32.0, 64.0])
+@pytest.mark.parametrize("onsource", [1.0, 2.0, 16.0])
+def test_snr_squared_from_an_estimated_psd_is_unbiased_on_any_grid(onsource, offsource):
+    # Unit white noise (one-sided PSD 2 / fs), so the true SNR^2 is closed form.
+    # Onsources longer than the 1 s Welch segment put the injection's bins
+    # between the PSD's; 4 s to 64 s of offsource give 7 to 127 segments. SNR^2
+    # is linear in each bin's weight, so its mean over noise draws is exactly the
+    # true SNR^2 when the weight is unbiased at every bin. Bound: 4 sigma of the
+    # draws' mean, with the inverse-bias factor's Monte Carlo standard error
+    # (measured: 1.6e-3 at 7 segments, falling as 1/sqrt(K)) in quadrature.
+    fs, draws = 512.0, 400
+    rng = np.random.default_rng(int(10 * onsource + offsource))
+    t = np.arange(int(onsource * fs)) / fs
+    h = (scipy.signal.chirp(t, f0=30.0, t1=t[-1], f1=200.0) * np.hanning(t.size)).astype(np.float32)
+    config = SpectralConfig(lower_frequency_hertz=20.0)
+    kmin, kmax = config.band_indices(h.size, fs)
+    true = (4.0 / h.size) * np.sum(np.abs(np.fft.rfft(h.astype(np.float64))[kmin:kmax]) ** 2) / 2.0
+    spectrum = estimate_psd(rng.standard_normal((draws, int(offsource * fs))).astype(np.float32), fs, config)
+    ratio = np.asarray(gf.snr(np.broadcast_to(h, (draws, h.size)), spectrum, fs), np.float64) ** 2 / true
+    sigma = np.hypot(ratio.std() / np.sqrt(draws), 1.6e-3 * np.sqrt(7 / spectrum.num_segments))
+    assert abs(ratio.mean() - 1.0) < 4 * sigma, (spectrum.num_segments, ratio.mean(), sigma)
+
+
 # --- matched filter -------------------------------------------------------------
 
 @pytest.mark.parametrize("phase", [0.0, np.pi / 2])

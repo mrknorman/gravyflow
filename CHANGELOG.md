@@ -57,3 +57,10 @@ repository before it may need the changes below.
 - A wheel or non-editable install lacked the package's data files, so coloured noise (its noise profiles), the bundled
   template bank and the shipped models were missing. The wheel no longer ships the tests or their data.
 - `import gravyflow` took 3.6 s and imported 119 third-party packages; it now imports none.
+- The SNR from an estimated PSD read low whenever the onsource was longer than a Welch segment: the inverse-bias
+  correction, exact at the PSD's own bins, over-corrected the linearly interpolated PSD between them (SNR^2 8% low
+  with 7 segments, 0.4% with 127). The SNR and the matched filter now interpolate the inverse PSD, which one factor
+  corrects exactly at every bin (`PowerSpectrum.inverse`). SNR labels and SNR-scaled injections at onsources longer
+  than `fft_duration_seconds` move by that much; at the default 1 s onsource and 1 s segments they do not move.
+- `pearson` added 1e-5 to its denominator, so its coefficients depended on the data's scale (proportional rows
+  correlated at 0.29 at a thousandth of the scale). It now divides exactly, and gives 0 for a row with no variance.

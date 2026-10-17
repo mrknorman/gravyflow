@@ -207,10 +207,11 @@ class SpectralConfig:
             the gain in bands where the noise has (almost) no power, and is the
             same in whitening and in the SNR.
         correct_inverse_bias: remove the bias the estimate's noise puts into its
-            inverse (Jensen: E[1 / P_hat] > 1 / P): the SNR divides by
-            E[P / P_hat], and whitening by its own measured gain, so that the SNR
-            of Gaussian noise has no estimator bias and whitened Gaussian noise has
-            unit in-band PSD.
+            inverse (Jensen: E[1 / P_hat] > 1 / P): the SNR weighs by the
+            inverse PSD divided by E[P / P_hat] (PowerSpectrum.inverse), and
+            whitening divides by its own measured gain, so that the SNR of
+            Gaussian noise has no estimator bias at any onsource length and
+            whitened Gaussian noise has unit in-band PSD.
     """
     lower_frequency_hertz: Optional[float] = 20.0
     upper_frequency_hertz: Optional[float] = None
@@ -297,7 +298,8 @@ def inverse_bias(nperseg: int, noverlap: int, num_frames: int, method: str) -> f
     so both inherit E[1 / P_hat] > 1 / P (Jensen). This is computed exactly for
     Gaussian noise by a fixed-seed Monte Carlo over the joint distribution of the
     overlapping segments' Fourier coefficients (correlated through the window's
-    overlap), so it is deterministic. Its standard error is below 1e-3.
+    overlap), so it is deterministic. Its relative standard error, measured
+    for the median with half overlap, is 1.6e-3 at 7 segments and 3e-4 at 127.
     """
     if num_frames < 1:
         raise ValueError("num_frames must be at least 1.")
@@ -334,7 +336,7 @@ class PowerSpectrum:
         sample rate, floored relative to its in-band median.
     scale: (..., 1) float32, the amplitude scale of each row.
     inverse_bias: E[P / P_hat] for this estimator (1.0 when the config turns the
-        correction off); the SNR divides by normalised * inverse_bias.
+        correction off); `inverse` divides by it.
     The PSD is normalised * scale**2 / sample_rate_hertz; it is never formed in
     float32 by the data path.
     """
@@ -375,11 +377,33 @@ class PowerSpectrum:
         The normalised PSD (or its square root) linearly interpolated onto the rfft
         grid of a num_samples series at the same sample rate.
         """
-        values = ops.sqrt(self.normalised) if amplitude else self.normalised
+        return self._on_grid(ops.sqrt(self.normalised) if amplitude else self.normalised, num_samples)
+
+    def inverse(self, num_samples: int):
+        """
+        An estimate of 1 / normalised on the rfft grid of a num_samples series,
+        without the estimator's inverse bias at any bin: 1 / normalised linearly
+        interpolated, divided by inverse_bias. The SNR and the matched filter
+        weigh by it.
+
+        The inverse is interpolated, not the PSD, because only then is one factor
+        exact between the PSD's bins too: E[1 / P_hat] = inverse_bias / P at each
+        bin, so by linearity at every point between two bins. The inverse of an
+        interpolated PSD is biased less between bins (the mean of two estimates is
+        less noisy than either), so dividing it by inverse_bias over-corrects
+        wherever the onsource is longer than a Welch segment. A bin with no
+        power (an unfloored PSD's DC bin) has inverse zero rather than infinity,
+        so that it carries no weight and spreads none to its neighbours.
+        """
+        powered = self.normalised > 0
+        inverse = ops.where(powered, 1.0 / ops.where(powered, self.normalised, 1.0), 0.0)
+        return self._on_grid(inverse, num_samples) / self.inverse_bias
+
+    def _on_grid(self, values, num_samples: int):
+        """values (..., F) on the PSD's grid, linearly interpolated onto the rfft grid of num_samples."""
         target = np.arange(num_samples // 2 + 1, dtype=np.float32) * (self.sample_rate_hertz / num_samples)
-        source = self.frequencies
         flat = ops.reshape(values, (-1, values.shape[-1]))
-        out = jax.vmap(lambda v: jnp.interp(target, source, v))(flat)
+        out = jax.vmap(lambda v: jnp.interp(target, self.frequencies, v))(flat)
         return ops.reshape(out, tuple(values.shape[:-1]) + (len(target),))
 
 
