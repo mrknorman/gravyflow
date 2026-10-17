@@ -98,7 +98,7 @@ Name the split with the 'group' parameter on every call (it is required):
 
 split = gf.SplitSpec()  # the default: the obtainer takes it as split_spec
 print(f"Split fractions: {dict(split.fractions)}, guard {split.guard_seconds} s")
-print(f"Split fingerprint (recorded with every model): {split.fingerprint()}")
+print(f"Split fingerprint (each model trained on this split records it): {split.fingerprint()}")
 
 # One obtainer serves every split: each call reads its split from a fresh copy.
 obtainer = gf.IFODataObtainer(

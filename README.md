@@ -73,7 +73,7 @@ Real noise and glitches use public data only; no credentials are needed:
 - Segments and observing-run bounds come from the GWOSC timeline and run API (https://gwosc.org). The default selection is `DATA` with the `BURST_CAT1` and `BURST_CAT2` vetoes applied, without CBC, burst, stochastic or detchar hardware injections (continuous-wave injections, which run throughout, are kept). Real noise also excludes every GW event GWOSC publishes (its whole signal in band; see `docs/acquisition.md`) and every Gravity Spy glitch (its whole extent).
 - Glitches come from the Gravity Spy machine-learning classifications: Glanzer et al. 2023, *Class. Quantum Grav.* 40 065004, released on Zenodo (doi:10.5281/zenodo.5649212, v1.0.0, CC-BY-4.0). Please cite both if you use them. Each file is downloaded on first use and cached in `~/.gravyflow/cache` (override with `GRAVYFLOW_CACHE_DIR`).
 
-Every cache gravyflow keeps lives under that one root, `GRAVYFLOW_CACHE_DIR` if it is set, else `~/.gravyflow/cache`: GWOSC timelines and events, Gravity Spy files, the glitch and event caches (`glitch_cache_v3.h5`, `event_cache_v3.h5`), real-noise segment caches (`segments/`) and the GWOSC strain downloads (`astropy/`). Earlier versions kept noise segment caches in `./generator_data` or beside the package. gravyflow does not move them; it warns once when it finds one there, naming where to move it to reuse it. Glitch and event caches of an earlier format (`glitch_cache.h5`, `event_cache.h5`) are never read, nor deleted.
+Every cache gravyflow keeps lives under that one root, `GRAVYFLOW_CACHE_DIR` if it is set, else `~/.gravyflow/cache`: GWOSC timelines and events, Gravity Spy files, the glitch, event and partner caches (`glitch_cache_v3.h5`, `event_cache_v3.h5`, `partner_cache_v3.h5`), real-noise segment caches (`segments/`) and the GWOSC strain downloads (`astropy/`). Earlier versions kept noise segment caches in `./generator_data` or beside the package. gravyflow does not move them; it warns once when it finds one there, naming where to move it to reuse it. Glitch and event caches of an earlier format (`glitch_cache.h5`, `event_cache.h5`) are never read, nor deleted.
 
 ## 6. Randomness: one seed tree
 
@@ -109,7 +109,11 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
   the data obtainer's `split_spec`, so a GPS time is in one split whatever reads it. A transient record takes its
   footprint's split; one that crosses an edge between splits is in no split. Noise and records have moved between
   splits: do not evaluate a model trained on an earlier release's split on this release's validate or test split.
-  The spec's fingerprint is recorded with every model, and the validator refuses a model that records another.
+  A model's split is its data's: `gf.Model.train` and the recipes' `TrainingRun.train` read it from their
+  training and validation data (a gravyflow dataset names its `split_spec` and `group`), refuse data that names
+  none or is split by two specs, and record the fingerprint and the split that selected the model in `run.json`
+  beside the model. `Model.validate` passes that record to the validator, which refuses a model split by another
+  spec and the split that selected it.
 - Every entry point needs a named split: `group='train'`, `'validate'` or `'test'`. `'all'` and any other name raise
   `KeyError`. `gf.DEFAULT_SPLIT_FRACTIONS`, `NoiseObtainer(groups=)`, `get_valid_segments(groups=)` and
   `TransientIndex.assign_groups` are gone: give the data obtainer `split_spec=gf.SplitSpec(fractions=...)`, or another
@@ -120,6 +124,10 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
   another, it rebuilds its segments (it served the first split's, and a fresh real-noise obtainer called directly
   served nothing). A generator it gave out for the first split then raises `RuntimeError`.
 - `TransientIndex.assign_splits` and `TransientDataObtainer.build_feature_index` take no seed.
+- A glitch's example reads each requested detector the glitch was not seen in at a partner time of its own, in the
+  record's split and block, never at the glitch's time, and labels that detector noise (`docs/acquisition.md`,
+  Transient detectors and partners); it read every detector over the glitch's window. A record with no partner time
+  is not served, and is counted under `"no partner"`. Partners have their own cache, `partner_cache_v3.h5`.
 - The model recipes take one root seed: `TrainingRun.train`'s `training_data` is called with the seed alone (it
   took the seed and the first epoch), and `split_seeds`, `TrainingRun.train_seed` and
   `GeorgeHuerta2017.dataset(first_epoch=)` / `dataset_regression(first_epoch=)` are gone; resume sets `ds.epoch`.

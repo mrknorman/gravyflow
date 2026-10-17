@@ -177,8 +177,9 @@ class TransientDataObtainer(BaseDataObtainer):
     def get_acquisition_stats(self) -> Dict[str, Any]:
         """
         As for noise, with ``rejections``: the records of the split not served, by
-        reason (``REJECTED_BY_DATA_QUALITY``, ``REJECTED_FOR_NO_DATA``), each record
-        counted once however many passes meet it; ``dropped_segments`` is their total.
+        reason (``REJECTED_BY_DATA_QUALITY``, ``REJECTED_FOR_NO_DATA``,
+        ``REJECTED_FOR_NO_PARTNER``), each record counted once however many passes
+        meet it; ``dropped_segments`` is their total.
         """
         return {
             **super().get_acquisition_stats(),
@@ -822,7 +823,7 @@ class TransientDataObtainer(BaseDataObtainer):
         prefix: str = "transient"
     ):
         """
-        Initialize or retrieve the transient cache for event/glitch data.
+        Initialize or retrieve the transient cache of one prefix: events, glitches or partners.
         
         Handles cache path generation, file creation, validation, and
         optional chunked memory caching for improved performance.
@@ -834,7 +835,7 @@ class TransientDataObtainer(BaseDataObtainer):
             offsource_duration_seconds: Requested offsource duration
             enable_chunked_mode: If True, load cache chunks into memory for faster access
             chunk_size: Number of samples per memory chunk (default 5000, ~1-2GB)
-            prefix: Cache type prefix ("transient", "glitch", "event")
+            prefix: Cache type prefix (``TRANSIENT_CACHE_PREFIXES``: "transient", "glitch", "event", "partner")
             
         Returns:
             Tuple of (cache, cache_sample_rate) - TransientCache instance and its sample rate
@@ -846,7 +847,7 @@ class TransientDataObtainer(BaseDataObtainer):
         # Determine data directory (None = the user cache, gwosc_data.user_cache_dir)
         data_dir = getattr(self, 'data_directory', None)
         
-        # Separate cache files for glitches and events (both use same format)
+        # A cache file per prefix: glitches, events and partners (one format)
         cache_path = generate_transient_cache_path(data_directory=data_dir, prefix=prefix)
         
         # Manage multiple caches (glitch, event)
