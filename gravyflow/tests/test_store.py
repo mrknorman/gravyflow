@@ -308,7 +308,7 @@ def test_differing_content_is_a_conflict_and_nothing_is_overwritten(tmp_path):
     before = (sha_of(samples_path), samples_path.stat().st_mtime_ns)
     with pytest.raises(StoreConflict, match="the source changed under the store") as conflict:
         store.commit(key(), strain(7, offset=1e-22))
-    assert "Store.forget the tile" in str(conflict.value) and callable(Store.forget)
+    assert "Store.forget the tile" in str(conflict.value)
     assert (sha_of(samples_path), samples_path.stat().st_mtime_ns) == before
     # The record's content excludes the commit metadata: another fetch time and tool
     # agree; another hash does not.
@@ -513,6 +513,8 @@ def test_write_errors_raise_by_name_and_never_truncate(tmp_path, monkeypatch, co
 
 
 def test_a_read_only_directory_is_a_write_error_by_name(tmp_path):
+    if os.geteuid() == 0:
+        pytest.fail("Run as root, which ignores directory permissions: this test needs an ordinary user.")
     store = Store(tmp_path)
     store.commit(key(6), strain(6))
     directory = key(6).directory(tmp_path)
@@ -564,27 +566,37 @@ def test_the_byte_budget_admits_exactly_to_its_cap():
 
 def test_the_byte_budget_never_exceeds_its_cap_under_threads():
     budget, lock = ByteBudget(1000), threading.Lock()
-    held, highest = [0], [0]
+    held, highest, errors = [0], [0], []
 
     def worker(seed):
-        rng = np.random.default_rng(seed)
-        for _ in range(50):
-            nbytes = int(rng.integers(1, 1001))
-            with budget.admit(nbytes, timeout=30):
-                with lock:
-                    held[0] += nbytes
-                    highest[0] = max(highest[0], held[0])
-                time.sleep(0.0005)
-                with lock:
-                    held[0] -= nbytes
+        try:
+            rng = np.random.default_rng(seed)
+            for _ in range(50):
+                nbytes = int(rng.integers(1, 1001))
+                with budget.admit(nbytes, timeout=30):
+                    with lock:
+                        held[0] += nbytes
+                        highest[0] = max(highest[0], held[0])
+                    time.sleep(0.0005)
+                    with lock:
+                        held[0] -= nbytes
+        except Exception as error:  # reported below: a thread's exception is otherwise lost
+            errors.append(repr(error))
 
     threads = [threading.Thread(target=worker, args=(seed,)) for seed in range(8)]
-    for thread in threads:
-        thread.start()
+    # The whole cap is held until a worker has waited for it: contention by construction.
+    with budget.admit(1000, timeout=0):
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 30
+        while budget.waits == 0:
+            assert time.monotonic() < deadline, "Gave up after 30 s: no worker waited for the held cap."
+            time.sleep(0.001)
     for thread in threads:
         thread.join(60)
-    assert highest[0] <= 1000 and budget.peak <= 1000
-    assert budget.waits > 0 and budget.in_flight == 0
+    assert [thread.name for thread in threads if thread.is_alive()] == []
+    assert errors == []
+    assert highest[0] <= 1000 and budget.peak <= 1000 and budget.in_flight == 0
 
 
 # --- One fetch per (stream, tile) in a process --------------------------------------
@@ -671,7 +683,7 @@ def test_a_failed_fetch_leaves_the_table_and_reaches_every_waiter(tmp_path):
 RACE_TILES = 20
 
 
-def _child(role, *args, timeout=120):
+def _child(role, *args):
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(Path(gf.__file__).parents[1]), env.get("PYTHONPATH", "")])
     return subprocess.Popen([sys.executable, __file__, role, *map(str, args)], env=env,
@@ -697,9 +709,9 @@ def test_two_processes_commit_each_tile_once_and_a_racing_reader_never_errors(tm
         name for k in range(RACE_TILES) for name in tile_files(tmp_path / "store", key(k)))
     contended = sum(report["contended"] for report in reports)
     assert contended >= RACE_TILES  # the loser of every tile saw the winner's link
-    print(f"two writers over {RACE_TILES} tiles: contended {contended}; reader {read}")
     assert read["errors"] == [] and read["torn"] == 0 and read["served"] == RACE_TILES
-    assert read["missing"] > 0  # it read while the tiles were being committed
+    # Its first pass, before the writers start, finds every tile missing.
+    assert read["missing"] >= RACE_TILES
     assert Store(tmp_path / "store").verify() == []
 
 
@@ -767,9 +779,9 @@ def _writer(root, name, offset, *watchers):
 
 def _reader(root, timeout=60):
     store = Store(Path(root) / "store")
-    (Path(root) / "ready-start-reader").touch()
     report = {"reads": 0, "missing": 0, "torn": 0, "served": 0, "errors": []}
     pending, deadline = set(range(RACE_TILES)), time.monotonic() + timeout
+    started = False
     expected = {tile: strain(tile).astype(np.float32) for tile in pending}
     while pending and time.monotonic() < deadline:
         for tile in sorted(pending):
@@ -785,6 +797,9 @@ def _reader(root, timeout=60):
             report["torn"] += not np.array_equal(window, expected[tile])
             report["served"] += 1
             pending.discard(tile)
+        if not started:  # the writers wait for one whole pass, every tile missing
+            (Path(root) / "ready-start-reader").touch()
+            started = True
     return report
 
 
@@ -1071,11 +1086,6 @@ def test_every_interleaving_of_two_writers_and_a_forget_is_whole_absent_or_repai
             assert set(report["outcomes"][writer]) == outcomes, (race, report["outcomes"])
 
 
-if __name__ == "__main__":
-    role, arguments = sys.argv[1], sys.argv[2:]
-    result = {"writer": _writer, "reader": _reader, "killed": _killed, "races": _races}[role](*arguments)
-    print(json.dumps(result))
-
 
 def test_verify_lists_orphan_samples_and_forget_alone_removes_them(tmp_path):
     # A writer that lost the race for a tile's record leaves samples no record names:
@@ -1092,3 +1102,8 @@ def test_verify_lists_orphan_samples_and_forget_alone_removes_them(tmp_path):
     store.forget([key()])
     assert store.verify() == [] and not orphan.exists()
 
+
+if __name__ == "__main__":
+    role, arguments = sys.argv[1], sys.argv[2:]
+    result = {"writer": _writer, "reader": _reader, "killed": _killed, "races": _races}[role](*arguments)
+    print(json.dumps(result))
