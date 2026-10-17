@@ -1,32 +1,18 @@
-
-import pytest
-import gravyflow as gf
-import numpy as np
-import jax
-import jax.numpy as jnp
+"""
+The datasets a model trains on: varied, reproducible, finite, correctly shaped
+and scaled, with injections placed and labelled as configured.
+"""
 import keras
+import numpy as np
+import pytest
 from keras import ops
+from pycbc.filter import sigma
+from pycbc.types import FrequencySeries, TimeSeries
+
+import gravyflow as gf
 from gravyflow.src.dataset.dataset import GravyflowDataset
+from gravyflow.tests import effective_count, representation_tolerance, statistical_bound
 
-
-@pytest.mark.skipif(
-    jax.default_backend() == "cpu",
-    reason="No GPU/TPU available; JAX is using CPU backend"
-)
-def test_jax_accelerator_available():
-    """Verify that JAX has access to a hardware accelerator (GPU or TPU), not just CPU."""
-    devices = jax.devices()
-    backend = jax.default_backend()
-
-    # Check that we have at least one device
-    assert len(devices) > 0, "No JAX devices found"
-
-    # Check that the backend is not CPU
-    assert backend in ("gpu", "tpu"), (
-        f"JAX is using '{backend}' backend. Expected 'gpu' or 'tpu'. "
-        f"Devices: {devices}. "
-        "Ensure CUDA libraries are correctly installed and LD_LIBRARY_PATH is configured."
-    )
 
 # Constants for testing
 SAMPLE_RATE = 2048.0
@@ -113,423 +99,277 @@ def test_independence(basic_dataset_config):
     
     assert not np.allclose(data1, data3), "Datasets with different seeds should produce different first batches."
 
-def test_shape_and_format(basic_dataset_config):
-    """Verify the (inputs, targets) tuple structure and shapes."""
-    dataset = GravyflowDataset(**basic_dataset_config, group="train")
-    batch = next(iter(dataset))
-    
-    assert isinstance(batch, tuple), "Dataset should yield a tuple."
-    assert len(batch) == 2, "Dataset should yield (inputs, targets)."
-    
-    X, y = batch
-    
-    assert isinstance(X, dict), "Inputs should be a dictionary."
-    assert isinstance(y, dict), "Targets should be a dictionary."
-    
-    assert gf.ReturnVariables.WHITENED_ONSOURCE.name in X
-    data = X[gf.ReturnVariables.WHITENED_ONSOURCE.name]
-    
-    # Check X shape: (Batch, Channels, Time) or (Batch, Time)
-    shape = ops.shape(data)
-    assert shape[0] == BATCH_SIZE, f"Batch size mismatch. Expected {BATCH_SIZE}, got {shape[0]}"
-    
-    # Note: Effective duration is DURATION - 2 * crop_duration_seconds.
-    # We do not assert a specific time dimension here to avoid fragility regarding internal cropping details.
-
 def test_peak_jitter(basic_noise_obtainer):
     """
-    The "Locked Center" Bug Check:
-    Verify signal peaks are distributed across the window, not locked to center.
+    Peaks spread uniformly over the padding, not locked to the centre.
+
+    The injection's centre is shifted uniformly over [-front, back) padding, so
+    over n examples the peak index has mean ``samples / 2`` and standard
+    deviation ``span / sqrt(12)``. Statistical bounds, k = 4: the mean's standard
+    error is ``std / sqrt(n)``; the sample standard deviation's is
+    ``std * sqrt(0.2 / n)`` (uniform: Var(s) = (mu4 - std^4) / (4 std^2 n),
+    mu4 = 1.8 std^4).
     """
-    # Setup generator
-    injection_directory_path = gf.tests.PATH / "example_injection_parameters"
-    scaling_method = gf.ScalingMethod(
-        value=gf.Distribution(min_=1000.0, max_=1000.0, type_=gf.DistributionType.UNIFORM),
-        type_=gf.ScalingTypes.SNR
-    )
-    
-    # Use WNB for clear peaks
+    padding_seconds = 2.0
+    num_examples = 50
     wnb_generator = gf.WNBGenerator(
-        scaling_method=scaling_method,
+        scaling_method=gf.ScalingMethod(
+            value=gf.Distribution(min_=1000.0, max_=1000.0, type_=gf.DistributionType.UNIFORM),
+            type_=gf.ScalingTypes.SNR
+        ),
         network=[gf.IFO.L1],
-        duration_seconds=0.1, # Short duration to make peak clear
+        duration_seconds=0.1,  # Short, so the peak marks the centre.
         min_frequency_hertz=100.0,
         max_frequency_hertz=200.0,
-        front_padding_duration_seconds=2.0,
-        back_padding_duration_seconds=2.0
+        front_padding_duration_seconds=padding_seconds,
+        back_padding_duration_seconds=padding_seconds,
     )
-    
-    config = {
-        "noise_obtainer": basic_noise_obtainer,
-        "sample_rate_hertz": SAMPLE_RATE,
-        "onsource_duration_seconds": DURATION,
-        "offsource_duration_seconds": 2.0,
-        "crop_duration_seconds": 0.5,
-        "num_examples_per_batch": 50, # 50 examples to check distribution
-        "waveform_generators": [wnb_generator],
-        "input_variables": [gf.ReturnVariables.WHITENED_INJECTIONS]
-    }
-    
-    dataset = GravyflowDataset(**config, seed=789, group="train")
-    batch = next(iter(dataset))
-    
-    # Get injections: (Batch, IFO, Time)
-    injections = batch[0][gf.ReturnVariables.WHITENED_INJECTIONS.name]
-    
-    # (Batch, Generators, IFO, Time): the one generator, the first IFO
-    injections = injections[:, 0, 0, :]
-        
-    # Find argmax
-    peak_indices = np.argmax(np.abs(injections), axis=-1)
-    
-    # Check distribution
-    # 1. Not all equal
-    unique_indices = np.unique(peak_indices)
-    assert len(unique_indices) > 1, "All signals have peak at the exact same index."
-    
-    # 2. Not all at center (approx)
-    center = injections.shape[-1] // 2
-    # Check if more than 90% are at the exact center (allowing for some coincidental centering)
-    fraction_at_center = np.mean(peak_indices == center)
-    assert fraction_at_center < 0.9, f"Too many signals centered exactly at {center}. Fraction: {fraction_at_center}"
-    
-    # 3. Variance check
-    std_dev = np.std(peak_indices)
-    # If distributed across 4s at 2048Hz, range is ~8192. 
-    # Uniform distribution std dev is range/sqrt(12) approx.
-    # Even if constrained, it should be > 100 samples.
-    assert std_dev > 100, f"Peak indices variance is too low: {std_dev}. Signals might be too clustered."
-
-
-def test_snr_bounds(basic_noise_obtainer):
-    """Verify WNB injections are scaled within specified SNR range."""
-    min_snr = 10.0
-    max_snr = 20.0
-    
-    # Setup generator with SNR scaling
-    injection_directory_path = gf.tests.PATH / "example_injection_parameters"
-    scaling_method = gf.ScalingMethod(
-        value=gf.Distribution(min_=min_snr, max_=max_snr, type_=gf.DistributionType.UNIFORM),
-        type_=gf.ScalingTypes.SNR
-    )
-    
-    # Use WNB
-    wnb_generator = gf.WNBGenerator(
-        scaling_method=scaling_method,
-        network=[gf.IFO.L1],
-        duration_seconds=0.5
-    )
-    
-    config = {
-        "noise_obtainer": basic_noise_obtainer,
-        "sample_rate_hertz": SAMPLE_RATE,
-        "onsource_duration_seconds": DURATION,
-        "offsource_duration_seconds": 16.0,
-        "crop_duration_seconds": 0.5,
-        "num_examples_per_batch": 20,
-        "waveform_generators": [wnb_generator],
-        # We need raw injections and background (offsource) to calc SNR
-        "input_variables": [
-            gf.ReturnVariables.INJECTIONS,
-            gf.ReturnVariables.OFFSOURCE
-        ]
-    }
-    
-    dataset = GravyflowDataset(**config, seed=101, group="train")
-    batch = next(iter(dataset))
-    
-    inputs = batch[0]
-    injections = inputs[gf.ReturnVariables.INJECTIONS.name]
-    offsource = inputs[gf.ReturnVariables.OFFSOURCE.name]
-    
-    # Calculate SNR for each example
-    # injections shape: (NumGenerators, Batch, IFO, Time)
-    # offsource shape: (Batch, IFO, Time)
-    # Take first generator's injections
-    injections = injections[:, 0]  # (Batch, Generators, IFO, Time) -> (Batch, IFO, Time)
-    
-    calculated_snrs = gf.snr(
-        injections,
-        offsource,
-        sample_rate_hertz=SAMPLE_RATE,
-        fft_duration_seconds=1.0, # Match default used in scaling if possible, or reasonable value
-        overlap_duration_seconds=0.5
-    )
-    
-    # WNBGenerator with 1 IFO -> 1 SNR per example.
-    # gf.snr combines channels if present.
-    print(f"Calculated SNR shape: {calculated_snrs.shape}")
-    
-    calculated_snrs = np.array(calculated_snrs).flatten()
-    
-    print(f"Calculated SNRs: {calculated_snrs}")
-    
-    # Check bounds
-    # Allow small tolerance for numerical differences in PSD estimation etc.
-    tolerance = 0.1
-    assert np.all(calculated_snrs >= (min_snr - tolerance)), f"Found SNR below {min_snr}: {calculated_snrs.min()}"
-    assert np.all(calculated_snrs <= (max_snr + tolerance)), f"Found SNR above {max_snr}: {calculated_snrs.max()}"
-
-def test_produced_snr(basic_noise_obtainer):
-    """
-    Verify that the produced SNR matches the expected SNR with high precision.
-    This ensures that the scaling logic correctly accounts for cropping.
-    """
-    target_snr = 15.0
-    tolerance = 0.1
-    
-    # Create dataset with fixed SNR scaling
-    dataset = gf.Dataset(
-        seed=42,
-        sample_rate_hertz=4096.0,
-        onsource_duration_seconds=8.0,
-        crop_duration_seconds=0.5,
-        offsource_duration_seconds=8.0, # Match onsource to avoid shape mismatch issues in test
+    dataset = GravyflowDataset(
         noise_obtainer=basic_noise_obtainer,
-        waveform_generators=[
-            gf.WNBGenerator(
-                duration_seconds=0.5,
-                min_frequency_hertz=16.0,
-                max_frequency_hertz=1024.0,
-                scaling_method=gf.ScalingMethod(
-                    gf.Distribution(target_snr, gf.DistributionType.CONSTANT), 
-                    gf.ScalingTypes.SNR
-                )
-            )
-        ],
-        input_variables=[gf.ReturnVariables.INJECTIONS, gf.ReturnVariables.OFFSOURCE],
-        output_variables=[gf.ReturnVariables.INJECTIONS], # Dummy
-        num_examples_per_batch=20,
-        group="train"
+        sample_rate_hertz=SAMPLE_RATE,
+        onsource_duration_seconds=DURATION,
+        offsource_duration_seconds=2.0,
+        crop_duration_seconds=0.5,
+        num_examples_per_batch=num_examples,
+        waveform_generators=[wnb_generator],
+        input_variables=[gf.ReturnVariables.WHITENED_INJECTIONS],
+        seed=789,
+        group="train",
     )
-    
     batch = next(iter(dataset))
-    inputs = batch[0]
-    injections = inputs[gf.ReturnVariables.INJECTIONS.name]
-    offsource = inputs[gf.ReturnVariables.OFFSOURCE.name]
-    
-    # injections: (Batch, Generators, IFO, Time) -> (Batch, IFO, Time)
-    injections = injections[:, 0]
-    
-    # Calculate actual SNR of the produced (cropped) injections
-    calculated_snrs = gf.snr(
-        injections,
-        offsource,
-        sample_rate_hertz=4096.0,
-        fft_duration_seconds=1.0,
-        overlap_duration_seconds=0.5
-    )
-    
-    calculated_snrs = np.array(calculated_snrs).flatten()
-    print(f"Target SNR: {target_snr}")
-    print(f"Calculated SNRs: {calculated_snrs}")
-    
-    # Check that calculated SNRs are close to target SNR
-    diff = np.abs(calculated_snrs - target_snr)
-    max_diff = np.max(diff)
-    
-    assert max_diff < tolerance, f"Max SNR difference {max_diff} exceeds tolerance {tolerance}"
+    # (Batch, Generators, IFO, Time): the one generator, the first IFO.
+    injections = np.asarray(batch[0][gf.ReturnVariables.WHITENED_INJECTIONS.name])[:, 0, 0, :]
+    peak_indices = np.argmax(np.abs(injections), axis=-1)
 
-def test_snr_bounds_cbc(basic_noise_obtainer):
-    """Verify CBC (PhenomD) injections are scaled within specified SNR range.
-    
-    This test uses CBC waveforms to check if SNR scaling issues are WNB-specific.
+    span = 2 * padding_seconds * SAMPLE_RATE
+    expected_std = span / np.sqrt(12.0)
+    expected_mean = injections.shape[-1] / 2
+    assert abs(np.mean(peak_indices) - expected_mean) <= statistical_bound(
+        expected_std / np.sqrt(num_examples)
+    ), f"Peak indices are centred at {np.mean(peak_indices)}, not {expected_mean}."
+    assert abs(np.std(peak_indices) - expected_std) <= statistical_bound(
+        expected_std * np.sqrt(0.2 / num_examples)
+    ), f"Peak indices spread {np.std(peak_indices)}, not {expected_std}: clustered or locked."
+
+
+#: The PSD estimate the dataset scales against (SpectralConfig's defaults).
+SPECTRAL = gf.SpectralConfig()
+#: A Hann window's equivalent noise bandwidth, in bins: neighbouring bins of a
+#: Hann-windowed estimate are correlated, so this many count as one.
+HANN_BINS_PER_INDEPENDENT_BIN = 1.5
+
+
+def _wnb_generator(scaling_method):
+    return gf.WNBGenerator(scaling_method=scaling_method, network=[gf.IFO.L1], duration_seconds=0.5)
+
+
+def _phenom_d_generator(scaling_method):
+    generator = gf.WaveformGenerator.load(
+        gf.tests.PATH / "example_injection_parameters" / "phenom_d_parameters.json"
+    )
+    generator.scaling_method = scaling_method
+    generator.injection_chance = 1.0
+    return generator
+
+
+def _reference_snr(injection):
     """
-    min_snr = 10.0
-    max_snr = 20.0
-    
-    # Setup generator with SNR scaling
-    injection_directory_path = gf.tests.PATH / "example_injection_parameters"
-    scaling_method = gf.ScalingMethod(
+    pycbc's sigma of one detector's series against the true one-sided PSD of
+    the unit-variance white noise, 2 / fs, over the dataset's band.
+    """
+    htilde = TimeSeries(
+        np.asarray(injection, dtype=np.float64), delta_t=1.0 / SAMPLE_RATE
+    ).to_frequencyseries()
+    psd = FrequencySeries(np.full(len(htilde), 2.0 / SAMPLE_RATE), delta_f=htilde.delta_f)
+    return float(sigma(htilde, psd=psd, low_frequency_cutoff=SPECTRAL.lower_frequency_hertz))
+
+
+def _reference_snr_sigma(injection, offsource_seconds):
+    """
+    The relative standard deviation of the scaled SNR against the reference,
+    from the noise of the dataset's PSD estimate.
+
+    A median of K independent periodograms (exponential, unit mean) has relative
+    standard deviation 1 / (ln 2 sqrt(K)); the K non-overlapping segments of the
+    offsource bound the overlapping estimate's count from below. The SNR is the
+    square root of a weighted mean of the estimate over the injection's in-band
+    power, which averages N_eff independent bins, so its relative deviation is
+    half the estimate's over sqrt(N_eff).
+    """
+    num_segments = int(offsource_seconds // SPECTRAL.fft_duration_seconds)
+    estimate_sigma = 1.0 / (np.log(2.0) * np.sqrt(num_segments))
+    power = np.abs(np.fft.rfft(np.asarray(injection, dtype=np.float64))) ** 2
+    frequencies = np.fft.rfftfreq(len(injection), 1.0 / SAMPLE_RATE)
+    in_band = (frequencies >= SPECTRAL.lower_frequency_hertz) & (frequencies < SAMPLE_RATE / 2)
+    estimate_bins = np.floor(frequencies[in_band] * SPECTRAL.fft_duration_seconds).astype(int)
+    independent_bins = effective_count(
+        np.bincount(estimate_bins, weights=power[in_band])
+    ) / HANN_BINS_PER_INDEPENDENT_BIN
+    return 0.5 * estimate_sigma / np.sqrt(independent_bins)
+
+
+@pytest.mark.parametrize("make_generator, num_examples, seed", [
+    (_wnb_generator, 20, 101),
+    (_phenom_d_generator, 10, 102),
+], ids=["wnb", "phenom_d"])
+def test_injections_carry_their_snr_label(basic_noise_obtainer, make_generator, num_examples, seed):
+    """
+    Each injection is scaled to the SNR its label reports, against the noise.
+
+    The labels lie in the target range; the SNR of the returned, cropped
+    injection in the returned offsource is its label (representation: the
+    FFT's log2(N) rounding); and pycbc's SNR against the noise's true PSD
+    agrees with it within the PSD estimate's own noise (statistical, k = 4).
+    """
+    min_snr, max_snr = 10.0, 20.0
+    offsource_seconds = 16.0
+    generator = make_generator(gf.ScalingMethod(
         value=gf.Distribution(min_=min_snr, max_=max_snr, type_=gf.DistributionType.UNIFORM),
         type_=gf.ScalingTypes.SNR
-    )
-    
-    # Use PhenomD (CBC) - load from test parameters
-    phenom_generator = gf.WaveformGenerator.load(
-        injection_directory_path / "phenom_d_parameters.json"
-    )
-    phenom_generator.scaling_method = scaling_method
-    phenom_generator.injection_chance = 1.0
-    
-    config = {
-        "noise_obtainer": basic_noise_obtainer,
-        "sample_rate_hertz": SAMPLE_RATE,
-        "onsource_duration_seconds": DURATION,
-        "offsource_duration_seconds": 16.0,
-        "crop_duration_seconds": 0.5,
-        "num_examples_per_batch": 10,
-        "waveform_generators": [phenom_generator],
-        "input_variables": [
-            gf.ReturnVariables.INJECTIONS,
-            gf.ReturnVariables.OFFSOURCE
-        ]
-    }
-    
-    dataset = GravyflowDataset(**config, seed=102, group="train")
-    batch = next(iter(dataset))
-    
-    inputs = batch[0]
-    injections = inputs[gf.ReturnVariables.INJECTIONS.name]
-    offsource = inputs[gf.ReturnVariables.OFFSOURCE.name]
-    
-    print(f"CBC Injections shape: {injections.shape}")
-    print(f"CBC Offsource shape: {offsource.shape}")
-    
-    # Calculate SNR for each example
-    injections = injections[:, 0]  # First generator: (Batch, IFO, Time)
-    
-    calculated_snrs = gf.snr(
-        injections,
-        offsource,
+    ))
+    dataset = GravyflowDataset(
+        noise_obtainer=basic_noise_obtainer,
         sample_rate_hertz=SAMPLE_RATE,
-        fft_duration_seconds=1.0,
-        overlap_duration_seconds=0.5
+        onsource_duration_seconds=DURATION,
+        offsource_duration_seconds=offsource_seconds,
+        crop_duration_seconds=0.5,
+        num_examples_per_batch=num_examples,
+        waveform_generators=[generator],
+        input_variables=[
+            gf.ReturnVariables.INJECTIONS, gf.ReturnVariables.OFFSOURCE, gf.ScalingTypes.SNR
+        ],
+        seed=seed,
+        group="train",
     )
-    
-    calculated_snrs = np.array(calculated_snrs).flatten()
-    print(f"CBC Calculated SNRs: {calculated_snrs}")
-    
-    # Check bounds
-    tolerance = 3.0 
-    assert np.all(calculated_snrs >= (min_snr - tolerance)), f"CBC: Found SNR below {min_snr}: {calculated_snrs.min()}"
-    assert np.all(calculated_snrs <= (max_snr + tolerance)), f"CBC: Found SNR above {max_snr}: {calculated_snrs.max()}"
+    inputs, _ = next(iter(dataset))
+    # (Batch, Generators, IFO, Time) and (Batch, Generators): the one generator.
+    injections = np.asarray(inputs[gf.ReturnVariables.INJECTIONS.name])[:, 0]
+    offsource = np.asarray(inputs[gf.ReturnVariables.OFFSOURCE.name])
+    labels = np.asarray(inputs[gf.ScalingTypes.SNR.name])[:, 0]
+
+    assert np.all((labels >= min_snr) & (labels <= max_snr)), f"Labels outside the range: {labels}"
+
+    measured = np.asarray(gf.snr(injections, offsource, sample_rate_hertz=SAMPLE_RATE))
+    tolerance = representation_tolerance(np.float32, max_snr, np.log2(injections.shape[-1]))
+    np.testing.assert_allclose(measured, labels, rtol=0.0, atol=tolerance)
+
+    for injection, label in zip(injections[:, 0], labels):
+        deviation = _reference_snr(injection) / label - 1.0
+        bound = statistical_bound(_reference_snr_sigma(injection, offsource_seconds))
+        assert abs(deviation) <= bound, (
+            f"SNR {label} against the true PSD is off by {deviation:.4f} (bound {bound:.4f})."
+        )
+
 
 def test_numerical_stability(basic_dataset_config):
-    """Check for NaNs or Infs in the generated data."""
+    """Batches have the configured shape, (Batch, IFO, onsource samples), and are finite."""
     dataset = GravyflowDataset(**basic_dataset_config, seed=555, group="train")
-    
+    expected_shape = (BATCH_SIZE, 1, int(DURATION * SAMPLE_RATE))
+
     for k in range(3):
-        X = dataset[k][0][gf.ReturnVariables.WHITENED_ONSOURCE.name]
+        inputs, targets = dataset[k]
+        assert set(inputs) == {gf.ReturnVariables.WHITENED_ONSOURCE.name}
+        assert targets == {}
+        X = np.asarray(inputs[gf.ReturnVariables.WHITENED_ONSOURCE.name])
+        assert X.shape == expected_shape
         assert np.all(np.isfinite(X)), "Input data contains NaNs or Infs."
 
-@pytest.mark.global_rng
 def test_micro_training(basic_dataset_config):
-    """Run a minimal training loop to ensure plumbing works with Keras."""
-    
-    # Setup a denoising task: Input = WHITENED_ONSOURCE, Target = WHITENED_INJECTIONS
-    # This ensures distinct keys for input and output, allowing Keras to map them correctly.
-    
+    """A minimal Keras model trains on the dataset's dicts with a finite loss."""
+    # A denoising task, so the input and target keys differ: WHITENED_ONSOURCE
+    # in, WHITENED_INJECTIONS out.
     config = basic_dataset_config.copy()
     config["input_variables"] = [gf.ReturnVariables.WHITENED_ONSOURCE]
     config["output_variables"] = [gf.ReturnVariables.WHITENED_INJECTIONS]
-    
-    # Ensure injections are generated so WHITENED_INJECTIONS isn't None
-    # Add a dummy waveform generator
-    injection_directory_path = gf.tests.PATH / "example_injection_parameters"
-    scaling_method = gf.ScalingMethod(
-        value=gf.Distribution(min_=10.0, max_=20.0, type_=gf.DistributionType.UNIFORM),
-        type_=gf.ScalingTypes.SNR
-    )
     wnb_generator = gf.WaveformGenerator.load(
-        path=injection_directory_path / "wnb_parameters.json", 
-        scaling_method=scaling_method,
+        path=gf.tests.PATH / "example_injection_parameters" / "wnb_parameters.json",
+        scaling_method=gf.ScalingMethod(
+            value=gf.Distribution(min_=10.0, max_=20.0, type_=gf.DistributionType.UNIFORM),
+            type_=gf.ScalingTypes.SNR
+        ),
         network=[gf.IFO.L1]
     )
     wnb_generator.injection_chance = 1.0
     config["waveform_generators"] = [wnb_generator]
-    
-    dataset = GravyflowDataset(**config, group="train")
-    
-    # Get input shape
-    batch = next(iter(dataset))
+    dataset = GravyflowDataset(**config, seed=314, group="train")
 
-    input_data = batch[0][gf.ReturnVariables.WHITENED_ONSOURCE.name]
-    input_shape = ops.shape(input_data)[1:] # Exclude batch dim
-    
-    # Define model with named inputs and outputs matching the dataset keys
+    input_shape = ops.shape(next(iter(dataset))[0][gf.ReturnVariables.WHITENED_ONSOURCE.name])[1:]
+    # Seeded initialisers: the weights come from their own seeds, not a global RNG.
     inputs = keras.Input(shape=input_shape, name=gf.ReturnVariables.WHITENED_ONSOURCE.name)
     x = keras.layers.Flatten()(inputs)
-    x = keras.layers.Dense(4, activation="relu")(x)
-    outputs = keras.layers.Dense(int(np.prod(input_shape)), activation="linear")(x)
+    x = keras.layers.Dense(
+        4, activation="relu", kernel_initializer=keras.initializers.GlorotUniform(seed=1)
+    )(x)
+    x = keras.layers.Dense(
+        int(np.prod(input_shape)), kernel_initializer=keras.initializers.GlorotUniform(seed=2)
+    )(x)
     # The target is (Batch, Generators, IFO, Time), one generator here.
-    output_layer = keras.layers.Reshape(
-        (1,) + tuple(input_shape), 
-        name=gf.ReturnVariables.WHITENED_INJECTIONS.name
-    )(outputs)
-    
-    # ROBUST FIX: Define the model outputs as a dictionary
-    # This aligns the model signature with the dataset signature
+    outputs = keras.layers.Reshape(
+        (1,) + tuple(input_shape), name=gf.ReturnVariables.WHITENED_INJECTIONS.name
+    )(x)
     model = keras.Model(
-        inputs=inputs, 
-        outputs={gf.ReturnVariables.WHITENED_INJECTIONS.name: output_layer}
+        inputs=inputs, outputs={gf.ReturnVariables.WHITENED_INJECTIONS.name: outputs}
     )
     model.compile(optimizer="adam", loss="mse")
-    
-    # Train directly on the dataset (which yields dicts)
-    history = model.fit(
-        dataset,
-        steps_per_epoch=2,
-        epochs=1,
-        verbose=0
-    )
-    
-    assert len(history.history["loss"]) > 0, "Training did not produce loss history."
+
+    # shuffle=False: the dataset's seeds set its order, and Keras would shuffle a
+    # PyDataset's batch order with Python's global random module.
+    history = model.fit(dataset, steps_per_epoch=2, epochs=1, verbose=0, shuffle=False)
+
+    losses = history.history["loss"]
+    assert len(losses) == 1 and np.isfinite(losses[0]), f"Training loss: {losses}"
+
 
 def test_parameter_independence(basic_noise_obtainer):
     """Verify that drawn parameters are uncorrelated (e.g. inclination vs mass).
 
     Not inclination vs distance: under SNR scaling DISTANCE_MPC is the distance
-    the injected amplitude implies, which depends on the inclination."""
-    
-    # Setup generator with distributed parameters
-    injection_directory_path = gf.tests.PATH / "example_injection_parameters"
-    scaling_method = gf.ScalingMethod(
-        value=gf.Distribution(min_=10.0, max_=20.0, type_=gf.DistributionType.UNIFORM),
-        type_=gf.ScalingTypes.SNR
-    )
-    
-    # Use CBCGenerator (PhenomD) which has many parameters
-    # We'll use distributions for inclination and distance
+    the injected amplitude implies, which depends on the inclination.
+
+    Statistical, k = 3 (stated): the sample correlation of n independent draws
+    has standard deviation 1 / sqrt(n).
+    """
+    num_examples = 100
     cbc_generator = gf.CBCGenerator(
-        scaling_method=scaling_method,
+        scaling_method=gf.ScalingMethod(
+            value=gf.Distribution(min_=10.0, max_=20.0, type_=gf.DistributionType.UNIFORM),
+            type_=gf.ScalingTypes.SNR
+        ),
         network=[gf.IFO.L1],
         mass_1_msun=gf.Distribution(min_=10.0, max_=50.0, type_=gf.DistributionType.UNIFORM),
         mass_2_msun=gf.Distribution(min_=10.0, max_=50.0, type_=gf.DistributionType.UNIFORM),
         inclination_radians=gf.Distribution(min_=0.0, max_=np.pi, type_=gf.DistributionType.UNIFORM),
         distance_mpc=gf.Distribution(min_=100.0, max_=500.0, type_=gf.DistributionType.UNIFORM)
     )
-    
-    # Request parameters in output
-    config = {
-        "noise_obtainer": basic_noise_obtainer,
-        "sample_rate_hertz": SAMPLE_RATE,
-        "onsource_duration_seconds": DURATION,
-        "offsource_duration_seconds": 2.0,
-        "crop_duration_seconds": 0.5,
-        "num_examples_per_batch": 100, # Need enough samples for correlation check
-        "waveform_generators": [cbc_generator],
-        "input_variables": [
+    dataset = GravyflowDataset(
+        noise_obtainer=basic_noise_obtainer,
+        sample_rate_hertz=SAMPLE_RATE,
+        onsource_duration_seconds=DURATION,
+        offsource_duration_seconds=2.0,
+        crop_duration_seconds=0.5,
+        num_examples_per_batch=num_examples,
+        waveform_generators=[cbc_generator],
+        input_variables=[
             gf.WaveformParameters.INCLINATION_RADIANS,
             gf.WaveformParameters.MASS_1_MSUN
-        ]
-    }
-    
-    dataset = GravyflowDataset(**config, seed=42, group="train")
-    batch = next(iter(dataset))
-    
-    # Extract parameters
-    # Input dict will contain the requested parameters
-    inputs = batch[0]
-    inclination = inputs[gf.WaveformParameters.INCLINATION_RADIANS.name]
-    mass = inputs[gf.WaveformParameters.MASS_1_MSUN.name]
-    
-    # Flatten (Batch, Generators) -> (Batch,)
-    inclination = np.array(inclination).flatten()
-    mass = np.array(mass).flatten()
-    
-    # Check correlation
+        ],
+        seed=42,
+        group="train",
+    )
+    inputs = next(iter(dataset))[0]
+    # (Batch, Generators) -> (Batch,)
+    inclination = np.asarray(inputs[gf.WaveformParameters.INCLINATION_RADIANS.name]).flatten()
+    mass = np.asarray(inputs[gf.WaveformParameters.MASS_1_MSUN.name]).flatten()
+
     correlation = np.corrcoef(inclination, mass)[0, 1]
-    
-    # Should be close to 0
-    print(f"Correlation between Inclination and Mass 1: {correlation}")
-    assert np.abs(correlation) < 0.3, f"Parameters appear correlated! Coeff: {correlation}"
+    bound = statistical_bound(1.0 / np.sqrt(num_examples), k=3.0)
+    assert abs(correlation) <= bound, f"Parameters appear correlated: {correlation} (bound {bound})"
+
 
 def test_parameter_variation(basic_noise_obtainer):
     """Verify that parameters change across batches and within batches."""
     
     # Setup generator
-    injection_directory_path = gf.tests.PATH / "example_injection_parameters"
     scaling_method = gf.ScalingMethod(
         value=gf.Distribution(min_=10.0, max_=20.0, type_=gf.DistributionType.UNIFORM),
         type_=gf.ScalingTypes.SNR
@@ -573,7 +413,6 @@ def test_signal_variation(basic_noise_obtainer):
     """Verify that INJECTIONS (pure signal) vary across batches."""
     
     # Setup generator
-    injection_directory_path = gf.tests.PATH / "example_injection_parameters"
     scaling_method = gf.ScalingMethod(
         value=gf.Distribution(min_=10.0, max_=20.0, type_=gf.DistributionType.UNIFORM),
         type_=gf.ScalingTypes.SNR
@@ -625,7 +464,6 @@ def test_padding_adherence(basic_noise_obtainer):
     """
     
     # Setup generator
-    injection_directory_path = gf.tests.PATH / "example_injection_parameters"
     scaling_method = gf.ScalingMethod(
         value=gf.Distribution(min_=10.0, max_=20.0, type_=gf.DistributionType.UNIFORM),
         type_=gf.ScalingTypes.SNR
@@ -714,7 +552,6 @@ def test_injection_shape_consistency(basic_noise_obtainer):
     """
     
     # Setup generator
-    injection_directory_path = gf.tests.PATH / "example_injection_parameters"
     scaling_method = gf.ScalingMethod(
         value=gf.Distribution(min_=10.0, max_=20.0, type_=gf.DistributionType.UNIFORM),
         type_=gf.ScalingTypes.SNR
@@ -751,8 +588,6 @@ def test_injection_shape_consistency(basic_noise_obtainer):
     shape_onsource = ops.shape(whitened_onsource)
     shape_injections = ops.shape(injections)
     
-    print(f"DEBUG: WHITENED_ONSOURCE shape: {shape_onsource}")
-    print(f"DEBUG: INJECTIONS shape: {shape_injections}")
     
     # Time dimension is usually the last one
     time_dim_onsource = shape_onsource[-1]
@@ -815,11 +650,11 @@ def test_injection_mask_consistency(basic_noise_obtainer):
         injections = inputs[gf.ReturnVariables.INJECTIONS.name][:, 0]
         masks = inputs[gf.ReturnVariables.INJECTION_MASKS.name][:, 0]
         
-        # Check consistency
-        batch_size = injections.shape[0]
-        for i in range(batch_size):
-            mask_val = masks[i]
-            injection_sum = np.sum(np.abs(injections[i]))
-            
-            if mask_val > 0.5: # Injection present
-                assert injection_sum > 0, f"Found Mask=1.0 but Injection is all zeros at batch index {i}!"
+        # The masks are the injections that carry signal: each set mask has a
+        # non-zero injection, each clear one none, and every batch has some.
+        injected = np.max(np.abs(np.asarray(injections)), axis=(-2, -1)) > 0
+        masks = np.asarray(masks)
+        assert np.any(masks > 0.5), "No injection in the batch: the check would pass vacuously."
+        np.testing.assert_array_equal(
+            masks > 0.5, injected, err_msg="A mask disagrees with its injection."
+        )
