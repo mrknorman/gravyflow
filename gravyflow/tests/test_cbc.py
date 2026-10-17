@@ -5,6 +5,8 @@ where the merger sits.
 How the waveforms match LALSimulation's is ``test_cbc_lal_parity.py``'s, and
 the chirp-time helpers are ``test_cbc_units.py``'s.
 """
+import lal
+import lalsimulation
 import numpy as np
 import pytest
 from keras import ops
@@ -12,6 +14,8 @@ from keras import ops
 from gravyflow.src.dataset.features.waveforms.cbc import _generate_cbc_window
 
 SAMPLE_RATE = 2048.0
+F_LOW = 20.0
+F_REF = 20.0
 
 
 def test_each_row_of_a_batch_is_its_source_generated_alone():
@@ -77,19 +81,75 @@ def test_an_unknown_approximant_is_refused():
         )
 
 
-def test_generate_cbc_window_puts_the_merger_at_the_centre():
-    """The merger is sample K // 2 of the K-sample window, whatever the window."""
-    for window_seconds in (1.0, 1.5, 3.0):
-        waveforms = np.asarray(_generate_cbc_window(
-            num_waveforms=1,
-            sample_rate_hertz=2048.0,
-            window_seconds=window_seconds,
-            min_frequency_hertz=None,
-            mass_1_msun=30.0,
-            mass_2_msun=30.0,
-            approximant="IMRPhenomD"
-        ))
-        num_samples = int(2048.0 * window_seconds)
-        assert waveforms.shape == (1, 2, num_samples)
-        peak = int(np.argmax(np.sum(waveforms[0] ** 2, axis=0)))
-        assert abs(peak - num_samples // 2) <= 10, (window_seconds, peak, num_samples // 2)
+# (m1, m2, spin_1, spin_2, inclination); precessing spins for IMRPhenomPv2.
+ALIGNED_SOURCES = [
+    (10.0, 10.0, (0, 0, 0.0), (0, 0, 0.0), 0.0),
+    (20.0, 20.0, (0, 0, 0.5), (0, 0, 0.5), 0.4),
+    (30.0, 30.0, (0, 0, 0.0), (0, 0, 0.0), 1.0),
+    (40.0, 21.0, (0, 0, -0.6), (0, 0, 0.3), 0.8),
+    (60.0, 50.0, (0, 0, 0.2), (0, 0, -0.4), 1.2),
+]
+PRECESSING_SOURCES = [
+    (10.0, 10.0, (0.5, 0.2, 0.4), (0.1, -0.6, 0.3), 1.0),
+    (30.0, 30.0, (0.3, 0.1, 0.5), (-0.2, 0.3, 0.4), 0.4),
+    (40.0, 21.0, (0.7, 0.2, 0.3), (0.1, -0.3, 0.2), 0.8),
+]
+
+
+def _lal_peak_after_merger_samples(approximant, source):
+    """
+    Where the peak of h+^2 + hx^2 sits relative to LAL's merger time, t = 0 of
+    SimInspiralChooseTDWaveform, in samples at SAMPLE_RATE.
+    """
+    m1, m2, spin_1, spin_2, inclination = source
+    hp, hc = lalsimulation.SimInspiralChooseTDWaveform(
+        m1 * lal.MSUN_SI, m2 * lal.MSUN_SI, *map(float, spin_1), *map(float, spin_2),
+        400e6 * lal.PC_SI, inclination, 0.0, 0.0, 0.0, 0.0,
+        1.0 / SAMPLE_RATE, F_LOW, F_REF, None,
+        lalsimulation.GetApproximantFromString(approximant),
+    )
+    power = hp.data.data ** 2 + hc.data.data ** 2
+    # The epoch is a whole number of samples before t = 0, to LAL's rounding.
+    return int(np.argmax(power)) + int(round(float(hp.epoch) * SAMPLE_RATE))
+
+
+@pytest.mark.parametrize(
+    "approximant, sources",
+    [
+        ("IMRPhenomD", ALIGNED_SOURCES),
+        ("IMRPhenomXAS", ALIGNED_SOURCES),
+        ("IMRPhenomPv2", PRECESSING_SOURCES),
+    ],
+)
+def test_the_merger_is_at_the_window_centre_as_lal_places_it(approximant, sources):
+    """
+    The merger is sample K // 2 of the K-sample window, whatever the window: the
+    peak of h+^2 + hx^2 sits as far from it as LAL's peak sits from LAL's
+    merger time.
+    """
+    failures = []
+    for source in sources:
+        expected = _lal_peak_after_merger_samples(approximant, source)
+        m1, m2, spin_1, spin_2, inclination = source
+        for window_seconds in (1.0, 1.5, 3.0):
+            waveform = np.asarray(_generate_cbc_window(
+                num_waveforms=1,
+                sample_rate_hertz=SAMPLE_RATE,
+                window_seconds=window_seconds,
+                min_frequency_hertz=None,
+                approximant=approximant,
+                f_ref=F_REF,
+                mass_1_msun=m1,
+                mass_2_msun=m2,
+                spin_1_in=np.asarray(spin_1, dtype=float),
+                spin_2_in=np.asarray(spin_2, dtype=float),
+                inclination_radians=inclination,
+            ))[0]
+            num_samples = int(SAMPLE_RATE * window_seconds)
+            assert waveform.shape == (2, num_samples)
+            peak = int(np.argmax(np.sum(waveform.astype(np.float64) ** 2, axis=0))) - num_samples // 2
+            # Exact to one sample: each peak is the nearest sample to the
+            # same continuous peak, and the two grids may round it apart by one.
+            if abs(peak - expected) > 1:
+                failures.append(f"{m1}+{m2}, {window_seconds} s: peak {peak:+d}, LAL {expected:+d} samples")
+    assert not failures, f"{approximant}: merger not where LAL places it: {failures}"
