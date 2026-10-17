@@ -20,7 +20,7 @@ from gravyflow.src.utils.tensor import (
     crop_samples, replace_nan_and_inf_with_zero, window_samples
 )
 from gravyflow.src.utils.shapes import BatchContract
-from gravyflow.src.dataset.config import Defaults, ignore_scale_factor
+from gravyflow.src.dataset.config import Defaults, WindowSpec, ignore_scale_factor
 from gravyflow.src.dataset.noise.noise import index_addressed, obtainer_batcher
 from gravyflow.src.dataset.features.injection import InjectionGenerator, check_scaling_matches_noise
 from gravyflow.src.rng import BatchStreams, SeedTree, check_coordinate, check_name, check_split
@@ -704,16 +704,13 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         injections = self._process_injections(scaled_injections)
         labels = self._batch_labels(labels, mask)
 
-        whitened_onsource, rolling_pearson_onsource, spectrogram_onsource = self._process_onsource(onsource, spectrum)
-
-        onsource = self._process_raw_onsource(onsource)
-        offsource = self._process_offsource(offsource)
+        conditioned = self._condition(onsource, offsource, spectrum)
         gps_times = self._process_gps_times(gps_times)
 
         input_dict, output_dict = self._create_output_dictionaries(
-            onsource, whitened_onsource, offsource, gps_times, injections,
-            whitened_injections, labels[gf.ReturnVariables.INJECTION_MASKS],
-            rolling_pearson_onsource, spectrogram_onsource, labels,
+            conditioned["onsource"], conditioned["whitened_onsource"], conditioned["offsource"], gps_times,
+            injections, whitened_injections, labels[gf.ReturnVariables.INJECTION_MASKS],
+            conditioned["rolling_pearson_onsource"], conditioned["spectrogram_onsource"], labels,
             feature_labels=self._process_transient_label(feature_labels),
             glitch_type=self._process_transient_label(glitch_type),
             source_type=self._process_transient_label(source_type),
@@ -725,6 +722,55 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         )
 
         return input_dict, output_dict
+
+    @property
+    def window_spec(self) -> WindowSpec:
+        """The geometry of the raw windows the dataset conditions (``prepare``)."""
+        return WindowSpec(self.sample_rate_hertz, self.onsource_duration_seconds,
+                          self.offsource_duration_seconds, self.crop_duration_seconds)
+
+    def prepare(self, onsource, offsource) -> Dict[str, Any]:
+        """
+        The model inputs (``input_variables``) of raw windows that hold nothing
+        injected: each padded onsource (B, I, ``window_spec.num_onsource_samples``)
+        with the offsource just before it (B, I, ``window_spec.num_offsource_samples``).
+
+        They are conditioned by the code that conditions a batch's (``_condition``):
+        each example's spectrum from its offsource, then whitening, cropping and the
+        derived inputs, so windows of another origin (a real event, time-slid noise)
+        score exactly as the dataset's own examples do.
+        """
+        spectrum = self._batch_spectrum(offsource) if self._needs_spectrum else None
+        conditioned = self._condition(onsource, offsource, spectrum)
+        inputs = create_variable_dictionary(
+            self.input_variables, conditioned["onsource"], conditioned["whitened_onsource"],
+            conditioned["offsource"], None, None, None, None,
+            conditioned["rolling_pearson_onsource"], conditioned["spectrogram_onsource"], None,
+        )
+        missing = [variable.name for variable in self.input_variables if inputs.get(variable.name) is None]
+        if missing:
+            raise ValueError(
+                f"Raw windows cannot give the inputs {missing}: only the conditioned strain and "
+                "what derives from it."
+            )
+        return inputs
+
+    def _condition(self, onsource, offsource, spectrum) -> Dict[str, Any]:
+        """
+        The conditioned strain of a batch: its whitened onsource and what derives from
+        it (rolling Pearson, spectrogram), and its cropped onsource and offsource, each
+        only if requested (None otherwise). The one conditioning of every window the
+        dataset serves or ``prepare``s.
+        """
+        whitened_onsource, rolling_pearson_onsource, spectrogram_onsource = self._process_onsource(
+            onsource, spectrum)
+        return {
+            "onsource": self._process_raw_onsource(onsource),
+            "whitened_onsource": whitened_onsource,
+            "offsource": self._process_offsource(offsource),
+            "rolling_pearson_onsource": rolling_pearson_onsource,
+            "spectrogram_onsource": spectrogram_onsource,
+        }
 
     def _process_whitened_injections(self, scaled_injections, spectrum):
         """Whiten the injections (G, B, I, T) with the batch's PSD, if required."""

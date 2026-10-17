@@ -48,7 +48,22 @@ class ValidationConfig:
     # Real GW events, scored for evaluation only. They need network access.
     score_real_events: bool = False
 
+    # The background of real noise of several detectors: time slides, detector j
+    # slid by j k steps in slide k = 1 .. num_time_slides (`slides.TimeSlides`);
+    # the step defaults to twice a window's footprint. Synthetic noise has no
+    # time to slide: its background is independent windows.
+    num_time_slides: int = 16
+    time_slide_step_seconds: Optional[float] = None
+    # Above-threshold windows of real noise starting within this of the one before
+    # are one trigger; by default one window, so adjacent windows join.
+    cluster_seconds: Optional[float] = None
+
     def __post_init__(self):
+        from .slides import TimeSlides
+
+        TimeSlides(self.num_time_slides, self.time_slide_step_seconds)  # refuses bad settings
+        if self.cluster_seconds is not None and not self.cluster_seconds >= 0:
+            raise ValueError(f"cluster_seconds must be >= 0, got {self.cluster_seconds}.")
         # Pairs are tuples, however they arrive (JSON gives lists).
         self.snr_range = tuple(self.snr_range)
         self.extra_roc_pools = [tuple(p) if isinstance(p, (list, tuple)) else p for p in self.extra_roc_pools]

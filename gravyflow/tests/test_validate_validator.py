@@ -4,6 +4,9 @@ draws its own seeds, and reuses a checkpoint only for the model and settings
 that wrote it.
 """
 
+from copy import deepcopy
+from unittest import mock
+
 import h5py
 import keras
 import numpy as np
@@ -14,6 +17,7 @@ import gravyflow as gf
 from gravyflow.src.model.examples.base import ValidationDatasetConfig, validation_dataset_args
 from gravyflow.src.validate import StaleCheckpointError, ValidationConfig, Validator
 from gravyflow.src.validate.bank import ValidationBank, per_example
+from gravyflow.src.validate.metrics import logit_scores
 from gravyflow.src.validate.plotting import first_detector
 from gravyflow.src.validate.utils import _extract_sample_data
 
@@ -142,8 +146,8 @@ def test_the_validator_draws_its_own_streams(dataset_args):
     config = ValidationConfig(seed=42, num_examples=32, batch_size=32)
     bank = ValidationBank(logit_model(1), dataset_args, config)
     outputs = [gf.ReturnVariables.WHITENED_ONSOURCE]
-    far = bank._dataset("far", [], outputs)
-    inj = bank._dataset("inj", [], outputs)
+    far = bank.stage_dataset("far", outputs=outputs)
+    inj = bank.stage_dataset("inj", outputs=outputs)
     training = gf.Dataset(**{**dataset_args, "seed": 42, "group": config.group, "waveform_generators": [],
                              "num_examples_per_batch": 32, "steps_per_epoch": 1, "output_variables": outputs})
     batches = [np.asarray(ds[0][0]["WHITENED_ONSOURCE"]) for ds in (far, inj, training)]
@@ -226,3 +230,67 @@ def test_the_validator_scores_real_events(dataset_args, offline_events):
     bank.generate_real_events(observing_runs=[gf.ObservingRun.O3])
     assert sorted(e["name"] for e in bank.real_events) == sorted(e["name"] for e in offline_events)
     assert all(e["status"] == "scored" and np.isfinite(e["score"]) for e in bank.real_events)
+
+
+def _scoring_args(sample_rate_hertz=2048.0):
+    """Validation arguments whose band, PSD estimate and crop are not the defaults."""
+    args = validation_dataset_args(config=ValidationDatasetConfig(sample_rate_hertz=sample_rate_hertz))
+    args.update(
+        crop_duration_seconds=0.75,
+        spectral_config=gf.SpectralConfig(lower_frequency_hertz=30.0, fft_duration_seconds=0.5,
+                                          overlap_duration_seconds=0.25),
+    )
+    return args
+
+
+def test_a_window_scores_as_the_background_scores_it():
+    # Real events were whitened by a spectrum of the default settings, not the dataset's,
+    # so an event's score was not comparable with the background's.
+    args = _scoring_args()
+    model = logit_model(1)
+    bank = ValidationBank(model, args, ValidationConfig(num_examples=8, batch_size=8))
+    dataset = bank.stage_dataset("far")
+    raw = dataset.noise(dataset.streams(0))
+    inputs, _ = dataset[0]
+    background = logit_scores(model.predict_on_batch(inputs))
+    windows = bank.score_windows(dataset, raw[gf.ReturnVariables.ONSOURCE], raw[gf.ReturnVariables.OFFSOURCE])
+    np.testing.assert_array_equal(windows, background)
+
+
+@pytest.mark.global_rng
+def test_real_events_are_read_in_the_backgrounds_window(offline_events):
+    # The event windows were read with the default crop, whatever the dataset's.
+    read = []
+    original = gf.TransientDataObtainer._get_sample_from_cache
+
+    def recording(self, cache, gps_time, sample_rate_hertz, onsource_duration, offsource_duration,
+                  target_ifos=None):
+        read.append((onsource_duration, offsource_duration))
+        return original(self, cache, gps_time, sample_rate_hertz, onsource_duration, offsource_duration,
+                        target_ifos)
+
+    args = _scoring_args()
+    bank = ValidationBank(logit_model(1), args, ValidationConfig(num_examples=8, batch_size=8))
+    bank.far_scores = np.random.default_rng(3).standard_normal(64)
+    with mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", recording):
+        bank.generate_real_events(observing_runs=[gf.ObservingRun.O3])
+    assert read and set(read) == {(1.0 + 2 * 0.75, args["offsource_duration_seconds"])}
+    assert all(e["status"] == "scored" and np.isfinite(e["score"]) for e in bank.real_events)
+
+
+@pytest.mark.parametrize("scaling,value", [(gf.ScalingTypes.HRSS, 1e-22), (gf.ScalingTypes.HPEAK, 1e-21)])
+def test_the_injection_set_is_scaled_to_its_snr_range_whatever_the_training_scaling(
+        dataset_args, scaling, value):
+    # The injection set kept a generator's scaling type, so a model trained with HRSS or
+    # HPEAK scaling was validated at an HRSS or HPEAK of 8 to 20, not at SNR 8 to 20.
+    args = dict(dataset_args)
+    generator = deepcopy(args["waveform_generators"])
+    generator.scaling_method = gf.ScalingMethod(
+        value=gf.Distribution(value=value, type_=gf.DistributionType.CONSTANT), type_=scaling)
+    args["waveform_generators"] = generator
+    config = ValidationConfig(num_examples=32, batch_size=32, snr_range=(8.0, 20.0))
+    bank = ValidationBank(logit_model(1), args, config)
+    bank.generate()
+    snrs = bank.get_efficiency_data()["snrs"]
+    assert np.all((snrs > 8.0 - 1e-3) & (snrs < 20.0 + 1e-3)), snrs
+    assert np.ptp(snrs) > 4.0

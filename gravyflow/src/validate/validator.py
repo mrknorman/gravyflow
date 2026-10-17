@@ -10,7 +10,7 @@ import h5py
 import numpy as np
 
 import gravyflow as gf
-from .bank import ValidationBank
+from .bank import ValidationBank, noise_background
 from .config import ValidationConfig, check_held_out, run_record_of
 from .metrics import Background, EfficiencyCurve, FarThreshold, efficiency_curve, roc_curve
 from .provenance import StaleCheckpointError, config_fingerprint, model_fingerprint, require_match
@@ -57,6 +57,7 @@ class Validator:
 
         self.far_scores: Optional[np.ndarray] = None
         self.noise_gps_times: Optional[np.ndarray] = None
+        self.noise_streams: Optional[Dict[str, np.ndarray]] = None  # time slides (`noise_background`)
         self.efficiency_data: Optional[Dict[str, np.ndarray]] = None
         self.worst_performers: Dict[str, Any] = {"false_negatives": {}, "false_positives": []}
         self.real_events: Optional[List[Dict[str, Any]]] = None
@@ -113,7 +114,8 @@ class Validator:
                 )
             require_match("model", saved.model_sha256, v.model_sha256, path)
             require_match("validation configuration", saved.config_sha256, v.config_sha256, path)
-            for attr in ("far_scores", "noise_gps_times", "efficiency_data", "worst_performers", "real_events"):
+            for attr in ("far_scores", "noise_gps_times", "noise_streams", "efficiency_data", "worst_performers",
+                         "real_events"):
                 setattr(v, attr, getattr(saved, attr))
             logger.info(f"Resuming validation from {path}.")
 
@@ -123,10 +125,11 @@ class Validator:
 
         if v.far_scores is None:
             bank.generate_noise()
-            v.far_scores, v.noise_gps_times = bank.far_scores, bank.noise_gps_times
+            v.far_scores, v.noise_gps_times, v.noise_streams = (
+                bank.far_scores, bank.noise_gps_times, bank.noise_streams)
             v.worst_performers["false_positives"] = bank.get_worst_performers()["false_positives"]
             checkpoint()
-        bank.far_scores = v.far_scores
+        bank.far_scores, bank.noise_streams = v.far_scores, v.noise_streams
 
         if v.efficiency_data is None:
             bank.generate()
@@ -145,10 +148,14 @@ class Validator:
     # ----------------------------------------------------------- metrics
 
     def background(self) -> Background:
-        """The noise scores, as independently drawn windows of the onsource length."""
+        """
+        The noise scores as a background: streams of time-slid windows of real
+        noise, or independently drawn windows of synthetic noise (`noise_background`).
+        """
         if self.far_scores is None:
             raise ValueError(f"Validator {self.name!r} has no noise scores.")
-        return Background.independent_windows(self.far_scores, self.input_duration_seconds)
+        return noise_background(self.far_scores, self.noise_streams, self.input_duration_seconds,
+                                self.config.cluster_seconds)
 
     def efficiency_curves(self, fars_hz=None) -> Dict[float, Tuple[FarThreshold, EfficiencyCurve]]:
         """Efficiency against SNR at each target FAR (Hz), with binomial intervals."""
@@ -225,6 +232,10 @@ class Validator:
                 g = f.create_group("far_scores")
                 g.create_dataset("scores", data=self.far_scores)
                 self._write_value(g, "gps_times", self.noise_gps_times)
+                if self.noise_streams is not None:
+                    streams = g.create_group("streams")
+                    for k, v in self.noise_streams.items():
+                        streams.create_dataset(k, data=v)
             if self.efficiency_data is not None:
                 g = f.create_group("efficiency_data")
                 for k, v in self.efficiency_data.items():
@@ -264,6 +275,8 @@ class Validator:
             if "far_scores" in f:
                 v.far_scores = f["far_scores/scores"][:]
                 v.noise_gps_times = f["far_scores/gps_times"][:] if "gps_times" in f["far_scores"] else None
+                if "streams" in f["far_scores"]:
+                    v.noise_streams = {k: f["far_scores/streams"][k][:] for k in f["far_scores/streams"]}
             if "efficiency_data" in f:
                 v.efficiency_data = {k: f["efficiency_data"][k][:] for k in f["efficiency_data"]}
             worst = f["worst_performers"]

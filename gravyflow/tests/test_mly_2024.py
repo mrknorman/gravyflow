@@ -237,18 +237,20 @@ def test_train_script_settings():
 @pytest.mark.global_rng
 def test_real_event_inputs_feed_the_coherence_network():
     # Real events were given only the whitened onsource, the onsource and the offsource,
-    # so a model reading ROLLING_PEARSON_ONSOURCE raised KeyError.
-    from gravyflow.src.validate.bank import real_event_inputs
+    # so a model reading ROLLING_PEARSON_ONSOURCE raised KeyError. They are now prepared
+    # by the background's dataset, over the model's own lag range.
+    from gravyflow.src.validate.bank import ValidationBank
 
     config = small(HLV)
     model = MLyCoherence.model(config)
+    bank = ValidationBank(model, MLyCoherence.validation_dataset_args(config), ValidationConfig())
     rng = np.random.default_rng(2)
     on = rng.normal(size=(3, 3, 2048)).astype(np.float32)
     off = rng.normal(size=(3, 3, 16 * 1024)).astype(np.float32)
-    whitened, x = real_event_inputs(model, on, off, list(HLV), 1024.0, 1.0)
+    x = bank.stage_dataset("far").prepare(on, off)
     assert sorted(x) == ["ROLLING_PEARSON_ONSOURCE", "WHITENED_ONSOURCE"]
     assert x["ROLLING_PEARSON_ONSOURCE"].shape == (3, *config.correlation_shape)
-    assert whitened.shape == (3, 3, 1024)
+    assert x["WHITENED_ONSOURCE"].shape == (3, 3, 1024)
     assert np.all(np.isfinite(logit_scores_of(model, x)))
 
 

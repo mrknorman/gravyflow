@@ -343,6 +343,17 @@ class NoiseDataObtainer(BaseDataObtainer):
     # ABSTRACT METHOD IMPLEMENTATIONS
     # =========================================================================
 
+    def available_segments(self, ifo: gf.IFO, group_name: str) -> np.ndarray:
+        """
+        ``ifo``'s noise of split ``group_name``: its segments inside the split's
+        admissible time (``SplitSpec.admissible``: its absolute blocks, less the
+        guard at every edge with another split), less every vetoed event and
+        glitch (``remove_unwanted_segments``). Sorted (N, 2) GPS intervals.
+        """
+        return self.remove_unwanted_segments(
+            ifo, self.split_spec.admissible(self.get_all_segment_times(ifo), group_name)
+        )
+
     def get_valid_segments(
             self,
             ifos: List[gf.IFO],
@@ -366,11 +377,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             self.valid_segments = []
 
             for ifo in ifos:
-                valid_segments = self.split_spec.admissible(
-                    self.get_all_segment_times(ifo), group_name
-                )
-
-                valid_segments = self.remove_unwanted_segments(ifo, valid_segments)
+                valid_segments = self.available_segments(ifo, group_name)
 
                 # Cut on the absolute grid [d k, d (k + 1)) in GPS (d = 2048 s by
                 # default), the grid merge_bins uses, so whole blocks survive.

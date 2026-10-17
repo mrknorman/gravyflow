@@ -1,5 +1,6 @@
 from .config import ValidationConfig
 from .bank import ValidationBank
+from .slides import SlideBatch, SlideStream, TimeSlideBackground, TimeSlides
 from .validator import Validator
 from .metrics import (
     Background,
