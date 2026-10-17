@@ -11,6 +11,7 @@ cross-correlation, which sees noise shared under any added signal.
 """
 
 import keras
+import pytest
 
 import gravyflow as gf
 from gravyflow.src.model.examples import train_gabbard_2017 as train_script
@@ -90,22 +91,27 @@ def validate(run_directory, num_examples):
     return Validator.validate(model=model, name="leakage", dataset_args=dataset_args, config=config)
 
 
-def by_split(taken, batches_per_stage=None):
+def by_split(taken, stages=(), batches_per_stage=None):
     """
     The tapped datasets' batches by split: train and validate each joined over
-    their datasets, then the validator's stages, in the order it built them.
+    their datasets, then the validator's stages, which the caller names in the
+    order the validator builds them. Every stage named must have been built,
+    and nothing more in the test split: a stage that escaped the tap would
+    otherwise drop out of the comparison unseen.
     """
-    sets, stages = {}, list(VALIDATOR_STAGES)
-    for group, batches in taken:
-        if group == "test":
-            if not stages:
-                raise AssertionError("the validator built more than its two stages")
-            name = stages.pop(0)
+    sets, expected = {}, list(stages)
+    for record in taken:
+        if record.group == "test":
+            if not expected:
+                raise AssertionError(f"a test-split dataset was built beyond the stages {list(stages)}")
+            name = expected.pop(0)
             if batches_per_stage is not None:
-                assert len(batches) == batches_per_stage, f"{name} served {len(batches)} batches"
+                assert len(record.batches) == batches_per_stage, f"{name} served {len(record.batches)} batches"
         else:
-            name = group
-        sets.setdefault(name, []).extend(batches)
+            name = record.group
+        sets.setdefault(name, []).extend(record.batches)
+    if expected:
+        raise AssertionError(f"the tap saw no dataset for the stages {expected}")
     return sets
 
 
@@ -117,6 +123,7 @@ def assert_strain_disjoint(sets):
     assert_noise_independent({name: whitened_noise(b) for name, b in sets.items()})
 
 
+@pytest.mark.global_rng
 def test_validator_sets_disjoint(tmp_path, monkeypatch):
     """
     Every training batch of two epochs, the fixed validation set, and the
@@ -126,13 +133,14 @@ def test_validator_sets_disjoint(tmp_path, monkeypatch):
     tap = DatasetTap(monkeypatch, STRAIN)
     train(tmp_path / "run", EPOCHS)
     validate(tmp_path / "run", STEPS * BATCH)
-    sets = by_split(tap.take(), batches_per_stage=STEPS)
+    sets = by_split(tap.take(), VALIDATOR_STAGES, batches_per_stage=STEPS)
     training = sets.pop("train")
     assert len(training) >= EPOCHS * STEPS, f"{len(training)} distinct training batches for {EPOCHS} epochs"
     sets.update({f"train batch {k}": [batch] for k, batch in enumerate(training)})
     assert_strain_disjoint(sets)
 
 
+@pytest.mark.global_rng
 def test_george_huerta_sets_disjoint(tmp_path, monkeypatch):
     """
     Both phases of the shipped George & Huerta 2017 run, the mass regression
@@ -156,7 +164,7 @@ def test_george_huerta_sets_disjoint(tmp_path, monkeypatch):
         for split, batches in phase.items():
             splits.setdefault(split, []).extend(batches)
     validate(tmp_path / "classification", BATCH)
-    splits.update(by_split(tap.take(), batches_per_stage=1))
+    splits.update(by_split(tap.take(), VALIDATOR_STAGES, batches_per_stage=1))
     assert_strain_disjoint(splits)
 
 

@@ -8,7 +8,7 @@ noise under a signal and every label stream of data it could not otherwise see.
 from __future__ import annotations
 
 import hashlib
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -24,6 +24,22 @@ STRAIN = (RV.WHITENED_ONSOURCE, RV.WHITENED_INJECTIONS)
 INJECTION_LABELS = (RV.INJECTION_PRESENT, *gf.ScalingTypes, *gf.WaveformParameters, RV.CENTRAL_TIME)
 
 Batch = Dict[str, np.ndarray]
+#: A batch's (epoch, k).
+Address = Tuple[int, int]
+
+
+class Tapped(NamedTuple):
+    """What one tapped dataset served, in the order it served it."""
+
+    #: The dataset's split.
+    group: str
+    #: Each distinct batch, its inputs and outputs together.
+    batches: List[Batch]
+    #: The (epoch, k) address of each of ``batches``; None for a dataset that
+    #: is not index-addressed, whose batches depend on the order asked.
+    addresses: List[Optional[Address]]
+    #: The (epoch, k) of every batch asked for, repeats included.
+    serves: List[Address]
 
 
 class DatasetTap:
@@ -35,48 +51,58 @@ class DatasetTap:
     Asking for an output selects it and draws nothing more. Every batch served
     is recorded, its inputs and outputs together, then returned with only the
     outputs the caller asked for, so the code under test sees exactly the
-    batches it would have seen. A batch served twice (Keras peeks before an
-    epoch) is recorded once.
+    batches it would have seen.
+
+    A batch served twice (Keras makes a pass before its first epoch) is
+    recorded once. An index-addressed dataset's batch is its address, (epoch,
+    k): rebuilt, it draws the same values, though on CPU its projected strain
+    may differ in the last bits of float32, so it is recognised by address,
+    never by its bytes. Any other dataset's batch is recognised by its bytes.
     """
 
     def __init__(self, monkeypatch, outputs: Sequence):
-        built: List[Tuple[str, List[Batch]]] = []
+        built: List[Tapped] = []
         self._built = built
         extra = list(outputs)
 
-        class Tapped(dataset_module.GravyflowDataset):
+        class Dataset(dataset_module.GravyflowDataset):
             def __init__(self, *, output_variables=None, **kwargs):
                 asked = list(output_variables or [])
                 super().__init__(output_variables=asked + [v for v in extra if v not in asked], **kwargs)
                 self._asked = {v.name for v in asked}
-                self._digests, self._served = set(), []
-                built.append((self.group, self._served))
+                self._seen = set()
+                self._record = Tapped(self.group, [], [], [])
+                built.append(self._record)
 
             def __getitem__(self, index):
                 x, y = super().__getitem__(index)
+                streams = self.streams(index)
+                address = (streams.epoch, streams.k)
+                self._record.serves.append(address)
                 served = {name: np.asarray(value) for name, value in {**y, **x}.items()}
-                digest = hashlib.sha256(b"".join(
+                key = address if self.index_addressed else hashlib.sha256(b"".join(
                     name.encode() + served[name].tobytes() for name in sorted(served))).hexdigest()
-                if digest not in self._digests:
-                    self._digests.add(digest)
-                    self._served.append(served)
+                if key not in self._seen:
+                    self._seen.add(key)
+                    self._record.batches.append(served)
+                    self._record.addresses.append(address if self.index_addressed else None)
                 return x, {name: value for name, value in y.items() if name in self._asked}
 
         # Example models build `gf.GravyflowDataset`; `gf.Dataset` builds the module's.
-        monkeypatch.setattr(dataset_module, "GravyflowDataset", Tapped)
-        monkeypatch.setattr(gf, "GravyflowDataset", Tapped)
+        monkeypatch.setattr(dataset_module, "GravyflowDataset", Dataset)
+        monkeypatch.setattr(gf, "GravyflowDataset", Dataset)
 
-    def take(self) -> List[Tuple[str, List[Batch]]]:
+    def take(self) -> List[Tapped]:
         """
-        ``(group, batches served)`` for each dataset built since the last take,
-        in the order they were built. A dataset that served nothing is refused:
-        its checks would be empty.
+        What each dataset built since the last take served, in the order they
+        were built. A dataset that served nothing is refused: its checks would
+        be empty.
         """
         taken = list(self._built)
         self._built.clear()
-        for group, served in taken:
-            if not served:
-                raise ValueError(f"A {group!r} dataset was built but served no batch.")
+        for record in taken:
+            if not record.batches:
+                raise ValueError(f"A {record.group!r} dataset was built but served no batch.")
         return taken
 
 
