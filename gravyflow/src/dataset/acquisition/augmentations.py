@@ -222,6 +222,15 @@ class Augmented(NamedTuple):
 _LOGGED: set = set()
 
 
+def augmented(split: str, sampling_mode: Optional[SamplingMode] = None) -> bool:
+    """
+    Whether data of ``split`` read under ``sampling_mode`` is augmented: training data,
+    and no GRID pass, which is evaluation. The one rule for every augmentation, and for
+    the transient reads a RandomShift moves (``TransientDataObtainer.batcher``).
+    """
+    return split == "train" and sampling_mode is not SamplingMode.GRID
+
+
 def augment(strain, streams, spec, split: str, labels=(), sampling_mode: Optional[SamplingMode] = None
             ) -> Augmented:
     """
@@ -244,7 +253,7 @@ def augment(strain, streams, spec, split: str, labels=(), sampling_mode: Optiona
     applied = np.zeros(int(np.shape(onsource)[0]), np.int32)
     if not spec:
         return Augmented(onsource, offsource, applied.astype(np.float32))
-    if split != "train" or sampling_mode is SamplingMode.GRID:
+    if not augmented(split, sampling_mode):
         data = "A GRID pass" if split == "train" else f"The '{split}' split"
         if data not in _LOGGED:
             _LOGGED.add(data)

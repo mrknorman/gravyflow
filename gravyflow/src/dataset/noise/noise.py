@@ -428,6 +428,7 @@ class NoiseObtainer(Obtainer):
                     offsource_duration_seconds=offsource_duration_seconds,
                     num_examples_per_batch=num_examples_per_batch,
                     ifos=ifos,
+                    sampling_mode=sampling_mode,
                     steps_per_epoch=steps_per_epoch,
                 )
 

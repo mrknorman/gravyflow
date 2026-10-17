@@ -711,6 +711,23 @@ class TestPasses:
         for e in (0, 1):
             assert sorted(times_of(forward[2 * e]) + times_of(forward[2 * e + 1])) == rounded(PASS_TIMES)
 
+    def test_balance_keeps_a_glitch_and_an_event_of_one_value_apart(self):
+        """AIR_COMPRESSOR and BBH share the integer 0; balanced, they are two classes, each served as often."""
+        from types import SimpleNamespace
+
+        from gravyflow.src.dataset.acquisition.transient import Passes
+
+        assert int(GlitchType.AIR_COMPRESSOR) == int(gf.SourceType.BBH)
+        glitches = [dataclasses.replace(r, kind=GlitchType.AIR_COMPRESSOR) for r in records(PASS_TIMES[:5])]
+        events = [dataclasses.replace(r, label=gf.DataLabel.EVENTS, kind=gf.SourceType.BBH)
+                  for r in records(PASS_TIMES[5:6])]
+        obtainer = SimpleNamespace(transient_segments=glitches + events, balanced_glitch_types=True,
+                                   segment_order=gf.SegmentOrder.RANDOM)
+        passes = Passes.of(obtainer, gf.src.rng.SeedTree(7), "train", 2, True)
+        assert len(passes.classes) == 2, f"classes {passes.classes}"
+        served = passes.items(0)
+        assert np.sum(served == len(glitches)) == len(glitches), f"the event is not balanced: {served}"
+
     def test_an_evaluation_split_is_one_fixed_set(self):
         with offline(catalogue=records(TEST_TIMES), science=WIDE_SCIENCE):
             batches = direct(10, group="test", num_examples_per_batch=2)
@@ -773,3 +790,18 @@ class TestReadSpan:
             assert np.all(np.abs(start - onsource[:, int(0.5 * RATE)]) < DECODE)
             shifts += list(shift)
         assert np.any(np.abs(shifts) > 2.0 / RATE), "no example was shifted"
+
+    @pytest.mark.parametrize("mode, moved", [(gf.SamplingMode.RANDOM, True), (gf.SamplingMode.GRID, False)])
+    def test_one_rule_moves_the_read_and_flags_it(self, mode, moved):
+        """A GRID pass is evaluation: RandomShift moves no read and flags none; RANDOM training does both."""
+        reader = gf.TransientDataObtainer(
+            data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
+            observing_runs=gf.ObservingRun.O3,
+            augmentations=[gf.RandomShift(probability=1.0, shift_fraction=0.25)])
+        with offline(catalogue=records(PASS_TIMES), science=WIDE_SCIENCE):
+            batch = batcher(reader, augmented=True, sampling_mode=mode)(0, 0)
+        onsource = decoded(batch)[:, 0]
+        shift = onsource[:, onsource.shape[-1] // 2] - np.asarray(batch[RV.TRANSIENT_GPS_TIME])[:, 0]
+        flags = np.asarray(batch[RV.AUGMENTATIONS])
+        assert bool(np.any(np.abs(shift) > 2.0 / RATE)) == moved, f"{mode.name}: shifts {shift}"
+        assert np.all(flags == (gf.RandomShift.bit if moved else 0)), f"{mode.name}: flags {flags}"

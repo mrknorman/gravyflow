@@ -41,6 +41,7 @@ from .sources import DataSource
 from gravyflow.src.dataset.store import read as store_read
 from gravyflow.src.dataset.store.pools import thread_pool
 from gravyflow.src.dataset.store.read import TimelineContradiction
+from .augmentations import augmented
 from .partners import PARTNER_GRID_HERTZ, partner_time
 from gravyflow.src.dataset.config import WindowSpec
 from gravyflow.src.dataset.splits import SplitSpec
@@ -663,16 +664,16 @@ class TransientDataObtainer(BaseDataObtainer):
         """
         A dataset's batcher of split ``group``: ``batch(streams)`` is a function of the
         batch's address alone (``Passes``), read from a fresh copy of this obtainer,
-        each example's reads moved by its training ``RandomShift``. ``window``: the
-        window and batch (``sample_rate_hertz``, ``onsource_duration_seconds``,
-        ``crop_duration_seconds``, ``offsource_duration_seconds``,
-        ``num_examples_per_batch``, ``ifos``), and ``steps_per_epoch`` (a training
-        epoch's batches; needed past the first epoch). ``batch.batches`` is an
-        evaluation split's length, floor(N / B), and None for training;
+        each example's reads moved by its ``RandomShift`` wherever ``augment`` would flag
+        it (``augmented``: training, and no GRID pass). ``window``: the window and batch
+        (``sample_rate_hertz``, ``onsource_duration_seconds``, ``crop_duration_seconds``,
+        ``offsource_duration_seconds``, ``num_examples_per_batch``, ``ifos``),
+        ``sampling_mode``, and ``steps_per_epoch`` (a training epoch's batches; needed
+        past the first epoch). ``batch.batches`` is an evaluation split's length,
+        floor(N / B), and None for training;
         ``batch.prepare(addresses)`` commits every tile those batches read and returns
         every refusal they would meet (``TransientUnavailable``).
         """
-        window.pop("sampling_mode", None)
         return deepcopy(self)._batches(tree, group, shift=True, **window)
 
     def _batches(
@@ -690,6 +691,7 @@ class TransientDataObtainer(BaseDataObtainer):
             whiten: bool = False,
             crop: bool = False,
             steps_per_epoch: Optional[int] = None,
+            sampling_mode: Optional[SamplingMode] = None,
             pool=None,
         ) -> Callable[[BatchStreams], Dict]:
         """
@@ -707,7 +709,8 @@ class TransientDataObtainer(BaseDataObtainer):
         ifos = ensure_list(ifos) or [gf.IFO.L1]
         size = int(num_examples_per_batch or gf.Defaults.num_examples_per_batch)
         training = group == "train"
-        random_shift = self._shift(training and shift)
+        # A RandomShift moves a read exactly where ``augment`` flags it: one rule decides both.
+        random_shift = self._shift(shift and augmented(group, sampling_mode))
         # The most a read moves, a whole number of samples either way.
         most = 0 if random_shift is None else int(
             random_shift.shift_fraction * window_spec.num_onsource_samples)
@@ -854,8 +857,10 @@ class Passes:
             raise ValueError(f"No transient records are planned for '{split}': there is nothing to serve.")
         balanced = training and obtainer.balanced_glitch_types
         if balanced:
-            kinds = np.array([int(record.kind) for record in records])
-            classes = tuple(np.flatnonzero(kinds == kind) for kind in np.unique(kinds))
+            # A class is a label's kind: GlitchType and SourceType values overlap as
+            # integers (BBH and AIR_COMPRESSOR), so the label keeps them apart.
+            keys = [(record.label.name, int(record.kind)) for record in records]
+            classes = tuple(np.flatnonzero([k == key for k in keys]) for key in sorted(set(keys)))
         else:
             classes = (np.arange(len(records)),)
         passes = cls(tree, split, classes, int(size), training,
