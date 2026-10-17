@@ -37,6 +37,9 @@ _LEAVES = tuple(re.compile(pattern) for pattern in (
     r"validator/(roc|plot|pad)",
     # Model search (genetics and model selection).
     rf"search(/{_SEGMENT})+",
+    # A training run's model: the seeds Keras gives its layers when they are
+    # built (initialisers, dropout).
+    r"model/build",
 ))
 
 #: Scopes a consumer may sit under: a named dataset, a pool of a composed

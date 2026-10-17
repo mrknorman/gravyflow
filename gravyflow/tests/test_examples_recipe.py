@@ -189,7 +189,6 @@ class EpochBatches(CountingBatches):
         return super().__getitem__(index)
 
 
-@pytest.mark.global_rng
 def test_training_resumes_from_the_last_epoch(tmp_path):
     builds, served = [], []
 
@@ -220,7 +219,85 @@ def test_training_resumes_from_the_last_epoch(tmp_path):
                    zip(last_weights, directory.load_model("last").get_weights()))
 
 
-@pytest.mark.global_rng
+class AddressedBatches(keras.utils.PyDataset):
+    """Batches addressed by (epoch, index), as a gravyflow training split's are, recording the order served."""
+
+    def __init__(self, seed, served, n=4):
+        super().__init__()
+        self.seed, self.served, self.n = seed, served, n
+        self.dataset = gf.Dataset(
+            seed=seed, noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
+            steps_per_epoch=n, input_variables=[gf.ReturnVariables.ONSOURCE],
+        )
+
+    def __len__(self):
+        return self.n
+
+    def epoch_callback(self):
+        return self.dataset.epoch_callback()
+
+    def __getitem__(self, index):
+        epoch = self.dataset.epoch
+        self.served.append((epoch, index))
+        rng = np.random.default_rng([self.seed, epoch, index])
+        x = rng.normal(size=(8, 1, 16)).astype(np.float32)
+        return {"WHITENED_ONSOURCE": x}, np.eye(2, dtype=np.float32)[(x.mean(axis=(1, 2)) > 0).astype(int)]
+
+
+def dropout_model():
+    """A model with every kind of Keras draw: initialisers and dropout."""
+    inputs = keras.Input(shape=(1, 16), name="WHITENED_ONSOURCE")
+    x = keras.layers.Dense(8, activation="elu")(keras.layers.Flatten()(inputs))
+    x = keras.layers.Dropout(0.5)(x)
+    model = keras.Model({"WHITENED_ONSOURCE": inputs}, keras.layers.Dense(2, name="output")(x))
+    model.compile(optimizer=keras.optimizers.Adam(1e-2),
+                  loss=keras.losses.CategoricalCrossentropy(from_logits=True))
+    return model
+
+
+def test_training_is_reproducible_from_the_seed(tmp_path):
+    # GF-B215: fit shuffled each epoch with Python's unseeded global random, and
+    # Keras seeded the initialisers and dropout from it too: neither the order
+    # nor the weights followed from the run's seed. No global_rng mark: the
+    # recipe must leave the global random state alone.
+    runs = []
+    for name in ("a", "b"):
+        served = []
+        validation = materialise(AddressedBatches(99, []), 2)
+        run = make_run(tmp_path / name, 3)
+        model = run.train(dropout_model, lambda seed: AddressedBatches(seed, served), validation, verbose=0)
+        runs.append((served, model.get_weights()))
+    (served_a, weights_a), (served_b, weights_b) = runs
+    peek = [(0, 0), (0, 1)]  # fit's structure pass, before the first epoch
+    expected = peek + [(epoch, k) for epoch in range(3) for k in range(4)]
+    assert served_a == expected, f"served {served_a}"
+    assert served_b == served_a
+    for a, b in zip(weights_a, weights_b):
+        np.testing.assert_array_equal(a, b)
+
+    another = make_run(tmp_path / "c", 1, seed=8).train(
+        dropout_model, lambda seed: AddressedBatches(seed, []), materialise(AddressedBatches(99, []), 2), verbose=0)
+    assert not np.array_equal(another.get_weights()[0], weights_a[0])
+
+
+def test_a_resumed_run_trains_as_an_uninterrupted_one(tmp_path):
+    # GF-B215: a resumed run's epochs came in another order.
+    validation = materialise(AddressedBatches(99, []), 2)
+    whole = make_run(tmp_path / "whole", 3).train(
+        dropout_model, lambda seed: AddressedBatches(seed, []), validation, verbose=0)
+    make_run(tmp_path / "parts", 2).train(dropout_model, lambda seed: AddressedBatches(seed, []), validation, verbose=0)
+    resumed = make_run(tmp_path / "parts", 3).train(
+        dropout_model, lambda seed: AddressedBatches(seed, []), validation, verbose=0)
+    whole_state = RunDirectory(tmp_path / "whole").state
+    parts_state = RunDirectory(tmp_path / "parts").state
+    assert whole_state["best_epoch"] == parts_state["best_epoch"]
+    for a, b in zip(RunDirectory(tmp_path / "whole").load_model("last").get_weights(),
+                    RunDirectory(tmp_path / "parts").load_model("last").get_weights()):
+        np.testing.assert_allclose(a, b, rtol=1e-6, atol=1e-7)
+    for a, b in zip(whole.get_weights(), resumed.get_weights()):
+        np.testing.assert_allclose(a, b, rtol=1e-6, atol=1e-7)
+
+
 def test_resume_refuses_another_configuration(tmp_path):
     validation = materialise(CountingBatches(99), 2)
     make_run(tmp_path, 1).train(tiny_model, CountingBatches, validation, verbose=0)

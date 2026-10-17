@@ -9,6 +9,12 @@ and evaluated.
   test data never share a stream. The training data takes Keras' epoch
   (``epoch_callback``), so each epoch, and a resumed run's first, draws that
   epoch's batches rather than replaying earlier ones.
+- **Reproducible from the seed.** The dataset owns the order: ``fit`` serves
+  each epoch's batches in index order (Keras' shuffle would draw from Python's
+  unseeded global random), and the model's initial weights and dropout seeds
+  come from the seed tree (`keras_draws`). Two runs of one seed train the same
+  batches in the same order into the same weights, and a resumed run trains as
+  an uninterrupted one.
 - **A run directory outside the package.** `RunDirectory` refuses any path
   inside the installed library, so a run can never overwrite shipped files.
 - **Resume.** Each epoch ends with the model and its optimiser saved
@@ -29,6 +35,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -43,6 +51,49 @@ from gravyflow.src.validate.provenance import (
 )
 
 SPLITS = ("train", "validate", "test")
+
+#: The name Keras gives the state variable of each seed generator (dropout's).
+_SEED_STATE = "seed_generator_state"
+
+
+@contextmanager
+def keras_draws(seed: int):
+    """
+    Give Keras' unseeded draws ``seed``, leaving the global random state alone.
+
+    Keras seeds every layer built without a seed (its initialisers, a dropout
+    layer's seed generator) from Python's global random, when the layer is
+    built or loaded. Within this context those draws come from ``seed``, and
+    Python's random state is restored afterwards: a model built here is the
+    same for the same seed, and building or loading one changes no global
+    random state.
+    """
+    state = random.getstate()
+    random.seed(seed)
+    try:
+        yield
+    finally:
+        random.setstate(state)
+
+
+def _seed_generators(model: keras.Model) -> list:
+    # In model order; their names are numbered per session, so order identifies them.
+    return [v for v in model.variables if v.name == _SEED_STATE]
+
+
+def _seed_states(model: keras.Model) -> List[List[int]]:
+    """The state of each seed generator in ``model`` (dropout's), in model order."""
+    return [np.asarray(v.value).tolist() for v in _seed_generators(model)]
+
+
+def _restore_seed_states(model: keras.Model, states: List[List[int]], source: Path) -> None:
+    variables = _seed_generators(model)
+    if len(variables) != len(states):
+        raise StaleCheckpointError(
+            f"{source} records the state of {len(states)} seed generators, but the model has "
+            f"{len(variables)}: it was written by an older recipe and cannot resume exactly.")
+    for variable, value in zip(variables, states):
+        variable.assign(np.asarray(value, dtype=variable.dtype))
 
 
 # ------------------------------------------------------------------ presets
@@ -203,14 +254,17 @@ class RunDirectory:
         tmp = target.with_name(f"{target.stem}.tmp.keras")
         model.save(tmp)
         os.replace(tmp, target)
+        # Keras saves no seed generator state, so a reloaded dropout layer would
+        # draw new masks: the record keeps it, and loading restores it.
         self._write(target.with_suffix(".json"), {
-            "weights_sha256": model_fingerprint(model), "config_sha256": config_sha256, **record})
+            "weights_sha256": model_fingerprint(model), "config_sha256": config_sha256,
+            "seed_states": _seed_states(model), **record})
 
     def load_model(self, name: str, config_sha256: Optional[str] = None) -> keras.Model:
         """
         Load a saved model and verify its provenance: its file must still hold
         the recorded weights and, given ``config_sha256``, it must belong to
-        that configuration.
+        that configuration. Its seed generators resume from their saved state.
 
         Raises:
             StaleCheckpointError: a mismatch.
@@ -221,8 +275,10 @@ class RunDirectory:
             raise FileNotFoundError(f"No {name} model with provenance in {self.path}.")
         if config_sha256 is not None:
             require_match("run configuration", record["config_sha256"], config_sha256, target)
-        model = keras.models.load_model(target)
+        with keras_draws(0):  # what a load draws is replaced by the saved state
+            model = keras.models.load_model(target)
         require_match("model", record["weights_sha256"], model_fingerprint(model), target)
+        _restore_seed_states(model, record.get("seed_states", []), target)
         return model
 
 
@@ -276,6 +332,11 @@ class TrainingRun:
     def config_sha256(self) -> str:
         return config_fingerprint(self._full_description())
 
+    @property
+    def model_seed(self) -> int:
+        """The seed Keras builds the run's model from (`keras_draws`): a stream of the seed tree."""
+        return int(gf.SeedTree(self.seed).stream("train", "model/build").integers(2**63))
+
     def _full_description(self) -> Dict[str, Any]:
         # The epoch count is where the run stops, not what it does: leaving it
         # out lets a finished run be extended.
@@ -294,7 +355,9 @@ class TrainingRun:
         (also saved as ``model.keras`` with its provenance).
 
         Args:
-            build_model: a new compiled model.
+            build_model: a new compiled model. It is built under `keras_draws`,
+                so its initial weights and dropout seeds follow from the run's
+                seed.
             training_data: the training batches, given the run's root seed.
                 Its ``epoch_callback()``, when it has one, gives it Keras'
                 epoch: a resumed run draws its first epoch's batches, and a
@@ -311,7 +374,8 @@ class TrainingRun:
             require_match("run configuration", run["config_sha256"], sha, self.directory.path)
         if state is None:
             self.directory.start(self._full_description())
-            model = build_model()
+            with keras_draws(self.model_seed):
+                model = build_model()
             state = {"epoch": -1, "best_val_loss": None, "best_epoch": None, "wait": 0,
                      "stopped_early": False, "history": []}
         else:
@@ -328,6 +392,7 @@ class TrainingRun:
                 epochs=self.schedule.epochs,
                 initial_epoch=first_epoch,
                 callbacks=callbacks,
+                shuffle=False,  # the dataset owns the order (see the module docstring)
                 verbose=verbose,
             )
         best = self.directory.load_model("best", sha)
@@ -339,5 +404,5 @@ class TrainingRun:
 
 __all__ = [
     "DetectionBatches", "FixedBatches", "RegressionBatches", "RunDirectory", "StaleCheckpointError",
-    "TrainingRun", "TrainingSchedule", "materialise",
+    "TrainingRun", "TrainingSchedule", "keras_draws", "materialise",
 ]
