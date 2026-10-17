@@ -914,6 +914,26 @@ class TestPseudoRealByIndex:
             np.testing.assert_array_equal(np.asarray(again(tree.batch("train", 3, 7))[RV.ONSOURCE]), late)
         assert not np.array_equal(early, late)
 
+    def test_a_batch_colours_by_the_rows_of_its_place_in_the_passes(self):
+        # Each block's segment has its own amplitude, so an example's level names its row.
+        amplitudes = [1.5 ** i for i in range(24)]
+        layout = science_layout([LONG], amplitudes, blocks=24)
+        steps, address = 10, (3, 7)
+        tree = gf.SeedTree(5)
+        with gwosc_serving(HashedFetch(layout)):
+            batch = pseudo_real(layout, saturation=0.25).batcher(
+                tree, "train", **OFFLINE_WINDOW, num_examples_per_batch=32, steps_per_epoch=steps)
+            levels = np.std(np.asarray(batch(tree.batch("train", *address))[RV.ONSOURCE]), axis=-1)[:, 0]
+        plan = batch.plan
+        row_amplitude = np.array([amplitudes[int((start - FIRST_BLOCK) // BLOCK_SECONDS)]
+                                  for start in plan.rows[:, 0, 0]])
+        # Uniform noise of amplitude a has standard deviation a / sqrt(12); colouring keeps its power.
+        drawn = np.argmin(np.abs(np.log(levels[:, None] * np.sqrt(12.0) / row_amplitude[None, :])), axis=1)
+        g = address[0] * steps + address[1]
+        assert set(plan.mixed(g).tolist()) != set(plan.mixed(address[1]).tolist())
+        assert set(drawn.tolist()) <= set(plan.mixed(g).tolist()), \
+            f"batch {g} drew rows {sorted(set(drawn.tolist()))}, outside its mixing window {sorted(set(plan.mixed(g).tolist()))}"
+
     def test_a_short_piece_is_left_out_not_read(self):
         # Every block also holds a 1 s science segment, whose interior is shorter than a window.
         layout = science_layout([1.0], [QUIET], blocks=24, offset=150.0) + science_layout([LONG], [QUIET], blocks=24)
