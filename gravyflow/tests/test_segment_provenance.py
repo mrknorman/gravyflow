@@ -91,7 +91,7 @@ def batches(source, mode, num_batches=2, seed=3):
     generator = source.get_onsource_offsource_chunks(
         sample_rate_hertz=RATE, onsource_duration_seconds=ONSOURCE, crop_duration_seconds=CROP,
         offsource_duration_seconds=OFFSOURCE, num_examples_per_batch=BATCH, ifos=IFOS,
-        scale_factor=1.0, seed=seed, sampling_mode=mode, crop=True,
+        seed=seed, sampling_mode=mode, crop=True,
     )
     return [next(generator) for _ in range(num_batches)]
 
@@ -113,11 +113,11 @@ class TestStartGpsTime:
             assert onsource.shape == (BATCH, len(IFOS), int(ONSOURCE * RATE))
             labels = np.asarray(batch[gf.ReturnVariables.START_GPS_TIME])
             assert labels.dtype == np.float64
-            # Each window is consecutive samples of its own piece.
-            steps = np.diff(np.asarray(onsource, dtype=np.float64), axis=-1)
-            assert np.all(np.abs(steps - 1.0) < 0.25)
-            error = labels - decoded_start_gps(onsource)
-            assert np.max(np.abs(error)) <= 1e-6, f"label minus first sample: {error.min()} to {error.max()} s"
+            # Each window is consecutive samples of its own piece. Every value is an integer
+            # below 2**24, exact in float32, and every time a multiple of 1/256 s, exact in
+            # float64 at GPS 1.2e9: label and first sample agree exactly.
+            np.testing.assert_array_equal(np.diff(np.asarray(onsource, dtype=np.float64), axis=-1), 1.0)
+            np.testing.assert_array_equal(labels, decoded_start_gps(onsource))
 
     def test_is_one_definition_with_the_crop(self):
         spec = gf.WindowSpec.from_params(sample_rate_hertz=RATE, onsource_duration_seconds=ONSOURCE,
