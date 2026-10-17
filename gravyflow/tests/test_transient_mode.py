@@ -340,7 +340,6 @@ class TestSpecificEventAcquisition:
             observing_runs=gf.ObservingRun.O1,
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS],
-            force_acquisition=True,
             event_names=["GW150914"]  # Specific event
         )
         
@@ -383,7 +382,6 @@ class TestSpecificEventAcquisition:
             observing_runs=gf.ObservingRun.O1,
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS],
-            force_acquisition=True,
             event_names=["GW150914", "GW151012"]  # Multiple events
         )
         
@@ -415,7 +413,6 @@ class TestSpecificEventAcquisition:
             observing_runs=gf.ObservingRun.O1,
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS],
-            force_acquisition=True,
             event_names=["GW150914"]
         )
         

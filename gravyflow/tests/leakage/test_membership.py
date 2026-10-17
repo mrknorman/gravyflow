@@ -79,14 +79,14 @@ class Stop(Exception):
 
 
 def served_by_dataset(obtainer, split, onsource_seconds, seed):
-    """The records a dataset serves for ``split``, stopped where it would read its cache."""
+    """The records a dataset serves for ``split``, stopped where it would read its first example."""
     served = {}
 
     def stop(self, *args, **kwargs):
         served["keys"] = {record.gps_key for record in self.transient_segments}
         raise Stop
 
-    with mock.patch.object(gf.TransientDataObtainer, "_initialize_transient_cache", stop), \
+    with mock.patch.object(gf.TransientDataObtainer, "_read_example", stop), \
             pytest.raises(Exception):
         gf.Dataset(noise_obtainer=obtainer, group=split, seed=seed, sample_rate_hertz=256.0,
                    onsource_duration_seconds=onsource_seconds, offsource_duration_seconds=16.0,

@@ -261,7 +261,6 @@ def _test_whitening_real_noise(
             gf.DataLabel.NOISE, 
             gf.DataLabel.GLITCHES
         ],
-        force_acquisition=True,
     )
     
     # Initialize noise generator wrapper:

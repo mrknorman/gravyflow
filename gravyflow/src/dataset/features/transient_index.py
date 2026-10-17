@@ -24,9 +24,13 @@ from gravyflow.src.dataset.features.event import EventConfidence
 from gravyflow.src.dataset.splits import EXCLUDED, SplitSpec, as_split_spec, require_split_fingerprint
 from gravyflow.src.utils.gps import gps_to_key
 
-#: Seconds of data the library may read around a transient's time, each side: the
-#: transient cache's span (``segment_builders.DEFAULT_PADDING``).
+#: Seconds of data the library may read around a transient's time, each side: a
+#: record's span (``segment_builders.DEFAULT_PADDING``).
 TRANSIENT_HALF_SPAN_SECONDS = 48.2
+
+#: A record's catalogue measurements, saved and loaded with it: a glitch's, and an
+#: event's parameters (its masses set its footprint). NaN where the catalogue has none.
+MEASUREMENTS = ("snr", "peak_freq", "duration", "ml_confidence", "mass1", "mass2", "distance", "p_astro")
 
 
 def event_footprints(gps, chirp_mass_source) -> np.ndarray:
@@ -467,14 +471,16 @@ class TransientIndex:
             group_keys=group_keys,
             group_values=group_values,
             split_fingerprint=np.array(self.split_fingerprint),
+            **{field: np.array([getattr(r, field) for r in self.records], dtype=np.float64)
+               for field in MEASUREMENTS},
         )
     
     @classmethod
     def load(cls, path: Path, spec: Optional[SplitSpec] = None) -> "TransientIndex":
         """
         Load an index from an NPZ file. Refuses an index split by another spec
-        than ``spec`` (None: the default split), or recording none, and any
-        object array.
+        than ``spec`` (None: the default split), or recording none, any object
+        array, and an index saved without its records' measurements (``MEASUREMENTS``).
         """
         path = Path(path)
         data = np.load(path, allow_pickle=False)
@@ -482,6 +488,12 @@ class TransientIndex:
             str(data["split_fingerprint"]) if "split_fingerprint" in data else None,
             as_split_spec(spec), f"Transient index {path}",
         )
+        missing = [field for field in MEASUREMENTS if field not in data]
+        if missing:
+            raise ValueError(
+                f"Transient index {path} was saved without its records' {', '.join(missing)}: "
+                "build the index again and save it."
+            )
         
         gps_times = data["gps_times"]
         labels = data["labels"]
@@ -491,6 +503,7 @@ class TransientIndex:
         ifo_masks = data["ifo_masks"]
         confidences = data["confidences"]
         names = data["names"]
+        measurements = {field: data[field] for field in MEASUREMENTS}
         
         records = []
         import gravyflow as gf  # Local import to avoid circular dependency
@@ -530,7 +543,8 @@ class TransientIndex:
                 seen_in=seen_in,
                 confidence=confidence,
                 name=name,
-                weight=float(weights[i])
+                weight=float(weights[i]),
+                **{field: float(values[i]) for field, values in measurements.items()},
             )
             records.append(record)
         

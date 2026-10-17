@@ -95,7 +95,6 @@ _MODULES = {
     "get_glitch_segments": "gravyflow.src.dataset.features.glitch",
     "get_glitch_type_from_index": "gravyflow.src.dataset.features.glitch",
     "get_glitch_catalogue": "gravyflow.src.dataset.features.glitch",
-    "TransientCache": "gravyflow.src.dataset.features.glitch_cache",
     "TransientIndex": "gravyflow.src.dataset.features.transient_index",
     "EventConfidence": "gravyflow.src.dataset.features.event",
     "SourceType": "gravyflow.src.dataset.features.event",

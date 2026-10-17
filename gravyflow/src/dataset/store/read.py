@@ -10,9 +10,12 @@ A read of ``n`` samples at ``rate`` from GPS ``t0`` is, in order:
 4. the margin cut away: the span reaches the resampler's margin past each end of the
    window, so every sample served is exact, never an edge approximation.
 
-The span never leaves the interval it reads: ``interiors`` gives the first sample and
-the whole seconds of an interval whose span lies inside it, and the sampling plan
-measures pieces by the same function, so plan and read agree.
+A read may start at any sample of the absolute grid at its rate: where that grid and
+the native one share only every ``up``-th sample, the read starts at the shared sample
+before it and cuts the lead away too. A noise piece never leaves the interval it reads:
+``interiors`` gives the first sample and the whole seconds of an interval whose span lies
+inside it, and the sampling plan measures pieces by the same function, so plan and read
+agree. A transient window is placed by its centre (``WindowSpec.transient_window_first_sample``).
 
 The source's timeline is the authority on which time holds data. A read whose span
 meets samples a tile does not hold, or a tile that cannot be fetched after
@@ -28,6 +31,7 @@ fetch or a read's span larger than the whole cap is refused before any fetch (``
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
 import logging
 import threading
 import time
@@ -72,13 +76,14 @@ class TimelineContradiction(StrainUnavailable):
     The timeline says this time holds data, and the source does not deliver it: a fetch
     failed after its retries, or the bytes delivered are not held (non-finite, or not in
     the source's file). ``exclusion`` is the ``(detector, (start, end), reason)`` entry
-    of an obtainer's ``exclusions`` that plans around it.
+    of an obtainer's ``exclusions`` that plans around it; ``reason`` is the cause alone.
     """
 
     def __init__(self, source: DataSource, detector: str, interval: Sequence[float], cause,
                  exclusion: Tuple[str, Tuple[float, float], str]):
         self.exclusion = exclusion
         reason = f"{type(cause).__name__}: {cause}" if isinstance(cause, BaseException) else str(cause)
+        self.reason = reason  # the contradiction alone, without the advice
         super().__init__(
             source, detector, interval,
             f"{reason}. The timeline says this time holds data; to plan around it, add "
@@ -131,9 +136,10 @@ def interiors(source: DataSource, sample_rate_hertz, intervals) -> Tuple[np.ndar
 def read_span(g: Geometry, first: int, num_samples: int) -> Tuple[int, int]:
     """
     The native samples [start, stop) a read of ``num_samples`` from ``first`` reaches
-    under geometry ``g``: its window and the resampler's margin past each end.
+    under geometry ``g``: its window, from the shared sample at or before ``first``, and
+    the resampler's margin past each end.
     """
-    start = first * g.down // g.up - g.margin
+    start = first // g.up * g.down - g.margin
     stop = -(-(first + num_samples) * g.down // g.up) + g.margin
     return start, stop
 
@@ -189,20 +195,43 @@ def _human(nbytes: int) -> str:
         nbytes /= 1024
 
 
-def legacy_caches() -> List[Path]:
+def _size(path: Path) -> Optional[int]:
+    """The bytes of a file, or of every file under a directory; None if it cannot be read."""
+    try:
+        if path.is_dir():
+            return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def legacy_caches() -> List[Tuple[Path, int]]:
     """
-    The real-noise segment caches an earlier gravyflow wrote: its ``segments``
-    directory under the cache root, and the places it used before that root. They
-    hold resampled strain under other numerics, and are never read.
+    The strain caches an earlier gravyflow wrote, with their sizes in bytes: its real-noise
+    segment caches (the ``segments`` directory under the cache root, and the places used
+    before that root), its transient window caches, and the download cache it kept for
+    gwpy. They hold strain under other numerics, or downloads the store now keeps, and are
+    never read. A place that cannot be listed, or a file gone before it is measured, is
+    left out: naming old caches never fails a read.
     """
-    places = [(user_cache_dir() / "segments", "*.hdf5"), (Path("generator_data"), "segment_data_*.hdf5"),
-              (PACKAGE.parent, "segment_data_*.hdf5")]
-    return sorted({path.resolve() for directory, pattern in places if directory.is_dir()
-                   for path in directory.glob(pattern) if path.is_file()})
+    root = user_cache_dir()
+    places = [(root / "segments", "*.hdf5"), (Path("generator_data"), "segment_data_*.hdf5"),
+              (PACKAGE.parent, "segment_data_*.hdf5"), (root, "*_cache_v*.h5"), (root, "astropy")]
+    found: Dict[Path, int] = {}
+    for directory, pattern in places:
+        try:
+            paths = list(directory.glob(pattern))
+        except OSError:
+            continue
+        for path in paths:
+            size = _size(path)
+            if size is not None:
+                found[path.resolve()] = size
+    return sorted(found.items())
 
 
 def warn_of_legacy_caches() -> None:
-    """Warn once per process, naming each legacy segment cache and its size; touch none."""
+    """Warn once per process, naming each legacy strain cache and its size; touch none."""
     global _legacy_warned
     with _lock:
         if _legacy_warned:
@@ -210,11 +239,12 @@ def warn_of_legacy_caches() -> None:
         _legacy_warned = True
     found = legacy_caches()
     if found:
-        listed = "; ".join(f"{path} ({_human(path.stat().st_size)})" for path in found)
+        listed = "; ".join(f"{path} ({_human(size)})" for path, size in found)
         warnings.warn(
-            f"gravyflow no longer reads its old real-noise segment caches; real strain is read "
-            f"from the store under {user_cache_dir('store')}. These are never read, changed or "
-            f"deleted: {listed}. Delete them to reclaim the space.",
+            f"gravyflow no longer reads its old strain caches (real-noise segments, transient "
+            f"windows and downloads); real strain is read from the store under "
+            f"{user_cache_dir('store')}. These are never read, changed or deleted: {listed}. "
+            f"Delete them to reclaim the space.",
             UserWarning,
             stacklevel=2,
         )
@@ -224,41 +254,64 @@ def _detector_name(detector) -> str:
     return getattr(detector, "name", str(detector))
 
 
-def _fetch_tile(source: DataSource, detector, key: TileKey) -> Fetched:
+def _fetch(source: DataSource, detector, key: TileKey):
     """
-    Tile ``key`` as ``source`` delivers it, tried ``FETCH_ATTEMPTS`` times. Samples the
-    source's file does not cover are ``NOT_IN_FILE``. A delivery that is not this tile's
-    (another source's strain, another rate, or samples off the tile's grid or past its
-    end) is refused by name.
+    Tile ``key``'s interval as ``source`` delivers it, tried ``FETCH_ATTEMPTS`` times; the
+    refusal after the last names how many tries failed and the last one's cause.
     """
     interval = (key.t0, key.t0 + key.tile_seconds)
-    for attempt in range(1, FETCH_ATTEMPTS + 1):
+    attempt = 1
+    while True:
         try:
-            strain = source.fetch(detector, float(key.rate), interval)
-            break
+            return source.fetch(detector, float(key.rate), interval)
         except StrainUnavailable as error:
-            if attempt == FETCH_ATTEMPTS:
-                raise
+            if attempt >= FETCH_ATTEMPTS:
+                raise StrainUnavailable(source, detector, interval,
+                                        f"{attempt} tries failed; the last: {error}") from error
             logger.info(f"Fetch {attempt} of {key.describe()} failed ({error}); trying again.")
             time.sleep(FETCH_BACKOFF_SECONDS * attempt)
-    offset = (float(strain.t0) - key.t0) * key.rate
-    first = int(round(offset))
-    data = np.asarray(strain.data)
-    problem = None
+            attempt += 1
+
+
+def _version(package: str) -> str:
+    """An installed package's version, read without importing it; "absent" if not installed."""
+    try:
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        return "absent"
+
+
+def _fetch_tile(source: DataSource, detector, key: TileKey) -> Fetched:
+    """
+    Tile ``key`` as ``source`` delivers it (``_fetch``). Samples the source's file does
+    not cover are ``NOT_IN_FILE``. A delivery that is not this tile's is refused by name,
+    before any arithmetic on it: another source's strain or another rate, samples that
+    are not one row of real floating point, a first-sample time that is not finite, or
+    samples off the tile's grid or past its end.
+    """
+    strain = _fetch(source, detector, key)
+    data, t0 = np.asarray(strain.data), float(strain.t0)
+    first, problem = 0, None
     if strain.source != key.source_id or float(strain.sample_rate_hertz) != key.rate:
-        problem = f"it served {strain.source} at {strain.sample_rate_hertz:g} Hz"
-    elif abs(offset - first) > 1e-3 or data.ndim != 1 or first < 0 or first + len(data) > key.length:
-        problem = f"its {data.shape} samples from GPS {strain.t0} do not lie on the tile's grid"
+        problem = f"it served {strain.source} at {float(strain.sample_rate_hertz):g} Hz"
+    elif data.ndim != 1 or not np.issubdtype(data.dtype, np.floating):
+        problem = f"its samples are {data.shape} {data.dtype}, not one row of real floating point"
+    elif not np.isfinite(t0):
+        problem = f"its first sample's GPS time is {t0}"
+    else:
+        offset = (t0 - key.t0) * key.rate
+        first = int(round(offset))
+        if abs(offset - first) > 1e-3 or first < 0 or first + len(data) > key.length:
+            problem = f"its {len(data)} samples from GPS {t0} do not lie on the tile's grid"
     if problem is not None:
-        raise StrainUnavailable(source, detector, interval, f"not {key.describe()}: {problem}")
+        raise StrainUnavailable(source, detector, (key.t0, key.t0 + key.tile_seconds),
+                                f"not {key.describe()}: {problem}")
     not_in_file = [(a, b) for a, b in ((0, first), (first + len(data), key.length)) if b > a]
     if not_in_file:
         placed = np.full(key.length, np.nan, dtype=np.float32 if data.dtype.itemsize <= 4 else np.float64)
         placed[first:first + len(data)] = data
         data = placed
-    import gwpy  # Here: the core imports without gwpy; a fetch is read through it.
-
-    return Fetched(data, tuple(not_in_file), {"source": type(source).__name__, "gwpy": gwpy.__version__})
+    return Fetched(data, tuple(not_in_file), {"source": type(source).__name__, "gwpy": _version("gwpy")})
 
 
 def _tile(store: Store, source: DataSource, detector, key: TileKey, stream: Hashable) -> Tile:
@@ -276,34 +329,18 @@ def _tile(store: Store, source: DataSource, detector, key: TileKey, stream: Hash
         ) from error
 
 
-def read(source: DataSource, detector, sample_rate_hertz, first: int, num_samples: int,
-         *, stream: Hashable = None, store: Optional[Store] = None) -> SegmentStrain:
+def _ensured(store: Store, source: DataSource, detector, g: Geometry, start: int, stop: int,
+             stream: Hashable) -> List[Tile]:
     """
-    ``num_samples`` of ``detector``'s strain at ``sample_rate_hertz`` from absolute
-    sample index ``first`` (GPS ``first / rate``), which lies on the grid both rates
-    share (``interiors`` gives such a first sample). The span read reaches the margin
-    past each end, so every sample is exact.
-
-    Raises:
-        TimelineContradiction: a tile cannot be fetched, or the span meets samples it
-            does not hold; naming the ``exclusions`` entry that plans around it.
-        ValueError: ``first`` not on the shared grid, or no samples asked for.
+    The tiles holding native samples [start, stop) at ``g.native``, each committed first
+    when absent: the one commit path of every read and every ``ensure``. A span larger
+    than the whole memory cap is refused before any fetch; a tile that cannot be fetched,
+    or a span meeting samples a tile does not hold, contradicts the timeline.
     """
-    g = geometry(source, sample_rate_hertz)
-    rate = g.native * g.up // g.down
-    first, num_samples = int(first), int(num_samples)
-    if first % g.up or num_samples < 1:
-        raise ValueError(
-            f"A read starts on the grid {g.native} Hz and {rate} Hz share (every {g.up}th sample "
-            f"at {rate} Hz) and serves at least one sample; got {num_samples} from sample {first}."
-        )
-    store = process_store() if store is None else store
     warn_of_legacy_caches()
     name = _detector_name(detector)
-    start, stop = read_span(g, first, num_samples)
-    budget = store.budget
-    if budget:  # A span larger than the whole cap is refused before any fetch.
-        budget.check((stop - start) * READ_BYTES_PER_SAMPLE)
+    if store.budget:
+        store.budget.check((stop - start) * READ_BYTES_PER_SAMPLE)
     tile_seconds = whole_hertz(source.tile_seconds(g.native))
     length = g.native * tile_seconds
     tiles = []
@@ -319,9 +356,53 @@ def read(source: DataSource, detector, sample_rate_hertz, first: int, num_sample
                     (name, gaps, reason.value),
                 )
         tiles.append(tile)
+    return tiles
+
+
+def ensure(source: DataSource, detector, sample_rate_hertz, first: int, num_samples: int,
+           stream: Hashable = None, *, store: Optional[Store] = None) -> None:
+    """
+    Commit every tile a ``read`` of the same arguments needs, and check that they hold
+    its span, without reading it: what a read would refuse, this refuses, by the same
+    path (``_ensured``). Afterwards that read runs offline.
+
+    Raises:
+        TimelineContradiction: as ``read``.
+        ValueError: no samples asked for.
+    """
+    g = geometry(source, sample_rate_hertz)
+    if int(num_samples) < 1:
+        raise ValueError(f"A read serves at least one sample; got {num_samples} from sample {first}.")
+    start, stop = read_span(g, int(first), int(num_samples))
+    _ensured(process_store() if store is None else store, source, detector, g, start, stop, stream)
+
+
+def read(source: DataSource, detector, sample_rate_hertz, first: int, num_samples: int,
+         *, stream: Hashable = None, store: Optional[Store] = None) -> SegmentStrain:
+    """
+    ``num_samples`` of ``detector``'s strain at ``sample_rate_hertz`` from absolute
+    sample index ``first`` (GPS ``first / rate``). The span read starts at the sample both
+    rates share at or before ``first`` and reaches the margin past each end, so every
+    sample is exact.
+
+    Raises:
+        TimelineContradiction: a tile cannot be fetched, or the span meets samples it
+            does not hold; naming the ``exclusions`` entry that plans around it.
+        ValueError: no samples asked for.
+    """
+    g = geometry(source, sample_rate_hertz)
+    rate = g.native * g.up // g.down
+    first, num_samples = int(first), int(num_samples)
+    if num_samples < 1:
+        raise ValueError(f"A read serves at least one sample; got {num_samples} from sample {first}.")
+    lead = first % g.up  # output samples from the shared sample the span starts at to first
+    store = process_store() if store is None else store
+    start, stop = read_span(g, first, num_samples)
+    tiles = _ensured(store, source, detector, g, start, stop, stream)
+    budget = store.budget
     held = budget.admit((stop - start) * READ_BYTES_PER_SAMPLE, WAIT_SECONDS) if budget else contextlib.nullcontext()
     with held:
         span = read_window(tiles, start, stop)
         data, _ = resample(span, start / g.native, g.native, rate)
-        data = np.array(data[g.margin_out:g.margin_out + num_samples])
+        data = np.array(data[g.margin_out + lead:g.margin_out + lead + num_samples])
     return SegmentStrain(data, first / rate, float(rate), tiles[0].key.source_id)

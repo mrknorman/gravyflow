@@ -24,13 +24,10 @@ user cache (``~/.gravyflow/cache/gwosc_timeline``) after its first download.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
 import tempfile
-import threading
-import warnings
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -106,66 +103,6 @@ def user_cache_dir(*parts: str) -> Path:
         path = path / part
     path.mkdir(parents=True, exist_ok=True)
     return path
-
-
-_moved_caches_warned: set = set()
-
-
-def warn_of_moved_cache(current: Path, *previous: Path) -> None:
-    """
-    Warn, once per file, of a cache found where an earlier gravyflow kept it while
-    ``current``, its place under the one cache root (``user_cache_dir``), is empty.
-    Before every cache used that root, the glitch and event caches ignored
-    ``GRAVYFLOW_CACHE_DIR``, and noise segment caches went beside the package or into
-    ``./generator_data``. gravyflow never moves a user's files itself.
-    """
-    if current.exists():
-        return
-    for path in previous:
-        if path.resolve() == current.resolve() or path in _moved_caches_warned or not path.exists():
-            continue
-        _moved_caches_warned.add(path)
-        warnings.warn(
-            f"gravyflow keeps its caches under {user_cache_dir()} (GRAVYFLOW_CACHE_DIR, "
-            f"else ~/.gravyflow/cache) and no longer reads {path}. Move it to {current} "
-            "to use it again; otherwise its data is downloaded again.",
-            UserWarning,
-            stacklevel=3,
-        )
-
-
-_strain_cache_lock = threading.Lock()
-_strain_cache_users = 0
-_strain_cache_context = None
-
-
-@contextlib.contextmanager
-def strain_download_cache():
-    """
-    Point astropy's download cache, where gwpy's GWOSC strain downloads are kept, at
-    the one cache root (``user_cache_dir()/astropy``) for the length of the block,
-    instead of astropy's own ``~/.astropy/cache``.
-
-    astropy keeps that location in one process-wide setting (``set_temp_cache``), so
-    concurrent downloads (the transient path fetches on many threads) share one
-    setting: it is made by the first block to enter and undone by the last to leave.
-    """
-    global _strain_cache_users, _strain_cache_context
-    from astropy.config import set_temp_cache
-
-    with _strain_cache_lock:
-        if _strain_cache_users == 0:
-            _strain_cache_context = set_temp_cache(user_cache_dir())
-            _strain_cache_context.__enter__()
-        _strain_cache_users += 1
-    try:
-        yield
-    finally:
-        with _strain_cache_lock:
-            _strain_cache_users -= 1
-            if _strain_cache_users == 0:
-                _strain_cache_context.__exit__(None, None, None)
-                _strain_cache_context = None
 
 
 def _get_json(url: str) -> Dict:

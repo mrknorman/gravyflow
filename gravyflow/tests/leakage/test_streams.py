@@ -22,7 +22,6 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
-from gravyflow.src.dataset.config import TransientDefaults
 from gravyflow.tests.leakage import fixtures as fx
 from gravyflow.tests.leakage.fingerprints import (
     assert_rows_disjoint, assert_streams_independent, assert_unchanged, concatenate_streams,
@@ -426,7 +425,7 @@ def augmented_world():
 
 
 #: The rate real events are read at: the validator's world is served at it.
-EVENT_RATE = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
+EVENT_RATE = 4096.0
 
 
 def validator_world():

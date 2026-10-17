@@ -231,7 +231,7 @@ def wheel(tmp_path_factory):
     for name in ("pyproject.toml", "README.md", "LICENSE"):
         shutil.copy2(ROOT / name, source / name)
     shutil.copytree(PACKAGE, source / "gravyflow",
-                    ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "glitch_cache"))
+                    ignore=shutil.ignore_patterns("__pycache__", "*.egg-info"))
     process = subprocess.run(
         [sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation", "--no-index",
          "--wheel-dir", str(root / "dist"), str(source)],

@@ -14,7 +14,7 @@ needs is read instead at a partner time t' of its own (``partner_time``):
   event's nearest such block in its observing run, since an event is in ``test``
   whatever its own block's split;
 - with its centre at least ``separation`` from the transient's time;
-- on the stored sample grid, chosen by a hash of ``key`` (the split's fingerprint,
+- on the partner grid (``PARTNER_GRID_HERTZ``), chosen by a hash of ``key`` (the split's fingerprint,
   the transient's time and the detector): the same partner on every build, from no
   random state.
 
@@ -27,6 +27,10 @@ import numpy as np
 
 from gravyflow.src.dataset.splits import hash_uniform
 from .gwosc_data import subtract_segments
+
+#: The grid a partner's centre lies on, in hertz. It fixes which partner a key draws, so
+#: it belongs to the plan; a read centres any time on its own rate's grid.
+PARTNER_GRID_HERTZ = 4096.0
 
 
 def partner_time(

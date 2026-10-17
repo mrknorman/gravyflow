@@ -304,7 +304,6 @@ def setup_noise_obtainer(
         observing_runs=gf.ObservingRun.O3, 
         data_quality=gf.DataQuality.BEST, 
         data_labels=[gf.DataLabel.NOISE],
-        force_acquisition=True,
     )
     return gf.NoiseObtainer(
         ifo_data_obtainer=ifo_data_obtainer,

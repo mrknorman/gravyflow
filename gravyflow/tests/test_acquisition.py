@@ -188,11 +188,9 @@ class TestIFODataObtainerInit:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            force_acquisition=False,
         )
         
         assert obtainer.data_quality == gf.DataQuality.BEST
-        assert obtainer.force_acquisition == False
     
     def test_initialization_with_multiple_labels(self):
         """Test initialization with multiple data labels."""
@@ -200,7 +198,6 @@ class TestIFODataObtainerInit:
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE, gf.DataLabel.GLITCHES],
             observing_runs=gf.ObservingRun.O3,
-            force_acquisition=False,
         )
         
         assert len(obtainer.data_labels) == 2
@@ -211,7 +208,6 @@ class TestIFODataObtainerInit:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            force_acquisition=False,
             overrides={"saturation": 0.5}
         )
         
@@ -242,7 +238,6 @@ class TestSegmentProcessing:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            force_acquisition=False,
         )
     
     def test_veto_time_segments(self, obtainer):
@@ -343,7 +338,6 @@ class TestSegmentOrdering:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            force_acquisition=False,
         )
     
     def test_order_segments_random(self, obtainer):
@@ -408,7 +402,6 @@ class TestCutAndGroupSegments:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            force_acquisition=False,
         )
     
     def test_cut_segments(self, obtainer):

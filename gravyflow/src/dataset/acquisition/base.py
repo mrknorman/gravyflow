@@ -667,7 +667,6 @@ class BaseDataObtainer(ABC):
             segment_order : SegmentOrder = SegmentOrder.RANDOM,
             max_segment_duration_seconds : float = 2048.0,
             saturation : float = 8.0,
-            force_acquisition : bool = False,
             overrides : dict = None,
             logging_level : int = logging.WARNING,
             augmentations: List = None,  # Training only; None is none
@@ -691,8 +690,6 @@ class BaseDataObtainer(ABC):
                 ``TimelineContradiction`` names. Each is taken from that detector's
                 readable time (``get_all_segment_times``) before anything is planned.
                 They are part of the specification, so of every fingerprint.
-            force_acquisition: The transient cache's: fetch transients afresh. Real
-                noise is read through the store, which is never bypassed.
             source: Where real strain and its segments come from (``gf.DataSource``):
                 ``gf.GWOSC()``, or ``gf.LocalFrames(...)`` by name. None takes
                 ``gf.Defaults.source`` (``gf.GWOSC()``) as the obtainer is built. It is
@@ -725,7 +722,6 @@ class BaseDataObtainer(ABC):
         self.segment_order = segment_order
         self.max_segment_duration_seconds = max_segment_duration_seconds
         self.saturation = saturation
-        self.force_acquisition = force_acquisition
         self.exclusions = _exclusions(exclusions)
         self.split_spec = as_split_spec(split_spec)
         self.source = gf.Defaults.source if source is None else source
@@ -780,18 +776,14 @@ class BaseDataObtainer(ABC):
             "_num_batches_in_current_segment": 0,
         }
 
-    #: Attributes that never change the data served, only how it is fetched: whether
-    #: the transient cache is read.
-    _NOT_SPECIFICATION = ("force_acquisition",)
-
     def specification(self) -> Dict[str, Any]:
         """
         Everything that determines the data this obtainer serves: every attribute but
-        its served state (``_served_state``) and ``_NOT_SPECIFICATION``. Content
-        fingerprints (``validate.provenance.canonical``) read it, so changing any
-        parameter that changes the data changes the fingerprint.
+        its served state (``_served_state``). Content fingerprints
+        (``validate.provenance.canonical``) read it, so changing any parameter that
+        changes the data changes the fingerprint.
         """
-        excluded = set(self._served_state()) | set(self._NOT_SPECIFICATION)
+        excluded = set(self._served_state())
         specification = {name: value for name, value in sorted(vars(self).items()) if name not in excluded}
         # The numerics that make the served samples from fetched strain.
         specification["data_versions"] = dict(DATA_VERSIONS)

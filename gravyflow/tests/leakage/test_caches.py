@@ -261,3 +261,104 @@ def test_alternating_splits_on_one_obtainer_change_neither_splits_bytes(world):
                 turns[split] += _draw(streams[split], 1)
     for split in splits:
         assert _same(turns[split], alone[split]), split
+
+
+# =============================================================================
+# TRANSIENTS: every example holds its own time's strain, from the tiles as they are
+# =============================================================================
+
+def _forget_every_tile():
+    """Forget every tile the process's store holds, as another holder may: the count."""
+    from gravyflow.src.dataset.store import read
+    from gravyflow.src.dataset.store.tile import key_from_path
+
+    store = read.process_store()
+    keys = [key_from_path(store.root, path) for path in store.root.rglob("*.json")]
+    store.forget(keys)
+    return len(keys)
+
+
+def _assert_own_strain(batch, offset=0.0, rate=2048.0):
+    """
+    Every detector of every example, served at ``rate``, is centred on the sample nearest
+    its own centre, in the strain of the generation valued its GPS time minus ``REF`` plus
+    ``offset``.
+    """
+    from gravyflow.tests import test_transient_windows as tw
+
+    centres = tw.transient_times_from(batch, tw.REF - offset)
+    error = centres - tw.nearest_sample(batch[gf.ReturnVariables.TRANSIENT_GPS_TIME], rate)
+    assert np.max(np.abs(error)) <= 0.25 / rate, f"an example holds another time's strain: {error} s"
+    tw.assert_never_filled(batch)
+
+
+def test_transient_rows_match_key():
+    """
+    An example served for a record holds the strain of that record's time from the tiles
+    as they are when it is read. Holder A reads; holder B forgets every tile and refills
+    them after the source republishes other bytes; holder B forgets every tile again in
+    the middle of one of A's reads. Every read of A serves its own times, from the
+    generation the store holds: tiles have no row index or chunk to go stale.
+    """
+    from gravyflow.src.dataset.store import read
+    from gravyflow.tests import test_transient_windows as tw
+
+    class ForgettingFetch(tw.GridFetch):
+        """The fake fetch; at its ``forget_at``-th call, holder B forgets every tile."""
+
+        forget_at = None
+
+        def __call__(self, ifo, sample_rate_hertz, interval):
+            strain = super().__call__(ifo, sample_rate_hertz, interval)
+            if len(self.calls) == self.forget_at:
+                assert _forget_every_tile() > 0
+            return strain
+
+    both = [gf.IFO.H1, gf.IFO.L1]
+    fetch = ForgettingFetch()
+    with tw.offline(fetch):
+        holder_a = tw.obtainer()(ifos=both, group=tw.SPLIT, seed=1,
+                                 **{**tw.WINDOW, "num_examples_per_batch": 1})
+        _assert_own_strain(next(holder_a))
+        # B forgets every tile; the source republishes; B refills at another rate.
+        assert _forget_every_tile() > 0
+        fetch.offset = 1000.0
+        _assert_own_strain(tw.first_batch(both, sample_rate_hertz=1024.0), fetch.offset, 1024.0)
+        _assert_own_strain(next(holder_a), fetch.offset)
+        # B forgets every tile, and again while A is inside a read (at A's second
+        # fetch, with its first tile committed and open), then A reads on.
+        assert _forget_every_tile() > 0
+        fetch.forget_at = len(fetch.calls) + 2
+        for _ in range(4):
+            _assert_own_strain(next(holder_a), fetch.offset)
+        assert len(fetch.calls) > fetch.forget_at, "no read followed the forget"
+    assert read.process_store().verify() == [], "the store was left inconsistent"
+
+
+def test_transient_warm_equals_cold():
+    """
+    Transients: two configurations differing in exactly one key (the rate) on one root
+    read the same tiles, so a warm read equals a cold one; a tile of another source at
+    the very place the reads use is never served; and everything written is under
+    ``GRAVYFLOW_CACHE_DIR``, in the store: no transient cache or download cache.
+    """
+    from gravyflow.src.dataset.store import Store, TileKey
+    from gravyflow.tests import test_transient_windows as tw
+
+    root = Path(os.environ["GRAVYFLOW_CACHE_DIR"])
+    before = {path for path in root.rglob("*") if path.is_file()}
+    both = [gf.IFO.H1, gf.IFO.L1]
+    canary = TileKey("fake-canary", "L1", 4096, tw.TILE_SECONDS, tw.tile_of(tw.TIMES[0]))
+    Store(root / "store").commit(canary, np.full(canary.length, 7.0))
+    with tw.offline() as fetch:
+        cold = tw.first_batch(both)
+        fetched = len(fetch.calls)
+        other = tw.first_batch(both, sample_rate_hertz=1024.0)
+        warm = tw.first_batch(both)
+    assert fetched > 0 and len(fetch.calls) == fetched, "a warm read, or another rate, fetched"
+    for batch, rate in ((cold, 2048.0), (other, 1024.0), (warm, 2048.0)):
+        _assert_own_strain(batch, rate=rate)
+    for key in cold:
+        np.testing.assert_array_equal(np.asarray(cold[key]), np.asarray(warm[key]), err_msg=str(key))
+    written = {path for path in root.rglob("*") if path.is_file()} - before
+    assert written and all((root / "store") in path.parents for path in written), sorted(written)

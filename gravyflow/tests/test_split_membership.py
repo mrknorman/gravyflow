@@ -9,14 +9,13 @@ synthetic catalogue records.
 """
 
 import copy
-from dataclasses import replace
+from dataclasses import fields, replace
 from unittest import mock
 
 import numpy as np
 import pytest
 
 import gravyflow as gf
-from gravyflow.src.dataset.acquisition.cache import DiskCache
 from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.transient_index import TransientIndex
@@ -138,6 +137,35 @@ class TestTransientMembership:
         assert order(1) != order(2)
         assert sorted(order(1)) == sorted(order(2))
 
+    def test_a_saved_index_loads_every_record_whole(self, tmp_path):
+        """
+        Save and load keep every field of every record: a glitch's SNR, peak frequency,
+        duration and confidence, and an event's masses (its footprint), distance and
+        astrophysical probability, NaN where the catalogue has none.
+        """
+        from gravyflow.src.dataset.features.event import EventConfidence, SourceType
+        from gravyflow.src.dataset.features.transient_index import transient_footprint
+
+        glitch = replace(glitch_records(1)[0], snr=12.5, peak_freq=211.0, duration=0.75, ml_confidence=0.97)
+        t = 1238170000.4
+        event = TransientSegment(
+            gps_key=gps_to_key(t), transient_gps_time=t, start_gps_time=t - 48.2, end_gps_time=t + 48.2,
+            label=gf.DataLabel.EVENTS, kind=SourceType.BBH, observing_run=gf.ObservingRun.O3,
+            seen_in=[gf.IFO.H1, gf.IFO.L1], confidence=EventConfidence.CONFIDENT, name="GW-ROUND-TRIP",
+            mass1=1.46, mass2=1.27, distance=40.0, p_astro=1.0,
+        )
+        index = TransientIndex([glitch, event, replace(glitch_records(2)[1], snr=float("nan"))])
+        index.assign_splits(gf.SplitSpec())
+        index.save(tmp_path / "index.npz")
+        loaded = TransientIndex.load(tmp_path / "index.npz")
+        names = [field.name for field in fields(TransientSegment)]
+        for before, after in zip(index.records, loaded.records):
+            for field in names:
+                a, b = getattr(before, field), getattr(after, field)
+                same = (a == b) or (isinstance(a, float) and np.isnan(a) and np.isnan(b))
+                assert same, f"{field}: saved {a!r}, loaded {b!r}"
+            assert transient_footprint(after) == transient_footprint(before)
+
     def test_index_assignment_is_a_partition(self):
         """Every record is in one split or counted out of all of them, by its footprint's split."""
         spec = gf.SplitSpec()
@@ -154,29 +182,26 @@ class TestTransientMembership:
 class TestObtainerCopies:
     """
     An obtainer is a specification: a copy, which every split reads from,
-    never carries what serving data built (segments, index, caches, rng).
+    never carries what serving data built (segments, index, rng).
     """
 
-    def used_glitch_obtainer(self, tmp_path):
+    def used_glitch_obtainer(self):
         obtainer = glitch_obtainer()
         obtainer.get_valid_segments([gf.IFO.L1], seed=1000, group_name="train")
         obtainer.rng = np.random.default_rng(1)
-        # What a served batch leaves behind: an open disk cache, with its lock.
-        obtainer._glitch_cache = DiskCache(tmp_path / "glitch_cache.h5", mode="a")
         return obtainer
 
-    def test_a_copy_of_a_used_transient_obtainer_is_fresh(self, catalogue, tmp_path):
-        used = self.used_glitch_obtainer(tmp_path)
+    def test_a_copy_of_a_used_transient_obtainer_is_fresh(self, catalogue):
+        used = self.used_glitch_obtainer()
         train = {segment.gps_key for segment in used.transient_segments}
         fresh = copy.deepcopy(used)
         assert fresh.transient_segments == []
         assert fresh._feature_index is None
         assert fresh.rng is None
-        assert fresh._glitch_cache is None
         assert not members(fresh, "test", 1000) & train
 
-    def test_a_dataset_builds_from_a_used_transient_obtainer(self, catalogue, tmp_path):
-        used = self.used_glitch_obtainer(tmp_path)
+    def test_a_dataset_builds_from_a_used_transient_obtainer(self, catalogue):
+        used = self.used_glitch_obtainer()
         segments_before = list(used.transient_segments)
         gf.Dataset(
             noise_obtainer=used,
@@ -210,8 +235,7 @@ class Served(Exception):
 def served_members(route, split):
     """
     The records a route serves for ``split``: the reader's segments when it
-    first reaches its cache, where reading data would begin (stopped there,
-    offline).
+    first reads an example, where reading data begins (stopped there, offline).
     """
     served = {}
 
@@ -219,7 +243,7 @@ def served_members(route, split):
         served["members"] = {segment.gps_key for segment in self.transient_segments}
         raise Served
 
-    with mock.patch.object(gf.TransientDataObtainer, "_initialize_transient_cache", stop):
+    with mock.patch.object(gf.TransientDataObtainer, "_read_example", stop):
         # A dataset reraises the stop as its own noise-generation error.
         with pytest.raises(Exception) as stopped:
             route(glitch_obtainer(), split)
@@ -350,14 +374,11 @@ def fake_strain(self, sample_rate_hertz, valid_segments, ifos, **kwargs):
         yield gf.IFOData(data, sample_rate_hertz, [start for start, _ in row])
 
 
-def cached_glitch(self, cache, gps_time, sample_rate_hertz, onsource_duration, offsource_duration,
-                  *args, target_ifos=None, **kwargs):
-    """A cache hit of zeros for every record, on each detector asked for."""
-    detectors = len(target_ifos or [None])
+def read_glitch(self, record, reads, window_spec):
+    """An example of zeros for every record, on each detector it reads."""
     return (
-        np.zeros((detectors, int(onsource_duration * sample_rate_hertz)), np.float32),
-        np.zeros((detectors, int(offsource_duration * sample_rate_hertz)), np.float32),
-        "memory",
+        np.zeros((len(reads), window_spec.num_onsource_samples), np.float32),
+        np.zeros((len(reads), window_spec.num_offsource_samples), np.float32),
     )
 
 
@@ -425,9 +446,7 @@ class TestOneObtainerCalledForEachSplit:
     def test_a_transient_generator_refuses_once_its_obtainer_serves_another_split(self, catalogue):
         obtainer = glitch_obtainer()
         obtainer.augmentations = []
-        with mock.patch.object(gf.TransientDataObtainer, "_initialize_transient_cache",
-                               lambda self, *args, **kwargs: (object(), None)), \
-             mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", cached_glitch):
+        with mock.patch.object(gf.TransientDataObtainer, "_read_example", read_glitch):
             train = obtainer(ifos=[gf.IFO.L1], group="train", seed=7, **WINDOW)
             next(train)
             validate = obtainer(ifos=[gf.IFO.L1], group="validate", seed=7, **WINDOW)
@@ -582,9 +601,7 @@ class TestOneObtainerCalledForOtherDetectors:
             assert reference and reference <= set().union(*(two_detector_catalogue[i] for i in ifos))
             served = served_members(lambda _, split: next(obtainer(ifos=ifos, group=split)), "train")
             assert served == reference, f"the {[ifo.name for ifo in ifos]} call served other detectors"
-            with mock.patch.object(gf.TransientDataObtainer, "_initialize_transient_cache",
-                                   lambda self, *args, **kwargs: (object(), None)), \
-                 mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", cached_glitch):
+            with mock.patch.object(gf.TransientDataObtainer, "_read_example", read_glitch):
                 onsource = next(obtainer(ifos=ifos, group="train", seed=7, **WINDOW))[
                     gf.ReturnVariables.ONSOURCE]
             assert np.shape(onsource)[:2] == (4, len(ifos))

@@ -3,6 +3,13 @@ Transient mode data acquisition.
 
 This module provides TransientDataObtainer for acquiring data around
 specific transient events (GW events, glitches) in TRANSIENT mode.
+
+Every example is read through the store (``store.read``), as noise is: on each
+detector, one view of the source's tiles over its offsource and padded onsource,
+resampled by the one resampler. A record is planned only where the timeline holds its
+span on every detector it is read on at its own time; a record whose strain the source
+then does not deliver is refused by name (``TransientUnavailable``), never skipped,
+zero-filled or stored as absent.
 """
 
 import dataclasses
@@ -10,8 +17,6 @@ import itertools
 import logging
 from collections import Counter
 from typing import Any, List, Dict, Iterator, NamedTuple, Optional, Union, Tuple
-from concurrent.futures import as_completed
-from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -21,29 +26,30 @@ from keras import ops
 
 import gravyflow as gf
 from gravyflow.src.dataset.features.event import EventConfidence
-from gravyflow.src.dataset.features.glitch_cache import TransientCache, generate_transient_cache_path
-from .cache import DiskCache
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, Coincidence,
     AcquisitionMode, SamplingMode, ObservingRun, label_kinds
 )
 from gravyflow.src.utils.numerics import ensure_list
-from gravyflow.src.utils.resample import resample, whole_hertz
 from gravyflow.src.utils.gps import as_gps_times
+from gravyflow.src.utils.tensor import centre_index
 from gravyflow.src.dataset.features.transient_index import TransientIndex, transient_footprint
 from .transient_segment import TransientSegment
 from .gwosc_data import within_segments
-from .sources import DataSource, fetch_rate
+from .sources import DataSource
+from gravyflow.src.dataset.store import read as store_read
 from gravyflow.src.dataset.store.pools import thread_pool
-from .partners import partner_time
-from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
+from gravyflow.src.dataset.store.read import TimelineContradiction
+from .partners import PARTNER_GRID_HERTZ, partner_time
+from gravyflow.src.dataset.config import WindowSpec
 from gravyflow.src.dataset.splits import SplitSpec
 
 
-# The transient caches an obtainer may open, one per prefix (`_initialize_transient_cache`):
-# records' own detectors in "glitch" and "event", partners in "partner".
-TRANSIENT_CACHE_PREFIXES = ("transient", "glitch", "event", "partner")
+#: The most threads that read one batch's examples at once, so a cold batch fetches its
+#: tiles together; the store's single-flight table fetches a shared tile once, and its
+#: memory accountant bounds what the fetches hold.
+READ_THREADS = 8
 
 
 class DetectorRead(NamedTuple):
@@ -57,6 +63,28 @@ class DetectorRead(NamedTuple):
     ifo: "gf.IFO"
     centre: float
     partner: bool
+
+
+class TransientUnavailable(TimelineContradiction):
+    """
+    A planned transient example that cannot be read: the timeline holds its span, and
+    the source does not deliver it (its fetch failed after its retries, or the samples
+    are not held: non-finite, or not in the source's file). It names the record and the
+    read, with all a ``TimelineContradiction`` names: the detector, the interval, the
+    source, the cause and the ``exclusions`` entry that plans around it. A record is
+    never skipped, zero-filled or stored as absent in its place.
+    """
+
+    def __init__(self, record: TransientSegment, read: "DetectorRead", contradiction: TimelineContradiction):
+        self.record, self.read = record, read
+        kind = getattr(record.kind, "name", str(record.kind))
+        what = f"{'event' if record.is_event else 'glitch'} {record.name or kind}"
+        where = f", read at its partner time {read.centre:.4f}" if read.partner else ""
+        super().__init__(
+            contradiction.source, contradiction.detector, contradiction.interval,
+            f"the {what} at GPS {record.transient_gps_time:.4f}{where}: {contradiction.reason}",
+            contradiction.exclusion,
+        )
 
 
 class TransientDataObtainer(BaseDataObtainer):
@@ -75,7 +103,6 @@ class TransientDataObtainer(BaseDataObtainer):
             segment_order: SegmentOrder = SegmentOrder.RANDOM,
             max_segment_duration_seconds: float = 2048.0,
             saturation: float = 8.0,
-            force_acquisition: bool = False,
             overrides: dict = None,
             event_types: List[EventConfidence] = None,
             logging_level: int = logging.WARNING,
@@ -128,7 +155,6 @@ class TransientDataObtainer(BaseDataObtainer):
             segment_order=segment_order,
             max_segment_duration_seconds=max_segment_duration_seconds,
             saturation=saturation,
-            force_acquisition=force_acquisition,
             overrides=overrides,
             logging_level=logging_level,
             augmentations=augmentations,
@@ -150,10 +176,6 @@ class TransientDataObtainer(BaseDataObtainer):
         self.balanced_glitch_types = balanced_glitch_types
 
     def _served_state(self) -> Dict[str, Any]:
-        caches = {}
-        for prefix in TRANSIENT_CACHE_PREFIXES:
-            caches[f"_{prefix}_cache"] = None
-            caches[f"_{prefix}_cache_logged"] = False
         return {
             **super()._served_state(),
             # TransientIndex - canonical source of truth for transient examples
@@ -162,47 +184,27 @@ class TransientDataObtainer(BaseDataObtainer):
             # per requested detector in order (_plan_reads)
             "transient_segments": [],
             "transient_reads": [],
-            # Records not served, by reason: a census of the split (_passing_data_quality,
-            # _plan_reads, _reject_for_no_data)
+            # Records not planned, by reason: a census of the split, made as it is
+            # planned (_passing_data_quality, _plan_reads)
             "_rejections": Counter(),
-            # The exact GPS times of records found without a requested detector's
-            # strain: not served, nor fetched again, while this state stands
-            "_unavailable": set(),
-            **caches,
         }
 
-    #: Why a record is not served: its window leaves the usable segments of a
-    #: detector it is read on at its own time (an event: of every requested
-    #: detector); a requested detector has no finite strain for it; a detector it
-    #: was not seen in has no partner time; or, under the coincident opt-in, its
-    #: window on a detector it was not seen in meets a catalogued glitch there.
+    #: Why a record is not planned: its span leaves the readable data of a detector
+    #: it is read on at its own time (an event: of every requested detector); a
+    #: detector it was not seen in has no partner time; or, under the coincident
+    #: opt-in, its window on a detector it was not seen in meets a catalogued glitch
+    #: there. A planned record whose strain the source does not deliver is refused
+    #: (``TransientUnavailable``), never counted here.
     REJECTED_BY_DATA_QUALITY = "data quality"
-    REJECTED_FOR_NO_DATA = "no data"
     REJECTED_FOR_NO_PARTNER = "no partner"
     REJECTED_FOR_OTHER_TRANSIENT = "transient in another detector"
 
-    def _reject_for_no_data(self, segment: TransientSegment) -> None:
-        """
-        A requested detector has no strain for ``segment``: it is never zero-filled.
-        It is counted once, as data quality is, and neither served nor fetched again
-        while this split's served state stands (``_unavailable``); a later run fetches
-        it again, so a failed fetch never persists as absence.
-        """
-        if segment.transient_gps_time in self._unavailable:
-            return
-        self._unavailable.add(segment.transient_gps_time)
-        self._rejections[self.REJECTED_FOR_NO_DATA] = len(self._unavailable)
-        logger.info(
-            f"Transient at GPS {segment.transient_gps_time:.3f} not served (no data); "
-            f"rejected: {dict(self._rejections)}"
-        )
-
     def get_acquisition_stats(self) -> Dict[str, Any]:
         """
-        ``rejections``: the records of the split not served, by reason
-        (``REJECTED_BY_DATA_QUALITY``, ``REJECTED_FOR_NO_DATA``,
-        ``REJECTED_FOR_NO_PARTNER``), each record counted once however many passes
-        meet it; ``dropped_segments`` is their total.
+        ``rejections``: the records of the split not planned, by reason
+        (``REJECTED_BY_DATA_QUALITY``, ``REJECTED_FOR_NO_PARTNER``,
+        ``REJECTED_FOR_OTHER_TRANSIENT``), each record counted once; ``dropped_segments``
+        is their total.
         """
         return {
             "dropped_segments": sum(self._rejections.values()),
@@ -234,11 +236,12 @@ class TransientDataObtainer(BaseDataObtainer):
         self, segments: List[TransientSegment], ifos: List[gf.IFO]
     ) -> List[TransientSegment]:
         """
-        The records whose acquired span lies, on every detector read at their own
-        time (``_own_detectors``), inside one usable segment
-        (``get_all_segment_times``: the obtainer's GWOSC flags, so by default no
-        hardware injection either). The others are rejected, and their number is the
-        split's ``REJECTED_BY_DATA_QUALITY`` count. A partner's data quality is its
+        The records whose span (the most a read may reach about the transient,
+        ``_check_request``) lies, on every detector read at their own time
+        (``_own_detectors``), inside one readable segment (``get_all_segment_times``:
+        the obtainer's GWOSC flags, less its ``exclusions``, so by default no hardware
+        injection either). The others are rejected at plan time, and their number is
+        the split's ``REJECTED_BY_DATA_QUALITY`` count. A partner's data quality is its
         own (``_partner_segments``).
 
         An event's detectors are found here: the catalogue does not say which
@@ -316,8 +319,6 @@ class TransientDataObtainer(BaseDataObtainer):
         meets one of that detector's catalogued glitches (``get_glitch_veto_segments``)
         is rejected, and their number is the ``REJECTED_FOR_OTHER_TRANSIENT`` count.
         """
-        from gravyflow.src.dataset.features.glitch_cache import CACHE_SAMPLE_RATE_HERTZ
-
         spec = self.split_spec
         fingerprint = spec.fingerprint()
         allowed: Dict[gf.IFO, np.ndarray] = {}
@@ -349,7 +350,7 @@ class TransientDataObtainer(BaseDataObtainer):
                         block=block,
                         separation=2.0 * (footprint_end - footprint_start),
                         key=(fingerprint, repr(t), ifo.name),
-                        sample_rate_hertz=CACHE_SAMPLE_RATE_HERTZ,
+                        sample_rate_hertz=PARTNER_GRID_HERTZ,
                     ) for block in self._partner_blocks(record, group_name)
                 ) if found is not None), None)
                 if centre is None:
@@ -449,51 +450,6 @@ class TransientDataObtainer(BaseDataObtainer):
         return index
 
 
-    def _get_sample_from_cache(
-        self,
-        cache,
-        gps_time: float,
-        sample_rate_hertz: float,
-        onsource_duration: float,
-        offsource_duration: float,
-        target_ifos: Optional[List[str]] = None,
-    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
-        """
-        Attempt to retrieve a sample from cache (chunked -> disk), as windows of the
-        request (``TransientCache.read_windows``).
-
-        Args:
-            gps_time: The transient's exact GPS time, its row's identity
-            target_ifos: List of IFO names to retrieve (must be present in cache)
-
-        Returns:
-            (onsource, offsource, source) where source is 'chunk', 'disk', or 'miss'
-        """
-        idx = cache.index_of(gps_time)
-        if idx is None:
-            return None, None, 'miss'
-
-        # Try chunked memory cache first (new fast path)
-        # Chunks hold the request's windows already (_load_chunk_around_index).
-        if cache._chunk_in_memory:
-            result = cache.get_from_chunk(idx, target_ifos=target_ifos)
-            if result is not None:
-                onsource, offsource, _, _ = result
-                return onsource, offsource, 'chunk'
-
-        try:
-            ons, off, _, _ = cache.get_batch(
-                np.array([idx]),
-                sample_rate_hertz=sample_rate_hertz,
-                onsource_duration=onsource_duration,
-                offsource_duration=offsource_duration,
-                target_ifos=target_ifos
-            )
-            return ons[0], off[0], 'disk'
-        except (ValueError, KeyError):
-            # Request parameters incompatible or IFO missing
-            return None, None, 'miss'
-
     def _prepare_batch(
         self,
         batch_subarrays: list,
@@ -503,7 +459,8 @@ class TransientDataObtainer(BaseDataObtainer):
         window_spec: WindowSpec,
     ) -> dict:
         """
-        The batch of the examples accumulated, each one record's reads.
+        The batch of ``batch_segments``' examples, each one record's reads
+        (``_read_example``).
 
         Every label is per detector, from the record and that detector's read: a
         partner is noise, with no type.
@@ -514,8 +471,8 @@ class TransientDataObtainer(BaseDataObtainer):
             - OFFSOURCE: (Batch, IFO, Samples) = BIS
             - START_GPS_TIME: (Batch, IFO) = BI, float64: the GPS time of the first
               onsource sample returned after cropping, as for noise
-              (``WindowSpec.onsource_start_gps``), the window centred on the
-              detector's read (``WindowSpec.transient_window_start_gps``).
+              (``WindowSpec.onsource_start_gps``), exactly: the window centred on the
+              sample nearest the detector's read (``WindowSpec.transient_window_start_gps``).
             - TRANSIENT_GPS_TIME: (Batch, IFO) = BI, float64: the centre of each
               detector's window: the transient's time, or a partner's.
             - DATA_LABEL: (Batch, IFO) = BI: GLITCHES or EVENTS on a detector the
@@ -560,46 +517,6 @@ class TransientDataObtainer(BaseDataObtainer):
             RV.SOURCE_TYPE: per_detector(lambda s: s.kind.value if s.is_event else -1),
             RV.COINCIDENT: (np.sum(at_time, axis=1) > 1).astype(np.int32),
         }
-    @staticmethod
-    def _extract_feature_event(
-        channels: List[Optional[Tuple[np.ndarray, float]]],
-        sample_rate_hertz: float,
-        num_onsource_samples: int,
-        num_offsource_samples: int,
-        transient_gps_time: float,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        The stored windows of one transient, one row per channel: the onsource
-        centred on the transient's sample (``centre_index``), the sample nearest
-        ``transient_gps_time`` counted from the channel's first returned sample, and
-        the offsource of the samples just before it (the layout
-        ``TransientCache.read_windows`` reads).
-
-        ``channels`` holds, per channel, its samples and the GPS time of the first, or
-        None. A channel that is None, does not hold both windows, or has any
-        non-finite sample in them is a row of NaN: missing, never zero-filled.
-        """
-        from gravyflow.src.utils.tensor import centre_index
-
-        onsource = np.full((len(channels), num_onsource_samples), np.nan, dtype=np.float32)
-        offsource = np.full((len(channels), num_offsource_samples), np.nan, dtype=np.float32)
-        for row, channel in enumerate(channels):
-            if channel is None:
-                continue
-            samples, first_gps = channel
-            # The transient's sample, from the true first-sample time, in float64.
-            transient = int(np.round((float(transient_gps_time) - float(first_gps)) * sample_rate_hertz))
-            start = transient - centre_index(num_onsource_samples)
-            off_start = start - num_offsource_samples
-            if off_start < 0 or start + num_onsource_samples > len(samples):
-                continue
-            on, off = samples[start:start + num_onsource_samples], samples[off_start:start]
-            if np.all(np.isfinite(on)) and np.all(np.isfinite(off)):
-                onsource[row], offsource[row] = on, off
-        return onsource, offsource
-
-
-
     # =========================================================================
     # ABSTRACT METHOD IMPLEMENTATIONS
     # =========================================================================
@@ -671,279 +588,61 @@ class TransientDataObtainer(BaseDataObtainer):
         ], dtype=np.float64).reshape(len(planned), len(ifos), 2)
 
 
-    @staticmethod
-    def _cache_prefix(record: TransientSegment, read: DetectorRead) -> str:
-        """The cache a read is stored in: partners', or its record's kind's."""
-        if read.partner:
-            return "partner"
-        return "event" if record.is_event else "glitch"
-
-    def _cached_windows(
-        self, caches: Dict[str, Any], record: TransientSegment, reads: Tuple[DetectorRead, ...],
-        window_spec: WindowSpec,
-    ) -> List[Optional[Tuple[np.ndarray, np.ndarray]]]:
+    def _check_request(self, window_spec: WindowSpec) -> None:
         """
-        Each read's (onsource, offsource) row from its cache, or None where the cache
-        does not hold its detector's strain (a row without it, or no row): a miss,
-        fetched by ``_fetch_windows``.
+        Refuse, by name and before any fetch, a request no read can serve: a rate that
+        is not whole hertz, or that the source cannot make, or a read larger than the
+        memory cap (``store.read.check``); or windows whose read, the resampler's margin
+        and the shared grid's lead counted, could reach past the span a planned record
+        may read about its centre (its start and end, which data quality checks). The
+        bound holds for every centre: the window's centre sample lies within half a
+        sample of it (``_read_example``).
         """
-        windows = []
-        for read in reads:
-            onsource, offsource, source = None, None, "miss"
-            if not self.force_acquisition:
-                onsource, offsource, source = self._get_sample_from_cache(
-                    caches[self._cache_prefix(record, read)],
-                    read.centre,
-                    window_spec.sample_rate_hertz,
-                    window_spec.total_onsource_duration_seconds,
-                    window_spec.offsource_duration_seconds,
-                    target_ifos=[read.ifo.name],
-                )
-            held = (source != "miss" and onsource is not None
-                    and np.all(np.isfinite(onsource)) and np.all(np.isfinite(offsource)))
-            windows.append((np.asarray(onsource)[0], np.asarray(offsource)[0]) if held else None)
-        return windows
-
-    def _download(self, spans: Dict[Tuple, Tuple[gf.IFO, float, float]], sample_rate_hertz: float) -> Dict:
-        """
-        Each span's strain, {key: (samples, GPS time of the first)} at
-        ``sample_rate_hertz``, fetched from the obtainer's source in parallel at the
-        native rate it needs (``fetch_rate``); a span whose strain could not be had is
-        left out (never zeros). ``spans`` is {key: (ifo, start, end)}.
-        """
-        native_rate = fetch_rate(self.source, sample_rate_hertz)
-
-        def download(key):
-            ifo, start, end = spans[key]
-            try:
-                strain = self.source.fetch(ifo, native_rate, (start, end))
-                # The stored windows end 0.2 s inside the span, past the resampler's
-                # margin (under 0.02 s from any public rate), so each stored sample is exact.
-                return key, resample(strain.data, strain.t0, strain.sample_rate_hertz, sample_rate_hertz)
-            except Exception as error:
-                logger.debug(f"No {ifo.name} strain over GPS {start:.3f}-{end:.3f}: {error}")
-                return key, None
-
-        downloaded = {}
-        if not spans:
-            return downloaded
-        workers = min(32, len(spans))
-        with thread_pool("download", workers) as executor:
-            futures = [executor.submit(download, key) for key in spans]
-            for future in tqdm(as_completed(futures), total=len(futures), desc=f"Downloading ({workers}w)",
-                               unit="read", leave=False, dynamic_ncols=True):
-                key, channel = future.result()
-                if channel is not None:
-                    downloaded[key] = channel
-        logger.info(f"Downloaded {len(downloaded)}/{len(spans)} detector windows ({workers} workers)")
-        return downloaded
-
-    def _store_read(
-        self, cache, record: TransientSegment, read: DetectorRead, channel, download_rate: float,
-        window_spec: WindowSpec,
-    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        """
-        Store one read's downloaded strain in its cache, as a row of the universal
-        detectors holding only the read's (a detector not held is NaN, ``_fill_row``),
-        and return its (onsource, offsource) windows of the request; None when the
-        strain does not hold them, finite.
-        """
-        from gravyflow.src.dataset.features.glitch_cache import (
-            CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION,
-        )
-        from .transient_segment import ifos_to_bitmask
-
-        universal = list(TransientDefaults.UNIVERSAL_IFOS)
-        row = universal.index(read.ifo.name)
-        channels = [None] * len(universal)
-        channels[row] = channel
-        onsource_full, offsource_full = self._extract_feature_event(
-            channels, download_rate,
-            int(CACHE_ONSOURCE_DURATION * download_rate), int(CACHE_OFFSOURCE_DURATION * download_rate),
-            read.centre,
-        )
-        if not (np.all(np.isfinite(onsource_full[row])) and np.all(np.isfinite(offsource_full[row]))):
-            return None
-        if read.partner:
-            label, metadata = -1, {"data_label": DataLabel.NOISE.value, "seen_in": 0}
-        else:
-            label = record.kind.value if record.is_glitch else -1
-            metadata = {
-                "data_label": DataLabel.GLITCHES.value if record.is_glitch else DataLabel.EVENTS.value,
-                "seen_in": ifos_to_bitmask(record.seen_in) if record.seen_in else 0,
-                "snr": record.snr,
-                "peak_freq": record.peak_freq,
-                "duration": record.duration,
-                "ml_confidence": record.ml_confidence,
-                "mass1": record.mass1,
-                "mass2": record.mass2,
-                "distance": record.distance,
-                "p_astro": record.p_astro,
-            }
-        try:
-            cache.append_single(onsource_full, offsource_full, read.centre, label, metadata=metadata)
-        except Exception as error:
-            logger.warning(f"Failed to store {read.ifo.name} at GPS {read.centre:.3f} in the cache: {error}")
-        onsource, offsource = TransientCache.read_windows(
-            onsource_full[row:row + 1], offsource_full[row:row + 1], download_rate,
-            window_spec.sample_rate_hertz, window_spec.total_onsource_duration_seconds,
-            window_spec.offsource_duration_seconds,
-        )
-        return onsource[0], offsource[0]
-
-    def _download_rate(self, window_spec: WindowSpec) -> float:
-        """
-        The rate a request's strain is downloaded and stored at: the higher of its own
-        and the cache's (a cache can downsample, never upsample).
-
-        Refuses, by name, a request no read could serve: a rate that is not whole hertz,
-        that the obtainer's source does not hold (``fetch_rate``), or whose windows reach
-        past the stored strain, the resampler's margin counted
-        (``TransientCache.check_request``). Called once, as a request is configured,
-        before any cache is opened or any strain fetched.
-        """
-        from gravyflow.src.dataset.features.glitch_cache import CACHE_SAMPLE_RATE_HERTZ
-
-        download_rate = max(whole_hertz(window_spec.sample_rate_hertz), CACHE_SAMPLE_RATE_HERTZ)
-        fetch_rate(self.source, download_rate)
-        TransientCache.check_request(
-            download_rate, window_spec.sample_rate_hertz,
-            window_spec.total_onsource_duration_seconds, window_spec.offsource_duration_seconds,
-        )
-        return download_rate
-
-    def _fetch_windows(
-        self, caches: Dict[str, Any], pending: List[Tuple[int, List]], window_spec: WindowSpec,
-        download_rate: float,
-    ):
-        """
-        Complete the windows of the ``pending`` records ([(index, windows)], each
-        read's cached window or None): download every missing read's span in
-        parallel at ``download_rate`` (``_download_rate``), store it in its cache, and
-        yield (index, onsource, offsource) for each record whose every read now holds
-        strain. A record with a read that does not is rejected for no data
-        (``_reject_for_no_data``).
-        """
-        def key(record, read):
-            return self._cache_prefix(record, read), read.ifo.name, read.centre
-
-        spans = {}
-        for index, windows in pending:
-            record = self.transient_segments[index]
-            before = record.transient_gps_time - record.start_gps_time
-            after = record.end_gps_time - record.transient_gps_time
-            for read, window in zip(self.transient_reads[index], windows):
-                if window is None:
-                    spans[key(record, read)] = (read.ifo, read.centre - before, read.centre + after)
-        downloaded = self._download(spans, download_rate)
-
-        for index, windows in pending:
-            record = self.transient_segments[index]
-            for d, read in enumerate(self.transient_reads[index]):
-                if windows[d] is None and key(record, read) in downloaded:
-                    windows[d] = self._store_read(
-                        caches[self._cache_prefix(record, read)], record, read,
-                        downloaded[key(record, read)], download_rate, window_spec,
-                    )
-            if any(window is None for window in windows):
-                self._reject_for_no_data(record)
-                continue
-            yield index, np.stack([on for on, _ in windows]), np.stack([off for _, off in windows])
-        for cache in caches.values():
-            cache.flush_write_buffer()
-    def _initialize_transient_cache(
-        self,
-        ifos: List,
-        sample_rate_hertz: float,
-        onsource_duration_seconds: float,
-        offsource_duration_seconds: float,
-        enable_chunked_mode: bool = True,  # NEW: Enable chunked cache by default
-        chunk_size: int = 5000,  # Number of samples per memory chunk
-        prefix: str = "transient"
-    ):
-        """
-        Initialize or retrieve the transient cache of one prefix: events, glitches or partners.
-        
-        Handles cache path generation, file creation, validation, and
-        optional chunked memory caching for improved performance.
-        
-        Args:
-            ifos: List of IFOs to cache
-            sample_rate_hertz: Requested sample rate
-            onsource_duration_seconds: Requested onsource duration
-            offsource_duration_seconds: Requested offsource duration
-            enable_chunked_mode: If True, load cache chunks into memory for faster access
-            chunk_size: Number of samples per memory chunk (default 5000, ~1-2GB)
-            prefix: Cache type prefix (``TRANSIENT_CACHE_PREFIXES``: "transient", "glitch", "event", "partner")
-            
-        Returns:
-            Tuple of (cache, cache_sample_rate) - TransientCache instance and its sample rate
-        """
-        from gravyflow.src.dataset.features.glitch_cache import (
-            CACHE_SAMPLE_RATE_HERTZ, CACHE_ONSOURCE_DURATION, CACHE_OFFSOURCE_DURATION
-        )
-        
-        # Determine data directory (None = the user cache, gwosc_data.user_cache_dir)
-        data_dir = getattr(self, 'data_directory', None)
-        
-        # A cache file per prefix (glitches, events and partners) and source: one format
-        cache_path = generate_transient_cache_path(data_directory=data_dir, prefix=prefix, source=self.source)
-        
-        # Manage multiple caches (glitch, event)
-        cache_attr = f"_{prefix}_cache"
-        
-        # Reuse existing cache if path matches (preserves GPS index)
-        if getattr(self, cache_attr) is None or getattr(self, cache_attr).path != cache_path:
-            setattr(self, cache_attr, DiskCache(cache_path, mode='a'))
-        
-        cache = getattr(self, cache_attr)
-        
-        # Validate cache compatibility (sample rate and duration only)
-        # IFO validation is not needed - All caches use H1+L1+V1 format
-        if cache.exists:
-            try:
-                cache.validate_request(sample_rate_hertz, onsource_duration_seconds, offsource_duration_seconds)
-                
-                # Use a unique logging attribute per cache
-                logged_attr = f"_{prefix}_cache_logged"
-                if not getattr(self, logged_attr):
-                    meta = cache.get_metadata()
-                    logger.info(f"{prefix.capitalize()} Cache: {meta['num_glitches']} items at {CACHE_SAMPLE_RATE_HERTZ}Hz")
-                    setattr(self, logged_attr, True)
-                    
-                # Enable chunked mode for faster cache hits (if not already enabled)
-                if enable_chunked_mode and not cache._chunk_in_memory:
-                    meta = cache.get_metadata()
-                    if meta['num_glitches'] > 0:
-                        cache.enable_chunked_mode(
-                            chunk_size=chunk_size,
-                            sample_rate_hertz=sample_rate_hertz,
-                            onsource_duration=onsource_duration_seconds,
-                            offsource_duration=offsource_duration_seconds
-                        )
-            except ValueError as e:
-                logger.warning(f"{prefix.capitalize()} cache incompatible: {e}. Resetting.")
-                cache.reset()
-        
-        # Initialize cache file if needed (or if reset)
-        # All caches use H1+L1+V1 format regardless of requested IFOs
-        if not cache.exists:
-            num_cache_onsource = int(CACHE_ONSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
-            num_cache_offsource = int(CACHE_OFFSOURCE_DURATION * CACHE_SAMPLE_RATE_HERTZ)
-            universal_ifos = list(TransientDefaults.UNIVERSAL_IFOS)
-            
-            cache.initialize_file(
-                sample_rate_hertz=CACHE_SAMPLE_RATE_HERTZ,
-                onsource_duration=CACHE_ONSOURCE_DURATION,
-                offsource_duration=CACHE_OFFSOURCE_DURATION,
-                ifo_names=universal_ifos,
-                num_ifos=len(universal_ifos),
-                onsource_samples=num_cache_onsource,
-                offsource_samples=num_cache_offsource
+        rate = float(window_spec.sample_rate_hertz)
+        g = store_read.geometry(self.source, rate)
+        n_on, n_off = window_spec.num_onsource_samples, window_spec.num_offsource_samples
+        store_read.check(self.source, rate, [(0, n_off + n_on)])
+        if not self.transient_segments:
+            return
+        before = (n_off + centre_index(n_on) + 0.5 + g.up - 1) / rate + g.margin / g.native
+        after = (n_on - centre_index(n_on) + 0.5) / rate + (g.margin + 1) / g.native
+        spans = np.array([[r.transient_gps_time - r.start_gps_time, r.end_gps_time - r.transient_gps_time]
+                          for r in self.transient_segments])
+        allowed_before, allowed_after = spans.min(axis=0)
+        if before > allowed_before or after > allowed_after:
+            raise ValueError(
+                f"Transient windows of {n_off / rate:g} s offsource and {n_on / rate:g} s padded "
+                f"onsource cannot be read at {rate:g} Hz: their read, the resampler's margin "
+                f"counted, reaches {before:.4f} s before and {after:.4f} s after a transient, past "
+                f"the {allowed_before:g} s and {allowed_after:g} s a record may read about it. "
+                f"Ask for shorter windows."
             )
-            logger.info(f"Created {prefix.capitalize()} Cache: {cache_path}")
-        
-        return cache, CACHE_SAMPLE_RATE_HERTZ
+
+    def _read_example(
+        self, record: TransientSegment, reads: Tuple[DetectorRead, ...], window_spec: WindowSpec,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        One record's example, (onsource, offsource), each (detectors, samples): on each
+        detector, one read through the store of the offsource and then the padded
+        onsource, its centre sample the sample of the absolute grid nearest the read's
+        centre (``WindowSpec.transient_window_first_sample``). Every sample is exact.
+
+        Raises:
+            TransientUnavailable: the source does not deliver strain the timeline holds
+                in a read's span; nothing is served, filled or stored in its place.
+        """
+        n_on, n_off = window_spec.num_onsource_samples, window_spec.num_offsource_samples
+        onsource, offsource = [], []
+        for read in reads:
+            first = int(window_spec.transient_window_first_sample(read.centre)) - n_off
+            try:
+                strain = store_read.read(self.source, read.ifo, window_spec.sample_rate_hertz, first,
+                                         n_off + n_on, stream=self._served_split)
+            except TimelineContradiction as contradiction:
+                raise TransientUnavailable(record, read, contradiction) from contradiction
+            offsource.append(strain.data[:n_off])
+            onsource.append(strain.data[n_off:])
+        return np.stack(onsource), np.stack(offsource)
 
     def _yield_onsource_offsource_chunks(
             self,
@@ -981,9 +680,8 @@ class TransientDataObtainer(BaseDataObtainer):
             offsource_duration_seconds=offsource_duration_seconds,
             crop_duration_seconds=crop_duration_seconds,
         )
-        # Before any cache is opened or any strain fetched: a request refused as a
-        # cache is read would meet the handlers that reset the cache or fetch a miss.
-        download_rate = self._download_rate(window_spec)
+        # Before any fetch, and before the plan: a rate no read can make.
+        store_read.geometry(self.source, window_spec.sample_rate_hertz)
 
         # Apply remaining defaults (not in WindowSpec)
         ifos = ensure_list(ifos) or [gf.IFO.L1]
@@ -1004,42 +702,23 @@ class TransientDataObtainer(BaseDataObtainer):
         if group is None and self._served_group is None:
             raise ValueError("Name the split to serve: group='train', 'validate' or 'test'.")
         self._serve_group(ifos, seed, group if group is not None else self._served_group)
+        # Before any fetch: windows no read of a planned record can serve.
+        self._check_request(window_spec)
         if self.rng is None:
             self.rng = default_rng(seed)
-        
-        # The caches the split's reads are stored in. A sparse request (few records)
-        # reads rows from disk rather than loading chunks into memory.
-        is_sparse_request = (len(self.transient_segments) < 100) or (self.event_names is not None)
-        caches = {
-            prefix: self._initialize_transient_cache(
-                ifos,
-                window_spec.sample_rate_hertz,
-                window_spec.total_onsource_duration_seconds,
-                window_spec.offsource_duration_seconds,
-                enable_chunked_mode=not is_sparse_request,
-                prefix=prefix,
-            )[0]
-            for prefix in sorted({
-                self._cache_prefix(record, read)
-                for record, reads in zip(self.transient_segments, self.transient_reads)
-                for read in reads
-            })
-        }
 
         rng = default_rng(seed)
         n_segments = len(self.transient_segments)
         if n_segments == 0:
             raise ValueError("No transient segments available for iteration.")
 
-        # Each pass draws among the records still servable, so a pass that serves
-        # nothing has found every record it drew unavailable: the servable records
-        # shrink with each such pass, and the split is served or refused, never spun.
-        # Equal weights: one shuffled order over the records, kept for cache hits.
-        # Otherwise (apply_balancing), weighted draws with replacement oversample the
-        # rare classes in training. An evaluation split is one pass, each record once
-        # and unweighted, then the end: its examples are a set, never a sample.
+        # Equal weights: one shuffled order over the records, every pass. Otherwise
+        # (apply_balancing), weighted draws with replacement oversample the rare classes
+        # in training. An evaluation split is one pass, each record once and unweighted,
+        # then the end: its examples are a set, never a sample. Every record drawn is
+        # served or refused by name (TransientUnavailable), so no pass is ever empty.
         evaluation = self._served_group != "train"
-        weights = np.array([seg.weight for seg in self.transient_segments], dtype=np.float32)
+        weights = np.array([seg.weight for seg in self.transient_segments], dtype=np.float64)
         weighted = not evaluation and not np.allclose(weights, 1.0)
         order = np.arange(n_segments)
         if weighted:
@@ -1047,89 +726,28 @@ class TransientDataObtainer(BaseDataObtainer):
         else:
             rng.shuffle(order)
 
-        batch_subarrays, batch_backgrounds, batch_indices = [], [], []
-        served = [0]  # Examples served this pass
-
-        def add(index, onsource, offsource):
-            """Add one example; the batch, once full."""
-            served[0] += 1
-            batch_subarrays.append(onsource)
-            batch_backgrounds.append(offsource)
-            batch_indices.append(index)
-            if len(batch_subarrays) < num_examples_per_batch:
-                return None
-            batch = self._prepare_batch(
-                batch_subarrays, batch_backgrounds,
-                [self.transient_segments[i] for i in batch_indices],
-                [self.transient_reads[i] for i in batch_indices],
+        def batch(indices, pool):
+            """The batch of the records at ``indices``, their examples read together."""
+            examples = list(pool.map(
+                lambda index: self._read_example(
+                    self.transient_segments[index], self.transient_reads[index], window_spec),
+                indices,
+            ))
+            return _post_process(self._prepare_batch(
+                [onsource for onsource, _ in examples],
+                [offsource for _, offsource in examples],
+                [self.transient_segments[index] for index in indices],
+                [self.transient_reads[index] for index in indices],
                 window_spec,
-            )
-            batch_subarrays.clear()
-            batch_backgrounds.clear()
-            batch_indices.clear()
-            return _post_process(batch)
+            ))
 
-        def fetch(pending):
-            """The batches the pending records complete, each cached before it is served."""
-            for index, onsource, offsource in self._fetch_windows(caches, pending, window_spec, download_rate):
-                batch = add(index, onsource, offsource)
-                if batch is not None:
-                    # A batch served is cached first: the caller may never resume.
-                    for cache in caches.values():
-                        cache.flush_write_buffer()
-                    yield batch
-
-        while True:
-            served[0] = 0
-            servable = np.array([
-                index for index in order
-                if self.transient_segments[index].transient_gps_time not in self._unavailable
-            ], dtype=int)
-            if len(servable) == 0:
-                raise ValueError(
-                    f"None of the {n_segments} transients of split '{self._served_group}' "
-                    f"can be served on {[ifo.name for ifo in ifos]}: each was rejected for "
-                    f"no data (rejections: {dict(self._rejections)})."
-                )
-            segment_indices = servable
-            if weighted:
-                probs = weights[servable] / weights[servable].sum()
-                segment_indices = rng.choice(servable, size=len(servable), replace=True, p=probs)
-
-            # Cache hits are served at once, in order; records with a read the
-            # caches do not hold are fetched a batch at a time.
-            pending = []
-            for index in tqdm(segment_indices, desc="Assembling batches", unit="seg",
-                              leave=False, dynamic_ncols=True):
-                record = self.transient_segments[index]
-                if record.transient_gps_time in self._unavailable:  # found unavailable this pass
-                    continue
-                windows = self._cached_windows(caches, record, self.transient_reads[index], window_spec)
-                if all(window is not None for window in windows):
-                    batch = add(index, np.stack([on for on, _ in windows]),
-                                np.stack([off for _, off in windows]))
-                    if batch is not None:
-                        yield batch
-                    continue
-                pending.append((index, windows))
-                if len(pending) >= num_examples_per_batch:
-                    yield from fetch(pending)
-                    pending = []
-            yield from fetch(pending)
-
-            # The partial batch left at the end of a pass
-            if batch_subarrays:
-                batch = self._prepare_batch(
-                    batch_subarrays, batch_backgrounds,
-                    [self.transient_segments[i] for i in batch_indices],
-                    [self.transient_reads[i] for i in batch_indices],
-                    window_spec,
-                )
-                batch_subarrays.clear()
-                batch_backgrounds.clear()
-                batch_indices.clear()
-                yield _post_process(batch)
-            # An evaluation pass ends once it has served. One that served nothing
-            # found every record it drew unavailable, so the next check refuses it.
-            if evaluation and served[0]:
-                return
+        with thread_pool("transient", min(READ_THREADS, num_examples_per_batch)) as pool:
+            while True:
+                indices = order
+                if weighted:
+                    indices = rng.choice(n_segments, size=n_segments, replace=True, p=weights / weights.sum())
+                # Consecutive batches of the pass; the last holds what is left.
+                for start in range(0, len(indices), num_examples_per_batch):
+                    yield batch(indices[start:start + num_examples_per_batch], pool)
+                if evaluation:
+                    return

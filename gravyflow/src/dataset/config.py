@@ -2,6 +2,8 @@ import logging
 from dataclasses import dataclass
 from typing import Tuple
 
+import numpy as np
+
 from gravyflow.src.rng.legacy import warn_deprecated
 
 #: Why a ``scale_factor`` is no longer taken: every array gravyflow reads,
@@ -131,17 +133,25 @@ class WindowSpec:
         from gravyflow.src.utils.gps import as_gps_times
         return as_gps_times(window_start_gps) + self.num_crop_samples / float(self.sample_rate_hertz)
 
-    def transient_window_start_gps(self, transient_gps):
+    def transient_window_first_sample(self, transient_gps) -> np.ndarray:
         """
-        The GPS time of the first sample of a transient's padded onsource window, from
-        the transient's: the window's centre sample (``centre_index``) is the
-        transient's sample, the grid sample nearest it, so this is within one sample of
-        the truth (see ``TransientCache.read_windows``). Float64.
+        The absolute sample index (samples since GPS 0 at ``sample_rate_hertz``) of the
+        first sample of a transient's padded onsource window: the window's centre sample
+        (``centre_index``) is the transient's sample, the sample of the absolute grid
+        nearest the transient's time. Int64, of the shape of ``transient_gps``.
         """
         from gravyflow.src.utils.gps import as_gps_times
         from gravyflow.src.utils.tensor import centre_index
-        return as_gps_times(transient_gps) \
-            - centre_index(self.num_onsource_samples) / float(self.sample_rate_hertz)
+        nearest = np.round(np.asarray(as_gps_times(transient_gps)) * float(self.sample_rate_hertz))
+        return nearest.astype(np.int64) - centre_index(self.num_onsource_samples)
+
+    def transient_window_start_gps(self, transient_gps):
+        """
+        The GPS time of the first sample of a transient's padded onsource window
+        (``transient_window_first_sample``), exactly. Float64.
+        """
+        from gravyflow.src.utils.gps import as_gps_times
+        return as_gps_times(self.transient_window_first_sample(transient_gps) / float(self.sample_rate_hertz))
 
     @property
     def sample_counts(self) -> Tuple[int, int]:
@@ -240,81 +250,10 @@ class Defaults:
 
 
 class TransientDefaults:
-    """
-    Configuration constants for transient (glitch/event) acquisition.
-    
-    These constants are used throughout the transient pipeline:
-    - Cache storage parameters
-    - Segment padding
-    - Batch save thresholds
-    - Logging intervals
-    
-    Centralizing them here allows easy tuning and ensures consistency.
-    """
-    
-    # ==========================================================================
-    # CACHE PARAMETERS
-    # ==========================================================================
-    # Maximum sample rate stored in cache (can downsample but not upsample)
-    CACHE_SAMPLE_RATE_HERTZ: float = 4096.0
-    
-    # Maximum duration windows (allows cropping to shorter durations)
-    CACHE_ONSOURCE_DURATION: float = 32.0
-    CACHE_OFFSOURCE_DURATION: float = 32.0
-    CACHE_PADDING_DURATION: float = 1.0
-    
-    # ==========================================================================
-    # SEGMENT PADDING
-    # ==========================================================================
-    # Default padding around transient events (ensures full event capture)
-    DEFAULT_START_PADDING_SECONDS: float = 32.0
-    DEFAULT_END_PADDING_SECONDS: float = 32.0
-    
-    # Epsilon buffer for segment boundary trimming
-    SEGMENT_BOUNDARY_BUFFER: float = 0.2
-    
-    # ==========================================================================
-    # BATCH THRESHOLDS
-    # ==========================================================================
-    # Save to cache every N glitches (balances I/O vs memory)
-    BATCH_SAVE_THRESHOLD: int = 1000
-    
-    # Log cache stats every N samples
-    CACHE_LOG_INTERVAL: int = 1000
-    
-    # LRU cache size for lazy-loaded transient segments
-    LAZY_CACHE_MAXSIZE: int = 1000
-    
-    # HDF5 chunk size for streaming operations
-    HDF5_CHUNK_SIZE: int = 10000
-    
-    # ==========================================================================
-    # GPS PRECISION
-    # ==========================================================================
-    # GPS time precision for cache key generation (10ms = 0.01s)
+    """Constants of transient records: how their GPS times are keyed and matched."""
+
+    # GPS time precision for a record's key (10 ms)
     GPS_KEY_PRECISION: float = 0.01
-    
+
     # GPS tolerance for matching transients (half second handles typical rounding)
     GPS_TOLERANCE_SECONDS: float = 0.5
-    
-    # ==========================================================================
-    # I/O CONFIGURATION
-    # ==========================================================================
-    # Parallel processes for TimeSeries.read() operations
-    TIMESERIES_NPROC: int = 100
-
-    # ==========================================================================
-    # CACHE STRATEGY (GLITCH + EVENT CACHES)
-    # ==========================================================================
-    # Separate cache files are used for glitches (glitch_cache_v4_<source>.h5) and events
-    # (event_cache_v4_<source>.h5). Both use the same format and download data for all 
-    # configured IFOs (H1, L1). This ensures maximum cache reuse - a cache 
-    # built with H1+L1 can serve any subset without redownloading.
-    # 
-    # NOTE: V1 (Virgo) is NOT included because:
-    # - Only joined during O2 with limited coverage
-    # - No data available for O1 events
-    # - Would cause acquisition failures for older events
-    #
-    # Requested IFOs are filtered at output time, not download time.
-    UNIVERSAL_IFOS: Tuple[str, ...] = ("H1", "L1")

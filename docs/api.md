@@ -86,7 +86,6 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `get_glitch_segments`: windows around Gravity Spy glitches.
 - `get_glitch_type_from_index`: the glitch class of an index.
 - `get_glitch_catalogue`: the Gravity Spy catalogue.
-- `TransientCache`: the on-disk cache of glitch and event windows.
 - `TransientIndex`: an index of transients and their windows.
 - `EventConfidence`: confident or marginal GWOSC events.
 - `SourceType`: the source class of an event.

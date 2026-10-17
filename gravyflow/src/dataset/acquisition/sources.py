@@ -38,7 +38,6 @@ from gravyflow.src.utils.resample import whole_hertz
 from .gwosc_data import (
     GWOSC_RUNS, GWOSC_SAMPLE_RATES_HERTZ, GWOSC_STRAIN_DATASETS, UpsamplingRefused,
     coalesce_segments, get_gwosc_segments, gwosc_runs_overlapping, intersect_segments,
-    strain_download_cache,
 )
 
 #: The length of GWOSC's bulk strain files, which start on multiples of it in GPS time,
@@ -197,9 +196,10 @@ class GWOSC(DataSource):
     Public strain and data quality from GWOSC (https://gwosc.org), the default source.
 
     Segments come from the GWOSC timeline. Strain is each run's bulk release at 4096 Hz
-    or 16384 Hz (``GWOSC_STRAIN_DATASETS``), downloaded by gwpy into the one cache root
-    (``strain_download_cache``). The release is named on every download, so an event
-    release that overlaps the interval is never served in its place.
+    or 16384 Hz (``GWOSC_STRAIN_DATASETS``), downloaded by gwpy and kept nowhere but the
+    store: gwpy's download cache is off, so a file is never kept twice. The release is
+    named on every download, so an event release that overlaps the interval is never
+    served in its place.
     """
 
     def segments(self, detector, flags, interval) -> np.ndarray:
@@ -235,14 +235,13 @@ class GWOSC(DataSource):
         from gwpy.timeseries import TimeSeries
 
         try:
-            with strain_download_cache():
-                series = TimeSeries.fetch_open_data(
-                    _detector_name(detector), start, end,
-                    sample_rate=int(sample_rate_hertz),
-                    dataset=f"^{re.escape(dataset)}$",
-                    cache=True,
-                    timeout=DOWNLOAD_TIMEOUT_SECONDS,
-                )
+            series = TimeSeries.fetch_open_data(
+                _detector_name(detector), start, end,
+                sample_rate=int(sample_rate_hertz),
+                dataset=f"^{re.escape(dataset)}$",
+                cache=False,  # the store keeps the tile; a download is read once and deleted
+                timeout=DOWNLOAD_TIMEOUT_SECONDS,
+            )
         except Exception as error:
             raise StrainUnavailable(self, detector, interval, error) from error
         return _served(self, detector, interval, series, sample_rate_hertz, f"gwosc-{dataset}")

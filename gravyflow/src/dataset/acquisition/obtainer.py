@@ -22,7 +22,6 @@ def IFODataObtainer(
         segment_order: SegmentOrder = SegmentOrder.RANDOM,
         max_segment_duration_seconds: float = 2048.0,
         saturation: float = 8.0,
-        force_acquisition: bool = False,
         overrides: dict = None,
         event_types: List[EventConfidence] = None,
         logging_level: int = logging.WARNING,
@@ -54,8 +53,6 @@ def IFODataObtainer(
         segment_order: How to order segments (RANDOM, CHRONOLOGICAL, SHORTEST_FIRST)
         max_segment_duration_seconds: Maximum segment length
         saturation: Oversampling factor for random sampling
-        force_acquisition: Fetch transients afresh rather than from the transient
-            cache (TRANSIENT only; real noise is always read through the store)
         overrides: Dictionary of attribute overrides
         event_types: Filter events by type (for TRANSIENT mode)
         logging_level: Logging verbosity
@@ -121,7 +118,6 @@ def IFODataObtainer(
             segment_order=segment_order,
             max_segment_duration_seconds=max_segment_duration_seconds,
             saturation=saturation,
-            force_acquisition=force_acquisition,
             overrides=overrides,
             event_types=event_types,
             logging_level=logging_level,

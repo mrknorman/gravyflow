@@ -263,18 +263,16 @@ def test_a_window_scores_as_the_background_scores_it():
 def test_real_events_are_read_in_the_backgrounds_window(offline_events):
     # The event windows were read with the default crop, whatever the dataset's.
     read = []
-    original = gf.TransientDataObtainer._get_sample_from_cache
+    original = gf.TransientDataObtainer._read_example
 
-    def recording(self, cache, gps_time, sample_rate_hertz, onsource_duration, offsource_duration,
-                  target_ifos=None):
-        read.append((onsource_duration, offsource_duration))
-        return original(self, cache, gps_time, sample_rate_hertz, onsource_duration, offsource_duration,
-                        target_ifos)
+    def recording(self, record, reads, window_spec):
+        read.append((window_spec.total_onsource_duration_seconds, window_spec.offsource_duration_seconds))
+        return original(self, record, reads, window_spec)
 
     args = _scoring_args()
     bank = ValidationBank(logit_model(1), args, ValidationConfig(num_examples=8, batch_size=8, score_real_events=True))
     bank.far_scores = np.random.default_rng(3).standard_normal(64)
-    with mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", recording):
+    with mock.patch.object(gf.TransientDataObtainer, "_read_example", recording):
         bank.generate_real_events(observing_runs=[gf.ObservingRun.O3])
     assert read and set(read) == {(1.0 + 2 * 0.75, args["offsource_duration_seconds"])}
     assert all(e["status"] == "scored" and np.isfinite(e["score"]) for e in bank.real_events)

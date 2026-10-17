@@ -186,6 +186,64 @@ def test_an_outage_refuses_by_name_and_is_never_zero_filled(cache, quick_retries
     assert [tile.key.index for tile in store_tiles(source)] == [int(T0 // 64)]
 
 
+class Misdelivering(ToneSource):
+    """A tone source whose deliveries are altered by ``alter(strain)``."""
+
+    def __init__(self, alter, **kwargs):
+        super().__init__(**kwargs)
+        self.alter = alter
+
+    def fetch(self, detector, sample_rate_hertz, interval):
+        return self.alter(super().fetch(detector, sample_rate_hertz, interval))
+
+
+MISDELIVERIES = {
+    "a start that is not finite": lambda s: s._replace(t0=float("nan")),
+    "an infinite start": lambda s: s._replace(t0=float("inf")),
+    "integer samples": lambda s: s._replace(data=np.asarray(s.data).astype(np.int32)),
+    "complex samples": lambda s: s._replace(data=np.asarray(s.data).astype(np.complex128)),
+    "samples off the grid": lambda s: s._replace(t0=s.t0 + 0.4 / s.sample_rate_hertz),
+    "another rate": lambda s: s._replace(sample_rate_hertz=2 * s.sample_rate_hertz),
+}
+
+
+@pytest.mark.parametrize("delivery", MISDELIVERIES)
+def test_a_delivery_that_is_not_the_tile_is_refused_by_name_and_stores_nothing(cache, quick_retries, delivery):
+    source = Misdelivering(MISDELIVERIES[delivery])
+    with pytest.raises(gf.StrainUnavailable, match="exclusions=") as refused:
+        acquire(source)
+    assert "not tile" in str(refused.value), str(refused.value)
+    assert store_tiles(source) == []
+
+
+def test_ensure_commits_what_a_read_needs_and_refuses_what_it_would(cache, quick_retries):
+    from gravyflow.src.dataset.store import read
+
+    source = ToneSource()
+    first, count = int(PIECE[0] * RATE), int(10 * RATE)
+    assert read.ensure(source, gf.IFO.H1, RATE, first, count) is None
+    fetched = source.fetches
+    assert fetched == len(store_tiles(source)) > 0
+    strain = read.read(source, gf.IFO.H1, RATE, first, count)
+    assert source.fetches == fetched and np.all(np.isfinite(strain.data))  # offline after ensure
+    gap = (PIECE[0] + 5.0, PIECE[0] + 5.5)
+    with pytest.raises(gf.StrainUnavailable, match="NON_FINITE"):
+        read.ensure(ToneSource(gaps=[gap], tile=32.0), gf.IFO.H1, RATE, first, count)
+
+
+def test_a_failed_fetch_names_its_tries(cache, quick_retries):
+    with pytest.raises(gf.StrainUnavailable, match=r"3 tries failed.*planted outage"):
+        acquire(ToneSource(outages=[PIECE]))
+
+
+def test_a_fetch_needs_gwpy_only_when_its_source_does(cache, monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "gwpy", None)  # an import of gwpy now fails
+    [row] = acquire(ToneSource())
+    assert np.all(np.isfinite(np.asarray(row.data[0])))
+
+
 def test_non_finite_samples_inside_the_timeline_refuse_by_name(cache):
     gap = (T0 + 50.0, T0 + 50.5)
     with pytest.raises(gf.StrainUnavailable, match="NON_FINITE") as refused:
@@ -247,6 +305,35 @@ def test_old_segment_caches_are_named_once_and_never_read_or_written(cache, monk
         acquire(ToneSource())  # once per process
     assert {path: path.read_bytes() for directory in (segments, older)
             for path in directory.iterdir()} == before
+
+
+@pytest.mark.parametrize("trouble", ["a file gone before it is named", "a directory that cannot be listed"])
+def test_naming_old_caches_never_fails_a_read(cache, monkeypatch, trouble):
+    from gravyflow.src.dataset.store import read
+
+    monkeypatch.setattr(read, "_legacy_warned", False)
+    segments = cache / "segments"
+    segments.mkdir(parents=True)
+    old = segments / "segment_data_0123456789abcdef.hdf5"
+    old.write_bytes(b"old")
+    real_stat, real_glob = Path.stat, Path.glob
+
+    def stat(path, *args, **kwargs):
+        if path.name == old.name and trouble.startswith("a file"):
+            raise FileNotFoundError(path)
+        return real_stat(path, *args, **kwargs)
+
+    def glob(path, pattern, *args, **kwargs):
+        if path == segments and trouble.startswith("a directory"):
+            raise PermissionError(path)
+        return real_glob(path, pattern, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(Path, "glob", glob)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        [row] = acquire(ToneSource())
+    assert np.all(np.isfinite(np.asarray(row.data[0])))
 
 
 # ---------------------------------------------------------------------------

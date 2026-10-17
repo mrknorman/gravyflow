@@ -50,7 +50,6 @@ def test_memory_noise(
                     gf.DataLabel.GLITCHES
                 ],
                 gf.SegmentOrder.RANDOM,
-                force_acquisition=True,
                 logging_level=logging.INFO
             )
         

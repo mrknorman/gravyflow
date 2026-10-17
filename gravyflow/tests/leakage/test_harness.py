@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
-from gravyflow.src.dataset.config import TransientDefaults
 
 from . import audit
 from . import fixtures as fx
@@ -27,7 +26,7 @@ RV = gf.ReturnVariables
 IFOS = ["H1", "L1"]
 #: Transient windows are read from the transient cache's stored 4096 Hz: at that rate
 #: the resampler is the identity, so the fixture's broadband code survives the read.
-TRANSIENT_RATE = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
+TRANSIENT_RATE = 4096.0
 
 
 # =============================================================================
@@ -471,14 +470,11 @@ def test_without_the_fake_real_noise_is_refused_by_name(world, refusals, monkeyp
 def test_every_cache_lives_under_the_one_cache_root():
     from gravyflow.src.dataset.acquisition import gwosc_data
     from gravyflow.src.dataset.features import gravity_spy
-    from gravyflow.src.dataset.features.glitch_cache import generate_transient_cache_path
 
     from gravyflow.src.dataset.store import read
 
     root = Path(os.environ["GRAVYFLOW_CACHE_DIR"])
     for path in (
-        generate_transient_cache_path(prefix="glitch", source=gf.GWOSC()),
-        generate_transient_cache_path(prefix="event", source=gf.GWOSC()),
         gravity_spy.cache_dir(),
         gwosc_data._timeline_cache_path("O1", "H1_DATA", 0, 1),
         read.process_store().root,
@@ -486,8 +482,8 @@ def test_every_cache_lives_under_the_one_cache_root():
         assert root in Path(path).parents, path
 
 
-def test_strain_downloads_are_cached_under_the_one_cache_root(monkeypatch):
-    """gwpy's GWOSC strain download goes to astropy's cache, which is moved under the root."""
+def test_strain_downloads_are_kept_only_by_the_store(monkeypatch):
+    """gwpy's GWOSC strain download keeps no copy of its own: the store keeps the tile."""
     from astropy.config import get_cache_dir_path
     from gwpy.timeseries import TimeSeries
 
@@ -497,12 +493,12 @@ def test_strain_downloads_are_cached_under_the_one_cache_root(monkeypatch):
         seen.append((get_cache_dir_path(), kwargs.get("cache")))
         return TimeSeries(np.ones(4096), t0=args[1], sample_rate=4096)
 
+    before = get_cache_dir_path()
     monkeypatch.setattr(TimeSeries, "fetch_open_data", fetch_open_data)
     gf.GWOSC().fetch(gf.IFO.L1, 4096.0, (1238166018.0, 1238166019.0))
     (directory, cache), = seen
-    assert cache is True
-    assert Path(os.environ["GRAVYFLOW_CACHE_DIR"]) in directory.parents, directory
-    assert Path(os.environ["GRAVYFLOW_CACHE_DIR"]) not in get_cache_dir_path().parents
+    assert cache is False
+    assert directory == before, "the fetch moved astropy's cache"
 
 
 # =============================================================================

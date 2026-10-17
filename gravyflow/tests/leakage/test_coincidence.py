@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
-from gravyflow.src.dataset.config import TransientDefaults
 
 from . import audit
 from . import fixtures as fx
@@ -134,7 +133,7 @@ def test_constructed_starts_keep_the_separation(monkeypatch, row, draws):
 TRANSIENT_HALF_SPAN_SECONDS = 48.2
 #: Transient windows are read from the transient cache's stored 4096 Hz: at that rate
 #: the resampler is the identity, so the fixture's broadband code survives the read.
-TRANSIENT_RATE = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
+TRANSIENT_RATE = 4096.0
 #: How far a partner's centre lies from the transient's at least: two spans.
 PARTNER_SEPARATION_SECONDS = 4 * TRANSIENT_HALF_SPAN_SECONDS
 
@@ -684,18 +683,26 @@ def test_an_evaluation_pass_serves_each_transient_once(world, split, balanced):
 
 
 @pytest.mark.parametrize("split", ["validate", "test"])
-def test_an_evaluation_pass_that_serves_nothing_is_refused(world, monkeypatch, split):
+def test_an_evaluation_pass_that_cannot_be_fetched_is_refused(world, monkeypatch, split):
     """
-    An evaluation pass none of whose records can be fetched is refused by name, as a
-    training split is, never ended after zero batches.
+    An evaluation pass none of whose records can be fetched is refused by name, naming
+    the first record it reads, as a training split is: never ended after zero batches.
     """
+    from gravyflow.src.dataset.acquisition.transient import TransientUnavailable
+    from gravyflow.src.dataset.store import read
+
     block = _golden_block("train", split, "train") + 1
     middle = fx.block_start("O3", block) + fx.BLOCK_SECONDS / 2
     peaks = [middle + 400.0 * k for k in range(-2, 3)]
     fixture = fx._fixture([(middle - 2000.0, middle + 2000.0)], 4096.0, "O3", ("O3",)).with_catalogues(
         glitches=[GlitchRecord("L1", t, t - 0.5, 1.0, "Blip", 0.95) for t in peaks])
-    monkeypatch.setattr(gf.TransientDataObtainer, "_download", lambda self, spans, rate: {})
-    with world(fixture):
+    monkeypatch.setattr(read, "FETCH_BACKOFF_SECONDS", 0.0)
+    with world(fixture) as harness:
+        def unreachable(detector, sample_rate_hertz, interval):
+            raise gf.StrainUnavailable(harness.source, detector, interval, "unreachable")
+
+        monkeypatch.setattr(harness.source, "fetch", unreachable)
         obtainer = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES])
-        with pytest.raises(ValueError, match=f"None of the 5 transients of split '{split}' can be served"):
+        with pytest.raises(TransientUnavailable, match="unreachable") as refused:
             list(itertools.islice(_transient_batches(obtainer, split, batch=2), EVALUATION_PASS_BOUND))
+    assert refused.value.record.transient_gps_time in peaks

@@ -440,27 +440,11 @@ class TestDataSource:
         # Equal sources give equal fingerprints: the fingerprint reads content, not identity.
         assert config_fingerprint(_noise_obtainer(gf.LocalFrames())) == prints["LocalFrames"]
 
-    def test_gwosc_and_local_frames_never_share_a_cache_entry(self, tmp_path):
-        from gravyflow.src.dataset.features.glitch_cache import generate_transient_cache_path
-
-        # The store's tiles are named by the strain they hold (``DataSource.source_id``).
+    def test_gwosc_and_local_frames_never_share_a_cache_entry(self):
+        # The store's tiles, noise's and transients' alike, are named by the strain they
+        # hold (``DataSource.source_id``).
         tiles = {name: make().source_id(O3A_GPS, 16384.0) for name, make in SOURCES.items()}
         assert len(set(tiles.values())) == len(SOURCES), tiles
-
-        transient_files = {}
-        for name, make in SOURCES.items():
-            reader = gf.IFODataObtainer(
-                data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
-                observing_runs=gf.ObservingRun.O3, source=make(),
-            )
-            reader.data_directory = tmp_path
-            for prefix in ("glitch", "event", "partner"):
-                cache, _ = reader._initialize_transient_cache(
-                    [gf.IFO.L1], 2048.0, 2.0, 16.0, enable_chunked_mode=False, prefix=prefix,
-                )
-                assert cache.path == generate_transient_cache_path(tmp_path, prefix, source=make())
-                transient_files[name, prefix] = cache.path
-        assert len(set(transient_files.values())) == len(transient_files), transient_files
 
     def test_an_unreachable_local_frame_refuses_by_name_and_never_falls_back(self, monkeypatch):
         from gravyflow.src.dataset.store import read
@@ -569,7 +553,7 @@ class TestDataSource:
         # The dataset is pinned, so an event release overlapping the time is never served.
         assert [(call["dataset"], call["sample_rate"]) for call in gwosc.calls] == [
             ("^O3a_4KHZ_R1$", 4096), ("^O1_16KHZ$", 16384)]
-        assert all(call["cache"] is True for call in gwosc.calls)
+        assert all(call["cache"] is False for call in gwosc.calls)  # the store keeps the tile
         assert strain.source == "gwosc-O3a_4KHZ_R1" and strain.sample_rate_hertz == 4096.0
         assert strain.t0 == O3A_GPS and len(strain.data) == 32 * 4096
 

@@ -398,7 +398,8 @@ def gwosc_serving(fetch):
     ``SegmentStrain``, whose ``rates`` (when it has them) replace GWOSC's native rates.
     Obtainers built before the block are served too, since they hold ``GWOSC()``.
     Its strain is the tiles of ``fetch.source_id`` (default ``"gwosc-test"``), which the
-    fetch's strain must be labelled with. Yields ``fetch``. A patch of ``GWOSC``, for
+    fetch's strain must be labelled with, of ``fetch.tile_seconds`` when it has them
+    (else GWOSC's). Yields ``fetch``. A patch of ``GWOSC``, for
     tests that fake one fetch; the leakage harness installs a source instead.
     """
     from unittest import mock
@@ -410,6 +411,9 @@ def gwosc_serving(fetch):
         if hasattr(fetch, "rates"):
             rates = tuple(float(rate) for rate in fetch.rates)
             stack.enter_context(mock.patch.object(gf.GWOSC, "rates", lambda source: rates))
+        if hasattr(fetch, "tile_seconds"):  # small tiles keep a fake's fetches small
+            seconds = float(fetch.tile_seconds)
+            stack.enter_context(mock.patch.object(gf.GWOSC, "tile_seconds", lambda source, rate: seconds))
         yield fetch
 
 
@@ -450,21 +454,19 @@ OFFLINE_EVENTS = [
 @pytest.fixture
 def offline_events():
     """
-    The event catalogue, its data quality and the transient cache, offline: the
-    catalogue lists OFFLINE_EVENTS, every record passes data quality, and every
-    record is a cache hit of unit Gaussian strain. Yields the events.
+    The event catalogue, its data quality and its strain, offline: the catalogue
+    lists OFFLINE_EVENTS, every record passes data quality, and every example reads
+    unit Gaussian strain, seeded by its record's time. Yields the events.
     """
     from unittest import mock
     import numpy as np
 
-    def cached_strain(self, cache, gps_time, sample_rate_hertz, onsource_duration,
-                      offsource_duration, target_ifos=None):
-        rng = np.random.default_rng(int(gps_time))
-        detectors = len(target_ifos or [None])
+    def gaussian_strain(self, record, reads, window_spec):
+        rng = np.random.default_rng(int(record.transient_gps_time))
+        shape = (len(reads),)
         return (
-            rng.standard_normal((detectors, int(onsource_duration * sample_rate_hertz))).astype(np.float32),
-            rng.standard_normal((detectors, int(offsource_duration * sample_rate_hertz))).astype(np.float32),
-            "memory",
+            rng.standard_normal(shape + (window_spec.num_onsource_samples,)).astype(np.float32),
+            rng.standard_normal(shape + (window_spec.num_offsource_samples,)).astype(np.float32),
         )
 
     def listed(observing_runs=None, event_types=None, event_names=None, **kwargs):
@@ -472,9 +474,7 @@ def offline_events():
 
     with mock.patch("gravyflow.src.dataset.features.event.get_events_with_params", listed), \
          mock.patch("gravyflow.src.dataset.features.segment_builders.get_events_with_params", listed), \
-         mock.patch.object(gf.TransientDataObtainer, "_initialize_transient_cache",
-                           lambda self, *args, **kwargs: (object(), None)), \
-         mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", cached_strain), \
+         mock.patch.object(gf.TransientDataObtainer, "_read_example", gaussian_strain), \
          mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs), \
          catalogued_events(OFFLINE_EVENTS):
         yield [dict(e) for e in OFFLINE_EVENTS]
