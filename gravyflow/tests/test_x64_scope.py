@@ -187,6 +187,7 @@ def test_gps_times_survive_the_random_draw():
     obtainer = gf.NoiseDataObtainer(
         data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
         observing_runs=[gf.ObservingRun.O3], augmentations=[], source=_AtTheRate(),
+        prefetch_depth=0,  # read on demand: the one read recorded is the batch's own
     )
     obtainer.valid_segments = np.array([[[GPS - 20.0, GPS + 44.0]]])
     read = {}
