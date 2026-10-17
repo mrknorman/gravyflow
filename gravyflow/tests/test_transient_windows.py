@@ -14,8 +14,10 @@ decodes to its GPS time.
 """
 
 import dataclasses
+import importlib.util
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 from unittest import mock
 
 import h5py
@@ -519,3 +521,38 @@ class TestCacheFormat:
                 pytest.fail(f"{name} did not refuse")
         assert path.read_bytes() == before, "a write reached a file of another format"
 
+
+def check_glitch_cache():
+    """``scripts/check_glitch_cache.py``, loaded as a module."""
+    script = Path(gf.__file__).resolve().parents[1] / "scripts" / "check_glitch_cache.py"
+    spec = importlib.util.spec_from_file_location("check_glitch_cache", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestCacheCheck:
+    """The cache check reads format 3: a detector not held (NaN) is no issue."""
+
+    def write(self, path, onsource):
+        cache = TransientCache(path, mode="a")
+        cache.initialize_file(STORED_RATE, 1.0, 1.0, ["H1", "L1"], 2,
+                              onsource.shape[-1], onsource.shape[-1])
+        cache.append(onsource, onsource.copy(), TIMES[:len(onsource)], np.zeros(len(onsource)))
+
+    def test_a_detector_not_held_is_healthy(self, tmp_path):
+        onsource = np.ones((3, 2, 8), dtype=np.float32)
+        onsource[1, 0] = np.nan  # H1 not held for the second record
+        self.write(tmp_path / "c.h5", onsource)
+        assert check_glitch_cache().check_cache(tmp_path / "c.h5")
+
+    def test_a_partly_non_finite_window_is_an_issue(self, tmp_path):
+        onsource = np.ones((3, 2, 8), dtype=np.float32)
+        onsource[1, 0, :4] = np.nan
+        self.write(tmp_path / "c.h5", onsource)
+        assert not check_glitch_cache().check_cache(tmp_path / "c.h5")
+
+    def test_another_format_is_refused(self, tmp_path, capsys):
+        write_format_2_cache(tmp_path / "old.h5", TIMES)
+        assert not check_glitch_cache().check_cache(tmp_path / "old.h5")
+        assert "format 2" in capsys.readouterr().out

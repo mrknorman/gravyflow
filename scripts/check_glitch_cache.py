@@ -1,129 +1,89 @@
 #!/usr/bin/env python3
 """
-Check glitch cache integrity - NaNs, data sizes, and basic statistics.
+Check a transient cache's integrity: its format, its sizes, and each row's strain.
+
+In the cache format (``TRANSIENT_CACHE_FORMAT``) each detector's window in a row is
+either held (every sample finite) or not held (every sample NaN: its strain was never
+fetched, or could not be had). Neither is an issue. The issues are a window that is
+partly non-finite, or held as all zeros: gravyflow writes neither.
+
+Usage: check_glitch_cache.py [PATH]; by default the glitch cache under the gravyflow
+cache root (``GRAVYFLOW_CACHE_DIR``, else ``~/.gravyflow/cache``).
 """
 import sys
-import numpy as np
-import h5py
 from pathlib import Path
 
-def check_cache(cache_path: str):
-    """Check a glitch cache for integrity issues."""
-    path = Path(cache_path)
-    
+import h5py
+import numpy as np
+
+from gravyflow.src.dataset.features.glitch_cache import (
+    TransientCache,
+    generate_transient_cache_path,
+)
+
+CHUNK_ROWS = 100  # rows read at once: windows of tens of MB each
+
+
+def check_cache(path: Path) -> bool:
+    """Print a report on the cache at ``path``; whether it is a healthy cache of the current format."""
     if not path.exists():
         print(f"Cache file not found: {path}")
         return False
-    
-    print(f"📁 Checking: {path}")
-    print(f"   File size: {path.stat().st_size / 1024 / 1024:.2f} MB")
-    print()
-    
-    with h5py.File(path, 'r') as f:
-        if 'glitches' not in f:
-            print("Invalid cache format: 'glitches' group not found")
-            return False
-        
-        grp = f['glitches']
-        
-        # Metadata
-        print("📊 Metadata:")
-        print(f"   Sample rate: {grp.attrs.get('sample_rate_hertz', 'N/A')} Hz")
-        print(f"   Onsource duration: {grp.attrs.get('onsource_duration', 'N/A')} s")
-        print(f"   Offsource duration: {grp.attrs.get('offsource_duration', 'N/A')} s")
-        print(f"   IFOs: {list(grp.attrs.get('ifo_names', []))}")
-        print()
-        
-        # Dataset shapes
-        print("📐 Dataset shapes:")
-        for name in ['onsource', 'offsource', 'gps_times', 'labels']:
-            if name in grp:
-                dset = grp[name]
-                print(f"   {name}: {dset.shape} (dtype: {dset.dtype})")
-        print()
-        
-        # Load and check for issues
-        n_glitches = grp['gps_times'].shape[0]
-        print(f"🔢 Total glitches: {n_glitches}")
-        
-        if n_glitches == 0:
-            print("⚠️  Cache is empty!")
-            return True
-        
-        # Check in chunks to avoid memory issues
-        chunk_size = 1000
-        total_nan_onsource = 0
-        total_nan_offsource = 0
-        total_zero_onsource = 0
-        total_inf_onsource = 0
-        
-        print("\n🔍 Checking for data issues...")
-        
-        for start in range(0, n_glitches, chunk_size):
-            end = min(start + chunk_size, n_glitches)
-            
-            onsource = grp['onsource'][start:end]
-            offsource = grp['offsource'][start:end]
-            
-            # NaN checks
-            nan_ons = np.isnan(onsource).sum()
-            nan_offs = np.isnan(offsource).sum()
-            total_nan_onsource += nan_ons
-            total_nan_offsource += nan_offs
-            
-            # Inf checks
-            total_inf_onsource += np.isinf(onsource).sum()
-            
-            # All-zero checks (per sample)
-            for i in range(len(onsource)):
-                if np.all(onsource[i] == 0):
-                    total_zero_onsource += 1
-            
-            if (start + chunk_size) % 10000 == 0:
-                print(f"   Checked {end}/{n_glitches}...")
-        
-        print()
-        print("📋 Results:")
-        print(f"   NaN values in onsource: {total_nan_onsource}")
-        print(f"   NaN values in offsource: {total_nan_offsource}")
-        print(f"   Inf values in onsource: {total_inf_onsource}")
-        print(f"   All-zero onsource samples: {total_zero_onsource}")
-        
-        # Sample statistics
-        print("\n📈 Sample statistics (first 100 samples):")
-        sample_ons = grp['onsource'][:min(100, n_glitches)]
-        print(f"   Onsource min: {sample_ons.min():.6e}")
-        print(f"   Onsource max: {sample_ons.max():.6e}")
-        print(f"   Onsource mean: {sample_ons.mean():.6e}")
-        print(f"   Onsource std: {sample_ons.std():.6e}")
-        
-        # GPS time range
-        gps_times = grp['gps_times'][:]
-        print(f"\n🕐 GPS time range:")
-        print(f"   Min: {gps_times.min():.1f}")
-        print(f"   Max: {gps_times.max():.1f}")
-        print(f"   Unique times: {len(np.unique(np.round(gps_times, 1)))}")
-        
-        # Label distribution
-        labels = grp['labels'][:]
-        unique_labels, counts = np.unique(labels, return_counts=True)
-        print(f"\n🏷️  Label distribution:")
-        for label, count in zip(unique_labels, counts):
-            print(f"   Label {label}: {count} ({count/n_glitches*100:.1f}%)")
-        
-        # Summary
-        has_issues = (total_nan_onsource > 0 or total_nan_offsource > 0 or 
-                      total_inf_onsource > 0 or total_zero_onsource > n_glitches * 0.01)
-        
-        print()
-        if has_issues:
-            print("⚠️  ISSUES DETECTED - cache may have data quality problems")
-        else:
-            print("✅ Cache appears healthy!")
-        
-        return not has_issues
+
+    print(f"Checking: {path} ({path.stat().st_size / 1024 / 1024:.2f} MB)")
+    try:
+        meta = TransientCache(path).get_metadata()  # refuses a file of another format
+    except ValueError as error:
+        print(f"Not readable: {error}")
+        return False
+
+    ifos = meta["ifo_names"]
+    rows = meta["num_glitches"]
+    print(f"Sample rate {meta['sample_rate_hertz']} Hz; onsource {meta['onsource_duration']} s; "
+          f"offsource {meta['offsource_duration']} s; detectors {ifos}; rows {rows}")
+    if rows == 0:
+        return True
+
+    held = np.zeros(len(ifos), dtype=int)
+    not_held = np.zeros(len(ifos), dtype=int)
+    partial = np.zeros(len(ifos), dtype=int)
+    zeros = np.zeros(len(ifos), dtype=int)
+    with h5py.File(path, "r") as f:
+        grp = f["glitches"]
+        for start in range(0, rows, CHUNK_ROWS):
+            # (rows, detectors, samples), onsource and offsource side by side
+            windows = np.concatenate(
+                [grp["onsource"][start:start + CHUNK_ROWS], grp["offsource"][start:start + CHUNK_ROWS]],
+                axis=-1,
+            )
+            finite = np.isfinite(windows)
+            is_held = finite.all(axis=-1)
+            is_not_held = np.isnan(windows).all(axis=-1)
+            held += is_held.sum(axis=0)
+            not_held += is_not_held.sum(axis=0)
+            partial += (~is_held & ~is_not_held).sum(axis=0)
+            zeros += (is_held & (windows == 0).all(axis=-1)).sum(axis=0)
+        gps_times = grp["gps_times"][:]
+        labels = grp["labels"][:]
+
+    print("Per detector: held / not held / partly non-finite / held as zeros")
+    for i, ifo in enumerate(ifos):
+        print(f"  {ifo}: {held[i]} / {not_held[i]} / {partial[i]} / {zeros[i]}")
+    print(f"GPS times {gps_times.min():.3f} to {gps_times.max():.3f}; "
+          f"{len(np.unique(gps_times))} distinct of {rows} rows")
+    for label, count in zip(*np.unique(labels, return_counts=True)):
+        print(f"  label {label}: {count} ({count / rows * 100:.1f}%)")
+
+    issues = {
+        "partly non-finite windows": int(partial.sum()),
+        "windows held as zeros": int(zeros.sum()),
+        "rows repeating a GPS time": rows - len(np.unique(gps_times)),
+    }
+    found = {name: count for name, count in issues.items() if count}
+    print(f"ISSUES DETECTED: {found}" if found else "Cache healthy")
+    return not found
+
 
 if __name__ == "__main__":
-    default_path = "./gravyflow_data/glitch_cache_O3_L1.h5"
-    cache_path = sys.argv[1] if len(sys.argv) > 1 else default_path
-    check_cache(cache_path)
+    target = Path(sys.argv[1]) if len(sys.argv) > 1 else generate_transient_cache_path(prefix="glitch")
+    sys.exit(0 if check_cache(target) else 1)
