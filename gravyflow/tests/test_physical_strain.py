@@ -143,7 +143,7 @@ def test_dataset_outputs_are_identical_with_and_without_the_old_scale():
     and its raw onsource is the strain times that scale."""
     def dataset():
         return gf.GravyflowDataset(
-            seed=26, sample_rate_hertz=FS, onsource_duration_seconds=1.0,
+            group="train", seed=26, sample_rate_hertz=FS, onsource_duration_seconds=1.0,
             offsource_duration_seconds=16.0, crop_duration_seconds=0.5,
             num_examples_per_batch=4, ifos=[gf.IFO.H1, gf.IFO.L1],
             noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED, ifos=[gf.IFO.H1, gf.IFO.L1]),
@@ -203,7 +203,7 @@ def _sine_gaussian(scaling_type, value):
 
 def _white_dataset(generator):
     return gf.GravyflowDataset(
-        seed=26, sample_rate_hertz=FS, onsource_duration_seconds=1.0, offsource_duration_seconds=16.0,
+        group="train", seed=26, sample_rate_hertz=FS, onsource_duration_seconds=1.0, offsource_duration_seconds=16.0,
         num_examples_per_batch=2, ifos=[gf.IFO.L1],
         noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]),
         waveform_generators=generator, input_variables=[RV.ONSOURCE], output_variables=[gf.ScalingTypes.SNR],
