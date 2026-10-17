@@ -149,17 +149,9 @@ def build_event_segments(
         return ifos if ifos else [gf.IFO.H1, gf.IFO.L1]  # Conservative fallback
     
     for event in events:
-        # Determine source type from probabilities
-        p_bbh = event.get('p_bbh') or 0
-        p_bns = event.get('p_bns') or 0
-        p_nsbh = event.get('p_nsbh') or 0
-        
-        if p_bbh >= max(p_bns, p_nsbh):
-            source_type = SourceType.BBH
-        elif p_bns >= p_nsbh:
-            source_type = SourceType.BNS
-        else:
-            source_type = SourceType.NSBH
+        # The event list gives no source-class probabilities (only p_astro), so
+        # every event is labelled BBH.
+        source_type = SourceType.BBH
         
         # Map run string to enum
         run_str = event.get('observing_run', 'O3')

@@ -230,7 +230,7 @@ class EventRecord:
         mass1, mass2 = self.masses
         return {
             "name": self.name, "gps": float(self.gps), "mass1": mass1, "mass2": mass2,
-            "distance": 400.0, "p_bbh": 1.0, "p_bns": 0.0, "p_nsbh": 0.0,
+            "distance": 400.0, "p_astro": 1.0,
             "catalog": self.catalog,
             "observing_run": observing_run,
             "event_type": 1 if self.confident else 0,

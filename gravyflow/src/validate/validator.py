@@ -299,7 +299,7 @@ class Validator:
             ("Parameter Space", pn.Column(param_controls, param_plot) if param_controls else param_plot),
         )
         if self.real_events:
-            events_table, _ = generate_real_events_table(self.real_events)
+            events_table, _ = generate_real_events_table(self.real_events, self.input_duration_seconds)
             tabs.append(("Real Events", events_table))
 
         fn = self.worst_performers.get("false_negatives", {})

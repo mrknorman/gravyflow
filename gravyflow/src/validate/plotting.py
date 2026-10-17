@@ -1218,6 +1218,7 @@ def generate_efficiency_plot(
 
 def generate_real_events_table(
     events: List[Dict],
+    input_duration_seconds: float,
     far_thresholds: List[float] = [1e-1, 1e-2, 1e-3, 1e-4],
     width: int = 1200,
     num_waveform_plots: int = 5
@@ -1229,7 +1230,9 @@ def generate_real_events_table(
     background (``far_hz``) and the upper end of its interval (``far_upper_hz``).
 
     Args:
-        events: List of event dicts with name, gps, mass1, mass2, distance, score, etc.
+        events: List of event dicts with name, gps, mass1, mass2, distance, p_astro,
+            score, etc. (``get_events_with_params``, scored by the validator)
+        input_duration_seconds: The duration of each event's whitened strain
         far_thresholds: List of FAR values for dropdown
         width: Table width in pixels
 
@@ -1283,8 +1286,7 @@ def generate_real_events_table(
             "M₁ (M☉)": safe_fmt("mass1", ".1f"),
             "M₂ (M☉)": safe_fmt("mass2", ".1f"),
             "D (Mpc)": safe_fmt("distance", ".0f"),
-            "p(BBH)": safe_fmt("p_bbh", ".2f"),
-            "p(BNS)": safe_fmt("p_bns", ".2f"),
+            "p(astro)": safe_fmt("p_astro", ".2f"),
             "Score": f"{score:.3f}" if score is not None else "Pending",
             "FAR (Hz)": f"{far_hz:.1e} (≤ {far_upper_hz:.1e})" if far_hz is not None else "-",
             "_score_num": score if score is not None else -1,
@@ -1319,7 +1321,7 @@ def generate_real_events_table(
     )
     
     # Display columns (exclude internal columns)
-    display_cols = ["Name", "Type", "Run", "Date", "M₁ (M☉)", "M₂ (M☉)", "D (Mpc)", "p(BBH)", "p(BNS)", "Score", "FAR (Hz)"]
+    display_cols = ["Name", "Type", "Run", "Date", "M₁ (M☉)", "M₂ (M☉)", "D (Mpc)", "p(astro)", "Score", "FAR (Hz)"]
     
     # Summary stats
     num_confident = len(confident)
@@ -1414,7 +1416,7 @@ def generate_real_events_table(
                 <b>M1:</b> {safe_val('mass1', '.1f')} M☉<br>
                 <b>M2:</b> {safe_val('mass2', '.1f')} M☉<br>
                 <b>Dist:</b> {safe_val('distance', '.0f')} Mpc<br>
-                <b>p(BBH):</b> {safe_val('p_bbh', '.2f')}<br>
+                <b>p(astro):</b> {safe_val('p_astro', '.2f')}<br>
                 <b>Status:</b> {event.get('event_type', 'Unknown')}
             </div>
             """
