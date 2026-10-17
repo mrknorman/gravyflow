@@ -238,3 +238,25 @@ def test_obtainer_whitening_is_per_row(world, tmp_path):
     for row in rows:
         _assert_only_row_changed(control, run([row]), row, "whitened onsource")
 
+
+# L7: START_GPS_TIME is the GPS time of the first returned (cropped) onsource sample.
+@pytest.mark.parametrize("path", ["obtainer", "dataset"])
+@pytest.mark.parametrize("mode", [gf.SamplingMode.RANDOM, gf.SamplingMode.GRID], ids=lambda m: m.name)
+@pytest.mark.parametrize("rate", [1024.0, 2048.0, 4096.0])
+def test_start_gps_is_first_sample(world, tmp_path, rate, mode, path):
+    fixture = fx.odd_pieces(rate=rate)
+    window = fx.window(rate)
+    with world(fixture) as harness:
+        if path == "obtainer":
+            batches = fx.noise_batches(fixture, tmp_path, "train", rate=rate, mode=mode)
+        else:
+            batches = fx.dataset_batches(fx.dataset(fixture, tmp_path, "train", rate=rate, mode=mode))
+        record = audit.collect(harness, {path: ("train", batches)}, 2, IFOS, window,
+                               onsource_cropped=(path == "dataset"))[path]
+    assert record.start_labels is not None
+    cropped_start = (record.footprints[..., 0] + window.offsource + window.crop) / rate
+    error = record.start_labels - cropped_start
+    assert np.max(np.abs(error)) <= 1.0 / rate, (
+        f"START_GPS_TIME minus the decoded first onsource sample: min {error.min():.6f} s, "
+        f"max {error.max():.6f} s"
+    )
