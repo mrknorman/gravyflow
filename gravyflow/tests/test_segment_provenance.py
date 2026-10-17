@@ -16,18 +16,18 @@ sample, so a window's first sample decodes to its GPS time.
 
 import inspect
 import logging
-from contextlib import closing, contextmanager
-from unittest.mock import patch
+from contextlib import closing
 
 import h5py
 import numpy as np
 import pytest
-from gwpy.timeseries import TimeSeries
 
 import gravyflow as gf
 from gravyflow.src.dataset.acquisition import base
-from gravyflow.src.dataset.acquisition.base import BaseDataObtainer, segment_key
+from gravyflow.src.dataset.acquisition.base import segment_key
+from gravyflow.src.dataset.acquisition.sources import SegmentStrain
 from gravyflow.src.validate.provenance import UnfingerprintableError, canonical, config_fingerprint
+from gravyflow.tests.conftest import gwosc_serving
 
 RATE = 256.0
 ORIGIN = 1238175000.0  # inside O3; the fake's values count from each segment's start
@@ -39,20 +39,23 @@ IFOS = [gf.IFO.H1, gf.IFO.L1]
 
 class GridFetch:
     """
-    A fake GWOSC fetch: the samples of [start, end) on the absolute grid at the
-    requested rate, from the first grid sample at or after ``start``
-    (``first_grid_gps``), each valued its index from that sample. Records its calls.
+    A fake GWOSC fetch, publishing RATE: the samples of [start, end) on the absolute
+    grid, from the first grid sample at or after ``start`` (``first_grid_gps``), each
+    valued its index from that sample. Records its calls.
     """
+
+    rates = (RATE,)
 
     def __init__(self):
         self.calls = []
 
-    def __call__(self, start, end, ifo, frame_type, channel, sample_rate_hertz=None):
+    def __call__(self, ifo, sample_rate_hertz, interval):
+        start, end = interval
         self.calls.append((ifo.name, float(start), float(end)))
         rate = float(sample_rate_hertz)
         first, stop = int(np.ceil(start * rate - 1e-6)), int(np.ceil(end * rate - 1e-6))
         values = np.arange(stop - first, dtype=np.float32)
-        return TimeSeries(values, t0=first / rate, sample_rate=rate, channel=f"{ifo.name}:FAKE-GRID")
+        return SegmentStrain(values, first / rate, rate, f"{ifo.name}:FAKE-GRID")
 
 
 def first_grid_gps(start, rate=RATE):
@@ -63,10 +66,12 @@ def refuse_fetch(*args, **kwargs):
     raise AssertionError("fetched although the segment was cached")
 
 
-@contextmanager
+refuse_fetch.rates = (RATE,)
+
+
 def fetching(fetch):
-    with patch.object(BaseDataObtainer, "get_segment_data_static", staticmethod(fetch)):
-        yield fetch
+    """Every GWOSC() source serves ``fetch`` (``conftest.gwosc_serving``)."""
+    return gwosc_serving(fetch)
 
 
 def obtainer(**kwargs):
@@ -173,6 +178,7 @@ class TestSegmentCache:
             "runs": path(obtainer(observing_runs=gf.ObservingRun.O2)),
             "longest segment": path(obtainer(max_segment_duration_seconds=1024.0)),
             "run bounds": path(obtainer(overrides={"end_gps_times": ORIGIN + 1.0e6})),
+            "source": path(obtainer(source=gf.LocalFrames())),
         }
         monkeypatch.setattr(base, "SEGMENT_LAYOUT_VERSION", "another-layout")
         paths["layout"] = path()
@@ -194,6 +200,7 @@ OBTAINER_PERTURBATIONS = {
     "event_names": ["GW150914"],
     "gwosc_flags": gf.GWOSC_DATA_FLAGS,
     "split_spec": gf.SplitSpec(version="fold-1"),
+    "source": gf.LocalFrames(),
 }
 #: Data-determining parameters with one buildable value (public runs publish BEST only;
 #: training on real events is refused for now).

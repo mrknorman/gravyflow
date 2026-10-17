@@ -24,18 +24,16 @@ from unittest import mock
 import h5py
 import numpy as np
 import pytest
-from gwpy.timeseries import TimeSeries
-
 import gravyflow as gf
-from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
 from gravyflow.src.dataset.acquisition.cache import DiskCache
+from gravyflow.src.dataset.acquisition.sources import SegmentStrain
 from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
 from gravyflow.src.dataset.features import glitch_cache
 from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.glitch_cache import TransientCache, generate_transient_cache_path
 from gravyflow.src.utils.gps import gps_to_key
-from gravyflow.tests.conftest import catalogued_events
+from gravyflow.tests.conftest import catalogued_events, gwosc_serving
 
 RV = gf.ReturnVariables
 REF = 1240000000.0  # inside O3; every sample is valued its GPS time minus REF
@@ -92,7 +90,8 @@ class GridFetch:
         self.nan = nan
         self.ref = ref
 
-    def __call__(self, start, end, ifo, frame_type, channel, sample_rate_hertz=None):
+    def __call__(self, ifo, sample_rate_hertz, interval):
+        start, end = interval
         self.calls.append((ifo.name, float(start), float(end)))
         rate = float(sample_rate_hertz)
         first, stop = int(np.ceil(start * rate - 1e-6)), int(np.ceil(end * rate - 1e-6))
@@ -103,7 +102,7 @@ class GridFetch:
                 if not self.nan:
                     raise ValueError(f"no {ifo.name} data at {t}")
                 values[np.abs(times - t) < 2.0] = np.nan
-        return TimeSeries(values, t0=first / rate, sample_rate=rate, channel=f"{ifo.name}:FAKE-GRID")
+        return SegmentStrain(values, first / rate, rate, f"{ifo.name}:FAKE-GRID")
 
 
 @contextmanager
@@ -121,7 +120,7 @@ def offline(fetch=None, catalogue=None, science=SCIENCE, vetoes=None):
                            lambda self, ifo: science[ifo] if isinstance(science, dict) else science), \
          mock.patch.object(gf.TransientDataObtainer, "get_glitch_veto_segments",
                            lambda self, ifo: np.reshape(vetoes.get(ifo, np.empty((0, 2))), (-1, 2))), \
-         mock.patch.object(BaseDataObtainer, "get_segment_data_static", staticmethod(fetch)), \
+         gwosc_serving(fetch), \
          catalogued_events():
         yield fetch
 
@@ -248,7 +247,7 @@ class TestGeometry:
         for d, (ifo, prefix) in enumerate((("H1", "partner"), ("L1", "glitch"))):
             on_expected = np.asarray(expected[RV.ONSOURCE])[:, d:d + 1]
             off_expected = np.asarray(expected[RV.OFFSOURCE])[:, d:d + 1]
-            cache = TransientCache(generate_transient_cache_path(tmp_path, prefix=prefix), mode="r")
+            cache = TransientCache(generate_transient_cache_path(tmp_path, prefix=prefix, source=gf.GWOSC()), mode="r")
             indices = np.array([cache.index_of(t) for t in centres[:, d]])
             reads = {"get_batch": cache.get_batch(indices, target_ifos=[ifo], **request)[:2]}
             row = list(TransientDefaults.UNIVERSAL_IFOS).index(ifo)
@@ -351,7 +350,7 @@ class TestDataQuality:
         assert h1 and not any(start < t < end for start, end in h1 for t in TIMES), (
             "H1 was read at the time of a glitch seen only in L1"
         )
-        cache = TransientCache(generate_transient_cache_path(tmp_path, prefix="glitch"), mode="r")
+        cache = TransientCache(generate_transient_cache_path(tmp_path, prefix="glitch", source=gf.GWOSC()), mode="r")
         indices = np.array([cache.index_of(t) for t in TIMES])
         onsource, offsource, _, _ = cache.get_batch(indices, target_ifos=["H1"])
         assert np.all(np.isnan(onsource)) and np.all(np.isnan(offsource)), "a glitch's row holds H1"
@@ -458,7 +457,7 @@ class TestUnavailableRecords:
 
 def cache_rows(directory, prefix="glitch"):
     """The rows a transient cache holds: 0 when it does not exist."""
-    path = generate_transient_cache_path(directory, prefix=prefix)
+    path = generate_transient_cache_path(directory, prefix=prefix, source=gf.GWOSC())
     if not path.exists():
         return 0
     with h5py.File(path, "r") as file:
@@ -629,7 +628,7 @@ class TestCacheFormat:
     @pytest.mark.parametrize("place", ["its own name", "the current name"])
     def test_an_older_cache_with_a_zero_filled_row_is_never_served(self, tmp_path, place):
         path = (tmp_path / "glitch_cache.h5" if place == "its own name"
-                else generate_transient_cache_path(tmp_path, prefix="glitch"))
+                else generate_transient_cache_path(tmp_path, prefix="glitch", source=gf.GWOSC()))
         write_format_2_cache(path, TIMES)
         with offline(GridFetch(bad={"L1": [TIMES[1]]})) as fetch:
             batch, reader = served(tmp_path, [gf.IFO.H1, gf.IFO.L1], num_examples_per_batch=2)

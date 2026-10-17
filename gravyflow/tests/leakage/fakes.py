@@ -1,19 +1,21 @@
 """
 Fakes at the library's own seams: strain, GWOSC timelines and catalogues.
 
-- **Strain.** ``BaseDataObtainer.get_segment_data_static`` is the one strain fetch
-  that noise and transients both call. ``installed`` replaces it with
-  ``StrainSource.fetch``, which serves the fixture's provenance code (see
-  ``provenance``) at the requested rate and logs every request.
+- **Strain.** Every obtainer reads strain from its data source (``gf.DataSource``),
+  which defaults to ``gf.Defaults.source``. ``installed`` makes a ``FakeSource`` that
+  default for its block: GWOSC with its strain replaced by the fixture's provenance
+  code (see ``provenance``), at the fixture's own rate, logging every request. No
+  library code is patched.
 - **Segments.** Fake GWOSC timeline lists are written where ``gwosc_data`` caches
-  them, under a temporary ``GRAVYFLOW_CACHE_DIR``, so the real intersect and clip
-  code runs on them.
+  them, under a temporary ``GRAVYFLOW_CACHE_DIR``, so the real fetch, intersect and
+  clip code of ``GWOSC`` runs on them.
 - **Catalogues.** Gravity Spy rows are written as release CSVs and reduced to the
   compact cache by the library's own builder; event tables replace the event
   producers, in their own modules and wherever a module bound them by name.
 
 Everything is undone when ``installed`` exits. Batches must be drawn inside it,
-eagerly: prefetch executors are shut down before the patches are removed, so no
+eagerly: every background strain thread is stopped and joined
+(``store.shutdown``) before the default source and the patches are restored, so no
 background fetch can reach the real network afterwards.
 """
 
@@ -21,7 +23,6 @@ from __future__ import annotations
 
 import contextlib
 import csv
-import gc
 import io
 import json
 import os
@@ -33,6 +34,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pytest
+
+import gravyflow as gf
+from gravyflow.src.dataset.acquisition.sources import SegmentStrain
 
 from .provenance import CODE_DETECTORS, Encoding, OutsideFixture
 
@@ -67,53 +71,66 @@ class Fetch:
         return self.first + self.num_samples
 
 
-class StrainSource:
-    """Serves the provenance code at the seam, and logs every request and error."""
+class FakeSource(gf.GWOSC):
+    """
+    GWOSC with its strain replaced by the fixture's provenance code: its segments are
+    GWOSC's own (the fake timelines), its fetch serves the code and logs every request
+    and every refusal.
+
+    - It publishes only the fixture's rate, so every read resamples the broadband code
+      at ratio one, which keeps it exact.
+    - Its tiles are ``TILE_SECONDS`` long, a whole number of the code's blocks at any
+      fixture rate and a divisor of the split's blocks; a fetch serves NaN where its
+      interval leaves the fixture's islands, as a file that covers part of a tile.
+    - Its ``source_id`` names the fixture, so no fake tile shares a name with a real
+      GWOSC tile, or with another fixture's.
+
+    The fixture is its specification; the log is not, so a fake equals another of the
+    same fixture, and a copy of it (as every obtainer copy holds) is itself.
+    """
+
+    #: The fake's tile length: a power of two of seconds, so a whole number of blocks.
+    TILE_SECONDS = 64.0
 
     def __init__(self, encoding: Encoding):
         self.encoding = encoding
         self.fetches: List[Fetch] = []
         self.errors: List[str] = []
-        #: (ifo, first, stop, factor): served samples [first, stop) of ``ifo`` are
-        #: multiplied by ``factor`` (for tests that perturb one row's raw data).
-        self.perturbations: List[Tuple[str, int, int, float]] = []
         self._lock = threading.Lock()
 
-    def fetch(
-        self,
-        segment_start_gps_time,
-        segment_end_gps_time,
-        ifo,
-        frame_type=None,
-        channel=None,
-        sample_rate_hertz=None,
-    ):
-        from gwpy.timeseries import TimeSeries
+    def rates(self) -> Tuple[float, ...]:
+        return (self.encoding.sample_rate_hertz,)
 
-        name = getattr(ifo, "name", str(ifo))
+    def tile_seconds(self, sample_rate_hertz) -> float:
+        return self.TILE_SECONDS
+
+    def source_id(self, gps, sample_rate_hertz) -> str:
+        from gravyflow.src.validate.provenance import config_fingerprint
+
+        return f"fake-{config_fingerprint(self.encoding)[:16]}"
+
+    def specification(self) -> Dict:
+        return {"encoding": self.encoding}
+
+    def fetch(self, detector, sample_rate_hertz, interval) -> SegmentStrain:
+        name = getattr(detector, "name", str(detector))
         rate = self.encoding.sample_rate_hertz
+        start, end = float(interval[0]), float(interval[1])
         try:
-            if sample_rate_hertz is None or float(sample_rate_hertz) != rate:
+            if float(sample_rate_hertz) != rate:
                 raise OutsideFixture(
                     f"{name} requested at {sample_rate_hertz} Hz; the fixture serves {rate:g} Hz."
                 )
-            first = int(np.ceil(np.float64(segment_start_gps_time) * rate))
-            stop = int(np.ceil(np.float64(segment_end_gps_time) * rate))
-            values = self.encoding.encode(name, first, stop - first)
-            samples = np.arange(first, stop)
-            for ifo_name, lo, hi, factor in self.perturbations:
-                if ifo_name == name:
-                    values[(samples >= lo) & (samples < hi)] *= factor
+            first = int(np.ceil(np.float64(start) * rate))
+            stop = int(np.ceil(np.float64(end) * rate))
+            values = self.encoding.serve(name, first, stop - first)
         except Exception as error:
             with self._lock:
-                self.errors.append(f"{name} [{segment_start_gps_time}, {segment_end_gps_time}): {error}")
+                self.errors.append(f"{name} [{start}, {end}): {error}")
             raise
         with self._lock:
-            self.fetches.append(Fetch(
-                name, float(segment_start_gps_time), float(segment_end_gps_time),
-                first, stop - first, threading.current_thread().name,
-            ))
-        return TimeSeries(values, t0=first / rate, sample_rate=rate)
+            self.fetches.append(Fetch(name, start, end, first, stop - first, threading.current_thread().name))
+        return SegmentStrain(values, first / rate, rate, self.source_id(start, rate))
 
     def snapshot(self) -> Tuple[Tuple[Fetch, ...], Tuple[str, ...]]:
         with self._lock:
@@ -124,17 +141,8 @@ class StrainSource:
             self.fetches.clear()
             self.errors.clear()
 
-
-def close_obtainers() -> int:
-    """Shut down, waiting, every live obtainer's prefetch executor. Returns the count."""
-    from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
-
-    closed = 0
-    for obj in gc.get_objects():
-        if isinstance(obj, BaseDataObtainer) and getattr(obj, "_prefetch_executor", None) is not None:
-            obj.close()
-            closed += 1
-    return closed
+    def __repr__(self) -> str:
+        return f"FakeSource({self.encoding.sample_rate_hertz:g} Hz, {len(self.encoding.islands)} islands)"
 
 
 # =============================================================================
@@ -385,7 +393,7 @@ def install_events(monkeypatch: pytest.MonkeyPatch, events: Sequence[EventRecord
 class Harness:
     """What ``installed`` exposes to a test."""
 
-    source: StrainSource
+    source: FakeSource
     cache_dir: Path
     monkeypatch: pytest.MonkeyPatch
 
@@ -399,16 +407,17 @@ def installed(fixture, root: Path, cache_dir: Optional[Path] = None, strain: boo
     """
     Install ``fixture`` (a ``fixtures.Fixture``): strain, timelines and catalogues,
     with ``GRAVYFLOW_CACHE_DIR`` at ``cache_dir`` (default: a new directory under
-    ``root``). Draw every batch inside the block. ``strain=False`` leaves the real
-    strain fetch in place (for the guard's own test).
+    ``root``). Obtainers built inside the block read the fixture's ``FakeSource``, the
+    default source for its length. Draw every batch inside the block. ``strain=False``
+    leaves the default source, GWOSC, in place (for the guard's own test).
     """
-    from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
+    from gravyflow.src.dataset import store
     from gravyflow.src.dataset.features import gravity_spy
 
     root = Path(root)
     cache_dir = Path(cache_dir) if cache_dir is not None else root / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    source = StrainSource(fixture.encoding)
+    source = FakeSource(fixture.encoding)
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("GRAVYFLOW_CACHE_DIR", str(cache_dir))
         gravity_spy.clear_memory_cache()
@@ -416,11 +425,11 @@ def installed(fixture, root: Path, cache_dir: Optional[Path] = None, strain: boo
         write_gravity_spy(fixture.glitches, root / "gravityspy_csv")
         install_events(mp, fixture.events)
         if strain:
-            mp.setattr(BaseDataObtainer, "get_segment_data_static", staticmethod(source.fetch))
+            mp.setattr(gf.Defaults, "source", source)
         try:
             yield Harness(source, cache_dir, mp)
         finally:
-            close_obtainers()
+            store.shutdown()
             gravity_spy.clear_memory_cache()
     stale = leftover_fakes()
     if stale:
@@ -428,7 +437,7 @@ def installed(fixture, root: Path, cache_dir: Optional[Path] = None, strain: boo
 
 
 __all__ = [
-    "GWOSC_FLAGS", "HARDWARE_INJECTION_FLAGS", "Fetch", "StrainSource", "close_obtainers",
+    "GWOSC_FLAGS", "HARDWARE_INJECTION_FLAGS", "Fetch", "FakeSource",
     "write_timelines", "write_gravity_spy", "GlitchRecord", "EventRecord", "write_event_catalogue",
     "install_events", "leftover_fakes", "Harness", "installed",
 ]

@@ -686,9 +686,7 @@ class TestWholeSegments:
     def _get(self, start, end, rate):
         fetch = _RecordingFetch()
         obtainer = _noise_obtainer(gf.ObservingRun.O3)
-        with patch("gwdatafind.find_urls",
-                   side_effect=ValueError("no local frames")), \
-             patch("gwpy.timeseries.TimeSeries.fetch_open_data",
+        with patch("gwpy.timeseries.TimeSeries.fetch_open_data",
                    side_effect=fetch):
             segment = obtainer.get_segment(start, end, rate, gf.IFO.L1, "segments/test")
         return segment.data, fetch.calls

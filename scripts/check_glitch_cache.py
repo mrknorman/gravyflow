@@ -85,5 +85,9 @@ def check_cache(path: Path) -> bool:
 
 
 if __name__ == "__main__":
-    target = Path(sys.argv[1]) if len(sys.argv) > 1 else generate_transient_cache_path(prefix="glitch")
+    if len(sys.argv) > 1:
+        target = Path(sys.argv[1])
+    else:  # the glitch cache of the default source
+        import gravyflow as gf
+        target = generate_transient_cache_path(prefix="glitch", source=gf.Defaults.source)
     sys.exit(0 if check_cache(target) else 1)

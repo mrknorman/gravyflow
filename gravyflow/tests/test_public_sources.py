@@ -33,7 +33,8 @@ import pytest
 
 import gravyflow as gf
 from gravyflow.src.resources import PACKAGE
-from gravyflow.src.dataset.acquisition.base import BaseDataObtainer, ObservingRunData
+from gravyflow.src.dataset.acquisition import sources
+from gravyflow.src.dataset.acquisition.base import ObservingRunData
 from gravyflow.tests.conftest import refuse_internet
 
 FIXTURES = Path(__file__).parent / "fixtures" / "public_sources"
@@ -242,15 +243,11 @@ class TestRunBounds:
 
     def test_datetime_runs_count_leap_seconds(self):
         # 2017-01-01 00:00:00 UTC is GPS 1167264018 (18 leap seconds since 1980).
-        run = ObservingRunData(
-            "custom", datetime(2017, 1, 1), datetime(2017, 1, 2), {}, {}, {}
-        )
+        run = ObservingRunData("custom", datetime(2017, 1, 1), datetime(2017, 1, 2), {})
         assert run.start_gps_time == 1167264018
         assert run.end_gps_time == 1167264018 + 86400
         # 2015-09-12 00:00:00 UTC is GPS 1126051217 (17 leap seconds then).
-        run = ObservingRunData(
-            "custom", datetime(2015, 9, 12), datetime(2015, 9, 13), {}, {}, {}
-        )
+        run = ObservingRunData("custom", datetime(2015, 9, 12), datetime(2015, 9, 13), {})
         assert run.start_gps_time == 1126051217
 
 
@@ -379,116 +376,260 @@ class TestDefaultConfiguration:
 
 
 # =============================================================================
-# FRAME TYPES AND CHANNELS (O1/O2)
+# THE DATA SOURCE: GWOSC() BY DEFAULT, LocalFrames(...) BY NAME, NEVER A FALLBACK
 # =============================================================================
 
-class TestFrameTypesAndChannels:
-
-    # Verified against GWOSC's datafind server and the frame files' channel lists.
-    @pytest.mark.parametrize("run, frame_type, channel", [
-        (gf.ObservingRun.O1, "LOSC_4_V1", "LOSC-STRAIN"),
-        (gf.ObservingRun.O2, "GWOSC_O2_4KHZ_R1", "GWOSC-4KHZ_R1_STRAIN"),
-    ])
-    def test_run_tables(self, run, frame_type, channel):
-        assert run.value.frame_types[gf.DataQuality.BEST] == frame_type
-        assert run.value.channels[gf.DataQuality.BEST] == channel
-
-    @pytest.mark.parametrize("gps, frame_type, channel", [
-        (1126259446, "H1_LOSC_4_V1", "H1:LOSC-STRAIN"),
-        (1187008866, "H1_GWOSC_O2_4KHZ_R1", "H1:GWOSC-4KHZ_R1_STRAIN"),
-    ])
-    def test_local_frame_lookup_uses_matching_pair(self, gps, frame_type, channel):
-        calls = {}
-
-        def fake_find_urls(**kwargs):
-            calls["frametype"] = kwargs["frametype"]
-            return ["file:///frames/fake.gwf"]
-
-        def fake_read(files, channel=None, **kwargs):
-            calls["channel"] = channel
-            return "data"
-
-        with patch("gwdatafind.find_urls", side_effect=fake_find_urls), \
-             patch("gwpy.timeseries.TimeSeries.read", side_effect=fake_read):
-            run = [r for r in gf.ObservingRun
-                   if r.value.start_gps_time <= gps <= r.value.end_gps_time][0]
-            BaseDataObtainer.get_segment_data_static(
-                gps, gps + 32, gf.IFO.H1,
-                run.value.frame_types[gf.DataQuality.BEST],
-                run.value.channels[gf.DataQuality.BEST],
-            )
-        assert calls == {"frametype": frame_type, "channel": channel}
+#: A GPS time inside GWOSC's O3a run, and one inside O1.
+O3A_GPS, O1_GPS = 1238170000.0, 1126259446.0
+#: Sources that must never share a cache entry or a fingerprint: equal but for the source.
+SOURCES = {
+    "GWOSC": lambda: gf.GWOSC(),
+    "LocalFrames": lambda: gf.LocalFrames(),
+    "LocalFrames C00": lambda: gf.LocalFrames(
+        frametypes={"O3a": "HOFT_C00", "O3b": "HOFT_C00"},
+        channels={"O3a": "GDS-CALIB_STRAIN_CLEAN", "O3b": "GDS-CALIB_STRAIN_CLEAN"},
+    ),
+}
 
 
-# =============================================================================
-# REQUESTED SAMPLE RATE
-# =============================================================================
+def _noise_obtainer(source=None, **kwargs):
+    return gf.IFODataObtainer(
+        data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
+        observing_runs=gf.ObservingRun.O3, cache_segments=False, prefetch_segments=0,
+        source=source, **kwargs,
+    )
 
-def _fake_strain(start, rate, duration):
+
+def _fake_strain(start, rate, duration, channel="H1:FAKE-STRAIN"):
     """Gaussian strain as gwpy returns it: starting at ``start``, at ``rate``."""
     from gwpy.timeseries import TimeSeries
     value = np.random.default_rng(0).normal(size=int(rate * duration)).astype(np.float32)
-    return TimeSeries(value, t0=start, sample_rate=rate, channel="H1:FAKE-STRAIN")
+    return TimeSeries(value, t0=start, sample_rate=rate, channel=channel)
+
+
+class GwoscRecorder:
+    """gwpy's ``fetch_open_data``: records each call's keywords; serves Gaussian strain."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, ifo, start, end, sample_rate=4096, **kwargs):
+        self.calls.append({"ifo": ifo, "start": start, "end": end, "sample_rate": sample_rate, **kwargs})
+        return _fake_strain(start, sample_rate, end - start)
+
+
+def serving_gwosc(recorder):
+    """Every GWOSC download is served by ``recorder``."""
+    return patch("gwpy.timeseries.TimeSeries.fetch_open_data", side_effect=recorder)
+
+
+class TestDataSource:
+
+    def test_the_default_source_is_gwosc_and_an_obtainer_holds_its_own(self):
+        assert gf.Defaults.source == gf.GWOSC()
+        assert isinstance(gf.Defaults.source, gf.DataSource)
+        assert _noise_obtainer().source == gf.GWOSC()
+        local = gf.LocalFrames()
+        assert _noise_obtainer(local).source is local
+        with patch.object(gf.Defaults, "source", local):
+            assert _noise_obtainer().source is local
+        with pytest.raises(TypeError, match="gf.DataSource"):
+            _noise_obtainer("GWOSC")
+
+    def test_the_source_enters_the_fingerprint(self):
+        from gravyflow.src.validate.provenance import canonical, config_fingerprint
+
+        obtainer = _noise_obtainer()
+        assert obtainer.specification()["source"] == gf.GWOSC()
+        assert canonical(obtainer)["source"]["__type__"] == "GWOSC"
+        prints = {name: config_fingerprint(_noise_obtainer(make())) for name, make in SOURCES.items()}
+        assert len(set(prints.values())) == len(SOURCES), prints
+        # Equal sources give equal fingerprints: the fingerprint reads content, not identity.
+        assert config_fingerprint(_noise_obtainer(gf.LocalFrames())) == prints["LocalFrames"]
+
+    def test_gwosc_and_local_frames_never_share_a_cache_entry(self, tmp_path):
+        from gravyflow.src.dataset.features.glitch_cache import generate_transient_cache_path
+
+        segment_files = {name: _noise_obtainer(make()).generate_file_path(2048.0, "train", tmp_path)
+                         for name, make in SOURCES.items()}
+        assert len(set(segment_files.values())) == len(SOURCES), segment_files
+
+        transient_files = {}
+        for name, make in SOURCES.items():
+            reader = gf.IFODataObtainer(
+                data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
+                observing_runs=gf.ObservingRun.O3, source=make(),
+            )
+            reader.data_directory = tmp_path
+            for prefix in ("glitch", "event", "partner"):
+                cache, _ = reader._initialize_transient_cache(
+                    [gf.IFO.L1], 2048.0, 2.0, 16.0, enable_chunked_mode=False, prefix=prefix,
+                )
+                assert cache.path == generate_transient_cache_path(tmp_path, prefix, source=make())
+                transient_files[name, prefix] = cache.path
+        assert len(set(transient_files.values())) == len(transient_files), transient_files
+
+    def test_an_unreachable_local_frame_refuses_by_name_and_never_falls_back(self):
+        gwosc = GwoscRecorder()
+
+        def unreachable(**kwargs):
+            raise ConnectionRefusedError("the datafind server is unreachable")
+
+        with patch("gwdatafind.find_urls", side_effect=unreachable), serving_gwosc(gwosc):
+            with pytest.raises(gf.StrainUnavailable, match=(
+                    r"LocalFrames\(.*H1 strain over GPS \[1238170000.0, 1238170032.0\).*"
+                    r"ConnectionRefusedError: the datafind server is unreachable")) as refused:
+                gf.LocalFrames().fetch(gf.IFO.H1, 16384.0, (O3A_GPS, O3A_GPS + 32.0))
+            assert refused.value.source == gf.LocalFrames()
+            # Through an obtainer too: the read fails, and nothing is fetched from GWOSC.
+            _noise_obtainer(gf.LocalFrames()).get_segment(
+                O3A_GPS, O3A_GPS + 64.0, 2048.0, gf.IFO.H1, "segments/test")
+        assert gwosc.calls == [], "a local read error fell back to GWOSC"
+
+    def test_unreadable_frames_refuse_by_name(self):
+        def read(*args, **kwargs):
+            raise OSError("frame file truncated")
+
+        with patch("gwdatafind.find_urls", return_value=["file:///frames/H-H1_HOFT_C01.gwf"]), \
+             patch("gwpy.timeseries.TimeSeries.read", side_effect=read):
+            with pytest.raises(gf.StrainUnavailable, match="OSError: frame file truncated"):
+                gf.LocalFrames().fetch(gf.IFO.H1, 16384.0, (O3A_GPS, O3A_GPS + 32.0))
+        with patch("gwdatafind.find_urls", return_value=[]):
+            with pytest.raises(gf.StrainUnavailable, match="found no H1_HOFT_C01 frames"):
+                gf.LocalFrames().fetch(gf.IFO.H1, 16384.0, (O3A_GPS, O3A_GPS + 32.0))
+
+    @pytest.mark.parametrize("make, gps, frametype, channel", [
+        (lambda: gf.LocalFrames(), O3A_GPS, "H1_HOFT_C01", "H1:DCS-CALIB_STRAIN_CLEAN_C01"),
+        # GWOSC's own O1 and O2 frames, verified against its datafind server and the
+        # frame files' channel lists, named explicitly at their 4096 Hz.
+        (lambda: gf.LocalFrames(frametypes={"O1": "LOSC_4_V1"}, channels={"O1": "LOSC-STRAIN"},
+                                sample_rate_hertz=4096.0),
+         O1_GPS, "H1_LOSC_4_V1", "H1:LOSC-STRAIN"),
+        (lambda: gf.LocalFrames(frametypes={"O2": "GWOSC_O2_4KHZ_R1"},
+                                channels={"O2": "GWOSC-4KHZ_R1_STRAIN"}, sample_rate_hertz=4096.0),
+         1187008866.0, "H1_GWOSC_O2_4KHZ_R1", "H1:GWOSC-4KHZ_R1_STRAIN"),
+    ])
+    def test_local_frames_read_exactly_the_frame_type_they_name(self, make, gps, frametype, channel):
+        source, calls = make(), {}
+
+        def find(**kwargs):
+            calls.update(frametype=kwargs["frametype"], on_gaps=kwargs["on_gaps"])
+            return ["file:///frames/fake.gwf"]
+
+        def read(files, channel=None, start=None, end=None, **kwargs):
+            calls["channel"] = channel
+            return _fake_strain(start, source.sample_rate_hertz, end - start, channel)
+
+        with patch("gwdatafind.find_urls", side_effect=find), \
+             patch("gwpy.timeseries.TimeSeries.read", side_effect=read):
+            strain = source.fetch(gf.IFO.H1, source.sample_rate_hertz, (gps, gps + 32.0))
+        assert calls == {"frametype": frametype, "on_gaps": "raise", "channel": channel}
+        assert strain.sample_rate_hertz == source.sample_rate_hertz and strain.t0 == gps
+        assert strain.source == source.source_id(gps, source.sample_rate_hertz)
+
+    def test_local_frames_never_switch_frame_type_or_rate(self):
+        """A run the table does not name, and frames at another rate, refuse by name."""
+        o3a_only = gf.LocalFrames(frametypes={"O3a": "HOFT_C00"}, channels={"O3a": "GDS-CALIB_STRAIN"})
+        o3b = 1260000000.0
+        with pytest.raises(ValueError, match="names no frame type for GWOSC run O3b"):
+            o3a_only.fetch(gf.IFO.H1, 16384.0, (o3b, o3b + 32.0))
+        with pytest.raises(ValueError, match="names no frame type for GWOSC run O1"):
+            gf.LocalFrames().segments(gf.IFO.H1, ("DATA",), (O1_GPS, O1_GPS + 100.0))
+
+        def read_4096(files, start=None, end=None, **kwargs):
+            return _fake_strain(start, 4096.0, end - start)
+
+        with patch("gwdatafind.find_urls", return_value=["file:///frames/fake.gwf"]), \
+             patch("gwpy.timeseries.TimeSeries.read", side_effect=read_4096):
+            with pytest.raises(gf.StrainUnavailable, match="served at 4096 Hz, not its native 16384 Hz"):
+                gf.LocalFrames().fetch(gf.IFO.H1, 16384.0, (O3A_GPS, O3A_GPS + 32.0))
+        with pytest.raises(ValueError, match="serves 16384 Hz"):
+            gf.LocalFrames().fetch(gf.IFO.H1, 4096.0, (O3A_GPS, O3A_GPS + 32.0))
+        with pytest.raises(ValueError, match="frametypes and channels name different runs"):
+            gf.LocalFrames(frametypes={"O3a": "HOFT_C00"}, channels={"O3b": "GDS-CALIB_STRAIN"})
+        with pytest.raises(ValueError, match="Unknown GWOSC run"):
+            gf.LocalFrames(frametypes={"O3": "HOFT_C00"}, channels={"O3": "GDS-CALIB_STRAIN"})
+
+    def test_local_frames_plan_only_where_their_frames_are(self, offline_public_sources):
+        """LocalFrames' segments are the GWOSC timeline where its frames are found."""
+        o3a = (1238166018.0, 1253977218.0)
+        timeline = gf.GWOSC().segments(gf.IFO.H1, ("DATA",), o3a)
+        assert len(timeline)
+        first, last = float(timeline[0, 0]), float(timeline[0, 1])
+        # Frames over the first timeline segment, and over time the timeline excludes.
+        found = [(first - 50.0, first - 10.0), (first, last)]
+        with patch("gwdatafind.find_times", return_value=found) as find_times:
+            local = gf.LocalFrames().segments(gf.IFO.H1, ("DATA",), o3a)
+        np.testing.assert_array_equal(local, [[first, last]])
+        assert find_times.call_args.args[:2] == ("H", "H1_HOFT_C01")
+
+    def test_gwosc_fetches_the_runs_bulk_release_only(self):
+        gwosc = GwoscRecorder()
+        with serving_gwosc(gwosc):
+            strain = gf.GWOSC().fetch(gf.IFO.L1, 4096.0, (O3A_GPS, O3A_GPS + 32.0))
+            gf.GWOSC().fetch(gf.IFO.L1, 16384.0, (O1_GPS, O1_GPS + 32.0))
+        # The dataset is pinned, so an event release overlapping the time is never served.
+        assert [(call["dataset"], call["sample_rate"]) for call in gwosc.calls] == [
+            ("^O3a_4KHZ_R1$", 4096), ("^O1_16KHZ$", 16384)]
+        assert all(call["cache"] is True for call in gwosc.calls)
+        assert strain.source == "gwosc-O3a_4KHZ_R1" and strain.sample_rate_hertz == 4096.0
+        assert strain.t0 == O3A_GPS and len(strain.data) == 32 * 4096
+
+    def test_a_gwosc_failure_refuses_by_name(self):
+        def refused(*args, **kwargs):
+            raise ConnectionRefusedError("gwosc.org unreachable")
+
+        with patch("gwpy.timeseries.TimeSeries.fetch_open_data", side_effect=refused):
+            with pytest.raises(gf.StrainUnavailable, match=r"GWOSC\(\) could not deliver L1 strain.*unreachable"):
+                gf.GWOSC().fetch(gf.IFO.L1, 4096.0, (O3A_GPS, O3A_GPS + 32.0))
+
+    @pytest.mark.parametrize("gps, rate, expected", [
+        (1238163456.0, 4096.0, "gwosc-O3a_4KHZ_R1"),  # the tile begins before O3a does
+        (O3A_GPS, 16384.0, "gwosc-O3a_16KHZ_R1"),
+        (1126072320.0, 4096.0, "gwosc-O1"),
+        (1126072320.0, 16384.0, "gwosc-O1_16KHZ"),
+        (1260000000.0, 4096.0, "gwosc-O3b_4KHZ_R1"),
+    ])
+    def test_gwosc_names_the_release_of_the_run_a_tile_lies_in(self, gps, rate, expected):
+        assert gf.GWOSC().source_id(gps, rate) == expected
+        assert gf.GWOSC().tile_seconds(rate) == 4096.0
+
+    def test_gwosc_refuses_time_outside_its_runs_and_rates_it_does_not_publish(self):
+        with pytest.raises(ValueError, match="no GWOSC run"):
+            gf.GWOSC().source_id(1200000000.0, 4096.0)
+        with pytest.raises(ValueError, match="publishes 4096 and 16384 Hz"):
+            gf.GWOSC().fetch(gf.IFO.L1, 2048.0, (O3A_GPS, O3A_GPS + 32.0))
 
 
 class TestSampleRate:
 
-    def _fetch_recorder(self, calls):
-        def fake_fetch(ifo, start, end, sample_rate=4096, **kwargs):
-            calls.append(sample_rate)
-            return _fake_strain(start, sample_rate, end - start)
-        return fake_fetch
-
     @pytest.mark.parametrize("requested, fetched", [
-        (2048.0, 4096), (4096.0, 4096), (8192.0, 16384), (16384.0, 16384),
+        (2048.0, 4096.0), (4096.0, 4096.0), (8192.0, 16384.0), (16384.0, 16384.0),
     ])
-    def test_noise_fetch_uses_needed_rate(self, requested, fetched):
-        calls = []
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.NOISE],
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False,
-            prefetch_segments=0,
-        )
-        with patch("gwdatafind.find_urls",
-                   side_effect=ValueError("no local frames")), \
-             patch("gwpy.timeseries.TimeSeries.fetch_open_data",
-                   side_effect=self._fetch_recorder(calls)):
-            segment = obtainer.get_segment(
-                1238170000.0, 1238170000.0 + 64.2, requested, gf.IFO.L1, "segments/test"
+    def test_the_lowest_native_rate_at_or_above_the_request_is_fetched(self, requested, fetched):
+        assert sources.fetch_rate(gf.GWOSC(), requested) == fetched
+        assert sources.fetch_rate(gf.LocalFrames(), requested) == 16384.0
+        gwosc = GwoscRecorder()
+        with serving_gwosc(gwosc):
+            segment = _noise_obtainer().get_segment(
+                O3A_GPS, O3A_GPS + 64.2, requested, gf.IFO.L1, "segments/test"
             )
-        assert calls == [fetched]
+        assert [call["sample_rate"] for call in gwosc.calls] == [int(fetched)]
         assert segment is not None
         assert segment.data.shape[0] == int(64 * requested)
 
-    def test_transient_fetch_uses_needed_rate(self):
-        calls = []
-        with patch("gwdatafind.find_urls",
-                   side_effect=ValueError("no local frames")), \
-             patch("gwpy.timeseries.TimeSeries.fetch_open_data",
-                   side_effect=self._fetch_recorder(calls)):
-            BaseDataObtainer.get_segment_data_static(
-                1238170000.0, 1238170032.0, gf.IFO.L1, "HOFT_C01",
-                "DCS-CALIB_STRAIN_CLEAN_C01", sample_rate_hertz=16384.0,
-            )
-        assert calls == [16384]
-
-    def test_rates_above_gwosc_are_refused(self):
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=[gf.DataLabel.NOISE],
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False,
-            prefetch_segments=0,
-        )
+    def test_rates_above_the_source_and_not_whole_hertz_are_refused(self):
+        with pytest.raises(gf.UpsamplingRefused, match="upsample"):
+            sources.fetch_rate(gf.GWOSC(), 32768.0)
+        with pytest.raises(ValueError, match="whole number of hertz"):
+            sources.fetch_rate(gf.GWOSC(), 2048.5)
+        obtainer = _noise_obtainer()
         obtainer.valid_segments = np.array([[[1238170000.0, 1238172048.0]]])
-        with patch("gwdatafind.find_urls",
-                   side_effect=ValueError("no local frames")), \
-             patch("gwpy.timeseries.TimeSeries.fetch_open_data",
-                   side_effect=self._fetch_recorder([])):
+        gwosc = GwoscRecorder()
+        with serving_gwosc(gwosc):
             with pytest.raises(ValueError, match="upsample"):
                 next(obtainer.acquire(32768.0, ifos=[gf.IFO.L1]))
+        assert gwosc.calls == [], "fetched before refusing the rate"
 
 
 # =============================================================================
@@ -600,6 +741,7 @@ class TestPublicDefaults:
         noise = gf.NoiseObtainer(noise_type=gf.NoiseType.REAL, ifos=[gf.IFO.L1])
         assert noise.ifo_data_obtainer is not None
         assert gf.DataLabel.NOISE in noise.ifo_data_obtainer.data_labels
+        assert noise.ifo_data_obtainer.source == gf.GWOSC()
         assert noise.ifo_data_obtainer.state_flags[0] == (
             "DATA", "BURST_CAT1", "BURST_CAT2",
             "NO_CBC_HW_INJ", "NO_BURST_HW_INJ", "NO_STOCH_HW_INJ", "NO_DETCHAR_HW_INJ",

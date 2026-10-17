@@ -15,12 +15,11 @@ each sample (from the digits the block's samples carry), each sample's position,
 so each sample's absolute index. No label and no fetch log is read. Every value is at
 least 1 (a zero-filled row never decodes) and at most 2^13.
 
-Exactness. The library resamples every real-noise piece with a float32 FFT, even at
-an equal rate, on pieces of any whole-second length. Its round trip moves a value by
-an amount proportional to the largest value in the piece: an absolute ramp of 2^20
-values moved by up to 1.9, while values below 2^13 move by about 0.01. The decoder
-rounds to the nearest integer and refuses any value more than 0.25 from it, so an
-error that grows refuses loudly rather than shifting a row.
+Exactness. The code is broadband: neighbouring samples jump by up to 3840. The fake
+source therefore publishes only the fixture's rate, so every read resamples it at
+ratio one, which returns the samples unchanged; any low-pass filter would rewrite
+every sample. The decoder rounds to the nearest integer and refuses any value more
+than 0.25 from it, so a filtered or rescaled row refuses loudly rather than shifting.
 
 The decoder refuses, never skips: a row it cannot decode raises ``DecodeRefused``
 with the row and the reason.
@@ -130,6 +129,14 @@ class Encoding:
             inside |= (samples >= island.first) & (samples < island.end)
         return inside
 
+    def _code(self, detector: int, samples: np.ndarray) -> np.ndarray:
+        """The values of absolute sample indices ``samples`` of detector index ``detector``."""
+        m = samples - self.origin
+        position, block = m % BLOCK_SAMPLES, m // BLOCK_SAMPLES
+        digit = (block // DIGIT_BASE ** (position % NUM_DIGITS)) % DIGIT_BASE
+        values = 1 + position + BLOCK_SAMPLES * (digit + DIGIT_BASE * detector)
+        return values.astype(np.float64) * self.unit
+
     def encode(self, ifo_name: str, first: int, num_samples: int) -> np.ndarray:
         """Values of samples [first, first + num_samples) of one detector, float64."""
         detector = self.detector_index(ifo_name)
@@ -142,11 +149,25 @@ class Encoding:
                 f"{self.sample_rate_hertz:g} Hz are not in the fixture (first missing GPS "
                 f"{(missing[0] if len(missing) else first) / self.sample_rate_hertz:.6f})."
             )
-        m = samples - self.origin
-        position, block = m % BLOCK_SAMPLES, m // BLOCK_SAMPLES
-        digit = (block // DIGIT_BASE ** (position % NUM_DIGITS)) % DIGIT_BASE
-        values = 1 + position + BLOCK_SAMPLES * (digit + DIGIT_BASE * detector)
-        return values.astype(np.float64) * self.unit
+        return self._code(detector, samples)
+
+    def serve(self, ifo_name: str, first: int, num_samples: int) -> np.ndarray:
+        """
+        Samples [first, first + num_samples) as a source serves them: the code inside
+        the islands and NaN outside, as a file that covers only part of a tile. Refuses
+        a request that holds no sample of an island.
+        """
+        detector = self.detector_index(ifo_name)
+        samples = np.arange(first, first + num_samples, dtype=np.int64)
+        inside = self.inside(samples)
+        if not np.any(inside):
+            raise OutsideFixture(
+                f"{ifo_name} samples {first}..{first + num_samples} at "
+                f"{self.sample_rate_hertz:g} Hz hold no sample of the fixture."
+            )
+        values = np.full(num_samples, np.nan)
+        values[inside] = self._code(detector, samples[inside])
+        return values
 
 
 @dataclass(frozen=True)

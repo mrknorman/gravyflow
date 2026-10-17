@@ -5,8 +5,11 @@ Every decoder refusal and every assertion helper is shown to refuse a planted
 defect, so a helper that would pass vacuously fails here.
 """
 
+import gc
 import os
 import socket
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -17,9 +20,9 @@ from gravyflow.src.dataset.config import TransientDefaults
 
 from . import audit
 from . import fixtures as fx
-from .fakes import EventRecord, GlitchRecord, StrainSource
+from .fakes import EventRecord, FakeSource, GlitchRecord
 from .provenance import (
-    CODE_CEILING, DecodeRefused, Encoding, OutsideFixture, decode_row, decode_rows,
+    BLOCK_SAMPLES, CODE_CEILING, DecodeRefused, Encoding, OutsideFixture, decode_row, decode_rows,
 )
 
 RV = gf.ReturnVariables
@@ -169,16 +172,42 @@ def test_decoder_refuses_values_outside_the_fixture(code):
         decode_row(_row(code, n=4), "H1", code)
 
 
-def test_the_fake_refuses_requests_outside_the_fixture(code):
-    source = StrainSource(code)
+def test_the_fake_is_a_gwosc_source_serving_the_fixture_at_its_own_rate(code):
+    """
+    The fake is GWOSC with its strain replaced: GWOSC's own timeline code plans on it.
+    It publishes only the fixture's rate, so the resampler runs at ratio one and keeps
+    the broadband code; its tiles are short and on the code's block grid, and named
+    as no GWOSC tile is.
+    """
+    source = FakeSource(code)
+    assert isinstance(source, gf.GWOSC) and type(source).segments is gf.GWOSC.segments
+    assert source.rates() == (256.0,)
+    tile = source.tile_seconds(256.0)
+    assert tile <= 64.0 and (tile * 256.0) % BLOCK_SAMPLES == 0
+    assert gf.SplitSpec().block_seconds % tile == 0
+    name = source.source_id(1000.0, 256.0)
+    assert name.startswith("fake-") and name != gf.GWOSC().source_id(1238166018.0, 4096.0)
+    other = FakeSource(Encoding.from_intervals([(1000.0, 1020.0)], 256.0))
+    assert other.source_id(1000.0, 256.0) != name and other != source
+    assert FakeSource(code) == source and source != gf.GWOSC()
+
+
+def test_the_fake_serves_nan_outside_its_islands_and_refuses_what_it_does_not_hold(code):
+    source = FakeSource(code)
+    # A tile across an island's end: the island's samples decode, the rest are NaN.
+    served = source.fetch(gf.IFO.H1, 256.0, (1008.0, 1012.0))
+    values = np.asarray(served.data)
+    assert served.t0 == 1008.0 and served.sample_rate_hertz == 256.0
+    assert np.all(np.isnan(values[2 * 256:])) and not np.any(np.isnan(values[:2 * 256]))
+    assert decode_row(values[:2 * 256], "H1", code).first == 1008 * 256
     with pytest.raises(OutsideFixture):
-        source.fetch(1005.0, 1020.0, gf.IFO.H1, sample_rate_hertz=256.0)
+        source.fetch(gf.IFO.H1, 256.0, (1012.0, 1020.0))  # no island sample at all
     with pytest.raises(OutsideFixture):
-        source.fetch(1001.0, 1002.0, gf.IFO.H1, sample_rate_hertz=4096.0)
+        source.fetch(gf.IFO.H1, 4096.0, (1001.0, 1002.0))  # not the rate it publishes
     fetches, errors = source.snapshot()
-    assert fetches == () and len(errors) == 2
-    served = source.fetch(1001.0, 1002.0, gf.IFO.L1, sample_rate_hertz=256.0)
-    assert decode_row(np.asarray(served.value), "L1", code).first == 1001 * 256
+    assert len(fetches) == 1 and len(errors) == 2
+    served = source.fetch(gf.IFO.L1, 256.0, (1001.0, 1002.0))
+    assert decode_row(np.asarray(served.data), "L1", code).first == 1001 * 256
 
 
 def test_encoding_refuses_a_layout_beyond_the_code():
@@ -205,7 +234,7 @@ def _synthetic_batch(code, firsts, window):
 
 
 def _fetching_then(harness, start, batch):
-    harness.source.fetch(start, start + 1.0, gf.IFO.H1, sample_rate_hertz=256.0)
+    harness.source.fetch(gf.IFO.H1, 256.0, (start, start + 1.0))
     yield batch
 
 
@@ -225,7 +254,7 @@ def test_collect_refuses_cold_without_fetches_warm_with_them_and_errors(world):
             audit.collect(harness, {"b": ("train", _fetching_then(harness, start, batch))}, 1,
                           IFOS, window, True, warm=True)
         with pytest.raises(OutsideFixture):
-            harness.source.fetch(1.0, 2.0, gf.IFO.H1, sample_rate_hertz=256.0)
+            harness.source.fetch(gf.IFO.H1, 256.0, (1.0, 2.0))
         with pytest.raises(AssertionError, match="refused 1 fetch"):
             audit.collect(harness, {"c": ("train", _fetching_then(harness, start, batch))}, 1,
                           IFOS, window, True)
@@ -342,8 +371,8 @@ def test_assert_inside_one_fetch_refuses_a_footprint_across_two_fetches(world):
     with world(fixture) as harness:
         start = float(fixture.segments["H1"][0][0])
         for ifo in (gf.IFO.H1, gf.IFO.L1):
-            harness.source.fetch(start, start + 50.0, ifo, sample_rate_hertz=256.0)
-            harness.source.fetch(start + 50.0, start + 100.0, ifo, sample_rate_hertz=256.0)
+            harness.source.fetch(ifo, 256.0, (start, start + 50.0))
+            harness.source.fetch(ifo, 256.0, (start + 50.0, start + 100.0))
         inside = np.stack([np.stack([[start + k, start + k + 6.0]] * 2) for k in range(8)])
         audit.assert_inside_one_fetch([_records("a", "train", inside)], harness)
         across = inside.copy()
@@ -451,8 +480,8 @@ def test_every_cache_lives_under_the_one_cache_root():
         data_labels=[gf.DataLabel.NOISE],
     )
     for path in (
-        generate_transient_cache_path(prefix="glitch"),
-        generate_transient_cache_path(prefix="event"),
+        generate_transient_cache_path(prefix="glitch", source=gf.GWOSC()),
+        generate_transient_cache_path(prefix="event", source=gf.GWOSC()),
         gravity_spy.cache_dir(),
         gwosc_data._timeline_cache_path("O1", "H1_DATA", 0, 1),
         obtainer.generate_file_path(256.0, "train", gf.NoiseObtainer().data_directory_path),
@@ -463,25 +492,75 @@ def test_every_cache_lives_under_the_one_cache_root():
 def test_strain_downloads_are_cached_under_the_one_cache_root(monkeypatch):
     """gwpy's GWOSC strain download goes to astropy's cache, which is moved under the root."""
     from astropy.config import get_cache_dir_path
-    import gwdatafind
     from gwpy.timeseries import TimeSeries
-
-    from gravyflow.src.dataset.acquisition import base
-
-    def no_local_frames(**kwargs):
-        raise ValueError("no local frames")
 
     seen = []
 
     def fetch_open_data(*args, **kwargs):
         seen.append((get_cache_dir_path(), kwargs.get("cache")))
-        return TimeSeries(np.ones(16), t0=args[1], sample_rate=16)
+        return TimeSeries(np.ones(4096), t0=args[1], sample_rate=4096)
 
-    monkeypatch.setattr(gwdatafind, "find_urls", no_local_frames)
     monkeypatch.setattr(TimeSeries, "fetch_open_data", fetch_open_data)
-    base.BaseDataObtainer.get_segment_data_static(1238166018.0, 1238166019.0, gf.IFO.L1, "HOFT_C01",
-                                                   "DCS-CALIB_STRAIN_CLEAN_C01", 4096.0)
+    gf.GWOSC().fetch(gf.IFO.L1, 4096.0, (1238166018.0, 1238166019.0))
     (directory, cache), = seen
     assert cache is True
     assert Path(os.environ["GRAVYFLOW_CACHE_DIR"]) in directory.parents, directory
     assert Path(os.environ["GRAVYFLOW_CACHE_DIR"]) not in get_cache_dir_path().parents
+
+
+# =============================================================================
+# INSTALLED: THE FAKE IS THE DEFAULT SOURCE, AND NOTHING OUTLIVES THE BLOCK
+# =============================================================================
+
+def test_installed_makes_the_fake_the_default_source_for_its_block(world):
+    """No patch of the library: obtainers built in the block hold the fake as their source."""
+    from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
+
+    fixture = fx.straddle("train", "test", half_width=64.0)
+    assert not hasattr(BaseDataObtainer, "get_segment_data_static")
+    with world(fixture) as harness:
+        assert gf.Defaults.source is harness.source
+        assert isinstance(harness.source, FakeSource) and harness.source.encoding == fixture.encoding
+        assert fx.ifo_data_obtainer(fixture).source is harness.source
+    assert gf.Defaults.source == gf.GWOSC()
+    with world(fixture, strain=False):
+        assert gf.Defaults.source == gf.GWOSC()
+
+
+def _background_threads(before):
+    return [thread for thread in threading.enumerate() if thread not in before and thread.is_alive()]
+
+
+def test_no_background_thread_survives_installed(world, tmp_path):
+    """
+    Every thread a block starts is a named store thread, and none outlives the block:
+    not even the prefetch of an obtainer dropped while its fetch is still running,
+    which no reference to the obtainer can reach any more.
+    """
+    fixture = fx.odd_pieces()  # pieces in several bins: rows to prefetch
+    before = set(threading.enumerate())
+    with world(fixture) as harness:
+        fetch = FakeSource.fetch
+        prefetching = threading.Event()
+
+        def slow(source, *args, **kwargs):
+            if threading.current_thread().name.startswith("gfstore-"):
+                prefetching.set()
+                time.sleep(1.0)
+            return fetch(source, *args, **kwargs)
+
+        harness.monkeypatch.setattr(FakeSource, "fetch", slow)
+        obtainer = fx.ifo_data_obtainer(fixture, prefetch_segments=2)
+        ifos = [gf.IFO[name] for name in IFOS]
+        obtainer.get_valid_segments(ifos, 7, "train")
+        assert len(obtainer.valid_segments) >= 2
+        rows = obtainer.acquire(256.0, obtainer.valid_segments, ifos)  # the streaming read
+        next(rows)
+        assert prefetching.wait(10.0), "no prefetch ran in the background"
+        started = _background_threads(before)
+        assert started and all(thread.name.startswith("gfstore-") for thread in started), (
+            [thread.name for thread in started])
+        del rows, obtainer
+        gc.collect()
+    survivors = _background_threads(before)
+    assert not survivors, f"threads outlived the block: {[thread.name for thread in survivors]}"

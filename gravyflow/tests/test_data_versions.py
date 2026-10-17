@@ -110,9 +110,9 @@ class TestCachesAreCut:
         assert noise_reads.obtainer().generate_file_path(noise_reads.RATE, "train", tmp_path) != path
 
     def test_a_transient_cache_from_before_the_cut_is_never_read(self, tmp_path):
-        path = generate_transient_cache_path(data_directory=tmp_path, prefix="glitch")
+        path = generate_transient_cache_path(data_directory=tmp_path, prefix="glitch", source=gf.GWOSC())
         assert TRANSIENT_CACHE_FORMAT > TRANSIENT_FORMAT_BEFORE_THE_FIR
-        assert path.name == f"glitch_cache_v{TRANSIENT_CACHE_FORMAT}.h5"
+        assert path.name.startswith(f"glitch_cache_v{TRANSIENT_CACHE_FORMAT}_")
 
         cache = TransientCache(path, mode="w")  # a file of the old format at the new name
         cache.initialize_file(4096.0, 32.0, 32.0, ["H1", "L1"], 2, 8, 8)

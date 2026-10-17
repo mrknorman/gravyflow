@@ -9,7 +9,7 @@ import itertools
 import logging
 from collections import Counter
 from typing import Any, List, Dict, NamedTuple, Optional, Union, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,8 @@ from gravyflow.src.utils.gps import as_gps_times
 from gravyflow.src.dataset.features.transient_index import TransientIndex, transient_footprint
 from .transient_segment import TransientSegment
 from .gwosc_data import within_segments
+from .sources import DataSource, fetch_rate
+from gravyflow.src.dataset.store.pools import thread_pool
 from .partners import partner_time
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
 from gravyflow.src.dataset.splits import SplitSpec
@@ -84,14 +86,17 @@ class TransientDataObtainer(BaseDataObtainer):
             event_names: List[str] = None,
             split_spec: Optional[SplitSpec] = None,
             train_on_real_events: bool = False,
+            source: Optional[DataSource] = None,
         ):
         """
-        Args (split):
+        Args (split and source):
             split_spec: How GPS time is split (``gf.SplitSpec``); None is the default.
             train_on_real_events: Real events are evaluation data, all in ``test``.
                 True, which would put each in its footprint's split and train on
                 some, is refused for now: an event is read on every detector at its
                 own time, unlike a glitch, and no flag yet marks it as coincident.
+            source: Where strain comes from (``gf.DataSource``); None takes
+                ``gf.Defaults.source`` (``BaseDataObtainer``).
         """
         if train_on_real_events:
             raise ValueError(
@@ -123,6 +128,7 @@ class TransientDataObtainer(BaseDataObtainer):
             augmentations=augmentations,
             prefetch_segments=prefetch_segments,
             split_spec=split_spec,
+            source=source,
         )
 
         self.acquisition_mode = AcquisitionMode.TRANSIENT
@@ -632,24 +638,19 @@ class TransientDataObtainer(BaseDataObtainer):
     def _download(self, spans: Dict[Tuple, Tuple[gf.IFO, float, float]], sample_rate_hertz: float) -> Dict:
         """
         Each span's strain, {key: (samples, GPS time of the first)} at
-        ``sample_rate_hertz``, downloaded in parallel; a span whose strain could not
-        be had is left out (never zeros). ``spans`` is {key: (ifo, start, end)}.
+        ``sample_rate_hertz``, fetched from the obtainer's source in parallel at the
+        native rate it needs (``fetch_rate``); a span whose strain could not be had is
+        left out (never zeros). ``spans`` is {key: (ifo, start, end)}.
         """
+        native_rate = fetch_rate(self.source, sample_rate_hertz)
+
         def download(key):
             ifo, start, end = spans[key]
-            frame_type, channel = BaseDataObtainer.get_frame_channel_for_gps_static(
-                start, self.frame_types, self.channels, self.start_gps_times, self.end_gps_times
-            )
             try:
-                strain = BaseDataObtainer.get_segment_data_static(
-                    start, end, ifo, frame_type, channel, sample_rate_hertz=sample_rate_hertz,
-                )
-                if strain.sample_rate.value < sample_rate_hertz:
-                    raise ValueError("source rate below the download rate")
+                strain = self.source.fetch(ifo, native_rate, (start, end))
                 # The stored windows end 0.2 s inside the span, past the resampler's
                 # margin (under 0.02 s from any public rate), so each stored sample is exact.
-                return key, resample(strain.value, float(strain.t0.value), strain.sample_rate.value,
-                                     sample_rate_hertz)
+                return key, resample(strain.data, strain.t0, strain.sample_rate_hertz, sample_rate_hertz)
             except Exception as error:
                 logger.debug(f"No {ifo.name} strain over GPS {start:.3f}-{end:.3f}: {error}")
                 return key, None
@@ -658,7 +659,7 @@ class TransientDataObtainer(BaseDataObtainer):
         if not spans:
             return downloaded
         workers = min(32, len(spans))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        with thread_pool("download", workers) as executor:
             futures = [executor.submit(download, key) for key in spans]
             for future in tqdm(as_completed(futures), total=len(futures), desc=f"Downloading ({workers}w)",
                                unit="read", leave=False, dynamic_ncols=True):
@@ -721,22 +722,21 @@ class TransientDataObtainer(BaseDataObtainer):
         )
         return onsource[0], offsource[0]
 
-    @staticmethod
-    def _download_rate(window_spec: WindowSpec) -> float:
+    def _download_rate(self, window_spec: WindowSpec) -> float:
         """
         The rate a request's strain is downloaded and stored at: the higher of its own
         and the cache's (a cache can downsample, never upsample).
 
         Refuses, by name, a request no read could serve: a rate that is not whole hertz,
-        that no public source holds, or whose windows reach past the stored strain, the
-        resampler's margin counted (``TransientCache.check_request``). Called once, as
-        a request is configured, before any cache is opened or any strain fetched.
+        that the obtainer's source does not hold (``fetch_rate``), or whose windows reach
+        past the stored strain, the resampler's margin counted
+        (``TransientCache.check_request``). Called once, as a request is configured,
+        before any cache is opened or any strain fetched.
         """
         from gravyflow.src.dataset.features.glitch_cache import CACHE_SAMPLE_RATE_HERTZ
-        from .gwosc_data import gwosc_sample_rate_hertz
 
         download_rate = max(whole_hertz(window_spec.sample_rate_hertz), CACHE_SAMPLE_RATE_HERTZ)
-        gwosc_sample_rate_hertz(download_rate)
+        fetch_rate(self.source, download_rate)
         TransientCache.check_request(
             download_rate, window_spec.sample_rate_hertz,
             window_spec.total_onsource_duration_seconds, window_spec.offsource_duration_seconds,
@@ -817,8 +817,8 @@ class TransientDataObtainer(BaseDataObtainer):
         # Determine data directory (None = the user cache, gwosc_data.user_cache_dir)
         data_dir = getattr(self, 'data_directory', None)
         
-        # A cache file per prefix: glitches, events and partners (one format)
-        cache_path = generate_transient_cache_path(data_directory=data_dir, prefix=prefix)
+        # A cache file per prefix (glitches, events and partners) and source: one format
+        cache_path = generate_transient_cache_path(data_directory=data_dir, prefix=prefix, source=self.source)
         
         # Manage multiple caches (glitch, event)
         cache_attr = f"_{prefix}_cache"

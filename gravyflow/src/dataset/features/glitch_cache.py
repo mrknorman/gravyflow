@@ -1107,14 +1107,17 @@ class TransientCache:
                 gps_times[unsort_order], labels[unsort_order])
 
 
-def generate_transient_cache_path(data_directory: Optional[Path] = None, prefix: str = "transient") -> Path:
+def generate_transient_cache_path(data_directory: Optional[Path] = None, prefix: str = "transient", *,
+                                  source) -> Path:
     """
     Generate standardized cache file path.
 
     Different prefixes are used for different transient types (e.g., "glitch" for
     glitches, "event" for GW events), resulting in separate cache files. The name
     carries ``TRANSIENT_CACHE_FORMAT``: a cache of another format is never read, and
-    gravyflow never deletes a user's files, so an older one is left where it is.
+    gravyflow never deletes a user's files, so an older one is left where it is. It
+    carries the data source's fingerprint too, so strain from two sources (``GWOSC()``
+    and ``LocalFrames()``, say) never shares a file.
 
     Args:
         data_directory: Base directory for cache files. If None, the user cache
@@ -1122,11 +1125,14 @@ def generate_transient_cache_path(data_directory: Optional[Path] = None, prefix:
             ``~/.gravyflow/cache``), the one root every gravyflow cache uses, so
             the same cache is found whatever the working directory.
         prefix: Filename prefix (e.g. "transient", "glitch", "event")
+        source: The data source the cached strain comes from (``gf.DataSource``).
 
     Returns:
-        Path like: data_directory/{prefix}_cache_v{TRANSIENT_CACHE_FORMAT}.h5
+        Path like: data_directory/{prefix}_cache_v{TRANSIENT_CACHE_FORMAT}_{source key}.h5
     """
-    name = f"{prefix}_cache_v{TRANSIENT_CACHE_FORMAT}.h5"
+    from gravyflow.src.validate.provenance import config_fingerprint
+
+    name = f"{prefix}_cache_v{TRANSIENT_CACHE_FORMAT}_{config_fingerprint(source)[:16]}.h5"
     if data_directory is None:
         from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
 

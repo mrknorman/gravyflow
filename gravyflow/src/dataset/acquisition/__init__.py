@@ -44,6 +44,7 @@ from .gwosc_data import (
     DEFAULT_GWOSC_FLAGS,
     UpsamplingRefused,
 )
+from .sources import DataSource, GWOSC, LocalFrames, StrainUnavailable
 from .noise import NoiseDataObtainer
 from .transient import TransientDataObtainer
 from .transient_segment import TransientSegment
@@ -81,6 +82,11 @@ __all__ = [
     'GWOSC_NO_HW_INJECTION_FLAGS',
     'DEFAULT_GWOSC_FLAGS',
     'UpsamplingRefused',
+    # Data sources
+    'DataSource',
+    'GWOSC',
+    'LocalFrames',
+    'StrainUnavailable',
     # Utility functions
     'ensure_even',
     'ifo_canonical_key',

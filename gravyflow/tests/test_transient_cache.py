@@ -244,28 +244,33 @@ class TestCachePersistence:
 
 
 class TestCachePathGeneration:
-    """Cache paths: one file per prefix, named with the cache format."""
+    """Cache paths: one file per prefix and data source, named with the cache format."""
 
     def test_default_prefix_is_transient(self, temp_cache_dir):
         """Default prefix should be 'transient'."""
-        path = generate_transient_cache_path(data_directory=temp_cache_dir)
-        assert path.name == f"transient_cache_v{TRANSIENT_CACHE_FORMAT}.h5"
+        path = generate_transient_cache_path(data_directory=temp_cache_dir, source=gf.GWOSC())
+        assert path.name.startswith(f"transient_cache_v{TRANSIENT_CACHE_FORMAT}_")
 
-    def test_each_prefix_has_its_own_file_named_with_the_format(self, temp_cache_dir):
-        glitch_path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="glitch")
-        event_path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="event")
-        assert glitch_path.name == f"glitch_cache_v{TRANSIENT_CACHE_FORMAT}.h5"
-        assert event_path.name == f"event_cache_v{TRANSIENT_CACHE_FORMAT}.h5"
+    def test_each_prefix_and_source_has_its_own_file_named_with_the_format(self, temp_cache_dir):
+        glitch_path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="glitch",
+                                                    source=gf.GWOSC())
+        event_path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="event",
+                                                   source=gf.GWOSC())
+        local_path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="glitch",
+                                                   source=gf.LocalFrames())
+        assert glitch_path.name.startswith(f"glitch_cache_v{TRANSIENT_CACHE_FORMAT}_")
+        assert event_path.name.startswith(f"event_cache_v{TRANSIENT_CACHE_FORMAT}_")
+        assert local_path != glitch_path and local_path.name.startswith(f"glitch_cache_v{TRANSIENT_CACHE_FORMAT}_")
 
     def test_default_directory_is_the_user_cache(self, monkeypatch, tmp_path):
         """The default is the one user cache root: GRAVYFLOW_CACHE_DIR, else ~/.gravyflow/cache."""
-        name = f"glitch_cache_v{TRANSIENT_CACHE_FORMAT}.h5"
+        name = generate_transient_cache_path(tmp_path, prefix="glitch", source=gf.GWOSC()).name
         monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path / "override"))
-        assert generate_transient_cache_path(prefix="glitch") == tmp_path / "override" / name
+        assert generate_transient_cache_path(prefix="glitch", source=gf.GWOSC()) == tmp_path / "override" / name
 
         monkeypatch.delenv("GRAVYFLOW_CACHE_DIR")
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        path = generate_transient_cache_path(prefix="glitch")
+        path = generate_transient_cache_path(prefix="glitch", source=gf.GWOSC())
         assert path == tmp_path / "home" / ".gravyflow" / "cache" / name
 
 

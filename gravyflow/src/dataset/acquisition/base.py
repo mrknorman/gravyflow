@@ -6,10 +6,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, IntEnum, auto
 from contextlib import closing
-from typing import TYPE_CHECKING, List, Tuple, Union, Dict, Any, Optional, Generator, NamedTuple, Sequence, FrozenSet
+from typing import TYPE_CHECKING, List, Tuple, Union, Dict, Any, Optional, Generator, Sequence, FrozenSet
 from pathlib import Path
 from .cache import MemoryCache
-from concurrent.futures import ThreadPoolExecutor, Future
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
@@ -32,11 +31,12 @@ from gravyflow.src.utils.tensor import check_tensor_integrity
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
 from gravyflow.src.utils.gps import as_gps_times
 from gravyflow.src.utils.shapes import ShapeEnforcer
+from gravyflow.src.dataset.store.pools import thread_pool
 from .gwosc_data import (
     GWOSC_RUNS, DEFAULT_GWOSC_FLAGS, UpsamplingRefused, coalesce_segments,
-    get_gwosc_segments, gwosc_runs_overlapping, gwosc_sample_rate_hertz, strain_download_cache,
     subtract_segments, user_cache_dir, warn_of_moved_cache,
 )
+from .sources import DataSource, SegmentStrain, fetch_rate
 from .versions import DATA_VERSIONS
 
 
@@ -66,17 +66,6 @@ SEGMENT_GRID_ORIGIN_GPS = 0.0
 # under an earlier layout are never read back: layout 3 was resampled by FFT, and
 # layout 2 stored bare samples under their nominal times.
 SEGMENT_LAYOUT_VERSION = "segment-layout-4"
-
-
-class SegmentStrain(NamedTuple):
-    """
-    One detector's strain over one segment: its samples, the GPS time of the first
-    sample as the source returned it, the rate and where the samples came from.
-    """
-    data: Any
-    t0: float
-    sample_rate_hertz: float
-    source: str
 
 
 def segment_key(ifo, start, end) -> str:
@@ -175,20 +164,19 @@ class SamplingMode(Enum):
 @dataclass
 class ObservingRunData:
     """
-    One observing run: its GPS bounds, channels, frame types and segment flags.
+    One observing run: its GPS bounds and segment flags.
 
     The built-in runs take their bounds from the GWOSC run API through
     ``gwosc_runs``: O3, for example, is GWOSC's O3a plus O3b. A run defined by hand
     can give UTC datetimes instead, which are converted to GPS counting leap seconds.
 
     ``state_flags`` holds, per data quality, the GWOSC timeline flags whose
-    intersection defines the usable times (see ``gwosc_data``).
+    intersection defines the usable times (see ``gwosc_data``). Where the run's strain
+    is read from is the obtainer's data source (``sources``), not the run's.
     """
     name: str
     start_date_time: Optional[datetime]
     end_date_time: Optional[datetime]
-    channels: Dict
-    frame_types: Dict
     state_flags: Dict
     gwosc_runs: Tuple[str, ...] = ()
 
@@ -230,46 +218,11 @@ class ObservingRunData:
         from astropy.time import Time
         return Time(gps_time, format="gps").utc.to_datetime()
 
-# Channels and frame types name GWOSC's public frames for O1 and O2 (gwdatafind type
-# "{ifo}_{frame_type}", channel "{ifo}:{channel}") and LVK's calibrated frames for O3
-# and O4. Without local frames, strain comes from GWOSC through fetch_open_data.
 observing_run_data : Dict = {
-    "O1" : (
-        "O1",
-        None,
-        None,
-        {DataQuality.BEST: "LOSC-STRAIN"},
-        {DataQuality.BEST: "LOSC_4_V1"},
-        {DataQuality.BEST: DEFAULT_GWOSC_FLAGS},
-        ("O1",),
-    ),
-    "O2" : (
-        "O2",
-        None,
-        None,
-        {DataQuality.BEST: "GWOSC-4KHZ_R1_STRAIN"},
-        {DataQuality.BEST: "GWOSC_O2_4KHZ_R1"},
-        {DataQuality.BEST: DEFAULT_GWOSC_FLAGS},
-        ("O2",),
-    ),
-    "O3" : (
-        "O3",
-        None,
-        None,
-        {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
-        {DataQuality.BEST: "HOFT_C01"},
-        {DataQuality.BEST: DEFAULT_GWOSC_FLAGS},
-        ("O3a", "O3b"),
-    ),
-    "O4" : (
-        "O4",
-        None,
-        None,
-        {DataQuality.BEST: "DCS-CALIB_STRAIN_CLEAN_C01"},
-        {DataQuality.BEST: "HOFT_C01"},
-        {DataQuality.BEST: DEFAULT_GWOSC_FLAGS},
-        ("O4a", "O4b"),
-    )
+    "O1" : ("O1", None, None, {DataQuality.BEST: DEFAULT_GWOSC_FLAGS}, ("O1",)),
+    "O2" : ("O2", None, None, {DataQuality.BEST: DEFAULT_GWOSC_FLAGS}, ("O2",)),
+    "O3" : ("O3", None, None, {DataQuality.BEST: DEFAULT_GWOSC_FLAGS}, ("O3a", "O3b")),
+    "O4" : ("O4", None, None, {DataQuality.BEST: DEFAULT_GWOSC_FLAGS}, ("O4a", "O4b")),
 }
 
 class ObservingRun(Enum):
@@ -653,6 +606,7 @@ class BaseDataObtainer(ABC):
             prefetch_segments : int = 16,
             gwosc_flags : Optional[Tuple[str, ...]] = None,
             split_spec : Optional[SplitSpec] = None,
+            source : Optional[DataSource] = None,
         ):
         """
         Args (selection):
@@ -663,6 +617,11 @@ class BaseDataObtainer(ABC):
                 never augmented. Real events refuse TimeReversal and
                 RandomShift, and noise refuses RandomShift (see
                 ``acquisition.augmentations``).
+            source: Where real strain and its segments come from (``gf.DataSource``):
+                ``gf.GWOSC()``, or ``gf.LocalFrames(...)`` by name. None takes
+                ``gf.Defaults.source`` (``gf.GWOSC()``) as the obtainer is built. It is
+                part of the obtainer's specification, so of every fingerprint and
+                cache key, and nothing falls back from it to another source.
             split_spec: How GPS time is split into train, validate and test
                 (``gf.SplitSpec``); None is the default split.
             gwosc_flags: GWOSC timeline flags whose intersection defines usable
@@ -690,7 +649,13 @@ class BaseDataObtainer(ABC):
         self.force_acquisition = force_acquisition
         self.cache_segments = cache_segments
         self.split_spec = as_split_spec(split_spec)
-            
+        self.source = gf.Defaults.source if source is None else source
+        if not isinstance(self.source, DataSource):
+            raise TypeError(
+                f"source must be a gf.DataSource, such as gf.GWOSC() or gf.LocalFrames(...); "
+                f"got {self.source!r}."
+            )
+
         from gravyflow.src.dataset.acquisition.augmentations import check_augmentations
         self.augmentations = check_augmentations(augmentations, self.data_labels)
             
@@ -707,7 +672,7 @@ class BaseDataObtainer(ABC):
         
         # Prefetching configuration
         self.prefetch_segments = prefetch_segments
-        self._prefetch_executor = ThreadPoolExecutor(max_workers=1) if prefetch_segments > 0 else None
+        self._prefetch_executor = thread_pool("prefetch") if prefetch_segments > 0 else None
 
         self.__dict__.update(self._served_state())
 
@@ -848,28 +813,10 @@ class BaseDataObtainer(ABC):
                 
         self.start_gps_times = [run.start_gps_time for run in observing_runs]
         self.end_gps_times = [run.end_gps_time for run in observing_runs]
-        
-        self.frame_types = \
-            [run.frame_types[data_quality] for run in observing_runs]
-        self.channels = \
-            [run.channels[data_quality] for run in observing_runs]
+
         self.state_flags = \
             [run.state_flags[data_quality] for run in observing_runs]
-    
-    def _get_frame_channel_for_gps(self, gps_time: float) -> tuple:
-        """
-        Get the correct frame_type and channel for a given GPS time.
-        
-        Returns:
-            (frame_type, channel) tuple for the observing run containing this GPS.
-            Falls back to first configured run if no match found.
-        """
-        for i, (start, end) in enumerate(zip(self.start_gps_times, self.end_gps_times)):
-            if start <= gps_time <= end:
-                return self.frame_types[i], self.channels[i]
-        # Fall back to first if no match (shouldn't happen normally)
-        return self.frame_types[0], self.channels[0]
-    
+
     def __getstate__(self):
         """The specification only: served state and the executor stay behind."""
         served = self._served_state()
@@ -883,7 +830,7 @@ class BaseDataObtainer(ABC):
         self.__dict__.update(state)
         self.__dict__.update(self._served_state())
         if self.prefetch_segments > 0:
-            self._prefetch_executor = ThreadPoolExecutor(max_workers=1)
+            self._prefetch_executor = thread_pool("prefetch")
         else:
             self._prefetch_executor = None
         
@@ -978,15 +925,14 @@ class BaseDataObtainer(ABC):
             # The one user cache root; never beside the installed package.
             data_directory_path = user_cache_dir("segments")
 
-        # Everything a stored segment depends on, by name: its source (frame types,
-        # channels and run bounds), its selection (flags, labels, the longest segment and
-        # the split), its rate, the numerics that resampled it and the layout it is
-        # stored in. Each stored segment also carries its own first-sample time, rate and
-        # source (see _cache_segment).
+        # Everything a stored segment depends on, by name: its source (the data source's
+        # specification, and the run bounds), its selection (flags, labels, the longest
+        # segment and the split), its rate, the numerics that resampled it and the layout
+        # it is stored in. Each stored segment also carries its own first-sample time,
+        # rate and source (see _cache_segment).
         from gravyflow.src.validate.provenance import config_fingerprint
         segment_hash = config_fingerprint({
-            "frame_types": self.frame_types,
-            "channels": self.channels,
+            "source": self.source,
             "run_bounds": [list(map(float, bounds))
                            for bounds in zip(self.start_gps_times, self.end_gps_times)],
             "state_flags": self.state_flags,
@@ -1023,22 +969,11 @@ class BaseDataObtainer(ABC):
         state_flag: Union[str, Tuple[str, ...]]
     ) -> np.ndarray:
         """
-        Times in [start, stop) when ``ifo`` passes every GWOSC flag in ``state_flag``.
-
-        Segments come from the public GWOSC timeline (see ``gwosc_data``), over the
-        GWOSC runs that overlap [start, stop). Returns a sorted (N, 2) array.
+        Times in [start, stop) when ``ifo`` passes every GWOSC flag in ``state_flag``,
+        from the obtainer's source (``DataSource.segments``): the public GWOSC timeline,
+        where the source holds strain. Returns a sorted (N, 2) array.
         """
-        flags = (state_flag,) if isinstance(state_flag, str) else tuple(state_flag)
-        for flag in flags:
-            if ":" in flag or "-" in flag:
-                raise ValueError(
-                    f"Flag {flag!r} looks like a DQSegDB flag. Real-noise segments come "
-                    "from the public GWOSC timeline: use GWOSC flags such as 'DATA', "
-                    "'BURST_CAT1', 'BURST_CAT2', 'CBC_CAT1' or 'CBC_CAT2'."
-                )
-        return get_gwosc_segments(
-            ifo.name, gwosc_runs_overlapping(start, stop), flags, start=start, end=stop
-        )
+        return self.source.segments(ifo, state_flag, (start, stop))
 
     def get_all_segment_times(
         self,
@@ -1271,158 +1206,6 @@ class BaseDataObtainer(ABC):
             dataset.attrs["source"] = str(strain.source)
             dataset.attrs["layout"] = SEGMENT_LAYOUT_VERSION
 
-    def get_segment_data(
-            self,
-            segment_start_gps_time: float,
-            segment_end_gps_time: float,
-            ifo: gf.IFO,
-            frame_type: str,
-            channel: str,
-            sample_rate_hertz: Optional[float] = None,
-        ) -> "TimeSeries":
-
-        """
-        Fetches new segment data from local frames, or else from GWOSC, and reads
-        it into a TimeSeries object. See ``get_segment_data_static``.
-        """
-
-        for run in ObservingRun:
-            if run.value.start_gps_time <= segment_start_gps_time <= run.value.end_gps_time:
-                new_frame_type = run.value.frame_types[DataQuality.BEST]
-                if new_frame_type != frame_type:
-                    logger.warning(
-                        f"Observing Run Mismatch: Requested GPS {segment_start_gps_time} "
-                        f"falls in {run.value.name}, but configured for different run. "
-                        f"Auto-switching frame type {frame_type}->{new_frame_type}."
-                    )
-                break
-
-        return self.get_segment_data_static(
-            segment_start_gps_time,
-            segment_end_gps_time,
-            ifo,
-            frame_type,
-            channel,
-            sample_rate_hertz=sample_rate_hertz,
-        )
-
-    @staticmethod
-    def get_segment_data_static(
-        segment_start_gps_time: float,
-        segment_end_gps_time: float,
-        ifo: "gf.IFO",
-        frame_type: str,
-        channel: str,
-        sample_rate_hertz: Optional[float] = None,
-    ) -> "TimeSeries":
-        """
-        Thread-safe static version of get_segment_data.
-
-        Fetches segment data without using any instance state.
-        Can be safely called from multiple threads concurrently.
-
-        Args:
-            segment_start_gps_time: Start GPS time of segment
-            segment_end_gps_time: End GPS time of segment
-            ifo: Interferometer to fetch data for
-            frame_type: Data frame type (e.g., 'HOFT_C00')
-            channel: Channel name (e.g., 'DCS-CALIB_STRAIN_CLEAN_C00')
-            sample_rate_hertz: The rate the caller needs. GWOSC strain is fetched at
-                4096 Hz when that suffices and at 16384 Hz otherwise. None fetches
-                4096 Hz.
-
-        Returns:
-            TimeSeries containing the requested data
-
-        Raises:
-            UpsamplingRefused: If ``sample_rate_hertz`` exceeds 16384 Hz.
-            ValueError: If data cannot be fetched from local or remote sources
-        """
-        # Real data is the realdata extra's: gwpy and gwdatafind load only here.
-        from gwdatafind import find_urls
-        from gwpy.timeseries import TimeSeries
-
-        open_data_rate = gwosc_sample_rate_hertz(
-            sample_rate_hertz if sample_rate_hertz is not None else 4096.0
-        )
-
-        # Auto-detect observing run and adjust frame_type/channel if needed
-        for run in ObservingRun:
-            if run.value.start_gps_time <= segment_start_gps_time <= run.value.end_gps_time:
-                run_data = run.value
-                new_frame_type = run_data.frame_types[DataQuality.BEST]
-                new_channel = run_data.channels[DataQuality.BEST]
-                if new_frame_type != frame_type:
-                    frame_type = new_frame_type
-                    channel = new_channel
-                break
-
-        try:
-            files = find_urls(
-                site=ifo.name.strip("1"),
-                frametype=f"{ifo.name}_{frame_type}",
-                gpsstart=segment_start_gps_time,
-                gpsend=segment_end_gps_time,
-                urltype="file",
-            )
-
-            if not files:
-                raise ValueError("No local files found.")
-
-            full_segment_data = TimeSeries.read(
-                files,
-                channel=f"{ifo.name}:{channel}",
-                start=segment_start_gps_time,
-                end=segment_end_gps_time,
-                nproc=1  # Single-threaded to avoid fork issues with JAX
-            )
-
-        except Exception as e:
-            try:
-                with strain_download_cache():
-                    full_segment_data = TimeSeries.fetch_open_data(
-                        ifo.name,
-                        segment_start_gps_time,
-                        segment_end_gps_time,
-                        sample_rate=int(open_data_rate),
-                        cache=True,
-                        timeout=30  # 30 second timeout
-                    )
-            except Exception as e_remote:
-                raise ValueError(f"Failed to acquire data from local ({e}) or remote ({e_remote}).")
-
-        return full_segment_data
-
-    @staticmethod
-    def get_frame_channel_for_gps_static(
-        gps_time: float,
-        frame_types: List[str],
-        channels: List[str],
-        start_gps_times: List[float],
-        end_gps_times: List[float]
-    ) -> Tuple[str, str]:
-        """
-        Thread-safe static lookup for frame type and channel.
-        
-        Determines the correct frame_type and channel for a given GPS time
-        based on the observing run boundaries.
-        
-        Args:
-            gps_time: GPS time to look up
-            frame_types: List of frame types per observing run
-            channels: List of channels per observing run
-            start_gps_times: Start GPS times of each run
-            end_gps_times: End GPS times of each run
-            
-        Returns:
-            Tuple of (frame_type, channel) for the matching run,
-            or first entry if no match found
-        """
-        for i, (start, end) in enumerate(zip(start_gps_times, end_gps_times)):
-            if start <= gps_time <= end:
-                return frame_types[i], channels[i]
-        return frame_types[0], channels[0]  # Fallback to first run
-
     def get_segment(
         self,
         segment_start_gps_time: float,
@@ -1494,52 +1277,39 @@ class BaseDataObtainer(ABC):
         sample_rate_hertz: float,
         ifo: gf.IFO,
     ) -> Optional["SegmentStrain"]:
-        """Fetch and resample one segment (see get_segment), or None if it cannot be had."""
+        """
+        Fetch one segment from the obtainer's source at the native rate the request
+        needs (``fetch_rate``) and resample it (see get_segment), or None if it cannot
+        be had.
+        """
         # Refuse impossible rates loudly, before the zero-fill fallback.
-        gwosc_sample_rate_hertz(sample_rate_hertz)
+        native_rate = fetch_rate(self.source, sample_rate_hertz)
         try:
-            # Get correct frame_type/channel for this GPS time's observing run
-            frame_type, channel = self._get_frame_channel_for_gps(segment_start_gps_time)
-            raw_segment = self.get_segment_data(
-                segment_start_gps_time,
-                segment_end_gps_time,
-                ifo,
-                frame_type,
-                channel,
-                sample_rate_hertz=sample_rate_hertz,
+            raw_segment = self.source.fetch(
+                ifo, native_rate, (segment_start_gps_time, segment_end_gps_time)
             )
-
-            original_sample_rate = float(raw_segment.sample_rate.value)
-            if original_sample_rate < sample_rate_hertz:
-                raise UpsamplingRefused(
-                    f"{ifo.name} data at {segment_start_gps_time} is sampled at "
-                    f"{original_sample_rate} Hz, below the requested "
-                    f"{sample_rate_hertz} Hz; gravyflow does not upsample real data."
-                )
 
             # Keep every sample from the segment's start; cut only the tail, to
             # whole seconds (see get_segment).
-            num_samples = len(raw_segment)
-            whole_seconds = int(kept_seconds(num_samples / original_sample_rate))
+            num_samples = len(raw_segment.data)
+            whole_seconds = int(kept_seconds(num_samples / raw_segment.sample_rate_hertz))
             if whole_seconds < 1:
                 logging.debug(
                     f"Segment shorter than one second ({num_samples} samples); skipped."
                 )
                 return None
-            samples = raw_segment.value[:whole_seconds * whole_hertz(original_sample_rate)]
+            samples = raw_segment.data[:whole_seconds * whole_hertz(raw_segment.sample_rate_hertz)]
 
             # Resampling keeps the first sample's time: sample k is at t0 + k / rate.
             # The segment's own samples alone are resampled, so within the resampler's
             # margin of either end the samples are approximate (``gf.resample``).
-            data, t0 = resample(samples, float(raw_segment.t0.value), original_sample_rate, sample_rate_hertz)
+            data, t0 = resample(samples, raw_segment.t0, raw_segment.sample_rate_hertz, sample_rate_hertz)
             return SegmentStrain(
                 data=ops.convert_to_tensor(data, dtype="float32"),
                 t0=t0,
                 sample_rate_hertz=float(sample_rate_hertz),
-                source=f"{raw_segment.channel} at {original_sample_rate} Hz",
+                source=raw_segment.source,
             )
-        except UpsamplingRefused:
-            raise
         except Exception as e:
             logging.debug(f"Segment acquisition failed (will zero-fill): {type(e).__name__}, {str(e)}")
             return None
@@ -1603,9 +1373,9 @@ class BaseDataObtainer(ABC):
         """
         if sample_rate_hertz is None:
             sample_rate_hertz = gf.Defaults.sample_rate_hertz
-        # Refuse rates no public source holds, or the resampler cannot make, before any
-        # fetch and its zero-fill fallback.
-        gwosc_sample_rate_hertz(whole_hertz(sample_rate_hertz))
+        # Refuse rates the source does not hold, or the resampler cannot make, before
+        # any fetch and its zero-fill fallback.
+        fetch_rate(self.source, sample_rate_hertz)
 
         if self.file_path is not None and self.cache_segments:
             gf.ensure_directory_exists(self.file_path.parent)

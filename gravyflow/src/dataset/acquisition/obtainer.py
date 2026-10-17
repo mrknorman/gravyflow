@@ -38,6 +38,8 @@ def IFODataObtainer(
         # The split
         split_spec: Optional["gf.SplitSpec"] = None,
         train_on_real_events: bool = False,
+        # Where strain comes from
+        source: Optional["gf.DataSource"] = None,
     ):
     """
     Factory function that returns the appropriate IFO data obtainer.
@@ -69,6 +71,10 @@ def IFODataObtainer(
             (``gf.SplitSpec``); None is the default split.
         train_on_real_events: Real events are evaluation data, all in ``test``;
             True is refused for now (TRANSIENT only; see TransientDataObtainer).
+        source: Where real strain and its segments come from (``gf.DataSource``):
+            ``gf.GWOSC()``, or ``gf.LocalFrames(...)`` by name. None takes
+            ``gf.Defaults.source`` (``gf.GWOSC()``). Nothing falls back from it to
+            another source.
 
     Returns:
         NoiseDataObtainer or TransientDataObtainer instance
@@ -99,6 +105,7 @@ def IFODataObtainer(
             prefetch_segments=prefetch_segments,
             gwosc_flags=gwosc_flags,
             split_spec=split_spec,
+            source=source,
         )
     else:
         # TRANSIENT mode for events/glitches
@@ -120,4 +127,5 @@ def IFODataObtainer(
             event_names=event_names,
             split_spec=split_spec,
             train_on_real_events=train_on_real_events,
+            source=source,
         )

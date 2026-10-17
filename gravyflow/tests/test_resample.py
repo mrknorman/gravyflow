@@ -16,11 +16,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from gwpy.timeseries import TimeSeries
 from scipy.signal import freqz
 
 import gravyflow as gf
 from gravyflow.src.dataset.acquisition.base import segment_key
+from gravyflow.src.dataset.acquisition.sources import SegmentStrain
 from gravyflow.src.dataset.config import TransientDefaults
 from gravyflow.src.dataset.features.glitch_cache import TransientCache
 from gravyflow.src.utils.resample import (
@@ -149,20 +149,21 @@ class TestContract:
 
 class ToneFetch:
     """
-    A fake GWOSC fetch: [start, end) on the absolute grid at ``served_rate``, whatever
-    rate was asked for, holding one tone at ``TONE_HERTZ``. Records the rates served.
+    A fake GWOSC fetch publishing ``served_rate`` only: [start, end) on the absolute
+    grid, holding one tone at ``TONE_HERTZ``. Records the rates served.
     """
 
     def __init__(self, served_rate, tone=TONE_HERTZ):
         self.served_rate, self.tone, self.served = float(served_rate), tone, []
+        self.rates = (self.served_rate,)
 
-    def __call__(self, start, end, ifo, frame_type, channel, sample_rate_hertz=None):
-        rate = self.served_rate
+    def __call__(self, ifo, sample_rate_hertz, interval):
+        (start, end), rate = interval, float(sample_rate_hertz)
         first, stop = int(np.ceil(start * rate - 1e-6)), int(np.ceil(end * rate - 1e-6))
         times = np.arange(first, stop, dtype=np.float64) / rate
         self.served.append(rate)
-        return TimeSeries(np.sin(2 * np.pi * self.tone * (times - transient_reads.REF) + 0.4),
-                          t0=first / rate, sample_rate=rate, channel=f"{ifo.name}:FAKE-TONE")
+        return SegmentStrain(np.sin(2 * np.pi * self.tone * (times - transient_reads.REF) + 0.4),
+                             first / rate, rate, f"{ifo.name}:FAKE-TONE")
 
 
 @pytest.mark.parametrize("served_rate", [4096.0, 16384.0])
@@ -220,18 +221,19 @@ def test_transient_windows_at_a_rate_that_does_not_divide_the_stored_one(tmp_pat
 
 class NoiseFetch:
     """
-    A fake GWOSC fetch: [start, end) on the absolute grid at ``served_rate``, whatever
-    rate was asked for, holding white noise. Records each series served.
+    A fake GWOSC fetch publishing ``served_rate`` only: [start, end) on the absolute
+    grid, holding white noise. Records each strain served.
     """
 
     def __init__(self, served_rate):
         self.served_rate, self.served = float(served_rate), []
+        self.rates = (self.served_rate,)
 
-    def __call__(self, start, end, ifo, frame_type, channel, sample_rate_hertz=None):
-        rate = self.served_rate
+    def __call__(self, ifo, sample_rate_hertz, interval):
+        (start, end), rate = interval, float(sample_rate_hertz)
         first, stop = int(np.ceil(start * rate - 1e-6)), int(np.ceil(end * rate - 1e-6))
         noise = np.random.default_rng(len(self.served)).normal(size=stop - first)
-        self.served.append(TimeSeries(noise, t0=first / rate, sample_rate=rate, channel=f"{ifo.name}:FAKE-NOISE"))
+        self.served.append(SegmentStrain(noise, first / rate, rate, f"{ifo.name}:FAKE-NOISE"))
         return self.served[-1]
 
 
@@ -243,7 +245,7 @@ def test_a_noise_segment_is_the_resamplers_samples(served_rate):
         segment = source.get_segment(start, end, RATE, ifo, segment_key(ifo, start, end))
     (served,) = fetch.served
     data = np.asarray(segment.data)
-    kept = served.value[:len(data) * int(served_rate) // int(RATE)]  # the whole seconds
+    kept = served.data[:len(data) * int(served_rate) // int(RATE)]  # the whole seconds
     np.testing.assert_array_equal(data, resample(kept, 0.0, served_rate, RATE)[0])
 
 
@@ -254,8 +256,8 @@ def test_a_transient_download_is_the_resamplers_samples(tmp_path):
     with transient_reads.offline(NoiseFetch(4 * stored_rate)) as fetch:
         samples, t0 = reader._download({"read": span}, stored_rate)["read"]
     (served,) = fetch.served
-    assert t0 == served.t0.value
-    np.testing.assert_array_equal(samples, resample(served.value, 0.0, 4 * stored_rate, stored_rate)[0])
+    assert t0 == served.t0
+    np.testing.assert_array_equal(samples, resample(served.data, 0.0, 4 * stored_rate, stored_rate)[0])
 
 
 @pytest.mark.parametrize("rate", [2048, 1000])

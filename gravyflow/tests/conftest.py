@@ -26,6 +26,7 @@ import gravyflow as gf
 from gravyflow.src.resources import PACKAGE
 
 import warnings
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -369,6 +370,26 @@ def usable_over_its_runs(obtainer, ifo):
     import numpy as np
 
     return np.array([[min(obtainer.start_gps_times), max(obtainer.end_gps_times)]])
+
+
+@contextmanager
+def gwosc_serving(fetch):
+    """
+    Serve every ``gf.GWOSC()`` source's strain from ``fetch`` for the block, offline: a
+    callable ``fetch(detector, sample_rate_hertz, interval)`` returning a
+    ``SegmentStrain``, whose ``rates`` (when it has them) replace GWOSC's native rates.
+    Obtainers built before the block are served too, since they hold ``GWOSC()``.
+    Yields ``fetch``. A patch of ``GWOSC``, for tests that fake one fetch; the leakage
+    harness installs a source instead.
+    """
+    from unittest import mock
+
+    with ExitStack() as stack:
+        stack.enter_context(mock.patch.object(gf.GWOSC, "fetch", lambda source, *args: fetch(*args)))
+        if hasattr(fetch, "rates"):
+            rates = tuple(float(rate) for rate in fetch.rates)
+            stack.enter_context(mock.patch.object(gf.GWOSC, "rates", lambda source: rates))
+        yield fetch
 
 
 def no_glitch_vetoes():

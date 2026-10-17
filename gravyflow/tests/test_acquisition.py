@@ -613,8 +613,6 @@ class TestObservingRunData:
             data = run.value
             assert data.name in ["O1", "O2", "O3"]
             assert data.start_gps_time > 0
-            assert gf.DataQuality.BEST in data.channels
-            assert gf.DataQuality.BEST in data.frame_types
             assert gf.DataQuality.BEST in data.state_flags
 
 
@@ -980,8 +978,7 @@ class TestUnpackObservingRuns:
         
         assert len(obtainer.start_gps_times) == 1
         assert len(obtainer.end_gps_times) == 1
-        assert len(obtainer.frame_types) == 1
-        assert len(obtainer.channels) == 1
+        assert len(obtainer.state_flags) == 1
     
     def test_unpack_multiple_observing_runs(self):
         """Test unpacking multiple observing runs."""
@@ -1417,34 +1414,26 @@ class TestRemoveUnwantedSegments:
 
 @pytest.mark.slow
 class TestGetSegmentData:
-    """Tests for get_segment_data (lines 931-946)."""
-    
+    """Tests for the default source's fetch, from GWOSC."""
+
     def test_get_segment_data_short_segment(self):
-        """Test fetching a short segment of real LIGO data (lines 931-946)."""
+        """Test fetching a short segment of real LIGO data from the obtainer's source."""
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
             cache_segments=False
         )
-        
+
         # Use a very short segment (10 seconds) to minimize data transfer
         # This GPS time is during O3
         start_gps = 1238166100.0
         end_gps = start_gps + 10.0
-        
-        data = obtainer.get_segment_data(
-            start_gps,
-            end_gps,
-            gf.IFO.L1,
-            obtainer.frame_types[0],
-            obtainer.channels[0]
-        )
-        
-        # Should return a TimeSeries object
-        from gwpy.timeseries import TimeSeries
-        assert isinstance(data, TimeSeries)
-        assert len(data) > 0
+
+        data = obtainer.source.fetch(gf.IFO.L1, 4096.0, (start_gps, end_gps))
+
+        assert data.sample_rate_hertz == 4096.0 and data.source == "gwosc-O3a_4KHZ_R1"
+        assert len(data.data) > 0
 
 
 @pytest.mark.slow

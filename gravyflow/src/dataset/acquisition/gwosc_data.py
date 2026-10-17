@@ -13,8 +13,10 @@ This module supplies the three public facts that real-noise acquisition needs:
   1 at some time, it means the data are 'good' at that time: that it passes a test, or
   there are no hardware injections", https://gwosc.org/archive/dataset/O3a_4KHZ_R1/).
   Applying a category therefore means intersecting with its flag.
-- **Strain sample rates** (``gwosc_sample_rate_hertz``): GWOSC publishes strain at
-  4096 Hz and 16384 Hz only.
+- **Strain releases** (``GWOSC_STRAIN_DATASETS``): GWOSC publishes each run's strain
+  in one bulk release per sample rate, at 4096 Hz and 16384 Hz only
+  (``GWOSC_SAMPLE_RATES_HERTZ``). The ``GWOSC`` data source (``sources``) fetches
+  them.
 
 Timeline segments of a released run never change, so each list is cached in the
 user cache (``~/.gravyflow/cache/gwosc_timeline``) after its first download.
@@ -69,6 +71,19 @@ DEFAULT_GWOSC_FLAGS: Tuple[str, ...] = GWOSC_BURST_FLAGS + GWOSC_NO_HW_INJECTION
 
 #: Strain sample rates GWOSC publishes, in Hz.
 GWOSC_SAMPLE_RATES_HERTZ: Tuple[float, ...] = (4096.0, 16384.0)
+
+#: The bulk strain release of each GWOSC run at each rate: the dataset whose 4096 s files
+#: on the absolute GPS grid hold the run's strain, as GWOSC's archive lists them
+#: (https://gwosc.org/archive/). The 4096 Hz release of each run is also the dataset its
+#: timeline flags are published under (``GWOSC_RUNS``). Event releases are never named.
+GWOSC_STRAIN_DATASETS: Dict[str, Dict[float, str]] = {
+    "O1": {4096.0: "O1", 16384.0: "O1_16KHZ"},
+    "O2": {4096.0: "O2_4KHZ_R1", 16384.0: "O2_16KHZ_R1"},
+    "O3a": {4096.0: "O3a_4KHZ_R1", 16384.0: "O3a_16KHZ_R1"},
+    "O3b": {4096.0: "O3b_4KHZ_R1", 16384.0: "O3b_16KHZ_R1"},
+    "O4a": {4096.0: "O4a_4KHZ_R1", 16384.0: "O4a_16KHZ_R1"},
+    "O4b": {4096.0: "O4b_4KHZ_R1", 16384.0: "O4b_16KHZ_R1"},
+}
 
 _TIMEOUT_SECONDS = 120
 
@@ -151,27 +166,6 @@ def strain_download_cache():
             if _strain_cache_users == 0:
                 _strain_cache_context.__exit__(None, None, None)
                 _strain_cache_context = None
-
-
-def gwosc_sample_rate_hertz(sample_rate_hertz: float) -> float:
-    """
-    The GWOSC strain sample rate to fetch for a requested sample rate.
-
-    Returns 4096 Hz when the request is at most 4096 Hz, otherwise 16384 Hz. The data
-    is then downsampled to the request. A request above 16384 Hz raises
-    UpsamplingRefused (a ValueError): upsampling adds no information.
-    """
-    sample_rate_hertz = float(sample_rate_hertz)
-    if sample_rate_hertz <= 0:
-        raise ValueError(f"Sample rate must be positive, got {sample_rate_hertz} Hz.")
-    for rate in GWOSC_SAMPLE_RATES_HERTZ:
-        if sample_rate_hertz <= rate:
-            return rate
-    raise UpsamplingRefused(
-        f"Requested sample rate {sample_rate_hertz} Hz exceeds the highest rate GWOSC "
-        f"publishes ({GWOSC_SAMPLE_RATES_HERTZ[-1]:.0f} Hz). Gravyflow does not upsample "
-        "real data."
-    )
 
 
 def _get_json(url: str) -> Dict:

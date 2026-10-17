@@ -74,6 +74,11 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `GWOSC_CBC_FLAGS`: GWOSC's CBC vetoes.
 - `GWOSC_NO_HW_INJECTION_FLAGS`: GWOSC's flags for time without hardware injections.
 - `DEFAULT_GWOSC_FLAGS`: the default selection: data, burst vetoes, no hardware injections.
+- `DataSource`: where real strain and its segments come from; every obtainer takes one (`source=`).
+- `GWOSC`: the default source: GWOSC's public bulk strain, downloaded and cached.
+- `LocalFrames`: frames on this host, found by GWDataFind, with their frame types and channels named.
+- `StrainUnavailable`: a source could not serve the strain asked for; it never falls back to another.
+- `UpsamplingRefused`: a sample rate above what the source publishes.
 - `GlitchType`: the Gravity Spy glitch classes.
 - `get_glitch_times`: Gravity Spy glitch times.
 - `get_glitch_times_with_labels`: Gravity Spy glitch times with their classes.

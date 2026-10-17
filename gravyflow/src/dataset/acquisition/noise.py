@@ -106,6 +106,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             prefetch_segments: int = 16,
             gwosc_flags: Optional[Tuple[str, ...]] = None,
             split_spec=None,
+            source=None,
         ):
 
         super().__init__(
@@ -123,6 +124,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             prefetch_segments=prefetch_segments,
             gwosc_flags=gwosc_flags,
             split_spec=split_spec,
+            source=source,
         )
 
         self.acquisition_mode = AcquisitionMode.NOISE

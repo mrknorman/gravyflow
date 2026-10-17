@@ -175,6 +175,9 @@ class Defaults:
     onsource_duration_seconds: float = 1.0
     offsource_duration_seconds: float = 16.0
     crop_duration_seconds: float = 0.5
+    #: Where an obtainer built without a ``source`` reads real strain: ``GWOSC()``,
+    #: set by ``acquisition.sources`` as it is imported (it imports this module).
+    source = None
 
     # Standard tiers for JIT graph optimization
     # Using these values reduces the number of unique JAX graph compilations
