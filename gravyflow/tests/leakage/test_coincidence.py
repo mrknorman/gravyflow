@@ -13,7 +13,7 @@ import gravyflow as gf
 
 from . import audit
 from . import fixtures as fx
-from .fakes import GlitchRecord
+from .fakes import EventRecord, GlitchRecord
 
 RV = gf.ReturnVariables
 IFOS = ["H1", "L1"]
@@ -236,3 +236,123 @@ def test_partner_windows(world, tmp_path, glitch_ifo):
         assert gf.DEFAULT_SPLIT.assign(*span) == "train", f"the {other} fetch {span} leaves the split"
         centre = (span[0] + span[1]) / 2.0
         assert abs(centre - peak) >= PARTNER_SEPARATION_SECONDS, f"{other} read at {centre - peak:+.1f} s"
+
+
+# =============================================================================
+# PARTNERS: THEIR SPLIT, BLOCK AND EVENTS, AND RECORDS WITHOUT ONE
+# =============================================================================
+
+#: Half the footprint of the partner world's event: 2 s in band, so 48.2 s each side.
+EVENT_HALF_FOOTPRINT_SECONDS = 48.2
+
+
+def _golden_block(*splits):
+    """The first block k of the golden O3 table where blocks k, k + 1, ... are ``splits``."""
+    table = fx.golden_blocks("O3")
+    return next(k for k in sorted(table) if all(table.get(k + i) == s for i, s in enumerate(splits)))
+
+
+def _partner_world():
+    """
+    L1-only glitches over [H1, L1], each in a block of its own, where H1 has data only
+    near the glitch, so its partner has one narrow place to go:
+
+    - ``block``: 250 s into a train block after a train block, H1 over 300 s each side
+      of the edge: a partner fits only in the record's block's first 9 s, the rest of
+      H1 being in the block before;
+    - ``split``: 250 s into a train block after a test block, H1 from 600 s before the
+      edge to 300 s after: a partner fits only in the guard (or the test block), so
+      there is none;
+    - ``event``: mid train block, an event 300 s after the glitch, and H1 from 100 s
+      before the glitch to the end of the event's footprint and guard: a partner fits
+      only there, so there is none;
+    - ``test``, ``validate``: mid block, H1 over 600 s each side: partners served.
+
+    Returns the fixture, the glitches' times by case, and the event's footprint.
+    """
+    B = fx.BLOCK_SECONDS
+    trains = _golden_block("train", "train", "train", "train")
+    after_train, middle = (trains + 2) * B, (trains + 3) * B + B / 2
+    after_test = (_golden_block("test", "train") + 1) * B
+    held_out = {split: (_golden_block("train", split, "train") + 1) * B + B / 2 for split in ("test", "validate")}
+    event = middle + 300.0
+    event_end = event + EVENT_HALF_FOOTPRINT_SECONDS + fx.GUARD_SECONDS + TRANSIENT_HALF_SPAN_SECONDS
+    times = {"block": after_train + 250.0, "split": after_test + 250.0, "event": middle, **held_out}
+    h1 = [(after_train - 300.0, after_train + 300.0), (after_test - 600.0, after_test + 300.0),
+          (middle - 100.0, event_end)] + [(t - 600.0, t + 600.0) for t in held_out.values()]
+    l1 = [(t - 400.0, t + 400.0) for t in times.values()]
+    base = fx._fixture(sorted(l1), 256.0, "O3", ("O3",))
+    fixture = fx.Fixture(base.encoding, {"H1": np.array(sorted(h1)), "L1": np.array(sorted(l1))}, "O3", ("O3",))
+    rows = [GlitchRecord("L1", t, t - 0.5, 1.0, "Blip", 0.95) for t in times.values()]
+    footprint = (event - EVENT_HALF_FOOTPRINT_SECONDS, event + EVENT_HALF_FOOTPRINT_SECONDS)
+    return fixture.with_catalogues(glitches=rows, events=[EventRecord("GWPARTNER", event, 2.0)]), times, footprint
+
+
+def _served_partners(world):
+    """
+    {split: (records' own L1 spans, their H1 partners' spans, the split's rejections)}
+    in the partner world, from the library's served time (``get_valid_segments``).
+    """
+    fixture, _, _ = _partner_world()
+    served = {}
+    with world(fixture):
+        for split in ("train", "validate", "test"):
+            obtainer = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES])
+            spans = obtainer.get_valid_segments([gf.IFO.H1, gf.IFO.L1], 7, split)
+            served[split] = (spans[:, 1], spans[:, 0], obtainer.get_acquisition_stats()["rejections"])
+    return served
+
+
+def _other_split_distance(span, split):
+    """
+    Seconds from ``span`` to the nearest time of a split other than ``split`` in the
+    blocks about it, by the golden table (infinite when they are all ``split``).
+    """
+    table = fx.golden_blocks("O3")
+    return min((max(fx.block_start("O3", k) - span[1], span[0] - fx.block_start("O3", k + 1), 0.0)
+                for k in range(fx.block_of("O3", span[0]) - 1, fx.block_of("O3", span[1]) + 2)
+                if table[k] != split), default=np.inf)
+
+
+def test_partners_keep_to_their_split_and_block(world):
+    """
+    A partner reads only its record's split, half the guard from every other split's
+    time (judged by the golden table), and its record's block, though the detector has
+    data in other splits and in the next block of the record's split.
+    """
+    for split, (own, partners, _) in _served_partners(world).items():
+        assert len(partners), f"no {split} record served a partner"
+        for span, partner in zip(own, partners):
+            assert fx.golden_split("O3", *span) == split
+            gap = _other_split_distance(partner, split)
+            assert gap >= fx.GUARD_SECONDS / 2, f"a {split} partner {partner} lies {gap:.1f} s from another split"
+            blocks = {fx.block_of("O3", t) for t in (*span, *partner)}
+            assert len(blocks) == 1, f"a {split} partner {partner} leaves its record's block {span}"
+
+
+def test_partners_avoid_events(world):
+    """
+    No partner reads an event's footprint or its guard, though the record's detector
+    has data there and nowhere else a partner fits.
+    """
+    _, _, (start, end) = _partner_world()
+    guarded = [(start - fx.GUARD_SECONDS, end + fx.GUARD_SECONDS)]
+    for split, (_, partners, _) in _served_partners(world).items():
+        for partner in partners:
+            assert not _meets(partner, guarded), f"a {split} partner {partner} meets an event's guard {guarded}"
+
+
+def test_records_without_a_partner_are_counted(world):
+    """
+    A record with no partner time is not served, and its split counts it under "no
+    partner": the two train records whose partner could read only a guard; none in
+    test or validate.
+    """
+    _, times, _ = _partner_world()
+    served = _served_partners(world)
+    own, _, rejections = served["train"]
+    centres = sorted(round((a + b) / 2.0, 3) for a, b in own)
+    assert centres == [round(times["block"], 3)], f"train served the records at {centres}"
+    assert rejections.get("no partner") == 2, f"train rejections {rejections}"
+    for split in ("validate", "test"):
+        assert "no partner" not in served[split][2], f"{split} rejections {served[split][2]}"
