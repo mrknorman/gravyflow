@@ -113,10 +113,11 @@ For classification training, use 'balanced_glitch_types=True':
         # ... the other settings
     )
 
-How balancing works:
-  1. Count examples of each glitch type
-  2. Oversample minority classes to match majority
-  3. Result: Equal probability of seeing any type
+How balancing works (training only; validate and test are never balanced):
+  1. Count the training split's records of each glitch type
+  2. Every pass serves each type exactly as often as the largest: a rarer
+     type's records repeat, the leftover few drawn afresh each pass
+  3. Each pass is shuffled by its own draw, so every epoch's order differs
 
 This prevents the model from just predicting the most common type.
 """)

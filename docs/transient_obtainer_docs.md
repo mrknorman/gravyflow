@@ -18,7 +18,10 @@ When initialized, the `TransientObtainer` performs three main steps:
 ### 2. Balancing (`balanced_glitch_types`)
 For validation and training, it is often critical to have a balanced dataset.
 *   **`balanced_glitch_types=False` (Default)**: The obtainer provides access to *all* available segments. If "Scattered_Light" has 20,000 samples and "Helix" has 50, the dataset will be heavily imbalanced.
-*   **`balanced_glitch_types=True`**: The obtainer calculates the count of the *rarest* class (e.g., 61 samples) and limits *all* other classes to this count. This ensures every batch has a uniform probability of containing any given class, but significantly reduces the total dataset size.
+*   **`balanced_glitch_types=True`**: In training, every pass serves each glitch class exactly as many times as the training split's largest class, M: a class of n records serves each record floor(M / n) times and M mod n of them once more, drawn afresh each pass. Validate and test are never balanced.
+
+### 3. Passes
+A split's batches are addressed by index. Training concatenates passes over the split's records, each pass shuffled (`SegmentOrder.RANDOM`, and always when balanced) and balanced by draws of its own, so every pass differs and one seed gives one sequence; a batch is the next `num_examples_per_batch` items, so none is partial. Validate and test are one fixed pass, `floor(N / B)` batches, the same every epoch; the remainder of fewer than one batch is never served. Data quality judges each record by the span its windows read, which must lie inside the record's footprint (48.2 s each side of a glitch; longer before an event).
 
 ---
 
@@ -97,5 +100,6 @@ print(f"Glitch Type: {glitch_enum.name}")
 
 ## Troubleshooting
 
-*   **"Min count: X" Log**: When using `balanced_glitch_types=True`, look for this log line. It tells you the bottleneck class limit. If this number is too small, consider disabling balancing or manually excluding rare glitch types.
+*   **A rare class repeats**: With `balanced_glitch_types=True`, a class of a few records is served as often as the largest class each pass, so its records repeat many times. If that is too much, disable balancing or exclude the rare glitch types.
+*   **"never served" Log**: A validate or test split serves whole batches only; the log names how many records short of a batch are left out.
 *   **Gravity Spy download or md5 errors**: Glitches come from the public Gravity Spy release on Zenodo (doi:10.5281/zenodo.5649212; Glanzer et al. 2023, *Class. Quantum Grav.* 40 065004). A failed download or checksum raises an error and caches nothing; retry, or check access to zenodo.org.

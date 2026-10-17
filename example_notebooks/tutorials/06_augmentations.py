@@ -110,8 +110,10 @@ is no longer a chirp.
 print("\n2.3 RandomShift (glitches only)")
 print("-" * 40)
 print("""
-Rolls both windows by a random number of samples, so the glitch is
-off-center. Samples rolled out of one end come back at the other.
+Reads both windows off centre by a random whole number of samples, so the
+glitch is off-center. The strain is read where the shifted windows lie,
+never rolled, so START_GPS_TIME stays the first sample's time. The shifted
+windows must fit the record's footprint (48.2 s each side of a glitch).
 
 Parameters:
   - probability: Chance of applying shift
@@ -276,7 +278,7 @@ axes[0, 2].set_xlabel("Time (s)")
 axes[0, 2].set_ylabel("Strain")
 axes[0, 2].grid(True, alpha=0.3)
 
-# Random shift (simulate)
+# Random shift (simulated here by a roll; the library reads the shifted window instead)
 shift_samples = int(0.2 * len(sample))  # 20% shift
 shifted = np.roll(sample, shift_samples)
 axes[1, 0].plot(time, shifted, 'm-', lw=0.5)
