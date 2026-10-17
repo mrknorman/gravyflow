@@ -55,7 +55,7 @@ class ScalingTypes(Enum):
         member = cls.__members__.get(key.upper()) 
         
         if member is None:
-            raise ValueError(f"{key} not found in WaveformParameters")
+            raise ValueError(f"{key} not found in ScalingTypes")
         
         return member
 
@@ -627,7 +627,7 @@ class WaveformGenerator:
                 raise TypeError(f"{name} should be list or tuple.")
         else:
             if value.dtype == int:
-                logging.warn(f"{name} should not have dtype = int, automatically adjusting.")
+                logging.warning(f"{name} should not have dtype = int, automatically adjusting.")
                 return replace(value, dtype=float)
             else:
                 return value
@@ -640,7 +640,7 @@ class WaveformGenerator:
     ):
         if not isinstance(value, gf.Distribution):
             if isinstance(value, int):
-                logging.warn(f"{name} should be float not int, automatically adjusting.")
+                logging.warning(f"{name} should be float not int, automatically adjusting.")
                 return float(value)
             elif isinstance(value, float):
                 return value
@@ -648,7 +648,7 @@ class WaveformGenerator:
                 raise TypeError(f"{name} should be float or gf.Distribution object.")    
         else:
             if value.dtype == int:
-                logging.warn(f"{name} should not have dtype = int, automatically adjusting.")
+                logging.warning(f"{name} should not have dtype = int, automatically adjusting.")
                 return replace(value, dtype=float)
             else:
                 return value

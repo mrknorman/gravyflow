@@ -8,6 +8,7 @@ these tests check what the injection layer does with them.
 """
 import json
 import logging
+import warnings
 from itertools import islice
 from pathlib import Path
 
@@ -252,7 +253,7 @@ def test_waveform_parameters_get():
 def test_scaling_types_get():
     assert gf_inj.ScalingTypes.get("snr") is gf_inj.ScalingTypes.SNR
     assert gf_inj.ScalingTypes.get("HRSS") is gf_inj.ScalingTypes.HRSS
-    with pytest.raises(ValueError, match="not found"):
+    with pytest.raises(ValueError, match="invalid not found in ScalingTypes"):
         gf_inj.ScalingTypes.get("invalid")
 
 
@@ -402,7 +403,9 @@ def test_ensure_float_refusal():
     ("ensure_float", 123, "should be float not int"),
 ], ids=["list-distribution", "float-distribution", "float-int"])
 def test_integers_are_converted_with_a_warning(caplog, convert, value, message):
-    with caplog.at_level(logging.WARNING):
+    # The warning is logged through the logging API that is not deprecated.
+    with caplog.at_level(logging.WARNING), warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
         result = getattr(gf_inj.WaveformGenerator(), convert)("test_param", value)
     assert f"test_param {message}, automatically adjusting." in caplog.text
     if isinstance(value, gf.Distribution):
