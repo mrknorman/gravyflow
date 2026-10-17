@@ -14,7 +14,7 @@ from gwpy.segments import Segment, SegmentList
 import gravyflow as gf
 from gravyflow.src.dataset.acquisition import gwosc_data
 from gravyflow.src.dataset.features import gravity_spy
-from gravyflow.tests.test_public_sources import _fixture_rows, offline_public_sources  # noqa: F401
+from gravyflow.tests.test_public_sources import _fixture_rows
 
 from . import fixtures as fx
 

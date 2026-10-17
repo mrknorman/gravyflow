@@ -199,14 +199,6 @@ def _glitch_batch(world, fixture):
     return record, np.asarray(outputs[RV.DATA_LABEL.name]), fetches
 
 
-def test_glitch_detectors_never_coincide(world):
-    """An L1-only glitch over [H1, L1]: H1 is read at least two footprints away."""
-    fixture, peak = _glitch_world()
-    record, _, _ = _glitch_batch(world, fixture)
-    separation = float(np.abs(np.diff(record.footprints[0, :, 0]))[0] / 4096.0)
-    assert separation >= 2 * FOOTPRINT_SECONDS, f"H1 and L1 read {separation} s apart"
-
-
 def _inside(span, segments):
     return any(a <= span[0] and span[1] <= b for a, b in segments)
 
@@ -235,9 +227,7 @@ def test_partner_windows(world, glitch_ifo):
     expected = [0.0, 0.0]
     expected[g] = 1.0
     assert labels.tolist() == [expected], f"labels {labels.tolist()}, expected {expected} (NOISE, GLITCH)"
-    decoded_start = seconds[:, 0] + fx.OFFSOURCE_SECONDS + fx.CROP_SECONDS
-    np.testing.assert_allclose(first.start_labels[0], decoded_start, atol=1 / TRANSIENT_RATE,
-                               err_msg="START_GPS_TIME is not each detector's own window")
+    audit.assert_start_labels(first, fx.window(TRANSIENT_RATE))
     assert np.array_equal(first.footprints, second.footprints), "two builds chose different partners"
 
     glitch_span = (peak - TRANSIENT_HALF_SPAN_SECONDS, peak + TRANSIENT_HALF_SPAN_SECONDS)
@@ -351,9 +341,15 @@ def test_partners_avoid_events(world):
     No partner reads an event's footprint or its guard, though the record's detector
     has data there and nowhere else a partner fits.
     """
-    _, _, (start, end) = _partner_world()
+    _, times, (start, end) = _partner_world()
     guarded = [(start - fx.GUARD_SECONDS, end + fx.GUARD_SECONDS)]
-    for split, (_, partners, _) in _served_partners(world).items():
+    served = _served_partners(world)
+    own, partners, _ = served["train"]
+    assert len(partners), "no train record served a partner: the check would be empty"
+    centres = {round((a + b) / 2.0, 3) for a, b in own}
+    assert round(times["event"], 3) not in centres, "the record whose partner fits only by the event was served"
+    for split, (_, partners, _) in served.items():
+        assert len(partners), f"no {split} record served a partner"
         for partner in partners:
             assert not _meets(partner, guarded), f"a {split} partner {partner} meets an event's guard {guarded}"
 
@@ -482,13 +478,15 @@ def test_coincident_glitches_read_every_detector(world):
         rejections = obtainer.get_acquisition_stats()["rejections"]
         assert spans.shape == (1, 2, 2), f"served {spans.tolist()}"
         assert np.array_equal(spans[0, 0], spans[0, 1]), "H1 is not read at the glitch's time"
-        assert abs(np.mean(spans[0, 1]) - times["clean"]) < 1.0
+        # The record's own span is centred on its glitch: a float64 mean of two GPS
+        # times is within one spacing of the centre.
+        assert abs(np.mean(spans[0, 1]) - times["clean"]) <= np.spacing(times["clean"]), spans[0, 1]
         assert rejections == {"data quality": 1, "transient in another detector": 2}, rejections
 
         batch = next(iter(_transient_batches(obtainer, "train")))
         assert batch_arrays(batch, [RV.COINCIDENT])[RV.COINCIDENT].tolist() == [1]
         assert np.asarray(batch[RV.DATA_LABEL]).tolist() == [[0, 1]]
-        np.testing.assert_allclose(np.asarray(batch[RV.TRANSIENT_GPS_TIME])[0], [times["clean"]] * 2)
+        np.testing.assert_array_equal(np.asarray(batch[RV.TRANSIENT_GPS_TIME])[0], [times["clean"]] * 2)
 
         separated = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES])
         flags = [batch_arrays(b, [RV.COINCIDENT])[RV.COINCIDENT].tolist()
@@ -566,9 +564,9 @@ def test_event_detectors_from_data_quality(world):
     flags = batch_arrays(batch, [RV.COINCIDENT])[RV.COINCIDENT][order].tolist()
     assert labels == [[2, 2], [2, 0]], labels
     assert flags == [1, 0], flags
-    np.testing.assert_allclose(centres[order][0], [times["both"]] * 2)
-    assert abs(centres[order][1][1] - times["h1_only"]) >= PARTNER_SEPARATION_SECONDS
-    _assert_unflagged_apart(batch)
+    np.testing.assert_array_equal(centres[order][0], [times["both"]] * 2)
+    assert centres[order][1][0] == times["h1_only"], "the H1-only event is not read at its time on H1"
+    _assert_unflagged_apart(batch)  # its L1 partner two footprints away
 
 
 def _test_time_partner_world():

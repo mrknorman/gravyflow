@@ -35,7 +35,7 @@ TRANSIENT_RATE = 4096.0
 
 @pytest.mark.parametrize("rate", [256.0, 2048.0])
 @pytest.mark.parametrize("mode", [gf.SamplingMode.RANDOM, gf.SamplingMode.GRID])
-def test_noise_round_trip_decodes_every_sample(world, tmp_path, rate, mode):
+def test_noise_round_trip_decodes_every_sample(world, rate, mode):
     fixture = fx.straddle("train", "test", half_width=128.0 if rate > 256 else 512.0, rate=rate)
     window = fx.window(rate)
     with world(fixture) as harness:
@@ -45,11 +45,9 @@ def test_noise_round_trip_decodes_every_sample(world, tmp_path, rate, mode):
                                 window, onsource_cropped=False)
         records.update(audit.collect(harness, {"dataset": ("train", fx.dataset_batches(ds))}, 2,
                                      IFOS, window, onsource_cropped=True))
+    # collect decoded every row (the decoder refuses a row of any other length).
     for record in records.values():
         assert record.num_examples == 16
-        # collect decoded every row; each spans its window exactly.
-        lengths = record.footprints[..., 1] - record.footprints[..., 0]
-        assert np.all(lengths == window.offsource + window.onsource + 2 * window.crop)
     audit.assert_inside_fetched(records.values(), harness)
 
 
@@ -65,7 +63,7 @@ def _train_record_time(start):
     raise LookupError(f"no train record time within 1000 s of {start}")
 
 
-def test_transient_round_trip_decodes_every_sample(world, tmp_path):
+def test_transient_round_trip_decodes_every_sample(world):
     """
     Glitch windows, fetched and read at the transient cache's 4096 Hz (so resampling
     them is the identity, which keeps the broadband code), decode exactly; the padded
@@ -256,7 +254,7 @@ def test_collect_refuses_cold_without_fetches_warm_with_them_and_errors(world):
                           IFOS, window, True)
 
 
-def test_warm_build_reads_the_cache_and_equals_the_cold_build(world, tmp_path):
+def test_warm_build_reads_the_cache_and_equals_the_cold_build(world):
     fixture = fx.straddle("train", "test", half_width=256.0)
     window = fx.window()
     with world(fixture) as harness:
@@ -411,8 +409,12 @@ def test_golden_table_agrees_with_the_library():
     assert set(fx.golden_blocks("O3").values()) == {"train", "validate", "test"}
 
 
-def test_catalogues_reach_every_consumer(world):
-    """One sentinel event and one glitch reach the producers and the noise veto."""
+def test_catalogues_reach_every_consumer(world, monkeypatch):
+    """
+    One sentinel event and one glitch reach the producers and the noise veto. Both lie
+    inside the train time the guard leaves, so only their vetoes keep them out: with
+    the glitch veto emptied, the glitch is served.
+    """
     from gravyflow.src.dataset.features import event as event_module
     from gravyflow.src.dataset.features import segment_builders
 
@@ -420,7 +422,7 @@ def test_catalogues_reach_every_consumer(world):
     fixture = fx.straddle("train", "test", half_width=512.0)
     edge = float(np.mean(fixture.segments["H1"][0]))
     sentinel = EventRecord("GWSENTINEL", edge - 100.4, 2.0)
-    glitch = GlitchRecord("L1", edge - 50.0, edge - 50.5, 1.0, "Koi_Fish", 0.97)
+    glitch = GlitchRecord("L1", edge - 400.0, edge - 400.5, 1.0, "Koi_Fish", 0.97)
     fixture = fixture.with_catalogues(glitches=[glitch], events=[sentinel])
     with world(fixture):
         assert [e["name"] for e in event_module.get_events_with_params()] == ["GWSENTINEL"]
@@ -435,6 +437,13 @@ def test_catalogues_reach_every_consumer(world):
     for ifo in IFOS:
         audit.assert_avoids({ifo: served[ifo]}, [sentinel.extent])
     audit.assert_avoids({"L1": served["L1"]}, [glitch.extent])
+
+    from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
+    monkeypatch.setattr(BaseDataObtainer, "get_glitch_veto_segments", lambda self, ifo: np.empty((0, 2)))
+    with world(fixture):
+        unvetoed = fx.served_segments(fixture, IFOS, "train")
+    with pytest.raises(AssertionError, match="forbidden time served"):
+        audit.assert_avoids({"L1": unvetoed["L1"]}, [glitch.extent])
 
 
 def test_the_guard_refuses_and_records_every_socket(refusals):
@@ -510,7 +519,6 @@ def test_installed_makes_the_fake_the_default_source_for_its_block(world):
     from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
 
     fixture = fx.straddle("train", "test", half_width=64.0)
-    assert not hasattr(BaseDataObtainer, "get_segment_data_static")
     with world(fixture) as harness:
         assert gf.Defaults.source is harness.source
         assert isinstance(harness.source, FakeSource) and harness.source.encoding == fixture.encoding

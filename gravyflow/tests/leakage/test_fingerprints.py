@@ -5,12 +5,14 @@ judge. A fingerprint that passed everything would make every leakage test
 built on it vacuous.
 """
 
+import math
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
 import pytest
+from scipy.stats import norm
 
 from gravyflow.tests.leakage import fingerprints
 from gravyflow.tests.leakage.fingerprints import (
@@ -99,9 +101,14 @@ def test_disjoint_refuses_too_few_sets_or_rows():
 
 
 def test_independent_noise_passes_the_correlation_check():
+    """Three sets of 32 rows of 2048 samples pass, against the Bonferroni threshold's own value."""
+    rows, n, sets = 32, 2048, 3
     threshold = assert_noise_independent({
-        "train": _noise(1, (32, 1, 2048)), "validation": _noise(2, (32, 1, 2048)), "test": _noise(3, (32, 1, 2048))})
-    assert 0.1 < threshold < 0.25
+        "train": _noise(1, (rows, 1, n)), "validation": _noise(2, (rows, 1, n)), "test": _noise(3, (rows, 1, n))})
+    # The normal quantile of alpha over every (pair, lag, direction) test, over sqrt(n).
+    tests = math.comb(sets, 2) * rows * rows * (2 * n - 1) * 2
+    expected = norm.isf(fingerprints.STREAM_ALPHA / (2 * tests)) / math.sqrt(n)
+    assert threshold == pytest.approx(expected, rel=4 * np.finfo(np.float64).eps)
 
 
 def test_shared_noise_under_a_signal_is_caught():

@@ -24,6 +24,7 @@ import pytest
 
 import gravyflow as gf
 from gravyflow.tests.conftest import refuse_internet
+from gravyflow.tests.test_public_sources import offline_public_sources  # noqa: F401  (offline GWOSC and Zenodo)
 
 
 @pytest.fixture(scope="package", autouse=True)

@@ -14,8 +14,9 @@ import gravyflow as gf
 from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.transient_index import TransientIndex
-from gravyflow.src.dataset.splits import _block_uniform
+from gravyflow.src.dataset.splits import SPLIT_NAMES, _block_uniform
 from gravyflow.src.model.examples.base import validation_dataset_args
+from gravyflow.src.rng.tree import DIRECT_SPLIT
 from gravyflow.src.utils.gps import gps_to_key
 
 from . import audit
@@ -234,10 +235,22 @@ def refusal(call, **group):
     return None
 
 
+def expected_refusals(name):
+    """
+    The texts the split check refuses ``name`` with: not a split; and for the reserved
+    name, where a dataset's seed tree checks it first, reserved.
+    """
+    texts = [f"Unknown split {name!r}: a split is one of {list(SPLIT_NAMES)}."]
+    if name == DIRECT_SPLIT:
+        texts.append(f"The split '{DIRECT_SPLIT}' is reserved for draws made outside a dataset.")
+    return texts
+
+
 def assert_refuses(call, name):
     message = refusal(call, group=name)
     assert message is not None, f"split {name!r} was accepted"
-    assert "a split is one of" in message or "reserved" in message or name in message, message
+    assert any(text in message for text in expected_refusals(name)), \
+        f"split {name!r} refused by another check: {message}"
 
 
 @pytest.mark.parametrize("entry", list(ENTRY_POINTS))
@@ -252,6 +265,15 @@ def test_names_check_sees_an_accepted_name(monkeypatch):
     monkeypatch.setattr(gf.SplitSpec, "check_name", staticmethod(lambda name: name))
     with pytest.raises(AssertionError, match="was accepted"):
         assert_refuses(ENTRY_POINTS["ValidationConfig"], "val")
+
+
+def test_names_check_sees_a_refusal_by_another_check():
+    """The planted leak: a call that fails for another reason, naming the split, is caught."""
+    def lookup(group):
+        raise KeyError(group)
+
+    with pytest.raises(AssertionError, match="refused by another check"):
+        assert_refuses(lookup, "val")
 
 
 #: The entry points that build or serve data without a named split.

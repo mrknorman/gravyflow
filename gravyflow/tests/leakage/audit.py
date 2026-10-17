@@ -297,6 +297,22 @@ def assert_avoids(subject, forbidden, ifos: Optional[Sequence[str]] = None) -> N
         raise AssertionError(f"forbidden time served (ifo, seconds, first overlaps): {bad}")
 
 
+def assert_start_labels(record: Records, window: Window) -> None:
+    """
+    Every START_GPS_TIME is exactly the GPS time of its row's first cropped onsource
+    sample, decoded: a sample index over a power-of-two rate is exact in float64.
+    """
+    if record.start_labels is None:
+        raise AssertionError(f"{record.name} returned no START_GPS_TIME")
+    first = (record.footprints[..., 0] + window.offsource + window.crop) / record.sample_rate_hertz
+    error = (np.asarray(record.start_labels, dtype=np.float64) - first) * record.sample_rate_hertz
+    if np.any(error != 0):
+        raise AssertionError(
+            f"{record.name}: {np.count_nonzero(error)} of {error.size} START_GPS_TIME labels are not their "
+            f"first onsource sample (off by {error.min():+.3g} to {error.max():+.3g} samples)"
+        )
+
+
 def assert_warm_equals_cold(cold: Records, warm: Records) -> None:
     """A warm build fetched nothing and decodes to exactly the cold build's footprints."""
     _check([cold, warm])
@@ -312,6 +328,6 @@ def assert_warm_equals_cold(cold: Records, warm: Records) -> None:
 
 __all__ = [
     "MIN_EXAMPLES", "Records", "collect", "fetch_intervals", "assert_inside_fetched",
-    "assert_warm_equals_cold",
+    "assert_warm_equals_cold", "assert_start_labels",
     "assert_inside", "assert_in_split", "assert_split_gap", "assert_avoids",
 ]

@@ -117,13 +117,13 @@ def test_the_window_budget_ends_a_stream_short_and_counts_it(world):
 
 
 def logit_model(detectors: int, samples: int) -> keras.Model:
-    keras.utils.set_random_seed(1)
+    """A fixed linear model: its initialiser carries its own seed, so no global state is drawn."""
     inputs = keras.Input(shape=(detectors, samples), name="WHITENED_ONSOURCE")
-    outputs = keras.layers.Dense(2, name="output")(keras.layers.Flatten()(inputs))
+    dense = keras.layers.Dense(2, name="output", kernel_initializer=keras.initializers.GlorotUniform(seed=1))
+    outputs = dense(keras.layers.Flatten()(inputs))
     return keras.Model({"WHITENED_ONSOURCE": inputs}, outputs)
 
 
-@pytest.mark.global_rng
 def test_the_validator_backgrounds_real_network_noise_by_time_slides(world):
     # The validator scored real noise as independent windows of each detector, so its
     # FAR had no slides, no clustering and no livetime per slide.

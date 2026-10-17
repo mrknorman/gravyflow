@@ -143,7 +143,6 @@ def assert_strain_disjoint(sets):
     assert_noise_independent({name: whitened_noise(b) for name, b in sets.items()})
 
 
-@pytest.mark.global_rng
 def test_validator_sets_disjoint(tmp_path, monkeypatch):
     """
     Every training batch of two epochs, the fixed validation set, and the
@@ -160,7 +159,6 @@ def test_validator_sets_disjoint(tmp_path, monkeypatch):
     assert_strain_disjoint(sets)
 
 
-@pytest.mark.global_rng
 def test_george_huerta_sets_disjoint(tmp_path, monkeypatch):
     """
     Both phases of the shipped George & Huerta 2017 run, the mass regression
@@ -228,7 +226,6 @@ def label_sets(taken_by_split):
     return {name: injection_label_streams(batches) for name, batches in taken_by_split.items()}
 
 
-@pytest.mark.global_rng
 def test_validator_label_streams_independent(tmp_path, monkeypatch):
     """
     No injection label stream (presence, SNR, HRSS, HPEAK, every waveform
@@ -248,7 +245,6 @@ def test_validator_label_streams_independent(tmp_path, monkeypatch):
         tap.take(), VALIDATOR_STAGES, batches_per_stage=LABEL_VALIDATOR_BATCHES, epochs=True)))
 
 
-@pytest.mark.global_rng
 def test_george_huerta_label_streams_independent(tmp_path, monkeypatch):
     """
     As above for both phases of the shipped George & Huerta 2017 run over the
@@ -280,10 +276,6 @@ def test_george_huerta_label_streams_independent(tmp_path, monkeypatch):
         assert_streams_independent(view)
 
 
-# Rebuilt on CPU, a batch's whitened strain may differ in the last bits of float32.
-REBUILD_RTOL = 1e-5
-
-
 def training_batches(taken):
     """Every training batch served, by its (epoch, k) address."""
     return {address: batch for record in taken if record.group == "train"
@@ -295,7 +287,6 @@ def training_epochs(windows):
     return {epoch: sorted(serve[1:] for serve in served if serve[0] == "train") for epoch, served in windows.items()}
 
 
-@pytest.mark.global_rng
 def test_resumed_run_trains_on_the_same_epochs(tmp_path, monkeypatch):
     """
     A run stopped after epoch 0 and resumed trains each epoch it resumes on
@@ -319,11 +310,11 @@ def test_resumed_run_trains_on_the_same_epochs(tmp_path, monkeypatch):
     assert training_epochs(uninterrupted_epochs) == expected
     assert training_epochs(resumed_epochs) == {epoch: expected[epoch] for epoch in range(1, EPOCHS)}, (
         "a run resumed at epoch 1 trained on other batches than the uninterrupted run")
+    # Exact: a batch is a pure function of its address, rebuilt by the same code on the
+    # same host, so the resumed run's batch is the uninterrupted run's to the bit.
     for address, batch in resumed.items():
         for name, value in batch.items():
-            np.testing.assert_allclose(value, uninterrupted[address][name], rtol=REBUILD_RTOL,
-                                       atol=REBUILD_RTOL * float(np.max(np.abs(value))),
-                                       err_msg=f"{name} of batch {address}")
+            np.testing.assert_array_equal(value, uninterrupted[address][name], err_msg=f"{name} of batch {address}")
 
 
 class _Scored(Exception):
@@ -472,7 +463,7 @@ def test_a_run_records_the_split_its_data_reads(world, tmp_path):
             resume(FOLD_2)
 
 
-@pytest.mark.global_rng  # gf.Model builds its Keras model from Keras' global seed
+@pytest.mark.global_rng  # gf.Model builds its Keras model from Python's global random (unseeded initialisers)
 def test_a_gf_model_records_its_split_for_the_validator(tmp_path):
     """
     gf.Model records the split its data reads and the split that selected it, and its
@@ -785,7 +776,8 @@ class _EventsObtainerBuilt(Exception):
     (lambda: {"noise_obtainer": gf.TransientDataObtainer(
         data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
         observing_runs=gf.ObservingRun.O3, source=gf.LocalFrames())}, gf.LocalFrames()),
-], ids=["the default noise", "real noise", "glitches as noise"])
+    (lambda: {"noise_obtainer": gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE)}, None),
+], ids=["the default noise", "real noise", "glitches as noise", "synthetic noise"])
 def test_the_banks_events_read_its_backgrounds_source(noise, source, monkeypatch):
     """
     Real events are read from the source the noise background reads, so an event's
@@ -803,7 +795,7 @@ def test_the_banks_events_read_its_backgrounds_source(noise, source, monkeypatch
     monkeypatch.setattr(event, "get_events_with_params",
                         lambda *args, **kwargs: [{"name": "GW190521", "gps": 1242442967.4}])
     monkeypatch.setattr(gf, "TransientDataObtainer", events_obtainer)
-    bank = ValidationBank(stub_model(256), args)
+    bank = ValidationBank(stub_model(256), args, ValidationConfig(score_real_events=True))
     bank.far_scores = np.zeros(1)
     with pytest.raises(_EventsObtainerBuilt):
         bank.generate_real_events()
@@ -849,7 +841,7 @@ def _fold_2_data(fixture):
             "validate_args": {**real, "steps_per_epoch": 2, "group": "validate"}}
 
 
-@pytest.mark.global_rng  # gf.Model builds its Keras model from Keras' global seed
+@pytest.mark.global_rng  # gf.Model builds its Keras model from Python's global random (unseeded initialisers)
 @pytest.mark.parametrize("force_retrain", [True, False])
 def test_trained_weights_keep_to_their_split(world, tmp_path, force_retrain):
     """
@@ -869,7 +861,7 @@ def test_trained_weights_keep_to_their_split(world, tmp_path, force_retrain):
             assert model.run_record == _selected_on_validate(gf.DEFAULT_SPLIT)
 
 
-@pytest.mark.global_rng
+@pytest.mark.global_rng  # gf.Model builds its Keras model from Python's global random (unseeded initialisers)
 def test_a_resumed_gf_model_keeps_to_its_directorys_split(world, tmp_path):
     """
     Resuming (force_retrain=False) continues the run saved in the model's directory,
@@ -893,7 +885,7 @@ class _InterruptTraining(keras.callbacks.Callback):
         raise _Interrupted
 
 
-@pytest.mark.global_rng
+@pytest.mark.global_rng  # gf.Model builds its Keras model from Python's global random (unseeded initialisers)
 def test_a_new_run_never_leaves_an_earlier_runs_weights_beside_its_record(world, tmp_path):
     """
     New weights trained in a directory holding a run of another split start a new run
@@ -910,7 +902,7 @@ def test_a_new_run_never_leaves_an_earlier_runs_weights_beside_its_record(world,
     assert _gf_model(tmp_path / "model", load=True).run_record is None, "loaded an earlier run's weights"
 
 
-@pytest.mark.global_rng
+@pytest.mark.global_rng  # gf.Model builds its Keras model from Python's global random (unseeded initialisers)
 def test_gravyflow_models_carry_their_record(world, tmp_path):
     """
     Every model gravyflow trains or loads carries its training record, so the validator

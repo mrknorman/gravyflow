@@ -287,7 +287,9 @@ def one_layer_model(target):
     import keras
 
     inputs = keras.Input(shape=(len(IFOS), int(FS * ONSOURCE_S)), name=RV.ONSOURCE.name)
-    outputs = keras.layers.Dense(1, name=target.name)(keras.layers.Flatten()(inputs))
+    # The initialiser carries its own seed: building the model draws no global state.
+    dense = keras.layers.Dense(1, name=target.name, kernel_initializer=keras.initializers.GlorotUniform(seed=1))
+    outputs = dense(keras.layers.Flatten()(inputs))
     model = keras.Model(inputs, {target.name: outputs})
     model.compile(optimizer="sgd", loss={target.name: "mse"})
     return model
@@ -314,7 +316,6 @@ def fit_serves(monkeypatch, shuffle, epochs=FIT_EPOCHS, initial_epoch=0):
     return windows.take()
 
 
-@pytest.mark.global_rng
 def test_keras_fit_addresses(monkeypatch):
     """
     Under ``model.fit``, Keras epoch e serves the training addresses
@@ -339,7 +340,7 @@ def test_keras_fit_addresses(monkeypatch):
             f"{run}, before its first epoch: {before}")
 
 
-@pytest.mark.global_rng
+@pytest.mark.global_rng  # Keras' own shuffle draws from Python's global random, which the test seeds
 def test_keras_shuffle_is_refused(monkeypatch):
     """
     ``fit``'s shuffle, its default, reorders a dataset's batches with Python's unseeded
@@ -353,7 +354,7 @@ def test_keras_shuffle_is_refused(monkeypatch):
         fit_serves(monkeypatch, True)
 
 
-@pytest.mark.global_rng
+@pytest.mark.global_rng  # its last fit shuffles: Keras draws from Python's global random, seeded here
 def test_after_fit_any_order_is_served():
     """
     The out-of-order refusal holds only while ``fit`` runs: after it, the same
