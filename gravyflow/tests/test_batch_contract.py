@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.dataset.features.injection import RENAMED_SKY_KEYS
 from gravyflow.src.dataset.features.injection import calculate_hpeak
 
 FS = 2048.0
@@ -225,7 +226,7 @@ def test_the_old_sky_keys_are_refused_by_name():
     injections, mask, parameters = next(injector(
         sample_rate_hertz=FS, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
         num_examples_per_batch=2))
-    for old, new in gf.RENAMED_SKY_KEYS.items():
+    for old, new in RENAMED_SKY_KEYS.items():
         with pytest.raises(KeyError, match=new.name):
             injector.add_injections_to_onsource(
                 injections, mask, np.zeros((2, 1, 2 * T), np.float32),

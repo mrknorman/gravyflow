@@ -6,15 +6,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, IntEnum, auto
 from contextlib import closing
-from typing import List, Tuple, Union, Dict, Any, Optional, Generator, NamedTuple, Sequence
+from typing import TYPE_CHECKING, List, Tuple, Union, Dict, Any, Optional, Generator, NamedTuple, Sequence
 from pathlib import Path
 from .cache import MemoryCache
 from concurrent.futures import ThreadPoolExecutor, Future
 from abc import ABC, abstractmethod
-
-# Suppress verbose logging from external libraries (gwpy, gwosc)
-logging.getLogger('gwpy').setLevel(logging.WARNING)
-logging.getLogger('gwosc').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +20,15 @@ from numpy.random import default_rng
 import keras
 from keras import ops
 
-from gwdatafind import find_urls
-from gwpy.timeseries import TimeSeries
+if TYPE_CHECKING:
+    from gwpy.timeseries import TimeSeries
 
 # Local imports:
 import gravyflow as gf
+from gravyflow.src.resources import PACKAGE
+from gravyflow.src.utils.io import open_hdf5_file
 from gravyflow.src.utils.resample import resample, whole_hertz
+from gravyflow.src.utils.tensor import check_tensor_integrity
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
 from gravyflow.src.utils.gps import as_gps_times
 from gravyflow.src.utils.shapes import ShapeEnforcer
@@ -182,14 +181,14 @@ class ObservingRunData:
     @staticmethod
     def _to_gps_time(date_time: datetime) -> float:
         """UTC datetime to GPS seconds, counting the leap seconds in between."""
-        from gwpy.time import to_gps
-        return float(to_gps(date_time))
+        from astropy.time import Time
+        return float(Time(date_time, scale="utc").gps)
 
     @staticmethod
     def _to_date_time(gps_time: float) -> datetime:
         """GPS seconds to a naive UTC datetime."""
-        from gwpy.time import from_gps
-        return from_gps(gps_time).replace(tzinfo=None)
+        from astropy.time import Time
+        return Time(gps_time, format="gps").utc.to_datetime()
 
 # Channels and frame types name GWOSC's public frames for O1 and O2 (gwdatafind type
 # "{ifo}_{frame_type}", channel "{ifo}:{channel}") and LVK's calibrated frames for O3
@@ -503,7 +502,7 @@ class IFOData:
     One row of detector pieces: ``data[i]`` at ``sample_rate_hertz``, its first sample
     at GPS ``start_gps_time[i]``.
     """
-    data: Union[List[TimeSeries], Any, np.ndarray]
+    data: Union[List["TimeSeries"], Any, np.ndarray]
     sample_rate_hertz: float
     start_gps_time: List[float]
 
@@ -1005,7 +1004,7 @@ class BaseDataObtainer(ABC):
             # Where the default put segment caches before the one cache root.
             warn_of_moved_cache(
                 self.file_path,
-                gf.PATH.parent / self.file_path.name,
+                PACKAGE.parent / self.file_path.name,
                 Path("generator_data") / self.file_path.name,
             )
 
@@ -1256,7 +1255,7 @@ class BaseDataObtainer(ABC):
         if self.file_path is None:
             return
 
-        with closing(gf.open_hdf5_file(self.file_path, logger, mode="a")) as f:
+        with closing(open_hdf5_file(self.file_path, logger, mode="a")) as f:
             if key in f:
                 if not self.force_acquisition:
                     return
@@ -1275,7 +1274,7 @@ class BaseDataObtainer(ABC):
             frame_type: str,
             channel: str,
             sample_rate_hertz: Optional[float] = None,
-        ) -> TimeSeries:
+        ) -> "TimeSeries":
 
         """
         Fetches new segment data from local frames, or else from GWOSC, and reads
@@ -1310,7 +1309,7 @@ class BaseDataObtainer(ABC):
         frame_type: str,
         channel: str,
         sample_rate_hertz: Optional[float] = None,
-    ) -> TimeSeries:
+    ) -> "TimeSeries":
         """
         Thread-safe static version of get_segment_data.
 
@@ -1334,6 +1333,10 @@ class BaseDataObtainer(ABC):
             UpsamplingRefused: If ``sample_rate_hertz`` exceeds 16384 Hz.
             ValueError: If data cannot be fetched from local or remote sources
         """
+        # Real data is the realdata extra's: gwpy and gwdatafind load only here.
+        from gwdatafind import find_urls
+        from gwpy.timeseries import TimeSeries
+
         open_data_rate = gwosc_sample_rate_hertz(
             sample_rate_hertz if sample_rate_hertz is not None else 4096.0
         )
@@ -1444,7 +1447,7 @@ class BaseDataObtainer(ABC):
             )
         if segment is None:
             return None
-        if not gf.check_tensor_integrity(segment.data, 1, 10):
+        if not check_tensor_integrity(segment.data, 1, 10):
             logging.debug(f"Segment integrity check failed for {ifo.name}, will zero-fill")
             return None
         self._segment_cache.put(memory_key, segment)
@@ -1459,7 +1462,7 @@ class BaseDataObtainer(ABC):
         if (self.acquisition_mode == AcquisitionMode.TRANSIENT or self.file_path is None
                 or self.force_acquisition or not Path(self.file_path).exists()):
             return None
-        with closing(gf.open_hdf5_file(self.file_path, logger, mode="r")) as segment_file:
+        with closing(open_hdf5_file(self.file_path, logger, mode="r")) as segment_file:
             if segment_key not in segment_file:
                 return None
             dataset = segment_file[segment_key]

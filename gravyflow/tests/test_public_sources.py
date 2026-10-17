@@ -32,6 +32,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.resources import PACKAGE
 from gravyflow.src.dataset.acquisition.base import BaseDataObtainer, ObservingRunData
 from gravyflow.tests.conftest import refuse_internet
 
@@ -183,10 +184,10 @@ class FakeEventApi:
     def serve(self, monkeypatch):
         """Answer gravyflow's event-API calls."""
         from gwosc import api as gwosc_api
-        from gravyflow.src.dataset.features import event as event_module
+        from gwpy.table import EventTable
 
         monkeypatch.setattr(gwosc_api, "fetch_cataloglist_json", self.cataloglist)
-        monkeypatch.setattr(event_module.EventTable, "fetch_open_data", self.fetch_open_data)
+        monkeypatch.setattr(EventTable, "fetch_open_data", self.fetch_open_data)
         return self
 
 
@@ -328,7 +329,7 @@ class TestGwoscSegments:
         assert len(offline_public_sources.requests) == n_requests
         cached = list((tmp_path / ".gravyflow" / "cache" / "gwosc_timeline").glob("*.json"))
         assert len(cached) == len(gf.DEFAULT_GWOSC_FLAGS)  # one file per flag, L1 O1
-        assert not list((gf.PATH / "res").glob("**/*gwosc*"))
+        assert not list((PACKAGE / "res").glob("**/*gwosc*"))
 
 
 # =============================================================================
@@ -407,8 +408,8 @@ class TestFrameTypesAndChannels:
             calls["channel"] = channel
             return "data"
 
-        with patch("gravyflow.src.dataset.acquisition.base.find_urls", side_effect=fake_find_urls), \
-             patch("gravyflow.src.dataset.acquisition.base.TimeSeries.read", side_effect=fake_read):
+        with patch("gwdatafind.find_urls", side_effect=fake_find_urls), \
+             patch("gwpy.timeseries.TimeSeries.read", side_effect=fake_read):
             run = [r for r in gf.ObservingRun
                    if r.value.start_gps_time <= gps <= r.value.end_gps_time][0]
             BaseDataObtainer.get_segment_data_static(
@@ -450,9 +451,9 @@ class TestSampleRate:
             cache_segments=False,
             prefetch_segments=0,
         )
-        with patch("gravyflow.src.dataset.acquisition.base.find_urls",
+        with patch("gwdatafind.find_urls",
                    side_effect=ValueError("no local frames")), \
-             patch("gravyflow.src.dataset.acquisition.base.TimeSeries.fetch_open_data",
+             patch("gwpy.timeseries.TimeSeries.fetch_open_data",
                    side_effect=self._fetch_recorder(calls)):
             segment = obtainer.get_segment(
                 1238170000.0, 1238170000.0 + 64.2, requested, gf.IFO.L1, "segments/test"
@@ -463,9 +464,9 @@ class TestSampleRate:
 
     def test_transient_fetch_uses_needed_rate(self):
         calls = []
-        with patch("gravyflow.src.dataset.acquisition.base.find_urls",
+        with patch("gwdatafind.find_urls",
                    side_effect=ValueError("no local frames")), \
-             patch("gravyflow.src.dataset.acquisition.base.TimeSeries.fetch_open_data",
+             patch("gwpy.timeseries.TimeSeries.fetch_open_data",
                    side_effect=self._fetch_recorder(calls)):
             BaseDataObtainer.get_segment_data_static(
                 1238170000.0, 1238170032.0, gf.IFO.L1, "HOFT_C01",
@@ -482,9 +483,9 @@ class TestSampleRate:
             prefetch_segments=0,
         )
         obtainer.valid_segments = np.array([[[1238170000.0, 1238172048.0]]])
-        with patch("gravyflow.src.dataset.acquisition.base.find_urls",
+        with patch("gwdatafind.find_urls",
                    side_effect=ValueError("no local frames")), \
-             patch("gravyflow.src.dataset.acquisition.base.TimeSeries.fetch_open_data",
+             patch("gwpy.timeseries.TimeSeries.fetch_open_data",
                    side_effect=self._fetch_recorder([])):
             with pytest.raises(ValueError, match="upsample"):
                 next(obtainer.acquire(32768.0, ifos=[gf.IFO.L1]))

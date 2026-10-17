@@ -1538,7 +1538,6 @@ class Population:
             current_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             population_directory_path = Path(f"./population_{current_timestamp}")
 
-        self.repo = gf.get_current_repo()
 
         self.generation = 0
 

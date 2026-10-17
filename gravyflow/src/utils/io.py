@@ -1,6 +1,5 @@
 from typing import Union, Optional
 from pathlib import Path
-import inspect
 import sys
 import os
 import logging
@@ -12,33 +11,6 @@ import keras
 from keras.callbacks import Callback
 
 import h5py
-
-def get_file_parent_path() -> Optional[Path]:
-    """
-    Returns the absolute path of the script/file that calls this function, with added error checking.
-
-    Returns:
-        Optional[Path]: The absolute path of the directory containing the caller file, or None if not found.
-    """
-    try:
-        # Get the frame of the caller
-        caller_frame = inspect.stack()[1]
-        # Extract the file path from the frame
-        caller_path = caller_frame.filename
-        # Return the absolute path of the directory containing the file
-        return Path(caller_path).parent.resolve()
-    except IndexError:
-        # This may occur if the call stack isn't accessible
-        logger.error("Error: Could not access the call stack.")
-    except AttributeError:
-        # This may occur if the caller frame does not have a 'filename' attribute
-        logger.error("Error: Caller frame does not have a 'filename' attribute.")
-    except Exception as e:
-        # Catch-all for any other unforeseen errors
-        logger.error(f"An unexpected error occurred: {e}")
-
-    # Return None if we couldn't get the caller path
-    return None
 
 def is_redirected():
     return (
@@ -129,12 +101,6 @@ def ensure_directory_exists(
 
 def snake_to_capitalized_spaces(snake_str: str) -> str:
     return ' '.join(word.capitalize() for word in snake_str.split('_'))
-
-def transform_string(s):
-    # Remove the 'perceptron_' prefix and split by underscore
-    name = s.replace('model_', '')
-
-    return snake_to_capitalized_spaces(name)
 
 def save_dict_to_hdf5(data_dict, filepath, force_overwrite=False):
 

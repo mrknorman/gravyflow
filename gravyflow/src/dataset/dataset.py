@@ -974,9 +974,6 @@ def create_variable_dictionary(
 def Dataset(**kwargs):
     return GravyflowDataset(**kwargs)
 
-# Legacy class alias
-data = GravyflowDataset
-
 
 # =============================================================================
 # COMPOSED DATASET

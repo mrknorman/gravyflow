@@ -28,6 +28,7 @@ from gravyflow.src.dataset.acquisition.augmentations import (
     AddNoise, RandomShift, SignReversal, TimeReversal
 )
 from gravyflow.src.dataset.acquisition.transient import TransientDataObtainer
+from gravyflow.src.dataset.tools.psd import estimate_psd
 from gravyflow.src.dataset.tools.snr import template_sigma
 from gravyflow.src.detection import MatchedFilter, TemplateBank
 
@@ -86,7 +87,7 @@ ELEMENT, PEAK = "element", "peak"
 CENSUS = {
     "gf.psd": (lambda k: gf.psd(at(OFFSOURCE, k), nperseg=1024, sample_rate_hertz=FS).value() / k ** 2,
                ELEMENT, False),
-    "gf.estimate_psd": (lambda k: gf.estimate_psd(at(OFFSOURCE, k), FS).value() / k ** 2, ELEMENT, False),
+    "estimate_psd": (lambda k: estimate_psd(at(OFFSOURCE, k), FS).value() / k ** 2, ELEMENT, False),
     "gf.whiten": (lambda k: gf.whiten(at(ONSOURCE, k), at(OFFSOURCE, k), FS), PEAK, False),
     "gf.Whiten": (lambda k: gf.Whiten(sample_rate_hertz=FS, onsource_duration_seconds=1.0)(
         [at(ONSOURCE, k), at(OFFSOURCE, k)]), PEAK, False),
@@ -102,7 +103,7 @@ CENSUS = {
     "gf.matched_filter_fft (PSD array)": (lambda k: gf.matched_filter_fft(
         at(ONSOURCE[:, 0], k), TEMPLATE[None], psd=PSD * k ** 2, sample_rate_hertz=FS), PEAK, False),
     "gf.matched_filter_fft (PowerSpectrum)": (lambda k: gf.matched_filter_fft(
-        at(ONSOURCE[:, 0], k), TEMPLATE[None], psd=gf.estimate_psd(at(OFFSOURCE[:, 0], k), FS),
+        at(ONSOURCE[:, 0], k), TEMPLATE[None], psd=estimate_psd(at(OFFSOURCE[:, 0], k), FS),
         sample_rate_hertz=FS), PEAK, False),
     "gf.matched_filter_fft (white)": (lambda k: np.asarray(gf.matched_filter_fft(
         at(ONSOURCE[:, 0], k), TEMPLATE[None], sample_rate_hertz=FS)) / k, PEAK, False),
@@ -123,7 +124,7 @@ CENSUS = {
 #: Public names of the numeric modules that take no raw strain, and why.
 EXEMPT = {
     "SpectralConfig": "configuration; takes no data",
-    "PowerSpectrum": "the estimate gf.psd and gf.estimate_psd return; value() is checked through them",
+    "PowerSpectrum": "the estimate gf.psd and estimate_psd return; value() is checked through them",
     "spectrogram_shape": "shapes only",
     "MatchedFilterLayer": "runs gf.MatchedFilter's search (_run) on the model's inputs",
     "TemplateBank": "templates, generated at unit scale",
@@ -183,11 +184,11 @@ def test_f_of_k_x_relates_to_f_of_x_as_its_units_require_or_refuses(name):
 
 
 def test_every_public_numeric_function_is_in_the_census():
-    # "gf.name" entries are public names; others (template_sigma) are module functions.
+    # "gf.name" entries are public names; others (estimate_psd, template_sigma) are module functions.
     listed = {name.split(" ")[0].removeprefix("gf.") for name in CENSUS if name.startswith("gf.")}
     listed |= set(EXEMPT)
     public = {
-        name for name, value in vars(gf).items()
+        name for name, value in ((name, getattr(gf, name)) for name in gf.__all__)
         if callable(value) and getattr(value, "__module__", "").startswith(NUMERIC_MODULES)
     }
     missing = sorted(public - listed)

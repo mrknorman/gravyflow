@@ -1,13 +1,14 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "gravyflow"
-version = "1.0.0"
-description = "Jax and Keras-3 tools for gravitational wave data science."
+dynamic = ["version"]
+description = "JAX and Keras 3 tools for gravitational-wave data science."
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
   { name = "Michael Norman", email = "mrknorman@proton.me" },
 ]
@@ -15,31 +16,53 @@ requires-python = ">=3.13"
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.13",
-  "License :: OSI Approved :: Apache Software License",
   "Operating System :: MacOS :: MacOS X",
   "Operating System :: POSIX :: Linux",
 ]
+# The synthetic path: noise, injections, conditioning, datasets and models.
 dependencies = [
-  # If you want tighter compatibility, consider bounding these (e.g. <0.10),
-  # but leaving as-is preserves your current intent.
   "jax>=0.8.1",
   "jaxlib>=0.8.1",
-
   "keras>=3.0",
   "ripplegw>=0.4.1,<0.5",
-  "gwdatafind",
-  "gwpy",
-  "pycbc",
-  "GitPython",
-  "sqlalchemy",
-  "bokeh>=3.3",
-  "panel>=1.3",
-  "holoviews>=1.18",
-  "psycopg2-binary",
-  "ipykernel",
+  "numpy",
+  "scipy",
+  "h5py",
+  "astropy",
+  "tqdm",
 ]
 
 [project.optional-dependencies]
+# Real detector data, glitches and events from GWOSC, Gravity Spy and GWDataFind.
+realdata = [
+  "gwpy",
+  "gwdatafind",
+  "gwosc",
+  "requests",
+  "pandas",
+]
+# Plots and the validation dashboard.
+viz = [
+  "bokeh>=3.3",
+  "panel>=1.3",
+  "holoviews>=1.18",
+  "datashader",
+  "pandas",
+]
+# The test suite, with the references it checks against.
+test = [
+  "gravyflow[realdata,viz]",
+  "pytest",
+  "pytest-cov",
+  "lalsuite",
+  "pycbc",
+]
+# The example notebooks and tutorials.
+notebooks = [
+  "gravyflow[realdata,viz]",
+  "ipykernel",
+  "matplotlib",
+]
 # NVIDIA CUDA (Linux x86_64 only). These markers prevent macOS/Apple Silicon installs from trying to pull CUDA wheels.
 cuda = [
   "jax-cuda12-pjrt>=0.8.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -61,25 +84,30 @@ cuda = [
   "nvidia-nccl-cu12>=2.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
-# Apple Silicon Metal backend (optional / experimental)
-metal = [
-  "jax-metal>=0.1.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
-]
-
-dev = [
-  "pytest",
-  "pytest-env",
-  "pytest-cov",
-]
-
 [project.urls]
 Homepage = "https://github.com/mrknorman/gravyflow"
 Repository = "https://github.com/mrknorman/gravyflow"
+Changelog = "https://github.com/mrknorman/gravyflow/blob/main/CHANGELOG.md"
+
+[tool.setuptools.dynamic]
+version = { attr = "gravyflow.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["gravyflow*"]
-exclude = ["tests*"]
+exclude = ["gravyflow.tests*", "gravyflow.res*"]
+
+# The data files the package reads; the test data in res/tests stays in the
+# repository, and the weights in gravyflow.src.resources.RELEASE_WEIGHTS are
+# release downloads.
+[tool.setuptools.package-data]
+gravyflow = [
+  "res/noise_profiles/*.csv",
+  "res/template_banks/*.json",
+  "res/model/gabbard_2017.keras",
+  "res/model/georgehuerta2017shallow_classification.keras",
+  "res/model/georgehuerta2017shallow_regression.keras",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["gravyflow/tests"]
@@ -100,7 +128,7 @@ filterwarnings = [
   "ignore:The structure of `inputs` doesn't match:UserWarning",
   # Past acquisition (where data gaps are expected), a NaN or inf the sanitiser
   # replaces is a failure upstream: tests fail on it.
-  "error::gravyflow.src.utils.tensor.NonFiniteWarning:gravyflow\\.src\\.dataset\\.(dataset|features\\.injection|tools\\.snr)",
+  "error::gravyflow.src.utils.numerics.NonFiniteWarning:gravyflow\\.src\\.dataset\\.(dataset|features\\.injection|tools\\.snr)",
 ]
 addopts = "--cov=gravyflow --cov-report=term-missing --cov-fail-under=90"
 
@@ -113,7 +141,6 @@ omit = [
   "gravyflow/src/model/genetics.py",
   "gravyflow/src/utils/processes.py",
   "gravyflow/src/utils/alert.py",
-  "gravyflow/src/utils/git.py",
 ]
 
 [tool.coverage.report]

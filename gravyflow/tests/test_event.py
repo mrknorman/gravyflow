@@ -11,6 +11,7 @@ import pytest
 import numpy as np
 
 import gravyflow as gf
+from gravyflow.src.resources import PACKAGE
 from gravyflow.src.dataset.features import event as event_module
 
 
@@ -159,7 +160,7 @@ class TestEventsWithParams:
         assert gf.search_events(distance_range=(None, 100.0)) == ["GW170817"]
 
     def test_nothing_is_written_inside_the_package(self):
-        package = Path(gf.PATH)
+        package = Path(PACKAGE)
         before = sorted(str(p) for p in package.rglob("*") if "__pycache__" not in p.parts)
         event_module.get_events_with_params()
         event_module.get_events_with_params(event_types=[gf.EventConfidence.MARGINAL])

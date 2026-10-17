@@ -19,10 +19,12 @@ import pytest
 # Local imports:
 
 import gravyflow as gf
+from gravyflow.src.dataset.features.injection import roll_vector_zero_padding
+from gravyflow.src.resources import PACKAGE
 from gravyflow.src.dataset.tools import snr as gf_snr
 from gravyflow.src.dataset.tools import psd as gf_psd
 from gravyflow.src.dataset.conditioning.whiten import whiten
-from gravyflow.src.dataset.features.waveforms.cbc import generate_cbc_waveform
+from gravyflow.src.dataset.features.waveforms.cbc import _generate_cbc_window
 import keras
 from keras import ops
 
@@ -215,7 +217,7 @@ def _test_snr(
     
     with gf.env():
         
-        output_directory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests/"
+        output_directory_path : Path = PACKAGE.parent.parent / "gravyflow_data/tests/"
 
         gf.Defaults.onsource_duration_seconds = 16.0
 
@@ -257,12 +259,13 @@ def _test_snr(
         crop_duration_seconds : float = gf.Defaults.crop_duration_seconds
 
         # Generate phenom injection:
-        injection = generate_cbc_waveform(
+        injection = _generate_cbc_window(
             num_waveforms=1, 
             mass_1_msun=30, 
             mass_2_msun=30,
             sample_rate_hertz=sample_rate_hertz,
-            duration_seconds=onsource_duration_seconds + (2.0*crop_duration_seconds),
+            window_seconds=onsource_duration_seconds + (2.0*crop_duration_seconds),
+            min_frequency_hertz=None,
             inclination_radians=1.0,
             distance_mpc=100,
             reference_orbital_phase_in=0.0,
@@ -286,7 +289,7 @@ def _test_snr(
         shift = rng.integers(min_roll, max_roll, size=1)
         shift = ops.convert_to_tensor(shift, dtype="int32")
 
-        injection = gf.roll_vector_zero_padding(
+        injection = roll_vector_zero_padding(
             injection,
             shift
         )      

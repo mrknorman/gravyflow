@@ -23,6 +23,7 @@ except Exception as e:
 # Set Keras backend to JAX
 os.environ["KERAS_BACKEND"] = "jax"
 import gravyflow as gf
+from gravyflow.src.resources import PACKAGE
 
 import warnings
 from dataclasses import dataclass, field
@@ -309,7 +310,7 @@ def suite_guard(request, tmp_path_factory):
     from another process using the cache meanwhile: this host records no writer.
     So such a change is named in the report and does not fail the suite.
     """
-    watched = {"the package": Path(gf.PATH), "~/.gravyflow": Path.home() / ".gravyflow"}
+    watched = {"the package": Path(PACKAGE), "~/.gravyflow": Path.home() / ".gravyflow"}
     before = {name: tree_snapshot(path) for name, path in watched.items()}
     root = tmp_path_factory.mktemp("suite")
     guard = SuiteGuard(root, offline=not request.config.getoption("--network"))

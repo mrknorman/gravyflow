@@ -6,6 +6,7 @@ import warnings
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.resources import PACKAGE
 
 import numpy as np
 import keras
@@ -314,7 +315,7 @@ def test_project_wave(
         pytestconfig : Config
     ) -> None:
 
-    output_directory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests"
+    output_directory_path : Path = PACKAGE.parent.parent / "gravyflow_data/tests"
 
     with gf.env():
         _test_projection(
@@ -330,7 +331,7 @@ def test_project_wave_single(
         pytestconfig : Config
     ) -> None:
     
-    output_directory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests"
+    output_directory_path : Path = PACKAGE.parent.parent / "gravyflow_data/tests"
     
     with gf.env():
         _test_projection(

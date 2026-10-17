@@ -16,6 +16,7 @@ import gravyflow as gf
 import jax
 
 from gravyflow.src.rng.legacy import warn_deprecated
+from gravyflow.src.utils.numerics import NonFiniteWarning
 
 logger = logging.getLogger(__name__)
 
@@ -166,17 +167,6 @@ class Distribution:
         if self.dtype == int and samples.dtype.kind != "i":
             samples = np.rint(samples.astype(np.float64)).astype(np.int64)
         return samples
-
-    
-def randomise_arguments(input_dict, func):
-    output_dict = {}
-    for key, value in input_dict.items():
-        output_dict[key] = randomise_dict(value)
-
-    return func(**output_dict), output_dict
-
-class NonFiniteWarning(UserWarning):
-    """NaN or infinite values were replaced with zeros."""
 
 
 @jax.jit
@@ -550,10 +540,6 @@ def rfftfreq(
     frequency_tensor = ops.cast(results, dtype="float32") * val
     
     return frequency_tensor
-
-def get_element_shape(dataset):
-    for element in dataset.take(1):
-        return element[0].shape
 
 def print_active_gpu_memory_info():
     # Placeholder for JAX/Keras backend memory info

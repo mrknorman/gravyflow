@@ -8,6 +8,7 @@ import pytest
 import scipy.signal
 
 import gravyflow as gf
+from gravyflow.src.dataset.tools.psd import estimate_psd
 from gravyflow.src.dataset.tools.psd import PowerSpectrum, SpectralConfig, inverse_bias
 from gravyflow.src.dataset.tools import snr as gf_snr
 from gravyflow.src.dataset.conditioning import whiten as gf_whiten
@@ -100,14 +101,14 @@ def test_psd_refuses_a_signal_shorter_than_one_segment():
 
 def test_estimate_psd_refuses_too_few_segments():
     with pytest.raises(ValueError, match="Welch segment"):
-        gf.estimate_psd(np.zeros((1, 1, int(1.5 * FS)), dtype=np.float32), FS)
+        estimate_psd(np.zeros((1, 1, int(1.5 * FS)), dtype=np.float32), FS)
 
 
 def test_estimate_psd_is_scale_free():
     rng = np.random.default_rng(4)
     x = coloured_noise(rng, (2, 1), 16.0)
-    physical = gf.estimate_psd(x.astype(np.float32), FS)
-    internal = gf.estimate_psd((x * SCALE).astype(np.float32), FS)
+    physical = estimate_psd(x.astype(np.float32), FS)
+    internal = estimate_psd((x * SCALE).astype(np.float32), FS)
     np.testing.assert_allclose(np.asarray(physical.normalised), np.asarray(internal.normalised), rtol=1e-4)
     np.testing.assert_allclose(np.asarray(internal.scale) / np.asarray(physical.scale), SCALE, rtol=1e-5)
 
@@ -140,7 +141,7 @@ def test_whiten_matches_gwpy(with_chirp):
     # 1 / duration; gravyflow ramps up to the band edge over the same 5 bins.
     ref = TimeSeries(x, sample_rate=FS).whiten(asd=asd, fduration=1.0, highpass=20.0 - 5 / 4.0).value
     config = SpectralConfig(lower_frequency_hertz=20.0, psd_floor=0.0, correct_inverse_bias=False)
-    spectrum = gf.estimate_psd(off[None].astype(np.float32), FS, config)
+    spectrum = estimate_psd(off[None].astype(np.float32), FS, config)
     mine = np.asarray(gf.whiten(x[None].astype(np.float32), spectrum, FS))[0]
     keep = slice(int(0.5 * FS), -int(0.5 * FS))
     assert np.max(np.abs(mine[keep] - ref[keep])) < 1e-4 * np.std(ref[keep])
@@ -151,7 +152,7 @@ def test_whitened_gaussian_noise_has_unit_variance_at_any_scale(scale):
     rng = np.random.default_rng(6)
     on = coloured_noise(rng, (48, 1), 2.0) * scale
     off = coloured_noise(rng, (48, 1), 16.0) * scale
-    spectrum = gf.estimate_psd(off.astype(np.float32), FS, SpectralConfig(lower_frequency_hertz=None))
+    spectrum = estimate_psd(off.astype(np.float32), FS, SpectralConfig(lower_frequency_hertz=None))
     whitened = np.asarray(gf.whiten(on.astype(np.float32), spectrum, FS))[..., 1024:-1024]
     assert whitened.dtype == np.float32
     # The Nyquist taper removes about 0.3% of the variance.
@@ -165,7 +166,7 @@ def test_whitening_without_the_correction_is_biased_high():
     on = coloured_noise(rng, (48, 1), 2.0)
     off = coloured_noise(rng, (48, 1), 16.0)
     config = SpectralConfig(lower_frequency_hertz=None, correct_inverse_bias=False)
-    whitened = np.asarray(gf.whiten(on.astype(np.float32), gf.estimate_psd(off.astype(np.float32), FS, config),
+    whitened = np.asarray(gf.whiten(on.astype(np.float32), estimate_psd(off.astype(np.float32), FS, config),
                                     FS))[..., 1024:-1024]
     assert np.var(whitened) > 1.02
 
@@ -181,7 +182,7 @@ def test_whiten_keeps_the_length_and_broadcasts_leading_axes():
     rng = np.random.default_rng(8)
     off = rng.standard_normal((3, 2, int(16 * FS))).astype(np.float32)
     x = rng.standard_normal((4, 3, 2, int(2 * FS))).astype(np.float32)
-    spectrum = gf.estimate_psd(off, FS)
+    spectrum = estimate_psd(off, FS)
     out = np.asarray(gf.whiten(x, spectrum, FS))
     assert out.shape == x.shape
     np.testing.assert_allclose(out[1], np.asarray(gf.whiten(x[1], spectrum, FS)), atol=1e-5)
@@ -193,7 +194,7 @@ def test_whiten_band_removes_content_outside_it():
     t = np.arange(int(4 * FS)) / FS
     low = np.sin(2 * np.pi * 8.0 * t).astype(np.float32)[None, None]
     inside = np.sin(2 * np.pi * 100.0 * t).astype(np.float32)[None, None]
-    spectrum = gf.estimate_psd(off, FS, SpectralConfig(lower_frequency_hertz=20.0, upper_frequency_hertz=500.0))
+    spectrum = estimate_psd(off, FS, SpectralConfig(lower_frequency_hertz=20.0, upper_frequency_hertz=500.0))
     keep = slice(1024, -1024)
     out_low = np.asarray(gf.whiten(low, spectrum, FS))[..., keep]
     out_in = np.asarray(gf.whiten(inside, spectrum, FS))[..., keep]
@@ -206,7 +207,7 @@ def test_whiten_floor_bounds_the_gain_of_an_empty_band():
     rng = np.random.default_rng(10)
     off = scipy.signal.sosfiltfilt(scipy.signal.butter(16, 700.0, fs=FS, output="sos"),
                                    rng.standard_normal((1, 1, int(16 * FS)))).astype(np.float32)
-    spectrum = gf.estimate_psd(off, FS)
+    spectrum = estimate_psd(off, FS)
     psd = np.asarray(spectrum.normalised)[0, 0]
     band = psd[20:1024]
     floor = spectrum.config.psd_floor * np.median(band)
@@ -222,7 +223,7 @@ def test_whiten_glitch_in_the_offsource_barely_moves_the_median_psd():
     off[..., int(7 * FS):int(8 * FS)] += glitch
     out = {}
     for method in ("mean", "median"):
-        spectrum = gf.estimate_psd(off.astype(np.float32), FS, SpectralConfig(psd_method=method))
+        spectrum = estimate_psd(off.astype(np.float32), FS, SpectralConfig(psd_method=method))
         w = np.asarray(gf.whiten(on.astype(np.float32), spectrum, FS))[..., 1024:-1024]
         f, p = scipy.signal.welch(w, fs=FS, nperseg=256, axis=-1)
         out[method] = np.mean(p[..., (f >= 130) & (f <= 170)]) / (2 / FS)
@@ -300,7 +301,7 @@ def test_network_snr_is_the_quadrature_sum_over_detectors():
     off = rng.standard_normal((2, 2, int(16 * FS))).astype(np.float32)
     h = sine_gaussian(100.0, 9.0, 1.0).astype(np.float32)
     x = np.stack([np.stack([h, 2 * h]), np.stack([3 * h, h])])
-    spectrum = gf.estimate_psd(off, FS)
+    spectrum = estimate_psd(off, FS)
     network = np.asarray(gf.snr(x, spectrum, FS))
     per_detector = np.stack([np.asarray(gf.snr(x[:, i], gf.PowerSpectrum(
         spectrum.normalised[:, i], spectrum.scale[:, i], FS, spectrum.config, spectrum.inverse_bias,
@@ -313,7 +314,7 @@ def test_scale_to_snr_scales_each_example_to_its_own_target():
     off = rng.standard_normal((3, 1, int(16 * FS))).astype(np.float32)
     h = np.repeat(sine_gaussian(100.0, 9.0, 2.0)[None, None], 3, axis=0).astype(np.float32)
     targets = np.array([5.0, 10.0, 20.0], np.float32)
-    spectrum = gf.estimate_psd(off, FS)
+    spectrum = estimate_psd(off, FS)
     scaled = gf.scale_to_snr(h, spectrum, targets, FS, onsource_duration_seconds=1.0)
     measured = np.asarray(gf.snr(gf.crop_samples(scaled, 1.0, FS), spectrum, FS))
     np.testing.assert_allclose(measured, targets, rtol=1e-4)
@@ -333,7 +334,7 @@ def test_scaled_injection_carries_its_target_in_the_whitened_data():
     rng = np.random.default_rng(19)
     off = coloured_noise(rng, (8, 1), 16.0) * SCALE
     h = np.repeat(sine_gaussian(150.0, 9.0, 2.0)[None, None], 8, axis=0) * SCALE * 1e-22
-    spectrum = gf.estimate_psd(off.astype(np.float32), FS)
+    spectrum = estimate_psd(off.astype(np.float32), FS)
     scaled = gf.scale_to_snr(h.astype(np.float32), spectrum, np.full(8, 10.0, np.float32), FS,
                              onsource_duration_seconds=1.0)
     whitened = np.asarray(gf.crop_samples(gf.whiten(scaled, spectrum, FS), 1.0, FS), dtype=np.float64)

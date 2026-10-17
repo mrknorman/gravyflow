@@ -1,142 +1,236 @@
 """
-This module initializes the GravyFlow library, setting up necessary imports and configurations.
+GravyFlow: JAX and Keras 3 tools for gravitational-wave data science.
+
+``import gravyflow`` imports nothing beyond the standard library and changes
+nothing in the process: no environment variable, warnings filter, logger or
+library setting. Each public name (``__all__``, documented in ``docs/api.md``)
+imports its module the first time it is used.
+
+gravyflow runs on Keras's JAX backend, which it never chooses for the process:
+set ``KERAS_BACKEND=jax`` before Keras is imported.
 """
 
-# Standard library imports
-import warnings
-
-# Suppress specific LAL warning when running in an ipython kernel
-warnings.filterwarnings("ignore", category=UserWarning, message="Wswiglal-redir-stdio")
-
-# Disable JAX memory preallocation to avoid conflicts with TensorFlow
-import os
-import site
-import glob
-import sys
+import importlib
 import logging
+import os
+import sys
 
-# Set up NullHandler to prevent "No handler found" warnings
+__version__ = "1.0.0"
+
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
-# Suppress JAX/CUDA warnings
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TF info/warnings
-os.environ['JAX_PLATFORMS'] = 'cuda,cpu'  # CUDA for compute, CPU for callbacks
-logging.getLogger('jax._src.xla_bridge').setLevel(logging.ERROR)
+#: Each public name and the module that defines it, one per line, grouped as
+#: docs/api.md groups them.
+_MODULES = {
+    # Configuration and randomness
+    "Defaults": "gravyflow.src.dataset.config",
+    "WindowSpec": "gravyflow.src.dataset.config",
+    "SplitSpec": "gravyflow.src.dataset.splits",
+    "DEFAULT_SPLIT": "gravyflow.src.dataset.splits",
+    "EXCLUDED": "gravyflow.src.dataset.splits",
+    "SeedTree": "gravyflow.src.rng",
+    "BatchStreams": "gravyflow.src.rng",
+    "set_random_seeds": "gravyflow.src.utils.tensor",
+    "Distribution": "gravyflow.src.utils.tensor",
+    "DistributionType": "gravyflow.src.utils.tensor",
 
-# Set Keras backend to JAX
-os.environ["KERAS_BACKEND"] = "jax"
+    # Datasets
+    "Dataset": "gravyflow.src.dataset.dataset",
+    "GravyflowDataset": "gravyflow.src.dataset.dataset",
+    "ComposedDataset": "gravyflow.src.dataset.dataset",
+    "EpochMode": "gravyflow.src.dataset.dataset",
+    "FeaturePool": "gravyflow.src.dataset.pools",
+    "PoolSampler": "gravyflow.src.dataset.pools",
+    "Curriculum": "gravyflow.src.dataset.curriculum",
+    "CurriculumSchedule": "gravyflow.src.dataset.curriculum",
+    "CurriculumProgressCallback": "gravyflow.src.dataset.curriculum",
+    "DiversityCallback": "gravyflow.src.dataset.diversity",
+    "LabelTrackingDataset": "gravyflow.src.dataset.diversity",
+    "compute_diversity_score": "gravyflow.src.dataset.diversity",
+    "BatchConfig": "gravyflow.src.utils.numerics",
+    "BatchContract": "gravyflow.src.utils.shapes",
+    "BatchContractError": "gravyflow.src.utils.shapes",
+    "ReturnVariables": "gravyflow.src.dataset.features.injection",
 
-# Attempt to find nvidia libraries and set LD_LIBRARY_PATH
-try:
-    site_packages = site.getsitepackages()[0]
-    nvidia_dir = os.path.join(site_packages, 'nvidia')
-    
-    if os.path.exists(nvidia_dir):
-        libs = glob.glob(os.path.join(nvidia_dir, '*/lib'))
-        path_to_add = ":".join(libs)
-        
-        current_ld = os.environ.get('LD_LIBRARY_PATH', '')
-        
-        # Filter out conflicting system CUDA paths
-        ld_paths = current_ld.split(':') if current_ld else []
-        clean_ld_paths = [p for p in ld_paths if '/usr/local/cuda' not in p]
-        
-        # Prepend nvidia paths
-        new_ld_path = f"{path_to_add}:{':'.join(clean_ld_paths)}"
-        os.environ['LD_LIBRARY_PATH'] = new_ld_path
-except Exception as e:
-    pass
+    # Noise and detectors
+    "NoiseType": "gravyflow.src.dataset.noise.noise",
+    "NoiseObtainer": "gravyflow.src.dataset.noise.noise",
+    "Obtainer": "gravyflow.src.dataset.noise.noise",
+    "IFO": "gravyflow.src.dataset.conditioning.detector",
+    "Network": "gravyflow.src.dataset.conditioning.detector",
+    "NoiseProfile": "gravyflow.src.dataset.conditioning.detector",
+    "project_wave": "gravyflow.src.dataset.conditioning.detector",
+    "greenwich_mean_sidereal_time": "gravyflow.src.dataset.conditioning.detector",
+    "REFERENCE_GPS_TIME_SECONDS": "gravyflow.src.dataset.conditioning.detector",
 
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+    # Real data
+    "IFODataObtainer": "gravyflow.src.dataset.acquisition",
+    "NoiseDataObtainer": "gravyflow.src.dataset.acquisition",
+    "TransientDataObtainer": "gravyflow.src.dataset.acquisition",
+    "IFOData": "gravyflow.src.dataset.acquisition",
+    "ObservingRun": "gravyflow.src.dataset.acquisition",
+    "DataQuality": "gravyflow.src.dataset.acquisition",
+    "DataLabel": "gravyflow.src.dataset.acquisition",
+    "SegmentOrder": "gravyflow.src.dataset.acquisition",
+    "AcquisitionMode": "gravyflow.src.dataset.acquisition",
+    "SamplingMode": "gravyflow.src.dataset.acquisition",
+    "SignReversal": "gravyflow.src.dataset.acquisition",
+    "TimeReversal": "gravyflow.src.dataset.acquisition",
+    "RandomShift": "gravyflow.src.dataset.acquisition",
+    "AddNoise": "gravyflow.src.dataset.acquisition",
+    "default_augmentations": "gravyflow.src.dataset.acquisition",
+    "GWOSC_DATA_FLAGS": "gravyflow.src.dataset.acquisition",
+    "GWOSC_BURST_FLAGS": "gravyflow.src.dataset.acquisition",
+    "GWOSC_CBC_FLAGS": "gravyflow.src.dataset.acquisition",
+    "GWOSC_NO_HW_INJECTION_FLAGS": "gravyflow.src.dataset.acquisition",
+    "DEFAULT_GWOSC_FLAGS": "gravyflow.src.dataset.acquisition",
+    "GlitchType": "gravyflow.src.dataset.features.glitch",
+    "get_glitch_times": "gravyflow.src.dataset.features.glitch",
+    "get_glitch_times_with_labels": "gravyflow.src.dataset.features.glitch",
+    "get_glitch_segments": "gravyflow.src.dataset.features.glitch",
+    "get_glitch_type_from_index": "gravyflow.src.dataset.features.glitch",
+    "get_glitch_catalogue": "gravyflow.src.dataset.features.glitch",
+    "TransientCache": "gravyflow.src.dataset.features.glitch_cache",
+    "TransientIndex": "gravyflow.src.dataset.features.transient_index",
+    "EventConfidence": "gravyflow.src.dataset.features.event",
+    "SourceType": "gravyflow.src.dataset.features.event",
+    "search_events": "gravyflow.src.dataset.features.event",
+    "get_event_catalogue": "gravyflow.src.dataset.features.event",
+    "get_all_event_times": "gravyflow.src.dataset.features.event",
+    "get_confident_event_times": "gravyflow.src.dataset.features.event",
+    "get_marginal_event_times": "gravyflow.src.dataset.features.event",
+    "get_event_times_by_type": "gravyflow.src.dataset.features.event",
+    "get_confident_events_with_params": "gravyflow.src.dataset.features.event",
+    "get_event_veto_segments": "gravyflow.src.dataset.features.event",
+
+    # Injections
+    "InjectionGenerator": "gravyflow.src.dataset.features.injection",
+    "WaveformGenerator": "gravyflow.src.dataset.features.injection",
+    "CBCGenerator": "gravyflow.src.dataset.features.injection",
+    "Approximant": "gravyflow.src.dataset.features.injection",
+    "WNBGenerator": "gravyflow.src.dataset.features.injection",
+    "IncoherentGenerator": "gravyflow.src.dataset.features.injection",
+    "WaveformParameter": "gravyflow.src.dataset.features.injection",
+    "WaveformParameters": "gravyflow.src.dataset.features.injection",
+    "ScalingMethod": "gravyflow.src.dataset.features.injection",
+    "ScalingType": "gravyflow.src.dataset.features.injection",
+    "ScalingTypes": "gravyflow.src.dataset.features.injection",
+    "ScalingOrdinality": "gravyflow.src.dataset.features.injection",
+    "calculate_hrss": "gravyflow.src.dataset.features.injection",
+    "calculate_hpeak": "gravyflow.src.dataset.features.injection",
+    "WaveShape": "gravyflow.src.dataset.features.waveforms.simple",
+    "PeriodicWaveGenerator": "gravyflow.src.dataset.features.waveforms.simple",
+    "SineGaussianGenerator": "gravyflow.src.dataset.features.waveforms.simple",
+    "ChirpletGenerator": "gravyflow.src.dataset.features.waveforms.simple",
+    "RingdownGenerator": "gravyflow.src.dataset.features.waveforms.simple",
+    "wnb": "gravyflow.src.dataset.features.waveforms.wnb",
+
+    # Signal processing
+    "psd": "gravyflow.src.dataset.tools.psd",
+    "PowerSpectrum": "gravyflow.src.dataset.tools.psd",
+    "SpectralConfig": "gravyflow.src.dataset.tools.psd",
+    "snr": "gravyflow.src.dataset.tools.snr",
+    "scale_to_snr": "gravyflow.src.dataset.tools.snr",
+    "whiten": "gravyflow.src.dataset.conditioning.whiten",
+    "Whiten": "gravyflow.src.dataset.conditioning.whiten",
+    "WhitenPass": "gravyflow.src.dataset.conditioning.whiten",
+    "rolling_pearson": "gravyflow.src.dataset.conditioning.pearson",
+    "spectrogram": "gravyflow.src.dataset.conditioning.conditioning",
+    "spectrogram_shape": "gravyflow.src.dataset.conditioning.conditioning",
+    "resample": "gravyflow.src.utils.resample",
+    "NonFiniteWarning": "gravyflow.src.utils.numerics",
+
+    # Matched filtering
+    "MatchedFilter": "gravyflow.src.detection",
+    "MatchedFilterLayer": "gravyflow.src.detection",
+    "TemplateBank": "gravyflow.src.detection",
+    "TemplateGrid": "gravyflow.src.detection",
+    "matched_filter_fft": "gravyflow.src.detection",
+    "optimal_snr": "gravyflow.src.detection",
+
+    # Models
+    "Gabbard2017": "gravyflow.src.model.examples.gabbard_2017",
+    "MatchedFilterBaseline": "gravyflow.src.model.examples.matched_filter_baseline",
+    "MatchedFilterBaselineConfig": "gravyflow.src.model.examples.matched_filter_baseline",
+    "Model": "gravyflow.src.model.model",
+    "BaseLayer": "gravyflow.src.model.model",
+    "Reshape": "gravyflow.src.model.model",
+    "DenseLayer": "gravyflow.src.model.model",
+    "FlattenLayer": "gravyflow.src.model.model",
+    "ConvLayer": "gravyflow.src.model.model",
+    "PoolLayer": "gravyflow.src.model.model",
+    "DropLayer": "gravyflow.src.model.model",
+    "BatchNormLayer": "gravyflow.src.model.model",
+    "WhitenLayer": "gravyflow.src.model.model",
+    "WhitenPassLayer": "gravyflow.src.model.model",
+    "Population": "gravyflow.src.model.model",
+    "PopulationSector": "gravyflow.src.model.model",
+    "HyperParameter": "gravyflow.src.model.genetics",
+    "HyperInjectionGenerator": "gravyflow.src.model.genetics",
+    "ModelGenome": "gravyflow.src.model.genetics",
+
+    # Validation (the viz extra)
+    "Validator": "gravyflow.src.validate",
+    "ValidationConfig": "gravyflow.src.validate",
+
+    # Plotting (the viz extra)
+    "generate_strain_plot": "gravyflow.src.utils.plotting",
+    "generate_psd_plot": "gravyflow.src.utils.plotting",
+    "generate_spectrogram": "gravyflow.src.utils.plotting",
+    "generate_correlation_plot": "gravyflow.src.utils.plotting",
+    "generate_segment_timeline_plot": "gravyflow.src.utils.plotting",
+    "generate_example_extraction_plot": "gravyflow.src.utils.plotting",
+
+    # Training, I/O and process utilities
+    "crop_samples": "gravyflow.src.utils.tensor",
+    "replace_nan_and_inf_with_zero": "gravyflow.src.utils.tensor",
+    "ensure_directory_exists": "gravyflow.src.utils.io",
+    "replace_placeholders": "gravyflow.src.utils.io",
+    "snake_to_capitalized_spaces": "gravyflow.src.utils.io",
+    "is_redirected": "gravyflow.src.utils.io",
+    "load_history": "gravyflow.src.utils.io",
+    "save_dict_to_hdf5": "gravyflow.src.utils.io",
+    "model_file": "gravyflow.src.utils.io",
+    "CustomHistorySaver": "gravyflow.src.utils.io",
+    "EarlyStoppingWithLoad": "gravyflow.src.utils.io",
+    "PrintWaitCallback": "gravyflow.src.utils.io",
+    "Heart": "gravyflow.src.utils.processes",
+    "HeartbeatCallback": "gravyflow.src.utils.processes",
+    "Process": "gravyflow.src.utils.processes",
+    "Manager": "gravyflow.src.utils.processes",
+    "send_email": "gravyflow.src.utils.alert",
+
+    # GPUs (CUDA)
+    "env": "gravyflow.src.utils.gpu",
+    "setup_cuda": "gravyflow.src.utils.gpu",
+    "find_available_GPUs": "gravyflow.src.utils.gpu",
+    "get_gpu_memory_info": "gravyflow.src.utils.gpu",
+    "get_tf_memory_usage": "gravyflow.src.utils.gpu",
+}
+
+__all__ = list(_MODULES)
 
 
+def _require_jax_backend() -> None:
+    """Refuse, naming the fix, unless Keras runs (or will run) on its JAX backend."""
+    keras = sys.modules.get("keras")
+    backend = keras.backend.backend() if keras is not None else os.environ.get("KERAS_BACKEND")
+    if backend != "jax":
+        raise ImportError(
+            f"gravyflow runs on Keras's JAX backend, and this process's is {backend!r}. "
+            "Set KERAS_BACKEND=jax before Keras is imported (for example, `export KERAS_BACKEND=jax`)."
+        )
 
-# Local application/library specific imports
-from .src.dataset.config import Defaults, WindowSpec
-from .src.dataset.splits import SplitSpec, DEFAULT_SPLIT, EXCLUDED
-from .src.rng import SeedTree, BatchStreams
-from .src.utils.tensor import (
-    DistributionType, Distribution, randomise_arguments,
-    replace_nan_and_inf_with_zero, NonFiniteWarning, expand_tensor, batch_tensor,
-    crop_samples, rfftfreq, get_element_shape, check_tensor_integrity,
-    set_random_seeds
-)
-from .src.utils.resample import resample
-from .src.utils.numerics import (
-    ensure_even, ensure_list, calculate_sample_counts, BatchConfig
-)
-from .src.utils.shapes import (
-    ShapeContract, ShapeEnforcer, Axis_BIS, Axis_BI,
-    BatchContract, BatchContractError
-)
-from .src.utils.gpu import (setup_cuda, find_available_GPUs, get_tf_memory_usage, env, 
-    get_gpu_memory_info)
-from .src.utils.io import (
-    open_hdf5_file, ensure_directory_exists, replace_placeholders,
-    transform_string, snake_to_capitalized_spaces, is_redirected, load_history, model_file,
-    CustomHistorySaver, EarlyStoppingWithLoad, PrintWaitCallback, save_dict_to_hdf5,
-    get_file_parent_path
-)
-PATH = get_file_parent_path()
-from .src.utils.processes import (Heart, HeartbeatCallback, Process, Manager, 
-    explain_exit_code)
-from .src.dataset.tools.psd import psd, SpectralConfig, PowerSpectrum, estimate_psd
-from .src.dataset.tools.snr import snr, scale_to_snr
-from .src.dataset.features.waveforms.wnb import wnb
-from .src.dataset.conditioning.conditioning import spectrogram, spectrogram_shape
-from .src.model.genetics import HyperParameter, HyperInjectionGenerator, ModelGenome
-from .src.utils.git import get_current_repo
-from .src.model.model import (
-    BaseLayer, Reshape, DenseLayer, FlattenLayer, ConvLayer,
-    PoolLayer, DropLayer, BatchNormLayer, WhitenLayer, WhitenPassLayer,
-    Model, PopulationSector, Population, calculate_fitness
-)
-from .src.dataset.conditioning.whiten import whiten, Whiten, WhitenPass
-from .src.dataset.conditioning.pearson import rolling_pearson
-from .src.dataset.conditioning.detector import (
-    IFO, Network, NoiseProfile, project_wave, greenwich_mean_sidereal_time,
-    REFERENCE_GPS_TIME_SECONDS
-)
-from .src.dataset.acquisition import (
-    DataQuality, DataLabel, SegmentOrder, AcquisitionMode, SamplingMode, ObservingRun,
-    IFOData, IFODataObtainer, NoiseDataObtainer, TransientDataObtainer,
-    SignReversal, TimeReversal, RandomShift, AddNoise, default_augmentations,
-    GWOSC_DATA_FLAGS, GWOSC_BURST_FLAGS, GWOSC_CBC_FLAGS, DEFAULT_GWOSC_FLAGS,
-    GWOSC_NO_HW_INJECTION_FLAGS,
-)
-from .src.dataset.noise.noise import NoiseType, Obtainer, NoiseObtainer
-from .src.dataset.curriculum import Curriculum, CurriculumSchedule, CurriculumProgressCallback
-from .src.dataset.features.injection import (
-    ScalingOrdinality, ScalingType, ScalingTypes, ScalingMethod, ReturnVariables,
-    WaveformGenerator, WaveformParameter, WaveformParameters, WNBGenerator,
-    IncoherentGenerator, InjectionGenerator,
-    roll_vector_zero_padding, generate_mask, is_not_inherited,
-    batch_injection_parameters, CBCGenerator, Approximant,
-    calculate_hrss, calculate_hpeak, RENAMED_SKY_KEYS
-)
-from .src.dataset.features.waveforms.simple import (
-    WaveShape, PeriodicWaveGenerator, SineGaussianGenerator,
-    ChirpletGenerator, RingdownGenerator
-)
-from .src.dataset.dataset import data, Dataset, GravyflowDataset, ComposedDataset, EpochMode
-from .src.dataset.pools import FeaturePool, PoolSampler
-from .src.utils.plotting import (
-    generate_strain_plot, generate_psd_plot, generate_spectrogram, generate_correlation_plot,
-    generate_segment_timeline_plot, generate_example_extraction_plot
-)
-from .src.validate import Validator, ValidationConfig
-from .src.dataset.features.glitch import GlitchType, get_glitch_times, get_glitch_times_with_labels, get_glitch_segments, get_glitch_type_from_index, get_glitch_catalogue
-from .src.dataset.features.glitch_cache import TransientCache, generate_transient_cache_path
-from .src.dataset.features.event import (
-    EventConfidence, SourceType, get_confident_event_times, get_marginal_event_times, 
-    get_all_event_times, get_event_times_by_type, get_confident_events_with_params,
-    search_events, get_event_catalogue, get_event_veto_segments
-)
-# record.py removed - functionality replaced by TransientSegment
-from .src.dataset.features.transient_index import TransientIndex
-from .src.utils.alert import send_email
-from .src.model.examples.gabbard_2017 import Gabbard2017
-from .src.model.examples.matched_filter_baseline import MatchedFilterBaseline, MatchedFilterBaselineConfig
-from .src.detection import MatchedFilter, MatchedFilterLayer, TemplateBank, TemplateGrid, matched_filter_fft, optimal_snr
-from .src.dataset.diversity import DiversityCallback, LabelTrackingDataset, compute_diversity_score
 
+def __getattr__(name: str):
+    module = _MODULES.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    _require_jax_backend()
+    value = getattr(importlib.import_module(module), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(__all__)

@@ -16,6 +16,7 @@ from _pytest.config import Config
 
 
 import gravyflow as gf
+from gravyflow.src.resources import PACKAGE
 from gravyflow.src.dataset.dataset import GravyflowDataset
 import keras
 from keras import ops
@@ -101,7 +102,7 @@ def _test_dataset(
     """
     
     if output_directory_path is None:
-        output_directory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests/"
+        output_directory_path : Path = PACKAGE.parent.parent / "gravyflow_data/tests/"
     
     # Validate input arguments:
     validate_dataset_arguments(
@@ -160,7 +161,7 @@ def setup_paths(name: str) -> Tuple[Path, Path, Path]:
         parameters file path.
     """
     injection_directory_path = gf.tests.PATH / "example_injection_parameters"
-    parameters_file_path = gf.PATH / f"res/tests/dataset_{name}.hdf5"
+    parameters_file_path = PACKAGE / f"res/tests/dataset_{name}.hdf5"
     gf.ensure_directory_exists(parameters_file_path.parent)
     gf.ensure_directory_exists(injection_directory_path)
     return injection_directory_path, parameters_file_path
@@ -572,7 +573,7 @@ def _test_dataset_iteration(
         )
 
         logging.info("Start data iteration tests...")
-        iterate_data(gf.data, dataset_args, num_tests)
+        iterate_data(gf.Dataset, dataset_args, num_tests)
         logging.info("Complete.")
 
         logging.info("Start dataset iteration tests...")

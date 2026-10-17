@@ -16,18 +16,17 @@ logger = logging.getLogger(__name__)
 import time
 from typing import List
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from keras.callbacks import Callback
 import numpy as np
-import pytz
 
 import gravyflow as gf
 
 def get_current_datetime():
     """Returns the current datetime in UK timezone as a formatted string."""
-    uk_timezone = pytz.timezone('Europe/London')
-    uk_time = datetime.now(uk_timezone)
+    uk_time = datetime.now(ZoneInfo('Europe/London'))
     return uk_time.strftime("%Y-%m-%d %H:%M:%S")
 
 def explain_exit_code(exit_code):

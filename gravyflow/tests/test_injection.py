@@ -18,6 +18,7 @@ from _pytest.config import Config
 # Local imports:
 # Local imports:
 import gravyflow as gf
+from gravyflow.src.resources import PACKAGE
 from gravyflow.src.dataset.features import injection as gf_inj
 import keras
 from keras import ops
@@ -59,7 +60,7 @@ def _test_phenom_d_injection(
         plot_results : bool = False
     ) -> None:
     
-    output_diretory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests/"
+    output_diretory_path : Path = PACKAGE.parent.parent / "gravyflow_data/tests/"
 
     with gf.env():
 
@@ -106,7 +107,7 @@ def _test_phenom_d_injection(
             ][1]
         }
         parameters_file_path : Path = (
-            gf.PATH / f"res/tests/phenom_d_consistancy.hdf5"
+            PACKAGE / f"res/tests/phenom_d_consistancy.hdf5"
         )
         gf.tests.compare_and_save_parameters(
             current_parameters, parameters_file_path
@@ -156,7 +157,7 @@ def _test_wnb_injection(
         plot_results : bool = False
     ) -> None:
 
-    output_diretory_path : Path = gf.PATH.parent.parent / "gravyflow_data/tests/"
+    output_diretory_path : Path = PACKAGE.parent.parent / "gravyflow_data/tests/"
     
     with gf.env():
         # Define injection directory path:
@@ -195,7 +196,7 @@ def _test_wnb_injection(
             ][0]
         }
         parameters_file_path : Path = (
-            gf.PATH / f"res/tests/wnb_consistancy.hdf5"
+            PACKAGE / f"res/tests/wnb_consistancy.hdf5"
         )
         gf.tests.compare_and_save_parameters(
             current_parameters, parameters_file_path

@@ -8,6 +8,15 @@ import gravyflow as gf
 from gravyflow.src.dataset.config import ignore_scale_factor
 
 
+class NonFiniteWarning(UserWarning):
+    """
+    NaN or infinite values were replaced with zeros.
+
+    It lives in this module, which imports no third-party package, so a warnings
+    filter can name it before Keras's backend is chosen.
+    """
+
+
 def ensure_even(number: int) -> int:
     """Ensures that a number is even by subtracting 1 if it is odd."""
     if number % 2 != 0:
@@ -32,33 +41,6 @@ def ensure_list(x: Any) -> list:
     if isinstance(x, (list, tuple)):
         return list(x)
     return [x]
-
-
-def calculate_sample_counts(
-    onsource_duration_seconds: float,
-    offsource_duration_seconds: float,
-    crop_duration_seconds: float,
-    sample_rate_hertz: float
-) -> tuple:
-    """
-    Calculate onsource and offsource sample counts with padding.
-    
-    Args:
-        onsource_duration_seconds: Base onsource duration
-        offsource_duration_seconds: Offsource duration  
-        crop_duration_seconds: Padding/crop duration (applied to both ends)
-        sample_rate_hertz: Sample rate
-        
-    Returns:
-        Tuple of (total_onsource_duration, num_onsource_samples, num_offsource_samples)
-    """
-    total_padding = crop_duration_seconds * 2.0
-    total_onsource_duration = onsource_duration_seconds + total_padding
-    
-    num_onsource_samples = ensure_even(int(total_onsource_duration * sample_rate_hertz))
-    num_offsource_samples = ensure_even(int(offsource_duration_seconds * sample_rate_hertz))
-    
-    return total_onsource_duration, num_onsource_samples, num_offsource_samples
 
 
 @dataclass

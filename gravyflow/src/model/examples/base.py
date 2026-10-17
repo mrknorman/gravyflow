@@ -16,6 +16,7 @@ import keras
 import numpy as np
 
 import gravyflow as gf
+from gravyflow.src.resources import weights
 
 # The batch contract every example model is built on.
 MODEL_INPUT = gf.ReturnVariables.WHITENED_ONSOURCE
@@ -116,7 +117,8 @@ class ExampleModel(ABC):
     @classmethod
     def pretrained(cls, weights_path: Optional[Path] = None) -> keras.Model:
         """
-        Load trained weights, by default the shipped ones in ``res/model``.
+        Load trained weights, by default the example's own (``gravyflow.src.resources.weights``:
+        shipped in the package, or a release download in the user cache).
 
         Raises:
             FileNotFoundError: no weights at the path.
@@ -125,7 +127,9 @@ class ExampleModel(ABC):
                 retrain them with the example's training script.
         """
         if weights_path is None:
-            weights_path = Path(gf.__file__).parent / "res" / "model" / (cls.weights_name or "")
+            if cls.weights_name is None:
+                raise FileNotFoundError(f"{cls.__name__} has no trained weights.")
+            weights_path = weights(cls.weights_name)
         weights_path = Path(weights_path)
         if not weights_path.is_file():
             raise FileNotFoundError(f"No trained weights at {weights_path}.")

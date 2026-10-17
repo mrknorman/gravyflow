@@ -36,19 +36,6 @@ class ShapeContract(Enum):
 # Semantic Axis Constants
 # =============================================================================
 
-class Axis_BIS:
-    """Axis indices for BIS (Batch, IFO, Samples) tensors."""
-    BATCH = 0
-    IFO = 1
-    SAMPLES = 2
-
-
-class Axis_BI:
-    """Axis indices for BI (Batch, IFO) tensors."""
-    BATCH = 0
-    IFO = 1
-
-
 # =============================================================================
 # The batch contract
 # =============================================================================

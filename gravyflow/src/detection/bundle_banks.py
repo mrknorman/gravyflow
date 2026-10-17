@@ -24,9 +24,9 @@ import time
 
 os.environ.setdefault("KERAS_BACKEND", "jax")
 
-import gravyflow as gf
 from gravyflow.src.detection.matched_filter import default_bank_placement
 from gravyflow.src.detection.template_grid import BUNDLED_BANK_DIRECTORY, TemplateBank
+from gravyflow.src.resources import PACKAGE
 
 # The bundled banks, by file name: the default MatchedFilter's.
 BUNDLED = {
@@ -38,7 +38,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Place the template banks bundled with gravyflow.")
     parser.add_argument("--check", action="store_true", help="Compare with the bundled files instead of writing")
     args = parser.parse_args(argv)
-    directory = gf.PATH / BUNDLED_BANK_DIRECTORY
+    directory = PACKAGE / BUNDLED_BANK_DIRECTORY
     current = True
     for name, placement in BUNDLED.items():
         start = time.time()

@@ -532,8 +532,8 @@ def _settings(arguments: dict) -> dict:
 @lru_cache(maxsize=1)
 def _bundled_banks() -> tuple:
     """The bank records shipped in res/template_banks."""
-    import gravyflow as gf
-    directory = gf.PATH / BUNDLED_BANK_DIRECTORY
+    from gravyflow.src.resources import PACKAGE
+    directory = PACKAGE / BUNDLED_BANK_DIRECTORY
     if not directory.is_dir():
         return ()
     return tuple(json.loads(path.read_text()) for path in sorted(directory.glob("*.json")))

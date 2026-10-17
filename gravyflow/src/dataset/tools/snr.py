@@ -243,7 +243,7 @@ def _weight_on_grid(psd, num_samples: int, sample_rate_hertz: float):
         raise ValueError(
             "The PSD array's median is zero, below float32's range or not finite. The PSD "
             "of physical strain (~1e-46) underflows float32: pass the array as float64, or "
-            "pass a PowerSpectrum (gf.estimate_psd or gf.psd)."
+            "pass a PowerSpectrum (gf.psd)."
         )
     weight = weight / reference
     weight = np.maximum(weight, 1.0e-4 * np.median(weight, axis=-1, keepdims=True))

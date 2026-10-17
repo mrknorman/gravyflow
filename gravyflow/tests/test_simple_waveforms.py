@@ -14,6 +14,7 @@ from bokeh.layouts import gridplot
 from _pytest.config import Config
 
 import gravyflow as gf
+from gravyflow.src.resources import PACKAGE
 
 
 # =============================================================================
@@ -26,7 +27,7 @@ def _test_periodic_wave_generation(
     plot_results: bool = False
 ) -> None:
     """Test periodic wave generation for a given shape."""
-    output_directory_path = gf.PATH.parent.parent / "gravyflow_data/tests/"
+    output_directory_path = PACKAGE.parent.parent / "gravyflow_data/tests/"
     
     gen = gf.PeriodicWaveGenerator(
         wave_shape=wave_shape,
@@ -137,7 +138,7 @@ def _test_sine_gaussian_generation(
     plot_results: bool = False
 ) -> None:
     """Test sine-Gaussian generation."""
-    output_directory_path = gf.PATH.parent.parent / "gravyflow_data/tests/"
+    output_directory_path = PACKAGE.parent.parent / "gravyflow_data/tests/"
     
     gen = gf.SineGaussianGenerator(
         frequency_hertz=gf.Distribution(value=150.0, type_=gf.DistributionType.CONSTANT),
@@ -242,7 +243,7 @@ def _test_chirplet_generation(
     plot_results: bool = False
 ) -> None:
     """Test chirplet generation."""
-    output_directory_path = gf.PATH.parent.parent / "gravyflow_data/tests/"
+    output_directory_path = PACKAGE.parent.parent / "gravyflow_data/tests/"
     
     gen = gf.ChirpletGenerator(
         start_frequency_hertz=gf.Distribution(value=50.0, type_=gf.DistributionType.CONSTANT),
@@ -327,7 +328,7 @@ def _test_ringdown_generation(
     plot_results: bool = False
 ) -> None:
     """Test ringdown generation."""
-    output_directory_path = gf.PATH.parent.parent / "gravyflow_data/tests/"
+    output_directory_path = PACKAGE.parent.parent / "gravyflow_data/tests/"
     
     gen = gf.RingdownGenerator(
         frequency_hertz=gf.Distribution(value=200.0, type_=gf.DistributionType.CONSTANT),

@@ -12,7 +12,9 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 from astropy import coordinates, units
+from gravyflow.src.resources import RESOURCES
 from gravyflow.src.rng.legacy import warn_deprecated
+from gravyflow.src.utils.tensor import rfftfreq
 
 import gravyflow as gf
 
@@ -222,7 +224,7 @@ def shift_waveform(
         time_shift_seconds
     ):
     
-    frequency_axis = gf.rfftfreq(
+    frequency_axis = rfftfreq(
         strain.shape[-1],
         1.0/sample_rate_hertz
     )
@@ -374,7 +376,7 @@ _ARM_ALTITUDE_RADIANS : Dict = {
     "virgo" : {"x_altitude_radians": 0.0, "y_altitude_radians": 0.0},
 }
 
-NOISE_PROFILE_DIRECTORY_PATH : Path = gf.PATH / "res/noise_profiles/"
+NOISE_PROFILE_DIRECTORY_PATH : Path = RESOURCES / "noise_profiles"
 
 # Bundled amplitude spectral densities (strain / sqrt(Hz)), generated from
 # lalsimulation's curves; each file's header names its source.
@@ -455,7 +457,7 @@ class Network:
         ):
         """
         A detector network: a list of IFOs, or a dict of geometry. A dict's
-        values may be gf.Distributions, drawn once here from ``rng`` (a NumPy
+        values may be gf.Distribution objects, drawn once here from ``rng`` (a NumPy
         Generator); the Network then holds that fixed geometry and no random
         state. ``seed`` is deprecated.
         """

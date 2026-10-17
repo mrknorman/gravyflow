@@ -18,7 +18,6 @@ from typing import List, Optional, Union
 import logging
 
 import numpy as np
-from gwpy.table import EventTable
 
 
 class EventConfidence(IntEnum):
@@ -205,6 +204,7 @@ def get_event_catalogue(use_cache: bool = True) -> dict:
     catalogs = fetch_event_catalogue_names()
     events = []
     for catalog in catalogs:
+        from gwpy.table import EventTable  # the realdata extra's
         table = EventTable.fetch_open_data(catalog)
         for row in table:
             gps = _row_value(row, "GPS")

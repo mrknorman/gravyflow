@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.resources import PACKAGE
+from gravyflow.src.dataset.tools.psd import estimate_psd
 from gravyflow.src.dataset.conditioning.whiten import whiten
 from gravyflow.src.dataset.features.waveforms.cbc import _TAPER_START_RATIO
 from gravyflow.src.dataset.tools import snr as gf_snr
@@ -46,7 +48,7 @@ def raw_onsource(m1, m2, merger_seconds, phase=0.0):
 @pytest.fixture(scope="module")
 def spectrum():
     rng = np.random.default_rng(18)
-    return gf.estimate_psd(coloured_noise(rng, (1,), 16.0).astype(np.float32), FS, gf.SpectralConfig())
+    return estimate_psd(coloured_noise(rng, (1,), 16.0).astype(np.float32), FS, gf.SpectralConfig())
 
 
 def whitened(raw, spectrum, target=None):
@@ -146,7 +148,7 @@ def test_one_spectrum_per_example(spectrum):
     # Each example is whitened with its own spectrum; the filter must use each
     # row for its own example, not broadcast rows against the templates.
     rng = np.random.default_rng(6)
-    loud = gf.estimate_psd((coloured_noise(rng, (1,), 16.0) * 3.0).astype(np.float32), FS, gf.SpectralConfig())
+    loud = estimate_psd((coloured_noise(rng, (1,), 16.0) * 3.0).astype(np.float32), FS, gf.SpectralConfig())
     both = gf.PowerSpectrum(np.concatenate([np.asarray(spectrum.normalised), np.asarray(loud.normalised)]),
                             np.concatenate([np.asarray(spectrum.scale), np.asarray(loud.scale)]),
                             spectrum.sample_rate_hertz, spectrum.config, spectrum.inverse_bias, spectrum.num_segments)
@@ -235,10 +237,10 @@ def test_a_spectrum_is_refused_only_when_it_would_change_the_search():
     for name, config in [("filter_duration_seconds", gf.SpectralConfig(filter_duration_seconds=0.5)),
                          ("lower_frequency_hertz", gf.SpectralConfig(lower_frequency_hertz=30.0))]:
         with pytest.raises(ValueError, match=name):
-            mf.max_snr(w, gf.estimate_psd(noise, FS, config))
+            mf.max_snr(w, estimate_psd(noise, FS, config))
     for config in [gf.SpectralConfig(upper_frequency_hertz=800.0), gf.SpectralConfig(filter_duration_seconds=1.0001),
                    gf.SpectralConfig(psd_method="mean")]:
-        spectrum = gf.estimate_psd(noise, FS, config)
+        spectrum = estimate_psd(noise, FS, config)
         own = MatchedFilter(bank=bank, sample_rate_hertz=FS, spectral_config=config).max_snr(w, spectrum)
         out = mf.max_snr(w, spectrum)
         assert (out["snr"][0], out["time_seconds"][0]) == (own["snr"][0], own["time_seconds"][0]), config
@@ -457,7 +459,7 @@ def test_the_bundled_bank_is_the_default_filters_and_names_what_it_depends_on():
         assert key["space"]["noise_curve"]["sha256"] == hashlib.sha256(f.read()).hexdigest()
     assert key["space"]["waveform_model"]["approximant"] == "IMRPhenomD"
     assert key["code"]["files"] == ["cbc.py", "template_grid.py"]
-    records = [json.loads(p.read_text()) for p in sorted((gf.PATH / BUNDLED_BANK_DIRECTORY).glob("*.json"))]
+    records = [json.loads(p.read_text()) for p in sorted((PACKAGE / BUNDLED_BANK_DIRECTORY).glob("*.json"))]
     # After any change to what the key names, the bundled bank is placed again.
     assert [r["arguments"] for r in records] == [key], \
         "a stale bundled bank: place it again with python -m gravyflow.src.detection.bundle_banks"

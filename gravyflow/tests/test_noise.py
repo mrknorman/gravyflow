@@ -16,6 +16,7 @@ from _pytest.config import Config
 # Local imports:
 
 import gravyflow as gf
+from gravyflow.src.resources import PACKAGE
 from gravyflow.src.dataset.noise import noise as gf_noise
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 import keras
@@ -66,7 +67,7 @@ def _test_real_noise_single(
             }
 
             parameters_file_path : Path = (
-                gf.PATH / f"res/tests/real_noise_consistency_single.hdf5"
+                PACKAGE / f"res/tests/real_noise_consistency_single.hdf5"
             )
             gf.tests.compare_and_save_parameters(
                 parameters_dict, parameters_file_path
@@ -141,7 +142,7 @@ def _test_real_noise_multi(
             }
 
             parameters_file_path : Path = (
-                gf.PATH / f"res/tests/real_noise_consistancy_multi.hdf5"
+                PACKAGE / f"res/tests/real_noise_consistancy_multi.hdf5"
             )
             gf.tests.compare_and_save_parameters(
                 parameters_dict, parameters_file_path

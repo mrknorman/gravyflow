@@ -13,6 +13,7 @@ import pytest
 
 
 import gravyflow as gf
+from gravyflow.src.resources import PACKAGE
 from gravyflow.src.model.examples import (
     Gabbard2017, Gabbard2017Config, GeorgeHuerta2017Config, GeorgeHuerta2017Deep, GeorgeHuerta2017Shallow,
 )
@@ -90,7 +91,7 @@ def test_train_scripts_need_an_output_directory():
 
 
 def test_run_directory_refuses_the_package(tmp_path):
-    for inside in (gf.PATH, gf.PATH / "res" / "model", gf.PATH / "res" / "model" / "run"):
+    for inside in (PACKAGE, PACKAGE / "res" / "model", PACKAGE / "res" / "model" / "run"):
         with pytest.raises(ValueError, match="outside the gravyflow package"):
             RunDirectory(inside)
     assert RunDirectory(tmp_path / "run").path == (tmp_path / "run").resolve()

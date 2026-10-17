@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.dataset.tools.psd import estimate_psd
 from gravyflow.src.dataset.noise import noise as gf_noise
 
 #: The internal scale of earlier releases: strain x OLD_SCALE was O(1).
@@ -82,8 +83,8 @@ def test_noise_is_strain_sized(case):
 
 def test_the_spectrum_is_scale_free(case):
     _, offsource, scale, tolerance, floor_above_hertz = case
-    physical = gf.estimate_psd(offsource, FS)
-    scaled = gf.estimate_psd(offsource * scale, FS)
+    physical = estimate_psd(offsource, FS)
+    scaled = estimate_psd(offsource * scale, FS)
     _close(physical.normalised, scaled.normalised, tolerance)
     _close(np.asarray(physical.scale) * np.float64(scale), scaled.scale, tolerance)
     normalised = np.asarray(physical.normalised)
@@ -95,8 +96,8 @@ def test_the_spectrum_is_scale_free(case):
 
 def test_whitening_is_identical_with_and_without_the_old_scale(case):
     onsource, offsource, scale, tolerance, _ = case
-    physical = gf.whiten(onsource, gf.estimate_psd(offsource, FS), FS)
-    scaled = gf.whiten(onsource * scale, gf.estimate_psd(offsource * scale, FS), FS)
+    physical = gf.whiten(onsource, estimate_psd(offsource, FS), FS)
+    scaled = gf.whiten(onsource * scale, estimate_psd(offsource * scale, FS), FS)
     _close(physical, scaled, tolerance)
     # And from the timeseries, as the obtainers whiten (with whiten's own defaults).
     _close(gf.whiten(onsource, offsource, FS), gf.whiten(onsource * scale, offsource * scale, FS), tolerance)
@@ -110,8 +111,8 @@ def test_snr_is_identical_with_and_without_the_old_scale(case):
     streams = gf.SeedTree(2).direct(0).sub(f"wave/{generator.stream_label}")
     polarisations, _ = generator.generate(4, FS, 2.0, streams)
     injection = np.repeat(np.asarray(polarisations)[:, :1], 2, axis=1)  # (B, I, T), strain
-    spectrum = gf.estimate_psd(offsource, FS)
-    scaled_spectrum = gf.estimate_psd(offsource * scale, FS)
+    spectrum = estimate_psd(offsource, FS)
+    scaled_spectrum = estimate_psd(offsource * scale, FS)
 
     physical = np.asarray(gf.snr(injection, spectrum, FS))
     assert np.all(physical > 0.1), physical
@@ -127,8 +128,8 @@ def test_snr_is_identical_with_and_without_the_old_scale(case):
 
 def test_matched_filter_is_identical_with_and_without_the_old_scale(case):
     onsource, offsource, scale, tolerance, _ = case
-    spectrum = gf.estimate_psd(offsource[:, 0], FS)
-    scaled_spectrum = gf.estimate_psd(offsource[:, 0] * scale, FS)
+    spectrum = estimate_psd(offsource[:, 0], FS)
+    scaled_spectrum = estimate_psd(offsource[:, 0] * scale, FS)
     t = (np.arange(int(FS)) - FS / 2) / FS
     templates = (np.sin(2 * np.pi * 120.0 * t) * np.exp(-(t / 0.05) ** 2))[None].astype(np.float32) * 1e-21
     data = onsource[:, 0, :int(FS)]
