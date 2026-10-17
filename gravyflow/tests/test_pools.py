@@ -109,7 +109,7 @@ class TestPoolSampler:
             gf.FeaturePool(name="pool_b", label=1, probability=0.3, noise_obtainer=noise_obtainer),
             gf.FeaturePool(name="pool_c", label=2, probability=0.2, noise_obtainer=noise_obtainer),
         ]
-        sampler = gf.PoolSampler(pools, seed=42)
+        sampler = gf.PoolSampler(pools)
         
         assert len(sampler.pools) == 3
         assert sampler.num_classes == 3
@@ -122,7 +122,7 @@ class TestPoolSampler:
             gf.FeaturePool(name="pool_a", label=0, probability=1.0, noise_obtainer=noise_obtainer),
             gf.FeaturePool(name="pool_b", label=1, probability=1.0, noise_obtainer=noise_obtainer),
         ]
-        sampler = gf.PoolSampler(pools, seed=42)
+        sampler = gf.PoolSampler(pools)
         
         # Should be normalized to [0.5, 0.5]
         np.testing.assert_array_almost_equal(sampler.probabilities, [0.5, 0.5])
@@ -134,11 +134,11 @@ class TestPoolSampler:
             gf.FeaturePool(name="pool_a", label=0, probability=0.7, noise_obtainer=noise_obtainer),
             gf.FeaturePool(name="pool_b", label=1, probability=0.3, noise_obtainer=noise_obtainer),
         ]
-        sampler = gf.PoolSampler(pools, seed=42)
+        sampler = gf.PoolSampler(pools)
         
         # Sample many times
         n_samples = 10000
-        indices = sampler.sample_pool_indices(n_samples)
+        indices = sampler.sample_pool_indices(n_samples, rng=default_rng(42))
         
         # Count occurrences
         unique, counts = np.unique(indices, return_counts=True)
@@ -155,7 +155,7 @@ class TestPoolSampler:
             gf.FeaturePool(name="signal_cbc", label=1, probability=0.25, noise_obtainer=noise_obtainer),
             gf.FeaturePool(name="signal_wnb", label=1, probability=0.25, noise_obtainer=noise_obtainer),
         ]
-        sampler = gf.PoolSampler(pools, seed=42)
+        sampler = gf.PoolSampler(pools)
         
         # Only 2 unique labels
         assert sampler.num_classes == 2
@@ -183,9 +183,9 @@ class TestPoolSampler:
             gf.FeaturePool(name="pool_a", label=0, probability=0.5, noise_obtainer=noise_obtainer),
             gf.FeaturePool(name="pool_b", label=1, probability=0.5, noise_obtainer=noise_obtainer),
         ]
-        sampler = gf.PoolSampler(pools, seed=42)
+        sampler = gf.PoolSampler(pools)
         
-        assignments = sampler.get_pool_batch_sizes(32)
+        assignments = sampler.get_pool_batch_sizes(32, rng=default_rng(42))
         
         # Should have assignments for pools
         total_assigned = sum(count for count, positions in assignments.values())
