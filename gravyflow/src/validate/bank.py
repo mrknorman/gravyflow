@@ -125,7 +125,12 @@ class ValidationBank:
 
     @property
     def window_seconds(self) -> float:
-        return float(self.dataset_args.get("onsource_duration_seconds", gf.Defaults.onsource_duration_seconds))
+        """
+        The length of every scored window, and the stride of a background's
+        streams: the noise dataset's window (`Dataset.window_spec`), the one its
+        time slides tile, so a stream's livetime is the span of the windows scored.
+        """
+        return float(self._noise_dataset.window_spec.onsource_duration_seconds)
 
     @property
     def _real_noise(self) -> bool:

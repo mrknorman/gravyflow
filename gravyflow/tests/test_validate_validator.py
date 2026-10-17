@@ -296,3 +296,19 @@ def test_the_injection_set_is_scaled_to_its_snr_range_whatever_the_training_scal
     snrs = bank.get_efficiency_data()["snrs"]
     assert np.all((snrs > 8.0 - 1e-3) & (snrs < 20.0 + 1e-3)), snrs
     assert np.ptp(snrs) > 4.0
+
+
+@pytest.mark.global_rng
+def test_the_backgrounds_livetime_is_the_span_of_the_windows_it_scored(dataset_args, monkeypatch):
+    # The livetime's window length was read from the dataset arguments, or the default
+    # when they named none, apart from the window the background's dataset scored (and
+    # its time slides tile): a default moved after scoring moved the livetime, not the
+    # windows.
+    args = {k: v for k, v in dataset_args.items() if k != "onsource_duration_seconds"}
+    window = SAMPLES / args["sample_rate_hertz"]  # the model's input; the default is set to it, whatever it was
+    monkeypatch.setattr(gf.Defaults, "onsource_duration_seconds", window)
+    bank = ValidationBank(logit_model(1), args, ValidationConfig(num_examples=32, batch_size=32))
+    bank.generate_noise()
+    assert bank._noise_dataset.window_spec.onsource_duration_seconds == window
+    monkeypatch.setattr(gf.Defaults, "onsource_duration_seconds", 2.0 * window)
+    assert bank.background().livetime_seconds == 32 * window
