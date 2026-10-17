@@ -12,6 +12,8 @@ from gravyflow.src.dataset.acquisition import gwosc_data
 from gravyflow.src.dataset.features import gravity_spy
 from gravyflow.tests.test_public_sources import _fixture_rows, offline_public_sources  # noqa: F401
 
+from . import fixtures as fx
+
 ERAS = ("O1", "O2", "O3a", "O3b")
 RUNS = {"O1": gf.ObservingRun.O1, "O2": gf.ObservingRun.O2, "O3": gf.ObservingRun.O3}
 
@@ -98,3 +100,94 @@ def test_catalogue_caches(offline_public_sources, tmp_path):
     # The flags and the detector must matter somewhere, or the checks are empty.
     assert any(stricter), "no run where the extra flags remove time; the property is untested"
     assert any(detectors_differ), "no run where the detectors' time differs; the cache key is untested"
+
+
+# =============================================================================
+# THE SPLIT FINGERPRINT (L35)
+# =============================================================================
+
+SPEC_A = gf.SplitSpec()
+SPEC_B = gf.SplitSpec(version="fold-1")
+
+
+def _index(spec):
+    from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
+    from gravyflow.src.dataset.features.glitch import GlitchType
+    from gravyflow.src.dataset.features.transient_index import TransientIndex
+    from gravyflow.src.utils.gps import gps_to_key
+
+    times = 1.24e9 + np.arange(20) * 5000.0
+    index = TransientIndex([
+        TransientSegment(gps_key=gps_to_key(t), transient_gps_time=t, start_gps_time=t - 48.2,
+                         end_gps_time=t + 48.2, label=gf.DataLabel.GLITCHES, kind=GlitchType.BLIP,
+                         observing_run=gf.ObservingRun.O3, seen_in=[gf.IFO.L1])
+        for t in times
+    ])
+    index.assign_splits(spec)
+    return index
+
+
+def _refuses_another_split(call):
+    """``call`` refuses by the fingerprint check (its message), or returns None."""
+    try:
+        call()
+    except ValueError as error:
+        return str(error) if "SplitSpec" in str(error) or "split fingerprint" in str(error) else None
+    return None
+
+
+def test_split_fingerprint_recorded(world, tmp_path):
+    """
+    The transient index file, a dataset's metadata, a run's record (run.json and every
+    model record) carry the spec's fingerprint; loading or evaluating under another
+    spec, or with none recorded, is refused; an index holding an object array is never
+    unpickled.
+    """
+    from gravyflow.src.dataset.features.transient_index import TransientIndex
+    from gravyflow.src.model.examples.recipe import RunDirectory, TrainingRun, TrainingSchedule
+    from gravyflow.src.validate.config import check_held_out
+
+    path = tmp_path / "index.npz"
+    _index(SPEC_A).save(path)
+    assert TransientIndex.load(path, SPEC_A).split_fingerprint == SPEC_A.fingerprint()
+    assert _refuses_another_split(lambda: TransientIndex.load(path, SPEC_B))
+
+    unsplit = dict(np.load(path, allow_pickle=False))
+    unsplit.pop("split_fingerprint")
+    np.savez(tmp_path / "unsplit.npz", **unsplit)
+    assert _refuses_another_split(lambda: TransientIndex.load(tmp_path / "unsplit.npz", SPEC_A))
+
+    pickled = {**dict(np.load(path, allow_pickle=False)), "kinds": np.array([object()], dtype=object)}
+    np.savez(tmp_path / "pickled.npz", **pickled)
+    with pytest.raises(ValueError, match="allow_pickle"):
+        TransientIndex.load(tmp_path / "pickled.npz", SPEC_A)
+
+    # The golden table's blocks, with another guard: a spec of its own.
+    narrow = gf.SplitSpec(guard_seconds=64.0)
+    fixture = fx.straddle("train", "test", half_width=512.0)
+    with world(fixture):
+        ds = fx.dataset(fixture, tmp_path / "data", "train", split_spec=narrow)
+        assert ds.seed_metadata["split_fingerprint"] == narrow.fingerprint() != SPEC_A.fingerprint()
+
+    def run(spec):
+        return TrainingRun(directory=RunDirectory(tmp_path / "run"), seed=1, split_spec=spec,
+                           schedule=TrainingSchedule(epochs=1, steps_per_epoch=1,
+                                                     validation_batches=1, patience=1))
+
+    records = {"a": run(SPEC_A).split_record, "b": run(SPEC_B).split_record}
+    assert records["a"] == {"fingerprint": SPEC_A.fingerprint(), "selection_split": "validate"}
+    assert run(SPEC_A).config_sha256 != run(SPEC_B).config_sha256  # so a resume refuses
+
+    check_held_out("test", SPEC_A, {"split": records["a"]})
+    assert _refuses_another_split(lambda: check_held_out("test", SPEC_B, {"split": records["a"]}))
+    assert _refuses_another_split(lambda: check_held_out("test", SPEC_A, {"split": {}}))
+
+
+def test_fingerprint_check_sees_a_spec_mismatch_let_through(tmp_path, monkeypatch):
+    """The planted leak: a loader that ignores the fingerprint is caught."""
+    from gravyflow.src.dataset.features import transient_index
+
+    monkeypatch.setattr(transient_index, "require_split_fingerprint", lambda *args, **kwargs: None)
+    path = tmp_path / "index.npz"
+    _index(SPEC_A).save(path)
+    assert _refuses_another_split(lambda: transient_index.TransientIndex.load(path, SPEC_B)) is None

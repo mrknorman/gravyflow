@@ -1,12 +1,22 @@
 """
-Split assignment in absolute time, and the guard between splits.
+Split assignment in absolute time, the guard between splits, the fractions (L2), and
+split names: checked (L4) and required (L5).
 """
+
+from collections import Counter
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
 from gwpy.segments import Segment, SegmentList
 
 import gravyflow as gf
+from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
+from gravyflow.src.dataset.features.glitch import GlitchType
+from gravyflow.src.dataset.features.transient_index import TransientIndex
+from gravyflow.src.dataset.splits import _block_uniform
+from gravyflow.src.model.examples.base import validation_dataset_args
+from gravyflow.src.utils.gps import gps_to_key
 
 from . import audit
 from . import fixtures as fx
@@ -95,3 +105,183 @@ def test_guard_between_splits(world, tmp_path, pair, mode):
     gap, closest = audit._distance(*lists)
     assert gap >= GUARD_SECONDS, f"served time of {pair} is {gap} s apart at {closest}"
     audit.assert_split_gap(list(records.values()), GUARD_SECONDS)
+
+
+# =============================================================================
+# FRACTIONS (L2)
+# =============================================================================
+
+#: About 10k absolute blocks, around O3.
+BLOCKS = range(150000, 160000)
+
+
+def split_moves(before, after, blocks=BLOCKS):
+    """{(split before, split after): blocks} for every block whose split changed."""
+    moves = Counter()
+    for block in blocks:
+        a, b = before.block_split(block), after.block_split(block)
+        if a != b:
+            moves[(a, b)] += 1
+    return dict(moves)
+
+
+def assert_monotone(before, after, raised, blocks=BLOCKS):
+    """Raising ``raised``'s fraction moved blocks, and only from train into ``raised``."""
+    moves = split_moves(before, after, blocks)
+    assert moves, f"raising {raised} moved no block"
+    assert set(moves) == {("train", raised)}, f"raising {raised} moved {moves}"
+
+
+def spec(test=0.1, validate=0.1, version="gravyflow-split-v1"):
+    return gf.SplitSpec(fractions={"test": test, "validate": validate, "train": 1.0 - test - validate},
+                        version=version)
+
+
+@dataclass(frozen=True)
+class CumulativeSplit(gf.SplitSpec):
+    """A planted leak: test, validate and train stacked in order on the hash."""
+
+    def block_split(self, block):
+        u = _block_uniform(self.version, int(block))
+        edge = 0.0
+        for name, fraction in self.fractions:
+            edge += fraction
+            if u < edge:
+                return name
+        return self.fractions[-1][0]
+
+
+def test_fractions_are_monotone():
+    """
+    Raising one split's fraction takes time from train alone: validate 0.10 against
+    0.20 leaves test unchanged, and test 0.10 against 0.20 leaves validate unchanged.
+    So do the records: a transient changes split only from train to the raised one.
+    """
+    assert_monotone(spec(), spec(validate=0.2), "validate")
+    assert_monotone(spec(), spec(test=0.2), "test")
+    assert_monotone(spec(version="fold-1"), spec(test=0.3, version="fold-1"), "test")
+
+    times = 1.23e9 + np.sort(np.random.default_rng(3).uniform(0.0, 3.0e7, 4000))
+    index = {}
+    for name, fractions in (("before", spec()), ("after", spec(validate=0.2))):
+        records = TransientIndex([
+            TransientSegment(gps_key=gps_to_key(float(t)), transient_gps_time=float(t),
+                             start_gps_time=float(t) - 48.2, end_gps_time=float(t) + 48.2,
+                             label=gf.DataLabel.GLITCHES, kind=GlitchType.BLIP,
+                             observing_run=gf.ObservingRun.O3, seen_in=[gf.IFO.L1])
+            for t in times
+        ])
+        records.assign_splits(fractions)
+        index[name] = records._groups
+    moved = Counter((index["before"].get(k), index["after"].get(k))
+                    for k in set(index["before"]) | set(index["after"])
+                    if index["before"].get(k) != index["after"].get(k))
+    assert moved and set(moved) <= {("train", "validate"), ("train", None), (None, "validate")}, moved
+
+
+def test_fractions_check_sees_a_cumulative_layout():
+    """The planted leak: stacking validate on test moves validate when test grows."""
+    before = CumulativeSplit(fractions=spec().fractions)
+    after = CumulativeSplit(fractions=spec(test=0.2).fractions)
+    assert ("validate", "test") in split_moves(before, after)
+    with pytest.raises(AssertionError, match="moved"):
+        assert_monotone(before, after, "test")
+
+
+# =============================================================================
+# NAMES (L4) AND A SPLIT NAMED EVERYWHERE (L5)
+# =============================================================================
+
+WINDOW = dict(sample_rate_hertz=256.0, onsource_duration_seconds=1.0, offsource_duration_seconds=4.0,
+              crop_duration_seconds=0.5, num_examples_per_batch=2, steps_per_epoch=1)
+
+
+def white():
+    return gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1])
+
+
+def indexed():
+    index = TransientIndex([])
+    index.assign_splits(gf.SplitSpec())
+    return index
+
+
+#: Every entry point that takes a split, called with ``group`` (omitted when None).
+ENTRY_POINTS = {
+    "Dataset": lambda **g: gf.Dataset(noise_obtainer=white(), **WINDOW, **g),
+    "ComposedDataset": lambda **g: gf.ComposedDataset(
+        pools=[gf.FeaturePool(name="noise", label=0, probability=1.0, noise_obtainer=white())],
+        **WINDOW, **g),
+    "NoiseObtainer": lambda **g: next(white()(**g)),
+    "noise get_valid_segments": lambda **g: gf.IFODataObtainer(
+        data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
+        observing_runs=gf.ObservingRun.O3).get_valid_segments([gf.IFO.L1], 1, g.get("group")),
+    "transient obtainer": lambda **g: next(gf.IFODataObtainer(
+        data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
+        observing_runs=gf.ObservingRun.O3)(ifos=[gf.IFO.L1], **g)),
+    "TransientIndex": lambda **g: list(indexed().iter(group=g.get("group", "unnamed"))),
+    "ValidationConfig": lambda **g: gf.ValidationConfig(**g),
+    "validation_dataset_args": lambda **g: validation_dataset_args(gf.NoiseType.WHITE, **g),
+}
+
+
+def refusal(call, **group):
+    """The message ``call`` refuses with (KeyError or ValueError), or None when it accepts."""
+    try:
+        call(**group)
+    except (KeyError, ValueError) as error:
+        return str(error)
+    return None
+
+
+def assert_refuses(call, name):
+    message = refusal(call, group=name)
+    assert message is not None, f"split {name!r} was accepted"
+    assert "a split is one of" in message or "reserved" in message or name in message, message
+
+
+@pytest.mark.parametrize("entry", list(ENTRY_POINTS))
+@pytest.mark.parametrize("name", ["val", "Train", "direct", "all"])
+def test_split_names_checked(entry, name):
+    """Every entry point refuses a name that is not a split, by name."""
+    assert_refuses(ENTRY_POINTS[entry], name)
+
+
+def test_names_check_sees_an_accepted_name(monkeypatch):
+    """The planted leak: a check that lets any name through is caught."""
+    monkeypatch.setattr(gf.SplitSpec, "check_name", staticmethod(lambda name: name))
+    with pytest.raises(AssertionError, match="was accepted"):
+        assert_refuses(ENTRY_POINTS["ValidationConfig"], "val")
+
+
+#: The entry points that build or serve data without a named split.
+UNNAMED = ["Dataset", "ComposedDataset", "NoiseObtainer", "transient obtainer"]
+
+
+def assert_needs_a_name(call, entry):
+    message = refusal(call)
+    assert message is not None and "Name the split" in message, \
+        f"{entry} served data without a named split ({message})"
+
+
+@pytest.mark.parametrize("entry", UNNAMED)
+def test_split_is_named(entry):
+    """No dataset or obtainer serves data without a named split."""
+    assert_needs_a_name(ENTRY_POINTS[entry], entry)
+
+
+def test_evaluation_arguments_build_only_a_held_out_split():
+    """validation_dataset_args builds test by default, validate on request, never train."""
+    assert gf.Dataset(**validation_dataset_args(gf.NoiseType.WHITE, steps_per_epoch=1)).group == "test"
+    assert gf.Dataset(**validation_dataset_args(
+        gf.NoiseType.WHITE, group="validate", steps_per_epoch=1)).group == "validate"
+    assert "never 'train'" in refusal(ENTRY_POINTS["validation_dataset_args"], group="train")
+
+
+def test_named_check_sees_a_default_split():
+    """The planted leak: a dataset that defaults its split is caught."""
+    def defaulting(**group):
+        return gf.Dataset(noise_obtainer=white(), **WINDOW, **{"group": "train", **group})
+
+    with pytest.raises(AssertionError, match="without a named split"):
+        assert_needs_a_name(defaulting, "a defaulting Dataset")

@@ -230,3 +230,116 @@ def test_census_sees_printed_code_that_does_not_parse():
     else:
         raise AssertionError("the planted block parsed")
     ast.parse(good[1])
+
+
+# =============================================================================
+# SPLIT NAMES
+# =============================================================================
+
+#: The classes that build a dataset, and the obtainer factories.
+DATASETS = {"Dataset", "ComposedDataset", "GravyflowDataset"}
+SPLIT_NAMES = {"train", "validate", "test"}
+
+
+def _called_name(call):
+    func = call.func
+    return func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+
+
+def _mentions_events(node):
+    return any(isinstance(n, ast.Attribute) and n.attr == "EVENTS"
+               and (_dotted(n.value) or ("", []))[1][-1:] == ["DataLabel"] for n in ast.walk(node))
+
+
+def _names(node):
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def _group(call):
+    """A call's split: its literal ``group``, '<forwarded>' when not a literal, None when absent."""
+    for keyword in call.keywords:
+        if keyword.arg == "group":
+            value = keyword.value
+            return value.value if isinstance(value, ast.Constant) else "<forwarded>"
+        if keyword.arg is None and isinstance(keyword.value, ast.Call):
+            inner = _group(keyword.value)
+            if inner is not None:
+                return inner
+        if keyword.arg is None and isinstance(keyword.value, ast.Dict):
+            for key, value in zip(keyword.value.keys, keyword.value.values):
+                if isinstance(key, ast.Constant) and key.value == "group":
+                    return value.value if isinstance(value, ast.Constant) else "<forwarded>"
+    return None
+
+
+def split_violations(source):
+    """
+    The split rules' violations in one source: a dataset built without a split, or
+    with a literal that is not a split; real events (an obtainer of DataLabel.EVENTS,
+    and whatever wraps it) read outside 'test'; a ``val*`` object read outside 'validate'.
+    """
+    tree = ast.parse(source)
+    events = set()  # names bound to events, or to something built from them
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                if _mentions_events(node.value) or _names(node.value) & events:
+                    for target in node.targets:
+                        for name in _names(target) - events:
+                            events.add(name)
+                            changed = True
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        group = _group(node)
+        if _called_name(node) in DATASETS and group is None:
+            found.append((node.lineno, f"{_called_name(node)} without a split"))
+        if group is None or group == "<forwarded>":
+            continue
+        if group not in SPLIT_NAMES:
+            found.append((node.lineno, f"split {group!r}"))
+        names = _names(node)
+        if (names & events or _mentions_events(node)) and group != "test":
+            found.append((node.lineno, f"real events read in {group!r}"))
+        if any(name.startswith("val") for name in names) and group != "validate":
+            found.append((node.lineno, f"a validation object read in {group!r}"))
+    return [f"line {line}: {violation}" for line, violation in sorted(found)]
+
+
+def test_examples_name_their_splits():
+    """Every example names a split; real events are test data; validation objects are validate's."""
+    checked, broken = 0, []
+    for label, source in example_sources():
+        checked += sum(isinstance(n, ast.Call) and _group(n) is not None for n in ast.walk(ast.parse(source)))
+        broken += [f"{label}, {violation}" for violation in split_violations(source)]
+    assert checked > 20, f"only {checked} calls name a split; the census would be hollow"
+    assert not broken, "Examples break the split rules:\n  " + "\n  ".join(broken)
+
+
+def test_census_sees_split_violations():
+    """The census itself: each planted violation is found, and correct calls are not."""
+    source = textwrap.dedent('''
+        noise = gf.NoiseObtainer(ifos=[gf.IFO.L1])
+        unnamed = gf.Dataset(noise_obtainer=noise)
+        misnamed = gf.Dataset(noise_obtainer=noise, group="all")
+        events = gf.IFODataObtainer(data_labels=[gf.DataLabel.EVENTS])
+        wrapped = gf.NoiseObtainer(ifo_data_obtainer=events)
+        trained = gf.Dataset(noise_obtainer=wrapped, group="train")
+        direct = next(events(group="validate"))
+        val_noise = gf.NoiseObtainer(ifos=[gf.IFO.H1])
+        crossed = gf.Dataset(noise_obtainer=val_noise, group="train")
+        fine = gf.Dataset(noise_obtainer=noise, group="train")
+        held_out = gf.Dataset(noise_obtainer=wrapped, group="test")
+        validated = gf.Dataset(noise_obtainer=val_noise, group="validate")
+        forwarded = gf.Dataset(**args(group=group))
+    ''')
+    assert split_violations(source) == [
+        "line 3: Dataset without a split",
+        "line 4: split 'all'",
+        "line 7: real events read in 'train'",
+        "line 8: real events read in 'validate'",
+        "line 10: a validation object read in 'train'",
+    ]

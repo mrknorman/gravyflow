@@ -12,6 +12,8 @@ injection label stream is compared too, at every offset; and a run resumed
 part-way trains on the batches the uninterrupted run did.
 """
 
+from unittest import mock
+
 import keras
 import numpy as np
 import pytest
@@ -319,3 +321,38 @@ def test_resumed_run_trains_on_the_same_epochs(tmp_path, monkeypatch):
             np.testing.assert_allclose(value, uninterrupted[address][name], rtol=REBUILD_RTOL,
                                        atol=REBUILD_RTOL * float(np.max(np.abs(value))),
                                        err_msg=f"{name} of batch {address}")
+
+
+def _scores_split(group, run_record):
+    """Whether the validator goes on to score ``group`` for a model with ``run_record``."""
+    class Scored(Exception):
+        pass
+
+    def scored(*args, **kwargs):
+        raise Scored
+
+    with mock.patch("gravyflow.src.validate.validator.model_fingerprint", scored):
+        try:
+            Validator.validate(None, "model", {"onsource_duration_seconds": 1.0},
+                               ValidationConfig(group=group), run_record=run_record)
+        except Scored:
+            return True
+    return False
+
+
+def test_validator_refuses_the_selection_split():
+    """
+    The validator refuses to score the split that selected the model (run.json's
+    selection_split), and scores the other held-out split.
+    """
+    record = {"split": {"fingerprint": gf.DEFAULT_SPLIT.fingerprint(), "selection_split": "validate"}}
+    assert _scores_split("test", record)
+    with pytest.raises(ValueError, match="selected on the 'validate' split"):
+        _scores_split("validate", record)
+
+
+def test_selection_check_sees_a_validator_that_scores_it(monkeypatch):
+    """The planted leak: a validator that ignores the record scores the selection split."""
+    monkeypatch.setattr("gravyflow.src.validate.validator.check_held_out", lambda *args: None)
+    record = {"split": {"fingerprint": gf.DEFAULT_SPLIT.fingerprint(), "selection_split": "validate"}}
+    assert _scores_split("validate", record)
