@@ -769,25 +769,40 @@ class TransientDataObtainer(BaseDataObtainer):
         )
         return onsource[0], offsource[0]
 
-    def _fetch_windows(
-        self, caches: Dict[str, Any], pending: List[Tuple[int, List]], window_spec: WindowSpec,
-    ):
+    @staticmethod
+    def _download_rate(window_spec: WindowSpec) -> float:
         """
-        Complete the windows of the ``pending`` records ([(index, windows)], each
-        read's cached window or None): download every missing read's span in
-        parallel, store it in its cache, and yield (index, onsource, offsource) for
-        each record whose every read now holds strain. A record with a read that
-        does not is rejected for no data (``_reject_for_no_data``).
+        The rate a request's strain is downloaded and stored at: the higher of its own
+        and the cache's (a cache can downsample, never upsample).
+
+        Refuses, by name, a request no read could serve: a rate that is not whole hertz,
+        that no public source holds, or whose windows reach past the stored strain, the
+        resampler's margin counted (``TransientCache.check_request``). Called once, as
+        a request is configured, before any cache is opened or any strain fetched.
         """
         from gravyflow.src.dataset.features.glitch_cache import CACHE_SAMPLE_RATE_HERTZ
         from .gwosc_data import gwosc_sample_rate_hertz
 
-        # Download at the higher of the requested and stored rates (a cache can
-        # downsample, never upsample), refusing a rate no public source holds, or the
-        # resampler cannot make.
         download_rate = max(whole_hertz(window_spec.sample_rate_hertz), CACHE_SAMPLE_RATE_HERTZ)
         gwosc_sample_rate_hertz(download_rate)
+        TransientCache.check_request(
+            download_rate, window_spec.sample_rate_hertz,
+            window_spec.total_onsource_duration_seconds, window_spec.offsource_duration_seconds,
+        )
+        return download_rate
 
+    def _fetch_windows(
+        self, caches: Dict[str, Any], pending: List[Tuple[int, List]], window_spec: WindowSpec,
+        download_rate: float,
+    ):
+        """
+        Complete the windows of the ``pending`` records ([(index, windows)], each
+        read's cached window or None): download every missing read's span in
+        parallel at ``download_rate`` (``_download_rate``), store it in its cache, and
+        yield (index, onsource, offsource) for each record whose every read now holds
+        strain. A record with a read that does not is rejected for no data
+        (``_reject_for_no_data``).
+        """
         def key(record, read):
             return self._cache_prefix(record, read), read.ifo.name, read.centre
 
@@ -945,7 +960,10 @@ class TransientDataObtainer(BaseDataObtainer):
             offsource_duration_seconds=offsource_duration_seconds,
             crop_duration_seconds=crop_duration_seconds,
         )
-        
+        # Before any cache is opened or any strain fetched: a request refused as a
+        # cache is read would meet the handlers that reset the cache or fetch a miss.
+        download_rate = self._download_rate(window_spec)
+
         # Apply remaining defaults (not in WindowSpec)
         ifos = ensure_list(ifos) or [gf.IFO.L1]
         num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
@@ -1028,7 +1046,7 @@ class TransientDataObtainer(BaseDataObtainer):
 
         def fetch(pending):
             """The batches the pending records complete, each cached before it is served."""
-            for index, onsource, offsource in self._fetch_windows(caches, pending, window_spec):
+            for index, onsource, offsource in self._fetch_windows(caches, pending, window_spec, download_rate):
                 batch = add(index, onsource, offsource)
                 if batch is not None:
                     # A batch served is cached first: the caller may never resume.

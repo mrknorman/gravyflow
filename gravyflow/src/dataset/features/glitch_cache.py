@@ -62,6 +62,19 @@ class WindowRead(NamedTuple):
     offsource: slice
     onsource: slice
 
+
+class WindowReadError(RuntimeError):
+    """
+    A read of a request's windows reaching past the stored strain
+    (``TransientCache.window_read``).
+
+    Every request is checked against the stored strain when it is configured, before any
+    cache is opened or any strain fetched (``TransientCache.check_request``), so a read
+    that reaches past it is a defect, not a request to refuse. It is deliberately not a
+    ValueError: no handler written for a request's or a file's errors (resetting an
+    incompatible cache, fetching a miss again) catches it.
+    """
+
 @dataclass
 class CacheChunk:
     """Represents a loaded chunk of cache data."""
@@ -121,17 +134,14 @@ class TransientCache:
         exact.
 
         Raises:
-            ValueError: if the request needs upsampling, a rate that is not whole hertz,
-                or more strain than is stored, the resampler's margin counted.
+            ValueError: if the request needs upsampling or a rate that is not whole hertz.
+            WindowReadError: if the stretch reaches past the stored strain: a request
+                ``check_request`` refuses, read unchecked.
         """
         from gravyflow.src.utils.resample import resample_margin, resample_ratio
         from gravyflow.src.utils.tensor import centre_index, even_samples
 
-        if sample_rate_hertz > stored_rate:
-            raise ValueError(
-                f"Cannot upsample from {stored_rate}Hz to {sample_rate_hertz}Hz. "
-                "Upsampling is not supported."
-            )
+        TransientCache._refuse_upsampling(stored_rate, sample_rate_hertz)
         up, down = resample_ratio(stored_rate, sample_rate_hertz)
         margin = resample_margin(stored_rate, sample_rate_hertz)
         num_onsource = even_samples(onsource_duration, sample_rate_hertz)
@@ -150,14 +160,95 @@ class TransientCache:
         last = multiples * up + after - 1
         stop = start + -(-last * down // up) + margin + 1
         if start < 0 or stop > stored_offsource + stored_onsource:
-            raise ValueError(
-                f"A {onsource_duration} s onsource with a {offsource_duration} s offsource at "
-                f"{sample_rate_hertz} Hz needs more strain than is stored "
-                f"({(stored_offsource + stored_onsource) / stored_rate} s at {stored_rate} Hz), "
-                f"with the resampler's margin of {margin} samples past each end."
+            raise WindowReadError(
+                f"A {onsource_duration} s padded onsource with a {offsource_duration} s offsource "
+                f"at {sample_rate_hertz} Hz reads stored samples [{start}, {stop}) of "
+                f"{stored_offsource + stored_onsource} at {stored_rate} Hz: a request the "
+                "configuration check (TransientCache.check_request) refuses was read."
             )
         middle = first + num_offsource
         return WindowRead(slice(start, stop), slice(first, middle), slice(middle, middle + num_onsource))
+
+    @staticmethod
+    def window_reach(
+        stored_offsource: int,
+        stored_onsource: int,
+        stored_rate: float,
+        sample_rate_hertz: float,
+    ) -> Tuple[int, int]:
+        """
+        How far a request's windows may reach from the transient's sample in a stored
+        stretch (``window_read``), the resampler's margin counted: ``(before, after)``,
+        in samples at ``sample_rate_hertz``. ``before`` bounds the offsource with the
+        padded onsource's first half (the samples before the transient's), and ``after``
+        the padded onsource's second half (the transient's sample and those after it).
+        """
+        from gravyflow.src.utils.resample import resample_margin, resample_ratio
+        from gravyflow.src.utils.tensor import centre_index
+
+        up, down = resample_ratio(stored_rate, sample_rate_hertz)
+        margin = resample_margin(stored_rate, sample_rate_hertz)
+        transient = stored_offsource + centre_index(stored_onsource)
+        # window_read's start, a whole number of down stored samples before the
+        # transient's, is at least the margin before the first sample served, and its
+        # stop the margin and one past the last.
+        before = up * ((transient // down) * down - margin) // down
+        after = up * (stored_offsource + stored_onsource - transient - margin - 1) // down + 1
+        return before, after
+
+    @staticmethod
+    def check_request(
+        stored_rate: float,
+        sample_rate_hertz: float,
+        onsource_duration: float,
+        offsource_duration: float,
+    ) -> None:
+        """
+        Refuse, by name, a request whose windows no read of the stored strain
+        (``CACHE_OFFSOURCE_DURATION`` of offsource, then ``CACHE_ONSOURCE_DURATION`` of
+        onsource, at ``stored_rate``) can serve exactly: one that needs upsampling, a
+        rate that is not whole hertz, or windows that reach past the stored strain, the
+        resampler's margin counted (``window_reach``). A request is checked once, when it
+        is configured, before any cache is opened or any strain fetched: a refusal raised
+        as a cache is read would meet the handlers of a cache's and a miss's errors.
+
+        Raises:
+            ValueError: naming the request's rate and, for windows that reach too far,
+                the longest that rate can serve.
+        """
+        from gravyflow.src.utils.resample import resample_margin
+        from gravyflow.src.utils.tensor import centre_index, even_samples
+
+        TransientCache._refuse_upsampling(stored_rate, sample_rate_hertz)
+        reach_before, reach_after = TransientCache.window_reach(
+            int(CACHE_OFFSOURCE_DURATION * stored_rate), int(CACHE_ONSOURCE_DURATION * stored_rate),
+            stored_rate, sample_rate_hertz,
+        )
+        num_onsource = even_samples(onsource_duration, sample_rate_hertz)
+        num_offsource = even_samples(offsource_duration, sample_rate_hertz)
+        before = num_offsource + centre_index(num_onsource)
+        after = num_onsource - centre_index(num_onsource)
+        if before > reach_before or after > reach_after:
+            raise ValueError(
+                f"Transient windows of a {onsource_duration} s padded onsource and a "
+                f"{offsource_duration} s offsource cannot be read at {sample_rate_hertz:g} Hz. "
+                f"They are read from {CACHE_OFFSOURCE_DURATION:g} s of stored offsource then "
+                f"{CACHE_ONSOURCE_DURATION:g} s of stored onsource at {stored_rate:g} Hz, the "
+                f"transient at the onsource's centre, and every sample is resampled exactly, which "
+                f"reads {resample_margin(stored_rate, sample_rate_hertz)} stored samples past each "
+                f"end of the windows: at {sample_rate_hertz:g} Hz the padded onsource is at most "
+                f"{2 * reach_after / sample_rate_hertz} s, and the offsource starts at most "
+                f"{reach_before / sample_rate_hertz} s before the transient."
+            )
+
+    @staticmethod
+    def _refuse_upsampling(stored_rate: float, sample_rate_hertz: float) -> None:
+        """A cache can downsample, never upsample."""
+        if sample_rate_hertz > stored_rate:
+            raise ValueError(
+                f"Cannot upsample from {stored_rate}Hz to {sample_rate_hertz}Hz. "
+                "Upsampling is not supported."
+            )
 
     @staticmethod
     def read_windows(
@@ -179,7 +270,7 @@ class TransientCache:
         an HDF5 read then holds only the samples needed).
 
         Raises:
-            ValueError: as ``window_read``.
+            ValueError, WindowReadError: as ``window_read``.
         """
         from gravyflow.src.utils.resample import resample
 

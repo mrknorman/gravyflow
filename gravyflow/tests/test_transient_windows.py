@@ -15,6 +15,7 @@ decodes to its GPS time.
 
 import dataclasses
 import importlib.util
+import re
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -30,6 +31,7 @@ from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
 from gravyflow.src.dataset.acquisition.cache import DiskCache
 from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
+from gravyflow.src.dataset.features import glitch_cache
 from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.glitch_cache import TransientCache, generate_transient_cache_path
 from gravyflow.src.utils.gps import gps_to_key
@@ -452,6 +454,104 @@ class TestUnavailableRecords:
         for batch in (again, warm):
             for key in (RV.ONSOURCE, RV.OFFSOURCE, RV.START_GPS_TIME):
                 np.testing.assert_array_equal(by_time(batch, key), by_time(fresh, key), err_msg=key.name)
+
+
+def cache_rows(directory, prefix="glitch"):
+    """The rows a transient cache holds: 0 when it does not exist."""
+    path = generate_transient_cache_path(directory, prefix=prefix)
+    if not path.exists():
+        return 0
+    with h5py.File(path, "r") as file:
+        return int(file["glitches"]["gps_times"].shape[0])
+
+
+#: A padded onsource of 31.95 s at RATE: within the stored 32 s, but not with the
+#: resampler's margin of 132 stored samples past each end, which leaves 31.935546875 s.
+BEYOND = dict(onsource_duration_seconds=30.95, crop_duration_seconds=0.5)
+LONGEST_PADDED_ONSOURCE = 31.935546875
+#: Requests no read can serve, and how each is refused.
+UNSERVABLE = {
+    "beyond the stored strain": (BEYOND, rf"cannot be read at 2048 Hz.* at most {LONGEST_PADDED_ONSOURCE} s"),
+    "not whole hertz": (dict(sample_rate_hertz=2048.5), "2048.5 Hz is not a positive whole number"),
+}
+#: Enough records in SPLIT, 2.8 s apart, that their caches are read in chunks.
+MANY_TIMES = TIMES[0] + 2.8 * np.arange(100)
+
+
+class TestRequestsNoReadCanServe:
+    """
+    A request whose windows no read can serve exactly (they reach past the stored
+    strain, the resampler's margin counted, or its rate is not whole hertz) is refused
+    by name when it is configured: before any cache is opened, read or reset, and
+    before any fetch. A read that reaches past the stored strain anyway is a defect,
+    which no handler of a cache's or a miss's errors catches.
+    """
+
+    @pytest.mark.parametrize("request_name", UNSERVABLE)
+    @pytest.mark.parametrize("times", [MANY_TIMES, TIMES], ids=["chunked", "sparse"])
+    def test_is_refused_before_any_cache_or_fetch(self, tmp_path, times, request_name):
+        window, refusal = UNSERVABLE[request_name]
+        with offline(catalogue=records(times)) as fetch:
+            _, reader = served(tmp_path, [gf.IFO.L1])
+            rows, fetched = cache_rows(tmp_path), len(fetch.calls)
+            with pytest.raises(ValueError) as refused:
+                served(tmp_path, [gf.IFO.L1], **window)
+        # TransientDataObtainer reads the caches of 100 records or more in chunks.
+        assert (len(reader.transient_segments) >= 100) == (len(times) >= 100)
+        assert rows > 0 and cache_rows(tmp_path) == rows, f"rows before {rows}, rows after {cache_rows(tmp_path)}"
+        assert len(fetch.calls) == fetched, f"fetches {len(fetch.calls) - fetched}"
+        assert re.search(refusal, str(refused.value)), str(refused.value)
+
+    def test_a_read_past_the_stored_strain_is_a_defect_no_handler_catches(self, tmp_path):
+        with offline(catalogue=records(MANY_TIMES)):
+            served(tmp_path, [gf.IFO.L1])
+        rows = cache_rows(tmp_path)
+        spec = WindowSpec.from_params(sample_rate_hertz=RATE, offsource_duration_seconds=16.0, **BEYOND)
+        request = (RATE, spec.total_onsource_duration_seconds, spec.offsource_duration_seconds)
+        # A chunk's load, inside the handler that resets an incompatible cache:
+        with pytest.raises(glitch_cache.WindowReadError):
+            obtainer(tmp_path)._initialize_transient_cache([gf.IFO.L1], *request, prefix="glitch")
+        # A row's read from disk, inside the handler that fetches a miss again:
+        reader = obtainer(tmp_path)
+        cache, _ = reader._initialize_transient_cache([gf.IFO.L1], *request, enable_chunked_mode=False,
+                                                      prefix="glitch")
+        with pytest.raises(glitch_cache.WindowReadError):
+            reader._get_sample_from_cache(cache, float(cache.get_all_gps_times()[0]), *request,
+                                          target_ifos=["L1"])
+        assert cache_rows(tmp_path) == rows, "a read past the stored strain changed the cache"
+        assert not issubclass(glitch_cache.WindowReadError, (ValueError, KeyError))
+
+    @pytest.mark.parametrize("rate", [4096, 2048, 1024, 1000, 512, 333])
+    def test_the_check_is_the_reads_geometry(self, rate):
+        """
+        The longest windows ``check_request`` passes are read within the stored strain;
+        two samples more of either window is refused by the check, and by the read as a
+        defect.
+        """
+        stored = int(32 * STORED_RATE)
+        before, after = TransientCache.window_reach(stored, stored, STORED_RATE, rate)
+        longest_offsource = before - 1 - (before - 1) % 2  # beside a two-sample onsource
+
+        def durations(num_onsource, num_offsource):
+            return (num_onsource + 0.5) / rate, (num_offsource + 0.5) / rate
+
+        for longest, beyond in [
+            (durations(2 * after, 2), durations(2 * after + 2, 2)),
+            (durations(2, longest_offsource), durations(2, longest_offsource + 2)),
+        ]:
+            TransientCache.check_request(STORED_RATE, rate, *longest)
+            read = TransientCache.window_read(stored, stored, STORED_RATE, rate, *longest)
+            assert 0 <= read.stored.start and read.stored.stop <= 2 * stored
+            with pytest.raises(ValueError, match=f"cannot be read at {rate} Hz"):
+                TransientCache.check_request(STORED_RATE, rate, *beyond)
+            with pytest.raises(glitch_cache.WindowReadError):
+                TransientCache.window_read(stored, stored, STORED_RATE, rate, *beyond)
+
+    def test_the_check_refuses_upsampling_and_rates_that_are_not_whole_hertz(self):
+        with pytest.raises(ValueError, match="upsample"):
+            TransientCache.check_request(STORED_RATE, 2 * STORED_RATE, 1.0, 1.0)
+        with pytest.raises(ValueError, match="not a positive whole number"):
+            TransientCache.check_request(STORED_RATE, 2048.5, 1.0, 1.0)
 
 
 #: One of the 89 pairs of confident (ml_confidence of at least 0.9) Gravity Spy
