@@ -6,6 +6,7 @@ training dataset's, which the model sizes from its training config.
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.validate.provenance import StaleCheckpointError
 
 SAMPLE_RATE, ONSOURCE, OFFSOURCE, BATCH = 256.0, 1.0, 2.0, 4
 
@@ -80,3 +81,26 @@ class TestOneEpochLength:
         history = model.metrics[0].history
         assert len(history["loss"]) == TRAINING["max_epochs"]
         assert len(history["val_loss"]) == TRAINING["max_epochs"]
+
+
+class TestResume:
+    """force_retrain=False resumes the run in the model's directory, and never discards it."""
+
+    @pytest.mark.global_rng
+    @pytest.mark.parametrize("record", ["kept", "removed"])
+    def test_a_checkpoint_with_no_history_is_kept_and_refused(self, tmp_path, record):
+        # A run whose history is empty cannot be resumed; starting a new one would
+        # delete its checkpoint (or overwrite it at the first epoch). Only
+        # force_retrain=True may.
+        validate = {**dataset_args(steps_per_epoch=2), "group": "validate"}
+        model = tiny_model(tmp_path)
+        assert model.train(validate_args=validate)
+        checkpoint = gf.model_file(model.model_path)
+        saved = checkpoint.read_bytes()
+        gf.save_dict_to_hdf5({}, model.model_path / "history.hdf5", True)
+        if record == "removed":
+            (model.model_path / "run.json").unlink()
+        with pytest.raises(StaleCheckpointError, match="force_retrain=True"):
+            tiny_model(tmp_path).train(validate_args=validate, force_retrain=False)
+        assert checkpoint.read_bytes() == saved
+        assert tiny_model(tmp_path).train(validate_args=validate, force_retrain=True)

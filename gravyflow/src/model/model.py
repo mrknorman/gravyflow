@@ -1165,8 +1165,9 @@ class Model:
 
         Raises:
             StaleCheckpointError: the weights, or the run resumed, record
-                another split, or none.
-        """ 
+                another split, or none; or, resuming, ``model_path`` holds a
+                checkpoint with no history.
+        """
 
         if validation_dataset is None and validate_args is None:
             raise ValueError("No validation dataset!")
@@ -1211,6 +1212,7 @@ class Model:
             callbacks = []
 
         from gravyflow.src.validate.config import require_same_split, split_record, with_run_record
+        from gravyflow.src.validate.provenance import StaleCheckpointError
 
         gf.ensure_directory_exists(self.model_path)
         split = split_record(training_dataset, validation_dataset)
@@ -1239,6 +1241,14 @@ class Model:
                     self.metrics.append(history_data)
                     
                     return False
+            elif gf.model_file(self.model_path).exists():
+                # A checkpoint with no history cannot be resumed, and a new run
+                # would discard it: only force_retrain does that.
+                raise StaleCheckpointError(
+                    f"{gf.model_file(self.model_path)} has no history to resume "
+                    f"({self.model_path / 'history.hdf5'} is empty). Train with "
+                    "force_retrain=True to start a new run there, or use another model_path."
+                )
             else:
                 initial_epoch = 0
                 model_path = None
