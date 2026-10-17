@@ -44,11 +44,11 @@ LAYOUTS = {
 
 @pytest.mark.parametrize("mode", [gf.SamplingMode.RANDOM, gf.SamplingMode.GRID], ids=lambda m: m.name)
 @pytest.mark.parametrize("layout", list(LAYOUTS))
-def test_detectors_never_coincide(world, tmp_path, layout, mode):
+def test_detectors_never_coincide(world, layout, mode):
     """In every example, the detectors' windows start at least two footprints apart."""
     fixture = LAYOUTS[layout]()
     with world(fixture) as harness:
-        batches = fx.noise_batches(fixture, tmp_path, "train", mode=mode)
+        batches = fx.noise_batches(fixture, "train", mode=mode)
         record = audit.collect(harness, {"train": ("train", batches)}, 8, IFOS, fx.window(), False)["train"]
     separation = _min_separation(record.footprints, 256.0)
     overlapping = int(np.sum(np.abs(np.diff(record.footprints[..., 0], axis=1)) / 256.0 < 2 * FOOTPRINT_SECONDS))
@@ -63,26 +63,26 @@ def test_detectors_never_coincide(world, tmp_path, layout, mode):
 GRID_PASS_BOUND = 2000
 
 
-def _grid_pass_length(world, fixture, directory):
+def _grid_pass_length(world, fixture):
     """The number of batches one GRID pass serves, refusing a pass that does not end."""
     with world(fixture):
-        batches = fx.noise_batches(fixture, directory, "train", mode=gf.SamplingMode.GRID)
+        batches = fx.noise_batches(fixture, "train", mode=gf.SamplingMode.GRID)
         length = sum(1 for _ in itertools.islice(batches, GRID_PASS_BOUND + 1))
     assert length <= GRID_PASS_BOUND, f"a GRID pass served more than {GRID_PASS_BOUND} batches: it never ends"
     return length
 
 
 @pytest.mark.parametrize("layout", list(LAYOUTS))
-def test_each_window_once(world, tmp_path, layout):
+def test_each_window_once(world, layout):
     """
     One GRID pass ends, serves each detector's window at most once, and keeps every
     example's detectors two footprints apart.
     """
     fixture = LAYOUTS[layout]()
-    length = _grid_pass_length(world, fixture, tmp_path / "count")
+    length = _grid_pass_length(world, fixture)
     assert length > 0, "a GRID pass served nothing"
     with world(fixture) as harness:
-        batches = fx.noise_batches(fixture, tmp_path / "pass", "train", mode=gf.SamplingMode.GRID)
+        batches = fx.noise_batches(fixture, "train", mode=gf.SamplingMode.GRID)
         record = audit.collect(harness, {"grid": ("train", batches)}, length, IFOS, fx.window(), False)["grid"]
     starts = record.footprints[..., 0]
     for d, ifo in enumerate(IFOS):
@@ -159,15 +159,14 @@ def _glitch_world(glitch_ifo="L1"):
     return fixture.with_catalogues(glitches=rows), peak
 
 
-def _glitch_batch(world, tmp_path, fixture):
+def _glitch_batch(world, fixture):
     with world(fixture) as harness:
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
-            observing_runs=[gf.ObservingRun.O3], augmentations=[], prefetch_segments=0,
+            observing_runs=[gf.ObservingRun.O3], augmentations=[],
         )
         noise = gf.NoiseObtainer(ifo_data_obtainer=obtainer, ifos=[gf.IFO.H1, gf.IFO.L1],
-                                 noise_type=gf.NoiseType.REAL, 
-                                 data_directory_path=tmp_path)
+                                 noise_type=gf.NoiseType.REAL)
         ds = gf.Dataset(
             noise_obtainer=noise, sample_rate_hertz=TRANSIENT_RATE,
             onsource_duration_seconds=fx.ONSOURCE_SECONDS, crop_duration_seconds=fx.CROP_SECONDS,
@@ -189,10 +188,10 @@ def _glitch_batch(world, tmp_path, fixture):
     return record, np.asarray(outputs[RV.DATA_LABEL.name]), fetches
 
 
-def test_glitch_detectors_never_coincide(world, tmp_path):
+def test_glitch_detectors_never_coincide(world):
     """An L1-only glitch over [H1, L1]: H1 is read at least two footprints away."""
     fixture, peak = _glitch_world()
-    record, _, _ = _glitch_batch(world, tmp_path, fixture)
+    record, _, _ = _glitch_batch(world, fixture)
     separation = float(np.abs(np.diff(record.footprints[0, :, 0]))[0] / 4096.0)
     assert separation >= 2 * FOOTPRINT_SECONDS, f"H1 and L1 read {separation} s apart"
 
@@ -206,7 +205,7 @@ def _meets(span, extents):
 
 
 @pytest.mark.parametrize("glitch_ifo", ["L1", "H1"])
-def test_partner_windows(world, tmp_path, glitch_ifo):
+def test_partner_windows(world, glitch_ifo):
     """
     A one-detector glitch over [H1, L1]: the other detector gets a partner window,
     read whole in its own data and the record's split, away from the glitch and from
@@ -217,8 +216,8 @@ def test_partner_windows(world, tmp_path, glitch_ifo):
     fixture, peak = _glitch_world(glitch_ifo)
     other = "H1" if glitch_ifo == "L1" else "L1"
     g, p = IFOS.index(glitch_ifo), IFOS.index(other)
-    first, labels, fetches = _glitch_batch(world, tmp_path / "first", fixture)
-    second, _, _ = _glitch_batch(world, tmp_path / "second", fixture)
+    first, labels, fetches = _glitch_batch(world, fixture)
+    second, _, _ = _glitch_batch(world, fixture)
 
     seconds = first.seconds()[0]
     assert abs(seconds[p, 0] - seconds[g, 0]) >= 2 * FOOTPRINT_SECONDS, f"{other} is read at the glitch's time"
@@ -382,46 +381,46 @@ def _intersection(fixture):
     return intersect_segments(*(np.asarray(fixture.segments[ifo]) for ifo in IFOS))
 
 
-def _noise_record(world, directory, fixture, mode, coincidence):
+def _noise_record(world, fixture, mode, coincidence):
     """Eight batches of train noise under ``coincidence``: their Records and flags."""
     flags = []
     with world(fixture) as harness:
-        batches = fx.noise_batches(fixture, directory, "train", mode=mode, coincidence=coincidence)
+        batches = fx.noise_batches(fixture, "train", mode=mode, coincidence=coincidence)
         record = audit.collect(harness, {"noise": ("train", _flagged(batches, flags))}, 8, IFOS,
                                fx.window(), False)["noise"]
     return record, np.concatenate(flags)
 
 
 @pytest.mark.parametrize("mode", [gf.SamplingMode.RANDOM, gf.SamplingMode.GRID], ids=lambda m: m.name)
-def test_coincident_noise_carries_the_flag(world, tmp_path, mode):
+def test_coincident_noise_carries_the_flag(world, mode):
     """
     Under the opt-in, every example's detectors start at one GPS time, inside the time
     both detectors hold, and carry COINCIDENT = 1; by default every example carries 0
     and its detectors start two footprints apart.
     """
     fixture = offset_pieces()
-    record, flags = _noise_record(world, tmp_path / "on", fixture, mode, gf.Coincidence.COINCIDENT)
+    record, flags = _noise_record(world, fixture, mode, gf.Coincidence.COINCIDENT)
     assert flags.shape == (record.num_examples,) and np.all(flags == 1), f"flags {np.unique(flags)}"
     starts = record.footprints[..., 0]
     assert np.array_equal(starts[:, 0], starts[:, 1]), "a coincident example's detectors start apart"
     common = _intersection(fixture)
     audit.assert_inside([record], {ifo: common for ifo in IFOS})
 
-    record, flags = _noise_record(world, tmp_path / "off", fixture, mode, gf.Coincidence.SEPARATED)
+    record, flags = _noise_record(world, fixture, mode, gf.Coincidence.SEPARATED)
     assert flags.shape == (record.num_examples,) and np.all(flags == 0), f"flags {np.unique(flags)}"
     assert _min_separation(record.footprints, 256.0) >= 2 * FOOTPRINT_SECONDS
 
 
 @pytest.mark.parametrize("coincidence", [gf.Coincidence.COINCIDENT, gf.Coincidence.SEPARATED],
                          ids=lambda c: c.name)
-def test_a_dataset_batch_carries_the_flag(world, tmp_path, coincidence):
+def test_a_dataset_batch_carries_the_flag(world, coincidence):
     """
     A gf.Dataset's batch carries its noise's COINCIDENT flag, (B,) float32: 1 for
     every example under the opt-in, 0 for every one by default.
     """
     fixture = offset_pieces()
     with world(fixture):
-        ds = fx.dataset(fixture, tmp_path / "data", "train", output_variables=[RV.COINCIDENT],
+        ds = fx.dataset(fixture, "train", output_variables=[RV.COINCIDENT],
                         coincidence=coincidence)
         _, output = ds[0]
     flags = np.asarray(output[RV.COINCIDENT.name])

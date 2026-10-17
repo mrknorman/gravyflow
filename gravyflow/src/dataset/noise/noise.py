@@ -1,4 +1,3 @@
-from pathlib import Path
 from dataclasses import dataclass, fields
 from enum import Enum, auto
 from itertools import count
@@ -295,18 +294,15 @@ def sequential_seed(tree: SeedTree, split: str, consumer: str) -> int:
 @dataclass
 class Obtainer:
     """Base class for data obtainers (noise and transient)."""
-    #: Where real-noise segment caches go; None is the one user cache root
-    #: (``gwosc_data.user_cache_dir("segments")``).
-    data_directory_path: Optional[Path] = None
     ifo_data_obtainer: Union[None, gf.IFODataObtainer] = None
     ifos: List[gf.IFO] = None
 
     def specification(self) -> dict:
         """
         What determines the noise served (``validate.provenance.canonical`` reads it):
-        every field but where segment files are kept.
+        every field.
         """
-        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "data_directory_path"}
+        return {f.name: getattr(self, f.name) for f in fields(self)}
 
     def __post_init__(self):
         if self.ifos is None:
@@ -460,7 +456,6 @@ class NoiseObtainer(Obtainer):
             sequential_seed(tree, group, "noise/segment_order"),
             group,
         )
-        reader.generate_file_path(sample_rate_hertz, group, self.data_directory_path)
         return reader
 
     def __call__(

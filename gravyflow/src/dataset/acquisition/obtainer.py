@@ -23,12 +23,10 @@ def IFODataObtainer(
         max_segment_duration_seconds: float = 2048.0,
         saturation: float = 8.0,
         force_acquisition: bool = False,
-        cache_segments: bool = True,
         overrides: dict = None,
         event_types: List[EventConfidence] = None,
         logging_level: int = logging.WARNING,
         augmentations: List = None,  # Training only; None is none
-        prefetch_segments: int = 16,
         # Class balancing
         balanced_glitch_types: bool = False,
         # Specific Names
@@ -41,6 +39,7 @@ def IFODataObtainer(
         # Where strain comes from
         source: Optional["gf.DataSource"] = None,
         coincidence: Coincidence = Coincidence.SEPARATED,
+        exclusions=(),
     ):
     """
     Factory function that returns the appropriate IFO data obtainer.
@@ -55,14 +54,13 @@ def IFODataObtainer(
         segment_order: How to order segments (RANDOM, CHRONOLOGICAL, SHORTEST_FIRST)
         max_segment_duration_seconds: Maximum segment length
         saturation: Oversampling factor for random sampling
-        force_acquisition: Force fresh data acquisition even if cached
-        cache_segments: Whether to cache segments to disk
+        force_acquisition: Fetch transients afresh rather than from the transient
+            cache (TRANSIENT only; real noise is always read through the store)
         overrides: Dictionary of attribute overrides
         event_types: Filter events by type (for TRANSIENT mode)
         logging_level: Logging verbosity
         augmentations: Augmentations a dataset applies to its training split only, per
             example (SignReversal, TimeReversal, RandomShift, AddNoise); none by default
-        prefetch_segments: Number of segments to prefetch
         balanced_glitch_types: Enable balanced sampling of glitch types
         event_names: Specific event names to acquire (TRANSIENT only)
         gwosc_flags: GWOSC timeline flags whose intersection defines usable noise
@@ -80,6 +78,9 @@ def IFODataObtainer(
         coincidence: Whether an example's detectors are read at one time
             (``gf.Coincidence``): never by default, or under the opt-in
             ``Coincidence.COINCIDENT``; every batch says which (``COINCIDENT``).
+        exclusions: ``(detector, (start, end), reason)`` entries taken from the
+            readable time before anything is planned, such as the one a refused read
+            names (``TimelineContradiction``).
 
     Returns:
         NoiseDataObtainer or TransientDataObtainer instance
@@ -102,16 +103,14 @@ def IFODataObtainer(
             segment_order=segment_order,
             max_segment_duration_seconds=max_segment_duration_seconds,
             saturation=saturation,
-            force_acquisition=force_acquisition,
-            cache_segments=cache_segments,
             overrides=overrides,
             logging_level=logging_level,
             augmentations=augmentations,
-            prefetch_segments=prefetch_segments,
             gwosc_flags=gwosc_flags,
             split_spec=split_spec,
             source=source,
             coincidence=coincidence,
+            exclusions=exclusions,
         )
     else:
         # TRANSIENT mode for events/glitches
@@ -123,16 +122,15 @@ def IFODataObtainer(
             max_segment_duration_seconds=max_segment_duration_seconds,
             saturation=saturation,
             force_acquisition=force_acquisition,
-            cache_segments=cache_segments,
             overrides=overrides,
             event_types=event_types,
             logging_level=logging_level,
             augmentations=augmentations,
-            prefetch_segments=prefetch_segments,
             balanced_glitch_types=balanced_glitch_types,
             event_names=event_names,
             split_spec=split_spec,
             train_on_real_events=train_on_real_events,
             source=source,
             coincidence=coincidence,
+            exclusions=exclusions,
         )

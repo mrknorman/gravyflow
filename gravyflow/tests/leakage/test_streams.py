@@ -479,7 +479,7 @@ def reversals_of(row, ifo_name, fixture) -> int:
     return bits
 
 
-def test_augmentation_stays_in_split(world, tmp_path, monkeypatch):
+def test_augmentation_stays_in_split(world, monkeypatch):
     """
     Augmentation never reaches evaluation data. One obtainer, with sign and time
     reversal at probability 1, serves train, validate and test, through a dataset
@@ -495,7 +495,7 @@ def test_augmentation_stays_in_split(world, tmp_path, monkeypatch):
 
     fixture = augmented_world()
     with world(fixture):
-        noise = fx.noise_obtainer(fixture, tmp_path / "data", augmentations=list(REVERSALS))
+        noise = fx.noise_obtainer(fixture, augmentations=list(REVERSALS))
         for split in SPLITS:
             for build in (world_dataset, pool_dataset):
                 x, _ = build(noise, split)[0]
@@ -508,7 +508,7 @@ def test_augmentation_stays_in_split(world, tmp_path, monkeypatch):
 
     fixture = validator_world()
     with world(fixture):
-        noise = fx.noise_obtainer(fixture, tmp_path / "validator", augmentations=list(REVERSALS))
+        noise = fx.noise_obtainer(fixture, augmentations=list(REVERSALS))
         tap = DatasetTap(monkeypatch, STRAIN)
         args = dict(noise_obtainer=noise, input_variables=[RV.WHITENED_ONSOURCE],
                     **world_settings(rate=EVENT_RATE))
@@ -541,7 +541,7 @@ def test_augmentation_stays_in_split(world, tmp_path, monkeypatch):
                                    augmentations=[augmentation])
 
 
-def test_composed_pools_augment_only_their_own_training_examples(world, tmp_path):
+def test_composed_pools_augment_only_their_own_training_examples(world):
     """
     A composed dataset augments each pool's noise by that pool's own source, for
     the dataset's split. In train, every example carries its own pool's
@@ -556,7 +556,7 @@ def test_composed_pools_augment_only_their_own_training_examples(world, tmp_path
     }
     with world(fixture):
         pools = [gf.FeaturePool(name=f"pool_{label}", label=label, probability=probability,
-                                noise_obtainer=fx.noise_obtainer(fixture, tmp_path / "data", augmentations=spec))
+                                noise_obtainer=fx.noise_obtainer(fixture, augmentations=spec))
                  for label, (probability, spec) in specs.items()]
         for split in SPLITS:
             ds = gf.ComposedDataset(pools=pools, seed=7, group=split, input_variables=STRAIN,
@@ -578,11 +578,11 @@ def test_composed_pools_augment_only_their_own_training_examples(world, tmp_path
                 assert seen == {0: {0}, 1: {0}, 2: {0}}, (split, seen)
 
 
-def test_a_default_batch_is_unaugmented(world, tmp_path):
+def test_a_default_batch_is_unaugmented(world):
     """No augmentation by default: a training batch is the strain as recorded, flagged 0."""
     fixture = augmented_world()
     with world(fixture):
-        noise = fx.noise_obtainer(fixture, tmp_path / "data", augmentations=None)
+        noise = fx.noise_obtainer(fixture, augmentations=None)
         ds = world_dataset(noise, "train")
         for k in range(4):
             x, _ = ds[k]
@@ -591,7 +591,7 @@ def test_a_default_batch_is_unaugmented(world, tmp_path):
         np.testing.assert_array_equal(y[RV.AUGMENTATIONS.name], np.zeros(8, np.float32))
 
 
-def test_each_example_draws_once_for_both_windows_and_is_flagged(world, tmp_path):
+def test_each_example_draws_once_for_both_windows_and_is_flagged(world):
     """
     Each example draws each augmentation once, from its own stream: its onsource
     and offsource, on every detector, are reversed together or not at all;
@@ -599,7 +599,7 @@ def test_each_example_draws_once_for_both_windows_and_is_flagged(world, tmp_path
     """
     fixture = augmented_world()
     with world(fixture):
-        noise = fx.noise_obtainer(fixture, tmp_path / "data", augmentations=[
+        noise = fx.noise_obtainer(fixture, augmentations=[
             gf.SignReversal(probability=0.5), gf.TimeReversal(probability=0.5)])
         ds = world_dataset(noise, "train", outputs=[RV.AUGMENTATIONS], batch=16)
         seen = []
@@ -615,7 +615,7 @@ def test_each_example_draws_once_for_both_windows_and_is_flagged(world, tmp_path
         assert set(seen) == {0, 1, 2, 3}, seen
 
 
-def test_injections_are_never_augmented(world, tmp_path):
+def test_injections_are_never_augmented(world):
     """
     Augmentation transforms the raw strain before injection: a signal injected
     into negated strain is the same signal, never negated with it.
@@ -625,7 +625,7 @@ def test_injections_are_never_augmented(world, tmp_path):
     with world(fixture):
         drawn = {}
         for name, spec in (("plain", []), ("negated", [gf.SignReversal(probability=1.0)])):
-            noise = fx.noise_obtainer(fixture, tmp_path / "data", augmentations=spec)
+            noise = fx.noise_obtainer(fixture, augmentations=spec)
             ds = gf.Dataset(noise_obtainer=noise, group="train", seed=7, input_variables=STRAIN,
                             output_variables=outputs, waveform_generators=[burst()], **world_settings())
             x, y = ds[0]
@@ -637,7 +637,7 @@ def test_injections_are_never_augmented(world, tmp_path):
     np.testing.assert_allclose(negated + plain, 2.0 * signal, atol=0.01 * np.max(np.abs(signal)))
 
 
-def test_toggling_an_augmentation_moves_no_window(world, tmp_path):
+def test_toggling_an_augmentation_moves_no_window(world):
     """
     Augmentation is drawn apart from sampling, and does not change how densely
     windows are drawn: adding augmentations changes no window drawn.
@@ -652,7 +652,7 @@ def test_toggling_an_augmentation_moves_no_window(world, tmp_path):
         starts = {}
         for name, spec in specs.items():
             # A low saturation, so a row serves a few batches and the reader moves between rows.
-            noise = fx.noise_obtainer(fixture, tmp_path / "data", augmentations=spec, saturation=0.125)
+            noise = fx.noise_obtainer(fixture, augmentations=spec, saturation=0.125)
             ds = world_dataset(noise, "train")
             starts[name] = [np.asarray(ds[k][1][RV.START_GPS_TIME.name]) for k in range(12)]
     rows = {tuple(np.floor(start[0] / fx.BLOCK_SECONDS)) for start in starts["none"]}

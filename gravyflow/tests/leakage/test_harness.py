@@ -5,11 +5,9 @@ Every decoder refusal and every assertion helper is shown to refuse a planted
 defect, so a helper that would pass vacuously fails here.
 """
 
-import gc
 import os
 import socket
 import threading
-import time
 from pathlib import Path
 
 import numpy as np
@@ -42,8 +40,8 @@ def test_noise_round_trip_decodes_every_sample(world, tmp_path, rate, mode):
     fixture = fx.straddle("train", "test", half_width=128.0 if rate > 256 else 512.0, rate=rate)
     window = fx.window(rate)
     with world(fixture) as harness:
-        obtained = fx.noise_batches(fixture, tmp_path, "train", rate=rate, mode=mode)
-        ds = fx.dataset(fixture, tmp_path, "train", rate=rate, mode=mode)
+        obtained = fx.noise_batches(fixture, "train", rate=rate, mode=mode)
+        ds = fx.dataset(fixture, "train", rate=rate, mode=mode)
         records = audit.collect(harness, {"obtainer": ("train", obtained)}, 2, IFOS,
                                 window, onsource_cropped=False)
         records.update(audit.collect(harness, {"dataset": ("train", fx.dataset_batches(ds))}, 2,
@@ -53,7 +51,7 @@ def test_noise_round_trip_decodes_every_sample(world, tmp_path, rate, mode):
         # collect decoded every row; each spans its window exactly.
         lengths = record.footprints[..., 1] - record.footprints[..., 0]
         assert np.all(lengths == window.offsource + window.onsource + 2 * window.crop)
-    audit.assert_inside_one_fetch(records.values(), harness)
+    audit.assert_inside_fetched(records.values(), harness)
 
 
 def _train_record_time(start):
@@ -86,11 +84,10 @@ def test_transient_round_trip_decodes_every_sample(world, tmp_path):
     with world(fixture) as harness:
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
-            observing_runs=[gf.ObservingRun.O3], augmentations=[], prefetch_segments=0,
+            observing_runs=[gf.ObservingRun.O3], augmentations=[],
         )
         noise = gf.NoiseObtainer(ifo_data_obtainer=obtainer, ifos=[gf.IFO.H1, gf.IFO.L1],
-                                 noise_type=gf.NoiseType.REAL,
-                                 data_directory_path=tmp_path)
+                                 noise_type=gf.NoiseType.REAL)
         ds = gf.Dataset(
             noise_obtainer=noise, sample_rate_hertz=TRANSIENT_RATE,
             onsource_duration_seconds=fx.ONSOURCE_SECONDS, crop_duration_seconds=fx.CROP_SECONDS,
@@ -266,7 +263,7 @@ def test_warm_build_reads_the_cache_and_equals_the_cold_build(world, tmp_path):
     with world(fixture) as harness:
         builds = {}
         for warm in (False, True):
-            batches = fx.noise_batches(fixture, tmp_path / "segments", "train", cache_segments=True)
+            batches = fx.noise_batches(fixture, "train")
             builds[warm] = audit.collect(harness, {"train": ("train", batches)}, 2, IFOS, window,
                                          False, warm=warm)["train"]
     audit.assert_warm_equals_cold(builds[False], builds[True])
@@ -366,19 +363,21 @@ def test_assert_inside_refuses_a_footprint_outside_the_intervals():
         audit.assert_inside([record], {"H1": [span]})
 
 
-def test_assert_inside_one_fetch_refuses_a_footprint_across_two_fetches(world):
+def test_assert_inside_fetched_refuses_a_footprint_across_a_gap_between_fetches(world):
     fixture = fx.straddle("train", "test", half_width=64.0)
     with world(fixture) as harness:
         start = float(fixture.segments["H1"][0][0])
         for ifo in (gf.IFO.H1, gf.IFO.L1):
             harness.source.fetch(ifo, 256.0, (start, start + 50.0))
-            harness.source.fetch(ifo, 256.0, (start + 50.0, start + 100.0))
+            harness.source.fetch(ifo, 256.0, (start + 50.0, start + 60.0))  # adjacent: one run
+            harness.source.fetch(ifo, 256.0, (start + 61.0, start + 100.0))
         inside = np.stack([np.stack([[start + k, start + k + 6.0]] * 2) for k in range(8)])
-        audit.assert_inside_one_fetch([_records("a", "train", inside)], harness)
+        inside[1, 0] = [start + 47.0, start + 53.0]  # across two adjacent fetches
+        audit.assert_inside_fetched([_records("a", "train", inside)], harness)
         across = inside.copy()
-        across[2, 0] = [start + 47.0, start + 53.0]  # inside the union, not inside one fetch
-        with pytest.raises(AssertionError, match="outside every fetch"):
-            audit.assert_inside_one_fetch([_records("a", "train", across)], harness)
+        across[2, 0] = [start + 57.0, start + 63.0]  # across the gap between fetches
+        with pytest.raises(AssertionError, match="outside the strain fetched"):
+            audit.assert_inside_fetched([_records("a", "train", across)], harness)
 
 
 def test_helpers_refuse_empty_and_small_inputs():
@@ -456,17 +455,17 @@ def test_the_guard_refuses_and_records_every_socket(refusals):
     assert len(refusals.seen) == 5, refusals.seen
 
 
-def test_without_the_fake_real_noise_is_refused_and_zero(world, tmp_path, refusals):
-    """With the real fetch in place, the guard refuses it, and every row is zero-filled."""
+def test_without_the_fake_real_noise_is_refused_by_name(world, refusals, monkeypatch):
+    """With the real fetch in place, the guard refuses it, and the read is refused by name, never zero-filled."""
+    from gravyflow.src.dataset.store import read
+
+    monkeypatch.setattr(read, "FETCH_BACKOFF_SECONDS", 0.0)
     # Each side keeps its half width less half the 128 s guard.
     fixture = fx.straddle("train", "test", half_width=128.0)
     with world(fixture, strain=False):
-        batch = next(fx.noise_batches(fixture, tmp_path, "train"))
+        with pytest.raises(gf.StrainUnavailable, match="exclusions="):
+            next(fx.noise_batches(fixture, "train"))
     assert refusals.seen, "the real fetch reached no socket"
-    onsource = np.asarray(batch[RV.ONSOURCE])
-    assert onsource.size and np.all(onsource == 0)
-    with pytest.raises(DecodeRefused, match="zero samples"):
-        decode_rows(onsource, IFOS, fixture.encoding)
 
 
 def test_every_cache_lives_under_the_one_cache_root():
@@ -474,17 +473,15 @@ def test_every_cache_lives_under_the_one_cache_root():
     from gravyflow.src.dataset.features import gravity_spy
     from gravyflow.src.dataset.features.glitch_cache import generate_transient_cache_path
 
+    from gravyflow.src.dataset.store import read
+
     root = Path(os.environ["GRAVYFLOW_CACHE_DIR"])
-    obtainer = gf.IFODataObtainer(
-        observing_runs=gf.ObservingRun.O3, data_quality=gf.DataQuality.BEST,
-        data_labels=[gf.DataLabel.NOISE],
-    )
     for path in (
         generate_transient_cache_path(prefix="glitch", source=gf.GWOSC()),
         generate_transient_cache_path(prefix="event", source=gf.GWOSC()),
         gravity_spy.cache_dir(),
         gwosc_data._timeline_cache_path("O1", "H1_DATA", 0, 1),
-        obtainer.generate_file_path(256.0, "train", gf.NoiseObtainer().data_directory_path),
+        read.process_store().root,
     ):
         assert root in Path(path).parents, path
 
@@ -531,36 +528,29 @@ def _background_threads(before):
     return [thread for thread in threading.enumerate() if thread not in before and thread.is_alive()]
 
 
-def test_no_background_thread_survives_installed(world, tmp_path):
+def test_no_background_thread_survives_installed(world):
     """
-    Every thread a block starts is a named store thread, and none outlives the block:
-    not even the prefetch of an obtainer dropped while its fetch is still running,
-    which no reference to the obtainer can reach any more.
+    A real-noise read runs in its caller's thread, through the store: it starts no
+    background thread, and none outlives the block.
     """
-    fixture = fx.odd_pieces()  # pieces in several bins: rows to prefetch
+    fixture = fx.odd_pieces()  # pieces in several bins: several rows read
     before = set(threading.enumerate())
     with world(fixture) as harness:
+        threads = set()
         fetch = FakeSource.fetch
-        prefetching = threading.Event()
 
-        def slow(source, *args, **kwargs):
-            if threading.current_thread().name.startswith("gfstore-"):
-                prefetching.set()
-                time.sleep(1.0)
+        def recorded(source, *args, **kwargs):
+            threads.add(threading.current_thread().name)
             return fetch(source, *args, **kwargs)
 
-        harness.monkeypatch.setattr(FakeSource, "fetch", slow)
-        obtainer = fx.ifo_data_obtainer(fixture, prefetch_segments=2)
+        harness.monkeypatch.setattr(FakeSource, "fetch", recorded)
+        obtainer = fx.ifo_data_obtainer(fixture)
         ifos = [gf.IFO[name] for name in IFOS]
         obtainer.get_valid_segments(ifos, 7, "train")
         assert len(obtainer.valid_segments) >= 2
-        rows = obtainer.acquire(256.0, obtainer.valid_segments, ifos)  # the streaming read
-        next(rows)
-        assert prefetching.wait(10.0), "no prefetch ran in the background"
-        started = _background_threads(before)
-        assert started and all(thread.name.startswith("gfstore-") for thread in started), (
-            [thread.name for thread in started])
-        del rows, obtainer
-        gc.collect()
+        rows = list(obtainer.acquire(256.0, obtainer.valid_segments, ifos))
+        assert len(rows) == len(obtainer.valid_segments)
+        assert threads == {threading.current_thread().name}, threads
+        assert not _background_threads(before)
     survivors = _background_threads(before)
     assert not survivors, f"threads outlived the block: {[thread.name for thread in survivors]}"

@@ -259,8 +259,7 @@ class ValidationBank:
             "slides": np.array([stream.slide for stream in streams], dtype=np.int64),
             "blocks": np.array([stream.block for stream in streams], dtype=np.int64),
         }
-        logger.info(f"Time slides: {len(streams)} streams from {len(background.stretches)} stretches "
-                    f"({len(background.skipped)} unreadable).")
+        logger.info(f"Time slides: {len(streams)} streams from {len(background.stretches)} stretches.")
 
     def _score_noise(self, batches) -> None:
         """Keep the scores, GPS times and highest-scoring examples of (scores, inputs, outputs) batches."""

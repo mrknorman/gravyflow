@@ -1,31 +1,29 @@
 """
-Real-noise labels and the segment cache's provenance.
+Real-noise labels and the provenance of the strain read through the store.
 
 ``START_GPS_TIME`` is the GPS time of the first sample of the onsource window
-returned after cropping, counted from the first sample the source returned (never
-the nominal segment start). The segment file is keyed by everything a stored
-segment depends on, and each stored segment carries its own first-sample time,
-rate, source and layout, so a cached segment is never served under another
-configuration or labelled from a nominal time. Content fingerprints read every
+returned after cropping, counted from the first sample read (never the nominal
+segment start). Strain is stored as the source's own tiles, keyed by the source, the
+detector, the rate and the time alone, and each tile's record carries its first
+sample's time, rate and source, so warm reads equal cold ones and every
+configuration of one source shares its tiles. Content fingerprints read every
 parameter that determines the data.
 
-The strain here is a fake GWOSC fetch: the samples of a segment on the absolute
-grid at the requested rate, each valued its index from the segment's first grid
-sample, so a window's first sample decodes to its GPS time.
+The strain here is a fake GWOSC fetch: the samples of an interval on the absolute
+grid at the requested rate, each valued its index from a fixed grid sample, so a
+window's first sample decodes to its GPS time.
 """
 
 import inspect
 import logging
-from contextlib import closing
 
-import h5py
 import numpy as np
 import pytest
 
 import gravyflow as gf
-from gravyflow.src.dataset.acquisition import base
-from gravyflow.src.dataset.acquisition.base import segment_key
 from gravyflow.src.dataset.acquisition.sources import SegmentStrain
+from gravyflow.src.dataset.store import Store
+from gravyflow.src.dataset.store.tile import key_from_path
 from gravyflow.src.validate.provenance import UnfingerprintableError, canonical, config_fingerprint
 from gravyflow.tests.conftest import gwosc_serving
 
@@ -34,6 +32,8 @@ ORIGIN = 1238175000.0  # inside O3; the fake's values count from each segment's 
 ONSOURCE, CROP, OFFSOURCE, BATCH = 1.0, 0.5, 4.0, 8
 #: One row, a piece per detector, starting off the sample grid and off whole seconds.
 ROW = [[ORIGIN + 0.3, ORIGIN + 64.3], [ORIGIN + 100.7, ORIGIN + 164.7]]
+#: The first sample of GWOSC's 4096 s tile holding ROW: the fake's values count from it.
+TILE = 1238171648.0
 IFOS = [gf.IFO.H1, gf.IFO.L1]
 
 
@@ -41,10 +41,11 @@ class GridFetch:
     """
     A fake GWOSC fetch, publishing RATE: the samples of [start, end) on the absolute
     grid, from the first grid sample at or after ``start`` (``first_grid_gps``), each
-    valued its index from that sample. Records its calls.
+    valued its index from TILE's first sample. Records its calls.
     """
 
     rates = (RATE,)
+    source_id = "gwosc-fake-grid"
 
     def __init__(self):
         self.calls = []
@@ -54,8 +55,8 @@ class GridFetch:
         self.calls.append((ifo.name, float(start), float(end)))
         rate = float(sample_rate_hertz)
         first, stop = int(np.ceil(start * rate - 1e-6)), int(np.ceil(end * rate - 1e-6))
-        values = np.arange(stop - first, dtype=np.float32)
-        return SegmentStrain(values, first / rate, rate, f"{ifo.name}:FAKE-GRID")
+        values = np.arange(first, stop, dtype=np.float64) - TILE * rate
+        return SegmentStrain(values.astype(np.float32), first / rate, rate, self.source_id)
 
 
 def first_grid_gps(start, rate=RATE):
@@ -67,6 +68,7 @@ def refuse_fetch(*args, **kwargs):
 
 
 refuse_fetch.rates = (RATE,)
+refuse_fetch.source_id = GridFetch.source_id
 
 
 def fetching(fetch):
@@ -76,7 +78,7 @@ def fetching(fetch):
 
 def obtainer(**kwargs):
     arguments = dict(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
-                     observing_runs=gf.ObservingRun.O3, cache_segments=False, prefetch_segments=0)
+                     observing_runs=gf.ObservingRun.O3)
     arguments.update(kwargs)
     built = gf.IFODataObtainer(**arguments)
     built.augmentations = []
@@ -97,8 +99,7 @@ def batches(source, mode, num_batches=2, seed=3):
 def decoded_start_gps(onsource):
     """The GPS time of each (example, detector)'s first returned sample, decoded."""
     first = np.rint(np.asarray(onsource, dtype=np.float64)[..., 0])
-    piece_starts = np.array([first_grid_gps(start) for start, _ in ROW])
-    return piece_starts[None, :] + first / RATE
+    return TILE + first / RATE
 
 
 class TestStartGpsTime:
@@ -127,63 +128,43 @@ class TestStartGpsTime:
         assert spec.onsource_start_gps(np.array([ORIGIN])) == pytest.approx(ORIGIN + CROP, abs=1e-9)
 
 
-class TestSegmentCache:
+def stored_records():
+    """Every committed tile's record in the store under the cache root."""
+    store = Store(gf.src.dataset.acquisition.gwosc_data.user_cache_dir("store"))
+    return [store.open(key_from_path(store.root, path)).record
+            for path in sorted(store.root.glob("v*/*/*/*/*/*.json"))]
 
-    def test_warm_build_equals_cold(self, tmp_path):
-        cold = obtainer(cache_segments=True)
-        cold.file_path = tmp_path / "segments.hdf5"
+
+class TestStoreReads:
+
+    def test_warm_build_equals_cold(self):
         with fetching(GridFetch()) as fetch:
-            cold_batches = batches(cold, gf.SamplingMode.GRID)
-        assert len(fetch.calls) == len(IFOS)
+            cold_batches = batches(obtainer(), gf.SamplingMode.GRID)
+        # One whole tile per detector, fetched once.
+        assert sorted(fetch.calls) == [(ifo.name, TILE, TILE + 4096.0) for ifo in IFOS]
+        records = stored_records()
+        assert [(r.key.detector, r.key.t0, r.key.rate, r.key.source_id) for r in records] == [
+            (ifo.name, TILE, int(RATE), GridFetch.source_id) for ifo in IFOS]
 
-        with h5py.File(cold.file_path, "r") as stored:
-            for ifo, (start, end) in zip(IFOS, ROW):
-                attrs = stored[segment_key(ifo, start, end)].attrs
-                assert attrs["t0"] == pytest.approx(first_grid_gps(start), abs=1e-9)
-                assert attrs["sample_rate_hertz"] == RATE
-                assert attrs["layout"] == base.SEGMENT_LAYOUT_VERSION
-                assert "FAKE-GRID" in attrs["source"]
-
-        warm = obtainer(cache_segments=True)
-        warm.file_path = cold.file_path
         with fetching(refuse_fetch):
-            warm_batches = batches(warm, gf.SamplingMode.GRID)
+            warm_batches = batches(obtainer(), gf.SamplingMode.GRID)
         for cold_batch, warm_batch in zip(cold_batches, warm_batches):
             for key in (gf.ReturnVariables.ONSOURCE, gf.ReturnVariables.OFFSOURCE,
                         gf.ReturnVariables.START_GPS_TIME):
                 np.testing.assert_array_equal(np.asarray(cold_batch[key]), np.asarray(warm_batch[key]))
 
-    def test_a_segment_stored_without_provenance_is_fetched_again(self, tmp_path, caplog):
-        source = obtainer(cache_segments=True)
-        source.file_path = tmp_path / "segments.hdf5"
-        (start, end), ifo = ROW[0], IFOS[0]
-        key = segment_key(ifo, start, end)
-        with closing(h5py.File(source.file_path, "a")) as stored:
-            stored.create_dataset(key, data=np.full(int(64 * RATE), 7.0, np.float32))  # layout 2: bare samples
-        with fetching(GridFetch()) as fetch, caplog.at_level(logging.WARNING):
-            segment = source.get_segment(start, end, RATE, ifo, key)
-        assert fetch.calls == [(ifo.name, start, end)]
-        assert segment.t0 == pytest.approx(first_grid_gps(start), abs=1e-9)
-        assert "fetching it again" in caplog.text
-
-    def test_configurations_never_share_a_file(self, tmp_path, monkeypatch):
-        def path(source=None, rate=RATE, group="train"):
-            return (source or obtainer()).generate_file_path(rate, group, tmp_path)
-
-        paths = {
-            "default": path(),
-            "rate": path(rate=2 * RATE),
-            "group": path(group="test"),
-            "flags": path(obtainer(gwosc_flags=gf.GWOSC_DATA_FLAGS)),
-            "runs": path(obtainer(observing_runs=gf.ObservingRun.O2)),
-            "longest segment": path(obtainer(max_segment_duration_seconds=1024.0)),
-            "run bounds": path(obtainer(overrides={"end_gps_times": ORIGIN + 1.0e6})),
-            "source": path(obtainer(source=gf.LocalFrames())),
-        }
-        monkeypatch.setattr(base, "SEGMENT_LAYOUT_VERSION", "another-layout")
-        paths["layout"] = path()
-        assert len(set(paths.values())) == len(paths), paths
-        assert path() == paths["layout"]  # deterministic
+    def test_configurations_of_one_source_share_its_tiles(self):
+        # A tile's content depends only on its source, detector, rate and time, so
+        # the selection (flags, splits, bins) chooses which tiles are read, never what
+        # they hold, and every configuration reads the tiles once fetched.
+        with fetching(GridFetch()) as fetch:
+            batches(obtainer(), gf.SamplingMode.GRID)
+        with fetching(refuse_fetch):
+            for other in (obtainer(gwosc_flags=gf.GWOSC_DATA_FLAGS),
+                          obtainer(max_segment_duration_seconds=1024.0),
+                          obtainer(split_spec=gf.SplitSpec(version="fold-1"))):
+                batches(other, gf.SamplingMode.GRID)
+        assert len(fetch.calls) == len(IFOS)
 
 
 #: Each data-determining parameter of the real-noise obtainers, and another value.
@@ -203,11 +184,12 @@ OBTAINER_PERTURBATIONS = {
     "source": gf.LocalFrames(),
     "train_on_real_events": True,
     "coincidence": gf.Coincidence.COINCIDENT,
+    "exclusions": [("H1", (ORIGIN, ORIGIN + 1.0), "a test exclusion")],
 }
 #: Data-determining parameters with one buildable value (public runs publish BEST only).
 SINGLE_VALUED = {"data_quality"}
 #: Parameters that change how data is fetched or logged, never the data.
-NOT_DATA = {"force_acquisition", "cache_segments", "logging_level", "prefetch_segments"}
+NOT_DATA = {"force_acquisition", "logging_level"}
 #: Parameters a NOISE obtainer ignores (they select transients).
 TRANSIENT_ONLY = {"event_types", "balanced_glitch_types", "event_names", "train_on_real_events"}
 
@@ -238,8 +220,7 @@ class TestFingerprint:
 
     @pytest.mark.parametrize("name", sorted(NOT_DATA))
     def test_ignores_how_data_is_fetched(self, name):
-        changed = {"force_acquisition": True, "cache_segments": False,
-                   "logging_level": logging.DEBUG, "prefetch_segments": 0}
+        changed = {"force_acquisition": True, "logging_level": logging.DEBUG}
         reference = config_fingerprint(gf.IFODataObtainer(**self.base_arguments()))
         arguments = {**self.base_arguments(), name: changed[name]}
         assert config_fingerprint(gf.IFODataObtainer(**arguments)) == reference
@@ -259,13 +240,10 @@ class TestFingerprint:
                    "ifos": [gf.IFO.L1], "noise_type": gf.NoiseType.PSEUDO_REAL,
                    "noise_profile": gf.NoiseProfile.O3_LOW}
         # The split is the data obtainer's (its split_spec), read with it.
-        assert fields == set(changed) | {"data_directory_path"}
+        assert fields == set(changed)
         for name, value in changed.items():
             other = gf.NoiseObtainer(**{"noise_type": gf.NoiseType.REAL, "ifos": [gf.IFO.H1], name: value})
             assert config_fingerprint(other) != reference, name
-        # Where segment files are kept is not what they hold.
-        moved = gf.NoiseObtainer(noise_type=gf.NoiseType.REAL, ifos=[gf.IFO.H1], data_directory_path="elsewhere")
-        assert config_fingerprint(moved) == reference
 
     def test_refuses_what_it_cannot_read(self):
         with pytest.raises(UnfingerprintableError, match="builtins.object"):

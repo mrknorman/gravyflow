@@ -398,7 +398,7 @@ def test_a_run_records_the_split_its_data_reads(world, tmp_path):
     fixture = _split_world([FOLD_2, gf.DEFAULT_SPLIT])
     with world(fixture):
         def data(split, spec=FOLD_2):
-            return StandingBatches(fx.dataset(fixture, tmp_path / "data", split, steps_per_epoch=2,
+            return StandingBatches(fx.dataset(fixture, split, steps_per_epoch=2,
                                               split_spec=spec))
 
         def run(epochs):
@@ -412,7 +412,7 @@ def test_a_run_records_the_split_its_data_reads(world, tmp_path):
         assert run_record_of(directory.load_model("model")) == record
 
         def args(spec):
-            return {"noise_obtainer": fx.noise_obtainer(fixture, tmp_path / "scored", split_spec=spec),
+            return {"noise_obtainer": fx.noise_obtainer(fixture, split_spec=spec),
                     "onsource_duration_seconds": 1.0, "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE]}
 
         with pytest.raises(ValueError, match="SplitSpec"):
@@ -492,7 +492,7 @@ def test_the_validator_reads_the_split_of_the_data_it_scores():
     assert _scores_split("test", _selected_on_validate(FOLD_2), args)
 
 
-def test_synthetic_data_is_split_neutral(world, tmp_path):
+def test_synthetic_data_is_split_neutral(world):
     """
     Data that reads no real data (WHITE or COLORED noise) is split-neutral: it names
     no SplitSpec, so it combines with real data of any spec. Synthetic training data
@@ -511,7 +511,7 @@ def test_synthetic_data_is_split_neutral(world, tmp_path):
 
     fixture = _split_world([FOLD_2, gf.DEFAULT_SPLIT])
     with world(fixture):
-        real = StandingBatches(fx.dataset(fixture, tmp_path / "data", "validate", steps_per_epoch=2,
+        real = StandingBatches(fx.dataset(fixture, "validate", steps_per_epoch=2,
                                           split_spec=FOLD_2))
         for noise_type in (gf.NoiseType.WHITE, gf.NoiseType.COLORED):
             training = synthetic("train", noise_type)
@@ -798,11 +798,11 @@ def _default_data():
             "validate_args": {**dataset_args(steps_per_epoch=2), "group": "validate"}}
 
 
-def _fold_2_data(fixture, directory):
+def _fold_2_data(fixture):
     """A gf.Model's training data and validation arguments on the fixture's real noise, split by fold-2."""
     from gravyflow.tests.test_model_train import dataset_args
 
-    real = dict(dataset_args(), noise_obtainer=fx.noise_obtainer(fixture, directory, ifos=("L1",), split_spec=FOLD_2),
+    real = dict(dataset_args(), noise_obtainer=fx.noise_obtainer(fixture, ifos=("L1",), split_spec=FOLD_2),
                 ifos=[gf.IFO.L1], waveform_generators=None)
     return {"training_dataset": _ModelBatches(gf.Dataset(**{**real, "steps_per_epoch": 3})),
             "validate_args": {**real, "steps_per_epoch": 2, "group": "validate"}}
@@ -824,7 +824,7 @@ def test_trained_weights_keep_to_their_split(world, tmp_path, force_retrain):
     with world(fixture):
         for model in (trained, loaded):
             with pytest.raises(StaleCheckpointError, match="records the split"):
-                model.train(**_fold_2_data(fixture, tmp_path / "fold-2"), force_retrain=force_retrain)
+                model.train(**_fold_2_data(fixture), force_retrain=force_retrain)
             assert model.run_record == _selected_on_validate(gf.DEFAULT_SPLIT)
 
 
@@ -840,7 +840,7 @@ def test_a_resumed_gf_model_keeps_to_its_directorys_split(world, tmp_path):
     fresh = _gf_model(tmp_path / "model")
     with world(fixture):
         with pytest.raises(StaleCheckpointError, match="records the split"):
-            fresh.train(**_fold_2_data(fixture, tmp_path / "fold-2"), force_retrain=False)
+            fresh.train(**_fold_2_data(fixture), force_retrain=False)
 
 
 class _Interrupted(Exception):
@@ -864,7 +864,7 @@ def test_a_new_run_never_leaves_an_earlier_runs_weights_beside_its_record(world,
     _gf_model(tmp_path / "model").train(**_default_data())
     with world(fixture):
         with pytest.raises(_Interrupted):
-            _gf_model(tmp_path / "model").train(**_fold_2_data(fixture, tmp_path / "fold-2"),
+            _gf_model(tmp_path / "model").train(**_fold_2_data(fixture),
                                                 callbacks=[_InterruptTraining()])
     assert _gf_model(tmp_path / "model", load=True).run_record is None, "loaded an earlier run's weights"
 
@@ -886,14 +886,14 @@ def test_gravyflow_models_carry_their_record(world, tmp_path):
 
     with world(fixture):
         def data(split):
-            return StandingBatches(fx.dataset(fixture, tmp_path / "data", split, steps_per_epoch=2,
+            return StandingBatches(fx.dataset(fixture, split, steps_per_epoch=2,
                                               split_spec=FOLD_2))
 
         run = recipe.TrainingRun(RunDirectory(tmp_path / "run"), seed=1, schedule=recipe.TrainingSchedule(
             epochs=1, steps_per_epoch=2, validation_batches=1, patience=1))
         model = run.train(tiny_model, lambda seed: data("train"), recipe.materialise(data("validate"), 1),
                           verbose=0)
-        args = {"noise_obtainer": fx.noise_obtainer(fixture, tmp_path / "scored", split_spec=FOLD_2),
+        args = {"noise_obtainer": fx.noise_obtainer(fixture, split_spec=FOLD_2),
                 "onsource_duration_seconds": 1.0, "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE]}
         for loaded in (model, *(run.directory.load_model(name) for name in ("model", "best", "last"))):
             selected_on_validate_is_refused(loaded, args)
@@ -912,7 +912,7 @@ def test_a_run_never_relabels_the_weights_it_is_given(world, tmp_path):
     fixture = _split_world([FOLD_2, gf.DEFAULT_SPLIT])
     with world(fixture):
         def data(split, spec):
-            return StandingBatches(fx.dataset(fixture, tmp_path / "data", split, steps_per_epoch=2,
+            return StandingBatches(fx.dataset(fixture, split, steps_per_epoch=2,
                                               split_spec=spec))
 
         def train_run(directory, spec, build):

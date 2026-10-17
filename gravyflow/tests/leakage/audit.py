@@ -71,8 +71,10 @@ def collect(
     Draw ``n_batches`` from each iterator in ``sets`` ({name: (split, iterator)}),
     eagerly, and decode them.
 
-    Refuses: a fetch error; on a cold build, a set that fetched nothing; on a warm
-    build (``warm=True``), a set that fetched anything.
+    Refuses: a fetch error; on a cold build, a harness that has fetched nothing (the
+    store shares tiles between builds, so a later set of a cold harness may read
+    tiles an earlier one fetched); on a warm build (``warm=True``), a set that
+    fetched anything.
     """
     import gravyflow as gf
 
@@ -98,7 +100,7 @@ def collect(
         if errors:
             raise AssertionError(f"{name}: the fake refused {len(errors)} fetch(es): {errors[:3]}")
         fetched = len(fetches) - before
-        if not warm and fetched == 0:
+        if not warm and not fetches:
             raise AssertionError(f"{name}: a cold build fetched nothing; its data did not come from the fake")
         if warm and fetched != 0:
             raise AssertionError(f"{name}: a warm build fetched {fetched} time(s); it should read its cache")
@@ -142,9 +144,21 @@ def fetch_intervals(harness: Harness) -> Dict[str, np.ndarray]:
     return {ifo: np.array(v, dtype=np.int64) for ifo, v in out.items()}
 
 
-def assert_inside_one_fetch(records: Iterable[Records], harness: Harness) -> None:
-    """Every footprint lies inside one served fetch of its own detector."""
-    intervals = fetch_intervals(harness)
+def assert_inside_fetched(records: Iterable[Records], harness: Harness) -> None:
+    """
+    Every footprint lies inside the strain served to its own detector: inside one run
+    of contiguous served fetches. The store reads whole tiles and a window may span
+    two adjacent ones, but never a gap between fetches.
+    """
+    intervals = {}
+    for ifo, served in fetch_intervals(harness).items():
+        runs = []
+        for first, stop in sorted(map(tuple, served)):
+            if runs and first <= runs[-1][1]:
+                runs[-1][1] = max(runs[-1][1], stop)
+            else:
+                runs.append([first, stop])
+        intervals[ifo] = np.array(runs, dtype=np.int64)
     if not intervals:
         raise AssertionError("the fetch log is empty")
     bad = []
@@ -159,7 +173,7 @@ def assert_inside_one_fetch(records: Iterable[Records], harness: Harness) -> Non
             for b in np.flatnonzero(~inside.any(axis=1)):
                 bad.append((record.name, int(b), ifo, tuple(as_seconds(prints[b], harness.encoding))))
     if bad:
-        raise AssertionError(f"{len(bad)} footprint(s) outside every fetch of their detector: {bad[:5]}")
+        raise AssertionError(f"{len(bad)} footprint(s) outside the strain fetched for their detector: {bad[:5]}")
 
 
 def assert_inside(records: Iterable[Records], intervals) -> None:
@@ -297,7 +311,7 @@ def assert_warm_equals_cold(cold: Records, warm: Records) -> None:
 
 
 __all__ = [
-    "MIN_EXAMPLES", "Records", "collect", "fetch_intervals", "assert_inside_one_fetch",
+    "MIN_EXAMPLES", "Records", "collect", "fetch_intervals", "assert_inside_fetched",
     "assert_warm_equals_cold",
     "assert_inside", "assert_in_split", "assert_split_gap", "assert_avoids",
 ]

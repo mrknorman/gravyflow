@@ -27,9 +27,8 @@ its own (`ValidationBank.score_windows`).
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Iterator, Optional, Sequence, Tuple
 
 import numpy as np
 from keras import ops
@@ -40,8 +39,6 @@ from gravyflow.src.dataset.acquisition.base import (
 )
 from gravyflow.src.dataset.acquisition.gwosc_data import intersect_segments
 from gravyflow.src.dataset.config import WindowSpec
-
-logger = logging.getLogger(__name__)
 
 #: How far apart two detectors' first samples may be and still be one stretch's.
 _ALIGNMENT_SECONDS = 1e-6
@@ -127,7 +124,6 @@ class TimeSlideBackground:
         rate = float(window.sample_rate_hertz)
         self.step_samples = int(round(slides.step(window) * rate))
         self.stride_samples = int(round(window.onsource_duration_seconds * rate))
-        self.skipped: List[Tuple[float, float]] = []
         self.stretches = self._stretches(rng)
 
     # ---------------------------------------------------------------- stretches
@@ -158,16 +154,14 @@ class TimeSlideBackground:
         offset = (len(self.ifos) - 1) * slide * self.step_samples
         return max((num_samples - footprint - offset) // self.stride_samples + 1, 0)
 
-    def _load(self, stretch) -> Optional[Tuple[list, float]]:
-        """Each detector's strain over ``stretch`` and its first sample's GPS, or None if not all of it came."""
-        before = self.obtainer.get_acquisition_stats()["zero_filled_segments"]
+    def _load(self, stretch) -> Tuple[list, float]:
+        """
+        Each detector's strain over ``stretch`` and its first sample's GPS. A detector's
+        data the source does not deliver is refused by name (``TimelineContradiction``),
+        never skipped: its ``exclusions`` entry plans around it.
+        """
         rows = np.repeat(np.asarray(stretch, dtype=np.float64)[None, None, :], len(self.ifos), axis=1)
         (row,) = list(self.obtainer.acquire(self.window.sample_rate_hertz, rows, self.ifos))
-        if self.obtainer.get_acquisition_stats()["zero_filled_segments"] != before:
-            logger.warning(f"Time slides skip the stretch [{stretch[0]}, {stretch[1]}): a detector's data "
-                           "could not be read.")
-            self.skipped.append(tuple(stretch))
-            return None
         first_gps = np.asarray(row.start_gps_time, dtype=np.float64)
         if np.ptp(first_gps) > _ALIGNMENT_SECONDS:
             raise ValueError(f"The detectors' data over [{stretch[0]}, {stretch[1]}) start at different "
@@ -185,10 +179,7 @@ class TimeSlideBackground:
         for stretch in self.stretches:
             if remaining <= 0:
                 return
-            loaded = self._load(stretch)
-            if loaded is None:
-                continue
-            data, first_gps = loaded
+            data, first_gps = self._load(stretch)
             num_samples = min(int(ops.shape(d)[0]) for d in data)
             for slide in self.slides.slides(len(self.ifos)):
                 count = min(self._num_windows(num_samples, slide), remaining)

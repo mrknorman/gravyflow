@@ -34,8 +34,8 @@ def _time_sets(fixture, runs):
     for split in SPLITS:
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
-            observing_runs=[gf.ObservingRun[r] for r in runs], cache_segments=False,
-            augmentations=[], prefetch_segments=0,
+            observing_runs=[gf.ObservingRun[r] for r in runs],
+            augmentations=[],
         )
         valid = np.asarray(obtainer.get_valid_segments([gf.IFO[name] for name in IFOS], 7, split))
         segments = SegmentList(Segment(float(a), float(b)) for a, b in valid.reshape(-1, 2))
@@ -91,7 +91,7 @@ def test_guard_between_splits(world, tmp_path, pair, mode):
         for warm in (False, True):
             sets = {
                 f"{split} {'warm' if warm else 'cold'}": (split, fx.noise_batches(
-                    fixture, tmp_path / "segments" / split, split, mode=mode, cache_segments=True))
+                    fixture, split, mode=mode))
                 for split in pair
             }
             records.update(audit.collect(harness, sets, 2, IFOS, fx.window(), False, warm=warm))

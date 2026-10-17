@@ -33,9 +33,9 @@ def _sets(fixture, directory, splits, mode, path):
     sets = {}
     for split in splits:
         if path == "obtainer":
-            batches = fx.noise_batches(fixture, directory / split, split, mode=mode)
+            batches = fx.noise_batches(fixture, split, mode=mode)
         else:
-            batches = fx.dataset_batches(fx.dataset(fixture, directory / split, split, mode=mode))
+            batches = fx.dataset_batches(fx.dataset(fixture, split, mode=mode))
         sets[f"{path} {split}"] = (split, batches)
     return sets
 
@@ -62,7 +62,7 @@ def test_window_inside_own_piece(world, tmp_path, layout, mode, path):
         served = {split: fx.served_segments(fixture, IFOS, split) for split in splits}
     for split, segments in served.items():
         audit.assert_served_in_split(segments, split, fixture.origin)
-    audit.assert_inside_one_fetch(records.values(), harness)
+    audit.assert_inside_fetched(records.values(), harness)
     audit.assert_in_split(records.values(), fixture.origin)
     for record in records.values():
         audit.assert_inside([record], served[record.split])
@@ -137,7 +137,7 @@ def _dataset_batch(world, fixture, directory, rows=(), generators=False):
         spy = PsdSpy()
         harness.monkeypatch.setattr(dataset_module, "estimate_psd", spy)
         ds = fx.dataset(
-            fixture, directory, "train",
+            fixture, "train",
             input_variables=[RV.ONSOURCE, RV.OFFSOURCE, RV.WHITENED_ONSOURCE],
             output_variables=[RV.INJECTIONS, RV.WHITENED_INJECTIONS, gf.ScalingTypes.SNR]
             if generators else [RV.START_GPS_TIME],
@@ -252,9 +252,9 @@ def test_start_gps_is_first_sample(world, tmp_path, rate, mode, path):
     window = fx.window(rate)
     with world(fixture) as harness:
         if path == "obtainer":
-            batches = fx.noise_batches(fixture, tmp_path, "train", rate=rate, mode=mode)
+            batches = fx.noise_batches(fixture, "train", rate=rate, mode=mode)
         else:
-            batches = fx.dataset_batches(fx.dataset(fixture, tmp_path, "train", rate=rate, mode=mode))
+            batches = fx.dataset_batches(fx.dataset(fixture, "train", rate=rate, mode=mode))
         record = audit.collect(harness, {path: ("train", batches)}, 2, IFOS, window,
                                onsource_cropped=(path == "dataset"))[path]
     assert record.start_labels is not None

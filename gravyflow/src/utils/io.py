@@ -57,40 +57,6 @@ def replace_placeholders(
     
     return input
 
-def open_hdf5_file(
-        file_path: Union[str, Path], 
-        logger = None,
-        mode: str ='r+'
-    ) -> h5py.File:
-    
-    file_path = Path(file_path)
-
-    try:
-        # Try to open the HDF5 file in the specified mode
-        # Only use swmr=True for read mode ('r')
-        if mode == 'r':
-            f = h5py.File(file_path, mode, swmr=True)
-        else:
-            f = h5py.File(file_path, mode)
-        f.close()
-    except OSError as e:
-        # The file does not exist, so create it in write mode
-        ensure_directory_exists(file_path.parent)
-        f = h5py.File(file_path, 'w')
-        f.close()
-
-        if logger is not None:
-            logger.info(f'The file {file_path} was created in write mode.')
-    else:
-        if logger is not None:
-            logger.info(f'The file {file_path} was opened in {mode} mode.')
-
-    # For the final open, also apply swmr only for read mode
-    if mode == 'r':
-        return h5py.File(file_path, mode, swmr=True)
-    else:
-        return h5py.File(file_path, mode)
-    
 def ensure_directory_exists(
     directory: Union[str, Path]
     ):

@@ -19,7 +19,6 @@ import pytest
 from scipy.signal import freqz
 
 import gravyflow as gf
-from gravyflow.src.dataset.acquisition.base import segment_key
 from gravyflow.src.dataset.acquisition.sources import SegmentStrain
 from gravyflow.src.dataset.config import TransientDefaults
 from gravyflow.src.dataset.features.glitch_cache import TransientCache
@@ -153,6 +152,8 @@ class ToneFetch:
     grid, holding one tone at ``TONE_HERTZ``. Records the rates served.
     """
 
+    source_id = "gwosc-fake-tone"
+
     def __init__(self, served_rate, tone=TONE_HERTZ):
         self.served_rate, self.tone, self.served = float(served_rate), tone, []
         self.rates = (self.served_rate,)
@@ -163,22 +164,28 @@ class ToneFetch:
         times = np.arange(first, stop, dtype=np.float64) / rate
         self.served.append(rate)
         return SegmentStrain(np.sin(2 * np.pi * self.tone * (times - transient_reads.REF) + 0.4),
-                             first / rate, rate, f"{ifo.name}:FAKE-TONE")
+                             first / rate, rate, self.source_id)
+
+
+def read_piece(fetch):
+    """ROW's first piece as the noise path reads it (``acquire``), and its first sample's index."""
+    (start, end), ifo = noise_reads.ROW[0], noise_reads.IFOS[0]
+    with noise_reads.fetching(fetch):
+        [row] = noise_reads.obtainer().acquire(RATE, np.array([[[start, end]]]), [ifo])
+    first = int(round(row.start_gps_time[0] * RATE))
+    return np.asarray(row.data[0]), first
 
 
 @pytest.mark.parametrize("served_rate", [4096.0, 16384.0])
 def test_noise_segments_are_resampled(served_rate):
-    source = noise_reads.obtainer()
-    (start, end), ifo = noise_reads.ROW[0], noise_reads.IFOS[0]
-    with noise_reads.fetching(ToneFetch(served_rate)) as fetch:
-        segment = source.get_segment(start, end, RATE, ifo, segment_key(ifo, start, end))
+    fetch = ToneFetch(served_rate)
+    data, first = read_piece(fetch)
+    (start, end) = noise_reads.ROW[0]
     assert fetch.served and set(fetch.served) != {RATE}, "the source served the output rate"
-    assert segment.sample_rate_hertz == RATE
-    assert segment.t0 == pytest.approx(np.ceil(start * served_rate - 1e-6) / served_rate, abs=1e-9)
-    data = np.asarray(segment.data)
-    assert len(data) == int(end - start) * RATE
-    edge = interior(served_rate, RATE)
-    assert rms(data[edge:-edge]) <= 1e-5, f"{TONE_HERTZ} Hz served at {RATE} Hz from {served_rate} Hz"
+    assert start <= first / RATE and first / RATE + len(data) / RATE <= end
+    assert len(data) % int(RATE) == 0 and len(data) >= (int(end - start) - 1) * RATE
+    # Every sample is exact: the read reaches the margin past each end of the piece.
+    assert rms(data) <= 1e-5, f"{TONE_HERTZ} Hz served at {RATE} Hz from {served_rate} Hz"
 
 
 @pytest.mark.parametrize("served_rate, tone", [
@@ -225,6 +232,8 @@ class NoiseFetch:
     grid, holding white noise. Records each strain served.
     """
 
+    source_id = "gwosc-fake-noise"
+
     def __init__(self, served_rate):
         self.served_rate, self.served = float(served_rate), []
         self.rates = (self.served_rate,)
@@ -233,20 +242,18 @@ class NoiseFetch:
         (start, end), rate = interval, float(sample_rate_hertz)
         first, stop = int(np.ceil(start * rate - 1e-6)), int(np.ceil(end * rate - 1e-6))
         noise = np.random.default_rng(len(self.served)).normal(size=stop - first)
-        self.served.append(SegmentStrain(noise, first / rate, rate, f"{ifo.name}:FAKE-NOISE"))
+        self.served.append(SegmentStrain(noise, first / rate, rate, self.source_id))
         return self.served[-1]
 
 
 @pytest.mark.parametrize("served_rate", [4096.0, 16384.0])
 def test_a_noise_segment_is_the_resamplers_samples(served_rate):
-    source = noise_reads.obtainer()
-    (start, end), ifo = noise_reads.ROW[0], noise_reads.IFOS[0]
-    with noise_reads.fetching(NoiseFetch(served_rate)) as fetch:
-        segment = source.get_segment(start, end, RATE, ifo, segment_key(ifo, start, end))
-    (served,) = fetch.served
-    data = np.asarray(segment.data)
-    kept = served.data[:len(data) * int(served_rate) // int(RATE)]  # the whole seconds
-    np.testing.assert_array_equal(data, resample(kept, 0.0, served_rate, RATE)[0])
+    fetch = NoiseFetch(served_rate)
+    data, first = read_piece(fetch)
+    (served,) = fetch.served  # one whole tile, stored as float32
+    tile = resample(np.asarray(served.data, dtype=np.float32), 0.0, served_rate, RATE)[0]
+    offset = first - int(round(served.t0 * RATE))
+    np.testing.assert_array_equal(data, tile[offset:offset + len(data)])
 
 
 def test_a_transient_download_is_the_resamplers_samples(tmp_path):

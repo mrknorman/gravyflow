@@ -91,7 +91,6 @@ def offline_noise_obtainer():
         observing_runs=gf.ObservingRun.O3,
         data_quality=gf.DataQuality.BEST,
         data_labels=[gf.DataLabel.NOISE],
-        prefetch_segments=0,
     )
 
 

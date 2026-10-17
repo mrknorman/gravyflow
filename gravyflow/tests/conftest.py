@@ -351,6 +351,24 @@ def suite_guard(request, tmp_path_factory):
         pytest.fail(f"The test suite wrote outside its temporary roots: {changed}")
 
 
+@pytest.fixture(autouse=True)
+def empty_store():
+    """
+    Every test starts with an empty store under the suite's cache root, so no test
+    reads tiles another test's fake source committed under the same source id.
+    """
+    import shutil
+
+    def clear():
+        root = os.environ.get("GRAVYFLOW_CACHE_DIR")
+        if root:
+            shutil.rmtree(Path(root) / "store", ignore_errors=True)
+
+    clear()
+    yield
+    clear()
+
+
 @pytest.fixture
 def data_obtainer():
     return gf.IFODataObtainer(
@@ -379,13 +397,16 @@ def gwosc_serving(fetch):
     callable ``fetch(detector, sample_rate_hertz, interval)`` returning a
     ``SegmentStrain``, whose ``rates`` (when it has them) replace GWOSC's native rates.
     Obtainers built before the block are served too, since they hold ``GWOSC()``.
-    Yields ``fetch``. A patch of ``GWOSC``, for tests that fake one fetch; the leakage
-    harness installs a source instead.
+    Its strain is the tiles of ``fetch.source_id`` (default ``"gwosc-test"``), which the
+    fetch's strain must be labelled with. Yields ``fetch``. A patch of ``GWOSC``, for
+    tests that fake one fetch; the leakage harness installs a source instead.
     """
     from unittest import mock
 
     with ExitStack() as stack:
         stack.enter_context(mock.patch.object(gf.GWOSC, "fetch", lambda source, *args: fetch(*args)))
+        name = getattr(fetch, "source_id", "gwosc-test")
+        stack.enter_context(mock.patch.object(gf.GWOSC, "source_id", lambda source, gps, rate: name))
         if hasattr(fetch, "rates"):
             rates = tuple(float(rate) for rate in fetch.rates)
             stack.enter_context(mock.patch.object(gf.GWOSC, "rates", lambda source: rates))

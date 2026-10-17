@@ -301,8 +301,7 @@ ONSOURCE_SECONDS, CROP_SECONDS, OFFSOURCE_SECONDS = 1.0, 0.5, 4.0
 
 def ifo_data_obtainer(fixture: Fixture, **overrides):
     """
-    A REAL-noise IFODataObtainer over the fixture's runs: no augmentation, no
-    prefetch, no segment cache.
+    A REAL-noise IFODataObtainer over the fixture's runs, with no augmentation.
     """
     import gravyflow as gf
 
@@ -310,15 +309,13 @@ def ifo_data_obtainer(fixture: Fixture, **overrides):
         data_quality=gf.DataQuality.BEST,
         data_labels=[gf.DataLabel.NOISE],
         observing_runs=fixture.observing_runs(),
-        cache_segments=False,
         augmentations=[],
-        prefetch_segments=0,
     )
     kwargs.update(overrides)
     return gf.IFODataObtainer(**kwargs)
 
 
-def noise_obtainer(fixture: Fixture, directory, ifos=("H1", "L1"), **overrides):
+def noise_obtainer(fixture: Fixture, ifos=("H1", "L1"), **overrides):
     """A REAL NoiseObtainer over the fixture, split by the default spec (the golden table's)."""
     import gravyflow as gf
 
@@ -326,16 +323,15 @@ def noise_obtainer(fixture: Fixture, directory, ifos=("H1", "L1"), **overrides):
         ifo_data_obtainer=ifo_data_obtainer(fixture, **overrides),
         ifos=[gf.IFO[name] for name in ifos],
         noise_type=gf.NoiseType.REAL,
-        data_directory_path=Path(directory),
     )
 
 
-def noise_batches(fixture: Fixture, directory, split: str, rate: float = 256.0,
+def noise_batches(fixture: Fixture, split: str, rate: float = 256.0,
                   mode=None, batch: int = 8, seed: int = 7, ifos=("H1", "L1"), **overrides):
     """The obtainer's raw batches (uncropped onsource) for one split."""
     import gravyflow as gf
 
-    obtainer = noise_obtainer(fixture, directory, ifos, **overrides)
+    obtainer = noise_obtainer(fixture, ifos, **overrides)
     return obtainer(
         sample_rate_hertz=rate,
         onsource_duration_seconds=ONSOURCE_SECONDS,
@@ -348,7 +344,7 @@ def noise_batches(fixture: Fixture, directory, split: str, rate: float = 256.0,
     )
 
 
-def dataset(fixture: Fixture, directory, split: str, rate: float = 256.0, mode=None,
+def dataset(fixture: Fixture, split: str, rate: float = 256.0, mode=None,
             batch: int = 8, seed: int = 7, ifos=("H1", "L1"), input_variables=None,
             output_variables=None, waveform_generators=None, steps_per_epoch: int = 1000,
             **overrides):
@@ -356,7 +352,7 @@ def dataset(fixture: Fixture, directory, split: str, rate: float = 256.0, mode=N
     import gravyflow as gf
 
     return gf.Dataset(
-        noise_obtainer=noise_obtainer(fixture, directory, ifos, **overrides),
+        noise_obtainer=noise_obtainer(fixture, ifos, **overrides),
         sample_rate_hertz=rate,
         onsource_duration_seconds=ONSOURCE_SECONDS,
         crop_duration_seconds=CROP_SECONDS,

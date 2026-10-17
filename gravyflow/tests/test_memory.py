@@ -51,7 +51,6 @@ def test_memory_noise(
                 ],
                 gf.SegmentOrder.RANDOM,
                 force_acquisition=True,
-                cache_segments=False,
                 logging_level=logging.INFO
             )
         

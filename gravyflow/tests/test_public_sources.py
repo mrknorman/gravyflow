@@ -262,7 +262,6 @@ class TestGwoscSegments:
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE],
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False,
         )
         with patch(
             "gwpy.segments.DataQualityDict.query_dqsegdb",
@@ -283,7 +282,6 @@ class TestGwoscSegments:
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE],
             observing_runs=gf.ObservingRun.O1,
-            cache_segments=False,
             gwosc_flags=gf.GWOSC_DATA_FLAGS,
         )
         segments = obtainer.get_all_segment_times(gf.IFO.H1)
@@ -295,7 +293,6 @@ class TestGwoscSegments:
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE],
             observing_runs=gf.ObservingRun.O1,
-            cache_segments=False,
         ).get_all_segment_times(gf.IFO.H1)
         livetime = lambda s: float(np.sum(s[:, 1] - s[:, 0]))
         assert livetime(default) < livetime(segments)
@@ -305,7 +302,6 @@ class TestGwoscSegments:
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE],
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False,
         )
         with pytest.raises(ValueError, match="GWOSC"):
             obtainer.get_segment_times(
@@ -317,7 +313,6 @@ class TestGwoscSegments:
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE],
             observing_runs=gf.ObservingRun.O1,
-            cache_segments=False,
         )
         first = obtainer.get_all_segment_times(gf.IFO.L1)
         n_requests = len(offline_public_sources.requests)
@@ -339,7 +334,6 @@ class TestDefaultConfiguration:
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE],
-            cache_segments=False,
         )
         per_run = [
             np.array([[1.0, 2.0], [3.0, 4.0]]),
@@ -354,7 +348,6 @@ class TestDefaultConfiguration:
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE],
-            cache_segments=False,
         )
         segments = obtainer.get_valid_segments(
             ifos=[gf.IFO.H1, gf.IFO.L1], seed=1, group_name="train"
@@ -395,7 +388,7 @@ SOURCES = {
 def _noise_obtainer(source=None, **kwargs):
     return gf.IFODataObtainer(
         data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
-        observing_runs=gf.ObservingRun.O3, cache_segments=False, prefetch_segments=0,
+        observing_runs=gf.ObservingRun.O3,
         source=source, **kwargs,
     )
 
@@ -450,9 +443,9 @@ class TestDataSource:
     def test_gwosc_and_local_frames_never_share_a_cache_entry(self, tmp_path):
         from gravyflow.src.dataset.features.glitch_cache import generate_transient_cache_path
 
-        segment_files = {name: _noise_obtainer(make()).generate_file_path(2048.0, "train", tmp_path)
-                         for name, make in SOURCES.items()}
-        assert len(set(segment_files.values())) == len(SOURCES), segment_files
+        # The store's tiles are named by the strain they hold (``DataSource.source_id``).
+        tiles = {name: make().source_id(O3A_GPS, 16384.0) for name, make in SOURCES.items()}
+        assert len(set(tiles.values())) == len(SOURCES), tiles
 
         transient_files = {}
         for name, make in SOURCES.items():
@@ -469,7 +462,10 @@ class TestDataSource:
                 transient_files[name, prefix] = cache.path
         assert len(set(transient_files.values())) == len(transient_files), transient_files
 
-    def test_an_unreachable_local_frame_refuses_by_name_and_never_falls_back(self):
+    def test_an_unreachable_local_frame_refuses_by_name_and_never_falls_back(self, monkeypatch):
+        from gravyflow.src.dataset.store import read
+
+        monkeypatch.setattr(read, "FETCH_BACKOFF_SECONDS", 0.0)
         gwosc = GwoscRecorder()
 
         def unreachable(**kwargs):
@@ -481,9 +477,11 @@ class TestDataSource:
                     r"ConnectionRefusedError: the datafind server is unreachable")) as refused:
                 gf.LocalFrames().fetch(gf.IFO.H1, 16384.0, (O3A_GPS, O3A_GPS + 32.0))
             assert refused.value.source == gf.LocalFrames()
-            # Through an obtainer too: the read fails, and nothing is fetched from GWOSC.
-            _noise_obtainer(gf.LocalFrames()).get_segment(
-                O3A_GPS, O3A_GPS + 64.0, 2048.0, gf.IFO.H1, "segments/test")
+            # Through an obtainer too: the read is refused by name, never zero-filled,
+            # and nothing is fetched from GWOSC.
+            with pytest.raises(gf.StrainUnavailable, match="the datafind server is unreachable"):
+                next(_noise_obtainer(gf.LocalFrames()).acquire(
+                    2048.0, np.array([[[O3A_GPS, O3A_GPS + 64.0]]]), [gf.IFO.H1]))
         assert gwosc.calls == [], "a local read error fell back to GWOSC"
 
     def test_unreadable_frames_refuse_by_name(self):
@@ -624,13 +622,13 @@ class TestSampleRate:
         assert sources.fetch_rate(gf.GWOSC(), requested) == fetched
         assert sources.fetch_rate(gf.LocalFrames(), requested) == 16384.0
         gwosc = GwoscRecorder()
-        with serving_gwosc(gwosc):
-            segment = _noise_obtainer().get_segment(
-                O3A_GPS, O3A_GPS + 64.2, requested, gf.IFO.L1, "segments/test"
-            )
-        assert [call["sample_rate"] for call in gwosc.calls] == [int(fetched)]
-        assert segment is not None
-        assert segment.data.shape[0] == int(64 * requested)
+        # 64 s tiles keep the test small; the piece crosses one tile boundary.
+        with serving_gwosc(gwosc), patch.object(gf.GWOSC, "tile_seconds", lambda source, rate: 64.0):
+            [row] = _noise_obtainer().acquire(
+                requested, np.array([[[O3A_GPS, O3A_GPS + 64.2]]]), [gf.IFO.L1])
+        assert [call["sample_rate"] for call in gwosc.calls] == [int(fetched)] * 2
+        # The whole seconds inside the resampler's margin: 64 of the 64.2 s.
+        assert row.data[0].shape[0] == int(64 * requested)
 
     def test_rates_above_the_source_and_not_whole_hertz_are_refused(self):
         with pytest.raises(gf.UpsamplingRefused, match="upsample"):
@@ -789,7 +787,6 @@ class TestOnline:
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE],  # events and glitches vetoed
-            cache_segments=False,
         )
         segments = obtainer.get_valid_segments(
             ifos=[gf.IFO.H1, gf.IFO.L1], seed=1, group_name="train"

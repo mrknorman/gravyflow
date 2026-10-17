@@ -196,6 +196,10 @@ class Defaults:
     #: Where an obtainer built without a ``source`` reads real strain: ``GWOSC()``,
     #: made on first read.
     source = _DefaultSource()
+    #: The bytes one process may hold in fetches and reads of real strain at once (the
+    #: store's accountant). Tiles are memory-mapped and never held, so this bounds what
+    #: is in flight; N worker processes use N times it.
+    memory_bytes: int = 2 * 1024 ** 3
 
     # Standard tiers for JIT graph optimization
     # Using these values reduces the number of unique JAX graph compilations

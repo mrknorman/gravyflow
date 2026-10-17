@@ -9,6 +9,8 @@ a slice of the map, so a whole tile is never resident.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -136,13 +138,28 @@ def read_window(tiles: Sequence[Tile], start: int, stop: int) -> np.ndarray:
 
 def verify(root: Path) -> List[str]:
     """
-    Check every committed tile under ``root`` in full, its sha256 included: one line
-    per tile that would be refused, naming it and why. An empty list is a clean store.
+    Check every committed tile under ``root`` in full, its sha256 included, and list
+    every orphan: one line per tile that would be refused, naming it and why, and one
+    per samples file that no record names (a writer that lost the race for a tile's
+    record leaves one; ``Store.forget`` of the tile removes it, and nothing else does).
+    An empty list is a clean store.
     """
-    problems = []
-    for record_path in sorted((Path(root) / f"v{STORE_FORMAT}").glob("*/*/*/*/*.json")):
+    problems, named = [], set()
+    tiles = Path(root) / f"v{STORE_FORMAT}"
+    for record_path in sorted(tiles.glob("*/*/*/*/*.json")):
         try:
-            open_tile(root, key_from_path(root, record_path), verify=True)
+            tile = open_tile(root, key_from_path(root, record_path), verify=True)
+            named.add(tile.key.samples_path(root, tile.record.sha256))
         except (StoreError, ValueError, TypeError, OSError) as error:
             problems.append(f"{record_path}: {error}")
+            # A refused record's own samples are refused with it, never called orphans.
+            with contextlib.suppress(ValueError, TypeError, KeyError, OSError):
+                sha256 = json.loads(record_path.read_bytes())["sha256"]
+                named.add(record_path.with_name(f"{record_path.stem}.{sha256}.npy"))
+    for samples_path in sorted(tiles.glob("*/*/*/*/*.*.npy")):
+        if samples_path not in named:
+            problems.append(
+                f"{samples_path}: orphan samples, named by no record; Store.forget its tile "
+                "to remove them."
+            )
     return problems

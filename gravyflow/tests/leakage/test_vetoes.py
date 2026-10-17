@@ -30,8 +30,7 @@ def _check_noise_avoids(world, tmp_path, fixture, forbidden):
     with world(fixture) as harness:
         served = {split: fx.served_segments(fixture, IFOS, split) for split in SPLITS}
         sets = {
-            f"{split} {mode.name}": (split, fx.noise_batches(fixture, tmp_path / f"{split}-{mode.name}",
-                                                             split, mode=mode))
+            f"{split} {mode.name}": (split, fx.noise_batches(fixture, split, mode=mode))
             for split in SPLITS for mode in MODES
         }
         records = audit.collect(harness, sets, 2, IFOS, fx.window(), onsource_cropped=False)

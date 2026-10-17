@@ -3,13 +3,13 @@ The data versions: the numerics that make served samples, in every fingerprint a
 every cache key.
 
 Every data obtainer's specification carries ``DATA_VERSIONS``, so a checkpoint, a
-validation or a training run made before a version changed is refused after it. Caches
-of strain the resampler made are cut with it: a real-noise segment stored before the
-resampler changed is fetched again, and a transient cache of an earlier format is
-never read.
+validation or a training run made before a version changed is refused after it. The
+store keeps raw strain, so a change of the resampler cuts no tile; the store's own
+format is a data version, and names its root. A transient cache of an earlier format
+is never read.
 """
 
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from unittest import mock
 
 import h5py
@@ -19,7 +19,8 @@ import scipy
 
 import gravyflow as gf
 from gravyflow.src.dataset.acquisition import base
-from gravyflow.src.dataset.acquisition.base import BaseDataObtainer, segment_key
+from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
+from gravyflow.src.dataset.store import STORE_FORMAT
 from gravyflow.src.dataset.acquisition.versions import DATA_VERSIONS
 from gravyflow.src.dataset.features.glitch_cache import (
     TRANSIENT_CACHE_FORMAT, TransientCache, generate_transient_cache_path,
@@ -34,9 +35,8 @@ from gravyflow.tests import test_examples_recipe as recipe_tests
 from gravyflow.tests.conftest import refuse_internet
 from gravyflow.tests import test_segment_provenance as noise_reads
 
-#: The segment layout and transient cache format gravyflow wrote before its resampler
-#: was the FIR (``utils/resample.py``).
-LAYOUT_BEFORE_THE_FIR = "segment-layout-3"
+#: The transient cache format gravyflow wrote before its resampler was the FIR
+#: (``utils/resample.py``).
 TRANSIENT_FORMAT_BEFORE_THE_FIR = 3
 
 
@@ -60,7 +60,7 @@ def real_noise():
 
 
 def test_every_obtainer_specification_carries_the_data_versions():
-    assert dict(DATA_VERSIONS) == {"resampler": "fir-1", "scipy": scipy.__version__}
+    assert dict(DATA_VERSIONS) == {"resampler": "fir-1", "scipy": scipy.__version__, "store": STORE_FORMAT}
     with pytest.raises(TypeError):
         DATA_VERSIONS["resampler"] = "another"  # one home, read-only
     transient = gf.TransientDataObtainer(data_quality=gf.DataQuality.BEST,
@@ -82,32 +82,12 @@ def test_a_data_version_changes_every_fingerprint(monkeypatch):
 
 class TestCachesAreCut:
 
-    def test_a_segment_stored_before_the_cut_is_fetched_again(self, tmp_path, monkeypatch, caplog):
-        (start, end), ifo = noise_reads.ROW[0], noise_reads.IFOS[0]
-        key = segment_key(ifo, start, end)
-        path = noise_reads.obtainer().generate_file_path(noise_reads.RATE, "train", tmp_path)
-
-        with monkeypatch.context() as before:  # stored by the code before the cut
-            before.setattr(base, "SEGMENT_LAYOUT_VERSION", LAYOUT_BEFORE_THE_FIR)
-            stale = noise_reads.obtainer(cache_segments=True)
-            stale_path = stale.generate_file_path(noise_reads.RATE, "train", tmp_path)
-            with noise_reads.fetching(noise_reads.GridFetch()):
-                noise_reads.batches(stale, gf.SamplingMode.GRID, num_batches=1)
-        with closing(h5py.File(stale_path, "r")) as stored:
-            assert stored[key].attrs["layout"] == LAYOUT_BEFORE_THE_FIR
-
-        assert path != stale_path, "the segment file is keyed by its layout"
-        fresh = noise_reads.obtainer(cache_segments=True)
-        fresh.file_path = stale_path  # even at the old file's path
-        with noise_reads.fetching(noise_reads.GridFetch()) as fetch:
-            fresh.get_segment(start, end, noise_reads.RATE, ifo, key)
-        assert fetch.calls == [(ifo.name, start, end)], "a segment stored before the cut was served"
-        assert "fetching it again" in caplog.text
-
-    def test_a_segment_file_is_keyed_by_the_data_versions(self, tmp_path, monkeypatch):
-        path = noise_reads.obtainer().generate_file_path(noise_reads.RATE, "train", tmp_path)
-        monkeypatch.setattr(base, "DATA_VERSIONS", {**DATA_VERSIONS, "scipy": "another"})
-        assert noise_reads.obtainer().generate_file_path(noise_reads.RATE, "train", tmp_path) != path
+    def test_the_store_format_is_a_data_version_and_names_the_root(self, tmp_path):
+        assert DATA_VERSIONS["store"] == STORE_FORMAT
+        with noise_reads.fetching(noise_reads.GridFetch()):
+            noise_reads.batches(noise_reads.obtainer(), gf.SamplingMode.GRID, num_batches=1)
+        store = gf.src.dataset.acquisition.gwosc_data.user_cache_dir("store")
+        assert sorted(path.name for path in store.iterdir()) == [f"v{STORE_FORMAT}"]
 
     def test_a_transient_cache_from_before_the_cut_is_never_read(self, tmp_path):
         path = generate_transient_cache_path(data_directory=tmp_path, prefix="glitch", source=gf.GWOSC())

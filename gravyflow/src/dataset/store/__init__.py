@@ -7,6 +7,8 @@ GPS grid, shared safely by every process on one root.
 - ``view``: opening a tile, and raw window views.
 - ``budget``: the byte accountant behind the memory cap.
 - ``pools``: the background threads that fetch strain, and ``shutdown``, which stops them.
+- ``read``: the one read path of real strain: tiles ensured, viewed, resampled, the
+  margin cut away; the process's store and memory cap; refusals by name.
 """
 
 from .budget import BudgetRefused, BudgetTimeout, ByteBudget

@@ -76,12 +76,10 @@ class TransientDataObtainer(BaseDataObtainer):
             max_segment_duration_seconds: float = 2048.0,
             saturation: float = 8.0,
             force_acquisition: bool = False,
-            cache_segments: bool = True,
             overrides: dict = None,
             event_types: List[EventConfidence] = None,
             logging_level: int = logging.WARNING,
             augmentations: List = None,  # Training only; None is none
-            prefetch_segments: int = 64,  # Higher for smaller TRANSIENT segments
             # Class balancing
             balanced_glitch_types: bool = False,
             # Specific Names
@@ -90,6 +88,7 @@ class TransientDataObtainer(BaseDataObtainer):
             train_on_real_events: bool = False,
             source: Optional[DataSource] = None,
             coincidence: Coincidence = Coincidence.SEPARATED,
+            exclusions=(),
         ):
         """
         Args (split and source):
@@ -103,6 +102,8 @@ class TransientDataObtainer(BaseDataObtainer):
                 transient was not seen in is read at a partner time.
             source: Where strain comes from (``gf.DataSource``); None takes
                 ``gf.Defaults.source`` (``BaseDataObtainer``).
+            exclusions: ``(detector, (start, end), reason)`` entries taken from the
+                readable time (``BaseDataObtainer``).
         """
         if train_on_real_events and Coincidence(coincidence) != Coincidence.COINCIDENT:
             raise ValueError(
@@ -128,14 +129,13 @@ class TransientDataObtainer(BaseDataObtainer):
             max_segment_duration_seconds=max_segment_duration_seconds,
             saturation=saturation,
             force_acquisition=force_acquisition,
-            cache_segments=cache_segments,
             overrides=overrides,
             logging_level=logging_level,
             augmentations=augmentations,
-            prefetch_segments=prefetch_segments,
             split_spec=split_spec,
             source=source,
             coincidence=coincidence,
+            exclusions=exclusions,
         )
 
         self.acquisition_mode = AcquisitionMode.TRANSIENT
@@ -148,8 +148,6 @@ class TransientDataObtainer(BaseDataObtainer):
         
         # Class balancing
         self.balanced_glitch_types = balanced_glitch_types
-
-    _segment_cache_maxsize = 128  # TRANSIENT uses larger cache for many small segments
 
     def _served_state(self) -> Dict[str, Any]:
         caches = {}
@@ -201,19 +199,17 @@ class TransientDataObtainer(BaseDataObtainer):
 
     def get_acquisition_stats(self) -> Dict[str, Any]:
         """
-        As for noise, with ``rejections``: the records of the split not served, by
-        reason (``REJECTED_BY_DATA_QUALITY``, ``REJECTED_FOR_NO_DATA``,
+        ``rejections``: the records of the split not served, by reason
+        (``REJECTED_BY_DATA_QUALITY``, ``REJECTED_FOR_NO_DATA``,
         ``REJECTED_FOR_NO_PARTNER``), each record counted once however many passes
         meet it; ``dropped_segments`` is their total.
         """
         return {
-            **super().get_acquisition_stats(),
             "dropped_segments": sum(self._rejections.values()),
             "rejections": dict(self._rejections),
         }
 
     def reset_acquisition_stats(self) -> None:
-        super().reset_acquisition_stats()
         self._rejections = Counter()
 
     def _own_detectors(self, record: TransientSegment, ifos: List[gf.IFO]) -> List[gf.IFO]:

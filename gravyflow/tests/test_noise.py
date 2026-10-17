@@ -42,7 +42,6 @@ def _test_real_noise_single(
                 observing_runs=gf.ObservingRun.O3,
                 segment_order=gf.SegmentOrder.RANDOM,
                 force_acquisition = True,
-                cache_segments = False
             )
             
             # Initialize noise generator wrapper:
@@ -119,7 +118,6 @@ def _test_real_noise_multi(
                 observing_runs=gf.ObservingRun.O3,
                 segment_order=gf.SegmentOrder.RANDOM,
                 force_acquisition = True,
-                cache_segments = False
             )
             
             # Initilise noise generator wrapper:
@@ -191,7 +189,6 @@ def _test_noise_shape(
                 observing_runs=gf.ObservingRun.O3,
                 segment_order=gf.SegmentOrder.RANDOM,
                 force_acquisition=True,
-                cache_segments=False,
                 logging_level=logging.INFO
             )
             
@@ -254,7 +251,6 @@ def _test_noise_iteration(
                 observing_runs=gf.ObservingRun.O3,
                 segment_order=gf.SegmentOrder.RANDOM,
                 force_acquisition=True,
-                cache_segments=False,
                 logging_level=logging.INFO
             )
             
@@ -528,7 +524,6 @@ def test_pseudo_real_noise_generation():
         data_quality=gf.DataQuality.BEST, 
         data_labels=[gf.DataLabel.NOISE, gf.DataLabel.GLITCHES],
         force_acquisition=True,
-        cache_segments=False
     )
     
     # Create NoiseObtainer with PSEUDO_REAL type
@@ -572,7 +567,6 @@ def test_gps_time_uniqueness_across_batches():
             observing_runs=gf.ObservingRun.O3,
             segment_order=gf.SegmentOrder.RANDOM,
             force_acquisition=True,
-            cache_segments=False
         )
         
         noise = gf.NoiseObtainer(

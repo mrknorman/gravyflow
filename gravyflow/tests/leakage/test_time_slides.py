@@ -45,7 +45,7 @@ def expected_windows(stretch, slide, step):
 
 
 @pytest.mark.parametrize("split,other", [("test", "train"), ("validate", "train")])
-def test_slid_windows_stay_inside_the_split(world, tmp_path, split, other):
+def test_slid_windows_stay_inside_the_split(world, split, other):
     # A slide pairs one detector's data with another's from elsewhere in time; every
     # sample of every window must still be the scored split's, guard included.
     fixture = fx.straddle(split, other, half_width=600.0)
@@ -75,7 +75,7 @@ def test_slid_windows_stay_inside_the_split(world, tmp_path, split, other):
         assert fx.golden_split(fixture.origin, *stretch) == split
 
 
-def test_slides_refuse_time_outside_the_split_the_data_is_certified_by(world, tmp_path):
+def test_slides_refuse_time_outside_the_split_the_data_is_certified_by(world):
     # The stretches come from the obtainer's admissible time; they are checked against
     # the split the validator certified (its one computation), never one read again,
     # so time another split owns is refused before any of it is read.
@@ -88,7 +88,7 @@ def test_slides_refuse_time_outside_the_split_the_data_is_certified_by(world, tm
                      32, 100, split_spec=other)
 
 
-def test_each_slide_counts_its_own_livetime(world, tmp_path):
+def test_each_slide_counts_its_own_livetime(world):
     # A slide of k steps loses k steps of each stretch: its livetime is its own windows'.
     fixture = fx.straddle("test", "train", half_width=600.0)
     slides = TimeSlides(num_slides=3, step_seconds=50.0)
@@ -104,7 +104,7 @@ def test_each_slide_counts_its_own_livetime(world, tmp_path):
     assert sorted(stream.slide for stream in streams) == [1, 2, 3]
 
 
-def test_the_window_budget_ends_a_stream_short_and_counts_it(world, tmp_path):
+def test_the_window_budget_ends_a_stream_short_and_counts_it(world):
     fixture = fx.straddle("test", "train", half_width=600.0)
     slides = TimeSlides(num_slides=3, step_seconds=50.0)
     with world(fixture):
@@ -124,7 +124,7 @@ def logit_model(detectors: int, samples: int) -> keras.Model:
 
 
 @pytest.mark.global_rng
-def test_the_validator_backgrounds_real_network_noise_by_time_slides(world, tmp_path):
+def test_the_validator_backgrounds_real_network_noise_by_time_slides(world):
     # The validator scored real noise as independent windows of each detector, so its
     # FAR had no slides, no clustering and no livetime per slide.
     fixture = fx.straddle("test", "train", half_width=600.0)
@@ -135,7 +135,7 @@ def test_the_validator_backgrounds_real_network_noise_by_time_slides(world, tmp_
                                  time_slide_step_seconds=50.0)
     with world(fixture):
         args = dict(
-            noise_obtainer=fx.noise_obtainer(fixture, tmp_path / "noise"),
+            noise_obtainer=fx.noise_obtainer(fixture),
             ifos=[gf.IFO[name] for name in IFOS], sample_rate_hertz=RATE,
             onsource_duration_seconds=fx.ONSOURCE_SECONDS, crop_duration_seconds=fx.CROP_SECONDS,
             offsource_duration_seconds=fx.OFFSOURCE_SECONDS,

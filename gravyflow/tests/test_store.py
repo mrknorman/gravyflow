@@ -1075,3 +1075,20 @@ if __name__ == "__main__":
     role, arguments = sys.argv[1], sys.argv[2:]
     result = {"writer": _writer, "reader": _reader, "killed": _killed, "races": _races}[role](*arguments)
     print(json.dumps(result))
+
+
+def test_verify_lists_orphan_samples_and_forget_alone_removes_them(tmp_path):
+    # A writer that lost the race for a tile's record leaves samples no record names:
+    # here, the record of the first content is gone when other content commits.
+    store = Store(tmp_path)
+    store.commit(key(), strain(7))
+    orphan = samples_file(tmp_path, key())
+    key().record_path(tmp_path).unlink()
+    store.commit(key(), strain(7, offset=1e-22))
+    assert orphan.exists() and samples_file(tmp_path, key()) != orphan
+    [line] = store.verify()
+    assert line.startswith(f"{orphan}: orphan samples, named by no record")
+    assert np.array_equal(store.open(key()).samples, (strain(7, offset=1e-22)).astype(np.float32))
+    store.forget([key()])
+    assert store.verify() == [] and not orphan.exists()
+

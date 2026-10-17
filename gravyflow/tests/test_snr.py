@@ -231,7 +231,6 @@ def _test_snr(
             observing_runs=gf.ObservingRun.O3,
             segment_order=gf.SegmentOrder.RANDOM,
             force_acquisition = True,
-            cache_segments = False
         )
         
         # Initialize noise generator wrapper:

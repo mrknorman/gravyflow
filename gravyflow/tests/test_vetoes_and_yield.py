@@ -55,8 +55,6 @@ def _noise_obtainer(runs, **kwargs):
         data_quality=gf.DataQuality.BEST,
         data_labels=[gf.DataLabel.NOISE],
         observing_runs=runs,
-        cache_segments=False,
-        prefetch_segments=0,
         **kwargs,
     )
 
@@ -210,7 +208,7 @@ class TestNoiseVetoes:
         kind, never its number (the label enums' values overlap).
         """
         obtainer = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE, *asked],
-                                      observing_runs=gf.ObservingRun.O3, cache_segments=False, prefetch_segments=0)
+                                      observing_runs=gf.ObservingRun.O3)
         applied = set()
 
         def veto(kind):
@@ -538,14 +536,28 @@ class TestSegmentYield:
 # SAMPLING DENSITY
 # =============================================================================
 
-from gravyflow.src.dataset.acquisition.base import kept_seconds  # noqa: E402
 from gravyflow.src.dataset.acquisition.noise import couple_pieces  # noqa: E402
+from gravyflow.src.dataset.store.read import interiors  # noqa: E402
 
 #: The test window at 64 Hz: 1 s onsource with 0.5 s crops (2 s loaded) and 1.75 s
 #: offsource, plus the sampler's 16-sample buffer: 4 s of footprint, so a piece of
 #: 4 + x whole seconds has x seconds of window starts. Usable pieces: >= 7.5 s.
 RATE, BATCH = 64.0, 16
 FOOTPRINT, OFFSOURCE = 4.0, 1.75
+
+
+class _AtTheRate(gf.GWOSC):
+    """GWOSC publishing RATE: reads need no resampling, so a piece's interior is its whole seconds."""
+
+    def rates(self):
+        return (RATE,)
+
+    def specification(self):
+        return {"rates": [RATE]}
+
+
+def _density_obtainer(**kwargs):
+    return _noise_obtainer(gf.ObservingRun.O3, source=_AtTheRate(), **kwargs)
 
 
 def _draw(obtainer, rows, num_batches, mode=gf.SamplingMode.RANDOM, offsource_seconds=OFFSOURCE,
@@ -555,11 +567,11 @@ def _draw(obtainer, rows, num_batches, mode=gf.SamplingMode.RANDOM, offsource_se
     every batch the generator serves when ``num_batches`` is None.
     """
     def fake_acquire(sample_rate_hertz, valid_segments, ifos, **kwargs):
-        # As the loader does: each piece is kept to whole seconds (kept_seconds).
+        # As the loader does: each piece is read as its interior (store.read.interiors).
         for row in valid_segments:
-            data = [np.zeros(int(kept_seconds(end - start) * sample_rate_hertz), np.float32)
-                    for start, end in row]
-            yield gf.IFOData(data, sample_rate_hertz, [start for start, _ in row])
+            firsts, counts = interiors(obtainer.source, sample_rate_hertz, row)
+            data = [np.zeros(int(count), np.float32) for count in counts]
+            yield gf.IFOData(data, sample_rate_hertz, list(firsts / sample_rate_hertz))
 
     obtainer.valid_segments = np.asarray(rows, dtype=np.float64)
     obtainer.augmentations = []  # saturation exactly: 8 gives 0.5 batches per second of starts
@@ -600,7 +612,7 @@ class TestSamplingDensity:
         assert tuple(index[0]) == (0, 0)
 
     def test_short_pieces_are_not_oversampled(self):
-        obtainer = _noise_obtainer(gf.ObservingRun.O3)
+        obtainer = _density_obtainer()
         pieces = np.array([[0.0, FOOTPRINT + 200.0], [300.0, 300.0 + FOOTPRINT + 20.0],
                            [2048.0, 2048.0 + FOOTPRINT + 100.0]])
         starts = _draw(obtainer, pieces[:, None, :], num_batches=100 + 10 + 50)
@@ -610,7 +622,7 @@ class TestSamplingDensity:
     def test_no_usable_piece_is_dropped(self):
         # H1 has two usable pieces; L1's second piece is too short. Pairing by rank put
         # H1's second piece with it, and the row was dropped.
-        obtainer = _noise_obtainer(gf.ObservingRun.O3)
+        obtainer = _density_obtainer()
         h1 = np.array([[0.0, FOOTPRINT + 100.0], [1000.0, 1000.0 + FOOTPRINT + 50.0]])
         l1 = np.array([[0.0, FOOTPRINT + 200.0], [1500.0, 1505.0]])
         rows = np.stack([h1, l1], axis=1)
@@ -628,22 +640,22 @@ class TestSamplingDensity:
         h1 = np.array([[1238166018.0, 1238166058.0]])
         rows = np.stack([h1, h1 + 60.0], axis=1)
         for seed in range(5):
-            obtainer = _noise_obtainer(gf.ObservingRun.O3, saturation=1.0)
+            obtainer = _density_obtainer(saturation=1.0)
             starts = _draw(obtainer, rows, num_batches=20, offsource_seconds=16.0, batch=32, seed=seed)
             assert starts.shape == (20 * 32, 2)
 
     def test_the_plan_measures_pieces_as_the_loader_keeps_them(self):
         # The loader keeps whole seconds of a piece; the plan measured its exact length,
         # so short fractional pieces were drawn up to 5.6% too densely.
-        obtainer = _noise_obtainer(gf.ObservingRun.O3)
-        plan = obtainer.plan_sampling(np.array([[[0.0, 30.6]]]), 8.0, FOOTPRINT)
+        obtainer = _density_obtainer()
+        plan = obtainer.plan_sampling(np.array([[[0.0, 30.6]]]), 8.0, FOOTPRINT, sample_rate_hertz=RATE)
         np.testing.assert_allclose(plan.start_seconds, [30.0 - FOOTPRINT])
 
     def test_grid_serves_each_window_once_a_pass_then_ends(self):
         # One H1 piece shares five rows with five L1 pieces. GRID wrapped inside each
         # row's share and never ended; one pass now serves each window at most once
         # across the rows, keeps the detectors two footprints apart, and ends.
-        obtainer = _noise_obtainer(gf.ObservingRun.O3, saturation=0.5)
+        obtainer = _density_obtainer(saturation=0.5)
         h1 = np.array([[0.0, FOOTPRINT + 256.0]])
         l1 = np.array([[k * 100.0, k * 100.0 + FOOTPRINT + 51.0] for k in range(5)])
         rows = np.stack([np.repeat(h1, 5, axis=0), l1], axis=1)
@@ -659,10 +671,10 @@ class TestSamplingDensity:
         # apart but never 37 s. Drawing from such a row spun without end.
         piece = np.array([[1238166018.0, 1238166058.0]])
         rows = np.stack([piece, piece], axis=1)
-        obtainer = _noise_obtainer(gf.ObservingRun.O3)
-        kept = obtainer.plan_sampling(rows, 8.0, FOOTPRINT, separation_seconds=36.0)
+        obtainer = _density_obtainer()
+        kept = obtainer.plan_sampling(rows, 8.0, FOOTPRINT, separation_seconds=36.0, sample_rate_hertz=RATE)
         assert len(kept.rows) == 1 and kept.inseparable == 0
-        left_out = obtainer.plan_sampling(rows, 8.0, FOOTPRINT, separation_seconds=37.0)
+        left_out = obtainer.plan_sampling(rows, 8.0, FOOTPRINT, separation_seconds=37.0, sample_rate_hertz=RATE)
         assert len(left_out.rows) == 0 and left_out.inseparable == 1
 
     def test_separable_tries_every_order(self):
@@ -688,27 +700,30 @@ class _RecordingFetch:
 
 class TestWholeSegments:
 
+    TILE = 1238171648.0  # a GWOSC file's first sample: tiles are whole 4096 s files
+
     def _get(self, start, end, rate):
         fetch = _RecordingFetch()
         obtainer = _noise_obtainer(gf.ObservingRun.O3)
         with patch("gwpy.timeseries.TimeSeries.fetch_open_data",
                    side_effect=fetch):
-            segment = obtainer.get_segment(start, end, rate, gf.IFO.L1, "segments/test")
-        return segment.data, fetch.calls
+            [row] = obtainer.acquire(rate, np.array([[[start, end]]]), [gf.IFO.L1])
+        return row.data[0], fetch.calls
 
-    def test_no_margin_is_trimmed(self):
-        start = 1238171648.0
-        segment, calls = self._get(start, start + 2048.0, 2048.0)
-        assert calls == [(start, start + 2048.0)]
-        assert segment.shape[0] == 2048 * 2048
+    def test_the_whole_file_is_fetched_and_the_piece_read_inside_it(self):
+        segment, calls = self._get(self.TILE, self.TILE + 2048.0, 2048.0)
+        assert calls == [(self.TILE, self.TILE + 4096.0)]
+        # Read at 2048 Hz from 4096 Hz: the whole seconds inside the resampler's margin.
+        assert segment.shape[0] == 2047 * 2048
 
     @pytest.mark.parametrize("duration, rate", [(1500.0, 2048.0), (700.0, 4096.0), (2048.0, 4096.0)])
     def test_no_power_of_two_truncation(self, duration, rate):
-        segment, _ = self._get(1238171648.0, 1238171648.0 + duration, rate)
-        assert segment.shape[0] == int(duration * rate)
+        segment, _ = self._get(self.TILE, self.TILE + duration, rate)
+        # At the native rate nothing is resampled, so the piece is read whole.
+        assert segment.shape[0] == int((duration - (rate != 4096.0)) * rate)
 
     def test_segment_starts_at_its_first_sample(self):
-        segment, _ = self._get(1238171648.0, 1238171648.0 + 64.5, 4096.0)
+        segment, _ = self._get(self.TILE, self.TILE + 64.5, 4096.0)
         values = np.asarray(segment)
         assert values.shape[0] == 64 * 4096
         assert abs(values[0]) < 1.0 and abs(values[100] - 100.0) < 1.0

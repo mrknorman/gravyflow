@@ -189,7 +189,6 @@ class TestIFODataObtainerInit:
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
-            cache_segments=False
         )
         
         assert obtainer.data_quality == gf.DataQuality.BEST
@@ -202,7 +201,6 @@ class TestIFODataObtainerInit:
             data_labels=[gf.DataLabel.NOISE, gf.DataLabel.GLITCHES],
             observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
-            cache_segments=False
         )
         
         assert len(obtainer.data_labels) == 2
@@ -214,7 +212,6 @@ class TestIFODataObtainerInit:
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
-            cache_segments=False,
             overrides={"saturation": 0.5}
         )
         
@@ -229,82 +226,6 @@ class TestIFODataObtainerInit:
                 observing_runs=gf.ObservingRun.O3,
                 overrides={"nonexistent_attribute": 123}
             )
-    
-    def test_close_method(self):
-        """Test close method handles None segment_file (lines 402-404)."""
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=gf.DataLabel.NOISE,
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
-        )
-        
-        # Should not raise with None segment_file
-        obtainer.close()
-    
-    def test_generate_file_path(self):
-        """Test generate_file_path creates correct path."""
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=gf.DataLabel.NOISE,
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
-        )
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = obtainer.generate_file_path(
-                sample_rate_hertz=1024.0,
-                group="train",
-                data_directory_path=Path(tmpdir)
-            )
-            
-            assert path.parent == Path(tmpdir)
-            assert path.suffix == ".hdf5"
-            assert "segment_data_" in path.name
-    
-    def test_generate_file_path_default_directory(self):
-        """With no directory, segment caches go under the one user cache root."""
-        from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
-
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=gf.DataLabel.NOISE,
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
-        )
-        
-        path = obtainer.generate_file_path(
-            sample_rate_hertz=1024.0,
-            group="train",
-            data_directory_path=None  # Uses default
-        )
-        
-        assert path.parent == user_cache_dir("segments")
-        assert path.suffix == ".hdf5"
-        # The NoiseObtainer's default directory is that root too.
-        assert obtainer.generate_file_path(
-            1024.0, "train", gf.NoiseObtainer().data_directory_path
-        ) == path
-
-    def test_a_segment_cache_left_in_generator_data_is_named_once(self, tmp_path, monkeypatch):
-        """A segment cache where the old default put it is named, once, with where it goes."""
-        monkeypatch.chdir(tmp_path)
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=gf.DataLabel.NOISE,
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
-        )
-        path = obtainer.generate_file_path(1024.0, "train", None)
-        legacy = Path("generator_data") / path.name
-        legacy.parent.mkdir()
-        legacy.write_bytes(b"")
-        with pytest.warns(UserWarning, match="no longer reads generator_data") as record:
-            obtainer.generate_file_path(1024.0, "train", None)
-        assert str(path) in str(record[0].message)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            obtainer.generate_file_path(1024.0, "train", None)
 
 
 # =============================================================================
@@ -322,7 +243,6 @@ class TestSegmentProcessing:
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
-            cache_segments=False
         )
     
     def test_veto_time_segments(self, obtainer):
@@ -406,7 +326,7 @@ class TestSegmentProcessing:
             [[4096, 4116]]     # 20s duration
         ], dtype=float)
         
-        plan = obtainer.plan_sampling(segments, 8.0, 2.0)
+        plan = obtainer.plan_sampling(segments, 8.0, 2.0, sample_rate_hertz=4096.0)
         
         assert plan.rows.shape == (2, 1, 2)
         durations = plan.rows[:, 0, 1] - plan.rows[:, 0, 0]
@@ -424,7 +344,6 @@ class TestSegmentOrdering:
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
-            cache_segments=False
         )
     
     def test_order_segments_random(self, obtainer):
@@ -490,7 +409,6 @@ class TestCutAndGroupSegments:
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
             force_acquisition=False,
-            cache_segments=False
         )
     
     def test_cut_segments(self, obtainer):
@@ -526,19 +444,6 @@ class TestCutAndGroupSegments:
         
         assert isinstance(result, list)
     
-    def test_cache_segment_no_file_path(self):
-        """Test _cache_segment with no file_path does nothing (lines 909-910)."""
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=gf.DataLabel.NOISE,
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
-        )
-        
-        # Should not raise when file_path is None
-        obtainer._cache_segment("test_key", np.array([1, 2, 3]))
-
-
 class TestClearValidSegments:
     """Tests for clear_valid_segments method."""
     
@@ -548,14 +453,13 @@ class TestClearValidSegments:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
         
         # Set some state
         obtainer.valid_segments = np.array([[0, 100]])
-        obtainer.sampling_plan = obtainer.plan_sampling(np.array([[[0.0, 100.0]]]), 8.0, 2.0)
+        obtainer.sampling_plan = obtainer.plan_sampling(
+            np.array([[[0.0, 100.0]]]), 8.0, 2.0, sample_rate_hertz=4096.0)
         obtainer.ifos = [gf.IFO.L1]
-        obtainer._current_segment_index = 5
         obtainer._current_batch_index = 3
         obtainer._segment_exhausted = False
         
@@ -565,7 +469,6 @@ class TestClearValidSegments:
         assert obtainer.valid_segments is None
         assert obtainer.sampling_plan is None
         assert obtainer.ifos is None
-        assert obtainer._current_segment_index == 0
         assert obtainer._current_batch_index == 0
         assert obtainer._segment_exhausted == True
 
@@ -650,7 +553,6 @@ def _test_segment_processing_visualization(
         data_quality=gf.DataQuality.BEST,
         data_labels=gf.DataLabel.NOISE,
         observing_runs=gf.ObservingRun.O3,
-        cache_segments=False
     )
     
     # Create test segments
@@ -814,7 +716,6 @@ class TestGetOnsourceOffsourceChunks:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
         
         # Set up valid segments manually
@@ -838,7 +739,6 @@ class TestGetOnsourceOffsourceChunks:
         obtainer.current_segment = mock_segment
         obtainer._num_batches_in_current_segment = 2
         obtainer._current_batch_index = 0
-        obtainer._segment_cache_maxsize = 8
         obtainer.rng = np.random.default_rng(42)
         
         # Get first chunk
@@ -878,12 +778,7 @@ class TestAcquireGenerator:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
-        
-        # Can't actually test acquire without network access
-        # But we can test the setup code paths
-        obtainer._current_segment_index = 0
         
         # Create empty/invalid segments to trigger early exit
         empty_segments = np.array([]).reshape(0, 1, 2)
@@ -908,7 +803,6 @@ class TestGetValidSegmentsErrors:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
         
         with pytest.raises(KeyError, match="a split is one of"):
@@ -954,7 +848,6 @@ class TestUnpackObservingRuns:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
         
         assert len(obtainer.start_gps_times) == 1
@@ -967,7 +860,6 @@ class TestUnpackObservingRuns:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=[gf.ObservingRun.O2, gf.ObservingRun.O3],
-            cache_segments=False
         )
         
         assert len(obtainer.start_gps_times) == 2
@@ -983,7 +875,6 @@ class TestMergeBinsEdgeCases:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
     
     def test_merge_bins_non_overlapping(self, obtainer):
@@ -1013,7 +904,6 @@ class TestMultipleIFOSegments:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
     
     def test_plan_sampling_multi_ifo(self, obtainer):
@@ -1025,7 +915,7 @@ class TestMultipleIFOSegments:
             [[4096, 4116], [4096, 4121]]    # L1: 20s, H1: 25s
         ], dtype=float)
         
-        plan = obtainer.plan_sampling(segments, 8.0, 2.0)
+        plan = obtainer.plan_sampling(segments, 8.0, 2.0, sample_rate_hertz=4096.0)
         
         assert plan.rows.shape[0] == 2
     
@@ -1048,48 +938,15 @@ class TestMultipleIFOSegments:
         np.testing.assert_array_equal(durations, [10, 20, 30])
 
 
-class TestCachingWithFilePath:
-    """Tests for caching with actual file paths."""
-    
-    def test_cache_segment_with_valid_path(self):
-        """_cache_segment stores a segment and its first-sample time, which read back."""
-        from gravyflow.src.dataset.acquisition.base import SegmentStrain
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=gf.DataLabel.NOISE,
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=True
-        )
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            obtainer.file_path = Path(tmpdir) / "test_cache.hdf5"
-            test_data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-            obtainer._cache_segment("test_key", SegmentStrain(test_data, 1238175000.25, 2.0, "test"))
-            assert obtainer.file_path.exists()
-
-            stored = obtainer._read_cached_segment("test_key", 2.0)
-            np.testing.assert_array_equal(np.asarray(stored.data), test_data)
-            assert stored.t0 == 1238175000.25 and stored.source == "test"
-            assert obtainer._read_cached_segment("test_key", 4.0) is None  # another rate
-
-
 class TestIFODataWithNaN:
     """Tests for IFOData handling of NaN values."""
     
-    def test_ifo_data_with_nan_replaced(self):
-        """Test that NaN values are replaced with zeros in IFOData."""
-        data = np.array([1.0, np.nan, 3.0, np.inf, 5.0], dtype=np.float32)
-        
-        ifo_data = gf_acq.IFOData(
-            data=[data],
-            sample_rate_hertz=1.0,
-            start_gps_time=[0.0]
-        )
-        
-        # NaN and Inf should be replaced with zeros
-        result = np.array(ifo_data.data[0])
-        assert not np.any(np.isnan(result))
-        assert not np.any(np.isinf(result))
+    @pytest.mark.parametrize("bad", [np.nan, np.inf])
+    def test_ifo_data_with_non_finite_strain_is_refused(self, bad):
+        """Held strain is finite: a row holding NaN or Inf is refused, never zeroed (GF:15 C1)."""
+        data = np.array([1.0, bad, 3.0, 5.0], dtype=np.float32)
+        with pytest.raises(ValueError, match="non-finite strain"):
+            gf_acq.IFOData(data=[data], sample_rate_hertz=1.0, start_gps_time=[0.0])
 
 class TestCutSegmentsEdgeCases:
     """Tests for cut_segments edge cases."""
@@ -1100,7 +957,6 @@ class TestCutSegmentsEdgeCases:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
     
     def test_cut_segments_exact_boundary(self, obtainer):
@@ -1137,7 +993,6 @@ class TestSplitSegments:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
     
     def test_the_splits_partition_time_less_their_guards(self):
@@ -1169,7 +1024,6 @@ class TestVetoTimeSegmentsComplex:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
     
     def test_veto_completely_covers_segment(self, obtainer):
@@ -1218,7 +1072,6 @@ def _test_full_pipeline_visualization(
         data_quality=gf.DataQuality.BEST,
         data_labels=gf.DataLabel.NOISE,
         observing_runs=gf.ObservingRun.O3,
-        cache_segments=False
     )
     
     # Create complex test segments
@@ -1320,7 +1173,6 @@ class TestGetSegmentTimes:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
         
         # Use a short time window to minimize lookup time
@@ -1348,7 +1200,6 @@ class TestGetSegmentTimes:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
         
         # Mock the observing run to use a small window
@@ -1370,7 +1221,6 @@ class TestRemoveUnwantedSegments:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,  # Noise only, should veto events and glitches
-            cache_segments=False
         )
         
         # Create some test segments
@@ -1403,7 +1253,6 @@ class TestGetSegmentData:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
 
         # Use a very short segment (10 seconds) to minimize data transfer
@@ -1418,74 +1267,8 @@ class TestGetSegmentData:
 
 
 @pytest.mark.slow
-class TestGetSegment:
-    """Tests for get_segment method (lines 948-1014)."""
-    
-    def test_get_segment_acquires_data(self):
-        """Test get_segment acquires and resamples data (lines 988-1014)."""
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=gf.DataLabel.NOISE,
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False,
-            force_acquisition=True  # Force fresh acquisition
-        )
-        
-        start_gps = 1238166100.0
-        end_gps = start_gps + 10.0
-        sample_rate = 1024.0
-        
-        segment = obtainer.get_segment(
-            start_gps,
-            end_gps,
-            sample_rate,
-            gf.IFO.L1,
-            f"test_segment_{start_gps}_{end_gps}"
-        )
-        
-        assert segment is not None
-        # Should have approximately (end-start) * sample_rate samples
-        expected_samples = int((end_gps - start_gps) * sample_rate)
-        # Allow some tolerance for resampling
-        assert abs(len(segment) - expected_samples) < sample_rate
-    
-    def test_get_segment_with_caching(self):
-        """Test get_segment caches data to HDF5 file (lines 966-986)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            obtainer = gf.IFODataObtainer(
-                data_quality=gf.DataQuality.BEST,
-                data_labels=gf.DataLabel.NOISE,
-                observing_runs=gf.ObservingRun.O3,
-                cache_segments=True
-            )
-            
-            obtainer.file_path = Path(tmpdir) / "test_cache.hdf5"
-            
-            start_gps = 1238166100.0
-            end_gps = start_gps + 10.0
-            segment_key = f"segments/test_{start_gps}"
-            
-            # First acquisition - should fetch from network
-            segment1 = obtainer.get_segment(
-                start_gps, end_gps, 1024.0, gf.IFO.L1, segment_key
-            )
-            
-            if segment1 is not None:
-                # Cache the segment
-                obtainer._cache_segment(segment_key, np.array(segment1))
-                
-                # Second acquisition with force_acquisition=False should use cache
-                obtainer.force_acquisition = False
-                segment2 = obtainer.get_segment(
-                    start_gps, end_gps, 1024.0, gf.IFO.L1, segment_key
-                )
-                
-                assert segment2 is not None
-
-
-@pytest.mark.slow
 class TestAcquireGenerator:
-    """Tests for acquire generator with real data (lines 1016-1087)."""
+    """Tests for acquire generator with real data."""
     
     def test_acquire_yields_ifo_data(self):
         """Test acquire generator yields IFOData objects (lines 1042-1082)."""
@@ -1493,7 +1276,6 @@ class TestAcquireGenerator:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
         
         # Create a small valid segment for testing
@@ -1508,15 +1290,12 @@ class TestAcquireGenerator:
             ifos=[gf.IFO.L1]
         )
         
-        # Get first segment
-        try:
-            segment = next(gen)
-            assert isinstance(segment, gf_acq.IFOData)
-            assert len(segment.data) == 1  # One IFO
-            assert len(segment.data[0]) > 0
-        except StopIteration:
-            # If acquisition fails, that's acceptable
-            pass
+        # The piece is read through the store: its whole GWOSC file fetched, then the
+        # whole seconds inside the resampler's margin.
+        segment = next(gen)
+        assert isinstance(segment, gf_acq.IFOData)
+        assert len(segment.data) == 1  # One IFO
+        assert len(segment.data[0]) == 19 * 1024
 
 
 @pytest.mark.slow
@@ -1529,7 +1308,6 @@ class TestGetValidSegmentsReal:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
         
         # Use a shorter time window for faster testing
@@ -1554,7 +1332,6 @@ class TestGetValidSegmentsReal:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
         
         # Short time window
@@ -1580,7 +1357,6 @@ class TestGetOnsourceOffsourceChunksReal:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
         )
         
         # Use a known good segment
@@ -1592,7 +1368,6 @@ class TestGetOnsourceOffsourceChunksReal:
         obtainer.valid_segments = test_segments
         obtainer.ifos = [gf.IFO.L1]
         obtainer._segment_exhausted = False
-        obtainer._current_segment_index = 0
         obtainer._current_batch_index = 0
         
         gen = obtainer.get_onsource_offsource_chunks(
@@ -1812,93 +1587,90 @@ def test_real_segment_visualization_plots(pytestconfig: Config) -> None:
         observing_runs=[gf.ObservingRun.O3]
     )
     
-    try:
-        # Get Valid Segments (Real Data)
-        # Use a fixed seed for reproducibility
-        segments_list = obtainer.get_valid_segments(
-            ifos=[gf.IFO.L1, gf.IFO.H1],
-            seed=42,
-            group_name="train"
-        )
-        
-        # Convert segments ndarray (num_segments, num_ifos, 2) to dictionary mapping IFO -> segments array
-        segments_array = segments_list
-        segments_dict = {}
-        requested_ifos = [gf.IFO.L1, gf.IFO.H1]
-        
-        for i, ifo in enumerate(requested_ifos):
-            segments_dict[ifo] = segments_array[:, i, :]
-        
-        # Extract Chunks
-        gen = obtainer.get_onsource_offsource_chunks(
-            sample_rate_hertz=2048.0,
-            onsource_duration_seconds=1.0,
-            crop_duration_seconds=0.5,
-            offsource_duration_seconds=16.0,
-            num_examples_per_batch=32,
-            ifos=[gf.IFO.L1, gf.IFO.H1],
-            seed=42
-        )
-        
-        # Get one batch to find extraction points
-        output = next(gen)
-        if len(output) >= 3:
-            subarrays, backgrounds, gps_times = output[:3]
+    # Get Valid Segments (Real Data)
+    # Use a fixed seed for reproducibility
+    segments_list = obtainer.get_valid_segments(
+        ifos=[gf.IFO.L1, gf.IFO.H1],
+        seed=42,
+        group_name="train"
+    )
+    
+    # Convert segments ndarray (num_segments, num_ifos, 2) to dictionary mapping IFO -> segments array
+    segments_array = segments_list
+    segments_dict = {}
+    requested_ifos = [gf.IFO.L1, gf.IFO.H1]
+    
+    for i, ifo in enumerate(requested_ifos):
+        segments_dict[ifo] = segments_array[:, i, :]
+    
+    # Extract Chunks
+    gen = obtainer.get_onsource_offsource_chunks(
+        sample_rate_hertz=2048.0,
+        onsource_duration_seconds=1.0,
+        crop_duration_seconds=0.5,
+        offsource_duration_seconds=16.0,
+        num_examples_per_batch=32,
+        ifos=[gf.IFO.L1, gf.IFO.H1],
+        seed=42
+    )
+    
+    # Get one batch to find extraction points
+    output = next(gen)
+    if len(output) >= 3:
+        subarrays, backgrounds, gps_times = output[:3]
+    else:
+        pytest.fail(f"Generator yielded {len(output)} items, expected at least 3")
+    extraction_points = gps_times
+    
+    # Generate Plots
+    
+    # Timeline Plot (All Segments)
+    p1 = gf.generate_segment_timeline_plot(
+        segments_dict,
+        observing_runs=[gf.ObservingRun.O3],
+        title="Noise Segment Timeline - Real O3 Data"
+    )
+    
+    # Extraction Plot (Zoomed in on first few examples)
+    # Find the segment containing the first extraction point for each IFO to set the plot context
+    first_gps_per_ifo = extraction_points[0]
+    
+    relevant_segments = {}
+    for ifo, segs in segments_dict.items():
+        # Determine which time corresponds to this IFO
+        if extraction_points.ndim == 1:
+            t = first_gps_per_ifo
         else:
-            pytest.fail(f"Generator yielded {len(output)} items, expected at least 3")
-        extraction_points = gps_times
+            try:
+                idx = requested_ifos.index(ifo)
+                t = first_gps_per_ifo[idx]
+            except ValueError:
+                continue
         
-        # Generate Plots
+        # Find segment containing the extraction time
+        mask = (segs[:, 0] <= t) & (segs[:, 1] >= t)
+        if np.any(mask):
+            relevant_segments[ifo] = segs[mask][0]
+    
+    p2 = gf.generate_example_extraction_plot(
+        relevant_segments,
+        extraction_points,
+        onsource_duration_seconds=1.0,
+        offsource_duration_seconds=16.0,
+        crop_duration_seconds=0.5,
+        title="Example Extraction - Real O3 Data (Batch 1)"
+    )
+    
+    if plot_results:
+        gf.ensure_directory_exists(output_directory_path)
+        output_file(output_directory_path / "segment_timeline_visualization_real.html")
+        save(p1)
+        output_file(output_directory_path / "example_extraction_visualization_real.html")
+        save(p2)
         
-        # Timeline Plot (All Segments)
-        p1 = gf.generate_segment_timeline_plot(
-            segments_dict,
-            observing_runs=[gf.ObservingRun.O3],
-            title="Noise Segment Timeline - Real O3 Data"
-        )
-        
-        # Extraction Plot (Zoomed in on first few examples)
-        # Find the segment containing the first extraction point for each IFO to set the plot context
-        first_gps_per_ifo = extraction_points[0]
-        
-        relevant_segments = {}
-        for ifo, segs in segments_dict.items():
-            # Determine which time corresponds to this IFO
-            if extraction_points.ndim == 1:
-                t = first_gps_per_ifo
-            else:
-                try:
-                    idx = requested_ifos.index(ifo)
-                    t = first_gps_per_ifo[idx]
-                except ValueError:
-                    continue
-            
-            # Find segment containing the extraction time
-            mask = (segs[:, 0] <= t) & (segs[:, 1] >= t)
-            if np.any(mask):
-                relevant_segments[ifo] = segs[mask][0]
-        
-        p2 = gf.generate_example_extraction_plot(
-            relevant_segments,
-            extraction_points,
-            onsource_duration_seconds=1.0,
-            offsource_duration_seconds=16.0,
-            crop_duration_seconds=0.5,
-            title="Example Extraction - Real O3 Data (Batch 1)"
-        )
-        
-        if plot_results:
-            gf.ensure_directory_exists(output_directory_path)
-            output_file(output_directory_path / "segment_timeline_visualization_real.html")
-            save(p1)
-            output_file(output_directory_path / "example_extraction_visualization_real.html")
-            save(p2)
-            
-        assert p1 is not None
-        assert p2 is not None
-        
-    finally:
-        obtainer.close()
+    assert p1 is not None
+    assert p2 is not None
+    
 
 
 def test_segment_visualization_plots(pytestconfig: Config) -> None:
@@ -1943,7 +1715,6 @@ class TestFeatureMode:
             data_labels=[gf.EventConfidence.CONFIDENT]
         )
         assert gf.EventConfidence.CONFIDENT in obtainer.data_labels
-        obtainer.close()
     
     def test_data_labels_with_glitch_type(self):
         """Test IFODataObtainer accepts GlitchType in data_labels."""
@@ -1953,7 +1724,6 @@ class TestFeatureMode:
             data_labels=[gf.GlitchType.BLIP]
         )
         assert gf.GlitchType.BLIP in obtainer.data_labels
-        obtainer.close()
     
     def test_data_labels_with_multiple_types(self):
         """Test IFODataObtainer accepts mixed DataLabel and specific types."""
@@ -1969,7 +1739,6 @@ class TestFeatureMode:
         assert gf.DataLabel.NOISE in obtainer.data_labels
         assert gf.GlitchType.BLIP in obtainer.data_labels
         assert gf.GlitchType.TOMTE in obtainer.data_labels
-        obtainer.close()
     
     def test_supersede_events_present(self):
         """Test EVENTS supersede individual EventConfidences when both present."""
@@ -1981,7 +1750,6 @@ class TestFeatureMode:
         # Both should be in labels (supersede happens at segment fetch time)
         assert gf.DataLabel.EVENTS in obtainer.data_labels
         assert gf.EventConfidence.MARGINAL in obtainer.data_labels
-        obtainer.close()
     
     def test_supersede_glitches_present(self):
         """Test GLITCHES supersede individual GlitchTypes when both present."""
@@ -1993,7 +1761,6 @@ class TestFeatureMode:
         # Both should be in labels
         assert gf.DataLabel.GLITCHES in obtainer.data_labels
         assert gf.GlitchType.BLIP in obtainer.data_labels
-        obtainer.close()
     
     def test_features_mode_triggers_without_noise(self):
         """Test that TRANSIENT mode is triggered when NOISE not in labels."""
@@ -2006,7 +1773,6 @@ class TestFeatureMode:
         # which requires network, so we just verify construction
         assert gf.DataLabel.NOISE not in obtainer.data_labels
         assert gf.DataLabel.EVENTS in obtainer.data_labels
-        obtainer.close()
     
 
 
@@ -2045,7 +1811,6 @@ class TestAcquisitionModeDetection:
             data_labels=[gf.DataLabel.NOISE]
         )
         assert gf.DataLabel.NOISE in obtainer.data_labels
-        obtainer.close()
     
     def test_mixed_mode_noise_and_glitches(self):
         """Test mixed mode with NOISE and GLITCHES."""
@@ -2056,7 +1821,6 @@ class TestAcquisitionModeDetection:
         )
         assert gf.DataLabel.NOISE in obtainer.data_labels
         assert gf.DataLabel.GLITCHES in obtainer.data_labels
-        obtainer.close()
     
     def test_events_only_no_noise(self):
         """Test events-only configuration."""
@@ -2067,7 +1831,6 @@ class TestAcquisitionModeDetection:
         )
         assert gf.DataLabel.EVENTS in obtainer.data_labels
         assert gf.DataLabel.NOISE not in obtainer.data_labels
-        obtainer.close()
     
     def test_individual_event_type_only(self):
         """Test individual EventConfidence without EVENTS or NOISE."""
@@ -2079,7 +1842,6 @@ class TestAcquisitionModeDetection:
         assert gf.EventConfidence.CONFIDENT in obtainer.data_labels
         assert gf.DataLabel.EVENTS not in obtainer.data_labels
         assert gf.DataLabel.NOISE not in obtainer.data_labels
-        obtainer.close()
     
     def test_individual_glitch_type_only(self):
         """Test individual GlitchType without GLITCHES or NOISE."""
@@ -2091,7 +1853,6 @@ class TestAcquisitionModeDetection:
         assert gf.GlitchType.BLIP in obtainer.data_labels
         assert gf.GlitchType.TOMTE in obtainer.data_labels
         assert not any(isinstance(label, gf.DataLabel) and label == gf.DataLabel.GLITCHES for label in obtainer.data_labels)
-        obtainer.close()
 
 
 # =============================================================================
@@ -2134,7 +1895,6 @@ class TestFeatureModePipeline:
             # Verify we can access the obtainer's data labels
             assert len(obtainer.data_labels) > 0
         
-        obtainer.close()
     
     def test_features_mode_acquisition_mode_detection(self):
         """Test that acquisition_mode is correctly set to TRANSIENT when no NOISE."""
@@ -2154,7 +1914,6 @@ class TestFeatureModePipeline:
         
         assert not has_noise
         assert has_features
-        obtainer.close()
     
 
     
@@ -2168,7 +1927,6 @@ class TestFeatureModePipeline:
         )
         # When EVENTS is present, supersede logic should use all events
         assert gf.DataLabel.EVENTS in obtainer1.data_labels
-        obtainer1.close()
         
         # Test 2: GLITCHES supersedes individual GlitchTypes
         obtainer2 = gf.IFODataObtainer(
@@ -2177,7 +1935,6 @@ class TestFeatureModePipeline:
             data_labels=[gf.DataLabel.GLITCHES, gf.GlitchType.BLIP]
         )
         assert gf.DataLabel.GLITCHES in obtainer2.data_labels
-        obtainer2.close()
         
         # Test 3: Individual types only (no supersede)
         obtainer3 = gf.IFODataObtainer(
@@ -2188,7 +1945,6 @@ class TestFeatureModePipeline:
         assert not any(isinstance(label, type(gf.DataLabel.GLITCHES)) and label == gf.DataLabel.GLITCHES for label in obtainer3.data_labels)
         assert gf.GlitchType.BLIP in obtainer3.data_labels
         assert gf.GlitchType.TOMTE in obtainer3.data_labels
-        obtainer3.close()
     
     def test_auto_precaching_info_message_format(self, caplog):
         """Test that auto-precaching info message has correct format."""
@@ -2213,7 +1969,6 @@ class TestFeatureModePipeline:
         # Verify obtainer is configured for TRANSIENT mode
         assert gf.DataLabel.NOISE not in obtainer.data_labels
         
-        obtainer.close()
     
     def test_mixed_event_glitch_types(self):
         """Test pipeline with mixed EventConfidence and GlitchType labels."""
@@ -2232,7 +1987,6 @@ class TestFeatureModePipeline:
         assert gf.GlitchType.SCATTERED_LIGHT in obtainer.data_labels
         assert gf.DataLabel.NOISE not in obtainer.data_labels
 
-        obtainer.close()
 
 
 class TestPostProcessWhitening:
@@ -2259,7 +2013,6 @@ class TestPostProcessWhitening:
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
-            cache_segments=False,
         )
         tolerance = 1e-5 * np.abs(expected).max()
         calls, wrong, written = 300, 0, 0
@@ -2270,7 +2023,6 @@ class TestPostProcessWhitening:
             written += not (np.array_equal(given[RV.ONSOURCE], onsource)
                             and np.array_equal(given[RV.OFFSOURCE], offsource)
                             and np.array_equal(np.asarray(served[RV.OFFSOURCE]), offsource))
-        obtainer.close()
         assert (wrong, written) == (0, 0), (
             f"of {calls} calls, {wrong} whitened onsources differ from a whitening of "
             f"untouched copies and {written} wrote the buffers given or served another offsource")

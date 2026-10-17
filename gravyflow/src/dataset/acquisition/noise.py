@@ -18,9 +18,10 @@ from gravyflow.src.dataset.config import WindowSpec
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, Coincidence,
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS,
-    WINDOW_EDGE_BUFFER_SAMPLES, kept_seconds, label_kinds, separable,
+    WINDOW_EDGE_BUFFER_SAMPLES, label_kinds, separable,
 )
 from .gwosc_data import intersect_segments
+from gravyflow.src.dataset.store.read import interiors
 from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
@@ -99,16 +100,14 @@ class NoiseDataObtainer(BaseDataObtainer):
             segment_order: SegmentOrder = SegmentOrder.RANDOM,
             max_segment_duration_seconds: float = 2048.0,
             saturation: float = 8.0,
-            force_acquisition: bool = False,
-            cache_segments: bool = True,
             overrides: dict = None,
             logging_level: int = logging.WARNING,
             augmentations: List = None,  # Training only; None is none
-            prefetch_segments: int = 16,
             gwosc_flags: Optional[Tuple[str, ...]] = None,
             split_spec=None,
             source=None,
             coincidence: Coincidence = Coincidence.SEPARATED,
+            exclusions=(),
         ):
         if DataLabel.EVENTS in label_kinds(data_labels):
             raise ValueError(
@@ -123,16 +122,14 @@ class NoiseDataObtainer(BaseDataObtainer):
             segment_order=segment_order,
             max_segment_duration_seconds=max_segment_duration_seconds,
             saturation=saturation,
-            force_acquisition=force_acquisition,
-            cache_segments=cache_segments,
             overrides=overrides,
             logging_level=logging_level,
             augmentations=augmentations,
-            prefetch_segments=prefetch_segments,
             gwosc_flags=gwosc_flags,
             split_spec=split_spec,
             source=source,
             coincidence=coincidence,
+            exclusions=exclusions,
         )
 
         self.acquisition_mode = AcquisitionMode.NOISE
@@ -177,15 +174,17 @@ class NoiseDataObtainer(BaseDataObtainer):
             minimum_duration_seconds: float,
             footprint_seconds: float,
             separation_seconds: float = 0.0,
+            *,
+            sample_rate_hertz: float,
         ) -> SamplingPlan:
         """
         The plan for drawing windows from ``segments`` (rows from ``get_valid_segments``).
 
         Within each ``max_segment_duration_seconds`` bin, each detector's pieces of at
         least ``minimum_duration_seconds`` are usable; a bin where some detector has
-        none is skipped. A piece is measured as it is loaded, in whole seconds
-        (``kept_seconds``), and its window starts span that length less
-        ``footprint_seconds``. The usable pieces are re-paired with ``couple_pieces``
+        none is skipped. A piece is measured as it is read at ``sample_rate_hertz``:
+        its interior (``store.read.interiors``), the whole seconds whose read lies
+        inside it, and its window starts span that length less ``footprint_seconds``. The usable pieces are re-paired with ``couple_pieces``
         in proportion to those starts, longest first, so every usable piece is drawn
         from and no short piece is drawn more densely than a long one. Bins keep the
         order in which ``segments`` first reach them.
@@ -202,23 +201,25 @@ class NoiseDataObtainer(BaseDataObtainer):
         rows, start_seconds, inseparable = [], [], 0
         for bin_index in bins[np.sort(first)]:
             in_bin = segments[bins == bin_index]
-            usable, starts = [], []
+            usable, origins, starts = [], [], []
             for j in range(num_ifos):
                 pieces = np.unique(in_bin[:, j, :], axis=0)
-                lengths = kept_seconds(pieces[:, 1] - pieces[:, 0])
+                firsts, counts = interiors(self.source, sample_rate_hertz, pieces)
+                lengths = counts / sample_rate_hertz
                 keep = lengths >= minimum_duration_seconds
-                pieces, lengths = pieces[keep], lengths[keep]
+                pieces, lengths, firsts = pieces[keep], lengths[keep], firsts[keep]
                 order = np.argsort(-lengths, kind="stable")
                 usable.append(pieces[order])
+                origins.append(firsts[order] / sample_rate_hertz)
                 starts.append(lengths[order] - footprint_seconds)
             if any(len(pieces) == 0 for pieces in usable):
                 continue
             index, weights = couple_pieces(starts)
             bin_rows = np.stack([usable[j][index[:, j]] for j in range(num_ifos)], axis=1)
             keep = np.array([
-                separable([(piece[0], piece[0] + starts[j][index[k, j]]) for j, piece in enumerate(row)],
-                          separation_seconds)
-                for k, row in enumerate(bin_rows)
+                separable([(origins[j][index[k, j]], origins[j][index[k, j]] + starts[j][index[k, j]])
+                           for j in range(num_ifos)], separation_seconds)
+                for k in range(len(bin_rows))
             ], dtype=bool)
             inseparable += int(np.sum(~keep))
             rows.append(bin_rows[keep])
@@ -549,7 +550,7 @@ class NoiseDataObtainer(BaseDataObtainer):
         footprint_seconds = (num_onsource_samples + num_offsource_samples) / window_spec.sample_rate_hertz
         separation_seconds = 0.0 if coincident else 2.0 * footprint_seconds
 
-        if not self._current_batch_index and not self._current_segment_index:
+        if not self._current_batch_index:
             window_seconds = \
                 window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds
             # A new plan starts new passes.
@@ -560,6 +561,7 @@ class NoiseDataObtainer(BaseDataObtainer):
                 footprint_seconds=footprint_seconds
                 + WINDOW_EDGE_BUFFER_SAMPLES / window_spec.sample_rate_hertz,
                 separation_seconds=separation_seconds,
+                sample_rate_hertz=window_spec.sample_rate_hertz,
             )
             if self.sampling_plan.inseparable:
                 logging.info(f"{self.sampling_plan.inseparable} rows left out: their detectors' "
@@ -598,7 +600,7 @@ class NoiseDataObtainer(BaseDataObtainer):
         failed_rows = set()
         while True:
             while self._segment_exhausted:
-                # Create generator ONCE and reuse it (preserves prefetch across batches)
+                # One generator of passes, kept across batches
                 if self._segment_generator is None:
                     self._segment_generator = self._planned_segments(
                         self.sampling_plan,

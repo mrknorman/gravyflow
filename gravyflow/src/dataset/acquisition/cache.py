@@ -1,16 +1,14 @@
 """
 Unified caching interface for data acquisition.
 
-This module provides a consistent caching API used by both NOISE and TRANSIENT
-modes. The interface abstracts whether data is cached in memory or on disk.
+The transient path's window cache. Real noise has no cache of its own: it is read
+through the store (``dataset/store``), whose tiles are memory-mapped and never held.
 
 Classes:
     AcquisitionCache: Abstract base class defining the cache interface
-    MemoryCache: LRU memory cache for raw segment data (NOISE mode)
     DiskCache: HDF5 disk cache for processed transient windows (TRANSIENT mode)
 """
 from abc import ABC, abstractmethod
-from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 import logging
@@ -25,8 +23,7 @@ class AcquisitionCache(ABC):
     Abstract base class for data acquisition caching.
     
     Provides a unified interface for both memory and disk caching strategies.
-    Each implementation names its keys: MemoryCache takes any hashable key, and
-    DiskCache a transient's exact GPS time.
+    DiskCache names its keys by a transient's exact GPS time.
     
     Subclasses must implement:
         has(key) - Check if key exists
@@ -102,83 +99,6 @@ class AcquisitionCache(ABC):
     def size(self) -> int:
         """Return number of items in cache."""
         pass
-
-
-class MemoryCache(AcquisitionCache):
-    """
-    LRU memory cache for raw segment data.
-    
-    Used primarily by NOISE mode to cache downloaded segments and avoid
-    re-downloading the same data within a session.
-    
-    Supports both integer GPS keys and string composite keys.
-    
-    Args:
-        maxsize: Maximum number of items to keep in cache (default: 8)
-    
-    Note:
-        This cache does NOT support resampling or cropping - it stores raw data.
-        The sample_rate/duration parameters in get() are ignored.
-    """
-    
-    def __init__(self, maxsize: int = 8):
-        self._cache: OrderedDict = OrderedDict()
-        self._maxsize = maxsize
-    
-    def has(self, key) -> bool:
-        """Check if key exists in cache."""
-        return key in self._cache
-    
-    def get(
-        self,
-        key,
-        sample_rate_hertz: Optional[float] = None,
-        onsource_duration: Optional[float] = None,
-        offsource_duration: Optional[float] = None,
-    ) -> Optional[any]:
-        """
-        Get cached data by key.
-        
-        Note: sample_rate/duration params are ignored - returns raw cached data.
-        """
-        if key not in self._cache:
-            return None
-        
-        # Move to end (most recently used)
-        self._cache.move_to_end(key)
-        return self._cache[key]
-    
-    def put(
-        self,
-        key,
-        data: any,
-        **metadata
-    ) -> None:
-        """
-        Store data in cache with LRU eviction.
-        
-        Simplified interface accepts any data and any key type.
-        If cache is full, evicts the least recently used item.
-        
-        Args:
-            key: Cache key (int or str)
-            data: Data to cache
-            **metadata: Ignored (for interface compatibility)
-        """
-        # Evict oldest if at capacity
-        while len(self._cache) >= self._maxsize:
-            self._cache.popitem(last=False)
-        
-        self._cache[key] = data
-    
-    def clear(self) -> None:
-        """Clear all cached data."""
-        self._cache.clear()
-    
-    @property
-    def size(self) -> int:
-        """Return number of items in cache."""
-        return len(self._cache)
 
 
 class DiskCache(AcquisitionCache):

@@ -305,7 +305,6 @@ def setup_noise_obtainer(
         data_quality=gf.DataQuality.BEST, 
         data_labels=[gf.DataLabel.NOISE],
         force_acquisition=True,
-        cache_segments=False
     )
     return gf.NoiseObtainer(
         ifo_data_obtainer=ifo_data_obtainer,
@@ -931,16 +930,11 @@ def test_dataset_empty_segment_list():
         def acquire(self, *args, **kwargs):
             # Empty generator
             return iter([])
-        
-        def generate_file_path(self, *args, **kwargs):
-            self.file_path = None
-    
+
     ifo_obtainer = EmptySegmentsObtainer(
         observing_runs=gf.ObservingRun.O3,
         data_quality=gf.DataQuality.BEST,
         data_labels=[gf.DataLabel.NOISE],
-        force_acquisition=False,
-        cache_segments=False
     )
     
     noise_obtainer = gf.NoiseObtainer(

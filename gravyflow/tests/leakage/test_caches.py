@@ -1,7 +1,11 @@
 """
-Catalogue caches serve only their own parameters: a warm cache answers a
-query exactly as a cold one would, whatever was asked of it before.
+Caches serve only their own parameters: a warm catalogue cache answers a query
+exactly as a cold one would, whatever was asked of it before, and the strain store
+serves every configuration and split of one source the same tiles.
 """
+
+import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -58,7 +62,7 @@ def test_catalogue_caches(offline_public_sources, tmp_path):
     def segments(run, ifo, flags):
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
-            observing_runs=RUNS[run], cache_segments=False, gwosc_flags=flags,
+            observing_runs=RUNS[run], gwosc_flags=flags,
         )
         return _segments(obtainer.get_all_segment_times(getattr(gf.IFO, ifo)))
 
@@ -165,7 +169,7 @@ def test_split_fingerprint_recorded(world, tmp_path):
     narrow = gf.SplitSpec(guard_seconds=64.0)
     fixture = fx.straddle("train", "test", half_width=512.0)
     with world(fixture):
-        ds = fx.dataset(fixture, tmp_path / "data", "train", split_spec=narrow)
+        ds = fx.dataset(fixture, "train", split_spec=narrow)
         assert ds.seed_metadata["split_fingerprint"] == narrow.fingerprint() != SPEC_A.fingerprint()
 
     record ={"fingerprint": SPEC_A.fingerprint(), "selection_split": "validate"}
@@ -185,3 +189,75 @@ def test_fingerprint_check_sees_a_spec_mismatch_let_through(tmp_path, monkeypatc
     path = tmp_path / "index.npz"
     _index(SPEC_A).save(path)
     assert _refuses_another_split(lambda: transient_index.TransientIndex.load(path, SPEC_B)) is None
+
+
+# =============================================================================
+# THE STORE (GF:15 M3c): L33's noise half, and L16's store half
+# =============================================================================
+
+def _draw(batches, count=2):
+    """``count`` batches of an iterator, every entry as a NumPy array."""
+    return [{key: np.asarray(value) for key, value in next(batches).items()} for _ in range(count)]
+
+
+def _same(a, b):
+    return len(a) == len(b) and all(
+        x.keys() == y.keys() and all(np.array_equal(x[key], y[key]) for key in x) for x, y in zip(a, b))
+
+
+def test_warm_reads_equal_cold_and_every_rate_reads_the_same_tiles(world):
+    """
+    L33, noise: a tile's content depends only on its source, detector, rate and time,
+    so a warm read equals a cold one, another output rate reads the tiles already
+    fetched, and a tile of another source at the same place is never served.
+    """
+    from gravyflow.src.dataset.store import Store, TileKey, read
+
+    from .audit import collect
+    from .fakes import FakeSource
+
+    fixture = fx.straddle("train", "test", half_width=512.0, rate=2048.0)
+    with world(fixture) as harness:
+        root = Path(os.environ["GRAVYFLOW_CACHE_DIR"])
+        assert root in read.process_store().root.parents
+        # A canary: another source's tile at the very place the reads use.
+        start = float(fixture.segments["H1"][0][0])
+        tile = int(FakeSource.TILE_SECONDS)
+        canary = TileKey("fake-canary", "H1", 2048, tile, int(start // tile) + 2)
+        Store(root / "store").commit(canary, np.full(canary.length, 7.0))
+
+        cold = _draw(fx.noise_batches(fixture, "train", rate=2048.0))
+        fetched = len(harness.source.snapshot()[0])
+        assert fetched > 0
+        _draw(fx.noise_batches(fixture, "train", rate=1024.0))  # resampled from the same tiles
+        warm = _draw(fx.noise_batches(fixture, "train", rate=2048.0))
+        assert len(harness.source.snapshot()[0]) == fetched, "a warm read, or another rate, fetched"
+        assert _same(cold, warm)
+        # The warm build decodes to the fake's own samples: no canary byte was served.
+        records = collect(harness, {"warm": ("train", fx.noise_batches(fixture, "train", rate=2048.0))},
+                          2, ["H1", "L1"], fx.window(2048.0), onsource_cropped=False, warm=True)
+        assert records["warm"].num_examples == 16
+
+
+def test_alternating_splits_on_one_obtainer_change_neither_splits_bytes(world):
+    """
+    L16, the store's half: train and validate drawn in turn from one obtainer serve
+    exactly what each serves alone, and neither stream ends early. Tiles carry no
+    split and no process keeps their contents, so no reading state passes between them.
+    """
+    fixture = fx.straddle("validate", "train", half_width=512.0)
+    splits = ("train", "validate")
+    with world(fixture):
+        alone = {split: _draw(fx.noise_batches(fixture, split), 3) for split in splits}
+        noise = fx.noise_obtainer(fixture)
+        streams = {split: noise(
+            sample_rate_hertz=256.0, onsource_duration_seconds=fx.ONSOURCE_SECONDS,
+            crop_duration_seconds=fx.CROP_SECONDS, offsource_duration_seconds=fx.OFFSOURCE_SECONDS,
+            num_examples_per_batch=8, group=split, seed=7, sampling_mode=gf.SamplingMode.RANDOM,
+        ) for split in splits}
+        turns = {split: [] for split in splits}
+        for _ in range(3):
+            for split in splits:
+                turns[split] += _draw(streams[split], 1)
+    for split in splits:
+        assert _same(turns[split], alone[split]), split
