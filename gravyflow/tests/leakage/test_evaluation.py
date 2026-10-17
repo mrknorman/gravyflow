@@ -40,7 +40,9 @@ MODEL_INPUT = gf.ReturnVariables.WHITENED_ONSOURCE.name
 EPOCHS, STEPS, BATCH = 2, 2, 32
 # George & Huerta's curriculum needs a run of at least four epochs.
 CURRICULUM_EPOCHS = 4
-VALIDATOR_STAGES = ("validator noise", "validator injections")
+# The validator's stages, in the order it builds them; the reach's serves one batch.
+VALIDATOR_STAGES = ("validator noise", "validator injections", "validator horizon", "validator volume")
+HORIZON_STAGE = "validator horizon"
 
 
 def stub_model(samples, task="classification"):
@@ -110,8 +112,9 @@ def by_split(taken, stages=(), batches_per_stage=None, epochs=False):
     their datasets, then the validator's stages, which the caller names in the
     order the validator builds them. Every stage named must have been built,
     and nothing more in the test split: a stage that escaped the tap would
-    otherwise drop out of the comparison unseen. With ``epochs``, training is
-    one set per epoch, ``train epoch e``.
+    otherwise drop out of the comparison unseen. Each stage serves
+    ``batches_per_stage`` batches, but the reach's (``HORIZON_STAGE``), which
+    serves one. With ``epochs``, training is one set per epoch, ``train epoch e``.
     """
     sets, expected = {}, list(stages)
     for record in taken:
@@ -120,7 +123,8 @@ def by_split(taken, stages=(), batches_per_stage=None, epochs=False):
                 raise AssertionError(f"a test-split dataset was built beyond the stages {list(stages)}")
             name = expected.pop(0)
             if batches_per_stage is not None:
-                assert len(record.batches) == batches_per_stage, f"{name} served {len(record.batches)} batches"
+                served = 1 if name == HORIZON_STAGE else batches_per_stage
+                assert len(record.batches) == served, f"{name} served {len(record.batches)} batches"
         elif record.group == "train" and epochs:
             if None in record.addresses:
                 raise AssertionError("the training data is not index-addressed, so it has no epochs")
@@ -210,7 +214,8 @@ def test_validator_default_is_test(monkeypatch):
     bank = ValidationBank(stub_model(256), dataset_args, config)
     bank.generate_noise()
     bank.generate()
-    assert groups == ["test", "test"], f"the validator built datasets in {groups}"
+    bank.generate_volume()  # the reach's batch, then the volume set
+    assert groups == ["test"] * 4, f"the validator built datasets in {groups}"
 
 
 # A label stream is compared over the examples present in both sets at an
@@ -223,7 +228,14 @@ EPOCH_LABEL_STEPS = 12
 
 
 def label_sets(taken_by_split):
-    return {name: injection_label_streams(batches) for name, batches in taken_by_split.items()}
+    """
+    Each set's label streams. The reach's stage is left out: its one batch is too short
+    for a stream to be compared, and its sources are fixed by construction (masses at
+    their bounds, face-on, one SNR) but for sky and polarisation, drawn under its own
+    scope; its strain is compared with every other set's (`test_validator_sets_disjoint`).
+    """
+    return {name: injection_label_streams(batches) for name, batches in taken_by_split.items()
+            if name != HORIZON_STAGE}
 
 
 def test_validator_label_streams_independent(tmp_path, monkeypatch):
