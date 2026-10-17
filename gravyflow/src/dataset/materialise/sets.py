@@ -22,8 +22,10 @@ manifest's bytes:
 
 Every file is committed create-if-absent (`backend.LocalBackend.create`), and
 every read is verified: a batch's sha256 must equal its name and its shard's
-entry, and hold its address; a shard must belong to the set and its platform;
-the manifest must hash to the set's id and match the reading dataset.
+entry, and hold its address; a shard must be a well-formed listing of the set's
+k, and belong to the set and its platform; the manifest must hash to the set's
+id (checked before it is parsed), hold a fingerprint record that hashes to its
+fingerprint, and match the reading dataset.
 """
 
 import json
@@ -37,6 +39,7 @@ from gravyflow.src.dataset.materialise.format import (
     FORMAT, ContractMismatch, FingerprintMismatch, ForeignPlatform, IntegrityError, MissingShard, SplitMismatch,
     UnknownFormat, decode_batch, encode_batch, json_bytes, sha256,
 )
+from gravyflow.src.utils.fingerprint import config_fingerprint
 
 Batch = Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]
 
@@ -50,8 +53,9 @@ class MaterialisedSet:
 
     Raises:
         FileNotFoundError: no manifest at ``path``.
+        IntegrityError: a manifest whose sha256 is not the set's id, that is
+            not a JSON object, or whose fingerprint record is not its fingerprint.
         UnknownFormat: a manifest of another format.
-        IntegrityError: a manifest whose sha256 is not the set's id.
     """
 
     def __init__(self, path: Union[str, Path]):
@@ -61,15 +65,20 @@ class MaterialisedSet:
         data = self._backend.read(self._name("manifest.json"))
         if data is None:
             raise FileNotFoundError(f"No materialised set at {path}: it has no manifest.json.")
+        if sha256(data) != self.set_id:
+            raise IntegrityError(
+                f"{path}/manifest.json has sha256 {sha256(data)}, not its set's id {self.set_id}: the "
+                "manifest was edited or the set renamed.")
         manifest = _json(data, path / "manifest.json")
         if manifest.get("format") != FORMAT:
             raise UnknownFormat(
                 f"{path} is a materialised set of format {manifest.get('format')}; this gravyflow reads "
                 f"format {FORMAT}.")
-        if sha256(data) != self.set_id:
+        record = {key: value for key, value in manifest["fingerprint"].items() if key != "sha256"}
+        if config_fingerprint(record) != manifest["fingerprint"]["sha256"]:
             raise IntegrityError(
-                f"{path}/manifest.json has sha256 {sha256(data)}, not its set's id {self.set_id}: the "
-                "manifest was edited or the set renamed.")
+                f"{path}/manifest.json's fingerprint record does not hash to its fingerprint "
+                f"{manifest['fingerprint']['sha256']}: the record was edited.")
         self.manifest = manifest
         self.k_range = range(*manifest["k_range"])
         self.epoch = manifest["epoch"]
@@ -98,8 +107,8 @@ class MaterialisedSet:
 
     def shard(self, s: int) -> Dict[int, str]:
         """
-        Shard ``s``'s sha256 for each of its k, verified to belong to this set
-        and its platform.
+        Shard ``s``'s sha256 for each of its k, verified to be a listing of its
+        k that belongs to this set and its platform.
 
         Raises:
             MissingShard, ForeignPlatform, IntegrityError.
@@ -112,21 +121,47 @@ class MaterialisedSet:
                 f"{self.path} has no shard {s}: k in [{ks.start}, {ks.stop}) were never completed. "
                 "Run the dataset's materialise again with the same arguments: it resumes the missing shards.")
         shard = _json(data, self._backend.path(name))
-        if shard.get("platform") != self.manifest["platform"]:
-            raise ForeignPlatform(
-                f"{self._backend.path(name)} was written on {shard.get('platform')}, the set on "
-                f"{self.manifest['platform']}: a set's batches come from one platform.")
-        entries = shard.get("batches", [])
+        entries = shard.get("batches")
+        if not (isinstance(entries, list) and all(
+                isinstance(entry, list) and len(entry) == 2 and isinstance(entry[1], str) for entry in entries)):
+            raise IntegrityError(
+                f"{self._backend.path(name)} is not a shard: its batches are not a list of [k, sha256].")
         if shard.get("set_id") != self.set_id or [k for k, _ in entries] != list(ks):
             raise IntegrityError(
                 f"{self._backend.path(name)} is not shard {s} of this set: it names set "
                 f"{shard.get('set_id')} and k {[k for k, _ in entries]}, not {list(ks)}.")
+        if shard.get("platform") != self.manifest["platform"]:
+            raise ForeignPlatform(
+                f"{self._backend.path(name)} was written on {shard.get('platform')}, the set on "
+                f"{self.manifest['platform']}: a set's batches come from one platform.")
         return dict(entries)
 
     def require_complete(self) -> None:
         """Verify every shard. Raises: MissingShard (the first missing), ForeignPlatform, IntegrityError."""
         for s, _ in self.shards():
             self.shard(s)
+
+    def verify_shard(self, s: int) -> None:
+        """
+        Verify shard ``s`` and that each batch it lists exists and hashes to its
+        name (what a resumed write keeps).
+
+        Raises:
+            MissingShard, ForeignPlatform, IntegrityError.
+        """
+        for k, digest in self.shard(s).items():
+            self._batch_bytes(s, k, digest)
+
+    def _batch_bytes(self, s: int, k: int, digest: str) -> bytes:
+        name = self._name("batches", f"{digest}.npz")
+        data = self._backend.read(name)
+        if data is None:
+            raise IntegrityError(f"Shard {s} of {self.path} lists {name} for batch {k}, which does not exist.")
+        if sha256(data) != digest:
+            raise IntegrityError(
+                f"{self._backend.path(name)}, batch {k}, has sha256 {sha256(data)}, not its name: it was "
+                "truncated or replaced.")
+        return data
 
     # ------------------------------------------------------------ batches
 
@@ -147,14 +182,7 @@ class MaterialisedSet:
         s = k // self.shard_size
         digest = self.shard(s)[k]
         name = self._name("batches", f"{digest}.npz")
-        data = self._backend.read(name)
-        if data is None:
-            raise IntegrityError(f"Shard {s} of {self.path} lists {name} for batch {k}, which does not exist.")
-        if sha256(data) != digest:
-            raise IntegrityError(
-                f"{self._backend.path(name)}, batch {k}, has sha256 {sha256(data)}, not its name: it was "
-                "truncated or replaced.")
-        arrays = decode_batch(data)
+        arrays = decode_batch(self._batch_bytes(s, k, digest))
         address = (str(arrays.pop("address/set_id", None)), int(arrays.pop("address/k", -1)))
         if address != (self.set_id, k):
             raise IntegrityError(
@@ -172,8 +200,8 @@ class MaterialisedSet:
 
     def check_reader(self, identity: Mapping) -> None:
         """
-        Refuse a reading dataset whose ``identity`` (the manifest's split, fingerprint
-        and contract, as the dataset would write them) is not this set's.
+        Refuse a reading dataset whose ``identity`` (the manifest's split, stage,
+        fingerprint and contract, as the dataset would write them) is not this set's.
 
         Raises:
             SplitMismatch, FingerprintMismatch, ContractMismatch.
@@ -189,6 +217,10 @@ class MaterialisedSet:
                 f"{self.path} holds the batches of dataset fingerprint {mine['fingerprint']['sha256']}; the "
                 f"dataset reading it has fingerprint {theirs['fingerprint']['sha256']}: another spec, seed root "
                 "or library version.")
+        if mine["stage"] != theirs["stage"]:
+            raise ContractMismatch(
+                f"{self.path} holds {mine['stage']!r}-stage data; the dataset reading it serves "
+                f"{theirs['stage']!r}-stage batches.")
         if mine["contract"] != theirs["contract"]:
             raise ContractMismatch(
                 f"{self.path}'s batch contract is {mine['contract']}; the dataset reading it has "
@@ -200,8 +232,9 @@ def write_set(root: Union[str, Path], manifest: Mapping, compute: Callable[[int]
     """
     Write the set ``manifest`` describes under ``root``, computing batch k with
     ``compute(k)``, and return it complete. Shards already committed are
-    verified and kept, so an interrupted run resumes where it stopped; a
-    complete set is returned without computing anything.
+    verified, with their batches' files, and kept, so an interrupted run
+    resumes where it stopped; a complete set is returned without computing
+    anything.
 
     Raises:
         MaterialiseConflict: a file exists with other bytes than this writer's.
@@ -215,7 +248,7 @@ def write_set(root: Union[str, Path], manifest: Mapping, compute: Callable[[int]
     for s, ks in the_set.shards():
         shard_name = f"{set_id}/shards/{s}.json"
         if backend.exists(shard_name):
-            the_set.shard(s)
+            the_set.verify_shard(s)
             continue
         entries = []
         for k in ks:
@@ -233,7 +266,15 @@ def write_set(root: Union[str, Path], manifest: Mapping, compute: Callable[[int]
 
 
 def _json(data: bytes, where) -> dict:
+    """The JSON object a file of the set holds. Raises: IntegrityError, naming ``where``."""
+    if not data:
+        raise IntegrityError(
+            f"{where} is empty: a commit that never reached the disk (a crash or power loss). Delete it "
+            "and run the dataset's materialise again with the same arguments: it rewrites what is missing.")
     try:
-        return json.loads(data)
+        value = json.loads(data)
     except ValueError as error:
         raise IntegrityError(f"{where} is not JSON: {error}.") from None
+    if not isinstance(value, dict):
+        raise IntegrityError(f"{where} is not a JSON object: it holds a {type(value).__name__}.")
+    return value

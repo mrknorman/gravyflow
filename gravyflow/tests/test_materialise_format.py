@@ -17,6 +17,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -24,10 +25,14 @@ import pytest
 import gravyflow as gf
 from gravyflow.src.dataset.materialise import (
     FORMAT, ContractMismatch, FingerprintMismatch, ForeignPlatform, IntegrityError, LocalBackend,
-    MaterialiseConflict, MaterialisedSet, MissingShard, SplitMismatch, UnknownFormat, encode_batch,
-    json_bytes,
+    MaterialiseConflict, MaterialisedSet, MissingShard, NotIndexAddressed, SplitMismatch, UnknownFormat,
+    encode_batch, json_bytes,
 )
 from gravyflow.src.rng import platform
+from gravyflow.src.utils import fingerprint as fingerprint_module
+from gravyflow.src.utils.fingerprint import (
+    BATCH_LIBRARIES, UnfingerprintableError, config_fingerprint, library_versions,
+)
 
 SHARD = 2
 BATCHES = 4
@@ -178,7 +183,7 @@ def plant_missing_shard(w):
 def plant_unknown_format(w):
     manifest = w.manifest
     manifest["format"] = FORMAT + 1
-    (w.path / "manifest.json").write_bytes(json_bytes(manifest))
+    w.rename_consistently(manifest)  # as a later gravyflow would have written it
     return w.load
 
 
@@ -230,6 +235,84 @@ def plant_race_different_bytes(w):
     return act
 
 
+# ------------------------------------------------- datasets read in order
+
+class _InOrderDataset(gf.GravyflowDataset):
+    """A dataset read in order, as one over a reader of the caller's own is (``index_addressed`` False)."""
+
+    @property
+    def index_addressed(self) -> bool:
+        return False
+
+
+def read_in_order(ds):
+    ds.__class__ = _InOrderDataset
+    return ds
+
+
+def plant_edited_versions_record(w):
+    # The record says another keras wrote the set; its sha256 was left as it was.
+    manifest = w.manifest
+    manifest["fingerprint"]["versions"]["keras"] = "0.0.0-other"
+    w.rename_consistently(manifest)
+    return w.load
+
+
+def plant_reader_on_other_library(w):
+    def act():
+        real = fingerprint_module._distribution_version
+        with mock.patch.object(fingerprint_module, "_distribution_version",
+                               lambda name: "0.0.0-other" if name == "jaxlib" else real(name)):
+            w.load()
+    return act
+
+
+def plant_reader_in_order(w):
+    return lambda: w.load(read_in_order(dataset()))
+
+
+def plant_other_stage(w):
+    manifest = w.manifest
+    manifest["stage"] = "tile"
+    w.rename_consistently(manifest)
+    return w.load
+
+
+def plant_manifest_not_an_object(w):
+    data = b"[]\n"
+    (w.path / "manifest.json").write_bytes(data)
+    w.path = w.path.rename(w.path.with_name(hashlib.sha256(data).hexdigest()))
+    return w.load
+
+
+def plant_null_shard(w):
+    (w.path / "shards" / "0.json").write_bytes(b"null\n")
+    return w.load
+
+
+def plant_empty_shard(w):
+    (w.path / "shards" / "1.json").write_bytes(b"")
+    return w.load
+
+
+def plant_fixed_set_epoch_ends(w):
+    # Keras ends each epoch on its validation data: a fixed set of a training
+    # (fresh-each-epoch) dataset serves its own bytes every epoch.
+    def act():
+        from gravyflow.src.model.examples.recipe import DetectionBatches, materialise
+        ds = dataset(group="train", output_variables=[gf.ReturnVariables.INJECTION_PRESENT])
+        fixed = materialise(DetectionBatches(ds), BATCHES, w.path.parent / "fixed")
+        first = [fixed[k] for k in range(BATCHES)]
+        for _ in range(2):
+            fixed.on_epoch_begin()
+            fixed.on_epoch_end()
+        with mock.patch.object(gf.GravyflowDataset, "_compute_batch", side_effect=AssertionError("computed")):
+            again = [fixed[k] for k in range(BATCHES)]
+        for (x, y), (first_x, first_y) in zip(again, first):
+            assert batch_bytes((x, {"labels": y})) == batch_bytes((first_x, {"labels": first_y}))
+    return act
+
+
 @dataclass(frozen=True)
 class Plant:
     name: str
@@ -252,6 +335,14 @@ PLANTS = [
     Plant("split mismatch", plant_split_mismatch, SplitMismatch, "'test'"),
     Plant("racing writers, equal bytes", plant_race_equal_bytes),
     Plant("racing writers, different bytes", plant_race_different_bytes, MaterialiseConflict, "other bytes"),
+    Plant("reader read in order", plant_reader_in_order, NotIndexAddressed, "index"),
+    Plant("fixed set across epochs", plant_fixed_set_epoch_ends),
+    Plant("versions record edited", plant_edited_versions_record, IntegrityError, "fingerprint record"),
+    Plant("reader on another jaxlib", plant_reader_on_other_library, FingerprintMismatch, "fingerprint"),
+    Plant("another stage", plant_other_stage, ContractMismatch, "stage"),
+    Plant("manifest not an object", plant_manifest_not_an_object, IntegrityError, "not a JSON object"),
+    Plant("null shard", plant_null_shard, IntegrityError, "shards/0.json"),
+    Plant("empty shard", plant_empty_shard, IntegrityError, "empty"),
 ]
 
 
@@ -441,3 +532,171 @@ def test_materialise_refuses_addresses_outside_the_epoch(tmp_path):
         ds.materialise(tmp_path, k_range=range(2), batches=2)
     with pytest.raises(ValueError, match="local"):
         ds.materialise("gs://bucket/prefix", batches=1)
+
+
+def test_materialise_warns_on_multi_threaded_kernels(tmp_path, monkeypatch):
+    monkeypatch.setattr(platform, "multi_threaded_cpu", lambda: True)
+    with pytest.warns(UserWarning, match="multi-threaded"):
+        dataset().materialise(tmp_path, batches=1)
+
+
+def test_a_dataset_read_in_order_is_never_materialised(tmp_path, pristine):
+    # Its batch k depends on the batches asked for before it: a set written or
+    # resumed from it would hold some batches twice and others never.
+    with pytest.raises(NotIndexAddressed, match="index"):
+        read_in_order(dataset()).materialise(tmp_path, batches=BATCHES, shard_size=SHARD)
+    assert list(tmp_path.iterdir()) == []
+    with pytest.raises(NotIndexAddressed, match="index"):
+        read_in_order(dataset()).load_materialised(pristine)
+
+
+# ------------------------------------------------------------- the identity
+
+def test_the_versions_record_every_library_that_makes_batch_bytes():
+    versions = dataset().fingerprint_record()["versions"]
+    assert set(BATCH_LIBRARIES) == {"numpy", "scipy", "jax", "jaxlib", "keras", "ripplegw"}
+    assert set(versions) == {"python", "gravyflow", *BATCH_LIBRARIES}
+    assert versions["gravyflow"] == gf.__version__ and versions["numpy"] == np.__version__
+    assert versions == library_versions()
+
+
+@pytest.mark.parametrize("library", ["gravyflow", *BATCH_LIBRARIES])
+def test_each_library_version_changes_the_fingerprint(library, monkeypatch):
+    base = dataset().fingerprint
+    if library == "gravyflow":
+        monkeypatch.setattr(gf, "__version__", "0.0.0-other")
+    else:
+        real = fingerprint_module._distribution_version
+        monkeypatch.setattr(fingerprint_module, "_distribution_version",
+                            lambda name: "0.0.0-other" if name == library else real(name))
+    assert dataset().fingerprint != base
+
+
+@pytest.mark.parametrize("field,value", [("python_version", "2.7.18"), ("python_implementation", "PyPy")])
+def test_the_python_implementation_and_version_change_the_fingerprint(field, value, monkeypatch):
+    import platform as python_platform
+    base = dataset().fingerprint
+    monkeypatch.setattr(python_platform, field, lambda: value)
+    assert dataset().fingerprint != base
+
+
+def test_each_identity_input_changes_the_fingerprint(monkeypatch):
+    from gravyflow.src.dataset import dataset as dataset_module
+    from gravyflow.src.dataset.acquisition.versions import DATA_VERSIONS
+
+    base = dataset().fingerprint
+    changed = {"root": dataset(seed=4).fingerprint, "spec": dataset(sample_rate_hertz=256.0).fingerprint}
+    with monkeypatch.context() as patch:
+        patch.setattr(gf.GravyflowDataset, "split_spec", property(lambda self: gf.SplitSpec(version="fold-3")))
+        changed["SplitSpec"] = dataset().fingerprint
+    with monkeypatch.context() as patch:
+        patch.setattr(dataset_module, "TREE_VERSION", "tree-other")
+        changed["TREE_VERSION"] = dataset().fingerprint
+    for key in DATA_VERSIONS:
+        with monkeypatch.context() as patch:
+            patch.setattr(dataset_module, "DATA_VERSIONS", {**DATA_VERSIONS, key: "data-other"})
+            changed[f"DATA_VERSIONS[{key}]"] = dataset().fingerprint
+    assert len(changed) > 4 and dataset().fingerprint == base
+    assert [name for name, fp in changed.items() if fp == base] == []
+
+
+def test_prefetching_and_use_leave_the_fingerprint(tmp_path):
+    ds = dataset(group="train")
+    base = ds.fingerprint
+    ds.workers, ds.use_multiprocessing, ds.max_queue_size = 4, True, 99  # Keras' prefetch settings
+    ds[0], ds[1]
+    ds.on_epoch_end()
+    ds.epoch = 5
+    ds.load_materialised(ds.materialise(tmp_path, batches=1))
+    ds[0]
+    assert ds.fingerprint == base
+
+
+def test_the_fingerprint_is_config_fingerprint_of_its_record():
+    # One canonical encoding: a dataset's fingerprint and a configuration's are made alike.
+    ds = dataset()
+    assert ds.fingerprint == config_fingerprint(ds.fingerprint_record())
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), np.float32("nan")])
+def test_a_non_finite_setting_is_refused_by_name(value):
+    with pytest.raises(UnfingerprintableError, match="not finite"):
+        config_fingerprint({"threshold": value})
+    ds = dataset()
+    ds.crop_duration_seconds = value
+    with pytest.raises(UnfingerprintableError, match="not finite"):
+        ds.fingerprint
+
+
+# ------------------------------------------------------------- malformed files
+
+def _rewrite_manifest(w, data: bytes) -> None:
+    (w.path / "manifest.json").write_bytes(data)
+    w.path = w.path.rename(w.path.with_name(hashlib.sha256(data).hexdigest()))
+
+
+@pytest.mark.parametrize("data", [b"[]\n", b"null\n", b"3\n"])
+def test_a_manifest_that_is_not_an_object_is_refused(world, data):
+    _rewrite_manifest(world, data)
+    with pytest.raises(IntegrityError, match="not a JSON object"):
+        MaterialisedSet(world.path)
+
+
+def test_the_manifest_is_hashed_before_it_is_parsed(world):
+    (world.path / "manifest.json").write_bytes(b"\x00not json")
+    with pytest.raises(IntegrityError, match="sha256"):
+        MaterialisedSet(world.path)
+
+
+@pytest.mark.parametrize("data", [b"null\n", b"[]\n", b'{"batches": null}\n', b'{"batches": [[0]]}\n'],
+                         ids=["null", "list", "null batches", "short entry"])
+def test_a_malformed_shard_is_refused(world, data):
+    (world.path / "shards" / "0.json").write_bytes(data)
+    with pytest.raises(IntegrityError, match="shards/0.json"):
+        world.load()
+
+
+def test_a_zero_length_shard_says_how_to_recover(world):
+    (world.path / "shards" / "1.json").write_bytes(b"")
+    with pytest.raises(IntegrityError, match=r"empty.*[Dd]elete it.*materialise"):
+        world.load()
+
+
+def test_a_resumed_write_verifies_committed_batches(tmp_path):
+    ds = dataset()
+    the_set = ds.materialise(tmp_path, batches=BATCHES, shard_size=SHARD)
+    batch = the_set.path / "batches" / f"{the_set.shard(0)[1]}.npz"
+    batch.unlink()
+    with pytest.raises(IntegrityError, match="does not exist"):
+        ds.materialise(tmp_path, batches=BATCHES, shard_size=SHARD)
+    batch.write_bytes(b"truncated")
+    with pytest.raises(IntegrityError, match="sha256"):
+        ds.materialise(tmp_path, batches=BATCHES, shard_size=SHARD)
+
+
+# --------------------------------------------------------------- the writes
+
+def test_a_commit_syncs_a_uniquely_named_temporary(tmp_path, monkeypatch):
+    synced, linked = [], []
+    real_fsync, real_link = os.fsync, os.link
+    monkeypatch.setattr(os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
+    monkeypatch.setattr(os, "link", lambda src, dst: linked.append(Path(src).name) or real_link(src, dst))
+    backend = LocalBackend(tmp_path)
+    backend.create("a/x.npz", b"one")
+    backend.create("a/x.npz", b"one")  # an equal second writer
+    assert len(synced) >= 2 and len(set(linked)) == 2
+    assert all(name.startswith(f".x.npz.{os.getpid()}.") for name in linked)
+    assert [p.name for p in (tmp_path / "a").iterdir()] == ["x.npz"]
+
+
+def test_a_stale_temporary_is_cleaned_on_the_next_write(tmp_path):
+    dead = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    (tmp_path / "a").mkdir()
+    stale = tmp_path / "a" / f".x.npz.{dead}.0123abcd.tmp"
+    stale.write_bytes(b"half a batch")
+    live = tmp_path / "a" / f".x.npz.{os.getpid()}.feedface.tmp"  # a live writer's, mid-commit
+    live.write_bytes(b"in progress")
+    LocalBackend(tmp_path).create("a/x.npz", b"whole")
+    assert not stale.exists() and live.exists()
+    assert (tmp_path / "a" / "x.npz").read_bytes() == b"whole"

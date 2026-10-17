@@ -3,8 +3,12 @@ The bytes of a materialised set: its format version, its refusals, and the
 canonical encodings of its manifest, shards and batches.
 
 Every file of a set is named by, or checked against, the sha256 of its bytes, so
-each encoding here is deterministic: the same content always gives the same
-bytes, on every machine and in every run.
+each encoding here is deterministic: the same arrays, names and values always
+encode to the same bytes, in every run, under this format and the numpy release
+that writes the ``.npy`` headers (whose version the manifest records). Whether a
+batch's arrays are the same on two machines is the platform's question, not the
+encoding's: the manifest records the platform, and a set holds one platform's
+batches.
 """
 
 import hashlib
@@ -39,6 +43,10 @@ class IntegrityError(MaterialiseError):
 
 class MissingShard(MaterialiseError):
     """A shard of the set was never completed: its batches are missing."""
+
+
+class NotIndexAddressed(MaterialiseError):
+    """A dataset read in order: its batches depend on the order they are asked for, so no set holds them."""
 
 
 class UnknownFormat(MaterialiseError):

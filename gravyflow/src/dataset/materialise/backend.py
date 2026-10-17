@@ -10,7 +10,7 @@ after an interruption, can only add what agrees with what is there.
 """
 
 import os
-import threading
+import secrets
 from pathlib import Path
 from typing import Optional, Union
 
@@ -38,16 +38,23 @@ class LocalBackend:
 
     def create(self, name: str, data: bytes) -> None:
         """
-        Commit ``data`` as ``name`` unless it exists. ``os.link`` creates the name
-        atomically, for a file already complete; readers never see part of one.
+        Commit ``data`` as ``name`` unless it exists. The bytes are written to a
+        temporary of this writer's own (named by its process and a random token)
+        and synced to the disk; then ``os.link`` creates the name atomically, for a
+        file already complete, so readers never see part of one. Temporaries of
+        ``name`` that a dead process left are removed first.
 
         Raises:
             MaterialiseConflict: ``name`` exists with other bytes.
         """
         target = self.path(name)
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        temporary.write_bytes(data)
+        _remove_stale_temporaries(target)
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+        with open(temporary, "xb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
         try:
             os.link(temporary, target)
         except FileExistsError:
@@ -61,6 +68,24 @@ class LocalBackend:
                 ) from None
         finally:
             temporary.unlink()
+
+
+def _remove_stale_temporaries(target: Path) -> None:
+    """Remove the temporaries of ``target`` whose writer's process is gone (an interrupted commit)."""
+    for temporary in target.parent.glob(f".{target.name}.*.tmp"):
+        pid = temporary.name[len(target.name) + 2:].split(".", 1)[0]
+        if pid.isdigit() and not _alive(int(pid)):
+            temporary.unlink(missing_ok=True)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # another user's process
+        return True
+    return True
 
 
 def backend_for(root: Union[str, Path]) -> LocalBackend:

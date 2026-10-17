@@ -200,6 +200,11 @@ class FixedBatches(_DatasetBatches):
     The first ``num_batches`` of ``batches`` (a gravyflow dataset's, converted
     for Keras), served identically every epoch from their dataset's
     materialised set (`materialise`), with their dataset's split.
+
+    A fixed set has no epochs: Keras ends each epoch on its validation data
+    too, and moving a training split's dataset on would serve that epoch's
+    batches, which the set does not hold. So its dataset's epoch stays the
+    set's.
     """
 
     def __init__(self, batches, num_batches: int):
@@ -208,6 +213,12 @@ class FixedBatches(_DatasetBatches):
 
     def __len__(self) -> int:
         return self._length
+
+    def on_epoch_begin(self):
+        pass
+
+    def on_epoch_end(self):
+        pass
 
     def __getitem__(self, index):
         if not 0 <= index < self._length:

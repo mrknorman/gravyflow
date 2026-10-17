@@ -226,6 +226,29 @@ def test_materialise_serves_its_set(tmp_path, monkeypatch):
     np.testing.assert_array_equal(again[1][0]["WHITENED_ONSOURCE"], expected[1][0]["WHITENED_ONSOURCE"])
 
 
+def test_a_fixed_set_serves_its_own_epoch_every_epoch(tmp_path, monkeypatch):
+    # Keras ends each epoch on its validation data too. A fixed set of a training
+    # split, which draws fresh batches each epoch, still serves the bytes it holds.
+    fixed = materialise(white_detection("train"), 2, tmp_path)
+    first = [fixed[k] for k in range(2)]
+    for _ in range(3):
+        fixed.on_epoch_begin()
+        fixed.on_epoch_end()
+    assert fixed.dataset.epoch == 0
+    monkeypatch.setattr(gf.GravyflowDataset, "_compute_batch", lambda self, k: pytest.fail(f"drew batch {k}"))
+    for (x, y), (first_x, first_y) in zip([fixed[k] for k in range(2)], first):
+        assert x["WHITENED_ONSOURCE"].tobytes() == first_x["WHITENED_ONSOURCE"].tobytes()
+        assert y.tobytes() == first_y.tobytes()
+
+
+def test_training_batches_still_move_on_with_the_epoch():
+    training = white_detection("train")
+    first = training[0][0]["WHITENED_ONSOURCE"]
+    training.on_epoch_end()
+    assert training.dataset.epoch == 1
+    assert training[0][0]["WHITENED_ONSOURCE"].tobytes() != first.tobytes()
+
+
 def test_materialise_needs_a_gravyflow_dataset(tmp_path):
     with pytest.raises(TypeError, match="gravyflow dataset's batches"):
         materialise(CountingBatches(0, group="validate"), 1, tmp_path)

@@ -284,14 +284,19 @@ a `DeprecationWarning`. These changes have no such period:
   refused by name: train it again.
 - A dataset's batches can be written once and read back: `ds.materialise(root, batches=N)` (or `k_range=`) writes
   them under `root` as a set named by its manifest's sha256, which records `ds.fingerprint` (the sha256 of the
-  dataset's canonical spec, seed root, split spec, seed-tree and data versions, and the gravyflow, numpy, jax and
-  scipy versions), the platform (`XLA_FLAGS` and the backend, recorded, never hashed), the batch contract, the split,
-  the epoch and the range. Each batch is an uncompressed `.npz` named by its sha256; files are created once and never
-  replaced, so an interrupted run resumes and writers that disagree are refused (`MaterialiseConflict`).
-  `ds.load_materialised(set)` serves `ds[k]` from the set wherever it holds the address, verifying every read, and
-  `seed_metadata["materialised"]` names it; another spec, split or contract, a missing shard, an edited or foreign
-  file is refused by name. The recipe's `materialise(batches, n, root)` is this: a fixed validation set read from
-  disk, so a resumed run reads it rather than drawing it again.
+  dataset's canonical spec, seed root, split spec, seed-tree and data versions, and the versions of Python and of
+  every library whose code makes batch bytes: gravyflow, numpy, scipy, jax, jaxlib, keras and ripplegw), the
+  platform (`XLA_FLAGS` and the backend, recorded, never hashed), the batch contract, the split, the epoch and the
+  range. Each batch is an uncompressed `.npz` named by its sha256; files are created once and never replaced, so an
+  interrupted run resumes and writers that disagree are refused (`MaterialiseConflict`). Like training, it warns on
+  multi-threaded CPU kernels, whose last bits no other writer reproduces. `ds.load_materialised(set)` serves `ds[k]`
+  from the set wherever it holds the address, verifying every read, and `seed_metadata["materialised"]` names it;
+  another spec, split, stage or contract, a missing shard, an edited, malformed or foreign file is refused by name.
+  A dataset read in order (a reader of the caller's own, `seed_metadata["index_addressed"]` False) is neither written
+  nor read as a set (`NotIndexAddressed`). The recipe's `materialise(batches, n, root)` is this: a fixed validation
+  set read from disk, the same bytes every epoch, so a resumed run reads it rather than drawing it again.
+- A content fingerprint (`config_fingerprint`, a dataset's `fingerprint`, a checkpoint's and a validation's) refuses a
+  setting that is NaN or infinite by name (`UnfingerprintableError`): JSON has no canonical spelling of either.
 - `gf.Model`'s binary output is a logit, not a sigmoid probability: it trains with
   `BinaryCrossentropy(from_logits=True)` and reports `BinaryAccuracy` at a threshold of 0, and the validator (which
   refused a probability output) scores it. `Model.validate(validate_args, config, model_path)` takes a

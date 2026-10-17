@@ -28,9 +28,9 @@ from gravyflow.src.rng import TREE_VERSION, BatchStreams, SeedTree, check_coordi
 from gravyflow.src.rng import platform
 from gravyflow.src.dataset.acquisition.versions import DATA_VERSIONS
 from gravyflow.src.dataset.materialise import (
-    DEFAULT_SHARD_SIZE, FORMAT, ContractMismatch, MaterialisedSet, json_bytes, sha256, write_set,
+    DEFAULT_SHARD_SIZE, FORMAT, ContractMismatch, MaterialisedSet, NotIndexAddressed, write_set,
 )
-from gravyflow.src.utils.fingerprint import canonical
+from gravyflow.src.utils.fingerprint import canonical, config_fingerprint, library_versions
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
@@ -522,12 +522,11 @@ class IndexedBatches:
         Everything that decides this dataset's batches but their address (split,
         effective epoch, k): its canonical specification, the seed tree's root
         and scope, the split spec's fingerprint, the seed tree's and the data's
-        versions, and the versions of gravyflow, numpy, jax and scipy. What the
-        platform decides (``XLA_FLAGS``, the backend) is recorded beside it,
-        never in it (`platform.platform_record`).
+        versions, and the version of every library whose code produces batch
+        bytes, with Python's (`fingerprint.library_versions`). What the platform
+        decides (``XLA_FLAGS``, the backend) is recorded beside it, never in it
+        (`platform.platform_record`).
         """
-        import scipy
-
         tree = self.tree.metadata()
         return {
             "specification": canonical(self.specification()),
@@ -536,20 +535,31 @@ class IndexedBatches:
             "split_fingerprint": None if self.split_spec is None else self.split_spec.fingerprint(),
             "tree_version": TREE_VERSION,
             "data_versions": dict(DATA_VERSIONS),
-            "versions": {"gravyflow": gf.__version__, "numpy": np.__version__, "jax": jax.__version__,
-                         "scipy": scipy.__version__},
+            "versions": library_versions(),
         }
 
     @property
     def fingerprint(self) -> str:
-        """The sha256 of `fingerprint_record`: batch k of a split and epoch is a pure function of it."""
-        return sha256(json_bytes(self.fingerprint_record()))
+        """
+        The content fingerprint (`config_fingerprint`) of `fingerprint_record`:
+        batch k of a split and epoch is a pure function of it.
+        """
+        return config_fingerprint(self.fingerprint_record())
 
     def _set_identity(self) -> dict:
         """The fields of a materialised set's manifest that a reader of this dataset must match."""
         record = self.fingerprint_record()
-        return {"split": self.group, "fingerprint": {**record, "sha256": sha256(json_bytes(record))},
+        return {"split": self.group, "stage": "batch",
+                "fingerprint": {**record, "sha256": config_fingerprint(record)},
                 "contract": self.contract_record()}
+
+    def _require_index_addressed(self, action: str) -> None:
+        if not self.index_addressed:
+            raise NotIndexAddressed(
+                f"Cannot {action} a materialised set for this dataset: it reads a reader of the caller's "
+                "own, so it is not addressed by index (seed_metadata['index_addressed'] is False). Its "
+                "batch k depends on the batches asked for before it, so a set written, resumed or read "
+                "out of that order would hold some batches twice and others never.")
 
     def materialise(self, root, k_range=None, *, batches: Optional[int] = None,
                     shard_size: int = DEFAULT_SHARD_SIZE) -> MaterialisedSet:
@@ -566,12 +576,18 @@ class IndexedBatches:
         Writers agree only on bit-reproducible kernels (`platform`); writers
         that disagree are refused, never merged.
 
+        Like training, it warns on multi-threaded CPU kernels
+        (`platform.warn_if_multi_threaded_cpu`), whose bytes no other writer
+        reproduces.
+
         Raises:
+            NotIndexAddressed: a dataset read in order (``index_addressed`` False).
             IndexError: a batch outside the epoch.
             MaterialiseConflict: a file of the set exists with other bytes.
             gravyflow.src.utils.fingerprint.UnfingerprintableError: a part of
                 the spec that has no content to fingerprint.
         """
+        self._require_index_addressed("write")
         if k_range is not None and batches is not None:
             raise ValueError("Give materialise one of k_range or batches=N, not both.")
         if batches is not None:
@@ -584,10 +600,10 @@ class IndexedBatches:
             raise IndexError(f"Batches {k_range} are outside the {len(self)} batches of an epoch.")
         if check_coordinate(shard_size, "shard_size") < 1:
             raise ValueError(f"shard_size must be at least 1, got {shard_size}.")
+        platform.warn_if_multi_threaded_cpu()
         manifest = {
             **self._set_identity(),
             "format": FORMAT,
-            "stage": "batch",
             "platform": platform.platform_record(),
             "shard_size": shard_size,
             "epoch": self._batch_epoch,
@@ -604,12 +620,14 @@ class IndexedBatches:
         written on another platform serves its own bytes.
 
         Raises:
+            NotIndexAddressed: a dataset read in order (``index_addressed`` False).
             SplitMismatch, FingerprintMismatch, ContractMismatch: another split,
-                spec or contract.
+                spec, stage or contract.
             MissingShard: an incomplete set (``materialise`` resumes it).
             UnknownFormat, ForeignPlatform, IntegrityError: a set that is not
                 what its files say.
         """
+        self._require_index_addressed("read")
         the_set = source if isinstance(source, MaterialisedSet) else MaterialisedSet(source)
         the_set.check_reader(self._set_identity())
         the_set.require_complete()
