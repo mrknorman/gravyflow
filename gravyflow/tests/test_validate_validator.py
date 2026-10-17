@@ -298,6 +298,39 @@ def test_the_injection_set_is_scaled_to_its_snr_range_whatever_the_training_scal
     assert np.ptp(snrs) > 4.0
 
 
+def test_a_time_slide_background_is_read_back_as_it_was_written(tmp_path, small_config):
+    # validation.h5 keeps a time-slide background's streams beside its scores, but no
+    # test read them back: a file whose streams were lost would be counted as
+    # independent windows, its adjacent passes each a trigger.
+    v = Validator("tiny", small_config, {"onsource_duration_seconds": 1.0})
+    v.far_scores = np.array([3.0, 3.0, 0.0, 3.0, 0.0, 3.0, 3.0])
+    v.noise_streams = {"lengths": np.array([3, 4], dtype=np.int64), "slides": np.array([1, 2], dtype=np.int64),
+                       "blocks": np.array([5, 5], dtype=np.int64)}
+    path = tmp_path / "validation.h5"
+    v.save(path)
+    loaded = Validator.load(path)
+    assert set(loaded.noise_streams) == set(v.noise_streams)
+    for key, value in v.noise_streams.items():
+        np.testing.assert_array_equal(loaded.noise_streams[key], value)
+        assert loaded.noise_streams[key].dtype == value.dtype
+    background = loaded.background()
+    # Two streams, the slides of one block; adjacent passes join: 1 + 2 triggers.
+    assert [stream.scores.tolist() for stream in background.streams] == [[3.0, 3.0, 0.0], [3.0, 0.0, 3.0, 3.0]]
+    assert {stream.block for stream in background.streams} == {5}
+    assert background.trigger_count(1.0) == v.background().trigger_count(1.0) == 3
+    assert background.livetime_seconds == 7.0
+
+    # A file without streams (synthetic noise, or written before time slides) is read
+    # as windows drawn independently: every pass its own trigger.
+    with h5py.File(path, "a") as f:
+        del f["far_scores/streams"]
+    independent = Validator.load(path)
+    assert independent.noise_streams is None
+    background = independent.background()
+    assert background.streams == () and background.trigger_count(1.0) == 5
+    assert background.livetime_seconds == 7.0
+
+
 @pytest.mark.global_rng
 def test_the_backgrounds_livetime_is_the_span_of_the_windows_it_scored(dataset_args, monkeypatch):
     # The livetime's window length was read from the dataset arguments, or the default
