@@ -341,6 +341,15 @@ class TestUnavailableRecords:
         assert fetches_of(fetch, TIMES[1]) == fetched, "the unavailable record was fetched every pass"
         assert stats["rejections"] == {"no data": 1} and stats["dropped_segments"] == 1
 
+    def test_a_split_with_no_record_available_is_refused_not_spun(self, tmp_path):
+        with offline(GridFetch(bad={"L1": list(TIMES)})) as fetch:
+            reader = obtainer(tmp_path)
+            batches = reader(ifos=[gf.IFO.L1], group="all", seed=1, **WINDOW)
+            with pytest.raises(ValueError, match="no data"):
+                next(batches)
+        assert all(fetches_of(fetch, t) == 2 for t in TIMES), "each record is fetched once (H1 and L1)"
+        assert reader.get_acquisition_stats()["rejections"] == {"no data": 3}
+
     def test_a_failed_fetch_of_an_unrequested_detector_is_fetched_when_requested(self, tmp_path):
         with offline(GridFetch(bad={"H1": [TIMES[1]]})):
             served(tmp_path, [gf.IFO.L1])  # stores TIMES[1] without its H1 strain

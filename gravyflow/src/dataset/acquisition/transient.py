@@ -1160,6 +1160,13 @@ class TransientDataObtainer(BaseDataObtainer):
             )
         
         while True:
+            # A pass over records all found without strain would serve nothing, forever.
+            if all(s.transient_gps_time in self._unavailable for s in self.transient_segments):
+                raise ValueError(
+                    f"None of the {n_segments} transients of this split can be served on "
+                    f"{[ifo.name for ifo in ifos]}: each was rejected for no data "
+                    f"(rejections: {dict(self._rejections)})."
+                )
             # DON'T shuffle here - keep deterministic order for cache hits
             batch_subarrays = []
             batch_backgrounds = []
