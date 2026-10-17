@@ -14,7 +14,7 @@ import pytest
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.pearson import num_lags
 from gravyflow.src.model.examples import MLy, MLyCoherence, MLyCoincidence, MLyConfig
-from gravyflow.src.model.examples.mly_2024 import CyclicLearningRate
+from gravyflow.src.model.examples.mly_2024 import CyclicLearningRate, mly_dataset_args
 from gravyflow.src.model.examples.recipe import DetectionBatches
 from gravyflow.src.validate import ValidationConfig, Validator
 
@@ -34,7 +34,7 @@ def wnb(snr=20.0, injection_chance=1.0):
         injection_chance=injection_chance)
 
 
-def pearson_dataset(ifos, generator, sample_rate_hertz=1024.0, on_dataset=False):
+def pearson_dataset(ifos, generator, sample_rate_hertz=1024.0, on_dataset=False, **kwargs):
     """A Pearson dataset whose detectors are set on the noise obtainer, or on the dataset."""
     if on_dataset:
         where = dict(ifos=list(ifos), noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED))
@@ -44,7 +44,8 @@ def pearson_dataset(ifos, generator, sample_rate_hertz=1024.0, on_dataset=False)
         sample_rate_hertz=sample_rate_hertz, onsource_duration_seconds=1.0, offsource_duration_seconds=16.0,
         **where,
         waveform_generators=generator, num_examples_per_batch=2, seed=1, steps_per_epoch=1,
-        input_variables=[gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE], output_variables=[], group="train")
+        input_variables=[gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE], output_variables=[], group="train",
+        **kwargs)
 
 
 # ------------------------------------------------------- rolling Pearson
@@ -69,6 +70,22 @@ def test_rolling_pearson_lags_do_not_depend_on_the_generators(ifos, sample_rate_
     lags = num_lags(gf.Network(list(ifos)).max_arrival_time_difference_seconds, sample_rate_hertz)
     pairs = len(ifos) * (len(ifos) - 1) // 2
     assert shapes == {(2, pairs, lags)}
+
+
+def test_the_dataset_takes_a_lag_range():
+    # The lag range was always the detectors' largest light travel time: MLy could not
+    # correlate over its paper's 30 ms.
+    x, _ = pearson_dataset(HL, wnb(), pearson_max_lag_seconds=0.03)[0]
+    # 30 ms is 30.72 samples at 1024 Hz: lags -31 to +31.
+    assert np.shape(x["ROLLING_PEARSON_ONSOURCE"]) == (2, 1, 63)
+
+
+@pytest.mark.parametrize("ifos,pairs", [(HL, 1), (HLV, 3)])
+def test_mly_correlates_over_its_papers_30_ms(ifos, pairs):
+    config = replace(MLyConfig(), ifos=ifos)
+    assert config.correlation_shape == (pairs, num_lags(0.03, config.sample_rate_hertz)) == (pairs, 63)
+    args = mly_dataset_args(config, (10.0, 50.0), 0.5, [gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE])
+    assert args["pearson_max_lag_seconds"] == 0.03
 
 
 # ------------------------------------------------------------ the networks
@@ -124,11 +141,10 @@ def test_coherence_layers_match_the_paper():
     assert [(c.filters, c.kernel_size[0], c.strides[0], c.padding, c.activation.__name__) for c in convs] == [
         (56, 32, 4, "valid", "relu"), (128, 24, 2, "valid", "relu"), (214, 16, 2, "valid", "relu"),
         (64, 8, 1, "valid", "relu"), (64, 5, 1, "valid", "relu")]
-    # 713,288 with the paper's 60 lags; the library's lag range for H, L and V
-    # at 1024 Hz (27.3 ms, 27.9 samples: lags -28 to +28) is 57 lags, which
-    # changes no weight count.
+    # 713,288 with the paper's 60 lags; the library's ±30 ms at 1024 Hz (30.72
+    # samples: lags -31 to +31) is 63 lags, which changes no weight count.
     assert model.count_params() == 713_288
-    assert config.correlation_shape == (3, 57)
+    assert config.correlation_shape == (3, 63)
 
 
 def test_combined_score_is_the_log_odds_of_the_product():

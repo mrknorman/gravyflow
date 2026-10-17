@@ -104,10 +104,10 @@ def split_spec_of(obtainers) -> "gf.SplitSpec":
 
 def get_max_arrival_time_difference(ifos: List[gf.IFO]) -> float:
     """
-    The lag range of ``ROLLING_PEARSON_ONSOURCE`` (s): the largest light travel
-    time between ``ifos``, the detectors the dataset uses (``noise_ifos``; every
-    generator's network is bound to them). Noise-only and injection batches
-    therefore have the same shape.
+    The default lag range of ``ROLLING_PEARSON_ONSOURCE`` (s): the largest light
+    travel time between ``ifos``, the detectors the dataset uses (``noise_ifos``;
+    every generator's network is bound to them), never the generators', so
+    noise-only and injection batches have the same shape.
 
     A Python float, because `rolling_pearson` takes it as a static argument.
     """
@@ -380,6 +380,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         spectral_config: Optional[SpectralConfig] = None,
         epoch_mode: Optional[EpochMode] = None,
         name: Optional[str] = None,
+        pearson_max_lag_seconds: Optional[float] = None,
     ):
         """
         seed: the root of the seed tree, an integer >= 0 or a gf.SeedTree.
@@ -392,6 +393,9 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             band 20 Hz to Nyquist, 1 s / 0.5 s median Welch PSD, 1 s filter).
             One PSD is estimated per batch from the offsource and reused by all
             three.
+        pearson_max_lag_seconds: the lag range of ``ROLLING_PEARSON_ONSOURCE``,
+            every lag from minus to plus this (rounded out to whole samples); by
+            default the largest light travel time between the noise's detectors.
         scale_factor: deprecated and ignored. Every input, output and label is
             physical strain (or derived from it: whitened data, SNRs).
         """
@@ -418,7 +422,13 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         self.output_variables = output_variables if output_variables is not None else []
         self.mask_history = mask_history
         self.spectral_config = spectral_config if spectral_config is not None else SpectralConfig()
-        
+        self.pearson_max_lag_seconds = (
+            get_max_arrival_time_difference(self._noise_ifos()) if pearson_max_lag_seconds is None
+            else float(pearson_max_lag_seconds)
+        )
+        if not self.pearson_max_lag_seconds >= 0.0:
+            raise ValueError(f"pearson_max_lag_seconds must be >= 0, got {pearson_max_lag_seconds}.")
+
         # Initialize waveform generators
         self.waveform_generators = copy.deepcopy(waveform_generators) if waveform_generators is not None else []
         if not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
@@ -770,14 +780,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
     def _calculate_rolling_pearson(self, whitened_onsource):
         """Calculate rolling Pearson correlation if required."""
         if gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE in self.variables_to_return:
-            max_arrival_time_difference_seconds = get_max_arrival_time_difference(
-                self._noise_ifos()
-            )
-            return gf.rolling_pearson(
-                whitened_onsource,
-                max_arrival_time_difference_seconds,
-                self.sample_rate_hertz
-            )
+            return gf.rolling_pearson(whitened_onsource, self.pearson_max_lag_seconds, self.sample_rate_hertz)
         return None
 
     def _calculate_spectrogram(self, whitened_onsource):

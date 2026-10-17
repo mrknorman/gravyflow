@@ -36,10 +36,10 @@ Where this example departs from the paper:
   validator ranks the log-odds ``z1 - z0`` of a two-class softmax. The
   combined score (`MLy.combined_score`) is the log-odds of the product of the
   two models' signal probabilities, which ranks exactly as the paper's product.
-- **Correlation lags.** The library's rolling Pearson spans the detectors'
-  largest light travel time, every lag from -M to +M samples with M rounded up
-  (57 lags for H1, L1 and V1 at 1024 Hz), where the paper uses ±30 ms (60 lags).
-  The weight count is the same.
+- **Correlation lags.** The paper's ±30 ms (``correlation_max_lag_seconds``):
+  every lag from -M to +M samples, with M = 31 rounded up from 30.72 at
+  1024 Hz, so 63 lags where the paper has 60. Each lag correlates the same
+  samples of the first detector, with no wrap. The weight count is the same.
 - **Schedule.** Model 2's learning rate is constant (the paper halves it when
   the loss stalls for 5 epochs). Both runs keep the model with the lowest
   validation loss and stop early on it (the paper keeps the best validation
@@ -74,7 +74,6 @@ from keras.models import Model
 
 import gravyflow as gf
 from gravyflow.src.dataset.conditioning.pearson import num_lags
-from gravyflow.src.dataset.dataset import get_max_arrival_time_difference
 from gravyflow.src.model.examples.base import MODEL_INPUT, ExampleModel, model_input
 
 # Model 2's second input: the Pearson correlation of each detector pair at each lag.
@@ -89,6 +88,8 @@ class MLyConfig:
     onsource_duration_seconds: float = 1.0
     offsource_duration_seconds: float = 16.0
     ifos: Tuple[gf.IFO, ...] = (gf.IFO.H1, gf.IFO.L1, gf.IFO.V1)
+    # The lag range of the coherence network's correlation: the paper's ±30 ms.
+    correlation_max_lag_seconds: float = 0.030
 
     # WNBs: duration, and the band's lower and upper edges (see the module notes)
     wnb_duration_seconds: Tuple[float, float] = (0.05, 0.9)
@@ -130,8 +131,7 @@ class MLyConfig:
     def correlation_shape(self) -> Tuple[int, int]:
         """``ROLLING_PEARSON_ONSOURCE`` per example: (detector pairs, lags)."""
         n = len(self.ifos)
-        lags = num_lags(get_max_arrival_time_difference(self.ifos), self.sample_rate_hertz)
-        return n * (n - 1) // 2, lags
+        return n * (n - 1) // 2, num_lags(self.correlation_max_lag_seconds, self.sample_rate_hertz)
 
 
 @keras.saving.register_keras_serializable(package="gravyflow.mly")
@@ -184,6 +184,7 @@ def mly_dataset_args(
             injection_chance=injection_chance,
         ),
         "num_examples_per_batch": config.batch_size,
+        "pearson_max_lag_seconds": config.correlation_max_lag_seconds,
         "input_variables": input_variables,
         "output_variables": [gf.ReturnVariables.INJECTION_PRESENT],
         **kwargs,
