@@ -136,3 +136,14 @@ def test_dataset_empty_segment_list():
 def test_a_dataset_with_no_return_variables_is_refused():
     with pytest.raises(ValueError, match="No return variables requested"):
         GravyflowDataset(group="train")
+
+
+@pytest.mark.parametrize("name, value", [
+    ("sample_rate_hertz", -100.0),
+    ("onsource_duration_seconds", -1.0),
+    ("num_examples_per_batch", 0),
+])
+def test_a_configuration_that_can_serve_nothing_is_refused_by_name(name, value):
+    """A non-positive rate, duration or batch size is refused as the dataset is built, naming it."""
+    with pytest.raises(ValueError, match=name):
+        white_dataset(**{name: value})

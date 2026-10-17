@@ -178,6 +178,15 @@ class TestCompressSegments:
     def test_empty_input(self, obtainer):
         assert obtainer.compress_segments(np.empty((0, 2))).size == 0
 
+    @pytest.mark.parametrize("segments, expected", [
+        ([[0, 10], [5, 15], [10, 20]], [[0, 20]]),
+        ([[0, 50], [40, 120], [110, 200], [250, 300], [290, 400], [500, 520], [600, 800]],
+         [[0, 200], [250, 400], [500, 520], [600, 800]]),
+    ], ids=["chain_of_three", "chains"])
+    def test_a_chain_of_overlaps_merges_into_one(self, obtainer, segments, expected):
+        """Each segment overlaps the next: their union is one segment, none of it lost."""
+        np.testing.assert_array_equal(obtainer.compress_segments(np.array(segments, float)), expected)
+
 
 def test_calculate_bin_indices(obtainer):
     """A segment's first bin is the floor of its start, its end bin the ceiling of its end."""
