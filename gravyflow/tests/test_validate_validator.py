@@ -243,6 +243,7 @@ def _scoring_args(sample_rate_hertz=2048.0):
     return args
 
 
+@pytest.mark.global_rng
 def test_a_window_scores_as_the_background_scores_it():
     # Real events were whitened by a spectrum of the default settings, not the dataset's,
     # so an event's score was not comparable with the background's.
@@ -278,6 +279,7 @@ def test_real_events_are_read_in_the_backgrounds_window(offline_events):
     assert all(e["status"] == "scored" and np.isfinite(e["score"]) for e in bank.real_events)
 
 
+@pytest.mark.global_rng
 @pytest.mark.parametrize("scaling,value", [(gf.ScalingTypes.HRSS, 1e-22), (gf.ScalingTypes.HPEAK, 1e-21)])
 def test_the_injection_set_is_scaled_to_its_snr_range_whatever_the_training_scaling(
         dataset_args, scaling, value):

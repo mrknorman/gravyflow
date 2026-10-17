@@ -123,6 +123,7 @@ def logit_model(detectors: int, samples: int) -> keras.Model:
     return keras.Model({"WHITENED_ONSOURCE": inputs}, outputs)
 
 
+@pytest.mark.global_rng
 def test_the_validator_backgrounds_real_network_noise_by_time_slides(world, tmp_path):
     # The validator scored real noise as independent windows of each detector, so its
     # FAR had no slides, no clustering and no livetime per slide.
