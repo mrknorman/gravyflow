@@ -1033,11 +1033,22 @@ class BaseDataObtainer(ABC):
     
     def get_event_veto_segments(self) -> np.ndarray:
         """
-        Veto segments for every event GWOSC publishes, each covering the signal's time
-        in band from 20 Hz plus padding. See ``gravyflow.get_event_veto_segments``.
+        Veto segments for every event GWOSC publishes: the signal's time in band from
+        20 Hz plus padding (``gravyflow.get_event_veto_segments``), and the event's
+        footprint, the time an example of it may read (``event_footprints``), widened
+        by the split's guard. Events are test data, so no other data comes within the
+        guard of them.
         """
-        from gravyflow.src.dataset.features.event import get_event_veto_segments
-        return get_event_veto_segments()
+        from gravyflow.src.dataset.features.event import get_event_catalogue, get_event_veto_segments
+        from gravyflow.src.dataset.features.transient_index import event_footprints
+
+        catalogue = get_event_catalogue()
+        guard = self.split_spec.guard_seconds
+        footprints = event_footprints(catalogue["gps"], catalogue["chirp_mass_source"])
+        return np.concatenate([
+            np.reshape(get_event_veto_segments(catalogue=catalogue), (-1, 2)),
+            footprints + np.array([-guard, guard]),
+        ])
 
     def veto_time_segments(
         self,

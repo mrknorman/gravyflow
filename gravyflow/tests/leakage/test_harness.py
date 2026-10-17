@@ -388,7 +388,8 @@ def test_catalogues_reach_every_consumer(world):
     from gravyflow.src.dataset.features import event as event_module
     from gravyflow.src.dataset.features import segment_builders
 
-    fixture = fx.straddle("train", "test", half_width=256.0)
+    # Wide enough that train keeps time beyond the event's footprint and guard.
+    fixture = fx.straddle("train", "test", half_width=512.0)
     edge = float(np.mean(fixture.segments["H1"][0]))
     sentinel = EventRecord("GWSENTINEL", edge - 100.4, 2.0)
     glitch = GlitchRecord("L1", edge - 50.0, edge - 50.5, 1.0, "Koi_Fish", 0.97)
