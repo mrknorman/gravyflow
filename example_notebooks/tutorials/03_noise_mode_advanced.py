@@ -52,7 +52,9 @@ GravyFlow supports two sampling strategies for NOISE mode:
 ║  SamplingMode.RANDOM │  Pick random positions within each segment.   ║
 ║                      │  Good for: training (max diversity)           ║
 ╠══════════════════════════════════════════════════════════════════════╣
-║  SamplingMode.GRID   │  Step through each segment once, then end.    ║
+║  SamplingMode.GRID   │  A finite set: each window once, floor(N/B)   ║
+║                      │  batches, the same every epoch; the remainder ║
+║                      │  of fewer than B windows is not served.       ║
 ║                      │  Good for: inference (each window once)       ║
 ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -251,7 +253,7 @@ print("=" * 70)
 print("""
 1. SAMPLING MODES:
    - SamplingMode.RANDOM: Best for training (default)
-   - SamplingMode.GRID: Best for inference/coverage
+   - SamplingMode.GRID: Best for inference/coverage (a finite set: each window once)
 
 2. TRAIN/VALIDATION SPLITTING:
    - One gf.SplitSpec: 80% train, 10% validate, 10% test, 128 s guard

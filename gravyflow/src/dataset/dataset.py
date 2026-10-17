@@ -155,6 +155,7 @@ def augmented_batcher(obtainer, tree: SeedTree, group: str, **window) -> NoiseBa
         return data
 
     batch.prepare = getattr(read, "prepare", None)
+    batch.plan = getattr(read, "plan", None)
     batch.batches = getattr(read, "batches", None)
     return batch
 
@@ -312,15 +313,16 @@ class IndexedBatches:
     (epoch, k), calls it itself. Under ``model.fit`` the epoch is Keras' own,
     from ``ds.epoch_callback()``.
 
-    Real noise drawn at random (REAL, ``SamplingMode.RANDOM``) is addressed
-    by index too: batch k of epoch e is batch e * steps + k of its split's
-    passes, from availability frozen when the dataset was built
+    Real noise drawn at random (REAL, ``SamplingMode.RANDOM``) and PSEUDO_REAL
+    noise are addressed by index too: batch k of epoch e is batch e * steps + k
+    of its split's passes, from availability frozen when the dataset was built
     (``freeze_availability``). So are transients: training batch k of epoch e
-    is batch e * steps + k of the split's passes over its records, and an
-    evaluation split is its whole batches, the same every epoch (its length).
-    PSEUDO_REAL and GRID noise are still read in order, whatever the address
-    (``seed_metadata["index_addressed"]`` is False): their batches depend on
-    the order they are asked for.
+    is batch e * steps + k of the split's passes over its records. GRID noise
+    and a transient evaluation split are finite sets: their length is their
+    whole batches, floor(N / B), whatever ``steps_per_epoch`` says, the
+    remainder reported, and every epoch serves the same set. Only a reader of
+    the caller's own is read in order (``seed_metadata["index_addressed"]`` is
+    False): its batches depend on the order they are asked for.
 
     Under ``model.fit`` the batches are asked for in order: Keras' shuffle
     (``fit``'s default) reorders them with Python's unseeded global random,
@@ -385,8 +387,8 @@ class IndexedBatches:
         return self.tree.batch(self.group, self._batch_epoch, index)
 
     def __len__(self):
-        # An evaluation set of transients is its whole batches, served once
-        # (``batch.batches``); every other split is steps_per_epoch long.
+        # A finite set (GRID noise, an evaluation set of transients) is its whole
+        # batches, served once (``batch.batches``); every other split is steps_per_epoch long.
         batches = getattr(getattr(self, "noise", None), "batches", None)
         return self.steps_per_epoch if batches is None else batches
 

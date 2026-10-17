@@ -388,6 +388,33 @@ def _split_world(specs):
     return fx._fixture(intervals, 256.0, "O3", ("O3",))
 
 
+@pytest.mark.parametrize("split", ["validate", "test"])
+def test_a_grid_evaluation_set_is_finite_and_the_same_every_epoch(world, split):
+    """
+    L12 (GRID): a GRID evaluation set is floor(N / B) batches of its N windows, each
+    window served at most once, and every epoch serves the same batches, in whatever
+    order they are asked for.
+    """
+    fixture = _split_world([gf.DEFAULT_SPLIT])
+    with world(fixture):
+        ds = fx.dataset(fixture, split, mode=gf.SamplingMode.GRID, batch=8)
+        windows = len(ds.noise.plan.starts)
+        assert len(ds) == windows // 8 > 0, f"{len(ds)} batches of {windows} windows"
+
+        def starts(order):
+            return {k: np.asarray(ds[k][1][gf.ReturnVariables.START_GPS_TIME.name]) for k in order}
+
+        first = starts(range(len(ds)))
+        ds.on_epoch_end()
+        ds.epoch = 2
+        later = starts(reversed(range(len(ds))))
+    for k in range(len(ds)):
+        np.testing.assert_array_equal(later[k], first[k], err_msg=f"batch {k} changed between epochs")
+    served = np.concatenate([first[k] for k in range(len(ds))])
+    for d in range(served.shape[1]):
+        assert len(np.unique(served[:, d])) == len(served), f"detector {d} served a window twice"
+
+
 def test_a_run_records_the_split_its_data_reads(world, tmp_path):
     """
     A run records the split its data reads, never one declared beside it: a default run

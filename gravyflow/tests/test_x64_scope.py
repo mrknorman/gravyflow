@@ -17,7 +17,6 @@ import pytest
 from keras import ops
 
 import gravyflow as gf
-from gravyflow.src.dataset.acquisition import base
 from gravyflow.src.dataset.features.waveforms import cbc
 from gravyflow.src.utils.shapes import ShapeEnforcer
 
@@ -164,11 +163,6 @@ OFFSOURCE = int(16.0 * SAMPLE_RATE)
 INTERVAL = np.float64(np.float32(1.0 / SAMPLE_RATE))  # IFOData keeps the interval in float32
 
 
-def _segment():
-    data = np.arange(NUM_SAMPLES, dtype=np.float32)
-    return base.IFOData(data=[data, data], sample_rate_hertz=SAMPLE_RATE, start_gps_time=[GPS, GPS + 100.0])
-
-
 class _AtTheRate(gf.GWOSC):
     """GWOSC publishing SAMPLE_RATE, so a window starts on any sample."""
 
@@ -179,10 +173,12 @@ class _AtTheRate(gf.GWOSC):
         return {"rates": [SAMPLE_RATE]}
 
 
-def test_gps_times_survive_the_random_draw():
+@pytest.mark.parametrize("mode", [gf.SamplingMode.RANDOM, gf.SamplingMode.GRID], ids=lambda m: m.name)
+def test_gps_times_survive_the_window_starts(mode):
     """
-    RANDOM draws each window's start as an absolute sample index; its START_GPS_TIME,
-    the first returned onsource sample's time, keeps float64 precision from it.
+    RANDOM and GRID give each window's start as an absolute sample index; its
+    START_GPS_TIME, the first returned onsource sample's time, keeps float64 precision
+    from it.
     """
     obtainer = gf.NoiseDataObtainer(
         data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
@@ -202,6 +198,7 @@ def test_gps_times_survive_the_random_draw():
         batch = next(obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=SAMPLE_RATE, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
             offsource_duration_seconds=16.0, num_examples_per_batch=8, ifos=[gf.IFO.L1], seed=1234,
+            sampling_mode=mode,
         ))
     start_times = np.asarray(batch[gf.ReturnVariables.START_GPS_TIME])
     assert start_times.dtype == np.float64
@@ -209,14 +206,6 @@ def test_gps_times_survive_the_random_draw():
     expected = (read["starts"] + int(0.5 * SAMPLE_RATE)) / SAMPLE_RATE  # the crop's samples on
     np.testing.assert_allclose(start_times, expected, rtol=0.0, atol=1e-6)
     assert np.all((GPS - 20.0 <= start_times) & (start_times < GPS + 44.0))
-
-
-def test_gps_times_survive_grid_windows():
-    with jax.enable_x64(False):
-        onsource, _, gps_times, _ = _segment().grid_windows(ONSOURCE, OFFSOURCE, 0.0, [None, None])
-    assert gps_times.dtype == np.float64
-    expected = np.array([GPS, GPS + 100.0])[None, :] + np.asarray(onsource)[:, :, 0].astype(np.float64) * INTERVAL
-    np.testing.assert_allclose(gps_times, expected, rtol=0.0, atol=1e-6)
 
 
 class _SegmentNoise:

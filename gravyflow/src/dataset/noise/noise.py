@@ -252,14 +252,14 @@ def colored_noise_generator(
 
 
 class ReaderExhausted(Exception):
-    """A sequential reader has no batch left: a GRID pass has ended, or no segment loaded."""
+    """A sequential reader (a transient obtainer, or a reader of the caller's own) has no batch left."""
 
 
 def sequential_batcher(iterator: Iterator) -> NoiseBatcher:
     """
     A batcher over a sequential reader: each call takes the reader's next
-    batch, whatever the address. PSEUDO_REAL and GRID noise (until it is
-    addressed by index) and a reader of the caller's own are read this way. A reader that ends raises
+    batch, whatever the address. A reader of the caller's own is read this
+    way. A reader that ends raises
     ``ReaderExhausted``, by name: a bare StopIteration would end, or break,
     whatever generator called the batcher.
     """
@@ -267,8 +267,7 @@ def sequential_batcher(iterator: Iterator) -> NoiseBatcher:
         try:
             return next(iterator)
         except StopIteration:
-            raise ReaderExhausted("The noise reader has no batch left: a GRID pass has ended, "
-                                  "or no segment could be loaded.") from None
+            raise ReaderExhausted("The sequential reader has no batch left.") from None
 
     return batch
 
@@ -358,13 +357,14 @@ class NoiseObtainer(Obtainer):
         """
         The noise of split ``group``, one batch per address.
 
-        WHITE and COLORED noise, and REAL noise drawn at random, is a pure
-        function of the batch's streams: REAL batch k of epoch e is batch
-        e * ``steps_per_epoch`` + k of the split's passes (``random_batcher``).
-        REAL noise read by a transient obtainer is that obtainer's own batcher,
-        addressed by index too. PSEUDO_REAL and GRID noise is read sequentially,
-        from readers seeded from ``tree`` and ``group``, until it is addressed by
-        index.
+        Every batch is a pure function of its address. WHITE and COLORED noise
+        is made from the batch's streams. REAL noise drawn at random, and
+        PSEUDO_REAL noise, are batch e * ``steps_per_epoch`` + k of the split's
+        endless passes (``random_batcher``, ``pseudo_real_batcher``). REAL noise
+        on a GRID is batch k of the split's finite GRID set, whatever the epoch
+        (``grid_batcher``); the batcher's ``batches`` is the set's length. REAL
+        noise read by a transient obtainer is that obtainer's own batcher,
+        addressed by index too. A reader of the caller's own is read in order.
         ``scale_factor`` is deprecated and ignored.
         """
         ignore_scale_factor(scale_factor)
@@ -383,6 +383,14 @@ class NoiseObtainer(Obtainer):
         # The detectors for this call only: the obtainer's own `ifos` is never
         # overwritten, so one obtainer can serve datasets with different detectors.
         ifos = gf.src.utils.numerics.ensure_list(ifos) if ifos is not None else list(self.ifos)
+
+        def window_spec() -> WindowSpec:
+            return WindowSpec.from_params(
+                sample_rate_hertz=sample_rate_hertz,
+                onsource_duration_seconds=onsource_duration_seconds,
+                offsource_duration_seconds=offsource_duration_seconds,
+                crop_duration_seconds=crop_duration_seconds,
+            )
 
         match self.noise_type:
             case NoiseType.WHITE:
@@ -407,16 +415,20 @@ class NoiseObtainer(Obtainer):
                 )
 
             case NoiseType.PSEUDO_REAL:
-                batch = sequential_batcher(self.pseudo_real_noise_generator(
+                reader = self._reader(ifos, tree, group, sample_rate_hertz)
+                if not isinstance(reader, gf.NoiseDataObtainer):
+                    raise ValueError(
+                        "PSEUDO_REAL noise is coloured by the rows of a noise obtainer's RANDOM plan: "
+                        f"give it a gf.NoiseDataObtainer, not a {type(reader).__name__}."
+                    )
+                batch = pseudo_real_batcher(
+                    reader,
+                    tree,
+                    window_spec(),
                     num_examples_per_batch,
-                    onsource_duration_seconds,
-                    crop_duration_seconds,
-                    offsource_duration_seconds,
-                    sample_rate_hertz,
-                    group,
-                    tree=tree,
-                    ifos=ifos
-                ))
+                    ifos,
+                    steps_per_epoch=steps_per_epoch,
+                )
 
             case NoiseType.REAL if isinstance(self.ifo_data_obtainer, gf.TransientDataObtainer):
                 batch = self.ifo_data_obtainer.batcher(
@@ -432,15 +444,15 @@ class NoiseObtainer(Obtainer):
                     steps_per_epoch=steps_per_epoch,
                 )
 
+            case NoiseType.REAL if addressed_by_index(self, sampling_mode) and sampling_mode == gf.SamplingMode.GRID:
+                batch = self._reader(ifos, tree, group, sample_rate_hertz).grid_batcher(
+                    window_spec(), num_examples_per_batch, ifos,
+                )
+
             case NoiseType.REAL if addressed_by_index(self, sampling_mode):
                 batch = self._reader(ifos, tree, group, sample_rate_hertz).random_batcher(
                     tree,
-                    WindowSpec.from_params(
-                        sample_rate_hertz=sample_rate_hertz,
-                        onsource_duration_seconds=onsource_duration_seconds,
-                        offsource_duration_seconds=offsource_duration_seconds,
-                        crop_duration_seconds=crop_duration_seconds,
-                    ),
+                    window_spec(),
                     num_examples_per_batch,
                     ifos,
                     steps_per_epoch=steps_per_epoch,
@@ -471,8 +483,10 @@ class NoiseObtainer(Obtainer):
             return enforce_shapes(batch(streams), num_ifos=len(ifos))
 
         # Noise addressed by index can be prepared ahead of a run (``Dataset.prepare``);
-        # an evaluation set of transients has a length of its own (``batch.batches``).
+        # a finite set (GRID, an evaluation set of transients) has a length of its own
+        # (``batch.batches``), and a plan that reports its remainder.
         checked.prepare = getattr(batch, "prepare", None)
+        checked.plan = getattr(batch, "plan", None)
         checked.batches = getattr(batch, "batches", None)
         return checked
 
@@ -514,7 +528,8 @@ class NoiseObtainer(Obtainer):
         """
         An iterator over the batches k = 0, 1, ... of split ``group`` (epoch
         0; required) of the seed tree rooted at ``seed`` (default
-        ``gf.Defaults.seed``).
+        ``gf.Defaults.seed``): endless, but for a GRID set, which ends after
+        its last batch.
         ``scale_factor`` is deprecated and ignored.
         """
         ignore_scale_factor(scale_factor)
@@ -532,100 +547,106 @@ class NoiseObtainer(Obtainer):
             ifos=ifos,
             sampling_mode=sampling_mode,
         )
-        return _until_exhausted(batch(tree.batch(group, 0, k)) for k in count())
+        indices = count() if batch.batches is None else range(batch.batches)
+        return _until_exhausted(batch(tree.batch(group, 0, k)) for k in indices)
 
-    def pseudo_real_noise_generator(
-        self,
+
+#: Samples per segment of the Welch PSD that colours PSEUDO_REAL noise.
+PSEUDO_REAL_NPERSEG = 1024
+
+
+def pseudo_real_batcher(
+        reader: "gf.NoiseDataObtainer",
+        tree: SeedTree,
+        window_spec: WindowSpec,
         num_examples_per_batch: int,
-        onsource_duration_seconds: float,
-        crop_duration_seconds : float,
-        offsource_duration_seconds: float,
-        sample_rate_hertz: float,
-        group : str,
-        tree : SeedTree,
-        ifos : List[gf.IFO] = None
-    ):
-        """
-        Gaussian noise coloured by the PSDs of real segments, read in order,
-        in strain. Batch b of the reader draws from the streams of (group,
-        epoch 0, b).
-        """
-        ifos = list(self.ifos) if ifos is None else ifos
+        ifos: List["gf.IFO"],
+        steps_per_epoch: Optional[int] = None,
+    ) -> NoiseBatcher:
+    """
+    PSEUDO_REAL noise addressed by index: Gaussian noise in strain, each example
+    coloured by the PSD of one row of the split's RANDOM plan (``reader.random_plan``).
 
-        window_spec = WindowSpec.from_params(
-            sample_rate_hertz=sample_rate_hertz,
-            onsource_duration_seconds=onsource_duration_seconds,
-            offsource_duration_seconds=offsource_duration_seconds,
-            crop_duration_seconds=crop_duration_seconds
-        )
-        num_samples_list = [
-            int(duration * sample_rate_hertz) for duration in (
-                window_spec.total_onsource_duration_seconds, offsource_duration_seconds
-            )
-        ]
+    Batch g = epoch * ``steps_per_epoch`` + k of the plan's endless passes draws each
+    example's row as RANDOM does, uniformly over the rows of its mixing window
+    (``RandomPlan.mixed``, from ``noise/row``), so in every pass each row colours its
+    share of examples, in proportion to its start-seconds. The white noise is
+    ``noise/{IFO}/{on,off}`` at (epoch, k). A row's PSD is estimated once, the first
+    time an example draws it, from the whole row read through the store
+    (``read_windows``), and kept by the batcher.
 
-        reader = self._reader(ifos, tree, group, sample_rate_hertz)
-        num_batches_in_segment : int = int(
-              reader.max_segment_duration_seconds
-            * reader.saturation
-            / (num_examples_per_batch * onsource_duration_seconds)
-        )
+    A batch raises ValueError naming a row whose strain on some detector has no power
+    (a constant, such as zeros): it has no spectrum to colour noise by.
+    """
+    plan = reader.random_plan(tree, window_spec, num_examples_per_batch)
+    rate = window_spec.sample_rate_hertz
+    lengths = [window_spec.num_onsource_samples, window_spec.num_offsource_samples]
+    spectra = {}
 
-        batch_index = count()
-        for segment in reader.acquire(
-            sample_rate_hertz,
-            reader.valid_segments,
-            ifos
-        ):
-            onsource_asds, offsource_asds = [], []
-            for data in segment.data:
-                # The PSD of strain (~1e-46) underflows float32: the spectrum
-                # is interpolated in its normalised units (the PSD of the
-                # segment over its scale), and the scale returns on the ASD.
-                spectrum = gf.psd(data, nperseg=1024, sample_rate_hertz=sample_rate_hertz)
+    def row_asds(j: int):
+        """Row ``j``'s onsource and offsource ASDs, each (I, F): its PSD, interpolated to each window."""
+        if j not in spectra:
+            on, off = [], []
+            for i, ifo in enumerate(ifos):
+                count = int(plan.counts[j, i])
+                if count < PSEUDO_REAL_NPERSEG:
+                    raise ValueError(
+                        f"Row {j} of the {plan.split!r} split ({ifo.name} piece {plan.rows[j, i].tolist()}) "
+                        f"holds {count} samples, fewer than one PSD segment of {PSEUDO_REAL_NPERSEG}."
+                    )
+                piece = reader.read_windows([ifo], rate, np.array([[plan.firsts[j, i]]]), count, 0)[0][0, 0]
+                spectrum = gf.psd(piece, nperseg=PSEUDO_REAL_NPERSEG, sample_rate_hertz=rate)
+                power = spectrum.value()
+                if not (np.all(np.isfinite(power)) and np.any(power > 0.0)):
+                    raise ValueError(
+                        f"Row {j} of the {plan.split!r} split ({ifo.name} piece {plan.rows[j, i].tolist()}) "
+                        "has no power: its strain is constant, so it has no spectrum to colour noise by."
+                    )
+                # The PSD of strain (~1e-46) underflows float32: the spectrum is interpolated
+                # in its normalised units (the PSD over its scale), and the scale returns on the ASD.
                 onsource_psd, offsource_psd = interpolate_onsource_offsource_psd(
-                    num_samples_list,
-                    sample_rate_hertz,
-                    spectrum.frequencies,
-                    ops.reshape(spectrum.normalised, (-1,)) / sample_rate_hertz
-                )
+                    lengths, rate, spectrum.frequencies, ops.reshape(spectrum.normalised, (-1,)) / rate)
                 scale = ops.cast(ops.reshape(spectrum.scale, ()), "complex64")
-                onsource_asds.append(ops.sqrt(onsource_psd) * scale)
-                offsource_asds.append(ops.sqrt(offsource_psd) * scale)
+                on.append(ops.sqrt(onsource_psd) * scale)
+                off.append(ops.sqrt(offsource_psd) * scale)
+            spectra[j] = (ops.stack(on, axis=0), ops.stack(off, axis=0))
+        return spectra[j]
 
-            onsource_asds = ops.expand_dims(ops.stack(onsource_asds, axis=0), 0)
-            offsource_asds = ops.expand_dims(ops.stack(offsource_asds, axis=0), 0)
+    def batch(streams: BatchStreams) -> Dict:
+        epoch = streams.epoch or 0
+        if epoch and steps_per_epoch is None:
+            raise ValueError("Batches of epochs after the first need the epoch's steps (steps_per_epoch).")
+        mixed = plan.mixed(epoch * (steps_per_epoch or 0) + streams.k)
+        rows = mixed[streams.stream("noise/row").integers(len(mixed), size=num_examples_per_batch)]
+        onsource_asds, offsource_asds = (ops.stack(asds, axis=0) for asds in zip(*map(row_asds, rows.tolist())))
+        return {
+            RV.ONSOURCE: color_noise(
+                unit_normal_noise(streams, ifos, "on", num_examples_per_batch, lengths[0]),
+                onsource_asds, sample_rate_hertz=rate),
+            RV.OFFSOURCE: color_noise(
+                unit_normal_noise(streams, ifos, "off", num_examples_per_batch, lengths[1]),
+                offsource_asds, sample_rate_hertz=rate),
+        }
 
-            for _ in range(num_batches_in_segment):
-                streams = tree.batch(group, 0, next(batch_index))
-                yield {
-                    RV.ONSOURCE: color_noise(
-                        unit_normal_noise(streams, ifos, "on", num_examples_per_batch, num_samples_list[0]),
-                        onsource_asds,
-                        sample_rate_hertz=sample_rate_hertz
-                    ),
-                    RV.OFFSOURCE: color_noise(
-                        unit_normal_noise(streams, ifos, "off", num_examples_per_batch, num_samples_list[1]),
-                        offsource_asds,
-                        sample_rate_hertz=sample_rate_hertz
-                    ),
-                }
+    batch.plan = plan
+    return batch
 
 
 def addressed_by_index(obtainer, sampling_mode=None) -> bool:
     """
     Whether ``obtainer``'s batches are a pure function of their address: simulated
     noise (WHITE, COLORED), transients, bare or read as REAL noise (their own
-    ``batcher``), and real noise drawn at random (``SamplingMode.RANDOM``) through a
-    noise obtainer (``random_batcher``). The rest is read in order.
+    ``batcher``), and REAL and PSEUDO_REAL noise read through a noise obtainer
+    (``random_batcher``, ``grid_batcher``, ``pseudo_real_batcher``), in either
+    sampling mode. A reader of the caller's own is read in order.
     """
     if not reads_real_data(obtainer):
         return True
-    real = isinstance(obtainer, NoiseObtainer) and obtainer.noise_type == NoiseType.REAL
-    reader = obtainer.ifo_data_obtainer if real else obtainer
+    noise = isinstance(obtainer, NoiseObtainer) and obtainer.noise_type in (NoiseType.REAL, NoiseType.PSEUDO_REAL)
+    reader = obtainer.ifo_data_obtainer if noise else obtainer
     if isinstance(reader, gf.TransientDataObtainer):
-        return True
-    return (real and sampling_mode in (None, gf.SamplingMode.RANDOM)
+        return obtainer.noise_type == NoiseType.REAL if noise else True
+    return (noise and sampling_mode in (None, gf.SamplingMode.RANDOM, gf.SamplingMode.GRID)
             and isinstance(reader, gf.NoiseDataObtainer))
 
 

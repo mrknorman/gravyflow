@@ -665,3 +665,284 @@ def test_obtainer_iterator_walks_the_batches_of_epoch_zero():
             np.asarray(next(iterator)[gf.ReturnVariables.ONSOURCE]),
             np.asarray(batch(gf.SeedTree(3).batch("validate", 0, k))[gf.ReturnVariables.ONSOURCE]),
         )
+
+
+# --- Real noise addressed by index, offline: GRID and PSEUDO_REAL --------------
+#
+# The strain is a fake GWOSC fetch of hashed uniform noise: each sample's value is a
+# function of its absolute index alone, scaled by the amplitude of the science
+# segment it lies in, so an example's level names the kind of segment it came from.
+
+from gravyflow.src.dataset.acquisition.sources import SegmentStrain  # noqa: E402
+from gravyflow.src.dataset.acquisition import noise as acquisition_noise  # noqa: E402
+from gravyflow.tests.conftest import gwosc_serving  # noqa: E402
+
+OFFLINE_RATE = 256.0
+OFFLINE_WINDOW = dict(sample_rate_hertz=OFFLINE_RATE, onsource_duration_seconds=1.0,
+                      crop_duration_seconds=0.5, offsource_duration_seconds=4.0)
+#: A window's footprint: its padded onsource and its offsource (s).
+FOOTPRINT_SECONDS = 6.0
+#: The first split block (8192 s) inside O3.
+BLOCK_SECONDS = 8192.0
+FIRST_BLOCK = float(np.ceil(1238170000.0 / BLOCK_SECONDS) * BLOCK_SECONDS)
+#: Equal splits, so a few blocks give every split some time.
+THIRDS = gf.SplitSpec(fractions={"test": 1 / 3, "validate": 1 / 3, "train": 1 / 3})
+
+
+def science_layout(lengths, amplitudes, blocks, offset=200.0):
+    """
+    One science segment a block, ``offset`` s into it: block i's lasts
+    ``lengths[i % len]`` seconds at amplitude ``amplitudes[i % len]``. Returns
+    (start, end, amplitude) rows.
+    """
+    return [(FIRST_BLOCK + BLOCK_SECONDS * i + offset,
+             FIRST_BLOCK + BLOCK_SECONDS * i + offset + lengths[i % len(lengths)],
+             amplitudes[i % len(amplitudes)]) for i in range(blocks)]
+
+
+class HashedFetch:
+    """A fake GWOSC fetch at OFFLINE_RATE: hashed uniform noise, scaled by each sample's segment's amplitude."""
+
+    rates = (OFFLINE_RATE,)
+    source_id = "gwosc-fake-hashed"
+
+    def __init__(self, layout):
+        self.layout = layout
+
+    def __call__(self, ifo, sample_rate_hertz, interval):
+        start, end = interval
+        rate = float(sample_rate_hertz)
+        first, stop = int(np.ceil(start * rate - 1e-6)), int(np.ceil(end * rate - 1e-6))
+        x = np.arange(first, stop, dtype=np.uint64) + np.uint64(sum(map(ord, ifo.name)) << 40)
+        with np.errstate(over="ignore"):  # splitmix64
+            x = x * np.uint64(0x9E3779B97F4A7C15)
+            x = (x ^ (x >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+            x = (x ^ (x >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+            x = x ^ (x >> np.uint64(31))
+        values = (x >> np.uint64(11)).astype(np.float64) / float(2 ** 53) - 0.5
+        gps = np.arange(first, stop, dtype=np.float64) / rate
+        for segment_start, segment_end, amplitude in self.layout:
+            values[(gps >= segment_start) & (gps < segment_end)] *= amplitude
+        return SegmentStrain(values.astype(np.float32), first / rate, rate, self.source_id)
+
+
+def offline_noise(layout, **kwargs):
+    """A noise data obtainer whose science time is ``layout``'s segments, with nothing vetoed."""
+
+    class OfflineNoise(gf.NoiseDataObtainer):
+        def get_segment_times(self, start, end, ifo, state_flags):
+            rows = [(s, e) for s, e, _ in layout if s >= start and e <= end]
+            return np.asarray(rows, dtype=np.float64).reshape(-1, 2)
+
+        def remove_unwanted_segments(self, ifo, valid_segments):
+            return valid_segments
+
+    arguments = dict(observing_runs=gf.ObservingRun.O3, data_quality=gf.DataQuality.BEST,
+                     data_labels=[gf.DataLabel.NOISE], augmentations=[])
+    arguments.update(kwargs)
+    return OfflineNoise(**arguments)
+
+
+#: Thirty blocks of 40 s and 30 s pieces, in three equal splits: every split has some.
+GRID_LAYOUT = science_layout([40.0, 30.0], [1.0], blocks=30)
+GRID_BATCH = 4
+
+
+def grid_dataset(group):
+    return gf.Dataset(
+        noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.REAL, ifos=[gf.IFO.L1],
+                                        ifo_data_obtainer=offline_noise(GRID_LAYOUT, split_spec=THIRDS)),
+        **OFFLINE_WINDOW, num_examples_per_batch=GRID_BATCH, group=group, seed=11, ifos=[gf.IFO.L1],
+        sampling_mode=gf.SamplingMode.GRID,
+        input_variables=[gf.ReturnVariables.ONSOURCE], output_variables=[gf.ReturnVariables.START_GPS_TIME],
+    )
+
+
+def grid_starts_of(ds, indices):
+    """START_GPS_TIME of the batches ``indices``, in that order: (n, B, I)."""
+    return np.stack([np.asarray(ds[k][1][gf.ReturnVariables.START_GPS_TIME.name]) for k in indices])
+
+
+class TestGridByIndex:
+    """GRID is a finite set addressed by index: floor(N / B) batches, each window once, the same every epoch."""
+
+    @pytest.mark.parametrize("group", ["train", "validate", "test"])
+    def test_length_is_the_whole_batches_of_the_set(self, group, caplog):
+        with gwosc_serving(HashedFetch(GRID_LAYOUT)), caplog.at_level(logging.INFO):
+            ds = grid_dataset(group)
+        plan = ds.noise.plan
+        assert isinstance(plan, acquisition_noise.GridPlan)
+        assert len(plan.starts) > 2 * GRID_BATCH, "the split serves too few GRID windows to test"
+        assert len(ds) == len(plan.starts) // GRID_BATCH
+        assert plan.remainder == len(plan.starts) % GRID_BATCH
+        assert f"remainder of {plan.remainder} example" in caplog.text, "the remainder is not reported"
+        with pytest.raises(IndexError):
+            ds.streams(len(ds))
+
+    def test_every_window_once(self):
+        with gwosc_serving(HashedFetch(GRID_LAYOUT)):
+            ds = grid_dataset("train")
+            starts = grid_starts_of(ds, range(len(ds)))
+        assert starts.shape[:2] == (len(ds), GRID_BATCH)
+        assert len(np.unique(starts[..., 0])) == len(ds) * GRID_BATCH, "a GRID window was served twice"
+
+    def test_a_batch_is_a_function_of_its_index(self):
+        with gwosc_serving(HashedFetch(GRID_LAYOUT)):
+            ds = grid_dataset("test")
+            backwards = grid_starts_of(ds, reversed(range(len(ds))))[::-1]
+            fresh = grid_starts_of(grid_dataset("test"), range(len(ds)))
+        np.testing.assert_array_equal(backwards, fresh)
+
+    @pytest.mark.parametrize("group", ["train", "validate", "test"])
+    def test_every_epoch_serves_the_same_set(self, group):
+        with gwosc_serving(HashedFetch(GRID_LAYOUT)):
+            ds = grid_dataset(group)
+            first = grid_starts_of(ds, range(len(ds)))
+            ds.on_epoch_end()
+            ds.epoch = 3
+            again = grid_starts_of(ds, range(len(ds)))
+        np.testing.assert_array_equal(first, again)
+
+    def test_the_obtainer_iterator_ends_with_the_set(self):
+        with gwosc_serving(HashedFetch(GRID_LAYOUT)):
+            length = len(grid_dataset("train"))
+            noise = gf.NoiseObtainer(noise_type=gf.NoiseType.REAL, ifos=[gf.IFO.L1],
+                                     ifo_data_obtainer=offline_noise(GRID_LAYOUT, split_spec=THIRDS))
+            served = list(islice(noise(**OFFLINE_WINDOW, num_examples_per_batch=GRID_BATCH, group="train", seed=11,
+                                       sampling_mode=gf.SamplingMode.GRID), 3 * length))
+        assert len(served) == length
+
+
+class TestGridPairs:
+    """GRID's pairs: slots one stride apart, each once a pass; detector k's the next free one from its middle, 2S away."""
+
+    ON, OFF = 64, 256  # samples
+
+    def starts(self, counts, firsts, separation, coincident=False):
+        return acquisition_noise.grid_examples(np.asarray([firsts], np.int64), np.asarray([counts], np.int64),
+                             np.zeros((1, len(counts), 2)), self.ON, self.OFF, separation, coincident)
+
+    def test_each_slot_once_and_separated(self):
+        starts = self.starts([6400, 6400], [0, 0], 640)
+        assert len(starts) > 0
+        for d in range(2):
+            assert len(np.unique(starts[:, d])) == len(starts)
+            assert np.all((starts[:, d] - self.OFF) % self.ON == 0), "a window off its slot"
+        assert np.min(np.abs(starts[:, 0] - starts[:, 1])) >= 640
+
+    @pytest.mark.parametrize("counts, firsts", [
+        ([2560, 2560], [0, 0]),          # equal short pieces
+        ([65536, 131072], [65536, 0]),   # one piece inside the other
+    ])
+    def test_adversarial_layouts_stay_apart(self, counts, firsts):
+        starts = self.starts(counts, firsts, 768)
+        assert len(starts) > 0
+        assert np.min(np.abs(starts[:, 0] - starts[:, 1])) >= 768
+
+    def test_an_inseparable_row_serves_nothing(self):
+        assert len(self.starts([512, 512], [0, 0], 768)) == 0
+
+    def test_coincident_slots_start_together(self):
+        starts = self.starts([6400, 6400], [0, 0], 0, coincident=True)
+        assert len(starts) == len(np.unique(starts[:, 0])) > 0
+        np.testing.assert_array_equal(starts[:, 0], starts[:, 1])
+
+    def test_a_piece_in_two_rows_serves_each_slot_once(self):
+        firsts = np.array([[0, 100000], [0, 300000]], np.int64)
+        counts = np.array([[6400, 6400], [6400, 6400]], np.int64)
+        rows = np.array([[[0, 25], [390, 415]], [[0, 25], [1171, 1196]]], np.float64)
+        starts = acquisition_noise.grid_examples(firsts, counts, rows, self.ON, self.OFF, 640, False)
+        assert len(starts) > 0
+        assert len(np.unique(starts[:, 0])) == len(starts), "detector 0's piece served a slot twice"
+
+    def test_a_plan_has_floor_n_over_b_batches(self):
+        starts = np.arange(30, dtype=np.int64).reshape(15, 2)
+        plan = acquisition_noise.GridPlan("test", starts, 4)
+        assert (plan.batches, plan.remainder) == (3, 3)
+        np.testing.assert_array_equal(plan.examples(2), starts[8:12])
+        with pytest.raises(IndexError):
+            plan.examples(3)
+
+
+SHORT, LONG = 200.0, 600.0
+QUIET, LOUD = 1.0, 100.0
+#: Short quiet pieces and long loud ones, three times as long, one a block.
+PSEUDO_LAYOUT = science_layout([SHORT, LONG], [QUIET, LOUD], blocks=24)
+
+
+def pseudo_real(layout, **kwargs):
+    return gf.NoiseObtainer(noise_type=gf.NoiseType.PSEUDO_REAL, ifos=[gf.IFO.L1],
+                            ifo_data_obtainer=offline_noise(layout, **kwargs))
+
+
+def loud_share(batches):
+    """The share of examples coloured by a loud segment: their level is far above the quietest's."""
+    levels = np.concatenate([np.std(np.asarray(b[RV.ONSOURCE]), axis=-1).ravel() for b in batches])
+    return float(np.mean(levels > np.sqrt(LOUD / QUIET) * np.min(levels)))
+
+
+class TestPseudoRealByIndex:
+    """PSEUDO_REAL colours each example by the PSD of a row of the RANDOM plan: endless, each row by its length."""
+
+    BATCH = 64
+
+    def batches(self, noise, n, group="train"):
+        return list(islice(noise(**OFFLINE_WINDOW, num_examples_per_batch=self.BATCH, group=group, seed=5), n))
+
+    def test_rows_serve_in_proportion_to_their_length(self):
+        with gwosc_serving(HashedFetch(PSEUDO_LAYOUT)):
+            served = self.batches(pseudo_real(PSEUDO_LAYOUT, saturation=0.25), 120)
+        expected = (LONG - FOOTPRINT_SECONDS) / (LONG + SHORT - 2 * FOOTPRINT_SECONDS)
+        assert abs(loud_share(served) - expected) < 0.08, \
+            f"loud share {loud_share(served):.3f}, where the rows' lengths give {expected:.3f}"
+
+    def test_serves_past_one_pass(self):
+        with gwosc_serving(HashedFetch(PSEUDO_LAYOUT)):
+            served = self.batches(pseudo_real(PSEUDO_LAYOUT, saturation=0.25), 400)
+        assert len(served) == 400, f"the reader ended after {len(served)} batches"
+
+    def test_a_batch_is_a_function_of_its_address(self):
+        kwargs = dict(**OFFLINE_WINDOW, num_examples_per_batch=8, steps_per_epoch=10)
+        tree = gf.SeedTree(5)
+        with gwosc_serving(HashedFetch(PSEUDO_LAYOUT)):
+            noise = pseudo_real(PSEUDO_LAYOUT, saturation=0.25)
+            batch = noise.batcher(tree, "train", **kwargs)
+            late = np.asarray(batch(tree.batch("train", 3, 7))[RV.ONSOURCE])
+            early = np.asarray(batch(tree.batch("train", 0, 0))[RV.ONSOURCE])
+            again = noise.batcher(tree, "train", **kwargs)
+            np.testing.assert_array_equal(np.asarray(again(tree.batch("train", 0, 0))[RV.ONSOURCE]), early)
+            np.testing.assert_array_equal(np.asarray(again(tree.batch("train", 3, 7))[RV.ONSOURCE]), late)
+        assert not np.array_equal(early, late)
+
+    def test_a_short_piece_is_left_out_not_read(self):
+        # Every block also holds a 1 s science segment, whose interior is shorter than a window.
+        layout = science_layout([1.0], [QUIET], blocks=24, offset=150.0) + science_layout([LONG], [QUIET], blocks=24)
+        with gwosc_serving(HashedFetch(layout)):
+            served = self.batches(pseudo_real(layout, segment_order=gf.SegmentOrder.SHORTEST_FIRST), 3)
+        assert len(served) == 3
+        assert all(np.all(np.isfinite(np.asarray(b[RV.ONSOURCE]))) for b in served)
+
+    def test_a_row_without_power_is_refused(self):
+        layout = science_layout([LONG], [0.0, QUIET, QUIET], blocks=24)
+        with gwosc_serving(HashedFetch(layout)):
+            with pytest.raises(ValueError, match="no power"):
+                self.batches(pseudo_real(layout, saturation=0.25), 200)
+
+    def test_precomputed_segments_are_served(self):
+        with gwosc_serving(HashedFetch(PSEUDO_LAYOUT)):
+            obtainer = offline_noise(PSEUDO_LAYOUT, saturation=0.25)
+            obtainer.get_valid_segments([gf.IFO.L1], 5, "train")
+            noise = gf.NoiseObtainer(noise_type=gf.NoiseType.PSEUDO_REAL, ifos=[gf.IFO.L1],
+                                     ifo_data_obtainer=obtainer)
+            served = self.batches(noise, 2)
+        assert len(served) == 2
+
+    def test_both_are_index_addressed(self):
+        with gwosc_serving(HashedFetch(PSEUDO_LAYOUT)):
+            pseudo = gf.Dataset(noise_obtainer=pseudo_real(PSEUDO_LAYOUT, saturation=0.25), **OFFLINE_WINDOW,
+                                num_examples_per_batch=4, group="train", seed=5, steps_per_epoch=3,
+                                input_variables=[gf.ReturnVariables.ONSOURCE],
+                                output_variables=[gf.ReturnVariables.INJECTION_MASKS])
+        with gwosc_serving(HashedFetch(GRID_LAYOUT)):
+            grid = grid_dataset("test")
+        assert pseudo.seed_metadata["index_addressed"] and grid.seed_metadata["index_addressed"]

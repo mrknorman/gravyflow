@@ -18,7 +18,7 @@ from gravyflow.src.dataset.config import WindowSpec
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, Coincidence,
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS,
-    WINDOW_EDGE_BUFFER_SAMPLES, label_kinds, separable,
+    WINDOW_EDGE_BUFFER_SAMPLES, label_kinds, separable, grid_slots, grid_starts, window_start_bounds,
 )
 from .gwosc_data import intersect_segments
 from gravyflow.src.dataset.store import read as store_read
@@ -249,6 +249,77 @@ def draw_examples(
                    else f"their detectors cannot start {separation_samples} samples apart.")
             )
     return rows, starts, rounds
+
+
+@dataclass(frozen=True, eq=False)
+class GridPlan:
+    """
+    The GRID set of one split, addressed by index: every example its rows hold
+    (``grid_examples``), each window once, in the rows' time order.
+
+    Batch k is examples [k B, (k + 1) B), so the set is floor(N / B) batches; the
+    ``remainder``, fewer than B examples, is never served. GRID draws nothing, so
+    every epoch serves the same set.
+    """
+    split: str
+    starts: np.ndarray  # (N, I) each example's detectors' onsource starts, absolute sample indices
+    num_examples_per_batch: int
+
+    @property
+    def batches(self) -> int:
+        """The set's whole batches: floor(N / B)."""
+        return len(self.starts) // self.num_examples_per_batch
+
+    @property
+    def remainder(self) -> int:
+        """The examples after the last whole batch, never served."""
+        return len(self.starts) % self.num_examples_per_batch
+
+    def examples(self, k: int) -> np.ndarray:
+        """Batch ``k``'s onsource starts, (B, I)."""
+        k = int(k)
+        if not 0 <= k < self.batches:
+            raise IndexError(f"GRID batch {k} is outside the {self.batches} batches of the {self.split!r} set.")
+        return self.starts[k * self.num_examples_per_batch:(k + 1) * self.num_examples_per_batch]
+
+
+def grid_examples(
+        firsts: np.ndarray,
+        counts: np.ndarray,
+        rows: np.ndarray,
+        num_onsource_samples: int,
+        num_offsource_samples: int,
+        separation_samples: float,
+        coincident: bool,
+        quantum: int = 1,
+    ) -> np.ndarray:
+    """
+    Every GRID example of ``rows`` ((M, I, 2) GPS pieces), in order, as each
+    detector's onsource start, an absolute sample index: (N, I).
+
+    Each piece's window starts (``window_start_bounds`` of its ``counts`` samples from
+    absolute sample ``firsts``, both (M, I), as ``store.read.interiors`` measures them)
+    are cut into slots one onsource apart, and each row pairs its pieces' free slots
+    (``grid_starts``): detectors at least ``separation_samples`` apart, or, when
+    ``coincident``, at one time. A piece in several rows serves each of its slots
+    once, whichever row takes it. Nothing is read or drawn: the set is arithmetic on
+    the pieces' lengths. A read starts on the grid of ``quantum`` samples
+    (``store.read``), which every slot of a piece shares only if the onsource does.
+    """
+    if num_onsource_samples % quantum:
+        raise ValueError(
+            f"GRID slots are one onsource ({num_onsource_samples} samples) apart, but a read starts "
+            f"only every {quantum} samples at this rate: choose an onsource of a multiple of {quantum} samples."
+        )
+    num_ifos = np.shape(firsts)[1] if np.ndim(firsts) == 2 else 0
+    used, examples = {}, []
+    for row, first, count in zip(rows, np.asarray(firsts, np.int64), np.asarray(counts, np.int64)):
+        bounds = [window_start_bounds(int(n), num_onsource_samples, num_offsource_samples) for n in count]
+        marks = [used.setdefault((i, float(start), float(end)), np.zeros(grid_slots(b, num_onsource_samples), bool))
+                 for i, ((start, end), b) in enumerate(zip(row, bounds))]
+        starts = grid_starts(bounds, first, num_onsource_samples, separation_samples, marks, coincident)
+        examples.append(first[None, :] + starts)
+    return np.concatenate(examples) if examples else np.empty((0, num_ifos), np.int64)
 
 
 class NoiseDataObtainer(BaseDataObtainer):
@@ -660,13 +731,9 @@ class NoiseDataObtainer(BaseDataObtainer):
 
         tree = SeedTree(seed)
         if sampling_mode == SamplingMode.GRID:
-            plan = self.build_sampling_plan(window_spec)
-            if len(plan.rows) == 0:
-                logging.warning("No valid segments available in NOISE mode. Generator will be empty.")
-                return
-            emit = lambda onsource, offsource, gps: self._emit(window_spec, onsource, offsource, gps, whiten, crop)
-            yield from self._grid_pass(window_spec, num_examples_per_batch, self._separation_seconds(window_spec),
-                                       ifos, emit, self.coincidence == Coincidence.COINCIDENT)
+            batch = self.grid_batcher(window_spec, num_examples_per_batch, ifos, whiten, crop)
+            for k in range(batch.batches):
+                yield batch(tree.batch(self._served_group, 0, k) if self._served_group else tree.direct(k))
             return
 
         batch = self.random_batcher(tree, window_spec, num_examples_per_batch, ifos, whiten, crop)
@@ -807,6 +874,70 @@ class NoiseDataObtainer(BaseDataObtainer):
         batch.prepare = prepare
         return batch
 
+    def grid_plan(self, window_spec: WindowSpec, num_examples_per_batch: int) -> GridPlan:
+        """
+        The served split's GRID set (``GridPlan``) for windows of ``window_spec`` and
+        batches of ``num_examples_per_batch``: every example of its sampling plan's rows
+        (``grid_examples``), rows in time order, each piece measured as it is read.
+        Logs the set's size and the remainder it leaves unserved.
+        """
+        split = self._served_group or DIRECT_SPLIT
+        rows = self.build_sampling_plan(window_spec).rows
+        rows = rows[np.lexsort(np.reshape(rows, (len(rows), int(np.prod(rows.shape[1:])))).T[::-1])]
+        rate = window_spec.sample_rate_hertz
+        firsts, counts = interiors(self.source, rate, np.reshape(rows, (-1, 2)))
+        plan = GridPlan(split, grid_examples(
+            np.reshape(firsts, rows.shape[:2]), np.reshape(counts, rows.shape[:2]), rows,
+            window_spec.num_onsource_samples, window_spec.num_offsource_samples,
+            self._separation_seconds(window_spec) * rate, self.coincidence == Coincidence.COINCIDENT,
+            store_read.geometry(self.source, rate).up,
+        ), num_examples_per_batch)
+        message = (f"The {split!r} GRID set has {len(plan.starts)} examples: {plan.batches} batches of "
+                   f"{num_examples_per_batch}, and a remainder of {plan.remainder} examples not served.")
+        if plan.batches:
+            logging.info(message)
+        else:
+            logging.warning(message)
+        return plan
+
+    def grid_batcher(
+            self,
+            window_spec: WindowSpec,
+            num_examples_per_batch: int,
+            ifos: List[gf.IFO],
+            whiten: bool = False,
+            crop: bool = False,
+        ):
+        """
+        The served split's GRID batches, addressed by index: ``batch(streams)`` is batch
+        ``streams.k`` of the split's GRID set (``grid_plan``), whatever the epoch, since
+        the set is the same every epoch; past its last batch it raises IndexError.
+        ``batch.batches`` is the set's length, floor(N / B), and ``batch.plan`` the set.
+        Its windows are read through the store (``read_windows``), and the batches after
+        it are read ahead (``store.prefetch``), which never changes a batch.
+        """
+        plan = self.grid_plan(window_spec, num_examples_per_batch)
+        rate = window_spec.sample_rate_hertz
+        on, off = window_spec.num_onsource_samples, window_spec.num_offsource_samples
+
+        def windows(k: int):
+            starts = plan.examples(k)
+            onsource, offsource = self.read_windows(ifos, rate, starts, on, off)
+            return onsource, offsource, starts / rate
+
+        prefetcher = Prefetcher(windows, name=plan.split, depth=self.prefetch_depth, workers=self.prefetch_workers)
+
+        def batch(streams: BatchStreams) -> Dict:
+            k = int(streams.k)
+            onsource, offsource, gps = prefetcher.get(k, range(k + 1, min(k + 1 + prefetcher.depth, plan.batches)))
+            return self._emit(window_spec, ops.convert_to_tensor(onsource), ops.convert_to_tensor(offsource), gps,
+                              whiten, crop)
+
+        batch.prefetcher = prefetcher
+        batch.plan = plan
+        batch.batches = plan.batches
+        return batch
+
     def read_windows(self, ifos: List[gf.IFO], sample_rate_hertz: float, starts: np.ndarray,
                      num_onsource_samples: int, num_offsource_samples: int) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -835,37 +966,3 @@ class NoiseDataObtainer(BaseDataObtainer):
             RV.DATA_LABEL: ops.full((batch_size, num_ifos), 0, dtype="int32"),  # NOISE = 0
             RV.COINCIDENT: ops.full((batch_size,), int(coincident and num_ifos > 1), dtype="int32"),
         }, window_spec.sample_rate_hertz, window_spec.onsource_duration_seconds, whiten, crop)
-
-    def _grid_pass(self, window_spec, num_examples_per_batch: int, separation_seconds: float,
-                   ifos: List[gf.IFO], emit, coincident: bool = False):
-        """
-        One GRID pass over the sampling plan, then the end: each row, in order, serves
-        every window its pieces still hold whose detectors start ``separation_seconds``
-        apart, or at one time when ``coincident`` (``IFOData.grid_windows``). A window
-        is served at most once a pass, though
-        its piece is in several rows, so the pass is finite and repeats nothing. The
-        examples are batched across rows; the last, partial batch is not served.
-        """
-        used, held = {}, []
-        for row in self.sampling_plan.rows:
-            for segment in self.acquire(window_spec.sample_rate_hertz, row[None], ifos):
-                keys = [(i, float(start), float(end)) for i, (start, end) in enumerate(row)]
-                onsource, offsource, gps, marks = segment.grid_windows(
-                    window_spec.num_onsource_samples,
-                    window_spec.num_offsource_samples,
-                    separation_seconds,
-                    [used.get(key) for key in keys],
-                    coincident,
-                )
-                used.update(zip(keys, marks))
-                held.append((ops.convert_to_numpy(onsource), ops.convert_to_numpy(offsource), gps))
-                onsource, offsource, gps = (np.concatenate(parts) for parts in zip(*held))
-                served = len(gps) - len(gps) % num_examples_per_batch
-                for first in range(0, served, num_examples_per_batch):
-                    batch = slice(first, first + num_examples_per_batch)
-                    yield emit(ops.convert_to_tensor(onsource[batch]), ops.convert_to_tensor(offsource[batch]),
-                               gps[batch])
-                held = [(onsource[served:], offsource[served:], gps[served:])]
-        if held and len(held[0][2]):
-            logging.info(f"The GRID pass ends with {len(held[0][2])} windows, short of a batch of "
-                         f"{num_examples_per_batch}.")

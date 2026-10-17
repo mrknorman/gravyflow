@@ -490,43 +490,6 @@ class IFOData:
         # Converts the data to a numpy array, handling different data types
         return [ops.convert_to_numpy(data) for data in self.data]
 
-    def grid_windows(
-        self,
-        num_onsource_samples: int,
-        num_offsource_samples: int,
-        min_separation_seconds: float,
-        used: Sequence[Optional[np.ndarray]],
-        coincident: bool = False,
-    ):
-        """
-        Every GRID window of this row's pieces not yet served this pass (``grid_starts``,
-        ``coincident`` or not), one padded onsource apart.
-
-        ``used[i]`` marks detector i's slots already served this pass, or is None for a
-        piece not walked before. Returns (onsource, offsource, start GPS times): (B, I,
-        on), (B, I, off) and (B, I) float64, the GPS time of each padded onsource's first
-        sample, with as many examples as the row has separated slots left (perhaps
-        none); and the updated marks.
-        """
-        first_gps = as_gps_times(np.asarray(self.start_gps_time, dtype=np.float64))
-        interval = self.time_interval_seconds
-        bounds = [window_start_bounds(int(ops.shape(tensor)[0]), num_onsource_samples, num_offsource_samples)
-                  for tensor in self.data]
-        used = [np.zeros(grid_slots(b, num_onsource_samples), dtype=bool) if marks is None else marks
-                for b, marks in zip(bounds, used)]
-        starts = grid_starts(
-            bounds,
-            (first_gps - first_gps[0]) / interval,
-            num_onsource_samples,
-            min_separation_seconds / interval,
-            used,
-            coincident,
-        )
-        onsource, offsource = zip(*(gather_windows(tensor, starts[:, i], num_onsource_samples, num_offsource_samples)
-                                    for i, tensor in enumerate(self.data)))
-        gps_times = first_gps[None, :] + window_offsets_seconds(starts, interval)
-        return ops.stack(onsource, axis=1), ops.stack(offsource, axis=1), gps_times, used
-
 
 # =============================================================================
 # BASE DATA OBTAINER (Abstract Base Class)
