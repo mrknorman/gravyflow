@@ -102,3 +102,14 @@ def test_write_audit_sees_this_process_writes_and_no_one_elses(tmp_path):
     assert events == ["os.mkdir", "open", "os.rename", "os.rename", "os.remove"], audit.writes
     (watched / "after").write_bytes(b"2")
     assert len(audit.writes["watched"]) == 5, "the audit saw a write after it ended"
+
+
+def test_write_audit_sees_a_write_through_a_symlink(tmp_path):
+    watched, elsewhere = tmp_path / "watched", tmp_path / "elsewhere"
+    watched.mkdir()
+    elsewhere.mkdir()
+    (elsewhere / "link").symlink_to(watched)
+    with WriteAudit({"watched": watched}) as audit:
+        (elsewhere / "link" / "file").write_bytes(b"1")
+    assert (watched / "file").exists()
+    assert [entry.split(" ")[0] for entry in audit.writes["watched"]] == ["open"], audit.writes

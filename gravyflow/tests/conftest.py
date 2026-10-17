@@ -216,10 +216,11 @@ def tree_changes(before: Dict, after: Dict) -> List[str]:
 class WriteAudit:
     """
     The writes this process makes under watched roots, seen through Python's audit
-    hooks (PEP 578): a file opened to write, and a path made, renamed or removed.
-    Another process's writes (a notebook filling the user cache meanwhile) are not
-    this run's and are not seen. C code that opens files itself (HDF5) raises no
-    audit event, so the package is also snapshotted.
+    hooks (PEP 578): a file opened to write, and a path made, renamed or removed,
+    through a symlink too. Another process's writes (a notebook filling the user
+    cache meanwhile, or a child process) are not this run's and are not seen. Nor
+    are C code that opens files itself (HDF5, sqlite), or a path relative to a
+    dir_fd, which the event does not carry; the watched roots are also snapshotted.
     """
 
     #: Path-changing events, with the argument positions that hold the changed paths.
@@ -249,10 +250,11 @@ class WriteAudit:
             return
         try:
             path = os.path.abspath(os.fsdecode(path))
+            paths = {path, os.path.realpath(path)}
         except (TypeError, ValueError, OSError):  # a hook must never fail the operation
             return
         for name, roots in self.roots.items():
-            if any(path == root or path.startswith(root + os.sep) for root in roots):
+            if any(p == root or p.startswith(root + os.sep) for p in paths for root in roots):
                 self.writes.setdefault(name, []).append(f"{event} {path}")
 
     def __enter__(self):
@@ -298,11 +300,17 @@ def suite_guard(request, tmp_path_factory):
     refused (and recorded) and proxies are off, so no test depends on the network
     unless it is marked 'network'.
 
-    When the suite ends, it fails if this process wrote into the installed package
-    or the user's own cache (``~/.gravyflow``), or if the package changed.
+    The library resolves its cache root at each use, so under the temporary HOME
+    it reaches the user's own cache (``~/.gravyflow``) only by a path taken before
+    this fixture ran. When the suite ends, it fails if the WriteAudit saw this
+    process write into the installed package or that cache, or if the package
+    changed. The cache is snapshotted too, but a change the audit did not see (C
+    code such as HDF5 or sqlite, a dir_fd path, a child process) cannot be told
+    from another process using the cache meanwhile: this host records no writer.
+    So such a change is named in the report and does not fail the suite.
     """
     watched = {"the package": Path(gf.PATH), "~/.gravyflow": Path.home() / ".gravyflow"}
-    package_before = tree_snapshot(watched["the package"])
+    before = {name: tree_snapshot(path) for name, path in watched.items()}
     root = tmp_path_factory.mktemp("suite")
     guard = SuiteGuard(root, offline=not request.config.getoption("--network"))
     previous_cwd = os.getcwd()
@@ -319,8 +327,14 @@ def suite_guard(request, tmp_path_factory):
         finally:
             os.chdir(previous_cwd)
 
+    if cache_changes := tree_changes(before["~/.gravyflow"], tree_snapshot(watched["~/.gravyflow"])):
+        request.config.pluginmanager.get_plugin("terminalreporter").write_line(
+            f"The user's own cache {watched['~/.gravyflow']} changed during the suite: "
+            f"{cache_changes}. A change the write audit did not see is this process's C code "
+            "or child, or another process's."
+        )
     changed = dict(audit.writes)
-    if changes := tree_changes(package_before, tree_snapshot(watched["the package"])):
+    if changes := tree_changes(before["the package"], tree_snapshot(watched["the package"])):
         changed.setdefault("the package", []).extend(changes)
     if changed:
         pytest.fail(f"The test suite wrote outside its temporary roots: {changed}")
