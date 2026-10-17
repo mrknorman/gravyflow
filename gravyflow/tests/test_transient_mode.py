@@ -80,10 +80,33 @@ class TestTransientDatasetOutput:
         np.testing.assert_array_equal(gps[:, 0], gps[:, 1])
 
 
+@pytest.fixture
+def listed_events():
+    """
+    The offline events as the one event catalogue lists them (``conftest.catalogued_events``),
+    so the library's own selection (by run, confidence and name) chooses among them; every
+    record passes data quality and reads Gaussian strain seeded by its time.
+    """
+    from unittest import mock
+
+    from gravyflow.tests.conftest import OFFLINE_EVENTS, catalogued_events, usable_over_its_runs
+
+    def gaussian_strain(self, record, reads, window_spec):
+        rng = np.random.default_rng(int(record.transient_gps_time))
+        shape = (len(reads),)
+        return (rng.standard_normal(shape + (window_spec.num_onsource_samples,)).astype(np.float32),
+                rng.standard_normal(shape + (window_spec.num_offsource_samples,)).astype(np.float32))
+
+    with mock.patch.object(gf.TransientDataObtainer, "_read_example", gaussian_strain), \
+         mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs), \
+         catalogued_events(OFFLINE_EVENTS):
+        yield [dict(e) for e in OFFLINE_EVENTS]
+
+
 class TestSpecificEventAcquisition:
 
-    def test_named_events_are_the_events_served(self, offline_events):
-        names = [offline_events[0]["name"], offline_events[2]["name"]]
+    def test_named_events_are_the_events_served(self, listed_events):
+        names = [listed_events[0]["name"], listed_events[2]["name"]]
         obtainer = gf.TransientDataObtainer(
             observing_runs=gf.ObservingRun.O3, data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS], event_names=names,
@@ -95,7 +118,7 @@ class TestSpecificEventAcquisition:
             ifos=[gf.IFO.H1, gf.IFO.L1], group="test",
         ))
         assert np.shape(batch[RV.ONSOURCE])[:2] == np.shape(batch[RV.OFFSOURCE])[:2] == (2, 2)
+        assert {segment.name for segment in obtainer.transient_segments} == set(names)
         served = np.asarray(batch[RV.TRANSIENT_GPS_TIME], dtype=np.float64)
-        assert served.shape == (2, 2)
-        np.testing.assert_array_equal(np.sort(served[:, 0]),
-                                      sorted(e["gps"] for e in offline_events if e["name"] in names))
+        np.testing.assert_array_equal(served[:, 0], served[:, 1])
+        assert set(served[:, 0]) == {e["gps"] for e in listed_events if e["name"] in names}

@@ -254,10 +254,12 @@ class TestMergeBins:
         # The bin [100, 200) holds neither detector's data: it is dropped.
         ([[[0, 50], [200, 250]], [[10, 60], [210, 260]]],
          [[[[0, 50]], [[10, 60]]], [[[200, 250]], [[210, 260]]]]),
+        # L1 has data in [100, 200), H1 none: a bin needs every detector.
+        ([[[0, 50], [100, 150]], [[10, 60]]], [[[[0, 50]], [[10, 60]]]]),
         ([[[0, 50], [100, 150]]], [[[[0, 50]]], [[[100, 150]]]]),
         # A segment across a bin edge is clipped to each bin.
         ([[[50, 150]]], [[[[50, 100]]], [[[100, 150]]]]),
-    ], ids=["two_detectors", "empty_bin_dropped", "one_detector", "clipped"])
+    ], ids=["two_detectors", "empty_bin_dropped", "a_detector_missing", "one_detector", "clipped"])
     def test_each_bin_holds_every_detectors_pieces_in_it(self, obtainer, lists, expected):
         bins = obtainer.merge_bins([np.array(s, float) for s in lists], interval=100.0)
         assert len(bins) == len(expected)
