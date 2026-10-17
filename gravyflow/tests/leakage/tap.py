@@ -130,9 +130,11 @@ class DatasetTap:
             if isinstance(cls, type) and issubclass(cls, base):
                 if cls not in tapped:
                     tapped[cls] = Dataset if cls is base else type(cls.__name__, (Dataset, cls), {})
-                monkeypatch.setattr(dataset_module, name, tapped[cls])
+                # gravyflow's name first: it resolves lazily from the module, so patching
+                # the module first would make the tapped class the value its undo restores.
                 if name in gf.__all__:
                     monkeypatch.setattr(gf, name, tapped[cls])
+                monkeypatch.setattr(dataset_module, name, tapped[cls])
 
     def take(self) -> List[Tapped]:
         """

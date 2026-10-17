@@ -67,3 +67,19 @@ def test_a_composed_dataset_is_tapped(monkeypatch):
     (record,) = tap.take()
     assert record.group == "validate" and record.addresses == [(0, 1)]
     assert RV.POOL_LABEL.name in record.batches[0]
+
+
+def test_the_tap_leaves_every_dataset_class_as_it_found_it():
+    """Once undone, the tap leaves no tapped class, even under a name gravyflow had not yet resolved."""
+    from gravyflow.src.dataset import dataset as dataset_module
+
+    names = [name for name in gf.__all__ if isinstance(vars(dataset_module).get(name), type)
+             and issubclass(vars(dataset_module)[name], dataset_module.GravyflowDataset)]
+    real = {name: vars(dataset_module)[name] for name in names}
+    for name in names:
+        vars(gf).pop(name, None)  # unresolved, as in a fresh process
+    with pytest.MonkeyPatch.context() as patch:
+        DatasetTap(patch, ())
+        assert gf.ComposedDataset is not real["ComposedDataset"]
+    assert {name: getattr(gf, name) for name in names} == real
+    assert {name: vars(dataset_module)[name] for name in names} == real

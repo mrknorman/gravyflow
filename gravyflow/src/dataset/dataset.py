@@ -1,6 +1,7 @@
 from typing import List, Tuple, Union, Dict, Any, Iterator, Optional, Set
 from enum import Enum, auto
 import copy
+import os
 from pathlib import Path
 from dataclasses import dataclass
 from warnings import warn
@@ -273,6 +274,23 @@ class EpochMode(Enum):
     REPEAT = auto()  # The same batches every epoch: epoch 0's.
 
 
+def _rebuilt(cls, arguments: dict, state: dict, fingerprint: str) -> "IndexedBatches":
+    """
+    A dataset rebuilt in this process from its original's ``arguments`` and
+    serving ``state`` (``IndexedBatches.__reduce__``), refused unless its
+    fingerprint is the original's ``fingerprint``.
+    """
+    dataset = cls(**arguments)
+    if dataset.fingerprint != fingerprint:
+        raise RuntimeError(
+            f"A {cls.__name__} rebuilt in process {os.getpid()} has fingerprint {dataset.fingerprint}, "
+            f"not its original's {fingerprint}: the original was changed after it was built, or the "
+            "data it froze then has changed, so this copy would serve other batches."
+        )
+    dataset.__dict__.update(state)
+    return dataset
+
+
 class _KerasEpoch(keras.callbacks.Callback):
     """Sets a dataset's epoch to Keras' epoch, before Keras reads its batches."""
 
@@ -291,6 +309,16 @@ class _KerasEpoch(keras.callbacks.Callback):
                 f"fit(steps_per_epoch={steps}) differs from the dataset's {len(self.dataset)} batches "
                 "per epoch, which would serve one epoch's batches in another. Give the dataset "
                 "steps_per_epoch instead, and leave fit's unset."
+            )
+        # Keras' enqueuer, under these settings (its PyDatasetAdapter's test), asks for
+        # batches from concurrent workers, so the order fit asks in cannot be checked.
+        workers, processes = self.dataset.workers, self.dataset.use_multiprocessing
+        if workers > 1 or (workers > 0 and processes):
+            raise ValueError(
+                f"fit under epoch_callback checks that it asks for each epoch's batches in order "
+                f"(its shuffle is unseeded); {workers} workers ask for them concurrently, so the "
+                "check cannot hold. Set the dataset's workers to 0 for fit; workers serve evaluate, "
+                "predict and a plain loop."
             )
         self.dataset._keras_fitting = True
 
@@ -358,6 +386,51 @@ class IndexedBatches:
         self._keras_next = 0
         # The materialised set batches are served from, if any (``load_materialised``).
         self._materialised: Optional[MaterialisedSet] = None
+        # The process that built (or rebuilt) the dataset, the only one it serves in.
+        self._process = os.getpid()
+
+    # ---- workers
+
+    #: What a copy in another process carries beside its arguments (``__reduce__``):
+    #: the epoch and cursor, Keras' fitting state and worker settings, a loaded set.
+    _SERVING_STATE = ("_epoch", "_cursor", "_epoch_from_keras", "_warned_keras_epoch", "_keras_fitting",
+                      "_keras_next", "_workers", "_use_multiprocessing", "_max_queue_size", "_materialised")
+
+    @staticmethod
+    def _arguments(arguments: dict) -> dict:
+        """A constructor's arguments (its ``locals()`` on entry), copied: what another process rebuilds it from."""
+        return copy.deepcopy({k: v for k, v in arguments.items() if k not in ("self", "__class__")})
+
+    def __reduce__(self):
+        """
+        A copy for another process, a spawned worker's, is rebuilt there from the
+        dataset's arguments with its serving state, and is refused unless its
+        fingerprint is this dataset's: it serves the same batches or none.
+        """
+        state = {name: self.__dict__[name] for name in self._SERVING_STATE if name in self.__dict__}
+        return (_rebuilt, (type(self), self._constructor_arguments, state, self.fingerprint))
+
+    def _require_own_process(self) -> None:
+        if os.getpid() != self._process:
+            raise RuntimeError(
+                "This dataset was copied into another process by fork, which shares JAX's state with "
+                "its parent and can deadlock it. Use threads, or the spawn start method "
+                "(multiprocessing.set_start_method('spawn')), whose workers rebuild the dataset."
+            )
+
+    @property
+    def workers(self) -> int:
+        """Keras' worker count (``keras.utils.PyDataset``): 0, the default, serves in the caller."""
+        return self._workers
+
+    @workers.setter
+    def workers(self, value: int):
+        if value and not self.index_addressed:
+            raise ValueError(
+                f"This dataset is read in order (index_addressed is False): its batches depend on the "
+                f"order they are asked for, which {value} workers would race. Keep workers=0."
+            )
+        self._workers = value
 
     @property
     def group(self) -> str:
@@ -510,6 +583,7 @@ class IndexedBatches:
         materialised set when the set holds it (``load_materialised``), and
         computed otherwise.
         """
+        self._require_own_process()
         self.streams(index)  # refuses an index outside the epoch
         self._check_keras_order(index)
         if self._materialised is not None and self._materialised.serves(self._batch_epoch, index):
@@ -751,6 +825,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         scale_factor: deprecated and ignored. Every input, output and label is
             physical strain (or derived from it: whitened data, SNRs).
         """
+        self._constructor_arguments = self._arguments(locals())
         ignore_scale_factor(scale_factor)
         # Initialize PyDataset (single-threaded to avoid JAX/fork deadlocks)
         super().__init__(workers=0)
@@ -1490,6 +1565,7 @@ class ComposedDataset(GravyflowDataset):
             epoch_mode: EpochMode.FRESH (default for group="train") or REPEAT.
             spectral_config: as GravyflowDataset's.
         """
+        self._constructor_arguments = self._arguments(locals())
         from gravyflow.src.dataset.pools import PoolSampler
 
         ignore_scale_factor(scale_factor)

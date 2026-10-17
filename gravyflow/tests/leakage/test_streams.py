@@ -85,7 +85,7 @@ def dataset(noise_type, root, split, generators=None, outputs=(), batch=8, obtai
     )
 
 
-def composed(noise_type, root, split, pools=None, outputs=(RV.POOL_LABEL,), batch=8):
+def composed(noise_type, root, split, pools=None, outputs=(RV.POOL_LABEL,), batch=8, **kwargs):
     pools = pools or [
         gf.FeaturePool(name="noise", label=0, probability=0.5,
                        noise_obtainer=gf.NoiseObtainer(noise_type=noise_type, ifos=IFOS)),
@@ -95,7 +95,7 @@ def composed(noise_type, root, split, pools=None, outputs=(RV.POOL_LABEL,), batc
     ]
     return gf.ComposedDataset(
         pools=pools, seed=root, group=split, input_variables=STRAIN,
-        output_variables=list(outputs), **settings(batch),
+        output_variables=list(outputs), **settings(batch, **kwargs),
     )
 
 
@@ -1085,3 +1085,163 @@ def test_a_transient_dataset_draws_each_training_epoch_and_fixes_evaluation(worl
     assert sorted(first) == sorted(second), "a training epoch serves records the last did not"
     assert first != second, "a training epoch repeats the order of the last"
     assert evaluation[0] == evaluation[1], "an evaluation epoch differs from the last"
+
+
+# ------------------------------------------------------------------- workers
+
+#: The addresses the worker checks serve: two training epochs of a short split.
+WORKER_STEPS = 4
+WORKER_ADDRESSES = [(epoch, k) for epoch in range(2) for k in range(WORKER_STEPS)]
+
+
+def worker_datasets():
+    """Datasets addressed by index, by name: synthetic noise with bursts, and a composed dataset."""
+    single = dataset(gf.NoiseType.COLORED, 42, "train", outputs=[ST.SNR, WP.RIGHT_ASCENSION_RADIANS],
+                     steps_per_epoch=WORKER_STEPS)
+    pooled = composed(gf.NoiseType.WHITE, 42, "train", steps_per_epoch=WORKER_STEPS)
+    return {"dataset": single, "composed": pooled}
+
+
+def served_digests(ds, epoch, ks):
+    """``ds[k]``'s digest at ``epoch`` for each k: what a worker process returns."""
+    ds.epoch = epoch
+    return [batch_digest(ds[k]) for k in ks]
+
+
+def _digest_of_shared(epoch, k):
+    """Batch k of epoch ``epoch`` of the dataset this process inherited (``_SHARED``)."""
+    _SHARED.epoch = epoch
+    return batch_digest(_SHARED[k])
+
+
+_SHARED = None
+
+
+def keras_epochs(ds, workers, use_multiprocessing, epochs=2):
+    """Each epoch's batch digests, as Keras' ordered enqueuer serves them with ``workers``."""
+    from keras.src.trainers.data_adapters.py_dataset_adapter import OrderedEnqueuer
+
+    served = []
+    for epoch in range(epochs):
+        ds.epoch = epoch
+        enqueuer = OrderedEnqueuer(ds, workers=workers, use_multiprocessing=use_multiprocessing)
+        enqueuer.start()
+        try:
+            batches = enqueuer.get()
+            served += [batch_digest(next(batches)) for _ in range(len(ds))]
+        finally:
+            enqueuer.stop()
+    return served
+
+
+def test_workers_serve_the_batches_served_in_process(monkeypatch):
+    """
+    A batch is the same bytes whatever loads it: in order in this process, from four
+    threads, from Keras' enqueuer on threads and on spawned processes, and from a
+    spawned process given the pickled dataset.
+    """
+    import multiprocessing
+    from concurrent.futures import ThreadPoolExecutor
+    from keras.src.trainers.data_adapters import py_dataset_adapter
+
+    spawn = multiprocessing.get_context("spawn")
+    # Keras' process pool takes the start method of the host: spawn, whatever it is.
+    monkeypatch.setattr(py_dataset_adapter, "get_pool_class",
+                        lambda use_multiprocessing: spawn.Pool if use_multiprocessing else
+                        multiprocessing.dummy.Pool)
+    mismatches = {}
+    for name, ds in worker_datasets().items():
+        reference = [d for epoch in range(2) for d in served_digests(ds, epoch, range(WORKER_STEPS))]
+        assert len(set(reference)) == len(reference), f"{name}: batches repeat"
+        with ThreadPoolExecutor(4) as pool:
+            threaded = []
+            for epoch in range(2):
+                ds.epoch = epoch
+                threaded += list(pool.map(lambda k: batch_digest(ds[k]), range(WORKER_STEPS)))
+        with spawn.Pool(2) as pool:
+            spawned = [d for epoch in range(2) for d in pool.apply(served_digests, (ds, epoch, range(WORKER_STEPS)))]
+        variants = {
+            "threads": threaded,
+            "Keras threads": keras_epochs(ds, 3, False),
+            "Keras processes": keras_epochs(ds, 2, True),
+            "a spawned process": spawned,
+        }
+        for variant, served in variants.items():
+            if served != reference:
+                mismatches[f"{name}, {variant}"] = [a for a, s, r in zip(WORKER_ADDRESSES, served, reference) if s != r]
+    assert not mismatches, f"batches that depend on the worker that loads them: {mismatches}"
+
+
+def test_real_batches_are_the_same_from_threads(world):
+    """Real noise drawn at random, read from four threads, is the bytes read in order."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    fixture = fx.odd_pieces()
+    with world(fixture):
+        reference = outcomes(real_dataset(fixture), REAL_ADDRESSES)
+    with world(fixture):
+        ds = real_dataset(fixture)
+        threaded = {}
+        with ThreadPoolExecutor(4) as pool:
+            for epoch in range(2):
+                ds.epoch = epoch
+                digests = pool.map(lambda k: batch_digest(ds[k]), range(REAL_STEPS))
+                threaded.update({(epoch, k): ("served", d) for k, d in enumerate(digests)})
+    assert threaded == reference
+
+
+class _ReadInOrder(gf.GravyflowDataset):
+    """A dataset read in order, as one over a reader of the caller's own is."""
+
+    @property
+    def index_addressed(self) -> bool:
+        return False
+
+
+def test_a_dataset_read_in_order_refuses_workers():
+    """Batches read in order depend on the order they are asked for, which workers race."""
+    ds = dataset(gf.NoiseType.WHITE, 42, "train")
+    ds.workers = 2  # addressed by index: any workers
+    ds.__class__ = _ReadInOrder
+    ds.workers = 0
+    with pytest.raises(ValueError, match="read in order"):
+        ds.workers = 2
+
+
+@pytest.mark.filterwarnings("ignore:os.fork\(\) was called:RuntimeWarning",
+                            "ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_a_forked_copy_refuses_to_serve():
+    """A dataset copied by fork shares JAX's state with its parent: it refuses by name, not deadlocks."""
+    import multiprocessing
+
+    global _SHARED
+    _SHARED = dataset(gf.NoiseType.WHITE, 42, "train")
+    try:
+        with multiprocessing.get_context("fork").Pool(1) as pool:
+            with pytest.raises(RuntimeError, match="fork"):
+                # Bounded: a child that deadlocks gives up by name (multiprocessing.TimeoutError).
+                pool.apply_async(_digest_of_shared, (0, 0)).get(timeout=120)
+    finally:
+        _SHARED = None
+
+
+def test_a_copy_that_would_serve_other_batches_is_refused():
+    """A dataset changed after it was built is refused in another process, not served differently."""
+    import pickle
+
+    ds = dataset(gf.NoiseType.WHITE, 42, "train")
+    ds.epoch = 3
+    copied = pickle.loads(pickle.dumps(ds))
+    assert copied.epoch == 3 and batch_digest(copied[1]) == batch_digest(ds[1])
+    ds.steps_per_epoch = 5
+    with pytest.raises(RuntimeError, match="changed after it was built"):
+        pickle.loads(pickle.dumps(ds))
+
+
+def test_fit_refuses_concurrent_workers():
+    """fit checks the order it asks for batches in, which concurrent workers cannot keep."""
+    ds = dataset(gf.NoiseType.WHITE, 42, "train", inputs=[RV.ONSOURCE], outputs=[ST.SNR], steps_per_epoch=2)
+    ds.workers = 2
+    model = one_layer_model(ST.SNR)
+    with pytest.raises(ValueError, match="workers"):
+        model.fit(ds, epochs=1, callbacks=[ds.epoch_callback()], shuffle=False, verbose=0)

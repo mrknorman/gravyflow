@@ -220,6 +220,12 @@ are gone, with no shim: a generator's `generate(seed=)` (pass streams, or the ge
   continues only with `initial_epoch` (without it, it starts again at epoch 0 and serves the first's batches), and a
   batch asked for out of order is refused: `fit`'s default shuffle reorders batches with Python's unseeded global
   random, which no seed repeats. Every batch is already a fresh seeded draw.
+- Keras' workers (`ds.workers = N`, `ds.use_multiprocessing`) serve the same bytes as the caller: on threads, or on
+  processes of the spawn start method, whose workers rebuild the dataset from its arguments and refuse if its
+  fingerprint differs (a dataset changed after it was built). A copy made by fork shares JAX's state and refuses to
+  serve: set `multiprocessing.set_start_method("spawn")` (fork is Linux's default before Python 3.14). A dataset
+  read in order refuses workers, and so does `fit` under `epoch_callback()`, whose order check concurrent workers
+  cannot keep; workers serve `evaluate`, `predict` and a plain loop.
 - Real noise drawn at random (`NoiseType.REAL`, `SamplingMode.RANDOM`) is addressed by index too: batch k of epoch
   e is the same bytes however and in whatever order it is asked for, so validate and test serve the same batches
   every epoch, and each training epoch its own. Its batches are a plan over the split's segments, from the
