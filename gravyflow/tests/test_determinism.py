@@ -7,6 +7,7 @@ caller builds hold no random state, and that datasets are pure functions of
 their address with independent splits.
 """
 
+import copy
 import hashlib
 import pickle
 import subprocess
@@ -205,9 +206,106 @@ class TestStatelessObjects:
         samples = distribution.sample(2000, np.random.default_rng(0))
         assert set(samples.tolist()) == {1, 2, 3}
 
-    def test_sample_without_rng_is_deprecated(self):
-        with pytest.warns(DeprecationWarning):
+    def test_sample_needs_an_rng(self):
+        with pytest.raises(TypeError, match="rng"):
             gf.Distribution(value=1.0).sample(1)
+
+    def test_distribution_is_frozen(self):
+        import dataclasses
+        distribution = gf.Distribution(min_=1.0, max_=3.0, type_=gf.DistributionType.UNIFORM)
+        for field, value in (("min_", 0.0), ("max_", 9.0), ("type_", gf.DistributionType.CONSTANT)):
+            with pytest.raises(dataclasses.FrozenInstanceError):
+                setattr(distribution, field, value)
+        for name in ("rng", "reseed", "seed"):
+            assert not hasattr(distribution, name), name
+        with pytest.raises(TypeError, match="seed"):
+            gf.Distribution(value=1.0, seed=1)
+
+    def test_distribution_returns_arrays_of_its_dtype(self):
+        rng = np.random.default_rng(0)
+        cases = [
+            gf.Distribution(value=3.0),
+            gf.Distribution(possible_values=[1, 2, 4], type_=gf.DistributionType.CHOICE, dtype=int),
+            gf.Distribution(min_=1, max_=100, type_=gf.DistributionType.LOG, dtype=int),
+            gf.Distribution(min_=1.0, max_=2.0, mean=1.5, std=0.5, type_=gf.DistributionType.NORMAL),
+        ]
+        for distribution in cases:
+            samples = distribution.sample(5, rng)
+            assert isinstance(samples, np.ndarray) and samples.shape == (5,)
+            if distribution.dtype == int:
+                assert samples.dtype.kind == "i"
+
+    def test_balanced_glitch_times_draw_from_the_tree(self, monkeypatch):
+        # Oversampling drew from NumPy's global RNG.
+        from gravyflow.src.dataset.features import glitch
+        catalogue = {"event_time": np.arange(7.0), "label": np.array([0, 0, 0, 0, 0, 1, 1])}
+        monkeypatch.setattr(glitch, "get_glitch_catalogue", lambda *args, **kwargs: catalogue)
+
+        def balanced(streams=None):
+            return gf.get_glitch_times_with_labels(gf.IFO.L1, balanced=True, streams=streams)
+
+        times, labels = balanced()
+        assert np.bincount(labels).tolist() == [5, 5]
+        np.testing.assert_array_equal(balanced()[0], times)
+        other = gf.SeedTree(7).direct()
+        assert not np.array_equal(balanced(other)[0], times)
+        np.testing.assert_array_equal(balanced(gf.SeedTree(7).direct())[0], balanced(other)[0])
+
+    def test_generators_hold_no_reseed(self):
+        assert not hasattr(wnb(), "reseed")
+        assert not hasattr(gf.IncoherentGenerator([wnb(), wnb()]), "reseed")
+
+    def test_draws_depend_only_on_their_address(self):
+        # The same (seed, split, epoch, k) gives the same batch from fresh
+        # objects, whatever was drawn before and in whatever order.
+        addresses = [(3, "train", 0, 2), (3, "validate", 0, 1), (4, "train", 1, 0), (3, "train", 0, 2)]
+        reference = {}
+        for seed, split, epoch, k in addresses:
+            ds = dataset(seed=seed, group=split)
+            ds.epoch = epoch
+            reference.setdefault((seed, split, epoch, k), digest(ds[k]))
+        for seed, split, epoch, k in reversed(addresses):
+            ds = dataset(seed=seed, group=split)
+            ds.epoch = epoch
+            assert digest(ds[k]) == reference[(seed, split, epoch, k)]
+
+    #: The modules whose objects must hold no random state.
+    STATELESS_MODULES = (
+        "utils/tensor.py", "dataset/curriculum.py", "dataset/conditioning/detector.py",
+        "dataset/features/injection.py", "dataset/features/glitch.py",
+        "dataset/features/waveforms/simple.py", "dataset/features/waveforms/wnb.py",
+        "dataset/features/waveforms/cbc.py",
+    )
+
+    def test_stateless_modules_draw_only_from_given_streams(self):
+        # Class-wide: no unseeded or global draw, and no RNG kept on an object,
+        # in the modules whose objects are specs. The one exception is the
+        # explicit helper that seeds the global RNGs for a script.
+        import ast
+        from pathlib import Path
+        src = Path(gf.__file__).parent / "src"
+        allowed = {("utils/tensor.py", "set_random_seeds")}
+        kept = ("np.random.Generator", "np.random.SeedSequence", "np.random.PCG64")
+        found = []
+
+        def visit(node, module, function):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                function = node.name
+            if (module, function) not in allowed:
+                if isinstance(node, ast.Attribute) and node.attr in ("rng", "_rng", "_legacy_rng"):
+                    found.append(f"{module}:{node.lineno} .{node.attr}")
+                if isinstance(node, ast.Call):
+                    called = ast.unparse(node.func)
+                    if called.endswith("default_rng") or (
+                        called.startswith(("np.random.", "numpy.random.", "random.")) and called not in kept
+                    ):
+                        found.append(f"{module}:{node.lineno} {called}()")
+            for child in ast.iter_child_nodes(node):
+                visit(child, module, function)
+
+        for module in self.STATELESS_MODULES:
+            visit(ast.parse((src / module).read_text()), module, None)
+        assert not found, found
 
     def test_direct_generate_is_deterministic(self):
         # B156: generate() without a seed crashed for WNB with injection_chance.
@@ -283,7 +381,7 @@ class TestStatelessObjects:
             b = gf.Network(geometry, rng=np.random.default_rng(3))
         np.testing.assert_array_equal(np.asarray(a.location), np.asarray(b.location))
         assert geometry["num_detectors"] == 2  # the caller's dict is not changed
-        with pytest.warns(DeprecationWarning, match="no rng"):
+        with pytest.raises(ValueError, match="rng"):
             gf.Network(geometry)
 
     def test_network_needs_every_sky_angle(self):
@@ -310,19 +408,14 @@ class TestDeprecations:
     SCRIPT = textwrap.dedent("""
         import gravyflow as gf
         uniform = dict(type_=gf.DistributionType.UNIFORM)
-        gf.Distribution(min_=1.0, max_=2.0, seed=1, **uniform)
-        gf.Distribution(min_=1.0, max_=2.0, **uniform).sample(2)
-        curriculum = gf.Curriculum(
+        gf.Curriculum(
             start=gf.Distribution(min_=80.0, max_=100.0, **uniform),
             end=gf.Distribution(min_=5.0, max_=15.0, **uniform),
-            seed=1, steps_per_epoch=10,
+            verbose=True,
         )
-        curriculum.sample(2)
-        curriculum.min_
         gf.WNBGenerator(
             duration_seconds=0.2, min_frequency_hertz=40.0, max_frequency_hertz=200.0,
         ).generate(2, 512.0, 1.0, seed=1)
-        gf.Network([gf.IFO.L1], seed=1)
     """)
 
     def test_deprecations_show_under_default_filters(self, tmp_path):
@@ -337,9 +430,7 @@ class TestDeprecations:
         )
         out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env)
         assert out.returncode == 0, out.stderr
-        for name in ("Distribution(seed=)", "Distribution.sample() without an rng", "Curriculum(seed=)",
-                     "Curriculum(steps_per_epoch=)", "Curriculum.sample() without an rng",
-                     "Curriculum.min_", "WNBGenerator.generate(seed=)", "Network(seed=)"):
+        for name in ("Curriculum(verbose=)", "WNBGenerator.generate(seed=)"):
             assert f"{name} is deprecated" in out.stderr, name
             assert "user_script.py" in out.stderr
 
@@ -371,19 +462,6 @@ class TestDeprecations:
             colored = next(gf_noise.colored_noise_generator(BATCH, 1.0, 0.5, 2.0, [gf.IFO.L1], SAMPLE_RATE, None, 1))
         for batch in (white, colored):
             assert np.shape(batch[gf.ReturnVariables.ONSOURCE]) == (BATCH, 1, int(2.0 * SAMPLE_RATE))
-
-    def test_deprecated_curriculum_sampling_keeps_its_old_meaning(self):
-        # It drew the end distribution, the same values every call.
-        curriculum = gf.Curriculum(
-            start=gf.Distribution(min_=80.0, max_=100.0, type_=gf.DistributionType.UNIFORM),
-            end=gf.Distribution(min_=5.0, max_=15.0, type_=gf.DistributionType.UNIFORM),
-        )
-        with pytest.warns(DeprecationWarning):
-            first, second = curriculum.sample(3), curriculum.sample(3)
-        assert not np.array_equal(first, second)
-        assert np.all((first >= 80.0) & (first <= 100.0))
-        with pytest.warns(DeprecationWarning):
-            assert (curriculum.min_, curriculum.max_) == (80.0, 100.0)
 
 
 class TestIndexedDatasets:
@@ -471,9 +549,12 @@ class TestIndexedDatasets:
         noise = gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1])
         generator = wnb()
         before = pickle.dumps((noise, generator))
+        snapshot = copy.deepcopy(generator)
         ds = dataset(seed=2, generators=[generator], noise=noise, ifos=[gf.IFO.L1])
         _ = [ds[k] for k in range(3)]
         assert pickle.dumps((noise, generator)) == before
+        assert generator == snapshot
+        assert generator.duration_seconds == gf.Distribution(min_=0.1, max_=0.4, type_=gf.DistributionType.UNIFORM)
         assert generator.network is None
 
     def test_validation_does_not_move_training(self):

@@ -9,13 +9,11 @@ import logging
 import keras
 from keras import ops
 import jax.numpy as jnp
-from numpy.random import default_rng  
 
 from scipy.stats import truncnorm
 import gravyflow as gf
 import jax
 
-from gravyflow.src.rng.legacy import warn_deprecated
 from gravyflow.src.utils.numerics import NonFiniteWarning
 
 logger = logging.getLogger(__name__)
@@ -28,14 +26,14 @@ class DistributionType(Enum):
     LOG = auto()
     POW_TWO = auto()
 
-@dataclass
+@dataclass(frozen=True)
 class Distribution:
     """
-    A distribution of one parameter.
+    A distribution of one parameter: a frozen spec.
 
     ``sample(n, rng)`` draws n values from the NumPy Generator ``rng`` and
-    returns an ndarray. A Distribution holds no random state and is never
-    changed by sampling, so one object can serve any number of datasets.
+    returns an ndarray. A Distribution holds no random state and cannot be
+    changed, so one object can serve any number of datasets.
     """
     value : Union[int, float] = None
     dtype : Type = float
@@ -45,53 +43,29 @@ class Distribution:
     std : float = None
     possible_values : List = None
     type_ : DistributionType = DistributionType.CONSTANT
-    seed : int = None  # Deprecated: pass an rng to sample().
 
     def __post_init__(self):
-        if self.seed is not None:
-            warn_deprecated("Distribution(seed=)", "pass a NumPy Generator to sample(n, rng)")
-        self._legacy_rng = None
-
-        # Check and adjust min and max values
         if self.min_ is not None or self.max_ is not None:
             if self.min_ is None or self.max_ is None:
                 raise ValueError("Both min and max must be provided if one is provided.")
 
             if self.min_ > self.max_:
-                self.min_, self.max_ = self.max_, self.min_  # Swap values
-
-    def _legacy_generator(self):
-        if self._legacy_rng is None:
-            seed = self.seed if self.seed is not None else gf.Defaults.seed
-            self._legacy_rng = default_rng(seed)
-        return self._legacy_rng
-
-    @property
-    def rng(self):
-        warn_deprecated("Distribution.rng", "pass a NumPy Generator to sample(n, rng)")
-        return self._legacy_generator()
-
-    def reseed(self, seed):
-        warn_deprecated("Distribution.reseed", "pass a NumPy Generator to sample(n, rng)")
-        self.seed = seed
-        self._legacy_rng = default_rng(seed)
+                # Bounds given in either order mean the same interval.
+                low, high = self.max_, self.min_
+                object.__setattr__(self, "min_", low)
+                object.__setattr__(self, "max_", high)
 
     def sample(
         self,
-        num_samples : int = 1,
-        rng : np.random.Generator = None
+        num_samples : int,
+        rng : np.random.Generator
         ) -> np.ndarray:
-        """
-        ``num_samples`` values drawn from ``rng``, as an ndarray.
-
-        Without ``rng`` (deprecated) the draw comes from a stream kept on the
-        object, seeded by ``seed`` or ``gf.Defaults.seed``.
-        """
-        if rng is None:
-            warn_deprecated(
-                "Distribution.sample() without an rng", "pass a NumPy Generator: sample(n, rng)"
+        """``num_samples`` values drawn from ``rng`` (a NumPy Generator), as an ndarray."""
+        if not isinstance(rng, np.random.Generator):
+            raise TypeError(
+                "Distribution.sample needs an rng: a NumPy Generator, such as a "
+                f"gf.SeedTree stream; got {type(rng).__name__}."
             )
-            rng = self._legacy_generator()
 
         low, high = self.min_, self.max_
 

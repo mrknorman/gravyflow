@@ -604,6 +604,40 @@ def test_network_load_distribution(tmp_path):
     again = gf.Network.load(config_path, rng=np.random.default_rng(1))
     np.testing.assert_array_equal(np.asarray(again.location), np.asarray(network.location))
 
+    # Without an rng, random geometry is refused by name: there is no hidden stream.
+    with pytest.raises(ValueError, match="rng"):
+        gf.Network.load(config_path)
+
+    # A generator given the config's path draws the geometry from its own
+    # stream of the seed tree: the same network every time, with no warning.
+    def generator():
+        return gf.WNBGenerator(
+            duration_seconds=0.2, min_frequency_hertz=40.0, max_frequency_hertz=200.0,
+            network=config_path,
+        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        first, second = generator().network, generator().network
+    np.testing.assert_array_equal(np.asarray(first.location), np.asarray(second.location))
+    tree_stream = gf.SeedTree(None).direct().sub("wave/WNBGenerator").stream("param/network")
+    np.testing.assert_array_equal(
+        np.asarray(first.location), np.asarray(gf.Network.load(config_path, rng=tree_stream).location)
+    )
+
+
+def test_network_holds_no_random_state():
+    network = gf.Network([gf.IFO.L1])
+    assert not hasattr(network, "rng")
+    with pytest.raises(TypeError, match="seed"):
+        gf.Network([gf.IFO.L1], seed=1)
+
+
+def test_project_wave_has_no_seed():
+    network = gf.Network([gf.IFO.L1])
+    strain = np.zeros((2, 2, 64), np.float32)
+    with pytest.raises(TypeError, match="seed"):
+        network.project_wave(strain, 512.0, 0.1, 0.2, 0.3, seed=1)
+
 def test_check_and_convert_errors():
     """Test error conditions in check_and_convert."""
     network = gf.Network([gf.IFO.L1])

@@ -170,9 +170,9 @@ scope of the tree, or are the pools of one `gf.ComposedDataset`. Old seeds give 
 XLA's multi-threaded kernels can still round whitened and projected strain and Welch spectra differently from one call
 to the next, in the last bits of float32. For bit-identical batches, set `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false`
 before starting Python: importing gravyflow starts JAX, which reads the flag then (the results differ, also in the last
-bits, from multi-threaded ones). The test suite sets it itself, and a recipe training run warns without it. The replaced seed arguments (`Distribution(seed=)`,
-`generate(seed=)`, `reseed`, `Network(seed=)`, `Curriculum(seed=)` and the like) still work for one release, with a
-`DeprecationWarning`. These changes have no such period:
+bits, from multi-threaded ones). The test suite sets it itself, and a recipe training run warns without it. The remaining replaced seed arguments
+(`generate(seed=)`, `InjectionGenerator(seed=)`, `PoolSampler(seed=)` and the like) still work for one release, with
+a `DeprecationWarning`. These changes have no such period:
 
 - `ds[k]` is batch k, and `next(iter(ds))` is always batch 0. Step through batches with `next(ds)`, or index them.
 - Under `model.fit`, a training split takes Keras' epoch: pass `callbacks=[ds.epoch_callback()]`. Without it, Keras
@@ -196,7 +196,15 @@ bits, from multi-threaded ones). The test suite sets it itself, and a recipe tra
 - An `IncoherentGenerator` labels each parameter with its components' common value, NaN where they differ (it gave
   component 0's), and has one mask value per example; with it, `InjectionGenerator.generate` gives (G, B, I, 2, S)
   injections, a coherent generator's repeated in each detector.
-- `Distribution.sample(n, rng)` returns an ndarray.
+- `Distribution` and `Curriculum` are frozen specs, holding no random state: `Distribution.sample(n, rng)` needs a
+  NumPy Generator and returns an ndarray (an integer UNIFORM includes its max); `Curriculum.sample(n, rng, epoch)`
+  draws from `at(epoch)`. Their `seed=`, `rng`, `reseed`, rng-less `sample`, and the Curriculum's `steps_per_epoch=`,
+  `configure`, `reset` and current `min_`/`max_` are gone. Change a field with `dataclasses.replace`.
+- A `Network` is stateless geometry: `Network(seed=)` and `Network.rng` are gone, and random geometry needs `rng=`.
+  A generator given a network config path draws it from its own seed-tree stream, so one config gives one network.
+  Waveform generators have no `reseed`.
+- `gf.get_glitch_times_with_labels(balanced=True)` oversamples from a seed-tree stream (`streams=`), not NumPy's
+  global RNG.
 - Splits are repartitioned by one `gf.SplitSpec` (`docs/acquisition.md`, section 2): GPS time is cut into absolute
   8192 s blocks from GPS 0, each hashed to test (10%), validate (10%) or train (80%), with 128 s between splits. Every
   route (a dataset, a composed dataset's pools, `NoiseObtainer`, an obtainer called directly, the validator) reads

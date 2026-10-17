@@ -2,7 +2,7 @@
 DEPRECATED: This module is deprecated and not actively maintained.
 It is excluded from test coverage requirements.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Union, List, Dict, Optional
 from copy import deepcopy
 from pathlib import Path
@@ -193,11 +193,14 @@ class HyperInjectionGenerator:
     def return_generator(self):
         generator = self.generator.value
         
-        generator.scaling_method.value.min_ = self.min_.value
-        generator.scaling_method.value.max_ = self.max_.value
-        generator.scaling_method.value.mean = self.mean.value
-        generator.scaling_method.value.std = self.std.value
-        generator.scaling_method.value.distribution = self.distribution.value
+        # A Distribution is frozen: the gene values make a new one.
+        generator.scaling_method.value = replace(
+            generator.scaling_method.value,
+            min_=self.min_.value,
+            max_=self.max_.value,
+            mean=self.mean.value,
+            std=self.std.value,
+        )
         generator.injection_chance = self.chance.value
 
         return generator

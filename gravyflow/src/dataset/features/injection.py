@@ -352,10 +352,10 @@ class WaveformGenerator:
     )
 
     def __post_init__(self):
-        self.network = self.init_network(self.network)
-        self.convert_all_distributions()
         if self.name is not None:
             check_name(self.name, "generator name")
+        self.network = self.init_network(self.network, self.geometry_stream())
+        self.convert_all_distributions()
 
         for attribute in self.sky_attributes:
             value = getattr(self, attribute, None)
@@ -389,6 +389,14 @@ class WaveformGenerator:
                 "pass streams (a gf.BatchStreams), or none for the default streams"
             )
         return resolve_streams(streams, seed, f"wave/{self.stream_label}")
+
+    def geometry_stream(self) -> np.random.Generator:
+        """
+        The stream a network given as a config path draws any random geometry
+        from, once, when the generator is built: the generator's direct
+        ``param/network`` stream, so one config always gives one network.
+        """
+        return resolve_streams(None, None, f"wave/{self.stream_label}").stream("param/network")
 
     def sample_attribute(self, attribute : str, num_samples : int, streams : BatchStreams):
         """``num_samples`` draws of one attribute, from its own stream, as float64."""
@@ -445,14 +453,17 @@ class WaveformGenerator:
         return max(centre + low - margin, 0.0), min(centre + high + margin, float(window_seconds))
 
     @classmethod
-    def init_network(cls, network):
-        
+    def init_network(cls, network, rng : Optional[np.random.Generator] = None):
+        """
+        ``network`` as a gf.Network: a list of IFOs, or a config path whose
+        random geometry is drawn from ``rng``.
+        """
         match network:
             case list():
                 network = gf.Network(network)
 
             case Path():
-                network = gf.Network.load(network)
+                network = gf.Network.load(network, rng=rng)
                 
             case None | gf.Network():
                 pass
@@ -525,7 +536,7 @@ class WaveformGenerator:
                 
         generator = waveform_cls(
             scaling_method=config.pop("scaling_method"),
-            network=cls.init_network(network),
+            network=network,
             injection_chance=config.pop("injection_chance"),
             front_padding_duration_seconds=config.pop(
                 "front_padding_duration_seconds"
@@ -566,12 +577,6 @@ class WaveformGenerator:
                 )
                 setattr(self, attribute, converted)
     
-    def reseed(self, seed):
-        warn_deprecated(
-            f"{type(self).__name__}.reseed",
-            "a generator holds no random state; pass streams to generate()"
-        )
-
     def apply_injection_chance(self, waveforms, streams : BatchStreams):
         """
         Zero each waveform with probability 1 - injection_chance, drawn from
@@ -1295,7 +1300,7 @@ class IncoherentGenerator(WaveformGenerator):
     def network(self, network):
         # Checked on every assignment, a dataset's binding included: a network
         # of another size would broadcast components onto the wrong detectors.
-        network = self.init_network(network)
+        network = self.init_network(network, self.geometry_stream())
         if network is not None:
             num_detectors = int(np.asarray(network.num_detectors).ravel()[0])
             if num_detectors != len(self.component_generators):

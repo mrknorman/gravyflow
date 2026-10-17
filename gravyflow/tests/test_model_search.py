@@ -61,3 +61,25 @@ def test_a_broken_result_is_an_error(tmp_path):
     (model / "validation_data.h5").write_bytes(b"not hdf5")
     with pytest.raises(OSError):
         _population(tmp_path, 1).load_and_calculate_fitness(0)
+
+
+def test_an_injection_gene_sets_a_new_scaling_distribution():
+    # The genes once mutated the generator's scaling Distribution in place,
+    # which a frozen Distribution refuses; they build a new one.
+    from gravyflow.src.model.genetics import HyperInjectionGenerator, HyperParameter
+
+    original = gf.Distribution(min_=8.0, max_=20.0, type_=gf.DistributionType.UNIFORM)
+    generator = gf.WNBGenerator(
+        scaling_method=gf.ScalingMethod(original, gf.ScalingTypes.SNR),
+        duration_seconds=0.2, min_frequency_hertz=40.0, max_frequency_hertz=200.0,
+    )
+    hyper = HyperInjectionGenerator(
+        min_=HyperParameter(5.0), max_=HyperParameter(30.0), mean=HyperParameter(10.0),
+        std=HyperParameter(2.0), distribution=HyperParameter("uniform"), chance=HyperParameter(0.5),
+        generator=HyperParameter(generator),
+    )
+    built = hyper.return_generator()
+    value = built.scaling_method.value
+    assert (value.min_, value.max_, value.mean, value.std) == (5.0, 30.0, 10.0, 2.0)
+    assert built.injection_chance == 0.5
+    assert original == gf.Distribution(min_=8.0, max_=20.0, type_=gf.DistributionType.UNIFORM)

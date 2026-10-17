@@ -33,6 +33,7 @@ from gravyflow.src.dataset.conditioning.detector import IFO
 from gravyflow.src.dataset.features import gravity_spy
 from gravyflow.src.dataset.features import event as event_module
 from gravyflow.src.dataset.features.gravity_spy import DEFAULT_MIN_ML_CONFIDENCE
+from gravyflow.src.rng import BatchStreams, resolve_streams
 from gravyflow.src.dataset.acquisition.gwosc_data import coalesce_segments, hardware_injection_gaps
 
 #: Seconds added on each side of a glitch's Omicron extent when it is vetoed from noise
@@ -264,6 +265,7 @@ def get_glitch_times_with_labels(
     end_gps_time: float = None,
     balanced: bool = False,
     min_ml_confidence: float = DEFAULT_MIN_ML_CONFIDENCE,
+    streams: Optional[BatchStreams] = None,
 ) -> tuple:
     """
     Get glitch times with type labels for classification.
@@ -276,6 +278,9 @@ def get_glitch_times_with_labels(
         end_gps_time: End GPS time (defaults to observing run end)
         balanced: If True, oversample every non-empty class to the largest
         min_ml_confidence: Keep classifications with at least this confidence
+        streams: The streams the oversampling draws from (its
+            ``transient/balance`` stream); default the direct streams of
+            ``gf.Defaults.seed``, so a call is repeatable.
 
     Returns:
         Tuple of (gps_times, type_indices), where type_indices are GlitchType values
@@ -288,10 +293,11 @@ def get_glitch_times_with_labels(
     if balanced and len(times) > 0:
         classes = [value for value in np.unique(labels)]
         max_count = max(int(np.sum(labels == value)) for value in classes)
+        rng = resolve_streams(streams, None, "").stream("transient/balance")
         balanced_times, balanced_labels = [], []
         for value in classes:
             class_times = times[labels == value]
-            indices = np.random.choice(len(class_times), max_count, replace=True)
+            indices = rng.choice(len(class_times), max_count, replace=True)
             balanced_times.append(class_times[indices])
             balanced_labels.append(np.full(max_count, value, dtype=np.int32))
         times = np.concatenate(balanced_times)

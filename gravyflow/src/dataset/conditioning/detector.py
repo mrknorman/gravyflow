@@ -13,7 +13,6 @@ import jax
 import numpy as np
 from astropy import coordinates, units
 from gravyflow.src.resources import RESOURCES
-from gravyflow.src.rng.legacy import warn_deprecated
 from gravyflow.src.utils.tensor import rfftfreq
 
 import gravyflow as gf
@@ -496,25 +495,22 @@ class Network:
     def __init__ (
             self,
             parameters : Union[List[IFO], Dict],
-            seed : Optional[int] = None,
             rng : Optional[np.random.Generator] = None
         ):
         """
         A detector network: a list of IFOs, or a dict of geometry. A dict's
         values may be gf.Distribution objects, drawn once here from ``rng`` (a NumPy
-        Generator); the Network then holds that fixed geometry and no random
-        state. ``seed`` is deprecated.
+        Generator, such as a gf.SeedTree stream; required for random
+        geometry); the Network then holds that fixed geometry. A Network is
+        stateless geometry: it holds no random state, and ``project_wave``
+        takes every sky angle from its caller.
         """
-        if seed is not None:
-            warn_deprecated("Network(seed=)", "a Network holds no random state; its sky is drawn by the dataset")
-
         def geometry_rng():
-            nonlocal rng
             if rng is None:
-                warn_deprecated(
-                    "A Network with random geometry and no rng", "pass rng= (a NumPy Generator)"
+                raise ValueError(
+                    "A Network with random geometry needs an rng (a NumPy Generator, "
+                    "such as a gf.SeedTree stream) to draw it from."
                 )
-                rng = np.random.default_rng(seed if seed is not None else gf.Defaults.seed)
             return rng
 
         arguments = {}
@@ -719,7 +715,7 @@ class Network:
         ) -> "Network":
         """
         The Network a JSON config describes. Geometry given as a distribution
-        is drawn once, from ``rng``, as for ``Network(dict, rng=)``.
+        is drawn once, from ``rng`` (required for it), as for ``Network(dict, rng=)``.
         """
 
         # Define replacement mapping
@@ -806,13 +802,6 @@ class Network:
 
         return input
     
-    @property
-    def rng(self):
-        warn_deprecated("Network.rng", "a Network holds no random state; draw from a gf.SeedTree stream")
-        if getattr(self, "_legacy_rng", None) is None:
-            self._legacy_rng = np.random.default_rng(gf.Defaults.seed)
-        return self._legacy_rng
-
     def project_wave(
         self,
         strain,

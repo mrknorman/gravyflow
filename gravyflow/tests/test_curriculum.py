@@ -41,16 +41,29 @@ class TestCurriculumBasics:
         with pytest.raises(ValueError, match="same type"):
             curriculum(end=gf.Distribution(value=5.0, type_=gf.DistributionType.CONSTANT))
 
-    @pytest.mark.parametrize("kwargs", [{"seed": 3}, {"verbose": True}])
-    def test_deprecated_arguments_warn(self, kwargs):
+    def test_verbose_is_deprecated(self):
         with pytest.warns(DeprecationWarning):
+            curriculum(verbose=True)
+
+    @pytest.mark.parametrize("kwargs", [{"seed": 3}, {"steps_per_epoch": 10}])
+    def test_the_seed_and_counter_arguments_are_gone(self, kwargs):
+        with pytest.raises(TypeError, match=next(iter(kwargs))):
             curriculum(**kwargs)
 
-    @pytest.mark.parametrize("method", ["reset", "configure"])
-    def test_deprecated_methods_warn(self, method):
+    @pytest.mark.parametrize("name", ["reset", "configure", "current_epoch", "min_", "max_", "value", "rng"])
+    def test_no_counter_or_current_values(self, name):
+        # A Curriculum is a schedule: the distribution of an epoch is at(epoch).
+        assert not hasattr(curriculum(), name)
+
+    def test_is_frozen(self):
+        import dataclasses
         c = curriculum()
-        with pytest.warns(DeprecationWarning):
-            getattr(c, method)(*([100] if method == "configure" else []))
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            c.num_epochs = 3
+
+    def test_sample_needs_an_rng(self):
+        with pytest.raises(TypeError, match="rng"):
+            curriculum().sample(2)
 
 
 class TestCurriculumSchedules:

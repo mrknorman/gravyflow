@@ -514,15 +514,14 @@ def test_waveform_generator_get_max_generated_duration():
     assert max_dur >= 0.0  # Just verify it returns a valid duration
 
 
-def test_reseed_and_generate_seed_are_deprecated():
-    """reseed holds no state now, and generate(seed=) draws the direct streams of that root."""
+def test_generate_seed_is_deprecated():
+    """A generator has no reseed, and generate(seed=) draws the direct streams of that root."""
     gen = gf_inj.WNBGenerator(
         duration_seconds=gf.Distribution(value=0.5, type_=gf.DistributionType.CONSTANT),
         min_frequency_hertz=gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT),
         max_frequency_hertz=gf.Distribution(value=50.0, type_=gf.DistributionType.CONSTANT)
     )
-    with pytest.warns(DeprecationWarning, match="reseed"):
-        gen.reseed(42)
+    assert not hasattr(gen, "reseed")
     with pytest.warns(DeprecationWarning, match="generate"):
         waveforms, _ = gen.generate(2, 100.0, 1.0, seed=42)
     np.testing.assert_array_equal(
@@ -894,8 +893,8 @@ def test_cbc_generator_injection_chance_zero():
     assert float(ops.sum(ops.abs(waveforms))) == 0.0
 
 
-def test_incoherent_generator_reseed_is_deprecated():
-    """IncoherentGenerator.reseed holds no state now."""
+def test_incoherent_generator_has_no_reseed():
+    """An IncoherentGenerator holds no random state, so it has nothing to reseed."""
     gen1 = gf_inj.WNBGenerator(
         duration_seconds=gf.Distribution(value=0.5, type_=gf.DistributionType.CONSTANT),
         min_frequency_hertz=gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT),
@@ -910,8 +909,7 @@ def test_incoherent_generator_reseed_is_deprecated():
     )
     
     incoherent_gen = gf_inj.IncoherentGenerator([gen1, gen2])
-    with pytest.warns(DeprecationWarning, match="reseed"):
-        incoherent_gen.reseed(123)
+    assert not hasattr(incoherent_gen, "reseed")
 
 
 def test_return_variables_comparison():
@@ -1056,13 +1054,14 @@ def test_waveform_generator_base_max_duration():
     assert gen.get_max_generated_duration() == 0.0
 
 def test_waveform_generator_init_network_path():
-    """Test init_network with a Path object."""
+    """init_network loads a config path, drawing its random geometry from the rng given."""
     # Patch the correct Network class location
     with patch("gravyflow.src.dataset.conditioning.detector.Network.load") as mock_load:
         mock_load.return_value = "LOADED_NETWORK"
         path = Path("some/path/network.h5")
-        result = gf_inj.WaveformGenerator.init_network(path)
-        mock_load.assert_called_once_with(path)
+        rng = np.random.default_rng(0)
+        result = gf_inj.WaveformGenerator.init_network(path, rng)
+        mock_load.assert_called_once_with(path, rng=rng)
         assert result == "LOADED_NETWORK"
 
 def test_waveform_generator_load_missing_scaling_type():
@@ -1117,8 +1116,7 @@ def test_ensure_vector_invalid_type():
 def test_ensure_vector_int_dtype_warning():
     gen = gf_inj.WaveformGenerator()
     # Create a distribution with int dtype
-    dist = gf.Distribution(value=1, type_=gf.DistributionType.CONSTANT)
-    dist.dtype = int # Force int dtype
+    dist = gf.Distribution(value=1, type_=gf.DistributionType.CONSTANT, dtype=int)
     # Mock logging.warn to verify it's called
     with patch("logging.warn") as mock_warn:
         result = gen.ensure_list_of_floats("test_param", dist)
@@ -1140,8 +1138,7 @@ def test_ensure_float_invalid_type():
 
 def test_ensure_float_distribution_int_warning():
     gen = gf_inj.WaveformGenerator()
-    dist = gf.Distribution(value=1, type_=gf.DistributionType.CONSTANT)
-    dist.dtype = int # Force int dtype
+    dist = gf.Distribution(value=1, type_=gf.DistributionType.CONSTANT, dtype=int)
     with patch("logging.warn") as mock_warn:
         result = gen.ensure_float("test_param", dist)
         mock_warn.assert_called_with("test_param should not have dtype = int, automatically adjusting.")
