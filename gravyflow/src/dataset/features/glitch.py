@@ -293,7 +293,7 @@ def get_glitch_times_with_labels(
     if balanced and len(times) > 0:
         classes = [value for value in np.unique(labels)]
         max_count = max(int(np.sum(labels == value)) for value in classes)
-        rng = resolve_streams(streams, None, "").stream("transient/balance")
+        rng = resolve_streams(streams, "").stream("transient/balance")
         balanced_times, balanced_labels = [], []
         for value in classes:
             class_times = times[labels == value]

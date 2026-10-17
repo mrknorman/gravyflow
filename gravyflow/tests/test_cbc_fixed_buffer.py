@@ -53,20 +53,21 @@ def _record_windows(monkeypatch):
 
 def _injection_batch(generator, num_examples=2):
     """One batch of the dataset path's injections: 1 s onsource, 0.5 s crop, 2048 Hz."""
-    injection_generator = gf.InjectionGenerator(waveform_generators=[generator], seed=42)
-    return next(injection_generator(
+    injection_generator = gf.InjectionGenerator(waveform_generators=[generator])
+    return injection_generator.generate(
+        gf.SeedTree(42).direct(0),
         sample_rate_hertz=SAMPLE_RATE,
         onsource_duration_seconds=ONSOURCE,
         crop_duration_seconds=CROP,
         num_examples_per_batch=num_examples,
-    ))
+    )
 
 
 def test_the_buffer_does_not_depend_on_the_masses(monkeypatch):
     buffers = _record_buffers(monkeypatch)
     for mass in (1.4, 8.0, 60.0):
         generator = gf.CBCGenerator(mass_1_msun=mass, mass_2_msun=mass, network=[gf.IFO.L1])
-        waveforms, _ = generator.generate(4, SAMPLE_RATE, 1.0, seed=1)
+        waveforms, _ = generator.generate(4, SAMPLE_RATE, 1.0, streams=generator.direct_streams(1))
         assert waveforms.shape == (4, 2, int(SAMPLE_RATE))
         assert np.isfinite(np.asarray(waveforms)).all()
     assert buffers == [2.0, 2.0, 2.0]

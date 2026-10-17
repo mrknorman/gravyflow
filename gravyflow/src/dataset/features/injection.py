@@ -28,7 +28,6 @@ from gravyflow.src.utils.shapes import (
 from gravyflow.src.utils.tensor import replace_nan_and_inf_with_zero
 from gravyflow.src.rng import BatchStreams, SeedTree, check_name, resolve_streams
 from gravyflow.src.rng import platform
-from gravyflow.src.rng.legacy import warn_deprecated
 from gravyflow.src.dataset.config import batch_size, ignore_scale_factor
 from gravyflow.src.dataset.features.waveforms.cbc import (
     _generate_cbc_window,
@@ -376,20 +375,20 @@ class WaveformGenerator:
         """The generator's name in stream paths when it is called directly."""
         return self.name or type(self).__name__
 
-    def resolve_streams(self, streams, seed=None) -> BatchStreams:
+    def resolve_streams(self, streams) -> BatchStreams:
         """
         The streams ``generate`` draws from: ``streams`` as given; else, for a
-        direct call, the deterministic default streams (of ``seed``, deprecated,
-        or ``gf.Defaults.seed``).
+        direct call, the default root's direct streams.
         """
-        if isinstance(streams, (int, np.integer)) and not isinstance(streams, bool):
-            streams, seed = None, streams
-        if seed is not None:
-            warn_deprecated(
-                f"{type(self).__name__}.generate(seed=)",
-                "pass streams (a gf.BatchStreams), or none for the default streams"
-            )
-        return resolve_streams(streams, seed, f"wave/{self.stream_label}")
+        return resolve_streams(streams, f"wave/{self.stream_label}")
+
+    def direct_streams(self, root : Optional[int] = None) -> BatchStreams:
+        """
+        The streams a direct call of ``generate`` draws from the seed tree
+        rooted at ``root`` (None: ``gf.Defaults.seed``, the streams a call
+        given none draws).
+        """
+        return SeedTree(root).direct().sub(f"wave/{self.stream_label}")
 
     def geometry_stream(self) -> np.random.Generator:
         """
@@ -397,7 +396,7 @@ class WaveformGenerator:
         from, once, when the generator is built: the generator's direct
         ``param/network`` stream, so one config always gives one network.
         """
-        return resolve_streams(None, None, f"wave/{self.stream_label}").stream("param/network")
+        return self.direct_streams().stream("param/network")
 
     def sample_attribute(self, attribute : str, num_samples : int, streams : BatchStreams):
         """``num_samples`` draws of one attribute, from its own stream, as float64."""
@@ -581,17 +580,13 @@ class WaveformGenerator:
     def apply_injection_chance(self, waveforms, streams : BatchStreams):
         """
         Zero each waveform with probability 1 - injection_chance, drawn from
-        the generator's ``chance`` stream. An integer seed for ``streams`` is
-        deprecated: it draws the direct streams of that root.
+        the generator's ``chance`` stream of ``streams``.
         """
-        if isinstance(streams, (int, np.integer)) and not isinstance(streams, bool):
-            warn_deprecated(
-                f"{type(self).__name__}.apply_injection_chance(waveforms, seed)",
-                "pass the batch's streams"
+        if not isinstance(streams, BatchStreams):
+            raise TypeError(
+                f"apply_injection_chance needs the batch's streams, a gf.BatchStreams; got "
+                f"{type(streams).__name__}."
             )
-            # The direct streams of that root, without generate(seed=)'s warning:
-            # the caller did not call generate.
-            streams = resolve_streams(None, int(streams), f"wave/{self.stream_label}")
         if self.injection_chance >= 1.0:
             return waveforms
             
@@ -879,14 +874,12 @@ class WNBGenerator(WaveformGenerator):
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds: float,
-        streams : Optional[BatchStreams] = None,
-        *,
-        seed : Optional[int] = None
+        streams : Optional[BatchStreams] = None
     ):
 
         if (num_waveforms > 0):
 
-            streams = self.resolve_streams(streams, seed)
+            streams = self.resolve_streams(streams)
             name = type(self).__name__
             nyquist = sample_rate_hertz / 2.0
             if _finite_support(self, "min_frequency_hertz")[0] >= nyquist \
@@ -1143,14 +1136,12 @@ class CBCGenerator(WaveformGenerator):
             num_waveforms : int,
             sample_rate_hertz : float,
             duration_seconds : float,
-            streams : Optional[BatchStreams] = None,
-            *,
-            seed : Optional[int] = None
+            streams : Optional[BatchStreams] = None
         ):
         
         if (num_waveforms > 0):
             
-            streams = self.resolve_streams(streams, seed)
+            streams = self.resolve_streams(streams)
             parameters = {}
             for attribute in self.distributed_attributes:
                 value = getattr(self, attribute)
@@ -1325,15 +1316,13 @@ class IncoherentGenerator(WaveformGenerator):
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds : float,
-        streams : Optional[BatchStreams] = None,
-        *,
-        seed : Optional[int] = None
+        streams : Optional[BatchStreams] = None
     ):
         """
         ``num_waveforms`` incoherent injections: (Batch, Detectors, 2, Time)
         polarisations and their parameters (see the class).
         """
-        streams = self.resolve_streams(streams, seed)
+        streams = self.resolve_streams(streams)
         waveforms, parameters, before, after = [], [], [], []
         for j, component in enumerate(self.component_generators):
             unconditional = copy(component)
@@ -1535,7 +1524,6 @@ class InjectionGenerator:
         self,
         waveform_generators: List[WaveformGenerator],
         parameters_to_return: List = None,
-        seed: int = None,
         scale_factor: None = None,
         scopes: Optional[List[str]] = None,
     ):
@@ -1556,9 +1544,10 @@ class InjectionGenerator:
         ``add_injections_to_onsource`` call takes too, so each batch gets its
         own sky and targets.
 
+        The iterator draws from the default root; batch k of another root
+        is ``generate(gf.SeedTree(root).direct(k), ...)``.
+
         Args:
-            seed: Deprecated. The root of the streams of the iterator
-                ``__call__`` returns (default ``gf.Defaults.seed``).
             scale_factor: Deprecated and ignored: injections are physical strain.
         """
         ignore_scale_factor(scale_factor)
@@ -1571,9 +1560,6 @@ class InjectionGenerator:
         else:
             self.parameters_to_return = parameters_to_return
         
-        if seed is not None:
-            warn_deprecated("InjectionGenerator(seed=)", "pass streams to generate()")
-        self._tree = SeedTree(seed)
         self.scopes = [""] * len(self.waveform_generators) if scopes is None else list(scopes)
         if len(self.scopes) != len(self.waveform_generators):
             raise ValueError(
@@ -1618,7 +1604,7 @@ class InjectionGenerator:
 
     def streams(self, k: Optional[int] = None) -> BatchStreams:
         """The streams of the direct iterator's batch ``k`` (None: one direct batch)."""
-        return self._tree.direct(k)
+        return SeedTree().direct(k)
 
     def _generator_streams(self, streams: BatchStreams, index: int) -> BatchStreams:
         """Generator ``index``'s view of a batch's streams: its scope of them."""
@@ -1818,7 +1804,8 @@ class InjectionGenerator:
         onsource_duration_seconds: float = None,
         injection_parameters: Optional[Dict] = None,
         scale_factor: None = None,
-        streams: Optional[BatchStreams] = None,
+        *,
+        streams: BatchStreams,
         epoch: Optional[int] = None,
         steps_per_epoch: Optional[int] = None,
     ):
@@ -1832,8 +1819,7 @@ class InjectionGenerator:
         k of epoch e (``streams``' coordinates) takes the next examples from
         position e x ``steps_per_epoch`` + k, cycling, so training epochs run
         on through the list. ``streams`` are the batch's: a dataset's, or
-        ``streams(k)`` for the direct iterator's batch k. Leaving them out is
-        deprecated: it draws every call from the same direct streams.
+        ``streams(k)`` for the direct iterator's batch k; they are required.
 
         Units: everything is physical strain. Each example's polarisations
         are first normalised to unit hpeak. HRSS and HPEAK: scaled to the
@@ -1862,12 +1848,11 @@ class InjectionGenerator:
         if injection_parameters:
             refuse_renamed_sky_keys(injection_parameters)
         ignore_scale_factor(scale_factor)
-        if streams is None:
-            warn_deprecated(
-                "add_injections_to_onsource without streams",
-                "pass the batch's streams (InjectionGenerator.streams(k) for the iterator's batch k)"
+        if not isinstance(streams, BatchStreams):
+            raise TypeError(
+                "add_injections_to_onsource needs the batch's streams, a gf.BatchStreams "
+                f"(InjectionGenerator.streams(k) for the iterator's batch k); got {type(streams).__name__}."
             )
-            streams = self.streams()
 
         # A generator without a scaling method is refused, by name, below.
         label_types = {

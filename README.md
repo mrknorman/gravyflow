@@ -206,9 +206,12 @@ scope of the tree, or are the pools of one `gf.ComposedDataset`. Old seeds give 
 XLA's multi-threaded kernels can still round whitened and projected strain and Welch spectra differently from one call
 to the next, in the last bits of float32. For bit-identical batches, set `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false`
 (on other backends, see [Platforms](#platforms-cpu-gpu-or-tpu)) before starting Python: importing gravyflow starts JAX, which reads the flag then (the results differ, also in the last
-bits, from multi-threaded ones). The test suite sets it itself, and a recipe training run warns without it. The remaining replaced seed arguments
-(`generate(seed=)`, `InjectionGenerator(seed=)`, `PoolSampler(seed=)` and the like) still work for one release, with
-a `DeprecationWarning`. These changes have no such period:
+bits, from multi-threaded ones). The test suite sets it itself, and a recipe training run warns without it. The replaced seed arguments
+are gone, with no shim: a generator's `generate(seed=)` (pass streams, or the generator's `direct_streams(root)`),
+`InjectionGenerator(seed=)` (pass `gf.SeedTree(root).direct(k)` to `generate`; `add_injections_to_onsource` requires
+`streams=`), `PoolSampler(seed=)` and `reseed` (every draw takes an rng), `gf.wnb`'s integer seed (pass `key=`), and
+`white_noise_generator` and `colored_noise_generator` (call the noise module's `white_noise_batcher` or
+`colored_noise_batcher` with each batch's streams). These changes too have no transition period:
 
 - `ds[k]` is batch k, and `next(iter(ds))` is always batch 0. Step through batches with `next(ds)`, or index them.
 - Under `model.fit`, a training split takes Keras' epoch: pass `callbacks=[ds.epoch_callback()]` and
@@ -365,8 +368,8 @@ Earlier releases multiplied strain by an internal scale, `gf.Defaults.scale_fact
   such as the shipped examples, are unaffected.
 - `gf.psd()` returns a `PowerSpectrum` instead of `(frequencies, psd)`: `spectrum.frequencies, spectrum.value()`.
 - `scale_factor=` arguments (`gf.Dataset`, `gf.ComposedDataset`, `gf.NoiseObtainer`, an obtainer called directly,
-  `gf.InjectionGenerator` and its `add_injections_to_onsource`, `gf.generate_strain_plot`, `gf.BatchConfig`,
-  `colored_noise_generator`) are ignored for one release, with a `DeprecationWarning`. `gf.scale_to_snr(return_scale_factor=)` is `return_factor=`, with the same warning.
+  `gf.InjectionGenerator` and its `add_injections_to_onsource`, `gf.generate_strain_plot`, `gf.BatchConfig`) are
+  ignored for one release, with a `DeprecationWarning`. `gf.scale_to_snr(return_scale_factor=)` is `return_factor=`, with the same warning.
 - `gf.Defaults.scale_factor` is removed: reading it raises `AttributeError`, and `gf.Defaults.set(scale_factor=)`
   raises one that says why. `IFOData.scale` is removed.
 - A validator checkpoint of format 3 is refused (format 4 holds physical strain); validate the model again.

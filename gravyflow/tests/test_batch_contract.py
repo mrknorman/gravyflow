@@ -175,8 +175,9 @@ def test_central_time_is_nan_where_absent():
 
 def _source_hpeak(distance_mpc):
     """The physical hpeak of the test's CBC source generated at ``distance_mpc``."""
-    waveforms, _ = cbc(distance=constant(float(distance_mpc))).generate(
-        num_waveforms=1, sample_rate_hertz=FS, duration_seconds=4.0, seed=1)
+    generator = cbc(distance=constant(float(distance_mpc)))
+    waveforms, _ = generator.generate(
+        num_waveforms=1, sample_rate_hertz=FS, duration_seconds=4.0, streams=generator.direct_streams(1))
     return float(np.asarray(calculate_hpeak(waveforms))[0])
 
 
@@ -222,18 +223,19 @@ def test_amplitude_label_is_the_injected_amplitude(make, method):
 
 
 def test_the_old_sky_keys_are_refused_by_name():
-    injector = gf.InjectionGenerator([cbc()], seed=1)
+    injector = gf.InjectionGenerator([cbc()])
     injector.waveform_generators[0].network = gf.Network([gf.IFO.L1])
-    injections, mask, parameters = next(injector(
-        sample_rate_hertz=FS, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
-        num_examples_per_batch=2))
+    injections, mask, parameters = injector.generate(
+        injector.streams(0), sample_rate_hertz=FS, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
+        num_examples_per_batch=2)
     for old, new in RENAMED_SKY_KEYS.items():
         with pytest.raises(KeyError, match=new.name):
             injector.add_injections_to_onsource(
                 injections, mask, np.zeros((2, 1, 2 * T), np.float32),
                 np.random.default_rng(0).normal(size=(2, 1, T_OFF)).astype(np.float32),
                 parameters_to_return=[], onsource_duration_seconds=1.0,
-                injection_parameters={**parameters, old: np.zeros((1, 2), np.float32)})
+                injection_parameters={**parameters, old: np.zeros((1, 2), np.float32)},
+                streams=injector.streams(0))
 
 
 def test_a_batch_off_its_contract_is_refused_with_its_documented_shape():

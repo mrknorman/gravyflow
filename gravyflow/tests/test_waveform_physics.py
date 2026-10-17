@@ -12,6 +12,7 @@ Waveform physics against references: lal and lalsimulation, and analytic forms.
 
 lal is a required input of these tests: if it cannot be imported, they fail.
 """
+import itertools
 import warnings
 
 import numpy as np
@@ -29,6 +30,8 @@ from gravyflow.src.dataset.features.waveforms.cbc import _generate_cbc_window
 FS = 2048.0
 ONSOURCE = 1.0
 CROP = 0.5
+#: The root of the direct streams the injection tests draw from.
+TREE = gf.SeedTree(7)
 
 
 def uniform(low, high):
@@ -43,12 +46,13 @@ def hrss(h):
     return float(np.sqrt(np.sum(np.asarray(h, np.float64) ** 2) / FS))
 
 
-def first_batch(generator, num_examples=64, seed=7):
-    injector = gf.InjectionGenerator([generator], seed=seed)
-    batches = injector(
-        sample_rate_hertz=FS, onsource_duration_seconds=ONSOURCE,
+def first_batch(generator, num_examples=64):
+    """An injector of ``generator`` and its batches k = 0, 1, ... of ``TREE``'s direct streams."""
+    injector = gf.InjectionGenerator([generator])
+    batches = (injector.generate(
+        TREE.direct(k), sample_rate_hertz=FS, onsource_duration_seconds=ONSOURCE,
         crop_duration_seconds=CROP, num_examples_per_batch=num_examples,
-    )
+    ) for k in itertools.count())
     return injector, batches
 
 
@@ -67,7 +71,7 @@ def test_sine_gaussian_matches_lalsimulation(q, frequency, eccentricity, phase):
         frequency_hertz=frequency, quality_factor=q, amplitude=1.0,
         phase_radians=phase, polarization_eccentricity=eccentricity,
     )
-    waveforms, parameters = generator.generate(1, FS, 4.0, seed=1)
+    waveforms, parameters = generator.generate(1, FS, 4.0, streams=generator.direct_streams(1))
     waveforms = np.asarray(waveforms[0], np.float64)
 
     plus, cross = lalsimulation.SimBurstSineGaussian(q, frequency, 1.0, eccentricity, phase, 1.0 / FS)
@@ -93,7 +97,7 @@ def test_sine_gaussian_eccentricity_sets_the_polarisation_content():
         generator = gf.SineGaussianGenerator(
             frequency_hertz=200.0, quality_factor=9.0, polarization_eccentricity=eccentricity
         )
-        waveforms, _ = generator.generate(1, FS, 2.0, seed=1)
+        waveforms, _ = generator.generate(1, FS, 2.0, streams=generator.direct_streams(1))
         rss[eccentricity] = (hrss(waveforms[0, 0]), hrss(waveforms[0, 1]))
     # Circular: equal power in both; linear: plus only.
     assert rss[0.0][0] == pytest.approx(rss[0.0][1], rel=1e-4)
@@ -109,7 +113,7 @@ def test_chirplet_instantaneous_frequency_runs_from_start_to_end():
         start_frequency_hertz=50.0, end_frequency_hertz=200.0, duration_seconds=0.5,
         phase_radians=0.4, polarization_eccentricity=0.0,
     )
-    waveforms, parameters = generator.generate(1, FS, 2.0, seed=1)
+    waveforms, parameters = generator.generate(1, FS, 2.0, streams=generator.direct_streams(1))
     plus = np.asarray(waveforms[0, 0], np.float64)
     cross = np.asarray(waveforms[0, 1], np.float64)
 
@@ -131,7 +135,7 @@ def test_ringdown_starts_at_its_reference_time_as_a_damped_sinusoid():
         frequency_hertz=frequency, damping_time_seconds=tau, phase_radians=phase,
         polarization_eccentricity=0.0,
     )
-    waveforms, _ = generator.generate(1, FS, 2.0, seed=1)
+    waveforms, _ = generator.generate(1, FS, 2.0, streams=generator.direct_streams(1))
     waveforms = np.asarray(waveforms[0], np.float64)
     num_samples = waveforms.shape[-1]
     t = (np.arange(num_samples) - num_samples / 2) / FS
@@ -173,7 +177,7 @@ def test_wnb_swapped_band_is_ordered_not_collapsed():
         duration_seconds=0.5, min_frequency_hertz=uniform(300.0, 400.0),
         max_frequency_hertz=uniform(100.0, 200.0),
     )
-    waveforms, parameters = generator.generate(16, FS, 2.0, seed=3)
+    waveforms, parameters = generator.generate(16, FS, 2.0, streams=generator.direct_streams(3))
     low = np.asarray(parameters[gf.WaveformParameters.MIN_FREQUENCY_HERTZ])
     high = np.asarray(parameters[gf.WaveformParameters.MAX_FREQUENCY_HERTZ])
     assert np.all((low >= 100.0) & (low <= 200.0))
@@ -191,7 +195,7 @@ def test_wnb_time_bandwidth_floor():
         duration_seconds=uniform(0.02, 0.5), min_frequency_hertz=uniform(20.0, 500.0),
         max_frequency_hertz=uniform(20.0, 500.0),
     )
-    _, parameters = generator.generate(512, FS, 2.0, seed=1)
+    _, parameters = generator.generate(512, FS, 2.0, streams=generator.direct_streams(1))
     low = np.asarray(parameters[gf.WaveformParameters.MIN_FREQUENCY_HERTZ])
     high = np.asarray(parameters[gf.WaveformParameters.MAX_FREQUENCY_HERTZ])
     duration = np.asarray(parameters[gf.WaveformParameters.DURATION_SECONDS])
@@ -205,13 +209,13 @@ def test_wnb_band_at_nyquist():
     with pytest.raises(ValueError, match="Nyquist"):
         gf.WNBGenerator(
             duration_seconds=0.5, min_frequency_hertz=1100.0, max_frequency_hertz=1200.0
-        ).generate(2, FS, 2.0, seed=1)
+        ).generate(2, FS, 2.0)
 
     generator = gf.WNBGenerator(
         duration_seconds=0.5, min_frequency_hertz=900.0, max_frequency_hertz=1200.0
     )
     with pytest.warns(UserWarning, match="clipped"):
-        _, parameters = generator.generate(2, FS, 2.0, seed=1)
+        _, parameters = generator.generate(2, FS, 2.0, streams=generator.direct_streams(1))
     np.testing.assert_allclose(parameters[gf.WaveformParameters.MAX_FREQUENCY_HERTZ], FS / 2)
 
 
@@ -241,7 +245,7 @@ def test_wnb_generate_leaves_its_distributions_alone():
     generator = gf.WNBGenerator(duration_seconds=uniform(0.1, 1.0))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        generator.generate(2, FS, 0.5, seed=1)
+        generator.generate(2, FS, 0.5, streams=generator.direct_streams(1))
     assert (generator.duration_seconds.min_, generator.duration_seconds.max_) == (0.1, 1.0)
 
 
@@ -261,7 +265,7 @@ def test_burst_distribution_types(make):
     for distribution in (bounded, choice):
         generator = make(distribution)
         assert np.isfinite(generator.get_max_generated_duration())
-        waveforms, _ = generator.generate(2, FS, 4.0, seed=1)
+        waveforms, _ = generator.generate(2, FS, 4.0, streams=generator.direct_streams(1))
         assert np.all(np.isfinite(np.asarray(waveforms)))
 
 
@@ -272,7 +276,7 @@ def test_burst_distribution_types(make):
 ])
 def test_burst_frequencies_must_be_below_nyquist(make):
     with pytest.raises(ValueError, match="Nyquist"):
-        make().generate(1, FS, 1.0, seed=1)
+        make().generate(1, FS, 1.0)
 
 
 def test_generators_without_scaling_are_refused_by_the_dataset():
@@ -345,7 +349,7 @@ def _add_to_zero_onsource(injector, injections, parameters, requested):
     return injector.add_injections_to_onsource(
         injections, None, zeros, offsource, parameters_to_return=requested,
         onsource_duration_seconds=ONSOURCE, injection_parameters=parameters,
-        streams=injector.streams(0),
+        streams=TREE.direct(0),
     )
 
 
@@ -422,7 +426,7 @@ def test_configured_sky_is_labelled_and_projected_as_lal():
 
 def test_single_spin_distribution_is_the_aligned_component():
     generator = gf.CBCGenerator(spin_1_in=uniform(-0.9, 0.9), spin_2_in=uniform(-0.5, 0.5))
-    _, parameters = generator.generate(64, FS, 2.0, seed=5)
+    _, parameters = generator.generate(64, FS, 2.0, streams=generator.direct_streams(5))
     for key in (gf.WaveformParameters.SPIN_1_IN, gf.WaveformParameters.SPIN_2_IN):
         spins = np.asarray(parameters[key])
         assert spins.shape == (64, 3)
@@ -447,7 +451,7 @@ def test_spin_tuples_stay_per_source_and_match_the_waveform():
         spin_1_in=(uniform(-0.5, 0.5), uniform(-0.5, 0.5), uniform(-0.5, 0.5)),
         spin_2_in=(0.1, 0.2, 0.3), approximant=gf.Approximant.IMRPhenomPv2,
     )
-    waveforms, parameters = generator.generate(4, FS, 2.0, seed=5)
+    waveforms, parameters = generator.generate(4, FS, 2.0, streams=generator.direct_streams(5))
     spin_1 = np.asarray(parameters[gf.WaveformParameters.SPIN_1_IN])
     spin_2 = np.asarray(parameters[gf.WaveformParameters.SPIN_2_IN])
     assert len({tuple(row) for row in spin_1.round(6)}) == 4
@@ -477,7 +481,7 @@ def test_the_mass_ordering_carries_each_bodys_spin_and_tides():
         lambda_1=400.0, lambda_2=0.0, spin_1_in=constant(0.05), spin_2_in=constant(0.6),
         approximant=gf.Approximant.IMRPhenomD_NRTidalv2,
     )
-    _, parameters = generator.generate(64, FS, 2.0, seed=2)
+    _, parameters = generator.generate(64, FS, 2.0, streams=generator.direct_streams(2))
     m1 = np.asarray(parameters[gf.WaveformParameters.MASS_1_MSUN])
     m2 = np.asarray(parameters[gf.WaveformParameters.MASS_2_MSUN])
     l1 = np.asarray(parameters[gf.WaveformParameters.LAMBDA_1])
@@ -509,7 +513,7 @@ def test_cbc_accepts_normal_and_choice_masses(distribution):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         generator = gf.CBCGenerator(mass_1_msun=distribution)
-    waveforms, _ = generator.generate(2, FS, 2.0, seed=1)
+    waveforms, _ = generator.generate(2, FS, 2.0, streams=generator.direct_streams(1))
     assert np.all(np.isfinite(np.asarray(waveforms)))
 
 

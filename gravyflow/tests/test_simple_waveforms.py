@@ -41,7 +41,7 @@ def _test_periodic_wave_generation(
         num_waveforms=num_tests,
         sample_rate_hertz=2048.0,
         duration_seconds=1.0,
-        seed=42
+        streams=gen.direct_streams(42)
     )
     
     # Check shape and validity
@@ -117,7 +117,7 @@ def test_periodic_frequency_distribution() -> None:
         num_waveforms=10,
         sample_rate_hertz=2048.0,
         duration_seconds=1.0,
-        seed=42
+        streams=gen.direct_streams(42)
     )
     
     freqs = np.array(params[gf.WaveformParameters.FREQUENCY_HERTZ])
@@ -151,7 +151,7 @@ def _test_sine_gaussian_generation(
         num_waveforms=num_tests,
         sample_rate_hertz=2048.0,
         duration_seconds=1.0,
-        seed=42
+        streams=gen.direct_streams(42)
     )
     
     assert waveforms.shape[0] == num_tests
@@ -202,8 +202,8 @@ def test_sine_gaussian_q_affects_width() -> None:
         network=[gf.IFO.L1],
     )
     
-    wf_low, params_low = gen_low_q.generate(1, 2048.0, 2.0, seed=42)
-    wf_high, params_high = gen_high_q.generate(1, 2048.0, 2.0, seed=42)
+    wf_low, params_low = gen_low_q.generate(1, 2048.0, 2.0, streams=gen_low_q.direct_streams(42))
+    wf_high, params_high = gen_high_q.generate(1, 2048.0, 2.0, streams=gen_high_q.direct_streams(42))
     
     # Higher Q = higher tau = wider signal (Q ∝ tau)
     tau_low = float(params_low[gf.WaveformParameters.TAU_SECONDS][0])
@@ -223,7 +223,7 @@ def test_sine_gaussian_centered_peak() -> None:
         num_waveforms=1,
         sample_rate_hertz=2048.0,
         duration_seconds=1.0,
-        seed=42
+        streams=gen.direct_streams(42)
     )
     
     h_plus = np.abs(np.array(waveform[0, 0, :]))
@@ -256,7 +256,7 @@ def _test_chirplet_generation(
         num_waveforms=num_tests,
         sample_rate_hertz=2048.0,
         duration_seconds=1.0,
-        seed=42
+        streams=gen.direct_streams(42)
     )
     
     assert waveforms.shape[0] == num_tests
@@ -306,7 +306,7 @@ def test_chirplet_frequency_sweep() -> None:
         num_waveforms=1,
         sample_rate_hertz=2048.0,
         duration_seconds=2.0,
-        seed=42
+        streams=gen.direct_streams(42)
     )
     
     k = float(params[gf.WaveformParameters.CHIRP_RATE][0])
@@ -341,7 +341,7 @@ def _test_ringdown_generation(
         num_waveforms=num_tests,
         sample_rate_hertz=2048.0,
         duration_seconds=1.0,
-        seed=42
+        streams=gen.direct_streams(42)
     )
     
     assert waveforms.shape[0] == num_tests
@@ -389,7 +389,7 @@ def test_ringdown_exponential_decay() -> None:
         num_waveforms=1,
         sample_rate_hertz=2048.0,
         duration_seconds=1.0,
-        seed=42
+        streams=gen.direct_streams(42)
     )
     
     h_plus = np.abs(np.array(waveform[0, 0, :]))

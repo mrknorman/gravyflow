@@ -19,7 +19,6 @@ from gravyflow.src.dataset.conditioning.detector import DEFAULT_NOISE_PROFILE, r
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.dataset.config import WindowSpec, batch_size, ignore_scale_factor
 from gravyflow.src.rng import BatchStreams, SeedTree
-from gravyflow.src.rng.legacy import warn_deprecated
 from gravyflow.src.utils.shapes import ShapeEnforcer
 
 class NoiseType(Enum):
@@ -205,50 +204,6 @@ def colored_noise_batcher(
         }
 
     return batch
-
-
-def white_noise_generator(
-    num_examples_per_batch: int,
-    ifos: List["gf.IFO"],
-    onsource_duration_seconds: float,
-    crop_duration_seconds: float,
-    offsource_duration_seconds: float,
-    sample_rate_hertz: float,
-    seed: int
-) -> Iterator:
-    """Deprecated: white_noise_batcher, iterated over the direct streams of ``seed``."""
-    warn_deprecated("white_noise_generator", "call white_noise_batcher(...) with each batch's streams")
-    batch = white_noise_batcher(
-        num_examples_per_batch, ifos, onsource_duration_seconds, crop_duration_seconds,
-        offsource_duration_seconds, sample_rate_hertz,
-    )
-    tree = SeedTree(seed)
-    return (batch(tree.direct(k)) for k in count())
-
-
-def colored_noise_generator(
-    num_examples_per_batch: int,
-    onsource_duration_seconds: float,
-    crop_duration_seconds: float,
-    offsource_duration_seconds: float,
-    ifos: List["gf.IFO"],
-    sample_rate_hertz: float,
-    scale_factor: None,
-    seed: int,
-    noise_profile: "gf.NoiseProfile" = None
-) -> Iterator:
-    """
-    Deprecated: colored_noise_batcher, iterated over the direct streams of
-    ``seed``. ``scale_factor`` is ignored: the noise is strain.
-    """
-    warn_deprecated("colored_noise_generator", "call colored_noise_batcher(...) with each batch's streams")
-    ignore_scale_factor(scale_factor)
-    batch = colored_noise_batcher(
-        num_examples_per_batch, onsource_duration_seconds, crop_duration_seconds,
-        offsource_duration_seconds, ifos, sample_rate_hertz, noise_profile=noise_profile,
-    )
-    tree = SeedTree(seed)
-    return (batch(tree.direct(k)) for k in count())
 
 
 class ReaderExhausted(Exception):

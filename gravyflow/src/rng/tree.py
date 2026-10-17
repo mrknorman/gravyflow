@@ -227,19 +227,21 @@ def _join(prefix: str, name: str) -> str:
     return f"{prefix}/{name}"
 
 
-def resolve_streams(streams, seed, consumer_prefix: str) -> BatchStreams:
+def resolve_streams(streams, consumer_prefix: str) -> BatchStreams:
     """
     The streams a direct call draws from.
 
     ``streams`` (a BatchStreams) is used as given. Without it, a direct call
-    draws from the reserved ``direct`` split of ``SeedTree(seed)``, prefixed
-    with ``consumer_prefix``: deterministic, so a script is repeatable.
+    draws from the reserved ``direct`` split of the default root, prefixed
+    with ``consumer_prefix``: deterministic, so a script is repeatable. A
+    direct call from another root is given that root's streams.
     """
     if streams is not None and not isinstance(streams, BatchStreams):
         raise TypeError(
-            f"streams must be a gf.BatchStreams (or None), got {type(streams).__name__}; "
-            "pass an integer seed as seed=."
+            f"streams must be a gf.BatchStreams (or None for the default root's), got "
+            f"{type(streams).__name__}; for another root pass its direct streams, "
+            "gf.SeedTree(root).direct() (a waveform generator's: direct_streams(root))."
         )
     if streams is not None:
         return streams
-    return SeedTree(seed).direct().sub(consumer_prefix)
+    return SeedTree().direct().sub(consumer_prefix)

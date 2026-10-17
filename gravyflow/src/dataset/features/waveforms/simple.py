@@ -182,14 +182,12 @@ class PeriodicWaveGenerator(gf.WaveformGenerator):
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds: float,
-        streams: Optional["gf.BatchStreams"] = None,
-        *,
-        seed: Optional[int] = None
+        streams: Optional["gf.BatchStreams"] = None
     ):
         if num_waveforms <= 0:
             return None, {}
 
-        streams = self.resolve_streams(streams, seed)
+        streams = self.resolve_streams(streams)
         _check_below_nyquist(self, ("frequency_hertz",), sample_rate_hertz)
 
         # Sample parameters
@@ -301,14 +299,12 @@ class SineGaussianGenerator(gf.WaveformGenerator):
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds: float,
-        streams: Optional["gf.BatchStreams"] = None,
-        *,
-        seed: Optional[int] = None
+        streams: Optional["gf.BatchStreams"] = None
     ):
         if num_waveforms <= 0:
             return None, {}
 
-        streams = self.resolve_streams(streams, seed)
+        streams = self.resolve_streams(streams)
         _check_below_nyquist(self, ("frequency_hertz",), sample_rate_hertz)
 
         # Sample parameters
@@ -419,14 +415,12 @@ class ChirpletGenerator(gf.WaveformGenerator):
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds: float,
-        streams: Optional["gf.BatchStreams"] = None,
-        *,
-        seed: Optional[int] = None
+        streams: Optional["gf.BatchStreams"] = None
     ):
         if num_waveforms <= 0:
             return None, {}
 
-        streams = self.resolve_streams(streams, seed)
+        streams = self.resolve_streams(streams)
         _check_below_nyquist(
             self, ("start_frequency_hertz", "end_frequency_hertz"), sample_rate_hertz
         )
@@ -532,14 +526,12 @@ class RingdownGenerator(gf.WaveformGenerator):
         num_waveforms: int,
         sample_rate_hertz: float,
         duration_seconds: float,
-        streams: Optional["gf.BatchStreams"] = None,
-        *,
-        seed: Optional[int] = None
+        streams: Optional["gf.BatchStreams"] = None
     ):
         if num_waveforms <= 0:
             return None, {}
 
-        streams = self.resolve_streams(streams, seed)
+        streams = self.resolve_streams(streams)
         _check_below_nyquist(self, ("frequency_hertz",), sample_rate_hertz)
 
         # Sample parameters

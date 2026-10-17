@@ -10,6 +10,7 @@ their address with independent splits.
 import copy
 import hashlib
 import pickle
+import re
 import subprocess
 import sys
 import textwrap
@@ -19,7 +20,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
-from gravyflow.src.rng import DIRECT_SPLIT, platform, resolve_streams
+from gravyflow.src.rng import DIRECT_SPLIT, platform
 
 SAMPLE_RATE = 512.0
 BATCH = 4
@@ -273,7 +274,7 @@ class TestStatelessObjects:
         "utils/tensor.py", "dataset/curriculum.py", "dataset/conditioning/detector.py",
         "dataset/features/injection.py", "dataset/features/glitch.py",
         "dataset/features/waveforms/simple.py", "dataset/features/waveforms/wnb.py",
-        "dataset/features/waveforms/cbc.py",
+        "dataset/features/waveforms/cbc.py", "dataset/pools.py", "dataset/noise/noise.py",
     )
 
     def test_stateless_modules_draw_only_from_given_streams(self):
@@ -320,8 +321,8 @@ class TestStatelessObjects:
         waveforms = np.asarray(waveforms)
         assert not np.array_equal(waveforms[:, 0], waveforms[:, 1])
 
-    def direct_labels(self, k, streams_of=None):
-        """Batch k of a direct InjectionGenerator, injected with the streams ``streams_of`` gives."""
+    def direct_labels(self, k):
+        """Batch k of a direct InjectionGenerator, injected with batch k's streams."""
         generator = wnb(network=[gf.IFO.L1, gf.IFO.H1])
         injector = gf.InjectionGenerator([generator])
         batches = injector(sample_rate_hertz=SAMPLE_RATE, onsource_duration_seconds=1.0,
@@ -335,7 +336,7 @@ class TestStatelessObjects:
             injections, mask, onsource, offsource,
             parameters_to_return=[gf.ScalingTypes.SNR, gf.WaveformParameters.RIGHT_ASCENSION_RADIANS],
             onsource_duration_seconds=1.0, injection_parameters=parameters,
-            streams=None if streams_of is None else streams_of(injector, k),
+            streams=injector.streams(k),
         )
         return {key: np.asarray(value) for key, value in labels.items()}
 
@@ -345,15 +346,11 @@ class TestStatelessObjects:
         # The labels also carry every parameter the generator drew, some of
         # them constant; the injection layer's own draws are the sky, the
         # polarisation and the SNR target.
-        first, second = (self.direct_labels(k, lambda injector, k: injector.streams(k)) for k in (0, 1))
+        first, second = (self.direct_labels(k) for k in (0, 1))
         drawn_here = [gf.ScalingTypes.SNR, gf.WaveformParameters.RIGHT_ASCENSION_RADIANS,
                       gf.WaveformParameters.DECLINATION_RADIANS, gf.WaveformParameters.POLARIZATION_RADIANS]
         for key in drawn_here:
             assert not np.array_equal(first[key], second[key]), key
-
-    def test_injecting_without_streams_is_deprecated(self):
-        with pytest.warns(DeprecationWarning, match="streams"):
-            self.direct_labels(0)
 
     def test_incoherent_components_share_their_presence(self):
         # Each component drew its own injection chance, so an example could
@@ -401,8 +398,8 @@ class TestStatelessObjects:
         assert curriculum.at(None).min_ == 5.0
 
 
-class TestDeprecations:
-    """The replaced seed API warns for one release, where a user will see it."""
+class TestRemovedSeedPaths:
+    """The seed API the tree replaced is gone, with no shim: each old call is refused."""
 
     SCRIPT = textwrap.dedent("""
         import gravyflow as gf
@@ -412,9 +409,6 @@ class TestDeprecations:
             end=gf.Distribution(min_=5.0, max_=15.0, **uniform),
             verbose=True,
         )
-        gf.WNBGenerator(
-            duration_seconds=0.2, min_frequency_hertz=40.0, max_frequency_hertz=200.0,
-        ).generate(2, 512.0, 1.0, seed=1)
     """)
 
     def test_deprecations_show_under_default_filters(self, tmp_path):
@@ -429,38 +423,96 @@ class TestDeprecations:
         )
         out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env)
         assert out.returncode == 0, out.stderr
-        for name in ("Curriculum(verbose=)", "WNBGenerator.generate(seed=)"):
-            assert f"{name} is deprecated" in out.stderr, name
-            assert "user_script.py" in out.stderr
+        assert "Curriculum(verbose=) is deprecated" in out.stderr
+        assert "user_script.py" in out.stderr
 
-    def test_renamed_functions_warn_and_still_run(self):
-        import jax
-        from gravyflow.src.dataset.noise import noise as gf_noise
-
-        args = (2, SAMPLE_RATE, 1.0, np.full(2, 0.3), np.full(2, 40.0), np.full(2, 120.0))
-        with pytest.warns(DeprecationWarning, match="gf.wnb"):
-            by_seed = gf.wnb(*args, 5)
-        np.testing.assert_array_equal(by_seed, gf.wnb(*args, key=jax.random.PRNGKey(5)))
-
+    def test_a_generator_draws_only_from_streams(self):
         generator = wnb(injection_chance=0.5)
+        with pytest.raises(TypeError, match="seed"):
+            generator.generate(2, SAMPLE_RATE, 1.0, seed=1)
+        with pytest.raises(TypeError, match="streams"):
+            generator.generate(2, SAMPLE_RATE, 1.0, 1)
+        with pytest.raises(TypeError, match="seed"):
+            gf.IncoherentGenerator([wnb(), wnb()]).generate(2, SAMPLE_RATE, 1.0, seed=1)
         waveforms = np.ones((16, 2, 8), np.float32)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            masked = generator.apply_injection_chance(waveforms, 3)
-        # One warning, for the call made: none for generate(seed=), never called.
-        deprecations = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]
-        assert len(deprecations) == 1 and "apply_injection_chance" in deprecations[0], deprecations
-        np.testing.assert_array_equal(
-            masked, generator.apply_injection_chance(
-                waveforms, resolve_streams(None, 3, f"wave/{generator.stream_label}"))
-        )
+        with pytest.raises(TypeError, match="streams"):
+            generator.apply_injection_chance(waveforms, 3)
 
-        with pytest.warns(DeprecationWarning, match="white_noise_generator"):
-            white = next(gf_noise.white_noise_generator(BATCH, [gf.IFO.L1], 1.0, 0.5, 2.0, SAMPLE_RATE, 1))
-        with pytest.warns(DeprecationWarning, match="colored_noise_generator"):
-            colored = next(gf_noise.colored_noise_generator(BATCH, 1.0, 0.5, 2.0, [gf.IFO.L1], SAMPLE_RATE, None, 1))
-        for batch in (white, colored):
-            assert np.shape(batch[gf.ReturnVariables.ONSOURCE]) == (BATCH, 1, int(2.0 * SAMPLE_RATE))
+    def test_direct_streams_address_a_root(self):
+        # A direct call draws from its generator's direct streams: the default
+        # root's when none are given, another root's by direct_streams(root).
+        generator = wnb()
+        default, _ = generator.generate(2, SAMPLE_RATE, 1.0)
+        np.testing.assert_array_equal(
+            default, generator.generate(2, SAMPLE_RATE, 1.0, generator.direct_streams())[0])
+        other, _ = generator.generate(2, SAMPLE_RATE, 1.0, generator.direct_streams(5))
+        np.testing.assert_array_equal(
+            other, generator.generate(2, SAMPLE_RATE, 1.0, gf.SeedTree(5).direct().sub("wave/WNBGenerator"))[0])
+        assert not np.array_equal(default, other)
+
+    def test_the_injection_layer_needs_streams(self):
+        with pytest.raises(TypeError, match="seed"):
+            gf.InjectionGenerator([wnb()], seed=3)
+        injector = gf.InjectionGenerator([wnb(network=[gf.IFO.L1, gf.IFO.H1])])
+        injections, mask, parameters = injector.generate(injector.streams(0), SAMPLE_RATE, 1.0, 0.5, BATCH)
+        onsource = np.zeros((BATCH, 2, int(2.0 * SAMPLE_RATE)), np.float32)
+        offsource = np.ones((BATCH, 2, int(4.0 * SAMPLE_RATE)), np.float32)
+        with pytest.raises(TypeError, match="streams"):
+            injector.add_injections_to_onsource(
+                injections, mask, onsource, offsource, [gf.ScalingTypes.SNR],
+                onsource_duration_seconds=1.0, injection_parameters=parameters)
+
+    def test_wnb_takes_a_key(self):
+        args = (2, SAMPLE_RATE, 1.0, np.full(2, 0.3), np.full(2, 40.0), np.full(2, 120.0))
+        with pytest.raises(TypeError, match="key"):
+            gf.wnb(*args, 5)
+        with pytest.raises(TypeError, match="seed"):
+            gf.wnb(*args, seed=5)
+
+    def test_the_renamed_noise_generators_are_gone(self):
+        from gravyflow.src.dataset.noise import noise as gf_noise
+        for name in ("white_noise_generator", "colored_noise_generator"):
+            assert not hasattr(gf_noise, name), name
+
+    def test_a_pool_sampler_holds_no_stream(self):
+        pools = [gf.FeaturePool(name=name, label=label, probability=0.5,
+                                noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE))
+                 for name, label in (("a", 0), ("b", 1))]
+        with pytest.raises(TypeError, match="seed"):
+            gf.PoolSampler(pools, seed=1)
+        sampler = gf.PoolSampler(pools)
+        assert not hasattr(sampler, "reseed")
+        for draw in (sampler.sample_pool, lambda rng: sampler.sample_pool_indices(4, rng),
+                     lambda rng: sampler.sample_batch_assignments(4, rng),
+                     lambda rng: sampler.get_pool_batch_sizes(4, rng)):
+            with pytest.raises(TypeError, match="rng"):
+                draw(None)
+        np.testing.assert_array_equal(sampler.sample_pool_indices(8, np.random.default_rng(1)),
+                                      sampler.sample_pool_indices(8, np.random.default_rng(1)))
+
+    def test_no_seed_path_is_left(self):
+        # Class-wide: no function of a module whose objects are specs takes a
+        # seed, and no warning in the library is about a seed, stream or rng
+        # path, so nothing is left of the replaced API.
+        import ast
+        from pathlib import Path
+        src = Path(gf.__file__).parent / "src"
+        found = []
+        # The explicit script helper, and a noise iterator's root (its tree, as
+        # a dataset's seed is), which keeps no state.
+        allowed = {("utils/tensor.py", "set_random_seeds"), ("dataset/noise/noise.py", "__call__")}
+        for module in TestStatelessObjects.STATELESS_MODULES:
+            for node in ast.walk(ast.parse((src / module).read_text())):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (module, node.name) not in allowed:
+                    arguments = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+                    found += [f"{module}:{node.lineno} {node.name}({a.arg}=)" for a in arguments if "seed" in a.arg]
+        for path in sorted(src.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Call) and ast.unparse(node.func).endswith("warn_deprecated"):
+                    message = " ".join(ast.unparse(a) for a in node.args)
+                    if re.search(r"seed|stream|rng|_generator\b", message):
+                        found.append(f"{path.relative_to(src)}:{node.lineno} {message}")
+        assert not found, found
 
 
 class TestIndexedDatasets:

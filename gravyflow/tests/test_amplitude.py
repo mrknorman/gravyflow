@@ -414,11 +414,12 @@ def test_injection_is_the_projected_physical_strain(scaling_type):
     generator = _sine_gaussian_generator(scaling_type, _constant(float(target)))
     network = gf.Network([gf.IFO.H1, gf.IFO.L1])
     generator.network = network
-    injection_generator = gf.InjectionGenerator([generator], seed=21)
-    injections, mask, parameters = next(injection_generator(
-        sample_rate_hertz=FS, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
+    injection_generator = gf.InjectionGenerator([generator])
+    streams = gf.SeedTree(21).direct(0)
+    injections, mask, parameters = injection_generator.generate(
+        streams, sample_rate_hertz=FS, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
         num_examples_per_batch=num_examples,
-    ))
+    )
 
     sky = {
         "right_ascension": ops.convert_to_tensor([0.3, 1.7, 3.1, 5.0], "float32"),
@@ -440,7 +441,7 @@ def test_injection_is_the_projected_physical_strain(scaling_type):
     onsource, _, _ = injection_generator.add_injections_to_onsource(
         injections, mask, noise, offsource, parameters_to_return=[scaling_type],
         onsource_duration_seconds=1.0, injection_parameters={**parameters, **given_sky},
-        streams=injection_generator.streams(0),
+        streams=streams,
     )
 
     raw = np.asarray(injections[0], np.float64)

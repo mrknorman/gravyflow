@@ -313,17 +313,6 @@ def test_get_max_generated_duration(generator, expected):
     assert duration == expected
 
 
-def test_generate_seed_is_deprecated():
-    """A generator has no reseed, and generate(seed=) draws the direct streams of that root."""
-    generator = wnb()
-    assert not hasattr(generator, "reseed")
-    with pytest.warns(DeprecationWarning, match="generate"):
-        waveforms, _ = generator.generate(2, 100.0, 1.0, seed=42)
-    np.testing.assert_array_equal(
-        waveforms, generator.generate(2, 100.0, 1.0, gf.SeedTree(42).direct().sub("wave/WNBGenerator"))[0]
-    )
-
-
 def test_waveform_generator_load_example_configs():
     """The example configs load as their type, with their distributions and scaling."""
     burst = gf.WaveformGenerator.load(EXAMPLES / "wnb_parameters.json")
@@ -566,7 +555,7 @@ def test_incoherent_generator_refuses_components_of_different_shapes():
             super().__init__()
             self.samples = samples
 
-        def generate(self, num_waveforms, sample_rate_hertz, duration_seconds, streams=None, *, seed=None):
+        def generate(self, num_waveforms, sample_rate_hertz, duration_seconds, streams=None):
             return ops.zeros((num_waveforms, 2, self.samples)), {}
 
     incoherent = gf_inj.IncoherentGenerator([Fixed(100), Fixed(200)])
@@ -671,8 +660,3 @@ def test_injection_generator_refuses_generators_disagreeing_on_detectors():
     with pytest.raises(ValueError, match=r"disagree on the detectors: \[2, 3\]"):
         injector.generate(injector.streams(0), 100.0, 1.0, 0.5, 2)
 
-
-def test_injection_generator_seed_is_deprecated():
-    """The seed tree replaces InjectionGenerator(seed=)."""
-    with pytest.warns(DeprecationWarning):
-        gf_inj.InjectionGenerator(waveform_generators=[], seed=3)
