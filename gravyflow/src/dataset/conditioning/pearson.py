@@ -48,8 +48,14 @@ def rolling_pearson(
     The Pearson correlation of every detector pair at every lag from -M to +M
     samples (``num_lags``), shape (Batch, Pairs, 2 M + 1). Lag index i compares the
     first detector with the second rolled by M - i samples.
+
+    Scale free: the correlation does not depend on a row's scale, so each row is
+    divided by its peak first, and the sums of squares of physical strain (~1e-42
+    per sample) stay inside float32's range.
     """
     tensor = ops.convert_to_tensor(tensor)
+    peak = ops.max(ops.abs(tensor), axis=-1, keepdims=True)
+    tensor = tensor / ops.where(peak > 0, peak, ops.ones_like(peak))
     # tensor: (Batch, Channels, Time)
     max_samples = max_lag_samples(max_arrival_time_difference_seconds, sample_rate_hertz)
 

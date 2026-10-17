@@ -208,9 +208,13 @@ def _weight_on_grid(psd, num_samples: int, sample_rate_hertz: float):
     """
     The PSD on the rfft grid of a num_samples series as a weight relative to
     unit-variance white noise (S = 2 / fs * weight), and the amplitude scale to
-    divide the data by first. `psd` is None (white, unit variance: the PSD of
-    whitened data), a PowerSpectrum (scale free), or a one-sided PSD array on a
-    uniform grid from DC to Nyquist (interpolated, floored at 1e-4 of its median).
+    divide the data (and templates) by first, so that no square of strain is
+    formed in float32. `psd` is None (white, unit variance: the PSD of whitened
+    data), a PowerSpectrum (scale free), or a one-sided PSD array (F,) or (B, F)
+    on a uniform grid from DC to Nyquist, in the data's units squared per hertz
+    (interpolated, each row floored at 1e-4 of its median). An array is
+    normalised in float64 by its median: the PSD of physical strain (~1e-46) is
+    below float32's range.
     Returns (weight (..., F), scale or None).
     """
     num_freqs = num_samples // 2 + 1
@@ -222,16 +226,29 @@ def _weight_on_grid(psd, num_samples: int, sample_rate_hertz: float):
         # S = normalised * scale^2 / fs: with the data divided by scale, the
         # weight is normalised / 2.
         return psd.interpolate(num_samples) * (psd.inverse_bias / 2.0), psd.scale
-    psd = ops.cast(ops.convert_to_tensor(psd), "float32")
-    if psd.shape[-1] != num_freqs:
-        source = np.linspace(0.0, sample_rate_hertz / 2.0, psd.shape[-1], dtype=np.float32)
-        target = np.arange(num_freqs, dtype=np.float32) * (sample_rate_hertz / num_samples)
-        flat = ops.reshape(psd, (-1, psd.shape[-1]))
-        psd = ops.reshape(jax.vmap(lambda v: jnp.interp(target, source, v))(flat),
-                          tuple(psd.shape[:-1]) + (num_freqs,))
-    weight = psd * (sample_rate_hertz / 2.0)
-    floor = 1.0e-4 * jnp.median(weight, axis=-1, keepdims=True)
-    return ops.maximum(weight, floor), None
+    given = np.asarray(psd)
+    weight = given.astype(np.float64) * (sample_rate_hertz / 2.0)
+    if weight.shape[-1] != num_freqs:
+        source = np.linspace(0.0, sample_rate_hertz / 2.0, weight.shape[-1])
+        target = np.arange(num_freqs) * (sample_rate_hertz / num_samples)
+        flat = weight.reshape(-1, weight.shape[-1])
+        weight = np.stack([np.interp(target, source, row) for row in flat]).reshape(
+            weight.shape[:-1] + (num_freqs,))
+    # One reference for every row, so per-row weights keep their ratios and the
+    # data and templates share one scale.
+    reference = float(np.median(weight))
+    tiny = float(np.finfo(np.float32).tiny)
+    if not np.isfinite(reference) or reference <= 0 or (
+            given.dtype.itemsize < 8 and np.median(np.abs(given)) < tiny):
+        raise ValueError(
+            "The PSD array's median is zero, below float32's range or not finite. The PSD "
+            "of physical strain (~1e-46) underflows float32: pass the array as float64, or "
+            "pass a PowerSpectrum (gf.estimate_psd or gf.psd)."
+        )
+    weight = weight / reference
+    weight = np.maximum(weight, 1.0e-4 * np.median(weight, axis=-1, keepdims=True))
+    return (ops.convert_to_tensor(weight.astype(np.float32)),
+            ops.convert_to_tensor(np.float32(np.sqrt(reference))))
 
 
 def _band(num_samples: int, sample_rate_hertz: float, lower, upper):
@@ -274,7 +291,9 @@ def template_sigma(
         if scale.size != 1:
             raise ValueError("template_sigma takes a PowerSpectrum of one row.")
         templates = templates / ops.reshape(scale, ())
-        weight = ops.reshape(weight, (-1,))
+        weight = ops.reshape(weight, (-1, weight.shape[-1]))
+        if weight.shape[0] == 1:
+            weight = weight[0]
     return ops.sqrt(_sigma_squared(jnp.fft.rfft(templates), weight, num_samples, kmin, kmax))
 
 

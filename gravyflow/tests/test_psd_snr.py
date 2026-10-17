@@ -6,13 +6,6 @@ from keras import ops
 from gravyflow.src.dataset.tools import psd as gf_psd
 from gravyflow.src.dataset.tools import snr as gf_snr
 
-def test_fftfreq():
-    n = 10
-    d = 0.1
-    freqs = gf_psd.fftfreq(n, d)
-    expected = np.fft.rfftfreq(n, d)
-    np.testing.assert_allclose(np.array(freqs), expected)
-
 def test_detrend_constant():
     data = ops.convert_to_tensor([1.0, 2.0, 3.0])
     # Mean is 2.0. Detrended: [-1, 0, 1]
@@ -37,7 +30,8 @@ def test_psd():
     # Batch it
     signal = ops.reshape(signal, (1, -1))
     
-    freqs, pxx = gf_psd.psd(signal, nperseg=100, sample_rate_hertz=sample_rate)
+    spectrum = gf_psd.psd(signal, nperseg=100, sample_rate_hertz=sample_rate)
+    freqs, pxx = spectrum.frequencies, spectrum.value()
     
     # Peak should be at 10Hz
     peak_freq = np.array(freqs)[np.argmax(np.array(pxx[0]))]

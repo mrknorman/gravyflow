@@ -189,7 +189,7 @@ for i in range(min(4, onsource.shape[0])):
     ax.grid(True, alpha=0.3)
     
     # Add RMS annotation
-    rms = np.sqrt(np.mean(onsource[i, 0, :]**2))
+    rms = np.sqrt(np.mean(np.asarray(onsource[i, 0, :], dtype=np.float64)**2))  # float64: strain squared underflows float32
     ax.text(0.02, 0.98, f"RMS: {rms:.2e}", transform=ax.transAxes, 
             va='top', fontsize=9, family='monospace')
 

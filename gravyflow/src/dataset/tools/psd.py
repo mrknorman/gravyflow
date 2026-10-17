@@ -13,11 +13,11 @@ Conventions:
   the number of segments, as scipy and pycbc do.
 - Scale free: the estimate is computed on data divided by its own peak
   amplitude, so physical strain (~1e-21) and the same data at any other
-  amplitude give the same normalised spectrum. A PSD of physical strain (~1e-46) is not
-  representable in float32 (the smallest normal float32 is 1.2e-38), so
-  `psd()` underflows for such inputs; `PowerSpectrum` keeps the normalised
-  spectrum and the amplitude scale apart, and its consumers never form the
-  physical PSD.
+  amplitude give the same normalised spectrum. A PSD of physical strain (~1e-46)
+  is not representable in float32 (the smallest normal float32 is 1.2e-38), so
+  every estimate, `psd()` and `estimate_psd()` alike, is a `PowerSpectrum`: the
+  normalised spectrum and the amplitude scale kept apart. Its consumers never
+  form the physical PSD in float32; `PowerSpectrum.value()` forms it in float64.
 """
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
@@ -33,16 +33,6 @@ import jax
 # an estimate whose inverse (used by whitening and the SNR) has a huge or
 # unbounded variance; one segment has no finite inverse mean at all.
 MIN_PSD_SEGMENTS = 3
-
-
-@partial(jax.jit, static_argnames=["n"])
-def fftfreq(
-        n : int,
-        d : float = 1.0
-    ):
-    val = 1.0 / (n * d)
-    results = ops.arange(0, n // 2 + 1, dtype="float32")
-    return results * val
 
 
 @partial(jax.jit, static_argnames=["axis", "type", "bp", "overwrite_data"])
@@ -185,28 +175,6 @@ def _normalised_welch(signal, nperseg: int, noverlap: int, mode: str):
     pxx = ops.reshape(pxx, batch_shape + (num_freqs,))
     scale = ops.reshape(scale, batch_shape + (1,))
     return pxx, scale
-
-
-@jax.jit(static_argnames=["nperseg", "sample_rate_hertz", "noverlap", "mode"])
-def psd(
-        signal,
-        nperseg : int,
-        sample_rate_hertz : float,
-        noverlap : Optional[int] = None,
-        mode : str = "mean"
-    ):
-    """
-    One-sided Welch PSD of `signal` along its last axis.
-
-    Matches scipy.signal.welch(x, fs, window='hann', nperseg, noverlap,
-    detrend='constant', average=mode). Raises ValueError when the signal is
-    shorter than one segment. Returns (frequencies (F,), pxx (..., F)), float32.
-    """
-    if noverlap is None:
-        noverlap = nperseg // 2
-    pxx_n, scale = _normalised_welch(signal, nperseg, noverlap, mode)
-    freqs = fftfreq(nperseg, d=1.0 / sample_rate_hertz)
-    return freqs, pxx_n * (scale ** 2) / sample_rate_hertz
 
 
 # ---------------------------------------------------------------------------
@@ -389,9 +357,15 @@ class PowerSpectrum:
     def frequencies(self) -> np.ndarray:
         return np.arange(self.normalised.shape[-1], dtype=np.float32) * (self.sample_rate_hertz / self.nperseg)
 
-    def value(self):
-        """The PSD in input units^2/Hz (underflows in float32 for physical strain)."""
-        return self.normalised * self.scale ** 2 / self.sample_rate_hertz
+    def value(self) -> np.ndarray:
+        """
+        The PSD in input units^2/Hz, as float64 NumPy: the PSD of physical strain
+        (~1e-46) is below float32's range. For plots and comparisons; it is not
+        traceable, and the data path never forms it.
+        """
+        normalised = np.asarray(self.normalised, dtype=np.float64)
+        scale = np.asarray(self.scale, dtype=np.float64)
+        return normalised * scale ** 2 / self.sample_rate_hertz
 
     def interpolate(self, num_samples: int, amplitude: bool = False):
         """
@@ -434,6 +408,42 @@ def estimate_psd(
     normalised, scale = _estimate(background, nperseg, noverlap, config.psd_method,
                                   config.psd_floor, config.band_indices(nperseg, sample_rate_hertz))
     return PowerSpectrum(normalised, scale, float(sample_rate_hertz), config, factor, num_frames)
+
+
+_welch = jax.jit(_normalised_welch, static_argnames=["nperseg", "noverlap", "mode"])
+
+
+def psd(
+        signal,
+        nperseg : int,
+        sample_rate_hertz : float,
+        noverlap : Optional[int] = None,
+        mode : str = "mean"
+    ) -> PowerSpectrum:
+    """
+    The one-sided Welch PSD of each row of `signal` (..., T), as a PowerSpectrum.
+
+    The estimate is scipy.signal.welch(x, fs, window='hann', nperseg, noverlap,
+    detrend='constant', average=mode): `value()` gives it in float64 (at any
+    amplitude, physical strain included), and `frequencies` its grid. Unlike
+    `estimate_psd`, it has no band, no floor and no inverse-bias correction, and
+    takes a single segment. Raises ValueError when the signal is shorter than
+    one segment.
+    """
+    if noverlap is None:
+        noverlap = nperseg // 2
+    signal = ops.convert_to_tensor(signal)
+    num_frames = _num_frames(int(signal.shape[-1]), nperseg, noverlap)
+    normalised, scale = _welch(signal, nperseg, noverlap, mode)
+    config = SpectralConfig(
+        lower_frequency_hertz=None,
+        fft_duration_seconds=nperseg / sample_rate_hertz,
+        overlap_duration_seconds=noverlap / sample_rate_hertz,
+        psd_method=mode,
+        psd_floor=0.0,
+        correct_inverse_bias=False,
+    )
+    return PowerSpectrum(normalised, scale, float(sample_rate_hertz), config, 1.0, num_frames)
 
 
 @partial(jax.jit, static_argnames=["nperseg", "noverlap", "method", "floor", "band"])

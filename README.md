@@ -141,15 +141,30 @@ Every array gravyflow reads, returns or caches is physical strain: noise of ever
 detector, and unit variance), injections, `ONSOURCE`, `OFFSOURCE` and `INJECTIONS`, the HRSS and HPEAK targets and
 labels, and the transient caches. Whitened outputs and SNRs are dimensionless, as before. The square of strain
 (about 1e-42) is below float32's normal range, so each step that squares data (PSD estimation, whitening, the SNR,
-the matched filter, HRSS and HPEAK) divides by the data's peak first and restores it after; whitened data and SNRs
-are identical, to float32 rounding, at any input amplitude. `gf.psd()`, which returns the PSD itself, still
-underflows for strain: use `gf.estimate_psd`, whose `PowerSpectrum` keeps the normalised PSD and its scale apart.
+the matched filter, HRSS and HPEAK, the rolling Pearson correlation) divides by the data's peak first and restores
+it after; whitened data, correlations and SNRs are identical, to float32 rounding, at any input amplitude. A PSD
+array given to `gf.matched_filter_fft` or `gf.optimal_snr` is normalised by its median in float64, so give it as
+float64: a float32 PSD of strain has already underflowed, and is refused.
+
+Where the result itself is a square of strain, float32 cannot hold it:
+
+- `gf.psd()` and `gf.estimate_psd()` return a `PowerSpectrum`, which keeps the normalised PSD and its amplitude scale
+  apart; `.value()` gives the PSD in float64 NumPy, and `.frequencies` its grid.
+- `gf.spectrogram()` and `gf.generate_spectrogram()` refuse an input whose power would underflow, such as raw strain,
+  with a `ValueError`: take the spectrogram of whitened data (`SPECTROGRAM_ONSOURCE` does).
+- A network cannot learn from raw strain: its gradients and normalisation statistics underflow. `gf.WhitenPass`, the
+  genetic search's ablation against whitening, therefore scales each example to unit RMS over its detectors and
+  samples; a model of your own on `ONSOURCE` must normalise its input too.
+- WHITE noise is dimensionless, so an HRSS or HPEAK target (a strain amplitude) cannot be injected into it: the
+  dataset (and a `gf.FeaturePool`) refuses the combination. Scale to SNR in WHITE noise; the HRSS and HPEAK labels of those injections are
+  then in WHITE noise's units, not strain.
 
 Earlier releases multiplied strain by an internal scale, `gf.Defaults.scale_factor`. It is gone:
 
 - `ONSOURCE`, `OFFSOURCE` and `INJECTIONS` are no longer multiplied by that scale. A model trained on raw `ONSOURCE`
-  must be retrained, or fed its input times the old scale; models on whitened inputs, such as the shipped examples,
-  are unaffected.
+  (through `gf.WhitenPass`, which now scales each example to unit RMS) must be retrained; models on whitened inputs,
+  such as the shipped examples, are unaffected.
+- `gf.psd()` returns a `PowerSpectrum` instead of `(frequencies, psd)`: `spectrum.frequencies, spectrum.value()`.
 - `scale_factor=` arguments (`gf.Dataset`, `gf.ComposedDataset`, `gf.NoiseObtainer`, an obtainer called directly,
   `gf.InjectionGenerator` and its `add_injections_to_onsource`, `gf.generate_strain_plot`, `gf.BatchConfig`,
   `colored_noise_generator`) are ignored for one release, with a `DeprecationWarning`. `gf.scale_to_snr(return_scale_factor=)` is `return_factor=`, with the same warning.

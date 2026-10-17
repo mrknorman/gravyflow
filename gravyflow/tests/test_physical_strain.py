@@ -235,3 +235,34 @@ def test_add_noise_adds_none_to_a_batch_without_variance():
                                  augmentations=[gf.AddNoise(probability=1.0, amplitude=0.1)])
     out = np.asarray(TransientDataObtainer._apply_augmentation(fake, np.zeros((2, 1, 64), np.float32)))
     assert np.all(out == 0.0)
+
+
+# --- Raw-strain consumers (every public one: test_raw_strain_census) ---------
+
+def test_whiten_pass_gives_each_example_unit_rms_at_any_scale():
+    """A network fed raw strain (~1e-21) cannot learn: WhitenPass scales each example to unit RMS."""
+    onsource = _coloured_strain(27, (4, 2), 2.0)
+    layer = gf.WhitenPass(sample_rate_hertz=FS, onsource_duration_seconds=1.0)
+    out = np.asarray(layer(onsource), np.float64)
+    np.testing.assert_allclose(np.sqrt(np.mean(out ** 2, axis=(1, 2))), 1.0, rtol=1e-5)
+    # The detectors' amplitude ratio is kept.
+    cropped = np.asarray(gf.crop_samples(onsource, 1.0, FS), np.float64)
+    ratio = np.std(cropped[:, 0], axis=-1) / np.std(cropped[:, 1], axis=-1)
+    np.testing.assert_allclose(np.std(out[:, 0], axis=-1) / np.std(out[:, 1], axis=-1), ratio, rtol=1e-5)
+    assert np.all(np.asarray(layer(np.zeros_like(onsource))) == 0.0)
+
+
+def test_spectrogram_refuses_raw_strain_by_name():
+    with pytest.raises(ValueError, match="below float32's range"):
+        gf.spectrogram(_coloured_strain(27, (1, 1), 2.0))
+
+
+def test_matched_filter_refuses_a_strain_psd_array_given_in_float32():
+    """A float32 PSD of strain (~1e-46) has already underflowed: it is refused, never used."""
+    data = _coloured_strain(27, (1, 1), 2.0)[0]
+    spectrum = gf.psd(_coloured_strain(26, (1, 1), 16.0)[0, 0], nperseg=int(FS), sample_rate_hertz=FS)
+    psd = np.interp(np.fft.rfftfreq(data.shape[-1], 1.0 / FS), spectrum.frequencies, spectrum.value())
+    template = np.ones((1, data.shape[-1]), np.float32)
+    assert np.all(np.isfinite(np.asarray(gf.matched_filter_fft(data, template, psd, FS))))
+    with pytest.raises(ValueError, match="pass the array as float64"):
+        gf.matched_filter_fft(data, template, psd.astype(np.float32), FS)

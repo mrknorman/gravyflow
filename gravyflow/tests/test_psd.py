@@ -9,13 +9,6 @@ import keras
 from keras import ops
 from gravyflow.src.dataset.tools import psd as gf_psd
 
-def test_fftfreq():
-    n = 10
-    d = 0.1
-    freqs = gf_psd.fftfreq(n, d)
-    expected = np.fft.rfftfreq(n, d)
-    np.testing.assert_allclose(freqs, expected)
-
 def test_detrend_constant():
     data = ops.convert_to_tensor([[1.0, 2.0, 3.0]])
     detrended = gf_psd.detrend(data, type='constant')
@@ -36,7 +29,8 @@ def test_psd():
     signal = np.sin(2 * np.pi * freq * t).astype(np.float32)
     signal = ops.convert_to_tensor(signal.reshape(1, -1))
     
-    freqs, pxx = gf_psd.psd(signal, nperseg=100, sample_rate_hertz=sample_rate)
+    spectrum = gf_psd.psd(signal, nperseg=100, sample_rate_hertz=sample_rate)
+    freqs, pxx = spectrum.frequencies, spectrum.value()
     
     # Peak should be at 10Hz
     # pxx is (Batch, Freqs)
@@ -59,12 +53,13 @@ def test_psd_vs_scipy():
     noise_tensor = ops.convert_to_tensor(noise.reshape(1, -1))
     
     # Gravyflow PSD
-    gf_freqs, gf_pxx = gf_psd.psd(
+    spectrum = gf_psd.psd(
         noise_tensor, 
         nperseg=nperseg, 
         noverlap=noverlap, 
         sample_rate_hertz=sample_rate
     )
+    gf_freqs, gf_pxx = spectrum.frequencies, spectrum.value()
     
     # Scipy PSD
     scipy_freqs, scipy_pxx = scipy.signal.welch(
@@ -100,12 +95,13 @@ def test_psd_vs_scipy():
     sine = np.sin(2 * np.pi * freq * t).astype(np.float32)
     sine_tensor = ops.convert_to_tensor(sine.reshape(1, -1))
     
-    gf_freqs_sine, gf_pxx_sine = gf_psd.psd(
+    spectrum = gf_psd.psd(
         sine_tensor, 
         nperseg=nperseg, 
         noverlap=noverlap, 
         sample_rate_hertz=sample_rate
     )
+    gf_freqs_sine, gf_pxx_sine = spectrum.frequencies, spectrum.value()
     
     scipy_freqs_sine, scipy_pxx_sine = scipy.signal.welch(
         sine, 
@@ -163,7 +159,8 @@ def test_psd_1d_input():
     signal = np.sin(2 * np.pi * freq * t).astype(np.float32)
     signal_1d = ops.convert_to_tensor(signal)  # 1D, no batch dim
     
-    freqs, pxx = gf_psd.psd(signal_1d, nperseg=100, sample_rate_hertz=sample_rate)
+    spectrum = gf_psd.psd(signal_1d, nperseg=100, sample_rate_hertz=sample_rate)
+    freqs, pxx = spectrum.frequencies, spectrum.value()
     
     # Should still work and find peak at 10Hz
     peak_freq = float(freqs[np.argmax(np.array(pxx))])
@@ -183,14 +180,16 @@ def test_psd_median_mode():
     noise_tensor = ops.convert_to_tensor(noise.reshape(1, -1))
     
     # Median mode
-    freqs_median, pxx_median = gf_psd.psd(
+    spectrum = gf_psd.psd(
         noise_tensor, nperseg=nperseg, sample_rate_hertz=sample_rate, mode='median'
     )
+    freqs_median, pxx_median = spectrum.frequencies, spectrum.value()
     
     # Mean mode for comparison
-    freqs_mean, pxx_mean = gf_psd.psd(
+    spectrum = gf_psd.psd(
         noise_tensor, nperseg=nperseg, sample_rate_hertz=sample_rate, mode='mean'
     )
+    freqs_mean, pxx_mean = spectrum.frequencies, spectrum.value()
     
     # Both should have same shape
     assert ops.shape(pxx_median) == ops.shape(pxx_mean)
@@ -231,11 +230,12 @@ def test_psd_pure_sine_peak_location():
         signal = np.sin(2 * np.pi * freq * t).astype(np.float32)
         signal_tensor = ops.convert_to_tensor(signal.reshape(1, -1))
         
-        freqs, pxx = gf_psd.psd(
+        spectrum = gf_psd.psd(
             signal_tensor, 
             nperseg=1024, 
             sample_rate_hertz=sample_rate
         )
+        freqs, pxx = spectrum.frequencies, spectrum.value()
         
         # Find peak
         peak_idx = np.argmax(np.array(pxx[0]))
@@ -256,7 +256,8 @@ def test_psd_white_noise_flatness():
     noise = np.random.normal(0, 1, int(sample_rate * duration)).astype(np.float32)
     noise_tensor = ops.convert_to_tensor(noise.reshape(1, -1))
     
-    freqs, pxx = gf_psd.psd(noise_tensor, nperseg=nperseg, sample_rate_hertz=sample_rate)
+    spectrum = gf_psd.psd(noise_tensor, nperseg=nperseg, sample_rate_hertz=sample_rate)
+    freqs, pxx = spectrum.frequencies, spectrum.value()
     
     pxx_values = np.array(pxx[0])
     

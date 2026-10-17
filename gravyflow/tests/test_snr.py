@@ -197,12 +197,13 @@ def compare_psd_methods(
         noverlap=noverlap
     )
 
-    frequencies_tensorflow, strain_psd_tensorflow = gf.psd(
+    spectrum = gf.psd(
         strain, 
         sample_rate_hertz = sample_rate_hertz, 
         nperseg=nperseg,
         noverlap=noverlap
     )
+    frequencies_tensorflow, strain_psd_tensorflow = spectrum.frequencies, spectrum.value()
     
     assert all(frequencies_scipy == frequencies_tensorflow), "Frequencies not equal."
     

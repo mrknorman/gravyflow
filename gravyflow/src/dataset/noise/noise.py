@@ -526,26 +526,19 @@ class NoiseObtainer(Obtainer):
         ):
             onsource_asds, offsource_asds = [], []
             for data in segment.data:
-                # The PSD of strain (~1e-46) underflows float32, so the
-                # spectrum is taken of the segment over its peak, and the
-                # peak returns on the ASD.
-                peak = ops.max(ops.abs(data))
-                peak = ops.where(peak > 0, peak, 1.0)
-                frequencies, psd = gf.psd(
-                    data / peak,
-                    nperseg=1024,
-                    sample_rate_hertz=sample_rate_hertz
-                )
-                # psd returns (batch, freqs); one spectrum per detector.
+                # The PSD of strain (~1e-46) underflows float32: the spectrum
+                # is interpolated in its normalised units (the PSD of the
+                # segment over its scale), and the scale returns on the ASD.
+                spectrum = gf.psd(data, nperseg=1024, sample_rate_hertz=sample_rate_hertz)
                 onsource_psd, offsource_psd = interpolate_onsource_offsource_psd(
                     num_samples_list,
                     sample_rate_hertz,
-                    ops.squeeze(frequencies),
-                    ops.squeeze(psd)
+                    spectrum.frequencies,
+                    ops.reshape(spectrum.normalised, (-1,)) / sample_rate_hertz
                 )
-                peak = ops.cast(peak, "complex64")
-                onsource_asds.append(ops.sqrt(onsource_psd) * peak)
-                offsource_asds.append(ops.sqrt(offsource_psd) * peak)
+                scale = ops.cast(ops.reshape(spectrum.scale, ()), "complex64")
+                onsource_asds.append(ops.sqrt(onsource_psd) * scale)
+                offsource_asds.append(ops.sqrt(offsource_psd) * scale)
 
             onsource_asds = ops.expand_dims(ops.stack(onsource_asds, axis=0), 0)
             offsource_asds = ops.expand_dims(ops.stack(offsource_asds, axis=0), 0)

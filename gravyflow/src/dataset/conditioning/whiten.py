@@ -463,9 +463,28 @@ def _whitening_kwargs(layer) -> dict:
     )
 
 
+def unit_rms(examples):
+    """
+    Each example of `examples` (Batch, ...) divided by its root mean square over
+    all its other axes (detectors and samples together, so their ratios stay).
+    Taken over the example's peak first: the square of strain (~1e-42) is below
+    float32's range. An all-zero example stays zero.
+    """
+    axes = tuple(range(1, len(examples.shape)))
+    peak = ops.max(ops.abs(examples), axis=axes, keepdims=True)
+    examples = examples / ops.where(peak > 0, peak, ops.ones_like(peak))
+    rms = ops.sqrt(ops.mean(ops.square(examples), axis=axes, keepdims=True))
+    return examples / ops.where(rms > 0, rms, ops.ones_like(rms))
+
+
 @keras.saving.register_keras_serializable(package="gravyflow")
 class WhitenPass(Layer):
-    """Crops the onsource without whitening; for ablations against Whiten."""
+    """
+    Crops the onsource and scales each example to unit RMS, without whitening;
+    the ablation against Whiten, whose output also has unit variance. The scaling
+    is what lets a network learn from raw strain: inputs of ~1e-21 give
+    gradients and normalisation statistics below float32's range.
+    """
     def __init__(
             self,
             sample_rate_hertz = None,
@@ -508,7 +527,7 @@ class WhitenPass(Layer):
         cropped = crop_samples(timeseries, self.onsource_duration_seconds, self.sample_rate_hertz)
 
         dynamic_shape = ops.shape(timeseries)
-        return ops.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples))
+        return unit_rms(ops.reshape(cropped, (dynamic_shape[0], dynamic_shape[1], self.num_output_samples)))
 
     def get_config(self):
         config = super().get_config().copy()

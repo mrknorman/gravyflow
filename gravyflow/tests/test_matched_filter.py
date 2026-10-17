@@ -202,8 +202,9 @@ class TestMatchedFilterCore:
             target_snr = float(injected_snrs[i])
             
             # Compute PSD from offsource using gf_psd with same settings as dataset
-            freqs, psd_val = gf_psd(bg, sample_rate_hertz=8192.0, 
+            spectrum = gf_psd(bg, sample_rate_hertz=8192.0, 
                                      nperseg=nperseg, noverlap=noverlap, mode='mean')
+            freqs, psd_val = spectrum.frequencies, spectrum.value()
             
             # Interpolate PSD to match injection length
             n = len(injection)

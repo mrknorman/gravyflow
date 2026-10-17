@@ -62,7 +62,7 @@ def sine_gaussian(f0, q, duration, fs=FS, phase=0.0):
 def test_psd_matches_scipy_welch(mode):
     rng = np.random.default_rng(1)
     x = (coloured_noise(rng, (3,), 16.0) * SCALE).astype(np.float32)
-    _, mine = gf.psd(x, nperseg=2048, sample_rate_hertz=FS, noverlap=1024, mode=mode)
+    mine = gf.psd(x, nperseg=2048, sample_rate_hertz=FS, noverlap=1024, mode=mode).value()
     _, ref = scipy.signal.welch(x.astype(np.float64), fs=FS, nperseg=2048, noverlap=1024, average=mode)
     band = slice(20, 1000)
     np.testing.assert_allclose(np.asarray(mine)[:, band], ref[:, band], rtol=1e-3)
@@ -74,7 +74,7 @@ def test_psd_matches_pycbc_welch(mode):
     import pycbc.types
     rng = np.random.default_rng(2)
     x = coloured_noise(rng, (1,), 16.0)[0] * SCALE
-    _, mine = gf.psd(x[None].astype(np.float32), nperseg=2048, sample_rate_hertz=FS, noverlap=1024, mode=mode)
+    mine = gf.psd(x[None].astype(np.float32), nperseg=2048, sample_rate_hertz=FS, noverlap=1024, mode=mode).value()
     ref = np.asarray(pycbc.psd.welch(pycbc.types.TimeSeries(x, delta_t=1 / FS), seg_len=2048,
                                      seg_stride=1024, avg_method=mode))
     band = slice(20, 1000)
@@ -87,7 +87,7 @@ def test_psd_matches_pycbc_welch(mode):
 def test_psd_median_has_no_bias_on_white_noise():
     rng = np.random.default_rng(3)
     x = rng.standard_normal((8, int(16 * FS))).astype(np.float32)
-    _, pxx = gf.psd(x, nperseg=2048, sample_rate_hertz=FS, noverlap=1024, mode="median")
+    pxx = gf.psd(x, nperseg=2048, sample_rate_hertz=FS, noverlap=1024, mode="median").value()
     level = np.mean(np.asarray(pxx)[:, 10:-10]) / (2.0 / FS)
     assert abs(level - 1.0) < 0.02, level
 

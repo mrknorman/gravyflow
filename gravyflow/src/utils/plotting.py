@@ -303,6 +303,9 @@ def generate_spectrogram(
 ):
     """
     Plot a spectrogram using Bokeh and return the figure or figures.
+
+    The power is `gf.spectrogram`'s, which refuses (ValueError) an input whose
+    power float32 cannot hold, such as raw strain: plot whitened data.
     """
 
     if sample_rate_hertz is None:
