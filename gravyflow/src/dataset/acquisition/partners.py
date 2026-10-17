@@ -9,8 +9,10 @@ needs is read instead at a partner time t' of its own (``partner_time``):
 
 - inside ``allowed``: that detector's usable data, less its own glitches and every
   event, inside the record's split (the obtainer builds it);
-- inside the record's block, so a partner is in the record's split whatever the
-  split's fractions, and near it in time;
+- inside one block of the record's split, so a partner is in that split whatever
+  the split's fractions, and near the record in time: a glitch's own block, and an
+  event's nearest such block in its observing run, since an event is in ``test``
+  whatever its own block's split;
 - with its centre at least ``separation`` from the transient's time;
 - on the stored sample grid, chosen by a hash of ``key`` (the split's fingerprint,
   the transient's time and the detector): the same partner on every build, from no

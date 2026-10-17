@@ -251,10 +251,11 @@ def test_partner_windows(world, tmp_path, glitch_ifo):
 EVENT_HALF_FOOTPRINT_SECONDS = 48.2
 
 
-def _golden_block(*splits):
-    """The first block k of the golden O3 table where blocks k, k + 1, ... are ``splits``."""
+def _golden_block(*splits, after=-np.inf):
+    """The first block k > ``after`` of the golden O3 table where blocks k, k + 1, ... are ``splits``."""
     table = fx.golden_blocks("O3")
-    return next(k for k in sorted(table) if all(table.get(k + i) == s for i, s in enumerate(splits)))
+    return next(k for k in sorted(table)
+                if k > after and all(table.get(k + i) == s for i, s in enumerate(splits)))
 
 
 def _partner_world():
@@ -558,6 +559,60 @@ def test_event_detectors_from_data_quality(world):
     np.testing.assert_allclose(centres[order][0], [times["both"]] * 2)
     assert abs(centres[order][1][1] - times["h1_only"]) >= PARTNER_SEPARATION_SECONDS
     _assert_unflagged_apart(batch)
+
+
+def _test_time_partner_world():
+    """
+    Events seen in H1 only (L1 has a 10 s gap at each merger), one in a block of each
+    split, each with a test block next to it: ``train`` and ``validate``, the block
+    after is test; ``test``, its own block. ``skip``: a train block between a test
+    block before it, where L1 has no data, and a test block three after, where it has.
+    Both detectors have data over each case's blocks. Returns the fixture, the
+    events' times by case and the block (index) each case's partner must lie in.
+    """
+    B = fx.BLOCK_SECONDS
+    patterns = {
+        "train": (("train", "test"), 0, 0, 1),
+        "validate": (("validate", "test"), 0, 0, 1),
+        "test": (("train", "test", "train"), 1, 0, 0),
+        "skip": (("test", "train", "train", "train", "test"), 1, 0, 3),
+    }
+    times, partner_blocks, h1, l1, after = {}, {}, [], [], -np.inf
+    for name, (splits, offset, first, last) in patterns.items():
+        block = _golden_block(*splits, after=after) + offset
+        after = block + last + 1  # The cases' data never meet.
+        times[name] = t = fx.block_start("O3", block) + B / 2
+        partner_blocks[name] = block + last
+        start, end = fx.block_start("O3", block + first), fx.block_start("O3", block + last + 1)
+        h1.append((start, end))
+        l1 += [(start, t - 5.0), (t + 5.0, end)]
+    base = fx._fixture(sorted(h1), 4096.0, "O3", ("O3",))
+    fixture = fx.Fixture(base.encoding, {"H1": np.array(sorted(h1)), "L1": np.array(sorted(l1))}, "O3", ("O3",))
+    events = [EventRecord(f"GW{name.upper()}", t, 2.0) for name, t in times.items()]
+    return fixture.with_catalogues(events=events), times, partner_blocks
+
+
+def test_an_events_partner_is_test_time(world):
+    """
+    An event seen in only some requested detectors reads each other at a partner in
+    the nearest test block of its run that holds one, whatever its own block's split:
+    every event is served, and every partner span lies in test time, half a guard
+    from train and validate (the golden table), in the block expected.
+    """
+    fixture, times, partner_blocks = _test_time_partner_world()
+    with world(fixture):
+        obtainer = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.EVENTS])
+        spans = obtainer.get_valid_segments([gf.IFO.H1, gf.IFO.L1], 7, "test")
+        rejections = obtainer.get_acquisition_stats()["rejections"]
+    assert "no partner" not in rejections, rejections
+    by_time = {round(float(np.mean(span[0])), 3): span[1] for span in spans}
+    assert sorted(by_time) == sorted(round(t, 3) for t in times.values()), sorted(by_time)
+    for name, t in times.items():
+        partner = by_time[round(t, 3)]
+        assert fx.golden_split("O3", *partner) == "test", f"the {name} event's partner {partner}"
+        gap = _other_split_distance(partner, "test")
+        assert gap >= fx.GUARD_SECONDS / 2, f"the {name} event's partner {partner} lies {gap:.1f} s from train or validate"
+        assert {fx.block_of("O3", x) for x in partner} == {partner_blocks[name]}, (name, partner)
 
 
 def test_the_validator_reads_an_events_time_on_its_own_detectors():

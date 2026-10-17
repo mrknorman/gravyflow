@@ -9,7 +9,7 @@ import dataclasses
 import itertools
 import logging
 from collections import Counter
-from typing import Any, List, Dict, NamedTuple, Optional, Union, Tuple
+from typing import Any, List, Dict, Iterator, NamedTuple, Optional, Union, Tuple
 from concurrent.futures import as_completed
 from tqdm import tqdm
 
@@ -278,13 +278,38 @@ class TransientDataObtainer(BaseDataObtainer):
         admissible = self.split_spec.admissible(self.get_all_segment_times(ifo), group_name)
         return self.veto_time_segments(admissible, vetoes)
 
+    def _partner_blocks(self, record: TransientSegment, group_name: str) -> Iterator[Tuple[float, float]]:
+        """
+        The blocks, as GPS intervals, a partner of ``record`` may lie in, in the
+        order they are tried. A glitch's is its own block, which is in its split.
+        An event is in ``test`` whatever its block (unless trained on), so its
+        partner lies in the nearest block of split ``group_name`` in the event's
+        observing run: its own block when that is one, else the next out, earlier
+        first at equal distance. An event outside every run has none.
+        """
+        spec = self.split_spec
+        own = spec.block_of(record.transient_gps_time)
+        if not record.is_event:
+            yield own * spec.block_seconds, (own + 1) * spec.block_seconds
+            return
+        t = float(record.transient_gps_time)
+        runs = [(start, end) for start, end in zip(self.start_gps_times, self.end_gps_times) if start <= t < end]
+        if not runs:
+            return
+        first, last = spec.block_of(runs[0][0]), spec.block_of(runs[0][1])
+        for distance in range(max(own - first, last - own) + 1):
+            for block in sorted({own - distance, own + distance}):
+                if first <= block <= last and spec.block_split(block) == group_name:
+                    yield block * spec.block_seconds, (block + 1) * spec.block_seconds
+
     def _plan_reads(
         self, segments: List[TransientSegment], ifos: List[gf.IFO], group_name: str
     ) -> Tuple[List[TransientSegment], List[Tuple[DetectorRead, ...]]]:
         """
         Each record's reads, one per requested detector in order: its own detectors
         at its own time, every other at a partner time (``partners.partner_time``)
-        in that detector's partner segments and the record's block, its centre at
+        in that detector's partner segments and the first of the record's partner
+        blocks that holds one (``_partner_blocks``), its centre at
         least twice the record's footprint from the transient, keyed by the split's
         fingerprint, the transient's time and the detector. The records with no
         partner time on a detector they need are rejected, and their number is the
@@ -307,7 +332,6 @@ class TransientDataObtainer(BaseDataObtainer):
             t = float(record.transient_gps_time)
             own = self._own_detectors(record, ifos)
             footprint_start, footprint_end = transient_footprint(record)
-            block = spec.block_of(t) * spec.block_seconds
             reads = []
             for ifo in ifos:
                 if ifo in own:
@@ -322,14 +346,16 @@ class TransientDataObtainer(BaseDataObtainer):
                     continue
                 if ifo not in allowed:
                     allowed[ifo] = self._partner_segments(ifo, group_name)
-                centre = partner_time(
-                    allowed[ifo], t,
-                    before=t - record.start_gps_time, after=record.end_gps_time - t,
-                    block=(block, block + spec.block_seconds),
-                    separation=2.0 * (footprint_end - footprint_start),
-                    key=(fingerprint, repr(t), ifo.name),
-                    sample_rate_hertz=CACHE_SAMPLE_RATE_HERTZ,
-                )
+                centre = next((found for found in (
+                    partner_time(
+                        allowed[ifo], t,
+                        before=t - record.start_gps_time, after=record.end_gps_time - t,
+                        block=block,
+                        separation=2.0 * (footprint_end - footprint_start),
+                        key=(fingerprint, repr(t), ifo.name),
+                        sample_rate_hertz=CACHE_SAMPLE_RATE_HERTZ,
+                    ) for block in self._partner_blocks(record, group_name)
+                ) if found is not None), None)
                 if centre is None:
                     rejected[self.REJECTED_FOR_NO_PARTNER] += 1
                     break

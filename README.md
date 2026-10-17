@@ -225,10 +225,12 @@ bits, from multi-threaded ones). The test suite sets it itself, and a recipe tra
   `gf.DataLabel`, `gf.GlitchType` or `gf.EventConfidence` members (a bare number is refused, since 2 is
   `DataLabel.EVENTS` and `GlitchType.CHIRP` alike), and `GlitchType.CHIRP` asks for chirp glitches, never
   events. A noise obtainer refuses `DataLabel.EVENTS`: noise vetoes every
-  event. An event is read at its time on the detectors whose data holds it, the others at partner times.
+  event. An event is read at its time on the detectors whose data holds it, the others at partner times in the
+  nearest test block of its observing run, so every read of an event is test time.
   A `validate` or `test` pass over transients serves each once, then ends.
 - Detectors are read at one time only under `coincidence=gf.Coincidence.COINCIDENT`, or for an event seen
-  in several; every real-noise batch says which examples are (`ReturnVariables.COINCIDENT`).
+  in several; every real-noise batch says which examples are (`ReturnVariables.COINCIDENT`), and a dataset
+  returns it when asked (0 for simulated noise).
 - The event list's cache is format 4 (`event_catalogue_v4.json`, fetched again once): it adds the 90% bounds of
   the component masses, and each event carries `mass_ambiguous`, True where either component's interval crosses
   the 3 solar-mass type threshold.
