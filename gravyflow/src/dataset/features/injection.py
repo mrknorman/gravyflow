@@ -1544,8 +1544,9 @@ class InjectionGenerator:
         ``add_injections_to_onsource`` call takes too, so each batch gets its
         own sky and targets.
 
-        The iterator draws from the default root; batch k of another root
-        is ``generate(gf.SeedTree(root).direct(k), ...)``.
+        The iterator draws from the default root as the generator is built
+        (``gf.Defaults.seed`` then: a later default changes no iterator);
+        batch k of another root is ``generate(gf.SeedTree(root).direct(k), ...)``.
 
         Args:
             scale_factor: Deprecated and ignored: injections are physical strain.
@@ -1574,6 +1575,7 @@ class InjectionGenerator:
         if len(set(zip(self.scopes, self.labels))) != len(self.labels):
             raise ValueError(f"Waveform generator names must be unique, got {self.labels}.")
         self.sample_rate_hertz = gf.Defaults.sample_rate_hertz # Default
+        self._tree = SeedTree()
         
     def __call__(
         self,
@@ -1604,7 +1606,7 @@ class InjectionGenerator:
 
     def streams(self, k: Optional[int] = None) -> BatchStreams:
         """The streams of the direct iterator's batch ``k`` (None: one direct batch)."""
-        return SeedTree().direct(k)
+        return self._tree.direct(k)
 
     def _generator_streams(self, streams: BatchStreams, index: int) -> BatchStreams:
         """Generator ``index``'s view of a batch's streams: its scope of them."""

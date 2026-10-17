@@ -1208,7 +1208,7 @@ def test_a_dataset_read_in_order_refuses_workers():
         ds.workers = 2
 
 
-@pytest.mark.filterwarnings("ignore:os.fork\(\) was called:RuntimeWarning",
+@pytest.mark.filterwarnings(r"ignore:os.fork\(\) was called:RuntimeWarning",
                             "ignore:This process .* is multi-threaded:DeprecationWarning")
 def test_a_forked_copy_refuses_to_serve():
     """A dataset copied by fork shares JAX's state with its parent: it refuses by name, not deadlocks."""
@@ -1226,7 +1226,10 @@ def test_a_forked_copy_refuses_to_serve():
 
 
 def test_a_copy_that_would_serve_other_batches_is_refused():
-    """A dataset changed after it was built is refused in another process, not served differently."""
+    """
+    A dataset changed after it was built serves batches derived from what it was built with: a copy
+    rebuilt from what it has now would serve others, so it is refused as it is pickled.
+    """
     import pickle
 
     ds = dataset(gf.NoiseType.WHITE, 42, "train")
@@ -1234,8 +1237,8 @@ def test_a_copy_that_would_serve_other_batches_is_refused():
     copied = pickle.loads(pickle.dumps(ds))
     assert copied.epoch == 3 and batch_digest(copied[1]) == batch_digest(ds[1])
     ds.steps_per_epoch = 5
-    with pytest.raises(RuntimeError, match="changed after it was built"):
-        pickle.loads(pickle.dumps(ds))
+    with pytest.raises(pickle.PicklingError, match="changed after it was built"):
+        pickle.dumps(ds)
 
 
 def test_fit_refuses_concurrent_workers():
@@ -1245,3 +1248,179 @@ def test_fit_refuses_concurrent_workers():
     model = one_layer_model(ST.SNR)
     with pytest.raises(ValueError, match="workers"):
         model.fit(ds, epochs=1, callbacks=[ds.epoch_callback()], shuffle=False, verbose=0)
+
+
+#: How long a worker may take to serve, or to refuse, one batch: a copy that hangs fails by name.
+WORKER_TIMEOUT_S = 120
+
+
+def keras_processes(monkeypatch, method):
+    """Make Keras' process enqueuer start its pool by ``method`` (it takes the host's default otherwise)."""
+    import multiprocessing
+    from keras.src.trainers.data_adapters import py_dataset_adapter
+
+    context = multiprocessing.get_context(method)
+    monkeypatch.setattr(py_dataset_adapter, "get_pool_class",
+                        lambda use_multiprocessing: context.Pool if use_multiprocessing else
+                        multiprocessing.dummy.Pool)
+
+
+def keras_first_batch(ds, workers, use_multiprocessing):
+    """
+    The first batch Keras' ordered enqueuer serves, or what it raised, within WORKER_TIMEOUT_S:
+    an enqueuer that serves and raises nothing fails the test, its pools terminated.
+    """
+    import threading
+    from keras.src.trainers.data_adapters import py_dataset_adapter
+
+    enqueuer = py_dataset_adapter.OrderedEnqueuer(ds, workers=workers, use_multiprocessing=use_multiprocessing)
+    outcome = {}
+
+    def first():
+        try:
+            outcome["batch"] = next(enqueuer.get())
+        except Exception as error:
+            outcome["error"] = error
+
+    enqueuer.start()
+    consumer = threading.Thread(target=first, daemon=True)
+    consumer.start()
+    consumer.join(WORKER_TIMEOUT_S)
+    if consumer.is_alive():
+        enqueuer.stop(drain_queue_and_join=False)
+        for pool in list(py_dataset_adapter._DATA_POOLS):
+            pool.terminate()
+        pytest.fail(f"Keras' enqueuer served nothing and raised nothing in {WORKER_TIMEOUT_S} s: it hung.")
+    enqueuer.stop()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["batch"]
+
+
+def test_a_copy_that_cannot_serve_raises_from_its_task(monkeypatch):
+    """
+    A copy rebuilt in a worker whose libraries differ from this process's would serve other
+    batches: it raises from serving, through the task's result, on a spawn pool and on Keras'
+    process enqueuer. It never fails to unpickle, which both answer by starting another worker,
+    forever.
+    """
+    import multiprocessing
+    from gravyflow.src.dataset import dataset as module
+
+    real = module.library_versions
+    monkeypatch.setattr(module, "library_versions", lambda: {**real(), "numpy": "another"})
+    ds = dataset(gf.NoiseType.WHITE, 42, "train", steps_per_epoch=WORKER_STEPS)
+    with multiprocessing.get_context("spawn").Pool(1) as pool:
+        with pytest.raises(RuntimeError, match="fingerprint"):
+            pool.apply_async(served_digests, (ds, 0, [0])).get(timeout=WORKER_TIMEOUT_S)
+    keras_processes(monkeypatch, "spawn")
+    with pytest.raises(RuntimeError, match="fingerprint"):
+        keras_first_batch(ds, 1, True)
+
+
+def test_a_dataset_built_from_set_defaults_serves_its_batches_in_a_worker(monkeypatch):
+    """A worker rebuilds a dataset from its resolved settings, not the defaults of the worker's process."""
+    import multiprocessing
+
+    for name in ("seed", "num_examples_per_batch", "sample_rate_hertz"):
+        monkeypatch.setattr(gf.Defaults, name, getattr(gf.Defaults, name))
+    gf.Defaults.set(seed=7, num_examples_per_batch=4, sample_rate_hertz=2 * FS)
+    ds = gf.GravyflowDataset(
+        noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=IFOS), waveform_generators=[burst()],
+        input_variables=STRAIN, onsource_duration_seconds=ONSOURCE_S, offsource_duration_seconds=OFFSOURCE_S,
+        crop_duration_seconds=CROP_S, ifos=IFOS, steps_per_epoch=WORKER_STEPS, group="train")
+    reference = served_digests(ds, 1, range(WORKER_STEPS))
+    with multiprocessing.get_context("spawn").Pool(1) as pool:
+        served = pool.apply_async(served_digests, (ds, 1, range(WORKER_STEPS))).get(timeout=WORKER_TIMEOUT_S)
+    assert served == reference
+
+
+class _Gained(gf.GravyflowDataset):
+    """A subclass with a parameter of its own, outside its specification, that changes its batches."""
+
+    def __init__(self, gain=1.0, **kwargs):
+        self.gain = gain
+        super().__init__(**kwargs)
+
+    def _compute_batch(self, index):
+        inputs, outputs = super()._compute_batch(index)
+        return {name: np.asarray(value) * self.gain for name, value in inputs.items()}, outputs
+
+
+class _DeclaredGain(_Gained):
+    """
+    The same subclass, its parameter declared in its specification, so in its fingerprint, and
+    every parameter named: a copy cannot know what ``**kwargs`` would take.
+    """
+
+    _SPECIFICATION = gf.GravyflowDataset._SPECIFICATION + ("gain",)
+
+    def __init__(self, gain, seed, group, noise_obtainer, waveform_generators, input_variables, sample_rate_hertz,
+                 onsource_duration_seconds, offsource_duration_seconds, crop_duration_seconds,
+                 num_examples_per_batch, ifos, steps_per_epoch):
+        arguments = dict(locals())
+        del arguments["self"], arguments["__class__"]
+        super().__init__(**arguments)
+
+
+def test_a_subclass_is_copied_only_with_every_parameter_it_takes():
+    """
+    A copy is rebuilt from the specification: a subclass parameter outside it would be rebuilt at
+    its default and serve other batches under the same fingerprint, so the copy is refused by name.
+    Declared in the specification, it is rebuilt, and fingerprinted.
+    """
+    import pickle
+
+    arguments = dict(seed=42, group="train", noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=IFOS),
+                     waveform_generators=[burst()], input_variables=STRAIN, **settings(steps_per_epoch=WORKER_STEPS))
+    with pytest.raises(pickle.PicklingError, match="gain"):
+        pickle.dumps(_Gained(gain=3.0, **arguments))
+    declared = _DeclaredGain(gain=3.0, **arguments)
+    copied = pickle.loads(pickle.dumps(declared))
+    assert copied.gain == 3.0 and batch_digest(copied[1]) == batch_digest(declared[1])
+    assert declared.fingerprint != _DeclaredGain(gain=1.0, **arguments).fingerprint
+
+
+def test_a_dataset_read_in_order_is_not_copied():
+    """A copy of a dataset read in order would read again from its first batch: it is refused by name."""
+    import pickle
+
+    ds = dataset(gf.NoiseType.WHITE, 42, "train")
+    ds.__class__ = _ReadInOrder
+    with pytest.raises(pickle.PicklingError, match="read in order"):
+        pickle.dumps(ds)
+
+
+def _materialise_shared(root):
+    return _SHARED.materialise(root, batches=1)
+
+
+def _load_shared(source):
+    return _SHARED.load_materialised(source)
+
+
+@pytest.mark.filterwarnings(r"ignore:os.fork\(\) was called:RuntimeWarning",
+                            "ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_a_forked_copy_refuses_to_write_or_read_a_set(tmp_path):
+    """Writing and loading a materialised set serve batches too: a forked copy refuses them by name."""
+    import multiprocessing
+
+    global _SHARED
+    _SHARED = dataset(gf.NoiseType.WHITE, 42, "train", steps_per_epoch=WORKER_STEPS)
+    written = _SHARED.materialise(tmp_path / "parent", batches=1)
+    try:
+        for task, argument in ((_materialise_shared, tmp_path / "child"), (_load_shared, written.path)):
+            with multiprocessing.get_context("fork").Pool(1) as pool:
+                with pytest.raises(RuntimeError, match="fork"):
+                    pool.apply_async(task, (argument,)).get(timeout=WORKER_TIMEOUT_S)
+    finally:
+        _SHARED = None
+
+
+@pytest.mark.filterwarnings(r"ignore:os.fork\(\) was called:RuntimeWarning",
+                            "ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_keras_fork_workers_refuse_by_name(monkeypatch):
+    """Keras' process workers under fork (Linux's default start method) refuse by name, not hang."""
+    keras_processes(monkeypatch, "fork")
+    with pytest.raises(RuntimeError, match="fork"):
+        keras_first_batch(dataset(gf.NoiseType.WHITE, 42, "train", steps_per_epoch=WORKER_STEPS), 2, True)

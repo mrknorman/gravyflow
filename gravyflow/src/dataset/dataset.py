@@ -1,7 +1,9 @@
 from typing import List, Tuple, Union, Dict, Any, Iterator, Optional, Set
 from enum import Enum, auto
 import copy
+import inspect
 import os
+import pickle
 from pathlib import Path
 from dataclasses import dataclass
 from warnings import warn
@@ -31,7 +33,9 @@ from gravyflow.src.dataset.acquisition.versions import DATA_VERSIONS
 from gravyflow.src.dataset.materialise import (
     DEFAULT_SHARD_SIZE, FORMAT, ContractMismatch, MaterialisedSet, NotIndexAddressed, write_set,
 )
-from gravyflow.src.utils.fingerprint import canonical, config_fingerprint, library_versions
+from gravyflow.src.utils.fingerprint import (
+    UnfingerprintableError, canonical, config_fingerprint, library_versions,
+)
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
@@ -274,18 +278,49 @@ class EpochMode(Enum):
     REPEAT = auto()  # The same batches every epoch: epoch 0's.
 
 
-def _rebuilt(cls, arguments: dict, state: dict, fingerprint: str) -> "IndexedBatches":
+class _RefusedCopy:
     """
-    A dataset rebuilt in this process from its original's ``arguments`` and
-    serving ``state`` (``IndexedBatches.__reduce__``), refused unless its
-    fingerprint is the original's ``fingerprint``.
+    A dataset's copy that cannot serve in the process it was unpickled in
+    (``_rebuilt``): every use raises why. Unpickling itself never fails, since a
+    pool, or Keras' process enqueuer, answers a worker that dies unpickling its
+    dataset by starting another, forever; the refusal returns through the first
+    task that uses the copy instead.
     """
-    dataset = cls(**arguments)
-    if dataset.fingerprint != fingerprint:
-        raise RuntimeError(
-            f"A {cls.__name__} rebuilt in process {os.getpid()} has fingerprint {dataset.fingerprint}, "
-            f"not its original's {fingerprint}: the original was changed after it was built, or the "
-            "data it froze then has changed, so this copy would serve other batches."
+
+    __slots__ = ("_refusal",)
+
+    def __init__(self, refusal: str):
+        object.__setattr__(self, "_refusal", refusal)
+
+    def _refuse(self, *args):
+        raise RuntimeError(self._refusal)
+
+    __getitem__ = __len__ = __iter__ = __setattr__ = _refuse
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        self._refuse()
+
+
+def _rebuilt(cls, arguments: dict, state: dict, fingerprint: str):
+    """
+    A dataset rebuilt in this process from its original's resolved ``arguments``
+    with its serving ``state`` (``IndexedBatches.__reduce__``) when its
+    fingerprint is the original's ``fingerprint``; otherwise a copy that refuses
+    to serve, saying why (``_RefusedCopy``).
+    """
+    rebuilt = f"A {cls.__name__} rebuilt in process {os.getpid()}"
+    try:
+        dataset = cls(**arguments)
+        rebuilt_fingerprint = dataset.fingerprint
+    except Exception as error:
+        return _RefusedCopy(f"{rebuilt} could not be built: {type(error).__name__}: {error}")
+    if rebuilt_fingerprint != fingerprint:
+        return _RefusedCopy(
+            f"{rebuilt} has fingerprint {rebuilt_fingerprint}, not its original's {fingerprint}: this "
+            "process's libraries, gravyflow or data versions are not the original's (fingerprint_record), "
+            "so it would serve other batches."
         )
     dataset.__dict__.update(state)
     return dataset
@@ -367,7 +402,9 @@ class IndexedBatches:
     def _init_batches(self, seed, group: str, steps_per_epoch: int, epoch_mode: Optional[EpochMode],
                       name: Optional[str] = None):
         self.name = None if name is None else check_name(name, "dataset name")
-        self.tree = SeedTree.of(seed)
+        # The tree as given, resolved, before the name's scope: what a copy is rebuilt from.
+        self._seed_tree = SeedTree.of(seed)
+        self.tree = self._seed_tree
         if self.name is not None:
             self.tree = self.tree.sub(f"dataset/{self.name}")
         self.seed = self.tree.root
@@ -391,26 +428,88 @@ class IndexedBatches:
 
     # ---- workers
 
-    #: What a copy in another process carries beside its arguments (``__reduce__``):
+    #: What a copy in another process carries beside its specification (``__reduce__``):
     #: the epoch and cursor, Keras' fitting state and worker settings, a loaded set.
     _SERVING_STATE = ("_epoch", "_cursor", "_epoch_from_keras", "_warned_keras_epoch", "_keras_fitting",
                       "_keras_next", "_workers", "_use_multiprocessing", "_max_queue_size", "_materialised")
 
-    @staticmethod
-    def _arguments(arguments: dict) -> dict:
-        """A constructor's arguments (its ``locals()`` on entry), copied: what another process rebuilds it from."""
-        return copy.deepcopy({k: v for k, v in arguments.items() if k not in ("self", "__class__")})
+    #: Constructor parameters a copy is rebuilt without: deprecated, and ignored.
+    _IGNORED_PARAMETERS = ("scale_factor",)
+
+    def _built(self) -> None:
+        """
+        Record the specification the dataset was built from, as its constructor's
+        last step: everything it serves was derived from it then, so a copy is
+        refused once it has changed (``__reduce__``). A subclass sets its own
+        settings before the base constructor runs.
+        """
+        try:
+            self._built_specification = config_fingerprint(self.specification())
+        except UnfingerprintableError:
+            self._built_specification = None  # pickling refuses it by that name (``fingerprint``)
+
+    def _rebuild_arguments(self) -> dict:
+        """
+        What another process rebuilds this dataset from: its specification as
+        resolved here (its own copies of what it was given, the defaults filled
+        in), its seed tree before its name's scope and its split, so the worker's
+        defaults change nothing.
+
+        Raises:
+            pickle.PicklingError: a constructor that takes anything else, such as
+                a subclass's own parameter: rebuilt at its default, the copy would
+                serve other batches under the same fingerprint. A subclass declares
+                such a parameter in its specification (``_SPECIFICATION``), which
+                fingerprints it too.
+        """
+        resolved = {**self.specification(), "seed": self._seed_tree, "group": self.group}
+        parameters = list(inspect.signature(type(self).__init__).parameters.values())[1:]
+        unexpressed = [
+            str(parameter) for parameter in parameters
+            if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
+            or parameter.name not in resolved and parameter.name not in self._IGNORED_PARAMETERS
+        ]
+        if unexpressed:
+            raise pickle.PicklingError(
+                f"A {type(self).__name__} cannot be copied into another process: its constructor takes "
+                f"{', '.join(unexpressed)}, which its specification does not hold, so a copy rebuilt from "
+                "the specification would not be this dataset. Declare each in the class's _SPECIFICATION "
+                "(it then decides the fingerprint too), or serve the dataset in this process (workers=0)."
+            )
+        return {parameter.name: resolved[parameter.name] for parameter in parameters if parameter.name in resolved}
 
     def __reduce__(self):
         """
-        A copy for another process, a spawned worker's, is rebuilt there from the
-        dataset's arguments with its serving state, and is refused unless its
-        fingerprint is this dataset's: it serves the same batches or none.
+        A copy for another process (a spawned worker's) is rebuilt there from the
+        resolved specification (``_rebuild_arguments``) with this dataset's serving
+        state, and serves only if its fingerprint is this dataset's (``_rebuilt``).
+
+        Raises:
+            pickle.PicklingError: a dataset read in order; a constructor the
+                specification cannot rebuild; a specification changed after the
+                dataset was built.
         """
+        if not self.index_addressed:
+            raise pickle.PicklingError(
+                self._read_in_order("which a copy in another process would ask for again from the first"))
+        arguments = self._rebuild_arguments()
+        fingerprint = self.fingerprint
+        if config_fingerprint(self.specification()) != self._built_specification:
+            raise pickle.PicklingError(
+                f"This {type(self).__name__} changed after it was built: what it serves was derived from "
+                "the specification it was built with, so a copy rebuilt from the one it has now would serve "
+                "other batches. Build a new dataset with the settings it should have."
+            )
         state = {name: self.__dict__[name] for name in self._SERVING_STATE if name in self.__dict__}
-        return (_rebuilt, (type(self), self._constructor_arguments, state, self.fingerprint))
+        return (_rebuilt, (type(self), arguments, state, fingerprint))
+
+    def _read_in_order(self, consequence: str) -> str:
+        """Why a dataset read in order cannot be served by workers, which ``consequence``."""
+        return ("This dataset is read in order (index_addressed is False): its batches depend on the order "
+                f"they are asked for, {consequence}. Keep workers=0.")
 
     def _require_own_process(self) -> None:
+        """Refuse to serve in a process fork copied the dataset into: every batch served, written or read checks."""
         if os.getpid() != self._process:
             raise RuntimeError(
                 "This dataset was copied into another process by fork, which shares JAX's state with "
@@ -426,10 +525,7 @@ class IndexedBatches:
     @workers.setter
     def workers(self, value: int):
         if value and not self.index_addressed:
-            raise ValueError(
-                f"This dataset is read in order (index_addressed is False): its batches depend on the "
-                f"order they are asked for, which {value} workers would race. Keep workers=0."
-            )
+            raise ValueError(self._read_in_order(f"which {value} workers would race"))
         self._workers = value
 
     @property
@@ -664,6 +760,7 @@ class IndexedBatches:
             gravyflow.src.utils.fingerprint.UnfingerprintableError: a part of
                 the spec that has no content to fingerprint.
         """
+        self._require_own_process()
         self._require_index_addressed("write")
         if k_range is not None and batches is not None:
             raise ValueError("Give materialise one of k_range or batches=N, not both.")
@@ -704,6 +801,7 @@ class IndexedBatches:
             UnknownFormat, ForeignPlatform, IntegrityError: a set that is not
                 what its files say.
         """
+        self._require_own_process()
         self._require_index_addressed("read")
         the_set = source if isinstance(source, MaterialisedSet) else MaterialisedSet(source)
         the_set.check_reader(self._set_identity())
@@ -733,6 +831,7 @@ class IndexedBatches:
                 ``exclusions`` entry that plans around it. Adding them changes the
                 availability, so every batch: a run that adds them starts again.
         """
+        self._require_own_process()
         if (batches is None) == (epochs is None):
             raise ValueError("Give prepare one of batches=N or epochs=E.")
         if epochs is not None:
@@ -776,7 +875,13 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
     ``name``s, each a scope of the seed tree, or are the pools of one
     ComposedDataset. The dataset works
     on its own copies of the obtainer and generators it is given, so the
-    caller's objects are never changed and can serve other datasets.
+    caller's objects are never changed and can serve other datasets; so are
+    the lists it is given (its variables are tuples).
+
+    Workers: a copy in another process (a spawned worker's) is rebuilt from the
+    dataset's resolved specification and serves only if its fingerprint is
+    this dataset's (``IndexedBatches.__reduce__``); a copy made by fork refuses
+    to serve.
 
     Augmentation: a training split drawn at random applies its IFO data
     obtainer's augmentations to each batch's raw strain, per example, before
@@ -825,7 +930,6 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         scale_factor: deprecated and ignored. Every input, output and label is
             physical strain (or derived from it: whitened data, SNRs).
         """
-        self._constructor_arguments = self._arguments(locals())
         ignore_scale_factor(scale_factor)
         # Initialize PyDataset (single-threaded to avoid JAX/fork deadlocks)
         super().__init__(workers=0)
@@ -841,12 +945,12 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         
         # The dataset's own copies: the caller's objects are never changed.
         self.noise_obtainer = copy.deepcopy(noise_obtainer) if noise_obtainer is not None else gf.NoiseObtainer()
-        self.ifos = ensure_list(ifos) if ifos is not None else None
+        self.ifos = list(ensure_list(ifos)) if ifos is not None else None
         
         # Default to RANDOM mode if not specified
         self.sampling_mode = sampling_mode if sampling_mode is not None else gf.SamplingMode.RANDOM
-        self.input_variables = input_variables if input_variables is not None else []
-        self.output_variables = output_variables if output_variables is not None else []
+        self.input_variables = tuple(input_variables or ())
+        self.output_variables = tuple(output_variables or ())
         self.mask_history = mask_history
         self.spectral_config = spectral_config if spectral_config is not None else SpectralConfig()
         self.pearson_max_lag_seconds = (
@@ -870,6 +974,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
 
         # Create noise and injection generators
         self._create_generators()
+        self._built()
 
     def _noise_ifos(self) -> List:
         """The detectors the noise will have (``noise_ifos``)."""
@@ -1565,7 +1670,6 @@ class ComposedDataset(GravyflowDataset):
             epoch_mode: EpochMode.FRESH (default for group="train") or REPEAT.
             spectral_config: as GravyflowDataset's.
         """
-        self._constructor_arguments = self._arguments(locals())
         from gravyflow.src.dataset.pools import PoolSampler
 
         ignore_scale_factor(scale_factor)
@@ -1579,10 +1683,10 @@ class ComposedDataset(GravyflowDataset):
         self.crop_duration_seconds = crop_duration_seconds if crop_duration_seconds is not None else Defaults.crop_duration_seconds
         self.num_examples_per_generation_batch = num_examples_per_generation_batch if num_examples_per_generation_batch is not None else Defaults.num_examples_per_generation_batch
         self.num_examples_per_batch = num_examples_per_batch if num_examples_per_batch is not None else Defaults.num_examples_per_batch
-        self.ifos = ensure_list(ifos) if ifos is not None else None
+        self.ifos = list(ensure_list(ifos)) if ifos is not None else None
         self.sampling_mode = gf.SamplingMode.RANDOM
-        self.input_variables = input_variables if input_variables is not None else []
-        self.output_variables = output_variables if output_variables is not None else []
+        self.input_variables = tuple(input_variables or ())
+        self.output_variables = tuple(output_variables or ())
         self.mask_history = None
         self.spectral_config = spectral_config if spectral_config is not None else SpectralConfig()
 
@@ -1600,6 +1704,7 @@ class ComposedDataset(GravyflowDataset):
         self._validate_settings()
         self.batch_contract = self._batch_contract()
         self._create_generators()
+        self._built()
 
     _SPECIFICATION = (
         "pools", "sample_rate_hertz", "onsource_duration_seconds", "offsource_duration_seconds",

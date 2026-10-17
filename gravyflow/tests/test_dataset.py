@@ -147,3 +147,21 @@ def test_a_configuration_that_can_serve_nothing_is_refused_by_name(name, value):
     """A non-positive rate, duration or batch size is refused as the dataset is built, naming it."""
     with pytest.raises(ValueError, match=name):
         white_dataset(**{name: value})
+
+
+@pytest.mark.parametrize("cls", [GravyflowDataset, gf.ComposedDataset], ids=["dataset", "composed"])
+def test_a_dataset_keeps_its_own_copies_of_what_it_is_given(cls):
+    """The caller's lists are copied as the dataset is built: changing them later changes no dataset."""
+    inputs, outputs, ifos = [RV.ONSOURCE], [RV.OFFSOURCE], [gf.IFO.L1]
+    noise = gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1])
+    source = ({"noise_obtainer": noise} if cls is GravyflowDataset else
+              {"pools": [gf.FeaturePool(name="noise", label=0, probability=1.0, noise_obtainer=noise)]})
+    ds = cls(seed=42, sample_rate_hertz=RATE, onsource_duration_seconds=1.0, offsource_duration_seconds=2.0,
+             crop_duration_seconds=0.5, num_examples_per_batch=4, ifos=ifos, input_variables=inputs,
+             output_variables=outputs, steps_per_epoch=10, group="train", **source)
+    built = ds.fingerprint
+    inputs.append(RV.WHITENED_ONSOURCE)
+    outputs.append(RV.START_GPS_TIME)
+    ifos.append(gf.IFO.H1)
+    assert (ds.input_variables, ds.output_variables, ds.ifos) == ((RV.ONSOURCE,), (RV.OFFSOURCE,), [gf.IFO.L1])
+    assert ds.fingerprint == built

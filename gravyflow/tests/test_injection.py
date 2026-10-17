@@ -660,3 +660,16 @@ def test_injection_generator_refuses_generators_disagreeing_on_detectors():
     with pytest.raises(ValueError, match=r"disagree on the detectors: \[2, 3\]"):
         injector.generate(injector.streams(0), 100.0, 1.0, 0.5, 2)
 
+
+def test_the_iterator_keeps_the_root_it_was_built_with(monkeypatch):
+    """The direct iterator draws from the default root of when it was built: a later default changes nothing."""
+    monkeypatch.setattr(gf.Defaults, "seed", 11)
+    injector = gf.InjectionGenerator([wnb(network=[gf.IFO.L1])])
+    window = dict(sample_rate_hertz=100.0, onsource_duration_seconds=1.0, crop_duration_seconds=0.5)
+    iterator = injector(**window, num_examples_per_batch=2)
+    next(iterator)
+    gf.Defaults.set(seed=12)
+    assert injector.streams(3).tree == gf.SeedTree(11)
+    expected = injector.generate(gf.SeedTree(11).direct(1), **window, num_examples_per_batch=2)
+    np.testing.assert_array_equal(next(iterator)[0], expected[0])
+
