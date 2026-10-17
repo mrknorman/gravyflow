@@ -140,3 +140,6 @@ omit = ["gravyflow/tests/*"]
 [tool.coverage.report]
 show_missing = true
 precision = 1
+# gravyflow/src and most directories under it are namespace packages (no
+# __init__.py): without this, a module no test imports is not counted at all.
+include_namespace_packages = true
