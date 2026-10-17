@@ -59,7 +59,7 @@ def test_a_broken_result_is_an_error(tmp_path):
     model = tmp_path / "generation_0" / "model_0"
     model.mkdir(parents=True)
     (model / "validation_data.h5").write_bytes(b"not hdf5")
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="file signature not found"):
         _population(tmp_path, 1).load_and_calculate_fitness(0)
 
 
