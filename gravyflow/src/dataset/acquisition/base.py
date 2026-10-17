@@ -959,17 +959,8 @@ class BaseDataObtainer(ABC):
         )
 
     def compress_segments(self, segments: np.ndarray) -> np.ndarray:
-        if segments.size == 0:
-            return segments
-
-        segments = segments[segments[:, 0].argsort()]
-        compressed = segments.copy()
-
-        overlaps = compressed[1:, 0] <= compressed[:-1, 1]
-        compressed[:-1][overlaps, 1] = np.maximum(compressed[:-1][overlaps, 1], compressed[1:][overlaps, 1])
-        keep_segments = np.append([True], ~overlaps)
-
-        return compressed[keep_segments]
+        """The union of ``segments``: sorted, disjoint, merged where they overlap or touch."""
+        return coalesce_segments(segments)
     
     def order_segments(
         self,
