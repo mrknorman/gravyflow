@@ -564,7 +564,7 @@ class IFOData:
     def __post_init__(self):
         # Strain read from the store is finite by construction: a read that meets samples
         # its tile does not hold is refused there. A non-finite sample here is a defect,
-        # refused by name, never zeroed (GF:15 C1).
+        # refused by name, never zeroed.
         pieces = self.data if isinstance(self.data, list) else [self.data]
         for index, piece in enumerate(pieces):
             if not np.all(np.isfinite(ops.convert_to_numpy(piece))):
@@ -943,7 +943,7 @@ class BaseDataObtainer(ABC):
             )
             
         # Held strain is finite, so a non-finite sample here was made by the processing
-        # above: a defect, refused by name, never zeroed (GF:15 C1).
+        # above: a defect, refused by name, never zeroed.
         for name in (RV.ONSOURCE, RV.OFFSOURCE):
             if not np.all(np.isfinite(ops.convert_to_numpy(batch[name]))):
                 raise ValueError(

@@ -192,7 +192,7 @@ def test_fingerprint_check_sees_a_spec_mismatch_let_through(tmp_path, monkeypatc
 
 
 # =============================================================================
-# THE STORE (GF:15 M3c): L33's noise half, and L16's store half
+# THE STORE: a tile's content depends only on what it holds, and splits share no reading state
 # =============================================================================
 
 def _draw(batches, count=2):
@@ -207,7 +207,7 @@ def _same(a, b):
 
 def test_warm_reads_equal_cold_and_every_rate_reads_the_same_tiles(world):
     """
-    L33, noise: a tile's content depends only on its source, detector, rate and time,
+    Noise: a tile's content depends only on its source, detector, rate and time,
     so a warm read equals a cold one, another output rate reads the tiles already
     fetched, and a tile of another source at the same place is never served.
     """
@@ -241,7 +241,7 @@ def test_warm_reads_equal_cold_and_every_rate_reads_the_same_tiles(world):
 
 def test_alternating_splits_on_one_obtainer_change_neither_splits_bytes(world):
     """
-    L16, the store's half: train and validate drawn in turn from one obtainer serve
+    The store: train and validate drawn in turn from one obtainer serve
     exactly what each serves alone, and neither stream ends early. Tiles carry no
     split and no process keeps their contents, so no reading state passes between them.
     """

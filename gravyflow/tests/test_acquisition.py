@@ -943,7 +943,7 @@ class TestIFODataWithNaN:
     
     @pytest.mark.parametrize("bad", [np.nan, np.inf])
     def test_ifo_data_with_non_finite_strain_is_refused(self, bad):
-        """Held strain is finite: a row holding NaN or Inf is refused, never zeroed (GF:15 C1)."""
+        """Held strain is finite: a row holding NaN or Inf is refused, never zeroed."""
         data = np.array([1.0, bad, 3.0, 5.0], dtype=np.float32)
         with pytest.raises(ValueError, match="non-finite strain"):
             gf_acq.IFOData(data=[data], sample_rate_hertz=1.0, start_gps_time=[0.0])

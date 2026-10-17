@@ -1,5 +1,5 @@
 """
-Real noise read through the store (GF:15 M3c): a read is a tile view, the one resampler
+Real noise read through the store: a read is a tile view, the one resampler
 and the margin; the timeline is the authority, so a source that does not deliver what it
 says it holds is refused by name, never zero-filled; nothing is truncated or overwritten
 on a read error; old segment caches are never read; and the memory cap holds.
