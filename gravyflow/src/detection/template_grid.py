@@ -22,6 +22,8 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+from gravyflow.src.dataset.conditioning.detector import DEFAULT_NOISE_PROFILE
+
 
 @dataclass
 class TemplateGrid:
@@ -147,17 +149,18 @@ class MatchSpace:
     filter of a signal's inspiral, so a bank placed on that span is at least as
     dense as any analysis with a shorter window needs.
 
-    The profile is O3_LOW unless named otherwise, whatever noise a dataset is
-    coloured with: a bank is the search's, one set of templates for every
-    detector of the network, placed on one smooth curve that its key names.
-    The search itself whitens with the data's own spectrum.
+    The profile is the default noise's (DEFAULT_NOISE_PROFILE, each detector's
+    measured O3 curve) unless named otherwise. A bank is the search's, one set
+    of templates for every detector of the network, placed on one detector's
+    curve, which its key names. The search itself whitens with the data's own
+    spectrum.
     """
     sample_rate_hertz: float = 2048.0
     visible_seconds: float = 1.5
     lower_frequency_hertz: float = 20.0
     ifo_name: str = "L1"
     approximant_name: str = "IMRPhenomD"
-    noise_profile_name: str = "O3_LOW"
+    noise_profile_name: str = DEFAULT_NOISE_PROFILE.name
 
     @property
     def window_seconds(self) -> float:
@@ -372,8 +375,9 @@ class TemplateBank:
         kept: the fraction of the space (in the proposal's measure) left with a
         fitting factor below the minimal match is then about that small.
 
-        The match is `MatchSpace`'s: the IFO's (default L1) O3_LOW curve over
-        [lower_frequency_hertz, Nyquist), on the `visible_seconds` before merger.
+        The match is `MatchSpace`'s: the IFO's (default L1) curve in the
+        default noise profile over [lower_frequency_hertz, Nyquist), on the
+        `visible_seconds` before merger.
         See `place` for caching and the banks bundled with gravyflow.
         """
         import gravyflow as gf

@@ -24,10 +24,10 @@ CROP = int(0.5 * FS)   # the dataset's default crop
 
 
 def coloured_noise(rng, shape, seconds):
-    """Gaussian noise with L1's O3 low curve, the curve the bank is placed on, in strain."""
+    """Gaussian noise with L1's measured O3 curve, the curve the default bank is placed on, in strain."""
     n = int(seconds * FS)
     f = np.fft.rfftfreq(n, 1 / FS)
-    amp = np.sqrt(noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0), gf.NoiseProfile.O3_LOW) * n * FS / 4.0)
+    amp = np.sqrt(noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0), gf.NoiseProfile.O3_ACTUAL) * n * FS / 4.0)
     spec = amp * (rng.standard_normal(shape + (len(f),)) + 1j * rng.standard_normal(shape + (len(f),)))
     spec[..., 0] = 0.0
     return np.fft.irfft(spec, n=n)
@@ -105,7 +105,7 @@ def test_whitened_noise_gives_unit_noise_statistics(spectrum):
     # Coloured noise whitened by the data path with the true PSD, against
     # templates whitened with the same filter: still chi-squared(2).
     f = np.arange(N // 2 + 1, dtype=np.float64)
-    true = noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0), gf.NoiseProfile.O3_LOW) * FS
+    true = noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0), gf.NoiseProfile.O3_ACTUAL) * FS
     exact = gf.PowerSpectrum(np.asarray(true / true.max(), np.float32)[None],
                              np.array([[np.sqrt(true.max())]], np.float32), FS,
                              gf.SpectralConfig(correct_inverse_bias=False), 1.0, 31)
@@ -378,17 +378,33 @@ def chirp_times(mass_1, mass_2, f_low=20.0):
     return 5.0 / (256.0 * np.pi * f_low * eta) * x ** (-5.0 / 3.0), 1.0 / (8.0 * f_low * eta) * x ** (-2.0 / 3.0)
 
 
-def pycbc_fitting_factors(bank, mass_1, mass_2, nearest=None):
+def pycbc_psd(ifo, profile):
     """
-    Each signal's best pycbc.filter.match (phase and time maximised, with
-    LALSimulation's analytic aLIGOO3LowT1800545 from 20 Hz) with a template of
-    `bank`: an overlap independent of the metric the bank is placed with. With
-    `nearest`, each signal is matched only against that many templates nearest
-    to it in chirp times, which can only lower its fitting factor.
+    The PSD pycbc matches with, from 10 Hz: LALSimulation's analytic
+    aLIGOO3LowT1800545 for O3_LOW (H1 and L1 share it), and for any other
+    profile the curve's table, read here and interpolated by pycbc rather than
+    by the bank's MatchSpace.
+    """
+    import pycbc.psd
+    length, delta_f = PYCBC_SEGMENT // 2 + 1, FS / PYCBC_SEGMENT
+    if profile is gf.NoiseProfile.O3_LOW:
+        return pycbc.psd.from_string("aLIGOO3LowT1800545", length, delta_f, 10.0)
+    frequencies, asd = np.loadtxt(profile.path(ifo), delimiter=",", comments="#", unpack=True)
+    return pycbc.psd.from_numpy_arrays(frequencies, asd ** 2, length, delta_f, 10.0)
+
+
+def pycbc_fitting_factors(bank, mass_1, mass_2, nearest=None, space=None):
+    """
+    Each signal's best pycbc.filter.match (phase and time maximised, from 20 Hz,
+    with `pycbc_psd` of the curve of the bank's match space, or of `space`)
+    with a template of `bank`: an overlap independent of the metric the bank is
+    placed with. With `nearest`, each signal is matched only against that many
+    templates nearest to it in chirp times, which can only lower its fitting
+    factor.
     """
     import pycbc.filter
-    import pycbc.psd
-    psd = pycbc.psd.from_string("aLIGOO3LowT1800545", PYCBC_SEGMENT // 2 + 1, FS / PYCBC_SEGMENT, 10.0)
+    space = bank.space if space is None else space
+    psd = pycbc_psd(gf.IFO[space.ifo_name], gf.NoiseProfile[space.noise_profile_name])
     templates = visible_spectra(bank.mass_1, bank.mass_2)
     t0, t3 = chirp_times(bank.mass_1, bank.mass_2)
     s0, s3 = chirp_times(mass_1, mass_2)
@@ -400,14 +416,18 @@ def pycbc_fitting_factors(bank, mass_1, mass_2, nearest=None):
     return np.array(ff)
 
 
-def test_the_bank_metric_is_pycbcs_overlap():
-    # pycbc's match (its own overlap, LALSimulation's analytic noise curve) on
-    # the search's waveforms equals the fitting factor the bank is placed with.
+@pytest.mark.parametrize("ifo_name, profile", [("L1", "O3_ACTUAL"), ("H1", "O3_ACTUAL"), ("L1", "O3_LOW")])
+def test_the_bank_metric_is_pycbcs_overlap(ifo_name, profile):
+    # pycbc's match (its own overlap, on the curve's published table or
+    # LALSimulation's analytic curve) on the search's waveforms equals the
+    # fitting factor the bank is placed with, in the default profile and in
+    # a named one.
     from gravyflow.src.detection.template_grid import MatchSpace
     bank = TemplateBank.from_masses([50.0, 13.0, 28.0, 30.0], [11.0, 8.5, 8.0, 25.0])
     signals = ([51.7, 12.2, 26.7], [10.4, 9.1, 8.3])
-    own = bank.fitting_factors(*signals, MatchSpace())
-    np.testing.assert_allclose(own, pycbc_fitting_factors(bank, *signals), atol=1e-3)
+    space = MatchSpace(ifo_name=ifo_name, noise_profile_name=profile)
+    own = bank.fitting_factors(*signals, space)
+    np.testing.assert_allclose(own, pycbc_fitting_factors(bank, *signals, space=space), atol=1e-3)
     assert np.min(own) < 0.97  # the comparison spans matches either side of the minimal match
 
 
@@ -417,30 +437,42 @@ def coverage_injections(n):
     return m.max(axis=1), m.min(axis=1)
 
 
-def test_the_bundled_bank_covers_its_range_by_an_independent_overlap():
+# The bundled banks: the default MatchedFilter's, one per LIGO detector, each
+# placed on that detector's curve in the default profile.
+BUNDLED_IFOS = [gf.IFO.L1, gf.IFO.H1]
+
+
+def bundled_bank(ifo):
+    return MatchedFilter(sample_rate_hertz=FS, ifos=[ifo]).bank
+
+
+@pytest.mark.parametrize("ifo", BUNDLED_IFOS, ids=lambda ifo: ifo.name)
+def test_the_bundled_bank_covers_its_range_by_an_independent_overlap(ifo):
     # The shipped bank's coverage of its interior, measured with pycbc's match
-    # rather than the placement metric; its boundary is the next test's.
-    # Placement stops when about 1% of the space is left below the minimal
-    # match: three placements with different seeds leave 0.72-1.05% of 20,000
-    # log-uniform injections there, so a sound bank puts more than 22 of these
-    # 1000 below it with probability 2e-6 to 5e-4 (binomial; 3e-2 at 1.5%).
-    # Removing 10% of the templates leaves 3.9% below, which passes with
-    # probability 2e-3; removing 25% leaves 10%, which passes with probability
-    # below 1e-21. The minimum is not bounded: it is the deepest of a few
-    # random holes, so it depends on where the injections fall.
-    bank = MatchedFilter(sample_rate_hertz=FS).bank
+    # on its own curve rather than the placement metric; its boundary is the
+    # next test's. Placement stops when about 1% of the space is left below
+    # the minimal match: three placements with different seeds leave
+    # 0.72-1.05% of 20,000 log-uniform injections there, so a sound bank puts
+    # more than 22 of these 1000 below it with probability 2e-6 to 5e-4
+    # (binomial; 3e-2 at 1.5%). Removing 10% of the templates leaves 3.9%
+    # below, which passes with probability 2e-3; removing 25% leaves 10%,
+    # which passes with probability below 1e-21. The minimum is not bounded:
+    # it is the deepest of a few random holes, so it depends on where the
+    # injections fall.
+    bank = bundled_bank(ifo)
     ff = pycbc_fitting_factors(bank, *coverage_injections(1000), nearest=48)
     assert np.sum(ff < 0.97) <= 22, (np.sum(ff < 0.97), ff.min())
 
 
-def test_the_bundled_bank_covers_the_boundary_of_its_range():
+@pytest.mark.parametrize("ifo", BUNDLED_IFOS, ids=lambda ifo: ifo.name)
+def test_the_bundled_bank_covers_the_boundary_of_its_range(ifo):
     # Placement covers every point of the boundary (one component at 5 or 95
     # solar masses, corners included) by construction, so this bound holds for
     # any sound placement, not only for this one. Points between the
     # placement's own boundary candidates, in the metric it places with (equal
     # to pycbc's overlap, above). A bank shifted by 2% in mass leaves the edge
     # m2 = 5 uncovered, which the interior's fraction above cannot see.
-    bank = MatchedFilter(sample_rate_hertz=FS).bank
+    bank = bundled_bank(ifo)
     edge = np.exp(np.linspace(np.log(5.0), np.log(95.0), 97))
     m1, m2 = np.concatenate([edge, np.full(97, 95.0)]), np.concatenate([np.full(97, 5.0), edge])
     ff = bank.fitting_factors(m1, m2)
@@ -448,43 +480,57 @@ def test_the_bundled_bank_covers_the_boundary_of_its_range():
     assert ff.min() >= 0.965, [(m1[i].round(2), m2[i].round(2), ff[i].round(4)) for i in worst]
 
 
-def test_the_bundled_bank_is_the_default_filters_and_names_what_it_depends_on():
+@pytest.mark.parametrize("ifo", BUNDLED_IFOS, ids=lambda ifo: ifo.name)
+def test_the_bundled_bank_is_the_default_filters_and_names_what_it_depends_on(ifo):
     import hashlib
     import json
+    from gravyflow.src.detection.bundle_banks import BUNDLED
     from gravyflow.src.detection.matched_filter import default_bank_placement
     from gravyflow.src.detection.template_grid import BUNDLED_BANK_DIRECTORY
-    key = json.loads(json.dumps(default_bank_placement().key()))
-    # The bank names the curve it is placed on, O3 low's, not the default noise's.
-    assert key["space"]["noise_profile_name"] == "O3_LOW"
-    curve = gf.NoiseProfile.O3_LOW.path(gf.IFO.L1)
+    key = json.loads(json.dumps(default_bank_placement(ifo=ifo).key()))
+    # The bank names the curve it is placed on: the detector's measured O3 curve.
+    assert key["space"]["ifo_name"] == ifo.name
+    assert key["space"]["noise_profile_name"] == "O3_ACTUAL"
+    curve = gf.NoiseProfile.O3_ACTUAL.path(ifo)
     assert key["space"]["noise_curve"]["file"] == curve.name
     with open(curve, "rb") as f:
         assert key["space"]["noise_curve"]["sha256"] == hashlib.sha256(f.read()).hexdigest()
     assert key["space"]["waveform_model"]["approximant"] == "IMRPhenomD"
     assert key["code"]["files"] == ["cbc.py", "template_grid.py"]
-    records = [json.loads(p.read_text()) for p in sorted((PACKAGE / BUNDLED_BANK_DIRECTORY).glob("*.json"))]
+    paths = sorted((PACKAGE / BUNDLED_BANK_DIRECTORY).glob("*.json"))
+    assert sorted(BUNDLED) == [path.name for path in paths]  # bundle_banks writes every bundled file
+    records = [json.loads(path.read_text()) for path in paths]
+    assert sorted(r["arguments"]["space"]["ifo_name"] for r in records) == sorted(i.name for i in BUNDLED_IFOS)
     # After any change to what the key names, the bundled bank is placed again.
-    assert [r["arguments"] for r in records] == [key], \
+    mine = [r for r in records if r["arguments"]["space"]["ifo_name"] == ifo.name]
+    assert [r["arguments"] for r in mine] == [key], \
         "a stale bundled bank: place it again with python -m gravyflow.src.detection.bundle_banks"
-    bank = MatchedFilter(sample_rate_hertz=FS).bank
-    assert bank.minimal_match == 0.97 and bank.num_templates == len(records[0]["mass_1"])
-    assert bank.to_dict() == records[0]  # the library's own serialiser writes the loadable record
+    bank = bundled_bank(ifo)
+    assert bank.minimal_match == 0.97 and bank.num_templates == len(mine[0]["mass_1"])
+    assert bank.to_dict() == mine[0]  # the library's own serialiser writes the loadable record
 
 
-def test_the_default_bank_is_the_searchs_and_not_the_default_noises():
-    # The default noise colours H1 and L1 with their own measured curves; the
-    # bank is placed on one named curve, O3 low's, which H1 and L1 share, so
-    # both read L1's bundled bank. Virgo's O3 low curve is its own.
+def test_each_detector_has_its_own_default_bank():
+    # The default noise colours each detector with its own measured curve, and
+    # each detector's default bank is placed on that same curve; a network's
+    # search takes its first detector's bank.
+    from gravyflow.src.dataset.conditioning.detector import DEFAULT_NOISE_PROFILE
     from gravyflow.src.detection.matched_filter import default_bank_placement
     from gravyflow.src.detection.template_grid import MatchSpace
-    assert gf.IFO.H1.value.optimal_psd_path != gf.IFO.L1.value.optimal_psd_path
-    assert default_bank_placement(ifo=gf.IFO.H1) == default_bank_placement(ifo=gf.IFO.L1)
-    assert default_bank_placement(ifo=gf.IFO.H1).space.ifo_name == "L1"
-    assert default_bank_placement(ifo=gf.IFO.V1).space.ifo_name == "V1"
-    assert MatchSpace().noise_profile_name == "O3_LOW"
-    # Another profile is another space, with another key.
-    actual = MatchSpace(ifo_name="H1", noise_profile_name="O3_ACTUAL")
-    assert actual.identity()["noise_curve"]["file"] == gf.NoiseProfile.O3_ACTUAL.path(gf.IFO.H1).name
+    assert DEFAULT_NOISE_PROFILE is gf.NoiseProfile.O3_ACTUAL
+    assert MatchSpace().noise_profile_name == DEFAULT_NOISE_PROFILE.name
+    for ifo in (gf.IFO.H1, gf.IFO.L1, gf.IFO.V1):
+        space = default_bank_placement(ifo=ifo).space
+        assert space.ifo_name == ifo.name and space.noise_curve == ifo.value.optimal_psd_path
+    assert default_bank_placement(ifo=gf.IFO.H1) != default_bank_placement(ifo=gf.IFO.L1)
+    assert default_bank_placement() == default_bank_placement(ifo=gf.IFO.L1)
+    network = MatchedFilter(sample_rate_hertz=FS, ifos=[gf.IFO.H1, gf.IFO.L1])
+    assert network.bank.placement == default_bank_placement(ifo=gf.IFO.H1)
+    # A named profile is another space, with another key: O3 low's curve,
+    # which H1 and L1 share.
+    low = [MatchSpace(ifo_name=name, noise_profile_name="O3_LOW") for name in ("H1", "L1")]
+    assert low[0].noise_curve == low[1].noise_curve == gf.NoiseProfile.O3_LOW.path(gf.IFO.L1)
+    assert low[1].identity()["noise_curve"] != MatchSpace().identity()["noise_curve"]
 
 
 def test_the_bank_metric_never_extrapolates_its_curve():

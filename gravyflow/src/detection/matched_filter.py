@@ -74,22 +74,17 @@ def default_bank_placement(
     The placement of a MatchedFilter's default bank: non-spinning IMRPhenomD
     over `mass_range` at `minimal_match`, matched on what the filter can see of
     a signal (the window plus half the whitening filter before the merger) with
-    the detector's curve in MatchSpace's noise profile (O3_LOW, whatever noise
-    the data have) from the band's lower edge. H1 shares L1's curve there, so
-    both get L1's (bundled) bank.
+    `ifo`'s curve (default L1's) in MatchSpace's noise profile, the default
+    noise's, from the band's lower edge. Each detector's curve is its own, so
+    each detector has its own bank; H1's and L1's are bundled.
     """
     import gravyflow as gf
     config = _as_spectral_config(spectral_config)
     fs = float(sample_rate_hertz)
-
-    def space(ifo) -> MatchSpace:
-        return MatchSpace(fs, float(onsource_duration_seconds) + _even_taps(config, fs) / (2.0 * fs),
-                          float(config.lower_frequency_hertz), ifo.name, "IMRPhenomD")
-
     ifo = gf.IFO.L1 if ifo is None else ifo
-    if space(ifo).noise_curve == space(gf.IFO.L1).noise_curve:
-        ifo = gf.IFO.L1
-    return BankPlacement(space(ifo), (float(mass_range[0]), float(mass_range[1])), float(minimal_match))
+    space = MatchSpace(fs, float(onsource_duration_seconds) + _even_taps(config, fs) / (2.0 * fs),
+                       float(config.lower_frequency_hertz), ifo.name, "IMRPhenomD")
+    return BankPlacement(space, (float(mass_range[0]), float(mass_range[1])), float(minimal_match))
 
 
 def _even_taps(config: SpectralConfig, sample_rate_hertz: float) -> int:

@@ -10,9 +10,10 @@ gravyflow.src.dataset.tools.psd). Two scales test that:
 - EXACT_SCALE, a power of two near OLD_SCALE: multiplying by it is exact in
   float32, so the scaled input is the same signal, and every output must agree
   to a few float32 roundings, PSDs on the estimator's floor included.
-- OLD_SCALE itself: x * 1e21 rounds each sample (relative 6e-8 of the sample),
-  so the scaled input differs from x by that rounding, which whitening and
-  PSD weighting amplify in quiet bands. Outputs agree to INPUT_ROUNDING.
+- OLD_SCALE itself: x * 1e21 rounds each sample (by at most INPUT_ROUNDING of
+  the sample), so the scaled input differs from x by that rounding, which
+  whitening and PSD weighting amplify in quiet bands, the more the steeper the
+  noise curve. Outputs agree to `_rounding_tolerance` of the noise.
 """
 import numpy as np
 import pytest
@@ -25,8 +26,8 @@ from gravyflow.src.dataset.noise import noise as gf_noise
 OLD_SCALE = np.float32(1e21)
 #: A power of two near it: scaling by it is exact in float32.
 EXACT_SCALE = np.float32(2.0 ** 70)
-#: The relative difference x * OLD_SCALE's own rounding makes on coloured noise.
-INPUT_ROUNDING = 1e-5
+#: The largest relative rounding of a float32 product, such as x * OLD_SCALE.
+INPUT_ROUNDING = 2.0 ** -24
 FS = 2048.0
 RV = gf.ReturnVariables
 ULP = float(np.finfo(np.float32).eps)
@@ -41,6 +42,22 @@ def _close(a, b, tolerance=8 * ULP):
     assert peak > 0
     error = np.max(np.abs(a - b)) / peak
     assert error <= tolerance, f"relative difference {error:.3g} > {tolerance:.3g}"
+
+
+def _rounding_tolerance(offsource):
+    """
+    How far an output may move when every input sample is rounded by up to
+    INPUT_ROUNDING. The rounding is white, and whitening weights each frequency
+    by 1/PSD, so relative to the whitened data it is amplified in proportion
+    to the spectrum's dynamic range, sqrt(<PSD> <1/PSD>) (of the estimate from
+    `offsource`, every bin but DC, its largest row): about 17 for the O3
+    low-noise curves and 160 for the measured O3 curves, whose noise rises
+    steeply below 20 Hz. On both, the largest difference of any output here is
+    at most 5 of these; the bound takes 10.
+    """
+    normalised = np.asarray(gf.estimate_psd(offsource, FS).normalised, np.float64)[..., 1:]
+    dynamic_range = np.sqrt(np.mean(normalised, axis=-1) * np.mean(1.0 / normalised, axis=-1))
+    return 10.0 * INPUT_ROUNDING * float(np.max(dynamic_range))
 
 
 def _coloured_strain(seed, shape, seconds, floor_above_hertz=None):
@@ -62,7 +79,7 @@ def _coloured_strain(seed, shape, seconds, floor_above_hertz=None):
 CASES = [
     pytest.param((None, EXACT_SCALE, 8 * ULP), id="coloured-exact"),
     pytest.param((700.0, EXACT_SCALE, 8 * ULP), id="on-the-floor-exact"),
-    pytest.param((None, OLD_SCALE, INPUT_ROUNDING), id="coloured-1e21"),
+    pytest.param((None, OLD_SCALE, _rounding_tolerance), id="coloured-1e21"),
 ]
 
 
@@ -71,6 +88,8 @@ def case(request):
     floor_above_hertz, scale, tolerance = request.param
     offsource = _coloured_strain(26, (4, 2), 16.0, floor_above_hertz)
     onsource = _coloured_strain(27, (4, 2), 2.0, floor_above_hertz)
+    if callable(tolerance):
+        tolerance = tolerance(offsource)
     return onsource, offsource, scale, tolerance, floor_above_hertz
 
 
@@ -173,8 +192,11 @@ def test_dataset_outputs_are_identical_with_and_without_the_old_scale():
     raw = np.asarray(x[RV.ONSOURCE.name], np.float64)
     assert 1e-24 < np.std(raw) < 1e-17
     _close(raw * np.float64(OLD_SCALE), x_old[RV.ONSOURCE.name])
-    _close(x[RV.WHITENED_ONSOURCE.name], x_old[RV.WHITENED_ONSOURCE.name], INPUT_ROUNDING)
-    _close(x[RV.WHITENED_INJECTIONS.name], x_old[RV.WHITENED_INJECTIONS.name], INPUT_ROUNDING)
+    # The dataset's noise is the default coloured noise, so its spectrum's dynamic range is that of the
+    # same noise's 16 s offsource.
+    tolerance = _rounding_tolerance(_coloured_strain(26, (4, 2), 16.0))
+    _close(x[RV.WHITENED_ONSOURCE.name], x_old[RV.WHITENED_ONSOURCE.name], tolerance)
+    _close(x[RV.WHITENED_INJECTIONS.name], x_old[RV.WHITENED_INJECTIONS.name], tolerance)
     _close(y["SNR"], y_old["SNR"])
     np.testing.assert_allclose(np.asarray(y["SNR"]), 12.0, rtol=1e-6)
 
