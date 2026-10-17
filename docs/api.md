@@ -208,8 +208,6 @@ validates as it trains: they need the `viz` extra.
 
 ## GPUs (the `cuda` extra)
 
-- `env`: a context that selects free GPUs.
-- `setup_cuda`: select a GPU and limit its memory.
-- `find_available_GPUs`: GPUs with enough free memory.
 - `get_gpu_memory_info`: each GPU's memory, from `nvidia-smi`.
-- `get_tf_memory_usage`: TensorFlow's GPU memory use.
+
+Selecting GPUs and running on CUDA clusters is a separate project, GravEvolve, built on GravyFlow.

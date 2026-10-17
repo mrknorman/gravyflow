@@ -128,67 +128,66 @@ def main():
         logger.info(f"  - {pool.name}: label={pool.label}, probability={pool.probability:.0%}")
     
     # Create composed dataset
-    with gf.env():
-        dataset = gf.ComposedDataset(
-            pools=pools,
-            ifos=[gf.IFO.H1, gf.IFO.L1],
-            sample_rate_hertz=2048.0,
-            onsource_duration_seconds=1.0,
-            offsource_duration_seconds=16.0,
-            crop_duration_seconds=0.5,
-            num_examples_per_batch=32,
-            input_variables=[
-                gf.ReturnVariables.WHITENED_ONSOURCE,
-            ],
-            output_variables=[
-                gf.ReturnVariables.POOL_LABEL,
-            ],
-            steps_per_epoch=100,
-            seed=42,
-            group="train"
-        )
+    dataset = gf.ComposedDataset(
+        pools=pools,
+        ifos=[gf.IFO.H1, gf.IFO.L1],
+        sample_rate_hertz=2048.0,
+        onsource_duration_seconds=1.0,
+        offsource_duration_seconds=16.0,
+        crop_duration_seconds=0.5,
+        num_examples_per_batch=32,
+        input_variables=[
+            gf.ReturnVariables.WHITENED_ONSOURCE,
+        ],
+        output_variables=[
+            gf.ReturnVariables.POOL_LABEL,
+        ],
+        steps_per_epoch=100,
+        seed=42,
+        group="train"
+    )
         
-        logger.info(f"\nDataset created:")
-        logger.info(f"  - Steps per epoch: {len(dataset)}")
-        logger.info(f"  - Batch size: {dataset.num_examples_per_batch}")
-        logger.info(f"  - Number of unique classes: {dataset.pool_sampler.num_classes}")
+    logger.info(f"\nDataset created:")
+    logger.info(f"  - Steps per epoch: {len(dataset)}")
+    logger.info(f"  - Batch size: {dataset.num_examples_per_batch}")
+    logger.info(f"  - Number of unique classes: {dataset.pool_sampler.num_classes}")
         
-        # Generate a few batches
-        logger.info("\nGenerating sample batches...")
+    # Generate a few batches
+    logger.info("\nGenerating sample batches...")
         
-        label_counts = {0: 0, 1: 0, 2: 0}
-        n_batches = 5
+    label_counts = {0: 0, 1: 0, 2: 0}
+    n_batches = 5
         
-        for i in range(n_batches):
-            inputs, outputs = dataset[i]
+    for i in range(n_batches):
+        inputs, outputs = dataset[i]
             
-            # Labels are float32, like every output; the class ids are integers.
-            labels = np.asarray(outputs['POOL_LABEL']).astype(int)
+        # Labels are float32, like every output; the class ids are integers.
+        labels = np.asarray(outputs['POOL_LABEL']).astype(int)
             
-            for label in labels:
-                label_counts[label] += 1
+        for label in labels:
+            label_counts[label] += 1
             
-            logger.info(f"  Batch {i+1}: shape={inputs['WHITENED_ONSOURCE'].shape}, "
-                       f"labels={labels.tolist()}")
+        logger.info(f"  Batch {i+1}: shape={inputs['WHITENED_ONSOURCE'].shape}, "
+                   f"labels={labels.tolist()}")
         
-        total = sum(label_counts.values())
-        logger.info(f"\nLabel distribution across {n_batches} batches:")
-        logger.info(f"  - Label 0 (noise): {label_counts[0]} ({label_counts[0]/total:.1%})")
-        logger.info(f"  - Label 1 (signal): {label_counts[1]} ({label_counts[1]/total:.1%})")
-        logger.info(f"  - Label 2 (glitch): {label_counts[2]} ({label_counts[2]/total:.1%})")
+    total = sum(label_counts.values())
+    logger.info(f"\nLabel distribution across {n_batches} batches:")
+    logger.info(f"  - Label 0 (noise): {label_counts[0]} ({label_counts[0]/total:.1%})")
+    logger.info(f"  - Label 1 (signal): {label_counts[1]} ({label_counts[1]/total:.1%})")
+    logger.info(f"  - Label 2 (glitch): {label_counts[2]} ({label_counts[2]/total:.1%})")
         
-        # Show expected vs actual
-        expected_noise = 0.40
-        expected_signal = 0.40  # 0.20 + 0.20
-        expected_glitch = 0.20
-        logger.info(f"\nExpected distribution:")
-        logger.info(f"  - Noise: {expected_noise:.0%}")
-        logger.info(f"  - Signal: {expected_signal:.0%}")
-        logger.info(f"  - Glitch: {expected_glitch:.0%}")
+    # Show expected vs actual
+    expected_noise = 0.40
+    expected_signal = 0.40  # 0.20 + 0.20
+    expected_glitch = 0.20
+    logger.info(f"\nExpected distribution:")
+    logger.info(f"  - Noise: {expected_noise:.0%}")
+    logger.info(f"  - Signal: {expected_signal:.0%}")
+    logger.info(f"  - Glitch: {expected_glitch:.0%}")
         
-        logger.info("\n" + "="*60)
-        logger.info("Example complete!")
-        logger.info("="*60)
+    logger.info("\n" + "="*60)
+    logger.info("Example complete!")
+    logger.info("="*60)
 
 
 if __name__ == "__main__":

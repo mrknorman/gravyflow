@@ -20,6 +20,11 @@ repository before it may need the changes below.
   `is_not_inherited`, `batch_injection_parameters`, `RENAMED_SKY_KEYS` and `generate_transient_cache_path`. These are
   deleted: `get_current_repo`, `get_file_parent_path`, `transform_string`, `randomise_arguments` (it called a function
   that did not exist), `get_element_shape`, `calculate_sample_counts`, `Axis_BIS` and `Axis_BI`.
+- **The CUDA-cluster tooling moved to its own project, GravEvolve.** `gf.env`, `gf.setup_cuda`,
+  `gf.find_available_GPUs` and `gf.get_tf_memory_usage` left the public API, with the GPU monitor script
+  (`gravyflow/src/tools/gpu_checker.py`, which called two functions that did not exist). GravEvolve, built on
+  GravyFlow, selects free GPUs and runs on CUDA clusters. `gf.get_gpu_memory_info` stays: `gf.Manager` places its
+  processes by it. A `with gf.env():` block needs nothing in its place: GravyFlow runs on whatever devices JAX sees.
 - **One CBC path.** `generate_cbc_waveform` (in `gravyflow.src.dataset.features.waveforms.cbc`) is deleted, with
   `Defaults.quantize_duration` and `Defaults.STANDARD_DURATIONS`: it rounded the duration up to a tier and kept the
   last samples, so between tiers its merger moved or was cut off. `gf.CBCGenerator` is the one CBC path; its merger is

@@ -206,11 +206,7 @@ _MODULES = {
     "send_email": "gravyflow.src.utils.alert",
 
     # GPUs (CUDA)
-    "env": "gravyflow.src.utils.gpu",
-    "setup_cuda": "gravyflow.src.utils.gpu",
-    "find_available_GPUs": "gravyflow.src.utils.gpu",
     "get_gpu_memory_info": "gravyflow.src.utils.gpu",
-    "get_tf_memory_usage": "gravyflow.src.utils.gpu",
 }
 
 __all__ = list(_MODULES)

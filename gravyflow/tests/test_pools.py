@@ -263,8 +263,7 @@ class TestComposedDatasetIteration:
         """An epoch is steps_per_epoch batches of whitened noise, every label the one pool's."""
         noise_obtainer = gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE)
         pools = [gf.FeaturePool(name="noise", label=0, probability=1.0, noise_obtainer=noise_obtainer)]
-        with gf.env():
-            batches = list(composed(pools, batch=4, steps=3))
+        batches = list(composed(pools, batch=4, steps=3))
         assert len(batches) == 3
         for inputs, outputs in batches:
             whitened = np.asarray(inputs["WHITENED_ONSOURCE"])
@@ -280,8 +279,7 @@ class TestComposedDatasetIteration:
         ]
 
         def labels(seed):
-            with gf.env():
-                _, outputs = next(iter(composed(pools, batch=32, steps=10, seed=seed)))
+            _, outputs = next(iter(composed(pools, batch=32, steps=10, seed=seed)))
             return np.asarray(outputs["POOL_LABEL"]).ravel()
 
         first = labels(42)
