@@ -3,8 +3,9 @@ LAL parity of gravyflow's CBC waveforms.
 
 For each approximant, the generator (``_generate_cbc_waveform_jit``) produces a
 few sources end to end, and each polarisation is matched against
-``lalsimulation.SimInspiralChooseFDWaveform`` for the same source. The match is
-maximised over time and phase and weighted by the aLIGO zero-detuned
+``lalsimulation.SimInspiralChooseFDWaveform`` for the same source: the match, and,
+since the match is blind to them, each polarisation's amplitude and the phase of
+plus against cross. The match is maximised over time and phase and weighted by the aLIGO zero-detuned
 high-power PSD above the band's lower frequency (and below the ISCO frequency
 for TaylorF2, LAL's cutoff for that model).
 
@@ -16,6 +17,7 @@ lal is a required input of this test: if it cannot be imported, the test
 fails and says so. It is never skipped.
 """
 import math
+from dataclasses import dataclass
 
 import numpy as np
 import pytest
@@ -31,6 +33,9 @@ SAMPLE_RATE = 4096.0
 F_REF = 20.0
 PHASE = 0.3
 DISTANCE_MPC = 400.0
+#: A stated target, not a derivation: a match M lowers the SNR by M and the volume a
+#: search reaches by M ** 3, so 0.9999 costs at most 0.03% of it. Measured worst, at
+#: gravyflow df4acab on CPU: 1 - 2.6e-8 (TaylorF2), so a regression to 1 - 1e-4 still passes.
 MINIMUM_MATCH = 0.9999
 
 # A band: the window, the merger time within it, and the match's lower frequency.
@@ -68,6 +73,9 @@ CASES = {
 # each source's whole inspiral from it. The reference is
 # lalsimulation.SimInspiralTD, LAL's own time-domain waveform for the same source.
 TD_SAMPLE_RATE = 2048.0
+#: A stated target, as MINIMUM_MATCH: 0.999 costs at most 0.3% of a search's volume.
+#: Measured worst, at gravyflow df4acab on CPU: 1 - 1.1e-4 (TaylorF2, whose LAL
+#: time-domain waveform is conditioned differently: tapered and high-passed).
 TD_MINIMUM_MATCH = 0.999
 TD_BINARY_BLACK_HOLE = dict(window=64.0, f_low=20.0)
 TD_BINARY_NEUTRON_STAR = dict(window=128.0, f_low=40.0)
@@ -98,6 +106,48 @@ TD_CASES = {
     Approximant.TaylorF2: (TIDAL, TD_BINARY_NEUTRON_STAR),
     Approximant.IMRPhenomD_NRTidalv2: (TIDAL, TD_BINARY_NEUTRON_STAR),
 }
+
+
+def residual_budget(minimum_match):
+    """
+    The relative norm of the residual a match floor admits: a residual orthogonal to
+    the waveform, of relative norm r, lowers the match by r ** 2 / 2. The match is
+    blind to the waveform's amplitude (distance, inclination) and to the phase of one
+    polarisation against the other (the sign of the cross polarisation), since each is
+    normalised and maximised alone; a wrong amplitude a or relative phase theta is a
+    residual of relative norm |a| or ~|theta|, so each is held to the same budget.
+    """
+    return math.sqrt(2.0 * (1.0 - minimum_match))
+
+
+def _assert_matches_lal(approximant, comparisons, minimum_match, reference):
+    budget = residual_budget(minimum_match)
+    failures = []
+    for label, (plus, cross) in comparisons:
+        for name, overlap in (("plus", plus), ("cross", cross)):
+            if not overlap.match >= minimum_match:
+                failures.append(f"{label}, {name}: match {overlap.match:.7f}")
+            if not abs(overlap.amplitude_ratio - 1.0) <= budget:
+                failures.append(f"{label}, {name}: amplitude ratio {overlap.amplitude_ratio:.5f}")
+        relative_phase = abs(math.remainder(plus.phase - cross.phase, 2.0 * math.pi))
+        if not relative_phase <= budget:
+            failures.append(f"{label}: plus and cross differ in phase by {relative_phase:.4f} rad")
+    assert not failures, (
+        f"{approximant.value} against {reference}, match floor {minimum_match}, amplitude and "
+        f"relative phase within {budget:.4f}: {failures}"
+    )
+
+
+@pytest.mark.parametrize("approximant", list(CASES), ids=lambda a: a.value)
+def test_cbc_waveforms_match_lal(approximant):
+    _assert_matches_lal(approximant, _fd_comparisons(approximant), MINIMUM_MATCH,
+                        "LAL's SimInspiralChooseFDWaveform")
+
+
+@pytest.mark.parametrize("approximant", list(TD_CASES), ids=lambda a: a.value)
+def test_cbc_time_domain_waveforms_match_lal(approximant):
+    _assert_matches_lal(approximant, _td_comparisons(approximant), TD_MINIMUM_MATCH,
+                        "LAL's SimInspiralTD")
 
 
 def _import_lal():
@@ -153,11 +203,25 @@ def _weight(lal, lalsimulation, approximant, point, freqs, f_low):
     return weight
 
 
-def _match(a, b, freqs, weight):
-    """Match of ``a`` and ``b``, maximised over time and phase."""
+@dataclass(frozen=True)
+class Overlap:
+    """How ``b`` compares with the reference ``a``, at the time shift that best aligns them."""
+
+    #: The normalised overlap, maximised over time and phase.
+    match: float
+    #: The time shift and the phase (radians) at which the match peaks.
+    time: float
+    phase: float
+    #: ``b``'s weighted norm over ``a``'s: 1 when their amplitudes (distance, inclination) agree.
+    amplitude_ratio: float
+
+
+def _overlap(a, b, freqs, weight):
+    """The ``Overlap`` of ``b`` with ``a``, maximised over time and phase."""
     df = freqs[1] - freqs[0]
     integrand = np.conj(a) * b * weight
-    norm = math.sqrt(np.sum(np.abs(a) ** 2 * weight) * np.sum(np.abs(b) ** 2 * weight))
+    norm_a = math.sqrt(np.sum(np.abs(a) ** 2 * weight))
+    norm_b = math.sqrt(np.sum(np.abs(b) ** 2 * weight))
     padding = 8
     n = padding * len(freqs)
     padded = np.zeros(n, dtype=complex)
@@ -170,22 +234,27 @@ def _match(a, b, freqs, weight):
     golden = (math.sqrt(5.0) - 1.0) / 2.0
 
     def overlap(t):
-        return abs(np.sum(integrand * np.exp(2j * np.pi * freqs * t)))
+        return np.sum(integrand * np.exp(2j * np.pi * freqs * t))
 
-    best = series[peak]
     for _ in range(40):
         left = upper - golden * (upper - lower)
         right = lower + golden * (upper - lower)
-        if overlap(left) > overlap(right):
+        if abs(overlap(left)) > abs(overlap(right)):
             upper = right
         else:
             lower = left
-    best = max(best, overlap(0.5 * (lower + upper)))
-    return best / norm
+    time = 0.5 * (lower + upper)
+    if series[peak] > abs(overlap(time)):
+        time = peak * step
+    value = overlap(time)
+    return Overlap(abs(value) / (norm_a * norm_b), time, float(np.angle(value)), norm_b / norm_a)
 
 
-@pytest.mark.parametrize("approximant", list(CASES), ids=lambda a: a.value)
-def test_cbc_waveforms_match_lal(approximant):
+def _fd_comparisons(approximant):
+    """
+    For each of ``approximant``'s sources: its label, and the ``Overlap`` of the
+    generator's plus and cross polarisations with LAL's frequency-domain ones.
+    """
     lal, lalsimulation = _import_lal()
     points, band = CASES[approximant]
     duration, coalescence_time, f_low = band["duration"], band["coalescence_time"], band["f_low"]
@@ -220,16 +289,14 @@ def test_cbc_waveforms_match_lal(approximant):
 
     n_freq = int(SAMPLE_RATE * duration) // 2 + 1
     freqs = np.arange(n_freq) / duration
-    failures = []
     for index, point in enumerate(points):
         reference = _lal_polarisations(lal, lalsimulation, approximant, point, f_low, 1.0 / duration, n_freq)
         weight = _weight(lal, lalsimulation, approximant, point, freqs, f_low)
-        for polarisation, name in enumerate(("plus", "cross")):
-            spectrum = np.fft.rfft(waveforms[index, polarisation]) / SAMPLE_RATE
-            match = _match(reference[polarisation], spectrum, freqs, weight)
-            if not match >= MINIMUM_MATCH:
-                failures.append(f"{point[0]}, {name}: match {match:.7f}")
-    assert not failures, f"{approximant.value} below {MINIMUM_MATCH} against LAL: {failures}"
+        yield point[0], [
+            _overlap(reference[polarisation], np.fft.rfft(waveforms[index, polarisation]) / SAMPLE_RATE,
+                     freqs, weight)
+            for polarisation in (0, 1)
+        ]
 
 
 def _lal_time_domain(lal, lalsimulation, approximant, point, f_low):
@@ -242,8 +309,11 @@ def _lal_time_domain(lal, lalsimulation, approximant, point, f_low):
     return np.stack([hp.data.data, hc.data.data])
 
 
-@pytest.mark.parametrize("approximant", list(TD_CASES), ids=lambda a: a.value)
-def test_cbc_time_domain_waveforms_match_lal(approximant):
+def _td_comparisons(approximant):
+    """
+    For each of ``approximant``'s sources: its label, and the ``Overlap`` of the
+    injected plus and cross polarisations with LAL's ``SimInspiralTD`` ones.
+    """
     lal, lalsimulation = _import_lal()
     points, band = TD_CASES[approximant]
     window, f_low = band["window"], band["f_low"]
@@ -269,22 +339,14 @@ def test_cbc_time_domain_waveforms_match_lal(approximant):
     waveforms = np.asarray(waveforms, dtype=np.float64)
     assert np.all(np.isfinite(waveforms))
 
-    failures = []
     for index, point in enumerate(points):
         reference = _lal_time_domain(lal, lalsimulation, approximant, point, f_low)
         # One grid, long enough that no time shift between the two wraps.
         size = 2 ** math.ceil(math.log2(waveforms.shape[-1] + reference.shape[-1]))
         freqs = np.fft.rfftfreq(size, 1.0 / TD_SAMPLE_RATE)
         weight = _weight(lal, lalsimulation, approximant, point, freqs, f_low)
-        for polarisation, name in enumerate(("plus", "cross")):
-            match = _match(
-                np.fft.rfft(reference[polarisation], size),
-                np.fft.rfft(waveforms[index, polarisation], size),
-                freqs,
-                weight,
-            )
-            if not match >= TD_MINIMUM_MATCH:
-                failures.append(f"{point[0]}, {name}: match {match:.5f}")
-    assert not failures, (
-        f"{approximant.value} below {TD_MINIMUM_MATCH} against LAL's SimInspiralTD: {failures}"
-    )
+        yield point[0], [
+            _overlap(np.fft.rfft(reference[polarisation], size),
+                     np.fft.rfft(waveforms[index, polarisation], size), freqs, weight)
+            for polarisation in (0, 1)
+        ]
