@@ -284,10 +284,16 @@ class _KerasEpoch(keras.callbacks.Callback):
                 "per epoch, which would serve one epoch's batches in another. Give the dataset "
                 "steps_per_epoch instead, and leave fit's unset."
             )
+        self.dataset._keras_fitting = True
 
     def on_epoch_begin(self, epoch, logs=None):
         self.dataset.epoch = epoch
         self.dataset._keras_next = 0
+
+    def on_train_end(self, logs=None):
+        # Only fit shuffles: evaluate, predict and plain indexing after it may ask
+        # for batches in any order.
+        self.dataset._keras_fitting = False
 
 
 class IndexedBatches:
@@ -334,7 +340,9 @@ class IndexedBatches:
         self._cursor = 0
         self._epoch_from_keras = False
         self._warned_keras_epoch = False
-        # The batch Keras asks for next, under epoch_callback (``_check_keras_order``).
+        # Whether fit is running under epoch_callback, and the batch it asks for next
+        # (``_check_keras_order``).
+        self._keras_fitting = False
         self._keras_next = 0
 
     @property
@@ -379,8 +387,9 @@ class IndexedBatches:
         """
         The callback that gives this dataset Keras' epoch:
         ``model.fit(ds, ..., callbacks=[ds.epoch_callback()], shuffle=False)``.
-        Under it, a batch Keras asks for out of order is refused: ``fit``'s
-        default shuffle draws from Python's unseeded global random.
+        Under it, a batch ``fit`` asks for out of order is refused: its default
+        shuffle draws from Python's unseeded global random. Outside ``fit``
+        (``evaluate``, ``predict``, ``ds[k]``) batches are served in any order.
 
         Keras also calls ``on_epoch_end`` when ``fit`` starts, before its
         first epoch, so counting those calls would serve Keras epoch e the
@@ -396,11 +405,12 @@ class IndexedBatches:
 
     def _check_keras_order(self, index: int) -> None:
         """
-        Refuse a batch Keras asks for out of order: ``fit``'s shuffle (its default)
+        Refuse a batch ``fit`` asks for out of order: its shuffle (its default)
         reorders a PyDataset's batches with Python's unseeded global random, so the
-        run's order would be repeatable by no seed. A plain loop may ask in any order.
+        run's order would be repeatable by no seed. Only while ``fit`` runs under
+        epoch_callback: evaluate, predict and a plain loop may ask in any order.
         """
-        if not self._epoch_from_keras:
+        if not self._keras_fitting:
             return
         if index != self._keras_next:
             raise ValueError(

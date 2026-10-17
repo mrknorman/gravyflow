@@ -282,6 +282,17 @@ def test_evaluation_targets_are_fixed_at_the_curriculum_end():
 FIT_STEPS, FIT_VALIDATION_STEPS, FIT_EPOCHS = 3, 2, 3
 
 
+def one_layer_model(target):
+    """A compiled one-layer model from the onsource window to ``target``."""
+    import keras
+
+    inputs = keras.Input(shape=(len(IFOS), int(FS * ONSOURCE_S)), name=RV.ONSOURCE.name)
+    outputs = keras.layers.Dense(1, name=target.name)(keras.layers.Flatten()(inputs))
+    model = keras.Model(inputs, {target.name: outputs})
+    model.compile(optimizer="sgd", loss={target.name: "mse"})
+    return model
+
+
 def fit_serves(monkeypatch, shuffle, epochs=FIT_EPOCHS, initial_epoch=0):
     """
     Fit a one-layer model to a training split, validating on a validate
@@ -296,10 +307,7 @@ def fit_serves(monkeypatch, shuffle, epochs=FIT_EPOCHS, initial_epoch=0):
         dataset(gf.NoiseType.WHITE, 42, split, generators=[burst()], outputs=[target],
                 inputs=[RV.ONSOURCE], steps_per_epoch=steps)
         for split, steps in (("train", FIT_STEPS), ("validate", FIT_VALIDATION_STEPS)))
-    inputs = keras.Input(shape=(len(IFOS), int(FS * ONSOURCE_S)), name=RV.ONSOURCE.name)
-    outputs = keras.layers.Dense(1, name=target.name)(keras.layers.Flatten()(inputs))
-    model = keras.Model(inputs, {target.name: outputs})
-    model.compile(optimizer="sgd", loss={target.name: "mse"})
+    model = one_layer_model(target)
     windows = EpochWindows(tap)
     model.fit(train, validation_data=validate, epochs=epochs, initial_epoch=initial_epoch, shuffle=shuffle,
               callbacks=[train.epoch_callback(), windows.callback()], verbose=0)
@@ -343,6 +351,30 @@ def test_keras_shuffle_is_refused(monkeypatch):
     random.seed(3)  # Keras' shuffle draws from here: seeded, so the refusal is repeatable
     with pytest.raises(ValueError, match=r"Keras asked for batch \d+ where batch \d+ comes next.*shuffle=False"):
         fit_serves(monkeypatch, True)
+
+
+@pytest.mark.global_rng
+def test_after_fit_any_order_is_served():
+    """
+    The out-of-order refusal holds only while ``fit`` runs: after it, the same
+    dataset is served to ``evaluate`` and ``predict``, and indexed by hand in any
+    order; a later ``fit`` that shuffles is still refused.
+    """
+    import random
+
+    target = RV.INJECTION_PRESENT
+    train = dataset(gf.NoiseType.WHITE, 42, "train", generators=[burst()], outputs=[target],
+                    inputs=[RV.ONSOURCE], steps_per_epoch=FIT_STEPS)
+    model = one_layer_model(target)
+    callbacks = [train.epoch_callback()]
+    model.fit(train, epochs=1, shuffle=False, callbacks=callbacks, verbose=0)
+    model.evaluate(train, verbose=0)
+    model.predict(train, verbose=0)
+    for k in reversed(range(FIT_STEPS)):
+        train[k]
+    random.seed(3)  # Keras' shuffle draws from here: seeded, so the refusal is repeatable
+    with pytest.raises(ValueError, match=r"Keras asked for batch \d+ where batch \d+ comes next"):
+        model.fit(train, epochs=FIT_EPOCHS, shuffle=True, callbacks=callbacks, verbose=0)
 
 
 # -------------------------------------------------------------------- pools
