@@ -188,9 +188,9 @@ class TestRandomPlan:
 
     @pytest.mark.parametrize("passes", [1, 2, 7, 50])
     def test_each_row_serves_its_density_to_within_one_batch(self, passes):
-        plan = random_plan()
+        plan = random_plan()  # 0.5 batches a second of starts: the test's own nominal density
         served = sum(plan.due(p) for p in range(passes))
-        assert np.all(np.abs(served - passes * plan.expected) < 1.0)
+        assert np.all(np.abs(served - passes * 0.5 * SECONDS) < 1.0)
         assert plan.batches_before(passes) == int(np.sum(served))
 
     def test_a_batch_is_located_by_arithmetic(self):
