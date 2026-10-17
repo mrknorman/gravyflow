@@ -125,3 +125,45 @@ def test_blessing_applies_only_to_the_test_being_blessed(goldens, monkeypatch):
     monkeypatch.setenv(_helpers.BLESS_ENVIRONMENT_VARIABLE, "gravyflow/tests/test_other.py::test_other")
     with pytest.raises(AssertionError, match="is missing"):
         _helpers.assert_matches_golden(_arrays(), goldens / "other.hdf5", source="synthetic", seed=7)
+
+
+# Kind (b): the batch passes through about eight FFT-length reductions (the
+# Welch estimate, whitening forward and back, SNR scaling), each ~log2(N).
+SEEDED_BATCH_SAMPLES = 1024
+SEEDED_BATCH_C = 8 * np.log2(SEEDED_BATCH_SAMPLES)
+
+
+def test_seeded_dataset_batch_matches_its_golden():
+    """A seeded white-noise batch with one WNB injection, as blessed."""
+    seed = 2026
+    dataset = gf.Dataset(
+        noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]),
+        sample_rate_hertz=float(SEEDED_BATCH_SAMPLES),
+        onsource_duration_seconds=1.0,
+        offsource_duration_seconds=4.0,
+        crop_duration_seconds=0.5,
+        num_examples_per_batch=2,
+        waveform_generators=[gf.WNBGenerator(
+            scaling_method=gf.ScalingMethod(
+                value=gf.Distribution(min_=8.0, max_=12.0, type_=gf.DistributionType.UNIFORM),
+                type_=gf.ScalingTypes.SNR,
+            ),
+            network=[gf.IFO.L1],
+            duration_seconds=0.2,
+            min_frequency_hertz=40.0,
+            max_frequency_hertz=300.0,
+        )],
+        input_variables=[
+            gf.ReturnVariables.WHITENED_ONSOURCE,
+            gf.ReturnVariables.INJECTIONS,
+            gf.ScalingTypes.SNR,
+        ],
+        seed=seed,
+        group="train",
+    )
+    inputs, _ = dataset[0]
+    arrays = {name: np.asarray(value) for name, value in inputs.items()}
+    gf.tests.assert_matches_golden(
+        arrays, gf.tests.GOLDENS / "seeded_dataset_batch.hdf5",
+        c=SEEDED_BATCH_C, source="synthetic", seed=seed,
+    )
