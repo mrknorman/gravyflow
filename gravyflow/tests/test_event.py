@@ -170,7 +170,7 @@ class TestEventsWithParams:
 
 
 class TestEventCatalogueParameters:
-    """The cached event list carries the parameter-estimation columns (format 3)."""
+    """The cached event list carries the parameter-estimation columns and mass bounds (format 4)."""
 
     def test_columns_are_fetched_cached_and_read_back(self, monkeypatch):
         from astropy.table import Table
@@ -186,10 +186,38 @@ class TestEventCatalogueParameters:
         fetched = event_module.get_event_catalogue(use_cache=False)
         monkeypatch.setattr(EventTable, "fetch_open_data", _refuse_table_fetch)
         cached = event_module.get_event_catalogue()
-        assert event_module.event_catalogue_cache_path().name == "event_catalogue_v3.json"
+        assert event_module.event_catalogue_cache_path().name == "event_catalogue_v4.json"
         for catalogue in (fetched, cached):
             assert catalogue["mass_1_source"][0] == 35.6 and catalogue["mass_2_source"][0] == 30.6
             assert catalogue["luminosity_distance"][0] == 440.0 and catalogue["p_astro"][0] == 1.0
+
+    def test_an_event_whose_mass_interval_crosses_the_threshold_is_ambiguous(self, monkeypatch):
+        """
+        The 90% bounds of each component's source mass are fetched and cached, and an
+        event is ``mass_ambiguous`` where either component's interval crosses 3 solar
+        masses (GW200210_092254: m2 2.83 -0.42 +0.47); its type still follows the
+        medians. Without bounds an event is not called ambiguous.
+        """
+        from astropy.table import Table
+        from gwosc import api as gwosc_api
+
+        names = ("commonName", "GPS", "chirp_mass_source", "mass_1_source", "mass_1_source_lower",
+                 "mass_1_source_upper", "mass_2_source", "mass_2_source_lower", "mass_2_source_upper")
+        table = Table(rows=[
+            ("GW150914", 1126259462.4, 28.6, 35.6, -3.1, 4.7, 30.6, -4.4, 3.0),
+            ("GW200210_092254", 1265361792.9, 6.56, 24.1, -4.6, 7.5, 2.83, -0.42, 0.47),
+        ], names=names)
+        monkeypatch.setattr(gwosc_api, "fetch_cataloglist_json",
+                            lambda *args, **kwargs: {"GWTC-3-confident": {}})
+        monkeypatch.setattr(EventTable, "fetch_open_data", lambda catalog, *args, **kwargs: table)
+        event_module.get_event_catalogue(use_cache=False)
+        monkeypatch.setattr(EventTable, "fetch_open_data", _refuse_table_fetch)
+        events = {e["name"]: e for e in event_module.get_events_with_params()}
+        assert events["GW150914"]["mass_ambiguous"] is False
+        assert events["GW200210_092254"]["mass_ambiguous"] is True
+        assert event_module.source_type_from_masses(events["GW200210_092254"]["mass1"],
+                                                    events["GW200210_092254"]["mass2"]) == gf.SourceType.NSBH
+        assert event_module.mass_ambiguous(35.6, np.nan, np.nan, 2.9, np.nan, np.nan) is False
 
 
 class TestCatalogMappings:

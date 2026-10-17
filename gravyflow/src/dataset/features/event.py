@@ -56,6 +56,21 @@ def source_type_from_masses(mass1: float, mass2: float) -> SourceType:
     neutron_stars = int(mass1 < NEUTRON_STAR_MAX_MASS) + int(mass2 < NEUTRON_STAR_MAX_MASS)
     return (SourceType.BBH, SourceType.NSBH, SourceType.BNS)[neutron_stars]
 
+
+def mass_ambiguous(mass1: float, mass1_lower: float, mass1_upper: float,
+                   mass2: float, mass2_lower: float, mass2_upper: float) -> bool:
+    """
+    Whether a binary's type is uncertain: either component's 90% credible interval
+    of source-frame mass, its median less ``lower`` to its median plus ``upper`` (the
+    catalogue's offsets, of either sign), crosses ``NEUTRON_STAR_MAX_MASS``. A
+    component without bounds is not called ambiguous.
+    """
+    for median, lower, upper in ((mass1, mass1_lower, mass1_upper), (mass2, mass2_lower, mass2_upper)):
+        low, high = median - abs(lower), median + abs(upper)
+        if np.isfinite(low) and np.isfinite(high) and low < NEUTRON_STAR_MAX_MASS < high:
+            return True
+    return False
+
 # Catalog mappings by event type
 CONFIDENT_CATALOGS = [
     "GWTC",
@@ -90,14 +105,19 @@ EVENT_VETO_PADDING_SECONDS = 2.0
 UNKNOWN_EVENT_CHIRP_MASS_SOLAR = 0.87
 
 #: Version of the cached event table's format; bumping it re-fetches every cache.
-#: 3 added the parameter-estimation columns (``EVENT_PARAMETER_COLUMNS``).
-_EVENT_CATALOGUE_FORMAT = 3
+#: 3 added the parameter-estimation columns (``EVENT_PARAMETER_COLUMNS``); 4 the 90%
+#: bounds of the component masses.
+_EVENT_CATALOGUE_FORMAT = 4
 
 #: Parameter-estimation columns the event list carries, as GWOSC names them (NaN
 #: where a catalogue gives none), and the keys ``get_events_with_params`` gives them.
 EVENT_PARAMETER_COLUMNS = {
     "mass_1_source": "mass1",
+    "mass_1_source_lower": "mass1_lower",
+    "mass_1_source_upper": "mass1_upper",
     "mass_2_source": "mass2",
+    "mass_2_source_lower": "mass2_lower",
+    "mass_2_source_upper": "mass2_upper",
     "luminosity_distance": "distance",
     "p_astro": "p_astro",
 }
@@ -344,8 +364,10 @@ def get_events_with_params(
 
     Returns:
         One dict per event, sorted by GPS time, with keys name, gps, catalog,
-        observing_run and the parameter estimates mass1, mass2, distance and p_astro
-        (NaN where the catalogue gives none). An event listed by several catalogues
+        observing_run, the parameter estimates mass1, mass2, distance and p_astro
+        (NaN where the catalogue gives none), the masses' 90% bounds (mass1_lower,
+        mass1_upper, mass2_lower, mass2_upper, offsets from the medians) and
+        ``mass_ambiguous`` (``mass_ambiguous``). An event listed by several catalogues
         is given once, by its catalogue name (``commonName``), from the first
         catalogue in the order above: one physical event is one record, though its
         catalogues' GPS times differ.
@@ -380,6 +402,8 @@ def get_events_with_params(
                 continue
             if event["name"] not in seen:
                 seen.add(event["name"])
+                event["mass_ambiguous"] = mass_ambiguous(*(event[key] for key in (
+                    "mass1", "mass1_lower", "mass1_upper", "mass2", "mass2_lower", "mass2_upper")))
                 events.append(event)
 
     events.sort(key=lambda event: event["gps"])
