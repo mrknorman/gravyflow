@@ -5,7 +5,8 @@ The chirp-time helpers of the CBC generator.
 (Newtonian) chirp relation, solved for the frequency and for the time to merger.
 They must give finite values in float32 (64-bit types disabled), the precision
 every gravyflow array has outside waveform generation, equal to their float64
-values to float32's precision.
+values to float32's precision; and in float64 they must be LALSimulation's
+Newtonian chirp time.
 """
 import os
 
@@ -13,6 +14,8 @@ os.environ["KERAS_BACKEND"] = "jax"
 
 import jax
 import jax.numpy as jnp
+import lal
+import lalsimulation
 import numpy as np
 import pytest
 
@@ -63,6 +66,36 @@ def test_float32_values_are_the_float64_values_to_float32_precision():
     reference_f_min, reference_duration = _float64_values()
     np.testing.assert_allclose(f_min, reference_f_min, rtol=FREQUENCY_ULPS * eps)
     np.testing.assert_allclose(duration, reference_duration, rtol=DURATION_ULPS * eps)
+
+
+def _lal_newtonian_chirp_time(mass_1, mass_2, frequency):
+    """LALSimulation's time to merger from ``frequency`` at leading (0PN) order, in seconds."""
+    return np.array([
+        lalsimulation.SimInspiralTaylorF2ReducedSpinChirpTime(
+            float(f), float(m1) * lal.MSUN_SI, float(m2) * lal.MSUN_SI, 0.0, 0
+        )
+        for m1, m2, f in zip(mass_1, mass_2, frequency)
+    ])
+
+
+def test_the_helpers_are_lal_newtonian_chirp_time():
+    """
+    The duration is LAL's 0PN chirp time at the frequency, and the frequency is
+    the one at which LAL's 0PN chirp time is the duration.
+    """
+    f_min, duration = _float64_values()
+    assert np.all(f_min > 1.0), f_min  # above the 1 Hz floor, so the relation holds
+    # Reference: LAL evaluates the same closed form in float64, so the budget is
+    # both sides' float64 rounding, DURATION_ULPS each.
+    rtol = 2 * DURATION_ULPS * np.finfo(np.float64).eps
+    np.testing.assert_allclose(
+        duration, _lal_newtonian_chirp_time(MASS_1, MASS_2, FREQUENCIES), rtol=rtol,
+        err_msg="calc_duration_from_f_min against LAL's Newtonian chirp time",
+    )
+    np.testing.assert_allclose(
+        _lal_newtonian_chirp_time(MASS_1, MASS_2, f_min), DURATIONS, rtol=rtol,
+        err_msg="LAL's Newtonian chirp time at calc_minimum_frequency's frequency",
+    )
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
