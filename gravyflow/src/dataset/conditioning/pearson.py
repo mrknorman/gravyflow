@@ -7,7 +7,12 @@ import jax
 
 @jax.jit
 def pearson(x, y):
-    # x, y: (Batch, Time)
+    """
+    The Pearson correlation of each row of x with the same row of y, (..., Time)
+    -> (...), with no regulariser: proportional rows give exactly +1 or -1 at
+    any scale whose sums of squares float32 holds (rolling_pearson divides by
+    each row's peak first). A row with no variance correlates at 0.
+    """
 
     mean_x = ops.mean(x, axis=-1, keepdims=True)
     mean_y = ops.mean(y, axis=-1, keepdims=True)
@@ -19,7 +24,8 @@ def pearson(x, y):
 
     denominator = ops.sqrt(var_x * var_y)
 
-    return numerator / (denominator + 1e-5)
+    defined = denominator > 0
+    return ops.where(defined, numerator / ops.where(defined, denominator, 1.0), 0.0)
 
 
 def max_lag_samples(max_lag_seconds: float, sample_rate_hertz: float) -> int:

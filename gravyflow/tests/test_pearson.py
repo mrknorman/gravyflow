@@ -10,17 +10,13 @@ def pearson_tolerance(num_samples):
     return representation_tolerance(np.float32, 1.0, num_samples)
 
 
-def test_pearson_basic():
-    # Perfectly correlated
-    x = ops.convert_to_tensor([[1.0, 2.0, 3.0]])
-    y = ops.convert_to_tensor([[2.0, 4.0, 6.0]])
-    corr = gf_pearson.pearson(x, y)
-    np.testing.assert_allclose(corr, [1.0], atol=1e-5)
-    
-    # Anti-correlated
-    y_neg = ops.convert_to_tensor([[-1.0, -2.0, -3.0]])
-    corr_neg = gf_pearson.pearson(x, y_neg)
-    np.testing.assert_allclose(corr_neg, [-1.0], atol=1e-5)
+@pytest.mark.parametrize("scale", [1.0, 1e-3])
+def test_pearson_basic(scale):
+    """Rows proportional to each other correlate exactly +1 or -1, at any scale."""
+    x = ops.convert_to_tensor(np.array([[1.0, 2.0, 3.0]], np.float32) * scale)
+    y = ops.convert_to_tensor(np.array([[2.0, 4.0, 6.0]], np.float32) * scale)
+    np.testing.assert_allclose(gf_pearson.pearson(x, y), [1.0], rtol=0.0, atol=pearson_tolerance(3))
+    np.testing.assert_allclose(gf_pearson.pearson(x, -x), [-1.0], rtol=0.0, atol=pearson_tolerance(3))
 
 
 def test_rolling_pearson_lags_are_symmetric_and_inclusive():
