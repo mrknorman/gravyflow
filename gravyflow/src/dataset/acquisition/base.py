@@ -37,8 +37,8 @@ from gravyflow.src.utils.gps import as_gps_times
 from gravyflow.src.utils.shapes import ShapeEnforcer
 from .gwosc_data import (
     GWOSC_RUNS, DEFAULT_GWOSC_FLAGS, UpsamplingRefused, coalesce_segments,
-    get_gwosc_segments, gwosc_sample_rate_hertz, strain_download_cache, subtract_segments,
-    user_cache_dir, warn_of_moved_cache,
+    get_gwosc_segments, gwosc_runs_overlapping, gwosc_sample_rate_hertz, strain_download_cache,
+    subtract_segments, user_cache_dir, warn_of_moved_cache,
 )
 
 
@@ -1020,11 +1020,9 @@ class BaseDataObtainer(ABC):
                     "from the public GWOSC timeline: use GWOSC flags such as 'DATA', "
                     "'BURST_CAT1', 'BURST_CAT2', 'CBC_CAT1' or 'CBC_CAT2'."
                 )
-        gwosc_runs = [
-            name for name, run in GWOSC_RUNS.items()
-            if run["gps_start"] < stop and run["gps_end"] > start
-        ]
-        return get_gwosc_segments(ifo.name, gwosc_runs, flags, start=start, end=stop)
+        return get_gwosc_segments(
+            ifo.name, gwosc_runs_overlapping(start, stop), flags, start=start, end=stop
+        )
 
     def get_all_segment_times(
         self,

@@ -171,6 +171,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             glitch_types=NOISE_VETO_GLITCH_TYPES,
             min_ml_confidence=NOISE_VETO_MIN_ML_CONFIDENCE,
             exclude_events=False,
+            exclude_hardware_injections=False,
         )
         if not catalogues:
             return np.empty((0, 2))

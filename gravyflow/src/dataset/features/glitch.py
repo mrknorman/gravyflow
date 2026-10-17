@@ -19,6 +19,7 @@ power around a glitch reaches beyond its Omicron extent by at most 0.44 s for 99
 of glitches; 99.88% lie within 1 s and the 99.9th percentile is 1.02 s. The only
 glitches beyond 1.25 s were Extremely_Loud, at up to 2.5 s.
 """
+from collections import Counter
 from enum import IntEnum
 from typing import Dict, List, Optional, Union
 
@@ -32,7 +33,7 @@ from gravyflow.src.dataset.conditioning.detector import IFO
 from gravyflow.src.dataset.features import gravity_spy
 from gravyflow.src.dataset.features import event as event_module
 from gravyflow.src.dataset.features.gravity_spy import DEFAULT_MIN_ML_CONFIDENCE
-from gravyflow.src.dataset.acquisition.gwosc_data import coalesce_segments
+from gravyflow.src.dataset.acquisition.gwosc_data import coalesce_segments, hardware_injection_gaps
 
 #: Seconds added on each side of a glitch's Omicron extent when it is vetoed from noise
 #: (see the module docstring for the measurement behind it).
@@ -159,6 +160,7 @@ def get_glitch_catalogue(
     end_gps_time: float = None,
     min_ml_confidence: float = DEFAULT_MIN_ML_CONFIDENCE,
     exclude_events: bool = True,
+    exclude_hardware_injections: bool = True,
 ) -> Dict[str, np.ndarray]:
     """
     Glitches of one detector with their Gravity Spy metadata.
@@ -171,6 +173,10 @@ def get_glitch_catalogue(
         min_ml_confidence: Keep classifications with at least this confidence.
         exclude_events: Drop entries whose extent overlaps a catalogued GW event's
             veto segment (confident or marginal), so no real event is ever a glitch.
+        exclude_hardware_injections: Drop entries whose extent overlaps a hardware-
+            injection gap (``gwosc_data.hardware_injection_gaps``), whatever their
+            class, and log how many (the owner's ruling: no hardware injections).
+            The noise vetoes keep them, so noise is vetoed around every entry.
 
     Returns:
         Arrays sorted by time: ``event_time`` (peak GPS), ``start_time``, ``duration``,
@@ -193,6 +199,17 @@ def get_glitch_catalogue(
     if exclude_events and len(labels) > 0:
         keep = ~overlaps_segments(glitch_extents(rows), event_module.get_event_veto_segments())
         rows = {key: value[keep] for key, value in rows.items()}
+    if exclude_hardware_injections and len(rows["label"]) > 0:
+        gaps = hardware_injection_gaps(ifo.name, start_gps_time, end_gps_time)
+        injected = overlaps_segments(glitch_extents(rows), gaps)
+        if np.any(injected):
+            by_class = Counter(GlitchType(int(label)).name for label in rows["label"][injected])
+            logger.info(
+                f"{ifo.name} GPS {start_gps_time}-{end_gps_time}: {int(np.sum(injected))} of "
+                f"{len(injected)} Gravity Spy entries lie in hardware-injection gaps and are "
+                f"dropped ({dict(by_class.most_common())})."
+            )
+        rows = {key: value[~injected] for key, value in rows.items()}
     return rows
 
 

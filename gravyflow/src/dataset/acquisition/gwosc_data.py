@@ -396,3 +396,25 @@ def get_gwosc_segments(
         ]])
         segments = intersect_segments(segments, bound)
     return segments
+
+
+def gwosc_runs_overlapping(start: float, end: float) -> List[str]:
+    """The names of the GWOSC runs (``GWOSC_RUNS``) that overlap [start, end)."""
+    return [
+        name for name, run in GWOSC_RUNS.items()
+        if run["gps_start"] < end and run["gps_end"] > start
+    ]
+
+
+def hardware_injection_gaps(ifo_name: str, start: float, end: float) -> np.ndarray:
+    """
+    The times in [start, end) when a detector has data (``DATA``) but fails one of
+    ``GWOSC_NO_HW_INJECTION_FLAGS``: its CBC, burst, stochastic and detchar
+    hardware-injection gaps, as a sorted, coalesced (N, 2) array.
+    """
+    runs = gwosc_runs_overlapping(start, end)
+    data = get_gwosc_segments(ifo_name, runs, GWOSC_DATA_FLAGS, start=start, end=end)
+    clean = get_gwosc_segments(
+        ifo_name, runs, GWOSC_DATA_FLAGS + GWOSC_NO_HW_INJECTION_FLAGS, start=start, end=end
+    )
+    return subtract_segments(data, clean)

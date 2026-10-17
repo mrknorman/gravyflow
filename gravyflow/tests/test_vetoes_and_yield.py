@@ -383,6 +383,43 @@ class TestHardwareInjections:
         assert _overlap(segments, [injection]) == 0.0
         assert _overlap(segments, [[a, injection[0]]]) == 100.0
 
+    def test_glitches_in_injection_gaps_are_dropped_from_every_class_and_counted(
+            self, offline_public_sources, monkeypatch, caplog):
+        """
+        The owner's ruling: Gravity Spy entries inside any NO_CBC, NO_BURST, NO_STOCH
+        or NO_DETCHAR hardware-injection gap are dropped from every class, and
+        counted. The noise vetoes still veto them.
+        """
+        from gravyflow.src.dataset.features.glitch import glitch_extents
+
+        # Every entry, before any timeline is read (and cached).
+        every = gf.get_glitch_catalogue(gf.IFO.H1, gf.ObservingRun.O3, exclude_hardware_injections=False)
+        data = public._fixture_intersection("O3a_4KHZ_R1", "H1", ["DATA"])
+        inside = [i for i, t in enumerate(every["event_time"]) if _inside([t], data)[0]]
+        first = inside[0]
+        second = next(i for i in inside if every["label"][i] != every["label"][first])
+        entry = public.TIMELINE["O3a_4KHZ_R1"]
+        for index, flag in ((first, "H1_NO_CBC_HW_INJ"), (second, "H1_NO_STOCH_HW_INJ")):
+            (extent,) = glitch_extents({key: value[[index]] for key, value in every.items()})
+            gap = [[extent[0] - 0.01, extent[1] + 0.01]]
+            monkeypatch.setitem(entry, flag, gwosc_data.subtract_segments(entry[flag], gap).tolist())
+
+        with caplog.at_level("INFO"):
+            kept = gf.get_glitch_catalogue(gf.IFO.H1, gf.ObservingRun.O3)
+        dropped = sorted(set(every["event_time"]) - set(kept["event_time"]))
+        assert {every["event_time"][first], every["event_time"][second]} <= set(dropped)
+        assert f"{len(dropped)} of {len(every['event_time'])} Gravity Spy entries" in caplog.text
+
+        # From every class: asked for by class, each is dropped too.
+        for index in (first, second):
+            glitch_type = gf.GlitchType(int(every["label"][index]))
+            by_class = gf.get_glitch_catalogue(gf.IFO.H1, gf.ObservingRun.O3, glitch_types=[glitch_type])
+            assert every["event_time"][index] not in by_class["event_time"]
+
+        # Noise is vetoed around every entry, injection gap or not.
+        vetoed = gf.get_glitch_catalogue(gf.IFO.H1, gf.ObservingRun.O3, exclude_hardware_injections=False)
+        assert set(dropped) <= set(vetoed["event_time"])
+
 
 # =============================================================================
 # SEGMENT YIELD
