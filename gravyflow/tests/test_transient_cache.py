@@ -3,7 +3,7 @@ Test Suite for Transient Cache Architecture
 
 Tests the TransientCache system, which provides separate cache files for 
 glitches and events. Both use the same underlying TransientCache class,
-but are stored in distinct files (glitch_cache.h5, event_cache.h5).
+but are stored in distinct files (glitch_cache_v3.h5, event_cache_v3.h5).
 """
 
 import pytest
@@ -13,7 +13,9 @@ from pathlib import Path
 import tempfile
 
 import gravyflow as gf
-from gravyflow.src.dataset.features.glitch_cache import TransientCache, generate_transient_cache_path
+from gravyflow.src.dataset.features.glitch_cache import (
+    TRANSIENT_CACHE_FORMAT, TransientCache, generate_transient_cache_path,
+)
 from gravyflow.src.dataset.config import TransientDefaults
 
 # Use central config constants
@@ -242,60 +244,29 @@ class TestCachePersistence:
 
 
 class TestCachePathGeneration:
-    """Tests for cache path generation with different prefixes."""
-    
+    """Cache paths: one file per prefix, named with the cache format."""
+
     def test_default_prefix_is_transient(self, temp_cache_dir):
         """Default prefix should be 'transient'."""
         path = generate_transient_cache_path(data_directory=temp_cache_dir)
-        assert path.name == "transient_cache.h5"
-    
-    def test_glitch_prefix_generates_glitch_path(self, temp_cache_dir):
-        """Glitch prefix should generate glitch_cache.h5."""
-        path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="glitch")
-        assert path.name == "glitch_cache.h5"
-    
-    def test_event_prefix_generates_event_path(self, temp_cache_dir):
-        """Event prefix should generate event_cache.h5."""
-        path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="event")
-        assert path.name == "event_cache.h5"
-    
-    def test_different_prefixes_generate_different_paths(self, temp_cache_dir):
-        """Different prefixes should generate different paths."""
+        assert path.name == f"transient_cache_v{TRANSIENT_CACHE_FORMAT}.h5"
+
+    def test_each_prefix_has_its_own_file_named_with_the_format(self, temp_cache_dir):
         glitch_path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="glitch")
         event_path = generate_transient_cache_path(data_directory=temp_cache_dir, prefix="event")
-        assert glitch_path != event_path
-        assert glitch_path.name == "glitch_cache.h5"
-        assert event_path.name == "event_cache.h5"
-    
+        assert glitch_path.name == f"glitch_cache_v{TRANSIENT_CACHE_FORMAT}.h5"
+        assert event_path.name == f"event_cache_v{TRANSIENT_CACHE_FORMAT}.h5"
+
     def test_default_directory_is_the_user_cache(self, monkeypatch, tmp_path):
         """The default is the one user cache root: GRAVYFLOW_CACHE_DIR, else ~/.gravyflow/cache."""
+        name = f"glitch_cache_v{TRANSIENT_CACHE_FORMAT}.h5"
         monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path / "override"))
-        assert generate_transient_cache_path(prefix="glitch") == tmp_path / "override" / "glitch_cache.h5"
+        assert generate_transient_cache_path(prefix="glitch") == tmp_path / "override" / name
 
         monkeypatch.delenv("GRAVYFLOW_CACHE_DIR")
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        path = generate_transient_cache_path(prefix="event")
-        assert path == tmp_path / "home" / ".gravyflow" / "cache" / "event_cache.h5"
-
-    def test_a_cache_left_where_the_override_was_ignored_is_named_once(self, monkeypatch, tmp_path):
-        """
-        Before the override was honoured, the glitch cache stayed in ~/.gravyflow/cache:
-        it is named, once, with where to move it, until the new place has a cache.
-        """
-        import warnings
-
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path / "override"))
-        legacy = tmp_path / "home" / ".gravyflow" / "cache" / "glitch_cache.h5"
-        legacy.parent.mkdir(parents=True)
-        legacy.write_bytes(b"")
-        with pytest.warns(UserWarning, match="no longer reads") as record:
-            path = generate_transient_cache_path(prefix="glitch")
-        assert str(legacy) in str(record[0].message) and str(path) in str(record[0].message)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            generate_transient_cache_path(prefix="glitch")
-            generate_transient_cache_path(prefix="event")  # no event cache was left behind
+        path = generate_transient_cache_path(prefix="glitch")
+        assert path == tmp_path / "home" / ".gravyflow" / "cache" / name
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ from .base import (
     AcquisitionMode, SamplingMode, ObservingRun
 )
 from gravyflow.src.utils.numerics import ensure_list
-from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys, as_gps_times
+from gravyflow.src.utils.gps import as_gps_times
 from gravyflow.src.dataset.features.transient_index import TransientIndex
 from .transient_segment import TransientSegment
 from .gwosc_data import within_segments
@@ -117,8 +117,12 @@ class TransientDataObtainer(BaseDataObtainer):
             "_feature_index": None,
             # TransientSegment objects (replaces raw numpy segments)
             "transient_segments": [],
-            # Records not served, by reason (see _reject)
+            # Records not served, by reason: a census of the split (_passing_data_quality,
+            # _reject_for_no_data)
             "_rejections": Counter(),
+            # The exact GPS times of records found without a requested detector's
+            # strain: not served, nor fetched again, while this state stands
+            "_unavailable": set(),
             "_cache_hit_count": 0,
             "_cache_miss_count": 0,
             "_last_log_count": 0,
@@ -130,19 +134,27 @@ class TransientDataObtainer(BaseDataObtainer):
     REJECTED_BY_DATA_QUALITY = "data quality"
     REJECTED_FOR_NO_DATA = "no data"
 
-    def _reject(self, segment: TransientSegment, reason: str) -> None:
-        """Count a record not served, and say why: it is never zero-filled."""
-        self._rejections[reason] += 1
+    def _reject_for_no_data(self, segment: TransientSegment) -> None:
+        """
+        A requested detector has no strain for ``segment``: it is never zero-filled.
+        It is counted once, as data quality is, and neither served nor fetched again
+        while this split's served state stands (``_unavailable``); a later run fetches
+        it again, so a failed fetch never persists as absence.
+        """
+        if segment.transient_gps_time in self._unavailable:
+            return
+        self._unavailable.add(segment.transient_gps_time)
+        self._rejections[self.REJECTED_FOR_NO_DATA] = len(self._unavailable)
         logger.info(
-            f"Transient at GPS {segment.transient_gps_time:.3f} not served ({reason}); "
-            f"rejected so far: {dict(self._rejections)}"
+            f"Transient at GPS {segment.transient_gps_time:.3f} not served (no data); "
+            f"rejected: {dict(self._rejections)}"
         )
 
     def get_acquisition_stats(self) -> Dict[str, Any]:
         """
-        As for noise, with ``rejections``: the records not served, by reason
-        (``REJECTED_BY_DATA_QUALITY``, ``REJECTED_FOR_NO_DATA``); ``dropped_segments``
-        is their total.
+        As for noise, with ``rejections``: the records of the split not served, by
+        reason (``REJECTED_BY_DATA_QUALITY``, ``REJECTED_FOR_NO_DATA``), each record
+        counted once however many passes meet it; ``dropped_segments`` is their total.
         """
         return {
             **super().get_acquisition_stats(),
@@ -309,122 +321,43 @@ class TransientDataObtainer(BaseDataObtainer):
         onsource_duration: float,
         offsource_duration: float,
         scale_factor: float = 1.0,
-        gps_key: Optional[int] = None,  # NEW: Pass key directly to avoid conversion
-        target_ifos: Optional[List[str]] = None  # NEW: Requested IFOs for subset selection
+        target_ifos: Optional[List[str]] = None,
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
         """
         Attempt to retrieve a sample from cache (chunked -> disk), as windows of the
         request (``TransientCache.read_windows``).
-        
+
         Args:
-            gps_key: Optional GPS key (preferred - no conversion needed)
-            gps_time: GPS time (fallback if key not provided)
+            gps_time: The transient's exact GPS time, its row's identity
             target_ifos: List of IFO names to retrieve (must be present in cache)
-            
+
         Returns:
             (onsource, offsource, source) where source is 'chunk', 'disk', or 'miss'
         """
-        # Compute key if not provided (backward compatibility)
-        if gps_key is None:
-            gps_key = gps_to_key(gps_time)
-        
+        idx = cache.index_of(gps_time)
+        if idx is None:
+            return None, None, 'miss'
+
         # Try chunked memory cache first (new fast path)
         # Chunks hold the request's windows already (_load_chunk_around_index).
-        if cache._chunk_in_memory and cache.has_key(gps_key):
-            idx = cache._gps_index[gps_key]
+        if cache._chunk_in_memory:
             result = cache.get_from_chunk(idx, target_ifos=target_ifos)
             if result is not None:
                 onsource, offsource, _, _ = result
                 return onsource * scale_factor, offsource * scale_factor, 'chunk'
-        
-        # Try disk cache (use key-based lookup)
-        if cache.has_key(gps_key):
-            # Resolve index directly
-            idx = cache._gps_index[gps_key]
-            
-            try:
-                ons, off, _, _ = cache.get_batch(
-                    np.array([idx]),
-                    sample_rate_hertz=sample_rate_hertz,
-                    onsource_duration=onsource_duration,
-                    offsource_duration=offsource_duration,
-                    target_ifos=target_ifos
-                )
-                return ons[0] * scale_factor, off[0] * scale_factor, 'disk'
-            except (ValueError, KeyError):
-                # Request parameters incompatible or IFO missing
-                return None, None, 'miss'
-        
-        # Cache miss
-        return None, None, 'miss'
-    
-    def _get_batch_from_cache(
-        self,
-        cache,
-        gps_keys: np.ndarray,
-        sample_rate_hertz: float,
-        onsource_duration: float,
-        offsource_duration: float,
-        scale_factor: float = 1.0,
-        target_ifos: Optional[List[str]] = None
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Batch cache lookup - reads multiple samples in a single HDF5 operation.
-        
-        Much more efficient than repeated single-sample lookups.
-        
-        Args:
-            gps_keys: Array of GPS keys to look up
-            sample_rate_hertz: Target sample rate
-            onsource_duration: Target onsource duration
-            offsource_duration: Target offsource duration  
-            scale_factor: Amplitude scale factor
-            target_ifos: List of IFO names to filter
-            
-        Returns:
-            Tuple of (onsource, offsource, found_mask, cache_indices)
-            where found_mask[i] is True if gps_keys[i] was found
-        """
-        n_keys = len(gps_keys)
-        
-        # Build index if needed and find which keys exist
-        with cache._gps_lock:
-            if cache._gps_index is None:
-                cache._gps_index = cache._build_gps_index()
-        
-        # Find indices for keys that exist
-        cache_indices = np.full(n_keys, -1, dtype=np.int32)
-        found_mask = np.zeros(n_keys, dtype=bool)
-        
-        for i, key in enumerate(gps_keys):
-            if key in cache._gps_index:
-                cache_indices[i] = cache._gps_index[key]
-                found_mask[i] = True
-        
-        # If nothing found, return empty
-        if not found_mask.any():
-            return np.array([]), np.array([]), found_mask, cache_indices
-        
-        # Get indices that were found
-        valid_cache_indices = cache_indices[found_mask]
-        
-        # Use chunked mode if enabled (faster for in-chunk samples)
-        if cache._chunk_in_memory:
-            ons, off, _, _, chunk_found = cache.get_batch_from_chunk(
-                valid_cache_indices,
-                target_ifos=target_ifos
-            )
-        else:
-            # Direct batch read from disk
+
+        try:
             ons, off, _, _ = cache.get_batch(
-                valid_cache_indices,
+                np.array([idx]),
                 sample_rate_hertz=sample_rate_hertz,
                 onsource_duration=onsource_duration,
                 offsource_duration=offsource_duration,
                 target_ifos=target_ifos
             )
-        
-        return ons * scale_factor, off * scale_factor, found_mask, cache_indices
+            return ons[0] * scale_factor, off[0] * scale_factor, 'disk'
+        except (ValueError, KeyError):
+            # Request parameters incompatible or IFO missing
+            return None, None, 'miss'
 
     def _prepare_batch(
         self,
@@ -936,10 +869,11 @@ class TransientDataObtainer(BaseDataObtainer):
             segment = self.transient_segments[miss_idx]
             channels = downloaded_segments.get(miss_idx)
             if channels is None:
-                self._reject(segment, self.REJECTED_FOR_NO_DATA)
+                self._reject_for_no_data(segment)
                 continue
 
-            # The stored windows, a channel without finite strain stored as NaN.
+            # The stored windows, a channel without finite strain stored as NaN: not
+            # held, so a request naming its detector fetches it again (_fill_row).
             onsource_full, offsource_full = self._extract_feature_event(
                 channels,
                 download_sample_rate,
@@ -947,12 +881,6 @@ class TransientDataObtainer(BaseDataObtainer):
                 num_cache_offsource,
                 segment.transient_gps_time,
             )
-            if not (np.all(np.isfinite(onsource_full[output_indices]))
-                    and np.all(np.isfinite(offsource_full[output_indices]))):
-                # Not cached, so a later request fetches it again.
-                self._reject(segment, self.REJECTED_FOR_NO_DATA)
-                continue
-            
             # Get label and append to cache (buffered)
             label = segment.kind.value if segment.is_glitch else -1
             
@@ -974,15 +902,19 @@ class TransientDataObtainer(BaseDataObtainer):
             
             try:
                 cache.append_single(
-                    np.array(onsource_full), 
-                    np.array(offsource_full), 
+                    np.array(onsource_full),
+                    np.array(offsource_full),
                     segment.transient_gps_time,
                     label,
-                    gps_key=segment.gps_key,
                     metadata=metadata
                 )
             except Exception as e:
                 logger.warning(f"Failed to append sample to cache (GPS={segment.transient_gps_time:.3f}): {e}")
+
+            if not (np.all(np.isfinite(onsource_full[output_indices]))
+                    and np.all(np.isfinite(offsource_full[output_indices]))):
+                self._reject_for_no_data(segment)
+                continue
             
             # This request's windows, as every cache read takes them
             onsource_cropped, offsource_cropped = TransientCache.read_windows(
@@ -1257,6 +1189,8 @@ class TransientDataObtainer(BaseDataObtainer):
                     })
                 # Get TransientSegment (has GPS key and times)
                 segment = self.transient_segments[seg_idx]
+                if segment.transient_gps_time in self._unavailable:
+                    continue
                 
                 # Select appropriate cache
                 active_cache = event_cache if segment.is_event else glitch_cache
@@ -1274,15 +1208,13 @@ class TransientDataObtainer(BaseDataObtainer):
                         total_onsource_duration_seconds,
                         offsource_duration_seconds,
                         scale_factor,
-                        gps_key=segment.gps_key,  # Pass key - eliminates float→key conversion!
                         target_ifos=[i.name for i in ifos]  # Select specific IFOs from cache
                     )
-                
-                if source != 'miss' and onsource is not None:
-                    if not (np.all(np.isfinite(onsource)) and np.all(np.isfinite(offsource))):
-                        # Stored without a requested detector's strain: never filled.
-                        self._reject(segment, self.REJECTED_FOR_NO_DATA)
-                        continue
+
+                # A row without a requested detector's strain does not hold it (a
+                # fetch failed, or it was never requested): a miss, fetched again.
+                if (source != 'miss' and onsource is not None
+                        and np.all(np.isfinite(onsource)) and np.all(np.isfinite(offsource))):
                     # Cache hit (chunk or disk) with valid data
                     batch_subarrays.append(onsource)
                     batch_backgrounds.append(offsource)
@@ -1303,7 +1235,7 @@ class TransientDataObtainer(BaseDataObtainer):
                         batch_segments = []
                     continue
                 
-                # Cache miss OR failed lookup (null data) - need to download
+                # Cache miss, or a row not holding a requested detector - download
                 miss_indices.append(seg_idx)
                 self._cache_miss_count += 1
                 

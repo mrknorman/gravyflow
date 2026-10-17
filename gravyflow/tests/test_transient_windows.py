@@ -16,6 +16,7 @@ decodes to its GPS time.
 from contextlib import contextmanager
 from unittest import mock
 
+import h5py
 import numpy as np
 import pytest
 from gwpy.timeseries import TimeSeries
@@ -25,7 +26,7 @@ from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
 from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
 from gravyflow.src.dataset.features.glitch import GlitchType
-from gravyflow.src.dataset.features.glitch_cache import TransientCache
+from gravyflow.src.dataset.features.glitch_cache import TransientCache, generate_transient_cache_path
 from gravyflow.src.utils.gps import gps_to_key
 
 RV = gf.ReturnVariables
@@ -70,21 +71,22 @@ class GridFetch:
     """
     A fake GWOSC fetch: the samples of [start, end) on the absolute grid at the
     requested rate, from the first grid sample at or after ``start``, each valued
-    its GPS time minus REF. ``bad`` maps a detector name to the times whose
+    its GPS time minus ``ref``. ``bad`` maps a detector name to the times whose
     download fails (raises) or, with ``nan``, returns NaN around them.
     """
 
-    def __init__(self, bad=None, nan=False):
+    def __init__(self, bad=None, nan=False, ref=REF):
         self.calls = []
         self.bad = bad or {}
         self.nan = nan
+        self.ref = ref
 
     def __call__(self, start, end, ifo, frame_type, channel, sample_rate_hertz=None):
         self.calls.append((ifo.name, float(start), float(end)))
         rate = float(sample_rate_hertz)
         first, stop = int(np.ceil(start * rate - 1e-6)), int(np.ceil(end * rate - 1e-6))
         times = np.arange(first, stop, dtype=np.float64) / rate
-        values = times - REF
+        values = times - self.ref
         for t in self.bad.get(ifo.name, ()):
             if start <= t <= end:
                 if not self.nan:
@@ -214,14 +216,13 @@ class TestGeometry:
         order = np.argsort(np.asarray(expected[RV.TRANSIENT_GPS_TIME])[:, 0])
         on_expected = np.asarray(expected[RV.ONSOURCE])[order]
         off_expected = np.asarray(expected[RV.OFFSOURCE])[order]
-        cache = TransientCache(tmp_path / "glitch_cache.h5", mode="r")
-        keys = [gps_to_key(float(t)) for t in TIMES]
-        indices = np.array([cache._build_gps_index()[key] for key in keys])
+        cache = TransientCache(generate_transient_cache_path(tmp_path, prefix="glitch"), mode="r")
+        indices = np.array([cache.index_of(t) for t in TIMES])
         request = dict(sample_rate_hertz=RATE, onsource_duration=SPEC.total_onsource_duration_seconds,
                        offsource_duration=SPEC.offsource_duration_seconds)
         reads = {"get_batch": cache.get_batch(indices, target_ifos=["H1", "L1"], **request)[:2]}
-        by_key = [cache.get_by_key(key, **request) for key in keys]
-        reads["get_by_key"] = (np.stack([r[0] for r in by_key]), np.stack([r[1] for r in by_key]))
+        by_gps = [cache.get_by_gps(t, **request) for t in TIMES]
+        reads["get_by_gps"] = (np.stack([r[0] for r in by_gps]), np.stack([r[1] for r in by_gps]))
         cache.enable_chunked_mode(chunk_size=2, **request)
         reads["get_batch_from_chunk"] = cache.get_batch_from_chunk(indices, target_ifos=["H1", "L1"])[:2]
         chunked = [cache.get_from_chunk(int(i), target_ifos=["H1", "L1"]) for i in indices]
@@ -284,21 +285,167 @@ class TestDataQuality:
         assert reader.get_acquisition_stats()["rejections"] == {"no data": 1}
 
     @pytest.mark.parametrize("nan", [False, True], ids=["download fails", "NaN strain"])
-    def test_an_unrequested_detector_without_strain_is_stored_as_missing(self, tmp_path, nan):
+    def test_an_unrequested_detector_without_strain_is_stored_as_not_held(self, tmp_path, nan):
         with offline(GridFetch(bad={"H1": [TIMES[1]]}, nan=nan)):
             batch, reader = served(tmp_path, [gf.IFO.L1])
             assert served_times(batch) == rounded(TIMES)
             assert_never_filled(batch)
             assert reader.get_acquisition_stats()["rejections"] == {}
 
-            cache = TransientCache(tmp_path / "glitch_cache.h5", mode="r")
-            index = cache._build_gps_index()[gps_to_key(float(TIMES[1]))]
+            cache = TransientCache(generate_transient_cache_path(tmp_path, prefix="glitch"), mode="r")
+            index = cache.index_of(TIMES[1])
             onsource, offsource, _, _ = cache.get_batch(np.array([index]), target_ifos=["H1"])
             assert np.all(np.isnan(onsource)) and np.all(np.isnan(offsource)), \
                 "missing H1 strain was stored as numbers"
 
-            # Served again with H1, the record is rejected, not zero-filled.
+            # Served again with H1, still failing, the record is fetched again and
+            # rejected, never zero-filled. The cache hits are served first, so the
+            # rejection is counted by the end of the first pass.
+            reader = obtainer(tmp_path)
+            batches = reader(ifos=[gf.IFO.H1, gf.IFO.L1], group="all", seed=1,
+                             **{**WINDOW, "num_examples_per_batch": 2})
+            for _ in range(2):
+                batch = next(batches)
+                assert served_times(batch) == rounded(TIMES[[0, 2]])
+                assert_never_filled(batch)
+        assert reader.get_acquisition_stats()["rejections"] == {"no data": 1}
+
+
+def fetches_of(fetch, gps_time):
+    """The fetches whose span holds ``gps_time``."""
+    return sum(1 for _, start, end in fetch.calls if start < gps_time < end)
+
+
+def by_time(batch, key):
+    """``batch[key]`` in order of the examples' transient times."""
+    order = np.argsort(np.asarray(batch[RV.TRANSIENT_GPS_TIME])[:, 0])
+    return np.asarray(batch[key])[order]
+
+
+class TestUnavailableRecords:
+    """
+    A record found without a requested detector's strain is counted once and not
+    fetched again in that run; a detector whose fetch failed is never stored as absent.
+    """
+
+    def test_a_record_without_strain_is_counted_once_and_fetched_once(self, tmp_path):
+        with offline(GridFetch(bad={"H1": [TIMES[1]]})) as fetch:
+            reader = obtainer(tmp_path)
+            batches = reader(ifos=[gf.IFO.H1, gf.IFO.L1], group="all", seed=1,
+                             **{**WINDOW, "num_examples_per_batch": 2})
+            assert served_times(next(batches)) == rounded(TIMES[[0, 2]])
+            fetched = fetches_of(fetch, TIMES[1])
+            for _ in range(3):  # three more passes over the records
+                assert served_times(next(batches)) == rounded(TIMES[[0, 2]])
+            stats = reader.get_acquisition_stats()
+        assert fetches_of(fetch, TIMES[1]) == fetched, "the unavailable record was fetched every pass"
+        assert stats["rejections"] == {"no data": 1} and stats["dropped_segments"] == 1
+
+    def test_a_failed_fetch_of_an_unrequested_detector_is_fetched_when_requested(self, tmp_path):
+        with offline(GridFetch(bad={"H1": [TIMES[1]]})):
+            served(tmp_path, [gf.IFO.L1])  # stores TIMES[1] without its H1 strain
+        both = [gf.IFO.H1, gf.IFO.L1]
+        with offline() as fetch:
+            again, reader = served(tmp_path, both)
+            assert served_times(again) == rounded(TIMES), "a failed fetch persisted as absence"
+            assert reader.get_acquisition_stats()["rejections"] == {}
+            fetched = len(fetch.calls)
+            warm, _ = served(tmp_path, both)
+            assert len(fetch.calls) == fetched, "the fetched H1 strain was not stored"
+            fresh, _ = served(tmp_path / "fresh", both)
+        for batch in (again, warm):
+            for key in (RV.ONSOURCE, RV.OFFSOURCE, RV.START_GPS_TIME):
+                np.testing.assert_array_equal(by_time(batch, key), by_time(fresh, key), err_msg=key.name)
+
+
+#: One of the 89 pairs of confident (ml_confidence of at least 0.9) Gravity Spy
+#: records, O1 to O3b, that share a 10 ms gps_key after TransientIndex.dedupe: an H1
+#: and an L1 record of one class, 5.85 ms apart (O3b).
+SHARED_KEY = [(1264316116.41895, gf.IFO.H1), (1264316116.42480, gf.IFO.L1)]
+SHARED_KEY_REF = 1264316000.0
+
+
+class TestRecordIdentity:
+    """Each record is served its own window, whatever other record shares its gps_key."""
+
+    def test_records_sharing_a_gps_key_are_served_their_own_windows(self, tmp_path):
+        catalogue = [
+            TransientSegment(
+                gps_key=gps_to_key(t), transient_gps_time=t,
+                start_gps_time=t - 48.2, end_gps_time=t + 48.2,
+                label=gf.DataLabel.GLITCHES, kind=GlitchType.BLIP,
+                observing_run=gf.ObservingRun.O3, seen_in=[ifo],
+            )
+            for t, ifo in SHARED_KEY
+        ]
+        assert len({record.gps_key for record in catalogue}) == 1
+        science = np.array([[SHARED_KEY_REF, SHARED_KEY_REF + 1000.0]])
+        both = [gf.IFO.H1, gf.IFO.L1]
+        with offline(GridFetch(ref=SHARED_KEY_REF), catalogue=catalogue, science=science) as fetch:
+            cold, _ = served(tmp_path, both, num_examples_per_batch=2)
+            fetched = len(fetch.calls)
+            warm, _ = served(tmp_path, both, num_examples_per_batch=2)
+        assert fetched > 0 and len(fetch.calls) == fetched, "the second read was not a cache hit"
+        for name, batch in (("cold", cold), ("warm", warm)):
+            onsource = np.asarray(batch[RV.ONSOURCE], dtype=np.float64)
+            centre = SHARED_KEY_REF + onsource[..., onsource.shape[-1] // 2]
+            error = centre - np.asarray(batch[RV.TRANSIENT_GPS_TIME])
+            assert np.max(np.abs(error)) <= 1.0 / RATE, f"{name}: centre minus transient time {error} s"
+        for key in (RV.ONSOURCE, RV.OFFSOURCE, RV.START_GPS_TIME):
+            np.testing.assert_array_equal(by_time(warm, key), by_time(cold, key), err_msg=key.name)
+
+
+def write_format_2_cache(path, times, zero_ifo="H1"):
+    """
+    A transient cache as gravyflow wrote it before format 3 (``version`` 2): every
+    detector's strain in one row, a detector without strain stored as zeros.
+    """
+    ifos = list(TransientDefaults.UNIVERSAL_IFOS)
+    num_onsource = int(TransientDefaults.CACHE_ONSOURCE_DURATION * STORED_RATE)
+    num_offsource = int(TransientDefaults.CACHE_OFFSOURCE_DURATION * STORED_RATE)
+    onsource = np.ones((len(times), len(ifos), num_onsource), dtype=np.float32)
+    offsource = np.ones((len(times), len(ifos), num_offsource), dtype=np.float32)
+    onsource[:, ifos.index(zero_ifo)] = 0.0
+    offsource[:, ifos.index(zero_ifo)] = 0.0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as f:
+        group = f.create_group("glitches")
+        for name, data in (("onsource", onsource), ("offsource", offsource)):
+            group.create_dataset(name, data=data, maxshape=(None, *data.shape[1:]),
+                                 chunks=(1, *data.shape[1:]))
+        group.create_dataset("gps_times", data=np.asarray(times, dtype=np.float64), maxshape=(None,))
+        group.create_dataset("labels", data=np.full(len(times), GlitchType.BLIP.value, np.int32),
+                             maxshape=(None,))
+        group.attrs.update(
+            sample_rate_hertz=STORED_RATE,
+            onsource_duration=TransientDefaults.CACHE_ONSOURCE_DURATION,
+            offsource_duration=TransientDefaults.CACHE_OFFSOURCE_DURATION,
+            ifo_names=ifos,
+            version=2,
+        )
+
+
+class TestCacheFormat:
+    """A cache of an older format is never read: its rows are fetched again."""
+
+    @pytest.mark.parametrize("place", ["its own name", "the current name"])
+    def test_an_older_cache_with_a_zero_filled_row_is_never_served(self, tmp_path, place):
+        path = (tmp_path / "glitch_cache.h5" if place == "its own name"
+                else generate_transient_cache_path(tmp_path, prefix="glitch"))
+        write_format_2_cache(path, TIMES)
+        with offline(GridFetch(bad={"H1": [TIMES[1]]})) as fetch:
             batch, reader = served(tmp_path, [gf.IFO.H1, gf.IFO.L1], num_examples_per_batch=2)
+        assert all(fetches_of(fetch, t) for t in TIMES), "a row of the older cache was served"
         assert served_times(batch) == rounded(TIMES[[0, 2]])
         assert_never_filled(batch)
         assert reader.get_acquisition_stats()["rejections"] == {"no data": 1}
+
+    def test_every_read_refuses_an_older_format(self, tmp_path):
+        path = tmp_path / "old.h5"
+        write_format_2_cache(path, TIMES)
+        cache = TransientCache(path, mode="r")
+        with pytest.raises(ValueError, match="format 2"):
+            cache.validate_request(RATE, 2.0, 16.0)
+        with pytest.raises(ValueError, match="format 2"):
+            cache.get_batch(np.array([0]), sample_rate_hertz=RATE, onsource_duration=2.0,
+                            offsource_duration=16.0)

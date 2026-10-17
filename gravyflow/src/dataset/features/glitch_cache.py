@@ -4,17 +4,19 @@ Standardized glitch data cache with bulk array storage.
 This module provides efficient HDF5 storage and loading for glitch data
 using multi-dimensional arrays instead of per-transient datasets.
 
-File Format (HDF5):
+File Format (HDF5), ``TRANSIENT_CACHE_FORMAT``:
     glitches/
-        onsource: (N, IFOs, samples)     # All onsource data
-        offsource: (N, IFOs, samples)    # All offsource data
-        gps_times: (N,)                   # GPS time for each glitch
+        onsource: (N, IFOs, samples)     # All onsource data; NaN where a detector's strain is not held
+        offsource: (N, IFOs, samples)    # All offsource data; likewise
+        gps_times: (N,)                   # GPS time of each transient: the row's identity
         labels: (N,)                      # GlitchType integer labels
-        metadata/
+        data_label, seen_in, snr, ...: (N,)  # The first record's catalogue metadata
+        attrs:
             sample_rate_hertz: float
             onsource_duration: float
             offsource_duration: float
             ifo_names: list of strings
+            version: int                 # TRANSIENT_CACHE_FORMAT
 """
 
 from pathlib import Path
@@ -29,7 +31,6 @@ import h5py
 from keras import ops
 
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
-from gravyflow.src.utils.gps import gps_to_key, gps_array_to_keys, as_gps_times
 from gravyflow.src.dataset.config import TransientDefaults
 
 # Re-export from TransientDefaults for internal use
@@ -37,6 +38,13 @@ CACHE_SAMPLE_RATE_HERTZ = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
 CACHE_ONSOURCE_DURATION = TransientDefaults.CACHE_ONSOURCE_DURATION
 CACHE_OFFSOURCE_DURATION = TransientDefaults.CACHE_OFFSOURCE_DURATION
 CACHE_PADDING_DURATION = TransientDefaults.CACHE_PADDING_DURATION
+
+#: The format of the transient caches, in the file name and the ``version``
+#: attribute; a file of another format is never read. 3: a detector's strain that is
+#: not held is NaN, never zeros, and is fetched again when requested; each row is
+#: its transient's exact GPS time, the transient on its stored onsource's centre
+#: sample. Format 2 zero-filled a missing detector and keyed rows at 10 ms.
+TRANSIENT_CACHE_FORMAT = 3
 
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -66,8 +74,8 @@ class TransientCache:
     Example:
         # Writing cache
         cache = TransientCache(Path("transients_O3.h5"), mode='w')
-        cache.save_all(onsource, offsource, gps_times, labels,
-                      sample_rate_hertz=4096.0, ifo_names=['L1'])
+        cache.initialize_file(4096.0, 32.0, 32.0, ['H1', 'L1'], 2, 131072, 131072)
+        cache.append(onsource, offsource, gps_times, labels)
         
         # Reading cache
         cache = TransientCache(Path("transients_O3.h5"), mode='r')
@@ -190,18 +198,30 @@ class TransientCache:
         self._metadata = None
     
     def get_metadata(self) -> Dict:
-        """Load and cache metadata from file."""
+        """
+        Load and cache metadata from file.
+
+        Raises:
+            ValueError: if the file is not of ``TRANSIENT_CACHE_FORMAT``, so no read
+                serves another format's rows.
+        """
         if self._metadata is not None:
             return self._metadata
-            
+
         if not self.exists:
             raise FileNotFoundError(f"Cache file not found: {self.path}")
-            
+
         with h5py.File(self.path, 'r') as f:
             if 'glitches' not in f:
                 raise ValueError(f"Invalid cache format: 'glitches' group not found")
-            
+
             grp = f['glitches']
+            version = int(grp.attrs.get('version', 0))
+            if version != TRANSIENT_CACHE_FORMAT:
+                raise ValueError(
+                    f"{self.path} is a transient cache of format {version}; this gravyflow "
+                    f"reads only format {TRANSIENT_CACHE_FORMAT}."
+                )
             self._metadata = {
                 'sample_rate_hertz': float(grp.attrs.get('sample_rate_hertz', CACHE_SAMPLE_RATE_HERTZ)),
                 'onsource_duration': float(grp.attrs.get('onsource_duration', CACHE_ONSOURCE_DURATION)),
@@ -212,85 +232,37 @@ class TransientCache:
             }
         return self._metadata
     
-    def get_attr(self, key: str, default=None):
-        """Get an attribute from the cache file metadata."""
-        if not self.exists:
-            return default
-            
-        with h5py.File(self.path, 'r') as f:
-            if 'glitches' not in f:
-                return default
-            return f['glitches'].attrs.get(key, default)
-
-    def set_attr(self, key: str, value):
-        """Set an attribute in the cache file metadata."""
-        if not self.exists:
-            raise FileNotFoundError(f"Cache file not initialized: {self.path}")
-            
-        with h5py.File(self.path, 'a') as f:
-            if 'glitches' not in f:
-                raise ValueError("Invalid cache format")
-            f['glitches'].attrs[key] = value
-
-    def get_last_gps(self) -> float:
-        """Get the last stored GPS time, or -1.0 if empty."""
-        if not self.exists:
-            return -1.0
-            
-        with h5py.File(self.path, 'r') as f:
-            if 'glitches' not in f or 'gps_times' not in f['glitches']:
-                return -1.0
-            
-            dset = f['glitches']['gps_times']
-            if dset.shape[0] == 0:
-                return -1.0
-            
-            # Read last element
-            return float(dset[-1])
-    
-    def _build_gps_index(self) -> Dict[int, int]:
-        """Build a dictionary mapping GPS integer keys to their indices in the cache."""
+    def _build_gps_index(self) -> Dict[float, int]:
+        """
+        Each row's index by its transient's exact GPS time, the row's identity: the
+        stored window is centred on that time, so two transients within 10 ms of each
+        other (one ``gps_key``) are two rows.
+        """
         if not self.exists:
             return {}
-            
+
         with h5py.File(self.path, 'r') as f:
             if 'glitches' not in f or 'gps_times' not in f['glitches']:
                 return {}
-            
+
             gps_times = f['glitches']['gps_times'][:]
-            # Use integer keys at 0.01s (10ms) precision for exact matching
-            index = {gps_to_key(gps): i for i, gps in enumerate(gps_times)}
-            return index
-    
-    def has_gps(self, gps_time: float) -> bool:
-        """Check if a GPS time exists in the cache using exact integer key match."""
+            return {float(gps): i for i, gps in enumerate(gps_times)}
+
+    def index_of(self, gps_time: float) -> Optional[int]:
+        """The row of the transient at exactly ``gps_time``, or None."""
         if not self.exists:
-            return False
-        
+            return None
+
         with self._gps_lock:
             # Build index on first call (lazy)
             if self._gps_index is None:
                 self._gps_index = self._build_gps_index()
-            
-            # Exact match using integer key
-            return gps_to_key(gps_time) in self._gps_index
-    
-    def get_closest_gps(self, gps_time: float) -> Optional[float]:
-        """Get the cached GPS time matching the integer key, or None if not found."""
-        if not self.exists:
-            return None
-        
-        with self._gps_lock:
-            if self._gps_index is None:
-                self._gps_index = self._build_gps_index()
-            
-            # Exact match using integer key
-            key = gps_to_key(gps_time)
-            if key in self._gps_index:
-                return gps_time  # Return the original time since key matched
-            
-            return None
-    
+            return self._gps_index.get(float(gps_time))
+
+    def has_gps(self, gps_time: float) -> bool:
+        """Whether the cache holds a row for the transient at exactly ``gps_time``."""
+        return self.index_of(gps_time) is not None
+
     def get_by_gps(
         self,
         gps_time: float,
@@ -305,9 +277,10 @@ class TransientCache:
             Tuple of (onsource, offsource, gps_time, label) or None if not found
             or if the request cannot be satisfied (e.g., upsampling required).
         """
-        if not self.has_gps(gps_time):
+        index = self.index_of(gps_time)
+        if index is None:
             return None
-        
+
         # Validate that request can be satisfied (no upsampling)
         if sample_rate_hertz is not None:
             try:
@@ -319,156 +292,48 @@ class TransientCache:
             except ValueError:
                 # Cache can't satisfy this request (e.g., upsampling needed)
                 return None
-        
-        # Use integer key for index lookup
-        key = gps_to_key(gps_time)
-        if key not in self._gps_index:
-            return None
-        idx = self._gps_index[key]
+
         ons, offs, gps, labels = self.get_batch(
-            np.array([idx]),
+            np.array([index]),
             sample_rate_hertz=sample_rate_hertz,
             onsource_duration=onsource_duration,
             offsource_duration=offsource_duration
         )
         return ons[0], offs[0], gps[0], labels[0]
-
-    def has_key(self, gps_key: int) -> bool:
-        """
-        Check if a GPS key exists in the cache (no float conversion needed).
-        
-        Args:
-            gps_key: Integer GPS key at 10ms precision
-            
-        Returns:
-            True if key exists in cache
-        """
-        if not self.exists:
-            return False
-        
-        with self._gps_lock:
-            # Build index on first call (lazy)
-            if self._gps_index is None:
-                self._gps_index = self._build_gps_index()
-            
-            return gps_key in self._gps_index
-    
-    def get_by_key(
-        self,
-        gps_key: int,
-        sample_rate_hertz: Optional[float] = None,
-        onsource_duration: Optional[float] = None,
-        offsource_duration: Optional[float] = None,
-    ) -> Optional[Tuple[np.ndarray, np.ndarray, float, int]]:
-        """
-        Get a single glitch by GPS key (optimized - no conversion needed).
-        
-        Args:
-            gps_key: Integer GPS key at 10ms precision
-            sample_rate_hertz: Desired sample rate
-            onsource_duration: Desired onsource duration  
-            offsource_duration: Desired offsource duration
-            
-        Returns:
-            Tuple of (onsource, offsource, gps_time, label) or None if not found
-        """
-        if not self.has_key(gps_key):
-            return None
-        
-        # Validate that request can be satisfied
-        if sample_rate_hertz is not None:
-            try:
-                self.validate_request(
-                    sample_rate_hertz,
-                    onsource_duration or self.get_metadata()['onsource_duration'],
-                    offsource_duration or self.get_metadata()['offsource_duration']
-                )
-            except ValueError:
-                return None
-        
-        # Direct index lookup (no conversion!)
-        idx = self._gps_index[gps_key]
-        ons, offs, gps, labels = self.get_batch(
-            np.array([idx]),
-            sample_rate_hertz=sample_rate_hertz,
-            onsource_duration=onsource_duration,
-            offsource_duration=offsource_duration
-        )
-        return ons[0], offs[0], gps[0], labels[0]
-
-    
-    def get_indices_for_gps(
-        self, 
-        gps_times: Union[List[float], np.ndarray],
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Bulk resolve GPS times to cache indices using exact integer key matching.
-        
-        Args:
-            gps_times: List or array of GPS times to look up.
-            
-        Returns:
-            found_indices: Array of indices in the cache (for found items).
-            missing_mask: Boolean mask of same length as input gps_times, 
-                          True where item was NOT found.
-        """
-        if not self.exists:
-             return np.array([]), np.ones(len(gps_times), dtype=bool)
-        
-        with self._gps_lock:
-            # Ensure index exists
-            if self._gps_index is None:
-                self._gps_index = self._build_gps_index()
-                 
-            gps_times = np.asarray(gps_times)
-            indices = np.full(len(gps_times), -1, dtype=np.int32)
-            missing_mask = np.ones(len(gps_times), dtype=bool)
-            
-            # Exact O(1) lookups using integer keys
-            for i, gps in enumerate(gps_times):
-                key = gps_to_key(gps)
-                if key in self._gps_index:
-                    indices[i] = self._gps_index[key]
-                    missing_mask[i] = False
-                    
-            return indices[~missing_mask], missing_mask
 
     def get_all_gps_times(self) -> np.ndarray:
-        """Return all GPS times currently in the cache as float seconds."""
+        """Return all GPS times currently in the cache as float seconds, sorted."""
         if not self.exists:
             return np.array([])
-        
+
         with self._gps_lock:
             if self._gps_index is None:
                 self._gps_index = self._build_gps_index()
-            
-            # Convert integer keys back to GPS times (floats)
-            from gravyflow.src.utils.gps import key_to_gps
-            keys = sorted(self._gps_index.keys())
-            return np.array([key_to_gps(k) for k in keys])
-    
+            return np.array(sorted(self._gps_index))
+
     def append_single(
         self,
         onsource: np.ndarray,
         offsource: np.ndarray,
         gps_time: float,
         label: int,
-        gps_key: Optional[int] = None,
         metadata: Optional[Dict] = None
     ) -> None:
         """
-        Buffer a single glitch for later batch append.
-        
+        Store one transient's windows: buffered for a later batch append, or, for a
+        transient the cache already holds, the detectors its row does not hold yet
+        (``_fill_row``).
+
         Writes are buffered to reduce HDF5 file operations and lock contention.
         Call flush_write_buffer() to persist buffered data, or let it auto-flush
         when the buffer reaches _write_buffer_size.
-        
+
         Args:
-            onsource: Array of shape (IFOs, samples)
-            offsource: Array of shape (IFOs, samples)
-            gps_time: GPS time of the glitch (for storage and display)
+            onsource: Array of shape (IFOs, samples); NaN where a detector's strain
+                could not be had
+            offsource: Array of shape (IFOs, samples); likewise
+            gps_time: GPS time of the transient, the row's identity
             label: GlitchType/SourceType integer label
-            gps_key: Optional GPS key (10ms precision). If not provided, computed from gps_time.
             metadata: Optional dict with extended metadata:
                 - data_label: int (DataLabel enum value, -1 if missing)
                 - seen_in: int (bitmask, 0 if missing)
@@ -477,24 +342,46 @@ class TransientCache:
         """
         if metadata is None:
             metadata = {}
-        
-        # Compute GPS key if not provided
-        if gps_key is None:
-            gps_key = gps_to_key(gps_time)
-        
-        # Skip if already in cache or buffer (duplicate protection)
-        if self.has_key(gps_key):
+        gps_time = float(gps_time)
+
+        if any(item[2] == gps_time for item in self._write_buffer):
+            self.flush_write_buffer()
+        index = self.index_of(gps_time)
+        if index is not None:
+            self._fill_row(index, onsource, offsource)
             return
-        if any(gps_to_key(item[2]) == gps_key for item in self._write_buffer):
-            return
-        
+
         # Add to buffer with metadata
         self._write_buffer.append((onsource, offsource, gps_time, label, metadata))
-        
+
         # Auto-flush when buffer is full
         if len(self._write_buffer) >= self._write_buffer_size:
             self.flush_write_buffer()
-    
+
+    @staticmethod
+    def _held(onsource: np.ndarray, offsource: np.ndarray) -> np.ndarray:
+        """Per detector, whether a row holds its strain: every sample finite."""
+        return np.all(np.isfinite(onsource), axis=-1) & np.all(np.isfinite(offsource), axis=-1)
+
+    def _fill_row(self, index: int, onsource: np.ndarray, offsource: np.ndarray) -> None:
+        """
+        Store in row ``index`` the detectors it does not hold yet and the new windows
+        do. A held detector is never replaced, and a detector whose fetch failed is
+        never stored as absent: its NaN means only that the cache does not hold it.
+        """
+        onsource, offsource = np.asarray(onsource), np.asarray(offsource)
+        with h5py.File(self.path, 'a') as f:
+            grp = f['glitches']
+            stored_onsource, stored_offsource = grp['onsource'][index], grp['offsource'][index]
+            fill = ~self._held(stored_onsource, stored_offsource) & self._held(onsource, offsource)
+            if not fill.any():
+                return
+            stored_onsource[fill], stored_offsource[fill] = onsource[fill], offsource[fill]
+            grp['onsource'][index] = stored_onsource
+            grp['offsource'][index] = stored_offsource
+        # A chunk read before the fill holds the row's old windows.
+        self._chunks.pop((index // self._chunk_size) * self._chunk_size, None)
+
     def flush_write_buffer(self) -> None:
         """
         Flush all buffered writes to disk in a single HDF5 operation.
@@ -560,7 +447,8 @@ class TransientCache:
         """
         Validate that a request can be satisfied from this cache.
         
-        Raises ValueError if any parameter exceeds cached limits.
+        Raises ValueError if the file is of another format (``get_metadata``) or any
+        parameter exceeds cached limits.
         
         Args:
             sample_rate_hertz: Requested sample rate
@@ -850,73 +738,6 @@ class TransientCache:
         )
 
     
-    def save_all(
-        self,
-        onsource: np.ndarray,
-        offsource: np.ndarray,
-        gps_times: np.ndarray,
-        labels: np.ndarray,
-        sample_rate_hertz: float,
-        onsource_duration: float,
-        offsource_duration: float,
-        ifo_names: List[str],
-        compression: str = 'gzip',
-        compression_opts: int = 4
-    ) -> None:
-        """
-        Save all glitches to cache in a single write.
-        
-        Args:
-            onsource: Array of shape (N, IFOs, samples)
-            offsource: Array of shape (N, IFOs, samples)
-            gps_times: Array of shape (N,)
-            labels: Array of shape (N,) with GlitchType integer values
-            sample_rate_hertz: Sample rate of the data
-            onsource_duration: Duration of onsource windows
-            offsource_duration: Duration of offsource windows
-            ifo_names: List of IFO names (e.g., ['L1', 'H1'])
-            compression: HDF5 compression algorithm
-            compression_opts: Compression level (0-9)
-        """
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        
-        with h5py.File(self.path, 'w') as f:
-            grp = f.create_group('glitches')
-            
-            # Store data with chunking for efficient access
-            grp.create_dataset(
-                'onsource', 
-                data=onsource.astype(np.float32),
-                chunks=(min(64, onsource.shape[0]), onsource.shape[1], onsource.shape[2]),
-                compression=compression,
-                compression_opts=compression_opts
-            )
-            grp.create_dataset(
-                'offsource', 
-                data=offsource.astype(np.float32),
-                chunks=(min(64, offsource.shape[0]), offsource.shape[1], offsource.shape[2]),
-                compression=compression,
-                compression_opts=compression_opts
-            )
-            grp.create_dataset('gps_times', data=gps_times.astype(np.float64))
-            grp.create_dataset('labels', data=labels.astype(np.int32))
-            
-            # Store metadata as attributes
-            grp.attrs['sample_rate_hertz'] = sample_rate_hertz
-            grp.attrs['onsource_duration'] = onsource_duration
-            grp.attrs['offsource_duration'] = offsource_duration
-            grp.attrs['ifo_names'] = ifo_names
-            grp.attrs['version'] = 1  # For future format changes
-            
-        logger.info(
-            f"Saved {len(gps_times)} glitches to {self.path} "
-            f"({onsource.nbytes / 1e6:.1f}MB onsource, "
-            f"{offsource.nbytes / 1e6:.1f}MB offsource)"
-        )
-        
-        # Clear cached metadata
-        self._metadata = None
-    
     def initialize_file(
         self,
         sample_rate_hertz: float,
@@ -986,7 +807,7 @@ class TransientCache:
             grp.attrs['onsource_duration'] = onsource_duration
             grp.attrs['offsource_duration'] = offsource_duration
             grp.attrs['ifo_names'] = ifo_names
-            grp.attrs['version'] = 2
+            grp.attrs['version'] = TRANSIENT_CACHE_FORMAT
             
         self._metadata = None
         
@@ -1072,8 +893,7 @@ class TransientCache:
             # If index exists, update incrementally; otherwise leave None for lazy rebuild
             if self._gps_index is not None:
                 for i, gps in enumerate(gps_times):
-                    key = gps_to_key(gps)
-                    self._gps_index[key] = n_current + i
+                    self._gps_index[float(gps)] = n_current + i
 
     
     def get_batch(
@@ -1151,7 +971,9 @@ def generate_transient_cache_path(data_directory: Optional[Path] = None, prefix:
     Generate standardized cache file path.
 
     Different prefixes are used for different transient types (e.g., "glitch" for
-    glitches, "event" for GW events), resulting in separate cache files.
+    glitches, "event" for GW events), resulting in separate cache files. The name
+    carries ``TRANSIENT_CACHE_FORMAT``: a cache of another format is never read, and
+    gravyflow never deletes a user's files, so an older one is left where it is.
 
     Args:
         data_directory: Base directory for cache files. If None, the user cache
@@ -1161,16 +983,12 @@ def generate_transient_cache_path(data_directory: Optional[Path] = None, prefix:
         prefix: Filename prefix (e.g. "transient", "glitch", "event")
 
     Returns:
-        Path like: data_directory/{prefix}_cache.h5
+        Path like: data_directory/{prefix}_cache_v{TRANSIENT_CACHE_FORMAT}.h5
     """
+    name = f"{prefix}_cache_v{TRANSIENT_CACHE_FORMAT}.h5"
     if data_directory is None:
-        from gravyflow.src.dataset.acquisition.gwosc_data import (
-            user_cache_dir, warn_of_moved_cache,
-        )
+        from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
 
-        path = user_cache_dir() / f"{prefix}_cache.h5"
-        # Before the one cache root, this cache ignored GRAVYFLOW_CACHE_DIR.
-        warn_of_moved_cache(path, Path.home() / ".gravyflow" / "cache" / path.name)
-        return path
+        return user_cache_dir() / name
 
-    return Path(data_directory) / f"{prefix}_cache.h5"
+    return Path(data_directory) / name

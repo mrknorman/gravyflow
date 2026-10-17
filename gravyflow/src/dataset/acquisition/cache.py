@@ -25,7 +25,8 @@ class AcquisitionCache(ABC):
     Abstract base class for data acquisition caching.
     
     Provides a unified interface for both memory and disk caching strategies.
-    All cache implementations use integer GPS keys (10ms precision) for lookups.
+    Each implementation names its keys: MemoryCache takes any hashable key, and
+    DiskCache a transient's exact GPS time.
     
     Subclasses must implement:
         has(key) - Check if key exists
@@ -35,12 +36,12 @@ class AcquisitionCache(ABC):
     """
     
     @abstractmethod
-    def has(self, key: int) -> bool:
+    def has(self, key) -> bool:
         """
-        Check if a GPS key exists in the cache.
+        Check if a key exists in the cache.
         
         Args:
-            key: Integer GPS key (10ms precision, from gps_to_key())
+            key: The implementation's key
             
         Returns:
             True if key exists in cache
@@ -50,16 +51,16 @@ class AcquisitionCache(ABC):
     @abstractmethod
     def get(
         self, 
-        key: int,
+        key,
         sample_rate_hertz: Optional[float] = None,
         onsource_duration: Optional[float] = None,
         offsource_duration: Optional[float] = None,
     ) -> Optional[Tuple[np.ndarray, np.ndarray, float, int]]:
         """
-        Retrieve cached data by GPS key.
+        Retrieve cached data by key.
         
         Args:
-            key: Integer GPS key
+            key: The implementation's key
             sample_rate_hertz: Desired output sample rate (for resampling)
             onsource_duration: Desired onsource duration (for cropping)
             offsource_duration: Desired offsource duration (for cropping)
@@ -73,21 +74,19 @@ class AcquisitionCache(ABC):
     @abstractmethod
     def put(
         self,
-        key: int,
+        key,
         onsource: np.ndarray,
         offsource: np.ndarray,
-        gps_time: float,
         label: int = 0,
         **metadata
     ) -> None:
         """
         Store data in the cache.
-        
+
         Args:
-            key: Integer GPS key
+            key: The implementation's key
             onsource: Array of shape (IFOs, samples)
             offsource: Array of shape (IFOs, samples)
-            gps_time: Float GPS time (for reference)
             label: Data label (0=NOISE, 1=GLITCH, 2=EVENT)
             **metadata: Additional metadata to store
         """
@@ -217,13 +216,13 @@ class DiskCache(AcquisitionCache):
         """Check if cache file exists."""
         return self._cache.exists
     
-    def has(self, key: int) -> bool:
-        """Check if GPS key exists in cache."""
-        return self._cache.has_key(key)
+    def has(self, key: float) -> bool:
+        """Check if the transient at exactly GPS time ``key`` is in the cache."""
+        return self._cache.has_gps(key)
     
     def get(
         self,
-        key: int,
+        key: float,
         sample_rate_hertz: Optional[float] = None,
         onsource_duration: Optional[float] = None,
         offsource_duration: Optional[float] = None,
@@ -234,7 +233,7 @@ class DiskCache(AcquisitionCache):
         Returns:
             Tuple of (onsource, offsource, gps_time, label) or None if not found.
         """
-        return self._cache.get_by_key(
+        return self._cache.get_by_gps(
             key,
             sample_rate_hertz=sample_rate_hertz,
             onsource_duration=onsource_duration,
@@ -243,10 +242,9 @@ class DiskCache(AcquisitionCache):
     
     def put(
         self,
-        key: int,
+        key: float,
         onsource: np.ndarray,
         offsource: np.ndarray,
-        gps_time: float,
         label: int = 0,
         **metadata
     ) -> None:
@@ -258,9 +256,8 @@ class DiskCache(AcquisitionCache):
         self._cache.append_single(
             onsource=onsource,
             offsource=offsource,
-            gps_time=gps_time,
+            gps_time=key,
             label=label,
-            gps_key=key
         )
     
     def clear(self) -> None:
@@ -331,14 +328,9 @@ class DiskCache(AcquisitionCache):
     # === Passthrough methods for TransientCache-specific functionality ===
     # These allow transient.py to access internal cache state efficiently
     
-    def has_key(self, gps_key: int) -> bool:
-        """Check if GPS key exists (alias for has())."""
-        return self._cache.has_key(gps_key)
-    
-    @property
-    def _gps_index(self) -> Dict[int, int]:
-        """Access internal GPS index mapping. For performance optimization only."""
-        return self._cache._gps_index
+    def index_of(self, gps_time: float) -> Optional[int]:
+        """The row of the transient at exactly ``gps_time``, or None (passthrough)."""
+        return self._cache.index_of(gps_time)
     
     def get_batch(
         self,
@@ -377,16 +369,14 @@ class DiskCache(AcquisitionCache):
         offsource: np.ndarray,
         gps_time: float,
         label: int,
-        gps_key: int = None,
         metadata: dict = None
     ) -> None:
-        """Append single item to cache (passthrough to TransientCache)."""
+        """Store one transient's windows (passthrough to TransientCache.append_single)."""
         self._cache.append_single(
             onsource=onsource,
             offsource=offsource,
             gps_time=gps_time,
             label=label,
-            gps_key=gps_key,
             metadata=metadata
         )
     
@@ -422,11 +412,6 @@ class DiskCache(AcquisitionCache):
         """Check if chunked cache mode is enabled."""
         return self._cache._chunk_in_memory
     
-    @property
-    def _gps_lock(self):
-        """Access GPS index lock."""
-        return self._cache._gps_lock
-    
     def enable_chunked_mode(
         self,
         chunk_size: int = 5000,
@@ -457,10 +442,6 @@ class DiskCache(AcquisitionCache):
     ):
         """Get batch of samples from chunked cache."""
         return self._cache.get_batch_from_chunk(indices, target_ifos=target_ifos)
-    
-    def _build_gps_index(self):
-        """Build GPS index (passthrough)."""
-        return self._cache._build_gps_index()
     
     def flush_write_buffer(self) -> None:
         """Flush buffered writes to disk (passthrough to TransientCache)."""

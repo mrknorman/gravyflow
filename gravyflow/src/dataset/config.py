@@ -286,8 +286,8 @@ class TransientDefaults:
     # ==========================================================================
     # CACHE STRATEGY (GLITCH + EVENT CACHES)
     # ==========================================================================
-    # Separate cache files are used for glitches (glitch_cache.h5) and events
-    # (event_cache.h5). Both use the same format and download data for all 
+    # Separate cache files are used for glitches (glitch_cache_v3.h5) and events
+    # (event_cache_v3.h5). Both use the same format and download data for all 
     # configured IFOs (H1, L1). This ensures maximum cache reuse - a cache 
     # built with H1+L1 can serve any subset without redownloading.
     # 
