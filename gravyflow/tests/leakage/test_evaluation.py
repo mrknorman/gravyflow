@@ -924,3 +924,36 @@ def test_a_run_never_relabels_the_weights_it_is_given(world, tmp_path):
         trained = train_run("default", gf.DEFAULT_SPLIT, tiny_model)
         with pytest.raises(StaleCheckpointError, match="records the split"):
             train_run("fold-2", FOLD_2, lambda: trained)
+
+
+def test_a_transient_evaluation_set_is_served_at_most_once(world):
+    """
+    A transient test split read through a dataset is one fixed set: floor(N / B) whole
+    batches, each record at most once, the same at every epoch; a batch past the set is
+    refused by name, never a second pass or a partial batch.
+    """
+    from gravyflow.tests.leakage.fakes import GlitchRecord
+
+    edge = fx.boundary("O3", "train", "test")
+    fixture = fx._fixture([(edge, edge + fx.BLOCK_SECONDS)], 256.0, "O3", ("O3",))
+    peaks = [edge + fx.BLOCK_SECONDS / 2 + 300.0 * k for k in range(-2, 3)]
+    fixture = fixture.with_catalogues(glitches=[GlitchRecord("L1", t, t - 0.5, 1.0, "Blip", 0.95) for t in peaks])
+    with world(fixture):
+        ds = gf.Dataset(
+            noise_obtainer=fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES]),
+            sample_rate_hertz=256.0, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
+            offsource_duration_seconds=4.0, num_examples_per_batch=2, steps_per_epoch=3, group="test",
+            seed=5, ifos=[gf.IFO.L1], input_variables=[gf.ReturnVariables.ONSOURCE],
+            output_variables=[gf.ReturnVariables.START_GPS_TIME],
+        )
+        epochs = []
+        for _ in range(2):
+            epochs.append([np.asarray(ds[k][1][gf.ReturnVariables.START_GPS_TIME.name])[:, 0] for k in range(2)])
+            ds.on_epoch_end()
+        # The batcher refuses by name (IndexError); the dataset wraps what its noise raises.
+        with pytest.raises(Exception, match="never are"):
+            ds[2]
+    served = np.concatenate(epochs[0])
+    assert len(set(served.tolist())) == len(served) == 4
+    assert all(min(abs(start - t) for t in peaks) < 2.0 for start in served), "a window is no record's"
+    assert all(np.array_equal(a, b) for a, b in zip(epochs[0], epochs[1])), "an evaluation epoch differs"

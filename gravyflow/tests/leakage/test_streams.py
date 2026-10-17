@@ -963,3 +963,82 @@ def test_prepare_lists_every_contradiction_at_once(world):
     assert spans == refused, f"contradictions named: {unprepared.value.exclusions}"
     assert len(unprepared.value.contradictions) == len(unprepared.value.exclusions) >= 2
     assert "exclusions=" in str(unprepared.value)
+
+
+# ----------------------------------------------------------------- transient passes
+
+def transient_world():
+    """L1 glitches in the middles of a train block and a test block, both detectors in data."""
+    from gravyflow.tests.leakage.fakes import GlitchRecord
+
+    edge = fx.boundary("O3", "train", "test")
+    fixture = fx._fixture([(edge - fx.BLOCK_SECONDS, edge + fx.BLOCK_SECONDS)], FS, "O3", ("O3",))
+    peaks = {"train": [edge - fx.BLOCK_SECONDS / 2 + 300.0 * k for k in range(-3, 3)],
+             "test": [edge + fx.BLOCK_SECONDS / 2 + 300.0 * k for k in range(-2, 3)]}
+    rows = [GlitchRecord("L1", t, t - 0.5, 1.0, "Blip", 0.95) for times in peaks.values() for t in times]
+    return fixture.with_catalogues(glitches=rows), peaks
+
+
+def transient_digest(batch):
+    h = hashlib.sha256()
+    for key in (RV.ONSOURCE, RV.OFFSOURCE, RV.START_GPS_TIME, RV.TRANSIENT_GPS_TIME):
+        h.update(np.ascontiguousarray(np.asarray(batch[key])).tobytes())
+    return h.hexdigest()
+
+
+#: The addresses read of each split: two epochs of two batches.
+TRANSIENT_ADDRESSES = [(0, 0), (0, 1), (1, 0), (1, 1)]
+
+
+def transient_reads(obtainer, order, call=lambda read, addresses: [read(*a) for a in addresses]):
+    """Each split's batches at ``TRANSIENT_ADDRESSES``, its batcher built in ``order`` from one obtainer."""
+    from gravyflow.src.dataset.noise.noise import obtainer_batcher
+
+    tree = gf.SeedTree(42)
+    readers = {}
+    for split in order:
+        batch = obtainer_batcher(obtainer, tree, split, ifos=IFOS, sample_rate_hertz=FS,
+                                 onsource_duration_seconds=ONSOURCE_S, offsource_duration_seconds=OFFSOURCE_S,
+                                 crop_duration_seconds=CROP_S, num_examples_per_batch=2, steps_per_epoch=2)
+        readers[split] = lambda epoch, k, batch=batch, split=split: batch(tree.batch(split, epoch, k))
+    return {split: [transient_digest(b) for b in call(readers[split], TRANSIENT_ADDRESSES)]
+            for split in ("train", "test")}, readers
+
+
+def test_transient_batches_are_addressed_by_index(world):
+    """
+    A transient split's batches depend on their address alone: whatever order the
+    splits' batchers are built in, whatever order and threads they are read in, and
+    one shared obtainer is never changed. Each training epoch is its own pass, and
+    each evaluation epoch the same set.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    fixture, peaks = transient_world()
+    with world(fixture):
+        def obtainer():
+            return fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES])
+
+        solo, readers = transient_reads(obtainer(), ("train", "test"))
+        mismatches = []
+        for order in itertools.permutations(("train", "test")):
+            shared = obtainer()
+            before = repr(shared.specification())
+            if transient_reads(shared, order)[0] != solo:
+                mismatches.append(f"built {order}")
+            assert repr(shared.specification()) == before and shared._served_split is None, "the obtainer changed"
+        backwards = transient_reads(obtainer(), ("test", "train"),
+                                    call=lambda read, addresses: [read(*a) for a in addresses[::-1]][::-1])[0]
+        with ThreadPoolExecutor(4) as pool:
+            threaded = transient_reads(obtainer(), ("train", "test"),
+                                       call=lambda read, addresses: list(pool.map(lambda a: read(*a), addresses)))[0]
+        train_times = [np.asarray(readers["train"](e, k)[RV.TRANSIENT_GPS_TIME])[:, 1] for e, k in TRANSIENT_ADDRESSES]
+        test_times = [np.asarray(readers["test"](e, k)[RV.TRANSIENT_GPS_TIME])[:, 1] for e, k in TRANSIENT_ADDRESSES]
+    assert backwards == solo, "a batch depends on the order batches are read"
+    assert threaded == solo, "a batch depends on the threads that read it"
+    assert not mismatches, f"Batches that depend on build order: {mismatches}"
+    assert set(np.concatenate(train_times)) <= set(peaks["train"])
+    assert set(np.concatenate(test_times)) <= set(peaks["test"])
+    assert len(set(np.concatenate(train_times[:2]))) == 4, "a pass serves a record twice"
+    assert solo["train"][:2] != solo["train"][2:], "a training epoch repeats the last"
+    assert solo["test"][:2] == solo["test"][2:], "an evaluation epoch differs from the last"
