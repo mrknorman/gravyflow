@@ -38,8 +38,6 @@ class Tapped(NamedTuple):
     #: The (epoch, k) address of each of ``batches``; None for a dataset that
     #: is not index-addressed, whose batches depend on the order asked.
     addresses: List[Optional[Address]]
-    #: The (epoch, k) of every batch asked for, repeats included.
-    serves: List[Address]
 
 
 class DatasetTap:
@@ -58,11 +56,16 @@ class DatasetTap:
     k): rebuilt, it draws the same values, though on CPU its projected strain
     may differ in the last bits of float32, so it is recognised by address,
     never by its bytes. Any other dataset's batch is recognised by its bytes.
+
+    ``serves`` logs every batch asked of any tapped dataset, repeats
+    included, as (split, epoch, k), in the order asked; `take` leaves it.
     """
 
     def __init__(self, monkeypatch, outputs: Sequence):
         built: List[Tapped] = []
         self._built = built
+        serves: List[Tuple[str, int, int]] = []
+        self.serves = serves
         extra = list(outputs)
 
         class Dataset(dataset_module.GravyflowDataset):
@@ -71,14 +74,14 @@ class DatasetTap:
                 super().__init__(output_variables=asked + [v for v in extra if v not in asked], **kwargs)
                 self._asked = {v.name for v in asked}
                 self._seen = set()
-                self._record = Tapped(self.group, [], [], [])
+                self._record = Tapped(self.group, [], [])
                 built.append(self._record)
 
             def __getitem__(self, index):
                 x, y = super().__getitem__(index)
                 streams = self.streams(index)
                 address = (streams.epoch, streams.k)
-                self._record.serves.append(address)
+                serves.append((self.group, *address))
                 served = {name: np.asarray(value) for name, value in {**y, **x}.items()}
                 key = address if self.index_addressed else hashlib.sha256(b"".join(
                     name.encode() + served[name].tobytes() for name in sorted(served))).hexdigest()
@@ -104,6 +107,73 @@ class DatasetTap:
             if not record.batches:
                 raise ValueError(f"A {record.group!r} dataset was built but served no batch.")
         return taken
+
+
+class EpochWindows:
+    """
+    Cuts a tap's serve log at Keras' epochs. An epoch's window runs from its
+    ``on_epoch_begin`` to its ``on_epoch_end``: its training steps and its
+    validation. Keras' epochs reach it through `callback`, or through a
+    callback class a fit already uses (`hook`), as that class sees them.
+    """
+
+    def __init__(self, tap: DatasetTap):
+        self._log = tap.serves
+        self._start = len(self._log)
+        self._first = None
+        self._begin = None
+        self._windows: Dict[int, List[Tuple[str, int, int]]] = {}
+
+    def begin(self, epoch: int):
+        self._begin = len(self._log)
+        if self._first is None:
+            self._first = self._begin
+
+    def end(self, epoch: int):
+        if epoch in self._windows:
+            raise ValueError(f"Keras epoch {epoch} ran twice before a take.")
+        self._windows[epoch] = self._log[self._begin:]
+
+    def take(self) -> Tuple[List[Tuple[str, int, int]], Dict[int, List[Tuple[str, int, int]]]]:
+        """
+        Since the last take: the serves before the first epoch began, and
+        each epoch's serves, as (split, epoch, k). Refuses when no epoch ran.
+        """
+        if self._first is None:
+            raise ValueError("No Keras epoch ran since the last take.")
+        before, windows = self._log[self._start:self._first], self._windows
+        self._start, self._first, self._windows = len(self._log), None, {}
+        return before, windows
+
+    def callback(self):
+        """A Keras callback that reports its fit's epochs here."""
+        import keras
+
+        windows = self
+
+        class Report(keras.callbacks.Callback):
+            def on_epoch_begin(self, epoch, logs=None):
+                windows.begin(epoch)
+
+            def on_epoch_end(self, epoch, logs=None):
+                windows.end(epoch)
+
+        return Report()
+
+    def hook(self, monkeypatch, callback_class):
+        """Report the epochs of every fit that uses ``callback_class``, as it sees them."""
+        begin, end = callback_class.on_epoch_begin, callback_class.on_epoch_end
+
+        def on_epoch_begin(callback, epoch, logs=None):
+            self.begin(epoch)
+            begin(callback, epoch, logs)
+
+        def on_epoch_end(callback, epoch, logs=None):
+            self.end(epoch)
+            end(callback, epoch, logs)
+
+        monkeypatch.setattr(callback_class, "on_epoch_begin", on_epoch_begin)
+        monkeypatch.setattr(callback_class, "on_epoch_end", on_epoch_end)
 
 
 def whitened(batches: Iterable[Batch]) -> np.ndarray:
