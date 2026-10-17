@@ -24,10 +24,10 @@ CROP = int(0.5 * FS)   # the dataset's default crop
 
 
 def coloured_noise(rng, shape, seconds):
-    """Gaussian noise with L1's bundled noise curve, in strain."""
+    """Gaussian noise with L1's O3 low curve, the curve the bank is placed on, in strain."""
     n = int(seconds * FS)
     f = np.fft.rfftfreq(n, 1 / FS)
-    amp = np.sqrt(noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0)) * n * FS / 4.0)
+    amp = np.sqrt(noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0), gf.NoiseProfile.O3_LOW) * n * FS / 4.0)
     spec = amp * (rng.standard_normal(shape + (len(f),)) + 1j * rng.standard_normal(shape + (len(f),)))
     spec[..., 0] = 0.0
     return np.fft.irfft(spec, n=n)
@@ -105,7 +105,7 @@ def test_whitened_noise_gives_unit_noise_statistics(spectrum):
     # Coloured noise whitened by the data path with the true PSD, against
     # templates whitened with the same filter: still chi-squared(2).
     f = np.arange(N // 2 + 1, dtype=np.float64)
-    true = noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0)) * FS
+    true = noise_curve_psd(gf.IFO.L1, np.maximum(f, 10.0), gf.NoiseProfile.O3_LOW) * FS
     exact = gf.PowerSpectrum(np.asarray(true / true.max(), np.float32)[None],
                              np.array([[np.sqrt(true.max())]], np.float32), FS,
                              gf.SpectralConfig(correct_inverse_bias=False), 1.0, 31)
@@ -454,7 +454,10 @@ def test_the_bundled_bank_is_the_default_filters_and_names_what_it_depends_on():
     from gravyflow.src.detection.matched_filter import default_bank_placement
     from gravyflow.src.detection.template_grid import BUNDLED_BANK_DIRECTORY
     key = json.loads(json.dumps(default_bank_placement().key()))
-    curve = gf.IFO.L1.value.optimal_psd_path
+    # The bank names the curve it is placed on, O3 low's, not the default noise's.
+    assert key["space"]["noise_profile_name"] == "O3_LOW"
+    curve = gf.NoiseProfile.O3_LOW.path(gf.IFO.L1)
+    assert key["space"]["noise_curve"]["file"] == curve.name
     with open(curve, "rb") as f:
         assert key["space"]["noise_curve"]["sha256"] == hashlib.sha256(f.read()).hexdigest()
     assert key["space"]["waveform_model"]["approximant"] == "IMRPhenomD"
@@ -466,6 +469,32 @@ def test_the_bundled_bank_is_the_default_filters_and_names_what_it_depends_on():
     bank = MatchedFilter(sample_rate_hertz=FS).bank
     assert bank.minimal_match == 0.97 and bank.num_templates == len(records[0]["mass_1"])
     assert bank.to_dict() == records[0]  # the library's own serialiser writes the loadable record
+
+
+def test_the_default_bank_is_the_searchs_and_not_the_default_noises():
+    # The default noise colours H1 and L1 with their own measured curves; the
+    # bank is placed on one named curve, O3 low's, which H1 and L1 share, so
+    # both read L1's bundled bank. Virgo's O3 low curve is its own.
+    from gravyflow.src.detection.matched_filter import default_bank_placement
+    from gravyflow.src.detection.template_grid import MatchSpace
+    assert gf.IFO.H1.value.optimal_psd_path != gf.IFO.L1.value.optimal_psd_path
+    assert default_bank_placement(ifo=gf.IFO.H1) == default_bank_placement(ifo=gf.IFO.L1)
+    assert default_bank_placement(ifo=gf.IFO.H1).space.ifo_name == "L1"
+    assert default_bank_placement(ifo=gf.IFO.V1).space.ifo_name == "V1"
+    assert MatchSpace().noise_profile_name == "O3_LOW"
+    # Another profile is another space, with another key.
+    actual = MatchSpace(ifo_name="H1", noise_profile_name="O3_ACTUAL")
+    assert actual.identity()["noise_curve"]["file"] == gf.NoiseProfile.O3_ACTUAL.path(gf.IFO.H1).name
+
+
+def test_the_bank_metric_never_extrapolates_its_curve():
+    # O3_ACTUAL's aLIGO curves end at 5 kHz: a space reaching beyond is refused, never held.
+    from gravyflow.src.detection.template_grid import MatchSpace
+    with pytest.raises(ValueError, match="10-5000 Hz"):
+        MatchSpace(sample_rate_hertz=16384.0, ifo_name="H1", noise_profile_name="O3_ACTUAL").whitened_spectra(
+            [30.0], [25.0])
+    with pytest.raises(ValueError, match="never extrapolated"):
+        noise_curve_psd(gf.IFO.L1, np.array([5.0, 100.0]), gf.NoiseProfile.O3_LOW)
 
 
 def test_a_bank_record_is_found_by_its_key_and_a_stale_one_is_not(monkeypatch):

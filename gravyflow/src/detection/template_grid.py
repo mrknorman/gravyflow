@@ -3,8 +3,8 @@ Template banks for matched filtering.
 
 `TemplateBank.stochastic` places non-spinning CBC templates so that every point
 of the mass range has a template whose match with it is at least the minimal
-match, measured with the detector's noise curve on the analysis band: the
-bank's coverage is a measured property, not an assumption. `TemplateGrid` is a
+match, measured with a named noise curve on the analysis band: the bank's
+coverage is a measured property, not an assumption. `TemplateGrid` is a
 plain grid in component masses, with no coverage guarantee; a linear grid
 leaves light binaries badly covered (a fitting factor near 0.5 below 30 solar
 masses for a 16 x 16 grid over 5-95), so it is kept only as a simple utility.
@@ -71,14 +71,15 @@ class TemplateGrid:
 # The match
 # ---------------------------------------------------------------------------
 
-def noise_curve_psd(ifo, frequencies: np.ndarray) -> np.ndarray:
+def noise_curve_psd(ifo, frequencies: np.ndarray, profile) -> np.ndarray:
     """
-    The one-sided PSD (strain^2/Hz) of an IFO's bundled noise curve (the curve
-    its coloured noise is drawn from) on `frequencies`, log-log interpolated and
-    held constant beyond the tabulated range.
+    The one-sided PSD (strain^2/Hz) of the IFO's curve in `profile` (a
+    gf.NoiseProfile) on `frequencies`, log-log interpolated. Frequencies beyond
+    the curve's band are refused: a curve is never extrapolated.
     """
-    curve_frequencies, asd = np.loadtxt(ifo.value.optimal_psd_path, delimiter=",").T
-    f = np.clip(np.asarray(frequencies, dtype=np.float64), curve_frequencies[0], curve_frequencies[-1])
+    from gravyflow.src.dataset.conditioning.detector import read_noise_curve
+    f = np.asarray(frequencies, dtype=np.float64)
+    curve_frequencies, asd = read_noise_curve(profile.path(ifo), from_hertz=f.min(), up_to_hertz=f.max())
     return np.exp(2.0 * np.interp(np.log(f), np.log(curve_frequencies), np.log(asd)))
 
 
@@ -136,24 +137,37 @@ def cbc_templates(
 @dataclass(frozen=True)
 class MatchSpace:
     """
-    The inner product the bank is placed with: the detector's noise curve on the
-    band [lower_frequency_hertz, Nyquist), on the visible part of each template,
-    the `visible_seconds` before its merger (with a Hann ramp over the first
-    tenth) and everything after it.
+    The inner product the bank is placed with: the detector's curve in the
+    noise profile `noise_profile_name` on the band [lower_frequency_hertz,
+    Nyquist), on the visible part of each template, the `visible_seconds`
+    before its merger (with a Hann ramp over the first tenth) and everything
+    after it.
 
     The matched filter sees at most the onsource window plus half the whitening
     filter of a signal's inspiral, so a bank placed on that span is at least as
     dense as any analysis with a shorter window needs.
+
+    The profile is O3_LOW unless named otherwise, whatever noise a dataset is
+    coloured with: a bank is the search's, one set of templates for every
+    detector of the network, placed on one smooth curve that its key names.
+    The search itself whitens with the data's own spectrum.
     """
     sample_rate_hertz: float = 2048.0
     visible_seconds: float = 1.5
     lower_frequency_hertz: float = 20.0
     ifo_name: str = "L1"
     approximant_name: str = "IMRPhenomD"
+    noise_profile_name: str = "O3_LOW"
 
     @property
     def window_seconds(self) -> float:
         return 2.0 * self.visible_seconds
+
+    @property
+    def noise_curve(self) -> Path:
+        """The file of the detector's curve in the space's noise profile."""
+        import gravyflow as gf
+        return gf.NoiseProfile[self.noise_profile_name].path(gf.IFO[self.ifo_name])
 
     def identity(self) -> dict:
         """
@@ -161,8 +175,7 @@ class MatchSpace:
         file and a hash of its contents) and the waveform model (the
         approximant, and the release series of the package that computes it).
         """
-        import gravyflow as gf
-        curve = Path(gf.IFO[self.ifo_name].value.optimal_psd_path)
+        curve = self.noise_curve
         return {
             **asdict(self),
             "noise_curve": {"file": curve.name, "sha256": hashlib.sha256(curve.read_bytes()).hexdigest()},
@@ -192,7 +205,8 @@ class MatchSpace:
         freqs = np.fft.rfftfreq(self.num_samples, 1.0 / self.sample_rate_hertz)
         weight = np.zeros_like(freqs)
         band = (freqs >= self.lower_frequency_hertz) & (freqs < self.sample_rate_hertz / 2.0)
-        weight[band] = 1.0 / np.sqrt(noise_curve_psd(gf.IFO[self.ifo_name], freqs[band]))
+        weight[band] = 1.0 / np.sqrt(noise_curve_psd(gf.IFO[self.ifo_name], freqs[band],
+                                                     gf.NoiseProfile[self.noise_profile_name]))
         spectra = np.fft.rfft(h.astype(np.float64), axis=-1) * weight
         norm = np.sqrt(np.sum(np.abs(spectra) ** 2, axis=-1, keepdims=True))
         return (spectra / np.where(norm > 0, norm, 1.0)).astype(np.complex64)
@@ -358,7 +372,7 @@ class TemplateBank:
         kept: the fraction of the space (in the proposal's measure) left with a
         fitting factor below the minimal match is then about that small.
 
-        The match is `MatchSpace`'s: the IFO's noise curve (default L1) over
+        The match is `MatchSpace`'s: the IFO's (default L1) O3_LOW curve over
         [lower_frequency_hertz, Nyquist), on the `visible_seconds` before merger.
         See `place` for caching and the banks bundled with gravyflow.
         """

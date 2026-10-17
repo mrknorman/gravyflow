@@ -16,6 +16,7 @@ import jax
 
 import gravyflow as gf
 
+from gravyflow.src.dataset.conditioning.detector import DEFAULT_NOISE_PROFILE, read_noise_curve
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.dataset.config import WindowSpec, ignore_scale_factor
 from gravyflow.src.rng import BatchStreams, SeedTree
@@ -157,7 +158,9 @@ def colored_noise_batcher(
     Colored Gaussian noise, one batch per address, in strain.
 
     Each detector's noise has the one-sided PSD of its curve in
-    ``noise_profile`` (default: each IFO's ``optimal_psd_path``).
+    ``noise_profile`` (default ``DEFAULT_NOISE_PROFILE``, O3_ACTUAL), and no
+    power below the curve's band. A sample rate whose Nyquist frequency lies
+    beyond a curve is refused (``read_noise_curve``): no curve is extrapolated.
     """
     window_spec = WindowSpec.from_params(
         sample_rate_hertz=sample_rate_hertz,
@@ -171,13 +174,10 @@ def colored_noise_batcher(
         )
     ]
 
+    profile = DEFAULT_NOISE_PROFILE if noise_profile is None else noise_profile
     onsource_asds, offsource_asds = [], []
     for ifo in ifos:
-        path = (
-            ifo.value.optimal_psd_path if noise_profile is None
-            else noise_profile.path(ifo)
-        )
-        frequencies, asd = np.loadtxt(path, delimiter=",").T
+        frequencies, asd = read_noise_curve(profile.path(ifo), up_to_hertz=sample_rate_hertz / 2.0)
         onsource_asd, offsource_asd = interpolate_onsource_offsource_psd(
             num_samples_list,
             sample_rate_hertz,
@@ -325,8 +325,9 @@ class NoiseObtainer(Obtainer):
     glitches removed.
 
     Noise is returned in strain (WHITE noise, which has no detector, in unit
-    variance). COLORED noise follows ``noise_profile``
-    (default: ``gf.NoiseProfile.O3_LOW``, each IFO's ``optimal_psd_path``).
+    variance). COLORED noise follows ``noise_profile``: by default
+    ``gf.NoiseProfile.O3_ACTUAL``, each detector's measured O3 curve, which the
+    obtainer then names, so that a fingerprint of it names the curve.
 
     An obtainer is a specification: building batches never changes it, so one
     obtainer can serve any number of datasets and splits.
@@ -341,6 +342,8 @@ class NoiseObtainer(Obtainer):
                 data_quality=gf.DataQuality.BEST,
                 data_labels=[gf.DataLabel.NOISE],
             )
+        if self.noise_type == NoiseType.COLORED and self.noise_profile is None:
+            self.noise_profile = DEFAULT_NOISE_PROFILE
 
     def batcher(
             self,

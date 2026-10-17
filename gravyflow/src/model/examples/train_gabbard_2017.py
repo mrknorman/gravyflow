@@ -29,6 +29,7 @@ from dataclasses import replace
 import keras
 
 import gravyflow as gf
+from gravyflow.src.dataset.conditioning.detector import DEFAULT_NOISE_PROFILE
 from gravyflow.src.model.examples.gabbard_2017 import Gabbard2017, Gabbard2017Config
 from gravyflow.src.model.examples.recipe import (
     DetectionBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise,
@@ -67,7 +68,8 @@ def build_run(args) -> tuple:
         directory=RunDirectory(args.output_dir),
         schedule=schedule,
         seed=args.seed,
-        description={"model": "Gabbard2017", "config": config, "noise": gf.NoiseType.COLORED},
+        description={"model": "Gabbard2017", "config": config, "noise": gf.NoiseType.COLORED,
+                     "noise_profile": DEFAULT_NOISE_PROFILE},
     )
     return config, run
 

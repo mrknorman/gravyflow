@@ -33,6 +33,7 @@ from pathlib import Path
 import keras
 
 import gravyflow as gf
+from gravyflow.src.dataset.conditioning.detector import DEFAULT_NOISE_PROFILE
 from gravyflow.src.model.examples.mly_2024 import MLyCoherence, MLyCoincidence, MLyConfig
 from gravyflow.src.model.examples.recipe import (
     DetectionBatches, RunDirectory, TrainingRun, TrainingSchedule, materialise,
@@ -90,7 +91,8 @@ def train(args, model_class, config, schedule) -> keras.Model:
         directory=RunDirectory(args.output_dir),
         schedule=schedule,
         seed=args.seed,
-        description={"model": model_class.__name__, "config": config, "noise": gf.NoiseType.COLORED},
+        description={"model": model_class.__name__, "config": config, "noise": gf.NoiseType.COLORED,
+                     "noise_profile": DEFAULT_NOISE_PROFILE},
     )
     print(f"{model_class.__name__} (arXiv:2009.14611), preset {args.preset}: "
           f"{[ifo.name for ifo in config.ifos]} at {config.sample_rate_hertz:g} Hz, "

@@ -6,6 +6,7 @@
    "lower_frequency_hertz": 20.0,
    "ifo_name": "L1",
    "approximant_name": "IMRPhenomD",
+   "noise_profile_name": "O3_LOW",
    "noise_curve": {
     "file": "aligo_o3low_t1800545.csv",
     "sha256": "1ba2b316774273c76ce773c140a07fcc29231885f2a3f1ea44565386fe5a05b4"
@@ -30,7 +31,7 @@
     "cbc.py",
     "template_grid.py"
    ],
-   "sha256": "a025993769905f6c73e1aa5c089b2a365d0aa7078d908d9b3f49279e58d95885"
+   "sha256": "4c7a058d44f4938ab961645c82468c22f970a05febbbbea96e27d498291bd1c9"
   }
  },
  "mass_1": [

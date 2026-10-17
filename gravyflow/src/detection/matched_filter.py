@@ -74,18 +74,22 @@ def default_bank_placement(
     The placement of a MatchedFilter's default bank: non-spinning IMRPhenomD
     over `mass_range` at `minimal_match`, matched on what the filter can see of
     a signal (the window plus half the whitening filter before the merger) with
-    the detector's noise curve from the band's lower edge. H1 shares L1's
-    curve, so both get L1's (bundled) bank.
+    the detector's curve in MatchSpace's noise profile (O3_LOW, whatever noise
+    the data have) from the band's lower edge. H1 shares L1's curve there, so
+    both get L1's (bundled) bank.
     """
     import gravyflow as gf
     config = _as_spectral_config(spectral_config)
     fs = float(sample_rate_hertz)
+
+    def space(ifo) -> MatchSpace:
+        return MatchSpace(fs, float(onsource_duration_seconds) + _even_taps(config, fs) / (2.0 * fs),
+                          float(config.lower_frequency_hertz), ifo.name, "IMRPhenomD")
+
     ifo = gf.IFO.L1 if ifo is None else ifo
-    if ifo.value.optimal_psd_path == gf.IFO.L1.value.optimal_psd_path:
+    if space(ifo).noise_curve == space(gf.IFO.L1).noise_curve:
         ifo = gf.IFO.L1
-    space = MatchSpace(fs, float(onsource_duration_seconds) + _even_taps(config, fs) / (2.0 * fs),
-                       float(config.lower_frequency_hertz), ifo.name, "IMRPhenomD")
-    return BankPlacement(space, (float(mass_range[0]), float(mass_range[1])), float(minimal_match))
+    return BankPlacement(space(ifo), (float(mass_range[0]), float(mass_range[1])), float(minimal_match))
 
 
 def _even_taps(config: SpectralConfig, sample_rate_hertz: float) -> int:
@@ -265,7 +269,7 @@ class MatchedFilter:
             raise ValueError("The matched filter needs a lower band edge (spectral_config.lower_frequency_hertz).")
         self.spectral_config.validate_band(fs)
         if self.bank is None:
-            # Placed with the first detector's noise curve.
+            # Placed with the first detector's curve in the bank's own profile.
             self.bank = TemplateBank.place(default_bank_placement(
                 self.mass_range, self.minimal_match, fs, self.onsource_duration_seconds, self.spectral_config,
                 self.ifos[0] if self.ifos else None))

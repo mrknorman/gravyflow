@@ -378,17 +378,73 @@ _ARM_ALTITUDE_RADIANS : Dict = {
 
 NOISE_PROFILE_DIRECTORY_PATH : Path = RESOURCES / "noise_profiles"
 
-# Bundled amplitude spectral densities (strain / sqrt(Hz)), generated from
-# lalsimulation's curves; each file's header names its source.
+# Bundled amplitude spectral densities (strain / sqrt(Hz)); each file's header
+# names its source. The O3 measured curves are LIGO-T2000012-v2's tables, every
+# row as published; the others were generated from lalsimulation's curves.
+_ALIGO_O3_ACTUAL_H1 = "aligo_o3actual_h1_t2000012.csv"  # LIGO-T2000012-v2, aligo_O3actual_H1.txt
+_ALIGO_O3_ACTUAL_L1 = "aligo_o3actual_l1_t2000012.csv"  # LIGO-T2000012-v2, aligo_O3actual_L1.txt
+_ADVIRGO_O3_ACTUAL = "advirgo_o3actual_t2000012.csv"    # LIGO-T2000012-v2, avirgo_O3actual.txt
 _ALIGO_O3_LOW = "aligo_o3low_t1800545.csv"      # LIGO-T1800545, aLIGOO3LowT1800545
 _ADVIRGO_O3_LOW = "advirgo_o3low_t1800545.csv"  # LIGO-T1800545, AdVO3LowT1800545
 _ALIGO_DESIGN = "aligo_design_t1800044.csv"     # LIGO-T1800044, aLIGODesignSensitivityT1800044
 _ADVIRGO_DESIGN = "advirgo_design_p1200087.csv" # LIGO-P1200087, AdVDesignSensitivityP1200087
 
+
+class NoiseProfile(Enum):
+    """
+    A named set of per-detector noise curves for simulated (coloured) noise.
+
+    O3_ACTUAL, the default (``DEFAULT_NOISE_PROFILE``), is each detector's
+    measured sensitivity in the third observing run, from LIGO-T2000012-v2:
+    H1, L1 and V1 each have their own curve, spectral lines included, from
+    10 Hz to 5 kHz (H1, L1) and to 10 kHz (V1). O3_LOW is the O3 low-noise
+    projection of LIGO-T1800545 (aLIGO for H1 and L1, Advanced Virgo for V1).
+    DESIGN is the aLIGO design curve of LIGO-T1800044 for H1 and L1, and the
+    Advanced Virgo design curve of LIGO-P1200087 for V1. A curve is used only
+    on its own band (``read_noise_curve``).
+    """
+    O3_ACTUAL = {"Hanford": _ALIGO_O3_ACTUAL_H1, "Livingston": _ALIGO_O3_ACTUAL_L1, "Virgo": _ADVIRGO_O3_ACTUAL}
+    O3_LOW = {"Hanford": _ALIGO_O3_LOW, "Livingston": _ALIGO_O3_LOW, "Virgo": _ADVIRGO_O3_LOW}
+    DESIGN = {"Hanford": _ALIGO_DESIGN, "Livingston": _ALIGO_DESIGN, "Virgo": _ADVIRGO_DESIGN}
+
+    def path(self, ifo: "IFO") -> Path:
+        """The ASD file of this profile for ``ifo``."""
+        return NOISE_PROFILE_DIRECTORY_PATH / self.value[ifo.value.name]
+
+
+#: The profile of coloured noise when none is named; each IFO's
+#: ``optimal_psd_path`` is its curve.
+DEFAULT_NOISE_PROFILE = NoiseProfile.O3_ACTUAL
+
+
+def read_noise_curve(path: Path, *, up_to_hertz: float, from_hertz: Optional[float] = None
+                     ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    The rows (frequency in Hz, ASD in strain / sqrt(Hz)) of a bundled noise
+    curve, for a reader that needs it up to ``up_to_hertz`` (and from
+    ``from_hertz``, if given). A curve is never extrapolated: a reader that
+    needs it beyond its band is refused, by name. Its last row holds for one
+    row's spacing, the curve's own resolution, which is where the curves made
+    with lalsimulation end: one evaluation step (1/64 Hz) short of 8192 Hz, the
+    Nyquist frequency of 16384 Hz. Coloured noise has no power below a curve,
+    as at DC, so it passes no ``from_hertz``.
+    """
+    frequencies, asd = np.loadtxt(path, delimiter=",").T
+    reach = frequencies[-1] + (frequencies[-1] - frequencies[-2])
+    if up_to_hertz > reach or (from_hertz is not None and from_hertz < frequencies[0]):
+        needed = f"{up_to_hertz:g} Hz" if from_hertz is None else f"{from_hertz:g}-{up_to_hertz:g} Hz"
+        raise ValueError(
+            f"The noise curve {Path(path).name} covers {frequencies[0]:g}-{frequencies[-1]:g} Hz and "
+            f"{needed} is needed: a curve is never extrapolated. Use a sample rate or band inside it, "
+            "or a noise profile that covers it."
+        )
+    return frequencies, asd
+
+
 ifo_data : Dict = {
     "livingston" : {
         "name": "Livingston",
-        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / _ALIGO_O3_LOW,
+        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / DEFAULT_NOISE_PROFILE.value["Livingston"],
         "longitude_radians" : -1.5843093707829257, 
         "latitude_radians" : 0.5334231350225018,
         "x_angle_radians" : 4.403177738189697,
@@ -399,7 +455,7 @@ ifo_data : Dict = {
     },
     "hanford" : {
         "name": "Hanford",
-        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / _ALIGO_O3_LOW,
+        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / DEFAULT_NOISE_PROFILE.value["Hanford"],
         "longitude_radians" : -2.08405676916594, 
         "latitude_radians" : 0.810795263791696,
         "x_angle_radians": 5.654877185821533,
@@ -410,7 +466,7 @@ ifo_data : Dict = {
     },
     "virgo" : {
         "name": "Virgo",
-        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / _ADVIRGO_O3_LOW,
+        "optimal_psd_path" : NOISE_PROFILE_DIRECTORY_PATH / DEFAULT_NOISE_PROFILE.value["Virgo"],
         "longitude_radians" : 0.1833380521285067, 
         "latitude_radians" : 0.7615118398044829,
         "x_angle_radians": 0.3391628563404083,
@@ -430,23 +486,6 @@ class IFO(Enum):
     def index(self) -> int:
         """Get integer index for this IFO (L1=0, H1=1, V1=2)."""
         return list(IFO).index(self)
-
-class NoiseProfile(Enum):
-    """
-    A named set of per-detector noise curves for simulated (coloured) noise.
-
-    O3_LOW, the default, is each detector's ``optimal_psd_path``: the O3
-    low-noise curves of LIGO-T1800545 (aLIGO for H1 and L1, Advanced Virgo for
-    V1). DESIGN is the aLIGO design curve of LIGO-T1800044 for H1 and L1, and
-    the Advanced Virgo design curve of LIGO-P1200087 for V1.
-    """
-    O3_LOW = {"Hanford": _ALIGO_O3_LOW, "Livingston": _ALIGO_O3_LOW, "Virgo": _ADVIRGO_O3_LOW}
-    DESIGN = {"Hanford": _ALIGO_DESIGN, "Livingston": _ALIGO_DESIGN, "Virgo": _ADVIRGO_DESIGN}
-
-    def path(self, ifo: "IFO") -> Path:
-        """The ASD file of this profile for ``ifo``."""
-        return NOISE_PROFILE_DIRECTORY_PATH / self.value[ifo.value.name]
-
 
 class Network:
     def __init__ (
