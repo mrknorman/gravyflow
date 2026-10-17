@@ -25,10 +25,11 @@ SAMPLES = 2048
 
 
 def logit_model(seed: int, activation=None, detectors: int = 1) -> keras.Model:
-    keras.utils.set_random_seed(seed)
+    """A linear model whose weights are drawn from ``seed`` alone, never a global RNG."""
     inputs = keras.Input(shape=(detectors, SAMPLES), name="WHITENED_ONSOURCE")
     x = keras.layers.Flatten()(inputs)
-    outputs = keras.layers.Dense(2, activation=activation, name="output")(x)
+    outputs = keras.layers.Dense(2, activation=activation, name="output",
+                                 kernel_initializer=keras.initializers.GlorotUniform(seed=seed))(x)
     return keras.Model({"WHITENED_ONSOURCE": inputs}, outputs)
 
 
@@ -71,7 +72,14 @@ def test_metrics_follow_from_the_stored_scores(validated, small_config):
     threshold, curve = curves[0.1]
     assert threshold.resolved and threshold.achieved.count <= 6
     assert curve.total.sum() == 64
-    assert 0.0 <= v.roc_curves()["SNR≥5"]["roc_auc"] <= 1.0
+    # The area under the ROC curve is the Mann-Whitney statistic: the chance that an
+    # injection outscores a noise window, ties counting a half.
+    injections = v.efficiency_data["scores"][v.efficiency_data["snrs"] >= small_config.default_roc_min_snr]
+    noise = v.far_scores
+    wins = (injections[:, None] > noise[None, :]).sum() + 0.5 * (injections[:, None] == noise[None, :]).sum()
+    # Representation: the trapezoid sums at most 128 float64 terms of one sign, each in [0, 1].
+    np.testing.assert_allclose(v.roc_curves()["SNR≥5"]["roc_auc"], wins / (injections.size * noise.size),
+                               rtol=0, atol=128 * np.finfo(np.float64).eps)
 
 
 def test_checkpoint_round_trip(validated):
@@ -96,7 +104,6 @@ def test_checkpoint_resumes_for_the_same_model(validated, dataset_args, small_co
     np.testing.assert_array_equal(again.far_scores, v.far_scores)
 
 
-@pytest.mark.global_rng
 def test_checkpoint_refuses_another_model(validated, dataset_args, small_config):
     # GF-B67: checkpoints were reused by path alone.
     _, path, _ = validated
@@ -124,7 +131,6 @@ def test_checkpoint_of_another_format_is_refused(validated, dataset_args, small_
         Validator.validate(model, "tiny", dataset_args, small_config, old)
 
 
-@pytest.mark.global_rng
 def test_checkpoint_without_provenance_is_refused(tmp_path, dataset_args, small_config):
     path = tmp_path / "old.h5"
     with h5py.File(path, "w") as f:
@@ -186,6 +192,13 @@ def test_a_worst_performer_sample_is_its_own_example():
         assert sample["score"] == 0.5
 
 
+#: Measured: the SNR label is set against the PSD of the uncropped onsource, and the
+#: injection is whitened by the offsource's and cropped, so the two differ by more than
+#: rounding. Worst over this module's 28 worst false negatives, at gravyflow df4acab on
+#: CPU: 1.9% (11.03 against 10.82); the bound keeps a margin of 2.
+SNR_LABEL_RTOL = 0.04
+
+
 def test_worst_false_negatives_carry_their_own_injection(validated):
     # Each worst false negative's whitened injection has the SNR its label gives.
     _, _, v = validated
@@ -194,7 +207,7 @@ def test_worst_false_negatives_carry_their_own_injection(validated):
     for sample in samples:
         injection = np.asarray(sample["WHITENED_INJECTIONS"], dtype=np.float64)
         norm = np.sqrt(np.sum(injection ** 2))
-        np.testing.assert_allclose(norm, float(np.ravel(sample["SNR"])[0]), rtol=0.05, atol=0.05)
+        np.testing.assert_allclose(norm, float(np.ravel(sample["SNR"])[0]), rtol=SNR_LABEL_RTOL)
         assert injection.shape == (1, 1, SAMPLES)  # (generators, detectors, samples)
 
 
@@ -222,7 +235,6 @@ def test_the_validator_scores_injections_on_two_detectors(tmp_path):
     v.plot(tmp_path / "report.html")
 
 
-@pytest.mark.global_rng
 def test_the_validator_scores_real_events(dataset_args, offline_events):
     # The real-event stage scores every confident event, once: real events are test data.
     config = ValidationConfig(num_examples=32, batch_size=32, score_real_events=True)
@@ -244,7 +256,6 @@ def _scoring_args(sample_rate_hertz=2048.0):
     return args
 
 
-@pytest.mark.global_rng
 def test_a_window_scores_as_the_background_scores_it():
     # Real events were whitened by a spectrum of the default settings, not the dataset's,
     # so an event's score was not comparable with the background's.
@@ -259,7 +270,6 @@ def test_a_window_scores_as_the_background_scores_it():
     np.testing.assert_array_equal(windows, background)
 
 
-@pytest.mark.global_rng
 def test_real_events_are_read_in_the_backgrounds_window(offline_events):
     # The event windows were read with the default crop, whatever the dataset's.
     read = []
@@ -278,7 +288,6 @@ def test_real_events_are_read_in_the_backgrounds_window(offline_events):
     assert all(e["status"] == "scored" and np.isfinite(e["score"]) for e in bank.real_events)
 
 
-@pytest.mark.global_rng
 @pytest.mark.parametrize("scaling,value", [(gf.ScalingTypes.HRSS, 1e-22), (gf.ScalingTypes.HPEAK, 1e-21)])
 def test_the_injection_set_is_scaled_to_its_snr_range_whatever_the_training_scaling(
         dataset_args, scaling, value):
@@ -330,7 +339,6 @@ def test_a_time_slide_background_is_read_back_as_it_was_written(tmp_path, small_
     assert background.livetime_seconds == 7.0
 
 
-@pytest.mark.global_rng
 def test_the_backgrounds_livetime_is_the_span_of_the_windows_it_scored(dataset_args, monkeypatch):
     # The livetime's window length was read from the dataset arguments, or the default
     # when they named none, apart from the window the background's dataset scored (and
