@@ -2334,5 +2334,48 @@ class TestFeatureModePipeline:
         assert gf.GlitchType.BLIP in obtainer.data_labels
         assert gf.GlitchType.SCATTERED_LIGHT in obtainer.data_labels
         assert gf.DataLabel.NOISE not in obtainer.data_labels
-        
+
         obtainer.close()
+
+
+class TestPostProcessWhitening:
+    """The obtainer's whiten=True post-processing."""
+
+    def test_whitening_never_writes_the_buffers_it_hands_to_jax(self):
+        """
+        On CPU, JAX may read a numpy array without copying it, and it whitens
+        asynchronously, so a buffer written after the call can change what the
+        whitening reads. The caller's arrays are never written, and every call on
+        identical input matches a whitening of untouched copies. The match allows
+        1e-5 of the peak: XLA on CPU rarely differs in the last few bits between
+        identical calls (about 6e-7 of a 3.7 peak, about once in a thousand
+        calls), while a whitening that read a half-scaled buffer is off by up to
+        1e21.
+        """
+        RV = gf.ReturnVariables
+        rng = np.random.default_rng(0)
+        onsource = (rng.standard_normal((8, 2, 512)) * 1e-21).astype(np.float32)
+        offsource = (rng.standard_normal((8, 2, 4096)) * 1e-21).astype(np.float32)
+        scale = gf.Defaults.scale_factor
+        expected = np.asarray(gf.replace_nan_and_inf_with_zero(
+            gf.whiten(onsource * scale, offsource * scale, 256.0)
+        ))
+        obtainer = gf.IFODataObtainer(
+            data_quality=gf.DataQuality.BEST,
+            data_labels=gf.DataLabel.NOISE,
+            observing_runs=gf.ObservingRun.O3,
+            cache_segments=False,
+        )
+        tolerance = 1e-5 * np.abs(expected).max()
+        calls, wrong, written = 300, 0, 0
+        for _ in range(calls):
+            given = {RV.ONSOURCE: onsource.copy(), RV.OFFSOURCE: offsource.copy()}
+            served = obtainer._post_process_batch(dict(given), 256.0, 1.0, 1.0, whiten=True)
+            wrong += not np.allclose(np.asarray(served[RV.ONSOURCE]), expected, rtol=0, atol=tolerance)
+            written += not (np.array_equal(given[RV.ONSOURCE], onsource)
+                            and np.array_equal(given[RV.OFFSOURCE], offsource)
+                            and np.array_equal(np.asarray(served[RV.OFFSOURCE]), offsource))
+        obtainer.close()
+        assert (wrong, written) == (0, 0), (
+            f"of {calls} calls, {wrong} whitened onsources differ from a whitening of "
+            f"untouched copies and {written} wrote the buffers given or served another offsource")

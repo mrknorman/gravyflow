@@ -847,12 +847,12 @@ class BaseDataObtainer(ABC):
             crop: Whether to crop to onsource_duration_seconds
             
         Returns:
-            Processed batch dict (modified in place)
-            
+            The batch dict, its entries replaced; the arrays it held are never written.
+
         Note:
-            Whitening scales data up before processing (to O(1e21) range for numerical
-            stability) and scales offsource back down afterward. Whitened onsource 
-            stays at unit variance - this is intentional for model training.
+            Whitening works on copies scaled to O(1e21), for numerical stability; the
+            offsource is served unscaled. Whitened onsource stays at unit variance -
+            this is intentional for model training.
         """
         RV = gf.ReturnVariables
         
@@ -860,24 +860,19 @@ class BaseDataObtainer(ABC):
             return None
             
         if whiten:
-            # Scale up before whitening to avoid numerical underflow with raw data
-            # Adjust scaling based on existing scale_factor to ensure data is O(1e21) range
+            # Whiten at O(1e21) amplitude, to avoid underflow with raw strain.
+            # The scaled arrays are new values, never the batch's buffers scaled
+            # in place: on CPU, JAX may read a numpy array without copying it,
+            # and whitens asynchronously, so a write after the call can change
+            # what the whitening reads. The offsource is served as it came.
             target_scale = gf.Defaults.scale_factor
             temp_scale = target_scale / (scale_factor if scale_factor > 0 else 1.0)
-            
-            batch[RV.ONSOURCE] *= temp_scale
-            batch[RV.OFFSOURCE] *= temp_scale
-            
             batch[RV.ONSOURCE] = gf.whiten(
-                batch[RV.ONSOURCE], 
-                batch[RV.OFFSOURCE], 
+                batch[RV.ONSOURCE] * temp_scale,
+                batch[RV.OFFSOURCE] * temp_scale,
                 sample_rate_hertz
             )
 
-            # Whitened onsource stays at unit variance - don't scale back
-            # Scale offsource back down for consistency
-            batch[RV.OFFSOURCE] /= temp_scale
-            
         if crop:
             batch[RV.ONSOURCE] = gf.crop_samples(
                 batch[RV.ONSOURCE], 
