@@ -1109,7 +1109,8 @@ class TestCachingWithFilePath:
     """Tests for caching with actual file paths."""
     
     def test_cache_segment_with_valid_path(self):
-        """Test _cache_segment creates file and stores data (lines 912-915)."""
+        """_cache_segment stores a segment and its first-sample time, which read back."""
+        from gravyflow.src.dataset.acquisition.base import SegmentStrain
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
@@ -1118,15 +1119,15 @@ class TestCachingWithFilePath:
         )
         
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Set file path
             obtainer.file_path = Path(tmpdir) / "test_cache.hdf5"
-            
-            # Cache a segment
             test_data = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-            obtainer._cache_segment("test_key", test_data)
-            
-            # Verify file was created
+            obtainer._cache_segment("test_key", SegmentStrain(test_data, 1238175000.25, 2.0, "test"))
             assert obtainer.file_path.exists()
+
+            stored = obtainer._read_cached_segment("test_key", 2.0)
+            np.testing.assert_array_equal(np.asarray(stored.data), test_data)
+            assert stored.t0 == 1238175000.25 and stored.source == "test"
+            assert obtainer._read_cached_segment("test_key", 4.0) is None  # another rate
 
 
 class TestIFODataWithNaN:

@@ -1,5 +1,4 @@
 # Standard library imports:
-import hashlib
 import logging
 import sys
 
@@ -7,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, IntEnum, auto
 from contextlib import closing
-from typing import List, Tuple, Union, Dict, Any, Optional, Generator, Sequence
+from typing import List, Tuple, Union, Dict, Any, Optional, Generator, NamedTuple, Sequence
 from pathlib import Path
 from .cache import MemoryCache
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -63,9 +62,26 @@ GPS_TOLERANCE_SECONDS = TransientDefaults.GPS_TOLERANCE_SECONDS
 SEGMENT_GRID_ORIGIN_GPS = 0.0
 
 # Version of the stored real-noise segment layout (vetoes, absolute grid, whole
-# segments). It is part of the segment file's hash, so files written under an
-# earlier layout are never read back.
-SEGMENT_LAYOUT_VERSION = "segment-layout-2"
+# segments, each stored with the GPS time of its first sample, its rate and its
+# source). It is part of the segment file's hash, so files written under an earlier
+# layout (layout 2 stored bare samples under their nominal times) are never read back.
+SEGMENT_LAYOUT_VERSION = "segment-layout-3"
+
+
+class SegmentStrain(NamedTuple):
+    """
+    One detector's strain over one segment: its samples, the GPS time of the first
+    sample as the source returned it, the rate and where the samples came from.
+    """
+    data: Any
+    t0: float
+    sample_rate_hertz: float
+    source: str
+
+
+def segment_key(ifo, start, end) -> str:
+    """The segment file's key for ``ifo``'s segment [start, end)."""
+    return f"segments/segment_{ifo.name}_{start}_{end}"
 
 
 def ifo_canonical_key(ifos) -> tuple:
@@ -267,6 +283,11 @@ def window_start_bounds(
     return num_offsource_samples, num_samples - num_onsource_samples - WINDOW_EDGE_BUFFER_SAMPLES
 
 
+def window_offsets_seconds(positions, time_interval_seconds) -> np.ndarray:
+    """Seconds from a piece's first sample to the samples at ``positions``, in float64."""
+    return np.asarray(positions).astype(np.float64) * float(time_interval_seconds)
+
+
 def _random_subsection(
         tensor_data,
         num_examples_per_batch: int,
@@ -279,8 +300,8 @@ def _random_subsection(
     """
     Generate random subsections from a tensor.
 
-    Returns the onsource and offsource subsections and the GPS start time of
-    each onsource subsection, as NumPy float64.
+    Returns the onsource and offsource subsections and the GPS time of each
+    (padded) onsource subsection's first sample, as NumPy float64.
     """
     batch_subarrays, batch_background_chunks, random_starts = _random_subsection_jit(
         tensor_data,
@@ -291,8 +312,7 @@ def _random_subsection(
     )
 
     # The start times are computed outside JAX, in float64.
-    start_times = np.asarray(random_starts).astype(np.float64) * as_gps_times(time_interval_seconds)
-    start_times += as_gps_times(start_gps_times)
+    start_times = as_gps_times(start_gps_times) + window_offsets_seconds(random_starts, time_interval_seconds)
 
     return batch_subarrays, batch_background_chunks, start_times
 
@@ -426,6 +446,10 @@ def random_subsection(
 
 @dataclass
 class IFOData:
+    """
+    One row of detector pieces: ``data[i]`` at ``sample_rate_hertz``, its first sample
+    at GPS ``start_gps_time[i]``.
+    """
     data: Union[List[TimeSeries], Any, np.ndarray]
     sample_rate_hertz: float
     start_gps_time: List[float]
@@ -444,9 +468,8 @@ class IFOData:
             for ifo_data in self.data
         ]
 
-        # Set the time interval between samples
-        self.time_interval_seconds = 1.0 / self.sample_rate_hertz
-        self.time_interval_seconds = ops.cast(self.time_interval_seconds, "float32")
+        # The time between samples, in float64: GPS arithmetic never runs in float32.
+        self.time_interval_seconds = 1.0 / float(self.sample_rate_hertz)
 
     def downsample(self, new_sample_rate_hertz: Union[int, float]):
         # To implement
@@ -526,7 +549,7 @@ class IFOData:
             offsource = ops.stack(
                 [tensor_data[pos - num_offsource_samples:pos] for pos in positions]
             )
-            gps_times = float(start_gps_time) + positions * float(self.time_interval_seconds)
+            gps_times = float(start_gps_time) + window_offsets_seconds(positions, self.time_interval_seconds)
 
             all_subarrays.append(ops.expand_dims(onsource, axis=1))
             all_background_chunks.append(ops.expand_dims(offsource, axis=1))
@@ -652,6 +675,20 @@ class BaseDataObtainer(ABC):
             "_dropped_segments_count": 0,
             "_zero_filled_segments_count": 0,
         }
+
+    #: Attributes that never change the data served, only how it is fetched: whether
+    #: the disk cache is read or written, and how far ahead segments are fetched.
+    _NOT_SPECIFICATION = ("force_acquisition", "cache_segments", "prefetch_segments", "_prefetch_executor")
+
+    def specification(self) -> Dict[str, Any]:
+        """
+        Everything that determines the data this obtainer serves: every attribute but
+        its served state (``_served_state``) and ``_NOT_SPECIFICATION``. Content
+        fingerprints (``validate.provenance.canonical``) read it, so changing any
+        parameter that changes the data changes the fingerprint.
+        """
+        excluded = set(self._served_state()) | set(self._NOT_SPECIFICATION)
+        return {name: value for name, value in sorted(vars(self).items()) if name not in excluded}
 
     @staticmethod
     def _split(
@@ -900,37 +937,16 @@ class BaseDataObtainer(ABC):
         valid_segments: np.ndarray,
         sample_rate_hertz: float,
         ifos: List
-    ) -> List:
+    ) -> Optional[List[Optional["SegmentStrain"]]]:
         """
-        Prefetch a segment by index - runs in background thread.
+        Fetch row ``segment_index``'s segments, one per detector (None where one cannot
+        be had), in a background thread. Nothing is written: the main thread stores them.
         """
         if segment_index >= len(valid_segments):
             return None
-            
-        segment_times = valid_segments[segment_index]
-        results = []
-        
-        for ifo, (segment_start_gps_time, segment_end_gps_time) in zip(ifos, segment_times):
-            # Include IFO name in key to prevent cache collision for multi-IFO transient events
-            segment_key = f"segments/segment_{ifo.name}_{segment_start_gps_time}_{segment_end_gps_time}"
-            try:
-                segment_data = self.get_segment(
-                    segment_start_gps_time,
-                    segment_end_gps_time,
-                    sample_rate_hertz,
-                    ifo,
-                    segment_key
-                )
-            except UpsamplingRefused:
-                raise
-            except Exception as e:
-                logging.warning(f"Prefetch failed for {ifo.name} at {segment_start_gps_time}: {e}")
-                segment_data = None
-            
-            results.append((segment_data, segment_start_gps_time, segment_end_gps_time, segment_key))
-        
-        return results
-        
+        return [self._fetch_segment(ifo, start, end, sample_rate_hertz, "Prefetch")
+                for ifo, (start, end) in zip(ifos, valid_segments[segment_index])]
+
     def generate_file_path(
         self,
         sample_rate_hertz : float,
@@ -947,26 +963,24 @@ class BaseDataObtainer(ABC):
         if default_directory:
             # The one user cache root; never beside the installed package.
             data_directory_path = user_cache_dir("segments")
-        
-        segment_parameters = [
-                self.frame_types, 
-                self.channels, 
-                self.state_flags, 
-                self.data_labels, 
-                self.max_segment_duration_seconds,
-                sample_rate_hertz,
-                group,
-                SEGMENT_LAYOUT_VERSION,
-            ]  
-        
-        segment_parameters = [
-                str(parameter) for parameter in segment_parameters
-            ]
-        
-        def generate_hash_from_list(params):
-            return hashlib.md5("".join(params).encode()).hexdigest()
 
-        segment_hash = generate_hash_from_list(segment_parameters)
+        # Everything a stored segment depends on, by name: its source (frame types,
+        # channels and run bounds), its selection (flags, labels, the longest segment and
+        # the split), its rate and the layout it is stored in. Each stored segment also
+        # carries its own first-sample time, rate and source (see _cache_segment).
+        from gravyflow.src.validate.provenance import config_fingerprint
+        segment_hash = config_fingerprint({
+            "frame_types": self.frame_types,
+            "channels": self.channels,
+            "run_bounds": [list(map(float, bounds))
+                           for bounds in zip(self.start_gps_times, self.end_gps_times)],
+            "state_flags": self.state_flags,
+            "data_labels": self.data_labels,
+            "max_segment_duration_seconds": self.max_segment_duration_seconds,
+            "sample_rate_hertz": float(sample_rate_hertz),
+            "group": group,
+            "layout": SEGMENT_LAYOUT_VERSION,
+        })[:32]
         
         # Determine prefix based on content
         if DataLabel.NOISE in self.data_labels:
@@ -985,42 +999,6 @@ class BaseDataObtainer(ABC):
 
         return self.file_path
     
-    def _get_cached_valid_segments(self, ifos: List, group_name: str) -> np.ndarray:
-        """
-        Try to load cached valid segments from HDF5 file.
-        """
-        if self.file_path is None or not Path(self.file_path).exists():
-            return None
-        
-        cache_key = f"valid_segments/{group_name}"
-        try:
-            with closing(gf.open_hdf5_file(self.file_path, logger, mode="r")) as f:
-                if cache_key in f:
-                    cached_segments = f[cache_key][()]
-                    logger.info(f"Loaded cached valid segments for group '{group_name}'")
-                    return cached_segments
-        except Exception as e:
-            logger.warning(f"Failed to load cached segments: {e}")
-        return None
-    
-    def _cache_valid_segments(self, valid_segments: np.ndarray, group_name: str) -> None:
-        """
-        Cache valid segments to HDF5 file for future use.
-        """
-        if self.file_path is None:
-            return
-        
-        cache_key = f"valid_segments/{group_name}"
-        try:
-            gf.ensure_directory_exists(self.file_path.parent)
-            with closing(gf.open_hdf5_file(self.file_path, logger, mode="a")) as f:
-                if cache_key in f:
-                    del f[cache_key]
-                f.create_dataset(cache_key, data=valid_segments)
-                logger.info(f"Cached valid segments for group '{group_name}'")
-        except Exception as e:
-            logger.warning(f"Failed to cache segments: {e}")
-
     def get_segment_times(
         self,
         start: float,
@@ -1206,14 +1184,26 @@ class BaseDataObtainer(ABC):
                 
         return np.reshape(np.array(new_segments, dtype=np.float64), (-1, 2))
 
-    def _cache_segment(self, key: str, segment: Any) -> None:
+    def _cache_segment(self, key: str, strain: "SegmentStrain") -> None:
+        """
+        Store ``strain`` under ``key`` with its provenance (first-sample GPS time, rate,
+        source and layout). A key already stored holds the same data (the file's hash
+        and the key fix every input to it), so it is written again only when
+        ``force_acquisition`` asks for fresh data.
+        """
         if self.file_path is None:
             return
-            
+
         with closing(gf.open_hdf5_file(self.file_path, logger, mode="a")) as f:
             if key in f:
+                if not self.force_acquisition:
+                    return
                 del f[key]
-            f.create_dataset(key, data=segment)
+            dataset = f.create_dataset(key, data=strain.data)
+            dataset.attrs["t0"] = float(strain.t0)
+            dataset.attrs["sample_rate_hertz"] = float(strain.sample_rate_hertz)
+            dataset.attrs["source"] = str(strain.source)
+            dataset.attrs["layout"] = SEGMENT_LAYOUT_VERSION
 
     def get_segment_data(
             self,
@@ -1370,131 +1360,182 @@ class BaseDataObtainer(ABC):
         sample_rate_hertz: float,
         ifo: gf.IFO,
         segment_key: str
-    ):
+    ) -> Optional["SegmentStrain"]:
         """
         The strain of one segment at ``sample_rate_hertz``, or None if it cannot be had.
 
         The whole segment is fetched, with no margin trimmed at either end. Only its
         tail is cut, to whole seconds (``kept_seconds``). No sample before the
-        segment's start is lost, and less than one second at its end.
+        segment's start is lost, and less than one second at its end. The strain
+        carries the GPS time of its first sample as the source returned it, which
+        every window's GPS time is counted from, never the nominal segment start.
         """
-        segment = None
-        
-        cache_key = f"{segment_key}_{ifo.name}_{sample_rate_hertz}"
-        
-        # Check memory cache first
-        cached = self._segment_cache.get(cache_key)
+        memory_key = f"{segment_key}_{ifo.name}_{sample_rate_hertz}"
+        cached = self._segment_cache.get(memory_key)
         if cached is not None:
             return cached
-    
-        # TRANSIENT mode: Skip disk caching entirely - transients go to TransientCache
-        use_disk_cache = (
-            self.acquisition_mode != AcquisitionMode.TRANSIENT and
-            self.file_path is not None and 
-            Path(self.file_path).exists()
-        )
-        
-        if use_disk_cache or (self.cache_segments and self.acquisition_mode != AcquisitionMode.TRANSIENT):
-            # Only try to read from file if it actually exists
-            if self.file_path is None:
-                pass
-            elif not Path(self.file_path).exists():
-                # File doesn't exist yet - skip cache read attempt
-                pass
-            else:
-                with closing(
-                        gf.open_hdf5_file(self.file_path, logger, mode="r")
-                    ) as segment_file:    
 
-                    if (segment_key in segment_file) and not self.force_acquisition:
-
-                        segment = segment_file[segment_key][()]
-                        segment = ops.convert_to_tensor(segment, dtype="float32")
-                        
-                        if gf.check_tensor_integrity(segment, 1, 10):
-                            self._segment_cache.put(cache_key, segment)
-                            return segment
-                        else:
-                            logging.debug(
-                                f"Segment integrity check failed for {ifo.name}, will zero-fill"
-                            )
-                            return None
-                    else: 
-                        logging.debug(
-                            "Cached segment not found or force acquisition is set"
-                        )
-        
+        segment = self._read_cached_segment(segment_key, sample_rate_hertz)
         if segment is None:
-            # Refuse impossible rates loudly, before the zero-fill fallback below.
-            gwosc_sample_rate_hertz(sample_rate_hertz)
-            try:
-                # Get correct frame_type/channel for this GPS time's observing run
-                frame_type, channel = self._get_frame_channel_for_gps(segment_start_gps_time)
-                raw_segment = self.get_segment_data(
-                    segment_start_gps_time,
-                    segment_end_gps_time,
-                    ifo,
-                    frame_type,
-                    channel,
-                    sample_rate_hertz=sample_rate_hertz,
+            segment = self._download_segment(
+                segment_start_gps_time, segment_end_gps_time, sample_rate_hertz, ifo
+            )
+        if segment is None:
+            return None
+        if not gf.check_tensor_integrity(segment.data, 1, 10):
+            logging.debug(f"Segment integrity check failed for {ifo.name}, will zero-fill")
+            return None
+        self._segment_cache.put(memory_key, segment)
+        return segment
+
+    def _read_cached_segment(self, segment_key: str, sample_rate_hertz: float) -> Optional["SegmentStrain"]:
+        """
+        ``segment_key`` from the segment file, or None when it is not there, fresh data
+        is forced, or its stored provenance is not this request's (it is then fetched
+        again).
+        """
+        if (self.acquisition_mode == AcquisitionMode.TRANSIENT or self.file_path is None
+                or self.force_acquisition or not Path(self.file_path).exists()):
+            return None
+        with closing(gf.open_hdf5_file(self.file_path, logger, mode="r")) as segment_file:
+            if segment_key not in segment_file:
+                return None
+            dataset = segment_file[segment_key]
+            attrs = dict(dataset.attrs)
+            if (attrs.get("layout") != SEGMENT_LAYOUT_VERSION or "t0" not in attrs
+                    or float(attrs.get("sample_rate_hertz", -1.0)) != float(sample_rate_hertz)):
+                logging.warning(
+                    f"Stored segment {segment_key} in {self.file_path} has provenance "
+                    f"{attrs}, not layout {SEGMENT_LAYOUT_VERSION} at {sample_rate_hertz} Hz; "
+                    "fetching it again."
+                )
+                return None
+            return SegmentStrain(
+                data=ops.convert_to_tensor(dataset[()], dtype="float32"),
+                t0=float(attrs["t0"]),
+                sample_rate_hertz=float(sample_rate_hertz),
+                source=str(attrs.get("source", "")),
+            )
+
+    def _download_segment(
+        self,
+        segment_start_gps_time: float,
+        segment_end_gps_time: float,
+        sample_rate_hertz: float,
+        ifo: gf.IFO,
+    ) -> Optional["SegmentStrain"]:
+        """Fetch and resample one segment (see get_segment), or None if it cannot be had."""
+        # Refuse impossible rates loudly, before the zero-fill fallback.
+        gwosc_sample_rate_hertz(sample_rate_hertz)
+        try:
+            # Get correct frame_type/channel for this GPS time's observing run
+            frame_type, channel = self._get_frame_channel_for_gps(segment_start_gps_time)
+            raw_segment = self.get_segment_data(
+                segment_start_gps_time,
+                segment_end_gps_time,
+                ifo,
+                frame_type,
+                channel,
+                sample_rate_hertz=sample_rate_hertz,
+            )
+
+            original_sample_rate = float(raw_segment.sample_rate.value)
+            if original_sample_rate < sample_rate_hertz:
+                raise UpsamplingRefused(
+                    f"{ifo.name} data at {segment_start_gps_time} is sampled at "
+                    f"{original_sample_rate} Hz, below the requested "
+                    f"{sample_rate_hertz} Hz; gravyflow does not upsample real data."
                 )
 
-                original_sample_rate = float(raw_segment.sample_rate.value)
-                if original_sample_rate < sample_rate_hertz:
-                    raise UpsamplingRefused(
-                        f"{ifo.name} data at {segment_start_gps_time} is sampled at "
-                        f"{original_sample_rate} Hz, below the requested "
-                        f"{sample_rate_hertz} Hz; gravyflow does not upsample real data."
-                    )
+            segment_data = jnp.array(raw_segment.value, dtype=jnp.float32)
 
-                segment_data = jnp.array(raw_segment.value, dtype=jnp.float32)
-
-                # Keep every sample from the segment's start; cut only the tail, to
-                # whole seconds (see the docstring).
-                samples_per_second = int(round(original_sample_rate))
-                num_samples = segment_data.shape[0]
-                whole_seconds = int(kept_seconds(num_samples / original_sample_rate))
-                if whole_seconds < 1:
-                    logging.debug(
-                        f"Segment shorter than one second ({num_samples} samples); skipped."
-                    )
-                    return None
-                segment_data = segment_data[:whole_seconds * samples_per_second]
-                
-                segment = resample_fft(
-                    segment_data, 
-                    original_sample_rate, 
-                    sample_rate_hertz
+            # Keep every sample from the segment's start; cut only the tail, to
+            # whole seconds (see get_segment).
+            samples_per_second = int(round(original_sample_rate))
+            num_samples = segment_data.shape[0]
+            whole_seconds = int(kept_seconds(num_samples / original_sample_rate))
+            if whole_seconds < 1:
+                logging.debug(
+                    f"Segment shorter than one second ({num_samples} samples); skipped."
                 )
-
-            except UpsamplingRefused:
-                raise
-            except Exception as e:
-                logging.debug(f"Segment acquisition failed (will zero-fill): {type(e).__name__}, {str(e)}")
                 return None
+            segment_data = segment_data[:whole_seconds * samples_per_second]
 
-            if segment is not None:
-                segment = ops.convert_to_tensor(segment, dtype="float32")
-                
-                if gf.check_tensor_integrity(segment, 1, 10):
-                    self._segment_cache.put(cache_key, segment)
-                    return segment
-                else:
-                    logging.debug(f"Segment integrity check failed for {ifo.name}, will zero-fill")
-                    return None
-            else:
-                logging.error("Segment is None for some reason, skipping")
-                return None
+            # Resampling keeps the first sample's time: sample k is at t0 + k / rate.
+            return SegmentStrain(
+                data=ops.convert_to_tensor(
+                    resample_fft(segment_data, original_sample_rate, sample_rate_hertz),
+                    dtype="float32",
+                ),
+                t0=float(raw_segment.t0.value),
+                sample_rate_hertz=float(sample_rate_hertz),
+                source=f"{raw_segment.channel} at {original_sample_rate} Hz",
+            )
+        except UpsamplingRefused:
+            raise
+        except Exception as e:
+            logging.debug(f"Segment acquisition failed (will zero-fill): {type(e).__name__}, {str(e)}")
+            return None
+
+    def _fetch_segment(self, ifo, start, end, sample_rate_hertz, what: str = "Segment") -> Optional["SegmentStrain"]:
+        """get_segment for one detector's segment of a row, or None (logged) if it fails."""
+        try:
+            return self.get_segment(start, end, sample_rate_hertz, ifo, segment_key(ifo, start, end))
+        except UpsamplingRefused:
+            raise
+        except Exception as e:
+            logging.warning(f"{what} failed for {ifo.name} at {start}: {e}")
+            return None
+
+    def _row_data(
+        self,
+        segment_times,
+        ifos: List[gf.IFO],
+        strains: List[Optional["SegmentStrain"]],
+        sample_rate_hertz: float,
+        scale_factor: float,
+        quiet_zero_fill: bool,
+    ) -> IFOData:
+        """
+        One row's IFOData from its detectors' strains: each stored to the segment file
+        when caching is on, and each detector's GPS time that of its first sample. A
+        segment that could not be had is zeros from its nominal start, and counted.
+        """
+        data, first_sample_gps = [], []
+        for ifo, (start, end), strain in zip(ifos, segment_times, strains):
+            if strain is not None:
+                if self.cache_segments:
+                    self._cache_segment(segment_key(ifo, start, end), strain)
+                data.append(strain.data)
+                first_sample_gps.append(strain.t0)
+                continue
+            self._zero_filled_segments_count += 1
+            if not quiet_zero_fill:
+                logging.warning(
+                    f"Segment missing for {ifo.name} at {start}. Filling with zeros "
+                    f"(total zero-filled: {self._zero_filled_segments_count})."
+                )
+            num_samples = int(kept_seconds(end - start) * sample_rate_hertz)
+            data.append(ops.zeros((num_samples,), dtype="float32"))
+            first_sample_gps.append(float(start))
+        return IFOData(data, sample_rate_hertz, first_sample_gps).scale(scale_factor)
 
     def acquire(
-        self, 
+        self,
         sample_rate_hertz: Optional[float] = None,
         valid_segments: Optional[np.ndarray] = None,
         ifos: List[gf.IFO] = [gf.IFO.L1],
         scale_factor: float = 1.0,
         quiet_zero_fill: bool = False  # Suppress zero-fill warnings (for batch cache downloads)
     ) -> Generator[IFOData, None, None]:
-        
+        """
+        One IFOData per row of ``valid_segments`` (default: the served split's), each
+        detector's piece labelled with the GPS time of its first sample.
+
+        A different array than the served segments is read statelessly (a one-off
+        download, no prefetch); the served segments are streamed from the obtainer's
+        position, the next row prefetched in the background.
+        """
         if sample_rate_hertz is None:
             sample_rate_hertz = gf.Defaults.sample_rate_hertz
         # Refuse rates no public source holds, before any zero-fill fallback.
@@ -1506,170 +1547,53 @@ class BaseDataObtainer(ABC):
         if valid_segments is None:
             valid_segments = self.valid_segments
 
-        # Auto-detect: if segments is a different array (subset), use local index
-        # This prevents state corruption when acquire() is used for one-off downloads
-        use_local_index = (
-            valid_segments is not None and 
-            valid_segments is not self.valid_segments
-        )
-        
-        if use_local_index:
-            # STATELESS MODE: One-off download (e.g., cache misses)
-            # Use local index, no prefetch, no state modification
-            for idx in range(len(valid_segments)):
-                segments = []
-                gps_start_times = []
-                
-                segment_times = valid_segments[idx]
-                for ifo, (segment_start_gps_time, segment_end_gps_time) in zip(ifos, segment_times):
-                    segment_key = f"segments/segment_{ifo.name}_{segment_start_gps_time}_{segment_end_gps_time}"
-                    try:
-                        segment_data = self.get_segment(
-                            segment_start_gps_time,
-                            segment_end_gps_time,
-                            sample_rate_hertz,
-                            ifo,
-                            segment_key
-                        )
-                    except UpsamplingRefused:
-                        raise
-                    except Exception as e:
-                        logging.warning(f"Failed to get segment for {ifo.name} at {segment_start_gps_time}: {e}")
-                        segment_data = None
-                    
-                    if segment_data is not None:
-                        segments.append(segment_data)
-                        gps_start_times.append(segment_start_gps_time)
-                        if self.cache_segments:
-                            self._cache_segment(segment_key, segment_data)
-                    else:
-                        self._zero_filled_segments_count += 1
-                        if not quiet_zero_fill:
-                            logging.warning(
-                                f"Segment missing for {ifo.name} at {segment_start_gps_time}. "
-                                f"Filling with zeros (total zero-filled: {self._zero_filled_segments_count})."
-                            )
-                        duration = kept_seconds(segment_end_gps_time - segment_start_gps_time)
-                        num_samples = int(duration * sample_rate_hertz)
-                        segments.append(ops.zeros((num_samples,), dtype="float32"))
-                        gps_start_times.append(segment_start_gps_time)
-                
-                if not segments:
-                    logging.error("No segments acquired, skipping to next iteration.")
-                    continue
-                
-                try:
-                    multi_segment = IFOData(segments, sample_rate_hertz, gps_start_times)
-                    if not multi_segment.data:
-                        raise ValueError("Input data should not be empty.")
-                    multi_segment = multi_segment.scale(scale_factor)
-                    yield multi_segment
-                except Exception as e:
-                    logging.error(f"Error processing segment: {e}")
-                    continue
-            return  # Exit generator after stateless download
+        def row(segment_times, strains):
+            return self._row_data(
+                segment_times, ifos, strains, sample_rate_hertz, scale_factor, quiet_zero_fill
+            )
 
-        # STATEFUL MODE: Streaming with prefetch (existing behavior)
+        if valid_segments is not self.valid_segments:
+            # A one-off download (e.g. cache misses): no prefetch, no state changed.
+            for segment_times in valid_segments:
+                yield row(segment_times, [
+                    self._fetch_segment(ifo, start, end, sample_rate_hertz)
+                    for ifo, (start, end) in zip(ifos, segment_times)
+                ])
+            return
+
+        # Streaming the served segments, with prefetch.
         self._prefetch_futures.clear()
 
         while self._current_segment_index < len(valid_segments):
             current_idx = self._current_segment_index
             self._current_segment_index += 1
-            
-            segments = []
-            gps_start_times = []
-            
-            prefetch_result = None
+
+            strains = None
             if current_idx in self._prefetch_futures:
                 future = self._prefetch_futures.pop(current_idx)
                 try:
-                    prefetch_result = future.result(timeout=300)
+                    strains = future.result(timeout=300)
                 except Exception as e:
                     logging.warning(f"Prefetch result failed: {e}")
-                    prefetch_result = None
-            
-            if prefetch_result is not None:
-                for segment_data, segment_start_gps_time, segment_end_gps_time, segment_key in prefetch_result:
-                    if segment_data is not None:
-                        segments.append(segment_data)
-                        gps_start_times.append(segment_start_gps_time)
-                        if self.cache_segments:
-                            self._cache_segment(segment_key, segment_data)
-                    else:
-                        self._zero_filled_segments_count += 1
-                        if not quiet_zero_fill:
-                            logging.warning(
-                                f"Prefetched segment missing. Filling with zeros "
-                                f"(total zero-filled: {self._zero_filled_segments_count})."
-                            )
-                        duration = kept_seconds(segment_end_gps_time - segment_start_gps_time)
-                        num_samples = int(duration * sample_rate_hertz)
-                        segments.append(ops.zeros((num_samples,), dtype="float32"))
-                        gps_start_times.append(segment_start_gps_time)
-            else:
-                segment_times = valid_segments[current_idx]
-                for ifo, (segment_start_gps_time, segment_end_gps_time) in zip(ifos, segment_times):
-                    # Include IFO name in key to prevent cache collision for multi-IFO transient events
-                    segment_key = f"segments/segment_{ifo.name}_{segment_start_gps_time}_{segment_end_gps_time}"
-                    try:
-                        segment_data = self.get_segment(
-                            segment_start_gps_time, 
-                            segment_end_gps_time,
-                            sample_rate_hertz, 
-                            ifo, 
-                            segment_key
-                        )
-                    except UpsamplingRefused:
-                        raise
-                    except Exception as e:
-                        logging.warning(f"Failed to get segment for {ifo.name} at {segment_start_gps_time}: {e}")
-                        segment_data = None
-                        
-                    if segment_data is not None:
-                        segments.append(segment_data)
-                        gps_start_times.append(segment_start_gps_time)
-                        if self.cache_segments:
-                            self._cache_segment(segment_key, segment_data)
-                    else:
-                        self._zero_filled_segments_count += 1
-                        if not quiet_zero_fill:
-                            logging.warning(
-                                f"Segment missing for {ifo.name} at {segment_start_gps_time}. "
-                                f"Filling with zeros (total zero-filled: {self._zero_filled_segments_count})."
-                            )
-                        duration = kept_seconds(segment_end_gps_time - segment_start_gps_time)
-                        num_samples = int(duration * sample_rate_hertz)
-                        segments.append(ops.zeros((num_samples,), dtype="float32"))
-                        gps_start_times.append(segment_start_gps_time)
+            segment_times = valid_segments[current_idx]
+            if strains is None:
+                strains = [self._fetch_segment(ifo, start, end, sample_rate_hertz)
+                           for ifo, (start, end) in zip(ifos, segment_times)]
 
-            if not segments:
-                logging.error("No segments acquired, skipping to next iteration.")
-                continue
+            multi_segment = row(segment_times, strains)
 
-            try:
-                multi_segment = IFOData(segments, sample_rate_hertz, gps_start_times)
+            if self.prefetch_segments > 0 and self._prefetch_executor is not None:
+                next_idx = self._current_segment_index
+                if next_idx < len(valid_segments) and next_idx not in self._prefetch_futures:
+                    self._prefetch_futures[next_idx] = self._prefetch_executor.submit(
+                        self._prefetch_segment_for_index,
+                        next_idx,
+                        valid_segments,
+                        sample_rate_hertz,
+                        ifos
+                    )
 
-                if not multi_segment.data:
-                    raise ValueError("Input data should not be empty.")
-                
-                multi_segment = multi_segment.scale(scale_factor)
-                
-                if self.prefetch_segments > 0 and self._prefetch_executor is not None:
-                    next_idx = self._current_segment_index
-                    if next_idx < len(valid_segments) and next_idx not in self._prefetch_futures:
-                        future = self._prefetch_executor.submit(
-                            self._prefetch_segment_for_index,
-                            next_idx,
-                            valid_segments,
-                            sample_rate_hertz,
-                            ifos
-                        )
-                        self._prefetch_futures[next_idx] = future
-
-                yield multi_segment
-            except Exception as e:
-                logging.error(f"Error processing segment: {e}")
-                continue
+            yield multi_segment
 
         self._current_segment_index = 0
         self._prefetch_futures.clear()

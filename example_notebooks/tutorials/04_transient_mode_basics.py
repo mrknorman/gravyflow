@@ -165,10 +165,11 @@ print("Additional metadata in TRANSIENT mode:")
 
 # GPS times
 if gf.ReturnVariables.START_GPS_TIME in batch:
-    gps = batch[gf.ReturnVariables.START_GPS_TIME]
-    print(f"\n  START_GPS_TIME (window start times):")
-    for i, t in enumerate(gps[:4]):
-        print(f"    Example {i}: GPS {t:.2f}")
+    # (Batch, IFO): the GPS time of each detector's first onsource sample, after cropping.
+    gps = np.asarray(batch[gf.ReturnVariables.START_GPS_TIME])
+    print(f"\n  START_GPS_TIME (first onsource sample, per detector):")
+    for i, row in enumerate(gps[:4]):
+        print(f"    Example {i}: " + ", ".join(f"GPS {t:.4f}" for t in row))
 
 # Glitch types (integer labels)
 if gf.ReturnVariables.GLITCH_TYPE in batch:
@@ -272,7 +273,7 @@ print("""
 
 4. Output includes additional metadata:
    - GLITCH_TYPE: Integer label (GlitchType value, 0-23)
-   - START_GPS_TIME: Window start time
+   - START_GPS_TIME: GPS time of the first onsource sample, per detector
    - TRANSIENT_GPS_TIME: Event center time
    - DATA_LABEL: What type (NOISE=0, GLITCHES=1, EVENTS=2)
 

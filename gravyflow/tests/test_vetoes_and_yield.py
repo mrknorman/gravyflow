@@ -580,10 +580,10 @@ class _RecordingFetch:
         self.calls = []
 
     def __call__(self, ifo, start, end, sample_rate=4096, **kwargs):
-        from types import SimpleNamespace
+        from gwpy.timeseries import TimeSeries
         self.calls.append((start, end))
         value = np.arange(int(round((end - start) * sample_rate)), dtype=np.float32)
-        return SimpleNamespace(sample_rate=SimpleNamespace(value=float(sample_rate)), value=value)
+        return TimeSeries(value, t0=start, sample_rate=sample_rate, channel="L1:FAKE-RAMP")
 
 
 class TestWholeSegments:
@@ -596,7 +596,7 @@ class TestWholeSegments:
              patch("gravyflow.src.dataset.acquisition.base.TimeSeries.fetch_open_data",
                    side_effect=fetch):
             segment = obtainer.get_segment(start, end, rate, gf.IFO.L1, "segments/test")
-        return segment, fetch.calls
+        return segment.data, fetch.calls
 
     def test_no_margin_is_trimmed(self):
         start = 1238171648.0

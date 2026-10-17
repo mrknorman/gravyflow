@@ -47,14 +47,23 @@ def model_fingerprint(model) -> str:
     return digest.hexdigest()
 
 
+class UnfingerprintableError(TypeError):
+    """A configuration value has no content a fingerprint can read."""
+
+
 def canonical(value: Any) -> Any:
     """
     A JSON-ready canonical form of a configuration value.
 
-    Dataclasses, mappings, sequences, enums (by qualified name), numpy scalars
-    and arrays, and paths are kept by content. Any other object is reduced to
-    its type's qualified name: such objects are not fingerprinted by content.
+    An object with a ``specification()`` method (the data obtainers) is kept by what
+    that returns: everything that determines the data it serves. Dataclasses,
+    mappings, sequences, enums (by qualified name), numpy scalars and arrays, and
+    paths are kept by content. Any other object is refused
+    (``UnfingerprintableError``): a fingerprint that read only its type would not
+    change when its content did.
     """
+    if callable(getattr(value, "specification", None)) and not isinstance(value, type):
+        return {"__type__": type(value).__qualname__, **canonical(value.specification())}
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {"__type__": type(value).__qualname__,
                 **{f.name: canonical(getattr(value, f.name)) for f in dataclasses.fields(value)}}
@@ -75,7 +84,10 @@ def canonical(value: Any) -> Any:
         return str(value)
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
-    return {"__object__": f"{type(value).__module__}.{type(value).__qualname__}"}
+    raise UnfingerprintableError(
+        f"Cannot fingerprint a {type(value).__module__}.{type(value).__qualname__} by its content; "
+        "give it a specification() method, or make it a dataclass."
+    )
 
 
 def config_fingerprint(*values: Any) -> str:

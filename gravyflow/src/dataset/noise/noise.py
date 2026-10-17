@@ -1,5 +1,5 @@
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from enum import Enum, auto
 from itertools import count
 from typing import Callable, Dict, Iterator, List, Optional, Union
@@ -282,6 +282,13 @@ class Obtainer:
     ifo_data_obtainer: Union[None, gf.IFODataObtainer] = None
     ifos: List[gf.IFO] = None
     groups: Union[dict, None] = None
+
+    def specification(self) -> dict:
+        """
+        What determines the noise served (``validate.provenance.canonical`` reads it):
+        every field but where segment files are kept.
+        """
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "data_directory_path"}
 
     def __post_init__(self):
         if self.ifos is None:

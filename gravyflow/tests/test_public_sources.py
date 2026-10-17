@@ -423,11 +423,11 @@ class TestFrameTypesAndChannels:
 # REQUESTED SAMPLE RATE
 # =============================================================================
 
-class _FakeTimeSeries:
-    def __init__(self, rate, duration):
-        from types import SimpleNamespace
-        self.sample_rate = SimpleNamespace(value=float(rate))
-        self.value = np.random.default_rng(0).normal(size=int(rate * duration)).astype(np.float32)
+def _fake_strain(start, rate, duration):
+    """Gaussian strain as gwpy returns it: starting at ``start``, at ``rate``."""
+    from gwpy.timeseries import TimeSeries
+    value = np.random.default_rng(0).normal(size=int(rate * duration)).astype(np.float32)
+    return TimeSeries(value, t0=start, sample_rate=rate, channel="H1:FAKE-STRAIN")
 
 
 class TestSampleRate:
@@ -435,7 +435,7 @@ class TestSampleRate:
     def _fetch_recorder(self, calls):
         def fake_fetch(ifo, start, end, sample_rate=4096, **kwargs):
             calls.append(sample_rate)
-            return _FakeTimeSeries(sample_rate, end - start)
+            return _fake_strain(start, sample_rate, end - start)
         return fake_fetch
 
     @pytest.mark.parametrize("requested, fetched", [
@@ -459,7 +459,7 @@ class TestSampleRate:
             )
         assert calls == [fetched]
         assert segment is not None
-        assert segment.shape[0] == int(64 * requested)
+        assert segment.data.shape[0] == int(64 * requested)
 
     def test_transient_fetch_uses_needed_rate(self):
         calls = []

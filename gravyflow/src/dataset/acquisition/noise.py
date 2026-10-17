@@ -471,8 +471,6 @@ class NoiseDataObtainer(BaseDataObtainer):
                 segment_order,
                 seed
             )
-            
-            self._cache_valid_segments(self.valid_segments, group_name)
 
         return self.valid_segments
 
@@ -677,6 +675,7 @@ class NoiseDataObtainer(BaseDataObtainer):
                 yield _post_process({
                     RV.ONSOURCE: self._apply_augmentation(subarrays),
                     RV.OFFSOURCE: self._apply_augmentation(background_chunks),
-                    RV.START_GPS_TIME: start_gps_times,  # Already (B, I)
+                    # The windows' first samples, as the first returned onsource sample.
+                    RV.START_GPS_TIME: window_spec.onsource_start_gps(start_gps_times),
                     RV.DATA_LABEL: ops.full((batch_size, num_ifos), 0, dtype="int32"),  # NOISE = 0
                 })

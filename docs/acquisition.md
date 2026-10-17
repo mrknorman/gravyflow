@@ -76,6 +76,11 @@ Unless the data labels include them, every event GWOSC publishes (see the event 
 ### Loading segments
 Each segment's strain is fetched whole, from its first sample: nothing is trimmed from its start, and its end is cut to a whole number of seconds, so the number of distinct segment lengths stays bounded (the sampling plan measures each piece on the same length). On the GWOSC timeline (O1 to O3, H1 and L1, each detector alone, at 2048 Hz), the noise available in pieces of at least 36 s rose from 9,458 h to 21,275 h, with the event and glitch vetoes now applied (with them applied to the previous binning, 5,780 h).
 
+Each segment keeps the GPS time of its first sample as the source returned it, and every window's GPS time is counted from it, never from the segment's nominal start. Segments are stored in a file under the obtainer's data directory, named by a hash of everything a stored segment depends on: frame types, channels and run bounds, the flags, labels, longest segment and split, the sample rate and the storage layout (`SEGMENT_LAYOUT_VERSION`). Each stored segment also records its first-sample time, its rate, its source and its layout; one whose record does not match the request is fetched again, and files of an earlier layout are never opened.
+
+### Labels
+`START_GPS_TIME` is, for each example and detector, the GPS time of the first sample of the onsource window returned after cropping (`WindowSpec.onsource_start_gps`), in float64. When the onsource is returned uncropped (an obtainer called without `crop=True`), its first sample is `crop_duration_seconds` earlier.
+
 ### 6. Final Ordering (`order_segments`)
 Finally, the segments are ordered based on the user's preference:
 -   **Random**: Shuffled for training variety.

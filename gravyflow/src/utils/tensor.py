@@ -435,6 +435,13 @@ def window_samples(duration_seconds: float, sample_rate_hertz: float) -> int:
     """The samples crop_samples keeps of a window of ``duration_seconds``."""
     return int(duration_seconds * sample_rate_hertz)
 
+def crop_start(num_samples: int, onsource_duration_seconds: float, sample_rate_hertz: float) -> int:
+    """
+    The index, in a window of ``num_samples``, of the first sample crop_samples keeps:
+    the window's first returned sample after cropping (see WindowSpec.onsource_start_gps).
+    """
+    return (int(num_samples) - window_samples(onsource_duration_seconds, sample_rate_hertz)) // 2
+
 def crop_samples(
         batched_onsource, 
         onsource_duration_seconds: float, 
@@ -468,9 +475,7 @@ def crop_samples(
         batched_onsource = ops.expand_dims(batched_onsource, 0) 
     
     desired_num_samples = window_samples(onsource_duration_seconds, sample_rate_hertz)
-    
-    # Calculate the start and end index for cropping
-    start = (ops.shape(batched_onsource)[-1] - desired_num_samples) // 2
+    start = crop_start(ops.shape(batched_onsource)[-1], onsource_duration_seconds, sample_rate_hertz)
     end = start + desired_num_samples
     
     # Crop the batched_onsource

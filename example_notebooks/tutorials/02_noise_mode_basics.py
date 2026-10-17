@@ -22,6 +22,8 @@ NOTE: This requires network access to GWOSC (Gravitational Wave Open Science).
 # IMPORTS
 # =============================================================================
 
+from pathlib import Path
+
 import gravyflow as gf
 import numpy as np
 import matplotlib.pyplot as plt
@@ -154,10 +156,11 @@ Offsource shape: {offsource.shape}
 
 # GPS times for each sample
 if gf.ReturnVariables.START_GPS_TIME in batch:
-    gps_times = batch[gf.ReturnVariables.START_GPS_TIME]
-    print(f"GPS times (start of each window):")
-    for i, t in enumerate(gps_times):
-        print(f"  Example {i}: GPS {t:.2f}")
+    # (Batch, IFO): the GPS time of each detector's first onsource sample, after cropping.
+    gps_times = np.asarray(batch[gf.ReturnVariables.START_GPS_TIME])
+    print(f"GPS times (first onsource sample of each window, per detector):")
+    for i, row in enumerate(gps_times):
+        print(f"  Example {i}: " + ", ".join(f"GPS {t:.4f}" for t in row))
 
 # =============================================================================
 # SECTION 5: VISUALIZING NOISE SAMPLES
@@ -191,7 +194,7 @@ for i in range(min(4, onsource.shape[0])):
             va='top', fontsize=9, family='monospace')
 
 plt.tight_layout()
-plt.savefig("/home/michael.norman/gravyflow/example_notebooks/tutorials/02_noise_samples.png", dpi=100)
+plt.savefig(Path(__file__).with_name("02_noise_samples.png"), dpi=100)
 print("Saved plot to: tutorials/02_noise_samples.png")
 plt.close()
 
@@ -216,7 +219,7 @@ print("""
 4. Each batch contains:
    - ONSOURCE: Main data window
    - OFFSOURCE: Background for whitening/PSD
-   - START_GPS_TIME: Start time of each window
+   - START_GPS_TIME: GPS time of each window's first onsource sample, per detector
 
 5. Data is downloaded from GWOSC automatically
 """)

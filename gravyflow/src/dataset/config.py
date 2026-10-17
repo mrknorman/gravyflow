@@ -95,6 +95,25 @@ class WindowSpec:
         return num - (num % 2)  # Ensure even
     
     @property
+    def num_crop_samples(self) -> int:
+        """
+        Samples of the padded onsource window before its first returned sample:
+        where ``crop_samples`` starts the onsource it keeps.
+        """
+        from gravyflow.src.utils.tensor import crop_start
+        return crop_start(self.num_onsource_samples, self.onsource_duration_seconds, self.sample_rate_hertz)
+
+    def onsource_start_gps(self, window_start_gps):
+        """
+        ``START_GPS_TIME``: the GPS time of the first sample of the onsource window
+        returned after cropping, from the GPS time of the padded window's first sample
+        (the owner's ruling, every path: real noise and transients, obtainer and
+        Dataset). Float64, whatever the global precision.
+        """
+        from gravyflow.src.utils.gps import as_gps_times
+        return as_gps_times(window_start_gps) + self.num_crop_samples / float(self.sample_rate_hertz)
+
+    @property
     def sample_counts(self) -> Tuple[int, int]:
         """
         Return (num_onsource_samples, num_offsource_samples) as a tuple.
