@@ -111,15 +111,15 @@ python -m gravyflow.src.model.examples.train_gabbard_2017 --output-dir ~/gravyfl
   && python -m gravyflow.src.model.examples.validate_gabbard_2017 --run-dir ~/gravyflow_runs/gabbard_2017_cpu
 ```
 
-- **Training** (about 3 minutes on an Apple M-series CPU): the paper's network at 2048 Hz (41,842 weights), 10 epochs of
+- **Training** (about 3 minutes, 198 s measured, on an Apple M-series CPU): the paper's network at 2048 Hz (41,842 weights), 10 epochs of
   300 batches of 32 one-second windows, Nadam at 0.002; the best epoch by validation loss is saved as `model.keras`.
   The run directory keeps a checkpoint per epoch: the same command resumes an interrupted run, and refuses a
   directory holding a run of another configuration.
-- **Validation** (about 3 minutes): 100,000 noise windows (100,000 s of background) and 100,000 injections at SNR
+- **Validation** (about 4 minutes, 246 s measured): 100,000 noise windows (100,000 s of background) and 100,000 injections at SNR
   0–15, from the validator's own seeds. It prints the score threshold for each false-alarm rate (in Hz, with its
   achieved rate), the efficiency by SNR bin at that threshold, and the ROC AUC, and writes the dashboard
-  `validation/validation.html` in the run directory. Expect an AUC near 0.976 and, at a false-alarm rate of 1e-3 Hz,
-  an efficiency near 0.69 at SNR 7–8 and 0.96 at SNR 9–10.
+  `validation/validation.html` in the run directory. With the default `NoiseProfile.O3_ACTUAL` noise, expect an AUC near 0.978 and, at a false-alarm rate
+  of 1e-3 Hz, an efficiency near 0.75 at SNR 7–8 and 0.97 at SNR 9–10.
 - **Reproducible from the seed** (`--seed`): the same seed gives the same batches, in the same order, from the same
   initial weights, and with the single-threaded kernels above the same weights, epoch by epoch. XLA's multi-threaded
   CPU kernels round the whitened strain differently in its last bits from call to call (see section 7); training
