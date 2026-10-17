@@ -60,9 +60,6 @@ from gravyflow.src.detection.template_grid import BankPlacement, MatchSpace, Tem
 # Added to the light travel time between detectors in the coincidence window,
 # for the timing error of each detector's peak.
 COINCIDENCE_MARGIN_SECONDS = 0.002
-# The SpectralConfig fields that shape the whitening filter and the band: a
-# spectrum must agree with the matched filter's config on each.
-FILTER_SHAPING_FIELDS = ("filter_duration_seconds", "lower_frequency_hertz", "upper_frequency_hertz")
 
 
 def default_bank_placement(
@@ -328,22 +325,31 @@ class MatchedFilter:
     def spectrum(self, background) -> Optional[PowerSpectrum]:
         """
         The PowerSpectrum the data were whitened with: given, or estimated from
-        an offsource. A given spectrum must have this filter's sample rate,
-        filter length and band (FILTER_SHAPING_FIELDS): the templates' alignment
-        and FFT length are fixed by this filter's spectral_config, while their
-        whitening filter is designed from the spectrum's.
+        an offsource. The templates' whitening filter is designed from the
+        spectrum, while their alignment and FFT length come from this filter's
+        tap count and their start from its band's lower edge. So a given
+        spectrum must have this filter's sample rate, tap count and lower band
+        edge, or it is refused by name. Anything else in its config (the upper
+        band edge, the estimator) leaves the search exactly as a filter built
+        with that config would run it.
         """
         if background is None:
             return None
         if isinstance(background, PowerSpectrum):
+            given = background.config
             if background.sample_rate_hertz != self.sample_rate_hertz:
                 raise ValueError("The PowerSpectrum's sample rate differs from the matched filter's.")
-            for name in FILTER_SHAPING_FIELDS:
-                given, own = getattr(background.config, name), getattr(self.spectral_config, name)
-                if given != own:
-                    raise ValueError(
-                        f"The PowerSpectrum's {name} ({given}) differs from the matched filter's "
-                        f"spectral_config ({own}): build the filter with the spectrum's config.")
+            if _even_taps(given, self.sample_rate_hertz) != self.num_taps:
+                raise ValueError(
+                    f"The PowerSpectrum's whitening filter has {_even_taps(given, self.sample_rate_hertz)} taps "
+                    f"(filter_duration_seconds {given.filter_duration_seconds}); this matched filter's templates "
+                    f"are aligned for {self.num_taps} (filter_duration_seconds "
+                    f"{self.spectral_config.filter_duration_seconds}): build the filter with the spectrum's config.")
+            if given.lower_frequency_hertz != self.spectral_config.lower_frequency_hertz:
+                raise ValueError(
+                    f"The PowerSpectrum's band starts at lower_frequency_hertz {given.lower_frequency_hertz}; this "
+                    f"matched filter's templates start at {self.spectral_config.lower_frequency_hertz}: build the "
+                    "filter with the spectrum's config.")
             return background
         return estimate_psd(ops.cast(ops.convert_to_tensor(background), "float32"),
                             self.sample_rate_hertz, self.spectral_config)

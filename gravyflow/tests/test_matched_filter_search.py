@@ -218,22 +218,29 @@ def test_network_snr_at_the_edge_of_the_search_window():
     assert abs(float(mf.max_snr(x)["snr"][0]) - np.hypot(10.0, 8.0)) < 0.05
 
 
-def test_a_spectrum_shaped_for_another_filter_is_refused():
-    # The filter's length and band are its spectral_config's: a spectrum
-    # estimated with another filter length or band would misalign or rescale
-    # every template, so it is refused by name.
+def test_a_spectrum_is_refused_only_when_it_would_change_the_search():
+    # The templates' alignment comes from this filter's tap count and their
+    # start from its band's lower edge; their whitening filter is designed from
+    # the spectrum. A spectrum whose filter has another tap count, or whose band
+    # starts elsewhere, would misalign or mis-start every template, so it is
+    # refused by name. Any other difference (the upper band edge, a filter
+    # length that rounds to the same taps, the estimator) leaves the search
+    # exactly as a filter built with the spectrum's own config.
     rng = np.random.default_rng(10)
     noise = coloured_noise(rng, (1,), 16.0).astype(np.float32)
-    mf = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS)
-    w = np.zeros((1, N), dtype=np.float32)
+    bank = TemplateBank.from_masses([30.0], [25.0])
+    mf = MatchedFilter(bank=bank, sample_rate_hertz=FS)
+    w = rng.standard_normal((1, N)).astype(np.float32)
     for name, config in [("filter_duration_seconds", gf.SpectralConfig(filter_duration_seconds=0.5)),
-                         ("lower_frequency_hertz", gf.SpectralConfig(lower_frequency_hertz=30.0)),
-                         ("upper_frequency_hertz", gf.SpectralConfig(upper_frequency_hertz=800.0))]:
+                         ("lower_frequency_hertz", gf.SpectralConfig(lower_frequency_hertz=30.0))]:
         with pytest.raises(ValueError, match=name):
             mf.max_snr(w, gf.estimate_psd(noise, FS, config))
-    # Estimator settings that do not shape the filter are the spectrum's own.
-    out = mf.max_snr(w, gf.estimate_psd(noise, FS, gf.SpectralConfig(psd_method="mean")))
-    assert out["snr"].shape == (1,)
+    for config in [gf.SpectralConfig(upper_frequency_hertz=800.0), gf.SpectralConfig(filter_duration_seconds=1.0001),
+                   gf.SpectralConfig(psd_method="mean")]:
+        spectrum = gf.estimate_psd(noise, FS, config)
+        own = MatchedFilter(bank=bank, sample_rate_hertz=FS, spectral_config=config).max_snr(w, spectrum)
+        out = mf.max_snr(w, spectrum)
+        assert (out["snr"][0], out["time_seconds"][0]) == (own["snr"][0], own["time_seconds"][0]), config
 
 
 def test_band_and_templates_start_at_f_low():
