@@ -12,6 +12,21 @@ import jax.numpy as jnp
 
 import gravyflow as gf
 from gravyflow.src.detection import TemplateGrid, matched_filter_fft, template_sigma
+from gravyflow.tests._helpers import representation_tolerance, statistical_bound
+
+
+def rounding(num_samples: int) -> float:
+    """
+    Representation: the relative float32 rounding of an SNR, a sum of N
+    squares and FFTs of N samples (sqrt N + log2 N roundings).
+    """
+    return representation_tolerance(np.float32, 1.0, np.sqrt(num_samples) + np.log2(num_samples))
+
+
+def whole_cycles(frequency_hertz, sample_rate, duration):
+    """A unit sine of a whole number of cycles: its energy N / 2 sits in one rfft bin."""
+    t = np.arange(int(sample_rate * duration)) / sample_rate
+    return jnp.asarray(np.sin(2 * np.pi * frequency_hertz * t), jnp.float32)
 
 
 class TestTemplateGrid:
@@ -53,22 +68,14 @@ class TestMatchedFilterCore:
         This verifies the sigma calculation is working correctly.
         """
         sample_rate = 8192.0
-        duration = 1.0
-        n_samples = int(sample_rate * duration)
-        
-        # Unit amplitude sine wave
-        t = jnp.linspace(0, duration, n_samples)
-        signal = jnp.sin(2 * jnp.pi * 100 * t)
-        templates = signal[None, :]
-        
+        n_samples = int(sample_rate)
+        templates = whole_cycles(100.0, sample_rate, 1.0)[None, :]
+
         sigma = template_sigma(templates, psd=None, sample_rate_hertz=sample_rate)
-        
+
         # psd=None is unit-variance white noise (one-sided PSD 2/fs), the PSD of
         # whitened data: a unit sine of N samples then has SNR sqrt(N / 2).
-        expected_sigma = np.sqrt(n_samples / 2.0)
-        
-        np.testing.assert_allclose(float(sigma[0]), expected_sigma, rtol=0.02,
-            err_msg=f"Sigma for unit sine should be ~{expected_sigma:.3f}")
+        np.testing.assert_allclose(float(sigma[0]), np.sqrt(n_samples / 2.0), rtol=rounding(n_samples))
         
     def test_autocorrelation_peak(self):
         """Test that autocorrelation SNR equals optimal SNR (sigma).
@@ -93,7 +100,7 @@ class TestMatchedFilterCore:
         snr = matched_filter_fft(signal, templates, psd=None, sample_rate_hertz=sample_rate)
         max_snr = float(jnp.max(snr))
         
-        np.testing.assert_allclose(max_snr, expected_snr, rtol=0.02,
+        np.testing.assert_allclose(max_snr, expected_snr, rtol=rounding(n_samples),
             err_msg=f"Autocorrelation SNR should equal sigma: got {max_snr}, expected {expected_snr}")
         
     def test_correct_template_identification(self):
@@ -187,8 +194,6 @@ class TestMatchedFilterCore:
         injections = inputs[gf.ReturnVariables.INJECTIONS.name]
         injected_snrs = np.array(outputs["SNR"])[:, 0]  # (batch, generators): the one generator
         
-        print("\nSNR Recovery Validation (using exact injections as templates):")
-        
         # PSD settings matching dataset's snr function
         fft_duration = 4.0
         overlap_duration = 2.0
@@ -224,20 +229,14 @@ class TestMatchedFilterCore:
             snr_result = matched_filter_fft(data_jax, template, psd=psd_jax, 
                                             sample_rate_hertz=8192.0)
             recovered_snr = float(jnp.max(jnp.abs(snr_result)))
-            
-            diff = recovered_snr - target_snr
-            ratio = recovered_snr / target_snr
-            print(f"  Ex {i}: Target={target_snr:.2f}, Recovered={recovered_snr:.2f}, "
-                  f"Diff={diff:+.2f}, Ratio={ratio:.2f}")
-            
-            # Assert recovered SNR is close to target (within 30%)
-            assert 0.70 < ratio < 1.30, \
-                f"Recovered SNR ratio {ratio:.2f} out of expected range [0.70, 1.30]"
-            
-            # Assert it's definitely a detection
-            assert recovered_snr > 5.0, "Failed to detect signal above noise floor"
+
+            # Statistical (k = 3, stated): the recovered SNR is the target plus
+            # the noise's projection on the template, a unit normal, so 3 sigma
+            # is 3 SNR units (plus a small PSD-estimate error, well inside it).
+            # It also bounds the recovered SNR below by min target - 3 = 5.
+            assert abs(recovered_snr - target_snr) < statistical_bound(1.0, k=3.0), \
+                f"Example {i}: recovered SNR {recovered_snr:.2f}, target {target_snr:.2f}"
     
-@pytest.mark.global_rng
 def test_matched_filter_with_sine_gaussian():
     """Test matched filter detection of sine-Gaussian signal.
     
@@ -258,8 +257,7 @@ def test_matched_filter_with_sine_gaussian():
     waveforms, _ = gen.generate(
         num_waveforms=1,
         sample_rate_hertz=sample_rate,
-        duration_seconds=duration,
-        seed=42
+        duration_seconds=duration
     )
     
     # Use h+ as signal
@@ -273,7 +271,7 @@ def test_matched_filter_with_sine_gaussian():
             quality_factor=q,
             network=[gf.IFO.L1],
         )
-        wf, _ = gen_template.generate(1, sample_rate, duration, seed=123)
+        wf, _ = gen_template.generate(1, sample_rate, duration)
         # Normalize template
         template = wf[0, 0, :]
         template = template / jnp.sqrt(jnp.sum(template**2))
@@ -282,8 +280,7 @@ def test_matched_filter_with_sine_gaussian():
     templates = jnp.stack(templates)  # (3, time)
     
     # Add noise
-    np.random.seed(42)
-    noise = np.random.normal(0, 0.1, signal.shape)
+    noise = np.random.default_rng(42).normal(0, 0.1, signal.shape)
     data = signal + jnp.array(noise)
     
     # Run matched filter
@@ -294,7 +291,6 @@ def test_matched_filter_with_sine_gaussian():
     best_idx = int(jnp.argmax(max_snr_per_template))
     
     assert best_idx == 1, f"Expected Q=8 template (index 1) to be best, got {best_idx}"
-    assert float(jnp.max(snr)) > 0, "Should have positive SNR"
 
 
 def test_matched_filter_with_chirplet():
@@ -314,7 +310,7 @@ def test_matched_filter_with_chirplet():
         network=[gf.IFO.L1],
     )
     
-    waveforms, _ = gen.generate(1, sample_rate, duration, seed=42)
+    waveforms, _ = gen.generate(1, sample_rate, duration)
     signal = waveforms[0, 0, :]
     
     # Create template bank with different frequency sweeps
@@ -327,7 +323,7 @@ def test_matched_filter_with_chirplet():
             duration_seconds=0.5,
             network=[gf.IFO.L1],
         )
-        wf, _ = gen_t.generate(1, sample_rate, duration, seed=123)
+        wf, _ = gen_t.generate(1, sample_rate, duration)
         template = wf[0, 0, :]
         template = template / jnp.sqrt(jnp.sum(template**2))
         templates.append(template)
@@ -335,8 +331,7 @@ def test_matched_filter_with_chirplet():
     templates = jnp.stack(templates)
     
     # Add noise
-    np.random.seed(42)
-    noise = np.random.normal(0, 0.1, signal.shape)
+    noise = np.random.default_rng(42).normal(0, 0.1, signal.shape)
     data = signal + jnp.array(noise)
     
     # Run matched filter
@@ -348,7 +343,6 @@ def test_matched_filter_with_chirplet():
     assert best_idx == 1, f"Expected 50-200Hz chirplet (index 1) to be best, got {best_idx}"
 
 
-@pytest.mark.global_rng
 def test_matched_filter_with_periodic_waves():
     """Test matched filter can distinguish between periodic wave shapes."""
     sample_rate = 2048.0
@@ -362,7 +356,7 @@ def test_matched_filter_with_periodic_waves():
         network=[gf.IFO.L1],
     )
     
-    waveforms, _ = gen.generate(1, sample_rate, duration, seed=42)
+    waveforms, _ = gen.generate(1, sample_rate, duration)
     signal = waveforms[0, 0, :]
     
     # Templates: sine, square, triangle (sine should match best)
@@ -374,7 +368,7 @@ def test_matched_filter_with_periodic_waves():
             duration_seconds=0.3,
             network=[gf.IFO.L1],
         )
-        wf, _ = gen_t.generate(1, sample_rate, duration, seed=123)
+        wf, _ = gen_t.generate(1, sample_rate, duration)
         template = wf[0, 0, :]
         template = template / jnp.sqrt(jnp.sum(template**2))
         templates.append(template)
@@ -382,8 +376,7 @@ def test_matched_filter_with_periodic_waves():
     templates = jnp.stack(templates)
     
     # Add noise
-    np.random.seed(42)
-    noise = np.random.normal(0, 0.05, signal.shape)
+    noise = np.random.default_rng(42).normal(0, 0.05, signal.shape)
     data = signal + jnp.array(noise)
     
     # Run matched filter
@@ -396,234 +389,102 @@ def test_matched_filter_with_periodic_waves():
     assert best_idx == 0, f"Expected SINE template (index 0) to be best, got {best_idx}"
 
 
-# =============================================================================
 class TestSNRScientificAccuracy:
-    """Tests to validate scientific correctness of SNR computations."""
-    
+    """The SNR's defining properties, each exact up to float32 rounding."""
+
+    RATE, N = 2048.0, 2048
+
     def test_snr_scales_with_amplitude(self):
-        """Verify SNR scales linearly with signal amplitude (fundamental property).
-        
-        For matched filtering: SNR ∝ h (signal amplitude)
-        So doubling the amplitude should double the SNR.
-        """
-        sample_rate = 2048.0
-        duration = 1.0
-        n_samples = int(sample_rate * duration)
-        
-        # Create a simple chirp-like signal
-        t = jnp.linspace(0, duration, n_samples)
-        base_signal = jnp.sin(2 * jnp.pi * (50 + 50 * t) * t)  # Chirp 50-100 Hz
-        template = base_signal[None, :]  # Use as template
-        
-        # Measure SNR at different amplitudes
-        amplitudes = [0.5, 1.0, 2.0, 4.0]
-        snrs = []
-        
-        for amp in amplitudes:
-            data = amp * base_signal
-            snr = matched_filter_fft(data, template, psd=None, sample_rate_hertz=sample_rate)
-            snrs.append(float(jnp.max(snr)))
-        
-        # Check linear scaling: SNR ratios should match amplitude ratios
-        for i in range(1, len(amplitudes)):
-            expected_ratio = amplitudes[i] / amplitudes[0]
-            actual_ratio = snrs[i] / snrs[0]
-            np.testing.assert_allclose(actual_ratio, expected_ratio, rtol=0.01,
-                err_msg=f"SNR should scale linearly: amp ratio {expected_ratio}, SNR ratio {actual_ratio}")
-    
+        """The matched-filter SNR is linear in the signal's amplitude."""
+        t = jnp.arange(self.N) / self.RATE
+        base_signal = jnp.sin(2 * jnp.pi * (50 + 50 * t) * t)  # chirp 50-150 Hz
+        template = base_signal[None, :]
+        amplitudes = np.array([0.5, 1.0, 2.0, 4.0])
+        snrs = np.array([float(jnp.max(matched_filter_fft(a * base_signal, template, psd=None,
+                                                          sample_rate_hertz=self.RATE)))
+                         for a in amplitudes])
+        np.testing.assert_allclose(snrs / snrs[0], amplitudes / amplitudes[0], rtol=rounding(self.N))
+
     def test_snr_inversely_proportional_to_noise(self):
-        """Verify SNR ∝ 1/√PSD (noise weighting property).
-        
-        When PSD increases by factor of 4, SNR should decrease by factor of 2.
-        """
-        from gravyflow.src.dataset.tools.snr import template_sigma
-        
-        sample_rate = 2048.0
-        duration = 1.0
-        n_samples = int(sample_rate * duration)
-        n_freq = n_samples // 2 + 1
-        
-        t = jnp.linspace(0, duration, n_samples)
-        signal = jnp.sin(2 * jnp.pi * 100 * t)
-        template = signal[None, :]
-        
-        # Base PSD (white noise)
-        psd_base = jnp.ones(n_freq) * 1e-20
-        
-        # PSD with 4x noise power
-        psd_loud = jnp.ones(n_freq) * 4e-20
-        
-        sigma_base = template_sigma(template, psd_base, sample_rate)
-        sigma_loud = template_sigma(template, psd_loud, sample_rate)
-        
-        # Sigma should scale as 1/sqrt(PSD), so sigma_loud = sigma_base / 2
-        expected_ratio = 0.5  # sqrt(1/4) = 0.5
-        actual_ratio = float(sigma_loud[0] / sigma_base[0])
-        
-        np.testing.assert_allclose(actual_ratio, expected_ratio, rtol=0.01,
-            err_msg="Sigma should scale as 1/sqrt(PSD)")
-    
+        """sigma scales as PSD^(-1/2): four times the noise power halves it."""
+        template = whole_cycles(100.0, self.RATE, 1.0)[None, :]
+        n_freq = self.N // 2 + 1
+        sigma_base = template_sigma(template, jnp.ones(n_freq) * 1e-20, self.RATE)
+        sigma_loud = template_sigma(template, jnp.ones(n_freq) * 4e-20, self.RATE)
+        np.testing.assert_allclose(float(sigma_loud[0] / sigma_base[0]), 0.5, rtol=rounding(self.N))
+
     def test_autocorrelation_snr_equals_optimal_snr(self):
-        """The SNR from correlating a signal with itself should equal optimal SNR.
-        
-        This is a fundamental property of matched filtering: when the template
-        perfectly matches the signal, the recovered SNR equals the optimal SNR.
-        """
+        """A signal filtered with itself recovers its optimal SNR, sqrt(<h|h>)."""
         from gravyflow.src.dataset.tools.snr import optimal_snr
-        
-        sample_rate = 2048.0
-        duration = 1.0
-        n_samples = int(sample_rate * duration)
-        
-        t = jnp.linspace(0, duration, n_samples)
-        signal = jnp.sin(2 * jnp.pi * 100 * t)
-        
-        # Optimal SNR = sqrt(<h|h>)
-        opt_snr = optimal_snr(signal, psd=None, sample_rate_hertz=sample_rate)
-        
-        # Matched filter SNR (signal against itself)
-        template = signal[None, :]
-        mf_snr = matched_filter_fft(signal, template, psd=None, sample_rate_hertz=sample_rate)
-        max_mf_snr = float(jnp.max(mf_snr))
-        
-        # The matched filter output normalized by sigma should equal optimal SNR
-        # matched_filter_fft already normalizes by sigma, so max should equal opt_snr
-        np.testing.assert_allclose(max_mf_snr, float(opt_snr), rtol=0.01,
-            err_msg=f"Auto-correlation SNR should equal optimal SNR: got {max_mf_snr}, expected {float(opt_snr)}")
-    
+
+        signal = whole_cycles(100.0, self.RATE, 1.0)
+        opt_snr = float(optimal_snr(signal, psd=None, sample_rate_hertz=self.RATE))
+        np.testing.assert_allclose(opt_snr, np.sqrt(self.N / 2.0), rtol=rounding(self.N))
+        mf_snr = float(jnp.max(matched_filter_fft(signal, signal[None, :], psd=None, sample_rate_hertz=self.RATE)))
+        np.testing.assert_allclose(mf_snr, opt_snr, rtol=rounding(self.N))
+
     def test_matched_filter_time_localization(self):
-        """Verify SNR peak occurs at correct time offset.
-        
-        When signal is at center, SNR peak should be at center.
-        When signal is shifted, peak should shift accordingly.
-        """
-        sample_rate = 2048.0
-        duration = 1.0
-        n_samples = int(sample_rate * duration)
-        
-        # Create a narrow pulse (easy to localize)
-        t = jnp.linspace(0, duration, n_samples)
-        center_idx = n_samples // 2
-        pulse_width = 0.01  # 10 ms
-        
-        # Gaussian pulse centered at different times
-        def make_pulse(center_time):
-            return jnp.exp(-((t - center_time) ** 2) / (2 * pulse_width ** 2))
-        
-        template_time = 0.5  # Template centered at 0.5s
-        template = make_pulse(template_time)[None, :]
-        
-        # Signal at same position
-        signal_same = make_pulse(0.5)
-        snr_same = matched_filter_fft(signal_same, template, psd=None, sample_rate_hertz=sample_rate)
-        peak_idx_same = int(jnp.argmax(snr_same[0]))
-        
-        # Peak should be at or near sample 0 (zero-lag in correlation)
-        # Actually, with FFT-based matched filter, peak is at time where signal aligns with template
-        assert peak_idx_same < 50 or peak_idx_same > n_samples - 50, \
-            f"Peak should be near edges (zero lag), got {peak_idx_same}"
-    
+        """The SNR of a pulse against itself peaks at zero lag, and a delayed pulse at its delay, exactly."""
+        t = jnp.arange(self.N) / self.RATE
+
+        def pulse(centre):
+            return jnp.exp(-((t - centre) ** 2) / (2 * 0.01 ** 2))
+
+        template = pulse(0.5)[None, :]
+        for delay in (0, 100, 517):
+            snr = matched_filter_fft(pulse(0.5 + delay / self.RATE), template, psd=None, sample_rate_hertz=self.RATE)
+            assert int(jnp.argmax(snr[0])) == delay
+
     def test_template_mismatch_reduces_snr(self):
-        """Verify that template mismatch causes SNR loss.
-        
-        When template differs from signal, recovered SNR should be lower
-        than optimal SNR.
         """
-        sample_rate = 2048.0
-        duration = 1.0
-        n_samples = int(sample_rate * duration)
-        t = jnp.linspace(0, duration, n_samples)
-        
-        # Signal: 100 Hz sine
-        signal = jnp.sin(2 * jnp.pi * 100 * t)
-        
-        # Perfect template
-        template_perfect = signal[None, :]
-        
-        # Mismatched template: 120 Hz sine
-        template_mismatch = jnp.sin(2 * jnp.pi * 120 * t)[None, :]
-        
-        snr_perfect = float(jnp.max(matched_filter_fft(
-            signal, template_perfect, psd=None, sample_rate_hertz=sample_rate
-        )))
-        
-        snr_mismatch = float(jnp.max(matched_filter_fft(
-            signal, template_mismatch, psd=None, sample_rate_hertz=sample_rate
-        )))
-        
-        # Mismatched template should give lower SNR
-        assert snr_mismatch < snr_perfect, \
-            f"Mismatched template should give lower SNR: perfect={snr_perfect}, mismatch={snr_mismatch}"
+        Sines of whole cycles in different bins are orthogonal at every circular
+        lag: a 120 Hz template finds nothing of a 100 Hz signal.
+        """
+        signal = whole_cycles(100.0, self.RATE, 1.0)
+        snr_perfect = float(jnp.max(matched_filter_fft(signal, signal[None, :], psd=None,
+                                                        sample_rate_hertz=self.RATE)))
+        snr_mismatch = float(jnp.max(matched_filter_fft(signal, whole_cycles(120.0, self.RATE, 1.0)[None, :],
+                                                         psd=None, sample_rate_hertz=self.RATE)))
+        assert snr_mismatch < rounding(self.N) * snr_perfect, (snr_mismatch, snr_perfect)
 
-
-# =============================================================================
-# SNR.PY COVERAGE TESTS
-# =============================================================================
 
 class TestSNRCoverage:
-    """Tests to cover remaining code paths in snr.py."""
-    
+    """A PSD given on another grid is interpolated onto the data's."""
+
+    RATE, N = 2048.0, 2048
+
     def test_matched_filter_with_psd_interpolation(self):
-        """Test matched filter with PSD that needs interpolation (lines 56-67)."""
-        sample_rate = 2048.0
-        duration = 1.0
-        n_samples = int(sample_rate * duration)
-        n_freq = n_samples // 2 + 1
-        
-        t = jnp.linspace(0, duration, n_samples)
-        signal = jnp.sin(2 * jnp.pi * 100 * t)
-        template = signal[None, :]
-        
-        # Create PSD with WRONG length to trigger interpolation
-        wrong_length = n_freq + 100
-        psd = jnp.ones(wrong_length) * 1e-20
-        
-        # Should not raise, should interpolate PSD
-        snr = matched_filter_fft(signal, template, psd=psd, sample_rate_hertz=sample_rate)
-        
-        assert snr.shape == (1, n_samples)
-        assert jnp.isfinite(jnp.max(snr))
-    
+        """A flat PSD of the wrong length interpolates to the same flat PSD: the same SNR series."""
+        signal = whole_cycles(100.0, self.RATE, 1.0)
+        n_freq = self.N // 2 + 1
+        on_grid = matched_filter_fft(signal, signal[None, :], psd=jnp.ones(n_freq) * 1e-20,
+                                     sample_rate_hertz=self.RATE)
+        off_grid = matched_filter_fft(signal, signal[None, :], psd=jnp.ones(n_freq + 100) * 1e-20,
+                                      sample_rate_hertz=self.RATE)
+        assert off_grid.shape == (1, self.N)
+        np.testing.assert_allclose(np.asarray(off_grid), np.asarray(on_grid), rtol=0.0,
+                                   atol=rounding(self.N) * float(jnp.max(on_grid)))
+
     def test_template_sigma_with_psd_interpolation(self):
-        """Test template sigma with PSD interpolation (lines 128-136)."""
-        sample_rate = 2048.0
-        duration = 1.0
-        n_samples = int(sample_rate * duration)
-        n_freq = n_samples // 2 + 1
-        
-        t = jnp.linspace(0, duration, n_samples)
-        template = jnp.sin(2 * jnp.pi * 100 * t)[None, :]
-        
-        # PSD with wrong length
-        wrong_length = n_freq + 50
-        psd = jnp.ones(wrong_length) * 1e-20
-        
-        sigma = template_sigma(template, psd=psd, sample_rate_hertz=sample_rate)
-        
-        assert sigma.shape == (1,)
-        assert float(sigma[0]) > 0
-        assert jnp.isfinite(sigma[0])
-    
+        """A PSD of the wrong length gives the sigma of the same PSD on the data's grid."""
+        template = whole_cycles(100.0, self.RATE, 1.0)[None, :]
+        n_freq = self.N // 2 + 1
+        # A linear PSD is interpolated exactly: the same line on either grid.
+        line = lambda n: np.linspace(1.0, 3.0, n) * 1e-20  # float64: physical PSDs underflow float32
+        on_grid = template_sigma(template, psd=line(n_freq), sample_rate_hertz=self.RATE)
+        off_grid = template_sigma(template, psd=line(n_freq + 50), sample_rate_hertz=self.RATE)
+        assert off_grid.shape == (1,)
+        np.testing.assert_allclose(np.asarray(off_grid), np.asarray(on_grid), rtol=rounding(self.N))
+
     def test_optimal_snr_function(self):
-        """Test optimal_snr function directly (lines 166-167)."""
+        """optimal_snr of one signal is template_sigma of it as a one-template bank."""
         from gravyflow.src.dataset.tools.snr import optimal_snr
-        
-        sample_rate = 2048.0
-        duration = 0.5
-        n_samples = int(sample_rate * duration)
-        
-        t = jnp.linspace(0, duration, n_samples)
-        signal = jnp.sin(2 * jnp.pi * 100 * t)
-        
-        opt = optimal_snr(signal, psd=None, sample_rate_hertz=sample_rate)
-        
-        assert float(opt) > 0, "Optimal SNR should be positive"
-        assert jnp.isfinite(opt), "Optimal SNR should be finite"
 
-
-# =============================================================================
-# MATCHED_FILTER.PY COVERAGE TESTS  
-# =============================================================================
+        signal = whole_cycles(100.0, self.RATE, 0.5)
+        opt = optimal_snr(signal, psd=None, sample_rate_hertz=self.RATE)
+        np.testing.assert_array_equal(np.asarray(opt),
+                                      np.asarray(template_sigma(signal[None, :], None, self.RATE))[0])
+        np.testing.assert_allclose(float(opt), np.sqrt(signal.size / 2.0), rtol=rounding(signal.size))
 
 class TestTemplateGridCoverage:
     """Tests to cover remaining code paths in template_grid.py."""
@@ -674,8 +535,3 @@ class TestTemplateGridCoverage:
         assert jnp.max(m1) <= 50.0
         assert jnp.min(m2) >= 5.0
         assert jnp.max(m2) <= 30.0
-
-
-# =============================================================================
-# MATCHED FILTER LAYER COVERAGE
-# =============================================================================

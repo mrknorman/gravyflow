@@ -1,12 +1,14 @@
-import os
-os.environ["KERAS_BACKEND"] = "jax"
-
 import pytest
-import gravyflow as gf
 import numpy as np
-import keras
 from keras import ops
 from gravyflow.src.dataset.conditioning import pearson as gf_pearson
+from gravyflow.tests._helpers import representation_tolerance
+
+
+def pearson_tolerance(num_samples):
+    """Representation: a float32 Pearson coefficient is sums of N products, bounded by N roundings."""
+    return representation_tolerance(np.float32, 1.0, num_samples)
+
 
 def test_pearson_basic():
     # Perfectly correlated
@@ -20,38 +22,6 @@ def test_pearson_basic():
     corr_neg = gf_pearson.pearson(x, y_neg)
     np.testing.assert_allclose(corr_neg, [-1.0], atol=1e-5)
 
-def test_rolling_pearson():
-    sample_rate = 1.0
-    max_diff = 2.0  # 2 samples: lags -2 to +2
-    
-    # Create two correlated signals with a known shift
-    # Channel 0: sine wave
-    # Channel 1: same sine wave shifted
-    
-    t = np.linspace(0, 2*np.pi, 20, dtype=np.float32)
-    c0 = np.sin(t)
-    c1 = np.sin(t)  # Identical - max correlation at zero shift
-    
-    tensor = np.stack([c0, c1], axis=0) # (2, 20)
-    tensor = tensor[np.newaxis, ...] # (1, 2, 20)
-    tensor = ops.convert_to_tensor(tensor)
-    
-    corrs = gf_pearson.rolling_pearson(
-        tensor,
-        max_lag_seconds=max_diff,
-        sample_rate_hertz=sample_rate
-    )
-    
-    # Shape: (Batch, NumPairs, N_offsets)
-    # NumPairs = 1 (0 vs 1)
-    assert ops.shape(corrs)[0] == 1
-    assert ops.shape(corrs)[1] == 1
-    
-    # For identical signals, max correlation should be 1.0 at some offset
-    max_corr = float(ops.max(corrs))
-    assert max_corr > 0.95, f"Max correlation should be ~1.0 for identical signals, got {max_corr}"
-
-
 
 def test_rolling_pearson_lags_are_symmetric_and_inclusive():
     """Lags run from -M to +M samples, M = ceil(delay * rate): every allowed delay is sampled."""
@@ -63,7 +33,8 @@ def test_rolling_pearson_lags_are_symmetric_and_inclusive():
     for k in range(-4, 5):
         tensor = ops.convert_to_tensor(np.stack([x, np.roll(x, -k)])[None])
         corrs = np.asarray(gf_pearson.rolling_pearson(tensor, max_delay, sample_rate))[0, 0]
-        assert corrs.shape == (9,) and corrs.max() > 0.99
+        assert corrs.shape == (9,)
+        np.testing.assert_allclose(corrs.max(), 1.0, rtol=0.0, atol=pearson_tolerance(x.size))
         found.append(int(np.argmax(corrs)))
     assert sorted(found) == list(range(9))
 
@@ -82,7 +53,7 @@ def test_the_largest_lag_is_compared_in_both_directions(direction):
     corrs = np.asarray(gf_pearson.rolling_pearson(np.stack([x, y])[None], max_lag, rate))[0, 0]
     assert corrs.shape == (2 * M + 1,)
     # Index i compares x[t] with y[t + i - M]: the delay is at lag -direction M.
-    np.testing.assert_allclose(corrs[M - direction * M], 1.0, atol=1e-5)
+    np.testing.assert_allclose(corrs[M - direction * M], 1.0, rtol=0.0, atol=pearson_tolerance(N))
 
 
 def test_every_lag_compares_the_same_samples_of_the_first_detector():
@@ -94,4 +65,4 @@ def test_every_lag_compares_the_same_samples_of_the_first_detector():
     corrs = np.asarray(gf_pearson.rolling_pearson(np.stack([x, y])[None], max_lag, rate))[0, 0]
     for i, lag in enumerate(range(-M, M + 1)):
         expected = np.corrcoef(x[M:N - M], y[M + lag:N - M + lag])[0, 1]
-        np.testing.assert_allclose(corrs[i], expected, atol=1e-4)
+        np.testing.assert_allclose(corrs[i], expected, rtol=0.0, atol=pearson_tolerance(N - 2 * M))

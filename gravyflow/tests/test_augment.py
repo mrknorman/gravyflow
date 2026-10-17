@@ -15,6 +15,7 @@ import pytest
 import gravyflow as gf
 from gravyflow.src.dataset.acquisition import augmentations as module
 from gravyflow.src.dataset.acquisition.augmentations import augment
+from gravyflow.tests._helpers import statistical_bound
 
 B, I, T, T_OFF = 64, 2, 128, 512
 GLITCHES, NOISE, EVENTS = [gf.DataLabel.GLITCHES], [gf.DataLabel.NOISE], [gf.DataLabel.EVENTS]
@@ -122,7 +123,10 @@ def test_add_noise_scales_each_example_by_its_own_background():
         added = np.asarray(windows, np.float64) - original
         assert np.all(added[~varied] == 0.0)
         ratio = np.std(added[varied], axis=-1) / np.std(off[varied].astype(np.float64), axis=-1)
-        np.testing.assert_allclose(ratio, 0.1, rtol=0.2)
+        # Statistical: the sample standard deviation of n Gaussian samples has
+        # relative sigma 1 / sqrt(2 n); the offsource's own std is the scale, exactly.
+        n = added.shape[-1]
+        np.testing.assert_allclose(ratio, 0.1, rtol=statistical_bound(1.0 / np.sqrt(2.0 * n)))
 
 
 def test_add_noise_refuses_a_non_finite_offsource():
