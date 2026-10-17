@@ -105,6 +105,7 @@ One command trains the CNN of Gabbard *et al.* (2017) on simulated binary black 
 needs the `viz` extra:
 
 ```bash
+export KERAS_BACKEND=jax
 python -m gravyflow.src.model.examples.train_gabbard_2017 --output-dir ~/gravyflow_runs/gabbard_2017_cpu --preset cpu \
   && python -m gravyflow.src.model.examples.validate_gabbard_2017 --run-dir ~/gravyflow_runs/gabbard_2017_cpu
 ```

@@ -2,8 +2,8 @@
 Place the template banks bundled with gravyflow and write them to
 res/template_banks, or check the bundled files against a fresh placement.
 
-    python -m gravyflow.src.detection.bundle_banks          # place and write
-    python -m gravyflow.src.detection.bundle_banks --check  # place and compare
+    KERAS_BACKEND=jax python -m gravyflow.src.detection.bundle_banks          # place and write
+    KERAS_BACKEND=jax python -m gravyflow.src.detection.bundle_banks --check  # place and compare
 
 Each file stores its placement's key (`BankPlacement.key`): the match space,
 the noise curve's hash, the waveform model, the placement settings and the
@@ -18,11 +18,8 @@ about two minutes on a CPU.
 
 import argparse
 import json
-import os
 import sys
 import time
-
-os.environ.setdefault("KERAS_BACKEND", "jax")
 
 from gravyflow.src.detection.matched_filter import default_bank_placement
 from gravyflow.src.detection.template_grid import BUNDLED_BANK_DIRECTORY, TemplateBank
