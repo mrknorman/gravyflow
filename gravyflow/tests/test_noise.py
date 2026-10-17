@@ -52,7 +52,7 @@ def _test_real_noise_single(
             )
             
             # Iterate through num_tests batches to check correct operation:
-            batch = next(noise())
+            batch = next(noise(group="train"))
             
             # Handle dict format
             onsource = batch[gf.ReturnVariables.ONSOURCE]
@@ -129,7 +129,7 @@ def _test_real_noise_multi(
             )
                     
             # Iterate through num_tests batches to check correct operation:
-            batch = next(noise())
+            batch = next(noise(group="train"))
             onsource = batch[gf.ReturnVariables.ONSOURCE]
             offsource = batch[gf.ReturnVariables.OFFSOURCE]
             gps_times = batch.get(gf.ReturnVariables.START_GPS_TIME)
@@ -201,7 +201,7 @@ def _test_noise_shape(
                 ifos = gf.IFO.L1
             )
                 
-            batch = next(iter(noise()))
+            batch = next(iter(noise(group="train")))
             onsource = batch[RV.ONSOURCE]
             offsource = batch[RV.OFFSOURCE]
 
@@ -210,7 +210,7 @@ def _test_noise_shape(
 
             logging.info("Start shape tests...")
             for index, batch in tqdm(
-                    enumerate(islice(noise(), num_tests))
+                    enumerate(islice(noise(group="train"), num_tests))
                 ):
                 onsource = batch[RV.ONSOURCE]
                 offsource = batch[RV.OFFSOURCE]
@@ -265,7 +265,7 @@ def _test_noise_iteration(
             )
                 
             logging.info("Start iteration tests...")
-            for index, _ in tqdm(enumerate(islice(noise(), num_tests))):
+            for index, _ in tqdm(enumerate(islice(noise(group="train"), num_tests))):
                 pass
             
             np.testing.assert_equal(
@@ -340,7 +340,7 @@ def test_unsupported_noise_type():
     
     with pytest.raises(ValueError, match="NoiseType .* not recognised"):
         # Validation happens in __call__
-        next(noise())
+        next(noise(group="train"))
 
 def test_noise_obtainer_defaults():
     """Test NoiseObtainer default parameter handling."""
@@ -349,7 +349,7 @@ def test_noise_obtainer_defaults():
         ifos=gf.IFO.L1
     )
     
-    gen = noise()
+    gen = noise(group="train")
     batch = next(gen)
     onsource = batch[RV.ONSOURCE]
     offsource = batch[RV.OFFSOURCE]
@@ -371,6 +371,7 @@ def test_noise_obtainer_white_type():
     )
     
     gen = noise(
+        group="train",
         sample_rate_hertz=1024.0,
         onsource_duration_seconds=1.0,
         crop_duration_seconds=0.5,
@@ -396,6 +397,7 @@ def test_noise_obtainer_multiple_ifos():
     )
     
     gen = noise(
+        group="train",
         sample_rate_hertz=1024.0,
         num_examples_per_batch=2,
         seed=42
@@ -420,33 +422,19 @@ def test_noise_obtainer_single_ifo_conversion():
     assert len(noise.ifos) == 1
 
 
-def test_noise_obtainer_takes_the_default_groups_by_value():
-    """NoiseObtainer accepts the default fractions given as a dict (others are refused)."""
-    custom_groups = {
-        "train": 0.8,
-        "validate": 0.1,
-        "test": 0.1
-    }
-    
-    noise = gf.NoiseObtainer(
-        noise_type=gf.NoiseType.WHITE,
-        ifos=gf.IFO.L1,
-        groups=custom_groups
-    )
-    
-    assert noise.groups == custom_groups
+def test_noise_obtainer_has_no_split_of_its_own():
+    """The split is the data obtainer's (its SplitSpec); NoiseObtainer takes no fractions."""
+    with pytest.raises(TypeError):
+        gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=gf.IFO.L1, groups={"train": 1.0})
+    assert not hasattr(gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=gf.IFO.L1), "groups")
 
 
-def test_noise_obtainer_default_groups():
-    """Test NoiseObtainer uses default groups when not provided."""
-    noise = gf.NoiseObtainer(
-        noise_type=gf.NoiseType.WHITE,
-        ifos=gf.IFO.L1
-    )
-    
-    assert "train" in noise.groups
-    assert "validate" in noise.groups
-    assert "test" in noise.groups
+def test_noise_obtainer_requires_a_named_split():
+    noise = gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=gf.IFO.L1)
+    with pytest.raises(ValueError, match="Name the split"):
+        next(noise())
+    with pytest.raises(KeyError, match="a split is one of"):
+        next(noise(group="all"))
 
 
 # Removed: test_noise_obtainer_generator_none_error
@@ -467,7 +455,7 @@ def test_noise_obtainer_real_without_ifo_obtainer():
 
     noise.ifo_data_obtainer = None
     with pytest.raises(ValueError, match="No IFO obtainer object present"):
-        next(noise())
+        next(noise(group="train"))
 
 
 def test_noise_obtainer_colored_type():
@@ -478,6 +466,7 @@ def test_noise_obtainer_colored_type():
     )
     
     gen = noise(
+        group="train",
         sample_rate_hertz=1024.0,
         onsource_duration_seconds=1.0,
         crop_duration_seconds=0.5,
@@ -501,6 +490,7 @@ def test_noise_obtainer_scale_factor_is_deprecated_and_ignored():
         ifos=gf.IFO.L1
     )
     window = dict(
+        group="train",
         sample_rate_hertz=1024.0,
         onsource_duration_seconds=1.0,
         crop_duration_seconds=0.5,
@@ -525,7 +515,7 @@ def test_noise_obtainer_pseudo_real_without_obtainer():
     )
     
     with pytest.raises(ValueError, match="No IFO obtainer object present"):
-        gen = noise()
+        gen = noise(group="train")
         next(gen)
 
 
@@ -548,6 +538,7 @@ def test_pseudo_real_noise_generation():
     )
     
     gen = noise(
+        group="train",
         sample_rate_hertz=gf.Defaults.sample_rate_hertz,
         onsource_duration_seconds=gf.Defaults.onsource_duration_seconds,
         crop_duration_seconds=gf.Defaults.crop_duration_seconds,
@@ -595,6 +586,7 @@ def test_gps_time_uniqueness_across_batches():
         batch_size = 4
         
         gen = noise(
+            group="train",
             num_examples_per_batch=batch_size,
             seed=42
         )

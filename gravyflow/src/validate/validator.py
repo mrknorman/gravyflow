@@ -11,7 +11,7 @@ import numpy as np
 
 import gravyflow as gf
 from .bank import ValidationBank
-from .config import ValidationConfig
+from .config import ValidationConfig, check_held_out, dataset_split_spec
 from .metrics import Background, EfficiencyCurve, FarThreshold, efficiency_curve, roc_curve
 from .provenance import StaleCheckpointError, config_fingerprint, model_fingerprint, require_match
 
@@ -77,9 +77,15 @@ class Validator:
         config: Optional[ValidationConfig] = None,
         checkpoint_file_path: Optional[Path] = None,
         heart: Optional[gf.Heart] = None,
+        run_record: Optional[dict] = None,
     ) -> "Validator":
         """
         Score ``model`` and return its results.
+
+        ``run_record`` is the model's training record (``RunDirectory.run``). The
+        validator refuses a model whose data was split by another spec than its
+        own, or whose selection split is the one it would score; with no record
+        the split the model saw is unknown, and it warns.
 
         With ``checkpoint_file_path``, results are saved after each stage, and a
         run resumes from the stages already saved there, provided the file was
@@ -90,6 +96,7 @@ class Validator:
                 to another model or to other settings.
         """
         v = cls(name, config, dataset_args)
+        check_held_out(v.config.group, dataset_split_spec(dataset_args), run_record)
         v.model_sha256 = model_fingerprint(model)
         v.config_sha256 = config_fingerprint(v.config, dataset_args)
         path = Path(checkpoint_file_path) if checkpoint_file_path else None

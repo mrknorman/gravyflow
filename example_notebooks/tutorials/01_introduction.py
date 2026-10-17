@@ -232,7 +232,7 @@ print("""
 Continue with the following tutorials:
 
   02_noise_mode_basics.py     - Basic NOISE mode acquisition
-  03_noise_mode_advanced.py   - Advanced NOISE features (grid, groups, multi-IFO)
+  03_noise_mode_advanced.py   - Advanced NOISE features (grid, splits, multi-IFO)
   04_transient_mode_basics.py - Basic TRANSIENT mode (glitches)
   05_transient_mode_advanced.py - Advanced TRANSIENT (events, caching)
   06_augmentations.py         - Data augmentation in detail

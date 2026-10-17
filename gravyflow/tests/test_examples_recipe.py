@@ -179,6 +179,7 @@ class EpochBatches(CountingBatches):
         self.dataset = gf.Dataset(
             seed=seed, noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
             steps_per_epoch=self.n, input_variables=[gf.ReturnVariables.ONSOURCE],
+            group="train",
         )
 
     def epoch_callback(self):
@@ -228,6 +229,7 @@ class AddressedBatches(keras.utils.PyDataset):
         self.dataset = gf.Dataset(
             seed=seed, noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
             steps_per_epoch=n, input_variables=[gf.ReturnVariables.ONSOURCE],
+            group="train",
         )
 
     def __len__(self):

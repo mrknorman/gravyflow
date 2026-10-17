@@ -193,13 +193,15 @@ OBTAINER_PERTURBATIONS = {
     "balanced_glitch_types": True,
     "event_names": ["GW150914"],
     "gwosc_flags": gf.GWOSC_DATA_FLAGS,
+    "split_spec": gf.SplitSpec(version="fold-1"),
+    "train_on_real_events": True,
 }
 #: Data-determining parameters with one buildable value (public runs publish BEST only).
 SINGLE_VALUED = {"data_quality"}
 #: Parameters that change how data is fetched or logged, never the data.
 NOT_DATA = {"force_acquisition", "cache_segments", "logging_level", "prefetch_segments"}
 #: Parameters a NOISE obtainer ignores (they select transients).
-TRANSIENT_ONLY = {"event_types", "balanced_glitch_types", "event_names"}
+TRANSIENT_ONLY = {"event_types", "balanced_glitch_types", "event_names", "train_on_real_events"}
 
 
 class TestFingerprint:
@@ -244,9 +246,8 @@ class TestFingerprint:
         changed = {"ifo_data_obtainer": noise(observing_runs=gf.ObservingRun.O1).ifo_data_obtainer,
                    "ifos": [gf.IFO.L1], "noise_type": gf.NoiseType.PSEUDO_REAL,
                    "noise_profile": gf.NoiseProfile.O3_LOW}
-        # The split's fractions have one value (every route refuses others); they are read all the same.
-        assert fields == set(changed) | {"data_directory_path", "groups"}
-        assert "groups" in gf.NoiseObtainer(noise_type=gf.NoiseType.REAL).specification()
+        # The split is the data obtainer's (its split_spec), read with it.
+        assert fields == set(changed) | {"data_directory_path"}
         for name, value in changed.items():
             other = gf.NoiseObtainer(**{"noise_type": gf.NoiseType.REAL, "ifos": [gf.IFO.H1], name: value})
             assert config_fingerprint(other) != reference, name

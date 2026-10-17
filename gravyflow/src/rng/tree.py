@@ -70,13 +70,17 @@ def _coordinate_words(value: Optional[int], none: int, name: str) -> Tuple[int, 
 
 
 def check_split(split: str) -> str:
-    """A dataset's split: any valid name but the reserved ``direct``."""
-    check_name(split, "split")
+    """
+    A dataset's split: one of ``gf.SplitSpec``'s splits (KeyError naming them
+    otherwise); the reserved ``direct`` is refused by name.
+    """
+    from gravyflow.src.dataset.splits import SplitSpec
+
     if split == DIRECT_SPLIT:
         raise ValueError(
             f"The split '{DIRECT_SPLIT}' is reserved for draws made outside a dataset."
         )
-    return split
+    return SplitSpec.check_name(split)
 
 
 def check_root(seed) -> int:

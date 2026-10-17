@@ -34,7 +34,7 @@ from gravyflow.src.dataset.features.transient_index import TransientIndex
 from .transient_segment import TransientSegment
 from .gwosc_data import within_segments
 from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
-from gravyflow.src.dataset.splits import ALL, split_fractions
+from gravyflow.src.dataset.splits import SplitSpec
 
 
 # The transient caches an obtainer may open, one per prefix (`_initialize_transient_cache`).
@@ -67,8 +67,16 @@ class TransientDataObtainer(BaseDataObtainer):
             # Class balancing
             balanced_glitch_types: bool = False,
             # Specific Names
-            event_names: List[str] = None
+            event_names: List[str] = None,
+            split_spec: Optional[SplitSpec] = None,
+            train_on_real_events: bool = False,
         ):
+        """
+        Args (split):
+            split_spec: How GPS time is split (``gf.SplitSpec``); None is the default.
+            train_on_real_events: Real events are evaluation data, all in ``test``;
+                True puts each in its footprint's split instead, training on some.
+        """
         
         # Default observing runs matching BaseDataObtainer behavior
         if observing_runs is None:
@@ -92,9 +100,11 @@ class TransientDataObtainer(BaseDataObtainer):
             logging_level=logging_level,
             augmentations=augmentations,
             prefetch_segments=prefetch_segments,
+            split_spec=split_spec,
         )
-        
+
         self.acquisition_mode = AcquisitionMode.TRANSIENT
+        self.train_on_real_events = bool(train_on_real_events)
         
         # Event type filtering
         if event_types is None:
@@ -227,15 +237,16 @@ class TransientDataObtainer(BaseDataObtainer):
         
         return data
 
-    def build_feature_index(
-        self,
-        ifos: List[gf.IFO],
-        groups: Dict[str, float] = None,
-    ) -> "TransientIndex":
+    def _events_only(self) -> bool:
+        """Whether the obtainer serves real events and nothing else."""
+        labels = self.data_labels if isinstance(self.data_labels, list) else [self.data_labels]
+        return all(label == DataLabel.EVENTS or isinstance(label, EventConfidence) for label in labels)
+
+    def build_feature_index(self, ifos: List[gf.IFO]) -> "TransientIndex":
         """
-        Build TransientIndex from segment builders.
-        
-        Returns TransientSegments directly.
+        Build the TransientIndex of the requested records, each assigned its split
+        by ``self.split_spec`` (``TransientIndex.assign_splits``), with every
+        catalogued event's footprint kept out of the glitches.
         """
         from gravyflow.src.dataset.features.segment_builders import (
             build_glitch_segments, build_event_segments
@@ -304,8 +315,17 @@ class TransientDataObtainer(BaseDataObtainer):
             index = index.filter_by_names(self.event_names)
             logger.info(f"After filtering: {len(index)} segments")
         
-        # Assign groups
-        index.assign_groups(groups)
+        from gravyflow.src.dataset.features.event import get_event_catalogue
+        from gravyflow.src.dataset.features.transient_index import event_footprints
+
+        catalogue = get_event_catalogue()
+        excluded = index.assign_splits(
+            self.split_spec,
+            event_footprints(catalogue["gps"], catalogue["chirp_mass_source"]),
+            train_on_real_events=self.train_on_real_events,
+        )
+        if excluded:
+            logger.info(f"Transient records in no split: {excluded}")
         
         # Apply balancing
         if self.balanced_glitch_types:
@@ -583,16 +603,17 @@ class TransientDataObtainer(BaseDataObtainer):
         self,
         ifos: List[gf.IFO],
         seed: int,
-        groups: Dict[str, float] = None,
-        group_name: str = "train",
+        group_name: str,
         segment_order: SegmentOrder = None,
     ) -> np.ndarray:
         """
         Get valid segments for TRANSIENT mode.
 
         Segments come from TransientIndex which contains full TransientSegments.
-        The split's members are fixed by the index (`TransientIndex.assign_groups`);
-        ``seed`` only orders them (SegmentOrder.RANDOM).
+        The split's members are fixed by the index (`TransientIndex.assign_splits`);
+        ``seed`` only orders them (SegmentOrder.RANDOM). Real events are test
+        data: an obtainer of events alone refuses any other split unless it
+        trains on real events.
         """
         if not isinstance(ifos, list):
             ifos = [ifos]
@@ -600,14 +621,18 @@ class TransientDataObtainer(BaseDataObtainer):
         if not segment_order:
             segment_order = self.segment_order
         
-        groups = split_fractions(groups, group_name)
+        split = self._split(ifos, group_name)
+        if group_name != "test" and not self.train_on_real_events and self._events_only():
+            raise ValueError(
+                f"Real events are evaluation data, served only in 'test', not {group_name!r}: "
+                "pass train_on_real_events=True to train on them."
+            )
 
         # The served state is one split's, on its detectors: another rebuilds
-        # it, index included, since the index carries the split's fractions
-        # and the detectors' records.
-        self._serve_split(self._split(ifos, group_name, groups))
+        # it, index included, since the index carries the detectors' records.
+        self._serve_split(split)
         if self._feature_index is None:
-            self.build_feature_index(ifos=ifos, groups=groups)
+            self.build_feature_index(ifos=ifos)
         
         # Get segments for this group, filtered by requested IFOs
         # Segments with seen_in overlapping requested IFOs will be included
@@ -1097,10 +1122,10 @@ class TransientDataObtainer(BaseDataObtainer):
         num_onsource_samples = window_spec.num_onsource_samples
         num_offsource_samples = window_spec.num_offsource_samples
 
-        # With no group, the split served, else train (all for specific event names).
-        self._serve_group(ifos, seed, group if group is not None else (
-            self._served_group or (ALL if self.event_names else "train")
-        ))
+        # With no group, the split served; a first call names one.
+        if group is None and self._served_group is None:
+            raise ValueError("Name the split to serve: group='train', 'validate' or 'test'.")
+        self._serve_group(ifos, seed, group if group is not None else self._served_group)
         if self.rng is None:
             self.rng = default_rng(seed)
         

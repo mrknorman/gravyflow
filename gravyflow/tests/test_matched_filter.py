@@ -176,6 +176,7 @@ class TestMatchedFilterCore:
                 gf.ScalingTypes.SNR,
             ],
             seed=42,
+            group="train",
         )
         
         batch = next(iter(dataset))

@@ -23,7 +23,6 @@ import numpy as np
 from numpy.random import default_rng  
 import keras
 from keras import ops
-import jax
 import jax.numpy as jnp
 
 from gwdatafind import find_urls
@@ -48,7 +47,7 @@ from .gwosc_data import (
 
 # Imported from TransientDefaults for consistency (canonical source)
 from gravyflow.src.dataset.config import TransientDefaults, ignore_scale_factor
-from gravyflow.src.dataset.splits import split_fractions
+from gravyflow.src.dataset.splits import SplitSpec, as_split_spec
 
 # GPS time precision is 10ms (0.01s) - defined in gravyflow.src.utils.gps
 # GPS_PRECISION_DECIMALS was 3 (1ms) which was stale - now using GPS_KEY_PRECISION
@@ -288,95 +287,105 @@ def window_offsets_seconds(positions, time_interval_seconds) -> np.ndarray:
     return np.asarray(positions).astype(np.float64) * float(time_interval_seconds)
 
 
-def _random_subsection(
-        tensor_data,
-        num_examples_per_batch: int,
-        num_onsource_samples: int,
-        num_offsource_samples: int,
-        time_interval_seconds,
-        start_gps_times : float,
-        seed
-    ):
+#: Rejection draws per detector, for each example, before its start is drawn
+#: constructively from the starts far enough from the others' (``separated_starts``).
+SEPARATION_DRAWS = 16
+
+
+def separable(bounds: Sequence[Tuple[float, float]], separation: float) -> bool:
     """
-    Generate random subsections from a tensor.
-
-    Returns the onsource and offsource subsections and the GPS time of each
-    (padded) onsource subsection's first sample, as NumPy float64.
+    Whether one point per interval (``bounds``: [lo, hi] on one clock) can be placed
+    with every two points at least ``separation`` apart. Exact: for each order of the
+    points, placing each as early as its interval and the one before allow is optimal
+    for that order, so the intervals are separable when some order fits.
     """
-    batch_subarrays, batch_background_chunks, random_starts = _random_subsection_jit(
-        tensor_data,
-        num_examples_per_batch,
-        num_onsource_samples,
-        num_offsource_samples,
-        seed
-    )
+    from itertools import permutations
 
-    # The start times are computed outside JAX, in float64.
-    start_times = as_gps_times(start_gps_times) + window_offsets_seconds(random_starts, time_interval_seconds)
+    for order in permutations(range(len(bounds))):
+        last = -np.inf
+        for i in order:
+            lo, hi = bounds[i]
+            point = max(lo, last + separation)
+            if point > hi:
+                break
+            last = point
+        else:
+            return True
+    return False
 
-    return batch_subarrays, batch_background_chunks, start_times
 
-
-@jax.jit(static_argnames=["num_examples_per_batch", "num_onsource_samples", "num_offsource_samples"])
-def _random_subsection_jit(
-        tensor_data,
-        num_examples_per_batch: int,
-        num_onsource_samples: int,
-        num_offsource_samples: int,
-        seed
-    ):
+def _allowed_draw(rng: np.random.Generator, lo: int, hi: int, taken: np.ndarray, separation: float):
     """
-    Random subsections of a tensor and their start indices. JIT compiled for efficiency.
+    A start uniform over the integers of [lo, hi) at least ``separation`` from every
+    start in ``taken`` (on the same clock), or None when there is none.
     """
-    # Determine the size of the input tensor.
-    num_samples = ops.shape(tensor_data)[0]
+    pieces = [(lo, hi)]
+    for centre in np.sort(taken):
+        cut_lo, cut_hi = int(np.floor(centre - separation)) + 1, int(np.ceil(centre + separation))
+        pieces = [part for a, b in pieces
+                  for part in ((a, min(b, cut_lo)), (max(a, cut_hi), b)) if part[1] > part[0]]
+    ends = np.cumsum([b - a for a, b in pieces], dtype=np.int64)
+    if not len(ends) or ends[-1] == 0:
+        return None
+    k = int(rng.integers(ends[-1]))
+    index = int(np.searchsorted(ends, k, side="right"))
+    return pieces[index][0] + k - (int(ends[index - 1]) if index else 0)
 
-    # The range of starts whose windows fit (see window_start_bounds).
-    minval, maxval = window_start_bounds(num_samples, num_onsource_samples, num_offsource_samples)
 
-    # Generate uniformly distributed random start indices for each batch.
-    # Use JAX random
-    key = jax.random.PRNGKey(seed)
-    random_starts = jax.random.randint(
-        key,
-        shape=(num_examples_per_batch,),
-        minval=minval,
-        maxval=maxval
-    )
-    random_starts = ops.cast(random_starts, "int32")
+def separated_starts(
+        rng: np.random.Generator,
+        bounds: Sequence[Tuple[int, int]],
+        origins_samples: Sequence[float],
+        separation_samples: float,
+        num_examples: int,
+    ) -> np.ndarray:
+    """
+    Window start indices for up to ``num_examples`` examples, one per detector, no two
+    of an example's detectors closer than ``separation_samples`` in absolute time.
 
-    # Create a tensor representing a sequence from 0 to num_onsource_samples - 1.
-    range_tensor = ops.arange(num_onsource_samples)
+    Detector i's start is uniform on ``[lo_i, hi_i)`` (``bounds``) given the earlier
+    detectors' starts, over the part of it at least ``separation_samples`` from each
+    of them: it is redrawn while it conflicts, up to ``SEPARATION_DRAWS`` times, then
+    drawn from that part directly. An example whose detector has no such start is
+    dropped, never emitted. ``origins_samples[i]`` is detector i's first sample on a
+    common clock, in samples.
 
-    # Reshape range_tensor for broadcasting.
-    range_tensor = range_tensor[None, :]
+    Returns an (M, detectors) int64 array, M <= num_examples.
+    """
+    origins = np.asarray(origins_samples, dtype=np.float64)
+    starts = np.empty((num_examples, len(bounds)), dtype=np.int64)
+    alive = np.ones(num_examples, dtype=bool)
+    for i, (lo, hi) in enumerate(bounds):
+        if hi <= lo:
+            return np.empty((0, len(bounds)), dtype=np.int64)
+        starts[:, i] = rng.integers(lo, hi, size=num_examples)
 
-    # Reshape random_starts for broadcasting.
-    random_starts_column = random_starts[:, None]
+        def conflicts():
+            gaps = np.abs((starts[:, i] + origins[i])[:, None] - (starts[:, :i] + origins[:i]))
+            return alive & np.any(gaps < separation_samples, axis=1)
 
-    # Calculate indices for onsource subarrays.
-    indices_for_subarrays = random_starts_column + range_tensor
+        for _ in range(SEPARATION_DRAWS):
+            conflict = conflicts()
+            if not conflict.any():
+                break
+            starts[conflict, i] = rng.integers(lo, hi, size=int(conflict.sum()))
+        for example in np.flatnonzero(conflicts()):
+            taken = starts[example, :i] + origins[:i] - origins[i]
+            start = _allowed_draw(rng, lo, hi, taken, separation_samples)
+            if start is None:
+                alive[example] = False
+            else:
+                starts[example, i] = start
+    return starts[alive]
 
-    # Gather subsections of onsource data using the calculated indices.
-    batch_subarrays = ops.take(tensor_data, indices_for_subarrays, axis=0)
 
-    # Create and reshape a tensor for offsource range.
-    range_tensor_offsource = ops.arange(num_offsource_samples)
-    range_tensor_offsource = range_tensor_offsource[None, :]
-
-    # Calculate and reshape starting indices for offsource data.
-    background_chunk_starts = random_starts - num_offsource_samples
-    background_chunk_starts_column = background_chunk_starts[:, None]
-
-    # Calculate indices for offsource background chunks.
-    background_chunk_indices = background_chunk_starts_column + range_tensor_offsource
-
-    # Gather subsections of offsource data using the calculated indices.
-    batch_background_chunks = ops.take(
-        tensor_data, background_chunk_indices, axis=0
-    )
-
-    return batch_subarrays, batch_background_chunks, random_starts
+def gather_windows(tensor_data, starts, num_onsource_samples: int, num_offsource_samples: int):
+    """The onsource ``[s, s + on)`` and offsource ``[s - off, s)`` of ``tensor_data`` at each start s."""
+    starts = np.asarray(starts, dtype=np.int64)[:, None]
+    onsource = ops.take(tensor_data, starts + np.arange(num_onsource_samples)[None, :], axis=0)
+    offsource = ops.take(tensor_data, starts - num_offsource_samples + np.arange(num_offsource_samples)[None, :],
+                         axis=0)
+    return onsource, offsource
 
 
 def concatenate_batches(subarrays, background_chunks, start_times):
@@ -386,7 +395,7 @@ def concatenate_batches(subarrays, background_chunks, start_times):
     stacked_subarrays = ops.concatenate(subarrays, axis=1)
     stacked_background_chunks = ops.concatenate(background_chunks, axis=1)
     stacked_start_times = np.concatenate([as_gps_times(times) for times in start_times], axis=1)
-    
+
     return stacked_subarrays, stacked_background_chunks, stacked_start_times
 
 
@@ -394,51 +403,42 @@ def random_subsection(
         data,
         start_gps_time,
         time_interval_seconds,
-        num_onsource_samples: int, 
-        num_offsource_samples: int, 
+        num_onsource_samples: int,
+        num_offsource_samples: int,
         num_examples_per_batch: int,
-        seed : int
+        seed: int,
+        min_separation_seconds: float = 0.0,
     ):
-        all_batch_subarrays, all_batch_background_chunks, all_subsections_start_gps_time = (
-            [], [], []
-        )
-        
-        rng = default_rng(seed)
+    """
+    ``num_examples_per_batch`` random windows from each detector's piece (``data[i]``,
+    its first sample at GPS ``start_gps_time[i]``), no two detectors' window starts
+    closer than ``min_separation_seconds`` (``separated_starts``).
 
-        for tensor_data, start_gps_time in zip(data, start_gps_time):
-            
-            s = rng.integers(1000000000)
-            
-            batch_subarrays, batch_background_chunks, subsections_start_gps_time = (
-                _random_subsection(
-                    tensor_data,
-                    num_examples_per_batch,
-                    num_onsource_samples,
-                    num_offsource_samples,
-                    time_interval_seconds,
-                    start_gps_time,
-                    s
-                )
-            )
+    Returns (onsource, offsource, start GPS times): (B, I, on), (B, I, off) and (B, I)
+    float64, the GPS time of each padded onsource's first sample; or three Nones
+    when the pieces cannot hold a full batch of separated windows.
+    """
+    rng = default_rng(seed)
+    interval = float(time_interval_seconds)
+    bounds = [window_start_bounds(int(ops.shape(tensor)[0]), num_onsource_samples, num_offsource_samples)
+              for tensor in data]
+    first_gps = as_gps_times(np.asarray(start_gps_time, dtype=np.float64))
+    origins = (first_gps - first_gps[0]) / interval
+    starts = np.empty((0, len(data)), dtype=np.int64)
+    for _ in range(4):
+        needed = num_examples_per_batch - len(starts)
+        if needed == 0:
+            break
+        starts = np.concatenate([starts, separated_starts(
+            rng, bounds, origins, min_separation_seconds / interval, needed)])
+    if len(starts) < num_examples_per_batch:
+        return None, None, None
 
-            # Append expanded results
-            all_batch_subarrays.append(
-                ops.expand_dims(batch_subarrays, 1)
-            )
-            all_batch_background_chunks.append(
-                ops.expand_dims(batch_background_chunks, 1)
-            )
-            all_subsections_start_gps_time.append(
-                np.expand_dims(subsections_start_gps_time, 1)
-            )
+    onsource, offsource = zip(*(gather_windows(tensor, starts[:, i], num_onsource_samples, num_offsource_samples)
+                                for i, tensor in enumerate(data)))
+    gps_times = first_gps[None, :] + window_offsets_seconds(starts, interval)
+    return (ops.stack(onsource, axis=1), ops.stack(offsource, axis=1), gps_times)
 
-        # Concatenate the batches
-        return concatenate_batches(
-            all_batch_subarrays, 
-            all_batch_background_chunks, 
-            all_subsections_start_gps_time
-        )
-    
 
 # =============================================================================
 # IFO DATA CONTAINER
@@ -480,25 +480,23 @@ class IFOData:
         return [ops.convert_to_numpy(data) for data in self.data]
 
     def random_subsection(
-        self, 
-        num_onsource_samples: int, 
-        num_offsource_samples: int, 
+        self,
+        num_onsource_samples: int,
+        num_offsource_samples: int,
         num_examples_per_batch: int,
-        seed : int
+        seed: int,
+        min_separation_seconds: float = 0.0,
     ):
-        # Create random number generator from seed:
-        rng = default_rng(seed)
-
-        generated_seed = int(rng.integers(1E10))
-
+        """Random windows of this row's pieces (``random_subsection``)."""
         return random_subsection(
             self.data,
             self.start_gps_time,
             self.time_interval_seconds,
-            num_onsource_samples, 
-            num_offsource_samples, 
+            num_onsource_samples,
+            num_offsource_samples,
             num_examples_per_batch,
-            generated_seed   
+            seed,
+            min_separation_seconds,
         )
     
     def grid_subsection(
@@ -587,9 +585,12 @@ class BaseDataObtainer(ABC):
             augmentations: List = None,  # List of augmentation instances
             prefetch_segments : int = 16,
             gwosc_flags : Optional[Tuple[str, ...]] = None,
+            split_spec : Optional[SplitSpec] = None,
         ):
         """
         Args (selection):
+            split_spec: How GPS time is split into train, validate and test
+                (``gf.SplitSpec``); None is the default split.
             gwosc_flags: GWOSC timeline flags whose intersection defines usable
                 times, e.g. ``gf.GWOSC_DATA_FLAGS`` or ``gf.GWOSC_CBC_FLAGS``. Each
                 flag lists the times that pass it. None uses each run's default:
@@ -615,6 +616,7 @@ class BaseDataObtainer(ABC):
         self.saturation = saturation
         self.force_acquisition = force_acquisition
         self.cache_segments = cache_segments
+        self.split_spec = as_split_spec(split_spec)
             
         # Data augmentation settings - list of augmentation instances
         from gravyflow.src.dataset.acquisition.augmentations import default_augmentations
@@ -685,19 +687,15 @@ class BaseDataObtainer(ABC):
         excluded = set(self._served_state()) | set(self._NOT_SPECIFICATION)
         return {name: value for name, value in sorted(vars(self).items()) if name not in excluded}
 
-    @staticmethod
-    def _split(
-            ifos: List[gf.IFO],
-            group_name: str,
-            groups: Optional[Dict[str, float]] = None,
-        ) -> Tuple:
+    def _split(self, ifos: List[gf.IFO], group_name: str) -> Tuple:
         """
-        The split a call names, as a key: its detectors, in order, its name and
-        the fractions it is drawn from. Every call that serves a split, through
-        get_valid_segments or _serve_group, names it by this one key.
+        The split a call names, as a key: its detectors, in order, its name
+        (refused unless it is a split) and the spec's fingerprint. Every call
+        that serves a split, through get_valid_segments or _serve_group, names
+        it by this one key.
         """
-        return (tuple(ensure_list(ifos)), group_name,
-                tuple(split_fractions(groups, group_name).items()))
+        return (tuple(ensure_list(ifos)), self.split_spec.check_name(group_name),
+                self.split_spec.fingerprint())
 
     def _serve_split(self, split: Tuple, order: Tuple = ()) -> bool:
         """
@@ -1602,13 +1600,12 @@ class BaseDataObtainer(ABC):
             self,
             ifos: List[gf.IFO],
             seed: int,
-            groups: Dict[str, float] = None,
-            group_name: str = "train",
+            group_name: str,
             segment_order: SegmentOrder = None,
         ) -> List:
         """
-        Get valid segments for this acquisition mode.
-        Must be implemented by subclasses.
+        The segments of split ``group_name`` (under ``self.split_spec``) on
+        ``ifos``, ordered by ``seed``. Must be implemented by subclasses.
         """
         pass
 

@@ -141,7 +141,8 @@ def main():
                 gf.ReturnVariables.POOL_LABEL,
             ],
             steps_per_epoch=100,
-            seed=42
+            seed=42,
+            group="train"
         )
         
         logger.info(f"\nDataset created:")

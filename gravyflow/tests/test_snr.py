@@ -246,7 +246,8 @@ def _test_snr(
             num_examples_per_batch=1,
             input_variables = [
                 gf.ReturnVariables.ONSOURCE
-            ]
+            ],
+            group="train"
         )
         
         background, _ = next(iter(dataset))

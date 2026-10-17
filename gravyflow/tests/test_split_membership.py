@@ -21,9 +21,9 @@ from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.transient_index import TransientIndex
 from gravyflow.src.dataset.noise.noise import sequential_seed
-from gravyflow.src.dataset.splits import split_fractions
+from gravyflow.src.dataset.splits import EXCLUDED
 from gravyflow.src.utils.gps import gps_to_key
-from gravyflow.tests.conftest import usable_over_its_runs
+from gravyflow.tests.conftest import catalogued_events, usable_over_its_runs
 
 SPLITS = ("train", "validate", "test")
 O3_START = 1238166018.0
@@ -58,7 +58,8 @@ def catalogue():
     with mock.patch(
         "gravyflow.src.dataset.features.segment_builders.build_glitch_segments",
         return_value=records,
-    ), mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs):
+    ), mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs), \
+            catalogued_events():
         yield {record.gps_key for record in records}
 
 
@@ -118,7 +119,10 @@ class TestTransientMembership:
         for i, a in enumerate(SPLITS):
             for b in SPLITS[i + 1:]:
                 assert not split_members[a] & split_members[b], f"{a} and {b} share records"
-        assert set().union(*split_members.values()) == catalogue
+        assigned = TransientIndex(glitch_records())
+        excluded = assigned.assign_splits(gf.SplitSpec())
+        assert set().union(*split_members.values()) == set(assigned._groups) <= catalogue
+        assert len(catalogue) - len(assigned._groups) == sum(excluded.values())
         assert all(split_members[split] for split in SPLITS)
 
     @pytest.mark.parametrize("seed", [0, 1, 2**63 - 1])
@@ -136,11 +140,16 @@ class TestTransientMembership:
         assert sorted(order(1)) == sorted(order(2))
 
     def test_index_assignment_is_a_partition(self):
+        """Every record is in one split or counted out of all of them, by its footprint's split."""
+        spec = gf.SplitSpec()
         index = TransientIndex(glitch_records(5000))
-        index.assign_groups({"train": 0.8, "validate": 0.1, "test": 0.1})
+        excluded = index.assign_splits(spec)
         counts = index.get_group_counts()
-        assert sum(counts.values()) == len(index)
+        assert sum(counts.values()) + sum(excluded.values()) == len(index)
         assert set(counts) == {"train", "validate", "test"}
+        for record in index:
+            split = spec.assign(record.transient_gps_time - 48.2, record.transient_gps_time + 48.2)
+            assert index._groups.get(record.gps_key, EXCLUDED) == split
 
 
 class TestObtainerCopies:
@@ -183,7 +192,7 @@ class TestObtainerCopies:
         """A caller's obtainer that already holds one split's segments never serves them to another."""
         used = offline_noise_obtainer()
         noise = gf.NoiseObtainer(ifo_data_obtainer=used, noise_type=gf.NoiseType.REAL, ifos=[gf.IFO.L1])
-        train = used.get_valid_segments([gf.IFO.L1], seed=1000, groups=noise.groups, group_name="train")
+        train = used.get_valid_segments([gf.IFO.L1], seed=1000, group_name="train")
 
         used.rng = np.random.default_rng(1)
         fresh = copy.deepcopy(used)
@@ -261,7 +270,7 @@ class TestEveryRouteSplitsAlike:
     @pytest.fixture
     def by_route(self, catalogue):
         index = TransientIndex(glitch_records())
-        index.assign_groups()
+        index.assign_splits(gf.SplitSpec())
         by_route = {
             route: {split: served_members(through, split) for split in SPLITS}
             for route, through in ROUTES.items()
@@ -288,8 +297,11 @@ class TestEveryRouteSplitsAlike:
                         assert not shared, f"{a} {first} and {b} {second} share {len(shared)} records"
 
     def test_the_default_split_is_the_ruled_one(self):
-        assert dict(gf.DEFAULT_SPLIT_FRACTIONS) == {"train": 0.8, "validate": 0.1, "test": 0.1}
-        assert gf.NoiseObtainer().groups == dict(gf.DEFAULT_SPLIT_FRACTIONS)
+        spec = gf.SplitSpec()
+        assert spec == gf.DEFAULT_SPLIT
+        assert spec.fractions == (("test", 0.1), ("validate", 0.1), ("train", 0.8))
+        assert (spec.block_seconds, spec.guard_seconds) == (8192.0, 128.0)
+        assert glitch_obtainer().split_spec == offline_noise_obtainer().split_spec == spec
 
 
 #: One obtainer's calls, in order: each must serve exactly its own split.
@@ -426,31 +438,27 @@ class TestOneObtainerCalledForEachSplit:
             next(validate)
 
 
-class TestTheAllSplit:
+class TestNoAllSplit:
     """
-    Split "all" is every record: it is served by not filtering the one
-    partition, never by a second set of fractions.
+    There is no split of every record: each name is test, validate or train, and
+    real events, named or not, are served in test.
     """
 
-    def test_split_all_takes_the_default_fractions(self):
-        assert split_fractions(None, "all") == dict(gf.DEFAULT_SPLIT_FRACTIONS)
+    @pytest.mark.parametrize("name", ["all", "val", "Train", "direct"])
+    def test_other_names_are_refused(self, catalogue, name):
+        with pytest.raises(KeyError, match="a split is one of"):
+            members(glitch_obtainer(), name, 1000)
+        with pytest.raises(KeyError, match="a split is one of"):
+            offline_noise_obtainer().get_valid_segments([gf.IFO.L1], seed=1000, group_name=name)
 
-    def test_a_transient_obtainer_serves_every_record_for_all(self, catalogue):
-        obtainer = glitch_obtainer()
-        obtainer.get_valid_segments([gf.IFO.L1], seed=1, group_name="all")
-        assert {segment.gps_key for segment in obtainer.transient_segments} == catalogue
-        assert served_members(through_a_direct_call, "all") == catalogue
+    def test_the_splits_cover_the_catalogue_less_what_is_excluded(self, catalogue):
+        served = set().union(*(members(glitch_obtainer(), split, 1000) for split in SPLITS))
+        index = TransientIndex(glitch_records())
+        excluded = index.assign_splits(gf.SplitSpec())
+        assert served <= catalogue
+        assert len(catalogue - served) == sum(excluded.values())
 
-    def test_split_all_leaves_the_other_splits_alone(self, catalogue):
-        obtainer = glitch_obtainer()
-        for split in ("all", *SPLITS):
-            expected = catalogue if split == "all" else members(glitch_obtainer(), split, 1000)
-            assert members(obtainer, split, 1000) == expected, split
-
-    def test_a_noise_obtainer_serves_every_segment_for_all(self):
-        assert noise_split("all") == noise_split("train") | noise_split("validate") | noise_split("test")
-
-    def test_named_events_are_served_without_a_group(self, offline_events):
+    def test_named_events_are_served_in_test(self, offline_events):
         names = [event["name"] for event in offline_events]
         obtainer = gf.TransientDataObtainer(
             observing_runs=gf.ObservingRun.O3,
@@ -459,9 +467,12 @@ class TestTheAllSplit:
             event_names=names,
         )
         obtainer.augmentations = []
-        batch = next(obtainer(ifos=[gf.IFO.H1, gf.IFO.L1], **{**WINDOW, "num_examples_per_batch": 3}))
+        batch = next(obtainer(ifos=[gf.IFO.H1, gf.IFO.L1], group="test",
+                              **{**WINDOW, "num_examples_per_batch": 3}))
         assert np.shape(batch[gf.ReturnVariables.ONSOURCE])[:2] == (3, 2)
         assert {segment.name for segment in obtainer.transient_segments} == set(names)
+        with pytest.raises(ValueError, match="evaluation data"):
+            next(obtainer(ifos=[gf.IFO.H1, gf.IFO.L1], group="train", **WINDOW))
 
 
 @pytest.fixture
@@ -477,7 +488,8 @@ def two_detector_catalogue():
     with mock.patch(
         "gravyflow.src.dataset.features.segment_builders.build_glitch_segments",
         return_value=records,
-    ), mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs):
+    ), mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs), \
+            catalogued_events():
         yield {ifo: {r.gps_key for r in records if ifo in r.seen_in} for ifo in (gf.IFO.L1, gf.IFO.H1)}
 
 
@@ -539,47 +551,36 @@ class TestOneObtainerCalledForOtherDetectors:
             assert np.shape(onsource)[:2] == (4, len(ifos))
 
 
-#: Fractions other than the default: other values, a missing split, another order, none.
-OTHER_FRACTIONS = [
-    {"train": 0.9, "validate": 0.05, "test": 0.05},
-    {"train": 0.8, "validate": 0.2},
-    {"train": 0.8, "test": 0.1, "validate": 0.1},
-    {},
+#: Specs other than the default: other fractions, another salt.
+OTHER_SPECS = [
+    gf.SplitSpec(fractions={"train": 0.6, "validate": 0.2, "test": 0.2}),
+    gf.SplitSpec(version="fold-1"),
 ]
 
 
-class TestOnlyTheDefaultFractions:
+class TestOneSpecPerObtainer:
     """
-    Until splits are specified as a whole, every route splits by
-    gf.DEFAULT_SPLIT_FRACTIONS: other fractions given to any one route would put
-    another route's validate or test records in its train split, so they are
-    refused, by name, wherever they are given.
+    The obtainer that partitions time holds the split: every split it serves is
+    its spec's, and a route has no second set of fractions to give.
     """
 
-    @pytest.mark.parametrize("fractions", OTHER_FRACTIONS)
-    def test_every_route_refuses_other_fractions(self, catalogue, fractions):
-        routes = {
-            "split_fractions": lambda: split_fractions(fractions),
-            "NoiseObtainer": lambda: gf.NoiseObtainer(groups=fractions),
-            "noise get_valid_segments": lambda: offline_noise_obtainer().get_valid_segments(
-                [gf.IFO.L1], seed=1000, groups=fractions),
-            "transient get_valid_segments": lambda: glitch_obtainer().get_valid_segments(
-                [gf.IFO.L1], seed=1000, groups=fractions),
-            "TransientIndex.assign_groups":
-                lambda: TransientIndex(glitch_records(10)).assign_groups(fractions),
-        }
-        for route, call in routes.items():
-            with pytest.raises(ValueError, match="DEFAULT_SPLIT_FRACTIONS") as refused:
-                call()
-            assert "split specification" in str(refused.value), route
+    @pytest.mark.parametrize("spec", OTHER_SPECS, ids=["fractions", "salt"])
+    def test_an_obtainer_serves_its_specs_split(self, catalogue, spec):
+        obtainer = gf.TransientDataObtainer(
+            data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
+            observing_runs=gf.ObservingRun.O3, split_spec=spec,
+        )
+        served = members(obtainer, "validate", 1000)
+        assert served
+        for record in glitch_records():
+            t = record.transient_gps_time
+            assert (record.gps_key in served) == (spec.assign(t - 48.2, t + 48.2) == "validate")
+        assert served != members(glitch_obtainer(), "validate", 1000)
 
-    def test_the_default_fractions_are_accepted_as_a_copy(self, catalogue):
-        fractions = dict(gf.DEFAULT_SPLIT_FRACTIONS)
-        assert split_fractions(fractions) == split_fractions() == fractions
-        assert gf.NoiseObtainer(groups=fractions).groups == fractions
-        noise = offline_noise_obtainer().get_valid_segments([gf.IFO.L1], seed=1000, groups=fractions)
-        assert set(map(tuple, noise[:, 0])) == noise_split("train")
-        glitches = glitch_obtainer()
-        glitches.get_valid_segments([gf.IFO.L1], seed=1000, groups=fractions, group_name="test")
-        assert {segment.gps_key for segment in glitches.transient_segments} \
-            == members(glitch_obtainer(), "test", 1000)
+    def test_no_route_takes_fractions(self):
+        with pytest.raises(TypeError):
+            gf.NoiseObtainer(groups={"train": 1.0})
+        with pytest.raises(TypeError):
+            offline_noise_obtainer().get_valid_segments([gf.IFO.L1], seed=1, groups={}, group_name="train")
+        assert not hasattr(TransientIndex, "assign_groups")
+        assert not hasattr(gf, "DEFAULT_SPLIT_FRACTIONS")

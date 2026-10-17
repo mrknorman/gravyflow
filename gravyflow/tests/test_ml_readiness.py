@@ -55,7 +55,7 @@ def basic_dataset_config(basic_noise_obtainer):
 def test_data_diversity(basic_dataset_config):
     """Verify that iterating the dataset produces different data (no constant output)."""
     # Use a fixed seed for reproducibility of the TEST, but the dataset should evolve
-    dataset = GravyflowDataset(**basic_dataset_config, seed=100)
+    dataset = GravyflowDataset(**basic_dataset_config, seed=100, group="train")
     
     # Batches 0 and 1
     batch1 = dataset[0]
@@ -91,10 +91,10 @@ def test_independence(basic_dataset_config):
 
     # Same seed -> Same data
     config1 = make_config(42)
-    ds1 = GravyflowDataset(**config1, seed=42)
+    ds1 = GravyflowDataset(**config1, seed=42, group="train")
     
     config2 = make_config(42)
-    ds2 = GravyflowDataset(**config2, seed=42)
+    ds2 = GravyflowDataset(**config2, seed=42, group="train")
     
     batch1 = next(iter(ds1))
     batch2 = next(iter(ds2))
@@ -107,7 +107,7 @@ def test_independence(basic_dataset_config):
     
     # Different seed -> Different data
     config3 = make_config(999)
-    ds3 = GravyflowDataset(**config3, seed=999)
+    ds3 = GravyflowDataset(**config3, seed=999, group="train")
     batch3 = next(iter(ds3))
     data3 = batch3[0][gf.ReturnVariables.WHITENED_ONSOURCE.name]
     
@@ -115,7 +115,7 @@ def test_independence(basic_dataset_config):
 
 def test_shape_and_format(basic_dataset_config):
     """Verify the (inputs, targets) tuple structure and shapes."""
-    dataset = GravyflowDataset(**basic_dataset_config)
+    dataset = GravyflowDataset(**basic_dataset_config, group="train")
     batch = next(iter(dataset))
     
     assert isinstance(batch, tuple), "Dataset should yield a tuple."
@@ -170,7 +170,7 @@ def test_peak_jitter(basic_noise_obtainer):
         "input_variables": [gf.ReturnVariables.WHITENED_INJECTIONS]
     }
     
-    dataset = GravyflowDataset(**config, seed=789)
+    dataset = GravyflowDataset(**config, seed=789, group="train")
     batch = next(iter(dataset))
     
     # Get injections: (Batch, IFO, Time)
@@ -235,7 +235,7 @@ def test_snr_bounds(basic_noise_obtainer):
         ]
     }
     
-    dataset = GravyflowDataset(**config, seed=101)
+    dataset = GravyflowDataset(**config, seed=101, group="train")
     batch = next(iter(dataset))
     
     inputs = batch[0]
@@ -299,7 +299,8 @@ def test_produced_snr(basic_noise_obtainer):
         ],
         input_variables=[gf.ReturnVariables.INJECTIONS, gf.ReturnVariables.OFFSOURCE],
         output_variables=[gf.ReturnVariables.INJECTIONS], # Dummy
-        num_examples_per_batch=20
+        num_examples_per_batch=20,
+        group="train"
     )
     
     batch = next(iter(dataset))
@@ -365,7 +366,7 @@ def test_snr_bounds_cbc(basic_noise_obtainer):
         ]
     }
     
-    dataset = GravyflowDataset(**config, seed=102)
+    dataset = GravyflowDataset(**config, seed=102, group="train")
     batch = next(iter(dataset))
     
     inputs = batch[0]
@@ -396,7 +397,7 @@ def test_snr_bounds_cbc(basic_noise_obtainer):
 
 def test_numerical_stability(basic_dataset_config):
     """Check for NaNs or Infs in the generated data."""
-    dataset = GravyflowDataset(**basic_dataset_config, seed=555)
+    dataset = GravyflowDataset(**basic_dataset_config, seed=555, group="train")
     
     for k in range(3):
         X = dataset[k][0][gf.ReturnVariables.WHITENED_ONSOURCE.name]
@@ -428,7 +429,7 @@ def test_micro_training(basic_dataset_config):
     wnb_generator.injection_chance = 1.0
     config["waveform_generators"] = [wnb_generator]
     
-    dataset = GravyflowDataset(**config)
+    dataset = GravyflowDataset(**config, group="train")
     
     # Get input shape
     batch = next(iter(dataset))
@@ -504,7 +505,7 @@ def test_parameter_independence(basic_noise_obtainer):
         ]
     }
     
-    dataset = GravyflowDataset(**config, seed=42)
+    dataset = GravyflowDataset(**config, seed=42, group="train")
     batch = next(iter(dataset))
     
     # Extract parameters
@@ -551,7 +552,7 @@ def test_parameter_variation(basic_noise_obtainer):
         "input_variables": [gf.WaveformParameters.MASS_1_MSUN]
     }
     
-    dataset = GravyflowDataset(**config, seed=123)
+    dataset = GravyflowDataset(**config, seed=123, group="train")
     
     # Batch 0
     batch1 = dataset[0]
@@ -598,7 +599,7 @@ def test_signal_variation(basic_noise_obtainer):
         "input_variables": [gf.ReturnVariables.INJECTIONS]
     }
     
-    dataset = GravyflowDataset(**config, seed=456)
+    dataset = GravyflowDataset(**config, seed=456, group="train")
     
     # next(iter(dataset)) is always batch 0: compare two batches by index.
     inj1 = np.asarray(dataset[0][0][gf.ReturnVariables.INJECTIONS.name])
@@ -670,7 +671,7 @@ def test_padding_adherence(basic_noise_obtainer):
         "input_variables": [gf.ReturnVariables.WHITENED_INJECTIONS]
     }
     
-    dataset = GravyflowDataset(**config, seed=999)
+    dataset = GravyflowDataset(**config, seed=999, group="train")
     batch = next(iter(dataset))
     
     injections = batch[0][gf.ReturnVariables.WHITENED_INJECTIONS.name]
@@ -739,7 +740,7 @@ def test_injection_shape_consistency(basic_noise_obtainer):
         ]
     }
     
-    dataset = GravyflowDataset(**config, seed=123)
+    dataset = GravyflowDataset(**config, seed=123, group="train")
     batch = next(iter(dataset))
     
     inputs = batch[0]
@@ -803,7 +804,7 @@ def test_injection_mask_consistency(basic_noise_obtainer):
     }
     
     # Run for a few batches to ensure coverage
-    dataset = GravyflowDataset(**config, seed=0)
+    dataset = GravyflowDataset(**config, seed=0, group="train")
     iterator = iter(dataset)
     
     for _ in range(5):

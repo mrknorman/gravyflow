@@ -21,7 +21,7 @@ import numpy as np
 from tqdm import tqdm
 
 import gravyflow as gf
-from .config import ValidationConfig
+from .config import ValidationConfig, dataset_split_spec
 from .metrics import Background, logit_scores
 from .utils import _extract_sample_data
 
@@ -237,7 +237,9 @@ class ValidationBank:
         """
         Score real GW events from the GWTC catalogues, for evaluation only.
 
-        Needs network access. Each event is prepared as the dataset prepares
+        Real events are test data: the confident events, each once (by name),
+        are scored when the validator's split is ``test``, and none otherwise;
+        marginal events are never examples. Needs network access. Each event is prepared as the dataset prepares
         its examples (whitened by its offsource, cropped to the onsource), so
         its score is comparable with the background's, and its FAR is read
         from that background.
@@ -252,16 +254,18 @@ class ValidationBank:
         ifos = noise_ifos(self.dataset_args.get("ifos"), self.dataset_args.get("noise_obtainer"))
         letters = {ifo.name[0] for ifo in ifos}
 
+        if self.config.group != "test":
+            logger.info(f"No real events are in the '{self.config.group}' split: they are all test data.")
+            self.real_events = []
+            return
         events, seen = [], set()
-        for e in sorted(get_events_with_params(
-                observing_runs, event_types=[EventConfidence.CONFIDENT, EventConfidence.MARGINAL]),
-                key=lambda e: e["gps"]):
-            key = round(e["gps"], 1)
+        for e in sorted(get_events_with_params(observing_runs, event_types=[EventConfidence.CONFIDENT]),
+                        key=lambda e: e["gps"]):
             network = e.get("network", "")
-            if key in seen or (network and not letters <= set(network)):
+            if e["name"] in seen or (network and not letters <= set(network)):
                 continue
-            seen.add(key)
-            e["event_type"] = "MARGINAL" if "marginal" in str(e.get("catalog", "")).lower() else "CONFIDENT"
+            seen.add(e["name"])
+            e["event_type"] = "CONFIDENT"
             events.append(e)
         logger.info(f"Scoring {len(events)} real events.")
 
@@ -272,6 +276,7 @@ class ValidationBank:
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.EVENTS],
             event_names=[e["name"] for e in events],
+            split_spec=dataset_split_spec(self.dataset_args),
         )
         chunks = obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=sample_rate,
@@ -279,6 +284,7 @@ class ValidationBank:
             offsource_duration_seconds=self.dataset_args.get("offsource_duration_seconds", 16.0),
             num_examples_per_batch=min(len(events), 256) or 1,
             ifos=ifos,
+            group="test",
         )
         onsource, offsource, gps = [], [], []
         for batch in chunks:

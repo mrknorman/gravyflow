@@ -611,7 +611,7 @@ class TestPublicDefaults:
         assert dataset is not None
 
     def test_default_dataset_builds_offline(self, offline_public_sources):
-        dataset = gf.GravyflowDataset(input_variables=[gf.ReturnVariables.ONSOURCE])
+        dataset = gf.GravyflowDataset(input_variables=[gf.ReturnVariables.ONSOURCE], group="train")
         assert dataset is not None
 
 

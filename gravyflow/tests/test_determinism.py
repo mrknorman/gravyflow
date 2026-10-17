@@ -471,6 +471,7 @@ class TestIndexedDatasets:
                 pools=pools, seed=seed, sample_rate_hertz=SAMPLE_RATE, offsource_duration_seconds=4.0,
                 num_examples_per_batch=BATCH, steps_per_epoch=4,
                 input_variables=[gf.ReturnVariables.ONSOURCE], output_variables=[gf.ReturnVariables.POOL_LABEL],
+                group="train",
             )
         a, b = composed(42), composed(43)
         x_a, y_a = a[0]

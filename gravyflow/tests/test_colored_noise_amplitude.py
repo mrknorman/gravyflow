@@ -97,7 +97,7 @@ def test_noise_obtainer_returns_strain():
     """A NoiseObtainer returns strain: its PSD is the profile's, unscaled."""
     obtainer = gf.NoiseObtainer(noise_type=gf.NoiseType.COLORED, ifos=[gf.IFO.H1])
     batch = next(obtainer(
-        sample_rate_hertz=FS, onsource_duration_seconds=16.0,
+        group="train", sample_rate_hertz=FS, onsource_duration_seconds=16.0,
         crop_duration_seconds=0.0, offsource_duration_seconds=16.0,
         num_examples_per_batch=8, seed=11,
     ))
@@ -139,7 +139,7 @@ def test_colored_noise_uses_the_named_profile():
         noise_profile=gf.NoiseProfile.DESIGN,
     )
     batch = next(obtainer(
-        sample_rate_hertz=FS, onsource_duration_seconds=16.0,
+        group="train", sample_rate_hertz=FS, onsource_duration_seconds=16.0,
         crop_duration_seconds=0.0, offsource_duration_seconds=16.0,
         num_examples_per_batch=8, seed=5,
     ))

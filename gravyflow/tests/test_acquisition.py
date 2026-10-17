@@ -539,24 +539,15 @@ class TestCutAndGroupSegments:
         # Second segment [300, 400] should be [300, 400]
         assert len(result) >= 3
     
-    def test_get_segments_for_group(self, obtainer):
-        """Test get_segments_for_group assigns deterministically (lines 841-876)."""
-        segments = np.array([
-            [0.0, 100.0],
-            [100.0, 200.0],
-            [200.0, 300.0],
-            [300.0, 400.0]
-        ])
-        
-        groups = {"train": 0.8, "validate": 0.1, "test": 0.1}
-        
-        train_segments = obtainer.get_segments_for_group(
-            segments, 100.0, "train", groups, 0.0
-        )
-        
-        # Should get some segments assigned to train
-        assert isinstance(train_segments, np.ndarray)
-    
+    def test_a_split_reads_its_admissible_time(self):
+        """A split's segments lie in that split's blocks (``SplitSpec.admissible``)."""
+        spec = gf.SplitSpec(block_seconds=100.0, guard_seconds=0.0)
+        segments = np.array([[0.0, 100.0], [100.0, 200.0], [200.0, 300.0], [300.0, 400.0]])
+        train = spec.admissible(segments, "train")
+        assert isinstance(train, np.ndarray) and train.shape[1] == 2
+        for start, end in train:
+            assert spec.assign(start, end) == "train"
+
     def test_merge_bins(self, obtainer):
         """Test merge_bins combines segments into time bins (lines 689-738)."""
         seg_list1 = np.array([[0.0, 50.0], [100.0, 150.0]])
@@ -953,7 +944,7 @@ class TestGetValidSegmentsErrors:
             cache_segments=False
         )
         
-        with pytest.raises(KeyError, match="not present in groups"):
+        with pytest.raises(KeyError, match="a split is one of"):
             obtainer.get_valid_segments(
                 ifos=[gf.IFO.L1],
                 seed=42,
@@ -1171,8 +1162,8 @@ class TestCutSegmentsEdgeCases:
         np.testing.assert_array_equal(result[0], [0.0, 50.0])
 
 
-class TestGetSegmentsForGroupEdgeCases:
-    """Tests for get_segments_for_group edge cases."""
+class TestSplitSegments:
+    """How SplitSpec shares out segments."""
     
     @pytest.fixture
     def obtainer(self):
@@ -1183,28 +1174,24 @@ class TestGetSegmentsForGroupEdgeCases:
             cache_segments=False
         )
     
-    def test_get_segments_for_different_groups(self, obtainer):
-        """Test that different groups get different segments."""
-        segments = np.array([
-            [0.0, 100.0],
-            [100.0, 200.0],
-            [200.0, 300.0],
-            [300.0, 400.0],
-            [400.0, 500.0],
-            [500.0, 600.0],
-            [600.0, 700.0],
-            [700.0, 800.0]
-        ])
-        
-        groups = {"train": 0.6, "validate": 0.2, "test": 0.2}
-        
-        train = obtainer.get_segments_for_group(segments, 100.0, "train", groups, 0.0)
-        validate = obtainer.get_segments_for_group(segments, 100.0, "validate", groups, 0.0)
-        test = obtainer.get_segments_for_group(segments, 100.0, "test", groups, 0.0)
-        
-        # Total should account for all segments
-        total = len(train) + len(validate) + len(test)
-        assert total == len(segments)
+    def test_the_splits_partition_time_less_their_guards(self):
+        """Without a guard the splits share out all time; a guard keeps them apart."""
+        segments = np.array([[0.0, 100.0], [100.0, 450.0], [500.0, 800.0]])
+        total = np.sum(segments[:, 1] - segments[:, 0])
+        fractions = {"train": 0.6, "validate": 0.2, "test": 0.2}
+        unguarded = gf.SplitSpec(fractions=fractions, block_seconds=100.0, guard_seconds=0.0)
+        split = {name: unguarded.admissible(segments, name) for name in ("train", "validate", "test")}
+        assert sum(np.sum(s[:, 1] - s[:, 0]) for s in split.values()) == pytest.approx(total)
+
+        guarded = gf.SplitSpec(fractions=fractions, block_seconds=100.0, guard_seconds=10.0)
+        split = {name: guarded.admissible(segments, name) for name in ("train", "validate", "test")}
+        for a in split:
+            for b in split:
+                if a == b:
+                    continue
+                for start, end in split[a]:
+                    gaps = np.maximum(split[b][:, 0] - end, start - split[b][:, 1])
+                    assert np.all(gaps >= 10.0 - 1e-9), (a, b)
 
 
 class TestVetoTimeSegmentsComplex:
@@ -1286,10 +1273,11 @@ def _test_full_pipeline_visualization(
     cut = obtainer.cut_segments(compressed, 100.0, 0.0)
     
     # Step 3: Group segments
-    groups = {"train": 0.7, "validate": 0.15, "test": 0.15}
-    train = obtainer.get_segments_for_group(cut, 100.0, "train", groups, 0.0)
-    validate = obtainer.get_segments_for_group(cut, 100.0, "validate", groups, 0.0)
-    test = obtainer.get_segments_for_group(cut, 100.0, "test", groups, 0.0)
+    spec = gf.SplitSpec(fractions={"train": 0.7, "validate": 0.15, "test": 0.15},
+                        block_seconds=100.0, guard_seconds=0.0)
+    train = spec.admissible(cut, "train")
+    validate = spec.admissible(cut, "validate")
+    test = spec.admissible(cut, "test")
     
     if plot_results:
         layout = []
@@ -1338,8 +1326,11 @@ def _test_full_pipeline_visualization(
     
     # Assertions
     assert len(compressed) <= len(segments)
-    total_grouped = len(train) + len(validate) + len(test)
-    assert total_grouped == len(cut)
+    def seconds(segments):
+        return float(np.sum(segments[:, 1] - segments[:, 0]))
+
+    # Without a guard the splits share out all the cut time (joined within a split).
+    assert seconds(train) + seconds(validate) + seconds(test) == pytest.approx(seconds(cut))
 
 
 def test_full_pipeline_visualization(pytestconfig: Config) -> None:
@@ -1587,10 +1578,10 @@ class TestGetValidSegmentsReal:
         obtainer.start_gps_times = [1238166018.0]
         obtainer.end_gps_times = [1238166018.0 + 86400]  # 1 day
         
-        # Correct signature: get_valid_segments(ifos, seed, groups, group_name, segment_order)
         segments = obtainer.get_valid_segments(
             ifos=[gf.IFO.L1],
-            seed=42
+            seed=42,
+            group_name="train"
         )
         
         assert isinstance(segments, np.ndarray)
@@ -1599,8 +1590,8 @@ class TestGetValidSegmentsReal:
             assert segments.shape[1] == 1  # One IFO
             assert segments.shape[2] == 2  # Start and end times
     
-    def test_get_valid_segments_with_groups(self):
-        """Test get_valid_segments with train/validate/test groups."""
+    def test_get_valid_segments_of_a_split(self):
+        """get_valid_segments serves the named split."""
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,

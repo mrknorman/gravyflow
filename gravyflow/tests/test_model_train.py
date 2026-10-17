@@ -23,6 +23,7 @@ def dataset_args(**extra):
     )
     wnb.injection_chance = 0.5
     return dict(
+        group="train",
         noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]),
         sample_rate_hertz=SAMPLE_RATE,
         onsource_duration_seconds=ONSOURCE,
@@ -73,7 +74,9 @@ class TestOneEpochLength:
     @pytest.mark.global_rng
     def test_train_runs_its_epochs(self, tmp_path):
         model = tiny_model(tmp_path)
-        assert model.train(validate_args=dataset_args(steps_per_epoch=2))
+        with pytest.raises(ValueError, match="validates on the 'validate' split"):
+            model.train(validate_args=dataset_args(steps_per_epoch=2))
+        assert model.train(validate_args={**dataset_args(steps_per_epoch=2), "group": "validate"})
         history = model.metrics[0].history
         assert len(history["loss"]) == TRAINING["max_epochs"]
         assert len(history["val_loss"]) == TRAINING["max_epochs"]

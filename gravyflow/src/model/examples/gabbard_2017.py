@@ -120,7 +120,7 @@ class Gabbard2017(ExampleModel):
         noise_type: gf.NoiseType = gf.NoiseType.COLORED,
         config: Optional[Gabbard2017Config] = None,
         seed: Optional[int] = None,
-        group: str = "train",
+        group: str = None,
         steps_per_epoch: int = 1000,
         **kwargs
     ) -> gf.GravyflowDataset:

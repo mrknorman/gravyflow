@@ -3,14 +3,15 @@ TransientIndex - canonical index of transient examples.
 
 Manages collections of TransientSegments with:
 - Deduplication
-- Deterministic train/val/test group assignment
+- Split assignment by footprint (SplitSpec.assign)
 - Class balancing via weights
 - Efficient iteration
 - Serialization to/from disk
 """
 
+from collections import Counter
 from dataclasses import replace
-from typing import List, Iterator, Dict, Optional, Set
+from typing import List, Iterator, Dict, Optional, Set, Tuple
 from pathlib import Path
 
 import numpy as np
@@ -20,8 +21,52 @@ from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.event import SourceType
 from gravyflow.src.dataset.acquisition.base import DataLabel, ObservingRun
 from gravyflow.src.dataset.features.event import EventConfidence
-from gravyflow.src.dataset.splits import in_split, split_fractions, split_of
+from gravyflow.src.dataset.splits import EXCLUDED, SplitSpec, as_split_spec, require_split_fingerprint
 from gravyflow.src.utils.gps import gps_to_key
+
+#: Seconds of data the library may read around a transient's time, each side: the
+#: transient cache's span (``segment_builders.DEFAULT_PADDING``).
+TRANSIENT_HALF_SPAN_SECONDS = 48.2
+
+
+def event_footprints(gps, chirp_mass_source) -> np.ndarray:
+    """
+    Each event's footprint, (N, 2): ``[t - max(48.2, tau + 1), t + 48.2]``, where tau
+    is the event's in-band time from 20 Hz (``EVENT_VETO_CHIRP_TIME_FACTOR`` times the
+    chirp time of its source-frame chirp mass; ``UNKNOWN_EVENT_CHIRP_MASS_SOLAR`` when
+    it has none).
+    """
+    from gravyflow.src.dataset.features.event import (
+        EVENT_VETO_CHIRP_TIME_FACTOR, UNKNOWN_EVENT_CHIRP_MASS_SOLAR, chirp_time_seconds,
+    )
+    gps = np.atleast_1d(np.asarray(gps, dtype=np.float64))
+    chirp_mass = np.atleast_1d(np.asarray(chirp_mass_source, dtype=np.float64))
+    chirp_mass = np.where(np.isfinite(chirp_mass) & (chirp_mass > 0), chirp_mass,
+                          UNKNOWN_EVENT_CHIRP_MASS_SOLAR)
+    in_band = EVENT_VETO_CHIRP_TIME_FACTOR * chirp_time_seconds(chirp_mass)
+    before = np.maximum(TRANSIENT_HALF_SPAN_SECONDS, in_band + 1.0)
+    return np.stack([gps - before, gps + TRANSIENT_HALF_SPAN_SECONDS], axis=1).reshape(-1, 2)
+
+
+def transient_footprint(record: TransientSegment) -> Tuple[float, float]:
+    """
+    The GPS interval the library may read for ``record``, whatever the dataset's
+    window: ``TRANSIENT_HALF_SPAN_SECONDS`` each side of a glitch, and an event's
+    footprint (``event_footprints``). A record's split is this interval's.
+    """
+    t = float(record.transient_gps_time)
+    if record.label == DataLabel.EVENTS:
+        m1, m2 = float(record.mass1), float(record.mass2)
+        chirp_mass = (m1 * m2) ** 0.6 / (m1 + m2) ** 0.2 if m1 > 0 and m2 > 0 else np.nan
+        start, end = event_footprints([t], [chirp_mass])[0]
+        return float(start), float(end)
+    return t - TRANSIENT_HALF_SPAN_SECONDS, t + TRANSIENT_HALF_SPAN_SECONDS
+
+
+def _overlaps(intervals: np.ndarray, start: float, end: float) -> bool:
+    """Whether [start, end] meets any of the sorted, coalesced (N, 2) ``intervals``."""
+    i = int(np.searchsorted(intervals[:, 1], start, side="left"))
+    return i < len(intervals) and intervals[i, 0] <= end
 
 
 class TransientIndex:
@@ -39,7 +84,7 @@ class TransientIndex:
         
         index = TransientIndex(events + glitches)
         index.dedupe()
-        index.assign_groups()  # DEFAULT_SPLIT_FRACTIONS
+        index.assign_splits(gf.SplitSpec())
         index.apply_balancing()
         
         # Iterate over training examples
@@ -54,7 +99,11 @@ class TransientIndex:
         Args:
             records: Initial list of TransientSegments. Can be added later.
         """
-        self._groups: Dict[int, str] = {}  # gps_key → group name
+        self._groups: Dict[int, str] = {}  # gps_key → split name
+        # The SplitSpec fingerprint the splits were assigned by, and the records
+        # left out of every split, by reason.
+        self.split_fingerprint: Optional[str] = None
+        self.excluded: Dict[str, int] = {}
         self.records: List[TransientSegment] = list(records) if records else []
         
     def __len__(self) -> int:
@@ -111,21 +160,60 @@ class TransientIndex:
         """Sort records by GPS time ascending."""
         self.records.sort(key=lambda r: r.transient_gps_time)
     
-    def assign_groups(self, groups: Optional[Dict[str, float]] = None) -> None:
+    def assign_splits(
+            self,
+            spec: Optional[SplitSpec] = None,
+            event_footprints_gps: Optional[np.ndarray] = None,
+            train_on_real_events: bool = False,
+        ) -> Dict[str, int]:
         """
-        Assign records to groups by a hash of each record's GPS key alone
-        (gravyflow.src.dataset.splits.split_of).
+        Assign each record its split: ``spec.assign`` of its footprint
+        (``transient_footprint``), so a record's split never depends on a seed,
+        the runs, the detectors or the window.
 
-        Membership never depends on a seed: every split of every run sees the
-        same partition, so no record can be in two splits. A seed only orders
-        or shuffles a split, after this.
+        - Real events are evaluation data: every event goes to ``test``, whatever
+          its block, unless ``train_on_real_events``, when an event too takes its
+          footprint's split.
+        - A record whose footprint straddles an edge between splits, or lies in a
+          guard, is in no split.
+        - No glitch holds an event: a glitch whose footprint meets an event's
+          footprint (``event_footprints_gps``: every catalogued event, (N, 2)), or,
+          outside ``test``, comes within ``spec.guard_seconds`` of one, is in no
+          split.
 
-        Args:
-            groups: Dict mapping group name to proportion (e.g., {"train": 0.8, "validate": 0.1,
-                "test": 0.1}); None for DEFAULT_SPLIT_FRACTIONS, as every other entry point.
+        Returns the records left out, by reason (also ``self.excluded``).
         """
-        fractions = split_fractions(groups)
-        self._groups = {record.gps_key: split_of(record.gps_key, fractions) for record in self.records}
+        from gravyflow.src.dataset.acquisition.gwosc_data import coalesce_segments
+
+        spec = as_split_spec(spec)
+        events = np.empty((0, 2)) if event_footprints_gps is None else np.reshape(
+            np.asarray(event_footprints_gps, dtype=np.float64), (-1, 2))
+        guard = spec.guard_seconds
+        touching = coalesce_segments(events) if len(events) else events
+        # Events are test data: the guard keeps every other split's glitches away.
+        near = coalesce_segments(events + np.array([-guard, guard])) if len(events) else events
+
+        groups: Dict[int, str] = {}
+        excluded: Counter = Counter()
+        for record in self.records:
+            start, end = transient_footprint(record)
+            if record.label == DataLabel.EVENTS and not train_on_real_events:
+                groups[record.gps_key] = "test"
+                continue
+            split = spec.assign(start, end)
+            if split == EXCLUDED:
+                excluded["straddles a split edge or guard"] += 1
+                continue
+            if record.label != DataLabel.EVENTS and len(events) and (
+                    _overlaps(touching, start, end)
+                    or (split != "test" and _overlaps(near, start, end))):
+                excluded["holds or neighbours a real event"] += 1
+                continue
+            groups[record.gps_key] = split
+        self._groups = groups
+        self.split_fingerprint = spec.fingerprint()
+        self.excluded = dict(excluded)
+        return self.excluded
     
     def apply_balancing(self, by: str = "kind") -> None:
         """
@@ -177,7 +265,8 @@ class TransientIndex:
         Iterate over records with optional filtering.
         
         Args:
-            group: Filter to specific group (e.g., "train"); "all" keeps every record.
+            group: The split whose records to keep (test, validate or train; others
+                raise KeyError); None keeps every record, of every split and none.
             label: Filter to specific label (EVENTS or GLITCHES).
             ifos_filter: Filter to specific IFOs (segments must overlap with these IFOs).
             shuffle: If True, shuffle records before iterating.
@@ -190,9 +279,10 @@ class TransientIndex:
         
         # Apply filters as generator pipeline
         if group is not None:
-            if self._groups is None:
-                raise ValueError("Groups not assigned. Call assign_groups() first.")
-            records_iter = (r for r in records_iter if in_split(self._groups.get(r.gps_key), group))
+            SplitSpec.check_name(group)
+            if self.split_fingerprint is None:
+                raise ValueError("Splits not assigned. Call assign_splits() first.")
+            records_iter = (r for r in records_iter if self._groups.get(r.gps_key) == group)
         
         # Filter by label
         if label is not None:
@@ -258,6 +348,8 @@ class TransientIndex:
         # Preserve group assignments for matching segments
         new_index._groups = {k: v for k, v in self._groups.items() 
                            if k in {r.gps_key for r in filtered}}
+        new_index.split_fingerprint = self.split_fingerprint
+        new_index.excluded = dict(self.excluded)
         return new_index
     
     def to_numpy_segments(self, num_ifos: int = 1) -> np.ndarray:
@@ -358,11 +450,13 @@ class TransientIndex:
         ], dtype=np.int8)
         
         # Names as separate array (variable length strings)
-        names = np.array([r.name if r.name else "" for r in self.records], dtype=object)
-        
-        # Group assignments
+        names = np.array([r.name if r.name else "" for r in self.records], dtype=str)
+
+        # Split assignments, with the spec they were made by.
+        if self.split_fingerprint is None:
+            raise ValueError("Splits not assigned: an index is saved with its split. Call assign_splits() first.")
         group_keys = np.array(list(self._groups.keys()), dtype=np.int64)
-        group_values = np.array(list(self._groups.values()), dtype=object)
+        group_values = np.array(list(self._groups.values()), dtype=str)
         
         np.savez_compressed(
             path,
@@ -377,22 +471,23 @@ class TransientIndex:
             confidences=confidences,
             names=names,
             group_keys=group_keys,
-            group_values=group_values
+            group_values=group_values,
+            split_fingerprint=np.array(self.split_fingerprint),
         )
     
     @classmethod
-    def load(cls, path: Path) -> "TransientIndex":
+    def load(cls, path: Path, spec: Optional[SplitSpec] = None) -> "TransientIndex":
         """
-        Load index from NPZ file.
-        
-        Args:
-            path: Input file path.
-            
-        Returns:
-            Loaded TransientIndex.
+        Load an index from an NPZ file. Refuses an index split by another spec
+        than ``spec`` (None: the default split), or recording none, and any
+        object array.
         """
         path = Path(path)
-        data = np.load(path, allow_pickle=True)
+        data = np.load(path, allow_pickle=False)
+        require_split_fingerprint(
+            str(data["split_fingerprint"]) if "split_fingerprint" in data else None,
+            as_split_spec(spec), f"Transient index {path}",
+        )
         
         gps_times = data["gps_times"]
         labels = data["labels"]
@@ -427,15 +522,8 @@ class TransientIndex:
             
             gps_time = float(gps_times[i])
             
-            # Restore boundaries from stored values, with fallback for old files
-            if "start_times" in data and "end_times" in data:
-                start_gps = float(data["start_times"][i])
-                end_gps = float(data["end_times"][i])
-            else:
-                # Backward compatibility: old files lack boundaries
-                padding = 16.0
-                start_gps = gps_time - padding
-                end_gps = gps_time + padding
+            start_gps = float(data["start_times"][i])
+            end_gps = float(data["end_times"][i])
             
             record = TransientSegment(
                 gps_key=gps_to_key(gps_time),
@@ -454,12 +542,7 @@ class TransientIndex:
         
         index = cls(records)
         
-        # Restore group assignments (if they exist in the file)
-        index._groups = {}  # Always initialize
-        if "group_keys" in data and len(data["group_keys"]) > 0:
-            index._groups = dict(zip(
-                data["group_keys"].tolist(),
-                data["group_values"].tolist()
-            ))
+        index._groups = dict(zip(data["group_keys"].tolist(), data["group_values"].tolist()))
+        index.split_fingerprint = str(data["split_fingerprint"])
         
         return index

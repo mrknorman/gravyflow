@@ -53,7 +53,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 # Local application/library specific imports
 from .src.dataset.config import Defaults, WindowSpec
-from .src.dataset.splits import DEFAULT_SPLIT_FRACTIONS
+from .src.dataset.splits import SplitSpec, DEFAULT_SPLIT, EXCLUDED
 from .src.rng import SeedTree, BatchStreams
 from .src.utils.tensor import (
     DistributionType, Distribution, randomise_arguments,

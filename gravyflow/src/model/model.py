@@ -1173,10 +1173,14 @@ class Model:
                         gf.ReturnVariables.ONSOURCE
                     ]
 
-            validation_dataset = gf.Dataset(
-                **deepcopy(validate_args),
-                group="validate"
-            )
+            # The validation dataset is the validate split; arguments naming another refuse.
+            validate_args = {**validate_args}
+            group = validate_args.pop("group", "validate")
+            if group != "validate":
+                raise ValueError(
+                    f"Model.train validates on the 'validate' split; validate_args names {group!r}."
+                )
+            validation_dataset = gf.Dataset(**deepcopy(validate_args), group="validate")
 
         if training_dataset is None:
             training_dataset = self.training_dataset

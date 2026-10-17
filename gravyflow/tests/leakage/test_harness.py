@@ -51,15 +51,12 @@ def test_noise_round_trip_decodes_every_sample(world, tmp_path, rate, mode):
 
 def _train_record_time(start):
     """
-    The first time from ``start``, in 10 s steps, whose transient record the library
-    puts in train: a record's split is a hash of its GPS key alone, not its block's.
+    The first time from ``start``, in 10 s steps, whose transient record the golden
+    table puts in train: its footprint, 48.2 s each side, lies in train blocks.
     """
-    from gravyflow.src.dataset.splits import DEFAULT_SPLIT_FRACTIONS, split_of
-    from gravyflow.src.utils.gps import gps_to_key
-
     for step in range(100):
         time = start + 10.0 * step
-        if split_of(gps_to_key(time), DEFAULT_SPLIT_FRACTIONS) == "train":
+        if fx.golden_split("O3", time - 48.2, time + 48.2) == "train":
             return time
     raise LookupError(f"no train record time within 1000 s of {start}")
 
@@ -83,7 +80,7 @@ def test_transient_round_trip_decodes_every_sample(world, tmp_path):
             observing_runs=[gf.ObservingRun.O3], augmentations=[], prefetch_segments=0,
         )
         noise = gf.NoiseObtainer(ifo_data_obtainer=obtainer, ifos=[gf.IFO.H1, gf.IFO.L1],
-                                 noise_type=gf.NoiseType.REAL, groups=dict(fx.GOLDEN_GROUPS),
+                                 noise_type=gf.NoiseType.REAL,
                                  data_directory_path=tmp_path)
         ds = gf.Dataset(
             noise_obtainer=noise, sample_rate_hertz=256.0,
@@ -369,22 +366,18 @@ def test_helpers_refuse_empty_and_small_inputs():
 # =============================================================================
 
 def test_golden_table_agrees_with_the_library():
-    """Every literal of the table is the split the library assigns to that block."""
-    from gravyflow.src.dataset.acquisition.noise import NoiseDataObtainer
-
-    obtainer = NoiseDataObtainer(
-        data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
-        observing_runs=gf.ObservingRun.O3, cache_segments=False, prefetch_segments=0,
-    )
+    """
+    Every literal of the table is the split the library admits a second of the block's
+    middle to, and no other split admits it.
+    """
+    spec = gf.SplitSpec()
     checked = 0
     for origin in fx.GOLDEN_BLOCKS:
-        start = fx.origin_gps(origin)
         for block, split in fx.golden_blocks(origin).items():
-            t = start + block * fx.BLOCK_SECONDS + 1.0
-            chosen = obtainer.get_segments_for_group(
-                [[t, t + 1.0]], fx.BLOCK_SECONDS, split, dict(fx.GOLDEN_GROUPS), start
-            )
-            assert len(chosen) == 1, (origin, block, split)
+            t = fx.block_start(origin, block) + fx.BLOCK_SECONDS / 2.0
+            for name in ("train", "validate", "test"):
+                admitted = len(spec.admissible([[t, t + 1.0]], name)) == 1
+                assert admitted == (name == split), (origin, block, split, name)
             checked += 1
     assert checked == 1200
     assert set(fx.golden_blocks("O3").values()) == {"train", "validate", "test"}
@@ -434,7 +427,8 @@ def test_the_guard_refuses_and_records_every_socket(refusals):
 
 def test_without_the_fake_real_noise_is_refused_and_zero(world, tmp_path, refusals):
     """With the real fetch in place, the guard refuses it, and every row is zero-filled."""
-    fixture = fx.straddle("train", "test", half_width=64.0)
+    # Each side keeps its half width less half the 128 s guard.
+    fixture = fx.straddle("train", "test", half_width=128.0)
     with world(fixture, strain=False):
         batch = next(fx.noise_batches(fixture, tmp_path, "train"))
     assert refusals.seen, "the real fetch reached no socket"

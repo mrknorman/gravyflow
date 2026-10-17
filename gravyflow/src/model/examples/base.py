@@ -102,7 +102,7 @@ class ExampleModel(ABC):
         noise_type: gf.NoiseType = gf.NoiseType.COLORED,
         config=None,
         seed: Optional[int] = None,
-        group: str = "train",
+        group: str = None,
         steps_per_epoch: int = 1000,
         **kwargs
     ) -> gf.GravyflowDataset:
@@ -168,9 +168,13 @@ def validation_dataset_args(
     Dataset arguments for validating an example model (`gf.Validator`).
 
     ``seed`` matters only when the arguments build a dataset directly: the
-    validator replaces it with seeds of its own.
+    validator replaces it with seeds of its own. The arguments build only a
+    held-out split: ``test`` unless ``group`` names another, never ``train``.
     """
     cfg = config or ValidationDatasetConfig()
+    group = gf.SplitSpec.check_name(kwargs.pop("group", "test"))
+    if group == "train":
+        raise ValueError("Validation arguments build a held-out split, never 'train'.")
     ifo_data_obtainer = None
     if noise_type == gf.NoiseType.REAL:
         ifo_data_obtainer = gf.IFODataObtainer(
@@ -191,5 +195,6 @@ def validation_dataset_args(
         noise_obtainer=gf.NoiseObtainer(
             noise_type=noise_type, ifos=cfg.ifos, ifo_data_obtainer=ifo_data_obtainer),
         seed=seed,
+        group=group,
         **kwargs,
     )

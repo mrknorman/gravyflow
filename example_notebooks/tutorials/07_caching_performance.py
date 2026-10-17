@@ -316,7 +316,7 @@ val_obtainer = gf.IFODataObtainer(
 )
 
 # One dataset per split, each obtainer wrapped in a NoiseObtainer; every route
-# splits by gf.DEFAULT_SPLIT_FRACTIONS
+# reads the data obtainer's split, gf.SplitSpec (the default here)
 dataset_settings = dict(
     sample_rate_hertz=2048.0,
     onsource_duration_seconds=1.0,
@@ -378,7 +378,7 @@ You have completed all 7 tutorials in the acquisition pipeline series:
 
   01_introduction.py           ✓ Core concepts and enums
   02_noise_mode_basics.py      ✓ Basic NOISE acquisition  
-  03_noise_mode_advanced.py    ✓ Grid sampling, groups, multi-IFO
+  03_noise_mode_advanced.py    ✓ Grid sampling, splits, multi-IFO
   04_transient_mode_basics.py  ✓ Glitch-centered acquisition
   05_transient_mode_advanced.py ✓ Events, balancing, caching
   06_augmentations.py          ✓ Dataclass-based augmentations

@@ -132,6 +132,7 @@ def _batch(generators, outputs, num_examples=8, seed=1234, ifos=(gf.IFO.H1, gf.I
         num_examples_per_batch=num_examples,
         input_variables=[gf.ReturnVariables.ONSOURCE],
         output_variables=list(outputs),
+        group="train",
     )
     x, y = dataset[0]
     return {key: np.asarray(value, np.float64) for key, value in {**x, **y}.items()}

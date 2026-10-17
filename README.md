@@ -103,22 +103,23 @@ gravyflow (the results then differ, also in the last bits, from multi-threaded o
 - `gf.project_wave` takes no seed and needs every sky angle; nothing is drawn there.
 - `Curriculum` has no progress counter: `current_epoch` is gone, and `at(epoch)` gives the distribution of an epoch.
 - `Distribution.sample(n, rng)` returns an ndarray.
-- Splits are repartitioned. Every entry point (a dataset, a composed dataset's pools, `NoiseObtainer`, an obtainer
-  called directly, `TransientIndex.assign_groups()`, the validator) splits by `gf.DEFAULT_SPLIT_FRACTIONS`: 80%
-  train, 10% validate, 10% test. They split 98/1/1 (an obtainer, and the datasets
-  reading one directly) or 89/10/1 (`NoiseObtainer`), so one record could be in train by one route and in validate
-  by another. A transient record's split is now a hash of its GPS key alone; it was the key and the seed. Records
-  have moved between splits: do not evaluate a model trained on an earlier release's split on this release's
-  validate or test split.
-- Split fractions other than `gf.DEFAULT_SPLIT_FRACTIONS` (its keys, in its order, with its values) raise
-  `ValueError` wherever they are given (`NoiseObtainer(groups=)`, `get_valid_segments(groups=)`,
-  `TransientIndex.assign_groups(groups)`): they were taken silently by one route, which could then train on another
-  route's validate or test records. Leave them unset; configurable fractions return with a split specification
-  that every route reads.
+- Splits are repartitioned by one `gf.SplitSpec` (`docs/acquisition.md`, section 2): GPS time is cut into absolute
+  8192 s blocks from GPS 0, each hashed to test (10%), validate (10%) or train (80%), with 128 s between splits. Every
+  route (a dataset, a composed dataset's pools, `NoiseObtainer`, an obtainer called directly, the validator) reads
+  the data obtainer's `split_spec`, so a GPS time is in one split whatever reads it. A transient record takes its
+  footprint's split; one that crosses an edge between splits is in no split. Noise and records have moved between
+  splits: do not evaluate a model trained on an earlier release's split on this release's validate or test split.
+  The spec's fingerprint is recorded with every model, and the validator refuses a model that records another.
+- Every entry point needs a named split: `group='train'`, `'validate'` or `'test'`. `'all'` and any other name raise
+  `KeyError`. `gf.DEFAULT_SPLIT_FRACTIONS`, `NoiseObtainer(groups=)`, `get_valid_segments(groups=)` and
+  `TransientIndex.assign_groups` are gone: give the data obtainer `split_spec=gf.SplitSpec(fractions=...)`, or another
+  `version` for an independent split (cross-validation).
+- Real events are evaluation data: every confident event is in `test`, named events too, and an obtainer of events
+  alone refuses `'train'` and `'validate'` unless it is built with `train_on_real_events=True`.
 - An obtainer called for a split serves that split, called directly or through a `NoiseObtainer`; called again for
   another, it rebuilds its segments (it served the first split's, and a fresh real-noise obtainer called directly
   served nothing). A generator it gave out for the first split then raises `RuntimeError`.
-- `TransientIndex.assign_groups` and `TransientDataObtainer.build_feature_index` take no seed.
+- `TransientIndex.assign_splits` and `TransientDataObtainer.build_feature_index` take no seed.
 - The model recipes take one root seed: `TrainingRun.train`'s `training_data` is called with the seed alone (it
   took the seed and the first epoch), and `split_seeds`, `TrainingRun.train_seed` and
   `GeorgeHuerta2017.dataset(first_epoch=)` / `dataset_regression(first_epoch=)` are gone; resume sets `ds.epoch`.

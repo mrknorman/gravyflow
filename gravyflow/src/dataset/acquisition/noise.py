@@ -15,11 +15,10 @@ from keras import ops
 
 import gravyflow as gf
 from gravyflow.src.dataset.config import WindowSpec
-from gravyflow.src.dataset.splits import in_split, split_fractions, split_of
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder,
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS,
-    WINDOW_EDGE_BUFFER_SAMPLES, kept_seconds,
+    WINDOW_EDGE_BUFFER_SAMPLES, kept_seconds, separable,
 )
 from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
@@ -79,6 +78,8 @@ class SamplingPlan:
     """
     rows: np.ndarray
     start_seconds: np.ndarray
+    #: Rows left out because their detectors' windows cannot start far enough apart.
+    inseparable: int = 0
 
 
 class NoiseDataObtainer(BaseDataObtainer):
@@ -104,6 +105,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             augmentations: List = None,  # List of augmentation instances
             prefetch_segments: int = 16,
             gwosc_flags: Optional[Tuple[str, ...]] = None,
+            split_spec=None,
         ):
 
         super().__init__(
@@ -120,8 +122,9 @@ class NoiseDataObtainer(BaseDataObtainer):
             augmentations=augmentations,
             prefetch_segments=prefetch_segments,
             gwosc_flags=gwosc_flags,
+            split_spec=split_spec,
         )
-        
+
         self.acquisition_mode = AcquisitionMode.NOISE
 
     def _served_state(self) -> Dict[str, Any]:
@@ -209,6 +212,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             segments: np.ndarray,
             minimum_duration_seconds: float,
             footprint_seconds: float,
+            separation_seconds: float = 0.0,
         ) -> SamplingPlan:
         """
         The plan for drawing windows from ``segments`` (rows from ``get_valid_segments``).
@@ -221,13 +225,17 @@ class NoiseDataObtainer(BaseDataObtainer):
         in proportion to those starts, longest first, so every usable piece is drawn
         from and no short piece is drawn more densely than a long one. Bins keep the
         order in which ``segments`` first reach them.
+
+        A row whose detectors' window starts cannot be ``separation_seconds`` apart
+        (``separable``) is left out and counted: it could never be drawn from without
+        coincident detectors.
         """
         segments = np.reshape(np.asarray(segments, dtype=np.float64), (len(segments), -1, 2))
         num_ifos = segments.shape[1]
         bins = np.floor(segments[:, 0, 0] / self.max_segment_duration_seconds)
         _, first = np.unique(bins, return_index=True)
 
-        rows, start_seconds = [], []
+        rows, start_seconds, inseparable = [], [], 0
         for bin_index in bins[np.sort(first)]:
             in_bin = segments[bins == bin_index]
             usable, starts = [], []
@@ -242,12 +250,19 @@ class NoiseDataObtainer(BaseDataObtainer):
             if any(len(pieces) == 0 for pieces in usable):
                 continue
             index, weights = couple_pieces(starts)
-            rows.append(np.stack([usable[j][index[:, j]] for j in range(num_ifos)], axis=1))
-            start_seconds.append(weights * min(np.sum(s) for s in starts))
+            bin_rows = np.stack([usable[j][index[:, j]] for j in range(num_ifos)], axis=1)
+            keep = np.array([
+                separable([(piece[0], piece[0] + starts[j][index[k, j]]) for j, piece in enumerate(row)],
+                          separation_seconds)
+                for k, row in enumerate(bin_rows)
+            ], dtype=bool)
+            inseparable += int(np.sum(~keep))
+            rows.append(bin_rows[keep])
+            start_seconds.append((weights * min(np.sum(s) for s in starts))[keep])
 
-        if not rows:
-            return SamplingPlan(np.empty((0, num_ifos, 2)), np.empty(0))
-        return SamplingPlan(np.concatenate(rows), np.concatenate(start_seconds))
+        if not sum(len(r) for r in rows):
+            return SamplingPlan(np.empty((0, num_ifos, 2)), np.empty(0), inseparable)
+        return SamplingPlan(np.concatenate(rows), np.concatenate(start_seconds), inseparable)
 
     def _planned_segments(
             self,
@@ -367,25 +382,6 @@ class NoiseDataObtainer(BaseDataObtainer):
 
         return np.array([np.array(rows) for rows in rows_per_ifo])
 
-    def get_segments_for_group(
-        self,
-        segments: np.ndarray,
-        chunk_size: float,
-        group_name: str,
-        groups: Dict[str, float],
-        start_time: float
-    ) -> np.ndarray:
-        """
-        The segments in split ``group_name``: each segment's split is that of
-        its chunk index (see gravyflow.src.dataset.splits.split_of), and split
-        "all" holds every segment.
-        """
-        selected_segments = [
-            [start, end] for start, end in segments
-            if in_split(split_of(int(np.floor((start - start_time) / chunk_size)), groups), group_name)
-        ]
-        return np.array(selected_segments)
-
     # =========================================================================
     # ABSTRACT METHOD IMPLEMENTATIONS
     # =========================================================================
@@ -394,42 +390,27 @@ class NoiseDataObtainer(BaseDataObtainer):
             self,
             ifos: List[gf.IFO],
             seed: int,
-            groups: Dict[str, float] = None,
-            group_name: str = "train",
+            group_name: str,
             segment_order: SegmentOrder = None,
         ) -> List:
         """
-        Get valid segments for NOISE mode acquisition.
+        The segments of split ``group_name``: each IFO's segments inside the
+        split's admissible time (``SplitSpec.admissible``: its absolute blocks,
+        less the guard at every edge with another split), vetoed, cut on the
+        absolute bin grid, and paired across IFOs bin by bin.
         """
         ifos = ensure_list(ifos)
 
         if not segment_order:
             segment_order = self.segment_order
 
-        groups = split_fractions(groups, group_name)
-
         # The served segments are one split's, in one order: another rebuilds them.
-        if self._serve_split(self._split(ifos, group_name, groups), order=(seed, segment_order)):
+        if self._serve_split(self._split(ifos, group_name), order=(seed, segment_order)):
             self.valid_segments = []
 
             for ifo in ifos:
-                valid_segments = self.get_all_segment_times(ifo)
-
-                # Split segments at 8192s boundaries (2^13 seconds) for deterministic group assignment
-                group_split_seconds: float = 8192.0
-
-                valid_segments = self.cut_segments(
-                    valid_segments, 
-                    group_split_seconds,
-                    self.start_gps_times[0]
-                )
-
-                valid_segments = self.get_segments_for_group(
-                    valid_segments, 
-                    group_split_seconds, 
-                    group_name, 
-                    groups,
-                    self.start_gps_times[0]
+                valid_segments = self.split_spec.admissible(
+                    self.get_all_segment_times(ifo), group_name
                 )
 
                 valid_segments = self.remove_unwanted_segments(ifo, valid_segments)
@@ -560,6 +541,8 @@ class NoiseDataObtainer(BaseDataObtainer):
         # With no group, the segments already held: built, or set by hand.
         if group is not None:
             self._serve_group(ifos, seed, group)
+        elif self.valid_segments is None:
+            raise ValueError("Name the split to serve: group='train', 'validate' or 'test'.")
         if self.rng is None:
             self.rng = default_rng(seed)
         
@@ -576,6 +559,12 @@ class NoiseDataObtainer(BaseDataObtainer):
             logging.warning(f"valid_segments has unexpected shape. Expected 3D array. Generator will be empty.")
             return
         
+        # A window's footprint, offsource to padded onsource end. Detectors are never
+        # coincident: an example's windows start at least two footprints apart, so no
+        # two of them share a moment.
+        footprint_seconds = (num_onsource_samples + num_offsource_samples) / window_spec.sample_rate_hertz
+        separation_seconds = 2.0 * footprint_seconds
+
         if not self._current_batch_index and not self._current_segment_index:
             window_seconds = \
                 window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds
@@ -585,9 +574,13 @@ class NoiseDataObtainer(BaseDataObtainer):
             self.sampling_plan = self.plan_sampling(
                 self.valid_segments,
                 minimum_duration_seconds=2.0 * window_seconds,
-                footprint_seconds=(num_onsource_samples + num_offsource_samples
-                                   + WINDOW_EDGE_BUFFER_SAMPLES) / window_spec.sample_rate_hertz,
+                footprint_seconds=footprint_seconds
+                + WINDOW_EDGE_BUFFER_SAMPLES / window_spec.sample_rate_hertz,
+                separation_seconds=separation_seconds,
             )
+            if self.sampling_plan.inseparable:
+                logging.info(f"{self.sampling_plan.inseparable} rows left out: their detectors' "
+                             "windows cannot start two footprints apart.")
         
         if self.sampling_plan is None or len(self.sampling_plan.rows) == 0:
             logging.warning("No valid segments available in NOISE mode. Generator will be empty.")
@@ -598,6 +591,8 @@ class NoiseDataObtainer(BaseDataObtainer):
             num_examples_per_batch * window_spec.onsource_duration_seconds
         )
 
+        # The rows that failed to hold a batch since the last one served.
+        failed_rows = set()
         while True:
             while self._segment_exhausted:
                 # Create generator ONCE and reuse it (preserves prefetch across batches)
@@ -630,10 +625,11 @@ class NoiseDataObtainer(BaseDataObtainer):
 
                 if sampling_mode == SamplingMode.RANDOM:
                     subarrays, background_chunks, start_gps_times = self.current_segment.random_subsection(
-                        num_onsource_samples, 
-                        num_offsource_samples, 
+                        num_onsource_samples,
+                        num_offsource_samples,
                         num_examples_per_batch,
-                        self.rng.integers(1E10)
+                        self.rng.integers(1E10),
+                        min_separation_seconds=separation_seconds,
                     )
                 else:
                     # GRID walks each detector's piece on from where its last row left
@@ -652,10 +648,19 @@ class NoiseDataObtainer(BaseDataObtainer):
                         self._grid_cursors.update(zip(keys, cursors))
 
                 if subarrays is None or background_chunks is None or start_gps_times is None:
-                    if sampling_mode == SamplingMode.GRID:
-                        self._segment_exhausted = True
+                    # The row cannot hold a batch (of separated windows, in RANDOM). Once
+                    # every row has failed since the last batch, none will serve one.
+                    self._segment_exhausted = True
+                    failed_rows.add(np.asarray(self._current_row).tobytes())
+                    if len(failed_rows) == len(self.sampling_plan.rows):
+                        raise ValueError(
+                            f"No row of the {self._served_group!r} split holds a batch of "
+                            f"{num_examples_per_batch} {sampling_mode.name} windows whose detectors "
+                            f"start {separation_seconds} s apart."
+                        )
                     continue
 
+                failed_rows.clear()
                 self._current_batch_index += 1
                 if not self._current_batch_index < self._num_batches_in_current_segment:
                     self._segment_exhausted = True

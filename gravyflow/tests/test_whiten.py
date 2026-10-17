@@ -279,7 +279,8 @@ def _test_whitening_real_noise(
         input_variables = [
             gf.ReturnVariables.ONSOURCE, 
             gf.ReturnVariables.WHITENED_ONSOURCE
-        ]
+        ],
+        group="train"
     )
     
     background, _ = next(iter(generator))

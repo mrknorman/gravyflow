@@ -81,22 +81,24 @@ print("SECTION 2: Train/Validation Splitting")
 print("=" * 70)
 
 print("""
-Every route splits the data by one set of fractions, gf.DEFAULT_SPLIT_FRACTIONS:
-80% train, 10% validate, 10% test. Segments are assigned to splits by a hash
-of their 8192 s block, so the splits are disjoint and the same on every run,
-whatever the seed. Other fractions are refused, so that no route can train on
-another route's validate or test data.
+One split, gf.SplitSpec, decides which of train, validate and test every
+stretch of GPS time belongs to, for every route: 80% train, 10% validate and
+10% test by default. The splits are disjoint and the same on every run,
+whatever the seed or the observing runs.
 
 How it works:
-  1. The timeline is cut into 8192 s blocks
+  1. GPS time is cut into absolute 8192 s blocks, counted from GPS 0
   2. A hash of each block's index decides its split
-  3. The same block is always in the same split (reproducible splits)
+  3. 128 s at every edge between splits belongs to no split, so data of two
+     splits is always at least 128 s apart
 
-Select a split with the 'group' parameter when calling:
+Name the split with the 'group' parameter on every call (it is required):
   noise(group="train"), noise(group="validate"), noise(group="test")
 """)
 
-print(f"Split fractions: {dict(gf.DEFAULT_SPLIT_FRACTIONS)}")
+split = gf.SplitSpec()  # the default: the obtainer takes it as split_spec
+print(f"Split fractions: {dict(split.fractions)}, guard {split.guard_seconds} s")
+print(f"Split fingerprint (recorded with every model): {split.fingerprint()}")
 
 # One obtainer serves every split: each call reads its split from a fresh copy.
 obtainer = gf.IFODataObtainer(
@@ -104,6 +106,7 @@ obtainer = gf.IFODataObtainer(
     data_quality=gf.DataQuality.BEST,
     data_labels=[gf.DataLabel.NOISE],
     segment_order=gf.SegmentOrder.RANDOM,
+    split_spec=split,
 )
 
 noise = gf.NoiseObtainer(
@@ -136,7 +139,9 @@ Available detectors:
   - gf.IFO.V1: Virgo (Cascina, Italy)
 
 When using multiple IFOs, data is downloaded for each detector
-and the output shape becomes (Batch, NumIFOs, Samples).
+and the output shape becomes (Batch, NumIFOs, Samples). Each detector's
+noise window is drawn at least two window footprints away from every other
+detector's, so the noise in an example is never coincident across detectors.
 """)
 
 # Create a multi-detector obtainer
@@ -245,9 +250,9 @@ print("""
    - SamplingMode.GRID: Best for inference/coverage
 
 2. TRAIN/VALIDATION SPLITTING:
-   - Splits are gf.DEFAULT_SPLIT_FRACTIONS: 80% train, 10% validate, 10% test
-   - Use 'group' parameter to select which split to use
-   - Splits are deterministic (hash-based on GPS times)
+   - One gf.SplitSpec: 80% train, 10% validate, 10% test, 128 s guard
+   - Name the split with the 'group' parameter on every call
+   - Splits are deterministic (absolute 8192 s GPS blocks, hashed)
 
 3. MULTI-DETECTOR:
    - Pass list of IFOs: ifos=[gf.IFO.L1, gf.IFO.H1, gf.IFO.V1]

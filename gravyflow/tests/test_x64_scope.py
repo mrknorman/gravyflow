@@ -144,11 +144,12 @@ def _segment():
 def test_gps_times_survive_random_subsection():
     data = np.arange(NUM_SAMPLES, dtype=np.float32)
     with jax.enable_x64(False):
-        subarrays, _, start_times = base._random_subsection(
-            data, 8, ONSOURCE, OFFSOURCE, np.float32(1.0 / SAMPLE_RATE), GPS, 1234
+        subarrays, _, start_times = base.random_subsection(
+            [data], [GPS], np.float32(1.0 / SAMPLE_RATE), ONSOURCE, OFFSOURCE, 8, 1234
         )
     assert start_times.dtype == np.float64
-    expected = GPS + np.asarray(subarrays)[:, 0].astype(np.float64) * INTERVAL
+    expected = GPS + np.asarray(subarrays)[:, 0, 0].astype(np.float64) * INTERVAL
+    start_times = start_times[:, 0]
     np.testing.assert_allclose(start_times, expected, rtol=0.0, atol=1e-6)
 
 
@@ -195,6 +196,7 @@ def test_gps_times_survive_the_dataset_path():
             noise_obtainer=_SegmentNoise(),
             input_variables=[gf.ReturnVariables.ONSOURCE],
             output_variables=[gf.ReturnVariables.START_GPS_TIME],
+            group="train",
         )
         inputs, outputs = dataset[0]
     gps_times = outputs[gf.ReturnVariables.START_GPS_TIME.name]

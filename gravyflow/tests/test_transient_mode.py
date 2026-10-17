@@ -99,7 +99,7 @@ class TestTransientDatasetOutput:
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=1,
                 steps_per_epoch=5,
-                group='train',
+                group='test',
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
                 output_variables=[gf.ReturnVariables.START_GPS_TIME]
             )
@@ -131,7 +131,7 @@ class TestTransientDatasetOutput:
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=1,
                 steps_per_epoch=1,
-                group='all',
+                group='test',
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
                 output_variables=[gf.ReturnVariables.START_GPS_TIME]
             )
@@ -217,7 +217,7 @@ class TestTransientDatasetOutput:
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=1,
                 steps_per_epoch=5,  # Request 5 batches
-                group='all',
+                group='test',
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
                 output_variables=[gf.ReturnVariables.START_GPS_TIME]
             )
@@ -273,7 +273,7 @@ class TestTransientModeBatching:
                 offsource_duration_seconds=2.0,
                 num_examples_per_batch=batch_size,
                 steps_per_epoch=1,
-                group='all',
+                group='test',
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
                 output_variables=[gf.ReturnVariables.START_GPS_TIME]
             )
@@ -320,7 +320,7 @@ class TestTransientModeBatching:
                 offsource_duration_seconds=0.0,
                 num_examples_per_batch=2,
                 steps_per_epoch=1,
-                group='all',
+                group='test',
                 input_variables=[gf.ReturnVariables.ONSOURCE], # Raw data to check correlation/alignment if needed
                 output_variables=[gf.ReturnVariables.START_GPS_TIME]
             )
@@ -374,6 +374,7 @@ class TestSpecificEventAcquisition:
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=1,
                 ifos=[gf.IFO.H1, gf.IFO.L1],
+                group="test",
             )
             batch = next(batch_gen)
             
@@ -420,6 +421,7 @@ class TestSpecificEventAcquisition:
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=2,
                 ifos=[gf.IFO.L1],
+                group="test",
             )
             batch = next(batch_gen)
             
@@ -455,6 +457,7 @@ class TestSpecificEventAcquisition:
                 offsource_duration_seconds=16.0,
                 num_examples_per_batch=1,
                 ifos=[gf.IFO.H1],
+                group="test",
             )
             batch = next(batch_gen)
             

@@ -177,7 +177,7 @@ class _GeorgeHuerta2017(ExampleModel):
         noise_type: gf.NoiseType = gf.NoiseType.COLORED,
         config: Optional[GeorgeHuerta2017Config] = None,
         seed: Optional[int] = None,
-        group: str = "train",
+        group: str = None,
         steps_per_epoch: int = 1000,
         curriculum: bool = False,
         **kwargs
@@ -198,7 +198,7 @@ class _GeorgeHuerta2017(ExampleModel):
         noise_type: gf.NoiseType = gf.NoiseType.COLORED,
         config: Optional[GeorgeHuerta2017Config] = None,
         seed: Optional[int] = None,
-        group: str = "train",
+        group: str = None,
         steps_per_epoch: int = 1000,
         curriculum: bool = False,
         **kwargs

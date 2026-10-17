@@ -456,6 +456,7 @@ def test_periodic_wave_in_dataset() -> None:
         waveform_generators=[gen],
         input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
         seed=42,
+        group="train",
     )
     
     batch = next(iter(dataset))
@@ -498,6 +499,7 @@ def test_sine_gaussian_in_dataset() -> None:
         waveform_generators=[gen],
         input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
         seed=42,
+        group="train",
     )
     
     batch = next(iter(dataset))

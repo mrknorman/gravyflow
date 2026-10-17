@@ -41,7 +41,7 @@ def dataset(**overrides):
         output_variables=[],
     )
     settings.update(overrides)
-    return gf.GravyflowDataset(**settings)
+    return gf.GravyflowDataset(**settings, group="train")
 
 
 def test_networks_are_built_from_the_datasets_detectors():

@@ -239,10 +239,14 @@ class RunDirectory:
     def state(self) -> Optional[dict]:
         return self._read(self.path / "state.json")
 
-    def start(self, description: Dict[str, Any]) -> str:
-        """Record a new run's configuration; returns its sha256."""
+    def start(self, description: Dict[str, Any], split: Dict[str, str]) -> str:
+        """
+        Record a new run's configuration and its split (``TrainingRun.split_record``);
+        returns the configuration's sha256.
+        """
         sha = config_fingerprint(description)
-        self._write(self.path / "run.json", {"config_sha256": sha, "description": canonical(description)})
+        self._write(self.path / "run.json",
+                    {"config_sha256": sha, "description": canonical(description), "split": split})
         return sha
 
     def write_state(self, state: Dict[str, Any]) -> None:
@@ -329,6 +333,11 @@ class TrainingRun:
     directory: RunDirectory
     schedule: TrainingSchedule
     seed: int
+    #: How the run's real data is split, and the split that selects the model
+    #: (the validation data's): both go into ``run.json``, so a validator never
+    #: reports on data that trained or selected the model.
+    split_spec: gf.SplitSpec = gf.DEFAULT_SPLIT
+    selection_split: str = "validate"
     description: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -344,7 +353,13 @@ class TrainingRun:
         # The epoch count is where the run stops, not what it does: leaving it
         # out lets a finished run be extended.
         schedule = {k: v for k, v in asdict(self.schedule).items() if k != "epochs"}
-        return {**self.description, "schedule": schedule, "seed": self.seed}
+        return {**self.description, "schedule": schedule, "seed": self.seed, "split": self.split_record}
+
+    @property
+    def split_record(self) -> Dict[str, str]:
+        """The run's split, as ``run.json`` and every saved model record it."""
+        return {"fingerprint": self.split_spec.fingerprint(),
+                "selection_split": gf.SplitSpec.check_name(self.selection_split)}
 
     def train(
         self,
@@ -376,7 +391,7 @@ class TrainingRun:
         if run is not None:
             require_match("run configuration", run["config_sha256"], sha, self.directory.path)
         if state is None:
-            self.directory.start(self._full_description())
+            self.directory.start(self._full_description(), self.split_record)
             with keras_draws(self.model_seed):
                 model = build_model()
             state = {"epoch": -1, "best_val_loss": None, "best_epoch": None, "wait": 0,
@@ -401,7 +416,7 @@ class TrainingRun:
         best = self.directory.load_model("best", sha)
         state = self.directory.state
         self.directory.save_model(best, "model", sha, epoch=state["best_epoch"],
-                                  val_loss=state["best_val_loss"])
+                                  val_loss=state["best_val_loss"], split=self.split_record)
         return best
 
 

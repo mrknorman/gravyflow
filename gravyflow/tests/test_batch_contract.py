@@ -80,7 +80,7 @@ def dataset(generators, ifos, outputs=LABELS, inputs=DATA, seed=7, **overrides):
         waveform_generators=generators, input_variables=inputs, output_variables=outputs,
     )
     settings.update(overrides)
-    return gf.GravyflowDataset(**settings)
+    return gf.GravyflowDataset(**settings, group="train")
 
 
 def documented_shape(key, g, i):

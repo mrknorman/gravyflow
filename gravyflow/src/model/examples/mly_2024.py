@@ -219,7 +219,7 @@ class _MLyModel(ExampleModel):
         noise_type: gf.NoiseType = gf.NoiseType.COLORED,
         config: Optional[MLyConfig] = None,
         seed: Optional[int] = None,
-        group: str = "train",
+        group: str = None,
         steps_per_epoch: int = 1000,
         **kwargs
     ) -> gf.GravyflowDataset:

@@ -31,7 +31,8 @@ def test_padding_warning():
                 )
             ],
             input_variables=[gf.ReturnVariables.INJECTIONS],
-            noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE)
+            noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
+            group="train"
         )
         
         # Check for the specific warning
@@ -65,7 +66,8 @@ def test_no_padding_warning():
                 )
             ],
             input_variables=[gf.ReturnVariables.INJECTIONS],
-            noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE)
+            noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
+            group="train"
         )
         
         # Check that the specific warning is NOT present

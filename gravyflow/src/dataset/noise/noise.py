@@ -18,7 +18,6 @@ import gravyflow as gf
 
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.src.dataset.config import WindowSpec, ignore_scale_factor
-from gravyflow.src.dataset.splits import split_fractions
 from gravyflow.src.rng import BatchStreams, SeedTree
 from gravyflow.src.rng.legacy import warn_deprecated
 from gravyflow.src.utils.shapes import ShapeEnforcer
@@ -283,7 +282,6 @@ class Obtainer:
     data_directory_path: Optional[Path] = None
     ifo_data_obtainer: Union[None, gf.IFODataObtainer] = None
     ifos: List[gf.IFO] = None
-    groups: Union[dict, None] = None
 
     def specification(self) -> dict:
         """
@@ -297,9 +295,6 @@ class Obtainer:
             self.ifos = [gf.IFO.L1]
         elif not isinstance(self.ifos, list) and not isinstance(self.ifos, tuple):
             self.ifos = [self.ifos]
-
-        # Every route that is given no fractions splits by the same ones.
-        self.groups = split_fractions(self.groups)
 
 
 @dataclass
@@ -442,7 +437,6 @@ class NoiseObtainer(Obtainer):
         reader.get_valid_segments(
             ifos,
             sequential_seed(tree, group, "noise/segment_order"),
-            self.groups,
             group,
         )
         reader.generate_file_path(sample_rate_hertz, group, self.data_directory_path)
@@ -457,16 +451,19 @@ class NoiseObtainer(Obtainer):
             num_examples_per_batch : float = None,
             ifos: List[gf.IFO] = None,
             scale_factor : None = None,
-            group : str = "train",
+            group : str = None,
             seed : int = None,
             sampling_mode : "gf.SamplingMode" = None
         ) -> Iterator:
         """
         An iterator over the batches k = 0, 1, ... of split ``group`` (epoch
-        0) of the seed tree rooted at ``seed`` (default ``gf.Defaults.seed``).
+        0; required) of the seed tree rooted at ``seed`` (default
+        ``gf.Defaults.seed``).
         ``scale_factor`` is deprecated and ignored.
         """
         ignore_scale_factor(scale_factor)
+        if group is None:
+            raise ValueError("Name the split: group='train', 'validate' or 'test'.")
         tree = SeedTree.of(seed)
         batch = self.batcher(
             tree,

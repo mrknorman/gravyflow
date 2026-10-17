@@ -532,7 +532,7 @@ def test_baseline_takes_the_example_input_contract():
     model = MatchedFilterBaseline.model(config=cfg)
     require_logit_model(model)
     assert [t.name for t in model.inputs] == ["WHITENED_ONSOURCE", "OFFSOURCE"]
-    x, y = MatchedFilterBaseline.dataset(config=cfg, seed=11)[0]
+    x, y = MatchedFilterBaseline.dataset(config=cfg, seed=11, group="train")[0]
     assert x["WHITENED_ONSOURCE"].shape == (4, 1, N) and x["WHITENED_ONSOURCE"].dtype == np.float32
     # The labels every example returns: one presence flag per example.
     assert list(y) == ["INJECTION_PRESENT"]
@@ -584,7 +584,7 @@ def test_layer_round_trips_through_its_config_and_a_saved_model(tmp_path):
     layer = model.get_layer("matched_filter")
     clone = MatchedFilterLayer.from_config(layer.get_config())
     np.testing.assert_array_equal(clone.matched_filter.bank.mass_1, layer.matched_filter.bank.mass_1)
-    x, _ = MatchedFilterBaseline.dataset(config=cfg, seed=12)[0]
+    x, _ = MatchedFilterBaseline.dataset(config=cfg, seed=12, group="train")[0]
     path = tmp_path / "baseline.keras"
     model.save(path)
     reloaded = keras.models.load_model(path)

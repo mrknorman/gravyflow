@@ -219,7 +219,7 @@ def test_obtainer_whitening_is_per_row(world, tmp_path):
 
         obtainer._post_process_batch = capturing
         ifos = [gf.IFO[name] for name in IFOS]
-        obtainer.get_valid_segments(ifos, 7, dict(fx.GOLDEN_GROUPS), "train")
+        obtainer.get_valid_segments(ifos, 7, "train")
         generator = obtainer.get_onsource_offsource_chunks(
             256.0, fx.ONSOURCE_SECONDS, fx.CROP_SECONDS, fx.OFFSOURCE_SECONDS, 8, ifos,
             1.0, 7, gf.SamplingMode.RANDOM, whiten=True,

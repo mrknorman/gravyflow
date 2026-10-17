@@ -35,6 +35,9 @@ def IFODataObtainer(
         event_names: List[str] = None,
         # Real-noise segment selection
         gwosc_flags: Optional[Tuple[str, ...]] = None,
+        # The split
+        split_spec: Optional["gf.SplitSpec"] = None,
+        train_on_real_events: bool = False,
     ):
     """
     Factory function that returns the appropriate IFO data obtainer.
@@ -61,6 +64,10 @@ def IFODataObtainer(
         gwosc_flags: GWOSC timeline flags whose intersection defines usable noise
             times (NOISE only). None uses DATA with BURST_CAT1 and BURST_CAT2
             applied; gf.GWOSC_DATA_FLAGS and gf.GWOSC_CBC_FLAGS are alternatives.
+        split_spec: How GPS time is split into train, validate and test
+            (``gf.SplitSpec``); None is the default split.
+        train_on_real_events: Real events are evaluation data, all in ``test``;
+            True puts each in its footprint's split (TRANSIENT only).
 
     Returns:
         NoiseDataObtainer or TransientDataObtainer instance
@@ -90,6 +97,7 @@ def IFODataObtainer(
             augmentations=augmentations,
             prefetch_segments=prefetch_segments,
             gwosc_flags=gwosc_flags,
+            split_spec=split_spec,
         )
     else:
         # TRANSIENT mode for events/glitches
@@ -108,5 +116,7 @@ def IFODataObtainer(
             augmentations=augmentations,
             prefetch_segments=prefetch_segments,
             balanced_glitch_types=balanced_glitch_types,
-            event_names=event_names
+            event_names=event_names,
+            split_spec=split_spec,
+            train_on_real_events=train_on_real_events,
         )

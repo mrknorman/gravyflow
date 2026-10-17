@@ -44,7 +44,7 @@ def pearson_dataset(ifos, generator, sample_rate_hertz=1024.0, on_dataset=False)
         sample_rate_hertz=sample_rate_hertz, onsource_duration_seconds=1.0, offsource_duration_seconds=16.0,
         **where,
         waveform_generators=generator, num_examples_per_batch=2, seed=1, steps_per_epoch=1,
-        input_variables=[gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE], output_variables=[])
+        input_variables=[gf.ReturnVariables.ROLLING_PEARSON_ONSOURCE], output_variables=[], group="train")
 
 
 # ------------------------------------------------------- rolling Pearson
@@ -161,7 +161,7 @@ def test_mly_trains_on_its_dataset(model_class, tmp_path):
     # The networks read an input named "strain" shaped (samples, detectors),
     # and the coherence dataset passed an argument the dataset rejects.
     config = small(HL)
-    batches = DetectionBatches(model_class.dataset(config=config, seed=3, steps_per_epoch=2))
+    batches = DetectionBatches(model_class.dataset(config=config, seed=3, group="train", steps_per_epoch=2))
     x, y = batches[0]
     assert set(x) == {t.name for t in model_class.model(config).inputs} and y.shape == (4, 2)
     model = model_class.compile_model(model_class.model(config), config)
@@ -175,7 +175,7 @@ def test_mly_trains_on_its_dataset(model_class, tmp_path):
 def test_mly_dataset_follows_the_paper():
     config = MLyConfig()
     for model_class, snr, chance in [(MLyCoincidence, (12.0, 30.0), 1 / 3), (MLyCoherence, (10.0, 50.0), 0.5)]:
-        dataset = model_class.dataset(config=config, steps_per_epoch=1)
+        dataset = model_class.dataset(config=config, group="train", steps_per_epoch=1)
         generator = dataset.waveform_generators[0]
         value = generator.scaling_method.value
         assert generator.scaling_method.type_ is gf.ScalingTypes.SNR

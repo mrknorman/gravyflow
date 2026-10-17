@@ -46,6 +46,10 @@ def _overlap(a, b):
     return total
 
 
+#: Every block in train: the segment tests below read all time as one split.
+ALL_TRAIN = gf.SplitSpec(fractions={"train": 1.0, "validate": 0.0, "test": 0.0})
+
+
 def _noise_obtainer(runs, **kwargs):
     return gf.IFODataObtainer(
         data_quality=gf.DataQuality.BEST,
@@ -129,7 +133,7 @@ class TestVetoSubtraction:
 class TestRunOrder:
 
     def test_non_chronological_runs_bin_and_veto(self):
-        obtainer = _noise_obtainer([gf.ObservingRun.O3, gf.ObservingRun.O1])
+        obtainer = _noise_obtainer([gf.ObservingRun.O3, gf.ObservingRun.O1], split_spec=ALL_TRAIN)
         o3 = np.array([[1238170000.0, 1238180000.0]])
         o1 = np.array([[1126060000.0, 1126070000.0]])
         with patch.object(obtainer, "get_segment_times", side_effect=[o3, o1]):
@@ -140,7 +144,7 @@ class TestRunOrder:
              patch.object(obtainer, "remove_unwanted_segments",
                           side_effect=lambda ifo, s: s):
             rows = obtainer.get_valid_segments(
-                ifos=[gf.IFO.L1], seed=1, group_name="all",
+                ifos=[gf.IFO.L1], seed=1, group_name="train",
                 segment_order=gf.SegmentOrder.CHRONOLOGICAL,
             )
         assert rows.shape[1:] == (1, 2)
@@ -427,31 +431,30 @@ class TestHardwareInjections:
 
 def _block_inside_o3(num_blocks):
     """A GPS time on the absolute 2048 s grid inside O3, with ``num_blocks`` blocks
-    after it that do not straddle the relative 8192 s group cut."""
+    after it inside one absolute 8192 s split block."""
     start = gf.ObservingRun.O3.value.start_gps_time
     k = int(np.ceil((start + 10 * 8192) / 2048))
     while True:
         b = 2048.0 * k
-        relative = (b - start) % 8192
-        if relative + num_blocks * 2048 <= 8192:
+        if b % 8192 + num_blocks * 2048 <= 8192:
             return b
         k += 1
 
 
 class TestSegmentYield:
 
-    def _rows(self, obtainer, per_ifo, ifos):
+    def _rows(self, obtainer, per_ifo, ifos, split="train"):
         with patch.object(obtainer, "get_all_segment_times", side_effect=per_ifo), \
              patch.object(obtainer, "remove_unwanted_segments",
                           side_effect=lambda ifo, s: s):
             return obtainer.get_valid_segments(
-                ifos=ifos, seed=1, group_name="all",
+                ifos=ifos, seed=1, group_name=split,
                 segment_order=gf.SegmentOrder.CHRONOLOGICAL,
             )
 
     def test_absolute_grid_keeps_whole_blocks(self):
         b = _block_inside_o3(2)
-        obtainer = _noise_obtainer(gf.ObservingRun.O3)
+        obtainer = _noise_obtainer(gf.ObservingRun.O3, split_spec=ALL_TRAIN)
         rows = self._rows(obtainer, [np.array([[b, b + 4096.0]])], [gf.IFO.L1])
         np.testing.assert_array_equal(
             rows[:, 0, :], [[b, b + 2048.0], [b + 2048.0, b + 4096.0]]
@@ -459,14 +462,14 @@ class TestSegmentYield:
 
     def test_every_piece_of_a_bin_is_kept(self):
         b = _block_inside_o3(1)
-        obtainer = _noise_obtainer(gf.ObservingRun.O3)
+        obtainer = _noise_obtainer(gf.ObservingRun.O3, split_spec=ALL_TRAIN)
         pieces = np.array([[b, b + 500.0], [b + 600.0, b + 2048.0]])
         rows = self._rows(obtainer, [pieces], [gf.IFO.L1])
         assert sorted(map(tuple, rows[:, 0, :])) == sorted(map(tuple, pieces))
 
     def test_every_piece_is_kept_for_each_ifo(self):
         b = _block_inside_o3(1)
-        obtainer = _noise_obtainer(gf.ObservingRun.O3)
+        obtainer = _noise_obtainer(gf.ObservingRun.O3, split_spec=ALL_TRAIN)
         h1 = np.array([[b, b + 2048.0]])
         l1 = np.array([[b, b + 500.0], [b + 600.0, b + 2048.0]])
         rows = self._rows(obtainer, [h1, l1], [gf.IFO.H1, gf.IFO.L1])
@@ -477,16 +480,21 @@ class TestSegmentYield:
         longest = rows[np.argmax(rows[:, 1, 1] - rows[:, 1, 0])]
         assert tuple(longest[1]) == (b + 600.0, b + 2048.0)
 
-    def test_the_relative_group_cut_still_splits_a_bin(self):
-        # The 8192 s group cut is counted from the first run's start, not GPS 0, so a
-        # contiguous stretch is split where it falls inside a 2048 s bin.
-        start = gf.ObservingRun.O3.value.start_gps_time
-        cut = start + 11 * 8192.0
-        b = 2048.0 * np.floor(cut / 2048.0)
-        assert b < cut < b + 2048.0
-        obtainer = _noise_obtainer(gf.ObservingRun.O3)
-        rows = self._rows(obtainer, [np.array([[b, b + 2048.0]])], [gf.IFO.L1])
-        assert sorted(map(tuple, rows[:, 0, :])) == [(b, cut), (cut, b + 2048.0)]
+    def test_the_split_never_cuts_a_bin(self):
+        # The split's blocks are absolute and whole bins: at an edge between splits,
+        # each side's bin loses only its half of the guard. The 8192 s cut was
+        # counted from the first run's start, so it split bins.
+        spec = gf.DEFAULT_SPLIT
+        k = spec.block_of(gf.ObservingRun.O3.value.start_gps_time) + 10
+        while spec.block_split(k) != "train" or spec.block_split(k + 1) != "validate":
+            k += 1
+        edge = (k + 1) * spec.block_seconds
+        half = spec.guard_seconds / 2.0
+        stretch = [np.array([[edge - 2048.0, edge + 2048.0]])]
+        train = self._rows(_noise_obtainer(gf.ObservingRun.O3), stretch, [gf.IFO.L1])
+        validate = self._rows(_noise_obtainer(gf.ObservingRun.O3), stretch, [gf.IFO.L1], "validate")
+        assert list(map(tuple, train[:, 0, :])) == [(edge - 2048.0, edge - half)]
+        assert list(map(tuple, validate[:, 0, :])) == [(edge + half, edge + 2048.0)]
 
     def test_merge_bins_with_an_empty_ifo_gives_no_bins(self):
         obtainer = _noise_obtainer(gf.ObservingRun.O3)
@@ -579,9 +587,10 @@ class TestSamplingDensity:
 
     def test_a_pass_with_no_batch_due_does_not_end_the_generator(self):
         # One 40 s piece per detector at saturation 1: about 0.68 batches are due per
-        # pass, so a pass can be due none. The generator ended on such a pass.
-        piece = np.array([[1238166018.0, 1238166058.0]])
-        rows = np.stack([piece, piece], axis=1)
+        # pass, so a pass can be due none. The generator ended on such a pass. (The
+        # pieces are a minute apart, so their windows are never coincident.)
+        h1 = np.array([[1238166018.0, 1238166058.0]])
+        rows = np.stack([h1, h1 + 60.0], axis=1)
         for seed in range(5):
             obtainer = _noise_obtainer(gf.ObservingRun.O3, saturation=1.0)
             starts = _draw(obtainer, rows, num_batches=20, offsource_seconds=16.0, batch=32, seed=seed)
@@ -608,6 +617,33 @@ class TestSamplingDensity:
         positions, visits = np.unique(starts, return_counts=True)
         assert len(positions) == 128 and np.all(visits == 2)
         assert np.min(np.diff(positions)) >= 2.0 - 1e-9  # no window overlaps another
+
+    def test_a_row_whose_detectors_cannot_be_separated_is_left_out(self):
+        # Both detectors on one 40 s piece: window starts span 36 s, so they can be 36 s
+        # apart but never 37 s. Drawing from such a row spun without end.
+        piece = np.array([[1238166018.0, 1238166058.0]])
+        rows = np.stack([piece, piece], axis=1)
+        obtainer = _noise_obtainer(gf.ObservingRun.O3)
+        kept = obtainer.plan_sampling(rows, 8.0, FOOTPRINT, separation_seconds=36.0)
+        assert len(kept.rows) == 1 and kept.inseparable == 0
+        left_out = obtainer.plan_sampling(rows, 8.0, FOOTPRINT, separation_seconds=37.0)
+        assert len(left_out.rows) == 0 and left_out.inseparable == 1
+
+    def test_separable_tries_every_order(self):
+        from gravyflow.src.dataset.acquisition.base import separable
+        # Earliest-deadline order fails here (L1 at 15, H1 at 33 > 25); H1 first fits.
+        assert separable([(15.0, 20.0), (0.0, 25.0)], 18.0)
+        assert separable([(0.0, 6.0)] * 3, 3.0)
+        assert not separable([(0.0, 5.0)] * 3, 3.0)
+
+    def test_a_tight_row_draws_separated_windows_without_end(self):
+        # Pieces whose starts can be separated only near their ends: rejection alone
+        # rarely finds a pair; the constructive draw always does when one exists.
+        from gravyflow.src.dataset.acquisition.base import separated_starts
+        rng = np.random.default_rng(1)
+        starts = separated_starts(rng, [(0, 100), (0, 100)], [0.0, 0.0], 95.0, 1000)
+        assert len(starts) > 0
+        assert np.all(np.abs(starts[:, 0] - starts[:, 1]) >= 95)
 
 
 class _RecordingFetch:

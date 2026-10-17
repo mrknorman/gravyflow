@@ -225,4 +225,4 @@ print("""
 """)
 
 print("\n✓ Tutorial 02 complete!")
-print("Next: 03_noise_mode_advanced.py - Grid sampling, groups, multi-IFO")
+print("Next: 03_noise_mode_advanced.py - Grid sampling, splits, multi-IFO")

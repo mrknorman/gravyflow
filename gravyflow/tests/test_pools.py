@@ -219,7 +219,8 @@ class TestComposedDatasetInit:
             num_examples_per_batch=4,
             input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
             output_variables=[gf.ReturnVariables.POOL_LABEL],
-            steps_per_epoch=10
+            steps_per_epoch=10,
+            group="train"
         )
         
         assert len(dataset) == 10
@@ -239,7 +240,8 @@ class TestComposedDatasetInit:
             num_examples_per_batch=4,
             input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
             output_variables=[gf.ReturnVariables.POOL_LABEL],
-            steps_per_epoch=10
+            steps_per_epoch=10,
+            group="train"
         )
         
         assert dataset.pool_sampler.num_classes == 2
@@ -268,7 +270,8 @@ class TestComposedDatasetIteration:
                 num_examples_per_batch=4,
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
                 output_variables=[gf.ReturnVariables.POOL_LABEL],
-                steps_per_epoch=3
+                steps_per_epoch=3,
+                group="train"
             )
             
             # Iterate a few batches
@@ -297,7 +300,8 @@ class TestComposedDatasetIteration:
                 input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
                 output_variables=[gf.ReturnVariables.POOL_LABEL],
                 steps_per_epoch=10,
-                seed=42
+                seed=42,
+                group="train"
             )
             
             inputs, outputs = next(iter(dataset))

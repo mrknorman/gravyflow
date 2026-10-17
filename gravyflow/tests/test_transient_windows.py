@@ -33,6 +33,7 @@ from gravyflow.src.dataset.config import TransientDefaults, WindowSpec
 from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.glitch_cache import TransientCache, generate_transient_cache_path
 from gravyflow.src.utils.gps import gps_to_key
+from gravyflow.tests.conftest import catalogued_events
 
 RV = gf.ReturnVariables
 REF = 1240000000.0  # inside O3; every sample is valued its GPS time minus REF
@@ -52,6 +53,9 @@ SPEC = WindowSpec.from_params(
 )
 #: Three glitches, off the sample grid at every rate.
 TIMES = REF + np.array([10.3701, 150.01234, 290.90007])
+#: The one split holding every record's footprint, which every test reads.
+SPLIT = gf.DEFAULT_SPLIT.assign(TIMES[0] - 48.2, TIMES[-1] + 48.2)
+assert SPLIT != gf.EXCLUDED
 #: Times inside one data-quality segment covering every record.
 SCIENCE = np.array([[REF - 1000.0, REF + 1000.0]])
 
@@ -111,7 +115,8 @@ def offline(fetch=None, catalogue=None, science=SCIENCE):
                     return_value=catalogue if catalogue is not None else records()), \
          mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times",
                            lambda self, ifo: science[ifo] if isinstance(science, dict) else science), \
-         mock.patch.object(BaseDataObtainer, "get_segment_data_static", staticmethod(fetch)):
+         mock.patch.object(BaseDataObtainer, "get_segment_data_static", staticmethod(fetch)), \
+         catalogued_events():
         yield fetch
 
 
@@ -127,7 +132,7 @@ def obtainer(directory):
 
 
 def first_batch(directory, ifos, **window):
-    return next(obtainer(directory)(ifos=ifos, group="all", seed=1, **{**WINDOW, **window}))
+    return next(obtainer(directory)(ifos=ifos, group=SPLIT, seed=1, **{**WINDOW, **window}))
 
 
 def transient_times(batch):
@@ -168,7 +173,7 @@ class TestStartGpsTime:
                 num_examples_per_batch=3,
                 steps_per_epoch=1,
                 scale_factor=1.0,
-                group="all",
+                group=SPLIT,
                 input_variables=[RV.ONSOURCE],
                 output_variables=[RV.START_GPS_TIME],
             )
@@ -237,10 +242,10 @@ class TestGeometry:
             np.testing.assert_array_equal(offsource, off_expected, err_msg=f"{path} offsource")
 
 
-def served(directory, ifos, **window):
-    """The first batch of a fresh obtainer over every record, and the obtainer."""
+def served(directory, ifos, split=SPLIT, **window):
+    """The first batch of a fresh obtainer over every record of ``split``, and the obtainer."""
     reader = obtainer(directory)
-    batch = next(reader(ifos=ifos, group="all", seed=1, **{**WINDOW, **window}))
+    batch = next(reader(ifos=ifos, group=split, seed=1, **{**WINDOW, **window}))
     return batch, reader
 
 
@@ -307,7 +312,7 @@ class TestDataQuality:
             # rejected, never zero-filled. The cache hits are served first, so the
             # rejection is counted by the end of the first pass.
             reader = obtainer(tmp_path)
-            batches = reader(ifos=[gf.IFO.H1, gf.IFO.L1], group="all", seed=1,
+            batches = reader(ifos=[gf.IFO.H1, gf.IFO.L1], group=SPLIT, seed=1,
                              **{**WINDOW, "num_examples_per_batch": 2})
             for _ in range(2):
                 batch = next(batches)
@@ -360,7 +365,7 @@ class TestUnavailableRecords:
     def test_a_record_without_strain_is_counted_once_and_fetched_once(self, tmp_path):
         with offline(GridFetch(bad={"H1": [TIMES[1]]})) as fetch:
             reader = obtainer(tmp_path)
-            batches = reader(ifos=[gf.IFO.H1, gf.IFO.L1], group="all", seed=1,
+            batches = reader(ifos=[gf.IFO.H1, gf.IFO.L1], group=SPLIT, seed=1,
                              **{**WINDOW, "num_examples_per_batch": 2})
             assert served_times(next(batches)) == rounded(TIMES[[0, 2]])
             fetched = fetches_of(fetch, TIMES[1])
@@ -373,8 +378,8 @@ class TestUnavailableRecords:
     def test_a_split_with_no_record_available_is_refused_not_spun(self, tmp_path):
         with offline(GridFetch(bad={"L1": list(TIMES)})) as fetch:
             reader = obtainer(tmp_path)
-            batches = reader(ifos=[gf.IFO.L1], group="all", seed=1, **WINDOW)
-            with pytest.raises(ValueError, match="split 'all'.*no data"):
+            batches = reader(ifos=[gf.IFO.L1], group=SPLIT, seed=1, **WINDOW)
+            with pytest.raises(ValueError, match=f"split '{SPLIT}'.*no data"):
                 next(batches)
         assert all(fetches_of(fetch, t) == 2 for t in TIMES), "each record is fetched once (H1 and L1)"
         assert reader.get_acquisition_stats()["rejections"] == {"no data": 3}
@@ -385,7 +390,7 @@ class TestUnavailableRecords:
         catalogue = weighted(records(), [1e-6, 1.0, 1.0])
         with offline(GridFetch(bad={"L1": list(TIMES[1:])}), catalogue=catalogue):
             reader = obtainer(tmp_path)
-            batches = reader(ifos=[gf.IFO.L1], group="all", seed=1, **WINDOW)
+            batches = reader(ifos=[gf.IFO.L1], group=SPLIT, seed=1, **WINDOW)
             batch = within(60, lambda: next(batches))
         assert set(served_times(batch)) == set(rounded(TIMES[:1]))
         assert reader.get_acquisition_stats()["rejections"] == {"no data": 2}
@@ -393,8 +398,8 @@ class TestUnavailableRecords:
     def test_a_weighted_split_with_no_record_available_is_refused_not_spun(self, tmp_path):
         catalogue = weighted(records(), [1e-6, 1.0, 1.0])
         with offline(GridFetch(bad={"L1": list(TIMES)}), catalogue=catalogue):
-            batches = obtainer(tmp_path)(ifos=[gf.IFO.L1], group="all", seed=1, **WINDOW)
-            with pytest.raises(ValueError, match="split 'all'.*no data"):
+            batches = obtainer(tmp_path)(ifos=[gf.IFO.L1], group=SPLIT, seed=1, **WINDOW)
+            with pytest.raises(ValueError, match=f"split '{SPLIT}'.*no data"):
                 within(60, lambda: next(batches))
 
     def test_a_failed_fetch_of_an_unrequested_detector_is_fetched_when_requested(self, tmp_path):
@@ -419,6 +424,7 @@ class TestUnavailableRecords:
 #: and an L1 record of one class, 5.85 ms apart (O3b).
 SHARED_KEY = [(1264316116.41895, gf.IFO.H1), (1264316116.42480, gf.IFO.L1)]
 SHARED_KEY_REF = 1264316000.0
+SHARED_KEY_SPLIT = gf.DEFAULT_SPLIT.assign(SHARED_KEY[0][0] - 48.2, SHARED_KEY[1][0] + 48.2)
 
 
 class TestRecordIdentity:
@@ -435,12 +441,13 @@ class TestRecordIdentity:
             for t, ifo in SHARED_KEY
         ]
         assert len({record.gps_key for record in catalogue}) == 1
+        assert SHARED_KEY_SPLIT != gf.EXCLUDED
         science = np.array([[SHARED_KEY_REF, SHARED_KEY_REF + 1000.0]])
         both = [gf.IFO.H1, gf.IFO.L1]
         with offline(GridFetch(ref=SHARED_KEY_REF), catalogue=catalogue, science=science) as fetch:
-            cold, _ = served(tmp_path, both, num_examples_per_batch=2)
+            cold, _ = served(tmp_path, both, SHARED_KEY_SPLIT, num_examples_per_batch=2)
             fetched = len(fetch.calls)
-            warm, _ = served(tmp_path, both, num_examples_per_batch=2)
+            warm, _ = served(tmp_path, both, SHARED_KEY_SPLIT, num_examples_per_batch=2)
         assert fetched > 0 and len(fetch.calls) == fetched, "the second read was not a cache hit"
         for name, batch in (("cold", cold), ("warm", warm)):
             onsource = np.asarray(batch[RV.ONSOURCE], dtype=np.float64)

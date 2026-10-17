@@ -211,6 +211,7 @@ training_dataset = gf.Dataset(
         gf.ReturnVariables.GLITCH_TYPE
     ],
     steps_per_epoch=STEPS_PER_EPOCH,
+    group="train",
 )
 
 validation_dataset = gf.Dataset(

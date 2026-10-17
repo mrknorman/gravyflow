@@ -303,9 +303,28 @@ class IndexedBatches:
         return {
             **self.tree.metadata(),
             "split": self.group,
+            "split_fingerprint": self.split_spec.fingerprint(),
             "epoch_mode": self.epoch_mode.name,
             "index_addressed": self.index_addressed,
         }
+
+    @property
+    def split_spec(self) -> "gf.SplitSpec":
+        """How the real data this dataset reads is split: its IFO obtainers' spec, else the default."""
+        specs = {getattr(obtainer, "split_spec", None) for obtainer in self._ifo_data_obtainers()}
+        specs.discard(None)
+        if len(specs) > 1:
+            raise ValueError(f"A dataset's obtainers split time differently: {sorted(s.fingerprint() for s in specs)}.")
+        return specs.pop() if specs else gf.DEFAULT_SPLIT
+
+    def _ifo_data_obtainers(self) -> list:
+        """The IFO data obtainers this dataset reads real data through."""
+        found = []
+        for obtainer in [getattr(self, "noise_obtainer", None),
+                         *[getattr(pool, name, None) for pool in getattr(self, "pools", None) or []
+                           for name in ("noise_obtainer", "transient_obtainer")]]:
+            found.append(getattr(obtainer, "ifo_data_obtainer", obtainer))
+        return [obtainer for obtainer in found if obtainer is not None]
 
     @property
     def index_addressed(self) -> bool:
@@ -343,7 +362,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         crop_duration_seconds: Optional[float] = None,
         scale_factor: None = None,
         noise_obtainer: Optional[gf.NoiseObtainer] = None,
-        group: str = "train",
+        group: str = None,
         waveform_generators: Optional[List[Union[gf.CBCGenerator, gf.WNBGenerator]]] = None,
         num_examples_per_generation_batch: Optional[int] = None,
         num_examples_per_batch: Optional[int] = None,
@@ -975,7 +994,7 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
         input_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         output_variables: Optional[List[Union[gf.WaveformParameters, gf.ReturnVariables]]] = None,
         steps_per_epoch: int = 1000,
-        group: str = "train",
+        group: str = None,
         epoch_mode: Optional[EpochMode] = None
     ):
         """

@@ -372,7 +372,8 @@ def create_dataset(
         noise_obtainer=noise_obtainer,
         waveform_generators=waveform_generator,
         num_examples_per_batch=num_tests,
-        input_variables=get_return_variables(waveform_type)
+        input_variables=get_return_variables(waveform_type),
+        group="train"
     )
 
 def extract_parameters(
@@ -799,7 +800,8 @@ def test_gravyflow_dataset_init():
         num_examples_per_batch=2,
         noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
         input_variables=[gf.ReturnVariables.ONSOURCE],
-        output_variables=[gf.ReturnVariables.OFFSOURCE]
+        output_variables=[gf.ReturnVariables.OFFSOURCE],
+        group="train"
     )
     
     assert isinstance(dataset, GravyflowDataset)
@@ -817,7 +819,8 @@ def test_gravyflow_dataset_batch_generation():
         noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE),
         input_variables=[gf.ReturnVariables.ONSOURCE],
         output_variables=[gf.ReturnVariables.OFFSOURCE],
-        steps_per_epoch=10
+        steps_per_epoch=10,
+        group="train"
     )
     
     # Get a batch
@@ -862,7 +865,8 @@ def test_gravyflow_dataset_with_injections():
         noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]),
         waveform_generators=[wnb_gen],
         input_variables=[gf.ReturnVariables.ONSOURCE, gf.ReturnVariables.INJECTIONS],
-        output_variables=[gf.ReturnVariables.OFFSOURCE]
+        output_variables=[gf.ReturnVariables.OFFSOURCE],
+        group="train"
     )
     
     inputs, outputs = dataset[0]
@@ -888,7 +892,8 @@ def test_gravyflow_dataset_processing():
             gf.ReturnVariables.WHITENED_ONSOURCE, 
             gf.ReturnVariables.SPECTROGRAM_ONSOURCE
         ],
-        output_variables=[]
+        output_variables=[],
+        group="train"
     )
 
     inputs, _ = dataset[0]
@@ -947,7 +952,8 @@ def test_dataset_empty_segment_list():
         noise_obtainer=noise_obtainer,
         input_variables=[gf.ReturnVariables.ONSOURCE],
         output_variables=[gf.ReturnVariables.OFFSOURCE],
-        steps_per_epoch=1
+        steps_per_epoch=1,
+        group="train"
     )
     
     # Iterating should raise StopIteration or Exception (empty generator), not hang
@@ -971,7 +977,7 @@ def test_dataset_invalid_config():
     
     # Let's try to pass negative sample rate
     try:
-        GravyflowDataset(sample_rate_hertz=-100.0)
+        GravyflowDataset(sample_rate_hertz=-100.0, group="train")
     except ValueError:
         pass
     except Exception as e:

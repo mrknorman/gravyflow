@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
-from typing import List, Tuple, Union
+import logging
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -48,6 +49,7 @@ class ValidationConfig:
         # Pairs are tuples, however they arrive (JSON gives lists).
         self.snr_range = tuple(self.snr_range)
         self.extra_roc_pools = [tuple(p) if isinstance(p, (list, tuple)) else p for p in self.extra_roc_pools]
+        gf.SplitSpec.check_name(self.group)
         if self.group == "train":
             raise ValueError("The validator never draws from the training split.")
         lo, hi = self.snr_range
@@ -59,3 +61,34 @@ class ValidationConfig:
         lo, hi = self.snr_range
         num_bins = max(1, int(np.ceil((hi - lo) / self.snr_bin_width - 1e-9)))
         return lo + self.snr_bin_width * np.arange(num_bins + 1)
+
+
+def dataset_split_spec(dataset_args: dict) -> "gf.SplitSpec":
+    """The split of the real data ``dataset_args`` read: its IFO obtainer's, else the default."""
+    noise = dataset_args.get("noise_obtainer")
+    obtainer = getattr(noise, "ifo_data_obtainer", None)
+    return getattr(obtainer, "split_spec", None) or gf.DEFAULT_SPLIT
+
+
+def check_held_out(group: str, spec: "gf.SplitSpec", run_record: Optional[dict]) -> None:
+    """
+    Refuse to score split ``group`` for a model whose training record
+    (``run_record``) names another split spec than ``spec``, or names ``group``
+    as the split that selected the model. With no record, warn: the split the
+    model trained on is unknown.
+    """
+    from gravyflow.src.dataset.splits import require_split_fingerprint
+
+    if run_record is None:
+        logging.getLogger(__name__).warning(
+            "No training record: the split this model trained on is unknown, so its "
+            f"'{group}' metrics may include data it trained on."
+        )
+        return
+    split = run_record.get("split") or {}
+    require_split_fingerprint(split.get("fingerprint"), spec, "The model's training run")
+    if split.get("selection_split") == group:
+        raise ValueError(
+            f"The model was selected on the '{group}' split, so its metrics there are biased: "
+            "score a split that played no part in training or selection ('test')."
+        )

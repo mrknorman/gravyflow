@@ -284,6 +284,7 @@ def test_generators_without_scaling_are_refused_by_the_dataset():
                 offsource_duration_seconds=4.0, num_examples_per_batch=2,
                 waveform_generators=[generator],
                 input_variables=[gf.ReturnVariables.ONSOURCE], seed=7,
+                group="train",
             )
 
 

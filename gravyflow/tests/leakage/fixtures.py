@@ -2,9 +2,9 @@
 Fixture layouts: where the fake detectors have data, what the catalogues hold, and
 the golden block table that judges a decoded footprint's split.
 
-The golden table is literal. Its values were read from the library one block at a
-time (``get_segments_for_group`` with a one-second segment inside each block) and
-blessed by hand; the harness never re-implements the split. A self-test checks that
+The golden table is literal. Its values were read from the library one absolute block
+at a time (``SplitSpec.block_split``) and blessed by hand; the harness never
+re-implements the split. A self-test checks that
 the library still agrees with every literal, so a change of split is a deliberate
 re-blessing, never a silent one.
 """
@@ -20,43 +20,42 @@ import numpy as np
 from .fakes import EventRecord, GlitchRecord, HARDWARE_INJECTION_FLAGS
 from .provenance import Encoding
 
-#: The split block, in seconds.
+#: The split block, in seconds, and the guard between splits.
 BLOCK_SECONDS = 8192.0
-#: The fractions the golden table was blessed with: gf.DEFAULT_SPLIT_FRACTIONS, the only
-#: ones every route accepts.
-GOLDEN_GROUPS = {"train": 0.8, "validate": 0.1, "test": 0.1}
+GUARD_SECONDS = 128.0
 _LETTERS = {"r": "train", "v": "validate", "t": "test"}
 
-#: {origin run: {first block index: letters}}, one letter per block from that index;
-#: block k is [origin + k * BLOCK_SECONDS, origin + (k + 1) * BLOCK_SECONDS), where
-#: the origin is the run's start (the first configured run's start, on this trunk).
+#: {region: {first block index: letters}}, one letter per block from that index, for
+#: the default gf.SplitSpec. Blocks are absolute: block k is [k * BLOCK_SECONDS,
+#: (k + 1) * BLOCK_SECONDS) in GPS, whatever the runs. A region is named by the run
+#: near whose start its first table begins; the O1 region's later tables cover O2 and O3.
 GOLDEN_BLOCKS: Dict[str, Dict[int, str]] = {
     "O3": {
-        1: (
-            "rrtrvrrrrvrrrrrrrrrrrrrrrrrrrrrrrvrrrrvvrrrtrvrrtrrrvrrrrrrrrrrttrrrrrvrvrv"
-            "trrvtrrtrrrrrrrrrrtrrvtrtrtrrrtrrrrrrrrrrtrrvrrrrrrtrvrrrrrrrrrvrrrrrrrrrtr"
-            "rrrrrrrrrrrrrtrrrrrrrrtrrrrrrrtrvrtrrrrvrrrrrrrrrrrrvrtrrrrrtrrrrrrtrtrrrrv"
-            "rrrrrrrvrrrrrrrtvrrrrrrrrrrrrttvrvrrrrvvttrrrrrrvrvrrvrvrrrrrrrrtrrrrrvrrtr"
+        151144: (
+            "vvtrrvrvvrtrrrrrvrrrvvtrvrtrrvrrrrrrrrrrrrrrrrrvrrrvrrtrrrrrrrrrrrtrrrrrrrr"
+            "rrrrtrtrrrrrrrrtvrrrrtvrtrrrrvrrrrrrrrrrrvrrvrrrrrrrvvrvrvrrrrrrrtvrrrrrrrv"
+            "rrrrrrtrrrrrrrrvrvtrrrrrrrrrrrrrrrrtvvrrvrrrrrvvvrrrvrtrrrtrvrrrrrtrrrrrrrr"
+            "trrrrrrrrrrrrrrrrrrrrrrrrrrrvrrrrrrrrrrrrrrrrrtrrvrrrrrtrrvrrrrrvrrrrrrvrvr"
         ),
     },
     "O1": {
-        1: (
-            "rrtrvrrrrvrrrrrrrrrrrrrrrrrrrrrrrvrrrrvvrrrtrvrrtrrrvrrrrrrrrrrttrrrrrvrvrv"
-            "trrvtrrtrrrrrrrrrrtrrvtrtrtrrrtrrrrrrrrrrtrrvrrrrrrtrvrrrrrrrrrvrrrrrrrrrtr"
-            "rrrrrrrrrrrrrtrrrrrrrrtrrrrrrrtrvrtrrrrvrrrrrrrrrrrrvrtrrrrrtrrrrrrtrtrrrrv"
-            "rrrrrrrvrrrrrrrtvrrrrrrrrrrrrttvrvrrrrvvttrrrrrrvrvrrvrvrrrrrrrrtrrrrrvrrtr"
+        137458: (
+            "rrtrrrrrrrrrrvvrrvrrrrrrrrtrtvrvvrrrrtrrrrtrrrrrrrrrrrrrrvrrrrrvrrrrrrrrrvr"
+            "rrrrrrrrvrrrrrrrrvrtrrrrtrrrrvrrrrvvrrrrrrrrrrrrrrrrrrrrvrrrtvrvrrrrrrrrttr"
+            "rrrrrrrrvtvrrrrrrrrrrrrrrtrrrrrrrrtrrrtrrvvrrrrrrrrrvrrrvtrrrrrrrrrrrrtrrrr"
+            "rrrrrrvrrrrrrrrrtvrrtrtrrrtrrrrrrrrvrrrrrrrrrrrrtrtrrrrrvrrtrrrrrrrrtrrrvrr"
         ),
-        4701: (
-            "rrrtvvrvrrrrrrrrrrvvrtrvrtrrrrrtrrrrrrtrrrvrrvrrrrtrvrrrvrvtrtrtvrrrvvrrrrr"
-            "rrrtrrrrrrrrrrrrrrrrrvvtrrrrrrrtrrrrrrrtvrtrrrrrrrrrvrrtrrrrrrrrrrrrtrvrrtr"
-            "rrrrrrrrrtrrrrvvrtrrrrrtvrrrrrrrrrrrrrvrtrrrtrrrrrrtrvrrrrrrrrrrvtvtrvrrrrt"
-            "rrrtrrrvrrrrtrrrrrrvrrrrtrrrrrvrrrrrrrrrrrrrtrvrrrrrrrrrrrtrrrtrrvrrrrvvrrr"
+        142158: (
+            "rrrtrrrtrrtrvrrrttrrvrrrvrrrtrrrtttrrrrrtrrrrrrtrrrrrrtrrrvrrrrrrvrrrrrrvrr"
+            "rrrrrtrtrrtrvrrrrvrrtrrrrrtrrrtrrtrrrrrrrrrvtrrrvrrtrrrrrrrrrrrrvrtrrvrrrrt"
+            "rtrrrrrrrrrrrrrrrrrrrrrrrvrtrrvrrrrrrrrvrrrvrrrvvrrrrrrrrrrrrtrrrrrrrvrrrrr"
+            "rrrrvtvvrrrrrrrrrvrvrrrvvrtrvrrrrrrrrrtrrrtrrrrrtrrrrrrrrrrrrrtrrrvrrrrrrrr"
         ),
-        13686: (
-            "rtrrrrrrrrrvrrrrrrrrrrrrrvrrrrrvrrrrrrvrrrrrrrrvrrrrrrrrrrrrvvrrrrrrrtrrrrr"
-            "rrvrvrrrrrrrrrrrrtrvrrrrrrrrrrrrrvvrrrrrrrrrttrrtrrtvvrrrrrrrrrrrrtrrrrrrrr"
-            "rrrvrvtrrrrrtrvrrrrrrrrvvrrrrrrrrrrrrrrrrtrrrrrrrvrrvrrrrrrrrrrrrrrrrrrrrrv"
-            "rrvrrrrrrrrrrrtrrrtrrtrrrtrvrrrrrrrrrtrtvrrrrrvvvrrtrrrrrrrrrrrvrrtrvrrrrrr"
+        151143: (
+            "rvvtrrvrvvrtrrrrrvrrrvvtrvrtrrvrrrrrrrrrrrrrrrrrvrrrvrrtrrrrrrrrrrrtrrrrrrr"
+            "rrrrrtrtrrrrrrrrtvrrrrtvrtrrrrvrrrrrrrrrrrvrrvrrrrrrrvvrvrvrrrrrrrtvrrrrrrr"
+            "vrrrrrrtrrrrrrrrvrvtrrrrrrrrrrrrrrrrtvvrrvrrrrrvvvrrrvrtrrrtrvrrrrrtrrrrrrr"
+            "rtrrrrrrrrrrrrrrrrrrrrrrrrrrrvrrrrrrrrrrrrrrrrrtrrvrrrrrtrrvrrrrrvrrrrrrvrv"
         ),
     },
 }
@@ -69,7 +68,7 @@ def origin_gps(origin: str) -> float:
 
 
 def golden_blocks(origin: str) -> Dict[int, str]:
-    """{block index: split} for every literal of ``origin``."""
+    """{block index: split} for every literal of region ``origin``."""
     table = {}
     for first, letters in GOLDEN_BLOCKS[origin].items():
         for offset, letter in enumerate(letters):
@@ -78,25 +77,28 @@ def golden_blocks(origin: str) -> Dict[int, str]:
 
 
 def block_of(origin: str, gps: float) -> int:
-    return int(np.floor((float(gps) - origin_gps(origin)) / BLOCK_SECONDS))
+    return int(np.floor(float(gps) / BLOCK_SECONDS))
 
 
 def block_start(origin: str, block: int) -> float:
-    return origin_gps(origin) + block * BLOCK_SECONDS
+    return block * BLOCK_SECONDS
 
 
 def golden_split(origin: str, start: float, end: float) -> str:
     """
-    The split of the time [start, end): it must lie in one block of the table.
-    Raises when it crosses a block edge or lies outside the table.
+    The split of the time [start, end): every block it touches must be in the table
+    and of one split. Raises when it crosses an edge between splits or lies outside
+    the table.
     """
     first, last = block_of(origin, start), block_of(origin, np.nextafter(float(end), -np.inf))
-    if first != last:
-        raise AssertionError(f"[{start}, {end}) crosses the edge of blocks {first} and {last}")
     table = golden_blocks(origin)
-    if first not in table:
-        raise AssertionError(f"[{start}, {end}) is in block {first}, outside the golden table")
-    return table[first]
+    missing = [block for block in range(first, last + 1) if block not in table]
+    if missing:
+        raise AssertionError(f"[{start}, {end}) is in block {missing[0]}, outside the golden table")
+    splits = {table[block] for block in range(first, last + 1)}
+    if len(splits) != 1:
+        raise AssertionError(f"[{start}, {end}) crosses the edge of blocks {first} and {last}")
+    return splits.pop()
 
 
 def boundary(origin: str, before: str, after: str, run: Optional[str] = None, skip: int = 0) -> float:
@@ -317,14 +319,13 @@ def ifo_data_obtainer(fixture: Fixture, **overrides):
 
 
 def noise_obtainer(fixture: Fixture, directory, ifos=("H1", "L1"), **overrides):
-    """A REAL NoiseObtainer over the fixture, with the golden table's fractions."""
+    """A REAL NoiseObtainer over the fixture, split by the default spec (the golden table's)."""
     import gravyflow as gf
 
     return gf.NoiseObtainer(
         ifo_data_obtainer=ifo_data_obtainer(fixture, **overrides),
         ifos=[gf.IFO[name] for name in ifos],
         noise_type=gf.NoiseType.REAL,
-        groups=dict(GOLDEN_GROUPS),
         data_directory_path=Path(directory),
     )
 
@@ -394,7 +395,7 @@ def served_segments(fixture: Fixture, ifos, split: str, seed: int = 7, **overrid
     import gravyflow as gf
 
     obtainer = ifo_data_obtainer(fixture, **overrides)
-    valid = obtainer.get_valid_segments([gf.IFO[name] for name in ifos], seed, dict(GOLDEN_GROUPS), split)
+    valid = obtainer.get_valid_segments([gf.IFO[name] for name in ifos], seed, split)
     valid = np.asarray(valid, dtype=np.float64)
     return {name: valid[:, d] for d, name in enumerate(ifos)}
 
@@ -402,7 +403,7 @@ def served_segments(fixture: Fixture, ifos, split: str, seed: int = 7, **overrid
 __all__ = [
     "ONSOURCE_SECONDS", "CROP_SECONDS", "OFFSOURCE_SECONDS", "ifo_data_obtainer",
     "noise_obtainer", "noise_batches", "dataset", "dataset_batches", "window", "served_segments",
-    "BLOCK_SECONDS", "GOLDEN_GROUPS", "GOLDEN_BLOCKS", "origin_gps", "golden_blocks", "block_of",
+    "BLOCK_SECONDS", "GUARD_SECONDS", "GOLDEN_BLOCKS", "origin_gps", "golden_blocks", "block_of",
     "block_start", "golden_split", "boundary", "Fixture", "straddle", "odd_pieces",
     "two_splits_per_run", "hw_injection_gaps", "glitches", "glitch_forbidden",
     "GLITCH_PADDING_SECONDS", "DEFAULT_GLITCH_PADDING_SECONDS", "events",

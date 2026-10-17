@@ -220,7 +220,7 @@ def test_the_validator_scores_injections_on_two_detectors(tmp_path):
 
 @pytest.mark.global_rng
 def test_the_validator_scores_real_events(dataset_args, offline_events):
-    # The real-event stage reads every named event, split "all", with no group named.
+    # The real-event stage scores every confident event, once: real events are test data.
     bank = ValidationBank(logit_model(1), dataset_args, ValidationConfig(num_examples=32, batch_size=32))
     bank.far_scores = np.random.default_rng(3).standard_normal(64)
     bank.generate_real_events(observing_runs=[gf.ObservingRun.O3])

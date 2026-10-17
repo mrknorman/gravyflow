@@ -361,6 +361,19 @@ def usable_over_its_runs(obtainer, ifo):
     return np.array([[min(obtainer.start_gps_times), max(obtainer.end_gps_times)]])
 
 
+def catalogued_events(events=()):
+    """
+    Serve ``events`` (rows with ``name``, ``gps`` and ``catalog``) as the one event
+    list, offline: a patch of ``event.get_event_catalogue``, which every event
+    veto and the transient index's event exclusion read.
+    """
+    from unittest import mock
+    from gravyflow.src.dataset.features import event as event_module
+
+    table = event_module._event_rows_to_arrays([dict(e) for e in events])
+    return mock.patch.object(event_module, "get_event_catalogue", lambda use_cache=True: table)
+
+
 #: Three O3 events seen by H1 and L1, as the GWTC catalogue lists them.
 OFFLINE_EVENTS = [
     {"name": name, "gps": gps, "network": "H1L1", "catalog": "GWTC-3-confident",
@@ -398,5 +411,6 @@ def offline_events():
          mock.patch.object(gf.TransientDataObtainer, "_initialize_transient_cache",
                            lambda self, *args, **kwargs: (object(), None)), \
          mock.patch.object(gf.TransientDataObtainer, "_get_sample_from_cache", cached_strain), \
-         mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs):
+         mock.patch.object(gf.TransientDataObtainer, "get_all_segment_times", usable_over_its_runs), \
+         catalogued_events(OFFLINE_EVENTS):
         yield [dict(e) for e in OFFLINE_EVENTS]
