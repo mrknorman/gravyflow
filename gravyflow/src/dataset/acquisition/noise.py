@@ -784,8 +784,8 @@ class NoiseDataObtainer(BaseDataObtainer):
                               whiten, crop)
 
         def held(ifo, start: int) -> None:
-            """Commit every tile one window's read needs, refusing as its read would (the store's own read)."""
-            store_read.read(self.source, ifo, rate, start - off, off + on, stream=stream)
+            """Commit every tile one window's read needs, refusing as its read would, without reading it."""
+            store_read.ensure(self.source, ifo, rate, start - off, off + on, stream=stream)
 
         def prepare(addresses: Sequence[BatchStreams]) -> List[store_read.TimelineContradiction]:
             """Every contradiction the windows of ``addresses`` meet, each tile committed once."""
