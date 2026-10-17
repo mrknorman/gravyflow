@@ -90,19 +90,21 @@ def test_cbc_waveforms_match_a_64_bit_reference(approximant):
     source = _sources(approximant, count=8, seed=7)
     with jax.enable_x64(False):
         # Arrays made outside the scope are float32, as the dataset path makes them.
-        waveforms = cbc.generate_cbc_waveform(
+        waveforms = cbc._generate_cbc_window(
             num_waveforms=8,
             sample_rate_hertz=SAMPLE_RATE,
-            duration_seconds=4.0,
+            window_seconds=2.0,
+            min_frequency_hertz=None,
             approximant=approximant,
             **{name: ops.convert_to_tensor(value, dtype="float32") for name, value in source.items()},
         )
         assert not jax.config.jax_enable_x64
     with jax.enable_x64(True):
-        reference = cbc.generate_cbc_waveform(
+        reference = cbc._generate_cbc_window(
             num_waveforms=8,
             sample_rate_hertz=SAMPLE_RATE,
-            duration_seconds=4.0,
+            window_seconds=2.0,
+            min_frequency_hertz=None,
             approximant=approximant,
             **{name: jax.numpy.asarray(value, dtype=jax.numpy.float64) for name, value in source.items()},
         )

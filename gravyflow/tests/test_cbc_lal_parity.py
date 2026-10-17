@@ -1,8 +1,8 @@
 """
 LAL parity of gravyflow's CBC waveforms.
 
-For each approximant, ``generate_cbc_waveform`` produces a few sources end to
-end, and each polarisation is matched against
+For each approximant, the generator (``_generate_cbc_waveform_jit``) produces a
+few sources end to end, and each polarisation is matched against
 ``lalsimulation.SimInspiralChooseFDWaveform`` for the same source. The match is
 maximised over time and phase and weighted by the aLIGO zero-detuned
 high-power PSD above the band's lower frequency (and below the ISCO frequency
@@ -22,9 +22,9 @@ import pytest
 
 from gravyflow.src.dataset.features.waveforms.cbc import (
     Approximant,
+    _generate_cbc_waveform_jit,
     _generate_cbc_window,
     _taper_band,
-    generate_cbc_waveform,
 )
 
 SAMPLE_RATE = 4096.0
@@ -198,7 +198,7 @@ def test_cbc_waveforms_match_lal(approximant):
     _, edge = _taper_band(m1, m2, np.full(len(points), coalescence_time))
     assert np.all(np.asarray(edge) < f_low), edge
 
-    waveforms = generate_cbc_waveform(
+    waveforms = _generate_cbc_waveform_jit(
         num_waveforms=len(points),
         sample_rate_hertz=SAMPLE_RATE,
         duration_seconds=duration,

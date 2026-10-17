@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from keras import ops
 
 from gravyflow.src.dataset.features.waveforms.cbc import (
-    generate_cbc_waveform,
+    _generate_cbc_window,
     calc_minimum_frequency,
     calc_duration_from_f_min,
     Approximant
@@ -88,12 +88,13 @@ def test_calc_duration_from_f_min_float32():
 # WAVEFORM GENERATION TESTS
 # ============================================================================
 
-def test_generate_cbc_waveform_imrphenomd():
+def test_generate_cbc_window_imrphenomd():
     """Test basic IMRPhenomD waveform generation."""
-    waveforms = generate_cbc_waveform(
+    waveforms = _generate_cbc_window(
         num_waveforms=2,
         sample_rate_hertz=2048.0,
-        duration_seconds=2.0,
+        window_seconds=2.0,
+        min_frequency_hertz=None,
         mass_1_msun=30.0,
         mass_2_msun=30.0,
         approximant="IMRPhenomD"
@@ -107,12 +108,13 @@ def test_generate_cbc_waveform_imrphenomd():
     assert float(jnp.max(jnp.abs(waveforms))) > 0.0
 
 
-def test_generate_cbc_waveform_imrphenomxas():
+def test_generate_cbc_window_imrphenomxas():
     """Test IMRPhenomXAS approximant."""
-    waveforms = generate_cbc_waveform(
+    waveforms = _generate_cbc_window(
         num_waveforms=1,
         sample_rate_hertz=2048.0,
-        duration_seconds=2.0,
+        window_seconds=2.0,
+        min_frequency_hertz=None,
         mass_1_msun=30.0,
         mass_2_msun=30.0,
         approximant="IMRPhenomXAS"
@@ -122,12 +124,13 @@ def test_generate_cbc_waveform_imrphenomxas():
     assert waveforms.shape[1] == 2
 
 
-def test_generate_cbc_waveform_imrphenompv2():
+def test_generate_cbc_window_imrphenompv2():
     """Test IMRPhenomPv2 approximant (covers lines 252-264)."""
-    waveforms = generate_cbc_waveform(
+    waveforms = _generate_cbc_window(
         num_waveforms=1,
         sample_rate_hertz=2048.0,
-        duration_seconds=2.0,
+        window_seconds=2.0,
+        min_frequency_hertz=None,
         mass_1_msun=30.0,
         mass_2_msun=30.0,
         spin_1_in=[0.1, 0.1, 0.3],  # Precessing spins
@@ -139,12 +142,13 @@ def test_generate_cbc_waveform_imrphenompv2():
     assert waveforms.shape[1] == 2
 
 
-def test_generate_cbc_waveform_taylorf2():
+def test_generate_cbc_window_taylorf2():
     """Test TaylorF2 approximant with tidal parameters (covers lines 266-274)."""
-    waveforms = generate_cbc_waveform(
+    waveforms = _generate_cbc_window(
         num_waveforms=1,
         sample_rate_hertz=2048.0,
-        duration_seconds=4.0,
+        window_seconds=4.0,
+        min_frequency_hertz=None,
         mass_1_msun=1.4,  # Neutron star masses
         mass_2_msun=1.4,
         lambda_1=400.0,  # Tidal deformability
@@ -156,12 +160,13 @@ def test_generate_cbc_waveform_taylorf2():
     assert waveforms.shape[1] == 2
 
 
-def test_generate_cbc_waveform_nrtidalv2():
+def test_generate_cbc_window_nrtidalv2():
     """Test IMRPhenomD_NRTidalv2 approximant."""
-    waveforms = generate_cbc_waveform(
+    waveforms = _generate_cbc_window(
         num_waveforms=1,
         sample_rate_hertz=2048.0,
-        duration_seconds=4.0,
+        window_seconds=4.0,
+        min_frequency_hertz=None,
         mass_1_msun=1.4,
         mass_2_msun=1.4,
         lambda_1=300.0,
@@ -172,11 +177,14 @@ def test_generate_cbc_waveform_nrtidalv2():
     assert waveforms.shape[0] == 1
 
 
-def test_generate_cbc_waveform_invalid_approximant():
+def test_generate_cbc_window_invalid_approximant():
     """Test error handling for invalid approximant (covers line 172)."""
     with pytest.raises(ValueError, match="not supported"):
-        generate_cbc_waveform(
+        _generate_cbc_window(
             num_waveforms=1,
+            sample_rate_hertz=2048.0,
+            window_seconds=1.0,
+            min_frequency_hertz=None,
             approximant="InvalidApproximant"
         )
 
@@ -185,7 +193,7 @@ def test_generate_cbc_waveform_invalid_approximant():
 # SPIN RESHAPING TESTS
 # ============================================================================
 
-def test_generate_cbc_waveform_batch_spins():
+def test_generate_cbc_window_batch_spins():
     """Test waveform generation with batch spin inputs (covers lines 199-200, 204-205)."""
     num_waveforms = 3
     
@@ -193,10 +201,11 @@ def test_generate_cbc_waveform_batch_spins():
     spin_1_flat = [0.1, 0.0, 0.3] * num_waveforms  # Will be reshaped to (3, 3)
     spin_2_flat = [0.0, 0.0, 0.2] * num_waveforms
     
-    waveforms = generate_cbc_waveform(
+    waveforms = _generate_cbc_window(
         num_waveforms=num_waveforms,
         sample_rate_hertz=2048.0,
-        duration_seconds=2.0,
+        window_seconds=2.0,
+        min_frequency_hertz=None,
         mass_1_msun=30.0,
         mass_2_msun=30.0,
         spin_1_in=spin_1_flat,
@@ -207,30 +216,34 @@ def test_generate_cbc_waveform_batch_spins():
     assert waveforms.shape[0] == num_waveforms
 
 
-def test_generate_cbc_waveform_with_coalescence_time():
-    """Test explicit coalescence time parameter."""
-    waveforms = generate_cbc_waveform(
-        num_waveforms=1,
-        sample_rate_hertz=2048.0,
-        duration_seconds=2.0,
-        mass_1_msun=30.0,
-        mass_2_msun=30.0,
-        coalescence_time=1.5,  # Explicit coalescence time
-        approximant="IMRPhenomD"
-    )
-    
-    assert waveforms.shape[0] == 1
+def test_generate_cbc_window_puts_the_merger_at_the_centre():
+    """The merger is sample K // 2 of the K-sample window, whatever the window."""
+    for window_seconds in (1.0, 1.5, 3.0):
+        waveforms = np.asarray(_generate_cbc_window(
+            num_waveforms=1,
+            sample_rate_hertz=2048.0,
+            window_seconds=window_seconds,
+            min_frequency_hertz=None,
+            mass_1_msun=30.0,
+            mass_2_msun=30.0,
+            approximant="IMRPhenomD"
+        ))
+        num_samples = int(2048.0 * window_seconds)
+        assert waveforms.shape == (1, 2, num_samples)
+        peak = int(np.argmax(np.sum(waveforms[0] ** 2, axis=0)))
+        assert abs(peak - num_samples // 2) <= 10, (window_seconds, peak, num_samples // 2)
 
 
-def test_generate_cbc_waveform_tensor_input():
+def test_generate_cbc_window_tensor_input():
     """Test waveform generation with tensor inputs (covers line 375)."""
     # Use ops tensors as inputs
     mass = ops.convert_to_tensor(30.0)
     
-    waveforms = generate_cbc_waveform(
+    waveforms = _generate_cbc_window(
         num_waveforms=1,
         sample_rate_hertz=2048.0,
-        duration_seconds=2.0,
+        window_seconds=2.0,
+        min_frequency_hertz=None,
         mass_1_msun=mass,
         mass_2_msun=mass,
         approximant="IMRPhenomD"
