@@ -1136,37 +1136,39 @@ class TransientDataObtainer(BaseDataObtainer):
         rng = default_rng(seed)
         n_segments = len(self.transient_segments)
         
-        # Weighted sampling: if segments have non-uniform weights (from apply_balancing),
-        # use weighted choice to oversample rare classes. Otherwise, shuffle uniformly.
+        if n_segments == 0:
+            raise ValueError("No transient segments available for iteration.")
+
+        # Each pass draws among the records still servable, so a pass that serves
+        # nothing has found every record it drew unavailable: the servable records
+        # shrink with each such pass, and the split is served or refused, never spun.
+        # Equal weights: one shuffled order over the records, kept for cache hits.
+        # Otherwise (apply_balancing), weighted draws with replacement oversample the
+        # rare classes.
         weights = np.array([seg.weight for seg in self.transient_segments], dtype=np.float32)
-        
-        if np.allclose(weights, 1.0):
-            # All weights equal - use simple shuffle (more efficient)
-            segment_indices = np.arange(n_segments)
-            rng.shuffle(segment_indices)
+        weighted = not np.allclose(weights, 1.0)
+        order = np.arange(n_segments)
+        if weighted:
+            logger.info(f"Using weighted sampling over {n_segments} transients")
         else:
-            # Weighted sampling - rare classes will appear more often
-            # Normalize weights to probabilities
-            probs = weights / weights.sum()
-            # Sample with replacement to allow oversampling of rare classes
-            segment_indices = rng.choice(n_segments, size=n_segments, replace=True, p=probs)
-            logger.info(f"Using weighted sampling: {len(np.unique(segment_indices))} unique segments from {n_segments} total")
-        
-        # Guard: If no segments, raise error rather than spin forever
-        if len(segment_indices) == 0:
-            raise ValueError(
-                f"No transient segments available for iteration. "
-                f"len(transient_segments)={len(self.transient_segments)}"
-            )
-        
+            rng.shuffle(order)
+
         while True:
-            # A pass over records all found without strain would serve nothing, forever.
-            if all(s.transient_gps_time in self._unavailable for s in self.transient_segments):
+            servable = np.array([
+                index for index in order
+                if self.transient_segments[index].transient_gps_time not in self._unavailable
+            ], dtype=int)
+            if len(servable) == 0:
                 raise ValueError(
-                    f"None of the {n_segments} transients of this split can be served on "
-                    f"{[ifo.name for ifo in ifos]}: each was rejected for no data "
-                    f"(rejections: {dict(self._rejections)})."
+                    f"None of the {n_segments} transients of split '{self._served_group}' "
+                    f"can be served on {[ifo.name for ifo in ifos]}: each was rejected for "
+                    f"no data (rejections: {dict(self._rejections)})."
                 )
+            segment_indices = servable
+            if weighted:
+                probs = weights[servable] / weights[servable].sum()
+                segment_indices = rng.choice(servable, size=len(servable), replace=True, p=probs)
+
             # DON'T shuffle here - keep deterministic order for cache hits
             batch_subarrays = []
             batch_backgrounds = []
@@ -1196,7 +1198,7 @@ class TransientDataObtainer(BaseDataObtainer):
                     })
                 # Get TransientSegment (has GPS key and times)
                 segment = self.transient_segments[seg_idx]
-                if segment.transient_gps_time in self._unavailable:
+                if segment.transient_gps_time in self._unavailable:  # found unavailable earlier this pass
                     continue
                 
                 # Select appropriate cache

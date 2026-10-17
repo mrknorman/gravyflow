@@ -13,6 +13,8 @@ at the requested rate, each valued its GPS time minus ``REF``, so a returned sam
 decodes to its GPS time.
 """
 
+import dataclasses
+import threading
 from contextlib import contextmanager
 from unittest import mock
 
@@ -322,6 +324,30 @@ def by_time(batch, key):
     return np.asarray(batch[key])[order]
 
 
+def weighted(catalogue, weights):
+    """``catalogue`` with each record's sampling weight, as class balancing sets it."""
+    return [dataclasses.replace(record, weight=w) for record, w in zip(catalogue, weights)]
+
+
+def within(seconds, call):
+    """``call()``, which fails the test if it has not returned within ``seconds``."""
+    outcome = {}
+
+    def run():
+        try:
+            outcome["value"] = call()
+        except BaseException as error:  # re-raised in the test's thread
+            outcome["error"] = error
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), f"no result within {seconds} s: the call spins"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
 class TestUnavailableRecords:
     """
     A record found without a requested detector's strain is counted once and not
@@ -345,10 +371,28 @@ class TestUnavailableRecords:
         with offline(GridFetch(bad={"L1": list(TIMES)})) as fetch:
             reader = obtainer(tmp_path)
             batches = reader(ifos=[gf.IFO.L1], group="all", seed=1, **WINDOW)
-            with pytest.raises(ValueError, match="no data"):
+            with pytest.raises(ValueError, match="split 'all'.*no data"):
                 next(batches)
         assert all(fetches_of(fetch, t) == 2 for t in TIMES), "each record is fetched once (H1 and L1)"
         assert reader.get_acquisition_stats()["rejections"] == {"no data": 3}
+
+    def test_a_weighted_split_is_served_by_the_records_its_first_draws_missed(self, tmp_path):
+        # The one servable record is all but never drawn: each pass draws among the
+        # records still servable, so it is served once the others are found unavailable.
+        catalogue = weighted(records(), [1e-6, 1.0, 1.0])
+        with offline(GridFetch(bad={"L1": list(TIMES[1:])}), catalogue=catalogue):
+            reader = obtainer(tmp_path)
+            batches = reader(ifos=[gf.IFO.L1], group="all", seed=1, **WINDOW)
+            batch = within(60, lambda: next(batches))
+        assert set(served_times(batch)) == set(rounded(TIMES[:1]))
+        assert reader.get_acquisition_stats()["rejections"] == {"no data": 2}
+
+    def test_a_weighted_split_with_no_record_available_is_refused_not_spun(self, tmp_path):
+        catalogue = weighted(records(), [1e-6, 1.0, 1.0])
+        with offline(GridFetch(bad={"L1": list(TIMES)}), catalogue=catalogue):
+            batches = obtainer(tmp_path)(ifos=[gf.IFO.L1], group="all", seed=1, **WINDOW)
+            with pytest.raises(ValueError, match="split 'all'.*no data"):
+                within(60, lambda: next(batches))
 
     def test_a_failed_fetch_of_an_unrequested_detector_is_fetched_when_requested(self, tmp_path):
         with offline(GridFetch(bad={"H1": [TIMES[1]]})):
