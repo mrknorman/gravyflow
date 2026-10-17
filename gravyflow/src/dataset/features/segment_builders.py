@@ -5,10 +5,14 @@ These replace build_glitch_records/build_event_records and return
 TransientSegments with acquisition boundaries already set.
 """
 from typing import List
+
+import numpy as np
 from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.acquisition.base import DataLabel, ObservingRun
 from gravyflow.src.dataset.features.glitch import GlitchType, get_glitch_catalogue, get_glitch_type_from_index
-from gravyflow.src.dataset.features.event import EventConfidence, SourceType, get_events_with_params
+from gravyflow.src.dataset.features.event import (
+    EventConfidence, SourceType, get_events_with_params, source_type_from_masses,
+)
 from gravyflow.src.utils.gps import gps_to_key
 import gravyflow as gf
 
@@ -149,9 +153,9 @@ def build_event_segments(
         return ifos if ifos else [gf.IFO.H1, gf.IFO.L1]  # Conservative fallback
     
     for event in events:
-        # The event list gives no source-class probabilities (only p_astro), so
-        # every event is labelled BBH.
-        source_type = SourceType.BBH
+        # The event list gives no source-class probabilities (only p_astro): the
+        # type follows from the median source masses.
+        source_type = source_type_from_masses(event.get("mass1", np.nan), event.get("mass2", np.nan))
         
         # Map run string to enum
         run_str = event.get('observing_run', 'O3')

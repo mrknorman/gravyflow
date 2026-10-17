@@ -26,6 +26,8 @@ def search_events(
   > - `gf.SourceType.BNS`: Binary Neutron Star (both masses < 3 M☉)
   > - `gf.SourceType.NSBH`: Neutron Star - Black Hole (one < 3 M☉, one ≥ 3 M☉)
   >
+  > A string names the type (`"bns"`); an unknown name raises `ValueError`. Events without masses match no type.
+  >
   > **Strings (Supported):** `"BBH"`, `"BNS"`, `"NSBH"` (case-insensitive).
 
 - `observing_runs` : `List[gf.ObservingRun]` = `None`:

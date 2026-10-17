@@ -123,6 +123,18 @@ class TestEventsWithParams:
         events = event_module.get_events_with_params()
         assert [(e["name"], e["catalog"]) for e in events] == [("GW150914", "GWTC")]
 
+    def test_source_types_from_catalogue_masses(self):
+        """Median source masses against 3 Msun; no masses is UNKNOWN, never BBH."""
+        from gravyflow.src.dataset.features.segment_builders import build_event_segments
+
+        kinds = {s.name: s.kind for s in build_event_segments(observing_runs=None)}
+        assert kinds == {"GW150914": gf.SourceType.BBH, "GW170817": gf.SourceType.BNS,
+                         "GW-NO-MASSES": gf.SourceType.UNKNOWN}
+        source_type = event_module.source_type_from_masses
+        assert source_type(1.4, 10.0) == source_type(10.0, 1.4) == gf.SourceType.NSBH
+        assert source_type(23.2, 2.6) == gf.SourceType.NSBH  # GW190814's secondary
+        assert source_type(3.0, 3.0) == gf.SourceType.BBH
+
     def test_marginal_events(self):
         events = event_module.get_events_with_params(event_types=[gf.EventConfidence.MARGINAL])
         assert [e["name"] for e in events] == ["marginal"]
@@ -143,6 +155,7 @@ class TestEventsWithParams:
 
     def test_search_reads_the_parameters(self):
         assert gf.search_events(source_type=gf.SourceType.BNS) == ["GW170817"]
+        assert gf.search_events(source_type="bns") == ["GW170817"]
         assert gf.search_events(distance_range=(None, 100.0)) == ["GW170817"]
 
     def test_nothing_is_written_inside_the_package(self):

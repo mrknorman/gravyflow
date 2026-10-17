@@ -36,9 +36,26 @@ class SourceType(IntEnum):
     
     Using IntEnum allows direct .value access for integer labels.
     """
+    UNKNOWN = -1  # The catalogue gives no masses
     BBH = 0   # Binary Black Hole
     BNS = 1   # Binary Neutron Star
     NSBH = 2  # Neutron Star - Black Hole
+
+
+#: The source-frame mass, in solar masses, below which a component is a neutron star.
+NEUTRON_STAR_MAX_MASS = 3.0
+
+
+def source_type_from_masses(mass1: float, mass2: float) -> SourceType:
+    """
+    The source type of a binary from its components' median source-frame masses, in
+    either order: BNS if both are below ``NEUTRON_STAR_MAX_MASS``, NSBH if one is,
+    BBH otherwise, and UNKNOWN when either mass is missing (NaN).
+    """
+    if not (np.isfinite(mass1) and np.isfinite(mass2)):
+        return SourceType.UNKNOWN
+    neutron_stars = int(mass1 < NEUTRON_STAR_MAX_MASS) + int(mass2 < NEUTRON_STAR_MAX_MASS)
+    return (SourceType.BBH, SourceType.NSBH, SourceType.BNS)[neutron_stars]
 
 # Catalog mappings by event type
 CONFIDENT_CATALOGS = [
@@ -428,10 +445,10 @@ def search_events(
     # Handle string input for source_type for backward compatibility/ease of use
     if isinstance(source_type, str):
         try:
-            source_type = SourceType(source_type.upper())
-        except ValueError:
-            logging.warning(f"Unknown source type: {source_type}. Ignoring filter.")
-            source_type = None
+            source_type = SourceType[source_type.upper()]
+        except KeyError:
+            raise ValueError(f"Unknown source type {source_type!r}: choose from "
+                             f"{[member.name for member in SourceType]}.") from None
 
     matching_names = []
     for event in events:
@@ -453,24 +470,7 @@ def search_events(
         
         # Source type filter
         if source_type is not None:
-            m1 = event.get("mass1", np.nan)
-            m2 = event.get("mass2", np.nan)
-            if np.isnan(m1) or np.isnan(m2):
-                continue
-            # Neutron star mass threshold ~3 solar masses
-            ns_threshold = 3.0
-            is_ns1 = m1 < ns_threshold
-            is_ns2 = m2 < ns_threshold
-            
-            is_bbh = (not is_ns1) and (not is_ns2)
-            is_bns = is_ns1 and is_ns2
-            is_nsbh = is_ns1 != is_ns2
-            
-            if source_type == SourceType.BBH and not is_bbh:
-                continue
-            elif source_type == SourceType.BNS and not is_bns:
-                continue
-            elif source_type == SourceType.NSBH and not is_nsbh:
+            if source_type_from_masses(event.get("mass1", np.nan), event.get("mass2", np.nan)) != source_type:
                 continue
         
         # Name filter
