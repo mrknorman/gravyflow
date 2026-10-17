@@ -426,6 +426,21 @@ def test_the_bundled_bank_covers_its_range_by_an_independent_overlap():
     assert below <= 0.03 and ff.min() >= 0.94, (below, ff.min())
 
 
+def test_the_bundled_bank_covers_the_boundary_of_its_range():
+    # Placement covers every point of the boundary (one component at 5 or 95
+    # solar masses, corners included) by construction, so this bound holds for
+    # any sound placement, not only for this one. Points between the
+    # placement's own boundary candidates, in the metric it places with (equal
+    # to pycbc's overlap, above). A bank shifted by 2% in mass leaves the edge
+    # m2 = 5 uncovered, which the interior's fraction above cannot see.
+    bank = MatchedFilter(sample_rate_hertz=FS).bank
+    edge = np.exp(np.linspace(np.log(5.0), np.log(95.0), 97))
+    m1, m2 = np.concatenate([edge, np.full(97, 95.0)]), np.concatenate([np.full(97, 5.0), edge])
+    ff = bank.fitting_factors(m1, m2)
+    worst = np.argsort(ff)[:3]
+    assert ff.min() >= 0.965, [(m1[i].round(2), m2[i].round(2), ff[i].round(4)) for i in worst]
+
+
 def test_the_bundled_bank_is_the_default_filters_and_names_what_it_depends_on():
     import hashlib
     import json
@@ -497,7 +512,8 @@ def test_max_templates_holds_for_a_bundled_bank():
     # The limit is the same whether the bank is placed or loaded.
     with pytest.raises(ValueError, match="max_templates"):
         TemplateBank.stochastic(max_templates=100)
-    assert TemplateBank.stochastic(max_templates=776).num_templates == 776
+    size = MatchedFilter(sample_rate_hertz=FS).bank.num_templates
+    assert TemplateBank.stochastic(max_templates=size).num_templates == size
 
 
 def json_copy(data):

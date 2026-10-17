@@ -348,10 +348,12 @@ class TemplateBank:
     ) -> "TemplateBank":
         """
         Stochastic placement (Harry, Allen & Sathyaprakash 2009; Babak 2008):
-        candidates drawn log-uniform in each component mass over `mass_range` are
-        kept when their match with every template already kept is below
-        `minimal_match`. Placement stops when, over the last
-        `convergence_candidates` candidates, fewer than 1 - `target_coverage` were
+        candidates are kept when their match with every template already kept
+        is below `minimal_match`. The boundary of `mass_range` (one component
+        at a bound) is placed first, with candidates in order along it, so
+        every point of it is covered. Then candidates drawn log-uniform in each
+        component mass fill the interior, until, over the last
+        `convergence_candidates` of them, fewer than 1 - `target_coverage` were
         kept: the fraction of the space (in the proposal's measure) left with a
         fitting factor below the minimal match is then about that small.
 
@@ -427,36 +429,74 @@ class TemplateBank:
                    int(record["candidates_tried"]), float(record["final_acceptance"]))
 
 
+# The spacing, in log mass, of the candidates placed along the boundary of the
+# mass range: a small fraction of the smallest template's extent there (about
+# 0.02 at 5 solar masses), so that between two neighbouring candidates the
+# fitting factor cannot dip measurably below the minimal match.
+BOUNDARY_SPACING = 0.002
+
+
+def _boundary_candidates(lo: float, hi: float):
+    """
+    (m1, m2) along the boundary of the mass range, in order: the edge m2 = lo
+    (m1 rising from lo to hi), then the edge m1 = hi (m2 rising). Their ends
+    are the range's corners. The diagonal m1 = m2 is not a boundary: the space
+    folds there, so a template on either side covers both.
+    """
+    edge = np.geomspace(lo, hi, max(int(np.ceil(np.log(hi / lo) / BOUNDARY_SPACING)), 1) + 1)  # exact at both ends
+    return (np.concatenate([edge, np.full(len(edge), hi)]), np.concatenate([np.full(len(edge), lo), edge]))
+
+
 @lru_cache(maxsize=16)
 def _stochastic_masses(placement: BankPlacement, max_templates: int):
+    """
+    The masses of `placement`'s bank: its boundary first, then its interior.
+
+    The boundary (one component at a bound of the mass range) is placed in
+    order along it, every `BOUNDARY_SPACING` in log mass, so each of those
+    points ends with a template within the minimal match. A stochastic
+    placement alone leaves it badly covered: a template's neighbourhood there
+    lies partly outside the range, and where templates are small (low masses)
+    a strip along an edge is so small a share of the proposal's measure that
+    the stopping rule does not see it (the corner m1 = m2 = 5 had a fitting
+    factor of 0.43). The interior is then placed stochastically until the
+    stopping rule holds; the acceptance returned is the interior's.
+    """
     space, minimal_match, per_round = placement.space, placement.minimal_match, placement.candidates_per_round
     lo, hi = placement.mass_range
     convergence_candidates, target_coverage = placement.convergence_candidates, placement.target_coverage
     rng = np.random.default_rng(placement.seed)
     bank_spectra = np.zeros((0, space.num_samples // 2 + 1), dtype=np.complex64)
     m1_kept, m2_kept = [], []
-    history = []  # 1 for each kept candidate, 0 for each rejected one
-    tried = 0
-    while True:
-        draws = np.exp(rng.uniform(np.log(lo), np.log(hi), size=(per_round, 2)))
-        c1, c2 = np.max(draws, axis=1), np.min(draws, axis=1)
+
+    def offer(c1, c2):
+        """Keep each candidate, in order, unless a template already kept covers it: 1 for kept, 0 for not."""
+        nonlocal bank_spectra
         spectra = space.whitened_spectra(c1, c2)
         against_bank = (np.max(max_matches(spectra, bank_spectra), axis=1)
-                        if len(bank_spectra) else np.zeros(per_round, dtype=np.float32))
+                        if len(bank_spectra) else np.zeros(len(c1), dtype=np.float32))
         among = max_matches(spectra, spectra)
         kept_now = []
-        for i in range(per_round):
-            covered = against_bank[i] >= minimal_match or any(among[i, j] >= minimal_match for j in kept_now)
-            history.append(0 if covered else 1)
-            if not covered:
+        for i in range(len(c1)):
+            if against_bank[i] < minimal_match and all(among[i, j] < minimal_match for j in kept_now):
                 kept_now.append(i)
-        tried += per_round
         if kept_now:
             bank_spectra = np.concatenate([bank_spectra, spectra[kept_now]])
             m1_kept.extend(c1[kept_now])
             m2_kept.extend(c2[kept_now])
         if len(m1_kept) > max_templates:
             raise _too_many(max_templates)
+        return [int(i in kept_now) for i in range(len(c1))]
+
+    b1, b2 = _boundary_candidates(lo, hi)
+    for start in range(0, len(b1), per_round):
+        offer(b1[start:start + per_round], b2[start:start + per_round])
+    tried = len(b1)
+    history = []  # the interior's: 1 for each kept candidate, 0 for each rejected one
+    while True:
+        draws = np.exp(rng.uniform(np.log(lo), np.log(hi), size=(per_round, 2)))
+        history.extend(offer(np.max(draws, axis=1), np.min(draws, axis=1)))
+        tried += per_round
         recent = history[-convergence_candidates:]
         if len(history) >= convergence_candidates and np.mean(recent) < 1.0 - target_coverage:
             return np.array(m1_kept), np.array(m2_kept), tried, float(np.mean(recent))
