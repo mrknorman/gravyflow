@@ -22,6 +22,7 @@ from gravyflow.src.utils.tensor import (
 from gravyflow.src.utils.shapes import BatchContract
 from gravyflow.src.dataset.config import Defaults, ignore_scale_factor
 from gravyflow.src.dataset.noise.noise import index_addressed, obtainer_batcher
+from gravyflow.src.dataset.features.injection import check_scaling_matches_noise
 from gravyflow.src.rng import BatchStreams, SeedTree, check_coordinate, check_name, check_split
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
@@ -447,6 +448,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         if not self.variables_to_return:
             raise ValueError("No return variables requested. What's the point?")
         validate_noise_settings(self.noise_obtainer, self.variables_to_return)
+        check_scaling_matches_noise(self.noise_obtainer, self._generator_list())
         self._validate_padding_settings()
         self._validate_spectral_settings()
 

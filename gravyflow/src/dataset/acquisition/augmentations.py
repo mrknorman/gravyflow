@@ -71,7 +71,8 @@ class AddNoise:
     
     Args:
         probability: Probability of applying this augmentation (0.0-1.0)
-        amplitude: Noise amplitude as fraction of data std (e.g., 0.1 = 10%)
+        amplitude: Noise amplitude as fraction of data std (e.g., 0.1 = 10%);
+            a batch with zero std gets no noise.
     """
     probability: float = 0.5
     amplitude: float = 0.1

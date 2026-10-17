@@ -216,13 +216,14 @@ class TransientDataObtainer(BaseDataObtainer):
                 shift = self.rng.integers(-max_shift, max_shift + 1)
                 data = ops.roll(data, shift, axis=-1)
             elif isinstance(aug, AddNoise):
-                # Add noise perturbation
+                # Noise of aug.amplitude times the batch's std, in the data's units.
+                # A batch with no variance has no scale to add noise in, so it gets
+                # none. In float64: the square of strain (~1e-42) is below float32's
+                # normal range.
                 data_np = ops.convert_to_numpy(data)
                 noise = self.rng.normal(0, aug.amplitude, data_np.shape)
-                # In float64: the square of strain (~1e-42) is below float32's normal range.
                 std = np.std(data_np, dtype=np.float64)
-                noise = noise * std if std > 0 else noise
-                data = ops.convert_to_tensor(data_np + noise, dtype=data.dtype)
+                data = ops.convert_to_tensor(data_np + noise * std, dtype=data.dtype)
         
         return data
 

@@ -39,6 +39,7 @@ import numpy as np
 from numpy.random import Generator, default_rng
 
 from gravyflow.src.dataset.config import Defaults
+from gravyflow.src.dataset.features.injection import check_scaling_matches_noise
 from gravyflow.src.rng.legacy import warn_deprecated
 
 if TYPE_CHECKING:
@@ -101,6 +102,8 @@ class FeaturePool:
                 "not transient_obtainer"
             )
         
+        check_scaling_matches_noise(self.noise_obtainer, self.injection_generators)
+
         # Probability must be positive
         if self.probability <= 0:
             raise ValueError(

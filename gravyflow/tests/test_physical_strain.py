@@ -187,3 +187,51 @@ def test_scale_factor_arguments_are_deprecated_and_ignored():
     with pytest.raises(AttributeError, match="physical strain"):
         gf.Defaults.set(scale_factor=3.0)
     assert not hasattr(gf.Defaults, "scale_factor")
+
+
+
+# --- Strain amplitudes and white noise; AddNoise ------------------------------
+
+def _sine_gaussian(scaling_type, value):
+    return gf.SineGaussianGenerator(
+        frequency_hertz=200.0, quality_factor=9.0,
+        scaling_method=gf.ScalingMethod(gf.Distribution(value=value, type_=gf.DistributionType.CONSTANT),
+                                        scaling_type),
+        front_padding_duration_seconds=0.0, back_padding_duration_seconds=0.0,
+    )
+
+
+def _white_dataset(generator):
+    return gf.GravyflowDataset(
+        seed=26, sample_rate_hertz=FS, onsource_duration_seconds=1.0, offsource_duration_seconds=16.0,
+        num_examples_per_batch=2, ifos=[gf.IFO.L1],
+        noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]),
+        waveform_generators=generator, input_variables=[RV.ONSOURCE], output_variables=[gf.ScalingTypes.SNR],
+    )
+
+
+@pytest.mark.parametrize("scaling_type", [gf.ScalingTypes.HRSS, gf.ScalingTypes.HPEAK])
+def test_strain_amplitude_targets_are_refused_in_white_noise(scaling_type):
+    """WHITE noise is dimensionless: an HRSS or HPEAK target in strain would be invisible in it."""
+    generator = _sine_gaussian(scaling_type, 2e-22)
+    with pytest.raises(ValueError, match="WHITE noise is dimensionless"):
+        _white_dataset(generator)
+    with pytest.raises(ValueError, match="WHITE noise is dimensionless"):
+        gf.FeaturePool(name="signal", label=1, probability=1.0,
+                       noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1]),
+                       injection_generators=[generator])
+
+
+def test_snr_targets_are_accepted_in_white_noise():
+    _, y = _white_dataset(_sine_gaussian(gf.ScalingTypes.SNR, 12.0))[0]
+    np.testing.assert_allclose(np.asarray(y["SNR"]), 12.0, rtol=1e-5)
+
+
+def test_add_noise_adds_none_to_a_batch_without_variance():
+    """AddNoise is relative to the batch's std; a batch with none has no scale for it."""
+    import types
+    from gravyflow.src.dataset.acquisition.transient import TransientDataObtainer
+    fake = types.SimpleNamespace(rng=np.random.default_rng(0),
+                                 augmentations=[gf.AddNoise(probability=1.0, amplitude=0.1)])
+    out = np.asarray(TransientDataObtainer._apply_augmentation(fake, np.zeros((2, 1, 64), np.float32)))
+    assert np.all(out == 0.0)

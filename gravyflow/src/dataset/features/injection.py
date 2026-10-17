@@ -116,6 +116,26 @@ class ScalingMethod:
         factor = _ratio(scaling_parameters, measure)
         return injections * _per_example(factor, injections), factor
 
+def check_scaling_matches_noise(noise_obtainer, generators) -> None:
+    """
+    Refuse a strain-amplitude target (HRSS or HPEAK) for injections into WHITE
+    noise. WHITE noise is dimensionless (unit variance, no detector), so a strain
+    target (~1e-21) would be invisible in it, with every example still labelled
+    as injected. SNR targets are measured against the noise itself and are fine.
+    """
+    if getattr(noise_obtainer, "noise_type", None) is not gf.NoiseType.WHITE:
+        return
+    for generator in generators or []:
+        type_ = getattr(getattr(generator, "scaling_method", None), "type_", None)
+        if type_ is not None and type_.value.ordinality == ScalingOrdinality.BEFORE_PROJECTION:
+            raise ValueError(
+                f"{type(generator).__name__} scales to {type_.name}, a strain amplitude, but "
+                "WHITE noise is dimensionless (unit variance), so the injection would be "
+                "invisible in it. Scale to SNR (gf.ScalingTypes.SNR) for WHITE noise, or use "
+                "noise in strain (COLORED, PSEUDO_REAL or REAL)."
+            )
+
+
 def _per_example(values, like):
     """Reshape a (Batch,) vector to broadcast against ``like``'s (Batch, ...)."""
     rank = len(ops.shape(like))
