@@ -165,6 +165,29 @@ def test_core_runs_without_any_extra():
     assert "batches [(2, 1, " in output, output
 
 
+def test_every_public_name_resolves_as_the_first_access():
+    # Each name is the first gravyflow name used: every gravyflow module is dropped
+    # from sys.modules before it, so an import cycle that only one first access
+    # meets (gf.GlitchType through acquisition's package once did) fails by name.
+    # Third-party modules stay loaded, which only makes the loop fast.
+    output = run_python("""
+        import os, sys
+        os.environ["KERAS_BACKEND"] = "jax"
+        import gravyflow
+        failed = []
+        for name in gravyflow.__all__:
+            for module in [m for m in sys.modules if m == "gravyflow" or m.startswith("gravyflow.")]:
+                del sys.modules[module]
+            import gravyflow as gf
+            try:
+                getattr(gf, name)
+            except Exception as error:
+                failed.append(f"{name}: {type(error).__name__}: {error}")
+        print("resolved", len(gravyflow.__all__), "failed", failed)
+    """)
+    assert "failed []" in output, output
+
+
 def test_the_default_source_is_gwosc_on_first_read():
     # Defaults.source is made as it is first read, so it is GWOSC() even when
     # nothing has imported the acquisition package that defines GWOSC.
