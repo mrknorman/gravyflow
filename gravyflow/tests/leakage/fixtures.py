@@ -350,7 +350,8 @@ def noise_batches(fixture: Fixture, directory, split: str, rate: float = 256.0,
 
 def dataset(fixture: Fixture, directory, split: str, rate: float = 256.0, mode=None,
             batch: int = 8, seed: int = 7, ifos=("H1", "L1"), input_variables=None,
-            output_variables=None, waveform_generators=None, **overrides):
+            output_variables=None, waveform_generators=None, steps_per_epoch: int = 1000,
+            **overrides):
     """A Dataset of the fixture's REAL noise (cropped onsource, as strain)."""
     import gravyflow as gf
 
@@ -363,6 +364,7 @@ def dataset(fixture: Fixture, directory, split: str, rate: float = 256.0, mode=N
         num_examples_per_batch=batch,
         group=split,
         seed=seed,
+        steps_per_epoch=steps_per_epoch,
         ifos=[gf.IFO[name] for name in ifos],
         sampling_mode=mode or gf.SamplingMode.RANDOM,
         waveform_generators=waveform_generators,

@@ -82,10 +82,12 @@ class Validator:
         """
         Score ``model`` and return its results.
 
-        ``run_record`` is the model's training record (``RunDirectory.run``). The
-        validator refuses a model whose data was split by another spec than its
-        own, or whose selection split is the one it would score; with no record
-        the split the model saw is unknown, and it warns.
+        ``run_record`` is the model's training record, the ``run.json`` gravyflow
+        writes beside a model it trains (``RunDirectory.run``, ``Model.run_record``).
+        The validator refuses a model whose data was split by another spec than
+        its own, whose selection split is the one it would score, or whose record
+        names no split (`check_held_out`). A model with no gravyflow record at all
+        (an external one) is scored with a warning: the split it saw is unknown.
 
         With ``checkpoint_file_path``, results are saved after each stage, and a
         run resumes from the stages already saved there, provided the file was

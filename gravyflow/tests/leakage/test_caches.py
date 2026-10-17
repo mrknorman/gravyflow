@@ -138,13 +138,12 @@ def _refuses_another_split(call):
 
 def test_split_fingerprint_recorded(world, tmp_path):
     """
-    The transient index file, a dataset's metadata, a run's record (run.json and every
-    model record) carry the spec's fingerprint; loading or evaluating under another
-    spec, or with none recorded, is refused; an index holding an object array is never
-    unpickled.
+    The transient index file and a dataset's metadata carry the spec's fingerprint, as a
+    run's record does (its own test is in test_evaluation); loading or evaluating under
+    another spec, or with no split recorded, is refused; an index holding an object
+    array is never unpickled.
     """
     from gravyflow.src.dataset.features.transient_index import TransientIndex
-    from gravyflow.src.model.examples.recipe import RunDirectory, TrainingRun, TrainingSchedule
     from gravyflow.src.validate.config import check_held_out
 
     path = tmp_path / "index.npz"
@@ -169,18 +168,13 @@ def test_split_fingerprint_recorded(world, tmp_path):
         ds = fx.dataset(fixture, tmp_path / "data", "train", split_spec=narrow)
         assert ds.seed_metadata["split_fingerprint"] == narrow.fingerprint() != SPEC_A.fingerprint()
 
-    def run(spec):
-        return TrainingRun(directory=RunDirectory(tmp_path / "run"), seed=1, split_spec=spec,
-                           schedule=TrainingSchedule(epochs=1, steps_per_epoch=1,
-                                                     validation_batches=1, patience=1))
-
-    records = {"a": run(SPEC_A).split_record, "b": run(SPEC_B).split_record}
-    assert records["a"] == {"fingerprint": SPEC_A.fingerprint(), "selection_split": "validate"}
-    assert run(SPEC_A).config_sha256 != run(SPEC_B).config_sha256  # so a resume refuses
-
-    check_held_out("test", SPEC_A, {"split": records["a"]})
-    assert _refuses_another_split(lambda: check_held_out("test", SPEC_B, {"split": records["a"]}))
+    record ={"fingerprint": SPEC_A.fingerprint(), "selection_split": "validate"}
+    check_held_out("test", SPEC_A, {"split": record})
+    assert _refuses_another_split(lambda: check_held_out("test", SPEC_B, {"split": record}))
     assert _refuses_another_split(lambda: check_held_out("test", SPEC_A, {"split": {}}))
+    assert _refuses_another_split(lambda: check_held_out("test", SPEC_A, {"config_sha256": "0"}))
+    with pytest.raises(ValueError, match="no selection split"):
+        check_held_out("test", SPEC_A, {"split": {"fingerprint": SPEC_A.fingerprint()}})
 
 
 def test_fingerprint_check_sees_a_spec_mismatch_let_through(tmp_path, monkeypatch):

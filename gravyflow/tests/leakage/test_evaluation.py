@@ -24,8 +24,9 @@ from gravyflow.src.model.examples import train_george_huerta_2017 as george_huer
 from gravyflow.src.model.examples import validate_gabbard_2017 as validate_script
 from gravyflow.src.model.examples import recipe
 from gravyflow.src.model.examples.recipe import RunDirectory
-from gravyflow.src.validate import ValidationConfig, Validator
+from gravyflow.src.validate import StaleCheckpointError, ValidationConfig, Validator
 from gravyflow.src.validate.bank import ValidationBank
+from gravyflow.tests.leakage import fixtures as fx
 from gravyflow.tests.leakage.fingerprints import (
     assert_noise_independent, assert_rows_disjoint, assert_streams_independent, strain_prints,
 )
@@ -98,7 +99,8 @@ def validate(run_directory, num_examples):
     run_record = RunDirectory(run_directory).run
     dataset_args, config = validate_script.build_validation(args, run_record)
     model = stub_model(samples_of(run_record["description"]["config"]))
-    return Validator.validate(model=model, name="leakage", dataset_args=dataset_args, config=config)
+    return Validator.validate(model=model, name="leakage", dataset_args=dataset_args, config=config,
+                              run_record=run_record)
 
 
 def by_split(taken, stages=(), batches_per_stage=None, epochs=False):
@@ -323,21 +325,126 @@ def test_resumed_run_trains_on_the_same_epochs(tmp_path, monkeypatch):
                                        err_msg=f"{name} of batch {address}")
 
 
-def _scores_split(group, run_record):
-    """Whether the validator goes on to score ``group`` for a model with ``run_record``."""
-    class Scored(Exception):
-        pass
+class _Scored(Exception):
+    """The validator went on to score: past its held-out checks."""
 
+
+def _scores(call):
+    """Whether ``call`` reaches the validator's scoring, which it stops there."""
     def scored(*args, **kwargs):
-        raise Scored
+        raise _Scored
 
     with mock.patch("gravyflow.src.validate.validator.model_fingerprint", scored):
         try:
-            Validator.validate(None, "model", {"onsource_duration_seconds": 1.0},
-                               ValidationConfig(group=group), run_record=run_record)
-        except Scored:
+            call()
+        except _Scored:
             return True
     return False
+
+
+def _scores_split(group, run_record, dataset_args=None):
+    """Whether the validator goes on to score ``group`` for a model with ``run_record``."""
+    dataset_args = dataset_args or {"onsource_duration_seconds": 1.0}
+    return _scores(lambda: Validator.validate(None, "model", dataset_args, ValidationConfig(group=group),
+                                              run_record=run_record))
+
+
+FOLD_2 = gf.SplitSpec(version="fold-2")
+
+
+class StandingBatches(recipe.DetectionBatches):
+    """
+    A gravyflow dataset's batches as the recipe wraps them, served as small arrays: a
+    run reads the dataset's split, never its strain.
+    """
+
+    def __getitem__(self, index):
+        rng = np.random.default_rng(index)
+        x = rng.normal(size=(4, 1, 16)).astype(np.float32)
+        return {"X": x}, np.eye(2, dtype=np.float32)[rng.integers(0, 2, 4)]
+
+
+def tiny_model():
+    inputs = keras.Input(shape=(1, 16), name="X")
+    model = keras.Model({"X": inputs}, keras.layers.Dense(2)(keras.layers.Flatten()(inputs)))
+    model.compile(optimizer="sgd", loss=keras.losses.CategoricalCrossentropy(from_logits=True))
+    return model
+
+
+def _train_and_validate_world(specs):
+    """O3 data inside one block of each spec's train and validate splits, away from its edges."""
+    first = gf.DEFAULT_SPLIT.block_of(fx.origin_gps("O3")) + 2
+    blocks = set()
+    for spec in specs:
+        for split in ("train", "validate"):
+            blocks.add(next(k for k in range(first, first + 1000) if spec.block_split(k) == split))
+    intervals = [(k * fx.BLOCK_SECONDS + 1024.0, k * fx.BLOCK_SECONDS + 4096.0) for k in sorted(blocks)]
+    return fx._fixture(intervals, 256.0, "O3", ("O3",))
+
+
+def test_a_run_records_the_split_its_data_reads(world, tmp_path):
+    """
+    A run records the split its data reads, never one declared beside it: a default run
+    on fold-2 data records fold-2's fingerprint (in run.json and the model's record), so
+    the validator refuses the default test split, which shares time with fold-2's training
+    split, and scores fold-2's. Resuming the run on data split otherwise is refused.
+    """
+    fixture = _train_and_validate_world([FOLD_2, gf.DEFAULT_SPLIT])
+    with world(fixture):
+        def data(split, spec=FOLD_2):
+            return StandingBatches(fx.dataset(fixture, tmp_path / "data", split, steps_per_epoch=2,
+                                              split_spec=spec))
+
+        def run(epochs):
+            return recipe.TrainingRun(RunDirectory(tmp_path / "run"), seed=1, schedule=recipe.TrainingSchedule(
+                epochs=epochs, steps_per_epoch=2, validation_batches=1, patience=1))
+
+        run(1).train(tiny_model, lambda seed: data("train"), recipe.materialise(data("validate"), 1), verbose=0)
+        directory = RunDirectory(tmp_path / "run")
+        record = directory.run
+        assert record["split"] == {"fingerprint": FOLD_2.fingerprint(), "selection_split": "validate"}
+        assert directory._read(directory.path / "model.json")["split"] == record["split"]
+
+        def args(spec):
+            return {"noise_obtainer": fx.noise_obtainer(fixture, tmp_path / "scored", split_spec=spec),
+                    "onsource_duration_seconds": 1.0}
+
+        with pytest.raises(ValueError, match="SplitSpec"):
+            _scores_split("test", record, args(gf.DEFAULT_SPLIT))
+        assert _scores_split("test", record, args(FOLD_2))
+
+        def resume(spec):
+            run(2).train(tiny_model, lambda seed: data("train", spec), recipe.materialise(data("validate", spec), 1),
+                         verbose=0)
+
+        with pytest.raises(StaleCheckpointError, match="records the split"):
+            resume(gf.DEFAULT_SPLIT)
+        directory._write(directory.path / "run.json", {k: v for k, v in record.items() if k != "split"})
+        with pytest.raises(StaleCheckpointError, match="records the split none"):
+            resume(FOLD_2)
+
+
+@pytest.mark.global_rng  # gf.Model builds its Keras model from Keras' global seed
+def test_a_gf_model_records_its_split_for_the_validator(tmp_path):
+    """
+    gf.Model records the split its data reads and the split that selected it, beside the
+    model, and Model.validate hands that record to the validator: it refuses to score
+    the selection split ('validate') and scores 'test'.
+    """
+    from gravyflow.tests.test_model_train import dataset_args, tiny_model as model_of
+
+    model = model_of(tmp_path)
+    model.train(validate_args={**dataset_args(steps_per_epoch=2), "group": "validate"})
+
+    def scores(group):
+        args = {key: value for key, value in dataset_args().items() if key != "group"}
+        return _scores(lambda: model.validate(args, ValidationConfig(group=group)))
+
+    with pytest.raises(ValueError, match="selected on the 'validate' split"):
+        scores("validate")
+    assert scores("test")
+    assert model.run_record["split"] == {
+        "fingerprint": gf.DEFAULT_SPLIT.fingerprint(), "selection_split": "validate"}
 
 
 def test_validator_refuses_the_selection_split():

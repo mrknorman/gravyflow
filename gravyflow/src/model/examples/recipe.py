@@ -28,6 +28,12 @@ and evaluated.
   run's configuration. Loading one recomputes both and refuses a mismatch:
   a checkpoint from another configuration, or one whose file changed, is never
   used silently.
+- **The split.** A run records the split its data reads, never one declared
+  beside it: the fingerprint of the training and validation data's
+  ``SplitSpec`` and the validation data's split, which selects the model
+  (``run.json``'s ``split``, also in the final model's record). Data split by
+  two specs, or a resumed run's data split otherwise, is refused; the
+  validator reads the record (``Validator.validate``'s ``run_record``).
 - **A fixed validation set.** `materialise` draws the validation batches once,
   so every epoch, and every resumed run, scores the same data. Anything that
   serves the same batches each epoch fits the same place; a dataset that
@@ -49,6 +55,7 @@ import numpy as np
 
 import gravyflow as gf
 from gravyflow.src.validate.bank import per_example
+from gravyflow.src.validate.config import require_same_split, split_record
 from gravyflow.src.validate.provenance import (
     StaleCheckpointError, canonical, config_fingerprint, model_fingerprint, require_match,
 )
@@ -129,8 +136,11 @@ def _float32(features: Dict[str, Any]) -> Dict[str, np.ndarray]:
     return {k: np.asarray(v, dtype=np.float32) for k, v in features.items()}
 
 
-class DetectionBatches(keras.utils.PyDataset):
-    """A gravyflow dataset as (float32 inputs, one-hot [noise, signal] labels)."""
+class _DatasetBatches(keras.utils.PyDataset):
+    """
+    A gravyflow dataset's batches, converted for Keras: their number, epoch and
+    split (``split_spec``, ``group``) are the dataset's.
+    """
 
     def __init__(self, dataset):
         super().__init__()
@@ -139,6 +149,14 @@ class DetectionBatches(keras.utils.PyDataset):
     def __len__(self) -> int:
         return len(self.dataset)
 
+    @property
+    def split_spec(self) -> gf.SplitSpec:
+        return self.dataset.split_spec
+
+    @property
+    def group(self) -> str:
+        return self.dataset.group
+
     def epoch_callback(self) -> keras.callbacks.Callback:
         return self.dataset.epoch_callback()
 
@@ -147,6 +165,10 @@ class DetectionBatches(keras.utils.PyDataset):
 
     def on_epoch_end(self):
         self.dataset.on_epoch_end()
+
+
+class DetectionBatches(_DatasetBatches):
+    """A gravyflow dataset as (float32 inputs, one-hot [noise, signal] labels)."""
 
     def __getitem__(self, index):
         x, y = self.dataset[index]
@@ -154,25 +176,12 @@ class DetectionBatches(keras.utils.PyDataset):
         return _float32(x), np.eye(2, dtype=np.float32)[present.astype(int)]
 
 
-class RegressionBatches(keras.utils.PyDataset):
+class RegressionBatches(_DatasetBatches):
     """A gravyflow dataset as (float32 inputs, (examples, labels) float32 targets)."""
 
     def __init__(self, dataset, labels: Sequence):
-        super().__init__()
-        self.dataset = dataset
+        super().__init__(dataset)
         self.labels = [getattr(label, "name", label) for label in labels]
-
-    def __len__(self) -> int:
-        return len(self.dataset)
-
-    def epoch_callback(self) -> keras.callbacks.Callback:
-        return self.dataset.epoch_callback()
-
-    def on_epoch_begin(self):
-        self.dataset.on_epoch_begin()
-
-    def on_epoch_end(self):
-        self.dataset.on_epoch_end()
 
     def __getitem__(self, index):
         x, y = self.dataset[index]
@@ -183,11 +192,12 @@ class RegressionBatches(keras.utils.PyDataset):
 
 
 class FixedBatches(keras.utils.PyDataset):
-    """Batches held in memory, served identically every epoch."""
+    """Batches held in memory, served identically every epoch, with the split they were drawn from."""
 
-    def __init__(self, batches: List):
+    def __init__(self, batches: List, split_spec: Optional[gf.SplitSpec], group: Optional[str]):
         super().__init__()
         self.batches = batches
+        self.split_spec, self.group = split_spec, group
 
     def __len__(self) -> int:
         return len(self.batches)
@@ -197,8 +207,12 @@ class FixedBatches(keras.utils.PyDataset):
 
 
 def materialise(batches, num_batches: int) -> FixedBatches:
-    """Draw ``num_batches`` batches once: a fixed validation set."""
-    return FixedBatches([batches[k] for k in range(num_batches)])
+    """
+    Draw ``num_batches`` batches once: a fixed validation set, naming the split
+    of ``batches`` (None for batches that name none, which a run refuses).
+    """
+    return FixedBatches([batches[k] for k in range(num_batches)],
+                        getattr(batches, "split_spec", None), getattr(batches, "group", None))
 
 
 # ---------------------------------------------------------- run directory
@@ -241,7 +255,7 @@ class RunDirectory:
 
     def start(self, description: Dict[str, Any], split: Dict[str, str]) -> str:
         """
-        Record a new run's configuration and its split (``TrainingRun.split_record``);
+        Record a new run's configuration and its data's split (`split_record`);
         returns the configuration's sha256.
         """
         sha = config_fingerprint(description)
@@ -329,15 +343,15 @@ class TrainingRun:
     configuration, schedule, seed); its sha256 is the configuration a
     checkpoint must match to be resumed. Raising ``schedule.epochs`` extends a
     finished run.
+
+    The run's split is its data's, never declared beside it: ``train`` reads
+    it from the training and validation data (`split_record`) and records it
+    in ``run.json`` and the final model's record, so a validator never reports
+    on data that trained or selected the model.
     """
     directory: RunDirectory
     schedule: TrainingSchedule
     seed: int
-    #: How the run's real data is split, and the split that selects the model
-    #: (the validation data's): both go into ``run.json``, so a validator never
-    #: reports on data that trained or selected the model.
-    split_spec: gf.SplitSpec = gf.DEFAULT_SPLIT
-    selection_split: str = "validate"
     description: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -353,13 +367,7 @@ class TrainingRun:
         # The epoch count is where the run stops, not what it does: leaving it
         # out lets a finished run be extended.
         schedule = {k: v for k, v in asdict(self.schedule).items() if k != "epochs"}
-        return {**self.description, "schedule": schedule, "seed": self.seed, "split": self.split_record}
-
-    @property
-    def split_record(self) -> Dict[str, str]:
-        """The run's split, as ``run.json`` and every saved model record it."""
-        return {"fingerprint": self.split_spec.fingerprint(),
-                "selection_split": gf.SplitSpec.check_name(self.selection_split)}
+        return {**self.description, "schedule": schedule, "seed": self.seed}
 
     def train(
         self,
@@ -376,22 +384,30 @@ class TrainingRun:
             build_model: a new compiled model. It is built under `keras_draws`,
                 so its initial weights and dropout seeds follow from the run's
                 seed.
-            training_data: the training batches, given the run's root seed.
+            training_data: the training batches, given the run's root seed:
+                the training split of gravyflow data (`DetectionBatches`, say).
                 Its ``epoch_callback()``, when it has one, gives it Keras'
                 epoch: a resumed run draws its first epoch's batches, and a
                 curriculum reads that epoch.
-            validation_data: fixed validation batches (see `materialise`).
+            validation_data: fixed validation batches (see `materialise`),
+                of the same split spec.
 
         Raises:
-            StaleCheckpointError: the directory holds a run of another configuration.
+            ValueError: data that names no split, or splits disagreeing
+                (`split_record`).
+            StaleCheckpointError: the directory holds a run of another
+                configuration, or of data split otherwise.
         """
+        data = training_data(self.seed)
+        split = split_record(data, validation_data)
         run = self.directory.run
         sha = self.config_sha256
         state = self.directory.state
         if run is not None:
             require_match("run configuration", run["config_sha256"], sha, self.directory.path)
+            require_same_split(run.get("split"), split, self.directory.path)
         if state is None:
-            self.directory.start(self._full_description(), self.split_record)
+            self.directory.start(self._full_description(), split)
             with keras_draws(self.model_seed):
                 model = build_model()
             state = {"epoch": -1, "best_val_loss": None, "best_epoch": None, "wait": 0,
@@ -400,7 +416,6 @@ class TrainingRun:
             model = self.directory.load_model("last", sha)
         first_epoch = state["epoch"] + 1
         if first_epoch < self.schedule.epochs and not state["stopped_early"]:
-            data = training_data(self.seed)
             callbacks = [_EpochCheckpoint(self.directory, sha, self.schedule, state)]
             if hasattr(data, "epoch_callback"):
                 callbacks.insert(0, data.epoch_callback())
@@ -416,7 +431,7 @@ class TrainingRun:
         best = self.directory.load_model("best", sha)
         state = self.directory.state
         self.directory.save_model(best, "model", sha, epoch=state["best_epoch"],
-                                  val_loss=state["best_val_loss"], split=self.split_record)
+                                  val_loss=state["best_val_loss"], split=split)
         return best
 
 

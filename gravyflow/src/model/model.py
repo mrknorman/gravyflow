@@ -1196,7 +1196,12 @@ class Model:
         if callbacks is None:
             callbacks = []
 
+        from gravyflow.src.validate.config import require_same_split, split_record
+
         gf.ensure_directory_exists(self.model_path)
+        # The split the model trains and is selected on is its data's: recorded
+        # beside it (run_record), and never changed under a resumed model.
+        split = split_record(training_dataset, validation_dataset)
 
         checkpoint_monitor = "val_loss"
         if not force_retrain:
@@ -1204,6 +1209,7 @@ class Model:
 
             history_data = gf.load_history(self.model_path)
             if history_data != {}:
+                require_same_split((self.run_record or {}).get("split"), split, self.model_path)
                 best_metric = min(history_data[checkpoint_monitor]) #assuming loss for now
                 best_epoch = np.argmin(history_data[checkpoint_monitor])
                 initial_epoch = len(history_data[checkpoint_monitor])
@@ -1228,9 +1234,10 @@ class Model:
             best_metric = None
             gf.save_dict_to_hdf5({}, self.model_path / "history.hdf5", True)
 
+        self._write_run_record({"split": split})
         if self.genome is not None:
             self.genome.save(self.model_path / "genome")
-        
+
         if max_epochs_per_lesson is None:
             current_max_epoch = training_config["max_epochs"]
         else:
@@ -1318,9 +1325,25 @@ class Model:
         )
 
         return True
-            
+
+    @property
+    def run_record(self) -> Optional[dict]:
+        """
+        The model's training record, ``run.json`` beside it (as a run recipe's
+        run directory keeps): its ``split`` is the split record its training
+        data gave (``split_record``). None for a model gravyflow never trained.
+        """
+        path = Path(self.model_path) / "run.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def _write_run_record(self, record: dict) -> None:
+        path = Path(self.model_path) / "run.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(record, indent=2, sort_keys=True))
+        os.replace(tmp, path)
+
     def validate(
-        self, 
+        self,
         validate_args : dict,
         config : "gf.ValidationConfig" = None,
         model_path : Path = None,
@@ -1329,7 +1352,9 @@ class Model:
         """
         Score the model with the validator (its logit output is the score),
         saving ``validation_data.h5`` and ``validation_plots.html`` in
-        ``model_path`` (the model's own directory by default).
+        ``model_path`` (the model's own directory by default). The validator
+        reads the model's training record (``run_record``), so it refuses to
+        score the split that selected the model or data split by another spec.
         """
         model_path = Path(model_path if model_path is not None else self.model_path)
         validation_file_path : Path = model_path / "validation_data.h5"
@@ -1351,7 +1376,8 @@ class Model:
                 dataset_args=deepcopy(validate_args),
                 config=config,
                 checkpoint_file_path=validation_file_path,
-                heart=heart
+                heart=heart,
+                run_record=self.run_record,
             )
 
         validator.plot(
