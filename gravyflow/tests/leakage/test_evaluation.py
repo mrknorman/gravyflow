@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.dataset.dataset import split_spec_of
 from gravyflow.src.model.examples import train_gabbard_2017 as train_script
 from gravyflow.src.model.examples import train_george_huerta_2017 as george_huerta_script
 from gravyflow.src.model.examples import validate_gabbard_2017 as validate_script
@@ -488,11 +489,16 @@ def test_the_validator_reads_the_split_of_the_data_it_scores():
     assert _scores_split("test", _selected_on_validate(FOLD_2), args)
 
 
+#: The one computation of a split, where gravyflow's source defines it.
+COMPUTATION = ("dataset/dataset.py", split_spec_of.__name__)
+
+
 def _split_spec_reads():
     """
     Where gravyflow's source reads a ``split_spec`` from another object than itself
-    (``x.split_spec`` or ``getattr(x, "split_spec", ...)``, x not ``self``), as
-    (module, enclosing class and function, whether x names an obtainer).
+    (``x.split_spec`` or ``getattr(x, "split_spec", ...)``, x not ``self``) or computes
+    one (a call of `split_spec_of`), as (module, enclosing class and function, how):
+    "obtainer" when x names an obtainer, "data" when it does not, "computes" for a call.
     """
     import ast
     from pathlib import Path
@@ -518,8 +524,11 @@ def _split_spec_reads():
                   and child.func.id in ("getattr", "hasattr") and len(child.args) >= 2
                   and isinstance(child.args[1], ast.Constant) and child.args[1].value == "split_spec"):
                 receiver = child.args[0]
+            elif (isinstance(child, ast.Call)
+                  and COMPUTATION[1] in (getattr(child.func, "id", None), getattr(child.func, "attr", None))):
+                reads.add((module, inner, "computes"))
             if receiver is not None and not (isinstance(receiver, ast.Name) and receiver.id == "self"):
-                reads.add((module, inner, names_an_obtainer(receiver)))
+                reads.add((module, inner, "obtainer" if names_an_obtainer(receiver) else "data"))
             visit(child, inner, module)
 
     for path in sorted(source.rglob("*.py")):
@@ -527,11 +536,14 @@ def _split_spec_reads():
     return reads
 
 
-#: Every place that reads another object's split, and why it may. Only a dataset
-#: derives its split from its obtainers; everything else reads it from data.
+#: Every place that reads another object's split or computes one, and why it may. Only
+#: the one computation reads obtainers; everything else reads its split from data, or
+#: has the computation read the obtainers its data is read through.
 SPLIT_READERS = {
-    ("dataset/dataset.py", "IndexedBatches.split_spec"): "the one computation: a dataset's obtainers' spec",
-    ("validate/bank.py", "ValidationBank.split_spec"): "the validator's data: its own dataset's",
+    COMPUTATION: "the one computation: the obtainers' spec",
+    ("dataset/dataset.py", "IndexedBatches.split_spec"): "a dataset's: the computation over its obtainers",
+    ("validate/bank.py", "ValidationBank.split_spec"): (
+        "the validator's data: the computation over its datasets' obtainer, before they are built"),
     ("validate/validator.py", "Validator.validate"): "the validator's check: its data's (the bank's)",
     ("validate/config.py", "split_record"): "a training run's: its training and validation data's",
     ("model/examples/recipe.py", "_DatasetBatches.split_spec"): "a recipe's batches: their dataset's",
@@ -541,11 +553,12 @@ SPLIT_READERS = {
 
 def test_only_a_dataset_derives_its_split_from_its_obtainers():
     """
-    A dataset's split has one computation, `Dataset.split_spec`, over its obtainers. The
-    validator and the training runs read the split of their data, never computing it
-    again: a second computation could see other obtainers, or the same ones otherwise
-    (one ignored a transient obtainer used as noise), and score a model on the time it
-    trained on.
+    A split has one computation, `split_spec_of`, over the obtainers data is read
+    through, and only a dataset and the validator's bank (over its datasets' obtainer,
+    before it builds them) call it. Everything else reads the split of its data, never
+    computing it again: a second computation could see other obtainers, or the same
+    ones otherwise (one ignored a transient obtainer used as noise), and score a model
+    on the time it trained on.
     """
     reads = _split_spec_reads()
     readers = {(module, scope) for module, scope, _ in reads}
@@ -553,10 +566,37 @@ def test_only_a_dataset_derives_its_split_from_its_obtainers():
         f"split read outside the known readers: {sorted(readers - set(SPLIT_READERS))}; "
         f"known readers gone: {sorted(set(SPLIT_READERS) - readers)}"
     )
-    from_obtainers = {(module, scope) for module, scope, obtainer in reads if obtainer}
-    assert from_obtainers == {("dataset/dataset.py", "IndexedBatches.split_spec")}, (
-        f"a split derived from an obtainer outside Dataset.split_spec: {sorted(from_obtainers)}"
+    from_obtainers = {(module, scope) for module, scope, how in reads if how == "obtainer"}
+    assert from_obtainers == {COMPUTATION}, (
+        f"a split derived from an obtainer outside {COMPUTATION[1]}: {sorted(from_obtainers)}"
     )
+    computing = {(module, scope) for module, scope, how in reads if how == "computes"}
+    assert computing == {("dataset/dataset.py", "IndexedBatches.split_spec"),
+                         ("validate/bank.py", "ValidationBank.split_spec")}, (
+        f"the split computed again outside a dataset and the validator's bank: {sorted(computing)}"
+    )
+
+
+@pytest.mark.parametrize("noise,spec", [
+    (lambda: {}, gf.DEFAULT_SPLIT),
+    (lambda: {"noise_obtainer": gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE)}, gf.DEFAULT_SPLIT),
+    (lambda: {"noise_obtainer": gf.NoiseObtainer(noise_type=gf.NoiseType.REAL, ifo_data_obtainer=gf.IFODataObtainer(
+        data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE], split_spec=FOLD_2))}, FOLD_2),
+    (lambda: {"noise_obtainer": gf.TransientDataObtainer(
+        data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
+        observing_runs=gf.ObservingRun.O3, split_spec=FOLD_2)}, FOLD_2),
+], ids=["the default noise", "white noise", "real noise", "glitches as noise"])
+def test_the_banks_split_is_its_datasets(noise, spec):
+    """
+    The bank reads its split before it builds a dataset, and it is the split of the
+    dataset it then builds: its noise's, a glitch obtainer used as noise included, and
+    the default noise's when none is named. The dataset is built here without its
+    generators, which read the data, since only its split is compared.
+    """
+    args = {"onsource_duration_seconds": 1.0, "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE], **noise()}
+    bank = ValidationBank(stub_model(256), args)
+    with mock.patch.object(gf.GravyflowDataset, "_create_generators", lambda self: None):
+        assert bank.split_spec == bank._noise_dataset.split_spec == spec
 
 
 class _ModelBatches(recipe.DetectionBatches):

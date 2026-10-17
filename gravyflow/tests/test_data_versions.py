@@ -28,8 +28,10 @@ from gravyflow.src.model.examples.base import ValidationDatasetConfig, validatio
 from gravyflow.src.model.examples.recipe import RunDirectory, TrainingRun, TrainingSchedule
 from gravyflow.src.validate import StaleCheckpointError, ValidationConfig, Validator
 from gravyflow.src.validate.bank import ValidationBank
+from gravyflow.src.validate.config import with_run_record
 from gravyflow.src.validate.provenance import config_fingerprint, model_fingerprint
 from gravyflow.tests import test_examples_recipe as recipe_tests
+from gravyflow.tests.conftest import refuse_internet
 from gravyflow.tests import test_segment_provenance as noise_reads
 
 #: The segment layout and transient cache format gravyflow wrote before its resampler
@@ -161,6 +163,38 @@ def test_validator_refuses_a_checkpoint_from_before_the_cut(tmp_path, monkeypatc
         write_validation(tmp_path / "before.h5", model, dataset_args, config)
     with pytest.raises(StaleCheckpointError, match="another validation configuration"):
         Validator.validate(model, "tiny", dataset_args, config, tmp_path / "before.h5")
+
+
+@pytest.mark.global_rng
+def test_the_validator_refuses_before_it_reads_any_data(tmp_path, monkeypatch):
+    """
+    The validator refuses from its arguments alone, before it builds a dataset or
+    fetches any strain: with every connection refused and recorded (with --network
+    too), a model selected on the split it would score, a model trained on another
+    split, and a checkpoint from before the cut are each refused on real-noise
+    arguments, and nothing tried to connect.
+    """
+    attempts = []
+    refuse_internet(monkeypatch, attempts, loopback=False)
+    model = logit_model()
+    dataset_args = validation_dataset_args(noise_type=gf.NoiseType.REAL,
+                                           config=ValidationDatasetConfig(sample_rate_hertz=2048.0))
+    config = ValidationConfig(num_examples=64, batch_size=32)
+
+    def trained(fingerprint, selection_split):
+        return with_run_record(model, {"split": {"fingerprint": fingerprint, "selection_split": selection_split}})
+
+    with pytest.raises(ValueError, match="selected on the 'test' split"):
+        Validator.validate(trained(gf.DEFAULT_SPLIT.fingerprint(), "test"), "tiny", dataset_args, config)
+    with pytest.raises(ValueError, match="SplitSpec"):
+        Validator.validate(trained(gf.SplitSpec(version="fold-2").fingerprint(), "validate"), "tiny",
+                           dataset_args, config)
+    held_out = trained(gf.DEFAULT_SPLIT.fingerprint(), "validate")
+    with before_the_cut():
+        write_validation(tmp_path / "before.h5", held_out, dataset_args, config)
+    with pytest.raises(StaleCheckpointError, match="another validation configuration"):
+        Validator.validate(held_out, "tiny", dataset_args, config, tmp_path / "before.h5")
+    assert attempts == []
 
 
 def test_training_run_refuses_a_checkpoint_from_before_the_cut(tmp_path):

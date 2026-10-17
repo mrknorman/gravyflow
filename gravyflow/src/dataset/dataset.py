@@ -84,6 +84,24 @@ def noise_ifos(ifos, noise_obtainer) -> List:
     return ensure_list(obtainer_ifos) if obtainer_ifos is not None else [gf.IFO.L1]
 
 
+def split_spec_of(obtainers) -> "gf.SplitSpec":
+    """
+    How the real data read through ``obtainers`` is split: the spec of the IFO
+    data obtainers they read through (a NoiseObtainer's, or a transient obtainer
+    itself), else the default. This is the one computation of a split, a
+    dataset's (`IndexedBatches.split_spec`) and the validator's alike, and it
+    reads only the obtainers' specifications, so a split is known before any
+    data is fetched. Everything else that needs a split, the training runs
+    included, reads it from data.
+    """
+    specs = {getattr(getattr(obtainer, "ifo_data_obtainer", obtainer), "split_spec", None)
+             for obtainer in obtainers}
+    specs.discard(None)
+    if len(specs) > 1:
+        raise ValueError(f"A dataset's obtainers split time differently: {sorted(s.fingerprint() for s in specs)}.")
+    return specs.pop() if specs else gf.DEFAULT_SPLIT
+
+
 def get_max_arrival_time_difference(ifos: List[gf.IFO]) -> float:
     """
     The lag range of ``ROLLING_PEARSON_ONSOURCE`` (s): the largest light travel
@@ -310,19 +328,8 @@ class IndexedBatches:
 
     @property
     def split_spec(self) -> "gf.SplitSpec":
-        """
-        How the real data this dataset reads is split: the spec of the IFO data
-        obtainers it reads through (a NoiseObtainer's, or a transient obtainer
-        itself), else the default. This is the one computation of a split:
-        everything else that needs one, the validator and the training runs
-        included, reads it from data.
-        """
-        specs = {getattr(getattr(obtainer, "ifo_data_obtainer", obtainer), "split_spec", None)
-                 for obtainer in self._obtainers()}
-        specs.discard(None)
-        if len(specs) > 1:
-            raise ValueError(f"A dataset's obtainers split time differently: {sorted(s.fingerprint() for s in specs)}.")
-        return specs.pop() if specs else gf.DEFAULT_SPLIT
+        """How the real data this dataset reads is split: `split_spec_of` its obtainers."""
+        return split_spec_of(self._obtainers())
 
     @property
     def index_addressed(self) -> bool:

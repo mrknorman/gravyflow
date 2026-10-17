@@ -151,17 +151,22 @@ class ValidationBank:
 
     @cached_property
     def _noise_dataset(self) -> gf.Dataset:
-        """The noise background's data, built once per bank: its split is the bank's, and `generate_noise` scores it."""
+        """The noise background's data, built once per bank, which `generate_noise` scores."""
         return self._dataset("far", [], [gf.ReturnVariables.WHITENED_ONSOURCE])
 
     @property
     def split_spec(self) -> gf.SplitSpec:
         """
-        How the data the bank scores is split: its own dataset's split
-        (`Dataset.split_spec`), never computed again here. Every stage reads
-        the same obtainers, so the noise background's dataset speaks for all.
+        How the data the bank scores is split: the one computation of a split
+        (`split_spec_of`, which `Dataset.split_spec` makes) over the noise
+        obtainer every stage's dataset reads (none named, the default noise,
+        whose split is the default). It reads the obtainer's specification, not
+        its data, so a model is refused before any dataset is built or any
+        strain fetched.
         """
-        return self._noise_dataset.split_spec
+        from gravyflow.src.dataset.dataset import split_spec_of
+
+        return split_spec_of([self.dataset_args.get("noise_obtainer")])
 
     def _score(self, x) -> np.ndarray:
         if self.heart:
