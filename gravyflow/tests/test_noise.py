@@ -11,14 +11,15 @@ from gravyflow.src.dataset.noise import noise as gf_noise
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from gravyflow.tests._helpers import representation_tolerance, statistical_bound
 
-def test_interpolate_psd_puts_each_bin_at_its_own_frequency():
+@pytest.mark.parametrize("lowest", [0.0, 10.0])
+def test_interpolate_psd_puts_each_bin_at_its_own_frequency(lowest):
     """
     Each rfft bin k of each length N gets the spectrum at k fs / N: a linear
     spectrum is reproduced to float32 rounding, DC and bins below the spectrum's
     lowest frequency are 0, and bins above its highest hold its last value.
     """
     sample_rate = 1024.0
-    freqs = np.linspace(10.0, 400.0, 79, dtype=np.float32)
+    freqs = np.linspace(lowest, 400.0, 81, dtype=np.float32)
     values = 3.0 + 0.5 * freqs
     on, off = gf_noise.interpolate_onsource_offsource_psd([2048, 1024], sample_rate, freqs, values)
     for interpolated, num_samples in ((on, 2048), (off, 1024)):
@@ -26,7 +27,7 @@ def test_interpolate_psd_puts_each_bin_at_its_own_frequency():
         assert interpolated.shape == (num_samples // 2 + 1,) and interpolated.dtype == np.complex64
         assert np.all(interpolated.imag == 0.0)
         grid = np.fft.rfftfreq(num_samples, 1.0 / sample_rate)
-        expected = np.where(grid < freqs[0], 0.0, 3.0 + 0.5 * np.clip(grid, None, freqs[-1]))
+        expected = np.where((grid == 0.0) | (grid < freqs[0]), 0.0, 3.0 + 0.5 * np.clip(grid, None, freqs[-1]))
         # Representation: a few float32 roundings of values up to the spectrum's peak.
         np.testing.assert_allclose(interpolated.real, expected, rtol=0.0,
                                    atol=representation_tolerance(np.float32, values.max(), 4))
@@ -512,9 +513,18 @@ class TestPseudoRealByIndex:
 
     def test_rows_serve_in_proportion_to_their_length(self):
         with gwosc_serving(HashedFetch(PSEUDO_LAYOUT)):
-            served = self.batches(pseudo_real(PSEUDO_LAYOUT, saturation=0.25), 120)
-        expected = (LONG - FOOTPRINT_SECONDS) / (LONG + SHORT - 2 * FOOTPRINT_SECONDS)
-        assert abs(loud_share(served) - expected) < 0.08, \
+            noise = pseudo_real(PSEUDO_LAYOUT, saturation=0.25)
+            served = self.batches(noise, 120)
+            rows = noise.batcher(gf.SeedTree(5), "train", **OFFLINE_WINDOW,
+                                 num_examples_per_batch=self.BATCH).plan.rows[:, 0, :]
+        # The split's own rows (not the layout's: the split need not hold as many
+        # long rows as short), each weighted by its window starts.
+        starts = (rows[:, 1] - rows[:, 0]) - FOOTPRINT_SECONDS
+        expected = np.sum(starts[rows[:, 1] - rows[:, 0] == LONG]) / np.sum(starts)
+        # Measured: the share's standard deviation over seeds 0-11 is 0.0053
+        # (gravyflow 164a167, this host; binomial alone gives 0.0043, the rows'
+        # mixing windows the rest), times k = 4.
+        assert abs(loud_share(served) - expected) < 4 * 0.0053, \
             f"loud share {loud_share(served):.3f}, where the rows' lengths give {expected:.3f}"
 
     def test_serves_past_one_pass(self):
