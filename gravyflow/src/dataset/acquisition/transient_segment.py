@@ -65,9 +65,8 @@ class TransientSegment(Segment):
     
     Note:
         The gps_key field is computed from transient_gps_time (event center),
-        NOT from start_gps_time. This shadows the base Segment.gps_key property
-        which uses start_gps_time. This is intentional - cache lookups should
-        use the event center time, not the download window start.
+        NOT from start_gps_time: cache lookups use the event center time, not
+        the download window start.
     
     Attributes:
         # From Segment base class:
