@@ -8,7 +8,7 @@ transient windows and their partners) serves a tone above the new Nyquist freque
 suppressed when its source serves another rate than the read's. The census: each site
 where strain changes rate serves exactly the samples ``gf.resample`` gives, every
 transient window sample exact to both ends of its stored row; no other code names a
-resampler or slices with a stride.
+resampler or slices with a stride, but the few functions that stride what is never strain.
 """
 
 import ast
@@ -296,9 +296,14 @@ def test_transient_windows_are_a_longer_reads_samples(rate):
 
 #: Names whose use resamples outside the one resampler.
 RESAMPLERS = {"resample_fft", "resample_poly", "upfirdn", "decimate"}
-#: Modules allowed a strided slice, and why.
+#: The functions allowed a strided slice, by module and qualified name, and why: each
+#: strides what is never strain data. A slice cannot say what it slices, so every other
+#: function, strain's modules' included, keeps the census; an allowance no code needs
+#: any more fails (`test_every_stride_allowance_is_needed`).
 STRIDE_ALLOWED = {
-    "validate/plotting.py": "thins lines for display; never data",
+    ("validate/plotting.py", "generate_waveform_plot"): "thins lines for display; never data",
+    ("validate/plotting.py", "generate_parameter_space_plot"): "thins a curve for display; never data",
+    ("dataset/store/tile.py", "_runs"): "pairs the edges of a mask's runs: indices, never samples",
 }
 
 
@@ -312,10 +317,28 @@ def _is_reversal_or_unit(step):
     return isinstance(value, ast.Constant) and value.value == 1
 
 
+def _strided_slices(tree):
+    """(The qualified name of the enclosing function, the line) of each slice with another stride than ±1."""
+    found = []
+
+    def visit(node, scope):
+        for child in ast.iter_child_nodes(node):
+            inner = scope
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                inner = f"{scope}.{child.name}" if scope else child.name
+            if isinstance(child, ast.Slice) and child.step is not None and not _is_reversal_or_unit(child.step):
+                found.append((inner, child.lineno))
+            visit(child, inner)
+
+    visit(tree, "")
+    return found
+
+
 def test_no_other_code_resamples_strain():
     """
     Nothing in the library resamples but ``utils/resample.py``: no FFT resampler, no
-    SciPy resampler or decimator, no gwpy ``.resample`` and no strided slice.
+    SciPy resampler or decimator, no gwpy ``.resample`` and no strided slice outside the
+    functions allowed one.
     """
     root, files = _source_files()
     found = []
@@ -323,7 +346,10 @@ def test_no_other_code_resamples_strain():
         name = path.relative_to(root).as_posix()
         if name == "utils/resample.py":
             continue
-        for node in ast.walk(ast.parse(path.read_text(), filename=name)):
+        tree = ast.parse(path.read_text(), filename=name)
+        found.extend(f"{name}:{line} slices with a stride (in {scope or 'the module'})"
+                     for scope, line in _strided_slices(tree) if (name, scope) not in STRIDE_ALLOWED)
+        for node in ast.walk(tree):
             where = f"{name}:{getattr(node, 'lineno', '?')}"
             if isinstance(node, ast.Name) and node.id in RESAMPLERS:
                 found.append(f"{where} uses {node.id}")
@@ -340,7 +366,14 @@ def test_no_other_code_resamples_strain():
                   and node.func.attr == "resample"
                   and not (isinstance(node.func.value, ast.Name) and node.func.value.id == "gf")):
                 found.append(f"{where} calls .resample")
-            elif (isinstance(node, ast.Slice) and node.step is not None
-                  and not _is_reversal_or_unit(node.step) and name not in STRIDE_ALLOWED):
-                found.append(f"{where} slices with a stride")
     assert not found, "Resampling outside utils/resample.py:\n" + "\n".join(found)
+
+
+def test_every_stride_allowance_is_needed():
+    """Each allowed function still slices with a stride, so the allowances stay the fewest the code needs."""
+    root, files = _source_files()
+    strided = {(path.relative_to(root).as_posix(), scope)
+               for path in files for scope, _ in _strided_slices(ast.parse(path.read_text()))}
+    assert not set(STRIDE_ALLOWED) - strided, (
+        f"allowances no code needs: {sorted(set(STRIDE_ALLOWED) - strided)}"
+    )
