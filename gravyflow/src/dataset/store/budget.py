@@ -10,11 +10,23 @@ contents. The cap is per process: N worker processes use N times it.
 from __future__ import annotations
 
 import contextlib
+import operator
 import threading
 import time
 from typing import Iterator
 
 from .tile import StoreError
+
+
+def _bytes(value, minimum: int, what: str) -> int:
+    """``value`` as an int of bytes ≥ ``minimum``: any integer, numpy's too (as a TileKey)."""
+    try:
+        whole = None if isinstance(value, bool) else operator.index(value)
+    except TypeError:
+        whole = None
+    if whole is None or whole < minimum:
+        raise ValueError(f"{what} is a whole number of bytes ≥ {minimum}, got {value!r}.")
+    return whole
 
 
 class BudgetRefused(StoreError, ValueError):
@@ -33,28 +45,26 @@ class ByteBudget:
     """
 
     def __init__(self, capacity: int):
-        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
-            raise ValueError(f"A byte budget needs a whole number of bytes ≥ 1, got {capacity!r}.")
-        self.capacity = capacity
+        self.capacity = _bytes(capacity, 1, "A byte budget's capacity")
         self._condition = threading.Condition()
         self._in_flight = 0
         self._peak = 0
         self._waits = 0
 
-    def check(self, nbytes: int) -> None:
-        """Refuse, by name, a request that could never be admitted."""
-        if isinstance(nbytes, bool) or not isinstance(nbytes, int) or nbytes < 0:
-            raise ValueError(f"A byte request is a whole number ≥ 0, got {nbytes!r}.")
+    def check(self, nbytes: int) -> int:
+        """``nbytes`` as an int; refuse, by name, a request that could never be admitted."""
+        nbytes = _bytes(nbytes, 0, "A byte request")
         if nbytes > self.capacity:
             raise BudgetRefused(
                 f"A request for {nbytes} bytes exceeds the whole memory cap of "
                 f"{self.capacity} bytes; raise the cap or lower the fetch's size."
             )
+        return nbytes
 
     @contextlib.contextmanager
     def admit(self, nbytes: int, timeout: float) -> Iterator[None]:
         """Hold ``nbytes`` of the budget for the block, waiting at most ``timeout`` s."""
-        self.check(nbytes)
+        nbytes = self.check(nbytes)
         deadline = time.monotonic() + timeout
         with self._condition:
             if self._in_flight + nbytes > self.capacity:

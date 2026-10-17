@@ -6,10 +6,14 @@ The commit, for one tile:
 
 1. Seal the whole fetched tile (``tile.seal``) and write it to a temporary file in the
    tile's directory, fsync'd and read-only.
-2. ``os.link`` it to ``k.npy``. The link fails if ``k.npy`` exists; then the committed
-   samples are hashed against this writer's: equal is a no-op, different is
-   ``StoreConflict`` (the source changed under the store). Nothing is overwritten.
-3. Write the record the same way and link it to ``k.json``, with the same check over
+2. When the tile has a record, its sha256 must be this writer's, or the commit is
+   ``StoreConflict`` (the source changed under the store) before anything is linked:
+   samples are never linked under a record that names others.
+3. ``os.link`` the temporary to ``k.npy``. The link fails if ``k.npy`` exists; then the
+   committed samples are hashed against this writer's: equal is a no-op, different is
+   ``StoreConflict``. Nothing is overwritten. The temporary is removed, and the
+   committed file's identity (``tile.identity``) read from an open handle on it.
+4. Write the record the same way and link it to ``k.json``, with the same check over
    the record's content (every field but the commit metadata).
 
 A tile exists only when its record does, and a record implies complete samples. A
@@ -43,7 +47,8 @@ from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
 
 from .budget import ByteBudget
 from .tile import (
-    StoreError, TileIncomplete, TileKey, TileMissing, TileRecord, content, file_sha256, seal,
+    Identity, StoreError, TileIncomplete, TileKey, TileMissing, TileRecord, content, file_sha256,
+    identity, read_record, seal,
 )
 from .view import Tile, open_tile, verify
 
@@ -140,6 +145,19 @@ def _link(source: Path, target: Path) -> bool:
     return True
 
 
+def _remove_temporary(path: Path) -> None:
+    with _named("remove the temporary file", path), contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+
+
+def _changed(key: TileKey, path: Path, committed: str, fetched: str) -> str:
+    return (
+        f"{key.describe()} is committed at {path} with sha256 {committed}, but this writer "
+        f"fetched sha256 {fetched}: the source changed under the store. Nothing was "
+        "overwritten; Store.forget the tile to fetch it again."
+    )
+
+
 def reap(directory: Path, max_age: float = REAP_AGE_SECONDS) -> int:
     """Remove the store's temporary files older than ``max_age`` s in ``directory``."""
     cutoff, reaped = time.time() - max_age, 0
@@ -187,24 +205,16 @@ class Store:
         with _named("make the tile directory", directory):
             directory.mkdir(parents=True, exist_ok=True)
         self._reap_once(directory)
-        samples_path, record_path = key.samples_path(self.root), key.record_path(self.root)
+        record_path = key.record_path(self.root)
         temporaries = []
         try:
             temporaries.append(_write_temporary(
                 directory, lambda handle: np.lib.format.write_array(handle, sealed, allow_pickle=False)))
             with _named("hash the temporary file", temporaries[0]), open(temporaries[0], "rb") as handle:
                 sha256 = file_sha256(handle)
-            linked_samples = _link(temporaries[0], samples_path)
-            with _named("verify the committed samples", samples_path), open(samples_path, "rb") as handle:
-                samples_ino = os.fstat(handle.fileno()).st_ino
-                committed = sha256 if linked_samples else file_sha256(handle)
-            if committed != sha256:
-                raise StoreConflict(
-                    f"{key.describe()} is committed at {samples_path} with sha256 {committed}, but "
-                    f"this writer fetched sha256 {sha256}: the source changed under the store. "
-                    "Nothing was overwritten; gf.store.forget the tile to fetch it again."
-                )
-            record = TileRecord(key, sha256, unheld, samples_ino, {
+            self._check_committed(key, sha256)
+            linked_samples, samples_identity = self._link_samples(key, temporaries[0], sha256)
+            record = TileRecord(key, sha256, unheld, samples_identity, {
                 "tools": dict(tools or {}),
                 "fetched_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             })
@@ -218,10 +228,35 @@ class Store:
                 with contextlib.suppress(OSError):
                     os.unlink(path)
             raise
-        for path in temporaries:
-            with _named("remove the temporary file", path), contextlib.suppress(FileNotFoundError):
-                os.unlink(path)
+        _remove_temporary(temporaries[1])
         return Commit(key, linked_samples, linked_record)
+
+    def _check_committed(self, key: TileKey, sha256: str) -> None:
+        """Refuse, before anything is linked, a tile whose record names other samples."""
+        record_path = key.record_path(self.root)
+        try:
+            with _named("read the committed record", record_path):
+                committed = read_record(self.root, key)
+        except TileMissing:
+            return
+        if committed.sha256 != sha256:
+            raise StoreConflict(_changed(key, record_path, committed.sha256, sha256))
+
+    def _link_samples(self, key: TileKey, temporary: Path, sha256: str) -> Tuple[bool, Identity]:
+        """
+        Link ``temporary`` as the tile's samples, or check the samples another writer
+        linked: whether this call made the link, and the committed file's identity.
+        The identity is read from a handle on that very file once the temporary is
+        removed, so the file's links, and with them its ctime, are final.
+        """
+        samples_path = key.samples_path(self.root)
+        linked = _link(temporary, samples_path)
+        committed = temporary if linked else samples_path
+        with _named("verify the committed samples", committed), open(committed, "rb") as handle:
+            if not linked and (found := file_sha256(handle)) != sha256:
+                raise StoreConflict(_changed(key, samples_path, found, sha256))
+            _remove_temporary(temporary)
+            return linked, identity(os.fstat(handle.fileno()))
 
     @staticmethod
     def _check_record(key: TileKey, record_path: Path, encoded: bytes) -> None:
@@ -234,7 +269,7 @@ class Store:
         if not same:
             raise StoreConflict(
                 f"{key.describe()} has a committed record at {record_path} whose content differs "
-                "from this writer's. Nothing was overwritten."
+                "from this writer's. Nothing was overwritten; Store.forget the tile to fetch it again."
             )
 
     def _reap_once(self, directory: Path) -> None:

@@ -9,7 +9,6 @@ a slice of the map, so a whole tile is never resident.
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +18,7 @@ import numpy as np
 
 from .tile import (
     SAMPLE_DTYPE, STORE_FORMAT, StoreError, TileIncomplete, TileKey, TileRecord, TileRefused,
-    file_sha256, key_from_path, read_record,
+    file_sha256, identity, key_from_path, read_record,
 )
 
 _HEADER_READERS = {
@@ -70,8 +69,9 @@ def open_tile(root: Path, key: TileKey, *, verify: bool = False) -> Tile:
     """
     The committed tile ``key``, checked: its record names this key (a renamed or moved
     record is refused), its samples file has the tile's shape and dtype, and its
-    samples are the very file committed, or else hash to the record's sha256 (a
-    swapped samples file is refused). ``verify`` checks the hash in every case.
+    samples are the very file committed (``tile.identity``), or else hash to the
+    record's sha256 (a swapped samples file is refused). ``verify`` checks the hash in
+    every case.
 
     Raises ``TileMissing`` when the tile is not committed, ``TileIncomplete`` when its
     record has no samples, and ``TileRefused`` when a check fails.
@@ -99,7 +99,7 @@ def open_tile(root: Path, key: TileKey, *, verify: bool = False) -> Tile:
                 f"{path} holds {dtype} {shape} in {stat.st_size} bytes; {key.describe()} is "
                 f"{SAMPLE_DTYPE} ({key.length},) in {expected_size}. It is never served."
             )
-        if (verify or stat.st_ino != record.samples_ino) and file_sha256(handle) != record.sha256:
+        if (verify or identity(stat) != record.samples_identity) and file_sha256(handle) != record.sha256:
             raise TileRefused(
                 f"{path} is not {key.describe()}'s samples: its sha256 differs from its "
                 "record's. A swapped or altered samples file is never served."
@@ -140,10 +140,9 @@ def verify(root: Path) -> List[str]:
     per tile that would be refused, naming it and why. An empty list is a clean store.
     """
     problems = []
-    for record_path in sorted((Path(root) / f"v{STORE_FORMAT}").glob("*/*/*/*.json")):
+    for record_path in sorted((Path(root) / f"v{STORE_FORMAT}").glob("*/*/*/*/*.json")):
         try:
-            tile_seconds = json.loads(record_path.read_bytes())["tile_seconds"]
-            open_tile(root, key_from_path(root, record_path, tile_seconds), verify=True)
-        except (StoreError, ValueError, TypeError, KeyError, OSError) as error:
+            open_tile(root, key_from_path(root, record_path), verify=True)
+        except (StoreError, ValueError, TypeError, OSError) as error:
             problems.append(f"{record_path}: {error}")
     return problems

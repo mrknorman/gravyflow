@@ -2,21 +2,25 @@
 The store's tile format: raw strain as the source publishes it, one source file per
 tile, written once.
 
-A tile is keyed by (source, detector, rate, k) and covers GPS [k*T, (k+1)*T), where T
-is the source's file length at that rate, so a tile lies on the absolute GPS grid and
-one download is one tile. On disk it is two files in
-``<root>/v<STORE_FORMAT>/<source_id>/<detector>/<rate>/``:
+A tile is keyed by (source, detector, rate, T, k) and covers GPS [k*T, (k+1)*T), where
+T is the source's file length at that rate, so a tile lies on the absolute GPS grid and
+one download is one tile. The path names the whole key, so a key on another grid is
+another tile. On disk a tile is two files in
+``<root>/v<STORE_FORMAT>/<source_id>/<detector>/<rate>/<T>/``:
 
 - ``k.npy``, the samples: float32, one dimension, ``rate * T`` long, memory-mapped by
   readers;
 - ``k.json``, the commit record: the key, ``t0``, the unheld sample intervals with
-  their reasons, the sha256 of ``k.npy``, the inode ``k.npy`` was committed as, and
-  the fetch metadata.
+  their reasons, the sha256 of ``k.npy``, the identity of the file committed as
+  ``k.npy`` (``identity``), and the fetch metadata.
 
-Opening a tile checks its identity, belt and braces: the record must name the
-key its path names, and the samples must be the very file committed (one ``fstat``)
-or else hash to the record's sha256, so a renamed, moved or swapped file is refused
-by name. The full hash is otherwise checked at commit and by ``verify``.
+Opening a tile checks its identity, belt and braces: the record must name the key its
+path names, and the samples must be the very file committed (one ``fstat``) or else
+hash to the record's sha256, so a renamed, moved or swapped file is refused by name.
+The full hash is otherwise checked at commit and by ``verify``. A record is written
+once, so a tile whose samples are not the file its record names (a copied or restored
+store, or a tile repaired after its samples were lost) is hashed on every open until
+it is forgotten and committed again.
 
 A tile exists only when its record exists. The record is the authority on which
 samples are held: unheld samples are NaN in ``k.npy`` as poison only, and no reader
@@ -46,7 +50,7 @@ SAMPLE_DTYPE = np.dtype("<f4")
 
 #: Record fields that describe one writer's commit, not the tile's content: two
 #: writers of one tile differ in them and agree in every other field.
-COMMIT_METADATA = ("fetch", "samples_ino")
+COMMIT_METADATA = ("fetch", "samples_identity")
 
 #: A source id or detector is one plain path component.
 _COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
@@ -139,7 +143,8 @@ class TileKey:
         return self.index * self.length
 
     def directory(self, root: Path) -> Path:
-        return Path(root) / f"v{STORE_FORMAT}" / self.source_id / self.detector / str(self.rate)
+        return (Path(root) / f"v{STORE_FORMAT}" / self.source_id / self.detector / str(self.rate)
+                / str(self.tile_seconds))
 
     def samples_path(self, root: Path) -> Path:
         return self.directory(root) / f"{self.index}.npy"
@@ -214,6 +219,21 @@ def seal(key: TileKey, samples, not_in_file: Iterable[Tuple[int, int]] = ()
     return sealed, tuple(unheld)
 
 
+#: A committed file's identity: (st_dev, st_ino, st_ctime_ns).
+Identity = Tuple[int, int, int]
+
+
+def identity(stat) -> Identity:
+    """
+    The identity of the file ``stat`` describes: its device, inode and status-change
+    time. A freed inode can be reused by the next file made, but that file's ctime is
+    its own and no call sets a ctime directly, so a different file matches only if
+    both were made within one tick of the filesystem's clock. A change of a file's
+    links or mode changes its ctime too; that costs a full hash, never a wrong tile.
+    """
+    return (stat.st_dev, stat.st_ino, stat.st_ctime_ns)
+
+
 def file_sha256(handle) -> str:
     """The sha256 of an open binary file's whole content."""
     handle.seek(0)
@@ -230,7 +250,7 @@ class TileRecord:
     key: TileKey
     sha256: str
     unheld: Tuple[Interval, ...]
-    samples_ino: int
+    samples_identity: Identity
     fetch: Mapping
 
     @property
@@ -257,7 +277,7 @@ class TileRecord:
             "t0": key.t0,
             "sha256": self.sha256,
             "unheld": [[start, stop, reason.value] for start, stop, reason in self.unheld],
-            "samples_ino": self.samples_ino,
+            "samples_identity": list(self.samples_identity),
             "fetch": dict(self.fetch),
         }
 
@@ -268,6 +288,11 @@ class TileRecord:
 def content(fields: Mapping) -> dict:
     """A record's fields that describe the tile's content: two writers agree on these."""
     return {name: value for name, value in fields.items() if name not in COMMIT_METADATA}
+
+
+def _identity_field(value) -> Identity:
+    device, inode, ctime = value
+    return (operator.index(device), operator.index(inode), operator.index(ctime))
 
 
 def parse_record(text: bytes, key: TileKey, path: Path) -> TileRecord:
@@ -286,7 +311,7 @@ def parse_record(text: bytes, key: TileKey, path: Path) -> TileRecord:
                         fields["tile_seconds"], fields["index"]),
             sha256=str(fields["sha256"]),
             unheld=unheld,
-            samples_ino=operator.index(fields["samples_ino"]),
+            samples_identity=_identity_field(fields["samples_identity"]),
             fetch=dict(fields["fetch"]),
         )
         stated = {name: fields[name] for name in ("store_format", "t0")}
@@ -330,8 +355,8 @@ def read_record(root: Path, key: TileKey) -> TileRecord:
     return parse_record(text, key, path)
 
 
-def key_from_path(root: Path, record_path: Path, tile_seconds: int) -> TileKey:
-    """The key a record's path names, with ``tile_seconds`` from the record."""
+def key_from_path(root: Path, record_path: Path) -> TileKey:
+    """The key a record's path names."""
     relative = Path(record_path).relative_to(Path(root) / f"v{STORE_FORMAT}")
-    source_id, detector, rate, name = relative.parts
-    return TileKey(source_id, detector, int(rate), tile_seconds, int(name[: -len(".json")]))
+    source_id, detector, rate, tile_seconds, name = relative.parts
+    return TileKey(source_id, detector, int(rate), int(tile_seconds), int(name[: -len(".json")]))

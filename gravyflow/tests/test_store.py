@@ -58,7 +58,7 @@ def test_a_key_names_its_place_on_the_absolute_grid(tmp_path):
     assert gwosc.t0 == 1238163456.0 and gwosc.t0 == 302286 * 4096
     assert gwosc.length == 4096 * 4096 and gwosc.start == 302286 * 4096 * 4096
     assert gwosc.samples_path(tmp_path) == (
-        tmp_path / f"v{STORE_FORMAT}" / "GWOSC-O3a_4KHZ_R1" / "H1" / "4096" / "302286.npy")
+        tmp_path / f"v{STORE_FORMAT}" / "GWOSC-O3a_4KHZ_R1" / "H1" / "4096" / "4096" / "302286.npy")
     assert gwosc.record_path(tmp_path).name == "302286.json"
     assert covering("S", "L1", RATE, SECONDS, 9.5, 16.0) == tuple(
         TileKey("S", "L1", RATE, SECONDS, k) for k in (2, 3))
@@ -120,9 +120,26 @@ def test_a_committed_tile_reads_back_exactly(tmp_path):
     record = json.loads(record_path.read_text())
     assert record["t0"] == key().t0 and record["sha256"] == sha_of(samples_path)
     assert record["unheld"] == [[3, 4, "NON_FINITE"], [1000, 1024, "NOT_IN_FILE"]]
+    # The record names the committed file as it stays, so an open skips the hash.
+    final = samples_path.stat()
+    assert record["samples_identity"] == [final.st_dev, final.st_ino, final.st_ctime_ns]
     for path in (samples_path, record_path):
         assert stat.S_IMODE(path.stat().st_mode) == 0o444
     assert files_in(samples_path.parent) == ["7.json", "7.npy"]
+    assert store.verify() == []
+
+
+def test_keys_on_two_grids_are_two_tiles(tmp_path):
+    # T is part of the key, so it is part of the path: a key on another grid is
+    # another tile, never a collision reported as a changed source.
+    store = Store(tmp_path)
+    coarse, fine = TileKey("S", "H1", RATE, 16, 2), TileKey("S", "H1", RATE, 8, 2)
+    assert coarse.samples_path(tmp_path) != fine.samples_path(tmp_path)
+    for grid in (fine, coarse):
+        store.commit(grid, np.arange(grid.length, dtype=np.float32))
+    for grid in (fine, coarse):
+        tile = store.open(grid, verify=True)
+        assert tile.key == grid and np.array_equal(tile.samples, np.arange(grid.length))
     assert store.verify() == []
 
 
@@ -195,6 +212,30 @@ def test_a_swapped_or_altered_samples_file_is_refused_by_name(tmp_path):
     assert len(store.verify()) == 3
 
 
+def test_a_file_that_reuses_the_committed_inode_is_hashed_never_trusted(tmp_path):
+    store = Store(tmp_path)
+    store.commit(key(), strain(7))
+    samples_path, record_path = key().samples_path(tmp_path), key().record_path(tmp_path)
+    samples_path.unlink()
+    np.save(samples_path, seal(key(), strain(7, offset=1e-22))[0])  # another file in its place
+    # A filesystem that reuses the freed inode gives the new file the committed
+    # inode number, but never its status-change time: forge that reuse.
+    fields = json.loads(record_path.read_text())
+    replaced = samples_path.stat()
+    record_path.chmod(0o644)
+    for forged in ([replaced.st_dev, replaced.st_ino, fields["samples_identity"][2]],
+                   [replaced.st_dev + 1, replaced.st_ino, replaced.st_ctime_ns]):
+        record_path.write_text(json.dumps({**fields, "samples_identity": forged}))
+        with pytest.raises(TileRefused, match="sha256 differs from its record's"):
+            store.open(key())
+    # The whole identity is what skips the hash on open; a full check still refuses.
+    identity = [replaced.st_dev, replaced.st_ino, replaced.st_ctime_ns]
+    record_path.write_text(json.dumps({**fields, "samples_identity": identity}))
+    assert store.open(key()).key == key()
+    with pytest.raises(TileRefused, match="sha256 differs"):
+        store.open(key(), verify=True)
+
+
 def test_a_malformed_record_or_samples_file_is_refused(tmp_path):
     store = Store(tmp_path)
     store.commit(key(), strain(7))
@@ -224,15 +265,16 @@ def test_differing_content_is_a_conflict_and_nothing_is_overwritten(tmp_path):
     store.commit(key(), strain(7))
     samples_path = key().samples_path(tmp_path)
     before = (sha_of(samples_path), samples_path.stat().st_mtime_ns)
-    with pytest.raises(StoreConflict, match="the source changed under the store"):
+    with pytest.raises(StoreConflict, match="the source changed under the store") as conflict:
         store.commit(key(), strain(7, offset=1e-22))
+    assert "Store.forget the tile" in str(conflict.value) and callable(Store.forget)
     assert (sha_of(samples_path), samples_path.stat().st_mtime_ns) == before
     # The record's content excludes the commit metadata: another fetch time and tool
     # agree; another hash does not.
     record_path = key().record_path(tmp_path)
     record = json.loads(record_path.read_text())
     record_path.unlink()
-    record_path.write_text(json.dumps({**record, "fetch": {"tools": {"x": "1"}}, "samples_ino": 1}))
+    record_path.write_text(json.dumps({**record, "fetch": {"tools": {"x": "1"}}, "samples_identity": [1, 1, 1]}))
     assert store.commit(key(), strain(7)).contended
     record_path.unlink()
     record_path.write_text(json.dumps({**record, "unheld": [[0, 1, "NON_FINITE"]]}))
@@ -251,6 +293,20 @@ def test_a_record_without_samples_is_refused_and_repaired_by_the_next_writer(tmp
     assert (commit.linked_samples, commit.linked_record) == (True, False)
     # The record names the samples it was written with; the new file hashes equal.
     assert np.array_equal(store.open(key()).samples, strain(7).astype(np.float32))
+
+
+def test_a_differing_writer_links_nothing_under_a_committed_record(tmp_path):
+    store = Store(tmp_path)
+    store.commit(key(), strain(7))
+    samples_path = key().samples_path(tmp_path)
+    samples_path.unlink()  # a forget that raced a commit, or an outside rm
+    with pytest.raises(StoreConflict, match="the source changed under the store"):
+        store.commit(key(), strain(7, offset=1e-22))
+    assert files_in(samples_path.parent) == ["7.json"]  # nothing of its own left behind
+    with pytest.raises(TileIncomplete):
+        store.open(key())
+    store.commit(key(), strain(7))  # the committed record's tile is still recoverable
+    assert np.array_equal(store.open(key(), verify=True).samples, strain(7).astype(np.float32))
 
 
 def test_forget_removes_the_record_before_the_samples(tmp_path, monkeypatch):
@@ -383,6 +439,14 @@ def test_the_byte_budget_admits_exactly_to_its_cap():
     for bad in (0, -1, 1.5, True):
         with pytest.raises(ValueError):
             ByteBudget(bad)
+    for bad in (-1, 1.5, True, "1"):
+        with pytest.raises(ValueError, match="whole number"):
+            budget.check(bad)
+    # Byte counts computed with numpy are whole numbers too, as they are for a TileKey.
+    counted = ByteBudget(np.int64(100))
+    with counted.admit(np.prod(np.array([6, 10], dtype=np.int64)), timeout=0):
+        assert counted.in_flight == 60 and type(counted.in_flight) is int
+    assert counted.capacity == 100 and type(counted.capacity) is int
 
 
 def test_the_byte_budget_never_exceeds_its_cap_under_threads():
