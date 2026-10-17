@@ -3,7 +3,7 @@ Test Suite for Transient Cache Architecture
 
 Tests the TransientCache system, which provides separate cache files for 
 glitches and events. Both use the same underlying TransientCache class,
-but are stored in distinct files (glitch_cache_v3.h5, event_cache_v3.h5).
+but are stored in distinct files (glitch_cache_v4.h5, event_cache_v4.h5).
 """
 
 import pytest

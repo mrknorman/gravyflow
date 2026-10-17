@@ -608,69 +608,6 @@ def pad_to_power_of_two(tensor):
 
     return tensor_padded
 
-@jax.jit(static_argnames=["original_sample_rate_hertz", "new_sample_rate_hertz"])
-def resample_fft(x, original_sample_rate_hertz: float, new_sample_rate_hertz: float):
-    """
-    Accurate FFT-based resampling with anti-aliasing via frequency truncation.
-    
-    JIT compiled for efficiency. Equivalent to scipy.signal.resample behavior.
-    Optimized for downsampling from higher rates (e.g., 16384 Hz) to lower
-    power-of-2 rates (1024, 2048, 4096, 8192 Hz).
-    
-    Parameters
-    ----------
-    x : 1D-Tensor
-        The signal to resample.
-    original_sample_rate_hertz : float
-        Original sample rate (static for JIT).
-    new_sample_rate_hertz : float
-        Target sample rate (static for JIT).
-    
-    Returns
-    -------
-    resampled_x : Tensor
-        Resampled signal at new sample rate.
-    """
-    x = ops.convert_to_tensor(x, dtype="float32")
-    original_size = x.shape[0]
-    
-    # Calculate new size based on sample rate ratio
-    ratio = new_sample_rate_hertz / original_sample_rate_hertz
-    new_size = int(round(original_size * ratio))
-    
-    # Ensure even size for FFT efficiency
-    if new_size % 2 != 0:
-        new_size -= 1
-    
-    # FFT the signal
-    X = jnp.fft.rfft(x)
-    
-    # For downsampling: truncate frequencies above new Nyquist
-    # For upsampling: zero-pad (rare case for GW data)
-    new_freq_size = new_size // 2 + 1
-    
-    if new_freq_size < len(X):
-        # Downsampling - truncate high frequencies (anti-aliasing)
-        X_new = X[:new_freq_size]
-    else:
-        # Upsampling - zero pad
-        X_new = jnp.pad(X, (0, new_freq_size - len(X)))
-    
-    # Inverse FFT at new size
-    resampled_x = jnp.fft.irfft(X_new, n=new_size)
-    
-    # Normalize amplitude to preserve signal power
-    resampled_x = resampled_x * (new_size / original_size)
-    
-    return resampled_x
-
-# Keep old function for backward compatibility
-def resample(x, original_size, original_sample_rate_hertz, new_sample_rate_hertz):
-    """
-    Legacy resample function. Use resample_fft for JIT-compiled version.
-    """
-    return resample_fft(x, original_sample_rate_hertz, new_sample_rate_hertz)
-
 def check_tensor_integrity(tensor, ndims, min_size):
     tensor = ops.convert_to_tensor(tensor)
     # Check if the tensor is 1D

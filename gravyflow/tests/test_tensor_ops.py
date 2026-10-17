@@ -84,11 +84,3 @@ def test_pad_to_power_of_two():
     padded = gf_tensor.pad_to_power_of_two(x)
     expected = np.array([1, 2, 3, 0])
     np.testing.assert_array_equal(padded, expected)
-
-def test_resample():
-    t = np.linspace(0, 1, 100, endpoint=False)
-    x = ops.convert_to_tensor(np.sin(2 * np.pi * 5 * t), dtype="float32") 
-    resampled = gf_tensor.resample(x, original_size=100, original_sample_rate_hertz=100.0, new_sample_rate_hertz=50.0)
-    
-    # Check shape
-    assert ops.shape(resampled)[0] == 50

@@ -28,6 +28,7 @@ from .base import (
     AcquisitionMode, SamplingMode, ObservingRun
 )
 from gravyflow.src.utils.numerics import ensure_list
+from gravyflow.src.utils.resample import resample, whole_hertz
 from gravyflow.src.utils.gps import as_gps_times
 from gravyflow.src.dataset.features.transient_index import TransientIndex, transient_footprint
 from .transient_segment import TransientSegment
@@ -693,9 +694,10 @@ class TransientDataObtainer(BaseDataObtainer):
                 )
                 if strain.sample_rate.value < sample_rate_hertz:
                     raise ValueError("source rate below the download rate")
-                if strain.sample_rate.value != sample_rate_hertz:
-                    strain = strain.resample(sample_rate_hertz)
-                return key, (np.asarray(strain.value), float(strain.t0.value))
+                # The stored windows end 0.2 s inside the span, past the resampler's
+                # margin (under 0.02 s from any public rate), so each stored sample is exact.
+                return key, resample(strain.value, float(strain.t0.value), strain.sample_rate.value,
+                                     sample_rate_hertz)
             except Exception as error:
                 logger.debug(f"No {ifo.name} strain over GPS {start:.3f}-{end:.3f}: {error}")
                 return key, None
@@ -781,8 +783,9 @@ class TransientDataObtainer(BaseDataObtainer):
         from .gwosc_data import gwosc_sample_rate_hertz
 
         # Download at the higher of the requested and stored rates (a cache can
-        # downsample, never upsample), refusing a rate no public source holds.
-        download_rate = max(window_spec.sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
+        # downsample, never upsample), refusing a rate no public source holds, or the
+        # resampler cannot make.
+        download_rate = max(whole_hertz(window_spec.sample_rate_hertz), CACHE_SAMPLE_RATE_HERTZ)
         gwosc_sample_rate_hertz(download_rate)
 
         def key(record, read):

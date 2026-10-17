@@ -142,18 +142,6 @@ class TestIFOData:
         assert len(ifo_data.duration_seconds) == 1
         np.testing.assert_allclose(float(ifo_data.duration_seconds[0]), 10.0)
     
-    def test_ifo_data_downsample(self):
-        """Test downsample method returns self (placeholder, line 274)."""
-        data = np.arange(1000, dtype=np.float32)
-        ifo_data = gf_acq.IFOData(
-            data=[data],
-            sample_rate_hertz=100.0,
-            start_gps_time=[0.0]
-        )
-        
-        result = ifo_data.downsample(50.0)
-        assert result is ifo_data
-    
     def test_ifo_data_numpy_method(self):
         """Test numpy() method converts to numpy arrays (lines 281-284)."""
         data = np.arange(100, dtype=np.float32)

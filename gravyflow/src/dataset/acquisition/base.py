@@ -23,14 +23,13 @@ import numpy as np
 from numpy.random import default_rng  
 import keras
 from keras import ops
-import jax.numpy as jnp
 
 from gwdatafind import find_urls
 from gwpy.timeseries import TimeSeries
 
 # Local imports:
 import gravyflow as gf
-from gravyflow.src.utils.tensor import resample_fft
+from gravyflow.src.utils.resample import resample, whole_hertz
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
 from gravyflow.src.utils.gps import as_gps_times
 from gravyflow.src.utils.shapes import ShapeEnforcer
@@ -39,6 +38,7 @@ from .gwosc_data import (
     get_gwosc_segments, gwosc_runs_overlapping, gwosc_sample_rate_hertz, strain_download_cache,
     subtract_segments, user_cache_dir, warn_of_moved_cache,
 )
+from .versions import DATA_VERSIONS
 
 
 # =============================================================================
@@ -61,10 +61,11 @@ GPS_TOLERANCE_SECONDS = TransientDefaults.GPS_TOLERANCE_SECONDS
 SEGMENT_GRID_ORIGIN_GPS = 0.0
 
 # Version of the stored real-noise segment layout (vetoes, absolute grid, whole
-# segments, each stored with the GPS time of its first sample, its rate and its
-# source). It is part of the segment file's hash, so files written under an earlier
-# layout (layout 2 stored bare samples under their nominal times) are never read back.
-SEGMENT_LAYOUT_VERSION = "segment-layout-3"
+# segments resampled by gf.resample, each stored with the GPS time of its first sample,
+# its rate and its source). It is part of the segment file's hash, so files written
+# under an earlier layout are never read back: layout 3 was resampled by FFT, and
+# layout 2 stored bare samples under their nominal times.
+SEGMENT_LAYOUT_VERSION = "segment-layout-4"
 
 
 class SegmentStrain(NamedTuple):
@@ -523,10 +524,6 @@ class IFOData:
         # The time between samples, in float64: GPS arithmetic never runs in float32.
         self.time_interval_seconds = 1.0 / float(self.sample_rate_hertz)
 
-    def downsample(self, new_sample_rate_hertz: Union[int, float]):
-        # To implement
-        return self
-
     def numpy(self):
         # Converts the data to a numpy array, handling different data types
         return [ops.convert_to_numpy(data) for data in self.data]
@@ -715,7 +712,10 @@ class BaseDataObtainer(ABC):
         parameter that changes the data changes the fingerprint.
         """
         excluded = set(self._served_state()) | set(self._NOT_SPECIFICATION)
-        return {name: value for name, value in sorted(vars(self).items()) if name not in excluded}
+        specification = {name: value for name, value in sorted(vars(self).items()) if name not in excluded}
+        # The numerics that make the served samples from fetched strain.
+        specification["data_versions"] = dict(DATA_VERSIONS)
+        return specification
 
     def _split(self, ifos: List[gf.IFO], group_name: str) -> Tuple:
         """
@@ -976,8 +976,9 @@ class BaseDataObtainer(ABC):
 
         # Everything a stored segment depends on, by name: its source (frame types,
         # channels and run bounds), its selection (flags, labels, the longest segment and
-        # the split), its rate and the layout it is stored in. Each stored segment also
-        # carries its own first-sample time, rate and source (see _cache_segment).
+        # the split), its rate, the numerics that resampled it and the layout it is
+        # stored in. Each stored segment also carries its own first-sample time, rate and
+        # source (see _cache_segment).
         from gravyflow.src.validate.provenance import config_fingerprint
         segment_hash = config_fingerprint({
             "frame_types": self.frame_types,
@@ -989,6 +990,7 @@ class BaseDataObtainer(ABC):
             "max_segment_duration_seconds": self.max_segment_duration_seconds,
             "sample_rate_hertz": float(sample_rate_hertz),
             "group": group,
+            "data_versions": dict(DATA_VERSIONS),
             "layout": SEGMENT_LAYOUT_VERSION,
         })[:32]
         
@@ -1507,27 +1509,24 @@ class BaseDataObtainer(ABC):
                     f"{sample_rate_hertz} Hz; gravyflow does not upsample real data."
                 )
 
-            segment_data = jnp.array(raw_segment.value, dtype=jnp.float32)
-
             # Keep every sample from the segment's start; cut only the tail, to
             # whole seconds (see get_segment).
-            samples_per_second = int(round(original_sample_rate))
-            num_samples = segment_data.shape[0]
+            num_samples = len(raw_segment)
             whole_seconds = int(kept_seconds(num_samples / original_sample_rate))
             if whole_seconds < 1:
                 logging.debug(
                     f"Segment shorter than one second ({num_samples} samples); skipped."
                 )
                 return None
-            segment_data = segment_data[:whole_seconds * samples_per_second]
+            samples = raw_segment.value[:whole_seconds * whole_hertz(original_sample_rate)]
 
             # Resampling keeps the first sample's time: sample k is at t0 + k / rate.
+            # The segment's own samples alone are resampled, so within the resampler's
+            # margin of either end the samples are approximate (``gf.resample``).
+            data, t0 = resample(samples, float(raw_segment.t0.value), original_sample_rate, sample_rate_hertz)
             return SegmentStrain(
-                data=ops.convert_to_tensor(
-                    resample_fft(segment_data, original_sample_rate, sample_rate_hertz),
-                    dtype="float32",
-                ),
-                t0=float(raw_segment.t0.value),
+                data=ops.convert_to_tensor(data, dtype="float32"),
+                t0=t0,
                 sample_rate_hertz=float(sample_rate_hertz),
                 source=f"{raw_segment.channel} at {original_sample_rate} Hz",
             )
@@ -1596,8 +1595,9 @@ class BaseDataObtainer(ABC):
         """
         if sample_rate_hertz is None:
             sample_rate_hertz = gf.Defaults.sample_rate_hertz
-        # Refuse rates no public source holds, before any zero-fill fallback.
-        gwosc_sample_rate_hertz(sample_rate_hertz)
+        # Refuse rates no public source holds, or the resampler cannot make, before any
+        # fetch and its zero-fill fallback.
+        gwosc_sample_rate_hertz(whole_hertz(sample_rate_hertz))
 
         if self.file_path is not None and self.cache_segments:
             gf.ensure_directory_exists(self.file_path.parent)

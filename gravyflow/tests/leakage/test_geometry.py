@@ -73,12 +73,16 @@ def test_window_inside_own_piece(world, tmp_path, layout, mode, path):
 # =============================================================================
 #
 # The perturbation is applied to raw rows as acquisition hands them on (after the
-# piece's resampling, whose float32 FFT couples every sample of a piece through its
-# rounding), so the test isolates what the per-row stages (PSD, whitening, SNR
-# scaling and labels) read. Every row is perturbed in turn: a dependency from any row
-# to any other is seen, whichever pair it joins.
+# piece's resampling), so the test isolates what the per-row stages (PSD, whitening,
+# SNR scaling and labels) read. Every row is perturbed in turn: a dependency from any
+# row to any other is seen, whichever pair it joins. It is a gain rising along the
+# row, never a uniform scale, which the scale-free whitening rightly ignores.
 
-PERTURBATION = 1.0 + 2.0 ** -3
+PERTURBATION = 2.0 ** -3
+
+
+def _perturbed(values):
+    return values * (1.0 + PERTURBATION * np.linspace(0.0, 1.0, values.shape[-1], dtype=np.float32))
 
 
 def _snr_generator():
@@ -95,14 +99,14 @@ def _snr_generator():
 
 def _copy_batch(batch, rows=()):
     """
-    A copy of a raw batch dict, with ONSOURCE and OFFSOURCE scaled at each index in
+    A copy of a raw batch dict, with ONSOURCE and OFFSOURCE perturbed at each index in
     ``rows``: (j, d) is one row, (j,) every detector of example j.
     """
     out = dict(batch)
     for key in (RV.ONSOURCE, RV.OFFSOURCE):
         values = np.array(batch[key], dtype=np.float32, copy=True)
         for row in rows:
-            values[row] *= PERTURBATION
+            values[row] = _perturbed(values[row])
         out[key] = values
     return out
 
@@ -260,3 +264,46 @@ def test_start_gps_is_first_sample(world, tmp_path, rate, mode, path):
         f"START_GPS_TIME minus the decoded first onsource sample: min {error.min():.6f} s, "
         f"max {error.max():.6f} s"
     )
+
+
+#: The resampling code: three in-band tones, each phased by absolute GPS time.
+TONE_EPOCH = 1238175000.0
+TONES_HERTZ = np.array([61.25, 211.75, 487.5])
+TONE_PHASES = np.array([0.3, 1.9, 4.4])
+
+
+def _tones(times):
+    return np.sin(2 * np.pi * TONES_HERTZ * (np.asarray(times)[:, None] - TONE_EPOCH) + TONE_PHASES).sum(axis=1)
+
+
+def _decoded_drift(samples, times):
+    """
+    How late ``samples`` are against their claimed ``times``, in seconds: each tone's
+    phase fitted by least squares, against the phase the code gives those times.
+    """
+    phase = 2 * np.pi * TONES_HERTZ * (np.asarray(times)[:, None] - TONE_EPOCH)
+    design = np.concatenate([np.sin(phase), np.cos(phase)], axis=1)
+    (sines, cosines), *_ = np.linalg.lstsq(design, samples, rcond=None)[0].reshape(1, 2, -1)
+    offset = np.angle(np.exp(1j * (np.arctan2(cosines, sines) - TONE_PHASES)))
+    return float(np.mean(offset / (2 * np.pi * TONES_HERTZ)))
+
+
+# Resampling keeps time: sample n of a resampled piece is at t0 + n / rate, to a tenth
+# of a sample, along the whole piece, for any piece length.
+@pytest.mark.parametrize("extra", [0, 1, 3], ids=lambda k: f"N+{k}")
+@pytest.mark.parametrize("rate_in", [4096.0, 2048.0, 16384.0])
+def test_resample_keeps_time(rate_in, extra):
+    rate_out = 2048.0
+    t0 = TONE_EPOCH + 100.3  # off the sample grid of either rate
+    num_samples = int(2 * rate_in) + extra
+    resampled, start = gf.resample(_tones(t0 + np.arange(num_samples) / rate_in), t0, rate_in, rate_out)
+    assert start == t0
+    width = 128
+    for fraction in (0.4, 0.5, 0.9):
+        centre = int(fraction * len(resampled))
+        n = np.arange(centre - width, centre + width)
+        drift = _decoded_drift(np.asarray(resampled[n], dtype=np.float64), t0 + n / rate_out) * rate_out
+        assert abs(drift) <= 0.1, (
+            f"{num_samples} samples at {rate_in:g} Hz: sample {centre} of {len(resampled)} "
+            f"is {drift:+.3f} samples off t0 + n / {rate_out:g}"
+        )

@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.dataset.config import TransientDefaults
 
 from . import audit
 from . import fixtures as fx
@@ -130,6 +131,9 @@ def test_constructed_starts_keep_the_separation(monkeypatch, row, draws):
 
 #: The span a transient's record reads, each side of its centre.
 TRANSIENT_HALF_SPAN_SECONDS = 48.2
+#: Transient windows are read from the transient cache's stored 4096 Hz: at that rate
+#: the resampler is the identity, so the fixture's broadband code survives the read.
+TRANSIENT_RATE = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
 #: How far a partner's centre lies from the transient's at least: two spans.
 PARTNER_SEPARATION_SECONDS = 4 * TRANSIENT_HALF_SPAN_SECONDS
 
@@ -164,7 +168,7 @@ def _glitch_batch(world, tmp_path, fixture):
                                  noise_type=gf.NoiseType.REAL, 
                                  data_directory_path=tmp_path)
         ds = gf.Dataset(
-            noise_obtainer=noise, sample_rate_hertz=256.0,
+            noise_obtainer=noise, sample_rate_hertz=TRANSIENT_RATE,
             onsource_duration_seconds=fx.ONSOURCE_SECONDS, crop_duration_seconds=fx.CROP_SECONDS,
             offsource_duration_seconds=fx.OFFSOURCE_SECONDS, num_examples_per_batch=1,
             group="train", seed=7, ifos=[gf.IFO.H1, gf.IFO.L1],
@@ -177,8 +181,8 @@ def _glitch_batch(world, tmp_path, fixture):
             drawn.append(ds[0])
             yield drawn[-1]
 
-        record = audit.collect(harness, {"glitch": ("train", draw())}, 1, IFOS, fx.window(256.0),
-                               onsource_cropped=True, stride=16, adjacent=False)["glitch"]
+        record = audit.collect(harness, {"glitch": ("train", draw())}, 1, IFOS, fx.window(TRANSIENT_RATE),
+                               onsource_cropped=True, adjacent=False)["glitch"]
         fetches = harness.source.snapshot()[0]
     outputs = drawn[0][1]
     return record, np.asarray(outputs[RV.DATA_LABEL.name]), fetches
@@ -221,7 +225,7 @@ def test_partner_windows(world, tmp_path, glitch_ifo):
     expected[g] = 1.0
     assert labels.tolist() == [expected], f"labels {labels.tolist()}, expected {expected} (NOISE, GLITCH)"
     decoded_start = seconds[:, 0] + fx.OFFSOURCE_SECONDS + fx.CROP_SECONDS
-    np.testing.assert_allclose(first.start_labels[0], decoded_start, atol=1 / 256.0,
+    np.testing.assert_allclose(first.start_labels[0], decoded_start, atol=1 / TRANSIENT_RATE,
                                err_msg="START_GPS_TIME is not each detector's own window")
     assert np.array_equal(first.footprints, second.footprints), "two builds chose different partners"
 

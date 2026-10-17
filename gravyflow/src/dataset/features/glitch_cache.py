@@ -21,7 +21,7 @@ File Format (HDF5), ``TRANSIENT_CACHE_FORMAT``:
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple, Union
 import logging
 import numbers
 import threading
@@ -42,14 +42,25 @@ CACHE_OFFSOURCE_DURATION = TransientDefaults.CACHE_OFFSOURCE_DURATION
 CACHE_PADDING_DURATION = TransientDefaults.CACHE_PADDING_DURATION
 
 #: The format of the transient caches, in the file name and the ``version``
-#: attribute; a file of another format is never read. 3: a detector's strain that is
-#: not held is NaN, never zeros, and is fetched again when requested; each row is
+#: attribute; a file of another format is never read. 4: strain downloaded at another
+#: rate than the stored one is resampled by ``gf.resample``; a detector's strain that
+#: is not held is NaN, never zeros, and is fetched again when requested; each row is
 #: its transient's exact GPS time, the transient on its stored onsource's centre
-#: sample. Format 2 zero-filled a missing detector and keyed rows at 10 ms.
-TRANSIENT_CACHE_FORMAT = 3
+#: sample. Format 3 was resampled by gwpy, and format 2 zero-filled a missing detector
+#: and keyed rows at 10 ms.
+TRANSIENT_CACHE_FORMAT = 4
 
 from collections import OrderedDict
 from dataclasses import dataclass
+
+
+class WindowRead(NamedTuple):
+    """Where a request's windows come from in a stored stretch (``TransientCache.window_read``)."""
+    #: The stretch's samples to resample.
+    stored: slice
+    #: The request's offsource, then its onsource, among the resampled samples.
+    offsource: slice
+    onsource: slice
 
 @dataclass
 class CacheChunk:
@@ -88,6 +99,67 @@ class TransientCache:
     """
     
     @staticmethod
+    def window_read(
+        stored_offsource: int,
+        stored_onsource: int,
+        stored_rate: float,
+        sample_rate_hertz: float,
+        onsource_duration: float,
+        offsource_duration: float,
+    ) -> WindowRead:
+        """
+        Where a request's (padded) onsource and offsource windows are read from a stored
+        stretch of ``stored_offsource`` and then ``stored_onsource`` samples: the one
+        geometry of every transient window, whatever reads it.
+
+        The transient is on the stored onsource's centre sample (``centre_index``). The
+        request's onsource is centred on that sample, and its offsource ends where the
+        onsource begins, as for noise, so it may reach into the stored onsource. Sample
+        counts are WindowSpec's (``even_samples``). The stretch read starts on a sample
+        of the request's rate, counted from the transient's, and reaches the resampler's
+        margin past each end of the windows (``gf.resample``), so every sample served is
+        exact.
+
+        Raises:
+            ValueError: if the request needs upsampling, a rate that is not whole hertz,
+                or more strain than is stored, the resampler's margin counted.
+        """
+        from gravyflow.src.utils.resample import resample_margin, resample_ratio
+        from gravyflow.src.utils.tensor import centre_index, even_samples
+
+        if sample_rate_hertz > stored_rate:
+            raise ValueError(
+                f"Cannot upsample from {stored_rate}Hz to {sample_rate_hertz}Hz. "
+                "Upsampling is not supported."
+            )
+        up, down = resample_ratio(stored_rate, sample_rate_hertz)
+        margin = resample_margin(stored_rate, sample_rate_hertz)
+        num_onsource = even_samples(onsource_duration, sample_rate_hertz)
+        num_offsource = even_samples(offsource_duration, sample_rate_hertz)
+
+        # Served sample m, counted from the transient's, is at stored sample
+        # transient + m * down / up: on a stored sample when m is a multiple of up.
+        transient = stored_offsource + centre_index(stored_onsource)
+        before = num_offsource + centre_index(num_onsource)
+        after = num_onsource - centre_index(num_onsource)
+        # Start a whole number of up served samples before the transient, and at least
+        # the margin before the first sample served.
+        multiples = -(-(before * down + margin * up) // (up * down))
+        start = transient - multiples * down
+        first = multiples * up - before
+        last = multiples * up + after - 1
+        stop = start + -(-last * down // up) + margin + 1
+        if start < 0 or stop > stored_offsource + stored_onsource:
+            raise ValueError(
+                f"A {onsource_duration} s onsource with a {offsource_duration} s offsource at "
+                f"{sample_rate_hertz} Hz needs more strain than is stored "
+                f"({(stored_offsource + stored_onsource) / stored_rate} s at {stored_rate} Hz), "
+                f"with the resampler's margin of {margin} samples past each end."
+            )
+        middle = first + num_offsource
+        return WindowRead(slice(start, stop), slice(first, middle), slice(middle, middle + num_onsource))
+
+    @staticmethod
     def read_windows(
         onsource,
         offsource,
@@ -98,53 +170,25 @@ class TransientCache:
         rows=None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        The (padded) onsource and offsource windows of a request, from stored ones: the
-        one geometry of every transient window, whatever reads it.
-
-        A stored offsource and its stored onsource are one stretch of strain, the
-        offsource first, with the transient on the onsource's centre sample
-        (``centre_index``). The request's onsource is centred on that sample, and its
-        offsource ends where the onsource begins, as for noise, so it may reach into
-        the stored onsource. Sample counts are WindowSpec's (``even_samples``).
+        The (padded) onsource and offsource windows of a request, from stored ones, by
+        the one geometry of every transient window (``window_read``), resampled by
+        ``gf.resample``.
 
         ``onsource`` and ``offsource`` are arrays (or HDF5 datasets) whose last axis is
         samples at ``stored_rate``; ``rows``, when given, selects their first axis (and
-        an HDF5 read then holds only the samples needed). The rate is lowered by
-        keeping every n-th sample, in phase with the transient's sample.
+        an HDF5 read then holds only the samples needed).
 
         Raises:
-            ValueError: if the request needs upsampling, a rate that does not divide the
-                stored one, or more strain than is stored.
+            ValueError: as ``window_read``.
         """
-        from gravyflow.src.utils.tensor import centre_index, even_samples
+        from gravyflow.src.utils.resample import resample
 
-        if sample_rate_hertz > stored_rate:
-            raise ValueError(
-                f"Cannot upsample from {stored_rate}Hz to {sample_rate_hertz}Hz. "
-                "Upsampling is not supported."
-            )
-        if stored_rate % sample_rate_hertz != 0:
-            raise ValueError(
-                f"Sample rates must be integer multiples. "
-                f"Cannot downsample from {stored_rate}Hz to {sample_rate_hertz}Hz. "
-                f"Ratio {stored_rate / sample_rate_hertz:.4f} is not an integer."
-            )
-        ratio = int(stored_rate // sample_rate_hertz)
-        num_onsource = even_samples(onsource_duration, sample_rate_hertz)
-        num_offsource = even_samples(offsource_duration, sample_rate_hertz)
-
-        # Indices along the stretch: the stored offsource, then the stored onsource.
         stored_offsource = int(offsource.shape[-1])
-        stored_total = stored_offsource + int(onsource.shape[-1])
-        onsource_start = stored_offsource + centre_index(onsource.shape[-1]) \
-            - centre_index(num_onsource) * ratio
-        start = onsource_start - num_offsource * ratio
-        stop = onsource_start + num_onsource * ratio
-        if start < 0 or stop > stored_total:
-            raise ValueError(
-                f"A {onsource_duration} s onsource with a {offsource_duration} s offsource "
-                f"needs more strain than is stored ({stored_total / stored_rate} s)."
-            )
+        read = TransientCache.window_read(
+            stored_offsource, int(onsource.shape[-1]), stored_rate, sample_rate_hertz,
+            onsource_duration, offsource_duration,
+        )
+        start, stop = read.stored.start, read.stored.stop
 
         def take(store, lo, hi):
             return np.asarray(store[..., lo:hi] if rows is None else store[rows, :, lo:hi])
@@ -154,8 +198,9 @@ class TransientCache:
             parts.append(take(offsource, start, min(stop, stored_offsource)))
         if stop > stored_offsource:
             parts.append(take(onsource, max(start - stored_offsource, 0), stop - stored_offsource))
-        stretch = np.concatenate(parts, axis=-1)[..., ::ratio]
-        return stretch[..., num_offsource:], stretch[..., :num_offsource]
+        # The geometry counts samples from the transient's, so no time is carried.
+        resampled, _ = resample(np.concatenate(parts, axis=-1), 0.0, stored_rate, sample_rate_hertz)
+        return resampled[..., read.onsource], resampled[..., read.offsource]
 
     def __init__(self, path: Path, mode: str = 'r'):
         self.path = Path(path)

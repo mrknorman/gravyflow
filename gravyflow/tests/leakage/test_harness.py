@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.dataset.config import TransientDefaults
 
 from . import audit
 from . import fixtures as fx
@@ -23,6 +24,9 @@ from .provenance import (
 
 RV = gf.ReturnVariables
 IFOS = ["H1", "L1"]
+#: Transient windows are read from the transient cache's stored 4096 Hz: at that rate
+#: the resampler is the identity, so the fixture's broadband code survives the read.
+TRANSIENT_RATE = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
 
 
 # =============================================================================
@@ -63,9 +67,10 @@ def _train_record_time(start):
 
 def test_transient_round_trip_decodes_every_sample(world, tmp_path):
     """
-    Glitch windows, fetched at 4096 Hz and thinned by stride to 256 Hz, decode
-    exactly; the padded onsource of the detector a glitch was seen in is centred on
-    it, and the other detector's on a partner time away from it.
+    Glitch windows, fetched and read at the transient cache's 4096 Hz (so resampling
+    them is the identity, which keeps the broadband code), decode exactly; the padded
+    onsource of the detector a glitch was seen in is centred on it, and the other
+    detector's on a partner time away from it.
     """
     edge = fx.boundary("O3", "train", "train", skip=3)
     peaks = np.array([_train_record_time(edge + 1000.0), _train_record_time(edge + 3000.0)])
@@ -74,7 +79,7 @@ def test_transient_round_trip_decodes_every_sample(world, tmp_path):
         GlitchRecord("H1", peaks[0], peaks[0] - 0.5, 1.0, "Blip", 0.95),
         GlitchRecord("L1", peaks[1], peaks[1] - 0.5, 1.0, "Blip", 0.95),
     ])
-    window = fx.window(256.0)
+    window = fx.window(TRANSIENT_RATE)
     with world(fixture) as harness:
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
@@ -84,7 +89,7 @@ def test_transient_round_trip_decodes_every_sample(world, tmp_path):
                                  noise_type=gf.NoiseType.REAL,
                                  data_directory_path=tmp_path)
         ds = gf.Dataset(
-            noise_obtainer=noise, sample_rate_hertz=256.0,
+            noise_obtainer=noise, sample_rate_hertz=TRANSIENT_RATE,
             onsource_duration_seconds=fx.ONSOURCE_SECONDS, crop_duration_seconds=fx.CROP_SECONDS,
             offsource_duration_seconds=fx.OFFSOURCE_SECONDS, num_examples_per_batch=2,
             group="train", seed=7, ifos=[gf.IFO.H1, gf.IFO.L1],
@@ -93,7 +98,7 @@ def test_transient_round_trip_decodes_every_sample(world, tmp_path):
         # The transient path takes its offsource from earlier in the cached window,
         # not adjacent to the onsource, so the seam is not required here.
         records = audit.collect(harness, {"glitches": ("train", fx.dataset_batches(ds))}, 1,
-                                IFOS, window, onsource_cropped=True, stride=16, adjacent=False)
+                                IFOS, window, onsource_cropped=True, adjacent=False)
     record = records["glitches"]
     padded_end = record.footprints[..., 1] / 4096.0
     centres = padded_end - (fx.ONSOURCE_SECONDS / 2 + fx.CROP_SECONDS)

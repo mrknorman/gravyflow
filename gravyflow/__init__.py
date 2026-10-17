@@ -61,6 +61,7 @@ from .src.utils.tensor import (
     crop_samples, rfftfreq, get_element_shape, check_tensor_integrity,
     set_random_seeds
 )
+from .src.utils.resample import resample
 from .src.utils.numerics import (
     ensure_even, ensure_list, calculate_sample_counts, BatchConfig
 )
