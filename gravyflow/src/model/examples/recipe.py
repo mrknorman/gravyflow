@@ -211,10 +211,13 @@ class FixedBatches(keras.utils.PyDataset):
 def materialise(batches, num_batches: int) -> FixedBatches:
     """
     Draw ``num_batches`` batches once: a fixed validation set, naming the split
-    of ``batches`` (None for batches that name none, which a run refuses).
+    of ``batches`` (its spec None for split-neutral, synthetic, data). Batches
+    that name no split give neither spec nor group, which a run refuses.
     """
+    named = hasattr(batches, "split_spec")
     return FixedBatches([batches[k] for k in range(num_batches)],
-                        getattr(batches, "split_spec", None), getattr(batches, "group", None))
+                        batches.split_spec if named else None,
+                        getattr(batches, "group", None) if named else None)
 
 
 # ---------------------------------------------------------- run directory

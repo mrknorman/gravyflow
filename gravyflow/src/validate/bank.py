@@ -166,12 +166,12 @@ class ValidationBank:
         return self.stage_dataset("far")
 
     @property
-    def split_spec(self) -> gf.SplitSpec:
+    def split_spec(self) -> Optional[gf.SplitSpec]:
         """
         How the data the bank scores is split: the one computation of a split
         (`split_spec_of`, which `Dataset.split_spec` makes) over the noise
         obtainer every stage's dataset reads (none named, the default noise,
-        whose split is the default). It reads the obtainer's specification, not
+        whose split is the default; synthetic noise, None, split-neutral). It reads the obtainer's specification, not
         its data, so a model is refused before any dataset is built or any
         strain fetched.
         """

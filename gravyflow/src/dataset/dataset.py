@@ -86,22 +86,31 @@ def noise_ifos(ifos, noise_obtainer) -> List:
     return ensure_list(obtainer_ifos) if obtainer_ifos is not None else [gf.IFO.L1]
 
 
-def split_spec_of(obtainers) -> "gf.SplitSpec":
+def split_spec_of(obtainers) -> Optional["gf.SplitSpec"]:
     """
     How the real data read through ``obtainers`` is split: the spec of the IFO
     data obtainers they read through (a NoiseObtainer's, or a transient obtainer
-    itself), else the default. This is the one computation of a split, a
-    dataset's (`IndexedBatches.split_spec`) and the validator's alike, and it
-    reads only the obtainers' specifications, so a split is known before any
-    data is fetched. Everything else that needs a split, the training runs
-    included, reads it from data.
+    itself); None (no obtainer named) is the default obtainer, real noise split
+    by the default spec. Synthetic noise (WHITE, COLORED) reads no real data, so
+    it is split-neutral: data read through it alone names no spec (None), and
+    combines with real data of any spec.
+
+    This is the one computation of a split, a dataset's
+    (`IndexedBatches.split_spec`) and the validator's alike, and it reads only
+    the obtainers' specifications, so a split is known before any data is
+    fetched. Everything else that needs a split, the training runs included,
+    reads it from data.
     """
-    specs = {getattr(getattr(obtainer, "ifo_data_obtainer", obtainer), "split_spec", None)
-             for obtainer in obtainers}
-    specs.discard(None)
+    specs = {getattr(getattr(obtainer, "ifo_data_obtainer", obtainer), "split_spec", None) or gf.DEFAULT_SPLIT
+             for obtainer in obtainers if not _synthetic(obtainer)}
     if len(specs) > 1:
         raise ValueError(f"A dataset's obtainers split time differently: {sorted(s.fingerprint() for s in specs)}.")
-    return specs.pop() if specs else gf.DEFAULT_SPLIT
+    return specs.pop() if specs else None
+
+
+def _synthetic(obtainer) -> bool:
+    """Whether ``obtainer`` makes its noise without reading real data."""
+    return isinstance(obtainer, gf.NoiseObtainer) and obtainer.noise_type in (gf.NoiseType.WHITE, gf.NoiseType.COLORED)
 
 
 def augment_batch(onsource, offsource, streams: BatchStreams, obtainer, split: str,
@@ -370,14 +379,17 @@ class IndexedBatches:
         return {
             **self.tree.metadata(),
             "split": self.group,
-            "split_fingerprint": self.split_spec.fingerprint(),
+            "split_fingerprint": None if self.split_spec is None else self.split_spec.fingerprint(),
             "epoch_mode": self.epoch_mode.name,
             "index_addressed": self.index_addressed,
         }
 
     @property
-    def split_spec(self) -> "gf.SplitSpec":
-        """How the real data this dataset reads is split: `split_spec_of` its obtainers."""
+    def split_spec(self) -> Optional["gf.SplitSpec"]:
+        """
+        How the real data this dataset reads is split: `split_spec_of` its
+        obtainers; None for synthetic noise alone, which is split-neutral.
+        """
         return split_spec_of(self._obtainers())
 
     @property

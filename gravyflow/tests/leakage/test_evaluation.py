@@ -489,6 +489,42 @@ def test_the_validator_reads_the_split_of_the_data_it_scores():
     assert _scores_split("test", _selected_on_validate(FOLD_2), args)
 
 
+def test_synthetic_data_is_split_neutral(world, tmp_path):
+    """
+    Data that reads no real data (WHITE or COLORED noise) is split-neutral: it names
+    no SplitSpec, so it combines with real data of any spec. Synthetic training data
+    selected on fold-2's real validate split records fold-2's spec; synthetic data
+    alone records the default, as it did. A validator scoring synthetic data scores a
+    model of any spec, though never on its selection split. Real noise with no
+    obtainer named is the default spec's, and is never neutral.
+    """
+    from gravyflow.src.validate.config import split_record
+    from gravyflow.tests.test_model_train import dataset_args
+
+    def synthetic(group, noise_type):
+        args = {**dataset_args(), "group": group, "steps_per_epoch": 1,
+                "noise_obtainer": gf.NoiseObtainer(noise_type=noise_type, ifos=[gf.IFO.L1])}
+        return StandingBatches(gf.Dataset(**args))
+
+    fixture = _split_world([FOLD_2, gf.DEFAULT_SPLIT])
+    with world(fixture):
+        real = StandingBatches(fx.dataset(fixture, tmp_path / "data", "validate", steps_per_epoch=2,
+                                          split_spec=FOLD_2))
+        for noise_type in (gf.NoiseType.WHITE, gf.NoiseType.COLORED):
+            training = synthetic("train", noise_type)
+            assert training.split_spec is None
+            assert training.dataset.seed_metadata["split_fingerprint"] is None
+            assert split_record(training, real) == {"fingerprint": FOLD_2.fingerprint(),
+                                                    "selection_split": "validate"}
+            assert split_record(training, synthetic("validate", noise_type)) == {
+                "fingerprint": gf.DEFAULT_SPLIT.fingerprint(), "selection_split": "validate"}
+    assert split_spec_of([None]) == gf.DEFAULT_SPLIT
+    assert split_spec_of([gf.NoiseObtainer(noise_type=gf.NoiseType.REAL)]) == gf.DEFAULT_SPLIT
+    assert _scores_split("test", _selected_on_validate(FOLD_2))
+    with pytest.raises(ValueError, match="selected on the 'validate' split"):
+        _scores_split("validate", _selected_on_validate(FOLD_2))
+
+
 #: The one computation of a split, where gravyflow's source defines it.
 COMPUTATION = ("dataset/dataset.py", split_spec_of.__name__)
 
@@ -579,7 +615,7 @@ def test_only_a_dataset_derives_its_split_from_its_obtainers():
 
 @pytest.mark.parametrize("noise,spec", [
     (lambda: {}, gf.DEFAULT_SPLIT),
-    (lambda: {"noise_obtainer": gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE)}, gf.DEFAULT_SPLIT),
+    (lambda: {"noise_obtainer": gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE)}, None),
     (lambda: {"noise_obtainer": gf.NoiseObtainer(noise_type=gf.NoiseType.REAL, ifo_data_obtainer=gf.IFODataObtainer(
         data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE], split_spec=FOLD_2))}, FOLD_2),
     (lambda: {"noise_obtainer": gf.TransientDataObtainer(
@@ -589,8 +625,8 @@ def test_only_a_dataset_derives_its_split_from_its_obtainers():
 def test_the_banks_split_is_its_datasets(noise, spec):
     """
     The bank reads its split before it builds a dataset, and it is the split of the
-    dataset it then builds: its noise's, a glitch obtainer used as noise included, and
-    the default noise's when none is named. The dataset is built here without its
+    dataset it then builds: its noise's, a glitch obtainer used as noise included, the
+    default noise's (real) when none is named, and none for synthetic noise. The dataset is built here without its
     generators, which read the data, since only its split is compared.
     """
     args = {"onsource_duration_seconds": 1.0, "input_variables": [gf.ReturnVariables.WHITENED_ONSOURCE], **noise()}

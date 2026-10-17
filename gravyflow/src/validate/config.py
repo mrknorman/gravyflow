@@ -91,7 +91,10 @@ def split_record(training, validation) -> Dict[str, str]:
     ``run.json``), which the validator checks (``check_held_out``).
 
     ``training`` and ``validation`` are gravyflow datasets, or anything naming
-    one's ``split_spec`` and ``group`` (the run recipe's batches do).
+    one's ``split_spec`` and ``group`` (the run recipe's batches do). Data whose
+    ``split_spec`` is None reads no real data (synthetic noise): it is
+    split-neutral, and takes the spec of the real data beside it; a model of
+    split-neutral data alone records the default spec.
 
     Raises:
         ValueError: data that names no split; training data outside the
@@ -100,23 +103,24 @@ def split_record(training, validation) -> Dict[str, str]:
     """
     named = {}
     for role, data in (("training", training), ("validation", validation)):
-        spec, group = getattr(data, "split_spec", None), getattr(data, "group", None)
-        if spec is None or group is None:
+        group = getattr(data, "group", None)
+        if not hasattr(data, "split_spec") or group is None:
             raise ValueError(
                 f"The {role} data ({type(data).__name__}) names no split: a model records the "
                 "split of gravyflow data, which names its split_spec and group."
             )
-        named[role] = (spec, gf.SplitSpec.check_name(group))
+        named[role] = (data.split_spec, gf.SplitSpec.check_name(group))
     (spec, group), (selection_spec, selection) = named["training"], named["validation"]
     if group != "train":
         raise ValueError(f"The training data is the {group!r} split; a model trains on 'train'.")
     if selection == "train":
         raise ValueError("The validation data is the 'train' split; a model is selected on held-out data.")
-    if selection_spec.fingerprint() != spec.fingerprint():
+    if spec is not None and selection_spec is not None and selection_spec.fingerprint() != spec.fingerprint():
         raise ValueError(
             f"The training data is split by SplitSpec {spec.fingerprint()} and the validation data "
             f"by {selection_spec.fingerprint()}: the validation data may be training data."
         )
+    spec = spec or selection_spec or gf.DEFAULT_SPLIT
     return {"fingerprint": spec.fingerprint(), "selection_split": selection}
 
 
@@ -164,14 +168,15 @@ def require_same_split(recorded: Optional[dict], live: Dict[str, str], where) ->
         )
 
 
-def check_held_out(group: str, spec: "gf.SplitSpec", run_record: Optional[dict]) -> None:
+def check_held_out(group: str, spec: Optional["gf.SplitSpec"], run_record: Optional[dict]) -> None:
     """
     Refuse to score split ``group`` for a model whose training record
     (``run_record``, the record its weights carry: `run_record_of`) names
     another split spec than ``spec``, names ``group`` as the split that selected
-    the model, or names no split. A model with no record at all, one gravyflow
-    never trained (an external one), is scored with a warning: the split it
-    trained on is unknown.
+    the model, or names no split. ``spec`` None is split-neutral data
+    (synthetic noise), which no record's spec can share time with. A model with
+    no record at all, one gravyflow never trained (an external one), is scored
+    with a warning: the split it trained on is unknown.
     """
     from gravyflow.src.dataset.splits import require_split_fingerprint
 
@@ -182,7 +187,10 @@ def check_held_out(group: str, spec: "gf.SplitSpec", run_record: Optional[dict])
         )
         return
     split = run_record.get("split") or {}
-    require_split_fingerprint(split.get("fingerprint"), spec, "The model's training run")
+    if spec is not None:
+        require_split_fingerprint(split.get("fingerprint"), spec, "The model's training run")
+    elif split.get("fingerprint") is None:
+        raise ValueError("The model's training run records no split fingerprint, so the split it trained on is unknown.")
     selection = split.get("selection_split")
     if selection is None:
         raise ValueError(
