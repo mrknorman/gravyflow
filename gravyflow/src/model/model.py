@@ -60,18 +60,22 @@ def beta_prime_log_prob(x, alpha, beta):
     log_beta_func = lax.lgamma(alpha) + lax.lgamma(beta) - lax.lgamma(alpha + beta)
     return log_prob - log_beta_func
 
+@keras.saving.register_keras_serializable(package="gravyflow")
 def gamma_nll(y_true, y_pred):
     alpha, beta = ops.split(y_pred, 2, axis=-1)
     return -gamma_log_prob(y_true, alpha, beta)
 
+@keras.saving.register_keras_serializable(package="gravyflow")
 def folded_normal_nll(y_true, y_pred):
     loc, scale = ops.split(y_pred, 2, axis=-1)
     return -folded_normal_log_prob(y_true, loc, scale)
 
+@keras.saving.register_keras_serializable(package="gravyflow")
 def trunc_normal_nll(y_true, y_pred, low=0.0, high=100.0):
     loc, scale = ops.split(y_pred, 2, axis=-1)
     return -trunc_normal_log_prob(y_true, loc, scale, low, high)
 
+@keras.saving.register_keras_serializable(package="gravyflow")
 def beta_prime_nll(y_true, y_pred):
     alpha, beta = ops.split(y_pred, 2, axis=-1)
     return -beta_prime_log_prob(y_true, alpha, beta)
@@ -82,6 +86,7 @@ from numpy.random import default_rng
 import gravyflow as gf
 
 
+@keras.saving.register_keras_serializable(package="gravyflow")
 class IndependentGamma(layers.Layer):
     """An independent Gamma Keras layer that outputs parameters."""
 
@@ -100,6 +105,7 @@ class IndependentGamma(layers.Layer):
         config.update({"event_shape": self.event_shape})
         return config
 
+@keras.saving.register_keras_serializable(package="gravyflow")
 class IndependentFoldedNormal(layers.Layer):
     """An independent folded normal Keras layer that outputs parameters."""
 
@@ -130,6 +136,7 @@ class IndependentFoldedNormal(layers.Layer):
         config.update({"event_shape": self.event_shape})
         return config
 
+@keras.saving.register_keras_serializable(package="gravyflow")
 class IndependentTruncNormal(layers.Layer):
     """An independent truncated normal Keras layer that outputs parameters."""
 
@@ -159,6 +166,7 @@ class IndependentTruncNormal(layers.Layer):
         })
         return config
 
+@keras.saving.register_keras_serializable(package="gravyflow")
 class IndependentBetaPrime(layers.Layer):
     """An independent Beta prime Keras layer that outputs parameters."""
 
@@ -224,6 +232,7 @@ class BaseLayer:
         for old, new in (self.mutable_attributes, other.mutable_attributes):
             old.crossover(new, crossover_rate)
 
+@keras.saving.register_keras_serializable(package="gravyflow")
 class Reshape(Layer):
     def __init__(self, reshaping_mode = "depthwise", **kwargs):
         super(Reshape, self).__init__(**kwargs)
@@ -568,7 +577,8 @@ class Model:
             if output_config["type"] == "normal":
                 loss = folded_normal_nll
             else:
-                loss = losses.BinaryCrossentropy()
+                # The binary output is a logit (see build_output_layer).
+                loss = losses.BinaryCrossentropy(from_logits=True)
         
         self.layers = layers
         self.batch_size = gf.HyperParameter(
@@ -699,7 +709,7 @@ class Model:
             name=name,
             layers=layers, 
             optimizer=genome.optimizer.value, 
-            loss=gf.HyperParameter(losses.BinaryCrossentropy(), seed=100), 
+            loss=gf.HyperParameter(losses.BinaryCrossentropy(from_logits=True), seed=100), 
             input_configs=input_configs, 
             output_config=output_config,
             training_config=training_config,
@@ -937,42 +947,20 @@ class Model:
                 seed=seed
             )
         
-        # Check if the model file exists
-        if os.path.exists(gf.model_file(model_path)) and not force_overwrite:
+        # A checkpoint that exists is loaded or refused: never replaced by an
+        # untrained model.
+        checkpoint = gf.model_file(model_path)
+        if os.path.exists(checkpoint) and not force_overwrite:
+            logger.info(f"Loading model from {model_path}")
             try:
-                # Try to load the model
-                logger.info(f"Loading model from {model_path}")
-                loaded_model = keras.models.load_model(gf.model_file(model_path))
-                model.model = loaded_model
-                model.loaded=True
-
-                return model
-
-            except Exception as e:
-                logger.error(f"Error loading model: {e}")
-                if blueprint_exists:
-                    logger.info("Using new model...")
-                    return model
-                elif load_genome is True:
-                    genome_path = Path(f"{model_path}/genome")
-                    if genome_path.exists():
-                        genome = gf.ModelGenome.load(genome_path)
-                        
-                        return cls.from_genome(
-                            genome=genome, 
-                            name=name,
-                            input_configs=input_configs, 
-                            output_config=output_config,
-                            training_config=training_config,
-                            dataset_args=dataset_args, 
-                            model_path=model_path,
-                            metrics=[],
-                            seed=seed
-                        )
-                    else: 
-                        raise ValueError("No genome exists!")
-                else:
-                    raise ValueError("No default model blueprint exists!")
+                model.model = keras.models.load_model(checkpoint)
+            except Exception as error:
+                raise ValueError(
+                    f"The checkpoint {checkpoint} exists but cannot be loaded. Pass "
+                    "force_overwrite=True to start an untrained model in its place."
+                ) from error
+            model.loaded = True
+            return model
         else:
             # If the model doesn't exist, build a new one
             if blueprint_exists:
@@ -1038,7 +1026,8 @@ class Model:
                 case "normal":
                     metrics = [keras.metrics.RootMeanSquaredError()]
                 case "binary":
-                    metrics = [keras.metrics.BinaryAccuracy()]
+                    # The output is a logit: positive means signal.
+                    metrics = [keras.metrics.BinaryAccuracy(threshold=0.0)]
         
         # Keyed by the output's name, as its target is.
         self.model.compile(
@@ -1133,10 +1122,11 @@ class Model:
                 )(x)
             output_tensor = IndependentFoldedNormal(1, name=output_config["name"])(x)
         elif output_config["type"] == "binary":
+            # A logit, never a probability: the validator ranks logits, because
+            # saturated probabilities tie (sigmoid of the output is P(signal)).
             x = layers.Flatten()(x)
             output_tensor = layers.Dense(
                                 1, 
-                                activation='sigmoid', 
                                 dtype='float32',
                                 name=output_config["name"]
                             )(x)
@@ -1306,6 +1296,10 @@ class Model:
                 callbacks = callbacks,
                 batch_size = self.batch_size.value,
                 verbose=verbose,
+                # The dataset owns the order: its batches are addressed by
+                # (epoch, index) from its seed, and Keras' shuffle would draw
+                # from Python's unseeded global random.
+                shuffle=False,
                 **epoch_steps
             )
         )
@@ -1324,13 +1318,17 @@ class Model:
     def validate(
         self, 
         validate_args : dict,
-        efficiency_config : dict,
-        far_config : dict,
-        roc_config : dict,
-        model_path : Path,
-        heart : None
-    ):
-        validation_file_path : Path = Path(model_path) / "validation_data.h5"
+        config : "gf.ValidationConfig" = None,
+        model_path : Path = None,
+        heart : "gf.Heart" = None
+    ) -> "gf.Validator":
+        """
+        Score the model with the validator (its logit output is the score),
+        saving ``validation_data.h5`` and ``validation_plots.html`` in
+        ``model_path`` (the model's own directory by default).
+        """
+        model_path = Path(model_path if model_path is not None else self.model_path)
+        validation_file_path : Path = model_path / "validation_data.h5"
 
         if self.genome is not None:
             validate_args["onsource_duration_seconds"] = self.genome.onsource_duration_seconds.value
@@ -1347,9 +1345,7 @@ class Model:
                 self.model, 
                 self.name,
                 dataset_args=deepcopy(validate_args),
-                efficiency_config=efficiency_config,
-                far_config=far_config,
-                roc_config=roc_config,
+                config=config,
                 checkpoint_file_path=validation_file_path,
                 heart=heart
             )
@@ -1357,6 +1353,7 @@ class Model:
         validator.plot(
             model_path / "validation_plots.html"
         )
+        return validator
 
     def test(self, validation_datasets, num_batches: int):
         """
