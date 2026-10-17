@@ -24,7 +24,14 @@
   "seed": 2026,
   "candidates_per_round": 128,
   "target_coverage": 0.99,
-  "convergence_candidates": 2048
+  "convergence_candidates": 2048,
+  "code": {
+   "files": [
+    "cbc.py",
+    "template_grid.py"
+   ],
+   "sha256": "3a947103ae86328e06caf64a264e7338d052fc15757cee650da4301dc5da18eb"
+  }
  },
  "mass_1": [
   32.90495258193883,

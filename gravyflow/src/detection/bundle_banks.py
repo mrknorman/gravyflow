@@ -6,11 +6,14 @@ res/template_banks, or check the bundled files against a fresh placement.
     python -m gravyflow.src.detection.bundle_banks --check  # place and compare
 
 Each file stores its placement's key (`BankPlacement.key`): the match space,
-the noise curve's hash, the waveform model and the placement settings.
-`TemplateBank.place` loads a bundled bank only when that key equals the key of
-the placement asked for, so after a change to any of them the bank is placed
-again (with a warning) until this script is rerun. Placing the default bank
-takes about two minutes on a CPU.
+the noise curve's hash, the waveform model, the placement settings and the
+hash of the gravyflow code that places it. `TemplateBank.place` loads a bundled
+bank only when that key equals the key of the placement asked for, so after a
+change to any of them (including any edit to the CBC generator or the
+template-bank module) the bank is placed again, with a warning, until this
+script is rerun. `--check` also catches what the key cannot name, such as a
+dependency's change within its release series. Placing the default bank takes
+about two minutes on a CPU.
 """
 
 import argparse

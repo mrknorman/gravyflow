@@ -429,8 +429,11 @@ def test_the_bundled_bank_is_the_default_filters_and_names_what_it_depends_on():
     with open(curve, "rb") as f:
         assert key["space"]["noise_curve"]["sha256"] == hashlib.sha256(f.read()).hexdigest()
     assert key["space"]["waveform_model"]["approximant"] == "IMRPhenomD"
+    assert key["code"]["files"] == ["cbc.py", "template_grid.py"]
     records = [json.loads(p.read_text()) for p in sorted((gf.PATH / BUNDLED_BANK_DIRECTORY).glob("*.json"))]
-    assert [r["arguments"] for r in records] == [key]
+    # After any change to what the key names, the bundled bank is placed again.
+    assert [r["arguments"] for r in records] == [key], \
+        "a stale bundled bank: place it again with python -m gravyflow.src.detection.bundle_banks"
     bank = MatchedFilter(sample_rate_hertz=FS).bank
     assert bank.minimal_match == 0.97 and bank.num_templates == len(records[0]["mass_1"])
     assert bank.to_dict() == records[0]  # the library's own serialiser writes the loadable record
@@ -454,6 +457,40 @@ def test_a_bank_record_is_found_by_its_key_and_a_stale_one_is_not(monkeypatch):
     with pytest.warns(UserWarning, match="noise_curve"):
         placed = TemplateBank.place(placement)
     np.testing.assert_array_equal(placed.mass_1, [40.0])
+
+
+def test_the_bank_key_names_the_placement_code(tmp_path, monkeypatch):
+    # A bank depends on gravyflow's own code too (the CBC generator, the match
+    # space, the proposal and acceptance rule): changing the ramp width changes
+    # the key, and the bundled bank placed before the change is not loaded.
+    from gravyflow.src.detection import template_grid
+    from gravyflow.src.detection.matched_filter import default_bank_placement
+    placement = default_bank_placement()
+    key = placement.key()
+    copies = []
+    for path in template_grid.PLACEMENT_SOURCES:
+        copies.append(tmp_path / path.name)
+        copies[-1].write_bytes(path.read_bytes())
+    monkeypatch.setattr(template_grid, "PLACEMENT_SOURCES", tuple(copies))
+    assert placement.key() == key  # the code's content, not its location
+    module = next(path for path in copies if path.name == "template_grid.py")
+    source = module.read_text()
+    assert source.count("0.1 * self.visible_seconds") == 1
+    module.write_text(source.replace("0.1 * self.visible_seconds", "0.2 * self.visible_seconds"))
+    changed = placement.key()
+    assert changed["code"] != key["code"] and {**changed, "code": None} == {**key, "code": None}
+    monkeypatch.setattr(template_grid, "_stochastic_masses",
+                        lambda *args: (np.array([40.0]), np.array([30.0]), 128, 0.0))
+    with pytest.warns(UserWarning, match="code"):
+        placed = TemplateBank.place(placement)
+    np.testing.assert_array_equal(placed.mass_1, [40.0])
+
+
+def test_max_templates_holds_for_a_bundled_bank():
+    # The limit is the same whether the bank is placed or loaded.
+    with pytest.raises(ValueError, match="max_templates"):
+        TemplateBank.stochastic(max_templates=100)
+    assert TemplateBank.stochastic(max_templates=776).num_templates == 776
 
 
 def json_copy(data):

@@ -87,7 +87,8 @@ def waveform_model(approximant_name: str) -> dict:
     The waveform model `cbc_templates` computes: the approximant and the
     release series (major.minor) of ripplegw, which computes it. A release
     series is the unit the dependency is pinned to; a change within one is
-    caught by the bank's coverage tests, not by the bank's key.
+    caught by the bank's coverage tests and by a fresh placement
+    (`bundle_banks --check`), not by the bank's key.
     """
     from importlib.metadata import version
     major, minor = version("ripplegw").split(".")[:2]
@@ -224,12 +225,38 @@ def max_matches(a: np.ndarray, b: np.ndarray, chunk: int = 64) -> np.ndarray:
 # The bank
 # ---------------------------------------------------------------------------
 
+# The gravyflow source a placement runs: the CBC generator its templates come
+# from, and this module (the match space, the overlap, the proposal and the
+# acceptance rule).
+PLACEMENT_SOURCES = (
+    Path(__file__).resolve().parents[1] / "dataset" / "features" / "waveforms" / "cbc.py",
+    Path(__file__).resolve(),
+)
+
+
+def placement_code() -> dict:
+    """
+    The version of the gravyflow code a placement runs: the SHA-256 of the
+    contents of PLACEMENT_SOURCES, with line endings normalised so that a
+    checkout's conversion does not change it. Any edit to those files changes
+    it, so a bank placed by other code is never reused for this code.
+    """
+    digest = hashlib.sha256()
+    for path in PLACEMENT_SOURCES:
+        digest.update(path.name.encode() + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    return {"files": [path.name for path in PLACEMENT_SOURCES], "sha256": digest.hexdigest()}
+
+
 @dataclass(frozen=True)
 class BankPlacement:
     """
     The arguments of a stochastic placement (see `TemplateBank.stochastic`).
-    Its `key` names everything the placed bank depends on, so a stored bank is
-    reused only for exactly the placement it came from.
+    Its `key` names what the placed bank depends on: these settings, the match
+    space with its noise curve and waveform model, and the version of the
+    gravyflow code that places it (`placement_code`). A stored bank is reused
+    only for exactly the placement it came from. What the key cannot name (a
+    dependency's change within its release series) is caught by placing the
+    bundled banks again (`bundle_banks --check`).
     """
     space: MatchSpace
     mass_range: Tuple[float, float]
@@ -255,6 +282,7 @@ class BankPlacement:
             "candidates_per_round": int(self.candidates_per_round),
             "target_coverage": float(self.target_coverage),
             "convergence_candidates": int(self.convergence_candidates),
+            "code": placement_code(),
         }
 
     @classmethod
@@ -347,18 +375,23 @@ class TemplateBank:
         The bank of `placement`. Deterministic for a given seed; banks are cached
         per placement, and a bank bundled with gravyflow (res/template_banks)
         whose stored key equals the placement's is loaded instead of placed
-        again. A bundled bank for the same arguments but another noise curve or
-        waveform model is not loaded: a warning names it and the bank is placed.
+        again. A bundled bank for the same settings but another noise curve,
+        waveform model or code is not loaded: a warning names what differs and
+        the bank is placed. A bank of more than `max_templates` is refused,
+        whether it is placed or loaded.
         """
         if use_bundled:
             key = _normalised(placement.key())
             for record in _bundled_banks():
                 if record["arguments"] == key:
-                    return cls.from_dict(record)
+                    bank = cls.from_dict(record)
+                    if bank.num_templates > max_templates:
+                        raise _too_many(max_templates)
+                    return bank
             for record in _bundled_banks():
-                stale = [name for name in ("noise_curve", "waveform_model")
-                         if record["arguments"]["space"].get(name) != key["space"][name]]
-                if stale and _without_identity(record["arguments"]) == _without_identity(key):
+                stored = _provenance(record["arguments"])
+                stale = [name for name, value in _provenance(key).items() if stored[name] != value]
+                if stale and _settings(record["arguments"]) == _settings(key):
                     warnings.warn(f"The bundled bank for these arguments was placed with another {' and '.join(stale)} "
                                   "(regenerate it with gravyflow.src.detection.bundle_banks); placing a new bank.")
         m1, m2, tried, acceptance = _stochastic_masses(placement, int(max_templates))
@@ -423,7 +456,7 @@ def _stochastic_masses(placement: BankPlacement, max_templates: int):
             m1_kept.extend(c1[kept_now])
             m2_kept.extend(c2[kept_now])
         if len(m1_kept) > max_templates:
-            raise ValueError(f"The bank exceeds max_templates ({max_templates}); raise it or lower the minimal match.")
+            raise _too_many(max_templates)
         recent = history[-convergence_candidates:]
         if len(history) >= convergence_candidates and np.mean(recent) < 1.0 - target_coverage:
             return np.array(m1_kept), np.array(m2_kept), tried, float(np.mean(recent))
@@ -437,9 +470,22 @@ def _normalised(data: dict) -> dict:
     return json.loads(json.dumps(data))
 
 
-def _without_identity(arguments: dict) -> dict:
-    space = {k: v for k, v in arguments["space"].items() if k not in ("noise_curve", "waveform_model")}
-    return {**arguments, "space": space}
+def _too_many(max_templates: int) -> ValueError:
+    return ValueError(f"The bank exceeds max_templates ({max_templates}); raise it or lower the minimal match.")
+
+
+# The parts of a bank's key that say what placed it, rather than what was asked for.
+_SPACE_PROVENANCE = ("noise_curve", "waveform_model")
+
+
+def _provenance(arguments: dict) -> dict:
+    space = arguments["space"]
+    return {**{name: space.get(name) for name in _SPACE_PROVENANCE}, "code": arguments.get("code")}
+
+
+def _settings(arguments: dict) -> dict:
+    space = {k: v for k, v in arguments["space"].items() if k not in _SPACE_PROVENANCE}
+    return {**{k: v for k, v in arguments.items() if k != "code"}, "space": space}
 
 
 @lru_cache(maxsize=1)
