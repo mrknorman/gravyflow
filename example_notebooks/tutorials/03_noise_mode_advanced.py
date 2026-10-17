@@ -144,6 +144,8 @@ When using multiple IFOs, data is downloaded for each detector
 and the output shape becomes (Batch, NumIFOs, Samples). Each detector's
 noise window is drawn at least two window footprints away from every other
 detector's, so the noise in an example is never coincident across detectors.
+Coincident noise is an opt-in: coincidence=gf.Coincidence.COINCIDENT draws
+every detector at one time, and each batch says so (ReturnVariables.COINCIDENT).
 """)
 
 # Create a multi-detector obtainer

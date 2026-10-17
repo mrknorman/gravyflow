@@ -74,6 +74,7 @@ _MODULES = {
     "SegmentOrder": "gravyflow.src.dataset.acquisition",
     "AcquisitionMode": "gravyflow.src.dataset.acquisition",
     "SamplingMode": "gravyflow.src.dataset.acquisition",
+    "Coincidence": "gravyflow.src.dataset.acquisition",
     "SignReversal": "gravyflow.src.dataset.acquisition",
     "TimeReversal": "gravyflow.src.dataset.acquisition",
     "RandomShift": "gravyflow.src.dataset.acquisition",

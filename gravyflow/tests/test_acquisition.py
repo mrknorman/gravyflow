@@ -355,25 +355,6 @@ class TestSegmentProcessing:
         
         np.testing.assert_array_equal(result, segments)
     
-    def test_find_segment_intersections(self, obtainer):
-        """Test find_segment_intersections finds overlapping regions (lines 558-574)."""
-        arr1 = np.array([
-            [0.0, 100.0],
-            [200.0, 300.0],
-            [400.0, 500.0]
-        ])
-        arr2 = np.array([
-            [50.0, 150.0],
-            [250.0, 350.0]
-        ])
-        
-        result = obtainer.find_segment_intersections(arr1, arr2)
-        
-        # Should find intersections
-        assert len(result) > 0
-        # First intersection: [50, 100]
-        # Second intersection: [250, 300]
-    
     def test_compress_segments_merges_overlapping(self, obtainer):
         """Test compress_segments merges overlapping segments."""
         segments = np.array([
@@ -1587,42 +1568,6 @@ class TestGetValidSegmentsReal:
         )
         
         assert isinstance(train_segments, np.ndarray)
-
-
-@pytest.mark.slow  
-class TestFindSegmentIntersections:
-    """Tests for find_segment_intersections (lines 557-582)."""
-    
-    def test_find_intersections_real_segments(self):
-        """Test finding intersections between real segment arrays."""
-        obtainer = gf.IFODataObtainer(
-            data_quality=gf.DataQuality.BEST,
-            data_labels=gf.DataLabel.NOISE,
-            observing_runs=gf.ObservingRun.O3,
-            cache_segments=False
-        )
-        
-        # Create overlapping segments
-        arr1 = np.array([
-            [0.0, 100.0],
-            [150.0, 250.0],
-            [300.0, 400.0]
-        ])
-        
-        arr2 = np.array([
-            [50.0, 120.0],
-            [200.0, 350.0]
-        ])
-        
-        intersections = obtainer.find_segment_intersections(arr1, arr2)
-        
-        assert isinstance(intersections, np.ndarray)
-        # Expected intersections:
-        # [0,100] ∩ [50,120] = [50, 100]
-        # [150,250] ∩ [200,350] = [200, 250]
-        # [300,400] ∩ [200,350] = [300, 350]
-        if len(intersections) > 0:
-            assert intersections.shape[1] == 2
 
 
 @pytest.mark.slow

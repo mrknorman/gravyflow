@@ -201,6 +201,18 @@ def test_event_guard_check_sees_the_in_band_veto(world, monkeypatch):
             audit.assert_avoids(segments, _footprints(found, fx.GUARD_SECONDS))
 
 
+def test_noise_never_keeps_events(world):
+    """
+    Events are not noise: an obtainer asked for noise and events is refused by name, in
+    every split, rather than serve noise whose windows hold real events.
+    """
+    fixture, _ = _event_world()
+    with world(fixture):
+        for split in SPLITS:
+            with pytest.raises(ValueError, match="Real events are not noise"):
+                fx.served_segments(fixture, IFOS, split, data_labels=[gf.DataLabel.NOISE, gf.DataLabel.EVENTS])
+
+
 def _event_obtainer(fixture, **overrides):
     return fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.EVENTS], **overrides)
 

@@ -94,6 +94,19 @@ def per_example(value, n: int, name: str, per_detector: bool = False) -> np.ndar
     raise ValueError(f"Label {name}: expected one value per example ({n}), got shape {array.shape}.")
 
 
+def event_times(batch) -> np.ndarray:
+    """
+    Each example's real-event time, from a transient batch: its ``TRANSIENT_GPS_TIME``
+    on the first detector labelled EVENTS. A detector the event was not seen in is
+    read at a partner time, away from the event, and labelled NOISE.
+    """
+    times = np.asarray(batch[gf.ReturnVariables.TRANSIENT_GPS_TIME], dtype=np.float64)
+    seen = np.asarray(batch[gf.ReturnVariables.DATA_LABEL]) == gf.DataLabel.EVENTS.value
+    if not np.all(np.any(seen, axis=1)):
+        raise ValueError("An example of a real event is labelled EVENTS on no detector.")
+    return times[np.arange(len(times)), np.argmax(seen, axis=1)]
+
+
 class ValidationBank:
     """Generates and stores a model's validation scores, one stage at a time."""
 
@@ -349,7 +362,6 @@ class ValidationBank:
         if observing_runs is None:
             observing_runs = [gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3]
         ifos = noise_ifos(self.dataset_args.get("ifos"), self.dataset_args.get("noise_obtainer"))
-        letters = {ifo.name[0] for ifo in ifos}
 
         if self.config.group != "test":
             logger.info(f"No real events are in the '{self.config.group}' split: they are all test data.")
@@ -365,8 +377,7 @@ class ValidationBank:
         events, seen = [], set()
         for e in sorted(get_events_with_params(observing_runs, event_types=[EventConfidence.CONFIDENT]),
                         key=lambda e: e["gps"]):
-            network = e.get("network", "")
-            if e["name"] in seen or (network and not letters <= set(network)):
+            if e["name"] in seen:
                 continue
             seen.add(e["name"])
             e["event_type"] = "CONFIDENT"
@@ -398,12 +409,10 @@ class ValidationBank:
         for batch in chunks:
             on = np.asarray(batch[gf.ReturnVariables.ONSOURCE])
             off = np.asarray(batch[gf.ReturnVariables.OFFSOURCE])
-            times = np.asarray(batch.get(gf.ReturnVariables.TRANSIENT_GPS_TIME,
-                                         batch.get(gf.ReturnVariables.START_GPS_TIME)))
             on, off = (on, off) if on.ndim == 3 else (on[None], off[None])
             onsource.append(on)
             offsource.append(off)
-            gps.extend(per_example(times, on.shape[0], "event GPS", per_detector=True))
+            gps.extend(event_times(batch))
             if len(gps) >= len(events):
                 break
 

@@ -220,10 +220,18 @@ bits, from multi-threaded ones). The test suite sets it itself, and a recipe tra
   `TransientIndex.assign_groups` are gone: give the data obtainer `split_spec=gf.SplitSpec(fractions=...)`, or another
   `version` for an independent split (cross-validation).
 - Real events are evaluation data: every confident event is in `test`, named events too, and an obtainer of events
-  alone refuses `'train'` and `'validate'`. `train_on_real_events=True` is refused for now. Data labels are read by
-  their kind, never their number: give `gf.DataLabel`, `gf.GlitchType` or `gf.EventConfidence` members (a bare number
-  is refused, since 2 is `DataLabel.EVENTS` and `GlitchType.CHIRP` alike), and `GlitchType.CHIRP` asks for chirp
-  glitches, never events.
+  alone refuses `'train'` and `'validate'` unless it is built with `train_on_real_events=True`, which needs
+  `coincidence=gf.Coincidence.COINCIDENT`. Data labels are read by their kind, never their number: give
+  `gf.DataLabel`, `gf.GlitchType` or `gf.EventConfidence` members (a bare number is refused, since 2 is
+  `DataLabel.EVENTS` and `GlitchType.CHIRP` alike), and `GlitchType.CHIRP` asks for chirp glitches, never
+  events. A noise obtainer refuses `DataLabel.EVENTS`: noise vetoes every
+  event. An event is read at its time on the detectors whose data holds it, the others at partner times.
+  A `validate` or `test` pass over transients serves each once, then ends.
+- Detectors are read at one time only under `coincidence=gf.Coincidence.COINCIDENT`, or for an event seen
+  in several; every real-noise batch says which examples are (`ReturnVariables.COINCIDENT`).
+- The event list's cache is format 4 (`event_catalogue_v4.json`, fetched again once): it adds the 90% bounds of
+  the component masses, and each event carries `mass_ambiguous`, True where either component's interval crosses
+  the 3 solar-mass type threshold.
 - An obtainer called for a split serves that split, called directly or through a `NoiseObtainer`; called again for
   another, it rebuilds its segments (it served the first split's, and a fresh real-noise obtainer called directly
   served nothing). A generator it gave out for the first split then raises `RuntimeError`.

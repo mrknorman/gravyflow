@@ -9,7 +9,7 @@ based on the data_labels parameter.
 from typing import Optional, Tuple, Union, List
 import logging
 
-from .base import DataLabel, DataQuality, SegmentOrder, ObservingRun, SamplingMode
+from .base import Coincidence, DataLabel, DataQuality, SegmentOrder, ObservingRun, SamplingMode
 from .noise import NoiseDataObtainer
 from .transient import TransientDataObtainer
 from gravyflow.src.dataset.features.event import EventConfidence
@@ -40,6 +40,7 @@ def IFODataObtainer(
         train_on_real_events: bool = False,
         # Where strain comes from
         source: Optional["gf.DataSource"] = None,
+        coincidence: Coincidence = Coincidence.SEPARATED,
     ):
     """
     Factory function that returns the appropriate IFO data obtainer.
@@ -70,11 +71,15 @@ def IFODataObtainer(
         split_spec: How GPS time is split into train, validate and test
             (``gf.SplitSpec``); None is the default split.
         train_on_real_events: Real events are evaluation data, all in ``test``;
-            True is refused for now (TRANSIENT only; see TransientDataObtainer).
+            True puts each in its footprint's split (TRANSIENT only), and needs
+            ``coincidence=Coincidence.COINCIDENT``.
         source: Where real strain and its segments come from (``gf.DataSource``):
             ``gf.GWOSC()``, or ``gf.LocalFrames(...)`` by name. None takes
             ``gf.Defaults.source`` (``gf.GWOSC()``). Nothing falls back from it to
             another source.
+        coincidence: Whether an example's detectors are read at one time
+            (``gf.Coincidence``): never by default, or under the opt-in
+            ``Coincidence.COINCIDENT``; every batch says which (``COINCIDENT``).
 
     Returns:
         NoiseDataObtainer or TransientDataObtainer instance
@@ -106,6 +111,7 @@ def IFODataObtainer(
             gwosc_flags=gwosc_flags,
             split_spec=split_spec,
             source=source,
+            coincidence=coincidence,
         )
     else:
         # TRANSIENT mode for events/glitches
@@ -128,4 +134,5 @@ def IFODataObtainer(
             split_spec=split_spec,
             train_on_real_events=train_on_real_events,
             source=source,
+            coincidence=coincidence,
         )

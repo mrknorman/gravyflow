@@ -157,6 +157,24 @@ class SamplingMode(Enum):
     GRID = auto()    # Non-overlapping sequential chunks (validation/FAR)
 
 
+class Coincidence(Enum):
+    """
+    Whether an example's detectors are read at one time.
+
+    - ``SEPARATED`` (the default): never, but for a real event seen in several
+      detectors, the stated exception. Noise windows start at least two footprints
+      apart, and a glitch's other detectors are read at partner times.
+    - ``COINCIDENT``: the opt-in. Noise is drawn from the time every detector holds,
+      each detector's window starting at one GPS time, and a transient is read on
+      every detector at its own time.
+
+    Every real-noise batch says which examples are coincident
+    (``ReturnVariables.COINCIDENT``).
+    """
+    SEPARATED = auto()
+    COINCIDENT = auto()
+
+
 # =============================================================================
 # OBSERVING RUN DATA
 # =============================================================================
@@ -372,6 +390,40 @@ def separated_starts(
     return starts[alive]
 
 
+def _common_clock(origins_samples: Sequence[float]) -> np.ndarray:
+    """
+    Each detector's first sample on the common clock, in whole samples: coincident
+    pieces share one sample grid, so their detectors can start at one time.
+    """
+    origins = np.asarray(origins_samples, dtype=np.float64)
+    shift = np.rint(origins).astype(np.int64)
+    if not np.allclose(origins, shift, rtol=0.0, atol=1e-6):
+        raise ValueError(f"Coincident pieces must share one sample grid; their origins are {origins} samples.")
+    return shift
+
+
+def coincident_starts(
+        rng: np.random.Generator,
+        bounds: Sequence[Tuple[int, int]],
+        origins_samples: Sequence[float],
+        num_examples: int,
+    ) -> np.ndarray:
+    """
+    Window start indices for ``num_examples`` examples whose detectors all start at one
+    time (the ``COINCIDENT`` opt-in): uniform over the times every detector's
+    ``[lo_i, hi_i)`` allows on the common clock (``origins_samples``).
+
+    Returns an (M, detectors) int64 array: M is ``num_examples``, or 0 when the
+    pieces share no start.
+    """
+    shift = _common_clock(origins_samples)
+    lo = max(lo_i + s for (lo_i, _), s in zip(bounds, shift))
+    hi = min(hi_i + s for (_, hi_i), s in zip(bounds, shift))
+    if hi <= lo:
+        return np.empty((0, len(bounds)), dtype=np.int64)
+    return rng.integers(lo, hi, size=num_examples)[:, None] - shift[None, :]
+
+
 def grid_slots(bounds: Tuple[int, int], stride: int) -> int:
     """The number of GRID slots, ``stride`` apart from ``lo``, among the window starts [lo, hi)."""
     lo, hi = bounds
@@ -384,6 +436,7 @@ def grid_starts(
         stride: int,
         separation_samples: float,
         used: Sequence[np.ndarray],
+        coincident: bool = False,
     ) -> np.ndarray:
     """
     GRID window starts, one per detector, for every example a row can still serve.
@@ -397,8 +450,21 @@ def grid_starts(
     detector 0 with no such partner is left free. Nothing is drawn: the pass is a
     pure function of the row and what was served before it.
 
+    ``coincident`` (the ``COINCIDENT`` opt-in): every detector takes the slot at
+    detector 0's time instead, so a row's pieces must start at one sample; each free
+    slot of them all is one example.
+
     Returns an (M, detectors) int64 array of start indices.
     """
+    if coincident:
+        shift = _common_clock(origins_samples)
+        if len({lo + s for (lo, _), s in zip(bounds, shift)}) != 1:
+            raise ValueError("A coincident GRID row's windows must start on one clock: its pieces start apart.")
+        n = min(len(free) for free in used)
+        slots = np.flatnonzero(~np.any([free[:n] for free in used], axis=0))
+        for free in used:
+            free[slots] = True
+        return np.stack([lo + stride * slots for lo, _ in bounds], axis=1).astype(np.int64).reshape(-1, len(bounds))
     times = [origin + lo + stride * np.arange(len(free), dtype=np.float64)
              for origin, (lo, _), free in zip(np.asarray(origins_samples, np.float64), bounds, used)]
     starts = []
@@ -453,11 +519,13 @@ def random_subsection(
         num_examples_per_batch: int,
         seed: int,
         min_separation_seconds: float = 0.0,
+        coincident: bool = False,
     ):
     """
     ``num_examples_per_batch`` random windows from each detector's piece (``data[i]``,
     its first sample at GPS ``start_gps_time[i]``), no two detectors' window starts
-    closer than ``min_separation_seconds`` (``separated_starts``).
+    closer than ``min_separation_seconds`` (``separated_starts``); or, ``coincident``,
+    every detector's starting at one time (``coincident_starts``).
 
     Returns (onsource, offsource, start GPS times): (B, I, on), (B, I, off) and (B, I)
     float64, the GPS time of each padded onsource's first sample; or three Nones
@@ -469,13 +537,16 @@ def random_subsection(
               for tensor in data]
     first_gps = as_gps_times(np.asarray(start_gps_time, dtype=np.float64))
     origins = (first_gps - first_gps[0]) / interval
-    starts = np.empty((0, len(data)), dtype=np.int64)
-    for _ in range(4):
-        needed = num_examples_per_batch - len(starts)
-        if needed == 0:
-            break
-        starts = np.concatenate([starts, separated_starts(
-            rng, bounds, origins, min_separation_seconds / interval, needed)])
+    if coincident:
+        starts = coincident_starts(rng, bounds, origins, num_examples_per_batch)
+    else:
+        starts = np.empty((0, len(data)), dtype=np.int64)
+        for _ in range(4):
+            needed = num_examples_per_batch - len(starts)
+            if needed == 0:
+                break
+            starts = np.concatenate([starts, separated_starts(
+                rng, bounds, origins, min_separation_seconds / interval, needed)])
     if len(starts) < num_examples_per_batch:
         return None, None, None
 
@@ -527,6 +598,7 @@ class IFOData:
         num_examples_per_batch: int,
         seed: int,
         min_separation_seconds: float = 0.0,
+        coincident: bool = False,
     ):
         """Random windows of this row's pieces (``random_subsection``)."""
         return random_subsection(
@@ -538,6 +610,7 @@ class IFOData:
             num_examples_per_batch,
             seed,
             min_separation_seconds,
+            coincident,
         )
     
     def grid_windows(
@@ -546,10 +619,11 @@ class IFOData:
         num_offsource_samples: int,
         min_separation_seconds: float,
         used: Sequence[Optional[np.ndarray]],
+        coincident: bool = False,
     ):
         """
-        Every GRID window of this row's pieces not yet served this pass (``grid_starts``),
-        one padded onsource apart.
+        Every GRID window of this row's pieces not yet served this pass (``grid_starts``,
+        ``coincident`` or not), one padded onsource apart.
 
         ``used[i]`` marks detector i's slots already served this pass, or is None for a
         piece not walked before. Returns (onsource, offsource, start GPS times) as
@@ -568,6 +642,7 @@ class IFOData:
             num_onsource_samples,
             min_separation_seconds / interval,
             used,
+            coincident,
         )
         onsource, offsource = zip(*(gather_windows(tensor, starts[:, i], num_onsource_samples, num_offsource_samples)
                                     for i, tensor in enumerate(self.data)))
@@ -607,6 +682,7 @@ class BaseDataObtainer(ABC):
             gwosc_flags : Optional[Tuple[str, ...]] = None,
             split_spec : Optional[SplitSpec] = None,
             source : Optional[DataSource] = None,
+            coincidence : Coincidence = Coincidence.SEPARATED,
         ):
         """
         Args (selection):
@@ -624,6 +700,9 @@ class BaseDataObtainer(ABC):
                 cache key, and nothing falls back from it to another source.
             split_spec: How GPS time is split into train, validate and test
                 (``gf.SplitSpec``); None is the default split.
+            coincidence: Whether an example's detectors are read at one time
+                (``gf.Coincidence``): never by default, or under the opt-in
+                ``Coincidence.COINCIDENT``.
             gwosc_flags: GWOSC timeline flags whose intersection defines usable
                 times, e.g. ``gf.GWOSC_DATA_FLAGS`` or ``gf.GWOSC_CBC_FLAGS``. Each
                 flag lists the times that pass it. None uses each run's default:
@@ -655,6 +734,8 @@ class BaseDataObtainer(ABC):
                 f"source must be a gf.DataSource, such as gf.GWOSC() or gf.LocalFrames(...); "
                 f"got {self.source!r}."
             )
+
+        self.coincidence = Coincidence(coincidence)
 
         from gravyflow.src.dataset.acquisition.augmentations import check_augmentations
         self.augmentations = check_augmentations(augmentations, self.data_labels)
@@ -1092,40 +1173,6 @@ class BaseDataObtainer(ABC):
 
         return compressed[keep_segments]
     
-    def find_segment_intersections(self, arr1: np.ndarray, arr2: np.ndarray) -> np.ndarray:
-        """
-        Find intersections between two sets of segments.
-        
-        For each segment in arr1, finds the best overlapping segment in arr2
-        and returns the intersection bounds.
-        
-        Args:
-            arr1: Array of shape (N, 2) with [start, end] for each segment
-            arr2: Array of shape (M, 2) with [start, end] for each segment
-            
-        Returns:
-            Array of shape (K, 2) with intersection [start, end] bounds,
-            where K <= N (segments with no overlap are excluded)
-        """
-        if len(arr1) == 0 or len(arr2) == 0:
-            return np.empty((0, 2))
-            
-        latest_starts = np.maximum(arr1[:, None, 0], arr2[None, :, 0])
-        earliest_ends = np.minimum(arr1[:, None, 1], arr2[None, :, 1])
-
-        overlap_durations = np.clip(earliest_ends - latest_starts, 0, None)
-        overlap_mask = overlap_durations > 0
-        best_overlap_indices = np.argmax(overlap_durations, axis=-1)
-
-        starts = latest_starts[np.arange(latest_starts.shape[0]), best_overlap_indices]
-        ends = earliest_ends[np.arange(earliest_ends.shape[0]), best_overlap_indices]
-
-        valid_mask = overlap_mask[np.arange(overlap_mask.shape[0]), best_overlap_indices]
-        starts = starts[valid_mask]
-        ends = ends[valid_mask]
-
-        return np.vstack((starts, ends)).T
-
     def order_segments(
         self,
         valid_segments : np.ndarray,

@@ -16,10 +16,11 @@ from keras import ops
 import gravyflow as gf
 from gravyflow.src.dataset.config import WindowSpec
 from .base import (
-    BaseDataObtainer, DataQuality, DataLabel, SegmentOrder,
+    BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, Coincidence,
     AcquisitionMode, SamplingMode, ObservingRun, IFOData, SEGMENT_GRID_ORIGIN_GPS,
     WINDOW_EDGE_BUFFER_SAMPLES, kept_seconds, label_kinds, separable,
 )
+from .gwosc_data import intersect_segments
 from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
@@ -107,7 +108,13 @@ class NoiseDataObtainer(BaseDataObtainer):
             gwosc_flags: Optional[Tuple[str, ...]] = None,
             split_spec=None,
             source=None,
+            coincidence: Coincidence = Coincidence.SEPARATED,
         ):
+        if DataLabel.EVENTS in label_kinds(data_labels):
+            raise ValueError(
+                "Real events are not noise: noise vetoes every event, in every split. Serve "
+                "events with a transient obtainer (data_labels=[DataLabel.EVENTS]), as test data."
+            )
 
         super().__init__(
             data_quality=data_quality,
@@ -125,6 +132,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             gwosc_flags=gwosc_flags,
             split_spec=split_spec,
             source=source,
+            coincidence=coincidence,
         )
 
         self.acquisition_mode = AcquisitionMode.NOISE
@@ -149,20 +157,15 @@ class NoiseDataObtainer(BaseDataObtainer):
         """
         Remove every published GW event and Gravity Spy glitch from noise segments.
 
-        Unless the obtainer's labels ask for real events, each event's in-band signal
-        is vetoed (``get_event_veto_segments``); unless they ask for glitches, each
-        glitch's whole extent is vetoed (``get_glitch_veto_segments``). What they ask
-        for is read by kind (``label_kinds``). Both cover every configured run.
-        Returns the vetoed segments, sorted and coalesced.
+        Every event's footprint and guard is vetoed (``get_event_veto_segments``):
+        events are test data, never noise. Unless the obtainer's labels include
+        GLITCHES, each glitch's whole extent is vetoed too
+        (``get_glitch_veto_segments``). Both cover every configured run. Returns the
+        vetoed segments, sorted and coalesced.
         """
-        asked = label_kinds(self.data_labels)
-        veto_segments = []
-        if DataLabel.EVENTS not in asked:
-            veto_segments.append(self.get_event_veto_segments())
-        if DataLabel.GLITCHES not in asked:
+        veto_segments = [self.get_event_veto_segments()]
+        if DataLabel.GLITCHES not in label_kinds(self.data_labels):
             veto_segments.append(self.get_glitch_veto_segments(ifo))
-        if not veto_segments:
-            return valid_segments
         return self.veto_time_segments(
             valid_segments,
             np.concatenate([np.reshape(veto, (-1, 2)) for veto in veto_segments]),
@@ -358,6 +361,13 @@ class NoiseDataObtainer(BaseDataObtainer):
             ifo, self.split_spec.admissible(self.get_all_segment_times(ifo), group_name)
         )
 
+    def coincident_segments(self, ifos: List[gf.IFO], group_name: str) -> np.ndarray:
+        """The time of split ``group_name`` every IFO's noise holds (``available_segments``)."""
+        common = self.available_segments(ifos[0], group_name)
+        for ifo in ifos[1:]:
+            common = intersect_segments(common, self.available_segments(ifo, group_name))
+        return common
+
     def get_valid_segments(
             self,
             ifos: List[gf.IFO],
@@ -369,7 +379,9 @@ class NoiseDataObtainer(BaseDataObtainer):
         The segments of split ``group_name``: each IFO's segments inside the
         split's admissible time (``SplitSpec.admissible``: its absolute blocks,
         less the guard at every edge with another split), vetoed, cut on the
-        absolute bin grid, and paired across IFOs bin by bin.
+        absolute bin grid, and paired across IFOs bin by bin. Under the
+        ``COINCIDENT`` opt-in every IFO's segments are the time they all hold
+        (``coincident_segments``), so each row is one piece for every IFO.
         """
         ifos = ensure_list(ifos)
 
@@ -379,9 +391,12 @@ class NoiseDataObtainer(BaseDataObtainer):
         # The served segments are one split's, in one order: another rebuilds them.
         if self._serve_split(self._split(ifos, group_name), order=(seed, segment_order)):
             self.valid_segments = []
+            common = None
+            if self.coincidence == Coincidence.COINCIDENT:
+                common = self.coincident_segments(ifos, group_name)
 
             for ifo in ifos:
-                valid_segments = self.available_segments(ifo, group_name)
+                valid_segments = self.available_segments(ifo, group_name) if common is None else common
 
                 # Cut on the absolute grid [d k, d (k + 1)) in GPS (d = 2048 s by
                 # default), the grid merge_bins uses, so whole blocks survive.
@@ -529,9 +544,10 @@ class NoiseDataObtainer(BaseDataObtainer):
         
         # A window's footprint, offsource to padded onsource end. Detectors are never
         # coincident: an example's windows start at least two footprints apart, so no
-        # two of them share a moment.
+        # two of them share a moment. Under the opt-in they start at one time.
+        coincident = self.coincidence == Coincidence.COINCIDENT
         footprint_seconds = (num_onsource_samples + num_offsource_samples) / window_spec.sample_rate_hertz
-        separation_seconds = 2.0 * footprint_seconds
+        separation_seconds = 0.0 if coincident else 2.0 * footprint_seconds
 
         if not self._current_batch_index and not self._current_segment_index:
             window_seconds = \
@@ -557,6 +573,7 @@ class NoiseDataObtainer(BaseDataObtainer):
             # Shapes: ONSOURCE/OFFSOURCE = (Batch, IFO, Samples) = BIS
             #         START_GPS_TIME = (Batch, IFO) = BI
             #         DATA_LABEL = (Batch, IFO) = BI (all NOISE = 0)
+            #         COINCIDENT = (Batch,) = B
             batch_size, num_ifos = subarrays.shape[:2]
             return _post_process({
                 RV.ONSOURCE: subarrays,
@@ -564,11 +581,12 @@ class NoiseDataObtainer(BaseDataObtainer):
                 # The windows' first samples, as the first returned onsource sample.
                 RV.START_GPS_TIME: window_spec.onsource_start_gps(start_gps_times),
                 RV.DATA_LABEL: ops.full((batch_size, num_ifos), 0, dtype="int32"),  # NOISE = 0
+                RV.COINCIDENT: ops.full((batch_size,), int(coincident and num_ifos > 1), dtype="int32"),
             })
 
         if sampling_mode == SamplingMode.GRID:
             yield from self._grid_pass(
-                window_spec, num_examples_per_batch, separation_seconds, ifos, emit)
+                window_spec, num_examples_per_batch, separation_seconds, ifos, emit, coincident)
             return
 
         # Nominal density: saturation examples per onsource duration of window starts.
@@ -613,6 +631,7 @@ class NoiseDataObtainer(BaseDataObtainer):
                     num_examples_per_batch,
                     self.rng.integers(1E10),
                     min_separation_seconds=separation_seconds,
+                    coincident=coincident,
                 )
 
                 if subarrays is None:
@@ -624,7 +643,7 @@ class NoiseDataObtainer(BaseDataObtainer):
                         raise ValueError(
                             f"No row of the {self._served_group!r} split holds a batch of "
                             f"{num_examples_per_batch} {sampling_mode.name} windows whose detectors "
-                            f"start {separation_seconds} s apart."
+                            + ("start at one time." if coincident else f"start {separation_seconds} s apart.")
                         )
                     continue
 
@@ -637,11 +656,12 @@ class NoiseDataObtainer(BaseDataObtainer):
                 yield emit(subarrays, background_chunks, start_gps_times)
 
     def _grid_pass(self, window_spec, num_examples_per_batch: int, separation_seconds: float,
-                   ifos: List[gf.IFO], emit):
+                   ifos: List[gf.IFO], emit, coincident: bool = False):
         """
         One GRID pass over the sampling plan, then the end: each row, in order, serves
         every window its pieces still hold whose detectors start ``separation_seconds``
-        apart (``IFOData.grid_windows``). A window is served at most once a pass, though
+        apart, or at one time when ``coincident`` (``IFOData.grid_windows``). A window
+        is served at most once a pass, though
         its piece is in several rows, so the pass is finite and repeats nothing. The
         examples are batched across rows; the last, partial batch is not served.
         """
@@ -654,6 +674,7 @@ class NoiseDataObtainer(BaseDataObtainer):
                     window_spec.num_offsource_samples,
                     separation_seconds,
                     [used.get(key) for key in keys],
+                    coincident,
                 )
                 used.update(zip(keys, marks))
                 held.append((ops.convert_to_numpy(onsource), ops.convert_to_numpy(offsource), gps))

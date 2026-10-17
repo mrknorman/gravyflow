@@ -201,14 +201,15 @@ OBTAINER_PERTURBATIONS = {
     "gwosc_flags": gf.GWOSC_DATA_FLAGS,
     "split_spec": gf.SplitSpec(version="fold-1"),
     "source": gf.LocalFrames(),
+    "train_on_real_events": True,
+    "coincidence": gf.Coincidence.COINCIDENT,
 }
-#: Data-determining parameters with one buildable value (public runs publish BEST only;
-#: training on real events is refused for now).
-SINGLE_VALUED = {"data_quality", "train_on_real_events"}
+#: Data-determining parameters with one buildable value (public runs publish BEST only).
+SINGLE_VALUED = {"data_quality"}
 #: Parameters that change how data is fetched or logged, never the data.
 NOT_DATA = {"force_acquisition", "cache_segments", "logging_level", "prefetch_segments"}
 #: Parameters a NOISE obtainer ignores (they select transients).
-TRANSIENT_ONLY = {"event_types", "balanced_glitch_types", "event_names"}
+TRANSIENT_ONLY = {"event_types", "balanced_glitch_types", "event_names", "train_on_real_events"}
 
 
 class TestFingerprint:
@@ -228,6 +229,9 @@ class TestFingerprint:
         arguments = self.base_arguments()
         if name in TRANSIENT_ONLY:
             arguments["data_labels"] = [gf.DataLabel.GLITCHES]
+        if name == "train_on_real_events":
+            # Training on real events needs the coincident opt-in.
+            arguments["coincidence"] = gf.Coincidence.COINCIDENT
         reference = config_fingerprint(gf.IFODataObtainer(**arguments))
         arguments[name] = OBTAINER_PERTURBATIONS[name]
         assert config_fingerprint(gf.IFODataObtainer(**arguments)) != reference

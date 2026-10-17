@@ -257,7 +257,6 @@ class TransientIndex:
         self, 
         group: Optional[str] = None,
         label: Optional[DataLabel] = None,
-        ifos_filter: Optional[List["gf.IFO"]] = None,
         shuffle: bool = False,
         seed: int = None
     ) -> Iterator[TransientSegment]:
@@ -268,7 +267,6 @@ class TransientIndex:
             group: The split whose records to keep (test, validate or train; others
                 raise KeyError); None keeps every record, of every split and none.
             label: Filter to specific label (EVENTS or GLITCHES).
-            ifos_filter: Filter to specific IFOs (segments must overlap with these IFOs).
             shuffle: If True, shuffle records before iterating.
             seed: Random seed for shuffling.
             
@@ -287,10 +285,6 @@ class TransientIndex:
         # Filter by label
         if label is not None:
             records_iter = (r for r in records_iter if r.label == label)
-        
-        # Filter by IFO(s) - check if segment's seen_in overlaps with filter
-        if ifos_filter is not None:
-            records_iter = (r for r in records_iter if any(ifo in r.seen_in for ifo in ifos_filter))
         
         # Shuffle if requested (must materialize for shuffling)
         if shuffle:

@@ -417,9 +417,9 @@ def catalogued_events(events=()):
     return mock.patch.object(event_module, "get_event_catalogue", lambda use_cache=True: table)
 
 
-#: Three O3 events seen by H1 and L1, as the GWTC catalogue lists them.
+#: Three O3 events, as the GWTC catalogue lists them.
 OFFLINE_EVENTS = [
-    {"name": name, "gps": gps, "network": "H1L1", "catalog": "GWTC-3-confident",
+    {"name": name, "gps": gps, "catalog": "GWTC-3-confident",
      "observing_run": "O3", "p_astro": 1.0}
     for name, gps in (("GW-OFFLINE-A", 1240000000.4), ("GW-OFFLINE-B", 1250000000.4),
                       ("GW-OFFLINE-C", 1260000000.4))

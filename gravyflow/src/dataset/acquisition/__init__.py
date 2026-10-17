@@ -19,6 +19,7 @@ from .base import (
     SegmentOrder,
     AcquisitionMode,
     SamplingMode,
+    Coincidence,
     ObservingRun,
     ObservingRunData,
     # Data structures
@@ -67,6 +68,7 @@ __all__ = [
     'SegmentOrder',
     'AcquisitionMode',
     'SamplingMode',
+    'Coincidence',
     'ObservingRun',
     'ObservingRunData',
     # Data structures

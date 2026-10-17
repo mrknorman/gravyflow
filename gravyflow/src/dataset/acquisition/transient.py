@@ -5,6 +5,7 @@ This module provides TransientDataObtainer for acquiring data around
 specific transient events (GW events, glitches) in TRANSIENT mode.
 """
 
+import dataclasses
 import itertools
 import logging
 from collections import Counter
@@ -24,7 +25,7 @@ from gravyflow.src.dataset.features.glitch_cache import TransientCache, generate
 from .cache import DiskCache
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from .base import (
-    BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, 
+    BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, Coincidence,
     AcquisitionMode, SamplingMode, ObservingRun, label_kinds
 )
 from gravyflow.src.utils.numerics import ensure_list
@@ -48,8 +49,9 @@ TRANSIENT_CACHE_PREFIXES = ("transient", "glitch", "event", "partner")
 class DetectorRead(NamedTuple):
     """
     Where an example of one record reads one detector: the centre of its window,
-    and whether it is a partner (``partners``), read away from the transient and
-    labelled noise, or the record's own detector, read at the transient's time.
+    and whether it is a partner (``partners``), read away from the transient, or
+    read at the transient's time. A detector is labelled with the transient only
+    where the record was seen in it (``seen_in``); every other is noise.
     """
 
     ifo: "gf.IFO"
@@ -87,22 +89,26 @@ class TransientDataObtainer(BaseDataObtainer):
             split_spec: Optional[SplitSpec] = None,
             train_on_real_events: bool = False,
             source: Optional[DataSource] = None,
+            coincidence: Coincidence = Coincidence.SEPARATED,
         ):
         """
         Args (split and source):
             split_spec: How GPS time is split (``gf.SplitSpec``); None is the default.
-            train_on_real_events: Real events are evaluation data, all in ``test``.
-                True, which would put each in its footprint's split and train on
-                some, is refused for now: an event is read on every detector at its
-                own time, unlike a glitch, and no flag yet marks it as coincident.
+            train_on_real_events: Real events are evaluation data, all in ``test``;
+                True puts each in its footprint's split instead, training on some.
+                An event is read at one time on every detector that observed it, so
+                training on events needs the coincident opt-in.
+            coincidence: ``gf.Coincidence.COINCIDENT`` reads every requested
+                detector at the transient's time; by default a detector the
+                transient was not seen in is read at a partner time.
             source: Where strain comes from (``gf.DataSource``); None takes
                 ``gf.Defaults.source`` (``BaseDataObtainer``).
         """
-        if train_on_real_events:
+        if train_on_real_events and Coincidence(coincidence) != Coincidence.COINCIDENT:
             raise ValueError(
-                "train_on_real_events=True is refused for now: an event is read on every detector at its own "
-                "time, unlike a glitch, and no flag yet marks it as coincident, so real events are evaluation "
-                "data, served only in 'test'."
+                "Training on real events puts coincident data in training: pass "
+                "coincidence=Coincidence.COINCIDENT with train_on_real_events=True, so its "
+                "batches carry the COINCIDENT flag."
             )
         
         # Default observing runs matching BaseDataObtainer behavior
@@ -129,6 +135,7 @@ class TransientDataObtainer(BaseDataObtainer):
             prefetch_segments=prefetch_segments,
             split_spec=split_spec,
             source=source,
+            coincidence=coincidence,
         )
 
         self.acquisition_mode = AcquisitionMode.TRANSIENT
@@ -167,11 +174,14 @@ class TransientDataObtainer(BaseDataObtainer):
         }
 
     #: Why a record is not served: its window leaves the usable segments of a
-    #: detector it is read on at its own time; a requested detector has no finite
-    #: strain for it; or a detector it was not seen in has no partner time.
+    #: detector it is read on at its own time (an event: of every requested
+    #: detector); a requested detector has no finite strain for it; a detector it
+    #: was not seen in has no partner time; or, under the coincident opt-in, its
+    #: window on a detector it was not seen in meets a catalogued glitch there.
     REJECTED_BY_DATA_QUALITY = "data quality"
     REJECTED_FOR_NO_DATA = "no data"
     REJECTED_FOR_NO_PARTNER = "no partner"
+    REJECTED_FOR_OTHER_TRANSIENT = "transient in another detector"
 
     def _reject_for_no_data(self, segment: TransientSegment) -> None:
         """
@@ -206,14 +216,14 @@ class TransientDataObtainer(BaseDataObtainer):
         super().reset_acquisition_stats()
         self._rejections = Counter()
 
-    @staticmethod
-    def _own_detectors(record: TransientSegment, ifos: List[gf.IFO]) -> List[gf.IFO]:
+    def _own_detectors(self, record: TransientSegment, ifos: List[gf.IFO]) -> List[gf.IFO]:
         """
-        The requested detectors ``record`` is read on at its own time: a glitch's
-        detectors are those it was seen in; an event is read on every detector.
-        The others are read at partner times (``_plan_reads``).
+        The requested detectors ``record`` is read on at its own time: those it was
+        seen in (an event's from data quality, ``_passing_data_quality``), or every
+        one under the coincident opt-in. The others are read at partner times
+        (``_plan_reads``).
         """
-        if record.is_event:
+        if self.coincidence == Coincidence.COINCIDENT:
             return list(ifos)
         return [ifo for ifo in ifos if ifo in record.seen_in]
 
@@ -234,18 +244,26 @@ class TransientDataObtainer(BaseDataObtainer):
         hardware injection either). The others are rejected, and their number is the
         split's ``REJECTED_BY_DATA_QUALITY`` count. A partner's data quality is its
         own (``_partner_segments``).
+
+        An event's detectors are found here: the catalogue does not say which
+        detectors observed it, so it is seen in each requested detector whose usable
+        data holds its span (its ``seen_in``, returned), and an event seen in none is
+        rejected.
         """
-        keep = np.ones(len(segments), dtype=bool)
-        if segments:
-            spans = np.array([[s.start_gps_time, s.end_gps_time] for s in segments], dtype=np.float64)
-            for ifo in ifos:
-                read_here = np.array([ifo in self._own_detectors(s, ifos) for s in segments])
-                keep &= ~read_here | within_segments(spans, self.get_all_segment_times(ifo))
+        records, keep = list(segments), np.ones(len(segments), dtype=bool)
+        if records:
+            spans = np.array([[s.start_gps_time, s.end_gps_time] for s in records], dtype=np.float64)
+            usable = {ifo: within_segments(spans, self.get_all_segment_times(ifo)) for ifo in ifos}
+            for k, record in enumerate(records):
+                if record.is_event:
+                    records[k] = dataclasses.replace(record, seen_in=[ifo for ifo in ifos if usable[ifo][k]])
+                keep[k] = any(ifo in records[k].seen_in for ifo in ifos) and all(
+                    usable[ifo][k] for ifo in self._own_detectors(records[k], ifos))
         self._count_rejections(
-            self.REJECTED_BY_DATA_QUALITY, int(np.sum(~keep)), len(segments),
+            self.REJECTED_BY_DATA_QUALITY, int(np.sum(~keep)), len(records),
             f"their windows leave the usable data of {[ifo.name for ifo in ifos]}",
         )
-        return list(itertools.compress(segments, keep))
+        return list(itertools.compress(records, keep))
 
     def _partner_segments(self, ifo: gf.IFO, group_name: str) -> np.ndarray:
         """
@@ -271,12 +289,19 @@ class TransientDataObtainer(BaseDataObtainer):
         fingerprint, the transient's time and the detector. The records with no
         partner time on a detector they need are rejected, and their number is the
         split's ``REJECTED_FOR_NO_PARTNER`` count.
+
+        Under the coincident opt-in every detector is read at the record's time, and
+        one the record was not seen in is labelled noise: a record whose span there
+        meets one of that detector's catalogued glitches (``get_glitch_veto_segments``)
+        is rejected, and their number is the ``REJECTED_FOR_OTHER_TRANSIENT`` count.
         """
         from gravyflow.src.dataset.features.glitch_cache import CACHE_SAMPLE_RATE_HERTZ
 
         spec = self.split_spec
         fingerprint = spec.fingerprint()
         allowed: Dict[gf.IFO, np.ndarray] = {}
+        glitches: Dict[gf.IFO, np.ndarray] = {}
+        rejected: Counter = Counter()
         planned, plans = [], []
         for record in segments:
             t = float(record.transient_gps_time)
@@ -286,6 +311,13 @@ class TransientDataObtainer(BaseDataObtainer):
             reads = []
             for ifo in ifos:
                 if ifo in own:
+                    if ifo not in record.seen_in:
+                        if ifo not in glitches:
+                            glitches[ifo] = np.reshape(self.get_glitch_veto_segments(ifo), (-1, 2))
+                        if np.any((glitches[ifo][:, 0] < record.end_gps_time)
+                                  & (glitches[ifo][:, 1] > record.start_gps_time)):
+                            rejected[self.REJECTED_FOR_OTHER_TRANSIENT] += 1
+                            break
                     reads.append(DetectorRead(ifo, t, False))
                     continue
                 if ifo not in allowed:
@@ -299,14 +331,19 @@ class TransientDataObtainer(BaseDataObtainer):
                     sample_rate_hertz=CACHE_SAMPLE_RATE_HERTZ,
                 )
                 if centre is None:
+                    rejected[self.REJECTED_FOR_NO_PARTNER] += 1
                     break
                 reads.append(DetectorRead(ifo, centre, True))
             else:
                 planned.append(record)
                 plans.append(tuple(reads))
         self._count_rejections(
-            self.REJECTED_FOR_NO_PARTNER, len(segments) - len(planned), len(segments),
+            self.REJECTED_FOR_NO_PARTNER, rejected[self.REJECTED_FOR_NO_PARTNER], len(segments),
             "a detector they were not seen in has no partner time",
+        )
+        self._count_rejections(
+            self.REJECTED_FOR_OTHER_TRANSIENT, rejected[self.REJECTED_FOR_OTHER_TRANSIENT], len(segments),
+            "a detector they were not seen in holds a glitch of its own at their time",
         )
         return planned, plans
 
@@ -459,25 +496,30 @@ class TransientDataObtainer(BaseDataObtainer):
               detector's read (``WindowSpec.transient_window_start_gps``).
             - TRANSIENT_GPS_TIME: (Batch, IFO) = BI, float64: the centre of each
               detector's window: the transient's time, or a partner's.
-            - DATA_LABEL: (Batch, IFO) = BI: GLITCHES or EVENTS, NOISE on a partner
-            - SUB_TYPE: (Batch, IFO) = BI: GlitchType or SourceType value, -1 on a partner
-            - GLITCH_TYPE: (Batch, IFO) = BI: GlitchType value on a glitch's own
-              detector, -1 otherwise
-            - SOURCE_TYPE: (Batch, IFO) = BI: SourceType value on an event's own
-              detector, -1 otherwise
+            - DATA_LABEL: (Batch, IFO) = BI: GLITCHES or EVENTS on a detector the
+              transient was seen in, NOISE on every other
+            - SUB_TYPE: (Batch, IFO) = BI: GlitchType or SourceType value where seen, -1 otherwise
+            - GLITCH_TYPE: (Batch, IFO) = BI: GlitchType value where a glitch was
+              seen, -1 otherwise
+            - SOURCE_TYPE: (Batch, IFO) = BI: SourceType value where an event was
+              seen, -1 otherwise
+            - COINCIDENT: (Batch,) = B: 1 where two or more detectors are read at the
+              transient's time, else 0
         """
         final_subarrays = ops.cast(ops.stack(batch_subarrays), "float32")
         final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
 
         transient_gps = as_gps_times([[read.centre for read in reads] for reads in batch_reads])
-        own = np.array([[not read.partner for read in reads] for reads in batch_reads])
+        at_time = np.array([[not read.partner for read in reads] for reads in batch_reads])
+        seen = at_time & np.array([[read.ifo in segment.seen_in for read in reads]
+                                   for segment, reads in zip(batch_segments, batch_reads)])
 
         def per_detector(value_of) -> np.ndarray:
             values = np.array([value_of(segment) for segment in batch_segments], dtype=np.int32)
-            return np.where(own, values[:, None], -1).astype(np.int32)
+            return np.where(seen, values[:, None], -1).astype(np.int32)
 
         data_label = np.where(
-            own,
+            seen,
             np.array([DataLabel.GLITCHES.value if s.is_glitch else DataLabel.EVENTS.value
                       for s in batch_segments], dtype=np.int32)[:, None],
             DataLabel.NOISE.value,
@@ -494,6 +536,7 @@ class TransientDataObtainer(BaseDataObtainer):
             RV.SUB_TYPE: per_detector(lambda s: s.kind.value),
             RV.GLITCH_TYPE: per_detector(lambda s: s.kind.value if s.is_glitch else -1),
             RV.SOURCE_TYPE: per_detector(lambda s: s.kind.value if s.is_event else -1),
+            RV.COINCIDENT: (np.sum(at_time, axis=1) > 1).astype(np.int32),
         }
     @staticmethod
     def _extract_feature_event(
@@ -574,11 +617,13 @@ class TransientDataObtainer(BaseDataObtainer):
         if self._feature_index is None:
             self.build_feature_index(ifos=ifos)
         
-        # The split's records seen in a requested detector, each read on every
-        # requested detector: its own at its time, the others at partner times.
+        # The split's glitches seen in a requested detector, and its events (seen
+        # where data quality holds them), each read on every requested detector: its
+        # own at its time, the others at partner times.
         records, reads = self._plan_reads(
             self._passing_data_quality(
-                list(self._feature_index.iter(group=group_name, ifos_filter=ifos)), ifos
+                [record for record in self._feature_index.iter(group=group_name)
+                 if record.is_event or any(ifo in record.seen_in for ifo in ifos)], ifos
             ),
             ifos, group_name,
         )
@@ -967,9 +1012,11 @@ class TransientDataObtainer(BaseDataObtainer):
         # shrink with each such pass, and the split is served or refused, never spun.
         # Equal weights: one shuffled order over the records, kept for cache hits.
         # Otherwise (apply_balancing), weighted draws with replacement oversample the
-        # rare classes.
+        # rare classes in training. An evaluation split is one pass, each record once
+        # and unweighted, then the end: its examples are a set, never a sample.
+        evaluation = self._served_group != "train"
         weights = np.array([seg.weight for seg in self.transient_segments], dtype=np.float32)
-        weighted = not np.allclose(weights, 1.0)
+        weighted = not evaluation and not np.allclose(weights, 1.0)
         order = np.arange(n_segments)
         if weighted:
             logger.info(f"Using weighted sampling over {n_segments} transients")
@@ -1055,3 +1102,5 @@ class TransientDataObtainer(BaseDataObtainer):
                 batch_backgrounds.clear()
                 batch_indices.clear()
                 yield _post_process(batch)
+            if evaluation:
+                return

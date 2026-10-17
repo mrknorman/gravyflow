@@ -15,6 +15,7 @@ from gravyflow.src.dataset.config import TransientDefaults
 from . import audit
 from . import fixtures as fx
 from .fakes import EventRecord, GlitchRecord
+from .provenance import batch_arrays
 
 RV = gf.ReturnVariables
 IFOS = ["H1", "L1"]
@@ -360,3 +361,251 @@ def test_records_without_a_partner_are_counted(world):
     assert rejections.get("no partner") == 2, f"train rejections {rejections}"
     for split in ("validate", "test"):
         assert "no partner" not in served[split][2], f"{split} rejections {served[split][2]}"
+
+
+# =============================================================================
+# THE COINCIDENT OPT-IN AND ITS FLAG
+# =============================================================================
+
+def _flagged(batches, flags):
+    """The batches, each passed on after its COINCIDENT flag is appended to ``flags``."""
+    for batch in batches:
+        flags.append(batch_arrays(batch, [RV.COINCIDENT])[RV.COINCIDENT])
+        yield batch
+
+
+def _intersection(fixture):
+    """The time every detector of ``fixture`` holds data, as (N, 2) GPS intervals."""
+    from gravyflow.src.dataset.acquisition.gwosc_data import intersect_segments
+
+    return intersect_segments(*(np.asarray(fixture.segments[ifo]) for ifo in IFOS))
+
+
+def _noise_record(world, directory, fixture, mode, coincidence):
+    """Eight batches of train noise under ``coincidence``: their Records and flags."""
+    flags = []
+    with world(fixture) as harness:
+        batches = fx.noise_batches(fixture, directory, "train", mode=mode, coincidence=coincidence)
+        record = audit.collect(harness, {"noise": ("train", _flagged(batches, flags))}, 8, IFOS,
+                               fx.window(), False)["noise"]
+    return record, np.concatenate(flags)
+
+
+@pytest.mark.parametrize("mode", [gf.SamplingMode.RANDOM, gf.SamplingMode.GRID], ids=lambda m: m.name)
+def test_coincident_noise_carries_the_flag(world, tmp_path, mode):
+    """
+    Under the opt-in, every example's detectors start at one GPS time, inside the time
+    both detectors hold, and carry COINCIDENT = 1; by default every example carries 0
+    and its detectors start two footprints apart.
+    """
+    fixture = offset_pieces()
+    record, flags = _noise_record(world, tmp_path / "on", fixture, mode, gf.Coincidence.COINCIDENT)
+    assert flags.shape == (record.num_examples,) and np.all(flags == 1), f"flags {np.unique(flags)}"
+    starts = record.footprints[..., 0]
+    assert np.array_equal(starts[:, 0], starts[:, 1]), "a coincident example's detectors start apart"
+    common = _intersection(fixture)
+    audit.assert_inside([record], {ifo: common for ifo in IFOS})
+
+    record, flags = _noise_record(world, tmp_path / "off", fixture, mode, gf.Coincidence.SEPARATED)
+    assert flags.shape == (record.num_examples,) and np.all(flags == 0), f"flags {np.unique(flags)}"
+    assert _min_separation(record.footprints, 256.0) >= 2 * FOOTPRINT_SECONDS
+
+
+def _coincident_world():
+    """
+    L1-only glitches in one train block, both detectors in data about each: at
+    ``clean``; at ``glitched``, with an H1 glitch 20 s after it; at ``gapped``, where
+    H1 has a 20 s gap. H1 has room for partners far from all three.
+    """
+    edge = fx.boundary("O3", "train", "train", skip=3)
+    times = {"clean": edge + 1000.0, "glitched": edge + 2000.0, "gapped": edge + 3000.0}
+    fixture = fx._fixture([(edge + 400.0, edge + 3600.0)], 4096.0, "O3", ("O3",))
+    gapped = times["gapped"]
+    segments = dict(fixture.segments)
+    segments["H1"] = np.array([(edge + 400.0, gapped - 10.0), (gapped + 10.0, edge + 3600.0)])
+    fixture = fx.Fixture(fixture.encoding, segments, "O3", ("O3",))
+    rows = [GlitchRecord("L1", t, t - 0.5, 1.0, "Blip", 0.95) for t in times.values()]
+    rows.append(GlitchRecord("H1", times["glitched"] + 20.0, times["glitched"] + 19.5, 1.0, "Blip", 0.95))
+    return fixture.with_catalogues(glitches=rows), times
+
+
+def _transient_batches(obtainer, split, batch=1, rate=TRANSIENT_RATE):
+    return obtainer.get_onsource_offsource_chunks(
+        sample_rate_hertz=rate, onsource_duration_seconds=fx.ONSOURCE_SECONDS,
+        crop_duration_seconds=fx.CROP_SECONDS, offsource_duration_seconds=fx.OFFSOURCE_SECONDS,
+        num_examples_per_batch=batch, ifos=[gf.IFO.H1, gf.IFO.L1], group=split, seed=7,
+    )
+
+
+def test_coincident_glitches_read_every_detector(world):
+    """
+    Under the opt-in a glitch is read on every detector at its time: the detector it
+    was not seen in is labelled NOISE, and the record is served only where that
+    detector holds the span in its data and no glitch of its own; the others are
+    counted (the H1 glitch itself among them: L1's glitch lies in its window). Its
+    batch carries COINCIDENT = 1, the same record's default batch 0.
+    """
+    fixture, times = _coincident_world()
+    with world(fixture):
+        obtainer = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES],
+                                        coincidence=gf.Coincidence.COINCIDENT)
+        spans = obtainer.get_valid_segments([gf.IFO.H1, gf.IFO.L1], 7, "train")
+        rejections = obtainer.get_acquisition_stats()["rejections"]
+        assert spans.shape == (1, 2, 2), f"served {spans.tolist()}"
+        assert np.array_equal(spans[0, 0], spans[0, 1]), "H1 is not read at the glitch's time"
+        assert abs(np.mean(spans[0, 1]) - times["clean"]) < 1.0
+        assert rejections == {"data quality": 1, "transient in another detector": 2}, rejections
+
+        batch = next(iter(_transient_batches(obtainer, "train")))
+        assert batch_arrays(batch, [RV.COINCIDENT])[RV.COINCIDENT].tolist() == [1]
+        assert np.asarray(batch[RV.DATA_LABEL]).tolist() == [[0, 1]]
+        np.testing.assert_allclose(np.asarray(batch[RV.TRANSIENT_GPS_TIME])[0], [times["clean"]] * 2)
+
+        separated = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES])
+        flags = [batch_arrays(b, [RV.COINCIDENT])[RV.COINCIDENT].tolist()
+                 for b in itertools.islice(_transient_batches(separated, "train"), 3)]
+        assert flags == [[0]] * 3, f"default glitch flags {flags}"
+
+
+def _assert_unflagged_apart(batch):
+    """Every example flagged 0 reads its detectors two transient footprints apart."""
+    flags = batch_arrays(batch, [RV.COINCIDENT])[RV.COINCIDENT]
+    centres = np.asarray(batch[RV.TRANSIENT_GPS_TIME])
+    for flag, row in zip(flags, centres):
+        if flag == 0:
+            gap = float(np.min(np.abs(np.diff(np.sort(row)))))
+            assert gap >= PARTNER_SEPARATION_SECONDS, f"an unflagged example reads detectors {gap} s apart"
+
+
+def test_the_flag_check_sees_a_glitch_read_at_its_time(world, monkeypatch):
+    """
+    The planted leak: a default obtainer whose partner is placed at the glitch's own
+    time, so its other detector is read coincident in an unflagged batch, is caught:
+    an unflagged example's detectors must lie two footprints apart.
+    """
+    from gravyflow.src.dataset.acquisition import transient
+
+    fixture, _ = _coincident_world()
+    with world(fixture):
+        obtainer = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES])
+        _assert_unflagged_apart(next(iter(_transient_batches(obtainer, "train"))))
+        monkeypatch.setattr(transient, "partner_time", lambda allowed, gps, **kwargs: gps)
+        planted = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES])
+        batch = next(iter(_transient_batches(planted, "train")))
+    with pytest.raises(AssertionError, match="unflagged"):
+        _assert_unflagged_apart(batch)
+
+
+# =============================================================================
+# EVENTS: THEIR DETECTORS FROM DATA QUALITY
+# =============================================================================
+
+def _event_partner_world():
+    """
+    Two 2 s events mid test block: ``both``, in both detectors' data; ``h1_only``,
+    where L1 has a 10 s gap at the merger. L1 has room for a partner far from both.
+    """
+    block = _golden_block("train", "test", "train") + 1
+    middle = fx.block_start("O3", block) + fx.BLOCK_SECONDS / 2
+    times = {"both": middle - 2000.0, "h1_only": middle + 2000.0}
+    fixture = fx._fixture([(middle - 3000.0, middle + 3000.0)], 4096.0, "O3", ("O3",))
+    gap = times["h1_only"]
+    segments = dict(fixture.segments)
+    segments["L1"] = np.array([(middle - 3000.0, gap - 5.0), (gap + 5.0, middle + 3000.0)])
+    fixture = fx.Fixture(fixture.encoding, segments, "O3", ("O3",))
+    events = [EventRecord(f"GW{name.upper()}", t, 2.0) for name, t in times.items()]
+    return fixture.with_catalogues(events=events), times
+
+
+def test_event_detectors_from_data_quality(world):
+    """
+    An event is read at its time on each detector whose data holds its span, and on
+    each other at a partner time, labelled NOISE: an event in both detectors' data is
+    labelled EVENTS on both and flagged COINCIDENT; one with an L1 gap at its merger
+    is labelled [EVENTS, NOISE], its L1 read two footprints away, and not flagged.
+    """
+    fixture, times = _event_partner_world()
+    with world(fixture):
+        obtainer = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.EVENTS])
+        obtainer.get_valid_segments([gf.IFO.H1, gf.IFO.L1], 7, "test")
+        served = {record.name: [ifo.name for ifo in record.seen_in] for record in obtainer.transient_segments}
+        assert served == {"GWBOTH": IFOS, "GWH1_ONLY": ["H1"]}, served
+        batch = next(iter(_transient_batches(obtainer, "test", batch=2)))
+    centres = np.asarray(batch[RV.TRANSIENT_GPS_TIME])
+    order = np.argsort(centres[:, 0])
+    labels = np.asarray(batch[RV.DATA_LABEL])[order].tolist()
+    flags = batch_arrays(batch, [RV.COINCIDENT])[RV.COINCIDENT][order].tolist()
+    assert labels == [[2, 2], [2, 0]], labels
+    assert flags == [1, 0], flags
+    np.testing.assert_allclose(centres[order][0], [times["both"]] * 2)
+    assert abs(centres[order][1][1] - times["h1_only"]) >= PARTNER_SEPARATION_SECONDS
+    _assert_unflagged_apart(batch)
+
+
+def test_the_validator_reads_an_events_time_on_its_own_detectors():
+    """
+    A real event's time is its time on the detectors it was seen in: an event whose
+    first detector is a partner is still found at its merger.
+    """
+    from gravyflow.src.validate.bank import event_times
+
+    batch = {
+        RV.TRANSIENT_GPS_TIME: np.array([[100.0, 100.0], [5000.0, 200.0]]),
+        RV.DATA_LABEL: np.array([[2, 2], [0, 2]]),
+    }
+    assert event_times(batch).tolist() == [100.0, 200.0]
+
+
+# =============================================================================
+# TRAINING ON REAL EVENTS: ONLY UNDER THE OPT-IN
+# =============================================================================
+
+def test_training_on_real_events_needs_the_opt_in(world):
+    """
+    ``train_on_real_events=True`` is refused unless coincident data is opted in; under
+    the opt-in an event in a train block is served in train, flagged COINCIDENT.
+    """
+    edge = fx.boundary("O3", "train", "train", skip=3)
+    event = EventRecord("GWTRAIN", edge + 2000.0, 2.0)
+    fixture = fx._fixture([(edge + 1000.0, edge + 3000.0)], 4096.0, "O3", ("O3",)).with_catalogues(
+        events=[event])
+    with world(fixture):
+        with pytest.raises(ValueError, match="COINCIDENT"):
+            fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.EVENTS], train_on_real_events=True)
+        obtainer = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.EVENTS], train_on_real_events=True,
+                                        coincidence=gf.Coincidence.COINCIDENT)
+        obtainer.get_valid_segments([gf.IFO.H1, gf.IFO.L1], 7, "train")
+        assert [record.name for record in obtainer.transient_segments] == ["GWTRAIN"]
+        batch = next(iter(_transient_batches(obtainer, "train")))
+    assert batch_arrays(batch, [RV.COINCIDENT])[RV.COINCIDENT].tolist() == [1]
+
+
+# =============================================================================
+# AN EVALUATION PASS SERVES EACH TRANSIENT ONCE
+# =============================================================================
+
+#: More batches than any evaluation pass here serves: a pass not ended by then never ends.
+EVALUATION_PASS_BOUND = 50
+
+
+@pytest.mark.parametrize("balanced", [False, True], ids=["equal weights", "balanced"])
+@pytest.mark.parametrize("split", ["validate", "test"])
+def test_an_evaluation_pass_serves_each_transient_once(world, split, balanced):
+    """
+    A validate or test pass over transients serves each record once and ends, though
+    its batches do not divide the records and balancing weights them unequally.
+    """
+    block = _golden_block("train", split, "train") + 1
+    middle = fx.block_start("O3", block) + fx.BLOCK_SECONDS / 2
+    peaks = [middle + 400.0 * k for k in range(-2, 3)]
+    fixture = fx._fixture([(middle - 2000.0, middle + 2000.0)], 4096.0, "O3", ("O3",))
+    kinds = ["Blip", "Blip", "Blip", "Koi_Fish", "Koi_Fish"]
+    fixture = fixture.with_catalogues(glitches=[
+        GlitchRecord("L1", t, t - 0.5, 1.0, kind, 0.95) for t, kind in zip(peaks, kinds)])
+    with world(fixture):
+        obtainer = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES],
+                                        balanced_glitch_types=balanced)
+        batches = list(itertools.islice(_transient_batches(obtainer, split, batch=2), EVALUATION_PASS_BOUND))
+    assert len(batches) < EVALUATION_PASS_BOUND, "an evaluation pass never ends"
+    centres = np.concatenate([np.asarray(b[RV.TRANSIENT_GPS_TIME])[:, 1] for b in batches])
+    assert sorted(centres.tolist()) == sorted(peaks), f"served {sorted(centres.tolist())}"

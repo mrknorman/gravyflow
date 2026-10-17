@@ -296,6 +296,11 @@ class ReturnVariables(Enum):
     # data, which is never augmented. START_GPS_TIME still gives the window read.
     AUGMENTATIONS = ReturnVariable(19, (BATCH,))
     
+    # 1 where two or more of the example's detectors are read at one time (real
+    # noise and transients: the gf.Coincidence opt-in, or a real event seen in
+    # several detectors), else 0.
+    COINCIDENT = ReturnVariable(20, (BATCH,))
+
     def __lt__(self, other):
         return self.value.index < other.value.index
 

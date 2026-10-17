@@ -126,32 +126,6 @@ def build_event_segments(
                 "Check observing_runs filter."
             )
     
-    def determine_active_ifos(event: dict) -> list:
-        """Determine which IFOs were active for this event from metadata."""
-        import gravyflow as gf
-        
-        # Try to parse from 'network' field (e.g., "H1L1" or "H1L1V1")
-        network = event.get('network', '')
-        if network:
-            ifos = []
-            if 'H1' in network:
-                ifos.append(gf.IFO.H1)
-            if 'L1' in network:
-                ifos.append(gf.IFO.L1)
-            if 'V1' in network:
-                ifos.append(gf.IFO.V1)
-            if ifos:
-                return ifos
-        
-        # Fallback: check FAR columns for detector presence
-        # (Events with FAR values for a detector were observed there)
-        ifos = []
-        if event.get('far_gstlal') is not None or event.get('far_pycbc') is not None:
-            # Primary LIGO detectors were active
-            ifos = [gf.IFO.H1, gf.IFO.L1]
-        
-        return ifos if ifos else [gf.IFO.H1, gf.IFO.L1]  # Conservative fallback
-    
     for event in events:
         # The event list gives no source-class probabilities (only p_astro): the
         # type follows from the median source masses.
@@ -178,7 +152,9 @@ def build_event_segments(
             label=DataLabel.EVENTS,
             kind=source_type,
             observing_run=obs_run,
-            seen_in=determine_active_ifos(event),  # Multi-detector events
+            # No detectors: the catalogue does not say which observed the event. An
+            # obtainer finds them from data quality (seen where its data holds the span).
+            seen_in=[],
             confidence=confidence,
             name=event.get('name'),
             weight=1.0
