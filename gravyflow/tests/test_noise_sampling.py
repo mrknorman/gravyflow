@@ -229,6 +229,27 @@ class TestRandomPlan:
                 np.add.at(expected, mixed, 1.0 / MIXING_WIDTH)
             np.testing.assert_allclose(expected, plan.due(p), rtol=0, atol=1e-9)
 
+    @pytest.mark.parametrize("segment_order", list(gf.SegmentOrder))
+    def test_the_obtainers_segment_order_orders_every_pass(self, segment_order):
+        from gravyflow.src.dataset.config import WindowSpec
+
+        obtainer = gf.NoiseDataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
+                                        observing_runs=[gf.ObservingRun.O3], augmentations=[],
+                                        segment_order=segment_order)
+        start = 1238170000.0
+        lengths = [900.0, 200.0, 500.0, 300.0]  # rows in time order, each 1000 s after the last
+        obtainer.valid_segments = np.array([[[start + 1000.0 * i, start + 1000.0 * i + n]]
+                                            for i, n in enumerate(lengths)])
+        window = WindowSpec.from_params(sample_rate_hertz=2048.0, onsource_duration_seconds=1.0,
+                                        offsource_duration_seconds=1.75, crop_duration_seconds=0.5)
+        plan = obtainer.random_plan(gf.SeedTree(1), window, 16)
+        orders = [list(plan.order(p)) for p in range(4)]
+        if segment_order is gf.SegmentOrder.RANDOM:
+            assert len({tuple(order) for order in orders}) > 1
+        else:
+            fixed = {gf.SegmentOrder.CHRONOLOGICAL: [0, 1, 2, 3], gf.SegmentOrder.SHORTEST_FIRST: [1, 3, 2, 0]}
+            assert orders == [fixed[segment_order]] * 4
+
     def test_no_row_feeds_a_run_of_batches_alone(self):
         plan = random_plan()
         alone = [len(set(plan.mixed(g).tolist())) == 1 for g in range(plan.batches_before(3))]
