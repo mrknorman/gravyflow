@@ -153,7 +153,8 @@ def _glitch_world(glitch_ifo="L1"):
     """
     A ``glitch_ifo``-only glitch at ``peak``, both detectors in data over
     [peak - 400, peak + 400] of one train block; the other detector has a 60 s gap
-    and a glitch of its own where a partner could otherwise go.
+    and a glitch of its own where a partner could otherwise go, 1 s before the gap,
+    so its own read leaves the data and only the ``glitch_ifo`` glitch is served.
     """
     other = "H1" if glitch_ifo == "L1" else "L1"
     edge = fx.boundary("O3", "train", "train", skip=3)
@@ -164,7 +165,7 @@ def _glitch_world(glitch_ifo="L1"):
     fixture = fx.Fixture(fixture.encoding, segments, "O3", ("O3",))
     rows = [
         GlitchRecord(glitch_ifo, peak, peak - 0.5, 1.0, "Blip", 0.95),
-        GlitchRecord(other, peak - 260.0, peak - 260.5, 1.0, "Blip", 0.95),
+        GlitchRecord(other, peak + 199.0, peak + 198.5, 1.0, "Blip", 0.95),
     ]
     return fixture.with_catalogues(glitches=rows), peak
 
@@ -442,8 +443,8 @@ def test_a_dataset_batch_carries_the_flag(world, coincidence):
 def _coincident_world():
     """
     L1-only glitches in one train block, both detectors in data about each: at
-    ``clean``; at ``glitched``, with an H1 glitch 20 s after it; at ``gapped``, where
-    H1 has a 20 s gap. H1 has room for partners far from all three.
+    ``clean``; at ``glitched``, with an H1 glitch 0.5 s after it, inside its read; at
+    ``gapped``, where H1 has a 20 s gap. H1 has room for partners far from all three.
     """
     edge = fx.boundary("O3", "train", "train", skip=3)
     times = {"clean": edge + 1000.0, "glitched": edge + 2000.0, "gapped": edge + 3000.0}
@@ -453,7 +454,7 @@ def _coincident_world():
     segments["H1"] = np.array([(edge + 400.0, gapped - 10.0), (gapped + 10.0, edge + 3600.0)])
     fixture = fx.Fixture(fixture.encoding, segments, "O3", ("O3",))
     rows = [GlitchRecord("L1", t, t - 0.5, 1.0, "Blip", 0.95) for t in times.values()]
-    rows.append(GlitchRecord("H1", times["glitched"] + 20.0, times["glitched"] + 19.5, 1.0, "Blip", 0.95))
+    rows.append(GlitchRecord("H1", times["glitched"] + 0.5, times["glitched"], 1.0, "Blip", 0.95))
     return fixture.with_catalogues(glitches=rows), times
 
 
@@ -674,8 +675,9 @@ EVALUATION_PASS_BOUND = 50
 @pytest.mark.parametrize("split", ["validate", "test"])
 def test_an_evaluation_pass_serves_each_transient_once(world, split, balanced):
     """
-    A validate or test pass over transients serves each record once and ends, though
-    its batches do not divide the records and balancing weights them unequally.
+    A validate or test pass over transients serves floor(N / B) whole batches, each
+    record at most once, never balanced, and ends: the remainder of N mod B records is
+    never served.
     """
     block = _golden_block("train", split, "train") + 1
     middle = fx.block_start("O3", block) + fx.BLOCK_SECONDS / 2
@@ -688,9 +690,10 @@ def test_an_evaluation_pass_serves_each_transient_once(world, split, balanced):
         obtainer = fx.ifo_data_obtainer(fixture, data_labels=[gf.DataLabel.GLITCHES],
                                         balanced_glitch_types=balanced)
         batches = list(itertools.islice(_transient_batches(obtainer, split, batch=2), EVALUATION_PASS_BOUND))
-    assert len(batches) < EVALUATION_PASS_BOUND, "an evaluation pass never ends"
+    assert len(batches) == len(peaks) // 2, f"{len(batches)} batches: an evaluation pass is floor(N / B)"
     centres = np.concatenate([np.asarray(b[RV.TRANSIENT_GPS_TIME])[:, 1] for b in batches])
-    assert sorted(centres.tolist()) == sorted(peaks), f"served {sorted(centres.tolist())}"
+    assert len(set(centres.tolist())) == len(centres) == 4, f"served {sorted(centres.tolist())}"
+    assert set(centres.tolist()) <= set(peaks), f"served {sorted(centres.tolist())}"
 
 
 @pytest.mark.parametrize("split", ["validate", "test"])

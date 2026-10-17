@@ -14,6 +14,7 @@ decodes to its GPS time.
 """
 
 import dataclasses
+import itertools
 import os
 import re
 import threading
@@ -323,8 +324,8 @@ class TestDataQuality:
     """Transient windows are checked against data quality, and never zero-filled."""
 
     def test_windows_outside_data_quality_are_rejected_and_counted(self):
-        # A 5 s gap inside the second record's span, on L1, where it was seen.
-        gap = TIMES[1] + 20.0
+        # A 5 s gap inside the second record's read (its offsource), on L1, where it was seen.
+        gap = TIMES[1] - 8.0
         science = {
             gf.IFO.H1: SCIENCE,
             gf.IFO.L1: np.array([[REF - 1000.0, gap], [gap + 5.0, REF + 1000.0]]),
@@ -355,7 +356,8 @@ class TestDataQuality:
             batch, reader = served([gf.IFO.H1, gf.IFO.L1])
         assert served_times(batch) == rounded(TIMES)
         assert reader.get_acquisition_stats()["rejections"] == {}
-        for start, end in read_spans(batch)[:, 0]:
+        # Each H1 read, from its first offsource sample to its last onsource sample.
+        for start, end in zip(decoded(batch, RV.OFFSOURCE)[:, 0, 0], decoded(batch)[:, 0, -1]):
             assert any(a <= start and end <= b for a, b in science[gf.IFO.H1]), f"H1 read {start}-{end} leaves its data"
             assert not any(start < b and a < end for a, b in vetoes[gf.IFO.H1]), f"H1 read {start}-{end} meets a veto"
         centres = np.asarray(batch[RV.TRANSIENT_GPS_TIME])
@@ -462,7 +464,7 @@ class TestRefusals:
 BEYOND = dict(onsource_duration_seconds=31.5, crop_duration_seconds=0.5, offsource_duration_seconds=32.0)
 #: Requests no read can serve, and how each is refused.
 UNSERVABLE = {
-    "beyond the record's span": (BEYOND, r"cannot be read at 2048 Hz.*48\.2 s"),
+    "beyond the record's span": (BEYOND, r"cannot be read.*48\.2 s"),
     "not whole hertz": (dict(sample_rate_hertz=2048.5), "2048.5 Hz is not a positive whole number"),
 }
 
@@ -598,3 +600,165 @@ class TestOneReadPath:
                 batch, _ = served([gf.IFO.L1])
         assert old.read_bytes() == before
         assert served_times(batch) == rounded(TIMES)
+
+
+# ----------------------------------------------------------------- passes
+
+#: Six glitches of the training split, each in tiles of its own.
+PASS_TIMES = REF + 10.3701 + 140.0 * np.arange(6)
+#: Five glitches of the test split.
+TEST_TIMES = REF + 15000.3701 + 140.0 * np.arange(5)
+#: Data quality over both splits' records.
+WIDE_SCIENCE = np.array([[REF - 1000.0, REF + 24000.0]])
+#: The window, as a batcher takes it.
+PASS_WINDOW = {key: value for key, value in WINDOW.items() if key != "scale_factor"}
+
+
+def times_of(batch):
+    """The transient times of a batch's examples, in its order."""
+    return [float(t) for t in np.round(np.asarray(batch[RV.TRANSIENT_GPS_TIME])[:, SEEN], 4)]
+
+
+def direct(count, group=SPLIT, seed=1, reader=None, **window):
+    """The first ``count`` batches (fewer, if it ends) of a fresh obtainer's own generator."""
+    reader = reader or obtainer()
+    return list(itertools.islice(reader(ifos=[gf.IFO.L1], group=group, seed=seed, **{**WINDOW, **window}), count))
+
+
+def batcher(reader, group=SPLIT, seed=7, steps_per_epoch=2, augmented=False, **window):
+    """A dataset's batcher of ``reader`` for split ``group``: a function of a batch's address."""
+    from gravyflow.src.dataset.dataset import augmented_batcher
+    from gravyflow.src.dataset.noise.noise import obtainer_batcher
+
+    make = augmented_batcher if augmented else obtainer_batcher
+    tree = gf.src.rng.SeedTree(seed)
+    batch = make(reader, tree, group, ifos=[gf.IFO.L1], steps_per_epoch=steps_per_epoch,
+                 **{**PASS_WINDOW, **window})
+    return lambda epoch, k: batch(tree.batch(group, epoch, k))
+
+
+def same_batches(a, b):
+    assert len(a) == len(b)
+    for one, other in zip(a, b):
+        for key in (RV.ONSOURCE, RV.TRANSIENT_GPS_TIME, RV.START_GPS_TIME):
+            assert np.array_equal(np.asarray(one[key]), np.asarray(other[key])), key.name
+
+
+class TestPasses:
+    """
+    Training concatenates passes over the split's records: pass p is ordered, and
+    balanced, by draws of its own, so every pass differs and the same seed gives the
+    same passes. A batch is the next B items of the concatenation, so none is partial.
+    An evaluation split is one fixed pass, floor(N / B) batches, its remainder never
+    served. A batch is a function of its address alone.
+    """
+
+    def test_each_pass_has_its_own_order_and_a_seed_gives_one_sequence(self):
+        with offline(catalogue=records(PASS_TIMES), science=WIDE_SCIENCE):
+            first = [times_of(batch) for batch in direct(8)]
+            again = [times_of(batch) for batch in direct(8)]
+        assert first == again
+        passes = [first[2 * p] + first[2 * p + 1] for p in range(4)]
+        for one in passes:
+            assert sorted(one) == rounded(PASS_TIMES), "a pass is not every record once"
+        assert len({tuple(one) for one in passes}) > 1, "every pass repeats one order"
+
+    def test_balance_is_exact_in_every_pass(self):
+        catalogue = records(PASS_TIMES[:4]) + [dataclasses.replace(
+            records(PASS_TIMES[4:5])[0], kind=GlitchType.KOI_FISH)]
+        with offline(catalogue=catalogue, science=WIDE_SCIENCE):
+            batches = direct(6, num_examples_per_batch=4, reader=obtainer(balanced_glitch_types=True))
+        kinds = [int(k) for batch in batches for k in np.asarray(batch[RV.GLITCH_TYPE])[:, SEEN]]
+        times = sum((times_of(batch) for batch in batches), [])
+        assert all(len(times_of(batch)) == 4 for batch in batches)
+        rare = round(float(PASS_TIMES[4]), 4)
+        for p in range(3):
+            assert sorted(kinds[8 * p:8 * p + 8]) == [GlitchType.BLIP.value] * 4 + [GlitchType.KOI_FISH.value] * 4
+            assert sorted(t for t in times[8 * p:8 * p + 8] if t != rare) == rounded(PASS_TIMES[:4])
+
+    def test_no_batch_is_partial(self):
+        with offline():
+            batches = direct(3, num_examples_per_batch=2)
+        assert [len(times_of(batch)) for batch in batches] == [2, 2, 2]
+        served = sum((times_of(batch) for batch in batches), [])
+        assert sorted(served[:3]) == sorted(served[3:]) == rounded(TIMES)
+
+    def test_a_batch_is_a_function_of_its_address(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        addresses = [(0, 0), (0, 1), (1, 0), (1, 1), (3, 1)]
+        with offline(catalogue=records(PASS_TIMES), science=WIDE_SCIENCE):
+            forward = [batcher(obtainer())(*a) for a in addresses]
+            read = batcher(obtainer())
+            backward = [read(*a) for a in reversed(addresses)][::-1]
+            with ThreadPoolExecutor(4) as pool:
+                read = batcher(obtainer())
+                threaded = list(pool.map(lambda a: read(*a), addresses))
+        same_batches(forward, backward)
+        same_batches(forward, threaded)
+        # Epoch e of two batches of three is pass e: every record once.
+        for e in (0, 1):
+            assert sorted(times_of(forward[2 * e]) + times_of(forward[2 * e + 1])) == rounded(PASS_TIMES)
+
+    def test_an_evaluation_split_is_one_fixed_set(self):
+        with offline(catalogue=records(TEST_TIMES), science=WIDE_SCIENCE):
+            batches = direct(10, group="test", num_examples_per_batch=2)
+            again = direct(10, group="test", num_examples_per_batch=2)
+            read = batcher(obtainer(), group="test", seed=1, num_examples_per_batch=2)
+            by_epoch = [[read(epoch, k) for k in range(2)] for epoch in (0, 3)]
+            with pytest.raises(IndexError, match="1 record"):
+                read(0, 2)
+        assert len(batches) == 2, "an evaluation split is floor(N / B) batches"
+        served = sum((times_of(batch) for batch in batches), [])
+        assert len(set(served)) == 4 and set(served) <= set(rounded(TEST_TIMES))
+        same_batches(batches, again)
+        same_batches(by_epoch[0], by_epoch[1])
+        same_batches(batches, by_epoch[0])
+
+
+class TestReadSpan:
+    """
+    A record is planned where its read, not its whole footprint, is readable; a read
+    may reach anywhere in the record's footprint, which for an event is longer before
+    its time; RandomShift moves the read, never rolls the strain.
+    """
+
+    def test_data_quality_reads_the_windows_span(self):
+        science = np.array([[REF - 1000.0, TIMES[2] + 20.0]])
+        with offline(science=science):
+            batch, reader = served([gf.IFO.L1])
+        assert served_times(batch) == rounded(TIMES)
+        assert reader.get_acquisition_stats()["rejections"] == {}
+
+    def test_an_events_read_reaches_into_its_footprint(self):
+        t = REF + 16000.3701
+        event = dataclasses.replace(
+            records([t])[0], label=gf.DataLabel.EVENTS, kind=gf.SourceType.BNS, seen_in=[],
+            mass1=1.4, mass2=1.4, name="GW-OFFLINE-BNS")
+        with offline(catalogue=[event], science=WIDE_SCIENCE):
+            batch, _ = served([gf.IFO.L1], split="test", offsource_duration_seconds=96.0, num_examples_per_batch=1)
+            assert served_times(batch) == rounded([t])
+            assert decoded(batch, RV.OFFSOURCE)[0, 0, 0] < t - 96.0
+            with pytest.raises(ValueError, match="cannot be read"):
+                served([gf.IFO.L1], split="test", offsource_duration_seconds=200.0, num_examples_per_batch=1)
+
+    def test_random_shift_moves_the_read_and_never_rolls(self):
+        reader = gf.TransientDataObtainer(
+            data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
+            observing_runs=gf.ObservingRun.O3,
+            augmentations=[gf.RandomShift(probability=1.0, shift_fraction=0.25)])
+        with offline(catalogue=records(PASS_TIMES), science=WIDE_SCIENCE):
+            read = batcher(reader, augmented=True)
+            batches = [read(0, k) for k in range(2)]
+        shifts = []
+        for batch in batches:
+            onsource = decoded(batch)[:, 0]
+            steps = np.diff(onsource, axis=-1)
+            assert np.all(np.abs(steps - 1.0 / RATE) < DECODE), "the strain was rolled"
+            shift = onsource[:, onsource.shape[-1] // 2] - np.asarray(batch[RV.TRANSIENT_GPS_TIME])[:, 0]
+            assert np.all(np.abs(shift) <= 0.25 * 2.0 + 1.0 / RATE)
+            assert np.all(np.asarray(batch[RV.AUGMENTATIONS]) == gf.RandomShift.bit)
+            start = np.asarray(batch[RV.START_GPS_TIME])[:, 0]
+            assert np.all(np.abs(start - onsource[:, int(0.5 * RATE)]) < DECODE)
+            shifts += list(shift)
+        assert np.any(np.abs(shifts) > 2.0 / RATE), "no example was shifted"

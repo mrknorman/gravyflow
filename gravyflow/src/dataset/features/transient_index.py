@@ -4,7 +4,6 @@ TransientIndex - canonical index of transient examples.
 Manages collections of TransientSegments with:
 - Deduplication
 - Split assignment by footprint (SplitSpec.assign)
-- Class balancing via weights
 - Efficient iteration
 - Serialization to/from disk
 """
@@ -89,7 +88,6 @@ class TransientIndex:
         index = TransientIndex(events + glitches)
         index.dedupe()
         index.assign_splits(gf.SplitSpec())
-        index.apply_balancing()
         
         # Iterate over training examples
         for record in index.iter(group="train"):
@@ -219,86 +217,33 @@ class TransientIndex:
         self.excluded = dict(excluded)
         return self.excluded
     
-    def apply_balancing(self, by: str = "kind") -> None:
-        """
-        Set weights for class balancing.
-        
-        Weights are set inversely proportional to class frequency,
-        so rare classes get higher weights.
-        
-        Args:
-            by: Field to balance by ("kind" or "label").
-        """
-        from collections import Counter
-        
-        # Count occurrences
-        if by == "kind":
-            counts = Counter(r.kind for r in self.records)
-        elif by == "label":
-            counts = Counter(r.label for r in self.records)
-        else:
-            raise ValueError(f"Unknown balance field: {by}. Use 'kind' or 'label'.")
-        
-        if not counts:
-            return
-        
-        max_count = max(counts.values())
-        
-        # Update weights
-        new_records = []
-        for record in self.records:
-            if by == "kind":
-                key = record.kind
-            else:  # by == "label"
-                key = record.label
-            
-            weight = max_count / counts[key]
-            new_records.append(replace(record, weight=weight))
-        
-        self.records = new_records
-    
     def iter(
-        self, 
+        self,
         group: Optional[str] = None,
         label: Optional[DataLabel] = None,
-        shuffle: bool = False,
-        seed: int = None
     ) -> Iterator[TransientSegment]:
         """
-        Iterate over records with optional filtering.
-        
+        The records, in index order, optionally filtered. A split's served order is
+        drawn per pass when its batches are served, never here.
+
         Args:
             group: The split whose records to keep (test, validate or train; others
                 raise KeyError); None keeps every record, of every split and none.
             label: Filter to specific label (EVENTS or GLITCHES).
-            shuffle: If True, shuffle records before iterating.
-            seed: Random seed for shuffling.
-            
+
         Yields:
             TransientSegments matching filters.
         """
         records_iter = iter(self.records)
-        
-        # Apply filters as generator pipeline
         if group is not None:
             SplitSpec.check_name(group)
             if self.split_fingerprint is None:
                 raise ValueError("Splits not assigned. Call assign_splits() first.")
             records_iter = (r for r in records_iter if self._groups.get(r.gps_key) == group)
-        
-        # Filter by label
         if label is not None:
             records_iter = (r for r in records_iter if r.label == label)
-        
-        # Shuffle if requested (must materialize for shuffling)
-        if shuffle:
-            filtered = list(records_iter)
-            rng = np.random.default_rng(seed)
-            indices = rng.permutation(len(filtered))
-            yield from (filtered[i] for i in indices)
-        else:
-            yield from records_iter
-    
+        yield from records_iter
+
     def to_segments(
         self, 
         padding_seconds: float,

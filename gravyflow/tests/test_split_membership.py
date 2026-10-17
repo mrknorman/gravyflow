@@ -128,14 +128,15 @@ class TestTransientMembership:
         reference = members(glitch_obtainer(), "test", 1000)
         assert members(glitch_obtainer(), "test", seed) == reference
 
-    def test_the_seed_still_orders_a_split(self, catalogue):
+    def test_the_seed_orders_the_passes_never_the_plan(self, catalogue):
+        """A split's plan is its records in time order, whatever the seed: each pass's
+        order is drawn when batches are served (test_transient_windows)."""
         def order(seed):
             obtainer = glitch_obtainer()
             obtainer.get_valid_segments([gf.IFO.L1], seed=seed, group_name="train")
             return [segment.gps_key for segment in obtainer.transient_segments]
 
-        assert order(1) != order(2)
-        assert sorted(order(1)) == sorted(order(2))
+        assert order(1) == order(2) == sorted(order(1))
 
     def test_a_saved_index_loads_every_record_whole(self, tmp_path):
         """

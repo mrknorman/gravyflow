@@ -156,19 +156,21 @@ def test_a_dataset_split_is_fixed_at_construction():
         assert dataset.group == "validate"
 
 
-def test_random_shift_rolls_both_windows_alike():
+def test_random_shift_never_rolls_and_flags_the_examples_its_draw_moves():
+    """
+    RandomShift moves a transient's read (the obtainer reads where ``draw`` puts each
+    window), so ``augment`` leaves the strain as read and flags exactly the examples
+    the same draw chose.
+    """
     on, off = ramps()
-    shift = gf.RandomShift(probability=1.0, shift_fraction=0.25)
+    shift = gf.RandomShift(probability=0.5, shift_fraction=0.25)
     out = augment((on, off), streams(), [shift], "train", GLITCHES)
-
-    def shifts(rows, n):
-        moved = (np.argmax(np.asarray(rows), axis=-1) - (n - 1)) % n
-        return np.where(moved > n // 2, moved - n, moved)
-
-    on_shift, off_shift = shifts(out.onsource, T), shifts(out.offsource, T_OFF)
-    np.testing.assert_array_equal(on_shift, off_shift)
-    assert np.all(on_shift == on_shift[:, :1]) and np.all(np.abs(on_shift) <= T // 4)
-    assert len(np.unique(on_shift[:, 0])) > 1
+    np.testing.assert_array_equal(np.asarray(out.onsource), on)
+    np.testing.assert_array_equal(np.asarray(out.offsource), off)
+    chosen, fraction = shift.draw(streams(), B)
+    np.testing.assert_array_equal(out.applied, np.where(chosen, gf.RandomShift.bit, 0).astype(np.float32))
+    assert 0 < chosen.sum() < B and np.all(fraction[~chosen] == 0.0)
+    assert np.all(np.abs(fraction) <= 1.0) and len(np.unique(fraction[chosen])) == chosen.sum()
 
 
 @pytest.mark.parametrize("labels", [EVENTS, [gf.EventConfidence.CONFIDENT], [*GLITCHES, *EVENTS]])

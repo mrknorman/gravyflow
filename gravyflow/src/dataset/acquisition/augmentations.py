@@ -99,12 +99,16 @@ class TimeReversal(Augmentation):
 @dataclass
 class RandomShift(Augmentation):
     """
-    Roll both windows by one whole number of samples, up to ``shift_fraction``
-    of the onsource (with its crop padding) either way, so a glitch is no longer
-    at the window's centre. Samples rolled out of one end come back at the other.
+    Read each chosen training example off centre: its windows move by a whole number
+    of samples, up to ``shift_fraction`` of the onsource (with its crop padding)
+    either way, so a glitch is no longer at the window's centre. The strain is read
+    where the windows lie, never rolled, so START_GPS_TIME stays the first returned
+    sample's time; TRANSIENT_GPS_TIME stays the glitch's.
 
-    Glitches only: real events refuse it, and so do noise windows, which are
-    drawn uniformly in time already.
+    The transient obtainer moves the read (``draw``), so the request's windows,
+    moved by the most, must lie in every record's footprint. Glitches only: real
+    events refuse it, and so do noise windows, which are drawn uniformly in time
+    already.
     """
     shift_fraction: float = 0.25
 
@@ -115,13 +119,22 @@ class RandomShift(Augmentation):
         if not 0.0 <= self.shift_fraction <= 0.5:
             raise ValueError(
                 f"RandomShift's shift_fraction must be in [0, 0.5], got {self.shift_fraction}: "
-                "a roll by more than half the window is a smaller roll the other way."
+                "the transient would leave the onsource."
             )
 
+    def draw(self, streams, num_examples: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        The draw ``augment`` makes for a batch at ``streams``: which of its examples are
+        chosen (B,), and each one's shift as a signed fraction of the most (B,), 0 where
+        not chosen, from the augmentation's own stream.
+        """
+        rng = streams.stream(f"augment/{type(self).__name__}")
+        chosen = rng.random(num_examples) < self.probability
+        return chosen, np.where(chosen, rng.uniform(-1.0, 1.0, num_examples), 0.0)
+
     def apply(self, onsource, offsource, chosen, rng):
-        limit = int(self.shift_fraction * onsource.shape[-1])
-        shifts = np.where(chosen, rng.integers(-limit, limit + 1, size=chosen.size), 0)
-        return _roll(onsource, shifts), _roll(offsource, shifts), chosen
+        # The windows were read where the shift put them (``draw``); nothing moves here.
+        return onsource, offsource, chosen
 
 
 @dataclass
@@ -158,13 +171,6 @@ class AddNoise(Augmentation):
 
 def _where(chosen: np.ndarray, transformed: np.ndarray, original: np.ndarray) -> np.ndarray:
     return np.where(chosen[:, None, None], transformed, original)
-
-
-def _roll(x: np.ndarray, shifts: np.ndarray) -> np.ndarray:
-    """Each example of ``x`` (B, I, T) rolled along time by its own ``shifts`` (B,), as np.roll."""
-    n = x.shape[-1]
-    index = (np.arange(n)[None, :] - shifts[:, None]) % n
-    return np.take_along_axis(x, np.broadcast_to(index[:, None, :], x.shape), axis=-1)
 
 
 def check_augmentations(augmentations: Optional[Iterable], data_labels=()) -> Tuple[Augmentation, ...]:

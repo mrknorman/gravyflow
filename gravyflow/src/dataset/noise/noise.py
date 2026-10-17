@@ -620,15 +620,8 @@ def reads_real_data(obtainer) -> bool:
 
 def obtainer_batcher(obtainer, tree: SeedTree, group: str, **kwargs) -> NoiseBatcher:
     """
-    The batcher of any obtainer: a NoiseObtainer's own, else (a transient
-    obtainer) a sequential reader of a fresh copy, seeded from ``tree`` and
-    ``group``. The seed orders the split; the split's members never depend on it.
+    The batcher of any obtainer, its own: a NoiseObtainer's, or a transient
+    obtainer's, addressed by index. The tree orders and balances the split; the
+    split's members never depend on it.
     """
-    if isinstance(obtainer, NoiseObtainer):
-        return obtainer.batcher(tree, group, **kwargs)
-    kwargs.pop("sampling_mode", None)
-    kwargs.pop("steps_per_epoch", None)
-    reader = deepcopy(obtainer)
-    return sequential_batcher(
-        reader(**kwargs, group=group, seed=sequential_seed(tree, group, "transient/reader"))
-    )
+    return obtainer.batcher(tree, group, **kwargs)

@@ -16,12 +16,12 @@ import dataclasses
 import itertools
 import logging
 from collections import Counter
-from typing import Any, List, Dict, Iterator, NamedTuple, Optional, Union, Tuple
+from copy import deepcopy
+from typing import Any, Callable, List, Dict, Iterator, NamedTuple, Optional, Sequence, Union, Tuple
 
 logger = logging.getLogger(__name__)
 
 import numpy as np
-from numpy.random import default_rng
 from keras import ops
 
 import gravyflow as gf
@@ -44,6 +44,7 @@ from gravyflow.src.dataset.store.read import TimelineContradiction
 from .partners import PARTNER_GRID_HERTZ, partner_time
 from gravyflow.src.dataset.config import WindowSpec
 from gravyflow.src.dataset.splits import SplitSpec
+from gravyflow.src.rng import BatchStreams, SeedTree
 
 
 #: The most threads that read one batch's examples at once, so a cold batch fetches its
@@ -233,11 +234,12 @@ class TransientDataObtainer(BaseDataObtainer):
             logger.info(f"{rejected} of {total} transients rejected: {why}.")
 
     def _passing_data_quality(
-        self, segments: List[TransientSegment], ifos: List[gf.IFO]
+        self, segments: List[TransientSegment], ifos: List[gf.IFO],
+        read_span: Optional[Tuple[float, float]] = None,
     ) -> List[TransientSegment]:
         """
-        The records whose span (the most a read may reach about the transient,
-        ``_check_request``) lies, on every detector read at their own time
+        The records whose read (``read_span`` about the transient, ``_read_span``; the
+        record's own span when None) lies, on every detector read at their own time
         (``_own_detectors``), inside one readable segment (``get_all_segment_times``:
         the obtainer's GWOSC flags, less its ``exclusions``, so by default no hardware
         injection either). The others are rejected at plan time, and their number is
@@ -251,7 +253,7 @@ class TransientDataObtainer(BaseDataObtainer):
         """
         records, keep = list(segments), np.ones(len(segments), dtype=bool)
         if records:
-            spans = np.array([[s.start_gps_time, s.end_gps_time] for s in records], dtype=np.float64)
+            spans = np.array([_span_about(s, s.transient_gps_time, read_span) for s in records], dtype=np.float64)
             usable = {ifo: within_segments(spans, self.get_all_segment_times(ifo)) for ifo in ifos}
             for k, record in enumerate(records):
                 if record.is_event:
@@ -302,12 +304,14 @@ class TransientDataObtainer(BaseDataObtainer):
                     yield block * spec.block_seconds, (block + 1) * spec.block_seconds
 
     def _plan_reads(
-        self, segments: List[TransientSegment], ifos: List[gf.IFO], group_name: str
+        self, segments: List[TransientSegment], ifos: List[gf.IFO], group_name: str,
+        read_span: Optional[Tuple[float, float]] = None,
     ) -> Tuple[List[TransientSegment], List[Tuple[DetectorRead, ...]]]:
         """
         Each record's reads, one per requested detector in order: its own detectors
         at its own time, every other at a partner time (``partners.partner_time``)
-        in that detector's partner segments and the first of the record's partner
+        whose read (``read_span``; the record's span when None) lies in that
+        detector's partner segments and the first of the record's partner
         blocks that holds one (``_partner_blocks``), its centre at
         least twice the record's footprint from the transient, keyed by the split's
         fingerprint, the transient's time and the detector. The records with no
@@ -315,7 +319,7 @@ class TransientDataObtainer(BaseDataObtainer):
         split's ``REJECTED_FOR_NO_PARTNER`` count.
 
         Under the coincident opt-in every detector is read at the record's time, and
-        one the record was not seen in is labelled noise: a record whose span there
+        one the record was not seen in is labelled noise: a record whose read there
         meets one of that detector's catalogued glitches (``get_glitch_veto_segments``)
         is rejected, and their number is the ``REJECTED_FOR_OTHER_TRANSIENT`` count.
         """
@@ -329,14 +333,14 @@ class TransientDataObtainer(BaseDataObtainer):
             t = float(record.transient_gps_time)
             own = self._own_detectors(record, ifos)
             footprint_start, footprint_end = transient_footprint(record)
+            read_start, read_end = _span_about(record, t, read_span)
             reads = []
             for ifo in ifos:
                 if ifo in own:
                     if ifo not in record.seen_in:
                         if ifo not in glitches:
                             glitches[ifo] = np.reshape(self.get_glitch_veto_segments(ifo), (-1, 2))
-                        if np.any((glitches[ifo][:, 0] < record.end_gps_time)
-                                  & (glitches[ifo][:, 1] > record.start_gps_time)):
+                        if np.any((glitches[ifo][:, 0] < read_end) & (glitches[ifo][:, 1] > read_start)):
                             rejected[self.REJECTED_FOR_OTHER_TRANSIENT] += 1
                             break
                     reads.append(DetectorRead(ifo, t, False))
@@ -346,7 +350,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 centre = next((found for found in (
                     partner_time(
                         allowed[ifo], t,
-                        before=t - record.start_gps_time, after=record.end_gps_time - t,
+                        before=t - read_start, after=read_end - t,
                         block=block,
                         separation=2.0 * (footprint_end - footprint_start),
                         key=(fingerprint, repr(t), ifo.name),
@@ -441,11 +445,7 @@ class TransientDataObtainer(BaseDataObtainer):
         )
         if excluded:
             logger.info(f"Transient records in no split: {excluded}")
-        
-        # Apply balancing
-        if self.balanced_glitch_types:
-            index.apply_balancing(by="kind")
-        
+
         self._feature_index = index
         return index
 
@@ -457,10 +457,12 @@ class TransientDataObtainer(BaseDataObtainer):
         batch_segments: List[TransientSegment],
         batch_reads: List[Tuple[DetectorRead, ...]],
         window_spec: WindowSpec,
+        shifts: Optional[np.ndarray] = None,
     ) -> dict:
         """
         The batch of ``batch_segments``' examples, each one record's reads
-        (``_read_example``).
+        (``_read_example``), each example's windows moved by its ``shifts``
+        seconds (B,), none when None.
 
         Every label is per detector, from the record and that detector's read: a
         partner is noise, with no type.
@@ -472,9 +474,10 @@ class TransientDataObtainer(BaseDataObtainer):
             - START_GPS_TIME: (Batch, IFO) = BI, float64: the GPS time of the first
               onsource sample returned after cropping, as for noise
               (``WindowSpec.onsource_start_gps``), exactly: the window centred on the
-              sample nearest the detector's read (``WindowSpec.transient_window_start_gps``).
-            - TRANSIENT_GPS_TIME: (Batch, IFO) = BI, float64: the centre of each
-              detector's window: the transient's time, or a partner's.
+              sample nearest the detector's read, moved by its shift
+              (``WindowSpec.transient_window_start_gps``).
+            - TRANSIENT_GPS_TIME: (Batch, IFO) = BI, float64: each detector's read:
+              the transient's time, or a partner's; the window's centre unless shifted.
             - DATA_LABEL: (Batch, IFO) = BI: GLITCHES or EVENTS on a detector the
               transient was seen in, NOISE on every other
             - SUB_TYPE: (Batch, IFO) = BI: GlitchType or SourceType value where seen, -1 otherwise
@@ -489,6 +492,7 @@ class TransientDataObtainer(BaseDataObtainer):
         final_background = ops.cast(ops.stack(batch_backgrounds), "float32")
 
         transient_gps = as_gps_times([[read.centre for read in reads] for reads in batch_reads])
+        moved = np.zeros(len(batch_reads)) if shifts is None else np.asarray(shifts, dtype=np.float64)
         at_time = np.array([[not read.partner for read in reads] for reads in batch_reads])
         seen = at_time & np.array([[read.ifo in segment.seen_in for read in reads]
                                    for segment, reads in zip(batch_segments, batch_reads)])
@@ -508,7 +512,7 @@ class TransientDataObtainer(BaseDataObtainer):
             RV.ONSOURCE: final_subarrays,
             RV.OFFSOURCE: final_background,
             RV.START_GPS_TIME: window_spec.onsource_start_gps(
-                window_spec.transient_window_start_gps(transient_gps)
+                window_spec.transient_window_start_gps(transient_gps + moved[:, None])
             ),
             RV.TRANSIENT_GPS_TIME: transient_gps,
             RV.DATA_LABEL: data_label,
@@ -528,22 +532,27 @@ class TransientDataObtainer(BaseDataObtainer):
         seed: int,
         group_name: str,
         segment_order: SegmentOrder = None,
+        read_span: Optional[Tuple[float, float]] = None,
     ) -> np.ndarray:
         """
-        Get valid segments for TRANSIENT mode.
+        Plan split ``group_name`` on ``ifos``: its records, each with its reads.
 
-        Segments come from TransientIndex which contains full TransientSegments.
-        The split's members are fixed by the index (`TransientIndex.assign_splits`);
-        ``seed`` only orders them (SegmentOrder.RANDOM). Real events are test
-        data: an obtainer of events alone refuses any other split unless it
-        trains on real events.
+        The split's members are fixed by the index (`TransientIndex.assign_splits`),
+        and their planned order by ``segment_order``: by time, or shortest first
+        (SHORTEST_FIRST). ``seed`` changes nothing: each pass's own order (RANDOM) and
+        balance are drawn when batches are served (``Passes``). Real events are test
+        data: an obtainer of events alone refuses any other split unless it trains on
+        real events.
+
+        ``read_span``, (seconds before, seconds after) a read's centre, is the span the
+        windows will read, which data quality and partners must hold; it must lie inside
+        every record's footprint (``transient_footprint``). None takes each record's
+        own span (its start and end).
         """
         if not isinstance(ifos, list):
             ifos = [ifos]
-        
-        if not segment_order:
-            segment_order = self.segment_order
-        
+        segment_order = segment_order or self.segment_order
+
         split = self._split(ifos, group_name)
         if group_name != "test" and not self.train_on_real_events and self._events_only():
             raise ValueError(
@@ -552,26 +561,24 @@ class TransientDataObtainer(BaseDataObtainer):
                 "coincidence=Coincidence.COINCIDENT."
             )
 
-        # The served state is one split's, on its detectors: another rebuilds
-        # it, index included, since the index carries the detectors' records.
-        self._serve_split(split)
+        # The served state is one split's, on its detectors, for one read span:
+        # another rebuilds it, index included, since the index carries the
+        # detectors' records.
+        self._serve_split(split, order=(segment_order, read_span))
         if self._feature_index is None:
             self.build_feature_index(ifos=ifos)
-        
+
         # The split's glitches seen in a requested detector, and its events (seen
         # where data quality holds them), each read on every requested detector: its
         # own at its time, the others at partner times.
-        records, reads = self._plan_reads(
-            self._passing_data_quality(
-                [record for record in self._feature_index.iter(group=group_name)
-                 if record.is_event or any(ifo in record.seen_in for ifo in ifos)], ifos
-            ),
-            ifos, group_name,
-        )
+        candidates = [record for record in self._feature_index.iter(group=group_name)
+                      if record.is_event or any(ifo in record.seen_in for ifo in ifos)]
+        if read_span is not None:
+            self._check_read_span(read_span, candidates)
+        records, reads = self._plan_reads(self._passing_data_quality(candidates, ifos, read_span),
+                                          ifos, group_name, read_span)
         planned = list(zip(records, reads))
-        if segment_order == SegmentOrder.RANDOM:
-            default_rng(seed).shuffle(planned)
-        elif segment_order == SegmentOrder.SHORTEST_FIRST:
+        if segment_order == SegmentOrder.SHORTEST_FIRST:
             planned.sort(key=lambda pair: pair[0].duration)
         self.transient_segments = [record for record, _ in planned]
         self.transient_reads = [plan for _, plan in planned]
@@ -582,41 +589,49 @@ class TransientDataObtainer(BaseDataObtainer):
 
         # (records, detectors, 2): the span each detector of each record is read over.
         return np.array([
-            [[read.centre - (record.transient_gps_time - record.start_gps_time),
-              read.centre + (record.end_gps_time - record.transient_gps_time)] for read in plan]
+            [list(_span_about(record, read.centre, read_span)) for read in plan]
             for record, plan in planned
         ], dtype=np.float64).reshape(len(planned), len(ifos), 2)
 
-
-    def _check_request(self, window_spec: WindowSpec) -> None:
+    def _read_span(self, window_spec: WindowSpec, shift_seconds: float = 0.0) -> Tuple[float, float]:
         """
-        Refuse, by name and before any fetch, a request no read can serve: a rate that
-        is not whole hertz, or that the source cannot make, or a read larger than the
-        memory cap (``store.read.check``); or windows whose read, the resampler's margin
-        and the shared grid's lead counted, could reach past the span a planned record
-        may read about its centre (its start and end, which data quality checks). The
-        bound holds for every centre: the window's centre sample lies within half a
-        sample of it (``_read_example``).
+        The seconds before and after a read's centre that its windows reach: the
+        offsource and the padded onsource about the centre sample (within half a sample
+        of the centre, ``_read_example``), the resampler's margin and the shared grid's
+        lead, and ``shift_seconds`` either way (``RandomShift``).
         """
         rate = float(window_spec.sample_rate_hertz)
         g = store_read.geometry(self.source, rate)
         n_on, n_off = window_spec.num_onsource_samples, window_spec.num_offsource_samples
-        store_read.check(self.source, rate, [(0, n_off + n_on)])
-        if not self.transient_segments:
-            return
         before = (n_off + centre_index(n_on) + 0.5 + g.up - 1) / rate + g.margin / g.native
         after = (n_on - centre_index(n_on) + 0.5) / rate + (g.margin + 1) / g.native
-        spans = np.array([[r.transient_gps_time - r.start_gps_time, r.end_gps_time - r.transient_gps_time]
-                          for r in self.transient_segments])
-        allowed_before, allowed_after = spans.min(axis=0)
+        return before + shift_seconds, after + shift_seconds
+
+    @staticmethod
+    def _check_read_span(read_span: Tuple[float, float], records: List[TransientSegment]) -> None:
+        """
+        Refuse, by name and before any fetch, windows whose read could reach past a
+        record's footprint (``transient_footprint``): the time its split holds for it.
+        """
+        if not records:
+            return
+        before, after = read_span
+        footprints = np.array([transient_footprint(record) for record in records])
+        times = np.array([float(record.transient_gps_time) for record in records])
+        allowed_before = float(np.min(times - footprints[:, 0]))
+        allowed_after = float(np.min(footprints[:, 1] - times))
         if before > allowed_before or after > allowed_after:
             raise ValueError(
-                f"Transient windows of {n_off / rate:g} s offsource and {n_on / rate:g} s padded "
-                f"onsource cannot be read at {rate:g} Hz: their read, the resampler's margin "
-                f"counted, reaches {before:.4f} s before and {after:.4f} s after a transient, past "
-                f"the {allowed_before:g} s and {allowed_after:g} s a record may read about it. "
-                f"Ask for shorter windows."
+                f"Transient windows reaching {before:.4f} s before and {after:.4f} s after a "
+                f"transient (the offsource, the padded onsource, the resampler's margin and any "
+                f"RandomShift) cannot be read: a record's footprint holds only {allowed_before:g} s "
+                f"before and {allowed_after:g} s after it. Ask for shorter windows."
             )
+
+    def _shift(self, training: bool) -> Optional["gf.RandomShift"]:
+        """The RandomShift that moves this obtainer's training reads, if it has one."""
+        from .augmentations import RandomShift
+        return next((a for a in self.augmentations if isinstance(a, RandomShift)), None) if training else None
 
     def _read_example(
         self, record: TransientSegment, reads: Tuple[DetectorRead, ...], window_spec: WindowSpec,
@@ -644,6 +659,118 @@ class TransientDataObtainer(BaseDataObtainer):
             onsource.append(strain.data[n_off:])
         return np.stack(onsource), np.stack(offsource)
 
+    def batcher(self, tree: SeedTree, group: str, **window) -> Callable[[BatchStreams], Dict]:
+        """
+        A dataset's batcher of split ``group``: ``batch(streams)`` is a function of the
+        batch's address alone (``Passes``), read from a fresh copy of this obtainer,
+        each example's reads moved by its training ``RandomShift``. ``window``: the
+        window and batch (``sample_rate_hertz``, ``onsource_duration_seconds``,
+        ``crop_duration_seconds``, ``offsource_duration_seconds``,
+        ``num_examples_per_batch``, ``ifos``), and ``steps_per_epoch`` (a training
+        epoch's batches; needed past the first epoch). ``batch.batches`` is an
+        evaluation split's length, floor(N / B), and None for training;
+        ``batch.prepare(addresses)`` commits every tile those batches read and returns
+        every refusal they would meet (``TransientUnavailable``).
+        """
+        window.pop("sampling_mode", None)
+        return deepcopy(self)._batches(tree, group, shift=True, **window)
+
+    def _batches(
+            self,
+            tree: SeedTree,
+            group: str,
+            *,
+            shift: bool,
+            sample_rate_hertz: float = None,
+            onsource_duration_seconds: float = None,
+            crop_duration_seconds: float = None,
+            offsource_duration_seconds: float = None,
+            num_examples_per_batch: int = None,
+            ifos: List[gf.IFO] = None,
+            whiten: bool = False,
+            crop: bool = False,
+            steps_per_epoch: Optional[int] = None,
+            pool=None,
+        ) -> Callable[[BatchStreams], Dict]:
+        """
+        Split ``group``'s batches, addressed by index (see ``batcher``); ``shift``: move
+        training reads by the obtainer's RandomShift. Reads run on ``pool`` (one of the
+        store's registered pools when None).
+        """
+        window_spec = WindowSpec.from_params(
+            sample_rate_hertz=sample_rate_hertz,
+            onsource_duration_seconds=onsource_duration_seconds,
+            offsource_duration_seconds=offsource_duration_seconds,
+            crop_duration_seconds=crop_duration_seconds,
+        )
+        rate = window_spec.sample_rate_hertz
+        ifos = ensure_list(ifos) or [gf.IFO.L1]
+        size = int(num_examples_per_batch or gf.Defaults.num_examples_per_batch)
+        training = group == "train"
+        random_shift = self._shift(training and shift)
+        # The most a read moves, a whole number of samples either way.
+        most = 0 if random_shift is None else int(
+            random_shift.shift_fraction * window_spec.num_onsource_samples)
+        # Before any fetch: a rate or read no store can make, then windows reaching past
+        # a record's footprint; then the plan, for the span the windows read.
+        n_on, n_off = window_spec.num_onsource_samples, window_spec.num_offsource_samples
+        store_read.check(self.source, rate, [(0, n_off + n_on)])
+        self.get_valid_segments(ifos, None, group, read_span=self._read_span(window_spec, most / rate))
+        passes = Passes.of(self, tree, group, size, training)
+        segments, reads = self.transient_segments, self.transient_reads
+        pool = pool or thread_pool("transient", min(READ_THREADS, size))
+
+        def planned(streams: BatchStreams):
+            """The batch's records, each example's shift in seconds, and its windows' reads (moved)."""
+            epoch = streams.epoch or 0
+            if training and epoch and steps_per_epoch is None:
+                raise ValueError("Batches of epochs after the first need the epoch's steps (steps_per_epoch).")
+            g = epoch * (steps_per_epoch or 0) + streams.k if training else streams.k
+            indices = passes.batch(g)
+            moved = np.zeros(size)
+            if random_shift is not None:
+                _, fraction = random_shift.draw(streams, size)
+                moved = np.round(fraction * most) / rate
+            windows = [tuple(read._replace(centre=read.centre + shift_seconds) for read in reads[index])
+                       for index, shift_seconds in zip(indices, moved)]
+            return indices, moved, windows
+
+        def batch(streams: BatchStreams) -> Dict:
+            indices, moved, windows = planned(streams)
+            examples = list(pool.map(
+                lambda i: self._read_example(segments[indices[i]], windows[i], window_spec), range(size)))
+            return self._post_process_batch(
+                self._prepare_batch(
+                    [onsource for onsource, _ in examples],
+                    [offsource for _, offsource in examples],
+                    [segments[index] for index in indices],
+                    [reads[index] for index in indices],
+                    window_spec,
+                    moved,
+                ),
+                rate, window_spec.onsource_duration_seconds, whiten, crop,
+            )
+
+        def prepare(addresses: Sequence[BatchStreams]) -> List[TransientUnavailable]:
+            """Every refusal the batches at ``addresses`` would meet, each tile committed once."""
+            met = {}
+            for streams in addresses:
+                indices, _, windows = planned(streams)
+                for index, example in zip(indices, windows):
+                    for read in example:
+                        first = int(window_spec.transient_window_first_sample(read.centre)) - n_off
+                        try:
+                            store_read.ensure(self.source, read.ifo, rate, first, n_off + n_on,
+                                              stream=self._served_split)
+                        except TimelineContradiction as contradiction:
+                            met.setdefault(contradiction.exclusion,
+                                           TransientUnavailable(segments[index], read, contradiction))
+            return list(met.values())
+
+        batch.batches = passes.batches
+        batch.prepare = prepare
+        return batch
+
     def _yield_onsource_offsource_chunks(
             self,
             sample_rate_hertz: float = None,
@@ -659,95 +786,135 @@ class TransientDataObtainer(BaseDataObtainer):
             group: str = None
         ):
         """
-        Generate onsource/offsource chunks for TRANSIENT mode.
-        
-        Extracts centered windows around each event/glitch.
-        
-        Args:
-            sample_rate_hertz: Sample rate in Hz
-            onsource_duration_seconds: Final onsource window duration
-            crop_duration_seconds: Cropping duration on each side (for edge effects)
-            offsource_duration_seconds: Background window duration
-            num_examples_per_batch: Batch size
-            ifos: List of interferometers
-            seed: Random seed
-            sampling_mode: RANDOM or GRID sampling
+        The obtainer's own batches of split ``group``: batch g of the seed tree rooted
+        at ``seed`` (``Passes``), for g = 0, 1, ...; a training split without end, an
+        evaluation split once, floor(N / B) batches. Never augmented.
         """
-        # Create WindowSpec for consistent parameter handling
-        window_spec = WindowSpec.from_params(
-            sample_rate_hertz=sample_rate_hertz,
-            onsource_duration_seconds=onsource_duration_seconds,
-            offsource_duration_seconds=offsource_duration_seconds,
-            crop_duration_seconds=crop_duration_seconds,
-        )
-        # Before any fetch, and before the plan: a rate no read can make.
-        store_read.geometry(self.source, window_spec.sample_rate_hertz)
-
-        # Apply remaining defaults (not in WindowSpec)
-        ifos = ensure_list(ifos) or [gf.IFO.L1]
-        num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
-        seed = gf.src.rng.check_root(seed if seed is not None else gf.Defaults.seed)
-
-        # Use shared post-processing from base class
-        def _post_process(batch):
-            return self._post_process_batch(
-                batch, 
-                window_spec.sample_rate_hertz, 
-                window_spec.onsource_duration_seconds,
-                whiten, 
-                crop
-            )
-        
         # With no group, the split served; a first call names one.
         if group is None and self._served_group is None:
             raise ValueError("Name the split to serve: group='train', 'validate' or 'test'.")
-        self._serve_group(ifos, seed, group if group is not None else self._served_group)
-        # Before any fetch: windows no read of a planned record can serve.
-        self._check_request(window_spec)
-        if self.rng is None:
-            self.rng = default_rng(seed)
+        group = group if group is not None else self._served_group
+        tree = SeedTree(gf.src.rng.check_root(seed if seed is not None else gf.Defaults.seed))
+        size = num_examples_per_batch or gf.Defaults.num_examples_per_batch
+        with thread_pool("transient", min(READ_THREADS, size)) as pool:
+            batch = self._batches(
+                tree, group, shift=False, sample_rate_hertz=sample_rate_hertz,
+                onsource_duration_seconds=onsource_duration_seconds, crop_duration_seconds=crop_duration_seconds,
+                offsource_duration_seconds=offsource_duration_seconds, num_examples_per_batch=size,
+                ifos=ifos, whiten=whiten, crop=crop, pool=pool,
+            )
+            for k in itertools.count() if batch.batches is None else range(batch.batches):
+                yield batch(tree.batch(group, 0, k))
 
-        rng = default_rng(seed)
-        n_segments = len(self.transient_segments)
-        if n_segments == 0:
-            raise ValueError("No transient segments available for iteration.")
 
-        # Equal weights: one shuffled order over the records, every pass. Otherwise
-        # (apply_balancing), weighted draws with replacement oversample the rare classes
-        # in training. An evaluation split is one pass, each record once and unweighted,
-        # then the end: its examples are a set, never a sample. Every record drawn is
-        # served or refused by name (TransientUnavailable), so no pass is ever empty.
-        evaluation = self._served_group != "train"
-        weights = np.array([seg.weight for seg in self.transient_segments], dtype=np.float64)
-        weighted = not evaluation and not np.allclose(weights, 1.0)
-        order = np.arange(n_segments)
-        if weighted:
-            logger.info(f"Using weighted sampling over {n_segments} transients")
+def _span_about(record: TransientSegment, centre: float, read_span: Optional[Tuple[float, float]]):
+    """The GPS interval a read of ``record`` centred on ``centre`` covers: ``read_span``,
+    or the record's own span (its start and end) when None."""
+    if read_span is None:
+        return (centre - (record.transient_gps_time - record.start_gps_time),
+                centre + (record.end_gps_time - record.transient_gps_time))
+    return centre - read_span[0], centre + read_span[1]
+
+
+@dataclasses.dataclass(frozen=True)
+class Passes:
+    """
+    The order a split's planned records are served in, addressed by index.
+
+    Training concatenates passes without end, and batch g is items gB to (g + 1)B - 1
+    of the concatenation, so no batch is partial and a batch may finish one pass and
+    begin the next. Pass p is drawn from streams of its own (epoch p, which counts
+    passes, not training epochs):
+
+    - balance (``balanced_glitch_types``): every class serves exactly as many items
+      as the largest, M: a class of n records serves each one floor(M / n) times, and
+      M mod n of them once more, drawn without replacement from ``transient/balance``;
+    - order (``SegmentOrder.RANDOM``, and always when balanced): a permutation from
+      ``transient/order``.
+
+    An evaluation split is one pass of its records, each once and never balanced,
+    in the order of pass 0: floor(N / B) batches (``batches``), the same at every
+    epoch, the remainder of N mod B records never served.
+    """
+
+    tree: SeedTree
+    split: str
+    #: Record indices of each class, in planned order: one class unless balanced.
+    classes: Tuple[np.ndarray, ...]
+    size: int
+    training: bool
+    randomised: bool
+
+    @classmethod
+    def of(cls, obtainer: "TransientDataObtainer", tree: SeedTree, split: str, size: int,
+           training: bool) -> "Passes":
+        """The passes of ``obtainer``'s planned records for split ``split``, in batches of ``size``."""
+        records = obtainer.transient_segments
+        if not records:
+            raise ValueError(f"No transient records are planned for '{split}': there is nothing to serve.")
+        balanced = training and obtainer.balanced_glitch_types
+        if balanced:
+            kinds = np.array([int(record.kind) for record in records])
+            classes = tuple(np.flatnonzero(kinds == kind) for kind in np.unique(kinds))
         else:
-            rng.shuffle(order)
+            classes = (np.arange(len(records)),)
+        passes = cls(tree, split, classes, int(size), training,
+                     balanced or obtainer.segment_order == SegmentOrder.RANDOM)
+        if not training:
+            if passes.batches == 0:
+                raise ValueError(
+                    f"The '{split}' split has {len(records)} records, fewer than one batch of {size}: "
+                    "an evaluation set serves whole batches only. Ask for smaller batches."
+                )
+            left = len(records) % size
+            if left:
+                logger.info(f"The '{split}' split serves {passes.batches} batches of {size}; "
+                            f"its last {left} records are never served.")
+        return passes
 
-        def batch(indices, pool):
-            """The batch of the records at ``indices``, their examples read together."""
-            examples = list(pool.map(
-                lambda index: self._read_example(
-                    self.transient_segments[index], self.transient_reads[index], window_spec),
-                indices,
-            ))
-            return _post_process(self._prepare_batch(
-                [onsource for onsource, _ in examples],
-                [offsource for _, offsource in examples],
-                [self.transient_segments[index] for index in indices],
-                [self.transient_reads[index] for index in indices],
-                window_spec,
-            ))
+    @property
+    def length(self) -> int:
+        """The items of one pass."""
+        if self.training:
+            return len(self.classes) * max(len(members) for members in self.classes)
+        return len(self.classes[0])
 
-        with thread_pool("transient", min(READ_THREADS, num_examples_per_batch)) as pool:
-            while True:
-                indices = order
-                if weighted:
-                    indices = rng.choice(n_segments, size=n_segments, replace=True, p=weights / weights.sum())
-                # Consecutive batches of the pass; the last holds what is left.
-                for start in range(0, len(indices), num_examples_per_batch):
-                    yield batch(indices[start:start + num_examples_per_batch], pool)
-                if evaluation:
-                    return
+    @property
+    def batches(self) -> Optional[int]:
+        """An evaluation split's batches, floor(N / B); None for training, which never ends."""
+        return None if self.training else self.length // self.size
+
+    def _stream(self, consumer: str, p: int) -> np.random.Generator:
+        return self.tree.stream(self.split, consumer, p)
+
+    def items(self, p: int) -> np.ndarray:
+        """The record index of each item of pass ``p``, in order."""
+        quota = max(len(members) for members in self.classes)
+        if len(self.classes) > 1:
+            balance = self._stream("transient/balance", p)
+            items = np.concatenate([
+                np.concatenate([np.tile(members, quota // len(members)),
+                                np.sort(balance.choice(members, quota % len(members), replace=False))])
+                for members in self.classes
+            ])
+        else:
+            items = self.classes[0]
+        if self.randomised:
+            items = items[self._stream("transient/order", p).permutation(len(items))]
+        return items
+
+    def batch(self, g: int) -> np.ndarray:
+        """The record indices of batch ``g``."""
+        if not self.training and g >= self.batches:
+            raise IndexError(
+                f"Batch {g} is past the {self.batches} batches of the '{self.split}' split: an "
+                f"evaluation set is served once, and its {self.length % self.size} record(s) "
+                f"short of a batch never are."
+            )
+        positions = g * self.size + np.arange(self.size)
+        passes = positions // self.length
+        out = np.empty(self.size, dtype=np.int64)
+        for p in np.unique(passes):
+            at = passes == p
+            out[at] = self.items(int(p))[positions[at] % self.length]
+        return out
