@@ -53,6 +53,9 @@ MIN_STREAM_EXAMPLES = 64
 #: Largest threshold a tested lag may need: a shared stream (|rho| = 1) is
 #: always caught, and a lag too short to reach this is not tested.
 MAX_STREAM_THRESHOLD = 0.9
+#: Most example pairs one chunk of the offset comparison holds: tens of MB of
+#: working arrays, rankdata's included.
+RANK_CHUNK_ELEMENTS = 1 << 16
 
 
 # ----------------------------------------------------------------- strain
@@ -314,8 +317,28 @@ def offset_rank_correlations(x: np.ndarray, y: np.ndarray, offsets: np.ndarray) 
     """
     Spearman's rho of ``x[t + d]`` against ``y[t]`` for each offset ``d``,
     over the ``t`` where both are present, and how many such ``t`` there are.
+
+    Each offset compares the shorter stream with the stretch of the longer it
+    faces, and the offsets are taken in chunks of at most
+    ``RANK_CHUNK_ELEMENTS`` compared pairs: memory is bounded, time is linear
+    in the offsets times the shorter stream, and neither depends on the order
+    the streams are given in.
     """
     offsets = np.asarray(offsets, dtype=np.int64)
+    if y.size > x.size:
+        # Pearson's correlation is symmetric: y[s - d] against x[s] is the same pairing.
+        return offset_rank_correlations(y, x, -offsets)
+    rho = np.empty(offsets.size)
+    count = np.empty(offsets.size, dtype=np.int64)
+    step = max(1, RANK_CHUNK_ELEMENTS // max(y.size, 1))
+    for start in range(0, offsets.size, step):
+        chunk = slice(start, start + step)
+        rho[chunk], count[chunk] = _rank_correlations(x, y, offsets[chunk])
+    return rho, count
+
+
+def _rank_correlations(x: np.ndarray, y: np.ndarray, offsets: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """`offset_rank_correlations` over one chunk of offsets: an (offsets, y.size) comparison."""
     index = np.arange(y.size)[None, :] + offsets[:, None]
     inside = (index >= 0) & (index < x.size)
     a = np.where(inside, x[np.clip(index, 0, x.size - 1)], np.nan)

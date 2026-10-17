@@ -12,10 +12,11 @@ from dataclasses import dataclass, field
 import numpy as np
 import pytest
 
+from gravyflow.tests.leakage import fingerprints
 from gravyflow.tests.leakage.fingerprints import (
     OpaqueStateError, assert_noise_independent, assert_rows_disjoint, assert_streams_independent,
-    assert_unchanged, concatenate_streams, label_streams, shared_rows, state_digest, state_items,
-    strain_prints,
+    assert_unchanged, concatenate_streams, label_streams, offset_rank_correlations, shared_rows,
+    state_digest, state_items, stream_offsets, strain_prints,
 )
 
 
@@ -160,6 +161,31 @@ def test_a_stream_anywhere_inside_a_longer_one_is_caught(start):
     inside = np.exp(u[start:start + 64])             # 64 of the longer stream's draws, transformed
     with pytest.raises(AssertionError, match=rf"long/X vs short/Y: rho \+1.0000 at offset {start} "):
         assert_streams_independent({"long": {"X": u}, "short": {"Y": inside}})
+
+
+def test_a_stream_inside_a_longer_one_is_caught_in_either_order():
+    u = _uniform(1, 4000)
+    inside = np.exp(u[1234:1490])
+    with pytest.raises(AssertionError, match=r"long/X vs short/Y: rho \+1.0000 at offset 1234 "):
+        assert_streams_independent({"long": {"X": u}, "short": {"Y": inside}})
+    with pytest.raises(AssertionError, match=r"short/Y vs long/X: rho \+1.0000 at offset -1234 "):
+        assert_streams_independent({"short": {"Y": inside}, "long": {"X": u}})
+
+
+def test_offset_correlations_do_not_depend_on_order_or_chunking(monkeypatch):
+    """Swapping the streams mirrors the offsets; chunks of one offset give what one chunk gives."""
+    x, y = _uniform(1, 300), _uniform(2, 70)
+    x[_uniform(3, 300) < 0.3] = np.nan
+    offsets, overlap = stream_offsets(x, y)
+    offsets = offsets[overlap >= 3]
+    rho, n = offset_rank_correlations(x, y, offsets)
+    mirrored = offset_rank_correlations(y, x, -offsets)
+    np.testing.assert_allclose(mirrored[0], rho, rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(mirrored[1], n)
+    monkeypatch.setattr(fingerprints, "RANK_CHUNK_ELEMENTS", 1)
+    chunked = offset_rank_correlations(x, y, offsets)
+    np.testing.assert_allclose(chunked[0], rho, rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(chunked[1], n)
 
 
 def test_absent_examples_keep_their_place():
