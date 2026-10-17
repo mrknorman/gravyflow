@@ -3,17 +3,19 @@ gravyflow takes ripple only as the installed ``ripplegw`` package.
 
 No source file imports a module named ``ripple`` (a vendored checkout or an
 alias of ``ripplegw``), and none edits ``sys.path`` or registers ``ripple`` in
-``sys.modules``. The scan covers every Python file in the repository and the
-code cells of every notebook.
+``sys.modules``. The scan covers every Python file the repository tracks and
+the code cells of every tracked notebook: what git ls-files lists, so a stray
+local checkout or build directory is never scanned.
 """
 import ast
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SKIPPED_DIRECTORIES = {".git", "build", "dist", "__pycache__", ".ipynb_checkpoints"}
 
 NOTEBOOK_PATTERNS = [
     re.compile(r"^\s*import\s+ripple(\s|\.|,|$)", re.MULTILINE),
@@ -23,12 +25,21 @@ NOTEBOOK_PATTERNS = [
 ]
 
 
-def _source_files(suffix):
-    for path in sorted(REPO_ROOT.rglob(f"*{suffix}")):
-        parts = path.relative_to(REPO_ROOT).parts
-        if any(part in SKIPPED_DIRECTORIES or part.endswith(".egg-info") for part in parts):
-            continue
-        yield path
+def _git(root, *arguments):
+    """git in ``root``, with none of the caller's GIT_* variables or user configuration."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    result = subprocess.run(
+        ["git", "-C", str(root), *arguments], capture_output=True, text=True, env=environment
+    )
+    assert result.returncode == 0, f"git {' '.join(arguments)} failed in {root}: {result.stderr.strip()}"
+    return result.stdout
+
+
+def _source_files(suffix, root=REPO_ROOT):
+    """Every file with ``suffix`` that git tracks under ``root`` (a git checkout)."""
+    tracked = (root / name for name in _git(root, "ls-files", "-z").split("\0") if name)
+    return sorted(path for path in tracked if path.suffix == suffix and path.is_file())
 
 
 def _is_ripple(module_name):
@@ -85,8 +96,19 @@ def _violations(tree):
 
 
 def test_scan_finds_the_package():
-    files = list(_source_files(".py"))
+    files = _source_files(".py")
     assert REPO_ROOT / "gravyflow" / "src" / "dataset" / "features" / "waveforms" / "cbc.py" in files
+    assert Path(__file__).resolve() in files
+
+
+def test_scan_ignores_untracked_files(tmp_path):
+    """A stray local ripple checkout inside a repository is not the repository's source."""
+    _git(tmp_path, "init", "-q")
+    (tmp_path / "tracked.py").write_text("import ripplegw\n")
+    (tmp_path / "ripple").mkdir()
+    (tmp_path / "ripple" / "stray.py").write_text("import ripple\n")
+    _git(tmp_path, "add", "tracked.py")
+    assert _source_files(".py", tmp_path) == [tmp_path / "tracked.py"]
 
 
 def test_the_scan_flags_each_forbidden_construct():
