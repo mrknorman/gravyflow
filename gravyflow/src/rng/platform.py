@@ -27,6 +27,19 @@ def xla_flags() -> str:
     return os.environ.get("XLA_FLAGS", "")
 
 
+def platform_record() -> dict:
+    """
+    What, besides a batch's address, decides its bits here: the backend JAX runs
+    on and ``XLA_FLAGS``. It is recorded beside data (a materialised set's
+    manifest), never hashed into a dataset's fingerprint, so a spec keeps its
+    streams on every device. This is the one place the record is made: what
+    else decides the bits on a device joins it here.
+    """
+    import jax
+
+    return {"backend": jax.default_backend(), "xla_flags": xla_flags()}
+
+
 def single_threaded_cpu() -> bool:
     """Whether ``XLA_FLAGS`` runs XLA's CPU kernels single-threaded (bit-reproducible)."""
     return SINGLE_THREADED_CPU_FLAG in xla_flags().split()

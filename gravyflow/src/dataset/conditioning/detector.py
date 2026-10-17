@@ -583,7 +583,16 @@ class Network:
         self.init_parameters(
             **arguments
         )
-    
+
+    def specification(self) -> Dict:
+        """
+        The network's geometry by content (``validate.provenance.canonical`` reads
+        it): every attribute, its arrays as NumPy arrays. A network is stateless
+        geometry, so this is all a projection depends on.
+        """
+        return {name: np.asarray(value) if hasattr(value, "shape") else value
+                for name, value in sorted(vars(self).items())}
+
     def init_parameters(
         self,
         longitude_radians = None,  # Batched tensor

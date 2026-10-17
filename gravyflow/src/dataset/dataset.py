@@ -18,13 +18,19 @@ from gravyflow.src.dataset.tools.psd import SpectralConfig, estimate_psd, MIN_PS
 from gravyflow.src.utils.tensor import (
     crop_samples, replace_nan_and_inf_with_zero, window_samples
 )
-from gravyflow.src.utils.shapes import BatchContract
+from gravyflow.src.utils.shapes import ANY, OFFSOURCE_SAMPLES, BatchContract, BatchContractError
 from gravyflow.src.dataset.config import Defaults, WindowSpec, ignore_scale_factor
 from gravyflow.src.dataset.noise.noise import NoiseBatcher, addressed_by_index, obtainer_batcher, reads_real_data
 from gravyflow.src.dataset.acquisition.augmentations import Augmented, augment
 from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
 from gravyflow.src.dataset.features.injection import InjectionGenerator, check_scaling_matches_noise
-from gravyflow.src.rng import BatchStreams, SeedTree, check_coordinate, check_name, check_split
+from gravyflow.src.rng import TREE_VERSION, BatchStreams, SeedTree, check_coordinate, check_name, check_split
+from gravyflow.src.rng import platform
+from gravyflow.src.dataset.acquisition.versions import DATA_VERSIONS
+from gravyflow.src.dataset.materialise import (
+    DEFAULT_SHARD_SIZE, FORMAT, ContractMismatch, MaterialisedSet, json_bytes, sha256, write_set,
+)
+from gravyflow.src.validate.provenance import canonical
 from gravyflow.src.dataset.conditioning.pearson import rolling_pearson
 from gravyflow.src.dataset.conditioning.conditioning import spectrogram
 from gravyflow.src.utils.numerics import ensure_even, ensure_list
@@ -350,6 +356,8 @@ class IndexedBatches:
         # (``_check_keras_order``).
         self._keras_fitting = False
         self._keras_next = 0
+        # The materialised set batches are served from, if any (``load_materialised``).
+        self._materialised: Optional[MaterialisedSet] = None
 
     @property
     def group(self) -> str:
@@ -467,6 +475,9 @@ class IndexedBatches:
             "split_fingerprint": None if self.split_spec is None else self.split_spec.fingerprint(),
             "epoch_mode": self.epoch_mode.name,
             "index_addressed": self.index_addressed,
+            "materialised": None if self._materialised is None else {
+                "set_id": self._materialised.set_id, "epoch": self._materialised.epoch,
+                "k_range": [self._materialised.k_range.start, self._materialised.k_range.stop]},
         }
 
     @property
@@ -487,6 +498,131 @@ class IndexedBatches:
         """
         sampling_mode = getattr(self, "sampling_mode", None)
         return all(addressed_by_index(obtainer, sampling_mode) for obtainer in self._obtainers())
+
+    def __getitem__(self, index) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Batch ``index`` of the current epoch: a pure function of its address
+        when the noise is (see the class docstring), read from the loaded
+        materialised set when the set holds it (``load_materialised``), and
+        computed otherwise.
+        """
+        self.streams(index)  # refuses an index outside the epoch
+        self._check_keras_order(index)
+        if self._materialised is not None and self._materialised.serves(self._batch_epoch, index):
+            return self._read_materialised(index)
+        return self._compute_batch(index)
+
+    def _compute_batch(self, index: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        raise NotImplementedError
+
+    # ---- identity and materialised sets
+
+    def fingerprint_record(self) -> dict:
+        """
+        Everything that decides this dataset's batches but their address (split,
+        effective epoch, k): its canonical specification, the seed tree's root
+        and scope, the split spec's fingerprint, the seed tree's and the data's
+        versions, and the versions of gravyflow, numpy, jax and scipy. What the
+        platform decides (``XLA_FLAGS``, the backend) is recorded beside it,
+        never in it (`platform.platform_record`).
+        """
+        import scipy
+
+        tree = self.tree.metadata()
+        return {
+            "specification": canonical(self.specification()),
+            "root": tree["root"],
+            "prefix": tree["prefix"],
+            "split_fingerprint": None if self.split_spec is None else self.split_spec.fingerprint(),
+            "tree_version": TREE_VERSION,
+            "data_versions": dict(DATA_VERSIONS),
+            "versions": {"gravyflow": gf.__version__, "numpy": np.__version__, "jax": jax.__version__,
+                         "scipy": scipy.__version__},
+        }
+
+    @property
+    def fingerprint(self) -> str:
+        """The sha256 of `fingerprint_record`: batch k of a split and epoch is a pure function of it."""
+        return sha256(json_bytes(self.fingerprint_record()))
+
+    def _set_identity(self) -> dict:
+        """The fields of a materialised set's manifest that a reader of this dataset must match."""
+        record = self.fingerprint_record()
+        return {"split": self.group, "fingerprint": {**record, "sha256": sha256(json_bytes(record))},
+                "contract": self.contract_record()}
+
+    def materialise(self, root, k_range=None, *, batches: Optional[int] = None,
+                    shard_size: int = DEFAULT_SHARD_SIZE) -> MaterialisedSet:
+        """
+        Write batches ``k_range`` (a range, or (start, stop)) or the first
+        ``batches`` of the current epoch, by default the whole epoch, as a
+        materialised set under the local directory ``root``, and return it
+        (`gravyflow.src.dataset.materialise`).
+
+        The set's directory is named by its manifest's sha256, which names the
+        dataset's fingerprint, the platform, the split, the effective epoch and
+        the range: a set already complete is returned as it is, and one an
+        interrupted run left incomplete is resumed, its committed shards kept.
+        Writers agree only on bit-reproducible kernels (`platform`); writers
+        that disagree are refused, never merged.
+
+        Raises:
+            IndexError: a batch outside the epoch.
+            MaterialiseConflict: a file of the set exists with other bytes.
+            gravyflow.src.validate.provenance.UnfingerprintableError: a part of
+                the spec that has no content to fingerprint.
+        """
+        if k_range is not None and batches is not None:
+            raise ValueError("Give materialise one of k_range or batches=N, not both.")
+        if batches is not None:
+            k_range = range(check_coordinate(batches, "batches"))
+        elif k_range is None:
+            k_range = range(len(self))
+        elif not isinstance(k_range, range):
+            k_range = range(*k_range)
+        if k_range.step != 1 or not 0 <= k_range.start < k_range.stop <= len(self):
+            raise IndexError(f"Batches {k_range} are outside the {len(self)} batches of an epoch.")
+        if check_coordinate(shard_size, "shard_size") < 1:
+            raise ValueError(f"shard_size must be at least 1, got {shard_size}.")
+        manifest = {
+            **self._set_identity(),
+            "format": FORMAT,
+            "stage": "batch",
+            "platform": platform.platform_record(),
+            "shard_size": shard_size,
+            "epoch": self._batch_epoch,
+            "k_range": [k_range.start, k_range.stop],
+        }
+        return write_set(root, manifest, self._compute_batch)
+
+    def load_materialised(self, source) -> MaterialisedSet:
+        """
+        Serve this dataset's batches from a complete materialised set (a
+        `MaterialisedSet` or its directory) wherever the set holds the address:
+        its epoch and k range; every other address is computed. Each read is
+        verified, and ``seed_metadata["materialised"]`` names the set. A set
+        written on another platform serves its own bytes.
+
+        Raises:
+            SplitMismatch, FingerprintMismatch, ContractMismatch: another split,
+                spec or contract.
+            MissingShard: an incomplete set (``materialise`` resumes it).
+            UnknownFormat, ForeignPlatform, IntegrityError: a set that is not
+                what its files say.
+        """
+        the_set = source if isinstance(source, MaterialisedSet) else MaterialisedSet(source)
+        the_set.check_reader(self._set_identity())
+        the_set.require_complete()
+        self._materialised = the_set
+        return the_set
+
+    def _read_materialised(self, index: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        inputs, outputs = self._materialised.read(index)
+        try:
+            self.batch_contract.check((self.input_variables, self.output_variables), inputs, outputs)
+        except BatchContractError as error:
+            raise ContractMismatch(f"Batch {index} of {self._materialised.path}: {error}") from None
+        return inputs, outputs
 
     def prepare(self, *, batches: Optional[int] = None, epochs: Optional[int] = None) -> int:
         """
@@ -833,13 +969,39 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
     def _obtainers(self) -> List:
         return [self.noise_obtainer]
 
-    def __getitem__(self, index) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    #: What the specification is made of (`specification`): every setting that decides the batches.
+    _SPECIFICATION = (
+        "name", "sample_rate_hertz", "onsource_duration_seconds", "offsource_duration_seconds",
+        "crop_duration_seconds", "num_examples_per_generation_batch", "num_examples_per_batch",
+        "noise_obtainer", "waveform_generators", "ifos", "sampling_mode", "input_variables",
+        "output_variables", "mask_history", "spectral_config", "pearson_max_lag_seconds", "steps_per_epoch",
+        "epoch_mode",
+    )
+
+    def specification(self) -> Dict[str, Any]:
         """
-        Batch ``index`` of the current epoch: a pure function of its address
-        when the noise is (see IndexedBatches).
+        Every setting that decides the dataset's batches, by name: its own
+        copies of what it was given, with the defaults filled in. Not the seed,
+        split or epoch, which address batches (`fingerprint_record`).
         """
+        return {name: getattr(self, name) for name in self._SPECIFICATION}
+
+    def contract_record(self) -> Dict[str, List]:
+        """
+        The batch contract (`BatchContract`) as data: [name, shape, dtype] of
+        each input and output, in order. A size the settings do not fix keeps
+        its symbol (the offsource length, "T_off"; trailing axes, "...").
+        """
+        def entry(key):
+            shape = self.batch_contract.shape(key, OFFSOURCE_SAMPLES)
+            return [key.name, ["..." if axis is ANY else axis for axis in shape], self.batch_contract.dtype(key)]
+
+        return {"inputs": [entry(key) for key in self.input_variables],
+                "outputs": [entry(key) for key in self.output_variables]}
+
+    def _compute_batch(self, index: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Batch ``index`` of the current epoch, computed from its streams."""
         streams = self.streams(index)
-        self._check_keras_order(index)
         # Errors pass through as they were raised: a refusal keeps its type and what it
         # names (a TimelineContradiction its exclusion).
         batch_data = self.noise(streams)
@@ -1341,6 +1503,12 @@ class ComposedDataset(GravyflowDataset):
         self._validate_settings()
         self.batch_contract = self._batch_contract()
         self._create_generators()
+
+    _SPECIFICATION = (
+        "pools", "sample_rate_hertz", "onsource_duration_seconds", "offsource_duration_seconds",
+        "crop_duration_seconds", "num_examples_per_generation_batch", "num_examples_per_batch", "ifos",
+        "input_variables", "output_variables", "spectral_config", "steps_per_epoch", "epoch_mode",
+    )
 
     def _obtainers(self) -> List:
         return [
