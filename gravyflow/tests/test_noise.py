@@ -942,6 +942,57 @@ class TestPseudoRealByIndex:
         assert len(served) == 3
         assert all(np.all(np.isfinite(np.asarray(b[RV.ONSOURCE]))) for b in served)
 
+    def test_a_row_shorter_than_a_psd_segment_is_left_out(self):
+        # A window so short that 3 s pieces (768 samples) are long enough for it, but not for one PSD segment.
+        window = dict(sample_rate_hertz=OFFLINE_RATE, onsource_duration_seconds=0.25, crop_duration_seconds=0.0,
+                      offsource_duration_seconds=0.25)
+        layout = science_layout([3.0], [QUIET], blocks=24, offset=150.0) + science_layout([LONG], [QUIET], blocks=24)
+        with gwosc_serving(HashedFetch(layout)):
+            served = list(islice(pseudo_real(layout, segment_order=gf.SegmentOrder.SHORTEST_FIRST)(
+                **window, num_examples_per_batch=self.BATCH, group="train", seed=5), 3))
+        assert len(served) == 3
+
+    def test_the_spectra_kept_are_bounded_by_the_rows_not_the_windows(self):
+        tree = gf.SeedTree(5)
+        with gwosc_serving(HashedFetch(PSEUDO_LAYOUT)):
+            noise = pseudo_real(PSEUDO_LAYOUT, saturation=0.25)
+            reader = noise._reader([gf.IFO.L1], tree, "train", OFFLINE_RATE)
+            batch = gf_noise.pseudo_real_batcher(reader, tree, gf.WindowSpec.from_params(**OFFLINE_WINDOW), 16,
+                                                 [gf.IFO.L1])
+            for k in range(60):
+                batch(tree.batch("train", 0, k))
+        bins = gf_noise.PSEUDO_REAL_NPERSEG // 2 + 1
+        assert 0 < len(batch.spectra) <= len(batch.plan.rows)
+        for normalised, scales in batch.spectra.values():
+            assert isinstance(normalised, np.ndarray) and normalised.shape == (1, bins) and scales.shape == (1,)
+        assert sum(n.nbytes + s.nbytes for n, s in batch.spectra.values()) <= len(batch.plan.rows) * (bins + 1) * 4
+
+    def test_each_split_is_coloured_by_its_own_rows_only(self):
+        # Each block's segment has its own amplitude, so an example's level names its block, and so its split.
+        amplitudes = [1.5 ** i for i in range(24)]
+        layout = science_layout([LONG], amplitudes, blocks=24)
+        noise = gf.NoiseObtainer(noise_type=gf.NoiseType.PSEUDO_REAL, ifos=[gf.IFO.L1],
+                                 ifo_data_obtainer=offline_noise(layout, split_spec=THIRDS, saturation=0.25))
+        tree = gf.SeedTree(5)
+        with gwosc_serving(HashedFetch(layout)):
+            batchers = {split: noise.batcher(tree, split, **OFFLINE_WINDOW, num_examples_per_batch=32)
+                        for split in ("train", "validate", "test")}
+            levels = {split: [] for split in batchers}
+            for k in range(6):
+                for split, batch in batchers.items():
+                    levels[split].append(np.std(np.asarray(batch(tree.batch(split, 0, k))[RV.ONSOURCE]), axis=-1))
+        first_block = int(FIRST_BLOCK // BLOCK_SECONDS)
+        for split, drawn in levels.items():
+            blocks = np.argmin(np.abs(np.log(np.concatenate(drawn).ravel()[:, None] * np.sqrt(12.0)
+                                             / np.asarray(amplitudes)[None, :])), axis=1)
+            splits = {THIRDS.block_split(first_block + int(b)) for b in blocks}
+            assert splits == {split}, f"the {split} batches were coloured by rows of {splits}"
+
+    def test_grid_is_refused(self):
+        with pytest.raises(ValueError, match="no GRID mode"):
+            pseudo_real(PSEUDO_LAYOUT).batcher(gf.SeedTree(5), "train", **OFFLINE_WINDOW,
+                                               sampling_mode=gf.SamplingMode.GRID)
+
     def test_a_row_without_power_is_refused(self):
         layout = science_layout([LONG], [0.0, QUIET, QUIET], blocks=24)
         with gwosc_serving(HashedFetch(layout)):

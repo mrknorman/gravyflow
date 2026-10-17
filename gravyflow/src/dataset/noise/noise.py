@@ -415,6 +415,9 @@ class NoiseObtainer(Obtainer):
                 )
 
             case NoiseType.PSEUDO_REAL:
+                if sampling_mode == gf.SamplingMode.GRID:
+                    raise ValueError("PSEUDO_REAL noise is drawn over its rows at random; "
+                                     "it has no GRID mode (SamplingMode.GRID is for REAL noise).")
                 reader = self._reader(ifos, tree, group, sample_rate_hertz)
                 if not isinstance(reader, gf.NoiseDataObtainer):
                     raise ValueError(
@@ -573,27 +576,27 @@ def pseudo_real_batcher(
     share of examples, in proportion to its start-seconds. The white noise is
     ``noise/{IFO}/{on,off}`` at (epoch, k). A row's PSD is estimated once, the first
     time an example draws it, from the whole row read through the store
-    (``read_windows``), and kept by the batcher.
+    (``read_windows``), and kept by the batcher (``batch.spectra``) as its normalised
+    Welch PSD and scale per detector, a few kB a row; each batch interpolates the
+    ASDs of its own rows. Rows shorter than one PSD segment never enter the plan.
 
     A batch raises ValueError naming a row whose strain on some detector has no power
     (a constant, such as zeros): it has no spectrum to colour noise by.
     """
-    plan = reader.random_plan(tree, window_spec, num_examples_per_batch)
+    plan = reader.random_plan(tree, window_spec, num_examples_per_batch, minimum_samples=PSEUDO_REAL_NPERSEG)
     rate = window_spec.sample_rate_hertz
     lengths = [window_spec.num_onsource_samples, window_spec.num_offsource_samples]
+    frequencies = np.fft.rfftfreq(PSEUDO_REAL_NPERSEG, 1.0 / rate)
+    # Each drawn row's Welch PSD, in host memory: (I, nperseg / 2 + 1) normalised, and its
+    # (I,) scales. The window-length ASDs are interpolated from them batch by batch.
     spectra = {}
 
-    def row_asds(j: int):
-        """Row ``j``'s onsource and offsource ASDs, each (I, F): its PSD, interpolated to each window."""
+    def row_spectrum(j: int):
+        """Row ``j``'s normalised PSD per detector and its scales, estimated once."""
         if j not in spectra:
-            on, off = [], []
+            normalised, scales = [], []
             for i, ifo in enumerate(ifos):
                 count = int(plan.counts[j, i])
-                if count < PSEUDO_REAL_NPERSEG:
-                    raise ValueError(
-                        f"Row {j} of the {plan.split!r} split ({ifo.name} piece {plan.rows[j, i].tolist()}) "
-                        f"holds {count} samples, fewer than one PSD segment of {PSEUDO_REAL_NPERSEG}."
-                    )
                 piece = reader.read_windows([ifo], rate, np.array([[plan.firsts[j, i]]]), count, 0)[0][0, 0]
                 spectrum = gf.psd(piece, nperseg=PSEUDO_REAL_NPERSEG, sample_rate_hertz=rate)
                 power = spectrum.value()
@@ -602,15 +605,23 @@ def pseudo_real_batcher(
                         f"Row {j} of the {plan.split!r} split ({ifo.name} piece {plan.rows[j, i].tolist()}) "
                         "has no power: its strain is constant, so it has no spectrum to colour noise by."
                     )
-                # The PSD of strain (~1e-46) underflows float32: the spectrum is interpolated
-                # in its normalised units (the PSD over its scale), and the scale returns on the ASD.
-                onsource_psd, offsource_psd = interpolate_onsource_offsource_psd(
-                    lengths, rate, spectrum.frequencies, ops.reshape(spectrum.normalised, (-1,)) / rate)
-                scale = ops.cast(ops.reshape(spectrum.scale, ()), "complex64")
-                on.append(ops.sqrt(onsource_psd) * scale)
-                off.append(ops.sqrt(offsource_psd) * scale)
-            spectra[j] = (ops.stack(on, axis=0), ops.stack(off, axis=0))
+                normalised.append(np.asarray(spectrum.normalised, np.float32).reshape(-1))
+                scales.append(np.float32(np.asarray(spectrum.scale).reshape(())))
+            spectra[j] = (np.stack(normalised), np.array(scales, np.float32))
         return spectra[j]
+
+    def row_asds(j: int):
+        """Row ``j``'s onsource and offsource ASDs, each (I, F), interpolated from its PSD."""
+        normalised, scales = row_spectrum(j)
+        on, off = [], []
+        for psd, scale in zip(normalised, scales):
+            # The PSD of strain (~1e-46) underflows float32: the spectrum is interpolated
+            # in its normalised units (the PSD over its scale), and the scale returns on the ASD.
+            onsource_psd, offsource_psd = interpolate_onsource_offsource_psd(lengths, rate, frequencies, psd / rate)
+            scale = ops.cast(scale, "complex64")
+            on.append(ops.sqrt(onsource_psd) * scale)
+            off.append(ops.sqrt(offsource_psd) * scale)
+        return ops.stack(on, axis=0), ops.stack(off, axis=0)
 
     def batch(streams: BatchStreams) -> Dict:
         epoch = streams.epoch or 0
@@ -618,7 +629,9 @@ def pseudo_real_batcher(
             raise ValueError("Batches of epochs after the first need the epoch's steps (steps_per_epoch).")
         mixed = plan.mixed(epoch * (steps_per_epoch or 0) + streams.k)
         rows = mixed[streams.stream("noise/row").integers(len(mixed), size=num_examples_per_batch)]
-        onsource_asds, offsource_asds = (ops.stack(asds, axis=0) for asds in zip(*map(row_asds, rows.tolist())))
+        distinct, example_row = np.unique(rows, return_inverse=True)
+        onsource_asds, offsource_asds = (ops.take(ops.stack(asds, axis=0), example_row.reshape(-1), axis=0)
+                                         for asds in zip(*map(row_asds, distinct.tolist())))
         return {
             RV.ONSOURCE: color_noise(
                 unit_normal_noise(streams, ifos, "on", num_examples_per_batch, lengths[0]),
@@ -628,6 +641,7 @@ def pseudo_real_batcher(
                 offsource_asds, sample_rate_hertz=rate),
         }
 
+    batch.spectra = spectra
     batch.plan = plan
     return batch
 

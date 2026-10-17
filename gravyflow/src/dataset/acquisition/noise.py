@@ -758,14 +758,18 @@ class NoiseDataObtainer(BaseDataObtainer):
         return 2.0 * (window_spec.num_onsource_samples + window_spec.num_offsource_samples) \
             / window_spec.sample_rate_hertz
 
-    def build_sampling_plan(self, window_spec: WindowSpec) -> SamplingPlan:
-        """The sampling plan of the served segments for windows of ``window_spec`` (``plan_sampling``)."""
+    def build_sampling_plan(self, window_spec: WindowSpec, minimum_samples: int = 0) -> SamplingPlan:
+        """
+        The sampling plan of the served segments for windows of ``window_spec``
+        (``plan_sampling``): pieces of at least twice the window, and at least
+        ``minimum_samples`` as read.
+        """
         window_seconds = window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds
         footprint_seconds = (window_spec.num_onsource_samples + window_spec.num_offsource_samples) \
             / window_spec.sample_rate_hertz
         self.sampling_plan = self.plan_sampling(
             self.valid_segments,
-            minimum_duration_seconds=2.0 * window_seconds,
+            minimum_duration_seconds=max(2.0 * window_seconds, minimum_samples / window_spec.sample_rate_hertz),
             footprint_seconds=footprint_seconds + WINDOW_EDGE_BUFFER_SAMPLES / window_spec.sample_rate_hertz,
             separation_seconds=self._separation_seconds(window_spec),
             sample_rate_hertz=window_spec.sample_rate_hertz,
@@ -775,7 +779,8 @@ class NoiseDataObtainer(BaseDataObtainer):
                          "windows cannot start two footprints apart.")
         return self.sampling_plan
 
-    def random_plan(self, tree: SeedTree, window_spec: WindowSpec, num_examples_per_batch: int) -> RandomPlan:
+    def random_plan(self, tree: SeedTree, window_spec: WindowSpec, num_examples_per_batch: int,
+                    minimum_samples: int = 0) -> RandomPlan:
         """
         The served split's RANDOM plan (``RandomPlan``) for windows of ``window_spec``
         and batches of ``num_examples_per_batch``: its rows in time order, each piece
@@ -783,12 +788,13 @@ class NoiseDataObtainer(BaseDataObtainer):
         of ``saturation`` examples per onsource duration of window starts, visited in
         a new order every pass (``SegmentOrder.RANDOM``), or in time order
         (``CHRONOLOGICAL``) or shortest first (``SHORTEST_FIRST``, by the first
-        detector's piece) every pass.
+        detector's piece) every pass. Pieces shorter than ``minimum_samples`` as read
+        are left out (``build_sampling_plan``).
         """
         split = self._served_group or DIRECT_SPLIT
-        key = (tree, split, window_spec, num_examples_per_batch)
+        key = (tree, split, window_spec, num_examples_per_batch, minimum_samples)
         if key not in self._random_plans:
-            sampling = self.build_sampling_plan(window_spec)
+            sampling = self.build_sampling_plan(window_spec, minimum_samples)
             if len(sampling.rows) == 0:
                 raise ValueError(f"The {split!r} split has no row long enough for a window "
                                  f"of {window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds} s.")

@@ -516,8 +516,10 @@ class IndexedBatches:
         prepare = getattr(self.noise, "prepare", None)
         if prepare is None:
             raise ValueError(
-                f"Only real noise (RANDOM or GRID) and transients are prepared by address; this dataset's noise "
-                f"({[type(o).__name__ for o in self._obtainers()]}, {self.sampling_mode.name}) is not."
+                f"Only REAL noise (RANDOM or GRID) and transients are prepared by address, not PSEUDO_REAL "
+                f"noise (each row's spectrum is read when an example first draws it) or a reader of the "
+                f"caller's own; this dataset's noise ({[type(o).__name__ for o in self._obtainers()]}, "
+                f"{self.sampling_mode.name}) is not."
             )
         contradictions = prepare([self.tree.batch(self.group, e, k) for e, k in addresses])
         if contradictions:
