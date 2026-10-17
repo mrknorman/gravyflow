@@ -19,7 +19,6 @@ import gravyflow as gf
 from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.features.glitch import GlitchType
 from gravyflow.src.dataset.features.transient_index import TransientIndex
-from gravyflow.src.dataset.noise.noise import sequential_seed
 from gravyflow.src.dataset.splits import EXCLUDED
 from gravyflow.src.utils.gps import gps_to_key
 from gravyflow.tests.conftest import catalogued_events, no_glitch_vetoes, usable_over_its_runs
@@ -102,18 +101,11 @@ class TestTransientMembership:
 
     def test_one_root_gives_disjoint_complete_splits(self, catalogue):
         """
-        Each split of one root reads its own copy of the obtainer, seeded from
-        its own stream, as a dataset does: the memberships must still be a
-        partition of the catalogue.
+        Each split reads its own copy of the obtainer, as a dataset does: the
+        memberships must be a partition of the catalogue.
         """
-        tree = gf.SeedTree(gf.Defaults.seed)
         obtainer = glitch_obtainer()
-        split_members = {
-            split: members(
-                copy.deepcopy(obtainer), split, sequential_seed(tree, split, "transient/reader")
-            )
-            for split in SPLITS
-        }
+        split_members = {split: members(copy.deepcopy(obtainer), split, gf.Defaults.seed) for split in SPLITS}
         for i, a in enumerate(SPLITS):
             for b in SPLITS[i + 1:]:
                 assert not split_members[a] & split_members[b], f"{a} and {b} share records"
