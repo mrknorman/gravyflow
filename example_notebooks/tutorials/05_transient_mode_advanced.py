@@ -5,14 +5,14 @@ TUTORIAL 05: TRANSIENT Mode - Advanced Features
 =============================================================================
 
 This tutorial covers advanced TRANSIENT mode features including GW events,
-class balancing, specific event names, and the TransientCache system.
+class balancing, specific event names, and the strain store transients read from.
 
 LEARNING OBJECTIVES:
 1. Use DataLabel.EVENTS for gravitational wave events
 2. Fetch specific events by name
 3. Enable class balancing for glitch types
 4. Understand ReturnVariables for metadata access
-5. Learn about the TransientCache system
+5. Learn how transient strain is read and kept
 
 RUNTIME: ~3-4 minutes
 """
@@ -172,46 +172,40 @@ for rv in sorted(gf.ReturnVariables, key=lambda x: x.value.index):
     print(f"  {rv.name}: index={rv.value.index}")
 
 # =============================================================================
-# SECTION 5: TRANSIENT CACHE SYSTEM
+# SECTION 5: THE STRAIN STORE
 # =============================================================================
 
 print("\n" + "=" * 70)
-print("SECTION 5: TransientCache System")
+print("SECTION 5: The strain store")
 print("=" * 70)
 
 print("""
-TRANSIENT mode uses a caching system to avoid re-downloading data:
+TRANSIENT mode reads strain as noise does, through the strain store:
 
-┌─────────────────────────────────────────────────────────────────────┐
-│                      TransientCache Flow                            │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│   Request GPS time → Check memory cache → Check disk cache → GWOSC │
-│                            ↓                     ↓           ↓     │
-│                          HIT?                  HIT?      Download   │
-│                            ↓                     ↓           ↓     │
-│                         Return              Load → Return → Cache   │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+  Request a window → the tiles it needs (the source's own files)
+                       ↓ absent?
+                     fetch each whole, once, and keep it
+                       ↓
+                     view the window, resample it to the request's rate
 
-Cache benefits:
-  1. MEMORY CACHE: Fastest, holds recently accessed segments
-  2. DISK CACHE: HDF5 files with pre-extracted windows
-  3. Persistence: Cached data survives restarts
+Store benefits:
+  1. A file is fetched once and shared by every rate, split and configuration
+  2. Every sample is exact: one resampler, its margin read past each end
+  3. Nothing goes stale: the store keeps raw files, no rows or index
 
-Cache files are stored in:
-  ~/.gravyflow/cache/transient/
+The store lives in:
+  ~/.gravyflow/cache/store/   (or $GRAVYFLOW_CACHE_DIR/store/)
 
-To pre-populate the cache (for large training runs), draw the dataset
-you will train on; the cache keeps every window it draws:
+A transient whose strain the source cannot deliver is refused by name
+(TransientUnavailable, a gf.StrainUnavailable), naming the exclusions
+entry that plans around it: pass it to the obtainer's exclusions=.
+
+To fetch ahead (for large training runs), draw the dataset you will
+train on once; every tile it reads is kept:
 
     # train_data: the gf.Dataset you will train on
     for k in range(len(train_data)):
         train_data[k]
-
-One pass draws len(train_data) = steps_per_epoch batches of
-num_examples_per_batch windows (32,000 at the defaults) and caches
-those, not every glitch of the split. Tutorial 07 shows a full example.
 """)
 
 # =============================================================================
@@ -307,10 +301,10 @@ print("""
    - START_GPS_TIME, TRANSIENT_GPS_TIME: Timing
    - GLITCH_TYPE, DATA_LABEL: Labels
 
-5. CACHING:
-   - Memory + disk caching
-   - ~/.gravyflow/cache/transient/
-   - Draw the training dataset to pre-cache the windows it draws
+5. THE STRAIN STORE:
+   - The source's files, fetched once, kept raw
+   - ~/.gravyflow/cache/store/
+   - Draw the training dataset once to fetch the tiles it reads
 """)
 
 print("\n✓ Tutorial 05 complete!")

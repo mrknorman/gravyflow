@@ -8,8 +8,8 @@ This tutorial covers caching mechanisms and performance optimization
 strategies for the gravyflow acquisition pipeline.
 
 LEARNING OBJECTIVES:
-1. Understand the strain store, where real noise is kept
-2. Learn about TransientCache for glitches/events
+1. Understand the strain store, where all real strain is kept
+2. See how glitches and events read the same store
 3. Bound memory with the store's cap
 4. Best practices for large-scale training
 
@@ -41,15 +41,11 @@ GravyFlow keeps what it downloads, so each piece of strain is fetched once:
 │                          WHAT IS KEPT, AND WHERE                        │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│   THE STRAIN STORE (real noise)                                         │
+│   THE STRAIN STORE (real noise, glitches, events and partners)          │
 │   ├── The source's own files (GWOSC: 4096 s each), raw, at the rate     │
 │   │   the source publishes, each written once and never changed         │
 │   ├── Read as memory-mapped views: no process holds a whole file        │
 │   └── Shared by every rate, split and configuration of one source       │
-│                                                                         │
-│   TRANSIENT CACHE (glitches and events)                                 │
-│   ├── TransientCache HDF5 files                                         │
-│   └── Survives restarts                                                 │
 │                                                                         │
 │   THE SOURCE (network, slowest)                                         │
 │   └── GWOSC by default; fetched only what is not yet kept               │
@@ -99,40 +95,33 @@ Pass that entry as the obtainer's exclusions= to plan around the time:
 Exclusions are part of the obtainer's fingerprint, so a run made with them is
 told apart from one made without.
 
-Segment caches of earlier gravyflow versions (~/.gravyflow/cache/segments/)
-are never read; gravyflow names them once, with their sizes. Delete them to
-reclaim the space.
+Strain caches of earlier gravyflow versions (segments/, the glitch, event and
+partner caches *_cache_v*.h5, and the download cache astropy/) are never read;
+gravyflow names them once, with their sizes. Delete them to reclaim the space.
 """)
 
 # =============================================================================
-# SECTION 3: TRANSIENT CACHE
+# SECTION 3: TRANSIENTS READ THE STORE
 # =============================================================================
 
 print("\n" + "=" * 70)
-print("SECTION 3: TransientCache (TRANSIENT mode only)")
+print("SECTION 3: Transients Read the Store (TRANSIENT mode)")
 print("=" * 70)
 
 print("""
-TransientCache stores pre-extracted glitch/event windows to avoid
-re-downloading the same events repeatedly.
+Glitches, events and their partners are read exactly as real noise is:
+each detector's offsource and padded onsource are one view of the stored
+files around the transient, resampled to the request's rate.
 
-Cache structure:
-    ~/.gravyflow/cache/transient/
-    ├── L1_2048Hz_1.0s_16.0s_O3.h5
-    ├── H1_2048Hz_1.0s_16.0s_O3.h5
-    └── ...
+    ~/.gravyflow/cache/store/v<format>/<source>/<detector>/<rate>/<seconds>/
+    ├── <k>.<sha256>.npy    the source's k-th file, raw
+    └── <k>.json            its record: what it holds, and what it does not
 
-File naming: {IFO}_{sample_rate}Hz_{onsource}s_{offsource}s_{runs}.h5
-
-Each HDF5 file contains:
-  - Onsource windows indexed by GPS time
-  - Offsource windows
-  - Metadata (glitch type, event name, etc.)
-
-Cache benefits:
-  ✓ 10-100x faster than re-downloading
-  ✓ Consistent data across runs
-  ✓ Enables offline training
+Store benefits for transients:
+  ✓ A file is fetched once, whatever rate or window asks for it
+  ✓ Every rate and configuration reads the same bytes: warm equals cold
+  ✓ A transient the source cannot deliver is refused by name, never
+    skipped or zero-filled, and nothing is stored for it
 """)
 
 # =============================================================================
@@ -156,21 +145,21 @@ own, so N workers use up to N times it.
 """)
 
 # =============================================================================
-# SECTION 5: PRE-CACHING FOR LARGE RUNS
+# SECTION 5: FETCHING AHEAD FOR LARGE RUNS
 # =============================================================================
 
 print("\n" + "=" * 70)
-print("SECTION 5: Pre-Caching for Large Training Runs")
+print("SECTION 5: Fetching Ahead for Large Training Runs")
 print("=" * 70)
 
 print("""
-For large training runs, pre-populate the cache before training. The
-cache keeps every window a dataset draws, so draw the dataset you will
-train on, with the same settings:
+For large training runs, fetch the files a dataset reads before training:
+draw the dataset you will train on once, with the same settings. Every
+file it reads is kept, and any later rate or window reads it again:
 
 Example script:
 
-    # Pre-cache the glitch windows of one pass over the training data
+    # Fetch the files one pass over the training glitches reads
     train_data = gf.Dataset(
         noise_obtainer=gf.NoiseObtainer(
             ifo_data_obtainer=gf.IFODataObtainer(
@@ -192,18 +181,13 @@ Example script:
         train_data[k]
 
 One pass draws len(train_data) = steps_per_epoch batches of
-num_examples_per_batch windows, 32,000 here (the defaults), and caches
-those: a split with more glitches than one pass draws is cached only in
-part. A larger steps_per_epoch draws, and caches, more of them.
-
-Run this ONCE before training:
-  1. Downloads the windows it draws
-  2. Stores them in TransientCache
-  3. Training reads those windows from the cache (fast!)
+num_examples_per_batch examples, 32,000 here, and fetches the files
+they read: each a whole source file (4096 s from GWOSC), so glitches
+close in time share one.
 
 Recommended workflow:
   ┌───────────────┐    ┌──────────────┐    ┌────────────────┐
-  │  Pre-cache    │ →  │   Train      │ →  │   Evaluate     │
+  │  Fetch ahead  │ →  │   Train      │ →  │   Evaluate     │
   │  (1-2 hours)  │    │   (hours)    │    │                │
   └───────────────┘    └──────────────┘    └────────────────┘
 """)
@@ -243,11 +227,8 @@ Clearing cache:
   # Clear all cache (careful!), when no gravyflow process is running
   rm -rf ~/.gravyflow/cache/
 
-  # Clear only transient cache
-  rm -rf ~/.gravyflow/cache/transient/
-
-  # Old segment caches, which this gravyflow never reads
-  rm -rf ~/.gravyflow/cache/segments/
+  # Old segment, transient and download caches, which this gravyflow never reads
+  rm -rf ~/.gravyflow/cache/segments/ ~/.gravyflow/cache/*_cache_v*.h5 ~/.gravyflow/cache/astropy/
 
   # Stored strain: forget the files of one source, detector and interval
   # (gf.src.dataset.store.Store.forget), or delete store/ when nothing reads it
@@ -265,20 +246,20 @@ print("""
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║  TIP                           │  DESCRIPTION                         ║
 ╠═══════════════════════════════════════════════════════════════════════╣
-║  1. Pre-cache before training  │  Avoid network during training       ║
+║  1. Fetch ahead of training    │  Avoid network during training       ║
 ╠═══════════════════════════════════════════════════════════════════════╣
 ║  2. Size the memory cap        │  gf.Defaults.memory_bytes (2 GiB)   ║
 ╠═══════════════════════════════════════════════════════════════════════╣
-║  3. Match cache parameters     │  Same sample_rate, durations         ║
+║  3. Any rate reads the store   │  No refetch for a new sample_rate    ║
 ╠═══════════════════════════════════════════════════════════════════════╣
-║  4. Use SSD for cache          │  HDF5 reads benefit from fast I/O   ║
+║  4. Use SSD for the store      │  Memory-mapped reads need fast I/O  ║
 ╠═══════════════════════════════════════════════════════════════════════╣
 ║  5. Multi-IFO single request   │  Download all IFOs together         ║
 ╠═══════════════════════════════════════════════════════════════════════╣
 ║  6. Batch size ≥ 16            │  Better GPU utilization              ║
 ╠═══════════════════════════════════════════════════════════════════════╣
-║  7. Use group= for splits      │  Deterministic train/val without    ║
-║                                │  separate cache files                ║
+║  7. Use group= for splits      │  Deterministic train/val from one   ║
+║                                │  store                               ║
 ╚═══════════════════════════════════════════════════════════════════════╝
 """)
 
@@ -338,22 +319,21 @@ print("=" * 70)
 
 print("""
 1. WHAT IS KEPT:
-   The strain store (real noise), the transient cache, then the source
+   The strain store (all real strain), then the source
 
 2. THE STRAIN STORE:
    - The source's own files, raw, fetched once, read as views
    - Refusals name the exclusions entry that plans around them
 
-3. TRANSIENT CACHE:
-   - Stores pre-extracted windows
-   - HDF5 files in ~/.gravyflow/cache/transient/
+3. TRANSIENTS:
+   - Read from the store as noise is; refused by name when not delivered
 
 4. MEMORY:
    - gf.Defaults.memory_bytes: 2 GiB per process by default
 
-5. PRE-CACHING:
-   - Draw the training dataset before large runs: each pass caches
-     the steps_per_epoch x num_examples_per_batch windows it draws
+5. FETCHING AHEAD:
+   - Draw the training dataset once before large runs: it fetches
+     every file its steps_per_epoch x num_examples_per_batch examples read
    - One-time cost, major training speedup
 
 6. CACHE MANAGEMENT:

@@ -5,17 +5,15 @@ The `TransientObtainer` is a specialized data acquisition class designed to fetc
 *   **Gravitational Wave Events**: Known mergers (e.g., GW150914).
 *   **Glitches**: Short-duration noise artifacts identified by GravitySpy (e.g., "Blip", "Scattered_Light").
 
-It acts as a high-level wrapper around `IFODataObtainer`, managing the logic of identifying these times, splitting them and planning each detector's read, caching the data locally, and serving it in batches.
+It acts as a high-level wrapper around `IFODataObtainer`, managing the logic of identifying these times, splitting them and planning each detector's read, reading the strain through the store, and serving it in batches.
 
 ## Key Concepts
 
-### 1. Identify -> Split and plan -> Cache
+### 1. Identify -> Split and plan -> Read
 When initialized, the `TransientObtainer` performs three main steps:
 1.  **Identify**: It queries a metadata source (GWOSC event catalogues for events, the public Gravity Spy release for glitches) to find a list of GPS times and labels.
 2.  **Split and plan**: Each record takes its footprint's split (`acquisition.md`, section 2). Each requested detector is planned one read: the transient's own detectors at its time, every other detector at a partner time of its own, in a block of the record's split (a glitch's own; an event's nearest in its run), never at the transient's time (`acquisition.md`, Transient detectors and partners). A record with no partner time is not served, and is counted under `"no partner"`.
-3.  **Cache**: 
-    *   **Full Precache**: If `precache_cap` is set (default behavior), it downloads *all* identified segments immediately and stores them in the transient caches (`glitch_cache_v4_<source>.h5` or `event_cache_v4_<source>.h5`, and partners' reads in `partner_cache_v4_<source>.h5`, in the user cache: `$GRAVYFLOW_CACHE_DIR`, else `~/.gravyflow/cache`).
-    *   **Lazy Loading**: If `precache_cap=0`, it skips the immediate download. Segments are fetched on-the-fly during generation.
+3.  **Read**: Each example reads each detector through the strain store, as noise does: the source's own files (tiles), fetched whole the first time a read needs them and kept under the user cache (`$GRAVYFLOW_CACHE_DIR`, else `~/.gravyflow/cache`), then viewed and resampled to the request's rate. A tile is fetched once and shared by every rate, split and configuration. A planned transient whose strain the source does not deliver is refused by name (`TransientUnavailable`, naming the `exclusions` entry that plans around it); nothing is skipped or zero-filled.
 
 ### 2. Balancing (`balanced_glitch_types`)
 For validation and training, it is often critical to have a balanced dataset.
@@ -79,22 +77,9 @@ transient_obt = gf.TransientObtainer(
 
 ## Advanced Usage
 
-### Lazy Loading vs. Precaching
+### Reading strain
 
-Downloading the entire O3 glitch catalog (~250k events) can take hours and consume significant disk space.
-
-*   **Production Training**: Use the default (Full Precache). This ensures input/output is fast during training because all data is strictly local.
-*   **Quick Tests / Debugging**: Use `precache_cap=0` (Lazy Loading).
-
-```python
-# Force lazy loading by passing precache_cap=0 to the generator call
-generator = transient_obt(
-    precache_cap=0, 
-    ...
-)
-```
-
-*Note: In some wrapper scripts (like `small_glitch.py`), you may need to subclass `TransientObtainer` to force this behavior if the standard interface doesn't expose it explicitly.*
+Nothing is downloaded ahead: a batch's reads fetch the tiles they need, together, and later reads of the same time, at any rate, read the stored tiles. Downloading the tiles of the whole O3 glitch catalogue (~250k records) takes hours and much disk space, so a quick test should serve a few named events or a small split.
 
 ### Handling Glitch Labels
 

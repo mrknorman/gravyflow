@@ -147,7 +147,7 @@ Real noise and glitches use public data only by default; no credentials are need
 - Segments and observing-run bounds come from the GWOSC timeline and run API (https://gwosc.org). The default selection is `DATA` with the `BURST_CAT1` and `BURST_CAT2` vetoes applied, without CBC, burst, stochastic or detchar hardware injections (continuous-wave injections, which run throughout, are kept). Real noise also excludes every GW event GWOSC publishes (its whole signal in band; see `docs/acquisition.md`) and every Gravity Spy glitch (its whole extent).
 - Glitches come from the Gravity Spy machine-learning classifications: Glanzer et al. 2023, *Class. Quantum Grav.* 40 065004, released on Zenodo (doi:10.5281/zenodo.5649212, v1.0.0, CC-BY-4.0). Please cite both if you use them. Each file is downloaded on first use and cached in `~/.gravyflow/cache` (override with `GRAVYFLOW_CACHE_DIR`).
 
-Every cache gravyflow keeps lives under that one root, `GRAVYFLOW_CACHE_DIR` if it is set, else `~/.gravyflow/cache`: GWOSC timelines and events, Gravity Spy files, the glitch, event and partner caches (`glitch_cache_v4_<source>.h5`, `event_cache_v4_<source>.h5`, `partner_cache_v4_<source>.h5`, `<source>` the data source's fingerprint, so two sources never share a file), the strain store (`store/`), which keeps the source's own files of real noise, raw, each fetched once, and the GWOSC strain downloads (`astropy/`). Real-noise segment caches of earlier versions (`segments/`, `./generator_data`, or beside the package) are never read; gravyflow names each once, with its size, and never moves or deletes them. Glitch and event caches of an earlier format (`glitch_cache.h5`, `event_cache.h5`) are never read, nor deleted.
+Every cache gravyflow keeps lives under that one root, `GRAVYFLOW_CACHE_DIR` if it is set, else `~/.gravyflow/cache`: GWOSC timelines and events, Gravity Spy files, and the strain store (`store/`), which keeps the source's own files of real strain, raw, each fetched once, named by the source they come from so two sources never share one. Noise, glitches, events and their partners are all read from it; nothing else keeps strain, and gwpy's download cache is off. Strain caches of earlier versions (real-noise segments in `segments/`, `./generator_data` or beside the package; glitch, event and partner caches, `*_cache_v*.h5`; GWOSC downloads in `astropy/`) are never read; gravyflow names each once, with its size, and never moves or deletes them.
 
 The data source changes these, with no transition period:
 
@@ -158,6 +158,14 @@ The data source changes these, with no transition period:
   and obtainers have no `frame_types` or `channels`: `gf.LocalFrames` names them, per GWOSC run.
 - The source is in every obtainer's fingerprint, so a checkpoint or validation written before is refused as stale,
   and caches written before (real-noise segments, and glitch, event and partner caches) are not read again.
+- Glitches, events and partners are read from the strain store, as noise is: whole source files, fetched once and
+  shared by every rate and configuration. The glitch, event and partner caches, `TransientCache`, the
+  `force_acquisition` argument and `scripts/check_glitch_cache.py` are gone. A transient whose strain the source
+  does not deliver is refused by name (`TransientUnavailable`, a `gf.StrainUnavailable`, naming the `exclusions`
+  entry that plans around it), never skipped and counted as `"no data"`. `START_GPS_TIME` of a transient window is
+  exact, its centre the sample nearest the transient on the absolute grid; a request may read up to 48.2 s each
+  side of a transient, the resampler's margin counted. A saved `TransientIndex` keeps each record's SNR, peak
+  frequency, duration, confidence and event parameters; an index saved before is refused, to be built again.
 
 ## 7. Randomness: one seed tree
 
@@ -249,7 +257,7 @@ a `DeprecationWarning`. These changes have no such period:
 - A glitch's example reads each requested detector the glitch was not seen in at a partner time of its own, in the
   record's split and block, never at the glitch's time, and labels that detector noise (`docs/acquisition.md`,
   Transient detectors and partners); it read every detector over the glitch's window. A record with no partner time
-  is not served, and is counted under `"no partner"`. Partners have their own cache, `partner_cache_v4_<source>.h5`.
+  is not served, and is counted under `"no partner"`.
 - The model recipes take one root seed: `TrainingRun.train`'s `training_data` is called with the seed alone (it
   took the seed and the first epoch), and `split_seeds`, `TrainingRun.train_seed` and
   `GeorgeHuerta2017.dataset(first_epoch=)` / `dataset_regression(first_epoch=)` are gone; resume sets `ds.epoch`.
@@ -273,7 +281,7 @@ a `DeprecationWarning`. These changes have no such period:
 
 Every array gravyflow reads, returns or caches is physical strain: noise of every type but white (which has no
 detector, and unit variance), injections, `ONSOURCE`, `OFFSOURCE` and `INJECTIONS`, the HRSS and HPEAK targets and
-labels, and the transient caches. Whitened outputs and SNRs are dimensionless, as before. The square of strain
+labels, and the strain store. Whitened outputs and SNRs are dimensionless, as before. The square of strain
 (about 1e-42) is below float32's normal range, so each step that squares data (PSD estimation, whitening, the SNR,
 the matched filter, HRSS and HPEAK, the rolling Pearson correlation) divides by the data's peak first and restores
 it after; whitened data, correlations and SNRs are identical, to float32 rounding, at any input amplitude. A PSD
