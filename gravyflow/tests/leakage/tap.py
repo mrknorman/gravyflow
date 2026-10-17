@@ -45,6 +45,21 @@ class Tapped(NamedTuple):
     prepared: List[Batch]
 
 
+def _digest(batch: Batch) -> str:
+    return hashlib.sha256(b"".join(name.encode() + batch[name].tobytes() for name in sorted(batch))).hexdigest()
+
+
+def _require_same(first: Batch, again: Batch, group: str, address: Address) -> None:
+    """A batch served again at ``address`` is the bytes first served there."""
+    differ = sorted(name for name in first
+                    if first[name].shape != again[name].shape or first[name].tobytes() != again[name].tobytes())
+    if differ:
+        raise AssertionError(
+            f"The {group!r} dataset served other data at (epoch {address[0]}, batch {address[1]}) "
+            f"than it first served there, in {', '.join(differ)}."
+        )
+
+
 class DatasetTap:
     """
     Records the batches every `GravyflowDataset` built while it is installed
@@ -58,9 +73,11 @@ class DatasetTap:
 
     A batch served twice (Keras makes a pass before its first epoch) is
     recorded once. An index-addressed dataset's batch is its address, (epoch,
-    k): rebuilt, it draws the same values, though on CPU its projected strain
-    may differ in the last bits of float32, so it is recognised by address,
-    never by its bytes. Any other dataset's batch is recognised by its bytes.
+    k), and a batch served again at an address must be the bytes first served
+    there, or the tap fails the test: the session's kernels are bit-reproducible
+    (the root conftest.py), so any difference is the dataset serving other
+    data at one address, which Keras would train on unseen. Any other
+    dataset's batch is recognised by its bytes.
 
     ``serves`` logs every batch asked of any tapped dataset, repeats
     included, as (split, epoch, k), in the order asked; `take` leaves it.
@@ -78,7 +95,7 @@ class DatasetTap:
                 asked = list(output_variables or [])
                 super().__init__(output_variables=asked + [v for v in extra if v not in asked], **kwargs)
                 self._asked = {v.name for v in asked}
-                self._seen = set()
+                self._seen: Dict = {}
                 self._record = Tapped(self.group, [], [], [])
                 built.append(self._record)
 
@@ -88,12 +105,14 @@ class DatasetTap:
                 address = (streams.epoch, streams.k)
                 serves.append((self.group, *address))
                 served = {name: np.asarray(value) for name, value in {**y, **x}.items()}
-                key = address if self.index_addressed else hashlib.sha256(b"".join(
-                    name.encode() + served[name].tobytes() for name in sorted(served))).hexdigest()
+                digest = _digest(served)
+                key = address if self.index_addressed else digest
                 if key not in self._seen:
-                    self._seen.add(key)
+                    self._seen[key] = len(self._record.batches)
                     self._record.batches.append(served)
                     self._record.addresses.append(address if self.index_addressed else None)
+                else:
+                    _require_same(self._record.batches[self._seen[key]], served, self.group, address)
                 return x, {name: value for name, value in y.items() if name in self._asked}
 
             def prepare(self, onsource, offsource):
