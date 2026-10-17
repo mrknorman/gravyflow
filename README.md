@@ -380,8 +380,9 @@ The suite needs the `test` extra (`pip install -e ".[test]"` in a clone) and run
 never reads or writes your cache. From the clone:
 
 ```bash
-pytest gravyflow
+pytest gravyflow --ignore=gravyflow/tests/online
 ```
 
-Tests that need GWOSC or Zenodo are marked `network` and run only with `--network`. Tests may fail for lack of GPU
-memory when GPUs are under heavy use.
+No test is skipped. The tests that check GWOSC and Zenodo themselves live apart, in `gravyflow/tests/online`, and
+need the network: `pytest --network gravyflow/tests/online`. Offline, each of them fails and names the host it could
+not reach. Tests may fail for lack of GPU memory when GPUs are under heavy use.

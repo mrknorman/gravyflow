@@ -82,25 +82,18 @@ def tree():
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--runsize", action="store", default="small",
-        help="Run a specific size of tests: small, normal, or large"
-    )
-    parser.addoption(
         "--plot", action="store_true", default=False,
         help="Enable plotting of results"
     )
     parser.addoption(
         "--network", action="store_true", default=False,
-        help="Run tests marked 'network', which query GWOSC and Zenodo"
+        help="Lift the suite's internet refusal, for the online unit (gravyflow/tests/online), "
+             "whose tests query GWOSC and Zenodo"
     )
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "slow: marks tests as slow (skipped on small runs)")
     config.addinivalue_line(
         "markers", "global_rng: the test draws its own data from a global RNG (not guarded)"
-    )
-    config.addinivalue_line(
-        "markers", "network: needs internet access to GWOSC or Zenodo (opt-in: --network)"
     )
     # Past acquisition (where data gaps are expected), a NaN or inf the sanitiser
     # replaces is a failure upstream: tests fail on it. Added here rather than in
@@ -111,19 +104,6 @@ def pytest_configure(config):
         "error::gravyflow.src.utils.numerics.NonFiniteWarning:"
         "gravyflow\\.src\\.dataset\\.(dataset|features\\.injection|tools\\.snr)",
     )
-
-def pytest_collection_modifyitems(config, items):
-    if config.getoption("--runsize") == "small":
-        skip_slow = pytest.mark.skip(reason="Slow test skipped on small run")
-        for item in items:
-            if "slow" in item.keywords:
-                item.add_marker(skip_slow)
-    if not config.getoption("--network"):
-        skip_network = pytest.mark.skip(reason="Network test: run with --network")
-        for item in items:
-            if "network" in item.keywords:
-                item.add_marker(skip_network)
-
 
 #: Environment variables through which a client would send traffic to a proxy.
 PROXY_VARIABLES = tuple(
@@ -308,8 +288,8 @@ def suite_guard(request, tmp_path_factory):
     ``GRAVYFLOW_CACHE_DIR`` and the working directory, in every run (with --network
     too), so no test reads or writes a user cache, or a ``./generator_data``, and
     the user cache starts empty. Without --network, every internet connection is
-    refused (and recorded) and proxies are off, so no test depends on the network
-    unless it is marked 'network'.
+    refused (and recorded) and proxies are off, so no test depends on the network:
+    only the online unit, which fails by name offline, asks for it.
 
     The library resolves its cache root at each use, so under the temporary HOME
     it reaches the user's own cache (``~/.gravyflow``) only by a path taken before

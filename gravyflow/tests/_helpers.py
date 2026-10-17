@@ -60,20 +60,6 @@ def effective_count(weights) -> float:
     return float(np.sum(weights) ** 2 / np.sum(weights ** 2))
 
 
-def num_tests_from_config(pytestconfig) -> int:
-    """The batch count the ``--runsize`` option asks for."""
-    runsize = pytestconfig.getoption("runsize")
-    match runsize:
-        case "small":
-            return 2
-        case "normal":
-            return 100
-        case "large":
-            return 1000
-        case _:
-            raise ValueError(f"Runsize {runsize!r} not recognised.")
-
-
 def sidecar_path(golden: Path) -> Path:
     """The sidecar of ``golden``: the same name with ``.json``."""
     return golden.with_suffix(".json")
