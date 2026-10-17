@@ -7,17 +7,16 @@ throughout; SNR is a ratio and has no unit.
 The references are independent of gravyflow: lalsimulation's burst measures
 and pycbc's ``sigma``.
 """
+import lal
+import lalsimulation as lalsim
 import numpy as np
+import pycbc.filter as pycbc_filter
+import pycbc.types as pycbc_types
 import pytest
 from keras import ops
 
 import gravyflow as gf
 from gravyflow.src.dataset.features import injection as gf_inj
-
-lal = pytest.importorskip("lal")
-lalsim = pytest.importorskip("lalsimulation")
-pycbc_types = pytest.importorskip("pycbc.types")
-pycbc_filter = pytest.importorskip("pycbc.filter")
 
 FS = 2048.0
 
