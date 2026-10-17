@@ -398,10 +398,15 @@ class NoiseProfile(Enum):
     measured sensitivity in the third observing run, from LIGO-T2000012-v2:
     H1, L1 and V1 each have their own curve, spectral lines included, from
     10 Hz to 5 kHz (H1, L1) and to 10 kHz (V1). O3_LOW is the O3 low-noise
-    projection of LIGO-T1800545 (aLIGO for H1 and L1, Advanced Virgo for V1).
-    DESIGN is the aLIGO design curve of LIGO-T1800044 for H1 and L1, and the
-    Advanced Virgo design curve of LIGO-P1200087 for V1. A curve is used only
-    on its own band (``read_noise_curve``).
+    projection of the observing scenarios (Living Rev. Relativ. 21, 3 (2018),
+    doi:10.1007/s41114-018-0012-9), as lalsimulation tabulates it in
+    https://git.ligo.org/lscsoft/lalsuite/-/tree/lalsimulation-v6.2.1/lalsimulation/lib
+    (aLIGO for H1 and L1, Advanced Virgo for V1). DESIGN is the aLIGO design curve
+    of Barsotti, Fritschel, Evans and Gras, "Updated Advanced LIGO sensitivity
+    design curve" (https://dcc.ligo.org/LIGO-T1800044/public) for H1 and L1, and
+    the Advanced Virgo design curve (Living Rev. Relativ. 19, 1 (2016),
+    doi:10.1007/lrr-2016-1) for V1. Each file's header names its exact source.
+    A curve is used only on its own band (``read_noise_curve``).
     """
     O3_ACTUAL = {"Hanford": _ALIGO_O3_ACTUAL_H1, "Livingston": _ALIGO_O3_ACTUAL_L1, "Virgo": _ADVIRGO_O3_ACTUAL}
     O3_LOW = {"Hanford": _ALIGO_O3_LOW, "Livingston": _ALIGO_O3_LOW, "Virgo": _ADVIRGO_O3_LOW}
