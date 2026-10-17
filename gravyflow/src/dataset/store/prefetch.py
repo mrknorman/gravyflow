@@ -34,7 +34,8 @@ class Prefetcher(Generic[T]):
     ``compute(address)``, read ahead: ``get(address, ahead)`` returns it, from the read
     started for it when there was one, and starts the reads of the first ``depth`` of
     ``ahead``. Reads started for addresses no longer ahead are cancelled, so at most
-    ``depth`` run or wait at once.
+    ``depth`` run or wait at once. Once ``gf.store.shutdown()`` has stopped its threads
+    it reads nothing ahead, and computes each address when it is asked for.
     """
 
     def __init__(self, compute: Callable[[Hashable], T], *, name: str, depth: int, workers: int,
@@ -43,6 +44,7 @@ class Prefetcher(Generic[T]):
         self.wait_seconds = float(wait_seconds)
         self._futures: Dict[Hashable, Future] = {}
         self._pool = None
+        self._stopped = False
         self._lock = threading.Lock()
 
     def get(self, address: Hashable, ahead: Sequence[Hashable] = ()) -> T:
@@ -53,7 +55,10 @@ class Prefetcher(Generic[T]):
                 self._futures.pop(stale).cancel()
             for later in wanted:
                 if later not in self._futures and later != address:
-                    self._futures[later] = self._executor().submit(self._compute, later)
+                    started = self._submit(later)
+                    if started is None:
+                        break
+                    self._futures[later] = started
         if future is None or future.cancelled():
             return self._compute(address)
         try:
@@ -63,10 +68,17 @@ class Prefetcher(Generic[T]):
                 f"The read ahead of {self.name} batch {address} did not finish in {self.wait_seconds:g} s."
             ) from None
 
-    def _executor(self):
+    def _submit(self, address: Hashable) -> Optional[Future]:
+        """The read ahead of ``address``; None once ``store.shutdown`` stopped the threads."""
+        if self._stopped:
+            return None
         if self._pool is None:
             self._pool = thread_pool(f"prefetch-{self.name}", self.workers)
-        return self._pool
+        try:
+            return self._pool.submit(self._compute, address)
+        except RuntimeError:  # the pool takes no more work: shutdown() stopped it
+            self._stopped, self._pool = True, None
+            return None
 
     def close(self) -> None:
         """Cancel every read ahead and stop the threads."""
@@ -81,7 +93,7 @@ class Prefetcher(Generic[T]):
     def __getstate__(self):
         """A copy reads ahead on threads of its own: reads in flight stay behind."""
         state = dict(self.__dict__)
-        state.update(_futures={}, _pool=None, _lock=None)
+        state.update(_futures={}, _pool=None, _stopped=False, _lock=None)
         return state
 
     def __setstate__(self, state):

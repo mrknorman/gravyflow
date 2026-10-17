@@ -573,10 +573,17 @@ def _draw(obtainer, rows, num_batches, mode=gf.SamplingMode.RANDOM, offsource_se
             data = [np.zeros(int(count), np.float32) for count in counts]
             yield gf.IFOData(data, sample_rate_hertz, list(firsts / sample_rate_hertz))
 
+    def fake_windows(ifos, sample_rate_hertz, starts, num_onsource_samples, num_offsource_samples):
+        # RANDOM reads each window through the store (read_windows).
+        shape = (len(starts), len(ifos))
+        return np.zeros(shape + (num_onsource_samples,), np.float32), \
+            np.zeros(shape + (num_offsource_samples,), np.float32)
+
     obtainer.valid_segments = np.asarray(rows, dtype=np.float64)
     obtainer.augmentations = []  # saturation exactly: 8 gives 0.5 batches per second of starts
     ifos = [gf.IFO.H1, gf.IFO.L1][:obtainer.valid_segments.shape[1]]
-    with patch.object(obtainer, "acquire", side_effect=fake_acquire):
+    with patch.object(obtainer, "acquire", side_effect=fake_acquire), \
+            patch.object(obtainer, "read_windows", side_effect=fake_windows):
         generator = obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=RATE, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
             offsource_duration_seconds=offsource_seconds, num_examples_per_batch=batch, ifos=ifos,
@@ -591,12 +598,19 @@ def _windows_per_piece(starts, pieces):
     return np.array([np.sum((starts >= a) & (starts < b)) for a, b in pieces])
 
 
+#: Passes drawn where a density is measured: RANDOM serves each row exactly its batches
+#: a pass, and draws each example's row from the rows of eight batches of the pass, so a
+#: piece's examples match its seconds of starts exactly in expectation, here drawn to
+#: within DENSITY_RTOL.
+DENSITY_PASSES, DENSITY_RTOL = 5, 0.15
+
+
 class TestSamplingDensity:
     """
     Each detector's windows are drawn uniformly over the window starts of its usable
     pieces in each bin: no usable piece is dropped and no short piece is oversampled.
-    The test pieces give whole numbers of batches (0.5 batches per second of starts at
-    the default saturation of 8), so one pass is exact.
+    The test pieces give whole numbers of batches a pass (0.5 batches per second of
+    starts at the default saturation of 8).
     """
 
     def test_couple_pieces_uses_each_piece_in_proportion(self):
@@ -615,9 +629,9 @@ class TestSamplingDensity:
         obtainer = _density_obtainer()
         pieces = np.array([[0.0, FOOTPRINT + 200.0], [300.0, 300.0 + FOOTPRINT + 20.0],
                            [2048.0, 2048.0 + FOOTPRINT + 100.0]])
-        starts = _draw(obtainer, pieces[:, None, :], num_batches=100 + 10 + 50)
-        density = _windows_per_piece(starts[:, 0], pieces) / np.array([200.0, 20.0, 100.0])
-        np.testing.assert_array_equal(density, [8.0, 8.0, 8.0])  # saturation / onsource
+        starts = _draw(obtainer, pieces[:, None, :], num_batches=DENSITY_PASSES * (100 + 10 + 50))
+        density = _windows_per_piece(starts[:, 0], pieces) / np.array([200.0, 20.0, 100.0]) / DENSITY_PASSES
+        np.testing.assert_allclose(density, [8.0, 8.0, 8.0], rtol=DENSITY_RTOL)  # saturation / onsource
 
     def test_no_usable_piece_is_dropped(self):
         # H1 has two usable pieces; L1's second piece is too short. Pairing by rank put
@@ -626,11 +640,11 @@ class TestSamplingDensity:
         h1 = np.array([[0.0, FOOTPRINT + 100.0], [1000.0, 1000.0 + FOOTPRINT + 50.0]])
         l1 = np.array([[0.0, FOOTPRINT + 200.0], [1500.0, 1505.0]])
         rows = np.stack([h1, l1], axis=1)
-        starts = _draw(obtainer, rows, num_batches=75)  # 0.5 x min(150, 200) s
-        h1_density = _windows_per_piece(starts[:, 0], h1) / np.array([100.0, 50.0])
+        starts = _draw(obtainer, rows, num_batches=DENSITY_PASSES * 75)  # 0.5 x min(150, 200) s a pass
+        h1_density = _windows_per_piece(starts[:, 0], h1) / np.array([100.0, 50.0]) / DENSITY_PASSES
         l1_windows = _windows_per_piece(starts[:, 1], l1)
-        np.testing.assert_array_equal(h1_density, [8.0, 8.0])
-        np.testing.assert_array_equal(l1_windows, [75 * BATCH, 0])
+        np.testing.assert_allclose(h1_density, [8.0, 8.0], rtol=DENSITY_RTOL)
+        np.testing.assert_array_equal(l1_windows, [DENSITY_PASSES * 75 * BATCH, 0])
 
 
     def test_a_pass_with_no_batch_due_does_not_end_the_generator(self):

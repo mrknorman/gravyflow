@@ -90,8 +90,8 @@ class SamplingPlan:
     inseparable: int = 0
 
 
-#: How many consecutive row visits a RANDOM batch draws its examples' rows from.
-MIXING_VISITS = 8
+#: How many batches of its pass a RANDOM batch draws its examples' rows from (``RandomPlan.mixed``).
+MIXING_WIDTH = 8
 #: Joint draws of an example's row and window starts before the example is refused.
 SEPARATION_ROUNDS = 64
 
@@ -115,15 +115,17 @@ class RandomPlan:
     at most g. Every count is arithmetic on piece lengths: nothing is read to address a
     batch, and the epoch of the order streams counts passes, not training epochs.
 
-    A batch draws each example's row from the ``MIXING_VISITS`` visits from its own on
-    (``visits``), so no row feeds a run of batches alone.
+    A batch draws each example's row uniformly from the rows of ``MIXING_WIDTH`` batches
+    of its pass, its own and those a stride of a ``MIXING_WIDTH``-th of the pass on from
+    it, cyclically (``mixed``): so no row feeds a run of batches alone, and every batch
+    of a pass is drawn from by exactly ``MIXING_WIDTH`` batches, so each row serves, in
+    expectation, exactly its batches' examples in every pass.
     """
     tree: SeedTree
     split: str
     rows: np.ndarray  # (M, I, 2) GPS pieces
     firsts: np.ndarray  # (M, I) absolute index of the first sample read of each piece
     counts: np.ndarray  # (M, I) samples read of each piece
-    start_seconds: np.ndarray  # (M,) each row's budget, which weighs its draws
     expected: np.ndarray  # (M,) batches due a pass
     accrual: np.ndarray  # (M,) u_j
     reorder: bool  # a new order every pass
@@ -136,7 +138,7 @@ class RandomPlan:
         if not np.sum(expected) > 0:
             raise ValueError(f"The {split!r} split's RANDOM plan has no row with window starts to draw.")
         accrual = tree.stream(split, "noise/accrual", epoch=0).random(len(expected))
-        return cls(tree, split, plan.rows, firsts, counts, plan.start_seconds, expected, accrual, reorder)
+        return cls(tree, split, plan.rows, firsts, counts, expected, accrual, reorder)
 
     def batches_before(self, p: int) -> int:
         """The batches of the passes before pass ``p``."""
@@ -162,17 +164,22 @@ class RandomPlan:
                                if self.reorder else np.arange(len(self.rows)))
         return self._orders[p]
 
-    def visits(self, g: int, width: int = MIXING_VISITS) -> np.ndarray:
-        """The rows of the ``width`` visits from batch ``g``'s on: its own row first."""
+    def mixed(self, g: int, width: int = MIXING_WIDTH) -> np.ndarray:
+        """
+        The rows batch ``g`` draws its examples from: those of the ``width`` batches of
+        its pass at positions x + m K, modulo the pass's length L, for m below ``width``,
+        where x is its own position and K = max(1, L // width). Every position of the
+        pass is among exactly ``width`` batches' (counted with multiplicity), so a
+        uniform draw over them serves each row exactly its batches' share, in
+        expectation, in every pass; and the next batch draws from almost the same rows.
+        """
         p, position = self.locate(int(g))
         order = self.order(p)
         due = self.due(p)[order]
-        rows = list(order[due > 0][np.searchsorted(np.cumsum(due[due > 0]), position, side="right"):][:width])
-        while len(rows) < width:
-            p += 1
-            order = self.order(p)
-            rows.extend(order[self.due(p)[order] > 0][:width - len(rows)])
-        return np.asarray(rows, dtype=np.int64)
+        ends = np.cumsum(due)
+        stride = max(1, int(ends[-1]) // width)
+        positions = (position + stride * np.arange(width)) % int(ends[-1])
+        return order[np.searchsorted(ends, positions, side="right")]
 
 
 def _start_on_grid(rng: np.random.Generator, lo: int, hi: int, quantum: int, phase: int) -> Optional[int]:
@@ -195,8 +202,8 @@ def draw_examples(
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     The windows of batch ``g`` (at ``streams``): exactly ``num_examples`` examples, each
-    drawn jointly, its row from the batch's visits (``RandomPlan.visits``) weighted by
-    start-seconds (``noise/row``), then each detector's onsource start uniform over its
+    drawn jointly, its row uniform over the batch's mixed rows (``RandomPlan.mixed``,
+    ``noise/row``), then each detector's onsource start uniform over its
     piece (``noise/start/{IFO}``), redrawn whole until no two detectors start closer than
     ``separation_samples`` in absolute time, or, ``coincident``, every detector starting
     at one time. A window's first sample lies on the grid of ``quantum`` samples the
@@ -209,8 +216,7 @@ def draw_examples(
         SeparationRefused: an example found no window in ``SEPARATION_ROUNDS`` rounds,
             naming the rows it drew from.
     """
-    visits = plan.visits(g)
-    weights = plan.start_seconds[visits] / np.sum(plan.start_seconds[visits])
+    mixed = plan.mixed(g)
     row_stream = streams.stream("noise/row")
     start_streams = [streams.stream(f"noise/start/{ifo.name}") for ifo in ifos]
     lo, phase = num_offsource_samples, num_offsource_samples % quantum
@@ -220,7 +226,7 @@ def draw_examples(
     rounds = np.zeros(num_examples, dtype=np.int64)
     for example in range(num_examples):
         for attempt in range(1, SEPARATION_ROUNDS + 1):
-            j = int(visits[row_stream.choice(len(visits), p=weights)])
+            j = int(mixed[row_stream.integers(len(mixed))])
             firsts = plan.firsts[j]
             if coincident:
                 at = _start_on_grid(start_streams[0], int(np.max(firsts + lo)), int(np.min(firsts + hi[j])),
@@ -239,7 +245,7 @@ def draw_examples(
         else:
             raise SeparationRefused(
                 f"Batch {g} of the {plan.split!r} split found no example in {SEPARATION_ROUNDS} draws "
-                f"among rows {sorted(set(visits.tolist()))} (GPS pieces {plan.rows[visits].tolist()}): "
+                f"among rows {sorted(set(mixed.tolist()))} (GPS pieces {plan.rows[sorted(set(mixed.tolist()))].tolist()}): "
                 + ("their detectors share no start." if coincident
                    else f"their detectors cannot start {separation_samples} samples apart.")
             )
@@ -270,6 +276,8 @@ class NoiseDataObtainer(BaseDataObtainer):
             source=None,
             coincidence: Coincidence = Coincidence.SEPARATED,
             exclusions=(),
+            prefetch_depth: int = 2,
+            prefetch_workers: int = 2,
         ):
         if DataLabel.EVENTS in label_kinds(data_labels):
             raise ValueError(
@@ -292,6 +300,8 @@ class NoiseDataObtainer(BaseDataObtainer):
             source=source,
             coincidence=coincidence,
             exclusions=exclusions,
+            prefetch_depth=prefetch_depth,
+            prefetch_workers=prefetch_workers,
         )
 
         self.acquisition_mode = AcquisitionMode.NOISE

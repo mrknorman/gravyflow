@@ -8,6 +8,7 @@ JAX's 64-bit mode is on only for waveform generation and matched-filter template
 import subprocess
 import sys
 import textwrap
+from unittest import mock
 
 import jax
 import lal
@@ -168,16 +169,45 @@ def _segment():
     return base.IFOData(data=[data, data], sample_rate_hertz=SAMPLE_RATE, start_gps_time=[GPS, GPS + 100.0])
 
 
-def test_gps_times_survive_random_subsection():
-    data = np.arange(NUM_SAMPLES, dtype=np.float32)
-    with jax.enable_x64(False):
-        subarrays, _, start_times = base.random_subsection(
-            [data], [GPS], np.float32(1.0 / SAMPLE_RATE), ONSOURCE, OFFSOURCE, 8, 1234
-        )
+class _AtTheRate(gf.GWOSC):
+    """GWOSC publishing SAMPLE_RATE, so a window starts on any sample."""
+
+    def rates(self):
+        return (SAMPLE_RATE,)
+
+    def specification(self):
+        return {"rates": [SAMPLE_RATE]}
+
+
+def test_gps_times_survive_the_random_draw():
+    """
+    RANDOM draws each window's start as an absolute sample index; its START_GPS_TIME,
+    the first returned onsource sample's time, keeps float64 precision from it.
+    """
+    obtainer = gf.NoiseDataObtainer(
+        data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
+        observing_runs=[gf.ObservingRun.O3], augmentations=[], source=_AtTheRate(),
+    )
+    obtainer.valid_segments = np.array([[[GPS - 20.0, GPS + 44.0]]])
+    read = {}
+
+    def zero_windows(ifos, sample_rate_hertz, starts, num_onsource_samples, num_offsource_samples):
+        read["starts"] = np.array(starts)
+        shape = (len(starts), len(ifos))
+        return np.zeros(shape + (num_onsource_samples,), np.float32), \
+            np.zeros(shape + (num_offsource_samples,), np.float32)
+
+    with jax.enable_x64(False), mock.patch.object(obtainer, "read_windows", side_effect=zero_windows):
+        batch = next(obtainer.get_onsource_offsource_chunks(
+            sample_rate_hertz=SAMPLE_RATE, onsource_duration_seconds=1.0, crop_duration_seconds=0.5,
+            offsource_duration_seconds=16.0, num_examples_per_batch=8, ifos=[gf.IFO.L1], seed=1234,
+        ))
+    start_times = np.asarray(batch[gf.ReturnVariables.START_GPS_TIME])
     assert start_times.dtype == np.float64
-    expected = GPS + np.asarray(subarrays)[:, 0, 0].astype(np.float64) * INTERVAL
-    start_times = start_times[:, 0]
+    assert read["starts"].dtype == np.int64 and len(np.unique(read["starts"])) > 1
+    expected = (read["starts"] + int(0.5 * SAMPLE_RATE)) / SAMPLE_RATE  # the crop's samples on
     np.testing.assert_allclose(start_times, expected, rtol=0.0, atol=1e-6)
+    assert np.all((GPS - 20.0 <= start_times) & (start_times < GPS + 44.0))
 
 
 def test_gps_times_survive_grid_windows():
@@ -189,23 +219,27 @@ def test_gps_times_survive_grid_windows():
 
 
 class _SegmentNoise:
-    """A noise obtainer that samples the synthetic segment as the real-noise path does."""
+    """
+    A noise obtainer that windows the synthetic segment, each sample holding its own
+    index: each example's detectors start at their own seeded sample, and its
+    START_GPS_TIME is the padded window's first sample time, in float64.
+    """
 
     ifos = [gf.IFO.H1, gf.IFO.L1]
 
     def __call__(self, num_examples_per_batch, seed, **kwargs):
-        segment = _segment()
+        data = np.arange(NUM_SAMPLES, dtype=np.float32)
+        origins = np.array([GPS, GPS + 100.0])
+        num_onsource = ONSOURCE + 2 * int(0.5 * SAMPLE_RATE)
         rng = np.random.default_rng(seed)
 
         def batches():
             while True:
-                onsource, offsource, gps_times = segment.random_subsection(
-                    ONSOURCE + 2 * int(0.5 * SAMPLE_RATE), OFFSOURCE, num_examples_per_batch, rng.integers(1e9)
-                )
+                starts = rng.integers(OFFSOURCE, NUM_SAMPLES - num_onsource, size=(num_examples_per_batch, 2))
                 yield {
-                    gf.ReturnVariables.ONSOURCE: onsource,
-                    gf.ReturnVariables.OFFSOURCE: offsource,
-                    gf.ReturnVariables.START_GPS_TIME: gps_times,
+                    gf.ReturnVariables.ONSOURCE: data[starts[..., None] + np.arange(num_onsource)],
+                    gf.ReturnVariables.OFFSOURCE: data[starts[..., None] - OFFSOURCE + np.arange(OFFSOURCE)],
+                    gf.ReturnVariables.START_GPS_TIME: origins[None, :] + starts * INTERVAL,
                 }
 
         return ShapeEnforcer.wrap_generator(batches(), num_ifos=len(self.ifos))

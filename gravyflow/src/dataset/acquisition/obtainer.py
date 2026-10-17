@@ -39,6 +39,9 @@ def IFODataObtainer(
         source: Optional["gf.DataSource"] = None,
         coincidence: Coincidence = Coincidence.SEPARATED,
         exclusions=(),
+        # How far ahead real noise is read (NOISE only)
+        prefetch_depth: int = 2,
+        prefetch_workers: int = 2,
     ):
     """
     Factory function that returns the appropriate IFO data obtainer.
@@ -78,6 +81,9 @@ def IFODataObtainer(
         exclusions: ``(detector, (start, end), reason)`` entries taken from the
             readable time before anything is planned, such as the one a refused read
             names (``TimelineContradiction``).
+        prefetch_depth, prefetch_workers: How many RANDOM batches past the one asked
+            for are read ahead, and on how many background threads (NOISE only).
+            They never change a batch.
 
     Returns:
         NoiseDataObtainer or TransientDataObtainer instance
@@ -108,6 +114,8 @@ def IFODataObtainer(
             source=source,
             coincidence=coincidence,
             exclusions=exclusions,
+            prefetch_depth=prefetch_depth,
+            prefetch_workers=prefetch_workers,
         )
     else:
         # TRANSIENT mode for events/glitches

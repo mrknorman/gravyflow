@@ -352,8 +352,8 @@ def noise_split(split, ifos=(gf.IFO.L1,)):
 def served_noise(call, split):
     """
     The segments a real-noise call for ``split`` serves: those of the reader
-    when it first acquires strain, where reading data would begin (stopped
-    there, offline).
+    when it first reads strain, where reading data would begin (stopped there,
+    offline). RANDOM reads windows (``read_windows``); the other modes acquire rows.
     """
     served = {}
 
@@ -361,17 +361,25 @@ def served_noise(call, split):
         served["members"] = set(map(tuple, self.valid_segments[:, 0]))
         raise Served
 
-    with mock.patch.object(OfflineNoiseObtainer, "acquire", stop):
+    with mock.patch.object(OfflineNoiseObtainer, "acquire", stop), \
+            mock.patch.object(OfflineNoiseObtainer, "read_windows", stop):
         with pytest.raises(Served):
             call(split)
     return served["members"]
 
 
-def fake_strain(self, sample_rate_hertz, valid_segments, ifos, **kwargs):
-    """Zero strain for each row of segments, as the loader yields it."""
-    for row in valid_segments:
-        data = [np.zeros(int((end - start) * sample_rate_hertz), np.float32) for start, end in row]
-        yield gf.IFOData(data, sample_rate_hertz, [start for start, _ in row])
+def windows_of(values):
+    """A ``read_windows`` serving each detector's window the constant ``values[ifo]``."""
+    def read_windows(self, ifos, sample_rate_hertz, starts, num_onsource_samples, num_offsource_samples):
+        level = np.array([values(ifo) for ifo in ifos], np.float32)[None, :, None]
+        shape = (len(starts), len(ifos))
+        return (np.broadcast_to(level, shape + (num_onsource_samples,)).copy(),
+                np.broadcast_to(level, shape + (num_offsource_samples,)).copy())
+    return read_windows
+
+
+#: Zero strain in every window, as the store's reads serve it.
+fake_windows = windows_of(lambda ifo: 0.0)
 
 
 def read_glitch(self, record, reads, window_spec):
@@ -386,12 +394,8 @@ def read_glitch(self, record, reads, window_spec):
 DETECTOR_STRAIN = {gf.IFO.L1: 1.0, gf.IFO.H1: 2.0}
 
 
-def detector_strain(self, sample_rate_hertz, valid_segments, ifos, **kwargs):
-    """Constant strain for each row of segments: each detector's DETECTOR_STRAIN."""
-    for row in valid_segments:
-        data = [np.full(int((end - start) * sample_rate_hertz), DETECTOR_STRAIN[ifo], np.float32)
-                for ifo, (start, end) in zip(ifos, row)]
-        yield gf.IFOData(data, sample_rate_hertz, [start for start, _ in row])
+#: Constant strain in each detector's windows: its DETECTOR_STRAIN.
+detector_windows = windows_of(DETECTOR_STRAIN.__getitem__)
 
 
 class TestOneObtainerCalledForEachSplit:
@@ -434,7 +438,7 @@ class TestOneObtainerCalledForEachSplit:
     def test_a_noise_generator_refuses_once_its_obtainer_serves_another_split(self):
         obtainer = offline_noise_obtainer()
         obtainer.augmentations = []
-        with mock.patch.object(OfflineNoiseObtainer, "acquire", fake_strain):
+        with mock.patch.object(OfflineNoiseObtainer, "read_windows", fake_windows):
             train = obtainer(ifos=[gf.IFO.L1], group="train", seed=7, **WINDOW)
             next(train)
             validate = obtainer(ifos=[gf.IFO.L1], group="validate", seed=7, **WINDOW)
@@ -569,7 +573,7 @@ class TestOneObtainerCalledForOtherDetectors:
             served = served_noise(lambda split: next(obtainer(ifos=ifos, group=split, **WINDOW)), "train")
             names = [ifo.name for ifo in ifos]
             assert served == noise_split("train", ifos), f"the {names} call served other detectors"
-            with mock.patch.object(OfflineNoiseObtainer, "acquire", detector_strain):
+            with mock.patch.object(OfflineNoiseObtainer, "read_windows", detector_windows):
                 onsource = np.asarray(next(obtainer(ifos=ifos, group="train", seed=7, **WINDOW))[
                     gf.ReturnVariables.ONSOURCE])
             assert onsource.shape[:2] == (4, len(ifos))
@@ -589,7 +593,7 @@ class TestOneObtainerCalledForOtherDetectors:
             served["segments"] = self.valid_segments.copy()
             raise Served
 
-        with mock.patch.object(OfflineNoiseObtainer, "acquire", stop), pytest.raises(Served):
+        with mock.patch.object(OfflineNoiseObtainer, "read_windows", stop), pytest.raises(Served):
             next(obtainer(ifos=[gf.IFO.L1], group="train", seed=7, **WINDOW))
         np.testing.assert_array_equal(served["segments"], ordered)
 

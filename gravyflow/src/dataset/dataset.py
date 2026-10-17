@@ -614,7 +614,6 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         self.batch_contract = self._batch_contract()
 
         # Create noise and injection generators
-        freeze_availability(self._obtainers(), self._noise_ifos())
         self._create_generators()
 
     def _noise_ifos(self) -> List:
@@ -780,6 +779,8 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
 
     def _create_generators(self):
         """Create noise and injection generators."""
+        # Reading the data starts here: first the availability every plan reads is frozen.
+        freeze_availability(self._obtainers(), self._noise_ifos())
         # Build base kwargs for noise obtainer
         noise_kwargs = {
             'sample_rate_hertz': self.sample_rate_hertz,
@@ -1316,7 +1317,6 @@ class ComposedDataset(GravyflowDataset):
         self._set_generator_networks()
         self._validate_settings()
         self.batch_contract = self._batch_contract()
-        freeze_availability(self._obtainers(), self._noise_ifos())
         self._create_generators()
 
     def _obtainers(self) -> List:
@@ -1356,6 +1356,8 @@ class ComposedDataset(GravyflowDataset):
 
     def _create_generators(self):
         """Each pool's noise batcher, the mixture of them, and the pools' injection layer."""
+        # Reading the data starts here: first the availability every plan reads is frozen.
+        freeze_availability(self._obtainers(), self._noise_ifos())
         window = {
             'sample_rate_hertz': self.sample_rate_hertz,
             'onsource_duration_seconds': self.onsource_duration_seconds,

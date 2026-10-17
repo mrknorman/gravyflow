@@ -307,8 +307,7 @@ def fit_serves(monkeypatch, shuffle, epochs=FIT_EPOCHS, initial_epoch=0):
 
 
 @pytest.mark.global_rng
-@pytest.mark.parametrize("shuffle", [True, False], ids=["shuffle", "in-order"])
-def test_keras_fit_addresses(monkeypatch, shuffle):
+def test_keras_fit_addresses(monkeypatch):
     """
     Under ``model.fit``, Keras epoch e serves the training addresses
     (train, e, k), each k once, and the validation addresses (validate, 0, k),
@@ -320,7 +319,7 @@ def test_keras_fit_addresses(monkeypatch, shuffle):
     dataset's epoch before Keras sets it, 0, even in a resumed run.
     """
     for initial_epoch in (0, 1):
-        before, epochs = fit_serves(monkeypatch, shuffle, initial_epoch=initial_epoch)
+        before, epochs = fit_serves(monkeypatch, False, initial_epoch=initial_epoch)
         run = f"fit from epoch {initial_epoch}"
         assert sorted(epochs) == list(range(initial_epoch, FIT_EPOCHS)), f"{run}: epochs {sorted(epochs)}"
         for epoch, served in epochs.items():
@@ -330,6 +329,20 @@ def test_keras_fit_addresses(monkeypatch, shuffle):
                 ("validate", 0, k) for k in range(FIT_VALIDATION_STEPS)], f"{run}, Keras epoch {epoch}: {served}"
         assert set(before) <= {("train", 0, k) for k in range(FIT_STEPS)}, (
             f"{run}, before its first epoch: {before}")
+
+
+@pytest.mark.global_rng
+def test_keras_shuffle_is_refused(monkeypatch):
+    """
+    ``fit``'s shuffle, its default, reorders a dataset's batches with Python's unseeded
+    global random, which no seed repeats: a training dataset given Keras' epoch refuses
+    the first batch asked for out of order, by name, before it is served.
+    """
+    import random
+
+    random.seed(3)  # Keras' shuffle draws from here: seeded, so the refusal is repeatable
+    with pytest.raises(ValueError, match=r"Keras asked for batch \d+ where batch \d+ comes next.*shuffle=False"):
+        fit_serves(monkeypatch, True)
 
 
 # -------------------------------------------------------------------- pools

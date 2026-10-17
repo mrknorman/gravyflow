@@ -2,7 +2,7 @@
 Comprehensive tests for acquisition.py module.
 
 This module contains tests to achieve near-100% test coverage for:
-- Core utility functions (ensure_even, random_subsection, etc.)
+- Core utility functions (ensure_even, concatenate_batches, etc.)
 - IFOData dataclass and methods
 - IFODataObtainer class and all its methods
 - Segment processing, ordering, and grouping
@@ -42,45 +42,6 @@ from bokeh.models import Span
 # =============================================================================
 # CORE UTILITY FUNCTION TESTS
 # =============================================================================
-
-
-class TestRandomSubsection:
-    """Tests for random_subsection and _random_subsection functions."""
-    
-    def test_random_subsection_shapes(self):
-        """Test that random_subsection returns correct shapes."""
-        total_samples = 10000
-        data = jnp.arange(total_samples, dtype=jnp.float32)
-        data_list = [data]
-        
-        start_gps = [1000.0]
-        time_interval = 1.0
-        num_onsource = 100
-        num_offsource = 200
-        num_examples = 5
-        seed = 42
-        
-        subarrays, backgrounds, starts = gf_acq.random_subsection(
-            data_list, start_gps, time_interval,
-            num_onsource, num_offsource, num_examples, seed
-        )
-        
-        assert ops.shape(subarrays) == (num_examples, 1, num_onsource)
-        assert ops.shape(backgrounds) == (num_examples, 1, num_offsource)
-        assert ops.shape(starts) == (num_examples, 1)
-    
-    def test_random_subsection_content_sequential(self):
-        """Subarrays should be sequential chunks from data."""
-        total_samples = 10000
-        data = jnp.arange(total_samples, dtype=jnp.float32)
-        
-        subarrays, _, _ = gf_acq.random_subsection(
-            [data], [0.0], 1.0, 100, 50, 3, seed=42
-        )
-        
-        # Check if differences are 1.0 (sequential)
-        diffs = subarrays[:, 0, 1:] - subarrays[:, 0, :-1]
-        np.testing.assert_allclose(diffs, 1.0)
 
 
 class TestConcatenateBatches:
@@ -154,25 +115,6 @@ class TestIFOData:
         numpy_data = ifo_data.numpy()
         assert isinstance(numpy_data, list)
         assert isinstance(numpy_data[0], np.ndarray)
-    
-    def test_ifo_data_random_subsection(self):
-        """Test random_subsection method on IFOData."""
-        data = np.arange(5000, dtype=np.float32)
-        ifo_data = gf_acq.IFOData(
-            data=[data],
-            sample_rate_hertz=1.0,
-            start_gps_time=[0.0]
-        )
-        
-        subarrays, backgrounds, starts = ifo_data.random_subsection(
-            num_onsource_samples=100,
-            num_offsource_samples=100,
-            num_examples_per_batch=2,
-            seed=123
-        )
-        
-        assert ops.shape(subarrays) == (2, 1, 100)
-        assert ops.shape(backgrounds) == (2, 1, 100)
 
 
 # =============================================================================
@@ -453,8 +395,6 @@ class TestClearValidSegments:
         obtainer.sampling_plan = obtainer.plan_sampling(
             np.array([[[0.0, 100.0]]]), 8.0, 2.0, sample_rate_hertz=4096.0)
         obtainer.ifos = [gf.IFO.L1]
-        obtainer._current_batch_index = 3
-        obtainer._segment_exhausted = False
         
         # Clear
         obtainer.clear_valid_segments()
@@ -462,8 +402,6 @@ class TestClearValidSegments:
         assert obtainer.valid_segments is None
         assert obtainer.sampling_plan is None
         assert obtainer.ifos is None
-        assert obtainer._current_batch_index == 0
-        assert obtainer._segment_exhausted == True
 
 
 # =============================================================================
@@ -598,99 +536,9 @@ def _test_segment_processing_visualization(
     assert len(cut) >= len(compressed)
 
 
-def _test_random_subsection_visualization(
-    output_directory_path: Path = Path("./gravyflow_data/tests/"),
-    plot_results: bool = False
-) -> None:
-    """Visualize random subsection extraction."""
-    # Create synthetic data
-    sample_rate = 1024.0
-    duration = 10.0
-    num_samples = int(sample_rate * duration)
-    
-    # Create a signal with some structure (sinusoid + noise)
-    t = np.linspace(0, duration, num_samples, endpoint=False)
-    signal = np.sin(2 * np.pi * 5.0 * t) + 0.1 * np.random.randn(num_samples)
-    signal = signal.astype(np.float32)
-    
-    ifo_data = gf_acq.IFOData(
-        data=[signal],
-        sample_rate_hertz=sample_rate,
-        start_gps_time=[1000000.0]
-    )
-    
-    # Extract random subsections
-    num_examples = 3
-    onsource_dur = 1.0
-    offsource_dur = 0.5
-    
-    subarrays, backgrounds, gps_times = ifo_data.random_subsection(
-        num_onsource_samples=int(onsource_dur * sample_rate),
-        num_offsource_samples=int(offsource_dur * sample_rate),
-        num_examples_per_batch=num_examples,
-        seed=42
-    )
-    
-    if plot_results:
-        layout = []
-        
-        # Full signal
-        p_full = figure(
-            title="Full Signal (10s duration)",
-            x_axis_label="Sample",
-            y_axis_label="Amplitude",
-            width=1200, height=200
-        )
-        p_full.line(range(len(signal)), signal, line_color="gray", alpha=0.7)
-        layout.append([p_full])
-        
-        # Individual extractions
-        for i in range(num_examples):
-            onsource = np.array(subarrays[i, 0, :])
-            offsource = np.array(backgrounds[i, 0, :])
-            gps = float(gps_times[i, 0])
-            
-            p = figure(
-                title=f"Extraction {i+1}: GPS {gps:.1f}",
-                x_axis_label="Sample",
-                y_axis_label="Amplitude",
-                width=600, height=150
-            )
-            p.line(range(len(onsource)), onsource, 
-                   line_color="steelblue", legend_label="Onsource")
-            
-            p_off = figure(
-                title=f"Offsource {i+1}",
-                x_axis_label="Sample",
-                y_axis_label="Amplitude",
-                width=400, height=150
-            )
-            p_off.line(range(len(offsource)), offsource,
-                      line_color="coral", legend_label="Offsource")
-            
-            layout.append([p, p_off])
-        
-        gf.ensure_directory_exists(output_directory_path)
-        output_file(output_directory_path / "acquisition_random_subsection.html")
-        grid = gridplot(layout)
-        save(grid)
-    
-    # Assertions
-    assert ops.shape(subarrays) == (num_examples, 1, int(onsource_dur * sample_rate))
-    assert ops.shape(backgrounds) == (num_examples, 1, int(offsource_dur * sample_rate))
-
-
 def test_segment_processing_visualization(pytestconfig: Config) -> None:
     """Test segment processing with optional visualization."""
     _test_segment_processing_visualization(
-        plot_results=pytestconfig.getoption("plot")
-    )
-
-
-@pytest.mark.global_rng
-def test_random_subsection_visualization(pytestconfig: Config) -> None:
-    """Test random subsection extraction with optional visualization."""
-    _test_random_subsection_visualization(
         plot_results=pytestconfig.getoption("plot")
     )
 
@@ -702,64 +550,38 @@ def test_random_subsection_visualization(pytestconfig: Config) -> None:
 class TestGetOnsourceOffsourceChunks:
     """Tests for get_onsource_offsource_chunks generator method."""
     
-    @pytest.mark.global_rng
     def test_get_chunks_defaults_applied(self):
-        """Test that defaults are applied when parameters are None (lines 1101-1111)."""
+        """The batch size and seed default when not given; RANDOM reads its windows by index."""
         obtainer = gf.IFODataObtainer(
             data_quality=gf.DataQuality.BEST,
             data_labels=gf.DataLabel.NOISE,
             observing_runs=gf.ObservingRun.O3,
         )
-        
-        # Set up valid segments manually
+        # Hand-set rows inside O3a; the windows are zeros, read without the network.
         obtainer.valid_segments = np.array([
-            [[100.0, 1000.0]],
-            [[1100.0, 2000.0]]
+            [[1238166100.0, 1238167000.0]],
+            [[1238168000.0, 1238169000.0]],
         ])
-        
-        # Create mock current segment with enough data
-        mock_data = np.random.randn(100000).astype(np.float32)
-        mock_segment = gf_acq.IFOData(
-            data=[mock_data],
-            sample_rate_hertz=1024.0,
-            start_gps_time=[100.0]
-        )
-        
-        
-        # Set up obtainer state to prevent real data acquisition
-        obtainer.acquisition_mode = gf.AcquisitionMode.NOISE
-        obtainer._segment_exhausted = False
-        obtainer.current_segment = mock_segment
-        obtainer._num_batches_in_current_segment = 2
-        obtainer._current_batch_index = 0
-        obtainer.rng = np.random.default_rng(42)
-        
-        # Get first chunk
-        gen = obtainer.get_onsource_offsource_chunks(
-            sample_rate_hertz=1024.0,
-            onsource_duration_seconds=1.0,
-            crop_duration_seconds=0.5,
-            offsource_duration_seconds=1.0,
-            num_examples_per_batch=None,  # Use default
-            ifos=gf.IFO.L1,
-            seed=None  # Use default
-        )
-        
-        # Should return generator that yields data (dict format)
-        try:
-            output = next(gen)
-            # Handle dict format
-            if isinstance(output, dict):
-                subarrays = output.get(gf.ReturnVariables.ONSOURCE)
-                assert subarrays is not None
-            elif len(output) >= 3:
-                subarrays, backgrounds, gps_times = output[:3]
-                assert subarrays is not None
-            else:
-                pytest.fail(f"Generator yielded unexpected output: {type(output)}")
-        except StopIteration:
-            # Expected if segments are exhausted
-            pass
+
+        def zero_windows(ifos, sample_rate_hertz, starts, num_onsource_samples, num_offsource_samples):
+            shape = (len(starts), len(ifos))
+            return np.zeros(shape + (num_onsource_samples,), np.float32), \
+                np.zeros(shape + (num_offsource_samples,), np.float32)
+
+        with patch.object(obtainer, "read_windows", side_effect=zero_windows):
+            output = next(obtainer.get_onsource_offsource_chunks(
+                sample_rate_hertz=1024.0,
+                onsource_duration_seconds=1.0,
+                crop_duration_seconds=0.5,
+                offsource_duration_seconds=1.0,
+                num_examples_per_batch=None,  # the default
+                ifos=gf.IFO.L1,
+                seed=None,  # the default
+            ))
+        onsource = output[gf.ReturnVariables.ONSOURCE]
+        assert ops.shape(onsource)[:2] == (gf.Defaults.num_examples_per_batch, 1)
+        gps = np.asarray(output[gf.ReturnVariables.START_GPS_TIME])[:, 0]
+        assert np.all((gps >= 1238166100.0) & (gps < 1238169000.0))
 
 
 class TestAcquireGenerator:
@@ -1360,8 +1182,6 @@ class TestGetOnsourceOffsourceChunksReal:
         
         obtainer.valid_segments = test_segments
         obtainer.ifos = [gf.IFO.L1]
-        obtainer._segment_exhausted = False
-        obtainer._current_batch_index = 0
         
         gen = obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=1024.0,

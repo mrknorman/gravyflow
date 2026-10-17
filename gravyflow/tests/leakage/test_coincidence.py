@@ -91,42 +91,53 @@ def test_each_window_once(world, layout):
     assert separation >= 2 * FOOTPRINT_SECONDS, f"H1 and L1 read {separation} s apart in GRID"
 
 
-#: Rows for the constructive draw, as (bounds, origins in samples, separation in samples):
-#: two detectors on one piece whose starts can be separated only near its ends (rejection
-#: alone rarely finds a pair), and three detectors on offset pieces.
+#: Rows for the joint draw, as (each detector's piece length in samples, its first sample,
+#: separation in samples, window samples): two detectors on one piece whose starts can be
+#: separated only near its ends, and three detectors on offset pieces.
 TIGHT_ROWS = {
-    "one piece": ([(0, 100), (0, 100)], [0.0, 0.0], 95.0),
-    "offset pieces": ([(0, 1000), (0, 1000), (0, 1000)], [0.0, 250.0, -130.0], 300.0),
+    "one piece": ([140, 140], [0, 0], 60, 10),
+    "offset pieces": ([1036, 1036, 1036], [0, 250, -130], 200, 10),
 }
 
 
-@pytest.mark.parametrize("draws", [0, None], ids=["constructed only", "after rejection draws"])
+def _one_row_plan(counts, firsts):
+    """A RANDOM plan of one row, due one batch a pass, whose pieces start at ``firsts``."""
+    from gravyflow.src.dataset.acquisition.noise import RandomPlan
+
+    firsts, counts = np.asarray([firsts], np.int64), np.asarray([counts], np.int64)
+    return RandomPlan(gf.SeedTree(1), "train", rows=np.zeros(firsts.shape + (2,)), firsts=firsts,
+                      counts=counts, expected=np.ones(1), accrual=np.zeros(1),
+                      reorder=False)
+
+
 @pytest.mark.parametrize("row", list(TIGHT_ROWS))
-def test_constructed_starts_keep_the_separation(monkeypatch, row, draws):
+def test_joint_draws_keep_the_separation(row):
     """
-    RANDOM places a detector's start constructively, from the starts far enough from
-    the others', once its rejection draws keep conflicting; those starts keep the
-    whole separation. Driven directly: with no rejection draws (every conflicting
-    example constructed), and after the library's draws on tight rows.
+    RANDOM draws each example's detectors' starts together, again until no two lie
+    closer than the separation in absolute time, so every example it serves keeps the
+    whole separation, on tight rows too; it serves exactly the batch, never fewer.
     """
-    from gravyflow.src.dataset.acquisition import base
+    from gravyflow.src.dataset.acquisition.noise import draw_examples
 
-    constructed = []
-    allowed_draw = base._allowed_draw
+    counts, firsts, separation, window = TIGHT_ROWS[row]
+    plan, tree = _one_row_plan(counts, firsts), gf.SeedTree(1)
+    ifos = [gf.IFO.H1, gf.IFO.L1, gf.IFO.V1][:len(counts)]
+    for g in range(20):
+        rows, starts, rounds = draw_examples(plan, tree.batch("train", 0, g), g, ifos, 32, window, window,
+                                             separation, coincident=False)
+        assert starts.shape == (32, len(ifos)) and np.all(rows == 0) and np.all(rounds >= 1)
+        gaps = [np.min(np.abs(starts[:, i] - starts[:, j])) for i, j in itertools.combinations(range(len(ifos)), 2)]
+        assert min(gaps) >= separation, f"batch {g}: starts {min(gaps)} samples apart, under {separation}"
 
-    def counting(*args):
-        constructed.append(allowed_draw(*args))
-        return constructed[-1]
 
-    monkeypatch.setattr(base, "_allowed_draw", counting)
-    if draws is not None:
-        monkeypatch.setattr(base, "SEPARATION_DRAWS", draws)
-    bounds, origins, separation = TIGHT_ROWS[row]
-    starts = base.separated_starts(np.random.default_rng(1), bounds, origins, separation, 2000)
-    assert len(starts) > 0 and sum(start is not None for start in constructed) >= 50
-    clock = starts + np.asarray(origins)
-    gaps = [np.min(np.abs(clock[:, i] - clock[:, j])) for i, j in itertools.combinations(range(len(bounds)), 2)]
-    assert min(gaps) >= separation, f"constructed starts {min(gaps)} samples apart, under {separation}"
+def test_a_row_that_cannot_be_separated_is_refused_by_name():
+    """A row whose detectors find no separated starts in the draw's rounds is refused, never served short."""
+    from gravyflow.src.dataset.acquisition.noise import SEPARATION_ROUNDS, SeparationRefused, draw_examples
+
+    plan = _one_row_plan([140, 140], [0, 0])
+    with pytest.raises(SeparationRefused, match=f"no example in {SEPARATION_ROUNDS} draws.*cannot start 113"):
+        draw_examples(plan, gf.SeedTree(1).batch("train", 0, 0), 0, [gf.IFO.H1, gf.IFO.L1], 32, 10, 10,
+                      113, coincident=False)
 
 
 #: The span a transient's record reads, each side of its centre.
