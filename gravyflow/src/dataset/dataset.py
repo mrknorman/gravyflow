@@ -5,7 +5,6 @@ from pathlib import Path
 from dataclasses import dataclass
 from warnings import warn
 import logging
-import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,7 @@ from gravyflow.src.utils.tensor import (
 )
 from gravyflow.src.utils.shapes import BatchContract
 from gravyflow.src.dataset.config import Defaults, WindowSpec, ignore_scale_factor
-from gravyflow.src.dataset.noise.noise import NoiseBatcher, obtainer_batcher, reads_real_data
+from gravyflow.src.dataset.noise.noise import NoiseBatcher, addressed_by_index, obtainer_batcher, reads_real_data
 from gravyflow.src.dataset.acquisition.augmentations import Augmented, augment
 from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
 from gravyflow.src.dataset.features.injection import InjectionGenerator, check_scaling_matches_noise
@@ -155,7 +154,39 @@ def augmented_batcher(obtainer, tree: SeedTree, group: str, **window) -> NoiseBa
             data[RV.ONSOURCE], data[RV.OFFSOURCE], streams, obtainer, group, sampling_mode)
         return data
 
+    batch.prepare = getattr(read, "prepare", None)
     return batch
+
+
+class Unprepared(RuntimeError):
+    """
+    ``prepare`` met contradictions between a source's timeline and what it delivers:
+    ``contradictions`` lists each ``TimelineContradiction``, and ``exclusions`` the
+    entries that plan around them all.
+    """
+
+    def __init__(self, contradictions):
+        self.contradictions = tuple(contradictions)
+        self.exclusions = tuple(dict.fromkeys(error.exclusion for error in self.contradictions))
+        listed = "\n".join(f"- {error}" for error in self.contradictions)
+        super().__init__(
+            f"{len(self.contradictions)} contradictions between the timeline and the source:\n{listed}\n"
+            f"To plan around them all, add exclusions={self.exclusions!r} to the obtainer."
+        )
+
+
+def freeze_availability(obtainers, ifos) -> None:
+    """
+    Freeze the availability of every IFO data obtainer ``obtainers`` read through
+    (``BaseDataObtainer.freeze_availability``) for ``ifos``: computed once, as the
+    dataset is built, and part of its obtainers' specification from then on.
+    """
+    for obtainer in obtainers:
+        if not reads_real_data(obtainer):
+            continue
+        reader = obtainer.ifo_data_obtainer if isinstance(obtainer, gf.NoiseObtainer) else obtainer
+        if isinstance(reader, BaseDataObtainer):
+            reader.freeze_availability(ifos)
 
 
 def get_max_arrival_time_difference(ifos: List[gf.IFO]) -> float:
@@ -256,6 +287,7 @@ class _KerasEpoch(keras.callbacks.Callback):
 
     def on_epoch_begin(self, epoch, logs=None):
         self.dataset.epoch = epoch
+        self.dataset._keras_next = 0
 
 
 class IndexedBatches:
@@ -273,10 +305,17 @@ class IndexedBatches:
     (epoch, k), calls it itself. Under ``model.fit`` the epoch is Keras' own,
     from ``ds.epoch_callback()``.
 
-    REAL, PSEUDO_REAL and transient noise are still read in order, whatever
-    the address (``seed_metadata["index_addressed"]`` is False): their batches
-    depend on the order they are asked for, so their evaluation sets are not
-    yet fixed across epochs or runs.
+    Real noise drawn at random (REAL, ``SamplingMode.RANDOM``) is addressed
+    by index too: batch k of epoch e is batch e * steps + k of its split's
+    passes, from availability frozen when the dataset was built
+    (``freeze_availability``). PSEUDO_REAL, GRID and transient noise are still
+    read in order, whatever the address (``seed_metadata["index_addressed"]``
+    is False): their batches depend on the order they are asked for.
+
+    Under ``model.fit`` the batches are asked for in order: Keras' shuffle
+    (``fit``'s default) reorders them with Python's unseeded global random,
+    so a dataset given ``epoch_callback()`` refuses a batch asked for out of
+    order. Pass ``shuffle=False`` to ``fit``.
     """
 
     def _init_batches(self, seed, group: str, steps_per_epoch: int, epoch_mode: Optional[EpochMode],
@@ -295,6 +334,8 @@ class IndexedBatches:
         self._cursor = 0
         self._epoch_from_keras = False
         self._warned_keras_epoch = False
+        # The batch Keras asks for next, under epoch_callback (``_check_keras_order``).
+        self._keras_next = 0
 
     @property
     def group(self) -> str:
@@ -351,6 +392,22 @@ class IndexedBatches:
         self._epoch_from_keras = True
         return _KerasEpoch(self)
 
+    def _check_keras_order(self, index: int) -> None:
+        """
+        Refuse a batch Keras asks for out of order: ``fit``'s shuffle (its default)
+        reorders a PyDataset's batches with Python's unseeded global random, so the
+        run's order would be repeatable by no seed. A plain loop may ask in any order.
+        """
+        if not self._epoch_from_keras:
+            return
+        if index != self._keras_next:
+            raise ValueError(
+                f"Keras asked for batch {index} where batch {self._keras_next} comes next: fit is "
+                "shuffling the batches with Python's unseeded global random. Pass shuffle=False to "
+                "fit; every batch is already a fresh, seeded draw."
+            )
+        self._keras_next = index + 1
+
     def on_epoch_begin(self):
         """Keras calls this before each epoch's batches; a plain loop never does."""
         if (
@@ -404,9 +461,47 @@ class IndexedBatches:
     def index_addressed(self) -> bool:
         """
         Whether every batch is a pure function of its address (see the class
-        docstring): so is data that reads no real data (`reads_real_data`).
+        docstring): data that reads no real data (`reads_real_data`), and real
+        noise drawn at random.
         """
-        return not any(map(reads_real_data, self._obtainers()))
+        sampling_mode = getattr(self, "sampling_mode", None)
+        return all(addressed_by_index(obtainer, sampling_mode) for obtainer in self._obtainers())
+
+    def prepare(self, *, batches: Optional[int] = None, epochs: Optional[int] = None) -> int:
+        """
+        Read, ahead of a run, every tile the first ``batches`` batches, or the batches
+        of the first ``epochs`` epochs, need, fetching what the store lacks, and list
+        every contradiction between the source's timeline and what it delivers at
+        once. After a clean ``prepare`` those batches read nothing from the network.
+        An evaluation split serves the same batches every epoch, so its epochs are
+        one. Returns the number of batches prepared.
+
+        Raises:
+            Unprepared: naming every ``TimelineContradiction`` met, each with the
+                ``exclusions`` entry that plans around it. Adding them changes the
+                availability, so every batch: a run that adds them starts again.
+        """
+        if (batches is None) == (epochs is None):
+            raise ValueError("Give prepare one of batches=N or epochs=E.")
+        if epochs is not None:
+            epochs = check_coordinate(epochs, "epochs")
+            epochs = 1 if self.epoch_mode is EpochMode.REPEAT else epochs
+            addresses = [(e, k) for e in range(epochs) for k in range(len(self))]
+        else:
+            batches = check_coordinate(batches, "batches")
+            per_epoch = len(self)
+            addresses = [(n // per_epoch if self.epoch_mode is EpochMode.FRESH else 0, n % per_epoch)
+                         for n in range(batches)]
+        prepare = getattr(self.noise, "prepare", None)
+        if prepare is None:
+            raise ValueError(
+                f"Only real noise drawn at random is prepared by address; this dataset's noise "
+                f"({[type(o).__name__ for o in self._obtainers()]}, {self.sampling_mode.name}) is read in order."
+            )
+        contradictions = prepare([self.tree.batch(self.group, e, k) for e, k in addresses])
+        if contradictions:
+            raise Unprepared(contradictions)
+        return len(addresses)
 
 
 class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
@@ -519,6 +614,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         self.batch_contract = self._batch_contract()
 
         # Create noise and injection generators
+        freeze_availability(self._obtainers(), self._noise_ifos())
         self._create_generators()
 
     def _noise_ifos(self) -> List:
@@ -692,6 +788,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             'offsource_duration_seconds': self.offsource_duration_seconds,
             'num_examples_per_batch': self.num_examples_per_batch,
             'sampling_mode': self.sampling_mode,
+            'steps_per_epoch': self.steps_per_epoch,
         }
         # Add ifos to noise_kwargs if provided
         if self.ifos is not None:
@@ -718,70 +815,49 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         when the noise is (see IndexedBatches).
         """
         streams = self.streams(index)
-        try:
-            batch_data = self.noise(streams)
-            
-            # Handle dict format (new) or tuple format (legacy)
-            if isinstance(batch_data, dict):
-                onsource = batch_data[gf.ReturnVariables.ONSOURCE]
-                offsource = batch_data[gf.ReturnVariables.OFFSOURCE]
-                # The first returned onsource sample's time, in every mode.
-                gps_times = batch_data.get(gf.ReturnVariables.START_GPS_TIME)
-                feature_labels = batch_data.get(gf.ReturnVariables.SUB_TYPE)
-                # Transient-specific outputs
-                glitch_type = batch_data.get(gf.ReturnVariables.GLITCH_TYPE)
-                source_type = batch_data.get(gf.ReturnVariables.SOURCE_TYPE)
-                data_label = batch_data.get(gf.ReturnVariables.DATA_LABEL)
-                # A composed dataset's noise names each example's pool.
-                pool_label = batch_data.get(gf.ReturnVariables.POOL_LABEL)
-                # The augmentations each example's noise had as it was read.
-                augmentations = batch_data.get(gf.ReturnVariables.AUGMENTATIONS)
-                # Whether each example's detectors were read at one time.
-                coincident = batch_data.get(gf.ReturnVariables.COINCIDENT)
-            elif len(batch_data) == 4:
-                onsource, offsource, gps_times, feature_labels = batch_data
-                glitch_type, source_type, data_label, pool_label, augmentations = None, None, None, None, None
-                coincident = None
-            else:
-                onsource, offsource, gps_times = batch_data
-                feature_labels = None
-                glitch_type, source_type, data_label, pool_label, augmentations = None, None, None, None, None
-                coincident = None
-        except Exception as e:
-            logger.info(f"Noise generation failed: {e}\nTraceback: {traceback.format_exc()}")
-            raise Exception(f"Noise generation failed: {e}")
+        self._check_keras_order(index)
+        # Errors pass through as they were raised: a refusal keeps its type and what it
+        # names (a TimelineContradiction its exclusion).
+        batch_data = self.noise(streams)
+        onsource = batch_data[gf.ReturnVariables.ONSOURCE]
+        offsource = batch_data[gf.ReturnVariables.OFFSOURCE]
+        # The first returned onsource sample's time, in every mode.
+        gps_times = batch_data.get(gf.ReturnVariables.START_GPS_TIME)
+        feature_labels = batch_data.get(gf.ReturnVariables.SUB_TYPE)
+        # Transient-specific outputs
+        glitch_type = batch_data.get(gf.ReturnVariables.GLITCH_TYPE)
+        source_type = batch_data.get(gf.ReturnVariables.SOURCE_TYPE)
+        data_label = batch_data.get(gf.ReturnVariables.DATA_LABEL)
+        # A composed dataset's noise names each example's pool.
+        pool_label = batch_data.get(gf.ReturnVariables.POOL_LABEL)
+        # The augmentations each example's noise had as it was read.
+        augmentations = batch_data.get(gf.ReturnVariables.AUGMENTATIONS)
+        # Whether each example's detectors were read at one time.
+        coincident = batch_data.get(gf.ReturnVariables.COINCIDENT)
 
-        try:
-            injections, mask, parameters = self.injection_generator.generate(
-                streams,
-                sample_rate_hertz=self.sample_rate_hertz,
-                onsource_duration_seconds=self.onsource_duration_seconds,
-                crop_duration_seconds=self.crop_duration_seconds,
-                num_examples_per_batch=self.num_examples_per_batch,
-            )
-        except Exception as e:
-            logger.info(f"Injection generation failed: {e}\nTraceback: {traceback.format_exc()}")
-            raise Exception(f"Injection generation failed: {e}")
+        injections, mask, parameters = self.injection_generator.generate(
+            streams,
+            sample_rate_hertz=self.sample_rate_hertz,
+            onsource_duration_seconds=self.onsource_duration_seconds,
+            crop_duration_seconds=self.crop_duration_seconds,
+            num_examples_per_batch=self.num_examples_per_batch,
+        )
 
         # One PSD per batch: scaling, labels and whitening all read this estimate.
         spectrum = self._batch_spectrum(offsource) if self._needs_spectrum else None
 
-        try:
-            onsource, scaled_injections, labels = self.injection_generator.add_injections_to_onsource(
-                injections,
-                mask,
-                onsource,
-                spectrum if spectrum is not None else offsource,
-                parameters_to_return=self.variables_to_return,
-                onsource_duration_seconds=self.onsource_duration_seconds,
-                injection_parameters=parameters,
-                streams=streams,
-                epoch=self._schedule_epoch,
-                steps_per_epoch=len(self),
-            )
-        except Exception as e:
-            logger.error(f"Failed to add injections to onsource: {e}\nTraceback: {traceback.format_exc()}")
-            raise e
+        onsource, scaled_injections, labels = self.injection_generator.add_injections_to_onsource(
+            injections,
+            mask,
+            onsource,
+            spectrum if spectrum is not None else offsource,
+            parameters_to_return=self.variables_to_return,
+            onsource_duration_seconds=self.onsource_duration_seconds,
+            injection_parameters=parameters,
+            streams=streams,
+            epoch=self._schedule_epoch,
+            steps_per_epoch=len(self),
+        )
 
         whitened_injections = self._process_whitened_injections(scaled_injections, spectrum)
         injections = self._process_injections(scaled_injections)
@@ -810,11 +886,11 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
 
     @property
     def window_spec(self) -> WindowSpec:
-        """The geometry of the raw windows the dataset conditions (``prepare``)."""
+        """The geometry of the raw windows the dataset conditions (``model_inputs``)."""
         return WindowSpec(self.sample_rate_hertz, self.onsource_duration_seconds,
                           self.offsource_duration_seconds, self.crop_duration_seconds)
 
-    def prepare(self, onsource, offsource) -> Dict[str, Any]:
+    def model_inputs(self, onsource, offsource) -> Dict[str, Any]:
         """
         The model inputs (``input_variables``) of raw windows that hold nothing
         injected: each padded onsource (B, I, ``window_spec.num_onsource_samples``)
@@ -845,7 +921,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         The conditioned strain of a batch: its whitened onsource and what derives from
         it (rolling Pearson, spectrogram), and its cropped onsource and offsource, each
         only if requested (None otherwise). The one conditioning of every window the
-        dataset serves or ``prepare``s.
+        dataset serves or turns into ``model_inputs``.
         """
         whitened_onsource, rolling_pearson_onsource, spectrogram_onsource = self._process_onsource(
             onsource, spectrum)
@@ -1240,6 +1316,7 @@ class ComposedDataset(GravyflowDataset):
         self._set_generator_networks()
         self._validate_settings()
         self.batch_contract = self._batch_contract()
+        freeze_availability(self._obtainers(), self._noise_ifos())
         self._create_generators()
 
     def _obtainers(self) -> List:
@@ -1287,6 +1364,7 @@ class ComposedDataset(GravyflowDataset):
             'num_examples_per_batch': self.num_examples_per_batch,
             'ifos': self._noise_ifos(),
             'sampling_mode': self.sampling_mode,
+            'steps_per_epoch': self.steps_per_epoch,
         }
         self._pool_noise = [
             augmented_batcher(obtainer, self.tree.sub(f"pool/{pool.name}"), self.group, **window)

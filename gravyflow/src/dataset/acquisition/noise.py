@@ -6,11 +6,11 @@ noise data from long IFO segments (NOISE mode).
 """
 
 import logging
-from dataclasses import dataclass
-from typing import Any, List, Dict, Optional, Tuple, Union
+from itertools import count
+from dataclasses import dataclass, field
+from typing import Any, List, Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
-from numpy.random import default_rng
 from keras import ops
 
 import gravyflow as gf
@@ -21,7 +21,13 @@ from .base import (
     WINDOW_EDGE_BUFFER_SAMPLES, label_kinds, separable,
 )
 from .gwosc_data import intersect_segments
+from gravyflow.src.dataset.store import read as store_read
 from gravyflow.src.dataset.store.read import interiors
+from gravyflow.src.dataset.store.prefetch import Prefetcher
+from gravyflow.src.dataset.store.tile import TileKey
+from gravyflow.src.dataset.store.view import UnheldSamples
+from gravyflow.src.utils.resample import whole_hertz
+from gravyflow.src.rng import DIRECT_SPLIT, BatchStreams, SeedTree
 from .segment import SegmentCollection, NoiseSegment
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
@@ -84,6 +90,162 @@ class SamplingPlan:
     inseparable: int = 0
 
 
+#: How many consecutive row visits a RANDOM batch draws its examples' rows from.
+MIXING_VISITS = 8
+#: Joint draws of an example's row and window starts before the example is refused.
+SEPARATION_ROUNDS = 64
+
+
+class SeparationRefused(ValueError):
+    """No example of a batch's rows has separated windows in ``SEPARATION_ROUNDS`` draws."""
+
+
+@dataclass(frozen=True, eq=False)
+class RandomPlan:
+    """
+    The RANDOM batches of one split, addressed by index: which rows batch g draws from.
+
+    Row j is due ``expected[j]`` batches a pass, its start-seconds at the nominal
+    density, and serves floor((p + 1) e_j + u_j) - floor(p e_j + u_j) of them in pass p,
+    u_j drawn once (``noise/accrual``), so over any number of passes it serves its
+    density to within one batch. Pass p visits its due rows in its own order
+    (``noise/segment_order`` at epoch p, a new one every pass, unless the obtainer's
+    ``segment_order`` fixes it), each for its batches; the passes run on without end.
+    Batch g lies in the pass p whose earlier batches, sum_j floor(p e_j + u_j), number
+    at most g. Every count is arithmetic on piece lengths: nothing is read to address a
+    batch, and the epoch of the order streams counts passes, not training epochs.
+
+    A batch draws each example's row from the ``MIXING_VISITS`` visits from its own on
+    (``visits``), so no row feeds a run of batches alone.
+    """
+    tree: SeedTree
+    split: str
+    rows: np.ndarray  # (M, I, 2) GPS pieces
+    firsts: np.ndarray  # (M, I) absolute index of the first sample read of each piece
+    counts: np.ndarray  # (M, I) samples read of each piece
+    start_seconds: np.ndarray  # (M,) each row's budget, which weighs its draws
+    expected: np.ndarray  # (M,) batches due a pass
+    accrual: np.ndarray  # (M,) u_j
+    reorder: bool  # a new order every pass
+    _orders: Dict[int, np.ndarray] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def build(cls, tree: SeedTree, split: str, plan: SamplingPlan, firsts, counts,
+              batches_per_start_second: float, reorder: bool) -> "RandomPlan":
+        expected = plan.start_seconds * batches_per_start_second
+        if not np.sum(expected) > 0:
+            raise ValueError(f"The {split!r} split's RANDOM plan has no row with window starts to draw.")
+        accrual = tree.stream(split, "noise/accrual", epoch=0).random(len(expected))
+        return cls(tree, split, plan.rows, firsts, counts, plan.start_seconds, expected, accrual, reorder)
+
+    def batches_before(self, p: int) -> int:
+        """The batches of the passes before pass ``p``."""
+        return int(np.sum(np.floor(p * self.expected + self.accrual)))
+
+    def due(self, p: int) -> np.ndarray:
+        """Each row's batches in pass ``p``."""
+        return (np.floor((p + 1) * self.expected + self.accrual)
+                - np.floor(p * self.expected + self.accrual)).astype(np.int64)
+
+    def locate(self, g: int) -> Tuple[int, int]:
+        """The pass batch ``g`` lies in, and its position there."""
+        lo, hi = 0, int(np.ceil((g + len(self.expected) + 1) / np.sum(self.expected))) + 1
+        while hi - lo > 1:  # batches_before(lo) <= g < batches_before(hi)
+            middle = (lo + hi) // 2
+            lo, hi = (middle, hi) if self.batches_before(middle) <= g else (lo, middle)
+        return lo, g - self.batches_before(lo)
+
+    def order(self, p: int) -> np.ndarray:
+        """The order pass ``p`` visits the rows in."""
+        if p not in self._orders:
+            self._orders[p] = (self.tree.stream(self.split, "noise/segment_order", epoch=p).permutation(len(self.rows))
+                               if self.reorder else np.arange(len(self.rows)))
+        return self._orders[p]
+
+    def visits(self, g: int, width: int = MIXING_VISITS) -> np.ndarray:
+        """The rows of the ``width`` visits from batch ``g``'s on: its own row first."""
+        p, position = self.locate(int(g))
+        order = self.order(p)
+        due = self.due(p)[order]
+        rows = list(order[due > 0][np.searchsorted(np.cumsum(due[due > 0]), position, side="right"):][:width])
+        while len(rows) < width:
+            p += 1
+            order = self.order(p)
+            rows.extend(order[self.due(p)[order] > 0][:width - len(rows)])
+        return np.asarray(rows, dtype=np.int64)
+
+
+def _start_on_grid(rng: np.random.Generator, lo: int, hi: int, quantum: int, phase: int) -> Optional[int]:
+    """A start uniform over the integers x of [lo, hi) with x = phase mod ``quantum``; None if none."""
+    first, last = -(-(lo - phase) // quantum), (hi - 1 - phase) // quantum
+    return None if last < first else phase + quantum * int(rng.integers(first, last + 1))
+
+
+def draw_examples(
+        plan: RandomPlan,
+        streams: BatchStreams,
+        g: int,
+        ifos: Sequence["gf.IFO"],
+        num_examples: int,
+        num_onsource_samples: int,
+        num_offsource_samples: int,
+        separation_samples: float,
+        coincident: bool,
+        quantum: int = 1,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    The windows of batch ``g`` (at ``streams``): exactly ``num_examples`` examples, each
+    drawn jointly, its row from the batch's visits (``RandomPlan.visits``) weighted by
+    start-seconds (``noise/row``), then each detector's onsource start uniform over its
+    piece (``noise/start/{IFO}``), redrawn whole until no two detectors start closer than
+    ``separation_samples`` in absolute time, or, ``coincident``, every detector starting
+    at one time. A window's first sample lies on the grid of ``quantum`` samples the
+    read needs (``store.read``).
+
+    Returns, per example: its row (B,), each detector's onsource start as an absolute
+    sample index (B, I), and its rounds of draws (B,).
+
+    Raises:
+        SeparationRefused: an example found no window in ``SEPARATION_ROUNDS`` rounds,
+            naming the rows it drew from.
+    """
+    visits = plan.visits(g)
+    weights = plan.start_seconds[visits] / np.sum(plan.start_seconds[visits])
+    row_stream = streams.stream("noise/row")
+    start_streams = [streams.stream(f"noise/start/{ifo.name}") for ifo in ifos]
+    lo, phase = num_offsource_samples, num_offsource_samples % quantum
+    hi = plan.counts - num_onsource_samples - WINDOW_EDGE_BUFFER_SAMPLES
+    rows = np.empty(num_examples, dtype=np.int64)
+    starts = np.empty((num_examples, len(ifos)), dtype=np.int64)
+    rounds = np.zeros(num_examples, dtype=np.int64)
+    for example in range(num_examples):
+        for attempt in range(1, SEPARATION_ROUNDS + 1):
+            j = int(visits[row_stream.choice(len(visits), p=weights)])
+            firsts = plan.firsts[j]
+            if coincident:
+                at = _start_on_grid(start_streams[0], int(np.max(firsts + lo)), int(np.min(firsts + hi[j])),
+                                    quantum, phase)
+                drawn = None if at is None else np.full(len(ifos), at, dtype=np.int64)
+            else:
+                offsets = [_start_on_grid(stream, lo, int(hi[j, i]), quantum, phase)
+                           for i, stream in enumerate(start_streams)]
+                drawn = None if None in offsets else firsts + np.array(offsets, dtype=np.int64)
+                if drawn is not None and np.any(
+                        np.abs(drawn[:, None] - drawn[None, :])[np.triu_indices(len(ifos), 1)] < separation_samples):
+                    drawn = None
+            if drawn is not None:
+                rows[example], starts[example], rounds[example] = j, drawn, attempt
+                break
+        else:
+            raise SeparationRefused(
+                f"Batch {g} of the {plan.split!r} split found no example in {SEPARATION_ROUNDS} draws "
+                f"among rows {sorted(set(visits.tolist()))} (GPS pieces {plan.rows[visits].tolist()}): "
+                + ("their detectors share no start." if coincident
+                   else f"their detectors cannot start {separation_samples} samples apart.")
+            )
+    return rows, starts, rounds
+
+
 class NoiseDataObtainer(BaseDataObtainer):
     """
     Data obtainer for NOISE mode acquisition.
@@ -137,9 +299,8 @@ class NoiseDataObtainer(BaseDataObtainer):
     def _served_state(self) -> Dict[str, Any]:
         return {
             **super()._served_state(),
-            "_segment_generator": None,  # Reusable generator over the sampling plan
-            "_current_row": None,  # The GPS pieces of the row being drawn from
-            "current_segment": None,
+            # The split's RANDOM plans, by their window and batch (``random_plan``).
+            "_random_plans": {},
         }
 
     # =========================================================================
@@ -228,43 +389,6 @@ class NoiseDataObtainer(BaseDataObtainer):
         if not sum(len(r) for r in rows):
             return SamplingPlan(np.empty((0, num_ifos, 2)), np.empty(0), inseparable)
         return SamplingPlan(np.concatenate(rows), np.concatenate(start_seconds), inseparable)
-
-    def _planned_segments(
-            self,
-            plan: SamplingPlan,
-            batches_per_start_second: float,
-            sample_rate_hertz: float,
-            ifos: List[gf.IFO],
-        ):
-        """
-        Passes over ``plan``, without end: each due row's pieces, its loaded segment
-        and its number of batches.
-
-        Each pass, a row accrues its expected number of batches, its ``start_seconds``
-        times ``batches_per_start_second``, and is due the whole batches it has
-        accrued; the fraction left is carried to the next pass. Accruals start at a
-        random fraction, so rows that expect less than a batch a pass come due in
-        random order. Every row is thus drawn at its expected rate, to within one
-        batch over any number of passes. A pass in which no row is due is not the
-        end: the passes end only when one with rows due loads none of them.
-        """
-        expected = plan.start_seconds * batches_per_start_second
-        if not np.any(expected > 0):
-            return
-        accrued = self.rng.random(len(expected))
-        while True:
-            accrued += expected
-            due = np.floor(accrued).astype(int)
-            accrued -= due
-            loaded = not np.any(due)
-            for row, num_batches in zip(plan.rows, due):
-                if num_batches == 0:
-                    continue
-                for segment in self.acquire(sample_rate_hertz, row[None], ifos):
-                    loaded = True
-                    yield row, segment, num_batches
-            if not loaded:
-                return
 
     def calculate_bin_indices(self, segments, interval, start_period):
         """Calculate bin indices for segments based on time interval."""
@@ -358,9 +482,7 @@ class NoiseDataObtainer(BaseDataObtainer):
         guard at every edge with another split), less every vetoed event and
         glitch (``remove_unwanted_segments``). Sorted (N, 2) GPS intervals.
         """
-        return self.remove_unwanted_segments(
-            ifo, self.split_spec.admissible(self.get_all_segment_times(ifo), group_name)
-        )
+        return self.split_spec.admissible(self.noise_admissible_segments(ifo), group_name)
 
     def coincident_segments(self, ifos: List[gf.IFO], group_name: str) -> np.ndarray:
         """The time of split ``group_name`` every IFO's noise holds (``available_segments``)."""
@@ -512,150 +634,202 @@ class NoiseDataObtainer(BaseDataObtainer):
         num_examples_per_batch = num_examples_per_batch or gf.Defaults.num_examples_per_batch
         seed = gf.src.rng.check_root(seed if seed is not None else gf.Defaults.seed)
 
-        # Use shared post-processing from base class
-        def _post_process(batch):
-            return self._post_process_batch(
-                batch, 
-                window_spec.sample_rate_hertz, 
-                window_spec.onsource_duration_seconds,
-                whiten, 
-                crop
-            )
-
         # With no group, the segments already held: built, or set by hand.
         if group is not None:
             self._serve_group(ifos, seed, group)
         elif self.valid_segments is None:
             raise ValueError("Name the split to serve: group='train', 'validate' or 'test'.")
-        if self.rng is None:
-            self.rng = default_rng(seed)
-        
-        # Use WindowSpec for sample counts (centralized calculation)
-        num_onsource_samples = window_spec.num_onsource_samples
-        num_offsource_samples = window_spec.num_offsource_samples
 
         # Early validation
         if self.valid_segments is None or len(self.valid_segments) == 0:
             logging.warning("No valid segments available in NOISE mode. Generator will be empty.")
             return
-        
+
         if not hasattr(self.valid_segments, 'ndim') or self.valid_segments.ndim != 3:
             logging.warning(f"valid_segments has unexpected shape. Expected 3D array. Generator will be empty.")
             return
-        
-        # A window's footprint, offsource to padded onsource end. Detectors are never
-        # coincident: an example's windows start at least two footprints apart, so no
-        # two of them share a moment. Under the opt-in they start at one time.
-        coincident = self.coincidence == Coincidence.COINCIDENT
-        footprint_seconds = (num_onsource_samples + num_offsource_samples) / window_spec.sample_rate_hertz
-        separation_seconds = 0.0 if coincident else 2.0 * footprint_seconds
 
-        if not self._current_batch_index:
-            window_seconds = \
-                window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds
-            # A new plan starts new passes.
-            self._segment_generator = None
-            self.sampling_plan = self.plan_sampling(
-                self.valid_segments,
-                minimum_duration_seconds=2.0 * window_seconds,
-                footprint_seconds=footprint_seconds
-                + WINDOW_EDGE_BUFFER_SAMPLES / window_spec.sample_rate_hertz,
-                separation_seconds=separation_seconds,
-                sample_rate_hertz=window_spec.sample_rate_hertz,
-            )
-            if self.sampling_plan.inseparable:
-                logging.info(f"{self.sampling_plan.inseparable} rows left out: their detectors' "
-                             "windows cannot start two footprints apart.")
-        
-        if self.sampling_plan is None or len(self.sampling_plan.rows) == 0:
-            logging.warning("No valid segments available in NOISE mode. Generator will be empty.")
-            return
-
-        def emit(subarrays, background_chunks, start_gps_times):
-            # Shapes: ONSOURCE/OFFSOURCE = (Batch, IFO, Samples) = BIS
-            #         START_GPS_TIME = (Batch, IFO) = BI
-            #         DATA_LABEL = (Batch, IFO) = BI (all NOISE = 0)
-            #         COINCIDENT = (Batch,) = B
-            batch_size, num_ifos = subarrays.shape[:2]
-            return _post_process({
-                RV.ONSOURCE: subarrays,
-                RV.OFFSOURCE: background_chunks,
-                # The windows' first samples, as the first returned onsource sample.
-                RV.START_GPS_TIME: window_spec.onsource_start_gps(start_gps_times),
-                RV.DATA_LABEL: ops.full((batch_size, num_ifos), 0, dtype="int32"),  # NOISE = 0
-                RV.COINCIDENT: ops.full((batch_size,), int(coincident and num_ifos > 1), dtype="int32"),
-            })
-
+        tree = SeedTree(seed)
         if sampling_mode == SamplingMode.GRID:
-            yield from self._grid_pass(
-                window_spec, num_examples_per_batch, separation_seconds, ifos, emit, coincident)
+            plan = self.build_sampling_plan(window_spec)
+            if len(plan.rows) == 0:
+                logging.warning("No valid segments available in NOISE mode. Generator will be empty.")
+                return
+            emit = lambda onsource, offsource, gps: self._emit(window_spec, onsource, offsource, gps, whiten, crop)
+            yield from self._grid_pass(window_spec, num_examples_per_batch, self._separation_seconds(window_spec),
+                                       ifos, emit, self.coincidence == Coincidence.COINCIDENT)
             return
 
-        # Nominal density: saturation examples per onsource duration of window starts.
-        batches_per_start_second = self.saturation / (
-            num_examples_per_batch * window_spec.onsource_duration_seconds
+        batch = self.random_batcher(tree, window_spec, num_examples_per_batch, ifos, whiten, crop)
+        for k in count():
+            yield batch(tree.batch(self._served_group, 0, k) if self._served_group else tree.direct(k))
+
+    def _separation_seconds(self, window_spec: WindowSpec) -> float:
+        """
+        How far apart an example's detectors start. A window's footprint runs from its
+        offsource to its padded onsource's end. Detectors are never coincident: an
+        example's windows start at least two footprints apart, so no two of them share
+        a moment. Under the opt-in they start at one time.
+        """
+        if self.coincidence == Coincidence.COINCIDENT:
+            return 0.0
+        return 2.0 * (window_spec.num_onsource_samples + window_spec.num_offsource_samples) \
+            / window_spec.sample_rate_hertz
+
+    def build_sampling_plan(self, window_spec: WindowSpec) -> SamplingPlan:
+        """The sampling plan of the served segments for windows of ``window_spec`` (``plan_sampling``)."""
+        window_seconds = window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds
+        footprint_seconds = (window_spec.num_onsource_samples + window_spec.num_offsource_samples) \
+            / window_spec.sample_rate_hertz
+        self.sampling_plan = self.plan_sampling(
+            self.valid_segments,
+            minimum_duration_seconds=2.0 * window_seconds,
+            footprint_seconds=footprint_seconds + WINDOW_EDGE_BUFFER_SAMPLES / window_spec.sample_rate_hertz,
+            separation_seconds=self._separation_seconds(window_spec),
+            sample_rate_hertz=window_spec.sample_rate_hertz,
         )
+        if self.sampling_plan.inseparable:
+            logging.info(f"{self.sampling_plan.inseparable} rows left out: their detectors' "
+                         "windows cannot start two footprints apart.")
+        return self.sampling_plan
 
-        # The rows that failed to hold a batch since the last one served.
-        failed_rows = set()
-        while True:
-            while self._segment_exhausted:
-                # One generator of passes, kept across batches
-                if self._segment_generator is None:
-                    self._segment_generator = self._planned_segments(
-                        self.sampling_plan,
-                        batches_per_start_second,
-                        window_spec.sample_rate_hertz,
-                        ifos
-                    )
-                
+    def random_plan(self, tree: SeedTree, window_spec: WindowSpec, num_examples_per_batch: int) -> RandomPlan:
+        """
+        The served split's RANDOM plan (``RandomPlan``) for windows of ``window_spec``
+        and batches of ``num_examples_per_batch``: its rows in time order, each piece
+        measured as it is read, each row due its start-seconds at the nominal density
+        of ``saturation`` examples per onsource duration of window starts.
+        """
+        split = self._served_group or DIRECT_SPLIT
+        key = (tree, split, window_spec, num_examples_per_batch)
+        if key not in self._random_plans:
+            sampling = self.build_sampling_plan(window_spec)
+            if len(sampling.rows) == 0:
+                raise ValueError(f"The {split!r} split has no row long enough for a window "
+                                 f"of {window_spec.total_onsource_duration_seconds + window_spec.offsource_duration_seconds} s.")
+            order = np.lexsort(np.reshape(sampling.rows, (len(sampling.rows), -1)).T[::-1])
+            sampling = SamplingPlan(sampling.rows[order], sampling.start_seconds[order], sampling.inseparable)
+            firsts, counts = interiors(self.source, window_spec.sample_rate_hertz, np.reshape(sampling.rows, (-1, 2)))
+            shape = sampling.rows.shape[:2]
+            self._random_plans[key] = RandomPlan.build(
+                tree, split, sampling, np.reshape(firsts, shape), np.reshape(counts, shape),
+                self.saturation / (num_examples_per_batch * window_spec.onsource_duration_seconds),
+                reorder=self.segment_order == SegmentOrder.RANDOM,
+            )
+        return self._random_plans[key]
+
+    def random_batcher(
+            self,
+            tree: SeedTree,
+            window_spec: WindowSpec,
+            num_examples_per_batch: int,
+            ifos: List[gf.IFO],
+            whiten: bool = False,
+            crop: bool = False,
+            steps_per_epoch: Optional[int] = None,
+        ):
+        """
+        The served split's RANDOM batches, addressed by index: ``batch(streams)`` is a
+        pure function of the plan (``random_plan``) and its streams' address, (epoch,
+        k), which is batch ``g = epoch * steps_per_epoch + k`` of the split's passes.
+        Its windows (``draw_examples``) are read through the store, each its own read,
+        and the batches after it are read ahead (``store.prefetch``,
+        ``prefetch_depth`` batches on ``prefetch_workers`` threads), which never changes
+        a batch.
+        """
+        plan = self.random_plan(tree, window_spec, num_examples_per_batch)
+        rate = window_spec.sample_rate_hertz
+        on, off = window_spec.num_onsource_samples, window_spec.num_offsource_samples
+        separation = self._separation_seconds(window_spec) * rate
+        quantum = store_read.geometry(self.source, rate).up
+        coincident = self.coincidence == Coincidence.COINCIDENT
+        stream = self._served_split
+
+        def windows(address):
+            streams = BatchStreams(*address)
+            epoch = streams.epoch or 0
+            if epoch and steps_per_epoch is None:
+                raise ValueError("Batches of epochs after the first need the epoch's steps (steps_per_epoch).")
+            g = epoch * (steps_per_epoch or 0) + streams.k
+            _, starts, _ = draw_examples(plan, streams, g, ifos, num_examples_per_batch, on, off, separation,
+                                         coincident, quantum)
+            onsource, offsource = self.read_windows(ifos, rate, starts, on, off)
+            return onsource, offsource, starts / rate
+
+        prefetcher = Prefetcher(windows, name=plan.split, depth=self.prefetch_depth, workers=self.prefetch_workers)
+
+        def batch(streams: BatchStreams) -> Dict:
+            address = (streams.tree, streams.split, streams.epoch, streams.k, streams.prefix)
+            ahead = [address[:3] + (k,) + address[4:] for k in range(streams.k + 1, streams.k + 1 + prefetcher.depth)
+                     if steps_per_epoch is None or k < steps_per_epoch]
+            onsource, offsource, gps = prefetcher.get(address, ahead)
+            return self._emit(window_spec, ops.convert_to_tensor(onsource), ops.convert_to_tensor(offsource), gps,
+                              whiten, crop)
+
+        def held(ifo, start: int) -> None:
+            """Commit every tile one window's read needs; refuse, as its read would, if it is not held."""
+            g = store_read.geometry(self.source, rate)
+            span_start, span_stop = store_read.read_span(g, start - off, off + on)
+            seconds = whole_hertz(self.source.tile_seconds(g.native))
+            length = g.native * seconds
+            store = store_read.process_store()
+            for index in range(span_start // length, (span_stop - 1) // length + 1):
+                key = TileKey(self.source.source_id(index * seconds, g.native), ifo.name, g.native, seconds, index)
+                tile = store_read._tile(store, self.source, ifo, key, stream)
                 try:
-                    (self._current_row, self.current_segment,
-                     self._num_batches_in_current_segment) = next(self._segment_generator)
-                except StopIteration:
-                    logging.warning("No planned segment could be loaded. Generator exhausted.")
-                    self._segment_generator = None
-                    self.current_segment = None  # Clear to free memory
-                    return
+                    tile.view(max(span_start, key.start), min(span_stop, key.start + key.length))
+                except UnheldSamples:
+                    # The read itself names the contradiction and the exclusion around it.
+                    store_read.read(self.source, ifo, rate, start - off, off + on, stream=stream)
 
-                min_num_samples = min([ops.shape(tensor)[0] for tensor in self.current_segment.data])
+        def prepare(addresses: Sequence[BatchStreams]) -> List[store_read.TimelineContradiction]:
+            """Every contradiction the windows of ``addresses`` meet, each tile committed once."""
+            met = {}
+            for streams in addresses:
+                g = (streams.epoch or 0) * (steps_per_epoch or 0) + streams.k
+                _, starts, _ = draw_examples(plan, streams, g, ifos, num_examples_per_batch, on, off, separation,
+                                             coincident, quantum)
+                for example in starts:
+                    for ifo, start in zip(ifos, example):
+                        try:
+                            held(ifo, int(start))
+                        except store_read.TimelineContradiction as error:
+                            met.setdefault(error.exclusion, error)
+            return list(met.values())
 
-                if min_num_samples < (num_onsource_samples + num_offsource_samples):
-                    logging.warning("Segment too short!")
-                    self._segment_exhausted = True
-                else: 
-                    self._segment_exhausted = False
-            
-            while self._current_batch_index < self._num_batches_in_current_segment and not self._segment_exhausted:
-                subarrays, background_chunks, start_gps_times = self.current_segment.random_subsection(
-                    num_onsource_samples,
-                    num_offsource_samples,
-                    num_examples_per_batch,
-                    self.rng.integers(1E10),
-                    min_separation_seconds=separation_seconds,
-                    coincident=coincident,
-                )
+        batch.prefetcher = prefetcher
+        batch.plan = plan
+        batch.prepare = prepare
+        return batch
 
-                if subarrays is None:
-                    # The row cannot hold a batch of separated windows. Once every row
-                    # has failed since the last batch, none will serve one.
-                    self._segment_exhausted = True
-                    failed_rows.add(np.asarray(self._current_row).tobytes())
-                    if len(failed_rows) == len(self.sampling_plan.rows):
-                        raise ValueError(
-                            f"No row of the {self._served_group!r} split holds a batch of "
-                            f"{num_examples_per_batch} {sampling_mode.name} windows whose detectors "
-                            + ("start at one time." if coincident else f"start {separation_seconds} s apart.")
-                        )
-                    continue
+    def read_windows(self, ifos: List[gf.IFO], sample_rate_hertz: float, starts: np.ndarray,
+                     num_onsource_samples: int, num_offsource_samples: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Each example's windows, read through the store (``store.read``), one read per
+        window: (B, I, on) onsource from each start (absolute sample indices, (B, I)),
+        and the (B, I, off) offsource just before it. The one place RANDOM reads strain.
+        """
+        stream = self._served_split
+        data = np.array([[store_read.read(self.source, ifo, sample_rate_hertz, int(start) - num_offsource_samples,
+                                          num_offsource_samples + num_onsource_samples, stream=stream).data
+                          for ifo, start in zip(ifos, example)] for example in starts], dtype=np.float32)
+        return data[..., num_offsource_samples:], data[..., :num_offsource_samples]
 
-                failed_rows.clear()
-                self._current_batch_index += 1
-                if not self._current_batch_index < self._num_batches_in_current_segment:
-                    self._segment_exhausted = True
-                    self._current_batch_index = 0
-
-                yield emit(subarrays, background_chunks, start_gps_times)
+    def _emit(self, window_spec: WindowSpec, onsource, offsource, start_gps_times, whiten: bool, crop: bool) -> Dict:
+        """
+        A batch's dict, post-processed (``_post_process_batch``). Shapes: ONSOURCE and
+        OFFSOURCE (B, I, samples); START_GPS_TIME, the first returned onsource sample's
+        time, and DATA_LABEL (B, I), all NOISE; COINCIDENT (B,).
+        """
+        batch_size, num_ifos = onsource.shape[:2]
+        coincident = self.coincidence == Coincidence.COINCIDENT
+        return self._post_process_batch({
+            RV.ONSOURCE: onsource,
+            RV.OFFSOURCE: offsource,
+            RV.START_GPS_TIME: window_spec.onsource_start_gps(start_gps_times),
+            RV.DATA_LABEL: ops.full((batch_size, num_ifos), 0, dtype="int32"),  # NOISE = 0
+            RV.COINCIDENT: ops.full((batch_size,), int(coincident and num_ifos > 1), dtype="int32"),
+        }, window_spec.sample_rate_hertz, window_spec.onsource_duration_seconds, whiten, crop)
 
     def _grid_pass(self, window_spec, num_examples_per_batch: int, separation_seconds: float,
                    ifos: List[gf.IFO], emit, coincident: bool = False):

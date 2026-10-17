@@ -10,7 +10,7 @@ validator's streams cannot coincide with training's, whatever the seeds.
 
 Every window the validator scores, whatever its origin (the dataset's own
 noise, time-slid real noise, a real event), is conditioned by its stage
-dataset's code (``Dataset.prepare``) in that dataset's window geometry, so
+dataset's code (``Dataset.model_inputs``) in that dataset's window geometry, so
 every score is comparable with every other.
 """
 
@@ -174,7 +174,7 @@ class ValidationBank:
         """
         The noise background's dataset, built once per bank (after `split_spec` has
         been checked): `generate_noise` scores its windows, or its conditioning of
-        time-slid ones, and real events are conditioned by it too (`prepare`).
+        time-slid ones, and real events are conditioned by it too (`model_inputs`).
         """
         return self.stage_dataset("far")
 
@@ -209,9 +209,9 @@ class ValidationBank:
     def score_windows(self, dataset: gf.Dataset, onsource, offsource) -> np.ndarray:
         """
         Scores of raw windows in ``dataset``'s geometry (padded onsource, offsource),
-        conditioned by ``dataset.prepare``: exactly as its own examples are scored.
+        conditioned by ``dataset.model_inputs``: exactly as its own examples are scored.
         """
-        return self._score(dataset.prepare(onsource, offsource))
+        return self._score(dataset.model_inputs(onsource, offsource))
 
     def _gps(self, y, n: int) -> Optional[np.ndarray]:
         if not self._real_noise:
@@ -250,7 +250,7 @@ class ValidationBank:
             for batch in background.batches(cfg.batch_size, cfg.num_examples):
                 if not streams or streams[-1] is not batch.stream:
                     streams.append(batch.stream)
-                x = dataset.prepare(batch.onsource, batch.offsource)
+                x = dataset.model_inputs(batch.onsource, batch.offsource)
                 yield self._score(x), x, {gf.ReturnVariables.START_GPS_TIME.name: batch.start_gps}
 
         self._score_noise(scored())
@@ -417,7 +417,7 @@ class ValidationBank:
 
         background = self.background()
         if onsource:
-            x = dataset.prepare(np.concatenate(onsource), np.concatenate(offsource))
+            x = dataset.model_inputs(np.concatenate(onsource), np.concatenate(offsource))
             whitened = x.get(gf.ReturnVariables.WHITENED_ONSOURCE.name)
             for i, (t, s) in enumerate(zip(gps, self._score(x))):
                 event = next((e for e in events if abs(e["gps"] - t) < 20.0), None)

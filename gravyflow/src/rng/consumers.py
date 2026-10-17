@@ -17,9 +17,12 @@ _LEAVES = tuple(re.compile(pattern) for pattern in (
     # Noise: one stream per detector and window, so adding a detector moves
     # no other detector's noise.
     rf"noise/{_SEGMENT}/(on|off)",
-    r"noise/segment_order",
+    # Real noise drawn at random: each pass's row order (its epoch counts
+    # passes), each row's accrual phase, each example's row and its detectors'
+    # window starts.
+    r"noise/(segment_order|accrual|row)",
     rf"noise/start/{_SEGMENT}",
-    # The sequential real-noise and transient readers, until they are
+    # The sequential real-noise (GRID) and transient readers, until they are
     # addressed by index.
     r"noise/real",
     r"transient/(order|balance|reader)",

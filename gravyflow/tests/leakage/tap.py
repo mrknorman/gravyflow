@@ -38,7 +38,7 @@ class Tapped(NamedTuple):
     #: The (epoch, k) address of each of ``batches``; None for a dataset that
     #: is not index-addressed, whose batches depend on the order asked.
     addresses: List[Optional[Address]]
-    #: The raw windows it conditioned for its caller (`prepare`), in the order
+    #: The raw windows it conditioned for its caller (`model_inputs`), in the order
     #: given: each call's padded onsource and offsource, as ONSOURCE and
     #: OFFSOURCE. These are windows it scores but never serves: time-slid
     #: noise, a real event.
@@ -64,7 +64,7 @@ class DatasetTap:
     """
     Records the batches every `GravyflowDataset` built while it is installed
     serves, a subclass's (`ComposedDataset`) included, and the raw windows each
-    conditions for its caller (`prepare`).
+    conditions for its caller (`model_inputs`).
 
     Each dataset is built asking for ``outputs`` besides its caller's own.
     Asking for an output selects it and draws nothing more. Every batch served
@@ -115,10 +115,10 @@ class DatasetTap:
                     _require_same(self._record.batches[self._seen[key]], served, self.group, address)
                 return x, {name: value for name, value in y.items() if name in self._asked}
 
-            def prepare(self, onsource, offsource):
+            def model_inputs(self, onsource, offsource):
                 self._record.prepared.append({RV.ONSOURCE.name: np.asarray(onsource),
                                               RV.OFFSOURCE.name: np.asarray(offsource)})
-                return super().prepare(onsource, offsource)
+                return super().model_inputs(onsource, offsource)
 
         # Every dataset class is tapped, each subclass as its own: example models build
         # `gf.GravyflowDataset`, `gf.Dataset` builds the module's, and composed data

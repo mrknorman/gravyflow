@@ -50,7 +50,6 @@ _MODULES = {
     # Utility functions
     "ensure_even": "base",
     "ifo_canonical_key": "base",
-    "random_subsection": "base",
     "concatenate_batches": "base",
     # Classes
     "BaseDataObtainer": "base",

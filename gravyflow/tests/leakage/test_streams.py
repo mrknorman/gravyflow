@@ -485,7 +485,7 @@ def test_augmentation_stays_in_split(world, monkeypatch):
     and a composed dataset's pool, and the validator: every evaluation row is the
     strain as recorded, forward and positive, and every training row is that
     strain negated and reversed. The validator's rows are every window it scores,
-    served or read raw and conditioned (`prepare`): its time-slid noise in both
+    served or read raw and conditioned (`model_inputs`): its time-slid noise in both
     splits, and a real event in test, read at the rate real events are read at.
     Real events refuse time reversal and random shift.
     """

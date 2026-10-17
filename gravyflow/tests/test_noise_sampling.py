@@ -154,34 +154,3 @@ class TestIFODataGridWindows:
         """Pieces too short to hold two windows 2S apart give no example, never a coincident one."""
         row = self._row([8.0, 8.0], [1e9, 1e9])
         assert len(row.grid_windows(self.ONSOURCE, self.OFFSOURCE, 12.0, [None, None])[2]) == 0
-
-
-class TestSegmentCyclingRegression:
-    """Regression tests for segment cycling bug fix.
-    
-    Prior to the fix, the generator would get stuck on a single segment
-    because the inner while loop condition didn't check _segment_exausted.
-    """
-    
-    def test_segment_exhausted_flag_checked_in_loop(self):
-        """Verify _segment_exausted is checked in the inner while condition."""
-        # This is a code structure test - verify the fix is in place
-        # Note: The public get_onsource_offsource_chunks is now a wrapper,
-        # check the private implementation method instead.
-        import inspect
-        source = inspect.getsource(gf.NoiseDataObtainer._yield_onsource_offsource_chunks)
-        
-        # The fix added "and not self._segment_exhausted" to the inner while
-        assert "and not self._segment_exhausted" in source
-    
-    def test_outer_while_true_wraps_segment_acquisition(self):
-        """Verify outer while True loop wraps both segment acquisition and batch yielding."""
-        # Note: The public get_onsource_offsource_chunks is now a wrapper,
-        # check the private implementation method instead.
-        import inspect
-        source = inspect.getsource(gf.NoiseDataObtainer._yield_onsource_offsource_chunks)
-        
-        # The fix wrapped everything in "while True"
-        assert "while True:" in source
-        # And the segment acquisition is inside it
-        assert "while self._segment_exhausted:" in source

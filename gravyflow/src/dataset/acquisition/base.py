@@ -80,6 +80,47 @@ def _exclusions(entries) -> Tuple[Tuple[str, Tuple[float, float], str], ...]:
     return tuple(sorted(checked))
 
 
+def _count(value, name: str, least: int) -> int:
+    """``value`` as an int of at least ``least``; anything else refused by name."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < least:
+        raise ValueError(f"{name} must be an integer of at least {least}, got {value!r}.")
+    return int(value)
+
+
+def _frozen(segments) -> np.ndarray:
+    """``segments`` as a read-only (N, 2) float64 copy."""
+    frozen = np.array(np.reshape(np.asarray(segments, dtype=np.float64), (-1, 2)))
+    frozen.flags.writeable = False
+    return frozen
+
+
+@dataclass(frozen=True)
+class DetectorAvailability:
+    """
+    One detector's time, sorted (N, 2) GPS intervals: ``readable``, the time its
+    source's timeline says holds data less the obtainer's exclusions, which strain is
+    read from and contradictions are judged against; and ``noise_admissible``, the
+    readable time less every veto, which noise is drawn from.
+    """
+    readable: np.ndarray
+    noise_admissible: np.ndarray
+
+
+@dataclass(frozen=True)
+class Availability:
+    """An obtainer's availability, frozen when it was built: each detector's, by name."""
+    detectors: Tuple[Tuple[str, DetectorAvailability], ...]
+
+    def of(self, ifo: gf.IFO) -> DetectorAvailability:
+        for name, availability in self.detectors:
+            if name == ifo.name:
+                return availability
+        raise ValueError(
+            f"The availability frozen for {[name for name, _ in self.detectors]} holds no "
+            f"{ifo.name}: freeze it for every detector read (freeze_availability)."
+        )
+
+
 def ifo_canonical_key(ifos) -> tuple:
     """
     Generate a canonical key for a list of IFOs.
@@ -289,11 +330,6 @@ def window_offsets_seconds(positions, time_interval_seconds) -> np.ndarray:
     return np.asarray(positions).astype(np.float64) * float(time_interval_seconds)
 
 
-#: Rejection draws per detector, for each example, before its start is drawn
-#: constructively from the starts far enough from the others' (``separated_starts``).
-SEPARATION_DRAWS = 16
-
-
 def separable(bounds: Sequence[Tuple[float, float]], separation: float) -> bool:
     """
     Whether one point per interval (``bounds``: [lo, hi] on one clock) can be placed
@@ -316,71 +352,6 @@ def separable(bounds: Sequence[Tuple[float, float]], separation: float) -> bool:
     return False
 
 
-def _allowed_draw(rng: np.random.Generator, lo: int, hi: int, taken: np.ndarray, separation: float):
-    """
-    A start uniform over the integers of [lo, hi) at least ``separation`` from every
-    start in ``taken`` (on the same clock), or None when there is none.
-    """
-    pieces = [(lo, hi)]
-    for centre in np.sort(taken):
-        cut_lo, cut_hi = int(np.floor(centre - separation)) + 1, int(np.ceil(centre + separation))
-        pieces = [part for a, b in pieces
-                  for part in ((a, min(b, cut_lo)), (max(a, cut_hi), b)) if part[1] > part[0]]
-    ends = np.cumsum([b - a for a, b in pieces], dtype=np.int64)
-    if not len(ends) or ends[-1] == 0:
-        return None
-    k = int(rng.integers(ends[-1]))
-    index = int(np.searchsorted(ends, k, side="right"))
-    return pieces[index][0] + k - (int(ends[index - 1]) if index else 0)
-
-
-def separated_starts(
-        rng: np.random.Generator,
-        bounds: Sequence[Tuple[int, int]],
-        origins_samples: Sequence[float],
-        separation_samples: float,
-        num_examples: int,
-    ) -> np.ndarray:
-    """
-    Window start indices for up to ``num_examples`` examples, one per detector, no two
-    of an example's detectors closer than ``separation_samples`` in absolute time.
-
-    Detector i's start is uniform on ``[lo_i, hi_i)`` (``bounds``) given the earlier
-    detectors' starts, over the part of it at least ``separation_samples`` from each
-    of them: it is redrawn while it conflicts, up to ``SEPARATION_DRAWS`` times, then
-    drawn from that part directly. An example whose detector has no such start is
-    dropped, never emitted. ``origins_samples[i]`` is detector i's first sample on a
-    common clock, in samples.
-
-    Returns an (M, detectors) int64 array, M <= num_examples.
-    """
-    origins = np.asarray(origins_samples, dtype=np.float64)
-    starts = np.empty((num_examples, len(bounds)), dtype=np.int64)
-    alive = np.ones(num_examples, dtype=bool)
-    for i, (lo, hi) in enumerate(bounds):
-        if hi <= lo:
-            return np.empty((0, len(bounds)), dtype=np.int64)
-        starts[:, i] = rng.integers(lo, hi, size=num_examples)
-
-        def conflicts():
-            gaps = np.abs((starts[:, i] + origins[i])[:, None] - (starts[:, :i] + origins[:i]))
-            return alive & np.any(gaps < separation_samples, axis=1)
-
-        for _ in range(SEPARATION_DRAWS):
-            conflict = conflicts()
-            if not conflict.any():
-                break
-            starts[conflict, i] = rng.integers(lo, hi, size=int(conflict.sum()))
-        for example in np.flatnonzero(conflicts()):
-            taken = starts[example, :i] + origins[:i] - origins[i]
-            start = _allowed_draw(rng, lo, hi, taken, separation_samples)
-            if start is None:
-                alive[example] = False
-            else:
-                starts[example, i] = start
-    return starts[alive]
-
-
 def _common_clock(origins_samples: Sequence[float]) -> np.ndarray:
     """
     Each detector's first sample on the common clock, in whole samples: coincident
@@ -391,28 +362,6 @@ def _common_clock(origins_samples: Sequence[float]) -> np.ndarray:
     if not np.allclose(origins, shift, rtol=0.0, atol=1e-6):
         raise ValueError(f"Coincident pieces must share one sample grid; their origins are {origins} samples.")
     return shift
-
-
-def coincident_starts(
-        rng: np.random.Generator,
-        bounds: Sequence[Tuple[int, int]],
-        origins_samples: Sequence[float],
-        num_examples: int,
-    ) -> np.ndarray:
-    """
-    Window start indices for ``num_examples`` examples whose detectors all start at one
-    time (the ``COINCIDENT`` opt-in): uniform over the times every detector's
-    ``[lo_i, hi_i)`` allows on the common clock (``origins_samples``).
-
-    Returns an (M, detectors) int64 array: M is ``num_examples``, or 0 when the
-    pieces share no start.
-    """
-    shift = _common_clock(origins_samples)
-    lo = max(lo_i + s for (lo_i, _), s in zip(bounds, shift))
-    hi = min(hi_i + s for (_, hi_i), s in zip(bounds, shift))
-    if hi <= lo:
-        return np.empty((0, len(bounds)), dtype=np.int64)
-    return rng.integers(lo, hi, size=num_examples)[:, None] - shift[None, :]
 
 
 def grid_slots(bounds: Tuple[int, int], stride: int) -> int:
@@ -501,52 +450,6 @@ def concatenate_batches(subarrays, background_chunks, start_times):
     return stacked_subarrays, stacked_background_chunks, stacked_start_times
 
 
-def random_subsection(
-        data,
-        start_gps_time,
-        time_interval_seconds,
-        num_onsource_samples: int,
-        num_offsource_samples: int,
-        num_examples_per_batch: int,
-        seed: int,
-        min_separation_seconds: float = 0.0,
-        coincident: bool = False,
-    ):
-    """
-    ``num_examples_per_batch`` random windows from each detector's piece (``data[i]``,
-    its first sample at GPS ``start_gps_time[i]``), no two detectors' window starts
-    closer than ``min_separation_seconds`` (``separated_starts``); or, ``coincident``,
-    every detector's starting at one time (``coincident_starts``).
-
-    Returns (onsource, offsource, start GPS times): (B, I, on), (B, I, off) and (B, I)
-    float64, the GPS time of each padded onsource's first sample; or three Nones
-    when the pieces cannot hold a full batch of separated windows.
-    """
-    rng = default_rng(seed)
-    interval = float(time_interval_seconds)
-    bounds = [window_start_bounds(int(ops.shape(tensor)[0]), num_onsource_samples, num_offsource_samples)
-              for tensor in data]
-    first_gps = as_gps_times(np.asarray(start_gps_time, dtype=np.float64))
-    origins = (first_gps - first_gps[0]) / interval
-    if coincident:
-        starts = coincident_starts(rng, bounds, origins, num_examples_per_batch)
-    else:
-        starts = np.empty((0, len(data)), dtype=np.int64)
-        for _ in range(4):
-            needed = num_examples_per_batch - len(starts)
-            if needed == 0:
-                break
-            starts = np.concatenate([starts, separated_starts(
-                rng, bounds, origins, min_separation_seconds / interval, needed)])
-    if len(starts) < num_examples_per_batch:
-        return None, None, None
-
-    onsource, offsource = zip(*(gather_windows(tensor, starts[:, i], num_onsource_samples, num_offsource_samples)
-                                for i, tensor in enumerate(data)))
-    gps_times = first_gps[None, :] + window_offsets_seconds(starts, interval)
-    return (ops.stack(onsource, axis=1), ops.stack(offsource, axis=1), gps_times)
-
-
 # =============================================================================
 # IFO DATA CONTAINER
 # =============================================================================
@@ -587,28 +490,6 @@ class IFOData:
         # Converts the data to a numpy array, handling different data types
         return [ops.convert_to_numpy(data) for data in self.data]
 
-    def random_subsection(
-        self,
-        num_onsource_samples: int,
-        num_offsource_samples: int,
-        num_examples_per_batch: int,
-        seed: int,
-        min_separation_seconds: float = 0.0,
-        coincident: bool = False,
-    ):
-        """Random windows of this row's pieces (``random_subsection``)."""
-        return random_subsection(
-            self.data,
-            self.start_gps_time,
-            self.time_interval_seconds,
-            num_onsource_samples,
-            num_offsource_samples,
-            num_examples_per_batch,
-            seed,
-            min_separation_seconds,
-            coincident,
-        )
-    
     def grid_windows(
         self,
         num_onsource_samples: int,
@@ -622,9 +503,10 @@ class IFOData:
         ``coincident`` or not), one padded onsource apart.
 
         ``used[i]`` marks detector i's slots already served this pass, or is None for a
-        piece not walked before. Returns (onsource, offsource, start GPS times) as
-        ``random_subsection`` does, with as many examples as the row has separated
-        slots left (perhaps none), and the updated marks.
+        piece not walked before. Returns (onsource, offsource, start GPS times): (B, I,
+        on), (B, I, off) and (B, I) float64, the GPS time of each padded onsource's first
+        sample, with as many examples as the row has separated slots left (perhaps
+        none); and the updated marks.
         """
         first_gps = as_gps_times(np.asarray(self.start_gps_time, dtype=np.float64))
         interval = self.time_interval_seconds
@@ -675,9 +557,15 @@ class BaseDataObtainer(ABC):
             source : Optional[DataSource] = None,
             coincidence : Coincidence = Coincidence.SEPARATED,
             exclusions : Sequence[Tuple[Any, Tuple[float, float], str]] = (),
+            prefetch_depth : int = 2,
+            prefetch_workers : int = 2,
         ):
         """
         Args (selection):
+            prefetch_depth, prefetch_workers: How many batches past the one asked for
+                are read ahead, and on how many background threads
+                (``store.prefetch``). They never change a batch, so they are not part
+                of the specification; depth 0 reads every batch when it is asked for.
             augmentations: Augmentations a dataset applies to its training
                 split's raw strain, per example (``gf.SignReversal``,
                 ``gf.TimeReversal``, ``gf.RandomShift``, ``gf.AddNoise``); none by
@@ -723,6 +611,11 @@ class BaseDataObtainer(ABC):
         self.max_segment_duration_seconds = max_segment_duration_seconds
         self.saturation = saturation
         self.exclusions = _exclusions(exclusions)
+        self.prefetch_depth = _count(prefetch_depth, "prefetch_depth", 0)
+        self.prefetch_workers = _count(prefetch_workers, "prefetch_workers", 1)
+        # Readable and noise-admissible time, frozen by ``freeze_availability``: None
+        # until then, when each read asks the source.
+        self.availability = None
         self.split_spec = as_split_spec(split_spec)
         self.source = gf.Defaults.source if source is None else source
         if not isinstance(self.source, DataSource):
@@ -767,23 +660,25 @@ class BaseDataObtainer(ABC):
             # This build of the served state: a generator serves only while it
             # is unchanged (see _while_served).
             "_served_build": object(),
+            # The transient reader's draws, until transients are addressed by index.
             "rng": None,
             "ifos": None,
             "valid_segments": None,
             "sampling_plan": None,
-            "_current_batch_index": 0,
-            "_segment_exhausted": True,
-            "_num_batches_in_current_segment": 0,
         }
+
+    #: Attributes that never change the data served, only how it is fetched: how far
+    #: ahead and on how many threads strain is read (``store.prefetch``).
+    _NOT_SPECIFICATION = ("prefetch_depth", "prefetch_workers")
 
     def specification(self) -> Dict[str, Any]:
         """
         Everything that determines the data this obtainer serves: every attribute but
-        its served state (``_served_state``). Content fingerprints
-        (``validate.provenance.canonical``) read it, so changing any parameter that
-        changes the data changes the fingerprint.
+        its served state (``_served_state``) and ``_NOT_SPECIFICATION``. Content
+        fingerprints (``validate.provenance.canonical``) read it, so changing any
+        parameter that changes the data changes the fingerprint.
         """
-        excluded = set(self._served_state())
+        excluded = set(self._served_state()) | set(self._NOT_SPECIFICATION)
         specification = {name: value for name, value in sorted(vars(self).items()) if name not in excluded}
         # The numerics that make the served samples from fetched strain.
         specification["data_versions"] = dict(DATA_VERSIONS)
@@ -971,6 +866,8 @@ class BaseDataObtainer(ABC):
         them, and a read that meets samples the source does not hold is refused by name.
         Noise draws from these times less the vetoes (``remove_unwanted_segments``).
         """
+        if self.availability is not None:
+            return self.availability.of(ifo).readable
         valid_segments = []
         for index, start_gps_time in enumerate(self.start_gps_times):
             valid_segments.append(
@@ -992,6 +889,37 @@ class BaseDataObtainer(ABC):
         excluded = [interval for name, interval, _ in self.exclusions if name == ifo.name]
         return subtract_segments(readable, np.array(excluded)) if excluded else readable
     
+    def noise_admissible_segments(self, ifo: gf.IFO) -> np.ndarray:
+        """
+        The time of ``ifo`` that noise may be drawn from: its readable time
+        (``get_all_segment_times``) less every veto (``remove_unwanted_segments``),
+        frozen with the availability once it is frozen.
+        """
+        if self.availability is not None:
+            return self.availability.of(ifo).noise_admissible
+        return self.remove_unwanted_segments(ifo, self.get_all_segment_times(ifo))
+
+    def remove_unwanted_segments(self, ifo: gf.IFO, valid_segments: np.ndarray) -> np.ndarray:
+        """``valid_segments`` less what noise may never be drawn from; nothing, by default."""
+        return np.reshape(np.asarray(valid_segments, dtype=np.float64), (-1, 2))
+
+    def freeze_availability(self, ifos: Sequence[gf.IFO]) -> "Availability":
+        """
+        Compute ``ifos``' readable and noise-admissible time once and freeze it: from
+        then on every plan reads these sets, never the source's timeline, so a plan is
+        the same on every host and in every worker that receives this obtainer, and the
+        sets are part of the specification, so of every fingerprint. Freezing again
+        for detectors already frozen changes nothing; others are added.
+        """
+        frozen = {} if self.availability is None else dict(self.availability.detectors)
+        for ifo in ensure_list(ifos):
+            if ifo.name not in frozen:
+                readable = self.get_all_segment_times(ifo)
+                frozen[ifo.name] = DetectorAvailability(
+                    _frozen(readable), _frozen(self.remove_unwanted_segments(ifo, readable)))
+        self.availability = Availability(tuple(sorted(frozen.items())))
+        return self.availability
+
     def get_event_veto_segments(self) -> np.ndarray:
         """
         Veto segments for every event GWOSC publishes: the signal's time in band from

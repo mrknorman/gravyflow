@@ -247,7 +247,7 @@ def test_real_event_inputs_feed_the_coherence_network():
     rng = np.random.default_rng(2)
     on = rng.normal(size=(3, 3, 2048)).astype(np.float32)
     off = rng.normal(size=(3, 3, 16 * 1024)).astype(np.float32)
-    x = bank.stage_dataset("far").prepare(on, off)
+    x = bank.stage_dataset("far").model_inputs(on, off)
     assert sorted(x) == ["ROLLING_PEARSON_ONSOURCE", "WHITENED_ONSOURCE"]
     assert x["ROLLING_PEARSON_ONSOURCE"].shape == (3, *config.correlation_shape)
     assert x["WHITENED_ONSOURCE"].shape == (3, 3, 1024)

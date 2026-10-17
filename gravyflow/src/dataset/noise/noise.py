@@ -352,13 +352,16 @@ class NoiseObtainer(Obtainer):
             num_examples_per_batch : int = None,
             ifos: List[gf.IFO] = None,
             scale_factor : None = None,
-            sampling_mode : "gf.SamplingMode" = None
+            sampling_mode : "gf.SamplingMode" = None,
+            steps_per_epoch : int = None,
         ) -> NoiseBatcher:
         """
         The noise of split ``group``, one batch per address.
 
-        WHITE and COLORED noise is a pure function of the batch's streams.
-        PSEUDO_REAL and REAL noise is read sequentially, from readers seeded
+        WHITE and COLORED noise, and REAL noise drawn at random, is a pure
+        function of the batch's streams: REAL batch k of epoch e is batch
+        e * ``steps_per_epoch`` + k of the split's passes (``random_batcher``).
+        PSEUDO_REAL and GRID noise is read sequentially, from readers seeded
         from ``tree`` and ``group``, until it is addressed by index.
         ``scale_factor`` is deprecated and ignored.
         """
@@ -413,6 +416,20 @@ class NoiseObtainer(Obtainer):
                     ifos=ifos
                 ))
 
+            case NoiseType.REAL if addressed_by_index(self, sampling_mode):
+                batch = self._reader(ifos, tree, group, sample_rate_hertz).random_batcher(
+                    tree,
+                    WindowSpec.from_params(
+                        sample_rate_hertz=sample_rate_hertz,
+                        onsource_duration_seconds=onsource_duration_seconds,
+                        offsource_duration_seconds=offsource_duration_seconds,
+                        crop_duration_seconds=crop_duration_seconds,
+                    ),
+                    num_examples_per_batch,
+                    ifos,
+                    steps_per_epoch=steps_per_epoch,
+                )
+
             case NoiseType.REAL:
                 ifo_data_obtainer = self._reader(ifos, tree, group, sample_rate_hertz)
                 batch = sequential_batcher(ifo_data_obtainer.get_onsource_offsource_chunks(
@@ -434,7 +451,12 @@ class NoiseObtainer(Obtainer):
                     "NoiseType.PSEUDO_REAL, or NoiseType.REAL. "
                 )
 
-        return lambda streams: enforce_shapes(batch(streams), num_ifos=len(ifos))
+        def checked(streams: BatchStreams) -> Dict:
+            return enforce_shapes(batch(streams), num_ifos=len(ifos))
+
+        # Noise addressed by index can be prepared ahead of a run (``Dataset.prepare``).
+        checked.prepare = getattr(batch, "prepare", None)
+        return checked
 
     def _reader(self, ifos, tree : SeedTree, group : str, sample_rate_hertz : float):
         """
@@ -572,6 +594,19 @@ class NoiseObtainer(Obtainer):
                 }
 
 
+def addressed_by_index(obtainer, sampling_mode=None) -> bool:
+    """
+    Whether ``obtainer``'s batches are a pure function of their address: simulated
+    noise (WHITE, COLORED), and real noise drawn at random (``SamplingMode.RANDOM``)
+    through a noise obtainer (``random_batcher``). The rest is read in order.
+    """
+    if not reads_real_data(obtainer):
+        return True
+    return (isinstance(obtainer, NoiseObtainer) and obtainer.noise_type == NoiseType.REAL
+            and sampling_mode in (None, gf.SamplingMode.RANDOM)
+            and isinstance(obtainer.ifo_data_obtainer, gf.NoiseDataObtainer))
+
+
 def reads_real_data(obtainer) -> bool:
     """
     Whether ``obtainer`` reads real data. Every obtainer does but simulated noise
@@ -592,6 +627,7 @@ def obtainer_batcher(obtainer, tree: SeedTree, group: str, **kwargs) -> NoiseBat
     if isinstance(obtainer, NoiseObtainer):
         return obtainer.batcher(tree, group, **kwargs)
     kwargs.pop("sampling_mode", None)
+    kwargs.pop("steps_per_epoch", None)
     reader = deepcopy(obtainer)
     return sequential_batcher(
         reader(**kwargs, group=group, seed=sequential_seed(tree, group, "transient/reader"))
