@@ -5,8 +5,10 @@ Its contract: alias suppression of at least 100 dB above the new Nyquist frequen
 passband ripple of at most 1e-3 up to 0.9 times it, output sample n at exactly
 ``t0 + n / rate_out``, and a linear ramp kept. Every window read (real-noise segments,
 transient windows and their partners) serves a tone above the new Nyquist frequency
-suppressed when its source serves another rate than the read's. No other code in the
-library resamples strain.
+suppressed when its source serves another rate than the read's. The census: each site
+where strain changes rate serves exactly the samples ``gf.resample`` gives, every
+transient window sample exact to both ends of its stored row; no other code names a
+resampler or slices with a stride.
 """
 
 import ast
@@ -19,9 +21,12 @@ from scipy.signal import freqz
 
 import gravyflow as gf
 from gravyflow.src.dataset.acquisition.base import segment_key
+from gravyflow.src.dataset.config import TransientDefaults
+from gravyflow.src.dataset.features.glitch_cache import TransientCache
 from gravyflow.src.utils.resample import (
     PASSBAND_FRACTION, resample, resample_filter, resample_margin, resample_ratio, whole_hertz,
 )
+from gravyflow.src.utils.tensor import centre_index
 from gravyflow.tests import test_segment_provenance as noise_reads
 from gravyflow.tests import test_transient_windows as transient_reads
 
@@ -207,6 +212,87 @@ def test_transient_windows_at_a_rate_that_does_not_divide_the_stored_one(tmp_pat
 
 
 # ------------------------------------------------------------- the census
+#
+# The census is semantic where strain changes rate: each site serves, bit for bit, what
+# gf.resample gives the strain it read, on white noise, which any other filter, stride,
+# gather, reshape or interpolation changes. Elsewhere, a syntax census refuses the
+# resamplers it can name and strided slices.
+
+class NoiseFetch:
+    """
+    A fake GWOSC fetch: [start, end) on the absolute grid at ``served_rate``, whatever
+    rate was asked for, holding white noise. Records each series served.
+    """
+
+    def __init__(self, served_rate):
+        self.served_rate, self.served = float(served_rate), []
+
+    def __call__(self, start, end, ifo, frame_type, channel, sample_rate_hertz=None):
+        rate = self.served_rate
+        first, stop = int(np.ceil(start * rate - 1e-6)), int(np.ceil(end * rate - 1e-6))
+        noise = np.random.default_rng(len(self.served)).normal(size=stop - first)
+        self.served.append(TimeSeries(noise, t0=first / rate, sample_rate=rate, channel=f"{ifo.name}:FAKE-NOISE"))
+        return self.served[-1]
+
+
+@pytest.mark.parametrize("served_rate", [4096.0, 16384.0])
+def test_a_noise_segment_is_the_resamplers_samples(served_rate):
+    source = noise_reads.obtainer()
+    (start, end), ifo = noise_reads.ROW[0], noise_reads.IFOS[0]
+    with noise_reads.fetching(NoiseFetch(served_rate)) as fetch:
+        segment = source.get_segment(start, end, RATE, ifo, segment_key(ifo, start, end))
+    (served,) = fetch.served
+    data = np.asarray(segment.data)
+    kept = served.value[:len(data) * int(served_rate) // int(RATE)]  # the whole seconds
+    np.testing.assert_array_equal(data, resample(kept, 0.0, served_rate, RATE)[0])
+
+
+def test_a_transient_download_is_the_resamplers_samples(tmp_path):
+    reader = transient_reads.obtainer(tmp_path)
+    span = (gf.IFO.L1, transient_reads.TIMES[0] - 48.2, transient_reads.TIMES[0] + 48.2)
+    stored_rate = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
+    with transient_reads.offline(NoiseFetch(4 * stored_rate)) as fetch:
+        samples, t0 = reader._download({"read": span}, stored_rate)["read"]
+    (served,) = fetch.served
+    assert t0 == served.t0.value
+    np.testing.assert_array_equal(samples, resample(served.value, 0.0, 4 * stored_rate, stored_rate)[0])
+
+
+@pytest.mark.parametrize("rate", [2048, 1000])
+def test_transient_windows_are_a_longer_reads_samples(rate):
+    """
+    Every sample of a transient's windows is exact: ``read_windows`` serves, bit for bit,
+    what the resampler gives a longer stretch of the same strain, at a ratio of one half
+    and at 4096 to 1000, with windows that reach both ends of the stored row. Noise, not
+    a ramp: the line-padded filter keeps a ramp exact even inside its margin.
+    """
+    stored_rate = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
+    stored = int(32 * stored_rate)  # samples of the stored offsource, and of the onsource
+    up, down = resample_ratio(stored_rate, rate)
+    before, after = TransientCache.window_reach(stored, stored, stored_rate, rate)
+    num_onsource, num_offsource = 2 * after, before - after - (before - after) % 2
+    durations = ((num_onsource + 0.5) / rate, (num_offsource + 0.5) / rate)
+
+    pad = 2 * (resample_margin(stored_rate, rate) + down)  # strain beyond each end of the row
+    strain = np.random.default_rng(5).normal(size=(2, pad + 2 * stored + pad)).astype(np.float32)
+    row = strain[:, pad:pad + 2 * stored]
+    onsource, offsource = TransientCache.read_windows(
+        row[:, stored:], row[:, :stored], stored_rate, rate, *durations,
+    )
+    # The longer read starts a whole number of down samples before the transient's
+    # sample, as every read does, so its samples fall on the windows'.
+    transient = pad + stored + centre_index(stored)
+    first = transient % down
+    longer, _ = resample(strain[:, first:], 0.0, stored_rate, rate)
+    centre = (transient - first) // down * up
+    onsource_start = centre - centre_index(num_onsource)
+    np.testing.assert_array_equal(offsource, longer[:, onsource_start - num_offsource:onsource_start])
+    np.testing.assert_array_equal(onsource, longer[:, onsource_start:onsource_start + num_onsource])
+    read = TransientCache.window_read(stored, stored, stored_rate, rate, *durations)
+    assert read.stored.start < down and read.stored.stop > 2 * stored - down, (
+        f"the windows read stored samples {read.stored}, not both ends of {2 * stored}"
+    )
+
 
 #: Names whose use resamples outside the one resampler.
 RESAMPLERS = {"resample_fft", "resample_poly", "upfirdn", "decimate"}
