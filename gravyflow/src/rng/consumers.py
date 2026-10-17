@@ -22,10 +22,10 @@ _LEAVES = tuple(re.compile(pattern) for pattern in (
     # window starts.
     r"noise/(segment_order|accrual|row)",
     rf"noise/start/{_SEGMENT}",
-    # The sequential real-noise (GRID) and transient readers, until they are
-    # addressed by index.
+    # The sequential real-noise (GRID) reader, until it is addressed by index.
     r"noise/real",
-    r"transient/(order|balance|reader)",
+    # A transient split's passes: pass p's order and balance, at epoch p.
+    r"transient/(order|balance)",
     rf"augment/{_SEGMENT}",
     r"partner/choice",
     # A waveform generator's own draws, one stream per attribute so adding an
