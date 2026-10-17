@@ -41,12 +41,13 @@ def test_importing_gravyflow_leaves_x64_off():
 
 
 def test_the_ripplegw_import_does_not_leave_x64_on():
-    # gravyflow imports ripplegw, whose models switch x64 on when imported.
+    # gravyflow imports ripplegw on first use of its CBC code, and ripplegw's models switch x64 on when imported.
     assert _run("""
         import sys
         import jax
+        import gravyflow as gf
         assert "ripplegw" not in sys.modules
-        import gravyflow
+        gf.CBCGenerator
         assert "ripplegw" in sys.modules
         import ripplegw
         from ripplegw.waveforms.cbc.IMRPhenomD import IMRPhenomD_QNMdata
