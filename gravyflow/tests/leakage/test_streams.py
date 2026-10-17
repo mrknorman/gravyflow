@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.src.dataset.config import TransientDefaults
 from gravyflow.tests.leakage import fixtures as fx
 from gravyflow.tests.leakage.fingerprints import (
     assert_rows_disjoint, assert_streams_independent, assert_unchanged, concatenate_streams,
@@ -171,11 +172,11 @@ def test_label_streams_independent(noise_type, root, monkeypatch):
                                 "generator 1": {"RA": ra["RIGHT_ASCENSION_RADIANS[1]"]}})
 
 
-def logit_model():
-    """A fixed linear model returning logits: the validator only needs scores."""
+def logit_model(rate=FS):
+    """A fixed linear model returning logits, at ``rate``: the validator only needs scores."""
     import keras
     return keras.Sequential([
-        keras.Input(shape=(len(IFOS), int(FS * ONSOURCE_S)), name=RV.WHITENED_ONSOURCE.name),
+        keras.Input(shape=(len(IFOS), int(rate * ONSOURCE_S)), name=RV.WHITENED_ONSOURCE.name),
         keras.layers.Flatten(),
         keras.layers.Dense(1, kernel_initializer="zeros", bias_initializer="zeros"),
     ])
@@ -409,10 +410,10 @@ REVERSALS = (gf.SignReversal(probability=1.0), gf.TimeReversal(probability=1.0))
 WORLD_IFOS = ("H1", "L1")
 
 
-def world_settings(batch=8):
-    """The fake world's window and detectors, at its 256 Hz."""
+def world_settings(batch=8, rate=256.0):
+    """The fake world's window and detectors, at its rate (256 Hz unless built at another)."""
     return dict(
-        sample_rate_hertz=256.0, onsource_duration_seconds=fx.ONSOURCE_SECONDS,
+        sample_rate_hertz=rate, onsource_duration_seconds=fx.ONSOURCE_SECONDS,
         crop_duration_seconds=fx.CROP_SECONDS, offsource_duration_seconds=fx.OFFSOURCE_SECONDS,
         num_examples_per_batch=batch, ifos=[gf.IFO[name] for name in WORLD_IFOS], steps_per_epoch=16,
     )
@@ -422,6 +423,22 @@ def augmented_world():
     """Real noise in every split: one O3 piece across a train|test edge, one across validate|train."""
     fixture, _ = fx.two_splits_per_run(("O3",), origin="O3")
     return fixture
+
+
+#: The rate real events are read at: the validator's world is served at it.
+EVENT_RATE = TransientDefaults.CACHE_SAMPLE_RATE_HERTZ
+
+
+def validator_world():
+    """
+    The augmented world at the rate real events are read at, with one confident
+    event in test: 100 s past the train|test edge, inside its piece.
+    """
+    from gravyflow.tests.leakage.fakes import EventRecord
+
+    fixture, _ = fx.two_splits_per_run(("O3",), rate=EVENT_RATE, origin="O3")
+    event = EventRecord("GWREAL", fx.boundary("O3", "train", "test", run="O3") + 100.4, 2.0)
+    return fixture.with_catalogues(events=[event])
 
 
 def world_dataset(obtainer, split, outputs=(), batch=8):
@@ -437,10 +454,15 @@ def pool_dataset(obtainer, split):
                               output_variables=[RV.POOL_LABEL], **world_settings())
 
 
-def recorded(onsource, offsource, fixture):
-    """The footprints of rows of the world's strain as recorded: refuses a reversed or negated row."""
+def recorded(onsource, offsource, fixture, padded=False, adjacent=True):
+    """
+    The footprints of rows of the world's strain as recorded: refuses a reversed
+    or negated row. A served onsource is cropped; a raw one (``padded``) is not.
+    A real event's offsource is not ``adjacent`` to its onsource.
+    """
     return footprints(np.asarray(onsource), np.asarray(offsource), WORLD_IFOS, fixture.encoding,
-                      fx.window(), onsource_cropped=True)
+                      fx.window(fixture.encoding.sample_rate_hertz), onsource_cropped=not padded,
+                      adjacent=adjacent)
 
 
 def reversals_of(row, ifo_name, fixture) -> int:
@@ -463,7 +485,10 @@ def test_augmentation_stays_in_split(world, tmp_path, monkeypatch):
     reversal at probability 1, serves train, validate and test, through a dataset
     and a composed dataset's pool, and the validator: every evaluation row is the
     strain as recorded, forward and positive, and every training row is that
-    strain negated and reversed. Real events refuse time reversal and random shift.
+    strain negated and reversed. The validator's rows are every window it scores,
+    served or read raw and conditioned (`prepare`): its time-slid noise in both
+    splits, and a real event in test, read at the rate real events are read at.
+    Real events refuse time reversal and random shift.
     """
     from gravyflow.src.validate import ValidationConfig
     from gravyflow.src.validate.bank import ValidationBank
@@ -481,15 +506,29 @@ def test_augmentation_stays_in_split(world, tmp_path, monkeypatch):
                     onsource, offsource = (-rows[..., ::-1] for rows in (onsource, offsource))
                 recorded(onsource, offsource, fixture)
 
+    fixture = validator_world()
+    with world(fixture):
+        noise = fx.noise_obtainer(fixture, tmp_path / "validator", augmentations=list(REVERSALS))
         tap = DatasetTap(monkeypatch, STRAIN)
-        args = dict(noise_obtainer=noise, input_variables=[RV.WHITENED_ONSOURCE], **world_settings())
-        for group in ("validate", "test"):
+        args = dict(noise_obtainer=noise, input_variables=[RV.WHITENED_ONSOURCE],
+                    **world_settings(rate=EVENT_RATE))
+        for group, events in (("validate", 0), ("test", 1)):
             config = ValidationConfig(group=group, num_examples=16, batch_size=8)
-            ValidationBank(logit_model(), args, config).generate_noise()
+            bank = ValidationBank(logit_model(EVENT_RATE), args, config)
+            bank.generate_noise()
+            bank.generate_real_events([gf.ObservingRun.O3])
+            assert [event["status"] for event in bank.real_events] == ["scored"] * events
             (stage,) = tap.take()
-            assert stage.group == group and stage.batches
+            assert stage.group == group
             for batch in stage.batches:
                 recorded(batch[RV.ONSOURCE.name], batch[RV.OFFSOURCE.name], fixture)
+            # Conditioned in the order scored: the background's windows, then the events'.
+            for k, windows in enumerate(stage.prepared):
+                recorded(windows[RV.ONSOURCE.name], windows[RV.OFFSOURCE.name], fixture, padded=True,
+                         adjacent=k < len(stage.prepared) - events)
+            # Every window scored was read here.
+            seen = sum(len(rows[RV.ONSOURCE.name]) for rows in (*stage.batches, *stage.prepared))
+            assert seen == len(bank.far_scores) + events, (group, seen)
 
     for labels in ([gf.DataLabel.EVENTS], [gf.DataLabel.GLITCHES, gf.EventConfidence.CONFIDENT]):
         for augmentation in (gf.TimeReversal(), gf.RandomShift()):

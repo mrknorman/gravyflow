@@ -38,12 +38,17 @@ class Tapped(NamedTuple):
     #: The (epoch, k) address of each of ``batches``; None for a dataset that
     #: is not index-addressed, whose batches depend on the order asked.
     addresses: List[Optional[Address]]
+    #: The raw windows it conditioned for its caller (`prepare`), in the order
+    #: given: each call's padded onsource and offsource, as ONSOURCE and
+    #: OFFSOURCE. These are windows it scores but never serves: time-slid
+    #: noise, a real event.
+    prepared: List[Batch]
 
 
 class DatasetTap:
     """
     Records the batches every `GravyflowDataset` built while it is installed
-    serves.
+    serves, and the raw windows each conditions for its caller (`prepare`).
 
     Each dataset is built asking for ``outputs`` besides its caller's own.
     Asking for an output selects it and draws nothing more. Every batch served
@@ -74,7 +79,7 @@ class DatasetTap:
                 super().__init__(output_variables=asked + [v for v in extra if v not in asked], **kwargs)
                 self._asked = {v.name for v in asked}
                 self._seen = set()
-                self._record = Tapped(self.group, [], [])
+                self._record = Tapped(self.group, [], [], [])
                 built.append(self._record)
 
             def __getitem__(self, index):
@@ -91,21 +96,26 @@ class DatasetTap:
                     self._record.addresses.append(address if self.index_addressed else None)
                 return x, {name: value for name, value in y.items() if name in self._asked}
 
+            def prepare(self, onsource, offsource):
+                self._record.prepared.append({RV.ONSOURCE.name: np.asarray(onsource),
+                                              RV.OFFSOURCE.name: np.asarray(offsource)})
+                return super().prepare(onsource, offsource)
+
         # Example models build `gf.GravyflowDataset`; `gf.Dataset` builds the module's.
         monkeypatch.setattr(dataset_module, "GravyflowDataset", Dataset)
         monkeypatch.setattr(gf, "GravyflowDataset", Dataset)
 
     def take(self) -> List[Tapped]:
         """
-        What each dataset built since the last take served, in the order they
-        were built. A dataset that served nothing is refused: its checks would
-        be empty.
+        What each dataset built since the last take served and prepared, in
+        the order they were built. A dataset that served no batch and prepared
+        no window is refused: its checks would be empty.
         """
         taken = list(self._built)
         self._built.clear()
         for record in taken:
-            if not record.batches:
-                raise ValueError(f"A {record.group!r} dataset was built but served no batch.")
+            if not record.batches and not record.prepared:
+                raise ValueError(f"A {record.group!r} dataset was built but served no batch and prepared no window.")
         return taken
 
 
