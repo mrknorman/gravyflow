@@ -331,11 +331,6 @@ class DiskCache(AcquisitionCache):
     # === Passthrough methods for TransientCache-specific functionality ===
     # These allow transient.py to access internal cache state efficiently
     
-    @property
-    def in_memory(self) -> bool:
-        """Check if cache data is loaded to memory."""
-        return self._cache.in_memory
-    
     def has_key(self, gps_key: int) -> bool:
         """Check if GPS key exists (alias for has())."""
         return self._cache.has_key(gps_key)
@@ -344,16 +339,6 @@ class DiskCache(AcquisitionCache):
     def _gps_index(self) -> Dict[int, int]:
         """Access internal GPS index mapping. For performance optimization only."""
         return self._cache._gps_index
-    
-    @property
-    def _mem_onsource(self) -> np.ndarray:
-        """Access in-memory onsource array. For performance optimization only."""
-        return self._cache._mem_onsource
-    
-    @property
-    def _mem_offsource(self) -> np.ndarray:
-        """Access in-memory offsource array. For performance optimization only."""
-        return self._cache._mem_offsource
     
     def get_batch(
         self,

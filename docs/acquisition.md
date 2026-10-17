@@ -81,6 +81,8 @@ Each segment keeps the GPS time of its first sample as the source returned it, a
 ### Labels
 `START_GPS_TIME` is, for each example and detector, the GPS time of the first sample of the onsource window returned after cropping (`WindowSpec.onsource_start_gps`), in float64. When the onsource is returned uncropped (an obtainer called without `crop=True`), its first sample is `crop_duration_seconds` earlier.
 
+Transient windows follow the same rule. A transient's padded onsource is centred on the transient's sample, the sample nearest its catalogue time, counted from the first sample the source returned, so `START_GPS_TIME` is within one sample of the truth (`WindowSpec.transient_window_start_gps`); `TRANSIENT_GPS_TIME` is the transient's own time. Its offsource ends where the padded onsource begins, as for noise. Every read, from the download or from any cache path, takes both windows from one stretch of stored strain by one function (`TransientCache.read_windows`).
+
 ### 6. Final Ordering (`order_segments`)
 Finally, the segments are ordered based on the user's preference:
 -   **Random**: Shuffled for training variety.

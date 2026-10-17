@@ -256,7 +256,8 @@ class TransientDataObtainer(BaseDataObtainer):
         target_ifos: Optional[List[str]] = None  # NEW: Requested IFOs for subset selection
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
         """
-        Attempt to retrieve a sample from cache (chunked -> memory -> disk).
+        Attempt to retrieve a sample from cache (chunked -> disk), as windows of the
+        request (``TransientCache.read_windows``).
         
         Args:
             gps_key: Optional GPS key (preferred - no conversion needed)
@@ -264,52 +265,20 @@ class TransientDataObtainer(BaseDataObtainer):
             target_ifos: List of IFO names to retrieve (must be present in cache)
             
         Returns:
-            (onsource, offsource, source) where source is 'chunk', 'memory', 'disk', or 'miss'
+            (onsource, offsource, source) where source is 'chunk', 'disk', or 'miss'
         """
         # Compute key if not provided (backward compatibility)
         if gps_key is None:
             gps_key = gps_to_key(gps_time)
         
         # Try chunked memory cache first (new fast path)
-        # NOTE: Chunks are already resampled in _load_chunk_around_index(), so no
-        # crop_and_resample needed here
+        # Chunks hold the request's windows already (_load_chunk_around_index).
         if cache._chunk_in_memory and cache.has_key(gps_key):
             idx = cache._gps_index[gps_key]
             result = cache.get_from_chunk(idx, target_ifos=target_ifos)
             if result is not None:
                 onsource, offsource, _, _ = result
                 return onsource * scale_factor, offsource * scale_factor, 'chunk'
-        
-        # Try full memory cache (fastest if loaded)
-        if cache.in_memory and cache.has_key(gps_key):
-            idx = cache._gps_index[gps_key]
-            onsource_raw = cache._mem_onsource[idx]
-            offsource_raw = cache._mem_offsource[idx]
-            
-            # Filter channels if requested
-            if target_ifos:
-                meta = cache.get_metadata()
-                stored_ifos = meta.get('ifo_names', [])
-                if stored_ifos:
-                    try:
-                        channel_indices = [stored_ifos.index(ifo) for ifo in target_ifos]
-                        onsource_raw = onsource_raw[channel_indices]
-                        offsource_raw = offsource_raw[channel_indices]
-                    except ValueError:
-                        return None, None, 'miss'
-                elif len(target_ifos) != onsource_raw.shape[0]:
-                    return None, None, 'miss'
-
-            # Crop and resample from cache sample rate to requested rate
-            meta = cache.get_metadata()
-            cache_sample_rate = meta.get('sample_rate_hertz', 4096.0)
-            onsource = TransientCache.crop_and_resample(
-                np.asarray(onsource_raw), cache_sample_rate, sample_rate_hertz, onsource_duration
-            )
-            offsource = TransientCache.crop_and_resample(
-                np.asarray(offsource_raw), cache_sample_rate, sample_rate_hertz, offsource_duration
-            )
-            return onsource * scale_factor, offsource * scale_factor, 'memory'
         
         # Try disk cache (use key-based lookup)
         if cache.has_key(gps_key):
@@ -404,7 +373,8 @@ class TransientDataObtainer(BaseDataObtainer):
         self,
         batch_subarrays: list,
         batch_backgrounds: list,
-        batch_segments: list  # List of TransientSegments
+        batch_segments: list,  # List of TransientSegments
+        window_spec: WindowSpec,
     ) -> dict:
         """
         Prepare batch tensors from accumulated lists.
@@ -413,9 +383,12 @@ class TransientDataObtainer(BaseDataObtainer):
             Dict with ReturnVariables keys:
             - ONSOURCE: (Batch, IFO, Samples) = BIS
             - OFFSOURCE: (Batch, IFO, Samples) = BIS  
+            - START_GPS_TIME: (Batch, IFO) = BI, float64: the GPS time of the first
+              onsource sample returned after cropping, as for noise
+              (``WindowSpec.onsource_start_gps``), the window centred on the
+              transient's sample (``WindowSpec.transient_window_start_gps``).
             - TRANSIENT_GPS_TIME: (Batch, IFO) = BI
-              NOTE: This is the GPS time of the EVENT/GLITCH CENTER, not the start
-              of the data window. For window start time, use the segment boundaries.
+              The GPS time of the event or glitch, the window's centre.
             - DATA_LABEL: (Batch, IFO) = BI (1 for GLITCHES, 2 for EVENTS)
             - SUB_TYPE: (Batch, IFO) = BI (GlitchType.value or SourceType.value)
             - GLITCH_TYPE: (Batch, IFO) = BI (GlitchType.value if glitch, -1 otherwise)
@@ -484,6 +457,9 @@ class TransientDataObtainer(BaseDataObtainer):
         return {
             RV.ONSOURCE: self._apply_augmentation(final_subarrays),
             RV.OFFSOURCE: self._apply_augmentation(final_background),
+            RV.START_GPS_TIME: window_spec.onsource_start_gps(
+                window_spec.transient_window_start_gps(transient_gps)
+            ),
             RV.TRANSIENT_GPS_TIME: transient_gps,
             RV.DATA_LABEL: data_label,     # Per-segment: GLITCHES=1 or EVENTS=2
             RV.SUB_TYPE: sub_type,         # Per-segment: GlitchType.value or SourceType.value
@@ -496,122 +472,47 @@ class TransientDataObtainer(BaseDataObtainer):
         event_segment: IFOData,
         num_onsource_samples: int,
         num_offsource_samples: int,
-        sample_rate_hertz: float,
-        known_gps_time: float = None  # Use this as ground truth if provided
+        transient_gps_time: float,
     ) -> tuple:
         """
-        Extract onsource/offsource windows from a feature segment.
-        Centers extraction on the middle of the segment (where the event is).
-        
-        Args:
-            event_segment: IFOData containing the downloaded segment
-            num_onsource_samples: Number of samples for onsource window
-            num_offsource_samples: Number of samples for offsource window
-            sample_rate_hertz: Sample rate
-            known_gps_time: If provided, use this as the event GPS time instead of computing
-                           from segment position. Recommended to pass TransientSegment.transient_gps_time.
-        
+        The stored windows of one transient from its downloaded segment, one row per
+        channel: the onsource centred on the transient's sample (``centre_index``), the
+        sample nearest ``transient_gps_time`` counted from the channel's first returned
+        sample, and the offsource of the samples just before it (the layout
+        ``TransientCache.read_windows`` reads).
+
         Returns:
-            Tuple of (onsource, offsource, event_gps_time) or (None, None, None) if extraction fails.
+            (onsource, offsource), or (None, None) when a selected channel lacks them.
         """
-        # Get reference length from first non-empty channel
-        data_len = None
-        for idx, channel_data in enumerate(event_segment.data):
-            if channel_data is not None and len(channel_data) > 0:
-                data_len = ops.shape(channel_data)[0]
-                break
-        
-        if data_len is None or data_len < num_onsource_samples:
-            # Only warn if we have selected_ifo_indices and they're the issue
-            if self._current_selected_ifo_indices:
-                logger.debug(f"Feature segment too short ({data_len} < {num_onsource_samples})")
-            return None, None, None
-        
-        center_idx = data_len // 2
-        half_onsource = num_onsource_samples // 2
-        start_onsource = center_idx - half_onsource
-        end_onsource = start_onsource + num_onsource_samples
-        
-        # Use known GPS time (ground truth) if provided, otherwise compute from segment
-        if known_gps_time is not None:
-            event_gps_time = known_gps_time
-        else:
-            feature_gps_start = event_segment.start_gps_time[0]
-            event_gps_time = feature_gps_start + (center_idx / sample_rate_hertz)
-        
-        temp_onsource = []
-        temp_offsource = []
-        
-        # Get selected IFO indices (set during cache miss processing)
+        from gravyflow.src.utils.tensor import centre_index
+
+        rate = float(event_segment.sample_rate_hertz)
         selected_ifo_indices = self._current_selected_ifo_indices
-        
-        for channel_idx, channel_data in enumerate(event_segment.data):
+        temp_onsource, temp_offsource = [], []
+
+        for channel_idx, (channel_data, first_gps) in enumerate(
+                zip(event_segment.data, event_segment.start_gps_time)):
             is_selected = selected_ifo_indices is None or channel_idx in selected_ifo_indices
-            
-            # Check if this channel has valid data
-            channel_is_valid = (
-                channel_data is not None and 
-                len(channel_data) >= end_onsource
+            # The transient's sample, from the true first-sample time, in float64.
+            transient = int(np.round((float(transient_gps_time) - float(first_gps)) * rate))
+            start = transient - centre_index(num_onsource_samples)
+            off_start = start - num_offsource_samples
+            fits = (
+                channel_data is not None and off_start >= 0
+                and start + num_onsource_samples <= int(ops.shape(channel_data)[0])
             )
-            
-            if not channel_is_valid:
+            if not fits:
                 if is_selected:
-                    # Selected IFO has no data - fail extraction
-                    logger.debug(f"Selected IFO channel {channel_idx} has insufficient data")
-                    return None, None, None
-                else:
-                    # Non-selected IFO - silently zero-fill
-                    temp_onsource.append(np.zeros(num_onsource_samples, dtype=np.float32))
-                    temp_offsource.append(np.zeros(num_offsource_samples, dtype=np.float32))
-                    continue
-            
-            chunk = channel_data[start_onsource:end_onsource]
-            if ops.shape(chunk)[0] != num_onsource_samples:
-                if is_selected:
-                    return None, None, None
-                else:
-                    temp_onsource.append(np.zeros(num_onsource_samples, dtype=np.float32))
-                    temp_offsource.append(np.zeros(num_offsource_samples, dtype=np.float32))
-                    continue
-            temp_onsource.append(chunk)
-            
-            off_chunk = None
-            
-            # Try to get offsource BEFORE onsource
-            available_before = start_onsource
-            if available_before >= num_offsource_samples:
-                off_start = start_onsource - num_offsource_samples
-                off_chunk = channel_data[off_start:start_onsource]
-            elif available_before > 0:
-                off_chunk = channel_data[0:start_onsource]
-                pad_needed = num_offsource_samples - available_before
-                off_chunk = ops.pad(off_chunk, [(pad_needed, 0)], mode='edge')
-            
-            # If no data before, try AFTER onsource
-            if off_chunk is None:
-                available_after = len(channel_data) - end_onsource
-                if available_after >= num_offsource_samples:
-                    off_chunk = channel_data[end_onsource:end_onsource + num_offsource_samples]
-                elif available_after > 0:
-                    off_chunk = channel_data[end_onsource:len(channel_data)]
-                    pad_needed = num_offsource_samples - available_after
-                    off_chunk = ops.pad(off_chunk, [(0, pad_needed)], mode='edge')
-            
-            if off_chunk is None:
-                if is_selected:
-                    logger.debug(f"No offsource data available for selected IFO at GPS {event_gps_time:.1f}")
-                    return None, None, None
-                else:
-                    # Silently zero-fill non-selected IFO
-                    temp_offsource.append(np.zeros(num_offsource_samples, dtype=np.float32))
-                    continue
-            
-            temp_offsource.append(off_chunk)
-        
-        onsource_stacked = ops.stack(temp_onsource)
-        offsource_stacked = ops.stack(temp_offsource)
-        
-        return onsource_stacked, offsource_stacked, event_gps_time
+                    logger.debug(f"Channel {channel_idx} does not hold the windows of GPS {transient_gps_time:.3f}")
+                    return None, None
+                # Non-selected IFO - silently zero-fill
+                temp_onsource.append(np.zeros(num_onsource_samples, dtype=np.float32))
+                temp_offsource.append(np.zeros(num_offsource_samples, dtype=np.float32))
+                continue
+            temp_onsource.append(channel_data[start:start + num_onsource_samples])
+            temp_offsource.append(channel_data[off_start:start])
+
+        return ops.stack(temp_onsource), ops.stack(temp_offsource)
 
 
     def _cluster_transients(
@@ -764,9 +665,7 @@ class TransientDataObtainer(BaseDataObtainer):
         self,
         miss_indices: List[int],
         ifos: List,
-        sample_rate_hertz: float,
-        total_onsource_duration_seconds: float,
-        offsource_duration_seconds: float,
+        window_spec: WindowSpec,
         scale_factor: float,
         cache,
         batch_subarrays: List,
@@ -784,9 +683,7 @@ class TransientDataObtainer(BaseDataObtainer):
         Args:
             miss_indices: List of segment indices that need downloading
             ifos: List of IFOs to download
-            sample_rate_hertz: Target sample rate for output
-            total_onsource_duration_seconds: Onsource duration including padding
-            offsource_duration_seconds: Offsource duration
+            window_spec: The windows requested
             scale_factor: Amplitude scale factor
             cache: DiskCache instance for storing/retrieving
             batch_subarrays: Accumulated onsource arrays (mutated)
@@ -805,7 +702,8 @@ class TransientDataObtainer(BaseDataObtainer):
         
         if len(miss_indices) == 0:
             return
-        
+
+        sample_rate_hertz = window_spec.sample_rate_hertz
         # Download at higher of requested or cache sample rate (can downsample but not upsample)
         download_sample_rate = max(sample_rate_hertz, CACHE_SAMPLE_RATE_HERTZ)
         # Refuse rates no public source holds, before the zero-fill fallback below.
@@ -879,7 +777,8 @@ class TransientDataObtainer(BaseDataObtainer):
                         raise ValueError("source rate below the download rate")
                     resampled = segment_data.resample(download_sample_rate)
                     data_list.append(resampled.value)
-                    start_gps_list.append(float(segment.start_gps_time))
+                    # The first sample's time as the source returned it.
+                    start_gps_list.append(float(resampled.t0.value))
                 except Exception:
                     # Zero-fill failed IFOs to maintain consistent array shape
                     num_samples = int((segment.end_gps_time - segment.start_gps_time) * download_sample_rate)
@@ -1039,11 +938,11 @@ class TransientDataObtainer(BaseDataObtainer):
                 continue
             
             # Extract windows
-            onsource_full, offsource_full, _ = self._extract_feature_event(
+            onsource_full, offsource_full = self._extract_feature_event(
                 event_segment,
                 num_cache_onsource,
                 num_cache_offsource,
-                download_sample_rate
+                segment.transient_gps_time,
             )
             
             if onsource_full is None:
@@ -1085,18 +984,14 @@ class TransientDataObtainer(BaseDataObtainer):
             except Exception as e:
                 logger.warning(f"Failed to append sample to cache (GPS={segment.transient_gps_time:.3f}): {e}")
             
-            # Crop and resample for this request
-            onsource_cropped = TransientCache.crop_and_resample(
+            # This request's windows, as every cache read takes them
+            onsource_cropped, offsource_cropped = TransientCache.read_windows(
                 np.asarray(onsource_full),
-                download_sample_rate,
-                sample_rate_hertz,
-                total_onsource_duration_seconds
-            )
-            offsource_cropped = TransientCache.crop_and_resample(
                 np.asarray(offsource_full),
                 download_sample_rate,
                 sample_rate_hertz,
-                offsource_duration_seconds
+                window_spec.total_onsource_duration_seconds,
+                window_spec.offsource_duration_seconds,
             )
             
             # Slice to requested IFOs
@@ -1111,10 +1006,14 @@ class TransientDataObtainer(BaseDataObtainer):
             batch_segments.append(segment)
             
             if len(batch_subarrays) >= num_examples_per_batch:
-                yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments)
+                # A batch served is cached first: the caller may never resume.
+                cache.flush_write_buffer()
+                yield self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments, window_spec)
                 batch_subarrays.clear()
                 batch_backgrounds.clear()
                 batch_segments.clear()
+
+        cache.flush_write_buffer()
 
     def _initialize_transient_cache(
         self,
@@ -1397,7 +1296,7 @@ class TransientDataObtainer(BaseDataObtainer):
                         self._last_log_count = total_samples
                     
                     if len(batch_subarrays) >= num_examples_per_batch:
-                        yield _post_process(self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments))
+                        yield _post_process(self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments, window_spec))
                         batch_subarrays = []
                         batch_backgrounds = []
                         batch_segments = []
@@ -1423,23 +1322,17 @@ class TransientDataObtainer(BaseDataObtainer):
                     
                     if event_misses and event_cache:
                          for batch in self._process_cache_misses(
-                            event_misses, ifos, sample_rate_hertz, 
-                            total_onsource_duration_seconds, offsource_duration_seconds, 
-                            scale_factor, event_cache, 
+                            event_misses, ifos, window_spec, scale_factor, event_cache, 
                             batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
                         ):
                             yield _post_process(batch)
-                         event_cache.flush_write_buffer()
                          
                     if glitch_misses and glitch_cache:
                          for batch in self._process_cache_misses(
-                            glitch_misses, ifos, sample_rate_hertz, 
-                            total_onsource_duration_seconds, offsource_duration_seconds, 
-                            scale_factor, glitch_cache, 
+                            glitch_misses, ifos, window_spec, scale_factor, glitch_cache, 
                             batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
                         ):
                             yield _post_process(batch)
-                         glitch_cache.flush_write_buffer()
                     
                     miss_indices = []
 
@@ -1450,24 +1343,18 @@ class TransientDataObtainer(BaseDataObtainer):
                     
                     if event_misses and event_cache:
                          for batch in self._process_cache_misses(
-                            event_misses, ifos, sample_rate_hertz, 
-                            total_onsource_duration_seconds, offsource_duration_seconds, 
-                            scale_factor, event_cache, 
+                            event_misses, ifos, window_spec, scale_factor, event_cache, 
                             batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
                         ):
                             yield _post_process(batch)
-                         event_cache.flush_write_buffer()
 
                     if glitch_misses and glitch_cache:
                          for batch in self._process_cache_misses(
-                            glitch_misses, ifos, sample_rate_hertz, 
-                            total_onsource_duration_seconds, offsource_duration_seconds, 
-                            scale_factor, glitch_cache, 
+                            glitch_misses, ifos, window_spec, scale_factor, glitch_cache, 
                             batch_subarrays, batch_backgrounds, batch_segments, num_examples_per_batch
                         ):
                             yield _post_process(batch)
-                         glitch_cache.flush_write_buffer()
 
             # Yield any remaining partial batch at end of epoch
             if len(batch_subarrays) > 0:
-                yield _post_process(self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments))
+                yield _post_process(self._prepare_batch(batch_subarrays, batch_backgrounds, batch_segments, window_spec))

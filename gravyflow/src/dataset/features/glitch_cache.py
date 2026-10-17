@@ -71,74 +71,86 @@ class TransientCache:
         
         # Reading cache
         cache = TransientCache(Path("transients_O3.h5"), mode='r')
-        cache.validate_request(2048.0, 1.0, 16.0)  # Raises if unsatisfiable
-        data = cache.load_all()  # Single bulk read
+        cache.validate_request(2048.0, 2.0, 16.0)  # Raises if unsatisfiable
+        onsource, offsource, gps, labels = cache.get_batch(
+            np.arange(4), sample_rate_hertz=2048.0, onsource_duration=2.0,
+            offsource_duration=16.0)  # Windows by read_windows
     """
     
     @staticmethod
-    def crop_and_resample(
-        data: np.ndarray,
-        current_rate: float,
-        target_rate: float,
-        target_duration: float
-    ) -> np.ndarray:
+    def read_windows(
+        onsource,
+        offsource,
+        stored_rate: float,
+        sample_rate_hertz: float,
+        onsource_duration: float,
+        offsource_duration: float,
+        rows=None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Crop and resample data along the last axis (samples).
-        
-        Handles arbitrary leading dimensions (Batch, IFOs, etc).
-        Only supports integer downsampling.
-        
+        The (padded) onsource and offsource windows of a request, from stored ones: the
+        one geometry of every transient window, whatever reads it.
+
+        A stored offsource and its stored onsource are one stretch of strain, the
+        offsource first, with the transient on the onsource's centre sample
+        (``centre_index``). The request's onsource is centred on that sample, and its
+        offsource ends where the onsource begins, as for noise, so it may reach into
+        the stored onsource. Sample counts are WindowSpec's (``even_samples``).
+
+        ``onsource`` and ``offsource`` are arrays (or HDF5 datasets) whose last axis is
+        samples at ``stored_rate``; ``rows``, when given, selects their first axis (and
+        an HDF5 read then holds only the samples needed). The rate is lowered by
+        keeping every n-th sample, in phase with the transient's sample.
+
         Raises:
-            ValueError: If target_rate > current_rate or rates are not integer multiples.
+            ValueError: if the request needs upsampling, a rate that does not divide the
+                stored one, or more strain than is stored.
         """
-        if data.size == 0:
-            return data
-            
-        # 1. Resample (downsample only)
-        if target_rate != current_rate:
-            if target_rate > current_rate:
-                raise ValueError(
-                    f"Cannot upsample from {current_rate}Hz to {target_rate}Hz. "
-                    "Upsampling is not supported."
-                )
-            
-            # Validate integer multiple relationship
-            if current_rate % target_rate != 0:
-                raise ValueError(
-                    f"Sample rates must be integer multiples. "
-                    f"Cannot downsample from {current_rate}Hz to {target_rate}Hz. "
-                    f"Ratio {current_rate/target_rate:.4f} is not an integer."
-                )
-            
-            ratio = int(current_rate / target_rate)
-            if ratio > 1:
-                data = data[..., ::ratio]
-                
-        # 2. Crop
-        target_samples = int(target_duration * target_rate)
-        current_samples = data.shape[-1]
-        
-        if current_samples > target_samples:
-            # Center crop
-            start = (current_samples - target_samples) // 2
-            data = data[..., start : start + target_samples]
-            
-        return data
+        from gravyflow.src.utils.tensor import centre_index, even_samples
+
+        if sample_rate_hertz > stored_rate:
+            raise ValueError(
+                f"Cannot upsample from {stored_rate}Hz to {sample_rate_hertz}Hz. "
+                "Upsampling is not supported."
+            )
+        if stored_rate % sample_rate_hertz != 0:
+            raise ValueError(
+                f"Sample rates must be integer multiples. "
+                f"Cannot downsample from {stored_rate}Hz to {sample_rate_hertz}Hz. "
+                f"Ratio {stored_rate / sample_rate_hertz:.4f} is not an integer."
+            )
+        ratio = int(stored_rate // sample_rate_hertz)
+        num_onsource = even_samples(onsource_duration, sample_rate_hertz)
+        num_offsource = even_samples(offsource_duration, sample_rate_hertz)
+
+        # Indices along the stretch: the stored offsource, then the stored onsource.
+        stored_offsource = int(offsource.shape[-1])
+        stored_total = stored_offsource + int(onsource.shape[-1])
+        onsource_start = stored_offsource + centre_index(onsource.shape[-1]) \
+            - centre_index(num_onsource) * ratio
+        start = onsource_start - num_offsource * ratio
+        stop = onsource_start + num_onsource * ratio
+        if start < 0 or stop > stored_total:
+            raise ValueError(
+                f"A {onsource_duration} s onsource with a {offsource_duration} s offsource "
+                f"needs more strain than is stored ({stored_total / stored_rate} s)."
+            )
+
+        def take(store, lo, hi):
+            return np.asarray(store[..., lo:hi] if rows is None else store[rows, :, lo:hi])
+
+        parts = []
+        if start < stored_offsource:
+            parts.append(take(offsource, start, min(stop, stored_offsource)))
+        if stop > stored_offsource:
+            parts.append(take(onsource, max(start - stored_offsource, 0), stop - stored_offsource))
+        stretch = np.concatenate(parts, axis=-1)[..., ::ratio]
+        return stretch[..., num_offsource:], stretch[..., :num_offsource]
 
     def __init__(self, path: Path, mode: str = 'r'):
         self.path = Path(path)
         self.mode = mode
         self._metadata: Optional[Dict] = None
-        
-        # In-memory cache for fast serving
-        self._in_memory = False
-        self._mem_onsource: Optional[np.ndarray] = None
-        self._mem_offsource: Optional[np.ndarray] = None
-        self._mem_gps: Optional[np.ndarray] = None
-        self._mem_labels: Optional[np.ndarray] = None
-        self._mem_sample_rate: Optional[float] = None
-        self._mem_ons_dur: Optional[float] = None
-        self._mem_off_dur: Optional[float] = None
         
         # Chunked memory cache for large datasets
         # Loads a subset of samples into memory with LRU-style eviction
@@ -176,14 +188,6 @@ class TransientCache:
         
         self._gps_index = None
         self._metadata = None
-        self._in_memory = False
-        self._mem_onsource = None
-        self._mem_offsource = None
-    
-    @property
-    def in_memory(self) -> bool:
-        """Check if data is loaded to memory."""
-        return self._in_memory
     
     def get_metadata(self) -> Dict:
         """Load and cache metadata from file."""
@@ -584,64 +588,6 @@ class TransientCache:
             )
     
     
-    def load_all(
-        self,
-        sample_rate_hertz: Optional[float] = None,
-        onsource_duration: Optional[float] = None,
-        offsource_duration: Optional[float] = None,
-    ) -> Dict[str, np.ndarray]:
-        """
-        Load entire cache to memory in a single read.
-        
-        Optionally resample/crop to requested parameters.
-        
-        Args:
-            sample_rate_hertz: Target sample rate (must be <= cached rate)
-            onsource_duration: Target onsource duration (must be <= cached)
-            offsource_duration: Target offsource duration (must be <= cached)
-            
-        Returns:
-            Dict with keys: 'onsource', 'offsource', 'gps_times', 'labels'
-        """
-        meta = self.get_metadata()
-        
-        with h5py.File(self.path, 'r') as f:
-            grp = f['glitches']
-            
-            # Load raw data
-            onsource = grp['onsource'][:]
-            offsource = grp['offsource'][:]
-            gps_times = grp['gps_times'][:]
-            labels = grp['labels'][:]
-        
-        # Use unified crop/resample logic
-        target_rate = sample_rate_hertz or meta['sample_rate_hertz']
-        
-        # Process onsource
-        target_on_dur = onsource_duration or meta['onsource_duration']
-        onsource = self.crop_and_resample(
-            onsource, 
-            meta['sample_rate_hertz'], 
-            target_rate, 
-            target_on_dur
-        )
-        
-        # Process offsource
-        target_off_dur = offsource_duration or meta['offsource_duration']
-        offsource = self.crop_and_resample(
-            offsource, 
-            meta['sample_rate_hertz'], 
-            target_rate, 
-            target_off_dur
-        )
-        
-        return {
-            'onsource': onsource,
-            'offsource': offsource,
-            'gps_times': gps_times,
-            'labels': labels
-        }
-    
     def enable_chunked_mode(
         self,
         chunk_size: int = 5000,
@@ -709,21 +655,15 @@ class TransientCache:
         target_ons_dur = self._chunk_ons_dur or meta['onsource_duration']
         target_off_dur = self._chunk_off_dur or meta['offsource_duration']
         
-        # Read raw data for this chunk range
+        # Read this chunk's windows (read_windows)
         with h5py.File(self.path, 'r') as f:
             grp = f['glitches']
-            chunk_onsource = grp['onsource'][start:end]
-            chunk_offsource = grp['offsource'][start:end]
+            chunk_onsource, chunk_offsource = self.read_windows(
+                grp['onsource'], grp['offsource'], stored_rate, target_rate,
+                target_ons_dur, target_off_dur, rows=slice(start, end),
+            )
             chunk_gps = grp['gps_times'][start:end]
             chunk_labels = grp['labels'][start:end]
-        
-        # Apply crop/resample
-        chunk_onsource = self.crop_and_resample(
-            chunk_onsource, stored_rate, target_rate, target_ons_dur
-        )
-        chunk_offsource = self.crop_and_resample(
-            chunk_offsource, stored_rate, target_rate, target_off_dur
-        )
         
         # Create chunk object
         new_chunk = CacheChunk(
@@ -1145,59 +1085,30 @@ class TransientCache:
         target_ifos: Optional[List[str]] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Load a batch of glitches by indices.
-        
-        More memory efficient than load_all() when working with subsets.
-        
+        Load a batch of glitches by indices, as windows of the request
+        (``read_windows``): only the samples they need are read.
+
         Args:
             indices: Array of glitch indices to load
             sample_rate_hertz: Target sample rate
-            onsource_duration: Target onsource duration
+            onsource_duration: Target (padded) onsource duration
             offsource_duration: Target offsource duration
             target_ifos: Optional list of IFO names to retrieve (must be subset of cached IFOs)
-            
+
         Returns:
             Tuple of (onsource, offsource, gps_times, labels)
         """
         meta = self.get_metadata()
         stored_rate = meta['sample_rate_hertz']
-        stored_ons_dur = meta['onsource_duration']
-        stored_off_dur = meta['offsource_duration']
         stored_ifos = meta.get('ifo_names', [])
-        
-        # Determine target parameters
-        target_rate = sample_rate_hertz if sample_rate_hertz else stored_rate
-        target_ons_dur = onsource_duration if onsource_duration else stored_ons_dur
-        target_off_dur = offsource_duration if offsource_duration else stored_off_dur
-        
-        # Calculate resample ratio (only supports integer downsampling)
-        resample_ratio = int(stored_rate / target_rate) if target_rate != stored_rate else 1
-        
-        # Calculate sample counts at STORED rate (before resampling)
-        stored_ons_samples = int(stored_ons_dur * stored_rate)
-        stored_off_samples = int(stored_off_dur * stored_rate)
-        
-        # Calculate how many stored samples we need to read to get target duration after resampling
-        target_ons_samples = int(target_ons_dur * target_rate)
-        target_off_samples = int(target_off_dur * target_rate)
-        
-        # Samples to read at stored rate (will become target_samples after resampling)
-        read_ons_samples = target_ons_samples * resample_ratio
-        read_off_samples = target_off_samples * resample_ratio
-        
-        # Center crop indices at stored rate
-        ons_start = (stored_ons_samples - read_ons_samples) // 2
-        ons_end = ons_start + read_ons_samples
-        off_start = (stored_off_samples - read_off_samples) // 2
-        off_end = off_start + read_off_samples
-        
+
         # HDF5 fancy indexing requires sorted indices for efficiency and correctness
         # Sort indices, read, then restore original order
         indices = np.asarray(indices)
         sort_order = np.argsort(indices)
         sorted_indices = indices[sort_order]
         unsort_order = np.argsort(sort_order)  # Inverse permutation
-        
+
         # Determine channel indices if filtering
         channel_indices = slice(None)
         if target_ifos:
@@ -1215,121 +1126,24 @@ class TransientCache:
 
         with h5py.File(self.path, 'r') as f:
             grp = f['glitches']
-            
-            # Read only the slice we need: [sorted_indices, :ifos, start:end]
-            # We read all channels then slice in memory for simplicity/safety
-            onsource = grp['onsource'][sorted_indices, :, ons_start:ons_end]
-            offsource = grp['offsource'][sorted_indices, :, off_start:off_end]
+            onsource, offsource = self.read_windows(
+                grp['onsource'], grp['offsource'], stored_rate,
+                sample_rate_hertz or stored_rate,
+                onsource_duration or meta['onsource_duration'],
+                offsource_duration or meta['offsource_duration'],
+                rows=sorted_indices,
+            )
             gps_times = grp['gps_times'][sorted_indices]
             labels = grp['labels'][sorted_indices]
-            
+
         # Apply channel filtering
         if target_ifos:
             onsource = onsource[:, channel_indices, :]
             offsource = offsource[:, channel_indices, :]
-        
+
         # Restore original order
-        onsource = onsource[unsort_order]
-        offsource = offsource[unsort_order]
-        gps_times = gps_times[unsort_order]
-        labels = labels[unsort_order]
-        
-        # Apply resampling if needed (now on much smaller arrays)
-        if resample_ratio > 1:
-            onsource = onsource[:, :, ::resample_ratio]
-            offsource = offsource[:, :, ::resample_ratio]
-        
-        return onsource, offsource, gps_times, labels
-
-
-    def stream_batches(
-        self,
-        batch_size: int,
-        sample_rate_hertz: float,
-        onsource_duration: float,
-        offsource_duration: float,
-        scale_factor: float = 1.0,
-        seed: int = None,
-        allowed_segments: np.ndarray = None
-    ):
-        """
-        Generator that yields random batches from the cache.
-        
-        Streams batches directly from disk to avoid loading entire cache into memory.
-        Supports optional segment filtering for train/val/test splits.
-        
-        Args:
-            batch_size: Number of samples per batch
-            sample_rate_hertz: Target sample rate
-            onsource_duration: Target onsource duration (including any padding)
-            offsource_duration: Target offsource duration
-            scale_factor: Amplitude scaling factor
-            seed: Random seed for reproducibility
-            allowed_segments: Optional (N, 2) array of [start, end] GPS segments to filter by
-            
-        Yields:
-            Tuples of (onsource, offsource, gps_times, labels)
-        """
-        from numpy.random import default_rng
-        
-        meta = self.get_metadata()
-        n_glitches = meta['num_glitches']
-        
-        # Get GPS times for filtering
-        gps_all = self.get_all_gps_times()
-        
-        # Build index of valid glitches
-        valid_indices = np.arange(n_glitches)
-        
-        if allowed_segments is not None and len(allowed_segments) > 0:
-            # Handle potential extra dimensions
-            if allowed_segments.ndim == 3 and allowed_segments.shape[1] == 1:
-                allowed_segments = allowed_segments.reshape(-1, 2)
-            elif allowed_segments.ndim == 1 and allowed_segments.shape[0] == 2:
-                allowed_segments = allowed_segments.reshape(1, 2)
-            
-            # Filter based on segment overlap
-            keep_mask = np.zeros(len(gps_all), dtype=bool)
-            for start, end in allowed_segments:
-                in_segment = (gps_all >= start) & (gps_all <= end)
-                keep_mask |= in_segment
-                
-            valid_indices = np.where(keep_mask)[0]
-            n_glitches = len(valid_indices)
-        
-        if n_glitches == 0:
-            raise ValueError(
-                f"No glitches found after filtering! "
-                f"(Allowed segments: {len(allowed_segments) if allowed_segments is not None else 0})"
-            )
-        
-        rng = default_rng(seed)
-        
-        while True:
-            # Random batch indices from valid_indices (with replacement for infinite generator)
-            batch_idx = rng.choice(n_glitches, size=batch_size, replace=True)
-            batch_indices = valid_indices[batch_idx]
-            
-            # Stream batch from disk
-            onsource, offsource, gps_times, labels = self.get_batch(
-                batch_indices,
-                sample_rate_hertz=sample_rate_hertz,
-                onsource_duration=onsource_duration,
-                offsource_duration=offsource_duration
-            )
-            
-            # Convert to dict format with (B, I) shape for GPS and labels
-            num_ifos = onsource.shape[1]
-            gps_expanded = np.tile(np.expand_dims(as_gps_times(gps_times), axis=-1), (1, num_ifos))
-            labels_expanded = ops.tile(ops.expand_dims(labels, axis=-1), (1, num_ifos))
-            
-            yield {
-                RV.ONSOURCE: onsource * scale_factor,
-                RV.OFFSOURCE: offsource * scale_factor,
-                RV.TRANSIENT_GPS_TIME: gps_expanded,
-                RV.DATA_LABEL: ops.full((batch_size, num_ifos), 1, dtype="int32"),  # GLITCHES = 1
-                RV.SUB_TYPE: labels_expanded,
-            }
+        return (onsource[unsort_order], offsource[unsort_order],
+                gps_times[unsort_order], labels[unsort_order])
 
 
 def generate_transient_cache_path(data_directory: Optional[Path] = None, prefix: str = "transient") -> Path:

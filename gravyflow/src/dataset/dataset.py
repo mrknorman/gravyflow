@@ -611,11 +611,8 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             if isinstance(batch_data, dict):
                 onsource = batch_data[gf.ReturnVariables.ONSOURCE]
                 offsource = batch_data[gf.ReturnVariables.OFFSOURCE]
-                # Use START_GPS_TIME if available, fall back to TRANSIENT_GPS_TIME for transient mode
-                gps_times = batch_data.get(
-                    gf.ReturnVariables.START_GPS_TIME,
-                    batch_data.get(gf.ReturnVariables.TRANSIENT_GPS_TIME)
-                )
+                # The first returned onsource sample's time, in every mode.
+                gps_times = batch_data.get(gf.ReturnVariables.START_GPS_TIME)
                 feature_labels = batch_data.get(gf.ReturnVariables.SUB_TYPE)
                 # Transient-specific outputs
                 glitch_type = batch_data.get(gf.ReturnVariables.GLITCH_TYPE)
@@ -1106,10 +1103,7 @@ class ComposedDataset(IndexedBatches, keras.utils.PyDataset):
                 if isinstance(batch_data, dict):
                     onsource = batch_data[gf.ReturnVariables.ONSOURCE]
                     offsource = batch_data[gf.ReturnVariables.OFFSOURCE]
-                    gps_times = batch_data.get(
-                        gf.ReturnVariables.START_GPS_TIME,
-                        batch_data.get(gf.ReturnVariables.TRANSIENT_GPS_TIME)
-                    )
+                    gps_times = batch_data.get(gf.ReturnVariables.START_GPS_TIME)
                     glitch_type = batch_data.get(gf.ReturnVariables.GLITCH_TYPE)
                     source_type = batch_data.get(gf.ReturnVariables.SOURCE_TYPE)
                     data_label = batch_data.get(gf.ReturnVariables.DATA_LABEL)

@@ -435,6 +435,21 @@ def window_samples(duration_seconds: float, sample_rate_hertz: float) -> int:
     """The samples crop_samples keeps of a window of ``duration_seconds``."""
     return int(duration_seconds * sample_rate_hertz)
 
+def even_samples(duration_seconds: float, sample_rate_hertz: float) -> int:
+    """
+    The samples of an acquired window (a padded onsource or an offsource) of
+    ``duration_seconds``: whole samples, made even (WindowSpec's counts).
+    """
+    num = int(duration_seconds * sample_rate_hertz)
+    return num - (num % 2)
+
+def centre_index(num_samples: int) -> int:
+    """
+    The index of a window's centre sample: where a transient window holds its
+    transient, in the stored onsource and in every window read from it.
+    """
+    return int(num_samples) // 2
+
 def crop_start(num_samples: int, onsource_duration_seconds: float, sample_rate_hertz: float) -> int:
     """
     The index, in a window of ``num_samples``, of the first sample crop_samples keeps:

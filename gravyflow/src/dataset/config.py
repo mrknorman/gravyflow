@@ -85,14 +85,14 @@ class WindowSpec:
     @property
     def num_onsource_samples(self) -> int:
         """Number of onsource samples including cropping padding (ensured even)."""
-        num = int(self.total_onsource_duration_seconds * self.sample_rate_hertz)
-        return num - (num % 2)  # Ensure even
-    
+        from gravyflow.src.utils.tensor import even_samples
+        return even_samples(self.total_onsource_duration_seconds, self.sample_rate_hertz)
+
     @property
     def num_offsource_samples(self) -> int:
         """Number of offsource samples (ensured even)."""
-        num = int(self.offsource_duration_seconds * self.sample_rate_hertz)
-        return num - (num % 2)  # Ensure even
+        from gravyflow.src.utils.tensor import even_samples
+        return even_samples(self.offsource_duration_seconds, self.sample_rate_hertz)
     
     @property
     def num_crop_samples(self) -> int:
@@ -112,6 +112,18 @@ class WindowSpec:
         """
         from gravyflow.src.utils.gps import as_gps_times
         return as_gps_times(window_start_gps) + self.num_crop_samples / float(self.sample_rate_hertz)
+
+    def transient_window_start_gps(self, transient_gps):
+        """
+        The GPS time of the first sample of a transient's padded onsource window, from
+        the transient's: the window's centre sample (``centre_index``) is the
+        transient's sample, the grid sample nearest it, so this is within one sample of
+        the truth (see ``TransientCache.read_windows``). Float64.
+        """
+        from gravyflow.src.utils.gps import as_gps_times
+        from gravyflow.src.utils.tensor import centre_index
+        return as_gps_times(transient_gps) \
+            - centre_index(self.num_onsource_samples) / float(self.sample_rate_hertz)
 
     @property
     def sample_counts(self) -> Tuple[int, int]:
