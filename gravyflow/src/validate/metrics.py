@@ -319,14 +319,36 @@ class Background:
             nan = float("nan")
             unresolved = FarEstimate(nan, 0, self.livetime_seconds, nan, nan, nan, confidence)
             return FarThreshold(float(far_hz), nan, False, unresolved)
-        # The envelope rises as the threshold falls; keep the breakpoints it allows.
-        num_allowed = int(np.searchsorted(self._envelope, allowed, side="right"))
-        if num_allowed == self._breakpoints.size:
-            threshold = -np.inf
-        else:
-            # Just above the first breakpoint that would exceed the allowance.
-            threshold = float(np.nextafter(self._breakpoints[num_allowed], np.inf))
+        threshold = self._threshold_allowing(allowed)
         return FarThreshold(float(far_hz), threshold, True, self.far(threshold, confidence))
+
+    def _threshold_allowing(self, count: int) -> float:
+        """The lowest threshold whose FAR count is at most ``count``: +inf when none is, -inf when all are."""
+        if count < 0:
+            return np.inf
+        # The envelope rises as the threshold falls; keep the breakpoints it allows.
+        num_allowed = int(np.searchsorted(self._envelope, count, side="right"))
+        if num_allowed == self._breakpoints.size:
+            return -np.inf
+        # Just above the first breakpoint that would exceed the allowance.
+        return float(np.nextafter(self._breakpoints[num_allowed], np.inf))
+
+    def far_band_thresholds(self, far_hz: float, confidence: float = DEFAULT_CONFIDENCE) -> Tuple[float, float]:
+        """
+        The thresholds a true FAR of ``far_hz`` may lie between, given the background's
+        finite livetime: ``(high, low)``, the lowest thresholds at which the upper and the
+        lower end of the FAR's Poisson interval fall to ``far_hz``. The threshold that
+        truly gives ``far_hz`` is between them wherever the interval covers the true FAR.
+        ``high`` is +inf when the upper end is above ``far_hz`` even with no trigger.
+        """
+        self._require_livetime()
+        counts = np.arange(int(self._envelope[-1] if self._envelope.size else 0) + 2)
+        lower, upper = poisson_interval(counts, confidence)
+        limit = far_hz * self.livetime_seconds * (1 + 1e-12)
+        # Both ends rise with the count: the largest count each allows.
+        high = self._threshold_allowing(int(np.searchsorted(upper, limit, side="right")) - 1)
+        low = self._threshold_allowing(int(np.searchsorted(lower, limit, side="right")) - 1)
+        return high, low
 
     def far_curve(self, confidence: float = DEFAULT_CONFIDENCE) -> FarCurve:
         """The FAR at every breakpoint, with Poisson intervals."""
@@ -347,10 +369,29 @@ class Background:
         """
         if not self.streams:
             return {self._independent_block: self}
+        return {block: Background(streams, self.cluster_seconds) for block, streams in self._blocks().items()}
+
+    def _blocks(self) -> Dict[Hashable, list]:
+        """The streams of each ``block`` label, in order."""
         groups: Dict[Hashable, list] = {}
         for stream in self.streams:
             groups.setdefault(stream.block, []).append(stream)
-        return {block: Background(streams, self.cluster_seconds) for block, streams in groups.items()}
+        return groups
+
+    def resample(self, rng: np.random.Generator) -> "Background":
+        """
+        A bootstrap replicate of this background: its blocks (the ``block`` labels of
+        `by_block`) drawn with replacement, as many as it has, each with all its streams;
+        or, for independent windows, the windows themselves, each its own block.
+        """
+        if not self.streams:
+            n = self.num_windows
+            window_seconds = self.livetime_seconds / n
+            return Background.independent_windows(self._opens[rng.integers(0, n, n)], window_seconds,
+                                                  self._independent_block)
+        blocks = list(self._blocks().values())
+        drawn = rng.integers(0, len(blocks), len(blocks))
+        return Background([stream for b in drawn for stream in blocks[b]], self.cluster_seconds)
 
     def _require_livetime(self) -> None:
         if self.livetime_seconds <= 0:

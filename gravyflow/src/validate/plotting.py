@@ -545,6 +545,64 @@ def generate_far_curves(
     _style(p, "bottom_left")
     return p
 
+def generate_sensitive_volume_plot(
+        validators: list,
+        colors: List[str] = Bright[7],
+        width: int = 1000,
+        height: int = 600
+    ):
+    """
+    Sensitive volume (Gpc³) and sensitive distance (Mpc) against FAR per month: each
+    curve with its joint interval (the wider band), its injection interval (the
+    narrower band), and the Poisson interval of the FAR its threshold achieves (the
+    horizontal bars, the background's term). A FAR the background cannot resolve,
+    and a validator whose injections carry no distances, have no points.
+
+    Returns:
+        A column of the two figures.
+    """
+    from .volume import SECONDS_PER_MONTH, SECONDS_PER_YEAR, sensitive_distance
+
+    tooltips = [
+        ("FAR (per month)", "@x{0.00e}"), ("FAR (per year)", "@per_year{0.00e}"),
+        ("Value", "@y{0.000}"), ("Joint", "@joint_lower{0.000} – @joint_upper{0.000}"),
+        ("Injections", "@injection_lower{0.000} – @injection_upper{0.000}"),
+        ("Background", "@background_lower{0.000} – @background_upper{0.000}"),
+    ]
+    figures = [
+        figure(width=width, height=height, x_axis_type="log", x_axis_label="False Alarm Rate (per month)",
+               y_axis_label=label, tools="pan,box_zoom,wheel_zoom,reset", tooltips=tooltips)
+        for label in ("Sensitive Volume (Gpc³)", "Sensitive Distance (Mpc)")
+    ]
+    for index, (color, validator) in enumerate(zip(cycle(colors), validators)):
+        curve = validator.sensitive_volume_curve()
+        if curve is None:
+            continue
+        ok = curve.resolved
+        title = _title(validator, index)
+        for p, convert in zip(figures, (np.asarray, sensitive_distance)):
+            source = ColumnDataSource(data=dict(
+                x=curve.far_hz[ok] * SECONDS_PER_MONTH, per_year=curve.far_hz[ok] * SECONDS_PER_YEAR,
+                x_lower=curve.far_lower_hz[ok] * SECONDS_PER_MONTH,
+                x_upper=curve.far_upper_hz[ok] * SECONDS_PER_MONTH,
+                y=convert(curve.volume_gpc3[ok]),
+                **{f"{term}_{end}": convert(getattr(curve, f"{term}_{end}_gpc3")[ok])
+                   for term in ("joint", "injection", "background") for end in ("lower", "upper")},
+            ))
+            p.varea(x="x", y1="joint_lower", y2="joint_upper", source=source, fill_color=color, fill_alpha=0.15,
+                    legend_label=f"{title} (joint {curve.confidence:.0%} interval)")
+            p.varea(x="x", y1="injection_lower", y2="injection_upper", source=source, fill_color=color,
+                    fill_alpha=0.3, legend_label=f"{title} (injections)")
+            p.segment(x0="x_lower", x1="x_upper", y0="y", y1="y", source=source, line_color=color,
+                      legend_label=f"{title} (FAR interval)")
+            p.line("x", "y", source=source, line_color=color, line_width=2, legend_label=title)
+            p.scatter("x", "y", source=source, size=6, color=color, legend_label=title)
+    for p in figures:
+        if p.renderers:
+            _style(p, "bottom_right")
+    return column(*figures)
+
+
 def generate_roc_curves(
     validators: list,
     colors : List[str] = Bright[7],

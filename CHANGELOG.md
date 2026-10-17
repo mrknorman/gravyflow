@@ -173,6 +173,12 @@ repository before it may need the changes below.
 - **`gf.NoiseProfile.ZERO_DET_HIGH_POWER`**: Advanced LIGO's zero-detuning, high-power design curve
   (LIGO-T0900288-v3, aLIGOZeroDetHighPower), for H1 and L1 only; a profile refuses a detector it does not cover, by
   name.
+- **Sensitive volume and distance.** `Validator.sensitive_volume_curve()` gives the sensitive volume (Gpc³) and
+  distance (Mpc) at each target FAR, with three intervals: the injections' Monte Carlo, the background's livetime,
+  and a joint bootstrap over both. The dashboard plots them beside efficiency. The injection set records each
+  injection's distance (`distances`, CBC only), so a validation written before it has no volume; its settings
+  (`volume_horizon_snr`, `volume_bootstrap_samples`) change the validation's fingerprint, so its checkpoints are
+  not resumed.
 
 - `gravyflow.__version__`.
 - `docs/api.md`, the public API, which a test holds equal to `gravyflow.__all__`.

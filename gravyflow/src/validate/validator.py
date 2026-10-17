@@ -14,6 +14,7 @@ from .bank import ValidationBank, noise_background
 from .config import ValidationConfig, check_held_out, run_record_of
 from .metrics import Background, EfficiencyCurve, FarThreshold, efficiency_curve, roc_curve
 from .provenance import StaleCheckpointError, model_fingerprint, require_match
+from .volume import InjectionVolumes, SensitiveVolumeCurve, sensitive_volume_curve
 from gravyflow.src.utils.fingerprint import config_fingerprint
 
 if TYPE_CHECKING:  # avoids importing keras at runtime
@@ -170,6 +171,30 @@ class Validator:
                 cfg.snr_bin_edges, cfg.confidence, cfg.efficiency_interval))
         return curves
 
+    def sensitive_volume_curve(self, fars_hz=None) -> Optional[SensitiveVolumeCurve]:
+        """
+        Sensitive volume (Gpc^3) and distance (Mpc) at each target FAR (Hz), with their
+        injection, background and joint intervals (`volume`). The injections are
+        weighted by the distance their scaled amplitude implies, so a set without
+        distances (a burst set) has no volume: None. The joint interval's bootstrap
+        draws from the validator's own seed, so a record gives the same curve
+        whenever it is read.
+        """
+        data = self.efficiency_data
+        if self.far_scores is None or data is None or "distances" not in data:
+            return None
+        cfg = self.config
+        if cfg.snr_range[0] > 0:
+            logger.warning(f"The injections start at SNR {cfg.snr_range[0]:g}: the sensitive volume counts "
+                           "every quieter source as missed.")
+        injections = InjectionVolumes.from_snr_scaled(
+            data["scores"], data["snrs"], data["distances"], cfg.snr_range,
+            min(cfg.snr_bin_width, cfg.snr_range[1] - cfg.snr_range[0]), cfg.volume_horizon_snr)
+        return sensitive_volume_curve(
+            injections, self.background(), cfg.far_thresholds if fars_hz is None else fars_hz,
+            gf.SeedTree(cfg.seed).stream(cfg.group, "validator/volume"),
+            cfg.volume_bootstrap_samples, cfg.confidence, cfg.efficiency_interval)
+
     def roc_curves(self) -> Dict[str, Dict[str, Any]]:
         """Exact ROC curves of noise against injection populations, keyed by population."""
         if self.far_scores is None or self.efficiency_data is None:
@@ -309,6 +334,7 @@ class Validator:
             generate_gps_distribution_plot,
             generate_roc_curves,
             generate_parameter_space_plot,
+            generate_sensitive_volume_plot,
             generate_waveform_plot,
             generate_real_events_table,
         )
@@ -326,8 +352,10 @@ class Validator:
         roc_plot, roc_select = generate_roc_curves(validators)
         param_plot, param_controls = generate_parameter_space_plot(validators)
 
+        volume_plot = generate_sensitive_volume_plot(validators)
         tabs = pn.Tabs(
             ("Efficiency", pn.Column(eff_controls, eff_plot)),
+            *([("Sensitive Volume", volume_plot)] if any(p.renderers for p in volume_plot.children) else []),
             ("ROC Curves", pn.Column(roc_select, roc_plot)),
             ("FAR Curves", pn.Column(*far_tab)),
             ("Parameter Space", pn.Column(param_controls, param_plot) if param_controls else param_plot),

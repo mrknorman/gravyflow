@@ -224,7 +224,8 @@ validates as it trains: they need the `viz` extra.
 
 ## Validation (the `viz` extra)
 
-- `Validator`: validate a model: efficiency, false-alarm rate, ROC and the dashboard.
+- `Validator`: validate a model: efficiency, false-alarm rate, sensitive volume and distance against false-alarm
+  rate (with injection, background and joint intervals), ROC and the dashboard.
 - `ValidationConfig`: the settings of a validation.
 
 ## Plotting (the `viz` extra)

@@ -16,6 +16,12 @@ from .metrics import (
     poisson_interval,
     roc_curve,
 )
+from .volume import (
+    InjectionVolumes,
+    SensitiveVolumeCurve,
+    sensitive_distance,
+    sensitive_volume_curve,
+)
 from .provenance import StaleCheckpointError, model_fingerprint
 from gravyflow.src.utils.fingerprint import config_fingerprint
 from .plotting import (
@@ -23,6 +29,7 @@ from .plotting import (
     generate_far_curves,
     generate_gps_distribution_plot,
     generate_roc_curves,
+    generate_sensitive_volume_plot,
     generate_waveform_plot,
     generate_parameter_space_plot
 )

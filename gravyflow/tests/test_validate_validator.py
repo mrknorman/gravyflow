@@ -4,6 +4,7 @@ draws its own seeds, and reuses a checkpoint only for the model and settings
 that wrote it.
 """
 
+import dataclasses
 from copy import deepcopy
 from unittest import mock
 
@@ -18,7 +19,7 @@ from gravyflow.src.model.examples.base import ValidationDatasetConfig, validatio
 from gravyflow.src.validate import StaleCheckpointError, ValidationConfig, Validator
 from gravyflow.src.validate.bank import ValidationBank, per_example
 from gravyflow.src.validate.metrics import logit_scores
-from gravyflow.src.validate.plotting import first_detector
+from gravyflow.src.validate.plotting import first_detector, generate_sensitive_volume_plot
 from gravyflow.src.validate.utils import _extract_sample_data
 
 SAMPLES = 2048
@@ -55,7 +56,8 @@ def test_validator_runs_offline_on_synthetic_noise(validated, tmp_path):
     _, path, v = validated
     assert v.far_scores.shape == (64,) and np.all(np.isfinite(v.far_scores))
     assert v.noise_gps_times is None
-    assert set(v.efficiency_data) == {"snrs", "scores", "mass1", "mass2", "central_times", "hpeak", "hrss"}
+    assert set(v.efficiency_data) == {"snrs", "scores", "mass1", "mass2", "distances", "central_times", "hpeak",
+                                      "hrss"}
     assert all(a.shape == (64,) for a in v.efficiency_data.values())
     assert path.exists()
     report = tmp_path / "report.html"
@@ -90,6 +92,64 @@ def test_checkpoint_round_trip(validated):
         np.testing.assert_array_equal(loaded.efficiency_data[k], v.efficiency_data[k])
     assert loaded.model_sha256 == v.model_sha256 and loaded.config_sha256 == v.config_sha256
     assert loaded.config == v.config
+
+
+def test_the_sensitive_volume_is_recorded_and_plotted(validated, small_config):
+    # The default run's injections carry the distance their scaled amplitude implies, so
+    # the volume curve follows from the record alone, with its three intervals, and the
+    # record read back gives the same curve.
+    _, path, v = validated
+    distances, snrs = v.efficiency_data["distances"], v.efficiency_data["snrs"]
+    assert np.all(np.isfinite(distances)) and np.all(distances > 0) and np.ptp(snrs) > 5.0
+    curve = v.sensitive_volume_curve()
+    assert curve.far_hz.tolist() == small_config.far_thresholds
+    resolved = curve.resolved
+    assert resolved.any() and not resolved.all()  # 64 s of background resolves only the higher FARs
+    assert np.all(np.isnan(curve.volume_gpc3[~resolved]))
+    for lower, upper in ((curve.injection_lower_gpc3, curve.injection_upper_gpc3),
+                         (curve.background_lower_gpc3, curve.background_upper_gpc3),
+                         (curve.joint_lower_gpc3, curve.joint_upper_gpc3)):
+        assert np.all(lower[resolved] <= curve.volume_gpc3[resolved])
+        assert np.all(curve.volume_gpc3[resolved] <= upper[resolved])
+    assert np.all(curve.volume_gpc3[resolved] <= curve.reference_volume_gpc3)
+    assert curve.num_injections == small_config.num_examples
+    assert curve.num_bootstrap == small_config.volume_bootstrap_samples
+    loaded = Validator.load(path).sensitive_volume_curve()
+    for field in dataclasses.fields(curve):
+        np.testing.assert_array_equal(getattr(loaded, field.name), getattr(curve, field.name), err_msg=field.name)
+
+    plot = generate_sensitive_volume_plot([v])
+    assert [child.yaxis.axis_label for child in plot.children] == ["Sensitive Volume (Gpc³)",
+                                                                    "Sensitive Distance (Mpc)"]
+    assert all(child.renderers for child in plot.children)
+
+
+def test_a_sources_snr_times_its_distance_does_not_depend_on_the_snr_drawn(dataset_args):
+    # The volume weighs each injection by D = SNR x distance, its source's SNR at 1 Mpc.
+    # Drawn over twice the SNR range, from the same seeds, the same sources are scaled to
+    # twice the SNR, so each lies at half the distance, with the same D.
+    def injected(snr_range):
+        bank = ValidationBank(logit_model(1), dataset_args,
+                              ValidationConfig(num_examples=32, batch_size=32, snr_range=snr_range))
+        bank.generate()
+        return bank.get_efficiency_data()
+
+    near, far = injected((0.0, 30.0)), injected((0.0, 15.0))
+    np.testing.assert_allclose(near["snrs"], 2 * far["snrs"], rtol=1e-6)
+    np.testing.assert_allclose(near["mass1"], far["mass1"], rtol=0)
+    # float32 labels: the SNR, its scale factor and the distance each carry a rounding.
+    np.testing.assert_allclose(near["snrs"] * near["distances"], far["snrs"] * far["distances"], rtol=1e-5)
+    assert np.ptp(far["snrs"] * far["distances"]) > 0  # sources differ: sky, orientation, masses
+
+
+def test_injections_without_distances_have_no_sensitive_volume(validated):
+    # A burst set has no distance: it has efficiency, but no volume.
+    _, _, v = validated
+    burst = Validator("burst", v.config, v.dataset_args)
+    burst.far_scores = v.far_scores
+    burst.efficiency_data = {k: x for k, x in v.efficiency_data.items() if k != "distances"}
+    assert burst.sensitive_volume_curve() is None
+    assert all(not child.renderers for child in generate_sensitive_volume_plot([burst]).children)
 
 
 def test_checkpoint_resumes_for_the_same_model(validated, dataset_args, small_config, monkeypatch):

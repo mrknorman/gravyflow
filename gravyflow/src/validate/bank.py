@@ -41,9 +41,12 @@ _INJECTION_LABELS = {
     "hrss": gf.ScalingTypes.HRSS,
     "mass1": gf.WaveformParameters.MASS_1_MSUN,
     "mass2": gf.WaveformParameters.MASS_2_MSUN,
+    # The distance (Mpc) the scaled amplitude implies: with the SNR, the source's
+    # SNR at a fixed distance, which the sensitive volume weighs it by.
+    "distances": gf.WaveformParameters.DISTANCE_MPC,
     "central_times": gf.ReturnVariables.CENTRAL_TIME,
 }
-_CBC_LABELS = ("mass1", "mass2")
+_CBC_LABELS = ("mass1", "mass2", "distances")
 
 
 def require_logit_model(model) -> None:
@@ -299,7 +302,7 @@ class ValidationBank:
             type_=gf.ScalingTypes.SNR,
         )
         generator.injection_chance = 1.0
-        # Component masses exist only for CBC injections (a burst set has none).
+        # Component masses and distances exist only for CBC injections (a burst set has none).
         labels = {k: v for k, v in _INJECTION_LABELS.items()
                   if k not in _CBC_LABELS or isinstance(generator, gf.CBCGenerator)}
         outputs = [gf.ReturnVariables.WHITENED_ONSOURCE, gf.ReturnVariables.WHITENED_INJECTIONS,
