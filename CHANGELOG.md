@@ -16,7 +16,7 @@ repository before it may need the changes below.
   events and the segment timeline plot. Every default real-data dataset changes, with its fingerprint; split blocks are
   absolute GPS, so O1 to O3's time keeps its splits. O4's noise has no glitch veto (`gf.NoGlitchVetoWarning`), and
   glitches are read only in the runs Gravity Spy's release covers (O1 to O3b, H1 and L1): over the default runs, O1
-  to O3's. Name the runs to keep the old default: `observing_runs=[gf.ObservingRun.O1, gf.ObservingRun.O2,
+  to O3's, under a `gf.PartialGlitchCoverageWarning` naming the runs and detectors left without glitches. Name the runs to keep the old default: `observing_runs=[gf.ObservingRun.O1, gf.ObservingRun.O2,
   gf.ObservingRun.O3]`.
 - **The aLIGO `O3_LOW` and `DESIGN` noise curves stop where their tables do** (4995.38 Hz and 5000 Hz). Their rows
   above that were lalsimulation's extrapolation of its table (1.9 times the last tabulated ASD by 8191 Hz), not

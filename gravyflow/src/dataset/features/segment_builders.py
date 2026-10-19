@@ -4,6 +4,7 @@ Builder functions for creating TransientSegments directly from API data.
 These replace build_glitch_records/build_event_records and return
 TransientSegments with acquisition boundaries already set.
 """
+import warnings
 from typing import List
 
 import numpy as np
@@ -35,7 +36,8 @@ def build_glitch_segments(
 
     Each detector's glitches are read in the runs Gravity Spy's public release covers
     for it (H1 and L1, O1 to O3b), as a detector's strain is read only in the runs
-    that publish it: O4 adds none. A detector no run covers (Virgo; O4 alone) is
+    that publish it: O4 adds none. Runs left without glitches are named in a
+    ``gf.PartialGlitchCoverageWarning``. A detector no run covers (Virgo; O4 alone) is
     refused by name, never served empty.
 
     Args:
@@ -60,6 +62,15 @@ def build_glitch_segments(
                 f"{', '.join(run.name for run in observing_runs)}: the release ({gravity_spy.ZENODO_DOI}) "
                 f"covers H1 and L1 in {', '.join(gravity_spy.ERAS)}."
             )
+
+    uncovered = {ifo.name: [run.name for run in observing_runs if run not in runs]
+                 for ifo, runs in covered.items() if len(runs) < len(observing_runs)}
+    if uncovered:
+        warnings.warn(gravity_spy.PartialGlitchCoverageWarning(
+            "No glitches for " + "; ".join(f"{name} in {', '.join(names)}" for name, names in uncovered.items())
+            + f": no public Gravity Spy labels cover them ({gravity_spy.ZENODO_DOI} covers H1 and L1 in "
+            f"{', '.join(gravity_spy.ERAS)}). The covered runs' glitches are served."
+        ), stacklevel=2)
 
     segments = []
     

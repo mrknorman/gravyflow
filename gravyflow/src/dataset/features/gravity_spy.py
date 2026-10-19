@@ -52,6 +52,15 @@ class NoGlitchVetoWarning(UserWarning):
     """
 
 
+class PartialGlitchCoverageWarning(UserWarning):
+    """
+    Glitches were requested over several runs and some have no public Gravity Spy labels
+    for a detector: the glitches of the covered runs are served, none from the others.
+    Filter it by name to silence it, for example
+    ``warnings.simplefilter("ignore", gf.PartialGlitchCoverageWarning)``.
+    """
+
+
 ZENODO_RECORD = 5649212
 ZENODO_DOI = "10.5281/zenodo.5649212"
 RELEASE_VERSION = "v1.0.0"

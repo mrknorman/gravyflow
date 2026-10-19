@@ -869,6 +869,31 @@ class TestObservingRunO4:
         with pytest.raises(ValueError, match=r"No public Gravity Spy release covers V1 in O1, O2, O3, O4"):
             build_glitch_segments(ifos=[gf.IFO.V1], observing_runs=list(DEFAULT_OBSERVING_RUNS))
 
+    def test_partly_covered_glitch_requests_are_served_under_a_visible_warning(self, offline_public_sources):
+        """
+        Glitches asked over runs only some of which Gravity Spy covers are served for the
+        covered runs, under a ``gf.PartialGlitchCoverageWarning`` naming the runs and
+        detectors left without glitches. Full coverage warns nothing; no coverage is refused.
+        """
+        import warnings
+        from gravyflow.src.dataset.features.segment_builders import build_glitch_segments
+
+        assert issubclass(gf.PartialGlitchCoverageWarning, UserWarning)
+        with pytest.warns(gf.PartialGlitchCoverageWarning) as caught:
+            segments = build_glitch_segments(
+                ifos=[gf.IFO.H1], observing_runs=[gf.ObservingRun.O3, gf.ObservingRun.O4])
+        assert {s.observing_run for s in segments} == {gf.ObservingRun.O3}
+        (warning,) = [w for w in caught if issubclass(w.category, gf.PartialGlitchCoverageWarning)]
+        message = str(warning.message)
+        assert "H1" in message and "O4" in message and "Gravity Spy" in message, message
+        assert "O3" not in message.replace("O3a", "").replace("O3b", ""), message
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", gf.PartialGlitchCoverageWarning)
+            build_glitch_segments(ifos=[gf.IFO.H1], observing_runs=[gf.ObservingRun.O3])
+        with pytest.raises(ValueError, match="No public Gravity Spy release covers"):
+            build_glitch_segments(ifos=[gf.IFO.H1], observing_runs=[gf.ObservingRun.O4])
+
     def test_a_detector_is_read_only_in_the_runs_gwosc_publishes_it_in(self, offline_public_sources):
         """
         Virgo is in O4b but not O4a (nor O1): its O4 time is O4b's, and no O4a timeline is

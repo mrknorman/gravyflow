@@ -150,6 +150,7 @@ _MODULES = {
     "resample": "gravyflow.src.utils.resample",
     "NonFiniteWarning": "gravyflow.src.utils.numerics",
     "NoGlitchVetoWarning": "gravyflow.src.dataset.features.gravity_spy",
+    "PartialGlitchCoverageWarning": "gravyflow.src.dataset.features.gravity_spy",
 
     # Matched filtering
     "MatchedFilter": "gravyflow.src.detection",
