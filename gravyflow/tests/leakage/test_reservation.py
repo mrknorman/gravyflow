@@ -12,6 +12,8 @@ The segments here are literal rows of the challenge's ``segments.csv`` (rows 0 a
 judges.
 """
 
+import pickle
+
 import numpy as np
 import pytest
 
@@ -188,3 +190,40 @@ def test_a_reservation_is_checked_as_it_is_made():
     with pytest.raises(ValueError, match="non-negative"):
         gf.Reservation.from_segments("bad", [[0.0, 1.0]], {"H1": -1.0})
     assert len(repr(gf.DEFAULT_SPLIT)) < 400
+
+
+@pytest.mark.parametrize("intervals", [
+    (),
+    (("H1", []),),
+    (("H1", [[5.0, 5.0]]), ("L1", np.empty((0, 2)))),
+], ids=["no detector", "no interval", "no time"])
+def test_a_reservation_that_reserves_nothing_is_refused(intervals):
+    """A hollow reservation would name a mode ("reserved: <name>") and hold nothing out."""
+    with pytest.raises(ValueError, match="reserves no time"):
+        gf.Reservation("hollow", intervals)
+
+
+def test_a_reservation_with_no_detector_is_refused():
+    with pytest.raises(ValueError, match="reserves no time"):
+        gf.Reservation.from_segments("hollow", [[0.0, 10.0]], {})
+
+
+def test_a_detector_is_named_once():
+    """A detector named twice, as gf.IFO and as its name, would keep only one's time."""
+    with pytest.raises(ValueError, match="H1 twice"):
+        gf.Reservation("twice", ((gf.IFO.H1, [[0.0, 10.0]]), ("H1", [[100.0, 110.0]])))
+    with pytest.raises(ValueError, match="H1 twice"):
+        gf.Reservation.from_segments("twice", [[0.0, 10.0]], {gf.IFO.H1: 0.0, "H1": 5.0})
+
+
+def test_a_reservation_stays_read_only_through_pickling():
+    """An unpickled reservation's time refuses writes, and its identity is unchanged."""
+    original = gf.MLGWSC1_O3A
+    clone = pickle.loads(pickle.dumps(original))
+    assert clone == original and clone.sha256 == original.sha256
+    assert clone.specification() == original.specification()
+    for detector in (None, "H1", gf.IFO.L1, "V1"):
+        time = clone.of(detector)
+        assert np.array_equal(time, original.of(detector))
+        with pytest.raises(ValueError, match="read-only"):
+            time[...] = 0.0
