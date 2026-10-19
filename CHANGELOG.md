@@ -31,10 +31,10 @@ repository before it may need the changes below.
   `randomise_arguments` (it called a function that did not exist), `get_element_shape`, `calculate_sample_counts`,
   `Axis_BIS`, `Axis_BI`, and, since nothing in GravyFlow used them, `expand_tensor`, `batch_tensor`,
   `roll_vector_zero_padding` and `is_not_inherited`.
-- **The CUDA-cluster tooling moved to its own project, GravEvolve.** `gf.env`, `gf.setup_cuda`,
+- **The CUDA-cluster tooling was removed from the library.** `gf.env`, `gf.setup_cuda`,
   `gf.find_available_GPUs` and `gf.get_tf_memory_usage` left the public API, with the GPU monitor script
-  (`gravyflow/src/tools/gpu_checker.py`, which called two functions that did not exist). GravEvolve, built on
-  GravyFlow, selects free GPUs and runs on CUDA clusters. A `with gf.env():` block needs nothing in its place:
+  (`gravyflow/src/tools/gpu_checker.py`, which called two functions that did not exist). Selecting free GPUs and
+  running on CUDA clusters is no longer part of GravyFlow. A `with gf.env():` block needs nothing in its place:
   GravyFlow runs on whatever devices JAX sees.
 - **The cluster tools are removed from the library**: the genetic model search and the multi-process training
   supervisor it ran on. These left the public API: `gf.Population`, `gf.PopulationSector`, `gf.ModelGenome`,
