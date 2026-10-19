@@ -4,8 +4,10 @@ Sensitive volume and sensitive distance against false-alarm rate.
 The injections are drawn as an injection campaign draws them: each source from
 the population, placed at a physical distance drawn uniformly in volume out to
 a fixed reach ``max_distance_mpc``, which the population defines and never the
-sample (the validator's is the horizon of the population's loudest source:
-`ValidationBank.horizon_distance`). A found injection (``score >= threshold``,
+sample (the validator's is the distance beyond which no source of the
+population can have a stated SNR: `ValidationBank.horizon_distance`). The
+volume is Euclidean (no cosmology) and the population's masses are in the
+detector frame, as in MLGWSC-1's ``evaluate.py``. A found injection (``score >= threshold``,
 as everywhere in `metrics`) stands for the reference volume
 ``V_ref = 4/3 pi max_distance^3`` times its population weight ``w`` (1 when the
 draw is the population's own; a power of the chirp mass for a draw uniform in
@@ -27,8 +29,8 @@ reported, each two-sided and central at ``confidence``:
   which the FAR's Poisson interval puts the true threshold
   (`Background.far_band_thresholds`);
 - **joint**: a bootstrap over injections and background blocks
-  (`Background.bootstrap`), the threshold found again in each replicate, with
-  its lower end at most the background interval's (`sensitive_volume_curve`).
+  (`Background.bootstrap`), the threshold found again in each replicate, each
+  end at least as far out as the background interval's (`sensitive_volume_curve`).
 
 **The noise floor.** An injection is found when its window passes the
 threshold, whatever passes it: one beyond reach is found by its noise alone,
@@ -36,6 +38,21 @@ with the chance ``p`` that a noise window passes (`Background.window_exceedance`
 Those add about ``p V_ref`` to V, which is part of what the threshold finds,
 not an error; it is recorded at each target, and a point where it exceeds a
 stated fraction of V is marked noise-dominated.
+
+**The reach guard.** V counts only what is found inside the reach: a detector
+that finds sources beyond it is measured short, by an amount the estimate
+cannot see. Its witness is the outermost shell (distances of at least
+`REACH_SHELL` of the reach): with no source found by its signal there, the
+shell is found at the noise's rate, and the injections beyond the reach would
+be too. At each target, a one-sided exact test compares the shell's found count
+with the background's windows at or above the threshold (conditional on their
+sum, binomial under equal rates), and a target where the shell is found more
+often, at the level ``(1 - confidence) / number of targets`` (so that a long
+enough reach marks a target of a curve in at most ``1 - confidence`` of runs),
+is marked reach-limited.
+
+Neither a noise-dominated nor a reach-limited V is a number to quote:
+`SensitiveVolumeCurve.quote` refuses them by name, and the plot marks them.
 
 Units: distances in Mpc, volumes in Gpc^3 (Euclidean: no cosmology), FAR in Hz;
 `SECONDS_PER_YEAR` and `SECONDS_PER_MONTH` convert it for display.
@@ -49,9 +66,14 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
-from .metrics import DEFAULT_CONFIDENCE, Background, binomial_interval
+from scipy import stats
+
+from .metrics import DEFAULT_CONFIDENCE, Background, _count_at_or_above, binomial_interval
 
 logger = logging.getLogger(__name__)
+
+#: The reach guard's shell: the injections at distances of at least this fraction of the reach.
+REACH_SHELL = 0.9
 
 GPC3_PER_MPC3 = 1e-9
 #: A Julian year, and a twelfth of it.
@@ -81,26 +103,34 @@ def uniform_in_volume(num: int, max_distance_mpc: float, rng: np.random.Generato
 class InjectionVolumes:
     """
     Injections drawn uniformly in volume out to ``max_distance_mpc``: injection
-    ``i`` scored ``scores[i]`` and stands, when found, for the reference volume
-    times ``weights[i]`` (1 by default; a draw uniform in chirp distance gives
-    each its chirp-mass weight).
+    ``i``, at ``distances[i]`` (Mpc; a chirp distance for a draw uniform in chirp
+    distance), scored ``scores[i]`` and stands, when found, for the reference
+    volume times ``weights[i]`` (1 by default; a draw uniform in chirp distance
+    gives each its chirp-mass weight). The distances are the reach guard's
+    (module docstring).
     """
     scores: np.ndarray
     max_distance_mpc: float
+    distances: np.ndarray
     weights: Optional[np.ndarray] = None
 
     def __post_init__(self):
         scores = np.asarray(self.scores, dtype=np.float64).reshape(-1)
+        distances = np.asarray(self.distances, dtype=np.float64).reshape(-1)
         weights = np.ones_like(scores) if self.weights is None else \
             np.asarray(self.weights, dtype=np.float64).reshape(-1)
-        if scores.size == 0 or scores.shape != weights.shape:
-            raise ValueError(f"{weights.size} weights for {scores.size} injection scores: need one per injection.")
+        if scores.size == 0 or scores.shape != weights.shape or scores.shape != distances.shape:
+            raise ValueError(f"{weights.size} weights and {distances.size} distances for {scores.size} injection "
+                             "scores: need one of each per injection.")
         if not (np.all(np.isfinite(scores)) and np.all(np.isfinite(weights)) and np.all(weights >= 0)):
             raise ValueError("Injection scores must be finite, and their weights finite and >= 0.")
         if not self.max_distance_mpc > 0:
             raise ValueError(f"max_distance_mpc must be > 0, got {self.max_distance_mpc}.")
+        if not np.all((distances > 0) & (distances <= self.max_distance_mpc)):
+            raise ValueError(f"Injection distances must be in (0, max_distance_mpc = {self.max_distance_mpc}].")
         order = np.argsort(scores, kind="stable")
         object.__setattr__(self, "scores", scores)
+        object.__setattr__(self, "distances", distances)
         object.__setattr__(self, "weights", weights)
         object.__setattr__(self, "max_distance_mpc", float(self.max_distance_mpc))
         # Scores ascending, for the injections found at a threshold: a suffix.
@@ -147,6 +177,14 @@ class InjectionVolumes:
         n = self.num_injections
         return self.reference_volume_gpc3 * np.sqrt(np.maximum(s2 - s1**2 / n, 0.0)) / n
 
+    def shell_found(self, thresholds) -> Tuple[np.ndarray, int]:
+        """
+        The reach guard's counts: the injections of the outermost shell (at least
+        `REACH_SHELL` of the reach) found at each threshold, and the shell's size.
+        """
+        shell = np.sort(self.scores[self.distances >= REACH_SHELL * self.max_distance_mpc])
+        return _count_at_or_above(shell, thresholds), shell.size
+
     def interval(self, thresholds, confidence: float = DEFAULT_CONFIDENCE,
                  method: str = "clopper-pearson") -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -182,7 +220,10 @@ class SensitiveVolumeCurve:
     not resolve the target (their livetime too short); where any could not, the
     joint interval is NaN. ``noise_floor_gpc3`` is the volume noise alone finds
     (module docstring); ``noise_dominated`` marks the targets where it exceeds
-    ``noise_floor_fraction`` of V.
+    ``noise_floor_fraction`` of V. ``shell_found_fraction`` is the found fraction
+    of the reach's outermost shell, ``shell_p_value`` the reach guard's p-value,
+    and ``reach_limited`` marks the targets where it is below ``reach_alpha``
+    (module docstring). `quote` gives V only where neither marks it.
     """
     far_hz: np.ndarray
     threshold: np.ndarray
@@ -201,6 +242,9 @@ class SensitiveVolumeCurve:
     joint_unresolved: np.ndarray
     noise_floor_gpc3: np.ndarray
     noise_floor_fraction: float
+    shell_found_fraction: np.ndarray
+    shell_p_value: np.ndarray
+    reach_alpha: float
     max_distance_mpc: float
     num_injections: int
     num_bootstrap: int
@@ -220,6 +264,35 @@ class SensitiveVolumeCurve:
         """The resolved targets whose noise floor exceeds ``noise_floor_fraction`` of V."""
         with np.errstate(invalid="ignore"):
             return self.resolved & (self.noise_floor_gpc3 > self.noise_floor_fraction * self.volume_gpc3)
+
+    @property
+    def reach_limited(self) -> np.ndarray:
+        """The resolved targets whose reach's outermost shell is found more often than noise is (module docstring)."""
+        with np.errstate(invalid="ignore"):
+            return self.resolved & (self.shell_p_value < self.reach_alpha)
+
+    def quote(self, far_hz: float) -> Tuple[float, float, float]:
+        """
+        V (Gpc^3) at the target ``far_hz`` with its joint interval, (V, lower, upper):
+        the number a comparison quotes. Refuses, by name, a target the background
+        cannot resolve, one noise-dominated (V mostly what noise alone finds), one
+        reach-limited (V short by what lies beyond the reach: lower
+        ``ValidationConfig.volume_horizon_snr``, or set ``volume_max_distance_mpc``
+        longer), and one whose joint interval is unresolved.
+        """
+        matches = np.flatnonzero(np.isclose(self.far_hz, far_hz, rtol=1e-9, atol=0))
+        if matches.size == 0:
+            raise ValueError(f"{far_hz:g} Hz is not one of the curve's target FARs.")
+        i = int(matches[0])
+        for marked, why in ((~self.resolved, "the background cannot resolve it"),
+                            (self.noise_dominated, "it is noise-dominated: noise alone finds more than "
+                                                   f"{self.noise_floor_fraction:.0%} of V"),
+                            (self.reach_limited, "it is reach-limited: the reach's outermost shell is found "
+                                                 "more often than noise is, so V misses what lies beyond it"),
+                            (np.isnan(self.joint_lower_gpc3), "its joint interval is unresolved")):
+            if marked[i]:
+                raise ValueError(f"No sensitive volume to quote at {far_hz:g} Hz: {why}.")
+        return float(self.volume_gpc3[i]), float(self.joint_lower_gpc3[i]), float(self.joint_upper_gpc3[i])
 
 
 def sensitive_volume_curve(
@@ -244,7 +317,13 @@ def sensitive_volume_curve(
     threshold above the loudest background trigger, while the true threshold may
     lie there: the background interval's high threshold can (+inf when even no
     trigger leaves the FAR's upper bound above the target), so the joint lower
-    end is at most the background interval's.
+    end is at most the background interval's. Where the background has few
+    blocks, the replicates' thresholds take few values and their spread
+    understates the threshold's error: the joint upper end is at least the
+    background interval's.
+
+    Each target's reach guard (module docstring) compares the shell's found
+    count with the background's windows at or above its threshold.
     """
     if num_bootstrap < 1:
         raise ValueError(f"num_bootstrap must be >= 1, got {num_bootstrap}.")
@@ -277,6 +356,11 @@ def sensitive_volume_curve(
     if np.any(complete):
         joint[:, complete] = np.quantile(replicates[:, complete], [alpha / 2, 1 - alpha / 2], axis=0)
     injection_lower, injection_upper = injections.interval(threshold, confidence, method)
+    # The reach guard: the shell's found count against the background's, given their sum.
+    shell_found, shell_size = injections.shell_found(threshold)
+    noise_found = background.windows_at_or_above(threshold)
+    share = shell_size / (shell_size + background.num_windows)
+    shell_p_value = np.where(resolved, stats.binom.sf(shell_found - 1, shell_found + noise_found, share), np.nan)
     return SensitiveVolumeCurve(
         far_hz=fars,
         threshold=threshold,
@@ -291,11 +375,14 @@ def sensitive_volume_curve(
         background_lower_gpc3=background_lower,
         background_upper_gpc3=background_upper,
         joint_lower_gpc3=np.minimum(joint[0], background_lower),
-        joint_upper_gpc3=joint[1],
+        joint_upper_gpc3=np.maximum(joint[1], background_upper),
         joint_unresolved=unresolved.astype(np.int64),
         noise_floor_gpc3=np.where(resolved, background.window_exceedance(threshold), np.nan)
         * injections.reference_volume_gpc3,
         noise_floor_fraction=float(noise_floor_fraction),
+        shell_found_fraction=np.where(resolved, shell_found / max(shell_size, 1), np.nan),
+        shell_p_value=shell_p_value,
+        reach_alpha=float((1.0 - confidence) / max(fars.size, 1)),
         max_distance_mpc=injections.max_distance_mpc,
         num_injections=n,
         num_bootstrap=int(num_bootstrap),

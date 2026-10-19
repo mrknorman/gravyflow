@@ -229,10 +229,10 @@ EPOCH_LABEL_STEPS = 12
 
 def label_sets(taken_by_split):
     """
-    Each set's label streams. The reach's stage is left out: its one batch is too short
-    for a stream to be compared, and its sources are fixed by construction (masses at
-    their bounds, face-on, one SNR) but for sky and polarisation, drawn under its own
-    scope; its strain is compared with every other set's (`test_validator_sets_disjoint`).
+    Each set's label streams. The reach's stage is left out: it injects nothing (its one
+    batch of noise, drawn under its own scope, gives the PSD the reach is computed in), so
+    it has no labels; its strain is compared with every other set's
+    (`test_validator_sets_disjoint`).
     """
     return {name: injection_label_streams(batches) for name, batches in taken_by_split.items()
             if name != HORIZON_STAGE}

@@ -104,8 +104,9 @@ def test_the_sensitive_volume_is_recorded_and_plotted(validated, small_config):
     data = v.volume_data
     max_distance = float(data["max_distance_mpc"])
     assert np.all((data["distances"] > 0) & (data["distances"] <= max_distance))
-    # Each source's SNR goes as one over its distance: its SNR at the reach is at most
-    # the loudest source's, the horizon SNR (the loudest sky of one batch, so to a margin).
+    # Each source's SNR goes as one over its distance: its SNR at the reach is at most the
+    # loudest possible source's, the horizon SNR, to the scatter of each window's own PSD
+    # estimate (a few per cent), against which its SNR is measured.
     assert np.all(data["snrs"] * data["distances"] / max_distance <= small_config.volume_horizon_snr * 1.1)
     curve = v.sensitive_volume_curve()
     assert curve.far_hz.tolist() == small_config.far_thresholds
@@ -128,8 +129,10 @@ def test_the_sensitive_volume_is_recorded_and_plotted(validated, small_config):
         np.testing.assert_array_equal(getattr(loaded, field.name), getattr(curve, field.name), err_msg=field.name)
 
     plot = generate_sensitive_volume_plot([v])
-    assert [child.yaxis.axis_label for child in plot.children] == ["Sensitive Volume (Gpc³)",
-                                                                    "Sensitive Distance (Mpc)"]
+    # The axes say what the number is: a Euclidean volume, of detector-frame masses.
+    assert [child.yaxis.axis_label for child in plot.children] == [
+        "Sensitive Volume (Gpc³, Euclidean, detector-frame masses)",
+        "Sensitive Distance (Mpc, Euclidean, detector-frame masses)"]
     assert all(child.renderers for child in plot.children)
 
 
@@ -157,6 +160,112 @@ def test_the_reach_is_the_populations_and_can_be_set(dataset_args):
     assert given["max_distance_mpc"] == 250.0 and np.all(given["distances"] <= 250.0)
     with pytest.raises(ValueError, match="volume_max_distance_mpc"):
         ValidationConfig(volume_max_distance_mpc=0.0)
+
+
+def reach_of(dataset_args, masses=None, spins=None, **settings):
+    """The validator's reach for the example population, its component masses (low, high) and aligned spins as given."""
+    args = deepcopy(dataset_args)
+    generator = args["waveform_generators"]
+    for attribute, bounds in (("mass_1_msun", masses), ("mass_2_msun", masses), ("spin_1_in", spins),
+                              ("spin_2_in", spins)):
+        if bounds is not None:
+            setattr(generator, attribute, gf.Distribution(value=bounds[0], type_=gf.DistributionType.CONSTANT)
+                    if bounds[0] == bounds[1] else
+                    gf.Distribution(min_=bounds[0], max_=bounds[1], type_=gf.DistributionType.UNIFORM))
+    config = ValidationConfig(**{"num_examples": 32, "batch_size": 32, **settings})
+    return ValidationBank(logit_model(1), args, config).horizon_distance()
+
+
+def test_the_reach_is_the_loudest_source_of_the_whole_population(dataset_args):
+    # A heavy binary merges below the band, so the heaviest is not the loudest: equal
+    # masses of 200 are louder than of 300. A population of masses up to 300 has a reach
+    # at least that of its loudest member, never the heaviest's.
+    loudest = reach_of(dataset_args, masses=(200.0, 200.0))
+    assert reach_of(dataset_args, masses=(300.0, 300.0)) < 0.9 * loudest
+    assert reach_of(dataset_args, masses=(5.0, 300.0)) >= loudest * (1 - 1e-4)
+    # Aligned spins: the reach is the loudest spin's, at its bounds or between them.
+    spinning = reach_of(dataset_args, masses=(5.0, 95.0), spins=(-0.9, 0.9))
+    assert spinning >= reach_of(dataset_args, masses=(95.0, 95.0), spins=(0.9, 0.9)) * (1 - 1e-4)
+    assert spinning >= reach_of(dataset_args, masses=(5.0, 95.0)) * (1 - 1e-4)
+
+
+def test_the_reach_is_the_populations_not_the_batchs(dataset_args):
+    # The reach reads the population's bounds and the noise's PSD: the batch size plays no
+    # part, and another seed moves it only by its PSD estimate's scatter (64 windows).
+    reach = reach_of(dataset_args)
+    assert reach_of(dataset_args, batch_size=8, num_examples=8) == reach
+    assert reach_of(dataset_args, batch_size=512, num_examples=512) == reach
+    assert reach_of(dataset_args, seed=2) == pytest.approx(reach, rel=0.01)
+
+
+def test_the_reach_refuses_a_population_it_cannot_bound(dataset_args):
+    from gravyflow.src.validate.reach import population_box
+
+    generator = deepcopy(dataset_args["waveform_generators"])
+    box = population_box(generator)
+    assert box["mass_1_msun"] == (5.0, 95.0) and box["spin_1_in"] == (0.0,)
+    generator.spin_1_in = gf.Distribution(min_=-0.5, max_=0.8, type_=gf.DistributionType.UNIFORM)
+    assert population_box(generator)["spin_1_in"] == (-0.5, 0.0, 0.8)
+    unbounded = deepcopy(generator)
+    unbounded.mass_1_msun = gf.Distribution(mean=30.0, std=5.0, type_=gf.DistributionType.NORMAL)
+    with pytest.raises(ValueError, match="mass_1_msun is unbounded"):
+        population_box(unbounded)
+    precessing = deepcopy(generator)
+    precessing.approximant = gf.Approximant.IMRPhenomPv2
+    precessing.spin_2_in = (gf.Distribution(min_=0.0, max_=0.5, type_=gf.DistributionType.UNIFORM), 0.0, 0.0)
+    with pytest.raises(ValueError, match="in-plane components"):
+        population_box(precessing)
+
+
+def test_the_network_bound_is_the_best_response_each_detector_can_have():
+    # One detector: a face-on source overhead is within it at every polarisation angle,
+    # and reaches it at the best; two detectors of one PSD, root two times it.
+    from gravyflow.src.dataset.features.waveforms.cbc import _generate_cbc_window
+    from gravyflow.src.dataset.tools.snr import template_sigma
+    from gravyflow.src.validate.reach import network_snr_bound
+
+    rate, n = 2048.0, 3
+    h = np.asarray(_generate_cbc_window(num_waveforms=n, sample_rate_hertz=rate, window_seconds=2.0,
+                                        min_frequency_hertz=np.full(n, 20.0), mass_1_msun=np.array([10.0, 30.0, 60.0]),
+                                        mass_2_msun=np.array([10.0, 20.0, 50.0]), distance_mpc=np.full(n, 100.0),
+                                        inclination_radians=np.zeros(n), reference_orbital_phase_in=np.zeros(n)))
+    psd = np.full(int(rate) // 2 + 1, 1e-46)
+    config = gf.SpectralConfig()
+    bound = network_snr_bound(h, psd[None], rate, config)
+    overhead = np.stack([np.asarray(template_sigma(np.cos(2 * psi) * h[:, 0] + np.sin(2 * psi) * h[:, 1], psd,
+                                                   rate, 20.0, None)) for psi in np.linspace(0, np.pi / 2, 91)])
+    assert np.all(overhead <= bound * (1 + 1e-5))
+    np.testing.assert_allclose(overhead.max(axis=0), bound, rtol=1e-4)
+    np.testing.assert_allclose(network_snr_bound(h, np.stack([psd, psd]), rate, config), np.sqrt(2) * bound,
+                               rtol=1e-6)
+
+
+def test_a_placed_source_does_not_depend_on_the_distance_its_generator_drew(dataset_args):
+    # The physical placement: the injected strain is the generated source's at the
+    # distance its generator drew, times drawn over target, so the same sources at the
+    # same targets have the same SNR whether the generator drew them at 100 Mpc, at
+    # 1000 Mpc or anywhere between. (The label is the target by construction, and
+    # proves nothing of the strain.)
+    targets = np.linspace(500.0, 4000.0, 32)
+
+    def placed(distance):
+        generator = deepcopy(dataset_args["waveform_generators"])
+        generator.distance_mpc = distance
+        generator.scaling_method = gf.ScalingMethod(value=targets, type_=gf.WaveformParameters.DISTANCE_MPC)
+        generator.injection_chance = 1.0
+        args = {**dataset_args, "waveform_generators": [generator], "num_examples_per_batch": 32,
+                "steps_per_epoch": 1, "group": "test", "seed": gf.SeedTree(7).sub("validator/vol"),
+                "output_variables": [gf.ScalingTypes.SNR, gf.WaveformParameters.MASS_1_MSUN]}
+        _, y = gf.Dataset(**args)[0]
+        return per_example(y["SNR"], 32, "SNR"), per_example(y["MASS_1_MSUN"], 32, "MASS_1_MSUN")
+
+    (near, masses), (far, far_masses) = (placed(gf.Distribution(value=d, type_=gf.DistributionType.CONSTANT))
+                                         for d in (100.0, 1000.0))
+    between, _ = placed(gf.Distribution(min_=100.0, max_=1000.0, type_=gf.DistributionType.UNIFORM))
+    np.testing.assert_array_equal(masses, far_masses)
+    assert np.all(np.isfinite(near) & (near > 0)), near
+    np.testing.assert_allclose(near, far, rtol=1e-4)
+    np.testing.assert_allclose(near, between, rtol=1e-4)
 
 
 def test_a_source_placed_at_a_distance_is_the_generated_source_scaled_by_it(dataset_args):

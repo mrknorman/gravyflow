@@ -45,6 +45,8 @@ _INJECTION_LABELS = {
     "central_times": gf.ReturnVariables.CENTRAL_TIME,
 }
 _CBC_LABELS = ("mass1", "mass2")
+#: The noise windows whose median PSD the reach is computed in (`ValidationBank.horizon_distance`).
+REACH_NOISE_WINDOWS = 64
 # Per-example labels of the sensitive-volume set (`generate_volume`).
 _VOLUME_LABELS = {
     "distances": gf.WaveformParameters.DISTANCE_MPC,
@@ -164,16 +166,18 @@ class ValidationBank:
 
     def stage_dataset(self, stage: str, waveform_generators=(),
                       outputs=(gf.ReturnVariables.WHITENED_ONSOURCE,),
-                      num_examples: Optional[int] = None) -> gf.Dataset:
+                      num_examples: Optional[int] = None, batch_size: Optional[int] = None) -> gf.Dataset:
         """
         Stage ``stage``'s dataset (``far``, ``inj``, ``vol`` or ``horizon``) of
-        ``num_examples`` (default ``num_examples``): its own seeds, in the held-out split.
+        ``num_examples`` (default ``num_examples``) in batches of ``batch_size``
+        (default ``batch_size``): its own seeds, in the held-out split.
         """
+        batch_size = batch_size or self.config.batch_size
         args = deepcopy(self.dataset_args)
         args.update(
             waveform_generators=list(waveform_generators),
-            num_examples_per_batch=self.config.batch_size,
-            steps_per_epoch=self._num_batches(num_examples),
+            num_examples_per_batch=batch_size,
+            steps_per_epoch=math.ceil((num_examples or self.config.num_examples) / batch_size),
             output_variables=list(outputs),
             group=self.config.group,
             seed=gf.SeedTree(self.config.seed).sub(f"validator/{stage}"),
@@ -369,38 +373,28 @@ class ValidationBank:
 
     def horizon_distance(self) -> float:
         """
-        The population's reach (Mpc): the distance at which its loudest source has
-        optimal network SNR ``volume_horizon_snr``, so that every source beyond it is
-        quieter. The loudest source is taken as the population's heaviest binary
-        (each component mass at its upper bound: louder at a fixed distance for any
-        masses whose merger is in a ground-based detector's band), face-on, at the
-        best of one batch of sky positions; its other parameters are the
-        population's. It reads the population's bounds and the noise, never the
-        injections drawn; ``volume_max_distance_mpc`` overrides it.
+        The population's reach (Mpc): the distance at which its loudest possible
+        source has network SNR ``volume_horizon_snr``, so that every source beyond
+        it has less, whatever its sky position, orientation and parameters
+        (`reach.horizon_distance`: face-on, the best response every detector can
+        have, maximised over the population's masses and aligned spins). The noise's
+        PSD is the median, over `REACH_NOISE_WINDOWS` windows of the stage's own
+        noise, of the data path's estimate (``Dataset.spectral_config``). It reads
+        the population's bounds and the noise, never the injections drawn, nor the
+        batch size; ``volume_max_distance_mpc`` overrides it.
         """
-        from gravyflow.src.dataset.features.injection import get_support_bounds
+        from gravyflow.src.dataset.tools.psd import estimate_psd
+        from . import reach
 
-        cfg = self.config
-        generator = self._generator()
-        for attribute in ("mass_1_msun", "mass_2_msun"):
-            _, high = get_support_bounds(getattr(generator, attribute), attribute)
-            if not np.isfinite(high):
-                raise ValueError(
-                    f"The population's {attribute} is unbounded, so it has no loudest source: set "
-                    "ValidationConfig.volume_max_distance_mpc."
-                )
-            setattr(generator, attribute, gf.Distribution(value=high, type_=gf.DistributionType.CONSTANT))
-        generator.inclination_radians = gf.Distribution(value=0.0, type_=gf.DistributionType.CONSTANT)
-        generator.scaling_method = gf.ScalingMethod(
-            value=gf.Distribution(value=cfg.volume_horizon_snr, type_=gf.DistributionType.CONSTANT),
-            type_=gf.ScalingTypes.SNR,
-        )
-        generator.injection_chance = 1.0
-        label = gf.WaveformParameters.DISTANCE_MPC
-        dataset = self.stage_dataset("horizon", [generator], (gf.ReturnVariables.WHITENED_ONSOURCE, label),
-                                     num_examples=cfg.batch_size)
+        dataset = self.stage_dataset("horizon", outputs=(gf.ReturnVariables.OFFSOURCE,),
+                                     num_examples=REACH_NOISE_WINDOWS, batch_size=REACH_NOISE_WINDOWS)
         _, y = dataset[0]
-        return float(np.nanmax(per_example(y[label.name], cfg.batch_size, label.name)))
+        spectrum = estimate_psd(y[gf.ReturnVariables.OFFSOURCE.name], dataset.sample_rate_hertz,
+                                dataset.spectral_config)
+        psds = np.median(spectrum.value(), axis=0)
+        return reach.horizon_distance(self._generator(), psds, dataset.sample_rate_hertz,
+                                      dataset.window_spec.onsource_duration_seconds, dataset.spectral_config,
+                                      self.config.volume_horizon_snr)
 
     def generate_volume(self) -> None:
         """
@@ -408,6 +402,8 @@ class ValidationBank:
         population, each at a physical distance drawn uniformly in volume out to the
         population's reach (``volume_max_distance_mpc``, else `horizon_distance`):
         the generated source placed at that distance, never scaled to an SNR.
+        Distances are Euclidean and masses in the detector frame, as the generator
+        draws them.
         """
         cfg = self.config
         if not self.has_volume:
@@ -428,9 +424,12 @@ class ValidationBank:
             for key, label in _VOLUME_LABELS.items():
                 columns[key].append(per_example(y[label.name], batch_scores.size, label.name))
         volume = {k: np.concatenate(v)[:n] for k, v in columns.items()}
-        # Each source is where it was drawn for: the dataset reads the targets in order.
+        # The dataset reads the targets in order, batch after batch. The label is the
+        # target by construction, so this proves the order, not the placement: that the
+        # injected strain is the generated source's at its drawn distance, scaled by
+        # drawn over target, is the injection path's contract, and is tested there.
         if not np.allclose(volume["distances"], targets, rtol=1e-5, atol=0):
-            raise RuntimeError("The volume set's injections are not at the distances drawn for them.")
+            raise RuntimeError("The volume set's injections were not given their targets in the order drawn.")
         volume["distances"] = targets
         volume["max_distance_mpc"] = np.float64(max_distance)
         self.volume = volume

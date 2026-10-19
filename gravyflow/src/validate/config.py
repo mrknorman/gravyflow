@@ -41,15 +41,19 @@ class ValidationConfig:
     efficiency_interval: str = "clopper-pearson"
 
     # Sensitive volume against FAR (`volume`), at the same targets, from a set of
-    # this many injections of its own (default num_examples), each at a physical distance drawn uniformly
-    # in volume out to volume_max_distance_mpc: by default the distance at which
-    # the population's loudest source has this optimal network SNR, so that every
-    # source beyond it is quieter (`ValidationBank.horizon_distance`). The joint
+    # this many injections of its own (default num_examples), each at a physical
+    # distance drawn uniformly in volume out to volume_max_distance_mpc: by default
+    # the distance beyond which no source of the population can have this network
+    # SNR, whatever its sky, orientation, masses and spins
+    # (`ValidationBank.horizon_distance`). The volume is Euclidean and the masses
+    # are in the detector frame (as in MLGWSC-1's evaluate.py). A lower SNR is a
+    # longer reach: fewer targets reach-limited (the reach's outermost shell found
+    # more often than noise is), more injections for the same interval. The joint
     # interval bootstraps this many replicates of the injections and background. A
     # target where noise alone finds more than this fraction of V is marked.
     volume_num_injections: Optional[int] = None
     volume_max_distance_mpc: Optional[float] = None
-    volume_horizon_snr: float = 4.0
+    volume_horizon_snr: float = 3.0
     volume_bootstrap_samples: int = 1000
     volume_noise_floor_fraction: float = 0.1
 

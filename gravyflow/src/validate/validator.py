@@ -181,8 +181,9 @@ class Validator:
     def sensitive_volume_curve(self, fars_hz=None) -> Optional[SensitiveVolumeCurve]:
         """
         Sensitive volume (Gpc^3) and distance (Mpc) at each target FAR (Hz), with their
-        injection, background and joint intervals and noise floor (`volume`), from the
-        sensitive-volume set; None without one (a burst population, or WHITE noise).
+        injection, background and joint intervals, noise floor and reach guard (`volume`;
+        Euclidean, detector-frame masses), from the sensitive-volume set; None without
+        one (a burst population, or WHITE noise).
         The joint interval's bootstrap draws from the validator's own seed, so a record
         gives the same curve whenever it is read.
         """
@@ -191,7 +192,7 @@ class Validator:
             return None
         cfg = self.config
         return sensitive_volume_curve(
-            InjectionVolumes(data["scores"], float(data["max_distance_mpc"])), self.background(),
+            InjectionVolumes(data["scores"], float(data["max_distance_mpc"]), data["distances"]), self.background(),
             cfg.far_thresholds if fars_hz is None else fars_hz,
             gf.SeedTree(cfg.seed).stream(cfg.group, "validator/volume"),
             cfg.volume_bootstrap_samples, cfg.confidence, cfg.efficiency_interval,

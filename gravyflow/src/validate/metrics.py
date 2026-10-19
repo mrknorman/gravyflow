@@ -300,6 +300,10 @@ class Background:
             confidence=confidence,
         )
 
+    def windows_at_or_above(self, threshold) -> np.ndarray:
+        """The number of the background's windows scoring ``>= threshold``, each counted on its own."""
+        return _count_at_or_above(self._opens, threshold)
+
     def window_exceedance(self, threshold) -> np.ndarray:
         """
         The chance that a window of noise scores ``>= threshold``: the fraction of the
@@ -307,7 +311,7 @@ class Background:
         """
         if self.num_windows == 0:
             raise ValueError("The background has no windows.")
-        return _count_at_or_above(self._opens, threshold) / self.num_windows
+        return self.windows_at_or_above(threshold) / self.num_windows
 
     def far(self, threshold: float, confidence: float = DEFAULT_CONFIDENCE) -> FarEstimate:
         """FAR (Hz) of detections at ``score >= threshold``, with its Poisson interval."""
