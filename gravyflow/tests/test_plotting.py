@@ -44,11 +44,13 @@ def test_the_real_events_report_shows_each_events_p_astro():
         "name": "GW-REPORT", "gps": 1240000000.4, "catalog": "GWTC-3-confident",
         "observing_run": "O3", "mass1": 30.0, "mass2": 25.0, "distance": 400.0,
         "p_astro": 0.97, "event_type": "CONFIDENT", "score": 0.9,
-        "far_hz": 1e-3, "far_upper_hz": 2e-3, "whitened_strain": np.zeros((2, 64)),
+        "far_hz": 1e-3, "far_interval_hz": np.array([[5e-4, 2e-3], [2e-4, 4e-3]]),
+        "far_sigmas": np.array([1.0, 2.0]), "whitened_strain": np.zeros((2, 64)),
     }
     layout, _ = generate_real_events_table([event], input_duration_seconds=1.0)
     table = next(item for item in layout if isinstance(item, pn.widgets.DataFrame))
     assert table.value["p(astro)"].tolist() == ["0.97"]
+    assert table.value["FAR (Hz)"].tolist() == ["1.0e-03 [5.0e-04–2.0e-03 (1σ), 2.0e-04–4.0e-03 (2σ)]"]
     boxes = [pane.object for row in layout if isinstance(row, pn.Row)
              for pane in row if isinstance(pane, pn.pane.HTML)]
     assert len(boxes) == 1 and "<b>p(astro):</b> 0.97" in boxes[0]

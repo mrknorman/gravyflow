@@ -28,7 +28,7 @@ from tqdm import tqdm
 
 import gravyflow as gf
 from .config import ValidationConfig
-from .metrics import Background, ScoreStream, logit_scores
+from .metrics import Background, ScoreStream, logit_scores, sigma_level
 from .slides import TimeSlideBackground, TimeSlides
 from .volume import uniform_in_volume
 from .utils import _extract_sample_data
@@ -55,6 +55,7 @@ _CBC_LABELS = ("mass1", "mass2")
 REACH_NOISE_WINDOWS = 64
 # Per-example labels of the sensitive-volume set (`generate_volume`).
 _VOLUME_LABELS = {
+    "chirp_distances": gf.WaveformParameters.CHIRP_DISTANCE_MPC,
     "distances": gf.WaveformParameters.DISTANCE_MPC,
     "snrs": gf.ScalingTypes.SNR,
     "mass1": gf.WaveformParameters.MASS_1_MSUN,
@@ -141,7 +142,8 @@ class ValidationBank:
         self.config = config or ValidationConfig()
         self.heart = heart
         if self.has_volume and self.config.volume_reach_mpc is None:
-            # A population with no loudest source has no reach: refused here, before any stage runs.
+            # A population with no loudest source (an unbounded mass) has no reach: refused here,
+            # before any stage runs.
             from .reach import population_box
             population_box(self._generator())
 
@@ -388,15 +390,16 @@ class ValidationBank:
 
     def reach_distance(self) -> float:
         """
-        The population's reach (Mpc): the distance at which its loudest possible
-        source has network SNR ``volume_reach_snr``, so that every source beyond
-        it has less, whatever its sky position, orientation and parameters
-        (`reach.reach_distance`: face-on, the best response every detector can
-        have, maximised over the population's masses and aligned spins). The noise's
-        PSD is the median, over `REACH_NOISE_WINDOWS` windows of the stage's own
-        noise, of the data path's estimate (``Dataset.spectral_config``). It reads
-        the population's bounds and the noise, never the injections drawn, nor the
-        batch size; ``volume_reach_mpc`` overrides it.
+        The population's reach (Mpc, chirp distance): the chirp distance beyond which no
+        source of any mass has network SNR ``volume_reach_snr``, whatever its sky
+        position, orientation and parameters (`reach.chirp_reach`: the best response
+        every detector can have, maximised over the population's masses and spins, and
+        its orientations where face-on is not the loudest). A source of chirp mass M
+        then reaches R (M / M_ref)^(5/6) of physical distance. The noise's PSD is the
+        median, over `REACH_NOISE_WINDOWS` windows of the stage's own noise, of the data
+        path's estimate (``Dataset.spectral_config``). It reads the population's bounds
+        and the noise, never the injections drawn, nor the batch size;
+        ``volume_reach_mpc`` overrides it.
         """
         from gravyflow.src.dataset.tools.psd import estimate_psd
         from . import reach
@@ -407,18 +410,18 @@ class ValidationBank:
         spectrum = estimate_psd(y[gf.ReturnVariables.OFFSOURCE.name], dataset.sample_rate_hertz,
                                 dataset.spectral_config)
         psds = np.median(spectrum.value(), axis=0)
-        return reach.reach_distance(self._generator(), psds, dataset.sample_rate_hertz,
-                                    dataset.window_spec.onsource_duration_seconds, dataset.spectral_config,
-                                    self.config.volume_reach_snr)
+        return reach.chirp_reach(self._generator(), psds, dataset.sample_rate_hertz,
+                                 dataset.window_spec.onsource_duration_seconds, dataset.spectral_config,
+                                 self.config.volume_reach_snr)
 
     def generate_volume(self) -> None:
         """
         Score the sensitive-volume set: ``num_volume_injections`` sources from the
-        population, each at a physical distance drawn uniformly in volume out to the
-        population's reach R (``volume_reach_mpc``, else `reach_distance`):
-        the generated source placed at that distance, never scaled to an SNR.
-        Distances are Euclidean and masses in the detector frame, as the generator
-        draws them.
+        population, each placed out to its own mass's reach: its chirp distance drawn
+        uniformly in volume out to the chirp reach R (``volume_reach_mpc``, else
+        `reach_distance`), the generated source placed at that chirp distance (at the
+        physical distance its own masses give it), never scaled to an SNR. Distances
+        are Euclidean and masses in the detector frame, as the generator draws them.
         """
         cfg = self.config
         if not self.has_volume:
@@ -427,7 +430,7 @@ class ValidationBank:
         reach = cfg.volume_reach_mpc or self.reach_distance()
         targets = uniform_in_volume(n, reach, gf.SeedTree(cfg.seed).stream(cfg.group, "validator/distance"))
         generator = self._generator()
-        generator.scaling_method = gf.ScalingMethod(value=targets, type_=gf.WaveformParameters.DISTANCE_MPC)
+        generator.scaling_method = gf.ScalingMethod(value=targets, type_=gf.WaveformParameters.CHIRP_DISTANCE_MPC)
         generator.injection_chance = 1.0
         outputs = [gf.ReturnVariables.WHITENED_ONSOURCE, *_VOLUME_LABELS.values()]
         dataset = self.stage_dataset("vol", [generator], outputs, num_examples=n)
@@ -439,13 +442,12 @@ class ValidationBank:
             for key, label in _VOLUME_LABELS.items():
                 columns[key].append(per_example(y[label.name], batch_scores.size, label.name))
         volume = {k: np.concatenate(v)[:n] for k, v in columns.items()}
-        # The dataset reads the targets in order, batch after batch. The label is the
-        # target by construction, so this proves the order, not the placement: that the
-        # injected strain is the generated source's at its drawn distance, scaled by
-        # drawn over target, is the injection path's contract, and is tested there.
-        if not np.allclose(volume["distances"], targets, rtol=1e-5, atol=0):
+        # The dataset reads the targets in order, batch after batch. The chirp-distance label
+        # is the target by construction, so this proves the order; the physical distance is
+        # the generator's own masses' (the placement's contract, tested on the injection path).
+        if not np.allclose(volume["chirp_distances"], targets, rtol=1e-5, atol=0):
             raise RuntimeError("The volume set's injections were not given their targets in the order drawn.")
-        volume["distances"] = targets
+        volume["chirp_distances"] = targets
         volume["reach_mpc"] = np.float64(reach)
         self.volume = volume
 
@@ -537,8 +539,11 @@ class ValidationBank:
                 event = next((e for e in events if abs(e["gps"] - t) < 20.0), None)
                 if event is None:
                     continue
-                far = background.far(float(s), self.config.confidence)
-                event.update(score=float(s), status="scored", far_hz=far.rate_hz, far_upper_hz=far.upper_hz)
+                fars = [background.far(float(s), sigma_level(sigma)) for sigma in self.config.interval_sigmas]
+                # The FAR's interval at each level of interval_sigmas: (levels, 2).
+                event.update(score=float(s), status="scored", far_hz=fars[0].rate_hz,
+                             far_interval_hz=np.array([[far.lower_hz, far.upper_hz] for far in fars]),
+                             far_sigmas=np.array(self.config.interval_sigmas))
                 if whitened is not None:
                     event["whitened_strain"] = np.asarray(whitened[i])
         self.real_events = events
@@ -559,7 +564,7 @@ class ValidationBank:
         return dict(self.efficiency)
 
     def get_volume_data(self) -> Dict[str, np.ndarray]:
-        """The volume set's scores, distances and labels, and its reach (``reach_mpc``)."""
+        """The volume set's scores, chirp and physical distances and labels, and its chirp reach (``reach_mpc``)."""
         if self.volume is None:
             raise ValueError("Call generate_volume() first.")
         return dict(self.volume)

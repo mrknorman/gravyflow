@@ -173,28 +173,36 @@ repository before it may need the changes below.
 - **`gf.NoiseProfile.ZERO_DET_HIGH_POWER`**: Advanced LIGO's zero-detuning, high-power design curve
   (LIGO-T0900288-v3, aLIGOZeroDetHighPower), for H1 and L1 only; a profile refuses a detector it does not cover, by
   name.
-- **Sensitive volume and distance within a reach.** `Validator.sensitive_volume_curve()` gives the sensitive volume
-  (Gpc³) and distance (Mpc) **within a reach R** at each target FAR, exactly what MLGWSC-1's `evaluate.py` computes,
-  and every result carries its R (`reach_mpc`; the curve's `volume_within_reach_gpc3`, the plot's axes and legend).
-  It comes with three intervals: the injections' (exact binomial), the background's livetime, and a joint bootstrap
-  over the injections and the background's thresholds whose ends are at least as far out as the background's (so it
-  covers where the background allows only a trigger or two). The bootstrap counts a time-slid background's
-  independent information, not its slid windows: each detector's data enters one window per slide
-  (`Background.data_reuse`). The volume is Euclidean (no cosmology) and the population's masses are in the detector
-  frame, as in `evaluate.py`. It is measured, as an injection campaign measures it, on a set of its own
-  (`volume_num_injections`, by default `num_examples`): CBC sources at physical distances drawn uniformly in volume
-  out to R, `volume_reach_mpc` or by default the distance beyond which no source of the population can have network
-  SNR `volume_reach_snr` (3), whatever its sky, orientation, masses and aligned spins, in the noise's PSD; R is
-  recorded. A population whose masses are unbounded, or whose spins precess, has no such distance and is refused by
-  name when the validator is built, before any stage runs. The volume noise alone finds (the chance a noise window
-  passes, times R's volume) is recorded at each target, and a point where it exceeds `volume_noise_floor_fraction`
-  (0.1) of V is noise-dominated and not quoted (`SensitiveVolumeCurve.quotable`). Beside V, each target reports an
-  estimate, with its interval, of the volume found by signal between R and twice R (`beyond_reach_gpc3`), assuming a
-  source's chance of being found depends on it through its SNR; where it exceeds `volume_beyond_reach_fraction`
-  (0.1) of V the point is marked reach-limited, a warning. `SensitiveVolumeCurve.quote` gives a `VolumeQuote`: V
-  within R with its joint interval, R, and the estimate beyond R; it refuses an unresolved or noise-dominated point
-  by name and warns at a reach-limited one. The dashboard plots them beside efficiency. A burst population, or WHITE
-  noise, has none.
+- **Sensitive volume and distance within the per-mass reach.** `Validator.sensitive_volume_curve()` gives the
+  sensitive volume (Gpc³) and distance (Mpc) **within the reach** at each target FAR, and every result states its
+  reach. Nothing is findable past the distance at which even the best-case source of a mass (best sky, orientation
+  and spins) has network SNR `volume_reach_snr` (2), so the volume set (`volume_num_injections`, by default
+  `num_examples`) places each source out to its own mass's reach: uniformly in volume in chirp distance,
+  `d (M_ref / M)^(5/6)` (`WaveformParameters.CHIRP_DISTANCE_MPC`, `M_ref` two neutron stars of 1.4), out to the
+  chirp reach `R` (`reach_mpc`; `volume_reach_mpc` sets it), each found source weighted by its mass's reach volume,
+  `(M / M_ref)^(5/2)` (`chirp_weights`), so the volume stays exact. `R` bounds every mass and aligned or precessing
+  spin of the population (precessing: a search over orientations, stated); a population whose masses are unbounded is
+  refused by name when the validator is built. An injection is found when its window passes the threshold, whatever
+  passes it: the chance that noise alone passes (`Background.found_by_chance`) is subtracted, `(V_found - c V_pop) /
+  (1 - c)`, and a point where noise alone finds more than `volume_chance_fraction` (0.1) of what is found is not
+  quoted (`SensitiveVolumeCurve.quotable`). Three intervals at 1σ and 2σ: the injections' (exact binomial), the
+  background's, and a joint bootstrap over the injections, the background's thresholds (counting a time-slid
+  background's independent information) and the chance. `SensitiveVolumeCurve.quote` gives a `VolumeQuote`. The
+  dashboard plots V and the distance against FAR, and the found fraction against chirp distance with the chance level
+  drawn on it, the check that the reach is long enough. The volume is Euclidean (no cosmology) and the masses are in
+  the detector frame, as in MLGWSC-1's `evaluate.py`. A burst population, or WHITE noise, has none. Records are
+  format 6.
+- **Efficiency against SNR, the owner's rolling curve.** `Validator.efficiency_curves()` gives, at each target FAR,
+  the rolling efficiency (a window of ±0.5 in SNR at 50 points, `rolling_efficiency_curve`) with pointwise bands, a
+  sigmoid fit with its 50% and 90% SNR points and their bootstrap intervals (`fit_efficiency_sigmoid`), and the
+  binned values the record keeps (`efficiency_curve`), each with the chance of a noise-only pass subtracted and
+  intervals carrying the injections', the threshold's and the chance's errors (`efficiency_against_snr`).
+  `volume_set_efficiency_curves()` gives the volume set's own, a cross-check. The dashboard's efficiency tab keeps
+  the score density behind the curves, the threshold line, the FAR slider and powers-of-ten selector, and adds one
+  curve per level.
+- **Intervals at 1σ and 2σ.** `ValidationConfig.interval_sigmas` (`(1.0, 2.0)`) replaces `confidence`: every interval
+  the validator reports is given at each level (`sigma_level`). The FAR's interval counts a time-slid background's
+  independent information (`Background.count_interval`), as its bootstrap does. The SNR set spans 0 to 20 by default.
 - **Injections at a physical distance.** `ScalingMethod(value=distances, type_=WaveformParameters.DISTANCE_MPC)`
   places each generated CBC source at a target distance (Mpc), scaling it by the ratio of its drawn distance to the
   target, and no other measure; WHITE noise refuses it, as it refuses HRSS and HPEAK.

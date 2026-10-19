@@ -133,11 +133,13 @@ def validate(args, model_class, config, model) -> Validator:
     validator.plot(output_dir / "validation.html")
     background = validator.background()
     print(f"Background: {background.num_windows} windows, {background.livetime_seconds:.0f} s livetime")
-    for far, (threshold, curve) in validator.efficiency_curves([1e-1, 1e-2, 1e-3]).items():
+    for far, result in validator.efficiency_curves([1e-1, 1e-2, 1e-3]).items():
+        threshold, fit = result.threshold, result.fit
         if threshold.resolved:
             print(f"FAR {far:.0e} Hz: threshold {threshold.threshold:.3f}, achieved "
-                  f"{threshold.achieved.rate_hz:.2e} Hz (<= {threshold.achieved.upper_hz:.2e}); "
-                  f"efficiency by SNR bin {[round(e, 2) for e in curve.efficiency.tolist()]}")
+                  f"{threshold.achieved.rate_hz:.2e} Hz (1σ upper end {threshold.achieved.upper_hz:.2e}); "
+                  f"efficiency by SNR bin {[round(e, 2) for e in result.binned.efficiency.tolist()]}; "
+                  f"50% and 90% SNR {fit.snr_50:.2f}, {fit.snr_90:.2f}")
         else:
             print(f"FAR {far:.0e} Hz: unresolved by {background.livetime_seconds:.0f} s of background")
     for key, roc in validator.roc_curves().items():

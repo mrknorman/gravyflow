@@ -2,7 +2,8 @@
 Detection metrics over score arrays: false-alarm rate, efficiency and ROC.
 
 Every function here is pure: it takes arrays of scores and returns numbers, with
-no model, dataset or random state. One set of conventions holds throughout:
+no model or dataset (a bootstrap takes the random generator it draws from). One
+set of conventions holds throughout:
 
 - **Scores are logits.** A score is a real number, larger meaning more
   signal-like. Use the log-odds a classifier computes before its softmax or
@@ -13,9 +14,21 @@ no model, dataset or random state. One set of conventions holds throughout:
 - **FAR is a rate in Hz**: background triggers per second of analysed livetime.
   Above-threshold windows that follow one another within ``cluster_seconds`` are
   one trigger.
-- **Intervals are two-sided and central**, at ``confidence`` (0.9 by default):
-  Garwood for Poisson counts, Clopper-Pearson (or Wilson) for binomial
-  efficiencies.
+- **Intervals are two-sided and central**, reported at 1 and 2 sigma
+  (`DEFAULT_SIGMAS`: 68.27% and 95.45%, `sigma_level`): Garwood for Poisson
+  counts, in the background's independent information (`Background.data_reuse`),
+  and Clopper-Pearson (or Wilson) for binomial efficiencies. A building block
+  takes one ``confidence``; a result carries every level.
+- **Found, and found by chance.** In window mode an injection is found when its
+  window's score passes the threshold, whatever passes it: noise alone passes
+  with the chance of a noise window passing (`Background.found_by_chance`, a
+  `ChanceLaw`), so the fraction found by the signal is ``(f - c) / (1 - c)``
+  (`subtract_chance`). It is subtracted at every threshold; at the tight
+  thresholds c is negligible, at loose ones it is not. In stream mode an
+  injection will be found by the loudest trigger within a fixed window of its
+  merger, and the chance will be the false-alarm rate times that window: the
+  estimators take the found test (a threshold on scores) and a `ChanceLaw`, the
+  two things stream mode replaces.
 """
 
 from __future__ import annotations
@@ -27,7 +40,17 @@ from typing import Dict, Hashable, Optional, Sequence, Tuple
 import numpy as np
 from scipy import special, stats
 
-DEFAULT_CONFIDENCE = 0.9
+#: The interval levels every result reports, in sigma of a normal law: 1 sigma (68.27%) and 2 sigma (95.45%).
+DEFAULT_SIGMAS = (1.0, 2.0)
+
+
+def sigma_level(sigma: float) -> float:
+    """The central probability within ``sigma`` standard deviations of a normal law: 0.6827 at 1, 0.9545 at 2."""
+    return float(special.erf(sigma / math.sqrt(2.0)))
+
+
+#: A building block's level when none is given: 1 sigma.
+DEFAULT_CONFIDENCE = sigma_level(1.0)
 
 
 # --------------------------------------------------------------------- scores
@@ -83,7 +106,8 @@ def _count_at_or_above(sorted_ascending: np.ndarray, thresholds) -> np.ndarray:
 
 def poisson_interval(count, confidence: float = DEFAULT_CONFIDENCE) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Garwood's exact central interval on the mean of a Poisson count.
+    Garwood's exact central interval on the mean of a Poisson count (a count need
+    not be whole: a time-slid background's is in its independent events).
 
     Returns:
         ``(lower, upper)`` bounds on the expected count; divide by livetime for a
@@ -91,7 +115,7 @@ def poisson_interval(count, confidence: float = DEFAULT_CONFIDENCE) -> Tuple[np.
     """
     k = np.asarray(count, dtype=np.float64)
     alpha = 1.0 - confidence
-    lower = np.where(k > 0, special.gammaincinv(np.maximum(k, 1.0), alpha / 2), 0.0)
+    lower = np.where(k > 0, special.gammaincinv(np.where(k > 0, k, 1.0), alpha / 2), 0.0)
     upper = special.gammaincinv(k + 1.0, 1.0 - alpha / 2)
     return lower, upper
 
@@ -294,8 +318,25 @@ class Background:
         envelope = np.concatenate([[0], self._envelope]).astype(np.int64)
         return envelope[num_at_or_above]
 
+    def count_interval(self, count, confidence: float = DEFAULT_CONFIDENCE) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Garwood's interval on the mean of the background's trigger ``count``, counted in
+        its independent information: a time-slid background reads each detector's data
+        in `data_reuse` slides, and a loud excursion in one detector's data opens a
+        trigger in each, so its count is that many times a Poisson count of independent
+        events, ``r Poisson(c / r)``, as `bootstrap_thresholds` draws it. The interval is
+        Garwood's on ``c / r``, times ``r``: on an unslid background (``r = 1``) Garwood's
+        own. ``r`` bounds the count's overdispersion (each excursion opens at most one
+        trigger per slide), so the interval is exact where one detector's excursions make
+        the triggers (a statistic like the detectors' maximum) and conservative where
+        both must (their sum: there the variance is nearer Poisson's).
+        """
+        reuse = self.data_reuse
+        lower, upper = poisson_interval(np.asarray(count, dtype=np.float64) / reuse, confidence)
+        return lower * reuse, upper * reuse
+
     def _estimate(self, threshold: float, count: int, confidence: float) -> FarEstimate:
-        lower, upper = poisson_interval(count, confidence)
+        lower, upper = self.count_interval(count, confidence)
         T = self.livetime_seconds
         return FarEstimate(
             threshold=float(threshold), count=int(count), livetime_seconds=T,
@@ -316,8 +357,43 @@ class Background:
             raise ValueError("The background has no windows.")
         return self.windows_at_or_above(threshold) / self.num_windows
 
+    def chosen_window_chance(self, threshold) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        The law of the chance that a fresh noise window passes a threshold chosen
+        from these windows, just above one of them (as `threshold_for_far` chooses):
+        ``Beta(a, b)``, returned as ``(a, b)``.
+
+        Of ``n`` exchangeable windows, a threshold just above the ``c``-th highest
+        (``c`` counting the windows at or above the highest one below the threshold)
+        is passed by a fresh window with a chance distributed as ``Beta(c, n - c + 1)``,
+        whatever the windows' distribution: on average ``c / (n + 1)``, not the
+        ``(c - 1) / n`` of `window_exceedance`. A background that reuses its data
+        (`data_reuse`, ``r``) holds the information of ``n / r`` windows, so both
+        counts are taken in ``r``'s: ``Beta(c / r, (n - c) / r + 1)``. Where no window
+        is below the threshold, ``c = n``.
+        """
+        if self.num_windows == 0:
+            raise ValueError("The background has no windows.")
+        n, reuse = self.num_windows, self.data_reuse
+        below = np.searchsorted(self._opens, np.asarray(threshold, dtype=np.float64), side="left")
+        highest_below = self._opens[np.maximum(below - 1, 0)]
+        count = np.where(below > 0, _count_at_or_above(self._opens, highest_below), n)
+        return count / reuse, (n - count) / reuse + 1.0
+
+    def found_by_chance(self, threshold) -> "ChanceLaw":
+        """
+        The chance that noise alone passes each threshold, in window mode: a fresh
+        noise window's chance of passing (`chosen_window_chance`'s Beta law), nothing
+        past every window (an infinite threshold), NaN at NaN (an unresolved target).
+        """
+        t = np.atleast_1d(np.asarray(threshold, dtype=np.float64))
+        a, b = self.chosen_window_chance(np.where(np.isfinite(t), t, 0.0))
+        a = np.where(t == np.inf, 0.0, np.where(t == -np.inf, 1.0, a))
+        b = np.where(t == -np.inf, 0.0, b)
+        return ChanceLaw(np.where(np.isnan(t), np.nan, a), np.where(np.isnan(t), np.nan, b))
+
     def far(self, threshold: float, confidence: float = DEFAULT_CONFIDENCE) -> FarEstimate:
-        """FAR (Hz) of detections at ``score >= threshold``, with its Poisson interval."""
+        """FAR (Hz) of detections at ``score >= threshold``, with its interval (`count_interval`)."""
         self._require_livetime()
         return self._estimate(threshold, int(self.far_count(threshold)), confidence)
 
@@ -353,13 +429,13 @@ class Background:
         """
         The thresholds a true FAR of ``far_hz`` may lie between, given the background's
         finite livetime: ``(high, low)``, the lowest thresholds at which the upper and the
-        lower end of the FAR's Poisson interval fall to ``far_hz``. The threshold that
+        lower end of the FAR's interval (`count_interval`) fall to ``far_hz``. The threshold that
         truly gives ``far_hz`` is between them wherever the interval covers the true FAR.
         ``high`` is +inf when the upper end is above ``far_hz`` even with no trigger.
         """
         self._require_livetime()
         counts = np.arange(int(self._envelope[-1] if self._envelope.size else 0) + 2)
-        lower, upper = poisson_interval(counts, confidence)
+        lower, upper = self.count_interval(counts, confidence)
         limit = far_hz * self.livetime_seconds * (1 + 1e-12)
         # Both ends rise with the count: the largest count each allows.
         high = self._threshold_allowing(int(np.searchsorted(upper, limit, side="right")) - 1)
@@ -367,9 +443,9 @@ class Background:
         return high, low
 
     def far_curve(self, confidence: float = DEFAULT_CONFIDENCE) -> FarCurve:
-        """The FAR at every breakpoint, with Poisson intervals."""
+        """The FAR at every breakpoint, with its interval (`count_interval`)."""
         self._require_livetime()
-        lower, upper = poisson_interval(self._envelope, confidence)
+        lower, upper = self.count_interval(self._envelope, confidence)
         T = self.livetime_seconds
         return FarCurve(
             thresholds=self._breakpoints.copy(), counts=self._envelope.copy(), livetime_seconds=T,
@@ -443,21 +519,139 @@ class Background:
             raise ValueError("The background has no livetime: it holds no scored windows.")
 
 
+# ------------------------------------------------------------------- chance
+
+@dataclass(frozen=True)
+class ChanceLaw:
+    """
+    The law of the chance that noise alone passes a threshold, one per threshold:
+    ``Beta(a, b)`` (`Background.found_by_chance`). ``a = 0`` is no chance (a
+    threshold above every window), ``b = 0`` certainty; NaN is no threshold (an
+    unresolved target).
+    """
+    a: np.ndarray
+    b: np.ndarray
+
+    def __post_init__(self):
+        for name in ("a", "b"):
+            object.__setattr__(self, name, np.atleast_1d(np.asarray(getattr(self, name), dtype=np.float64)))
+
+    @classmethod
+    def nothing(cls) -> "ChanceLaw":
+        """No chance at all: a found test noise never passes."""
+        return cls(np.zeros(1), np.ones(1))
+
+    @property
+    def mean(self) -> np.ndarray:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(self.a == 0, 0.0, self.a / (self.a + self.b))
+
+    def _at(self, values: np.ndarray) -> np.ndarray:
+        """``values`` (drawn where the law is a Beta) with the point masses and NaNs in place."""
+        point = np.where(self.a == 0, 0.0, 1.0)
+        regular = (self.a > 0) & (self.b > 0)
+        return np.where(np.isnan(self.a), np.nan, np.where(regular, values, point))
+
+    def quantile(self, q: float) -> np.ndarray:
+        regular = (self.a > 0) & (self.b > 0)
+        return self._at(stats.beta.ppf(q, np.where(regular, self.a, 1.0), np.where(regular, self.b, 1.0)))
+
+    def interval(self, confidence: float) -> Tuple[np.ndarray, np.ndarray]:
+        """The central interval at ``confidence``: ``(lower, upper)``."""
+        alpha = 1.0 - confidence
+        return self.quantile(alpha / 2), self.quantile(1 - alpha / 2)
+
+    def sample(self, rng: np.random.Generator, size: int) -> np.ndarray:
+        """``size`` draws of each chance: ``(size, thresholds)``."""
+        regular = (self.a > 0) & (self.b > 0)
+        draws = rng.beta(np.where(regular, self.a, 1.0), np.where(regular, self.b, 1.0), size=(size, self.a.size))
+        return self._at(draws)
+
+
+def subtract_chance(found_fraction, chance):
+    """
+    The fraction found by the signal, of a fraction ``found_fraction`` found where
+    noise alone passes with ``chance``: ``(f - c) / (1 - c)`` (module docstring). Not
+    clipped: below the chance it is negative, as an unbiased estimate may be.
+    """
+    f, c = np.asarray(found_fraction, dtype=np.float64), np.asarray(chance, dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return (f - c) / (1.0 - c)
+
+
+def nested(lower: np.ndarray, upper: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Intervals at ascending levels (``(levels, ...)``) made to nest: each level's holds every
+    lower level's. A term read at the ends of a range (the background's two thresholds)
+    need not order its levels where the estimate is not monotone in the threshold (where
+    noise alone passes as often as the signal); widening keeps each level's coverage.
+    """
+    return np.fmin.accumulate(lower, axis=0), np.fmax.accumulate(upper, axis=0)
+
+
+def chance_subtracted_interval(detected, total, chance: "ChanceLaw", sigmas: Sequence[float] = DEFAULT_SIGMAS,
+                               method: str = "clopper-pearson") -> Tuple[np.ndarray, np.ndarray]:
+    """
+    The interval at each of ``sigmas`` on the fraction found by the signal, of
+    ``detected`` found of ``total``: each end of the binomial interval mapped by
+    `subtract_chance` through the chance's own end on the far side (the lower end
+    through the chance's upper end), so both errors widen it; clipped to [0, 1].
+    ``(lower, upper)``, each ``(levels, ...)``.
+    """
+    lowers, uppers = [], []
+    for sigma in sigmas:
+        level = sigma_level(sigma)
+        lower, upper = binomial_interval(detected, total, level, method)
+        chance_lower, chance_upper = chance.interval(level)
+        lowers.append(np.clip(subtract_chance(lower, chance_upper), 0.0, 1.0))
+        uppers.append(np.clip(subtract_chance(upper, chance_lower), 0.0, 1.0))
+    return np.array(lowers), np.array(uppers)
+
+
 # ---------------------------------------------------------------- efficiency
+
+def _injections(snrs, scores) -> Tuple[np.ndarray, np.ndarray]:
+    snrs = np.asarray(snrs, dtype=np.float64).reshape(-1)
+    scores = _finite_scores(scores, "injection scores")
+    if snrs.shape != scores.shape:
+        raise ValueError(f"{snrs.size} SNRs for {scores.size} scores.")
+    return snrs, scores
+
+
+def _chance_or_nothing(chance: Optional["ChanceLaw"]) -> "ChanceLaw":
+    return ChanceLaw.nothing() if chance is None else chance
+
 
 @dataclass(frozen=True)
 class EfficiencyCurve:
-    """Fraction of injections detected per SNR bin, with binomial intervals."""
+    """
+    The fraction of injections found by their signal per SNR bin: ``detected`` of
+    ``total`` found at ``threshold``, less the ``chance`` of a noise-only pass
+    (`subtract_chance`), with intervals at each of ``sigmas`` (``(levels, bins)``).
+    The binned curve is the record's estimator; the dashboard plots the rolling one.
+    """
     threshold: float
     bin_edges: np.ndarray
     snr_mean: np.ndarray
     detected: np.ndarray
     total: np.ndarray
+    chance: float
     efficiency: np.ndarray
     lower: np.ndarray
     upper: np.ndarray
-    confidence: float
+    sigmas: Tuple[float, ...]
     method: str
+
+
+def bin_index(snrs: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    """Each SNR's bin of ``edges``, ``[lo, hi)`` with the last closed; -1 outside them."""
+    edges = np.asarray(edges, dtype=np.float64)
+    if edges.ndim != 1 or edges.size < 2 or np.any(np.diff(edges) <= 0):
+        raise ValueError("bin_edges must be strictly increasing, with at least two edges.")
+    num_bins = edges.size - 1
+    index = np.searchsorted(edges, snrs, side="right") - 1
+    index[snrs == edges[-1]] = num_bins - 1
+    return np.where((index >= 0) & (index < num_bins), index, -1)
 
 
 def efficiency_curve(
@@ -465,41 +659,298 @@ def efficiency_curve(
     scores,
     threshold: float,
     bin_edges: Sequence[float],
-    confidence: float = DEFAULT_CONFIDENCE,
+    chance: Optional[ChanceLaw] = None,
+    sigmas: Sequence[float] = DEFAULT_SIGMAS,
     method: str = "clopper-pearson",
 ) -> EfficiencyCurve:
     """
-    Efficiency of injections at ``score >= threshold`` in SNR bins.
+    The efficiency of injections at ``score >= threshold`` in SNR bins, with the
+    chance of a noise-only pass at that threshold (``chance``, none if None)
+    subtracted, and binomial intervals (`chance_subtracted_interval`).
 
     Bins are ``[lo, hi)``, the last one closed; injections outside the edges
     are not counted. A NaN threshold (an unresolved FAR) gives NaN efficiencies.
     """
-    snrs = np.asarray(snrs, dtype=np.float64).reshape(-1)
-    scores = _finite_scores(scores, "injection scores")
-    if snrs.shape != scores.shape:
-        raise ValueError(f"{snrs.size} SNRs for {scores.size} scores.")
+    snrs, scores = _injections(snrs, scores)
     edges = np.asarray(bin_edges, dtype=np.float64)
-    if edges.ndim != 1 or edges.size < 2 or np.any(np.diff(edges) <= 0):
-        raise ValueError("bin_edges must be strictly increasing, with at least two edges.")
-    num_bins = edges.size - 1
-    index = np.searchsorted(edges, snrs, side="right") - 1
-    index[snrs == edges[-1]] = num_bins - 1
-    inside = (index >= 0) & (index < num_bins)
+    index = bin_index(snrs, edges)
+    num_bins, inside = edges.size - 1, index >= 0
     total = np.bincount(index[inside], minlength=num_bins)
     snr_sum = np.bincount(index[inside], weights=snrs[inside], minlength=num_bins)
     with np.errstate(invalid="ignore", divide="ignore"):
         snr_mean = np.where(total > 0, snr_sum / total, np.nan)
+    sigmas = tuple(float(s) for s in sigmas)
+    chance = _chance_or_nothing(chance)
     if np.isnan(threshold):
-        nan = np.full(num_bins, np.nan)
-        return EfficiencyCurve(float(threshold), edges, snr_mean, nan, total, nan, nan, nan,
-                               confidence, method)
-    passed = inside & (scores >= threshold)
-    detected = np.bincount(index[passed], minlength=num_bins)
+        nan, nans = np.full(num_bins, np.nan), np.full((len(sigmas), num_bins), np.nan)
+        return EfficiencyCurve(float(threshold), edges, snr_mean, nan, total, np.nan, nan, nans, nans, sigmas, method)
+    detected = np.bincount(index[inside & (scores >= threshold)], minlength=num_bins)
     with np.errstate(invalid="ignore", divide="ignore"):
-        efficiency = np.where(total > 0, detected / total, np.nan)
-    lower, upper = binomial_interval(detected, total, confidence, method)
-    return EfficiencyCurve(float(threshold), edges, snr_mean, detected, total, efficiency,
-                           lower, upper, confidence, method)
+        efficiency = subtract_chance(np.where(total > 0, detected / total, np.nan), chance.mean)
+    lower, upper = chance_subtracted_interval(detected, total, chance, sigmas, method)
+    return EfficiencyCurve(float(threshold), edges, snr_mean, detected, total, float(chance.mean[0]), efficiency,
+                           lower, upper, sigmas, method)
+
+
+#: The owner's rolling efficiency curve: a window of +-0.5 in SNR, evaluated at 50 points; a
+#: point with fewer injections in its window than this has none.
+ROLLING_HALF_WIDTH = 0.5
+ROLLING_POINTS = 50
+ROLLING_MIN_INJECTIONS = 20
+
+
+@dataclass(frozen=True)
+class RollingEfficiency:
+    """
+    The owner's rolling efficiency curve: at each ``snr``, the fraction of the
+    injections within ``half_width`` of it (``[snr - w, snr + w)``) found by their
+    signal (the ``chance`` subtracted), with **pointwise** bands at each of
+    ``sigmas`` (``(levels, points)``): each covers its own point at its level, not
+    the curve as a whole. NaN where a window holds fewer than
+    `ROLLING_MIN_INJECTIONS`.
+    """
+    threshold: float
+    snr: np.ndarray
+    half_width: float
+    detected: np.ndarray
+    total: np.ndarray
+    chance: float
+    efficiency: np.ndarray
+    lower: np.ndarray
+    upper: np.ndarray
+    sigmas: Tuple[float, ...]
+    method: str
+
+    @property
+    def pointwise(self) -> bool:
+        """The bands are pointwise, never simultaneous: said wherever they are shown."""
+        return True
+
+
+def rolling_windows(snr_range: Optional[Tuple[float, float]], snrs: np.ndarray,
+                    half_width: float = ROLLING_HALF_WIDTH, num_points: int = ROLLING_POINTS) -> np.ndarray:
+    """
+    The rolling curve's window centres: ``num_points`` from the range's low end plus
+    ``half_width`` to its high end less it (the injected SNR range; by default the
+    injections' own, rounded out to whole SNRs, as the owner's curve took it).
+    """
+    lo, hi = (np.floor(snrs.min()), np.ceil(snrs.max())) if snr_range is None else snr_range
+    return np.linspace(lo + half_width, hi - half_width, num_points)
+
+
+def rolling_efficiency_curve(
+    snrs,
+    scores,
+    threshold: float,
+    snr_range: Optional[Tuple[float, float]] = None,
+    chance: Optional[ChanceLaw] = None,
+    sigmas: Sequence[float] = DEFAULT_SIGMAS,
+    method: str = "clopper-pearson",
+    half_width: float = ROLLING_HALF_WIDTH,
+    num_points: int = ROLLING_POINTS,
+) -> RollingEfficiency:
+    """
+    The rolling efficiency at ``score >= threshold`` (`RollingEfficiency`), its
+    windows over ``snr_range`` (`rolling_windows`), the ``chance`` of a noise-only
+    pass subtracted, with pointwise binomial bands (`chance_subtracted_interval`).
+    """
+    snrs, scores = _injections(snrs, scores)
+    centres = rolling_windows(snr_range, snrs, half_width, num_points)
+    order = np.argsort(snrs, kind="stable")
+    sorted_snrs = snrs[order]
+    first = np.searchsorted(sorted_snrs, centres - half_width, side="left")
+    last = np.searchsorted(sorted_snrs, centres + half_width, side="left")
+    total = last - first
+    sigmas = tuple(float(s) for s in sigmas)
+    chance = _chance_or_nothing(chance)
+    if np.isnan(threshold):
+        nan, nans = np.full(centres.size, np.nan), np.full((len(sigmas), centres.size), np.nan)
+        return RollingEfficiency(float(threshold), centres, float(half_width), nan, total, np.nan, nan, nans, nans,
+                                 sigmas, method)
+    found = np.concatenate([[0], np.cumsum(scores[order] >= threshold)])
+    detected = found[last] - found[first]
+    enough = total >= ROLLING_MIN_INJECTIONS
+    with np.errstate(invalid="ignore", divide="ignore"):
+        efficiency = np.where(enough, subtract_chance(detected / total, chance.mean), np.nan)
+    lower, upper = chance_subtracted_interval(detected, total, chance, sigmas, method)
+    return RollingEfficiency(float(threshold), centres, float(half_width), detected, total, float(chance.mean[0]),
+                             efficiency, np.where(enough, lower, np.nan), np.where(enough, upper, np.nan),
+                             sigmas, method)
+
+
+# ------------------------------------------------------------- sigmoid fit
+
+#: The sigmoid fit groups the injections into bins this many per unit of SNR, each at its
+#: injections' mean SNR: the binned likelihood is the per-injection one to the bins' width squared.
+FIT_BINS_PER_SNR = 20
+#: Fisher-scoring iterations of one fit, and the relative step at which it has converged.
+FIT_ITERATIONS = 200
+FIT_TOLERANCE = 1e-10
+
+
+@dataclass(frozen=True)
+class SigmoidFit:
+    """
+    A logistic efficiency fitted to the injections found at ``threshold``, over the
+    ``chance`` of a noise-only pass: found with chance ``c + (1 - c) S(snr)``,
+    ``S(snr) = 1 / (1 + exp(-slope (snr - snr_50)))``, by maximum likelihood. Its
+    50% and 90% points (``snr_90 = snr_50 + ln 9 / slope``), with bootstrap
+    intervals at each of ``sigmas`` (``(levels, 2)``: the 50% point, then the 90%).
+    A point outside the injected SNR range, or a fit with no transition, is NaN: it
+    was not measured. ``num_failed`` replicates of ``num_bootstrap`` gave no point.
+    """
+    threshold: float
+    chance: float
+    snr_50: float
+    snr_90: float
+    slope: float
+    lower: np.ndarray
+    upper: np.ndarray
+    sigmas: Tuple[float, ...]
+    num_bootstrap: int
+    num_failed: int
+
+    def efficiency(self, snr) -> np.ndarray:
+        """The fitted efficiency of the signal, ``S(snr)``."""
+        return special.expit(self.slope * (np.asarray(snr, dtype=np.float64) - self.snr_50))
+
+
+def resample_groups(rng: np.random.Generator, found: np.ndarray, total: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    One bootstrap draw of the injections, in groups: each row of ``found`` of ``total``
+    ((rows, groups) and (groups,)) redrawn as the injections drawn again with
+    replacement would fall, each group's count multinomial over the groups and its
+    found count binomial of it at the group's found fraction. (Redrawing only the
+    found counts, holding each group's total, loses the variance a group too small
+    to show both outcomes carries.) Returns ``(found, total)``, each (rows, groups).
+    """
+    found = np.atleast_2d(found)
+    total = np.asarray(total, dtype=np.int64)
+    n = int(total.sum())
+    drawn = rng.multinomial(n, total / max(n, 1), size=found.shape[0]) if n else np.zeros(found.shape, np.int64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rate = np.where(total > 0, found / np.maximum(total, 1), 0.0)
+    return rng.binomial(drawn, rate), drawn
+
+
+def fit_bins(snrs: np.ndarray, snr_range: Tuple[float, float]) -> Tuple[np.ndarray, np.ndarray]:
+    """The fit's bins over ``snr_range`` (`FIT_BINS_PER_SNR`): their edges, and each injection's bin (-1 outside)."""
+    lo, hi = snr_range
+    edges = np.linspace(lo, hi, max(int(round((hi - lo) * FIT_BINS_PER_SNR)), 1) + 1)
+    return edges, bin_index(snrs, edges)
+
+
+def fit_sigmoid(snr: np.ndarray, detected: np.ndarray, total: np.ndarray, chance: np.ndarray,
+                snr_range: Tuple[float, float], start: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+                ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    The maximum-likelihood logistic of each row of ``detected`` of ``total`` found at
+    bin SNRs ``snr`` ((R, J) counts, (J,) SNRs) over chances ``chance`` (R,), by Fisher
+    scoring, from ``start`` (``(snr_50, slope)``, a fit to start a bootstrap's
+    replicates from) where it is finite, else from the step a uniform SNR design
+    would give. Returns ``(snr_50, snr_90, slope)``, each (R,), NaN where the fit does
+    not converge, does not rise, or puts a point outside ``snr_range``.
+    """
+    k, n = np.atleast_2d(detected).astype(np.float64), np.atleast_2d(total).astype(np.float64)
+    c = np.asarray(chance, dtype=np.float64).reshape(-1, 1)
+    x = np.where(np.isfinite(snr), snr, 0.0)[None, :]
+    lo, hi = snr_range
+    with np.errstate(invalid="ignore", divide="ignore"):
+        signal = np.clip(subtract_chance(k.sum(axis=1) / n.sum(axis=1), c[:, 0]), 0.02, 0.98)
+    # A step at s over SNRs uniform on [lo, hi] finds (hi - s) / (hi - lo) of them.
+    slope = np.full(k.shape[0], 2.0)
+    a = -slope * (hi - signal * (hi - lo))
+    if start is not None:
+        given = np.isfinite(start[0]) & np.isfinite(start[1])
+        slope = np.where(given, start[1], slope)
+        a = np.where(given, -start[1] * start[0], a)
+    converged = np.zeros(k.shape[0], dtype=bool)
+    with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+        for _ in range(FIT_ITERATIONS):
+            s = special.expit(a[:, None] + slope[:, None] * x)
+            p = np.clip(c + (1 - c) * s, 1e-12, 1 - 1e-12)
+            gradient = (1 - c) * s * (1 - s)
+            weight = n * gradient**2 / (p * (1 - p))
+            residual = (k - n * p) * gradient / (p * (1 - p))
+            u0, u1 = residual.sum(axis=1), (residual * x).sum(axis=1)
+            i00, i01, i11 = weight.sum(axis=1), (weight * x).sum(axis=1), (weight * x**2).sum(axis=1)
+            det = i00 * i11 - i01**2
+            da, db = (i11 * u0 - i01 * u1) / det, (i00 * u1 - i01 * u0) / det
+            # A step of at most half the slope's size keeps it from overshooting through zero.
+            scale = np.minimum(1.0, 0.5 * np.abs(slope) / np.maximum(np.abs(db), 1e-300))
+            da, db = np.where(np.isfinite(da), da * scale, 0.0), np.where(np.isfinite(db), db * scale, 0.0)
+            a, slope = a + da, slope + db
+            converged = (np.abs(da) <= FIT_TOLERANCE * (1 + np.abs(a))) & (np.abs(db) <= FIT_TOLERANCE * (1 + np.abs(slope)))
+            if np.all(converged | ~np.isfinite(a)):
+                break
+        snr_50 = -a / slope
+        snr_90 = snr_50 + np.log(9.0) / slope
+    good = converged & (slope > 0) & np.isfinite(snr_50)
+    inside = lambda point: np.where(good & (point >= lo) & (point <= hi), point, np.nan)
+    return inside(snr_50), inside(snr_90), np.where(good, slope, np.nan)
+
+
+def sigmoid_fit_from_replicates(threshold: float, chance: float, points: Tuple[np.ndarray, np.ndarray, np.ndarray],
+                                sigmas: Sequence[float]) -> SigmoidFit:
+    """
+    A `SigmoidFit` from fits of the data (row 0 of ``points``, each (R,)) and of
+    bootstrap replicates (rows 1 onward): each point's interval is the central
+    range of its replicates' finite values at each level, at least wide enough to
+    hold the point itself.
+    """
+    snr_50, snr_90, slope = points
+    sigmas = tuple(float(s) for s in sigmas)
+    lower, upper = np.full((len(sigmas), 2), np.nan), np.full((len(sigmas), 2), np.nan)
+    replicates = np.stack([snr_50[1:], snr_90[1:]], axis=1)
+    for j, point in enumerate((snr_50[0], snr_90[0])):
+        values = replicates[:, j][np.isfinite(replicates[:, j])]
+        if not np.isfinite(point) or values.size == 0:
+            continue
+        for level, sigma in enumerate(sigmas):
+            alpha = 1.0 - sigma_level(sigma)
+            low, high = np.quantile(values, [alpha / 2, 1 - alpha / 2])
+            lower[level, j], upper[level, j] = min(low, point), max(high, point)
+    failed = int(np.count_nonzero(~(np.isfinite(snr_50[1:]) & np.isfinite(snr_90[1:]))))
+    return SigmoidFit(float(threshold), float(chance), float(snr_50[0]), float(snr_90[0]), float(slope[0]),
+                      lower, upper, sigmas, int(snr_50.size - 1), failed)
+
+
+def fit_efficiency_sigmoid(
+    snrs,
+    scores,
+    threshold: float,
+    chance: Optional[ChanceLaw],
+    snr_range: Tuple[float, float],
+    rng: np.random.Generator,
+    num_bootstrap: int = 1000,
+    sigmas: Sequence[float] = DEFAULT_SIGMAS,
+) -> SigmoidFit:
+    """
+    The sigmoid fit (`SigmoidFit`) of the injections found at ``score >=
+    threshold``, over the ``chance`` of a noise-only pass (none if None), the
+    injections grouped by SNR (`fit_bins`). Its bootstrap redraws the injections
+    (`resample_groups`) and the chance from its law: at a fixed threshold. (At a target FAR, `efficiency.efficiency_against_snr`
+    also redraws the threshold.)
+    """
+    snrs, scores = _injections(snrs, scores)
+    chance = _chance_or_nothing(chance)
+    if np.isnan(threshold):
+        nan = np.full((len(tuple(sigmas)), 2), np.nan)
+        return SigmoidFit(float(threshold), np.nan, np.nan, np.nan, np.nan, nan, nan.copy(),
+                          tuple(float(s) for s in sigmas), int(num_bootstrap), int(num_bootstrap))
+    edges, index = fit_bins(snrs, snr_range)
+    inside = index >= 0
+    num_bins = edges.size - 1
+    total = np.bincount(index[inside], minlength=num_bins)
+    detected = np.bincount(index[inside & (scores >= threshold)], minlength=num_bins)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        snr = np.bincount(index[inside], weights=snrs[inside], minlength=num_bins) / total
+    point = fit_sigmoid(snr, detected[None], total[None], chance.mean, snr_range)
+    counts, totals = resample_groups(rng, np.broadcast_to(detected, (num_bootstrap, num_bins)), total)
+    replicates = fit_sigmoid(snr, counts, totals, chance.sample(rng, num_bootstrap)[:, 0], snr_range,
+                             start=(np.repeat(point[0], num_bootstrap), np.repeat(point[2], num_bootstrap)))
+    points = tuple(np.concatenate([p, r]) for p, r in zip(point, replicates))
+    return sigmoid_fit_from_replicates(threshold, chance.mean[0], points, sigmas)
 
 
 # ----------------------------------------------------------------------- ROC

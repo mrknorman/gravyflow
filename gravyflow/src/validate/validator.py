@@ -12,9 +12,10 @@ import numpy as np
 import gravyflow as gf
 from .bank import Heartbeat, ValidationBank, noise_background
 from .config import ValidationConfig, check_held_out, run_record_of
-from .metrics import Background, EfficiencyCurve, FarThreshold, efficiency_curve, roc_curve
+from .efficiency import EfficiencyAgainstSnr, efficiency_against_snr
+from .metrics import Background, roc_curve, sigma_level
 from .provenance import StaleCheckpointError, model_fingerprint, require_match
-from .volume import InjectionVolumes, SensitiveVolumeCurve, sensitive_volume_curve
+from .volume import InjectionVolumes, SensitiveVolumeCurve, chirp_weights, sensitive_volume_curve
 from gravyflow.src.utils.fingerprint import config_fingerprint
 
 if TYPE_CHECKING:  # avoids importing keras at runtime
@@ -49,7 +50,10 @@ class Validator:
     # 5: the sensitive-volume set (``volume_data``): injections at physical
     # distances drawn uniformly in volume out to its recorded reach (``reach_mpc``),
     # with their SNRs.
-    FORMAT_VERSION = 5
+    # 6: the volume set placed per mass: chirp distances (``chirp_distances``) drawn
+    # uniformly in volume out to its recorded chirp reach (``reach_mpc``), with their
+    # physical distances; intervals at 1 and 2 sigma (``interval_sigmas``).
+    FORMAT_VERSION = 6
 
     def __init__(self, name: str = "model", config: Optional[ValidationConfig] = None,
                  dataset_args: Optional[dict] = None):
@@ -167,37 +171,59 @@ class Validator:
         return noise_background(self.far_scores, self.noise_streams, self.input_duration_seconds,
                                 self.config.cluster_seconds)
 
-    def efficiency_curves(self, fars_hz=None) -> Dict[float, Tuple[FarThreshold, EfficiencyCurve]]:
-        """Efficiency against SNR at each target FAR (Hz), with binomial intervals."""
+    def efficiency_curves(self, fars_hz=None) -> Dict[float, EfficiencyAgainstSnr]:
+        """
+        Efficiency against SNR at each target FAR (Hz) (`efficiency`): the binned record,
+        the owner's rolling curve and its sigmoid fit with the 50% and 90% SNR points,
+        the chance of a noise-only pass subtracted, each with joint intervals at every
+        level of ``interval_sigmas``. The bootstrap draws from the validator's own seed,
+        so a record gives the same curves whenever it is read.
+        """
+        return self._efficiency(self.efficiency_data, fars_hz)
+
+    def volume_set_efficiency_curves(self, fars_hz=None) -> Optional[Dict[float, EfficiencyAgainstSnr]]:
+        """
+        The volume set's own efficiency against SNR (its injections' SNRs are recorded): a
+        cross-check on the SNR set's, which it should match where the model depends on SNR
+        alone. None without a volume set.
+        """
+        return None if self.volume_data is None else self._efficiency(self.volume_data, fars_hz)
+
+    def _efficiency(self, data, fars_hz) -> Dict[float, EfficiencyAgainstSnr]:
         cfg = self.config
-        background = self.background()
-        curves = {}
-        for far in (cfg.far_thresholds if fars_hz is None else fars_hz):
-            threshold = background.threshold_for_far(float(far), cfg.confidence)
-            curves[float(far)] = (threshold, efficiency_curve(
-                self.efficiency_data["snrs"], self.efficiency_data["scores"], threshold.threshold,
-                cfg.snr_bin_edges, cfg.confidence, cfg.efficiency_interval))
-        return curves
+        fars = cfg.far_thresholds if fars_hz is None else fars_hz
+        results = efficiency_against_snr(
+            data["snrs"], data["scores"], self.background(), fars,
+            gf.SeedTree(cfg.seed).stream(cfg.group, "validator/efficiency"), cfg.snr_bin_edges, cfg.snr_range,
+            cfg.efficiency_bootstrap_samples, cfg.interval_sigmas, cfg.efficiency_interval)
+        return {float(far): result for far, result in zip(fars, results)}
 
     def sensitive_volume_curve(self, fars_hz=None) -> Optional[SensitiveVolumeCurve]:
         """
-        Sensitive volume (Gpc^3) and distance (Mpc) within the reach R the volume set was
-        drawn to, at each target FAR (Hz), with their injection, background and joint
-        intervals, noise floor, and the estimated volume beyond R with its interval
-        (`volume`; Euclidean, detector-frame masses); None without a volume set (a burst
-        population, or WHITE noise). The bootstrap draws from the validator's own seed,
-        so a record gives the same curve whenever it is read.
+        Sensitive volume (Gpc^3) and distance (Mpc) within the per-mass reach the volume
+        set was drawn to, at each target FAR (Hz), the chance of a noise-only pass
+        subtracted, with their injection, background and joint intervals at every level
+        of ``interval_sigmas`` (`volume`; Euclidean, detector-frame masses); each found
+        injection weighted by its mass's reach volume (`chirp_weights`). None without a
+        volume set (a burst population, or WHITE noise). The bootstrap draws from the
+        validator's own seed, so a record gives the same curve whenever it is read.
         """
         data = self.volume_data
         if self.far_scores is None or data is None:
             return None
         cfg = self.config
         return sensitive_volume_curve(
-            InjectionVolumes(data["scores"], float(data["reach_mpc"]), data["distances"], data["snrs"]),
-            self.background(), cfg.far_thresholds if fars_hz is None else fars_hz,
+            self.injection_volumes(), self.background(), cfg.far_thresholds if fars_hz is None else fars_hz,
             gf.SeedTree(cfg.seed).stream(cfg.group, "validator/volume"),
-            cfg.volume_bootstrap_samples, cfg.confidence, cfg.efficiency_interval,
-            cfg.volume_noise_floor_fraction, cfg.volume_beyond_reach_fraction)
+            cfg.volume_bootstrap_samples, cfg.interval_sigmas, cfg.efficiency_interval, cfg.volume_chance_fraction)
+
+    def injection_volumes(self) -> Optional[InjectionVolumes]:
+        """The volume set as the volume reads it: chirp distances within the chirp reach, chirp-mass weights."""
+        data = self.volume_data
+        if data is None:
+            return None
+        return InjectionVolumes(data["scores"], float(data["reach_mpc"]), data["chirp_distances"],
+                                chirp_weights(data["mass1"], data["mass2"]))
 
     def roc_curves(self) -> Dict[str, Dict[str, Any]]:
         """Exact ROC curves of noise against injection populations, keyed by population."""
@@ -360,9 +386,10 @@ class Validator:
         param_plot, param_controls = generate_parameter_space_plot(validators)
 
         volume_plot = generate_sensitive_volume_plot(validators)
+        has_volume = any(getattr(child, "renderers", None) for child in volume_plot.children)
         tabs = pn.Tabs(
             ("Efficiency", pn.Column(eff_controls, eff_plot)),
-            *([("Sensitive Volume", volume_plot)] if any(p.renderers for p in volume_plot.children) else []),
+            *([("Sensitive Volume", volume_plot)] if has_volume else []),
             ("ROC Curves", pn.Column(roc_select, roc_plot)),
             ("FAR Curves", pn.Column(*far_tab)),
             ("Parameter Space", pn.Column(param_controls, param_plot) if param_controls else param_plot),

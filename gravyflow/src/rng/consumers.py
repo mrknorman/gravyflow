@@ -40,7 +40,7 @@ _LEAVES = tuple(re.compile(pattern) for pattern in (
     # (gravyflow.src.dataset.standard.population).
     rf"standard/(volume|snr)/{_SEGMENT}",
     # The validator's own draws outside its datasets.
-    r"validator/(roc|plot|pad|volume|distance)",
+    r"validator/(roc|plot|pad|volume|distance|efficiency)",
     # A model's hyperparameters, its layers and its build seeds
     # (gravyflow.src.model.hyperparameter.search_stream).
     rf"search(/{_SEGMENT})+",

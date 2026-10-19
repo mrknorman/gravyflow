@@ -2,21 +2,24 @@
 Sensitive volume against independent references: the closed-form volume of a
 threshold detector averaged over sky and orientation; a realistic detector, whose
 efficiency is smooth and whose noise can pass the threshold, against its volume
-computed by quadrature; the coverage of each interval over many replicas; and the
-volume beyond the reach, estimated beside the volume within it, against its
-quadrature and over replicas, on independent windows and on time slides.
+computed by quadrature, with the chance of a noise-only pass subtracted; a
+population drawn uniformly in chirp distance, each source out to its own mass's
+reach and weighted to keep the volume exact; and the coverage of each interval,
+at 1 and 2 sigma, over many replicas, on independent windows and on time slides.
 """
 
 import numpy as np
 import pytest
 from scipy import stats
 
-from gravyflow.src.validate.metrics import Background, ScoreStream, poisson_interval
+from gravyflow.src.validate.metrics import Background, ChanceLaw, ScoreStream, poisson_interval, sigma_level
 from gravyflow.src.validate.volume import (
-    BEYOND_REACH_FACTOR,
     GPC3_PER_MPC3,
+    REFERENCE_CHIRP_MASS_MSUN,
     InjectionVolumes,
     VolumeQuote,
+    chirp_weights,
+    found_fraction_by_distance,
     sensitive_distance,
     sensitive_volume_curve,
     sphere_volume_gpc3,
@@ -73,7 +76,7 @@ def population(rng, n, reach=REACH_MPC):
 def detected(rng, n, detector, reach=REACH_MPC):
     """``n`` sources of the population out to ``reach``, scored by ``detector`` (of their SNRs)."""
     snrs, distances = population(rng, n, reach)
-    return InjectionVolumes(detector(rng, snrs), reach, distances, snrs)
+    return InjectionVolumes(detector(rng, snrs), reach, distances)
 
 
 def threshold_detector_volume(threshold_snr: float) -> float:
@@ -90,30 +93,48 @@ def realistic_scores(rng, snrs):
     return snrs + rng.normal(size=np.shape(snrs))
 
 
-def realistic_truth(far_hz: float, beyond: bool = False) -> float:
+
+
+def realistic_found(far_hz: float, reach=REACH_MPC) -> float:
     """
-    V at a true FAR for the realistic detector, by quadrature: the threshold is the normal
-    quantile of the FAR per 1 s window, and V = V_ref E[P(SNR + n >= t)] over the
-    population, the SNR of a source of response g at x R being H g / (x R), x^3
+    The volume the realistic detector finds at a true FAR, by quadrature: the threshold is
+    the normal quantile of the FAR per 1 s window, and it is V_ref E[P(SNR + n >= t)] over
+    the population, the SNR of a source of response g at x R being H g / (x R), x^3
     uniform: V_ref sum_g w_g int_0^1 3 x^2 Phi(H g / (x R) - t) dx. Sources found by
-    their noise alone, however far, are in it. ``beyond``: the volume found by signal
-    between the reach and `BEYOND_REACH_FACTOR` times it, the same integral from x = 1
-    to x = k, less the noise's chance ``far_hz``.
+    their noise alone, however far, are in it.
     """
     threshold = stats.norm.isf(far_hz * 1.0)
     response, weights = response_quadrature(16)
     x, w = np.polynomial.legendre.leggauss(256)
-    low, high = (1.0, BEYOND_REACH_FACTOR) if beyond else (0.0, 1.0)
-    x, w = low + 0.5 * (high - low) * (x + 1), 0.5 * (high - low) * w
-    snr = HORIZON_MPC * response[:, None] / (x[None, :] * REACH_MPC)
-    found = stats.norm.sf(threshold - snr) - (far_hz if beyond else 0.0)
-    return float(sphere_volume_gpc3(REACH_MPC)) * np.sum(weights[:, None] * w[None, :] * 3 * x[None, :] ** 2
-                                                                * found)
+    x, w = 0.5 * (x + 1), 0.5 * w
+    snr = HORIZON_MPC * response[:, None] / (x[None, :] * reach)
+    found = stats.norm.sf(threshold - snr)
+    return float(sphere_volume_gpc3(reach)) * np.sum(weights[:, None] * w[None, :] * 3 * x[None, :] ** 2 * found)
+
+
+def realistic_truth(far_hz: float, reach=REACH_MPC) -> float:
+    """
+    V within the reach at a true FAR, the estimand: what the realistic detector finds less
+    what noise alone finds, the chance ``p = FAR x 1 s`` of a noise window passing, over the
+    fraction it leaves, ``(found - p V_ref) / (1 - p)``.
+    """
+    p = far_hz * 1.0
+    return (realistic_found(far_hz, reach) - p * float(sphere_volume_gpc3(reach))) / (1 - p)
 
 
 def coverage_tolerance(replicas: int, level: float) -> float:
     """Three binomial standard deviations of a coverage measured over ``replicas``."""
     return 3.0 * np.sqrt(level * (1 - level) / replicas)
+
+
+#: The chance of each side's miss of a central interval at 1 and 2 sigma.
+TAILS = tuple((1 - sigma_level(s)) / 2 for s in (1.0, 2.0))
+
+
+def assert_misses_within_tails(misses, replicas):
+    """``misses`` (levels, 2 sides) counted over ``replicas``: each side at most its tail, to 3 sigma."""
+    for level, tail in enumerate(TAILS):
+        assert np.all(misses[level] / replicas <= tail + coverage_tolerance(replicas, tail)), (level, misses / replicas)
 
 
 # ------------------------------------------------------------------ the oracles
@@ -132,7 +153,7 @@ def test_a_threshold_detector_has_the_closed_form_volume():
     rng = np.random.default_rng(1)
     injections = detected(rng, 40_000, lambda rng, snrs: snrs)
     truth = threshold_detector_volume(8.0)
-    lower, upper = injections.interval(8.0, confidence=0.9)
+    lower, upper = injections.interval(8.0, confidence=sigma_level(2.0))
     assert lower < truth < upper, (lower, truth, upper)
     assert injections.volume(8.0) == pytest.approx(truth, rel=0.05)
     assert injections.volume(-np.inf) == pytest.approx(injections.reference_volume_gpc3, rel=1e-12)
@@ -152,10 +173,11 @@ def test_an_unweighted_draw_has_the_binomial_interval_and_error():
     # Clopper-Pearson's, and its error V_ref sqrt(N p (1 - p)) / N.
     scores = np.array([3.0, 1.0, 2.0, 0.0, 5.0, 4.0, 1.5, 2.5])
     distances = np.linspace(10.0, 100.0, scores.size)
-    injections = InjectionVolumes(scores, 100.0, distances, np.ones(scores.size))
+    injections = InjectionVolumes(scores, 100.0, distances)
     v_ref = 4.0 / 3.0 * np.pi * 100.0**3 * GPC3_PER_MPC3
     k, n = 3, scores.size  # found at a threshold of 3
     assert injections.volume(3.0) == pytest.approx(v_ref * k / n, rel=1e-12)
+    assert injections.population_volume_gpc3 == pytest.approx(v_ref, rel=1e-12)
     p = k / n
     assert injections.standard_error(3.0) == pytest.approx(v_ref * np.sqrt(n * p * (1 - p)) / n, rel=1e-12)
     lower, upper = injections.interval(3.0, confidence=0.9)
@@ -166,53 +188,43 @@ def test_an_unweighted_draw_has_the_binomial_interval_and_error():
     assert lower == 0.0 and upper == pytest.approx(v_ref * (1 - 0.05 ** (1 / n)), rel=1e-12)
     # A multiplicity counts an injection that many times.
     assert injections.volume(3.0, multiplicity=[2, 0, 0, 0, 1, 0, 0, 0]) == pytest.approx(v_ref * 3 / n)
-    # Population weights (a chirp-distance draw): each found injection stands for its weight.
-    weighted = InjectionVolumes(scores, 100.0, distances, np.ones(scores.size), weights=np.arange(1.0, 9.0))
+    # Population weights (a chirp-distance draw): each found injection stands for its weight, and
+    # the population fills its weights' mean of the reference volume.
+    weighted = InjectionVolumes(scores, 100.0, distances, weights=np.arange(1.0, 9.0))
     assert weighted.volume(3.0) == pytest.approx(v_ref * (1 + 5 + 6) / n, rel=1e-12)
+    assert weighted.population_volume_gpc3 == pytest.approx(v_ref * 4.5, rel=1e-12)
 
 
-def test_the_volume_beyond_the_reach_moves_the_outer_injections_out_at_their_snr_over_k():
-    # Eight injections, all reading the found chance in one SNR bin (fewer than a bin's worth):
-    # the five at d >= R / k, moved k times as far, stand for the volume between R and k R, each
-    # found at the bin's found fraction, less the noise's chance.
+def test_the_chance_of_a_noise_only_pass_is_subtracted_from_the_volume():
+    # An injection is found when its window passes, whatever passes it: noise alone passes with
+    # chance c, everywhere in the reach, so V is what is found less c of the population's volume,
+    # over 1 - c. Its injection interval maps the found volume's binomial ends the same way.
     scores = np.array([3.0, 1.0, 2.0, 0.0, 5.0, 4.0, 1.5, 2.5])
-    distances = np.array([10.0, 20.0, 40.0, 49.0, 50.0, 60.0, 80.0, 100.0])
-    injections = InjectionVolumes(scores, 100.0, distances, np.linspace(1.0, 2.0, 8))
-    k, v_ref, n = BEYOND_REACH_FACTOR, sphere_volume_gpc3(100.0), scores.size
-    moved, found = 4, 3 / 8  # d >= 50; three of eight found at a threshold of 3
-    for p in (0.0, 0.1):
-        assert injections.beyond_reach(3.0, p) == pytest.approx(v_ref * k**3 / n * moved * (found - p), rel=1e-12)
-    assert np.isnan(injections.beyond_reach(np.nan, 0.0))
-    # Its injections' interval: each reading stands for 4 / 8 when found, so the found sum is
-    # 4 times the found fraction, Clopper-Pearson's on 3 of 8, less the noise's part.
-    lower, upper = injections.beyond_reach_interval(3.0, 0.1, confidence=0.9)
-    for bound, fraction in ((lower, stats.beta.ppf(0.05, 3, 6)), (upper, stats.beta.ppf(0.95, 4, 5))):
-        assert bound == pytest.approx(v_ref * k**3 / n * moved * (fraction - 0.1), rel=1e-12)
-    # With a weight, each moved injection stands for its weight; a multiplicity counts it (as a moved
-    # source and as a reading) that many times.
-    weighted = InjectionVolumes(scores, 100.0, distances, np.ones(n), weights=np.arange(1.0, 9.0))
-    assert weighted.beyond_reach(3.0, 0.0) == pytest.approx(v_ref * k**3 / n * (5 + 6 + 7 + 8) * found, rel=1e-12)
-    twice = np.array([0, 0, 0, 0, 2, 0, 0, 0])  # the loudest moved injection, twice: found 2 of 2
-    assert injections.beyond_reach(3.0, 0.0, twice) == pytest.approx(v_ref * k**3 / n * 2, rel=1e-12)
+    injections = InjectionVolumes(scores, 100.0, np.linspace(10.0, 100.0, 8), weights=np.arange(1.0, 9.0))
+    found, population, c = injections.found_volume(3.0), injections.population_volume_gpc3, 0.25
+    assert injections.volume(3.0, chance=c) == pytest.approx((found - c * population) / (1 - c), rel=1e-12)
+    assert injections.volume(3.0) == found
+    lower, upper = injections.interval(3.0, confidence=0.9)
+    chance_lower, chance_upper = injections.interval(3.0, confidence=0.9, chance=c)
+    assert chance_lower == pytest.approx((lower - c * population) / (1 - c), rel=1e-12)
+    assert chance_upper == pytest.approx((upper - c * population) / (1 - c), rel=1e-12)
 
 
 def test_injection_volumes_refuse_what_they_cannot_integrate():
     ones = np.ones(2)
     with pytest.raises(ValueError, match="one of each per injection"):
-        InjectionVolumes(np.zeros(3), 1.0, np.ones(3), np.ones(3), weights=np.ones(2))
+        InjectionVolumes(np.zeros(3), 1.0, np.ones(3), weights=np.ones(2))
     with pytest.raises(ValueError, match="one of each per injection"):
-        InjectionVolumes(np.zeros(3), 1.0, ones, np.ones(3))
-    with pytest.raises(ValueError, match="one of each per injection"):
-        InjectionVolumes(np.zeros(2), 1.0, ones, np.ones(3))
+        InjectionVolumes(np.zeros(3), 1.0, ones)
     with pytest.raises(ValueError, match=">= 0"):
-        InjectionVolumes(np.zeros(2), 1.0, ones, ones, weights=np.array([1.0, -1.0]))
-    with pytest.raises(ValueError, match="SNRs must be finite and >= 0"):
-        InjectionVolumes(np.zeros(2), 1.0, ones, np.array([1.0, np.nan]))
+        InjectionVolumes(np.zeros(2), 1.0, ones, weights=np.array([1.0, -1.0]))
+    with pytest.raises(ValueError, match="finite"):
+        InjectionVolumes(np.array([0.0, np.nan]), 1.0, ones)
     with pytest.raises(ValueError, match="reach_mpc"):
-        InjectionVolumes(np.zeros(2), 0.0, ones, ones)
+        InjectionVolumes(np.zeros(2), 0.0, ones)
     # Every injection is inside the reach it was drawn to.
     with pytest.raises(ValueError, match=r"in \(0, reach_mpc"):
-        InjectionVolumes(np.zeros(2), 1.0, np.array([0.5, 1.5]), ones)
+        InjectionVolumes(np.zeros(2), 1.0, np.array([0.5, 1.5]))
     with pytest.raises(ValueError, match="reach_mpc"):
         uniform_in_volume(2, -1.0, np.random.default_rng(0))
 
@@ -220,38 +232,72 @@ def test_injection_volumes_refuse_what_they_cannot_integrate():
 # ------------------------------------------------------------ a realistic detector
 
 def test_a_realistic_detector_is_unbiased_and_its_injection_interval_covers():
-    # At the true threshold, the injection interval alone is the whole error: over
-    # replicas, V is unbiased and the interval covers the truth at its level, the
-    # sources its noise finds included.
-    replicas, n, far = 300, 4000, 1e-3
+    # At the true threshold, where the chance of a noise-only pass is known, the injection
+    # interval alone is the whole error: over replicas, V (the chance subtracted) is unbiased and
+    # its interval covers the truth at each level.
+    replicas, n, far = 300, 4000, 1e-2
     rng = np.random.default_rng(3)
     truth = realistic_truth(far)
     threshold = stats.norm.isf(far)
-    volumes, covered = np.empty(replicas), 0
+    volumes, covered = np.empty(replicas), np.zeros(2)
     for r in range(replicas):
         injections = detected(rng, n, realistic_scores)
-        volumes[r] = injections.volume(threshold)
-        lower, upper = injections.interval(threshold, confidence=0.9)
-        covered += lower <= truth <= upper
+        volumes[r] = injections.volume(threshold, chance=far)
+        for j, sigma in enumerate((1.0, 2.0)):
+            lower, upper = injections.interval(threshold, confidence=sigma_level(sigma), chance=far)
+            covered[j] += lower <= truth <= upper
     assert abs(volumes.mean() - truth) <= 3 * volumes.std() / np.sqrt(replicas), (volumes.mean(), truth)
-    assert abs(covered / replicas - 0.9) <= coverage_tolerance(replicas, 0.9), covered / replicas
+    for j, sigma in enumerate((1.0, 2.0)):
+        level = sigma_level(sigma)
+        assert abs(covered[j] / replicas - level) <= coverage_tolerance(replicas, level), covered / replicas
+
+
+def test_without_the_subtraction_the_volume_grows_with_the_reach():
+    # A detector that finds every source of SNR 8 or more, and otherwise passes a window as noise
+    # does (chance 1e-2): the found volume counts what noise alone finds everywhere in the reach,
+    # so it grows with the reach's cube though the detector sees nothing past D / 8; V, the chance
+    # subtracted, is the same within any reach past that, the closed form.
+    rng = np.random.default_rng(52)
+    p = 1e-2
+    sharp = lambda rng, snrs: np.where(snrs >= 8.0, 1e3, rng.normal(size=snrs.shape))
+    threshold = stats.norm.isf(p)
+    found, volume = {}, {}
+    for reach in (REACH_MPC / 2, REACH_MPC):  # both past the farthest source of SNR 8, D / 8
+        injections = detected(rng, 400_000, sharp, reach)
+        found[reach] = injections.found_volume(threshold)
+        volume[reach] = injections.volume(threshold, chance=p)
+        lower, upper = injections.interval(threshold, sigma_level(2.0), chance=p)
+        assert lower <= threshold_detector_volume(8.0) <= upper, (reach, lower, upper)
+    assert found[REACH_MPC] / found[REACH_MPC / 2] > 1.5
+    assert volume[REACH_MPC] / volume[REACH_MPC / 2] == pytest.approx(1.0, abs=0.1)
+
+
+def noise_background(rng, num_windows: int, slides: int = 0, label_slides: bool = True) -> Background:
+    """
+    ``num_windows`` 1 s windows of N(0, 1) noise: independent, or ``slides`` time slides that
+    each read the same ``num_windows / slides`` windows again (a slide of k, rolled by k), as a
+    score that one detector's excursions dominate reads them: every window's score appears once
+    in each slide. ``label_slides`` False labels every slide 0, as a background blind to its
+    data's reuse would.
+    """
+    if slides == 0:
+        return Background.independent_windows(rng.normal(size=num_windows), 1.0)
+    noise = rng.normal(size=num_windows // slides)
+    return Background([ScoreStream(np.roll(noise, k), 1.0, 1.0, 0, k if label_slides else 0)
+                       for k in range(1, slides + 1)])
 
 
 def realistic_curve(rng, allowed: int, far: float, num_injections: int, num_bootstrap: int, slides: int = 0,
                     detector=realistic_scores):
-    """
-    The realistic detector's curve at ``far``, from a background of 1 s windows allowing
-    ``allowed`` triggers: independent windows, or ``slides`` time slides that each read the
-    same windows again (a slide of k, rolled by k), as a score that one detector's
-    excursions dominate reads them: every window's score appears once in each slide.
-    """
-    if slides == 0:
-        background = Background.independent_windows(rng.normal(size=int(round(allowed / far))), 1.0)
-    else:
-        noise = rng.normal(size=int(round(allowed / far / slides)))
-        background = Background([ScoreStream(np.roll(noise, k), 1.0, 1.0, 0, k) for k in range(1, slides + 1)])
+    """The realistic detector's curve at ``far``, from a background (`noise_background`) allowing ``allowed`` triggers."""
+    background = noise_background(rng, int(round(allowed / far)), slides)
     injections = detected(rng, num_injections, detector)
     return sensitive_volume_curve(injections, background, [far], rng, num_bootstrap=num_bootstrap)
+
+
+def joint_misses(curve, truth) -> np.ndarray:
+    """(levels, 2): whether the truth is below and above the joint interval at each level."""
+    return np.stack([truth < curve.joint_lower_gpc3[:, 0], truth > curve.joint_upper_gpc3[:, 0]], axis=1)
 
 
 @pytest.mark.parametrize("allowed", [1, 2, 3, 10])
@@ -263,36 +309,46 @@ def test_the_joint_interval_covers_the_truth_where_the_background_allows_few_tri
     replicas, far = 300, 1e-2
     rng = np.random.default_rng(10 + allowed)
     truth = realistic_truth(far)
-    below = above = 0
+    misses = np.zeros((2, 2))
     for _ in range(replicas):
         curve = realistic_curve(rng, allowed, far, num_injections=2000, num_bootstrap=100)
-        below += truth < curve.joint_lower_gpc3[0]
-        above += truth > curve.joint_upper_gpc3[0]
-    # A central 90% interval misses at most 5% on each side.
-    tolerance = coverage_tolerance(replicas, 0.05)
-    assert below / replicas <= 0.05 + tolerance and above / replicas <= 0.05 + tolerance, (below, above)
+        assert curve.sigmas == (1.0, 2.0)
+        misses += joint_misses(curve, truth)
+    assert_misses_within_tails(misses, replicas)
 
 
 @pytest.mark.parametrize("slides", [0, 16])
-def test_both_intervals_cover_the_truth_on_time_slides(slides):
+def test_the_joint_interval_covers_the_truth_on_time_slides(slides):
     # Sixteen slides of the same windows hold the information of one: a background
     # that counted every slid window as independent would put the threshold 4 times too
-    # precisely. Counting its data's reuse, the joint interval and the interval beyond
-    # the reach cover as they do on independent windows (the same 10 events allowed).
+    # precisely. Counting its data's reuse, the joint interval covers as it does on
+    # independent windows (the same 10 events allowed).
     replicas, far = 300, 1e-2
     rng = np.random.default_rng(30 + slides)
-    truth, beyond = realistic_truth(far), realistic_truth(far, beyond=True)
+    truth = realistic_truth(far)
     misses = np.zeros((2, 2))
     for _ in range(replicas):
         curve = realistic_curve(rng, 10 * max(slides, 1), far, num_injections=20_000, num_bootstrap=100,
                                 slides=slides)
         assert curve.data_reuse == max(slides, 1)
-        for q, (value, lower, upper) in enumerate(((truth, curve.joint_lower_gpc3, curve.joint_upper_gpc3),
-                                                   (beyond, curve.beyond_reach_lower_gpc3,
-                                                    curve.beyond_reach_upper_gpc3))):
-            misses[q] += value < lower[0], value > upper[0]
-    tolerance = coverage_tolerance(replicas, 0.05)
-    assert np.all(misses / replicas <= 0.05 + tolerance), misses / replicas
+        misses += joint_misses(curve, truth)
+    assert_misses_within_tails(misses, replicas)
+
+
+def test_the_joint_interval_covers_where_few_injections_are_found():
+    # A silent detector (injections scored as noise is) at 1e-3 Hz: about four of 4000 injections
+    # are found, by their noise, and a bootstrap of so few understates their error; the binomial
+    # interval on the found count keeps the joint interval covering V, which, the chance of a
+    # noise-only pass subtracted, is 0.
+    replicas, far = 200, 1e-3
+    rng = np.random.default_rng(44)
+    misses = np.zeros((2, 2))
+    for _ in range(replicas):
+        background = Background.independent_windows(rng.normal(size=10_000), 1.0)
+        curve = sensitive_volume_curve(detected(rng, 4000, lambda rng, snrs: rng.normal(size=snrs.shape)),
+                                       background, [far], rng, num_bootstrap=100)
+        misses += joint_misses(curve, 0.0)
+    assert_misses_within_tails(misses, replicas)
 
 
 def test_the_joint_interval_is_not_the_injection_interval():
@@ -302,13 +358,112 @@ def test_the_joint_interval_is_not_the_injection_interval():
     rng = np.random.default_rng(20)
     truth = realistic_truth(far)
     joint = injections_alone = 0
+    level = sigma_level(2.0)
     for _ in range(replicas):
         curve = realistic_curve(rng, 10, far, num_injections=20_000, num_bootstrap=100)
-        joint += curve.joint_lower_gpc3[0] <= truth <= curve.joint_upper_gpc3[0]
-        injections_alone += curve.injection_lower_gpc3[0] <= truth <= curve.injection_upper_gpc3[0]
-    tolerance = coverage_tolerance(replicas, 0.9)
-    assert abs(joint / replicas - 0.9) <= tolerance, joint / replicas
-    assert injections_alone / replicas < 0.9 - tolerance, injections_alone / replicas
+        joint += curve.joint_lower_gpc3[1, 0] <= truth <= curve.joint_upper_gpc3[1, 0]
+        injections_alone += curve.injection_lower_gpc3[1, 0] <= truth <= curve.injection_upper_gpc3[1, 0]
+    tolerance = coverage_tolerance(replicas, level)
+    assert joint / replicas >= level - tolerance, joint / replicas
+    assert injections_alone / replicas < level - tolerance, injections_alone / replicas
+
+
+# ---------------------------------------------------- the per-mass reach
+
+#: Chirp masses (detector frame) of the test population, uniform; a source of chirp mass M at chirp
+#: distance d_c is at d_c (M / M_ref)^(5/6), and its horizon is HORIZON_MPC (M / M_ref)^(5/6) loudness(M).
+CHIRP_MASS_RANGE = (2.0, 40.0)
+#: The chirp-distance reach: the loudest source (loudness 1) has SNR 4 at its mass's reach.
+CHIRP_REACH_MPC = HORIZON_MPC / 4.0
+
+
+def loudness(chirp_mass):
+    """A source's loudness for its chirp mass, beyond the inspiral's M^(5/6): at most 1, falling with mass."""
+    return np.exp(-(np.asarray(chirp_mass) - CHIRP_MASS_RANGE[0]) / 30.0)
+
+
+def chirp_population(rng, n):
+    """
+    Sources drawn as the validator draws its volume set: chirp mass from the population,
+    chirp distance uniform in volume out to the chirp reach, so each is placed out to its own
+    mass's reach R (M / M_ref)^(5/6). Returns each one's SNR, chirp distance, physical distance
+    and chirp mass.
+    """
+    chirp_mass = rng.uniform(*CHIRP_MASS_RANGE, n)
+    g = antenna_response(rng.uniform(-1, 1, n), rng.uniform(0, np.pi, n), rng.uniform(0, np.pi, n),
+                         rng.uniform(-1, 1, n))
+    chirp_distance = uniform_in_volume(n, CHIRP_REACH_MPC, rng)
+    scale = (chirp_mass / REFERENCE_CHIRP_MASS_MSUN) ** (5 / 6)
+    snrs = HORIZON_MPC * scale * loudness(chirp_mass) * g / (chirp_distance * scale)
+    return snrs, chirp_distance, chirp_distance * scale, chirp_mass
+
+
+def chirp_truth(far_hz: float) -> float:
+    """V within each mass's reach at a true FAR, the chance subtracted, by quadrature over mass, sky, orientation and distance."""
+    p = far_hz
+    threshold = stats.norm.isf(p)
+    m, wm = np.polynomial.legendre.leggauss(12)
+    m = CHIRP_MASS_RANGE[0] + 0.5 * (m + 1) * (CHIRP_MASS_RANGE[1] - CHIRP_MASS_RANGE[0])
+    wm = 0.5 * wm
+    response, wg = response_quadrature(10)
+    x, wx = np.polynomial.legendre.leggauss(128)
+    x, wx = 0.5 * (x + 1), 0.5 * wx
+    total = 0.0
+    for mass, weight in zip(m, wm):
+        snr = HORIZON_MPC * loudness(mass) * response[:, None] / (x[None, :] * CHIRP_REACH_MPC)
+        signal = (stats.norm.sf(threshold - snr) - p) / (1 - p)
+        within = np.sum(wg[:, None] * wx[None, :] * 3 * x[None, :] ** 2 * signal)
+        reach = CHIRP_REACH_MPC * (mass / REFERENCE_CHIRP_MASS_MSUN) ** (5 / 6)
+        total += weight * float(sphere_volume_gpc3(reach)) * within
+    return total
+
+
+def test_the_reference_chirp_mass_is_two_neutron_stars():
+    assert REFERENCE_CHIRP_MASS_MSUN == pytest.approx(1.4 * 2 ** (-1 / 5), rel=1e-12)
+    np.testing.assert_allclose(chirp_weights([30.0, 1.4], [30.0, 1.4]),
+                               [(30 * 2 ** (-1 / 5) / REFERENCE_CHIRP_MASS_MSUN) ** 2.5, 1.0], rtol=1e-12)
+
+
+def test_a_chirp_distance_draw_weighted_by_chirp_mass_is_unbiased_and_covers():
+    # Each source out to its own mass's reach, chirp distance uniform in volume: a found injection
+    # stands for its mass's reach volume, the chirp reach's times (M / M_ref)^(5/2). Weighted, V
+    # is unbiased against the quadrature and its interval covers at each level; unweighted, it is
+    # the wrong number.
+    replicas, n, far = 200, 4000, 1e-2
+    rng = np.random.default_rng(50)
+    truth = chirp_truth(far)
+    threshold = stats.norm.isf(far)
+    volumes, unweighted, covered = np.empty(replicas), np.empty(replicas), np.zeros(2)
+    for r in range(replicas):
+        snrs, chirp_distance, distance, chirp_mass = chirp_population(rng, n)
+        weights = (chirp_mass / REFERENCE_CHIRP_MASS_MSUN) ** 2.5
+        assert np.all(distance <= CHIRP_REACH_MPC * weights ** (1 / 3) * (1 + 1e-12))
+        scores = realistic_scores(rng, snrs)
+        injections = InjectionVolumes(scores, CHIRP_REACH_MPC, chirp_distance, weights)
+        volumes[r] = injections.volume(threshold, chance=far)
+        unweighted[r] = InjectionVolumes(scores, CHIRP_REACH_MPC, chirp_distance).volume(threshold, chance=far)
+        for j, sigma in enumerate((1.0, 2.0)):
+            lower, upper = injections.interval(threshold, confidence=sigma_level(sigma), chance=far)
+            covered[j] += lower <= truth <= upper
+    assert abs(volumes.mean() - truth) <= 3 * volumes.std() / np.sqrt(replicas), (volumes.mean(), truth)
+    assert abs(unweighted.mean() - truth) > 10 * volumes.std() / np.sqrt(replicas)
+    for j, sigma in enumerate((1.0, 2.0)):
+        level = sigma_level(sigma)
+        assert abs(covered[j] / replicas - level) <= coverage_tolerance(replicas, level), covered / replicas
+
+
+def test_the_found_fraction_against_distance_is_counted_exactly():
+    # The visual check of the reach: the injections found in each distance bin, of those there;
+    # far out, at a reach long enough, the fraction falls to the chance level.
+    rng = np.random.default_rng(51)
+    injections = detected(rng, 20_000, realistic_scores)
+    edges, found, total = found_fraction_by_distance(injections, 2.0, num_bins=10)
+    np.testing.assert_allclose(edges, np.linspace(0, REACH_MPC, 11), rtol=1e-12)
+    expected_total, _ = np.histogram(injections.distances, edges)
+    expected_found, _ = np.histogram(injections.distances[injections.scores >= 2.0], edges)
+    np.testing.assert_array_equal(total, expected_total)
+    np.testing.assert_array_equal(found, expected_found)
+    assert np.all(np.isnan(found_fraction_by_distance(injections, np.nan, num_bins=10)[1]))
 
 
 # -------------------------------------------------------- the FAR intervals
@@ -352,126 +507,87 @@ def test_bootstrap_thresholds_draw_the_count_as_poisson_in_independent_events():
             assert np.mean(thresholds[:, 0] <= u) == pytest.approx(expected, abs=4 * np.sqrt(0.25 / replicas))
 
 
-def test_the_curve_reads_volume_at_the_backgrounds_threshold_with_its_noise_floor():
+def test_the_chance_of_passing_a_chosen_threshold_is_a_beta_law():
+    # A threshold just above the c-th highest of n exchangeable windows is passed by a fresh
+    # window with a chance distributed as Beta(c, n - c + 1), whatever their distribution: the
+    # window below it counts. Sixteen slides of the same windows hold one reading's information.
+    independent = Background.independent_windows(np.arange(10.0), 1.0)
+    threshold = independent.threshold_for_far(0.3).threshold  # just above 6, the fourth highest
+    assert independent.window_exceedance(threshold) == 0.3
+    np.testing.assert_array_equal(independent.chosen_window_chance(threshold), (4.0, 7.0))
+    np.testing.assert_array_equal(independent.chosen_window_chance(0.0), (10.0, 1.0))  # no window below
+    slid = Background([ScoreStream(np.roll(np.arange(10.0), k), 1.0, 1.0, 0, k) for k in range(1, 5)])
+    threshold = slid.threshold_for_far(0.3).threshold  # 12 allowed: just above 6, twelve windows pass
+    assert slid.window_exceedance(threshold) == 0.3
+    np.testing.assert_array_equal(slid.chosen_window_chance(threshold), (4.0, 7.0))
+    # Over draws of 100 uniform windows, the chance of passing the threshold for three triggers,
+    # just above the fourth highest, is exactly Beta(4, 97).
+    rng = np.random.default_rng(9)
+    chances = np.empty(4000)
+    for r in range(chances.size):
+        background = Background.independent_windows(rng.random(100), 1.0)
+        threshold = background.threshold_for_far(0.03).threshold
+        np.testing.assert_array_equal(background.chosen_window_chance(threshold), (4.0, 97.0))
+        chances[r] = 1 - threshold
+    assert stats.kstest(chances, stats.beta(4, 97).cdf).pvalue > 1e-3
+
+
+def test_the_curve_reads_volume_at_the_backgrounds_threshold_with_the_chance_subtracted():
     rng = np.random.default_rng(6)
     background = Background.independent_windows(rng.normal(size=20_000), 1.0)
     injections = detected(rng, 20_000, realistic_scores)
     curve = sensitive_volume_curve(injections, background, [1e-1, 1e-2, 1e-3, 1e-5], rng, num_bootstrap=200)
     assert curve.resolved.tolist() == [True, True, True, False]
-    assert np.all(np.isnan([curve.volume_within_reach_gpc3[3], curve.joint_lower_gpc3[3],
-                            curve.background_lower_gpc3[3], curve.injection_upper_gpc3[3], curve.noise_floor_gpc3[3],
-                            curve.beyond_reach_gpc3[3], curve.beyond_reach_upper_gpc3[3]]))
+    assert curve.sigmas == (1.0, 2.0)
+    for field in ("joint", "injection", "background"):
+        assert getattr(curve, f"{field}_lower_gpc3").shape == (2, 4)
+    assert curve.far_lower_hz.shape == curve.far_upper_hz.shape == (2, 4)
+    assert np.all(np.isnan([curve.volume_within_reach_gpc3[3], curve.found_gpc3[3], curve.chance[3],
+                            curve.chance_gpc3[3]]))
+    assert np.all(np.isnan(np.concatenate([curve.joint_lower_gpc3[:, 3], curve.background_lower_gpc3[:, 3],
+                                           curve.injection_upper_gpc3[:, 3]])))
     for i in (0, 1, 2):
         threshold = background.threshold_for_far(curve.far_hz[i]).threshold
-        noise_chance = np.mean(background._opens >= threshold)
-        assert curve.volume_within_reach_gpc3[i] == injections.volume(threshold)
-        assert curve.beyond_reach_gpc3[i] == injections.beyond_reach(threshold, noise_chance)
-        for value, lower, upper in (
-                (curve.volume_within_reach_gpc3, curve.injection_lower_gpc3, curve.injection_upper_gpc3),
-                (curve.volume_within_reach_gpc3, curve.background_lower_gpc3, curve.background_upper_gpc3),
-                (curve.volume_within_reach_gpc3, curve.joint_lower_gpc3, curve.joint_upper_gpc3),
-                (curve.beyond_reach_gpc3, curve.beyond_reach_lower_gpc3, curve.beyond_reach_upper_gpc3)):
-            assert lower[i] < value[i] < upper[i]
-        assert curve.volume_within_reach_gpc3[i] == pytest.approx(realistic_truth(curve.far_hz[i]), rel=0.1)
-        # Noise alone finds the fraction of windows the threshold passes, of the whole reach.
-        assert curve.noise_floor_gpc3[i] == pytest.approx(noise_chance * injections.reference_volume_gpc3, rel=1e-12)
+        chance = float(background.found_by_chance(threshold).mean[0])
+        assert curve.chance[i] == pytest.approx(chance, rel=1e-12)
+        assert curve.found_gpc3[i] == injections.found_volume(threshold)
+        assert curve.volume_within_reach_gpc3[i] == pytest.approx(injections.volume(threshold, chance), rel=1e-12)
+        # Noise alone finds the chance of a pass, of the population's whole volume.
+        assert curve.chance_gpc3[i] == pytest.approx(chance * injections.population_volume_gpc3, rel=1e-12)
+        value = curve.volume_within_reach_gpc3[i]
+        for term in ("injection", "background", "joint"):
+            lower, upper = getattr(curve, f"{term}_lower_gpc3")[:, i], getattr(curve, f"{term}_upper_gpc3")[:, i]
+            assert lower[1] <= lower[0] < value < upper[0] <= upper[1], (term, lower, value, upper)
+        assert (curve.far_lower_hz[1, i] <= curve.far_lower_hz[0, i] <= curve.far_upper_hz[0, i]
+                <= curve.far_upper_hz[1, i])
+        assert value == pytest.approx(realistic_truth(curve.far_hz[i]), rel=0.1)
     # At 0.1 Hz a tenth of the noise windows pass: most of what is found, noise found.
-    assert curve.noise_dominated.tolist() == [True, False, False, False]
+    assert curve.chance_dominated.tolist() == [True, False, False, False]
     assert curve.quotable.tolist() == [False, True, True, False]
-    assert curve.noise_floor_fraction == 0.1 and curve.beyond_reach_fraction == 0.1
-    assert curve.volume_within_reach_gpc3[0] > curve.volume_within_reach_gpc3[1] > curve.volume_within_reach_gpc3[2]
+    assert curve.chance_fraction == 0.1
+    assert curve.volume_within_reach_gpc3[1] > curve.volume_within_reach_gpc3[2]
     np.testing.assert_array_equal(curve.distance_within_reach_mpc, sensitive_distance(curve.volume_within_reach_gpc3))
-    assert curve.reach_mpc == REACH_MPC and curve.beyond_reach_factor == BEYOND_REACH_FACTOR
+    assert curve.reach_mpc == REACH_MPC and curve.reach_range_mpc == (REACH_MPC, REACH_MPC)
+    assert curve.population_volume_gpc3 == injections.population_volume_gpc3
     assert curve.num_injections == 20_000 and curve.num_bootstrap == 200 and curve.data_reuse == 1
 
 
-# --------------------------------------------------------- beyond the reach
-
 def offset_scores(offset):
-    """A detector that needs ``offset`` more SNR than the realistic one: none of the reach's outer shell is loud enough."""
+    """A detector that needs ``offset`` more SNR than the realistic one."""
     return lambda rng, snrs: snrs - offset + rng.normal(size=snrs.shape)
 
 
-def test_the_volume_beyond_the_reach_is_estimated_and_quoted_with_a_warning(caplog):
-    # The realistic detector finds sources of SNR 2-4 (a threshold near 3): with the reach
-    # where the loudest has SNR 4, it finds sources beyond it. V within the reach is the
-    # estimand, quoted; the estimate beyond it agrees with its quadrature and with V
-    # measured to twice the reach, and, more than a tenth of V, marks the point
-    # reach-limited and warns.
-    rng = np.random.default_rng(40)
-    background = Background.independent_windows(rng.normal(size=20_000), 1.0)
-    fars = [1e-2, 1e-3]
-    curve = sensitive_volume_curve(detected(rng, 20_000, realistic_scores), background, fars, rng, num_bootstrap=100)
-    longer = sensitive_volume_curve(detected(rng, 80_000, realistic_scores, 2 * REACH_MPC), background,
-                                    fars, rng, num_bootstrap=50)
-    for i, far in enumerate(fars):
-        truth = realistic_truth(far, beyond=True)
-        assert curve.beyond_reach_lower_gpc3[i] < truth < curve.beyond_reach_upper_gpc3[i]
-        # At the same threshold (the same background), V to twice the reach, less its noise floor,
-        # is V within it, less its own, plus what lies between.
-        measured = (longer.volume_within_reach_gpc3[i] - longer.noise_floor_gpc3[i]
-                    - (curve.volume_within_reach_gpc3[i] - curve.noise_floor_gpc3[i]))
-        # Within three standard errors of the injections (the estimate's own is about the longer set's).
-        tolerance = 3 * np.sqrt(2 * longer.injection_error_gpc3[i] ** 2 + curve.injection_error_gpc3[i] ** 2)
-        assert abs(curve.beyond_reach_gpc3[i] - measured) < tolerance, (curve.beyond_reach_gpc3[i], measured)
-    assert curve.reach_limited.tolist() == [True, True] and curve.quotable.tolist() == [True, True]
-    with caplog.at_level("WARNING"):
-        quote = curve.quote(1e-3)
-    assert quote == VolumeQuote(
-        1e-3, REACH_MPC, curve.volume_within_reach_gpc3[1], curve.joint_lower_gpc3[1],
-        curve.joint_upper_gpc3[1], curve.beyond_reach_gpc3[1], curve.beyond_reach_lower_gpc3[1],
-        curve.beyond_reach_upper_gpc3[1], BEYOND_REACH_FACTOR, True)
-    assert "misses an estimated" in caplog.text and f"({REACH_MPC:.0f} Mpc)" in caplog.text
-    # A detector that needs SNR 3 more finds nothing beyond the reach to speak of: quoted with no warning.
-    caplog.clear()
-    quiet = sensitive_volume_curve(detected(rng, 20_000, offset_scores(3.0)), background, fars, rng,
-                                   num_bootstrap=50)
-    assert not quiet.reach_limited.any()
-    with caplog.at_level("WARNING"):
-        assert not quiet.quote(1e-3).reach_limited
-    assert "misses" not in caplog.text
-
-
-def test_the_interval_beyond_the_reach_covers_at_its_level():
-    # Over replicas of the realistic detector (fresh injections and background each), the
-    # interval on the volume beyond the reach covers its quadrature as a central 90%
-    # interval should, at a target of 100 triggers and one of 10.
-    replicas, fars = 200, [1e-2, 1e-3]
-    rng = np.random.default_rng(43)
-    truths = [realistic_truth(far, beyond=True) for far in fars]
-    misses = np.zeros((2, 2))
-    for _ in range(replicas):
-        background = Background.independent_windows(rng.normal(size=10_000), 1.0)
-        curve = sensitive_volume_curve(detected(rng, 4000, realistic_scores), background, fars, rng, num_bootstrap=100)
-        misses[:, 0] += np.array(truths) < curve.beyond_reach_lower_gpc3
-        misses[:, 1] += np.array(truths) > curve.beyond_reach_upper_gpc3
-    assert np.all(misses / replicas <= 0.05 + coverage_tolerance(replicas, 0.05)), misses / replicas
-
-
-def test_the_interval_beyond_the_reach_covers_nothing_where_few_injections_are_found():
-    # A silent detector (injections scored as noise is): nothing lies beyond the reach. At
-    # 1e-3 Hz about four of 4000 injections are found, by their noise, and a bootstrap of so
-    # few found understates their error; the binomial interval on the found sum covers.
-    replicas = 200
-    rng = np.random.default_rng(44)
-    misses = np.zeros(2)
-    for _ in range(replicas):
-        background = Background.independent_windows(rng.normal(size=10_000), 1.0)
-        snrs, distances = population(rng, 4000)
-        injections = InjectionVolumes(rng.normal(size=4000), REACH_MPC, distances, snrs)
-        curve = sensitive_volume_curve(injections, background, [1e-3], rng, num_bootstrap=100)
-        misses += curve.beyond_reach_lower_gpc3[0] > 0, curve.beyond_reach_upper_gpc3[0] < 0
-    assert np.all(misses / replicas <= 0.05 + coverage_tolerance(replicas, 0.05)), misses / replicas
-
-
-def test_quote_refuses_every_number_not_to_quote_by_name():
+def test_quote_gives_the_volume_within_the_reach_at_both_levels_and_refuses_what_not_to_quote():
     rng = np.random.default_rng(42)
     background = Background.independent_windows(rng.normal(size=20_000), 1.0)
     curve = sensitive_volume_curve(detected(rng, 20_000, offset_scores(-1.0)), background,
                                    [1e-1, 1e-3, 1e-5], rng, num_bootstrap=50)
-    assert curve.noise_dominated[0] and not curve.resolved[2]
+    assert curve.chance_dominated[0] and not curve.resolved[2]
     assert curve.quotable.tolist() == [False, True, False]
-    with pytest.raises(ValueError, match="noise-dominated"):
+    quote = curve.quote(1e-3)
+    assert quote == VolumeQuote(1e-3, REACH_MPC, (REACH_MPC, REACH_MPC), curve.volume_within_reach_gpc3[1],
+                                tuple(curve.joint_lower_gpc3[:, 1]), tuple(curve.joint_upper_gpc3[:, 1]), (1.0, 2.0))
+    with pytest.raises(ValueError, match="noise alone finds more than 10%"):
         curve.quote(1e-1)
     with pytest.raises(ValueError, match="cannot resolve"):
         curve.quote(1e-5)

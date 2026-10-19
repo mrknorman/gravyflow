@@ -58,7 +58,7 @@ def test_validator_runs_offline_on_synthetic_noise(validated, tmp_path):
     assert v.noise_gps_times is None
     assert set(v.efficiency_data) == {"snrs", "scores", "mass1", "mass2", "central_times", "hpeak", "hrss"}
     assert all(a.shape == (64,) for a in v.efficiency_data.values())
-    assert set(v.volume_data) == {"scores", "distances", "snrs", "mass1", "mass2", "reach_mpc"}
+    assert set(v.volume_data) == {"scores", "distances", "chirp_distances", "snrs", "mass1", "mass2", "reach_mpc"}
     assert path.exists()
     report = tmp_path / "report.html"
     v.plot(report)
@@ -70,10 +70,17 @@ def test_metrics_follow_from_the_stored_scores(validated, small_config):
     background = v.background()
     assert background.livetime_seconds == 64 * 1.0
     curves = v.efficiency_curves([1.0, 0.1, 1e-3])
-    assert curves[1e-3][0].resolved is False and np.all(np.isnan(curves[1e-3][1].efficiency))
-    threshold, curve = curves[0.1]
-    assert threshold.resolved and threshold.achieved.count <= 6
-    assert curve.total.sum() == 64
+    assert curves[1e-3].threshold.resolved is False and np.all(np.isnan(curves[1e-3].binned.efficiency))
+    result = curves[0.1]
+    assert result.threshold.resolved and result.threshold.achieved.count <= 6
+    assert result.binned.total.sum() == 64
+    # The binned record, the rolling curve over the SNR range and the sigmoid fit, at both levels.
+    assert result.rolling.snr.size == 50 and result.rolling.lower.shape == (2, 50)
+    assert result.fit.sigmas == small_config.interval_sigmas
+    assert result.num_bootstrap == small_config.efficiency_bootstrap_samples
+    # The volume set's own curve, a cross-check, at the same targets.
+    cross = v.volume_set_efficiency_curves([0.1])
+    assert cross[0.1].threshold.threshold == result.threshold.threshold and cross[0.1].binned.total.sum() <= 64
     # The area under the ROC curve is the Mann-Whitney statistic: the chance that an
     # injection outscores a noise window, ties counting a half.
     injections = v.efficiency_data["scores"][v.efficiency_data["snrs"] >= small_config.default_roc_min_snr]
@@ -97,48 +104,91 @@ def test_checkpoint_round_trip(validated):
 
 
 def test_the_sensitive_volume_is_recorded_and_plotted(validated, small_config):
-    # The volume set: sources at physical distances, uniform in volume out to the
-    # population's reach R, recorded; the curve follows from the record alone, with
-    # V within R, its three intervals and noise floor, and the estimate beyond R, and
+    # The volume set: each source placed out to its own mass's reach, its chirp distance
+    # uniform in volume out to the chirp reach R, recorded; the curve follows from the record
+    # alone, each found injection weighted by its mass's reach volume, with V within the reach,
+    # its three intervals at 1 and 2 sigma and the chance of a noise-only pass subtracted, and
     # the record read back gives the same curve.
+    from gravyflow.src.validate.volume import REFERENCE_CHIRP_MASS_MSUN, chirp_weights
+
     _, path, v = validated
     data = v.volume_data
     reach = float(data["reach_mpc"])
-    assert np.all((data["distances"] > 0) & (data["distances"] <= reach))
-    # Each source's SNR goes as one over its distance: its SNR at the reach is at most the
-    # loudest possible source's, the reach SNR, to the scatter of each window's own PSD
-    # estimate (a few per cent), against which its SNR is measured.
-    assert np.all(data["snrs"] * data["distances"] / reach <= small_config.volume_reach_snr * 1.1)
+    assert np.all((data["chirp_distances"] > 0) & (data["chirp_distances"] <= reach))
+    # The physical distance is the chirp distance scaled by the source's own chirp mass: the
+    # generator's drawn masses, not the target, set it.
+    chirp_mass = (data["mass1"] * data["mass2"]) ** 0.6 / (data["mass1"] + data["mass2"]) ** 0.2
+    np.testing.assert_allclose(data["distances"],
+                               data["chirp_distances"] * (chirp_mass / REFERENCE_CHIRP_MASS_MSUN) ** (5 / 6), rtol=1e-4)
+    # A source's SNR goes as one over its chirp distance at its own mass, and its mass's reach
+    # bounds its best case: its SNR at the reach is at most the reach SNR, to the scatter of each
+    # window's own PSD estimate (a few per cent), against which its SNR is measured.
+    assert np.all(data["snrs"] * data["chirp_distances"] / reach <= small_config.volume_reach_snr * 1.1)
     curve = v.sensitive_volume_curve()
     assert curve.far_hz.tolist() == small_config.far_thresholds
     resolved = curve.resolved
     assert resolved.any() and not resolved.all()  # 64 s of background resolves only the higher FARs
     within = curve.volume_within_reach_gpc3
-    assert np.all(np.isnan(within[~resolved])) and np.all(np.isnan(curve.beyond_reach_gpc3[~resolved]))
-    for value, lower, upper in ((within, curve.injection_lower_gpc3, curve.injection_upper_gpc3),
-                                (within, curve.background_lower_gpc3, curve.background_upper_gpc3),
-                                (within, curve.joint_lower_gpc3, curve.joint_upper_gpc3),
-                                (curve.beyond_reach_gpc3, curve.beyond_reach_lower_gpc3,
-                                 curve.beyond_reach_upper_gpc3)):
-        assert np.all(lower[resolved] <= value[resolved]) and np.all(value[resolved] <= upper[resolved])
-    assert np.all(within[resolved] <= curve.reference_volume_gpc3)
+    assert np.all(np.isnan(within[~resolved])) and np.all(np.isnan(curve.chance[~resolved]))
+    assert curve.sigmas == small_config.interval_sigmas == (1.0, 2.0)
+    for term in ("injection", "background", "joint"):
+        lower, upper = getattr(curve, f"{term}_lower_gpc3"), getattr(curve, f"{term}_upper_gpc3")
+        assert lower.shape == (2, within.size)
+        assert np.all(lower[1, resolved] <= lower[0, resolved]) and np.all(upper[0, resolved] <= upper[1, resolved])
+        if term != "background":  # read at two thresholds, where this model's V is not monotone
+            assert np.all(lower[0, resolved] <= within[resolved]) and np.all(within[resolved] <= upper[0, resolved])
+    assert np.all(within[resolved] <= curve.population_volume_gpc3)
+    weights = chirp_weights(data["mass1"], data["mass2"])
+    assert curve.population_volume_gpc3 == pytest.approx(curve.reference_volume_gpc3 * weights.mean(), rel=1e-12)
+    assert curve.reach_range_mpc == pytest.approx((reach * weights.min() ** (1 / 3), reach * weights.max() ** (1 / 3)))
     assert curve.reach_mpc == reach and curve.data_reuse == 1
     assert curve.num_injections == small_config.volume_num_injections
     assert curve.num_bootstrap == small_config.volume_bootstrap_samples
-    assert curve.beyond_reach_fraction == small_config.volume_beyond_reach_fraction
     loaded = Validator.load(path).sensitive_volume_curve()
     for field in dataclasses.fields(curve):
         np.testing.assert_array_equal(getattr(loaded, field.name), getattr(curve, field.name), err_msg=field.name)
 
     plot = generate_sensitive_volume_plot([v])
-    # The axes say what the number is: a Euclidean volume within the reach, of detector-frame
-    # masses; the legend names the reach.
-    assert [child.yaxis.axis_label for child in plot.children] == [
-        "Sensitive Volume within reach R (Gpc³, Euclidean, detector-frame masses)",
-        "Sensitive Distance within reach R (Mpc, Euclidean, detector-frame masses)"]
-    assert all(child.renderers for child in plot.children)
-    labels = {item.label.value for child in plot.children for item in child.legend[0].items}
-    assert f"Tiny (R = {reach:,.0f} Mpc)" in labels
+    # The axes say what the number is: a Euclidean volume within the per-mass reach, of
+    # detector-frame masses; the legend states the reach; the found fraction against chirp
+    # distance carries the chance level.
+    volume, distance, found = plot.children[:3]
+    assert [volume.yaxis.axis_label, distance.yaxis.axis_label] == [
+        "Sensitive Volume within the reach (Gpc³)", "Sensitive Distance within the reach (Mpc)"]
+    assert "Euclidean (no cosmology), detector-frame masses, within the per-mass reach" in plot.children[-1].text
+    assert f"Tiny: reach {reach:,.0f} Mpc chirp distance" in plot.children[-1].text
+    assert found.xaxis.axis_label.startswith("Chirp Distance (Mpc")
+    assert all(child.renderers for child in (volume, distance, found))
+    labels = {item.label.value for child in (volume, distance, found) for item in child.legend[0].items}
+    assert f"Tiny (reach {reach:,.0f} Mpc chirp distance, SNR {small_config.volume_reach_snr:g})" in labels
+    assert {"Tiny (1σ joint)", "Tiny (2σ joint)", "Tiny (chance level)"} <= labels
+
+
+def test_the_efficiency_tab_restores_the_owners_plot(validated):
+    # Nothing of the owner's efficiency plot is lost: the density of every injection's score
+    # against its SNR behind the curves, on the score axis, painted by the threshold; the
+    # threshold's line; a FAR slider and a powers-of-ten selector; legends that hide on click.
+    # Beside them, the rolling curve's pointwise 1 and 2 sigma bands, the sigmoid fit, its 50%
+    # and 90% points with their error bars, the volume set's cross-check, and one curve per level.
+    from bokeh.models import ImageRGBA, Select, Slider
+    from gravyflow.src.validate.plotting import generate_efficiency_plot
+
+    _, _, v = validated
+    plots, controls = generate_efficiency_plot([v])
+    main, levels = plots.children
+    assert sum(isinstance(r.glyph, ImageRGBA) for r in main.renderers) == 1
+    assert [axis.axis_label for axis in main.right if hasattr(axis, "axis_label")] == ["Score (logit)"]
+    labels = {item.label.value for item in main.legend[0].items}
+    assert {"Tiny (rolling ±0.5 SNR)", "Tiny (1σ, pointwise)", "Tiny (2σ, pointwise)", "Tiny (sigmoid fit)",
+            "Tiny (50% and 90% SNR, 1σ)", "Tiny (50% and 90% SNR, 2σ)", "Tiny (threshold)",
+            "Tiny (volume set, cross-check)"} <= labels
+    assert main.legend[0].click_policy == "hide" and main.xaxis.axis_label_text_font_size == "21pt"
+    select, slider = controls.children
+    assert isinstance(select, Select) and isinstance(slider, Slider)
+    assert "change:value" in slider.js_property_callbacks and "change:value" in select.js_property_callbacks
+    resolved = [far for far, result in v.efficiency_curves().items() if result.threshold.resolved]
+    assert slider.end == max(len(resolved) - 1, 1)
+    assert levels.title.text.endswith("one curve per false-alarm-rate level")
 
 
 def volume_set(dataset_args, **settings):
@@ -162,7 +212,7 @@ def test_the_reach_is_the_populations_and_can_be_set(dataset_args):
     assert volume_set(dataset_args)["reach_mpc"] == volume_set(
         dataset_args, volume_num_injections=64)["reach_mpc"]
     given = volume_set(dataset_args, volume_reach_mpc=250.0)
-    assert given["reach_mpc"] == 250.0 and np.all(given["distances"] <= 250.0)
+    assert given["reach_mpc"] == 250.0 and np.all(given["chirp_distances"] <= 250.0)
     with pytest.raises(ValueError, match="volume_reach_mpc"):
         ValidationConfig(volume_reach_mpc=0.0)
 
@@ -208,28 +258,27 @@ def test_the_reach_refuses_a_population_it_cannot_bound(dataset_args):
 
     generator = deepcopy(dataset_args["waveform_generators"])
     box = population_box(generator)
-    assert box["mass_1_msun"] == (5.0, 95.0) and box["spin_1_in"] == (0.0,)
+    assert box["mass_1_msun"] == (5.0, 95.0) and box["spin_1_in"] == ((0.0, 0.0, 0.0),)
     generator.spin_1_in = gf.Distribution(min_=-0.5, max_=0.8, type_=gf.DistributionType.UNIFORM)
-    assert population_box(generator)["spin_1_in"] == (-0.5, 0.0, 0.8)
+    assert population_box(generator)["spin_1_in"] == ((0.0, 0.0, -0.5), (0.0, 0.0, 0.0), (0.0, 0.0, 0.8))
     unbounded = deepcopy(generator)
     unbounded.mass_1_msun = gf.Distribution(mean=30.0, std=5.0, type_=gf.DistributionType.NORMAL)
     with pytest.raises(ValueError, match="mass_1_msun is unbounded"):
         population_box(unbounded)
+    # A precessing population: its in-plane spins join the box, and face-on is no longer the
+    # best orientation, so the search runs over orientations too.
     precessing = deepcopy(generator)
     precessing.approximant = gf.Approximant.IMRPhenomPv2
     precessing.spin_2_in = (gf.Distribution(min_=0.0, max_=0.5, type_=gf.DistributionType.UNIFORM), 0.0, 0.0)
-    with pytest.raises(ValueError, match="in-plane components"):
-        population_box(precessing)
+    box = population_box(precessing)
+    assert box["spin_2_in"] == ((0.0, 0.0, 0.0), (0.5, 0.0, 0.0)) and box["orientations"].shape[0] > 1
+    assert population_box(generator)["orientations"].tolist() == [[0.0, 0.0]]  # aligned: face-on
 
 
 def test_a_population_with_no_reach_is_refused_before_any_stage_runs(dataset_args, tmp_path):
-    # A precessing or unbounded population has no loudest source, so no reach: the validator
-    # refuses it as it is built, before it scores a window or writes a checkpoint. A reach
-    # set by hand needs no loudest source.
-    precessing = deepcopy(dataset_args)
-    precessing["waveform_generators"].approximant = gf.Approximant.IMRPhenomPv2
-    precessing["waveform_generators"].spin_1_in = (
-        gf.Distribution(min_=0.0, max_=0.5, type_=gf.DistributionType.UNIFORM), 0.0, 0.0)
+    # An unbounded population has no loudest source, so no reach: the validator refuses it as it
+    # is built, before it scores a window or writes a checkpoint. A reach set by hand needs no
+    # loudest source.
     unbounded = deepcopy(dataset_args)
     unbounded["waveform_generators"].mass_1_msun = gf.Distribution(mean=30.0, std=5.0,
                                                                    type_=gf.DistributionType.NORMAL)
@@ -237,11 +286,55 @@ def test_a_population_with_no_reach_is_refused_before_any_stage_runs(dataset_arg
     model = logit_model(1)
     path = tmp_path / "validation.h5"
     with mock.patch.object(model, "predict_on_batch", side_effect=AssertionError("a window was scored")):
-        for args, match in ((precessing, "spin_1_in has in-plane components"), (unbounded, "mass_1_msun is unbounded")):
-            with pytest.raises(ValueError, match=match):
-                Validator.validate(model, "no reach", args, config, path)
-            assert not path.exists()
-    ValidationBank(model, precessing, dataclasses.replace(config, volume_reach_mpc=500.0))
+        with pytest.raises(ValueError, match="mass_1_msun is unbounded"):
+            Validator.validate(model, "no reach", unbounded, config, path)
+        assert not path.exists()
+    ValidationBank(model, unbounded, dataclasses.replace(config, volume_reach_mpc=500.0))
+
+
+def test_a_precessing_populations_reach_bounds_its_best_orientation(dataset_args):
+    # A precessing source is loudest at no fixed orientation: the reach searches orientations and
+    # in-plane spins, so it is at least the aligned population's (in-plane spin 0 is in the box),
+    # and at least what any one orientation of its loudest masses gives.
+    aligned = reach_of(dataset_args, masses=(30.0, 30.0))
+    args = deepcopy(dataset_args)
+    args["waveform_generators"].approximant = gf.Approximant.IMRPhenomPv2
+    args["waveform_generators"].spin_1_in = (
+        gf.Distribution(min_=0.0, max_=0.6, type_=gf.DistributionType.UNIFORM), 0.0,
+        gf.Distribution(min_=0.0, max_=0.6, type_=gf.DistributionType.UNIFORM))
+    precessing = reach_of(args, masses=(30.0, 30.0))
+    assert precessing >= aligned * (1 - 1e-4)
+
+
+def test_a_source_placed_at_a_chirp_distance_is_at_its_masss_physical_distance(dataset_args):
+    # CHIRP_DISTANCE_MPC places each generated source at the distance where a source of the
+    # reference chirp mass would have its inspiral amplitude: d_c (M / M_ref)^(5/6). Labelled
+    # there, and the same sources at those physical distances have the same SNR.
+    from gravyflow.src.validate.volume import REFERENCE_CHIRP_MASS_MSUN
+
+    def placed(type_, targets):
+        generator = deepcopy(dataset_args["waveform_generators"])
+        generator.scaling_method = gf.ScalingMethod(value=targets, type_=type_)
+        generator.injection_chance = 1.0
+        outputs = [gf.WaveformParameters.CHIRP_DISTANCE_MPC, gf.WaveformParameters.DISTANCE_MPC,
+                   gf.WaveformParameters.MASS_1_MSUN, gf.WaveformParameters.MASS_2_MSUN, gf.ScalingTypes.SNR]
+        args = {**dataset_args, "waveform_generators": [generator], "num_examples_per_batch": 32,
+                "steps_per_epoch": 1, "group": "test", "seed": gf.SeedTree(7).sub("validator/vol"),
+                "output_variables": outputs}
+        _, y = gf.Dataset(**args)[0]
+        return {label.name: per_example(y[label.name], 32, label.name) for label in outputs}
+
+    chirp = np.linspace(100.0, 800.0, 32)
+    at_chirp = placed(gf.WaveformParameters.CHIRP_DISTANCE_MPC, chirp)
+    m1, m2 = at_chirp["MASS_1_MSUN"], at_chirp["MASS_2_MSUN"]
+    chirp_mass = (m1 * m2) ** 0.6 / (m1 + m2) ** 0.2
+    physical = chirp * (chirp_mass / REFERENCE_CHIRP_MASS_MSUN) ** (5 / 6)
+    np.testing.assert_allclose(at_chirp["CHIRP_DISTANCE_MPC"], chirp, rtol=1e-5)
+    np.testing.assert_allclose(at_chirp["DISTANCE_MPC"], physical, rtol=1e-5)
+    at_physical = placed(gf.WaveformParameters.DISTANCE_MPC, physical)
+    np.testing.assert_array_equal(at_physical["MASS_1_MSUN"], m1)
+    np.testing.assert_allclose(at_physical["SNR"], at_chirp["SNR"], rtol=1e-4)
+    np.testing.assert_allclose(at_physical["CHIRP_DISTANCE_MPC"], chirp, rtol=1e-5)
 
 
 def test_the_network_bound_is_the_best_response_each_detector_can_have():
@@ -353,7 +446,7 @@ def test_injections_without_a_volume_set_have_no_sensitive_volume(validated, dat
     burst = Validator("burst", v.config, v.dataset_args)
     burst.far_scores, burst.efficiency_data = v.far_scores, v.efficiency_data
     assert burst.sensitive_volume_curve() is None
-    assert all(not child.renderers for child in generate_sensitive_volume_plot([burst]).children)
+    assert all(not child.renderers for child in generate_sensitive_volume_plot([burst]).children[:3])
     white = {**dataset_args, "noise_obtainer": gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=[gf.IFO.L1])}
     assert not ValidationBank(logit_model(1), white).has_volume
 
@@ -385,14 +478,15 @@ def test_checkpoint_refuses_other_settings(validated, dataset_args):
 
 
 def test_a_record_of_another_format_is_refused(validated, dataset_args, small_config, tmp_path):
-    # Format 4 had no volume set: it is refused by name, read or resumed, never converted.
+    # Format 5 drew its volume set out to one reach for every mass: it is refused by name, read or
+    # resumed, never converted.
     model, path, _ = validated
-    assert Validator.FORMAT_VERSION == 5
+    assert Validator.FORMAT_VERSION == 6
     old = tmp_path / "format.h5"
     old.write_bytes(path.read_bytes())
     with h5py.File(old, "a") as f:
-        f.attrs["format_version"] = 4
-    refusal = "is in validation format 4; this version reads only format 5.*Validate the model again"
+        f.attrs["format_version"] = 5
+    refusal = "is in validation format 5; this version reads only format 6.*Validate the model again"
     with pytest.raises(StaleCheckpointError, match=refusal):
         Validator.load(old)
     # Refused for its format, by name: not as written for another model.

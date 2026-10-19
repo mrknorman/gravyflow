@@ -688,7 +688,24 @@ class WaveformGenerator:
             else:
                 return value
 
-@dataclass 
+#: The chirp mass (solar masses) a chirp distance is referred to: two neutron stars of 1.4.
+REFERENCE_CHIRP_MASS_MSUN = 1.4 * 2.0 ** (-1.0 / 5.0)
+
+
+def chirp_mass(mass_1_msun, mass_2_msun):
+    """The chirp mass of component masses: ``(m1 m2)^(3/5) / (m1 + m2)^(1/5)``."""
+    return (mass_1_msun * mass_2_msun) ** 0.6 / (mass_1_msun + mass_2_msun) ** 0.2
+
+
+def chirp_distance(distance_mpc, mass_1_msun, mass_2_msun):
+    """
+    The chirp distance of a source at ``distance_mpc``: ``d (M_ref / M)^(5/6)``, ``M`` its
+    chirp mass (`chirp_mass`, `REFERENCE_CHIRP_MASS_MSUN`).
+    """
+    return distance_mpc * (REFERENCE_CHIRP_MASS_MSUN / chirp_mass(mass_1_msun, mass_2_msun)) ** (5.0 / 6.0)
+
+
+@dataclass
 class WaveformParameter:
     index : str
     # The shape of one value, per example and generator: a dataset returns
@@ -717,7 +734,12 @@ class WaveformParameters(Enum):
     SPIN_2_IN = WaveformParameter(109, (3,))
     LAMBDA_1 = WaveformParameter(110)
     LAMBDA_2 = WaveformParameter(111)
-    
+    # The distance at which a source of the reference chirp mass would have this
+    # source's inspiral amplitude, d (M_ref / M)^(5/6) (`chirp_distance`): derived
+    # from the drawn distance and masses, never drawn. At fixed masses the
+    # amplitude goes as one over it.
+    CHIRP_DISTANCE_MPC = WaveformParameter(112, amplitude_power=-1)
+
     # WNB paramters:
     DURATION_SECONDS = WaveformParameter(201)
     MIN_FREQUENCY_HERTZ = WaveformParameter(202)
@@ -1229,6 +1251,8 @@ class CBCGenerator(WaveformGenerator):
                 mask = swap[:, None] if one.ndim == 2 else swap
                 parameters[first] = np.where(mask, two, one)
                 parameters[second] = np.where(mask, one, two)
+            source_chirp_distance = chirp_distance(
+                *(np.asarray(parameters[key], dtype=np.float64) for key in ("distance_mpc", "mass_1_msun", "mass_2_msun")))
             for key in list(parameters):
                 parameters[key] = ops.convert_to_tensor(parameters[key], dtype="float32")
 
@@ -1272,8 +1296,9 @@ class CBCGenerator(WaveformGenerator):
             waveforms = ensure_last_dim_even(waveforms)
             waveforms = self.apply_injection_chance(waveforms, streams)
             
-            # Convert parameters to Enum keys for return
-            enum_parameters = {}
+            # Convert parameters to Enum keys for return, with the derived chirp distance (labels and scaling).
+            enum_parameters = {WaveformParameters.CHIRP_DISTANCE_MPC: ops.convert_to_tensor(source_chirp_distance,
+                                                                                             dtype="float32")}
             for key, value in parameters.items():
                 try:
                     enum_key = WaveformParameters.get(key)

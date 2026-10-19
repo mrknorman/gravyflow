@@ -26,6 +26,7 @@ from holoviews.operation.datashader import datashade
 import holoviews.operation.datashader
 
 import gravyflow as gf
+from .metrics import ROLLING_HALF_WIDTH, sigma_level
 from .utils import downsample_data
 
 logger = logging.getLogger(__name__)
@@ -508,17 +509,30 @@ def _style(p, legend_location: str) -> None:
     p.title.text_font_size = '24pt'
 
 
+def _sigma_label(sigma: float) -> str:
+    return f"{sigma:g}σ"
+
+
+#: Band opacity by level: the 1 sigma band the darker, inside the 2 sigma one.
+_BAND_ALPHA = {1.0: 0.28, 2.0: 0.12}
+
+
+def _band_alpha(sigma: float) -> float:
+    return _BAND_ALPHA.get(float(sigma), 0.1)
+
+
 def generate_far_curves(
         validators : list,
         colors : List[str] = Bright[7],
         width : int = 800,
         height : int = 600
     ):
-    """FAR (Hz) against the score threshold (logit), with each curve's Poisson band."""
+    """FAR (Hz) against the score threshold (logit), with each curve's 1 sigma and 2 sigma bands."""
     tooltips = [
         ("Score Threshold", "@x{0.000}"),
         ("False Alarm Rate (Hz)", "@y{0.0e}"),
-        ("Interval (Hz)", "@lower{0.0e} – @upper{0.0e}"),
+        ("1σ (Hz)", "@lower_0{0.0e} – @upper_0{0.0e}"),
+        ("2σ (Hz)", "@lower_1{0.0e} – @upper_1{0.0e}"),
     ]
     p = figure(
         width=width,
@@ -531,106 +545,204 @@ def generate_far_curves(
     for index, (color, validator) in enumerate(zip(cycle(colors), validators)):
         if validator.far_scores is None:
             continue
-        confidence = validator.config.confidence
-        curve = validator.background().far_curve(confidence)
-        keep = _display_indices(curve.thresholds.size, 2000)
+        background = validator.background()
+        sigmas = validator.config.interval_sigmas
+        curves = [background.far_curve(sigma_level(sigma)) for sigma in sigmas]
+        keep = _display_indices(curves[0].thresholds.size, 2000)
         source = ColumnDataSource(data=dict(
-            x=curve.thresholds[keep], y=curve.rate_hz[keep],
-            lower=curve.lower_hz[keep], upper=curve.upper_hz[keep],
+            x=curves[0].thresholds[keep], y=curves[0].rate_hz[keep],
+            **{f"lower_{j}": curve.lower_hz[keep] for j, curve in enumerate(curves)},
+            **{f"upper_{j}": curve.upper_hz[keep] for j, curve in enumerate(curves)},
         ))
         title = _title(validator, index)
-        p.varea(x="x", y1="lower", y2="upper", source=source, fill_color=color, fill_alpha=0.2,
-                legend_label=f"{title} ({confidence:.0%} interval)")
+        for j, sigma in reversed(list(enumerate(sigmas))):
+            p.varea(x="x", y1=f"lower_{j}", y2=f"upper_{j}", source=source, fill_color=color,
+                    fill_alpha=_band_alpha(sigma), legend_label=f"{title} ({_sigma_label(sigma)})")
         p.line("x", "y", source=source, line_color=color, line_width=2, legend_label=title)
     _style(p, "bottom_left")
     return p
 
-#: The sensitive volume plot's y axes: within each curve's reach R; Euclidean volume, detector-frame masses (as
-#: MLGWSC-1's evaluate.py).
-VOLUME_AXIS_LABELS = ("Sensitive Volume within reach R (Gpc³, Euclidean, detector-frame masses)",
-                      "Sensitive Distance within reach R (Mpc, Euclidean, detector-frame masses)")
+#: The sensitive volume plot's y axes: within each curve's per-mass reach; Euclidean volume, detector-frame
+#: masses (as MLGWSC-1's evaluate.py).
+VOLUME_AXIS_LABELS = ("Sensitive Volume within the reach (Gpc³)", "Sensitive Distance within the reach (Mpc)")
+#: What every volume on them is, stated above them.
+VOLUME_STATEMENT = "Euclidean (no cosmology), detector-frame masses, within the per-mass reach"
+
+
+#: The found fraction's log axis starts here, below any chance level it shows.
+FOUND_FRACTION_FLOOR = 1e-5
+
+
+def _legend_beside(p, font_size: str = "13pt") -> None:
+    """The larger fonts, a legend that hides on click, placed beside the plot so it covers no data."""
+    _style(p, "top_left")
+    p.legend.label_text_font_size = font_size
+    p.add_layout(p.legend[0], "right")
+
+
+def _initial_far(keys: List[str]) -> int:
+    """The FAR option a tab opens on: the one nearest 1e-3 Hz."""
+    return int(np.argmin([abs(np.log10(float(key)) + 3.0) for key in keys])) if keys else 0
+
+
+def _reach_statement(validator, curve) -> str:
+    """The reach a curve is within, as its legend states it."""
+    config = validator.config
+    how = (f"SNR {config.volume_reach_snr:g}" if config.volume_reach_mpc is None else "set by hand")
+    return f"reach {curve.reach_mpc:,.0f} Mpc chirp distance, {how}"
 
 
 def generate_sensitive_volume_plot(
         validators: list,
         colors: List[str] = Bright[7],
-        width: int = 1000,
+        width: int = 1450,
         height: int = 600
     ):
     """
-    Sensitive volume (Gpc³) and sensitive distance (Mpc) within each curve's reach R
-    (named in its legend) against FAR per month: each curve with its joint interval
-    (the wider band), its injection interval (the narrower band), the Poisson
-    interval of the FAR its threshold achieves (the horizontal bars, the
-    background's term), its noise floor (dashed), and, dotted, V within R plus the
-    estimated volume beyond R (out to the curve's ``beyond_reach_factor`` times R),
-    whose interval the tooltip gives. The points `SensitiveVolumeCurve.quote` will
-    not quote are ringed (noise-dominated); the reach-limited ones, where the
-    estimate beyond R exceeds its stated fraction of V, are crossed: a warning.
-    Volumes are Euclidean, of populations whose masses are in the detector frame, as
-    the axes say. A FAR the background cannot resolve, and a validator with no
-    volume set, have no points.
+    Sensitive volume (Gpc³) and sensitive distance (Mpc) within each curve's per-mass
+    reach against FAR per month, and the found fraction against chirp distance.
+
+    The first two figures: each curve with its joint interval at 1 sigma and 2
+    sigma (the darker band the 1 sigma), the FAR's 1 sigma interval its threshold
+    achieves (horizontal bars), and the volume noise alone finds (dashed, subtracted
+    from V). The points `SensitiveVolumeCurve.quote` will not quote (noise alone
+    finds more than its stated fraction) are ringed. The legend states each curve's
+    reach: its chirp reach, the reach SNR, and the title the range of physical
+    reaches over its masses. Volumes are Euclidean, of populations whose masses are
+    in the detector frame, as the axes say.
+
+    The third, the visual check of the reach: the fraction of the volume set found
+    in each bin of chirp distance out to the reach, with its pointwise binomial
+    bands at 1 and 2 sigma, and the chance level of a noise-only pass, at the FAR
+    chosen below it. At a reach long enough the fraction falls to the chance level at
+    the far end. A FAR the background cannot resolve, and a validator with no volume
+    set, have no points.
 
     Returns:
-        A column of the two figures.
+        A column of the three figures and the found fraction's FAR selector.
     """
-    from .volume import SECONDS_PER_MONTH, SECONDS_PER_YEAR, sensitive_distance
+    from .volume import (REFERENCE_CHIRP_MASS_MSUN, SECONDS_PER_MONTH, SECONDS_PER_YEAR,
+                         found_fraction_by_distance, sensitive_distance)
+    from .metrics import binomial_interval
 
     tooltips = [
         ("FAR (per month)", "@x{0.00e}"), ("FAR (per year)", "@per_year{0.00e}"),
-        ("Within reach R", "@y{0.000}"), ("Joint", "@joint_lower{0.000} – @joint_upper{0.000}"),
-        ("Injections", "@injection_lower{0.000} – @injection_upper{0.000}"),
-        ("Background", "@background_lower{0.000} – @background_upper{0.000}"),
-        ("Noise floor", "@noise_floor{0.000}"),
-        ("With the estimate beyond R", "@with_beyond{0.000} (@with_beyond_lower{0.000} – @with_beyond_upper{0.000})"),
+        ("Within the reach", "@y{0.000}"), ("Joint 1σ", "@joint_lower_0{0.000} – @joint_upper_0{0.000}"),
+        ("Joint 2σ", "@joint_lower_1{0.000} – @joint_upper_1{0.000}"),
+        ("Injections 1σ", "@injection_lower_0{0.000} – @injection_upper_0{0.000}"),
+        ("Background 1σ", "@background_lower_0{0.000} – @background_upper_0{0.000}"),
+        ("Noise alone finds", "@chance_volume{0.000}"),
     ]
     figures = [
         figure(width=width, height=height, x_axis_type="log", x_axis_label="False Alarm Rate (per month)",
                y_axis_label=label, tools="pan,box_zoom,wheel_zoom,reset", tooltips=tooltips)
         for label in VOLUME_AXIS_LABELS
     ]
+    found_figure = figure(
+        width=width, height=height, y_axis_type="log", y_range=(FOUND_FRACTION_FLOOR, 1.5),
+        tools="pan,box_zoom,wheel_zoom,reset",
+        x_axis_label=f"Chirp Distance (Mpc; M_ref = {REFERENCE_CHIRP_MASS_MSUN:.3g} M☉)",
+        y_axis_label="Fraction of the volume set found",
+        tooltips=[("Chirp distance (Mpc)", "@x{0,0}"), ("Found", "@y{0.000}"),
+                  ("1σ", "@lower_0{0.000} – @upper_0{0.000}"), ("2σ", "@lower_1{0.000} – @upper_1{0.000}"),
+                  ("Injections", "@n")])
+    found_data, found_sources, chance_sources, far_keys = {}, {}, {}, []
+    reaches = []
     for index, (color, validator) in enumerate(zip(cycle(colors), validators)):
         curve = validator.sensitive_volume_curve()
         if curve is None:
             continue
+        sigmas = curve.sigmas
         ok = curve.resolved
-        title = f"{_title(validator, index)} (R = {curve.reach_mpc:,.0f} Mpc)"
+        name = _title(validator, index)
+        title = f"{name} ({_reach_statement(validator, curve)})"
+        low, high = curve.reach_range_mpc
+        reaches.append(f"{name}: {_reach_statement(validator, curve)}; a physical reach of {low:,.0f}–{high:,.0f} Mpc "
+                       "over its masses")
         within = curve.volume_within_reach_gpc3
         for p, convert in zip(figures, (np.asarray, sensitive_distance)):
             source = ColumnDataSource(data=dict(
                 x=curve.far_hz[ok] * SECONDS_PER_MONTH, per_year=curve.far_hz[ok] * SECONDS_PER_YEAR,
-                x_lower=curve.far_lower_hz[ok] * SECONDS_PER_MONTH,
-                x_upper=curve.far_upper_hz[ok] * SECONDS_PER_MONTH,
+                x_lower=curve.far_lower_hz[0, ok] * SECONDS_PER_MONTH,
+                x_upper=curve.far_upper_hz[0, ok] * SECONDS_PER_MONTH,
                 y=convert(within[ok]),
-                noise_floor=convert(curve.noise_floor_gpc3[ok]),
-                **{f"with_beyond{end}": convert(within[ok] + getattr(curve, f"beyond_reach{end}_gpc3")[ok])
-                   for end in ("", "_lower", "_upper")},
-                **{f"{term}_{end}": convert(getattr(curve, f"{term}_{end}_gpc3")[ok])
-                   for term in ("joint", "injection", "background") for end in ("lower", "upper")},
+                chance_volume=convert(curve.chance_gpc3[ok]),
+                **{f"{term}_{end}_{j}": convert(np.clip(getattr(curve, f"{term}_{end}_gpc3")[j, ok], 0.0, None))
+                   for term in ("joint", "injection", "background") for end in ("lower", "upper")
+                   for j in range(len(sigmas))},
             ))
-            p.varea(x="x", y1="joint_lower", y2="joint_upper", source=source, fill_color=color, fill_alpha=0.15,
-                    legend_label=f"{title} (joint {curve.confidence:.0%} interval)")
-            p.varea(x="x", y1="injection_lower", y2="injection_upper", source=source, fill_color=color,
-                    fill_alpha=0.3, legend_label=f"{title} (injections)")
+            for j, sigma in reversed(list(enumerate(sigmas))):
+                p.varea(x="x", y1=f"joint_lower_{j}", y2=f"joint_upper_{j}", source=source, fill_color=color,
+                        fill_alpha=_band_alpha(sigma), legend_label=f"{name} ({_sigma_label(sigma)} joint)")
             p.segment(x0="x_lower", x1="x_upper", y0="y", y1="y", source=source, line_color=color,
-                      legend_label=f"{title} (FAR interval)")
+                      legend_label=f"{name} (FAR {_sigma_label(sigmas[0])})")
             p.line("x", "y", source=source, line_color=color, line_width=2, legend_label=title)
             p.scatter("x", "y", source=source, size=6, color=color, legend_label=title)
-            p.line("x", "noise_floor", source=source, line_color=color, line_dash="dashed",
-                   legend_label=f"{title} (noise floor)")
-            p.line("x", "with_beyond", source=source, line_color=color, line_dash="dotted",
-                   legend_label=f"{title} (with the estimate to {curve.beyond_reach_factor:g} R)")
-            for marked, marker, what in (
-                    (~curve.quotable[ok], "circle", f"not quoted: noise floor > {curve.noise_floor_fraction:.0%} of V"),
-                    (curve.reach_limited[ok], "x", f"reach-limited: beyond R > {curve.beyond_reach_fraction:.0%} of V")):
-                if marked.any():
-                    p.scatter(x=curve.far_hz[ok][marked] * SECONDS_PER_MONTH, y=convert(within[ok][marked]),
-                              size=14, marker=marker, fill_alpha=0, line_color=color, line_width=2,
-                              legend_label=f"{title} ({what})")
-    for p in figures:
+            p.line("x", "chance_volume", source=source, line_color=color, line_dash="dashed",
+                   legend_label=f"{name} (noise alone finds; subtracted)")
+            marked = ~curve.quotable[ok]
+            if marked.any():
+                p.scatter(x=curve.far_hz[ok][marked] * SECONDS_PER_MONTH, y=convert(within[ok][marked]),
+                          size=14, marker="circle", fill_alpha=0, line_color=color, line_width=2,
+                          legend_label=f"{name} (not quoted: noise alone > {curve.chance_fraction:.0%} of found)")
+
+        # The found fraction against chirp distance, at each resolved target.
+        injections = validator.injection_volumes()
+        found_data[name] = {}
+        for i in np.flatnonzero(ok):
+            key = f"{curve.far_hz[i]:.1e}"
+            edges, found, total = found_fraction_by_distance(injections, curve.threshold[i])
+            with np.errstate(invalid="ignore", divide="ignore"):
+                fraction = np.where(total > 0, found / total, np.nan)
+            # On a log axis, so that the chance level shows: a band's zero end is drawn at the axis's floor.
+            bands = [np.maximum(binomial_interval(found, total, sigma_level(sigma)), FOUND_FRACTION_FLOOR)
+                     for sigma in sigmas]
+            found_data[name][key] = dict(
+                x=0.5 * (edges[1:] + edges[:-1]), y=fraction, n=total,
+                **{f"lower_{j}": band[0] for j, band in enumerate(bands)},
+                **{f"upper_{j}": band[1] for j, band in enumerate(bands)},
+                chance_x=[0.0, curve.reach_mpc], chance_y=[curve.chance[i]] * 2)
+            if key not in far_keys:
+                far_keys.append(key)
+        if not found_data[name]:
+            continue
+        initial = next(iter(found_data[name].values()))
+        found_sources[name] = ColumnDataSource(data={k: v for k, v in initial.items() if not k.startswith("chance")})
+        chance_sources[name] = ColumnDataSource(data=dict(x=initial["chance_x"], y=initial["chance_y"]))
+        for j, sigma in reversed(list(enumerate(sigmas))):
+            found_figure.varea(x="x", y1=f"lower_{j}", y2=f"upper_{j}", source=found_sources[name], fill_color=color,
+                               fill_alpha=_band_alpha(sigma), legend_label=f"{name} ({_sigma_label(sigma)}, pointwise)")
+        found_figure.line("x", "y", source=found_sources[name], line_color=color, line_width=2,
+                          legend_label=f"{name} (found fraction)")
+        found_figure.scatter("x", "y", source=found_sources[name], color=color, size=6,
+                             legend_label=f"{name} (found fraction)")
+        found_figure.line("x", "y", source=chance_sources[name], line_color=color, line_dash="dotted", line_width=2,
+                          legend_label=f"{name} (chance level)")
+    for p in (*figures, found_figure):
         if p.renderers:
-            _style(p, "bottom_right")
-    return column(*figures)
+            _legend_beside(p)
+    initial = far_keys[_initial_far(far_keys)] if far_keys else None
+    for name, source in found_sources.items():
+        data = found_data[name].get(initial)
+        if data is not None:
+            source.data = {k: v for k, v in data.items() if not k.startswith("chance")}
+            chance_sources[name].data = dict(x=data["chance_x"], y=data["chance_y"])
+    statement = Div(text=f"<h3>{VOLUME_STATEMENT}</h3><p>" + "<br>".join(reaches) + "</p>", width=width)
+    select = Select(title="False Alarm Rate (Hz) of the found fraction:", value=initial, options=far_keys)
+    select.js_on_change("value", CustomJS(
+        args=dict(sources=found_sources, chances=chance_sources, all_data=found_data),
+        code="""
+        const far = cb_obj.value;
+        for (const name in sources) {
+            const data = all_data[name][far];
+            if (!data) { continue; }
+            const shown = {};
+            for (const key in data) { if (!key.startsWith("chance")) { shown[key] = data[key]; } }
+            sources[name].data = shown;
+            chances[name].data = {x: data.chance_x, y: data.chance_y};
+        }
+        """))
+    return column(*figures, found_figure, select, statement)
 
 
 def generate_roc_curves(
@@ -1228,81 +1340,261 @@ def generate_parameter_space_plot(
     full_layout = column(p, controls, p_rolling)
     return full_layout, None
 
+#: The score density layer's grid: cells along SNR and along score, as the owner's plot had it.
+DENSITY_CELLS = 400
+#: Its colours (RGBA packed little-endian, as image_rgba reads them): found above the threshold, missed below.
+_FOUND_RGB, _MISSED_RGB = 0x00CC00, 0xAAAAAA
+#: Superscript digits for the powers-of-ten selector.
+_SUPERSCRIPT = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
+
+_DENSITY_JS = """
+function paint(source, threshold) {
+    const data = source.data;
+    const counts = data['counts'][0], image = data['image'][0];
+    const rows = data['rows'][0], cols = data['cols'][0];
+    const y0 = data['y'][0], dh = data['dh'][0], peak = data['peak'][0];
+    for (let i = 0; i < image.length; i++) {
+        const count = counts[i];
+        if (count <= 0) { image[i] = 0; continue; }
+        const r = Math.floor(i / cols);
+        const score = y0 + (r + 0.5) / rows * dh;
+        const alpha = Math.round(60 + 195 * Math.log1p(count) / Math.log1p(peak));
+        const rgb = (Number.isFinite(threshold) && score >= threshold) ? %d : %d;
+        image[i] = ((alpha << 24) | ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)) >>> 0;
+    }
+    source.change.emit();
+}
+""" % (_FOUND_RGB, _MISSED_RGB)
+
+
+def _paint_density(counts: np.ndarray, y0: float, dh: float, threshold: float) -> np.ndarray:
+    """The density image (as `_DENSITY_JS` paints it): found cells green, missed grey, opacity by log count."""
+    rows = counts.shape[0]
+    peak = max(float(counts.max()), 1.0)
+    score = y0 + (np.arange(rows)[:, None] + 0.5) / rows * dh
+    alpha = np.round(60 + 195 * np.log1p(counts) / np.log1p(peak)).astype(np.uint32)
+    rgb = np.where(np.isfinite(threshold) & (score >= threshold), _FOUND_RGB, _MISSED_RGB).astype(np.uint32)
+    packed = (alpha << 24) | ((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF)
+    return np.where(counts > 0, packed, 0).astype(np.uint32)
+
+
+def _far_display(key: str) -> str:
+    """A FAR option's label: Hz, and per year."""
+    from .volume import SECONDS_PER_YEAR
+    return f"{float(key):.1e} Hz ({float(key) * SECONDS_PER_YEAR:.1e} per year)"
+
+
 def generate_efficiency_plot(
     validators: list,
     colors: List[str] = Bright[7],
-    width: int = 1000,
+    width: int = 1450,
     height: int = 800
 ):
     """
-    Efficiency against injected SNR at a chosen FAR, one point per SNR bin with
-    its binomial interval. A FAR the noise background cannot resolve has no curve.
+    Efficiency against optimal network SNR at a chosen false-alarm rate, the owner's
+    design restored and extended:
+
+    - behind the curves, the density of every injection's score against its SNR (the
+      score on the right axis), painted green where the score passes the chosen FAR's
+      threshold and grey where it does not, and the threshold itself (dashed, with its
+      value);
+    - for each model, the rolling efficiency (a window of +-0.5 in SNR at 50 points),
+      the chance of a noise-only pass subtracted, with its pointwise 1 sigma and 2 sigma
+      bands (joint: the injections', the threshold's and the chance's errors); the
+      sigmoid fit (dashed), and its 50% and 90% SNR points marked with their 1 sigma
+      (thick) and 2 sigma (thin) bootstrap error bars; and the volume set's own rolling
+      curve (dotted), a cross-check;
+    - a FAR slider over every level the background resolves, and a powers-of-ten
+      selector that moves it; click a legend entry to hide it.
+
+    Below it, the primary model's rolling curve at each power of ten of FAR the
+    background resolves, one curve per level with its 1 sigma band.
 
     Returns:
-        ``(figure, select)``: the plot and the FAR selector.
+        ``(figure, controls)``: the plots, and the slider and selector.
     """
+    primary = validators[-1] if validators else None
     p = figure(
-        x_axis_label="Injected SNR (bin mean)",
-        y_axis_label="Efficiency",
-        y_range=(0, 1.05),
+        x_axis_label="Optimal Network SNR",
+        y_axis_label="Efficiency (found by signal: chance subtracted)",
+        y_range=(-0.05, 1.05),
         width=width,
         height=height,
         tools="pan,box_zoom,wheel_zoom,reset"
     )
-    all_data, sources = {}, {}
+    snr_range = primary.config.snr_range if primary is not None else (0.0, 20.0)
+    p.x_range.start, p.x_range.end = snr_range
+
+    # The density layer of the primary model's injections, on the score axis.
+    density_source, score_range = None, (0.0, 1.0)
+    if primary is not None and primary.efficiency_data is not None:
+        snrs, scores = primary.efficiency_data["snrs"], primary.efficiency_data["scores"]
+        low, high = np.quantile(scores, [0.002, 0.998])
+        pad = 0.05 * max(high - low, 1e-6)
+        score_range = (float(low - pad), float(high + pad))
+        counts, _, _ = np.histogram2d(scores, snrs, bins=DENSITY_CELLS, range=[score_range, snr_range])
+        density_source = ColumnDataSource(data=dict(
+            image=[np.zeros(counts.shape, np.uint32)], counts=[counts.ravel()], rows=[counts.shape[0]],
+            cols=[counts.shape[1]], peak=[max(float(counts.max()), 1.0)], x=[snr_range[0]], y=[score_range[0]],
+            dw=[snr_range[1] - snr_range[0]], dh=[score_range[1] - score_range[0]]))
+    from bokeh.models import LinearAxis, Range1d
+    p.extra_y_ranges = {"score": Range1d(*score_range)}
+    p.add_layout(LinearAxis(y_range_name="score", axis_label="Score (logit)"), "right")
+    if density_source is not None:
+        p.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source=density_source, y_range_name="score",
+                     level="underlay")
+
+    all_data, sources, thresholds, threshold_sources, threshold_labels = {}, {}, {}, {}, {}
     far_keys: List[str] = []
+    hovered = []
     for index, (validator, color) in enumerate(zip(validators, cycle(colors))):
         if validator.efficiency_data is None or validator.far_scores is None:
             continue
-        name = validator.name or f"Model {index}"
-        curves = {}
-        for far, (threshold, curve) in validator.efficiency_curves().items():
+        name = _title(validator, index)
+        sigmas = validator.config.interval_sigmas
+        cross = validator.volume_set_efficiency_curves() if validator is primary else None
+        lo, hi = validator.config.snr_range
+        grid = np.linspace(lo, hi, 200)
+        curves, model_thresholds = {}, {}
+        for far, result in validator.efficiency_curves().items():
             key = f"{far:.1e}"
-            ok = np.isfinite(curve.efficiency)
+            rolling, fit = result.rolling, result.fit
+            fitted = np.isfinite(fit.snr_50)
+            points = [fit.snr_50, fit.snr_90]
             curves[key] = dict(
-                x=curve.snr_mean[ok].tolist(), y=curve.efficiency[ok].tolist(),
-                lower=curve.lower[ok].tolist(), upper=curve.upper[ok].tolist(),
-                n=curve.total[ok].tolist(),
+                rolling=dict(x=rolling.snr, y=rolling.efficiency, n=rolling.total,
+                             **{f"lower_{j}": rolling.lower[j] for j in range(len(sigmas))},
+                             **{f"upper_{j}": rolling.upper[j] for j in range(len(sigmas))}),
+                fit=dict(x=grid if fitted else np.array([]),
+                         y=fit.efficiency(grid) if fitted else np.array([])),
+                points=dict(x=np.array(points), y=np.array([0.5, 0.9]),
+                            **{f"low_{j}": fit.lower[j] for j in range(len(sigmas))},
+                            **{f"high_{j}": fit.upper[j] for j in range(len(sigmas))}),
+                cross=(dict(x=cross[far].rolling.snr, y=cross[far].rolling.efficiency) if cross is not None
+                       else dict(x=np.array([]), y=np.array([]))),
             )
-            if threshold.resolved and key not in far_keys:
+            model_thresholds[key] = float(result.threshold.threshold)
+            if result.threshold.resolved and validator is primary and key not in far_keys:
                 far_keys.append(key)
-        all_data[name] = curves
-        sources[name] = ColumnDataSource(data=dict(x=[], y=[], lower=[], upper=[], n=[]))
-        confidence = validator.config.confidence
-        p.varea(x="x", y1="lower", y2="upper", source=sources[name], fill_color=color,
-                fill_alpha=0.2, legend_label=f"{name} ({confidence:.0%} interval)")
-        line = p.line(x="x", y="y", source=sources[name], line_width=3, color=color, legend_label=name)
-        p.scatter(x="x", y="y", source=sources[name], size=8, color=color)
-        p.add_tools(HoverTool(renderers=[line], tooltips=[
-            ("SNR", "@x{0.0}"), ("Efficiency", "@y{0.000}"),
-            ("Interval", "@lower{0.000} – @upper{0.000}"), ("Injections", "@n"),
-        ]))
+        all_data[name], thresholds[name] = curves, model_thresholds
+        empty = lambda part: {k: np.array([]) for k in next(iter(curves.values()))[part]}
+        sources[name] = {part: ColumnDataSource(data=empty(part)) for part in ("rolling", "fit", "points", "cross")}
+        rolling_source, points_source = sources[name]["rolling"], sources[name]["points"]
+        for j, sigma in reversed(list(enumerate(sigmas))):
+            p.varea(x="x", y1=f"lower_{j}", y2=f"upper_{j}", source=rolling_source, fill_color=color,
+                    fill_alpha=_band_alpha(sigma), legend_label=f"{name} ({_sigma_label(sigma)}, pointwise)")
+        line = p.line(x="x", y="y", source=rolling_source, line_width=3, color=color,
+                      legend_label=f"{name} (rolling ±{ROLLING_HALF_WIDTH:g} SNR)")
+        hovered.append(line)
+        p.line(x="x", y="y", source=sources[name]["fit"], line_width=2, color=color, line_dash="dashed",
+               legend_label=f"{name} (sigmoid fit)")
+        for j, sigma in enumerate(sigmas):
+            p.segment(x0=f"low_{j}", x1=f"high_{j}", y0="y", y1="y", source=points_source, line_color=color,
+                      line_width=6 if j == 0 else 2, legend_label=f"{name} (50% and 90% SNR, {_sigma_label(sigma)})")
+        p.scatter(x="x", y="y", source=points_source, size=12, marker="diamond", color=color,
+                  legend_label=f"{name} (50% and 90% SNR, {_sigma_label(sigmas[0])})")
+        if cross is not None:
+            p.line(x="x", y="y", source=sources[name]["cross"], line_width=2, color=color, line_dash="dotted",
+                   legend_label=f"{name} (volume set, cross-check)")
+        threshold_sources[name] = ColumnDataSource(data=dict(x=list(snr_range), y=[np.nan, np.nan]))
+        p.line(x="x", y="y", source=threshold_sources[name], y_range_name="score", line_width=2, color=color,
+               line_dash="dashed", alpha=0.7, legend_label=f"{name} (threshold)")
+        threshold_labels[name] = Label(x=5, y=score_range[0], x_units="screen", y_range_name="score", text="",
+                                       text_font_size="15pt", text_color=color, x_offset=5)
+        p.add_layout(threshold_labels[name])
+    if hovered:
+        p.add_tools(HoverTool(renderers=hovered, tooltips=[
+            ("SNR", "@x{0.0}"), ("Efficiency", "@y{0.000}"), ("1σ", "@lower_0{0.000} – @upper_0{0.000}"),
+            ("2σ", "@lower_1{0.000} – @upper_1{0.000}"), ("Injections", "@n")]))
 
     if not far_keys:
-        far_keys = [f"{f:.1e}" for f in (validators[-1].config.far_thresholds if validators else [])][:1]
-    initial = far_keys[0] if far_keys else None
-    for name, source in sources.items():
-        if initial in all_data[name]:
-            source.data = all_data[name][initial]
-    if sources:
-        p.legend.location = "bottom_right"
-        p.legend.click_policy = "hide"
-        p.legend.label_text_font_size = "18pt"
-    p.axis.axis_label_text_font_size = "21pt"
-    p.axis.major_label_text_font_size = "18pt"
+        far_keys = [f"{f:.1e}" for f in (primary.config.far_thresholds if primary is not None else [])][:1]
+    decades = [(key, "10" + str(int(round(np.log10(float(key))))).translate(_SUPERSCRIPT) + " Hz")
+               for key in far_keys if abs(np.log10(float(key)) - round(np.log10(float(key)))) < 0.01]
+    first = _initial_far(far_keys)
+    slider = Slider(start=0, end=max(len(far_keys) - 1, 1), value=first, step=1, show_value=False,
+                    title=f"FAR: {_far_display(far_keys[first])}" if far_keys else "FAR")
+    nearest = min(decades, key=lambda d: abs(np.log10(float(d[0]) / float(far_keys[first]))))[0] if decades else None
+    select = Select(title="FAR (powers of ten):", value=nearest or (far_keys[first] if far_keys else ""),
+                    options=decades or [(k, k) for k in far_keys])
 
-    select = Select(title="False Alarm Rate (Hz):", value=initial, options=far_keys)
-    select.js_on_change('value', CustomJS(
-        args=dict(sources=sources, all_data=all_data),
-        code="""
-        const far = cb_obj.value;
+    def show(key: str) -> None:
+        """Put the curves and threshold of FAR ``key`` in the sources (the page's first view)."""
+        for name in sources:
+            for part, source in sources[name].items():
+                data = all_data[name].get(key)
+                if data is not None:
+                    source.data = data[part]
+            threshold = thresholds[name].get(key, np.nan)
+            threshold_sources[name].data = dict(x=list(snr_range), y=[threshold, threshold])
+            if np.isfinite(threshold):
+                threshold_labels[name].y, threshold_labels[name].text = threshold, f"{threshold:.3g}"
+        if density_source is not None and primary is not None:
+            threshold = thresholds.get(_title(primary, len(validators) - 1), {}).get(key, np.nan)
+            counts = density_source.data["counts"][0].reshape(DENSITY_CELLS, DENSITY_CELLS)
+            density_source.data["image"] = [_paint_density(counts, score_range[0], score_range[1] - score_range[0],
+                                                           threshold)]
+
+    if far_keys:
+        show(far_keys[first])
+    slider.js_on_change("value", CustomJS(
+        args=dict(sources=sources, all_data=all_data, far_options=far_keys, thresholds=thresholds,
+                  threshold_sources=threshold_sources, threshold_labels=threshold_labels, density=density_source,
+                  primary=_title(primary, len(validators) - 1) if primary is not None else "",
+                  labels={key: _far_display(key) for key in far_keys}),
+        code=_DENSITY_JS + """
+        const key = far_options[cb_obj.value];
+        if (key === undefined) { return; }
+        cb_obj.title = "FAR: " + labels[key];
         for (const name in sources) {
-            const data = all_data[name][far];
-            sources[name].data = data ? data : {x: [], y: [], lower: [], upper: [], n: []};
+            const data = all_data[name][key];
+            if (data) {
+                for (const part in sources[name]) { sources[name][part].data = data[part]; }
+            }
+            const threshold = thresholds[name][key];
+            threshold_sources[name].data = {x: threshold_sources[name].data.x, y: [threshold, threshold]};
+            if (Number.isFinite(threshold)) {
+                threshold_labels[name].y = threshold;
+                threshold_labels[name].text = threshold.toPrecision(3);
+            }
         }
-        """
-    ))
-    return p, select
+        if (density) { paint(density, thresholds[primary][key]); }
+        """))
+    select.js_on_change("value", CustomJS(args=dict(slider=slider, far_options=far_keys), code="""
+        const chosen = Math.log10(parseFloat(cb_obj.value));
+        let best = 0, gap = Infinity;
+        for (let i = 0; i < far_options.length; i++) {
+            const d = Math.abs(Math.log10(parseFloat(far_options[i])) - chosen);
+            if (d < gap) { gap = d; best = i; }
+        }
+        slider.value = best;
+        """))
+    if p.renderers:
+        _legend_beside(p)
+    return column(p, _efficiency_levels_plot(primary, decades, width)), row(select, slider)
+
+
+def _efficiency_levels_plot(validator, decades, width: int):
+    """The rolling efficiency at each power of ten of FAR the background resolves, one curve per level, 1 sigma bands."""
+    from bokeh.palettes import Viridis
+    p = figure(x_axis_label="Optimal Network SNR", y_axis_label="Efficiency (chance subtracted)", y_range=(-0.05, 1.05),
+               width=width, height=500, tools="pan,box_zoom,wheel_zoom,reset",
+               title=f"{_title(validator, 0)}: one curve per false-alarm-rate level" if validator else "")
+    if validator is None or validator.efficiency_data is None or not decades:
+        return p
+    results = validator.efficiency_curves([float(key) for key, _ in decades])
+    palette = Viridis[max(len(decades), 3)]
+    for (key, label), color in zip(decades, palette):
+        rolling = results[float(key)].rolling
+        source = ColumnDataSource(data=dict(x=rolling.snr, y=rolling.efficiency, lower=rolling.lower[0],
+                                            upper=rolling.upper[0]))
+        p.varea(x="x", y1="lower", y2="upper", source=source, fill_color=color, fill_alpha=0.25,
+                legend_label=f"{label} ({_sigma_label(rolling.sigmas[0])})")
+        p.line(x="x", y="y", source=source, line_width=3, color=color, legend_label=label)
+    _legend_beside(p)
+    p.title.text_font_size = "16pt"
+    return p
+
 
 def generate_real_events_table(
     events: List[Dict],
@@ -1315,7 +1607,8 @@ def generate_real_events_table(
     Generate interactive table for real GW events.
 
     Each scored event carries its FAR (Hz) read from the validator's noise
-    background (``far_hz``) and the upper end of its interval (``far_upper_hz``).
+    background (``far_hz``) and its interval at each level (``far_interval_hz``,
+    (levels, 2), at ``far_sigmas``).
 
     Args:
         events: List of event dicts with name, gps, mass1, mass2, distance, p_astro,
@@ -1341,7 +1634,9 @@ def generate_real_events_table(
     for event in confident + marginal:
         score = event.get("score")
         
-        far_hz, far_upper_hz = event.get("far_hz"), event.get("far_upper_hz")
+        far_hz = event.get("far_hz")
+        intervals = ", ".join(f"{lower:.1e}–{upper:.1e} ({sigma:g}σ)" for sigma, (lower, upper) in
+                              zip(event.get("far_sigmas", ()), event.get("far_interval_hz", ())))
         
         # Convert GPS to human-readable date
         gps_time = event.get('gps', 0)
@@ -1376,7 +1671,7 @@ def generate_real_events_table(
             "D (Mpc)": safe_fmt("distance", ".0f"),
             "p(astro)": safe_fmt("p_astro", ".2f"),
             "Score": f"{score:.3f}" if score is not None else "Pending",
-            "FAR (Hz)": f"{far_hz:.1e} (≤ {far_upper_hz:.1e})" if far_hz is not None else "-",
+            "FAR (Hz)": f"{far_hz:.1e} [{intervals}]" if far_hz is not None else "-",
             "_score_num": score if score is not None else -1,
             "_type": event.get("event_type", "Unknown"),
         }

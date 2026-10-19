@@ -27,8 +27,9 @@ class ValidationConfig:
     num_examples: int = 100_000
     batch_size: int = 512
 
-    # Injections: SNR uniform over this range; efficiency in bins of this width.
-    snr_range: Tuple[float, float] = (0.0, 15.0)
+    # Injections: SNR uniform over this range; efficiency in bins of this width (the
+    # record), and the owner's rolling curve and its sigmoid fit over it (`efficiency`).
+    snr_range: Tuple[float, float] = (0.0, 20.0)
     snr_bin_width: float = 1.0
     num_worst_per_bin: int = 5
 
@@ -36,31 +37,31 @@ class ValidationConfig:
     far_thresholds: List[float] = field(
         default_factory=lambda: np.logspace(-1, -4.5, 50).tolist()
     )
-    # Two-sided interval level, and the binomial interval for efficiencies.
-    confidence: float = 0.9
+    # Every interval is two-sided and central, reported at each of these levels, in sigma
+    # of a normal law (1 sigma: 68.27%, 2 sigma: 95.45%); the binomial interval for
+    # efficiencies. Efficiency's intervals carry the threshold's and the chance's errors
+    # too, by a joint bootstrap of this many replicates (`efficiency`).
+    interval_sigmas: Tuple[float, ...] = (1.0, 2.0)
     efficiency_interval: str = "clopper-pearson"
+    efficiency_bootstrap_samples: int = 500
 
-    # Sensitive volume within a reach R against FAR (`volume`), at the same targets,
-    # from a set of this many injections of its own (default num_examples), each at
-    # a physical distance drawn uniformly in volume out to R: volume_reach_mpc, by
-    # default the distance beyond which no source of the population can have
-    # volume_reach_snr, whatever its sky, orientation, masses and spins
-    # (`ValidationBank.reach_distance`). The volume is Euclidean and the masses are
-    # in the detector frame (as in MLGWSC-1's evaluate.py). The reach SNR sets how
-    # far the validator injects: a lower one is a longer reach, so V within it counts
-    # more of what a detector finds, and its volume grows as its cube, so the same
-    # interval takes more injections (from SNR 4 to 3: the reach 4/3 times as far,
-    # its volume 2.4 times, about 2 times the injections for the example population).
-    # The joint interval bootstraps this many replicates of the injections and the
-    # background. A target where noise alone finds more than the first fraction of V
-    # is marked noise-dominated (not quoted); one where the estimated volume beyond
-    # the reach exceeds the second is marked reach-limited (quoted, with a warning).
+    # Sensitive volume within the reach against FAR (`volume`), at the same targets, from
+    # a set of this many injections of its own (default num_examples), each placed out to
+    # its own mass's reach: its chirp distance (d (M_ref / M)^(5/6), M_ref two neutron
+    # stars of 1.4) drawn uniformly in volume out to the chirp reach R, volume_reach_mpc,
+    # by default the chirp distance beyond which no source of the population, of any
+    # mass, can have network SNR volume_reach_snr, whatever its sky, orientation and
+    # spins (`ValidationBank.reach_distance`). Nothing past it can be found, so no
+    # further check is made. The volume is Euclidean and the masses are in the detector
+    # frame (as in MLGWSC-1's evaluate.py). The chance of a noise-only pass is
+    # subtracted; a target where noise alone finds more than volume_chance_fraction of
+    # what is found is not quoted. The joint interval bootstraps this many replicates of
+    # the injections, the background and the chance.
     volume_num_injections: Optional[int] = None
     volume_reach_mpc: Optional[float] = None
-    volume_reach_snr: float = 3.0
+    volume_reach_snr: float = 2.0
     volume_bootstrap_samples: int = 1000
-    volume_noise_floor_fraction: float = 0.1
-    volume_beyond_reach_fraction: float = 0.1
+    volume_chance_fraction: float = 0.1
 
     # ROC populations: injections at SNR >= default_roc_min_snr, plus extra
     # pools given as (min_snr, max_snr) or a centre with a width of 1.
@@ -99,11 +100,16 @@ class ValidationConfig:
             raise ValueError(f"volume_num_injections must be >= 1, got {self.volume_num_injections}.")
         if self.volume_reach_mpc is not None and not self.volume_reach_mpc > 0:
             raise ValueError(f"volume_reach_mpc must be > 0, got {self.volume_reach_mpc}.")
-        for name in ("volume_noise_floor_fraction", "volume_beyond_reach_fraction", "volume_reach_snr"):
+        self.interval_sigmas = tuple(float(s) for s in self.interval_sigmas)
+        if not (self.interval_sigmas and all(s > 0 for s in self.interval_sigmas)
+                and list(self.interval_sigmas) == sorted(set(self.interval_sigmas))):
+            raise ValueError(f"interval_sigmas must be increasing and > 0, got {self.interval_sigmas}.")
+        for name in ("volume_chance_fraction", "volume_reach_snr"):
             if not getattr(self, name) > 0:
                 raise ValueError(f"{name} must be > 0, got {getattr(self, name)}.")
-        if self.volume_bootstrap_samples < 1:
-            raise ValueError(f"volume_bootstrap_samples must be >= 1, got {self.volume_bootstrap_samples}.")
+        for name in ("volume_bootstrap_samples", "efficiency_bootstrap_samples"):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}.")
 
     @property
     def num_volume_injections(self) -> int:
