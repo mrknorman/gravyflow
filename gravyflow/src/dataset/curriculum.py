@@ -60,6 +60,11 @@ class Curriculum:
         num_epochs: Number of epochs over which to transition.
         schedule: Type of interpolation schedule.
         custom_schedule_fn: Optional function (epoch, num_epochs) -> float (0-1).
+            A dataset's fingerprint reads it only as a frozen dataclass whose
+            fields are its settings and whose ``__call__`` is the schedule: a
+            plain function has no content a fingerprint can read, so a dataset
+            using one serves only in its own process (no process workers, no
+            materialised set).
     """
     start: 'gf.Distribution'
     end: 'gf.Distribution'

@@ -14,6 +14,7 @@ world's coded strain (`provenance`), whose every row says whether it was
 sign-flipped or time-reversed, and where it was read.
 """
 
+import dataclasses
 import hashlib
 import itertools
 import warnings
@@ -1225,10 +1226,24 @@ def test_a_forked_copy_refuses_to_serve():
         _SHARED = None
 
 
+def refused_copy(ds, match):
+    """
+    Pickle ``ds`` and assert its copy refuses to serve, saying ``match``: pickling never raises,
+    since Keras pickles every dataset it holds into every process pool it starts.
+    """
+    import pickle
+
+    copied = pickle.loads(pickle.dumps(ds))
+    with pytest.raises(RuntimeError, match=match):
+        copied[0]
+    with pytest.raises(RuntimeError, match=match):
+        len(copied)
+
+
 def test_a_copy_that_would_serve_other_batches_is_refused():
     """
     A dataset changed after it was built serves batches derived from what it was built with: a copy
-    rebuilt from what it has now would serve others, so it is refused as it is pickled.
+    rebuilt from what it has now would serve others, so the copy refuses, naming what changed.
     """
     import pickle
 
@@ -1237,8 +1252,26 @@ def test_a_copy_that_would_serve_other_batches_is_refused():
     copied = pickle.loads(pickle.dumps(ds))
     assert copied.epoch == 3 and batch_digest(copied[1]) == batch_digest(ds[1])
     ds.steps_per_epoch = 5
-    with pytest.raises(pickle.PicklingError, match="changed after it was built"):
-        pickle.dumps(ds)
+    refused_copy(ds, "changed after it was built: steps_per_epoch")
+
+
+def test_a_refused_dataset_left_with_keras_poisons_no_later_call(monkeypatch):
+    """
+    Keras' process enqueuer pickles every dataset it holds, not only the one it serves, into each
+    pool it starts, and keeps one whose call ended in its own error. A refused dataset it kept
+    must not refuse every later call in the session: the later call serves its own batches, and
+    the refused dataset still refuses by name when it is the one served.
+    """
+    from keras.src.trainers.data_adapters import py_dataset_adapter
+
+    refused = dataset(gf.NoiseType.WHITE, 42, "validate", steps_per_epoch=WORKER_STEPS)
+    refused.steps_per_epoch = 3
+    monkeypatch.setitem(py_dataset_adapter._SHARED_SEQUENCES, "kept by an earlier call", refused)
+    keras_processes(monkeypatch, "spawn")
+    fresh = dataset(gf.NoiseType.WHITE, 42, "validate", steps_per_epoch=WORKER_STEPS)
+    assert batch_digest(keras_first_batch(fresh, 1, True)) == batch_digest(fresh[0])
+    with pytest.raises(RuntimeError, match="changed after it was built"):
+        keras_first_batch(refused, 1, True)
 
 
 def test_fit_refuses_concurrent_workers():
@@ -1373,22 +1406,93 @@ def test_a_subclass_is_copied_only_with_every_parameter_it_takes():
 
     arguments = dict(seed=42, group="train", noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=IFOS),
                      waveform_generators=[burst()], input_variables=STRAIN, **settings(steps_per_epoch=WORKER_STEPS))
-    with pytest.raises(pickle.PicklingError, match="gain"):
-        pickle.dumps(_Gained(gain=3.0, **arguments))
+    refused_copy(_Gained(gain=3.0, **arguments), "gain")
     declared = _DeclaredGain(gain=3.0, **arguments)
     copied = pickle.loads(pickle.dumps(declared))
     assert copied.gain == 3.0 and batch_digest(copied[1]) == batch_digest(declared[1])
     assert declared.fingerprint != _DeclaredGain(gain=1.0, **arguments).fingerprint
 
 
-def test_a_dataset_read_in_order_is_not_copied():
-    """A copy of a dataset read in order would read again from its first batch: it is refused by name."""
-    import pickle
+def _worker_arguments():
+    return dict(seed=42, group="train", noise_obtainer=gf.NoiseObtainer(noise_type=gf.NoiseType.WHITE, ifos=IFOS),
+                waveform_generators=[burst()], input_variables=STRAIN, **settings(steps_per_epoch=WORKER_STEPS))
 
+
+class _GainSetLate(gf.GravyflowDataset):
+    """A declared parameter set after the base constructor, which records the specification it built."""
+
+    _SPECIFICATION = gf.GravyflowDataset._SPECIFICATION + ("gain",)
+
+    def __init__(self, gain, seed, group, noise_obtainer, waveform_generators, input_variables, sample_rate_hertz,
+                 onsource_duration_seconds, offsource_duration_seconds, crop_duration_seconds,
+                 num_examples_per_batch, ifos, steps_per_epoch):
+        arguments = dict(locals())
+        del arguments["self"], arguments["__class__"], arguments["gain"]
+        super().__init__(**arguments)
+        self.gain = gain
+
+
+class _GainDefaultedThenSetLate(_GainSetLate):
+    """The same, its parameter given a class default, so the base constructor reads that one."""
+
+    gain = 1.0
+
+
+def test_a_subclass_sets_its_declared_settings_before_the_base_constructor():
+    """
+    The base constructor records the specification the dataset was built from, so a declared
+    setting it cannot read yet is refused by name, saying to set it first; and one it read at its
+    default, then set, makes a changed dataset, whose copy names the setting and the same rule.
+    """
+    with pytest.raises(TypeError, match=r"_GainSetLate .*gain.* before .*super\(\).__init__"):
+        _GainSetLate(gain=3.0, **_worker_arguments())
+    refused_copy(_GainDefaultedThenSetLate(gain=3.0, **_worker_arguments()),
+                 r"changed after it was built: gain(.|\n)*before .*super\(\).__init__")
+
+
+def test_a_dataset_read_in_order_is_not_copied():
+    """A copy of a dataset read in order would read again from its first batch: it refuses by name."""
     ds = dataset(gf.NoiseType.WHITE, 42, "train")
     ds.__class__ = _ReadInOrder
-    with pytest.raises(pickle.PicklingError, match="read in order"):
-        pickle.dumps(ds)
+    refused_copy(ds, "read in order")
+
+
+def _custom_progress(epoch, num_epochs):
+    return min(epoch / num_epochs, 1.0) ** 2
+
+
+@dataclasses.dataclass(frozen=True)
+class _SquaredProgress:
+    """A custom curriculum schedule a fingerprint can read: its settings are its fields."""
+
+    power: float = 2.0
+
+    def __call__(self, epoch, num_epochs):
+        return min(epoch / num_epochs, 1.0) ** self.power
+
+
+def _curriculum_dataset(schedule_fn):
+    curriculum = gf.Curriculum(start=uniform(80.0, 100.0), end=uniform(8.0, 12.0), num_epochs=4,
+                               schedule=gf.CurriculumSchedule.CUSTOM, custom_schedule_fn=schedule_fn)
+    return dataset(gf.NoiseType.WHITE, 42, "train", generators=[burst(snr=curriculum)],
+                   steps_per_epoch=WORKER_STEPS)
+
+
+def test_a_custom_curriculum_schedule_is_served_by_workers_when_a_fingerprint_can_read_it(monkeypatch):
+    """
+    A copy in a worker serves only once its fingerprint is checked. A plain function's code is no
+    setting a fingerprint can read, so its copy refuses, saying to give a dataclass; a callable
+    dataclass is read by its fields, and a spawned worker serves its batches.
+    """
+    import multiprocessing
+
+    refused_copy(_curriculum_dataset(_custom_progress), "_custom_progress(.|\n)*dataclass")
+    ds = _curriculum_dataset(_SquaredProgress())
+    assert ds.fingerprint != _curriculum_dataset(_SquaredProgress(power=3.0)).fingerprint
+    reference = served_digests(ds, 2, range(WORKER_STEPS))
+    with multiprocessing.get_context("spawn").Pool(1) as pool:
+        served = pool.apply_async(served_digests, (ds, 2, range(WORKER_STEPS))).get(timeout=WORKER_TIMEOUT_S)
+    assert served == reference
 
 
 def _materialise_shared(root):

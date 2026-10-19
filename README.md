@@ -228,9 +228,14 @@ are gone, with no shim: a generator's `generate(seed=)` (pass streams, or the ge
   processes of the spawn start method, whose workers rebuild the dataset from its resolved settings (defaults
   filled in as it was built, so `gf.Defaults.set` in the parent carries over). A copy whose fingerprint differs
   in the worker (other library versions) raises from the batch it is asked for, by name, never hangs the pool.
-  Pickling refuses, by name, a dataset changed after it was built, one read in order, and a subclass whose
-  constructor takes a parameter its specification does not hold (declare it in `_SPECIFICATION`, and name every
-  parameter: a copy cannot know what `**kwargs` would take). A copy made by fork shares JAX's state and refuses to
+  So does a copy of a dataset changed after it was built (naming what changed), of one read in order, of one whose
+  settings no fingerprint can read (such as a `Curriculum` whose `custom_schedule_fn` is a plain function: give a
+  frozen dataclass with `__call__`, whose fields are its settings), and of a subclass whose constructor takes a
+  parameter its specification does not hold (declare it in `_SPECIFICATION`, and name every parameter: a copy
+  cannot know what `**kwargs` would take). Pickling itself never raises: Keras pickles every dataset it still holds
+  into each process pool it starts, so a refusal there would fail every later call. A subclass sets its own
+  settings before calling `super().__init__()`, which records the specification the dataset is built from; one it
+  declares but has not set by then is refused by name. A copy made by fork shares JAX's state and refuses to
   serve, write or read a set: set `multiprocessing.set_start_method("spawn")` (fork is Linux's default before
   Python 3.14). A dataset read in order refuses workers, and so does `fit` under `epoch_callback()`, whose order
   check concurrent workers cannot keep; workers serve `evaluate`, `predict` and a plain loop. A dataset keeps its

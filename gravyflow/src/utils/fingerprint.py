@@ -37,7 +37,9 @@ def canonical(value: Any) -> Any:
     mappings, sequences, enums (by qualified name), numpy scalars and arrays, and
     paths are kept by content. Any other object is refused
     (``UnfingerprintableError``): a fingerprint that read only its type would not
-    change when its content did. So is a float that is not finite: JSON has no
+    change when its content did; nor would one that read a function's name when
+    its code changed, so a callable is kept only as a dataclass or by its
+    ``specification()``. So is a float that is not finite: JSON has no
     canonical spelling of NaN or infinity, and a NaN setting is never meant.
     """
     if callable(getattr(value, "specification", None)) and not isinstance(value, type):
@@ -66,6 +68,13 @@ def canonical(value: Any) -> Any:
             "a setting that is unset.")
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if callable(value):
+        raise UnfingerprintableError(
+            f"Cannot fingerprint the callable {getattr(value, '__qualname__', type(value).__qualname__)} by "
+            "its content: a function's code is not a setting a fingerprint can read, and its name would not "
+            "change when its code did. Give a frozen dataclass whose fields are its settings and whose "
+            "__call__ does the work, or an object with a specification() method."
+        )
     raise UnfingerprintableError(
         f"Cannot fingerprint a {type(value).__module__}.{type(value).__qualname__} by its content; "
         "give it a specification() method, or make it a dataclass."

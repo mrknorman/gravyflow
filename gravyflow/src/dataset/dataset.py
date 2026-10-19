@@ -3,7 +3,6 @@ from enum import Enum, auto
 import copy
 import inspect
 import os
-import pickle
 from pathlib import Path
 from dataclasses import dataclass
 from warnings import warn
@@ -280,17 +279,23 @@ class EpochMode(Enum):
 
 class _RefusedCopy:
     """
-    A dataset's copy that cannot serve in the process it was unpickled in
-    (``_rebuilt``): every use raises why. Unpickling itself never fails, since a
-    pool, or Keras' process enqueuer, answers a worker that dies unpickling its
-    dataset by starting another, forever; the refusal returns through the first
-    task that uses the copy instead.
+    A dataset's copy that cannot serve: every use raises why. A refusal is never
+    raised as the dataset is pickled (``IndexedBatches.__reduce__``) or
+    unpickled (``_rebuilt``), but through the first task that uses the copy.
+    Keras' process enqueuer pickles every dataset it still holds, not only the
+    one it serves, into each pool it starts, so a refusal raised at pickling
+    would fail every later call in the session; and a pool, or that enqueuer,
+    answers a worker that dies unpickling its dataset by starting another,
+    forever.
     """
 
     __slots__ = ("_refusal",)
 
     def __init__(self, refusal: str):
         object.__setattr__(self, "_refusal", refusal)
+
+    def __reduce__(self):
+        return (_RefusedCopy, (self._refusal,))
 
     def _refuse(self, *args):
         raise RuntimeError(self._refusal)
@@ -444,64 +449,81 @@ class IndexedBatches:
         settings before the base constructor runs.
         """
         try:
-            self._built_specification = config_fingerprint(self.specification())
+            self._built_specification = canonical(self.specification())
         except UnfingerprintableError:
-            self._built_specification = None  # pickling refuses it by that name (``fingerprint``)
+            self._built_specification = None  # a copy refuses it by that name (``_copy_refusal``)
 
-    def _rebuild_arguments(self) -> dict:
+    def _rebuild_parameters(self) -> Tuple[List[inspect.Parameter], List[str]]:
         """
-        What another process rebuilds this dataset from: its specification as
-        resolved here (its own copies of what it was given, the defaults filled
-        in), its seed tree before its name's scope and its split, so the worker's
-        defaults change nothing.
-
-        Raises:
-            pickle.PicklingError: a constructor that takes anything else, such as
-                a subclass's own parameter: rebuilt at its default, the copy would
-                serve other batches under the same fingerprint. A subclass declares
-                such a parameter in its specification (``_SPECIFICATION``), which
-                fingerprints it too.
+        The constructor's parameters, and those a copy cannot be rebuilt with:
+        anything the specification, the seed and the split do not hold, such as a
+        subclass's own parameter, which, rebuilt at its default, would serve other
+        batches under the same fingerprint. A subclass declares such a parameter
+        in its specification (``_SPECIFICATION``), which fingerprints it too.
         """
-        resolved = {**self.specification(), "seed": self._seed_tree, "group": self.group}
+        held = {*self.specification(), "seed", "group", *self._IGNORED_PARAMETERS}
         parameters = list(inspect.signature(type(self).__init__).parameters.values())[1:]
         unexpressed = [
             str(parameter) for parameter in parameters
-            if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
-            or parameter.name not in resolved and parameter.name not in self._IGNORED_PARAMETERS
+            if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD) or parameter.name not in held
         ]
+        return parameters, unexpressed
+
+    def _copy_refusal(self) -> Optional[str]:
+        """
+        Why a copy of this dataset in another process would not serve its
+        batches, or None: a dataset read in order; a constructor the
+        specification cannot rebuild (``_rebuild_parameters``); a specification
+        no fingerprint can read, so the copy could not be checked; or one changed
+        after the dataset was built.
+        """
+        if not self.index_addressed:
+            return self._read_in_order("which a copy in another process would ask for again from the first")
+        _, unexpressed = self._rebuild_parameters()
         if unexpressed:
-            raise pickle.PicklingError(
+            return (
                 f"A {type(self).__name__} cannot be copied into another process: its constructor takes "
                 f"{', '.join(unexpressed)}, which its specification does not hold, so a copy rebuilt from "
                 "the specification would not be this dataset. Declare each in the class's _SPECIFICATION "
                 "(it then decides the fingerprint too), or serve the dataset in this process (workers=0)."
             )
-        return {parameter.name: resolved[parameter.name] for parameter in parameters if parameter.name in resolved}
+        try:
+            specification = canonical(self.specification())
+        except UnfingerprintableError as error:
+            return (
+                f"A {type(self).__name__} is copied into another process only with its fingerprint, which "
+                f"checks the copy serves its batches, and its settings have none: {error} Or serve the "
+                "dataset in this process (workers=0)."
+            )
+        built = self._built_specification or {}
+        changed = [name for name in sorted({*specification, *built}) if specification.get(name) != built.get(name)]
+        if changed:
+            return (
+                f"This {type(self).__name__} changed after it was built: {', '.join(changed)}. What it serves "
+                "was derived from the specification it was built with, so a copy rebuilt from the one it has "
+                "now would serve other batches. Build a new dataset with the settings it should have; a "
+                "subclass sets its own settings before calling super().__init__(), which records them."
+            )
+        return None
 
     def __reduce__(self):
         """
         A copy for another process (a spawned worker's) is rebuilt there from the
-        resolved specification (``_rebuild_arguments``) with this dataset's serving
-        state, and serves only if its fingerprint is this dataset's (``_rebuilt``).
-
-        Raises:
-            pickle.PicklingError: a dataset read in order; a constructor the
-                specification cannot rebuild; a specification changed after the
-                dataset was built.
+        resolved specification (its own copies of what it was given, the defaults
+        filled in), its seed tree before its name's scope and its split, so the
+        worker's defaults change nothing; with this dataset's serving state, it
+        serves only if its fingerprint is this dataset's (``_rebuilt``). A copy
+        that would not serve this dataset's batches (``_copy_refusal``) is a
+        ``_RefusedCopy``: pickling itself never raises.
         """
-        if not self.index_addressed:
-            raise pickle.PicklingError(
-                self._read_in_order("which a copy in another process would ask for again from the first"))
-        arguments = self._rebuild_arguments()
-        fingerprint = self.fingerprint
-        if config_fingerprint(self.specification()) != self._built_specification:
-            raise pickle.PicklingError(
-                f"This {type(self).__name__} changed after it was built: what it serves was derived from "
-                "the specification it was built with, so a copy rebuilt from the one it has now would serve "
-                "other batches. Build a new dataset with the settings it should have."
-            )
+        refusal = self._copy_refusal()
+        if refusal is not None:
+            return (_RefusedCopy, (refusal,))
+        resolved = {**self.specification(), "seed": self._seed_tree, "group": self.group}
+        parameters, _ = self._rebuild_parameters()
+        arguments = {parameter.name: resolved[parameter.name] for parameter in parameters if parameter.name in resolved}
         state = {name: self.__dict__[name] for name in self._SERVING_STATE if name in self.__dict__}
-        return (_rebuilt, (type(self), arguments, state, fingerprint))
+        return (_rebuilt, (type(self), arguments, state, self.fingerprint))
 
     def _read_in_order(self, consequence: str) -> str:
         """Why a dataset read in order cannot be served by workers, which ``consequence``."""
@@ -1186,6 +1208,13 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         copies of what it was given, with the defaults filled in. Not the seed,
         split or epoch, which address batches (`fingerprint_record`).
         """
+        unset = [name for name in self._SPECIFICATION if not hasattr(self, name)]
+        if unset:
+            raise TypeError(
+                f"A {type(self).__name__} has no {', '.join(unset)}, which its _SPECIFICATION declares: the "
+                "base constructor records the specification the dataset is built from as its last step, so "
+                "a subclass sets its own settings before calling super().__init__()."
+            )
         return {name: getattr(self, name) for name in self._SPECIFICATION}
 
     def contract_record(self) -> Dict[str, List]:
