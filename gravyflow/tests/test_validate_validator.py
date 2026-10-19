@@ -271,7 +271,26 @@ def test_the_reach_refuses_a_population_it_cannot_bound(dataset_args):
     precessing.approximant = gf.Approximant.IMRPhenomPv2
     precessing.spin_2_in = (gf.Distribution(min_=0.0, max_=0.5, type_=gf.DistributionType.UNIFORM), 0.0, 0.0)
     box = population_box(precessing)
-    assert box["spin_2_in"] == ((0.0, 0.0, 0.0), (0.5, 0.0, 0.0)) and box["orientations"].shape[0] > 1
+    assert box["spin_2_in"][0] == (0.0, 0.0, 0.0) and box["orientations"].shape[0] > 1
+    # Body 2's in-plane spin at every relative azimuth to body 1's, which no turn of the orbital
+    # phase reaches: six, at its bound.
+    in_plane = np.array(box["spin_2_in"][1:])
+    np.testing.assert_allclose(np.hypot(in_plane[:, 0], in_plane[:, 1]), 0.5)
+    np.testing.assert_allclose(np.sort(np.mod(np.arctan2(in_plane[:, 1], in_plane[:, 0]), 2 * np.pi)),
+                               np.arange(6) * np.pi / 3, atol=1e-12)
+    precessing.spin_1_in = precessing.spin_2_in
+    assert all(spin[1] == 0.0 for spin in population_box(precessing)["spin_1_in"])
+    # Components bounded separately can make an unphysical corner, (0.8, 0, 0.8) of magnitude 1.13,
+    # which the generator would accept and which would inflate the reach: every candidate stays
+    # within |chi| <= 1, the corner replaced by the two unit-magnitude points inside it.
+    precessing.spin_1_in = (gf.Distribution(min_=0.0, max_=0.8, type_=gf.DistributionType.UNIFORM), 0.0,
+                            gf.Distribution(min_=-0.8, max_=0.8, type_=gf.DistributionType.UNIFORM))
+    spins = np.array(population_box(precessing)["spin_1_in"])
+    assert np.all(np.linalg.norm(spins, axis=1) <= 1.0 + 1e-12)
+    for corner in ((0.6, 0.0, 0.8), (0.8, 0.0, 0.6), (0.6, 0.0, -0.8), (0.8, 0.0, -0.6), (0.0, 0.0, 0.8)):
+        assert np.any(np.all(np.isclose(spins, corner), axis=1)), corner
+    precessing.spin_1_in = (0.0, 0.0, gf.Distribution(min_=-1.5, max_=1.5, type_=gf.DistributionType.UNIFORM))
+    assert np.abs(np.array(population_box(precessing)["spin_1_in"])).max() == 1.0
     assert population_box(generator)["orientations"].tolist() == [[0.0, 0.0]]  # aligned: face-on
 
 

@@ -15,10 +15,16 @@ Their intervals, at each of the levels (1 and 2 sigma), carry three errors, as t
 sensitive volume's joint interval does (`volume`): the injections' (finite Monte
 Carlo), the background's (the threshold read from a finite livetime: where the
 background allows few triggers it is the larger), and the chance's. A bootstrap
-redraws all three together: the threshold from the background
-(`Background.bootstrap_thresholds`, counting a time-slid background's independent
-information), the chance from its law at that threshold (`Background.found_by_chance`),
-and each SNR group's found count as binomial (the injections' SNRs held as designed).
+redraws the threshold from the background (`Background.bootstrap_thresholds`,
+counting a time-slid background's independent information) and each SNR group's found
+count as binomial (the injections' SNRs held as designed), together. Each replicate
+subtracts the chance as the estimator computes it: at a target's threshold the chance
+(`Background.found_by_chance`, about ``k / (n + 1)`` for ``k`` triggers allowed of ``n``
+windows) is fixed by the target, whatever the background drew, so a replicate's is the
+point's. The chance's own error is then carried by the threshold's: the injections
+found by noise move with the replicate's threshold. (Drawing a replicate's chance from
+its law at the replicate's threshold, independently, loses the correlation between the
+two and undercovers.)
 Each band's ends are the central range of its replicates, at least as far out as the
 binomial interval at the threshold and as the efficiency at the two thresholds the
 FAR's interval allows (`Background.far_band_thresholds`). The bands are pointwise.
@@ -60,7 +66,10 @@ class EfficiencyAgainstSnr:
     """
     Efficiency against SNR at one target FAR (Hz): the background's threshold for it,
     the binned record, the rolling curve and the sigmoid fit, each with its joint
-    intervals (module docstring) from ``num_bootstrap`` replicates.
+    intervals (module docstring) from ``num_bootstrap`` replicates. ``quotable``: the
+    background has at least `metrics.MIN_BACKGROUND_EVENTS` independent events at or
+    above the threshold; where it has not, the curves are kept and shown, marked, but
+    not quoted.
     """
     far_hz: float
     threshold: FarThreshold
@@ -68,6 +77,10 @@ class EfficiencyAgainstSnr:
     rolling: RollingEfficiency
     fit: SigmoidFit
     num_bootstrap: int
+
+    @property
+    def quotable(self) -> bool:
+        return self.threshold.quotable
 
 
 class _GroupedScores:
@@ -125,6 +138,7 @@ def efficiency_against_snr(
     background: Background,
     fars_hz: Sequence[float],
     rng: np.random.Generator,
+    *,
     bin_edges: Sequence[float],
     snr_range: Tuple[float, float],
     num_bootstrap: int = 1000,
@@ -150,8 +164,9 @@ def efficiency_against_snr(
 
     # The point curves, at each target's threshold.
     edges = np.asarray(bin_edges, dtype=np.float64)
-    binned = [efficiency_curve(snrs, scores, t, edges, law, sigmas, method) for t, law in zip(thresholds, laws)]
-    rolling = [rolling_efficiency_curve(snrs, scores, t, snr_range, law, sigmas, method)
+    binned = [efficiency_curve(snrs, scores, t, edges, chance=law, sigmas=sigmas, method=method)
+              for t, law in zip(thresholds, laws)]
+    rolling = [rolling_efficiency_curve(snrs, scores, t, snr_range=snr_range, chance=law, sigmas=sigmas, method=method)
                for t, law in zip(thresholds, laws)]
 
     # The groups each curve counts: the bins; the rolling windows' elementary pieces; the fit's bins.
@@ -179,13 +194,15 @@ def efficiency_against_snr(
     point_fit = fit_sigmoid(fit_snr, groups["fit"].found(thresholds), np.broadcast_to(fit_total, (fars.size, fit_total.size)),
                             chance.mean, snr_range)
 
-    # The joint bootstrap: threshold, chance and found counts redrawn together.
+    # The joint bootstrap: threshold and found counts redrawn together. The chance is the estimator's: at a
+    # target's threshold it is fixed by the count the target allows, whatever the background drew (module
+    # docstring), so a replicate's is the point's.
     binned_replicates = np.full((num_bootstrap, fars.size, edges.size - 1), np.nan)
     rolling_replicates = np.full((num_bootstrap, fars.size, centres.size), np.nan)
     fit_replicates = np.full((2, num_bootstrap, fars.size), np.nan)
     for b in range(num_bootstrap):
         replicate = background.bootstrap_thresholds(fars, rng)
-        chances = background.found_by_chance(replicate).sample(rng, 1)[0]
+        chances = chance.mean
         binned_replicates[b] = _signal_fraction(*resample_groups(rng, groups["binned"].found(replicate),
                                                                  groups["binned"].total), chances)
         found, total = resample_groups(rng, groups["rolling"].found(replicate), groups["rolling"].total)
@@ -207,9 +224,11 @@ def efficiency_against_snr(
             return np.array([[curve_at(t) for t in band] for band in bands])
 
         band_laws = lambda t: background.found_by_chance(t)
-        binned_at = at_bands(lambda t: efficiency_curve(snrs, scores, t, edges, band_laws(t), sigmas, method).efficiency)
-        rolling_at = at_bands(lambda t: rolling_efficiency_curve(snrs, scores, t, snr_range, band_laws(t), sigmas,
-                                                                 method).efficiency)
+        binned_at = at_bands(lambda t: efficiency_curve(snrs, scores, t, edges, chance=band_laws(t), sigmas=sigmas,
+                                                        method=method).efficiency)
+        rolling_at = at_bands(lambda t: rolling_efficiency_curve(snrs, scores, t, snr_range=snr_range,
+                                                                 chance=band_laws(t), sigmas=sigmas,
+                                                                 method=method).efficiency)
         lower, upper = _joint_bands(binned[i].lower, binned[i].upper, binned_replicates[:, i], binned_at, sigmas)
         binned_i = replace(binned[i], lower=lower, upper=upper)
         lower, upper = _joint_bands(rolling[i].lower, rolling[i].upper, rolling_replicates[:, i], rolling_at, sigmas)

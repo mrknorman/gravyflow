@@ -1,33 +1,34 @@
 """
-PENDING known answers for the sensitive volume within the per-mass reach and the
-rolling efficiency curve with its sigmoid fit (the validation standard's agreed
-design), written before that API lands.
+Known answers for the sensitive volume within the per-mass reach and the rolling
+efficiency curve with its sigmoid fit (the validation standard's agreed design),
+written before that API landed.
 
-This module is not collected (its name does not start with ``test_``), so
-nothing here runs or is skipped. It is enabled by renaming it
-``test_volume_and_rolling.py`` on the branch that lands the API. The API it
-expects is reached only through `api` and the three adapters below it, imported
-lazily: if the landed names or signatures differ, those are the only lines to
-change; the truths and the tolerances are not to be touched.
+The API is reached only through `api` and the three adapters below it: they are
+the only lines changed to enable the module (the truths and the tolerances are
+untouched). The landed API:
 
-Expected API (a proposal where nothing has landed yet):
+- ``volume.InjectionVolumes(scores, reach_mpc, distances, weights)`` and
+  ``volume.sensitive_volume_curve(injections, background, fars_hz, rng, *,
+  num_bootstrap, sigmas)``, its intervals at each level in ``sigmas`` (``(levels,
+  targets)``). The per-mass reach is carried as weights: each injection is drawn
+  out to its own mass's reach ``R_m`` and weighted ``(R_m / R_ref)^3`` against the
+  largest reach ``R_ref``, which keeps the volume exact.
+- ``metrics.rolling_efficiency_curve(snrs, scores, threshold, *, half_width,
+  sigmas)`` with ``snr``, ``efficiency``, ``lower``, ``upper`` (pointwise, ``(levels,
+  points)``), and ``metrics.fit_efficiency_sigmoid(snrs, scores, threshold, *,
+  chance, snr_range, rng, num_bootstrap, sigmas)`` with ``snr_50``, ``snr_90`` and
+  their bootstrap bounds ``lower``, ``upper`` (``(levels, 2)``).
 
-- ``volume.InjectionVolumes(scores, reach_mpc, distances, snrs, weights)`` and
-  ``volume.sensitive_volume_curve(injections, background, fars_hz, rng,
-  num_bootstrap, confidence)`` with ``volume_within_reach_gpc3``,
-  ``injection_error_gpc3``, ``joint_lower_gpc3``, ``joint_upper_gpc3`` and
-  ``threshold`` (the in-flight volume module's names). The per-mass reach is
-  carried as weights: each injection is drawn out to its own mass's reach
-  ``R_m`` and weighted ``(R_m / R_ref)^3`` against the largest reach ``R_ref``,
-  which keeps the volume exact (``V = sum_m pi_m 4/3 pi R_m^3 f_m``).
-- ``metrics.rolling_efficiency_curve(snrs, scores, threshold, half_width,
-  confidence)`` with ``snr``, ``efficiency``, ``lower``, ``upper`` (pointwise),
-  and ``metrics.fit_efficiency_sigmoid(snrs, scores, threshold, rng,
-  num_bootstrap, confidence)`` with ``snr50``, ``snr90`` and their bootstrap
-  bounds ``snr50_lower``, ``snr50_upper``, ``snr90_lower``, ``snr90_upper``.
+The adapters ask for the one level a test names, as sigma.
+
+The sigmoid fit's point test uses 300,000 injections (50,000 when written): its 90%
+point's error has an sd of 0.027 at 50,000 (the independent check, 40 seeds, no
+bias), so the tolerance of 0.05 was 1.8 sd; at 300,000 it is at least 4 sd
+(measured: `data/volume-standard/r1`).
 """
 
 import dataclasses
+import types
 
 import numpy as np
 import pytest
@@ -39,32 +40,44 @@ Z = 4.0
 
 
 def api():
-    """The modules the pending API lives in, imported only when a test runs."""
+    """The modules the API lives in, imported only when a test runs."""
     from gravyflow.src.validate import metrics as metrics_module, volume
     return volume, metrics_module
+
+
+def sigma_of(confidence):
+    """The level in sigma of a normal law whose central probability is ``confidence``."""
+    from scipy import special
+    return float(np.sqrt(2.0) * special.erfinv(confidence))
 
 
 def volume_curve(scores, distances, snrs, reaches, background, fars, rng, num_bootstrap, confidence):
     volume, _ = api()
     reference = float(np.max(reaches))
-    given = dict(scores=scores, reach_mpc=reference, distances=distances, snrs=snrs,
-                 weights=(reaches / reference) ** 3)
-    # Drafts of the module differ on whether injections carry their SNRs: pass what it takes.
-    accepted = {f.name for f in dataclasses.fields(volume.InjectionVolumes)}
-    injections = volume.InjectionVolumes(**{k: v for k, v in given.items() if k in accepted})
-    return volume.sensitive_volume_curve(injections, background, fars, rng, num_bootstrap=num_bootstrap,
-                                         confidence=confidence)
+    injections = volume.InjectionVolumes(scores, reference, distances, (reaches / reference) ** 3)
+    curve = volume.sensitive_volume_curve(injections, background, fars, rng, num_bootstrap=num_bootstrap,
+                                          sigmas=(sigma_of(confidence),))
+    # The one level asked for: each interval's bounds at each target.
+    return dataclasses.replace(curve, joint_lower_gpc3=curve.joint_lower_gpc3[0],
+                               joint_upper_gpc3=curve.joint_upper_gpc3[0])
 
 
 def rolling_curve(snrs, scores, threshold, half_width, confidence):
     _, m = api()
-    return m.rolling_efficiency_curve(snrs, scores, threshold, half_width=half_width, confidence=confidence)
+    curve = m.rolling_efficiency_curve(snrs, scores, threshold, half_width=half_width,
+                                       sigmas=(sigma_of(confidence),))
+    return dataclasses.replace(curve, lower=curve.lower[0], upper=curve.upper[0])
 
 
 def sigmoid_fit(snrs, scores, threshold, rng, num_bootstrap, confidence):
     _, m = api()
-    return m.fit_efficiency_sigmoid(snrs, scores, threshold, rng, num_bootstrap=num_bootstrap,
-                                    confidence=confidence)
+    snrs = np.asarray(snrs)
+    fit = m.fit_efficiency_sigmoid(snrs, scores, threshold, chance=None,
+                                   snr_range=(float(np.floor(snrs.min())), float(np.ceil(snrs.max()))), rng=rng,
+                                   num_bootstrap=num_bootstrap, sigmas=(sigma_of(confidence),))
+    return types.SimpleNamespace(snr50=fit.snr_50, snr90=fit.snr_90,
+                                 snr50_lower=fit.lower[0, 0], snr50_upper=fit.upper[0, 0],
+                                 snr90_lower=fit.lower[0, 1], snr90_upper=fit.upper[0, 1])
 
 
 # --------------------------------------------------------------- the volume
@@ -155,7 +168,7 @@ def test_the_rolling_bands_cover_pointwise_at_their_level(confidence):
 def test_the_sigmoid_fit_finds_the_paper_s_50_and_90_percent_points():
     # The logistic detector's efficiency is exactly a sigmoid: 50% at t, 90% at t + s ln 9.
     rng = np.random.default_rng(45)
-    snr, scores = snr_set(rng, 50_000)
+    snr, scores = snr_set(rng, 300_000)
     fit = sigmoid_fit(snr, scores, THRESHOLD, rng, 200, truth.ONE_SIGMA)
     for point, q in ((fit.snr50, 0.5), (fit.snr90, 0.9)):
         expected = truth.snr_at_efficiency(LOGISTIC, THRESHOLD, q)

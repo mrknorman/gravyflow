@@ -6,6 +6,7 @@ intervals' coverage at both levels, and the ROC's points and area.
 
 import numpy as np
 import pytest
+from scipy import special
 
 from gravyflow.src.validate import metrics
 from gravyflow.tests.known_answers import truth
@@ -18,6 +19,11 @@ DETECTORS = {
 }
 EDGES = np.arange(2.0, 21.0, 1.0)
 Z = 4.0
+
+
+def sigma_of(confidence: float) -> float:
+    """The level in sigma of a normal law whose central probability is ``confidence``."""
+    return float(np.sqrt(2.0) * special.erfinv(confidence))
 
 
 def bin_truths(d, threshold):
@@ -51,8 +57,9 @@ def test_the_binned_efficiency_intervals_cover_at_their_level(confidence, name):
     covered = []
     for _ in range(replicas):
         snr = rng.uniform(EDGES[0], EDGES[-1], n)
-        curve = metrics.efficiency_curve(snr, d.signal(rng, snr), t, EDGES, confidence)
-        covered.append((curve.lower <= expected) & (expected <= curve.upper))
+        # One level, given in sigma: every argument after the edges is keyword-only.
+        curve = metrics.efficiency_curve(snr, d.signal(rng, snr), t, EDGES, sigmas=(sigma_of(confidence),))
+        covered.append((curve.lower[0] <= expected) & (expected <= curve.upper[0]))
     covered = np.array(covered)[:, transition]
     tolerance = truth.coverage_tolerance(confidence, replicas)
     assert covered.mean() >= confidence - tolerance / np.sqrt(transition.sum())

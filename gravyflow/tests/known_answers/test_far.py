@@ -55,10 +55,11 @@ def test_the_far_interval_covers_the_true_rate_at_its_level(confidence, mean_cou
 @pytest.mark.parametrize("confidence", truth.LEVELS, ids=truth.LEVEL_IDS)
 @pytest.mark.parametrize("allowed", [1, 5])
 def test_the_threshold_for_a_target_far_is_the_paper_s_order_statistic(confidence, allowed):
-    # Paper: the threshold for a target allowing k triggers sits just above the
-    # (k+1)-th loudest of n windows, so n times its true pass chance is Gamma(k + 1)
-    # (to O(1/n)): its mean is k + 1, and the achieved interval covers the true FAR
-    # with chance P(G_k^-1(a/2) <= Gamma(k+1) <= G_(k+1)^-1(1 - a/2)).
+    # Paper: the threshold for a target allowing k triggers is the k-th loudest of n
+    # windows (the order statistic whose true FAR is the target's on average), so n times
+    # its true pass chance is Gamma(k) (to O(1/n)): its mean is k, and the achieved
+    # interval (k counted) covers the true FAR with chance
+    # P(G_k^-1(a/2) <= Gamma(k) <= G_(k+1)^-1(1 - a/2)).
     d, rng = truth.GaussianBank.single(), np.random.default_rng(23 + allowed)
     replicas, n = 600, 20_000
     scaled, covered = [], []
@@ -70,9 +71,9 @@ def test_the_threshold_for_a_target_far_is_the_paper_s_order_statistic(confidenc
         scaled.append(n * float(d.noise_sf(target.threshold)))
         covered.append(target.achieved.lower_hz <= true <= target.achieved.upper_hz)
     k, a = allowed, 1 - confidence
-    assert abs(np.mean(scaled) - (k + 1)) <= Z * np.sqrt(k + 1) / np.sqrt(replicas)
-    paper = (stats.gamma.cdf(special.gammaincinv(k + 1, 1 - a / 2), k + 1)
-             - stats.gamma.cdf(special.gammaincinv(k, a / 2), k + 1))
+    assert abs(np.mean(scaled) - k) <= Z * np.sqrt(k) / np.sqrt(replicas)
+    paper = (stats.gamma.cdf(special.gammaincinv(k + 1, 1 - a / 2), k)
+             - stats.gamma.cdf(special.gammaincinv(k, a / 2), k))
     assert abs(np.mean(covered) - paper) <= truth.coverage_tolerance(paper, replicas)
 
 

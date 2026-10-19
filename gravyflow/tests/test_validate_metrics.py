@@ -202,8 +202,12 @@ def test_threshold_for_far_inverts_the_far(seed):
         assert result.achieved.count == bg.far_count(result.threshold) <= allowed
         assert result.achieved.rate_hz <= target * (1 + 1e-12)
         if np.isfinite(result.threshold):
-            # Anything below the threshold exceeds the target.
-            assert bg.far_count(np.nextafter(result.threshold, -np.inf)) > allowed
+            # The threshold is the allowed-th loudest trigger: just above it, fewer pass. Where a tie
+            # jumps the count past the allowance there, it is just above the tie: below it, too many pass.
+            if result.achieved.count == allowed:
+                assert bg.far_count(np.nextafter(result.threshold, np.inf)) < allowed
+            else:
+                assert bg.far_count(np.nextafter(result.threshold, -np.inf)) > allowed
 
 
 def test_unreachable_far_is_unresolved_never_a_rate():
@@ -323,10 +327,15 @@ def test_intervals_are_reported_at_one_and_two_sigma():
 
 
 def test_the_chance_of_a_noise_only_pass_is_its_beta_law():
-    # A threshold chosen from ten windows, just above the fourth highest: a fresh noise window
-    # passes it with a chance distributed as Beta(4, 7). Above every window nothing passes.
+    # A threshold chosen from ten windows at the third highest (the target allows three): a fresh
+    # noise window passes it with a chance distributed as Beta(3, 8). One between windows, just
+    # above the fourth highest, is passed as Beta(4, 7). Above every window nothing passes.
     background = Background.independent_windows(np.arange(10.0), 1.0)
-    threshold = background.threshold_for_far(0.3).threshold
+    at_third = background.threshold_for_far(0.3).threshold
+    assert at_third == 7.0
+    np.testing.assert_array_equal(background.found_by_chance([at_third]).a, [3.0])
+    assert background.found_by_chance([at_third]).mean[0] == pytest.approx(3 / 11)
+    threshold = 6.5
     chance = background.found_by_chance([threshold, np.inf, np.nan])
     np.testing.assert_array_equal(chance.a[:2], [4.0, 0.0])
     assert chance.mean[0] == pytest.approx(4 / 11) and chance.mean[1] == 0.0 and np.isnan(chance.mean[2])
@@ -373,7 +382,7 @@ def test_the_chance_of_a_noise_only_pass_is_subtracted_from_the_efficiency():
     snrs = np.repeat([1.0, 5.0, 9.0], 100)
     scores = np.concatenate([np.r_[np.ones(10), np.zeros(90)], np.r_[np.ones(55), np.zeros(45)], np.ones(100)])
     chance = ChanceLaw(np.array([10.0]), np.array([91.0]))  # mean 0.1
-    curve = efficiency_curve(snrs, scores, 0.5, [0.0, 3.0, 7.0, 10.0], chance)
+    curve = efficiency_curve(snrs, scores, 0.5, [0.0, 3.0, 7.0, 10.0], chance=chance)
     c = 10 / 101
     np.testing.assert_allclose(curve.efficiency, [(0.1 - c) / (1 - c), (0.55 - c) / (1 - c), 1.0], rtol=1e-12)
     assert curve.chance == pytest.approx(c)
@@ -399,7 +408,7 @@ def test_the_rolling_efficiency_is_the_owners_window():
     snrs = rng.uniform(0, 20, 6000)
     snrs = snrs[(snrs < 15.0) | (snrs > 18.0)]  # a gap: too few injections near 16.5
     scores = snrs + rng.normal(0, 1.0, snrs.size)
-    curve = rolling_efficiency_curve(snrs, scores, 8.0, (0.0, 20.0))
+    curve = rolling_efficiency_curve(snrs, scores, 8.0, snr_range=(0.0, 20.0))
     np.testing.assert_allclose(curve.snr, np.linspace(0.5, 19.5, 50), rtol=1e-12)
     assert curve.half_width == 0.5 and curve.pointwise and curve.sigmas == (1.0, 2.0)
     for i, centre in enumerate(curve.snr):
@@ -413,7 +422,7 @@ def test_the_rolling_efficiency_is_the_owners_window():
             lower, upper = binomial_interval(curve.detected[i], curve.total[i], sigma_level(sigma))
             assert (curve.lower[j, i], curve.upper[j, i]) == pytest.approx((lower, upper), rel=1e-12)
     assert np.isnan(curve.efficiency).sum() >= 1
-    assert np.all(np.isnan(rolling_efficiency_curve(snrs, scores, np.nan, (0.0, 20.0)).efficiency))
+    assert np.all(np.isnan(rolling_efficiency_curve(snrs, scores, np.nan, snr_range=(0.0, 20.0)).efficiency))
 
 
 def logistic_found(rng, snrs, centre, width, chance):
@@ -435,8 +444,8 @@ def test_the_sigmoid_fit_recovers_its_50_and_90_percent_points_and_its_bootstrap
     estimates = np.empty((replicas, 2))
     for r in range(replicas):
         snrs = rng.uniform(0, 20, n)
-        fit = fit_efficiency_sigmoid(snrs, logistic_found(rng, snrs, centre, width, c), 0.5, chance, (0.0, 20.0), rng,
-                             num_bootstrap=200)
+        fit = fit_efficiency_sigmoid(snrs, logistic_found(rng, snrs, centre, width, c), 0.5, chance=chance,
+                                     snr_range=(0.0, 20.0), rng=rng, num_bootstrap=200)
         estimates[r] = fit.snr_50, fit.snr_90
         covered += (fit.lower <= truth) & (truth <= fit.upper)
     assert fit.sigmas == (1.0, 2.0) and fit.lower.shape == (2, 2) and fit.num_bootstrap == 200
@@ -453,9 +462,11 @@ def test_the_sigmoid_fit_has_no_point_it_did_not_measure():
     # A point outside the injected range, or a fit with no transition (nothing found), is NaN.
     rng = np.random.default_rng(8)
     snrs = rng.uniform(0, 10, 5000)
-    beyond = fit_efficiency_sigmoid(snrs, logistic_found(rng, snrs, 9.0, 1.0, 0.0), 0.5, None, (0.0, 10.0), rng, 50)
+    beyond = fit_efficiency_sigmoid(snrs, logistic_found(rng, snrs, 9.0, 1.0, 0.0), 0.5, chance=None,
+                                    snr_range=(0.0, 10.0), rng=rng, num_bootstrap=50)
     assert np.isfinite(beyond.snr_50) and np.isnan(beyond.snr_90) and np.all(np.isnan(beyond.lower[:, 1]))
-    silent = fit_efficiency_sigmoid(snrs, np.zeros(snrs.size), 0.5, None, (0.0, 10.0), rng, 50)
+    silent = fit_efficiency_sigmoid(snrs, np.zeros(snrs.size), 0.5, chance=None, snr_range=(0.0, 10.0), rng=rng,
+                                    num_bootstrap=50)
     assert np.isnan(silent.snr_50) and np.isnan(silent.snr_90)
-    unresolved = fit_efficiency_sigmoid(snrs, snrs, np.nan, None, (0.0, 10.0), rng, 50)
+    unresolved = fit_efficiency_sigmoid(snrs, snrs, np.nan, chance=None, snr_range=(0.0, 10.0), rng=rng, num_bootstrap=50)
     assert np.isnan(unresolved.snr_50)

@@ -1,16 +1,14 @@
 """
-PENDING known answer: the FAR interval of a time-slid background covers the
-true rate at its level.
+Known answer: the FAR interval of a time-slid background covers the true rate at
+its level.
 
-Not collected (its name does not start with ``test_``): it fails on the current
-validator, whose FAR interval is Poisson's (Garwood) on the slid triggers as if
-each were independent. Slides that share one detector's data are not: a loud
-excursion in one detector passes in many slides, so the count's variance is
-several times Poisson's and the interval undercovers (with 8 slides, 2 sigma
-covers about 86% of the time for a sum of the detectors' statistics, 48% for
-their maximum). It is
-enabled, by renaming it ``test_time_slide_coverage.py``, on the branch that
-makes the FAR interval count a time-slid background's independent information.
+Slides that share one detector's data are not independent: a loud excursion in
+one detector passes in many slides, so the count's variance is several times
+Poisson's, and an interval on the slid triggers as if each were independent
+undercovers (with 8 slides, 2 sigma covered about 86% of the time for a sum of
+the detectors' statistics, 48% for their maximum). The interval counts a
+time-slid background's independent information (`Background.count_interval`).
+Written pending before that landed; enabled by the branch that lands it.
 """
 
 import numpy as np

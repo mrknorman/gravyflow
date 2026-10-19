@@ -25,7 +25,9 @@ and the volume found by signal is
 V is the estimand: without the subtraction the found volume would grow with the
 reach's cube however far the detector sees. At tight thresholds ``c`` is
 negligible; where what noise alone finds exceeds a stated fraction of what is
-found, the result rests on the subtraction and is not quoted (`quotable`).
+found, the result rests on the subtraction and is not quoted (`quotable`); nor is it
+where fewer than ten independent background events lie at or above the threshold
+(`metrics.MIN_BACKGROUND_EVENTS`, the standard's rule for every output).
 
 Every result states its reach: ``R`` (chirp distance), the reach SNR it was drawn
 for, and the range of physical reaches its masses span. The volume is Euclidean
@@ -37,12 +39,19 @@ reported, two-sided and central at each level (1 and 2 sigma):
 
 - **injections**: the finite Monte Carlo, a binomial interval on the found volume
   at the threshold (`InjectionVolumes.interval`), the chance subtracted;
-- **background**: the finite livetime, V at the two thresholds between which the
-  FAR's interval puts the true threshold (`Background.far_band_thresholds`);
-- **joint**: a bootstrap over the injections, the background's thresholds
+- **background**: the finite livetime, V's least and greatest over every threshold
+  between the two at which the FAR's interval puts the true threshold
+  (`Background.far_band_thresholds`): V need not be monotone in the threshold, so its
+  ends are not enough;
+- **joint**: a bootstrap over the injections and the background's thresholds
   (`Background.bootstrap_thresholds`, which counts a time-slid background's
-  independent information) and the chance (its law at each replicate's
-  threshold), each end at least as far out as the other two intervals'.
+  independent information), each end at least as far out as the other two
+  intervals'. Each replicate subtracts the chance as the estimator computes it: at a
+  target's threshold it is fixed by the count the target allows (about ``k / (n +
+  1)``), whatever the background drew, so a replicate's is the point's; the chance's
+  own error moves with the threshold, in the injections found by noise. (A chance
+  drawn from its law at the replicate's threshold, independently, loses that
+  correlation and undercovers.)
 
 The found fraction against distance (`found_fraction_by_distance`), drawn with the
 chance level, is the visual check that the reach is long enough: at its far end it
@@ -60,7 +69,8 @@ from typing import Optional, Sequence, Tuple
 import numpy as np
 
 from gravyflow.src.dataset.features.injection import REFERENCE_CHIRP_MASS_MSUN, chirp_mass
-from .metrics import DEFAULT_SIGMAS, Background, binomial_interval, nested, sigma_level
+from .metrics import (DEFAULT_SIGMAS, MIN_BACKGROUND_EVENTS, Background, binomial_interval, independent_events,
+                      nested, sigma_level)
 
 GPC3_PER_MPC3 = 1e-9
 #: A Julian year, and a twelfth of it.
@@ -264,8 +274,10 @@ class SensitiveVolumeCurve:
     of ``population_volume_gpc3``), V within the reach (the chance subtracted), and
     each interval's bounds; ``injection_error_gpc3`` is the found volume's Monte Carlo
     standard error. ``chance_dominated`` marks the targets where noise alone finds
-    more than ``chance_fraction`` of what is found; ``quotable`` is the one rule of
-    what `quote` gives.
+    more than ``chance_fraction`` of what is found; ``background_events`` counts the
+    independent background events at or above each threshold, and
+    ``enough_background`` marks the targets with at least `MIN_BACKGROUND_EVENTS`;
+    ``quotable`` is the one rule of what `quote` gives.
     """
     far_hz: np.ndarray
     threshold: np.ndarray
@@ -289,6 +301,7 @@ class SensitiveVolumeCurve:
     reach_range_mpc: Tuple[float, float]
     population_volume_gpc3: float
     data_reuse: int
+    background_events: np.ndarray
     num_injections: int
     num_bootstrap: int
     sigmas: Tuple[float, ...]
@@ -310,16 +323,22 @@ class SensitiveVolumeCurve:
             return self.resolved & (self.chance_gpc3 > self.chance_fraction * self.found_gpc3)
 
     @property
+    def enough_background(self) -> np.ndarray:
+        """The resolved targets with at least `MIN_BACKGROUND_EVENTS` independent background events."""
+        return self.resolved & (self.background_events >= MIN_BACKGROUND_EVENTS)
+
+    @property
     def quotable(self) -> np.ndarray:
-        """The targets `quote` gives: resolved, and not chance-dominated."""
-        return self.resolved & ~self.chance_dominated
+        """The targets `quote` gives: resolved, with enough background, and not chance-dominated."""
+        return self.enough_background & ~self.chance_dominated
 
     def quote(self, far_hz: float) -> VolumeQuote:
         """
         V within the reach at the target ``far_hz``, with its joint interval at each
         level and the reach: the number a comparison quotes. Refuses, by name, a target
-        the background cannot resolve and one chance-dominated (V rests mostly on the
-        subtraction of what noise alone finds).
+        the background cannot resolve, one with fewer than `MIN_BACKGROUND_EVENTS`
+        independent background events at or above its threshold, and one
+        chance-dominated (V rests mostly on the subtraction of what noise alone finds).
         """
         matches = np.flatnonzero(np.isclose(self.far_hz, far_hz, rtol=1e-9, atol=0))
         if matches.size == 0:
@@ -327,6 +346,8 @@ class SensitiveVolumeCurve:
         i = int(matches[0])
         if not self.quotable[i]:
             why = ("the background cannot resolve it" if not self.resolved[i] else
+                   f"{int(self.background_events[i])} independent background events at or above its threshold, "
+                   f"fewer than {MIN_BACKGROUND_EVENTS}" if not self.enough_background[i] else
                    f"noise alone finds more than {self.chance_fraction:.0%} of what is found there")
             raise ValueError(f"No sensitive volume to quote at {far_hz:g} Hz: {why}.")
         return VolumeQuote(
@@ -336,11 +357,32 @@ class SensitiveVolumeCurve:
             upper_gpc3=tuple(float(v) for v in self.joint_upper_gpc3[:, i]), sigmas=self.sigmas)
 
 
+def _volume_range(injections: InjectionVolumes, background: Background, high: float, low: float) -> Tuple[float, float]:
+    """
+    V's least and greatest (Gpc^3) over every threshold from ``low`` to ``high`` (the
+    FAR band's, `Background.far_band_thresholds`; ``high`` may be +inf), each with the
+    chance at it: V steps only at the injections' and the background windows' scores,
+    so it is read at each of them in the band and just above each. NaN for NaN ends.
+    """
+    if np.isnan(high) or np.isnan(low):
+        return np.nan, np.nan
+    steps = np.concatenate([injections.scores, background.window_scores])
+    steps = steps[(steps >= low) & (steps <= high)]
+    candidates = np.concatenate([steps, np.nextafter(steps, np.inf), [low, high]])
+    candidates = np.unique(candidates[(candidates >= low) & (candidates <= high) & np.isfinite(candidates)
+                                      | (candidates == np.inf)])
+    volumes = injections.volume(candidates, background.found_by_chance(candidates).mean)
+    if not np.any(np.isfinite(volumes)):
+        return np.nan, np.nan
+    return float(np.nanmin(volumes)), float(np.nanmax(volumes))
+
+
 def sensitive_volume_curve(
     injections: InjectionVolumes,
     background: Background,
     fars_hz: Sequence[float],
     rng: np.random.Generator,
+    *,
     num_bootstrap: int = 1000,
     sigmas: Sequence[float] = DEFAULT_SIGMAS,
     method: str = "clopper-pearson",
@@ -352,14 +394,14 @@ def sensitive_volume_curve(
     ``sigmas`` (module docstring).
 
     The bootstrap draws ``num_bootstrap`` replicates from ``rng``, each the
-    background's thresholds (`Background.bootstrap_thresholds`), the chance at them
-    from its law, and the injections drawn with replacement, and takes the central
-    range of the replicates' volumes at each level. Where the target allows few
+    background's thresholds (`Background.bootstrap_thresholds`) and the injections
+    drawn with replacement, the estimator's chance subtracted (module docstring), and
+    takes the central range of the replicates' volumes at each level. Where the target allows few
     triggers, no replicate can put the threshold above the loudest background
     trigger, while the true threshold may lie there: the background interval's high
     threshold can (+inf when even no trigger leaves the FAR's upper bound above the
     target), so each end is at least as far out as the volumes at the background
-    interval's thresholds. Where few injections are found, the replicates' found
+    interval's thresholds (`_volume_range`). Where few injections are found, the replicates' found
     counts understate their error: each end is also at least as far out as the
     injections' binomial interval.
     """
@@ -376,8 +418,7 @@ def sensitive_volume_curve(
     replicates = np.empty((num_bootstrap, fars.size))
     for b in range(num_bootstrap):
         replicate = background.bootstrap_thresholds(fars, rng)
-        replicates[b] = injections.volume(replicate, background.found_by_chance(replicate).sample(rng, 1)[0],
-                                          np.bincount(rng.integers(0, n, n), minlength=n))
+        replicates[b] = injections.volume(replicate, chance, np.bincount(rng.integers(0, n, n), minlength=n))
 
     shape = (len(sigmas), fars.size)
     intervals = {name: np.full(shape, np.nan) for name in
@@ -391,8 +432,7 @@ def sensitive_volume_curve(
                 intervals["far_lower"][level, i], intervals["far_upper"][level, i] = achieved.lower_hz, achieved.upper_hz
         bands = np.array([background.far_band_thresholds(float(far), confidence) if ok else (np.nan, np.nan)
                           for far, ok in zip(fars, resolved)]).reshape(-1, 2)
-        at_bands = np.stack([injections.volume(bands[:, j], background.found_by_chance(bands[:, j]).mean)
-                             for j in (0, 1)])  # (high, low) thresholds
+        at_bands = np.array([_volume_range(injections, background, high, low) for high, low in bands]).T
         injection_lower, injection_upper = injections.interval(threshold, confidence, method, chance)
         alpha = 1.0 - confidence
         ends = np.full((2, fars.size), np.nan)
@@ -429,6 +469,7 @@ def sensitive_volume_curve(
         reach_range_mpc=injections.reach_range_mpc,
         population_volume_gpc3=injections.population_volume_gpc3,
         data_reuse=background.data_reuse,
+        background_events=np.array([t.independent_events for t in targets], dtype=np.int64),
         num_injections=n,
         num_bootstrap=int(num_bootstrap),
         sigmas=sigmas,

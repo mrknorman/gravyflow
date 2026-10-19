@@ -487,9 +487,12 @@ def test_far_band_thresholds_bracket_the_threshold_by_the_poisson_interval():
 
 
 def test_bootstrap_thresholds_draw_the_count_as_poisson_in_independent_events():
-    # Unslid, a replicate's threshold is at or below a threshold of count c exactly when a
-    # Poisson count of mean c is within the target's allowance a: the bootstrap of independent
-    # windows. Slid sixteen times, the count is in events of sixteen windows each.
+    # The estimator's threshold for a allowed is the a-th loudest trigger, whose true count is
+    # Gamma(a) (in events: a / r of r slides). A replicate's threshold is at the trigger the
+    # process's arrival S ~ Gamma(a / r) puts there, the round(r S)-th loudest: at or below a
+    # threshold of count c exactly when r S >= c - 1/2. Unslid it is the bootstrap of independent
+    # windows; slid sixteen times, the count is in events of sixteen windows each (here each
+    # window's score appears in every slide, so the counts step by sixteen).
     rng = np.random.default_rng(5)
     noise = rng.normal(size=400)
     replicas, far = 4000, 0.05  # a = 20 triggers allowed
@@ -501,35 +504,43 @@ def test_bootstrap_thresholds_draw_the_count_as_poisson_in_independent_events():
         thresholds = np.array([background.bootstrap_thresholds([far, 1e-3, 0.1], rng) for _ in range(replicas)])
         assert np.all(np.isnan(thresholds[:, 1]))  # 0.4 triggers allowed: unresolved
         assert np.all(thresholds[:, 2] <= thresholds[:, 0])  # one process: a higher target, a lower threshold
-        for count in (12, 20, 30):
-            u = background._threshold_allowing(count)
-            expected = stats.poisson.cdf(20 // reuse, background.far_count(u) / reuse)
+        for count in (12, 20, 30, 40):
+            u = background._threshold_at(count)
+            expected = stats.gamma.sf((background.far_count(u) - 0.5) / reuse, 20 / reuse)
             assert np.mean(thresholds[:, 0] <= u) == pytest.approx(expected, abs=4 * np.sqrt(0.25 / replicas))
+        # On average the replicates' count is the estimator's: the a-th loudest.
+        if slides == 0:
+            counts = background.far_count(thresholds[:, 0])
+            assert counts.mean() == pytest.approx(20, abs=4 * np.sqrt(20 / replicas))
 
 
 def test_the_chance_of_passing_a_chosen_threshold_is_a_beta_law():
-    # A threshold just above the c-th highest of n exchangeable windows is passed by a fresh
-    # window with a chance distributed as Beta(c, n - c + 1), whatever their distribution: the
-    # window below it counts. Sixteen slides of the same windows hold one reading's information.
+    # A threshold at the c-th highest of n exchangeable windows is passed by a fresh window with
+    # a chance distributed as Beta(c, n - c + 1), whatever their distribution; one between
+    # windows, just above the (c+1)-th, as Beta(c + 1, n - c). Sixteen slides of the same windows
+    # hold one reading's information.
     independent = Background.independent_windows(np.arange(10.0), 1.0)
-    threshold = independent.threshold_for_far(0.3).threshold  # just above 6, the fourth highest
-    assert independent.window_exceedance(threshold) == 0.3
-    np.testing.assert_array_equal(independent.chosen_window_chance(threshold), (4.0, 7.0))
-    np.testing.assert_array_equal(independent.chosen_window_chance(0.0), (10.0, 1.0))  # no window below
+    threshold = independent.threshold_for_far(0.3).threshold  # 7, the third highest
+    assert threshold == 7.0 and independent.window_exceedance(threshold) == 0.3
+    np.testing.assert_array_equal(independent.chosen_window_chance(threshold), (3.0, 8.0))
+    np.testing.assert_array_equal(independent.chosen_window_chance(6.5), (4.0, 7.0))
+    np.testing.assert_array_equal(independent.chosen_window_chance(0.0), (10.0, 1.0))  # the lowest
+    np.testing.assert_array_equal(independent.chosen_window_chance(-1.0), (10.0, 1.0))  # no window below
     slid = Background([ScoreStream(np.roll(np.arange(10.0), k), 1.0, 1.0, 0, k) for k in range(1, 5)])
-    threshold = slid.threshold_for_far(0.3).threshold  # 12 allowed: just above 6, twelve windows pass
-    assert slid.window_exceedance(threshold) == 0.3
-    np.testing.assert_array_equal(slid.chosen_window_chance(threshold), (4.0, 7.0))
+    threshold = slid.threshold_for_far(0.3).threshold  # 12 allowed: 7, twelve windows pass
+    assert threshold == 7.0 and slid.window_exceedance(threshold) == 0.3
+    np.testing.assert_array_equal(slid.chosen_window_chance(threshold), (3.0, 8.0))
     # Over draws of 100 uniform windows, the chance of passing the threshold for three triggers,
-    # just above the fourth highest, is exactly Beta(4, 97).
+    # the third highest, is exactly Beta(3, 98): on average 3 / 101, the target's 0.03 (just
+    # above the fourth highest, it would be Beta(4, 97): 4 / 101, a third too many).
     rng = np.random.default_rng(9)
     chances = np.empty(4000)
     for r in range(chances.size):
         background = Background.independent_windows(rng.random(100), 1.0)
         threshold = background.threshold_for_far(0.03).threshold
-        np.testing.assert_array_equal(background.chosen_window_chance(threshold), (4.0, 97.0))
+        np.testing.assert_array_equal(background.chosen_window_chance(threshold), (3.0, 98.0))
         chances[r] = 1 - threshold
-    assert stats.kstest(chances, stats.beta(4, 97).cdf).pvalue > 1e-3
+    assert stats.kstest(chances, stats.beta(3, 98).cdf).pvalue > 1e-3
 
 
 def test_the_curve_reads_volume_at_the_backgrounds_threshold_with_the_chance_subtracted():
@@ -593,3 +604,88 @@ def test_quote_gives_the_volume_within_the_reach_at_both_levels_and_refuses_what
         curve.quote(1e-5)
     with pytest.raises(ValueError, match="not one of the curve's target FARs"):
         curve.quote(2e-3)
+
+
+# ------------------------------------------- the correction round's witnesses
+
+class _RecordedVolumes(InjectionVolumes):
+    """InjectionVolumes recording the chance each bootstrap replicate (a volume with a multiplicity) subtracts."""
+
+    def volume(self, thresholds, chance=0.0, multiplicity=None):
+        if multiplicity is not None:
+            self.__dict__.setdefault("replicate_chances", []).append(np.array(chance, dtype=np.float64))
+        return super().volume(thresholds, chance, multiplicity)
+
+
+def test_each_bootstrap_replicate_subtracts_the_estimators_chance():
+    # At a target's threshold the estimator's chance is fixed by the count the target allows
+    # (about k / (n + 1)): a replicate's is the point's, never a fresh draw from its law at the
+    # replicate's threshold, which loses the correlation of the chance with the found volume.
+    rng = np.random.default_rng(61)
+    background = Background.independent_windows(rng.normal(size=2000), 1.0)
+    plain = detected(rng, 4000, realistic_scores)
+    injections = _RecordedVolumes(plain.scores, plain.reach_mpc, plain.distances)
+    curve = sensitive_volume_curve(injections, background, [1e-1, 1e-2], rng, num_bootstrap=20)
+    assert len(injections.replicate_chances) == 20
+    for chance in injections.replicate_chances:
+        np.testing.assert_array_equal(chance, curve.chance)
+
+
+@pytest.mark.parametrize("slides", [0, 4])
+def test_nothing_is_quoted_with_fewer_than_ten_independent_background_events(slides):
+    # The standard's rule: a volume is quoted only where at least ten independent background
+    # events lie at or above its threshold, floor(count / data_reuse) >= 10. Below it the point is
+    # computed and kept (plotted, marked), never quoted. Slid four times, each event is four triggers.
+    rng = np.random.default_rng(62)
+    reuse = max(slides, 1)
+    background = noise_background(rng, 10_000, slides)
+    assert background.data_reuse == reuse
+    T = background.livetime_seconds
+    fars = np.array([10 * reuse - 1, 10 * reuse]) / T
+    curve = sensitive_volume_curve(detected(rng, 4000, realistic_scores), background, fars, rng, num_bootstrap=20)
+    np.testing.assert_array_equal(curve.background_events, [9, 10])
+    assert curve.resolved.all() and not curve.chance_dominated.any()
+    assert curve.quotable.tolist() == [False, True] and curve.enough_background.tolist() == [False, True]
+    assert np.isfinite(curve.volume_within_reach_gpc3).all()  # computed, though not quoted
+    with pytest.raises(ValueError, match="9 independent background events .* fewer than 10"):
+        curve.quote(fars[0])
+    assert curve.quote(fars[1]).volume_within_reach_gpc3 == curve.volume_within_reach_gpc3[1]
+    targets = [background.threshold_for_far(far) for far in fars]
+    assert [t.independent_events for t in targets] == [9, 10] and [t.quotable for t in targets] == [False, True]
+    rates = background.far_curve()
+    np.testing.assert_array_equal(rates.quotable, rates.counts // reuse >= 10)
+
+
+def test_the_threshold_for_a_target_far_has_the_targets_true_far_on_average():
+    # The threshold for a target allowing k triggers is the k-th loudest window: its true pass
+    # chance is k / (n + 1) on average, the target's. (Just above the (k+1)-th, it would be
+    # (k + 1) / (n + 1): at the ten-event floor, 10% too many false alarms.)
+    rng = np.random.default_rng(63)
+    replicas, n, k = 2000, 10_000, 10
+    passes = np.empty(replicas)
+    for r in range(replicas):
+        background = Background.independent_windows(rng.normal(size=n), 1.0)
+        passes[r] = stats.norm.sf(background.threshold_for_far(k / n).threshold) * (n + 1)
+    assert passes.mean() == pytest.approx(k, abs=4 * np.sqrt(k / replicas))
+
+
+def test_the_background_interval_holds_the_volume_at_every_threshold_in_its_band():
+    # V need not be monotone in the threshold (the chance and the found volume step at different
+    # scores), so the background term is V's least and greatest over the whole band, not its ends.
+    rng = np.random.default_rng(64)
+    for _ in range(5):
+        background = Background.independent_windows(rng.normal(size=20_000), 1.0)
+        injections = detected(rng, 20_000, realistic_scores)
+        fars = [1e-1, 1e-2, 1e-3]
+        curve = sensitive_volume_curve(injections, background, fars, rng, num_bootstrap=10)
+        windows = background._opens  # every window's score (the background's own)
+        for i, far in enumerate(fars):
+            for level, sigma in enumerate(curve.sigmas):
+                high, low = background.far_band_thresholds(far, sigma_level(sigma))
+                scores = np.concatenate([injections.scores, windows])
+                steps = scores[(scores >= low) & (scores <= high)]
+                grid = np.concatenate([steps, np.nextafter(steps, np.inf), [low, high]])
+                grid = grid[np.isfinite(grid)]
+                volumes = injections.volume(grid, background.found_by_chance(grid).mean)
+                assert curve.background_lower_gpc3[level, i] <= np.nanmin(volumes)
+                assert curve.background_upper_gpc3[level, i] >= np.nanmax(volumes)

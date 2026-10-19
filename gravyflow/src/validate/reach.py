@@ -26,14 +26,16 @@ has the reach SNR: injections there are spent, never lost.
 The box: each component mass over its support, searched on a grid refined around
 its best point (sources do not grow louder with mass monotonically); each spin's
 candidates, its aligned component at its bounds (and zero between them) and, for a
-precessing population, its in-plane magnitude at zero and at its bound (the in-plane
-spin's azimuth is a turn of the orbital phase, which the orientations search); the
+precessing population, its in-plane magnitude at zero and at its bound (body 1's
+in-plane azimuth is a turn of the orbital phase, which the orientations search; body
+2's azimuth relative to it is not, and is searched at `RELATIVE_AZIMUTHS`); the
 lowest band edge; and the orientation. For an aligned-spin source of the dominant
 (2, 2) mode, face-on is the loudest orientation, exactly. For any other (precessing,
 or with higher modes) no orientation is the loudest in general, so the bound is a
 search over a grid of inclinations and orbital phases (`ORIENTATIONS`), at the
 `ORIENTATION_CANDIDATES` best points of the masses and spins, before the masses are
-refined: a measured best case, not a proved bound.
+refined: a measured best case, not a proved bound, so the reach is set `SEARCH_MARGIN`
+past it (measured against a brute force).
 
 Each source is generated on a window twice the scored one, its merger at the
 centre, so every placement's visible part is inside it: the SNR a scored window
@@ -64,6 +66,15 @@ CHUNK = 128
 ORIENTATIONS = np.array(list(product(np.linspace(0.0, np.pi, 7), np.linspace(0.0, np.pi, 4, endpoint=False))))
 #: How many of the best mass and spin points the orientation grid is searched at.
 ORIENTATION_CANDIDATES = 4
+#: The azimuths (radians) of body 2's in-plane spin relative to body 1's, searched for a precessing population.
+RELATIVE_AZIMUTHS = tuple(np.arange(6) * np.pi / 3)
+#: Where the loudest orientation is searched, not proved (`population_box`), the reach is this much past the
+#: search's best case. Measured against a dense brute force (inclination 25 x phase 16, each spin's in-plane
+#: magnitude {0, half, bound} x 6 azimuths, aligned {-, 0, +}, then a continuous refinement) for IMRPhenomPv2
+#: with in-plane and aligned spins to 0.6, at masses (5, 5), (30, 30), (95, 95) and (5, 95): the largest ratio
+#: of brute force to search was 1.0058, at (95, 95). The independent check found 1.0086 at (95, 95) for in-plane
+#: spins alone to 0.9 (before body 2's relative azimuth was searched). 1.01 holds both.
+SEARCH_MARGIN = 1.01
 #: Approximants of aligned spins and the (2, 2) mode alone, whose loudest orientation is face-on.
 FACE_ON_APPROXIMANTS = (gf.Approximant.IMRPhenomD, gf.Approximant.IMRPhenomXAS, gf.Approximant.TaylorF2,
                         gf.Approximant.IMRPhenomD_NRTidalv2)
@@ -89,19 +100,34 @@ def population_box(generator) -> Dict[str, object]:
                 "ValidationConfig.volume_reach_mpc."
             )
         box[attribute] = (low, high)
-    for attribute in ("spin_1_in", "spin_2_in"):
+    for attribute, azimuths in (("spin_1_in", (0.0,)), ("spin_2_in", RELATIVE_AZIMUTHS)):
         value = getattr(generator, attribute)
         components = (0.0, 0.0, value) if isinstance(value, gf.Distribution) else tuple(value)
         bounds = [get_support_bounds(c, f"{attribute}[{j}]") for j, c in enumerate(components)]
-        low, high = bounds[2]
+        low, high = np.clip(bounds[2], -1.0, 1.0)
         aligned = sorted({low, high} | ({0.0} if low < 0.0 < high else set()))
-        in_plane = np.hypot(*(max(abs(b) for b in bound) for bound in bounds[:2]))
-        box[attribute] = tuple((float(x), 0.0, float(z)) for x in sorted({0.0, in_plane}) for z in aligned)
+        in_plane = min(np.hypot(*(max(abs(b) for b in bound) for bound in bounds[:2])), 1.0)
+        # Each (in-plane, aligned) corner of the components' bounds, kept physical: a corner past
+        # |chi| = 1 (the generator checks no magnitude) is replaced by the two points of unit
+        # magnitude inside it, one keeping its aligned part, the other its in-plane part.
+        corners = set()
+        for x in sorted({0.0, in_plane}):
+            for z in aligned:
+                if x * x + z * z <= 1.0:
+                    corners.add((float(x), float(z)))
+                else:
+                    corners.update({(float(np.sqrt(1.0 - z * z)), float(z)),
+                                    (float(x), float(np.copysign(np.sqrt(1.0 - x * x), z)))})
+        # Body 1's in-plane spin along x (its azimuth is a turn of the orbital phase); body 2's at
+        # each relative azimuth, which no turn of the phase reaches.
+        box[attribute] = tuple((float(x * np.cos(phi)), float(x * np.sin(phi)), z)
+                               for x, z in sorted(corners) for phi in (azimuths if x > 0 else (0.0,)))
     box["min_frequency_hertz"] = (get_support_bounds(generator.min_frequency_hertz, "min_frequency_hertz")[0],)
     for attribute in ("lambda_1", "lambda_2"):
         box[attribute] = (get_support_bounds(getattr(generator, attribute), attribute)[0],)
     approximant = gf.Approximant(generator.approximant)
-    precessing = any(spin[0] != 0.0 for attribute in ("spin_1_in", "spin_2_in") for spin in box[attribute])
+    precessing = any(spin[0] != 0.0 or spin[1] != 0.0 for attribute in ("spin_1_in", "spin_2_in")
+                     for spin in box[attribute])
     face_on = approximant in FACE_ON_APPROXIMANTS and not precessing
     box["orientations"] = np.zeros((1, 2)) if face_on else ORIENTATIONS
     return box
@@ -214,8 +240,10 @@ def chirp_reach(generator, psds, sample_rate_hertz: float, window_seconds: float
     """
     The population's reach (Mpc, chirp distance): the chirp distance beyond which no
     source of any mass has network SNR ``snr``, whatever its sky position,
-    orientation and parameters (`loudest_chirp_scaled_snr`); a source of chirp mass
+    orientation and parameters (`loudest_chirp_scaled_snr`, times `SEARCH_MARGIN`
+    where the orientation is searched rather than face-on); a source of chirp mass
     ``M`` reaches ``R (M / M_ref)^(5/6)`` of physical distance.
     """
-    return REFERENCE_DISTANCE_MPC * loudest_chirp_scaled_snr(generator, psds, sample_rate_hertz, window_seconds,
-                                                             config) / snr
+    margin = SEARCH_MARGIN if len(population_box(generator)["orientations"]) > 1 else 1.0
+    return REFERENCE_DISTANCE_MPC * margin * loudest_chirp_scaled_snr(generator, psds, sample_rate_hertz,
+                                                                      window_seconds, config) / snr

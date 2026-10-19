@@ -48,18 +48,19 @@ def test_the_curves_at_a_target_are_the_fixed_threshold_curves_at_its_threshold(
     # threshold, with the chance of a noise-only pass at that threshold subtracted.
     rng = np.random.default_rng(1)
     snrs, scores, background = draw(rng, 20_000, 20_000)
-    results = efficiency_against_snr(snrs, scores, background, [1e-2, 1e-3, 1e-6], rng, EDGES, SNR_RANGE,
-                                     num_bootstrap=100)
+    results = efficiency_against_snr(snrs, scores, background, [1e-2, 1e-3, 1e-6], rng, bin_edges=EDGES,
+                                     snr_range=SNR_RANGE, num_bootstrap=100)
     assert [r.far_hz for r in results] == [1e-2, 1e-3, 1e-6]
     for result in results[:2]:
         t = result.threshold.threshold
         chance = background.found_by_chance(t)
-        binned = efficiency_curve(snrs, scores, t, EDGES, chance)
-        rolling = rolling_efficiency_curve(snrs, scores, t, SNR_RANGE, chance=chance)
+        binned = efficiency_curve(snrs, scores, t, EDGES, chance=chance)
+        rolling = rolling_efficiency_curve(snrs, scores, t, snr_range=SNR_RANGE, chance=chance)
         np.testing.assert_array_equal(result.binned.efficiency, binned.efficiency)
         np.testing.assert_array_equal(result.rolling.efficiency, rolling.efficiency)
         np.testing.assert_array_equal(result.rolling.snr, rolling.snr)
-        fit = fit_efficiency_sigmoid(snrs, scores, t, chance, SNR_RANGE, rng, 10)
+        fit = fit_efficiency_sigmoid(snrs, scores, t, chance=chance, snr_range=SNR_RANGE, rng=rng,
+                                     num_bootstrap=10)
         assert result.fit.snr_50 == pytest.approx(fit.snr_50, rel=1e-9)
         assert result.fit.snr_90 == pytest.approx(fit.snr_90, rel=1e-9)
         # The bands: both levels, nested, around the point, at least as wide as the binomial ones.
@@ -93,7 +94,7 @@ def test_the_bands_cover_where_the_background_is_thin(allowed):
                                                                                                 edges[2:-1])])
     for _ in range(replicas):
         snrs, scores, background = draw(rng, 5000, int(round(allowed / far)))
-        (result,) = efficiency_against_snr(snrs, scores, background, [far], rng, edges, SNR_RANGE,
+        (result,) = efficiency_against_snr(snrs, scores, background, [far], rng, bin_edges=edges, snr_range=SNR_RANGE,
                                            num_bootstrap=200)
         rolling = result.rolling
         index = [int(np.argmin(np.abs(rolling.snr - p))) for p in points]
@@ -106,3 +107,56 @@ def test_the_bands_cover_where_the_background_is_thin(allowed):
         tolerance = 3 * np.sqrt(level * (1 - level) / replicas)
         for name, hits in covered.items():
             assert np.all(hits[j] / replicas >= level - tolerance), (name, sigma, hits / replicas)
+
+
+# ------------------------------------------- the correction round's witnesses
+
+def test_each_bootstrap_replicate_subtracts_the_estimators_chance(monkeypatch):
+    # As for the volume: at a target's threshold the estimator's chance is fixed by the count
+    # the target allows, so every replicate subtracts the point's, never a fresh draw.
+    from gravyflow.src.validate import efficiency
+
+    seen = []
+    original = efficiency._signal_fraction
+
+    def recorded(found, total, chance):
+        seen.append(np.array(chance, dtype=np.float64))
+        return original(found, total, chance)
+
+    monkeypatch.setattr(efficiency, "_signal_fraction", recorded)
+    rng = np.random.default_rng(71)
+    snrs, scores, background = draw(rng, 4000, 2000)
+    results = efficiency_against_snr(snrs, scores, background, [1e-1, 1e-2], rng, bin_edges=EDGES,
+                                     snr_range=SNR_RANGE, num_bootstrap=5)
+    point = np.array([r.binned.chance for r in results])
+    assert len(seen) == 10  # binned and rolling, in each of 5 replicates
+    for chance in seen:
+        np.testing.assert_array_equal(chance, point)
+
+
+def test_an_efficiency_with_fewer_than_ten_independent_background_events_is_not_quotable():
+    # The standard's rule, as for every output: kept and shown, marked, not quoted.
+    rng = np.random.default_rng(72)
+    snrs, scores, background = draw(rng, 2000, 10_000)
+    results = efficiency_against_snr(snrs, scores, background, [9e-4, 1e-3], rng, bin_edges=EDGES,
+                                     snr_range=SNR_RANGE, num_bootstrap=5)
+    assert [r.threshold.independent_events for r in results] == [9, 10]
+    assert [r.quotable for r in results] == [False, True]
+    assert np.isfinite(results[0].rolling.efficiency).any()
+
+
+def test_no_positional_argument_changes_meaning():
+    # efficiency_curve's fifth positional argument was the interval's confidence: passing one
+    # now fails loudly rather than being read as the chance. The new parameters are keyword-only.
+    snrs, scores = np.full(5, 10.0), np.arange(5.0)
+    with pytest.raises(TypeError):
+        efficiency_curve(snrs, scores, 2.0, [5.0, 15.0], 0.68)
+    with pytest.raises(TypeError):
+        rolling_efficiency_curve(snrs, scores, 2.0, (0.0, 20.0))
+    with pytest.raises(TypeError):
+        fit_efficiency_sigmoid(snrs, scores, 2.0, None, (0.0, 20.0), np.random.default_rng(0))
+    background = Background.independent_windows(np.random.default_rng(0).normal(size=100), 1.0)
+    with pytest.raises(TypeError):
+        efficiency_against_snr(snrs, scores, background, [0.1], np.random.default_rng(0), EDGES, SNR_RANGE)
+    curve = efficiency_curve(snrs, scores, 2.0, [5.0, 15.0], sigmas=(1.0,))
+    assert curve.lower.shape == (1, 1) and curve.efficiency[0] == pytest.approx(0.6)

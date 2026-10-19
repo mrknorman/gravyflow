@@ -194,8 +194,9 @@ class Validator:
         fars = cfg.far_thresholds if fars_hz is None else fars_hz
         results = efficiency_against_snr(
             data["snrs"], data["scores"], self.background(), fars,
-            gf.SeedTree(cfg.seed).stream(cfg.group, "validator/efficiency"), cfg.snr_bin_edges, cfg.snr_range,
-            cfg.efficiency_bootstrap_samples, cfg.interval_sigmas, cfg.efficiency_interval)
+            gf.SeedTree(cfg.seed).stream(cfg.group, "validator/efficiency"), bin_edges=cfg.snr_bin_edges,
+            snr_range=cfg.snr_range, num_bootstrap=cfg.efficiency_bootstrap_samples, sigmas=cfg.interval_sigmas,
+            method=cfg.efficiency_interval)
         return {float(far): result for far, result in zip(fars, results)}
 
     def sensitive_volume_curve(self, fars_hz=None) -> Optional[SensitiveVolumeCurve]:
@@ -215,7 +216,8 @@ class Validator:
         return sensitive_volume_curve(
             self.injection_volumes(), self.background(), cfg.far_thresholds if fars_hz is None else fars_hz,
             gf.SeedTree(cfg.seed).stream(cfg.group, "validator/volume"),
-            cfg.volume_bootstrap_samples, cfg.interval_sigmas, cfg.efficiency_interval, cfg.volume_chance_fraction)
+            num_bootstrap=cfg.volume_bootstrap_samples, sigmas=cfg.interval_sigmas, method=cfg.efficiency_interval,
+            chance_fraction=cfg.volume_chance_fraction)
 
     def injection_volumes(self) -> Optional[InjectionVolumes]:
         """The volume set as the volume reads it: chirp distances within the chirp reach, chirp-mass weights."""

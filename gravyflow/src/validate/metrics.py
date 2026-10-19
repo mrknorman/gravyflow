@@ -201,6 +201,17 @@ class FarEstimate:
     confidence: float
 
 
+#: The standard's rule (agreed with the owner, 19 October 2026): a rate, volume or efficiency is quoted only
+#: where at least this many independent background events lie at or above its threshold, ``floor(count /
+#: data_reuse)`` (`independent_events`). Below it the point is still computed, plotted and marked, never quoted.
+MIN_BACKGROUND_EVENTS = 10
+
+
+def independent_events(count, data_reuse: int) -> np.ndarray:
+    """The independent background events in a trigger ``count`` of a background reusing its data ``data_reuse`` times."""
+    return np.floor(np.asarray(count, dtype=np.float64) / max(int(data_reuse), 1)).astype(np.int64)
+
+
 @dataclass(frozen=True)
 class FarThreshold:
     """
@@ -208,17 +219,28 @@ class FarThreshold:
 
     ``resolved`` is False when the background is too short to resolve the
     target (it allows less than one trigger in the livetime); the threshold is
-    then NaN, and so is any efficiency measured at it.
+    then NaN, and so is any efficiency measured at it. ``independent_events`` is the
+    background's independent events at or above the threshold (`independent_events`);
+    ``quotable`` holds where they are at least `MIN_BACKGROUND_EVENTS`.
     """
     target_hz: float
     threshold: float
     resolved: bool
     achieved: FarEstimate
+    independent_events: int = 0
+
+    @property
+    def quotable(self) -> bool:
+        """Resolved, with at least `MIN_BACKGROUND_EVENTS` independent background events at or above the threshold."""
+        return bool(self.resolved and self.independent_events >= MIN_BACKGROUND_EVENTS)
 
 
 @dataclass(frozen=True)
 class FarCurve:
-    """FAR as a step function of the threshold, exact at every breakpoint."""
+    """
+    FAR as a step function of the threshold, exact at every breakpoint. ``quotable``
+    marks the breakpoints with at least `MIN_BACKGROUND_EVENTS` independent events.
+    """
     thresholds: np.ndarray   # descending; the FAR holds on (next threshold, threshold]
     counts: np.ndarray
     livetime_seconds: float
@@ -226,6 +248,11 @@ class FarCurve:
     lower_hz: np.ndarray
     upper_hz: np.ndarray
     confidence: float
+    data_reuse: int = 1
+
+    @property
+    def quotable(self) -> np.ndarray:
+        return independent_events(self.counts, self.data_reuse) >= MIN_BACKGROUND_EVENTS
 
 
 class Background:
@@ -243,9 +270,9 @@ class Background:
 
     Clustering makes the raw count non-monotone (a lower threshold can merge two
     triggers into one), so the FAR at ``t`` is the most triggers seen at any
-    threshold ``>= t``. That envelope is monotone, and `threshold_for_far` is its
-    exact inverse: an event's FAR is at most ``f`` exactly when its score is at
-    least ``threshold_for_far(f).threshold``.
+    threshold ``>= t``. That envelope is monotone, and `threshold_for_far` inverts
+    it: the threshold for a target allowing ``k`` triggers is the ``k``-th loudest
+    trigger's score, where the count first reaches ``k``.
     """
 
     def __init__(self, streams: Sequence[ScoreStream], cluster_seconds: float = 0.0):
@@ -344,6 +371,11 @@ class Background:
             confidence=confidence,
         )
 
+    @property
+    def window_scores(self) -> np.ndarray:
+        """Every window's score, each counted on its own, ascending."""
+        return self._opens
+
     def windows_at_or_above(self, threshold) -> np.ndarray:
         """The number of the background's windows scoring ``>= threshold``, each counted on its own."""
         return _count_at_or_above(self._opens, threshold)
@@ -360,14 +392,15 @@ class Background:
     def chosen_window_chance(self, threshold) -> Tuple[np.ndarray, np.ndarray]:
         """
         The law of the chance that a fresh noise window passes a threshold chosen
-        from these windows, just above one of them (as `threshold_for_far` chooses):
-        ``Beta(a, b)``, returned as ``(a, b)``.
+        from these windows, at one of them or just above one (as `threshold_for_far`
+        chooses): ``Beta(a, b)``, returned as ``(a, b)``.
 
-        Of ``n`` exchangeable windows, a threshold just above the ``c``-th highest
-        (``c`` counting the windows at or above the highest one below the threshold)
-        is passed by a fresh window with a chance distributed as ``Beta(c, n - c + 1)``,
-        whatever the windows' distribution: on average ``c / (n + 1)``, not the
-        ``(c - 1) / n`` of `window_exceedance`. A background that reuses its data
+        Of ``n`` exchangeable windows, a threshold at the ``c``-th highest is passed
+        by a fresh window with a chance distributed as ``Beta(c, n - c + 1)``,
+        whatever the windows' distribution: on average ``c / (n + 1)``. A threshold
+        between windows is taken as just above the highest window below it, ``c``
+        counting the windows at or above that one (on average ``c / (n + 1)``, not the
+        ``(c - 1) / n`` of `window_exceedance`). A background that reuses its data
         (`data_reuse`, ``r``) holds the information of ``n / r`` windows, so both
         counts are taken in ``r``'s: ``Beta(c / r, (n - c) / r + 1)``. Where no window
         is below the threshold, ``c = n``.
@@ -375,9 +408,12 @@ class Background:
         if self.num_windows == 0:
             raise ValueError("The background has no windows.")
         n, reuse = self.num_windows, self.data_reuse
-        below = np.searchsorted(self._opens, np.asarray(threshold, dtype=np.float64), side="left")
+        t = np.asarray(threshold, dtype=np.float64)
+        below = np.searchsorted(self._opens, t, side="left")
+        at_a_window = (below < n) & (self._opens[np.minimum(below, n - 1)] == t)
         highest_below = self._opens[np.maximum(below - 1, 0)]
-        count = np.where(below > 0, _count_at_or_above(self._opens, highest_below), n)
+        count = np.where(at_a_window, n - below,
+                         np.where(below > 0, _count_at_or_above(self._opens, highest_below), n))
         return count / reuse, (n - count) / reuse + 1.0
 
     def found_by_chance(self, threshold) -> "ChanceLaw":
@@ -399,11 +435,16 @@ class Background:
 
     def threshold_for_far(self, far_hz: float, confidence: float = DEFAULT_CONFIDENCE) -> FarThreshold:
         """
-        The lowest threshold whose FAR does not exceed ``far_hz``.
+        The threshold for ``far_hz``: the score of the ``k``-th loudest trigger, ``k``
+        the triggers the target allows in the livetime (`_threshold_at`).
 
-        Unresolved (threshold NaN) when ``far_hz`` allows less than one trigger
-        in the livetime. A target above anything the background produces gives
-        ``-inf``: every candidate passes.
+        Of the thresholds whose count is ``k`` (from just above the ``(k+1)``-th
+        loudest to the ``k``-th), the ``k``-th's true FAR is ``k`` triggers on average,
+        the target's: just above the ``(k+1)``-th, it would be ``k + 1``, a bias of
+        ``(k + 1) / k``. Unresolved (threshold NaN) when ``far_hz`` allows less than
+        one trigger in the livetime. A target above anything the background produces
+        gives ``-inf``: every candidate passes. Quotable only with at least
+        `MIN_BACKGROUND_EVENTS` independent events at or above it (`FarThreshold`).
         """
         self._require_livetime()
         allowed = math.floor(far_hz * self.livetime_seconds * (1 + 1e-12))
@@ -411,11 +452,35 @@ class Background:
             nan = float("nan")
             unresolved = FarEstimate(nan, 0, self.livetime_seconds, nan, nan, nan, confidence)
             return FarThreshold(float(far_hz), nan, False, unresolved)
-        threshold = self._threshold_allowing(allowed)
-        return FarThreshold(float(far_hz), threshold, True, self.far(threshold, confidence))
+        threshold = self._threshold_at(allowed)
+        achieved = self.far(threshold, confidence)
+        return FarThreshold(float(far_hz), threshold, True, achieved,
+                            int(independent_events(achieved.count, self.data_reuse)))
+
+    def _threshold_at(self, count: int) -> float:
+        """
+        The estimator's threshold for ``count`` triggers allowed: the score at which the FAR
+        count first reaches ``count`` (the ``count``-th loudest trigger), or, where ties jump
+        the count past it there, just above that score (fewer). Just above the loudest for
+        0; +inf below 0; -inf when the background never reaches ``count``.
+        """
+        if count < 0:
+            return np.inf
+        # The envelope rises as the threshold falls: the first breakpoint at which it reaches the count.
+        first = int(np.searchsorted(self._envelope, count - 1, side="right"))
+        if first == self._breakpoints.size:
+            return -np.inf
+        if self._envelope[first] == count:
+            return float(self._breakpoints[first])
+        return float(np.nextafter(self._breakpoints[first], np.inf))
 
     def _threshold_allowing(self, count: int) -> float:
-        """The lowest threshold whose FAR count is at most ``count``: +inf when none is, -inf when all are."""
+        """
+        The lowest threshold whose FAR count is at most ``count`` (just above the ``(count +
+        1)``-th loudest trigger): +inf when none is, -inf when all are. The FAR band's ends
+        (`far_band_thresholds`): where the true FAR's threshold is at or above it exactly
+        when the true count there is at most ``count``.
+        """
         if count < 0:
             return np.inf
         # The envelope rises as the threshold falls; keep the breakpoints it allows.
@@ -450,7 +515,7 @@ class Background:
         return FarCurve(
             thresholds=self._breakpoints.copy(), counts=self._envelope.copy(), livetime_seconds=T,
             rate_hz=self._envelope / T, lower_hz=lower / T, upper_hz=upper / T,
-            confidence=confidence,
+            confidence=confidence, data_reuse=self.data_reuse,
         )
 
     def by_block(self) -> Dict[Hashable, "Background"]:
@@ -486,16 +551,16 @@ class Background:
 
         The information in a background is its count of independent events above a
         threshold, Poisson, each counted `data_reuse` times among its windows (a
-        loud excursion in one detector's data opens a trigger in every slide). A
-        replicate's count above every threshold is `data_reuse` times a unit-rate
-        Poisson process run over the background's count in events, ``c / reuse``,
-        and a target's threshold is the lowest one that process allows: the
-        threshold allowing ``ceil(reuse * S_j) - 1`` triggers, ``S_j`` the
-        process's ``j``-th arrival and ``j - 1`` the events the target allows,
-        ``floor(allowed / reuse)``. One process serves every target, its arrivals
-        drawn as Gamma increments, so a replicate's thresholds fall as the target
-        rises. Unslid (reuse 1), it is the bootstrap of independent windows: the
-        replicate's count at a threshold of count ``c`` is Poisson of mean ``c``.
+        loud excursion in one detector's data opens a trigger in every slide). The
+        estimator puts a target's threshold at its ``k``-th loudest trigger
+        (`threshold_for_far`), ``k / reuse`` events down, where a unit-rate Poisson
+        process of events has its arrival ``S ~ Gamma(k / reuse)``: the replicate's
+        threshold is at the trigger the process puts there, the ``round(reuse * S)``-th
+        loudest (`_threshold_at`), whose count is on average the estimator's
+        ``k``. One process serves every target, its arrivals drawn as Gamma
+        increments, so a replicate's thresholds fall as the target rises. Unslid
+        (reuse 1), it is the bootstrap of independent windows: the true pass chance of
+        the ``k``-th loudest of ``n`` is ``Gamma(k) / n``.
         """
         self._require_livetime()
         fars = np.asarray(fars_hz, dtype=np.float64).reshape(-1)
@@ -505,13 +570,13 @@ class Background:
         if resolved.size == 0:
             return thresholds
         reuse = self.data_reuse
-        arrival = (np.floor(allowed[resolved] / reuse) + 1).astype(np.int64)
-        order = np.argsort(arrival, kind="stable")
-        steps = np.diff(np.concatenate([[0], arrival[order]]))
+        shape = allowed[resolved] / reuse
+        order = np.argsort(shape, kind="stable")
+        steps = np.diff(np.concatenate([[0.0], shape[order]]))
         times = np.empty(order.size)
-        times[order] = np.cumsum(rng.gamma(steps.astype(np.float64)))
-        counts = np.ceil(reuse * times) - 1
-        thresholds[resolved] = [self._threshold_allowing(int(count)) for count in counts]
+        times[order] = np.cumsum(np.where(steps > 0, rng.gamma(np.maximum(steps, 1e-300)), 0.0))
+        counts = np.rint(reuse * times)
+        thresholds[resolved] = [self._threshold_at(int(count)) for count in counts]
         return thresholds
 
     def _require_livetime(self) -> None:
@@ -659,6 +724,7 @@ def efficiency_curve(
     scores,
     threshold: float,
     bin_edges: Sequence[float],
+    *,
     chance: Optional[ChanceLaw] = None,
     sigmas: Sequence[float] = DEFAULT_SIGMAS,
     method: str = "clopper-pearson",
@@ -670,6 +736,8 @@ def efficiency_curve(
 
     Bins are ``[lo, hi)``, the last one closed; injections outside the edges
     are not counted. A NaN threshold (an unresolved FAR) gives NaN efficiencies.
+    Every argument after ``bin_edges`` is keyword-only: the fifth was once the
+    interval's ``confidence``, and a positional argument never changes meaning.
     """
     snrs, scores = _injections(snrs, scores)
     edges = np.asarray(bin_edges, dtype=np.float64)
@@ -742,6 +810,7 @@ def rolling_efficiency_curve(
     snrs,
     scores,
     threshold: float,
+    *,
     snr_range: Optional[Tuple[float, float]] = None,
     chance: Optional[ChanceLaw] = None,
     sigmas: Sequence[float] = DEFAULT_SIGMAS,
@@ -919,6 +988,7 @@ def fit_efficiency_sigmoid(
     snrs,
     scores,
     threshold: float,
+    *,
     chance: Optional[ChanceLaw],
     snr_range: Tuple[float, float],
     rng: np.random.Generator,
