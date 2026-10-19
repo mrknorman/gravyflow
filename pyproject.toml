@@ -152,4 +152,4 @@ include_namespace_packages = true
 # The whole suite's floor, checked on the combined data of its parts by
 # python -m gravyflow.tests.coverage_floor. It is raised whenever the total
 # passes it by more than a point, and lowered only by a stated decision.
-fail_under = 85.6
+fail_under = 90.0
