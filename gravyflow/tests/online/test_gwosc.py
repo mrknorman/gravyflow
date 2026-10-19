@@ -19,10 +19,10 @@ from gravyflow.src.dataset.features.event import get_event_catalogue
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "public_sources"
 
 
-def test_run_bounds_match_the_live_run_api():
+def test_run_bounds_and_detectors_match_the_live_run_api():
     live = fetch_gwosc_runs()
     assert {name: live[name] for name in GWOSC_RUNS} == {
-        name: (run["gps_start"], run["gps_end"]) for name, run in GWOSC_RUNS.items()}
+        name: (run["gps_start"], run["gps_end"], run["detectors"]) for name, run in GWOSC_RUNS.items()}
 
 
 def test_the_timeline_fixture_is_the_live_timeline():

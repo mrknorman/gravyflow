@@ -6,10 +6,10 @@ and public-data defaults.
 The default run is offline. Network access is replaced by small committed fixtures in
 ``fixtures/public_sources``:
 
-- ``gwosc_timeline.json``: GWOSC timeline segments over one day in each of O1, O2, O3a
-  and O3b, from https://gwosc.org: DATA, BURST_CAT1 and BURST_CAT2, and the
-  hardware-injection flags NO_CBC_HW_INJ, NO_BURST_HW_INJ, NO_STOCH_HW_INJ and
-  NO_DETCHAR_HW_INJ, for H1 and L1.
+- ``gwosc_timeline.json``: GWOSC timeline segments over one day in each of O1, O2, O3a,
+  O3b, O4a and O4b, each centred on an event, from https://gwosc.org: DATA, BURST_CAT1
+  and BURST_CAT2, and the hardware-injection flags NO_CBC_HW_INJ, NO_BURST_HW_INJ,
+  NO_STOCH_HW_INJ and NO_DETCHAR_HW_INJ, for H1 and L1, and for V1 in O4b.
 - ``gravityspy_{IFO}_{RUN}.csv``: a few hundred rows of the Gravity Spy machine-learning
   classifications (Glanzer et al. 2023, Class. Quantum Grav. 40 065004; Zenodo,
   doi:10.5281/zenodo.5649212, v1.0.0, CC-BY-4.0), restricted to the columns gravyflow
@@ -24,7 +24,6 @@ That the live sources still agree with these fixtures is checked apart, in
 import csv
 import hashlib
 import json
-import re
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -35,9 +34,9 @@ import pytest
 
 import gravyflow as gf
 from gravyflow.src.resources import PACKAGE
-from gravyflow.src.dataset.acquisition import sources
+from gravyflow.src.dataset.acquisition import gwosc_data, sources
 from gravyflow.src.dataset.acquisition.base import ObservingRunData
-from gravyflow.tests.conftest import gwosc_serving, refuse_internet
+from gravyflow.tests.conftest import GwoscLocator, gwosc_serving, refuse_internet
 
 FIXTURES = Path(__file__).parent / "fixtures" / "public_sources"
 TIMELINE = json.loads((FIXTURES / "gwosc_timeline.json").read_text())
@@ -48,17 +47,21 @@ GWOSC_RUN_BOUNDS = {
     "O2": (1164556817, 1187733618),
     "O3a": (1238166018, 1253977218),
     "O3b": (1256655618, 1269363618),
+    "O4a": (1368195220, 1389456018),
+    "O4b": (1396417050, 1422118818),
 }
 # Public events inside the fixture windows, used as the event-veto list, with their
 # source-frame chirp masses from GWOSC's GWTC table: GW150914, GW170817, GW190521,
-# GW200129_065458.
-FIXTURE_EVENT_TIMES = np.array([1126259462.4, 1187008882.4, 1242442967.4, 1264316116.4])
+# GW200129_065458, GW230529_181500 (O4a) and GW250114_082203 (O4b).
+FIXTURE_EVENT_TIMES = np.array([1126259462.4, 1187008882.4, 1242442967.4, 1264316116.4,
+                                1369419318.7, 1420878141.2])
 FIXTURE_EVENTS = {
     "gps": FIXTURE_EVENT_TIMES,
-    "chirp_mass_source": np.array([27.9, 1.186, 63.3, 27.2]),
-    "name": np.array(["GW150914", "GW170817", "GW190521", "GW200129_065458"]),
+    "chirp_mass_source": np.array([27.9, 1.186, 63.3, 27.2, 1.94, 28.71]),
+    "name": np.array(["GW150914", "GW170817", "GW190521", "GW200129_065458",
+                      "GW230529_181500", "GW250114_082203"]),
     "catalog": np.array(["GWTC-2.1-confident", "GWTC-1-confident",
-                         "GWTC-2.1-confident", "GWTC-3-confident"]),
+                         "GWTC-2.1-confident", "GWTC-3-confident", "GWTC-4.0", "GWTC-5.0"]),
 }
 
 
@@ -237,6 +240,7 @@ class TestRunBounds:
         (gf.ObservingRun.O1, ["O1"]),
         (gf.ObservingRun.O2, ["O2"]),
         (gf.ObservingRun.O3, ["O3a", "O3b"]),
+        (gf.ObservingRun.O4, ["O4a", "O4b"]),
     ])
     def test_bounds_match_gwosc_run_api(self, run, gwosc_runs):
         assert run.value.start_gps_time == GWOSC_RUN_BOUNDS[gwosc_runs[0]][0]
@@ -404,33 +408,22 @@ def _fake_strain(start, rate, duration, channel="H1:FAKE-STRAIN"):
 
 class GwoscRecorder:
     """
-    GWOSC as gwosc 0.8 and gwpy see it, offline. ``locate`` is gwosc's ``get_urls``: a
-    run's bulk data is the dataset named by the run (``O3a``), its release chosen by the
-    rate, and its files lie in ``/archive/data/<release>/`` (``releases``, by run and
-    rate; GWOSC's own by default). A release name such as ``O3a_4KHZ_R1`` matches no
-    dataset, as at GWOSC. ``__call__`` is gwpy's ``fetch_open_data``, which locates the
+    GWOSC as gwosc 0.8 and gwpy see it, offline: ``locate`` is gwosc's ``get_urls``
+    (``GwoscLocator``), and ``__call__`` gwpy's ``fetch_open_data``, which locates the
     same way and serves Gaussian strain. Each records its calls' keywords.
     """
 
     def __init__(self, releases=None):
-        self.releases = releases or sources.GWOSC_STRAIN_DATASETS
-        self.located, self.calls = [], []
+        self.locate = GwoscLocator(releases)
+        self.calls = []
 
-    def _release(self, dataset, sample_rate):
-        runs = [run for run in self.releases if dataset is not None and re.fullmatch(dataset, run)]
-        if len(runs) != 1:
-            raise ValueError(f"Cannot find a GWOSC dataset matching {dataset!r}")
-        return self.releases[runs[0]][float(sample_rate)]
-
-    def locate(self, detector, start, end, dataset=None, sample_rate=4096, **kwargs):
-        self.located.append({"detector": detector, "dataset": dataset, "sample_rate": sample_rate})
-        release = self._release(dataset, sample_rate)
-        tile = int(start // 4096 * 4096)
-        return [f"https://gwosc.org/archive/data/{release}/{tile}/{detector[0]}-{detector}_{release}-{tile}-4096.hdf5"]
+    @property
+    def located(self):
+        return self.locate.calls
 
     def __call__(self, ifo, start, end, sample_rate=4096, **kwargs):
         self.calls.append({"ifo": ifo, "start": start, "end": end, "sample_rate": sample_rate, **kwargs})
-        self._release(kwargs.get("dataset"), sample_rate)
+        self.locate.release(kwargs.get("dataset"), sample_rate)
         return _fake_strain(start, sample_rate, end - start)
 
 
@@ -779,6 +772,95 @@ class TestGravitySpyCatalogue:
     def test_no_public_release_for_o4(self, offline_public_sources):
         with pytest.raises(ValueError, match="Gravity Spy"):
             gf.get_glitch_times(gf.IFO.L1, observing_run=gf.ObservingRun.O4)
+
+
+# =============================================================================
+# O4: GWOSC'S O4a (H1, L1) AND O4b (H1, L1, V1)
+# =============================================================================
+
+O4_EVENTS = {"GW230529_181500": 1369419318.7, "GW250114_082203": 1420878141.2}
+
+
+def _o4_noise_obtainer():
+    return gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
+                              observing_runs=gf.ObservingRun.O4)
+
+
+class TestObservingRunO4:
+
+    @pytest.mark.parametrize("ifo, datasets", [
+        ("H1", ["O4a_4KHZ_R1", "O4b_4KHZ_R1"]),
+        ("L1", ["O4a_4KHZ_R1", "O4b_4KHZ_R1"]),
+        ("V1", ["O4b_4KHZ_R1"]),
+    ])
+    def test_o4_noise_is_read_where_o4s_default_flags_pass(self, offline_public_sources, ifo, datasets):
+        """
+        O4's readable time is GWOSC's O4a and O4b timelines under the default flags, each
+        detector where GWOSC publishes it (Virgo in O4b only), asked for by those flags.
+        """
+        readable = _o4_noise_obtainer().get_all_segment_times(gf.IFO[ifo])
+        expected = np.concatenate([_fixture_intersection(d, ifo, gf.DEFAULT_GWOSC_FLAGS) for d in datasets])
+        np.testing.assert_array_equal(readable, expected)
+        asked = {tuple(url.split("/timeline/segments/json/")[1].split("/")[:2])
+                 for url in offline_public_sources.requests if "/timeline/segments/json/" in url}
+        assert asked == {(d, f"{ifo}_{flag}") for d in datasets for flag in gf.DEFAULT_GWOSC_FLAGS}
+
+    @pytest.mark.parametrize("ifo", ["H1", "L1"])
+    def test_o4_events_are_vetoed_from_o4_noise(self, offline_public_sources, ifo):
+        """
+        Each O4 event in a detector's data is taken from its noise: its in-band signal
+        and its footprint widened by the split's guard, as in every run. (The veto list
+        is every detector's; Virgo was not observing at either fixture event.)
+        """
+        obtainer = _o4_noise_obtainer()
+        readable = obtainer.get_all_segment_times(gf.IFO[ifo])
+        admissible = obtainer.noise_admissible_segments(gf.IFO[ifo])
+        vetoes = obtainer.get_event_veto_segments()
+        bitten = 0
+        for name, gps in O4_EVENTS.items():
+            around = np.array([[gps - 300.0, gps + 300.0]])
+            if not len(gwosc_data.intersect_segments(readable, around)):
+                continue  # this detector had no data at the event
+            bitten += 1
+            (veto,) = [v for v in gwosc_data.coalesce_segments(vetoes) if v[0] <= gps <= v[1]]
+            assert len(gwosc_data.intersect_segments(admissible, [veto])) == 0, name
+        assert bitten >= 1, f"no O4 event lies in {ifo}'s fixture data: the test proves nothing"
+
+    def test_a_detector_is_read_only_in_the_runs_gwosc_publishes_it_in(self, offline_public_sources):
+        """
+        Virgo is in O4b but not O4a (nor O1): its O4 time is O4b's, and no O4a timeline is
+        asked for, which GWOSC does not publish (404). A detector no configured run
+        publishes is refused by name.
+        """
+        assert gwosc_data.GWOSC_RUNS["O4a"]["detectors"] == ("H1", "L1")
+        assert gwosc_data.GWOSC_RUNS["O4b"]["detectors"] == ("H1", "L1", "V1")
+        readable = _o4_noise_obtainer().get_all_segment_times(gf.IFO.V1)
+        assert len(readable) and readable[0, 0] >= GWOSC_RUN_BOUNDS["O4b"][0]
+        assert not any("/O4a_4KHZ_R1/V1_" in url for url in offline_public_sources.requests)
+        o1 = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
+                                observing_runs=gf.ObservingRun.O1)
+        with pytest.raises(ValueError, match=r"GWOSC publishes no V1 data in O1: O1 has H1, L1"):
+            o1.get_all_segment_times(gf.IFO.V1)
+
+    def test_o4_glitches_are_refused_by_name(self, offline_public_sources, caplog):
+        """
+        Gravity Spy's public release covers O1 to O3b, H1 and L1. Asking for glitches in
+        O4, or Virgo's in any run, is refused by name, never served empty; noise in O4
+        (and Virgo's) is served with no glitch veto, and a warning names why.
+        """
+        with pytest.raises(ValueError, match=r"No public Gravity Spy release covers GPS .*O1, O2, O3a, O3b"):
+            gf.get_glitch_catalogue(gf.IFO.H1, observing_run=gf.ObservingRun.O4)
+        with pytest.raises(ValueError, match=r"No public Gravity Spy release for V1 O3a"):
+            gf.get_glitch_catalogue(gf.IFO.V1, observing_run=gf.ObservingRun.O3)
+        glitches = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
+                                      observing_runs=gf.ObservingRun.O4)
+        with pytest.raises(ValueError, match="No public Gravity Spy release covers"):
+            glitches.get_valid_segments(ifos=[gf.IFO.L1], seed=1, group_name="train")
+        with caplog.at_level("WARNING"):
+            vetoes = _o4_noise_obtainer().get_glitch_veto_segments(gf.IFO.L1)
+        assert vetoes.shape == (0, 2)
+        assert any("No glitch veto for L1" in record.getMessage() and "Gravity Spy" in record.getMessage()
+                   for record in caplog.records), caplog.text
 
 
 # =============================================================================

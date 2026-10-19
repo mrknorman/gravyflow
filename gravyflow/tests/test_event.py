@@ -12,6 +12,7 @@ from gwpy.table import EventTable
 import gravyflow as gf
 from gravyflow.src.resources import PACKAGE
 from gravyflow.src.dataset.features import event as event_module
+from gravyflow.tests.test_public_sources import FIXTURES, offline_event_api  # noqa: F401  (pytest fixture)
 
 
 _CATALOGUE = {
@@ -215,3 +216,45 @@ class TestCatalogMappings:
         confident = set(event_module.CONFIDENT_CATALOGS)
         marginal = set(event_module.MARGINAL_CATALOGS)
         assert len(confident & marginal) == 0
+
+    def test_every_gwtc_release_gwosc_lists_has_a_confidence(self):
+        """
+        Each GWTC catalogue of the event-API snapshot is read as confident or marginal,
+        O4's GWTC-4.0, GWTC-4.1 and GWTC-5.0 among them: a release left out is served
+        by no event-time or event-example query (its events stay vetoed from noise).
+        """
+        listed = {row["catalog"] for row in _snapshot_rows() if row["catalog"].startswith("GWTC")}
+        assert {"GWTC-4.0", "GWTC-4.1", "GWTC-5.0"} <= listed
+        classified = set(event_module.CONFIDENT_CATALOGS) | set(event_module.MARGINAL_CATALOGS)
+        assert listed - classified == set()
+
+
+def _snapshot_rows():
+    import csv
+
+    with open(FIXTURES / "gwosc_events.csv", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+class TestObservingRunO4Events:
+    """O4's events, from the event-API snapshot: GWTC-4.x for O4a, GWTC-5.0 for O4b."""
+
+    def test_o4_events_are_confident_and_named_once(self, offline_event_api):
+        o4 = gf.ObservingRun.O4.value
+        expected = {row["name"] for row in _snapshot_rows()
+                    if row["catalog"] in event_module.CONFIDENT_CATALOGS
+                    and o4.start_gps_time <= float(row["gps"]) <= o4.end_gps_time}
+        events = event_module.get_events_with_params(observing_runs=[gf.ObservingRun.O4])
+        # 140 in O4a (GWTC-4.1, a superset of GWTC-4.0's 129) and 161 in O4b (GWTC-5.0).
+        assert len(expected) == 301 and {"GW230529_181500", "GW250114_082203"} <= expected
+        assert [e["name"] for e in events if e["name"] in expected] == [e["name"] for e in events]
+        assert len({e["name"] for e in events}) == len(events) == len(expected)
+        assert [e["gps"] for e in events] == sorted(e["gps"] for e in events)
+        assert {e["observing_run"] for e in events} == {"O4"}
+        # Confident times include every O4 release's, and a marginal query none of them.
+        confident = gf.get_confident_event_times()
+        for catalog in ("GWTC-4.0", "GWTC-4.1", "GWTC-5.0"):
+            times = [float(row["gps"]) for row in _snapshot_rows() if row["catalog"] == catalog]
+            assert len(times) and np.all(np.isin(times, confident)), catalog
+        marginal = gf.get_marginal_event_times()
+        assert not np.any((marginal >= o4.start_gps_time) & (marginal <= o4.end_gps_time))

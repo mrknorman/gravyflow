@@ -37,15 +37,23 @@ logger = logging.getLogger(__name__)
 
 GWOSC_HOST = "https://gwosc.org"
 
-#: GWOSC run bounds and the timeline dataset that holds each run's flags.
+#: GWOSC run bounds, the detectors GWOSC publishes data of in each run, and the timeline
+#: dataset that holds each run's flags. A detector a run does not list has no timeline
+#: there (GWOSC answers 404): Virgo is in neither O1 nor O4a.
 #: Source: https://gwosc.org/api/v2/runs and https://gwosc.org/api/v2/runs/{run}/datasets.
 GWOSC_RUNS: Dict[str, Dict] = {
-    "O1": {"gps_start": 1126051217, "gps_end": 1137254417, "dataset": "O1"},
-    "O2": {"gps_start": 1164556817, "gps_end": 1187733618, "dataset": "O2_4KHZ_R1"},
-    "O3a": {"gps_start": 1238166018, "gps_end": 1253977218, "dataset": "O3a_4KHZ_R1"},
-    "O3b": {"gps_start": 1256655618, "gps_end": 1269363618, "dataset": "O3b_4KHZ_R1"},
-    "O4a": {"gps_start": 1368195220, "gps_end": 1389456018, "dataset": "O4a_4KHZ_R1"},
-    "O4b": {"gps_start": 1396417050, "gps_end": 1422118818, "dataset": "O4b_4KHZ_R1"},
+    "O1": {"gps_start": 1126051217, "gps_end": 1137254417, "dataset": "O1",
+           "detectors": ("H1", "L1")},
+    "O2": {"gps_start": 1164556817, "gps_end": 1187733618, "dataset": "O2_4KHZ_R1",
+           "detectors": ("H1", "L1", "V1")},
+    "O3a": {"gps_start": 1238166018, "gps_end": 1253977218, "dataset": "O3a_4KHZ_R1",
+            "detectors": ("H1", "L1", "V1")},
+    "O3b": {"gps_start": 1256655618, "gps_end": 1269363618, "dataset": "O3b_4KHZ_R1",
+            "detectors": ("H1", "L1", "V1")},
+    "O4a": {"gps_start": 1368195220, "gps_end": 1389456018, "dataset": "O4a_4KHZ_R1",
+            "detectors": ("H1", "L1")},
+    "O4b": {"gps_start": 1396417050, "gps_end": 1422118818, "dataset": "O4b_4KHZ_R1",
+            "detectors": ("H1", "L1", "V1")},
 }
 
 #: Data present only.
@@ -117,14 +125,14 @@ def _get_json(url: str) -> Dict:
     return response.json()
 
 
-def fetch_gwosc_runs(host: str = GWOSC_HOST) -> Dict[str, Tuple[int, int]]:
-    """Query the live GWOSC run API: {run name: (gps_start, gps_end)}."""
+def fetch_gwosc_runs(host: str = GWOSC_HOST) -> Dict[str, Tuple[int, int, Tuple[str, ...]]]:
+    """Query the live GWOSC run API: {run name: (gps_start, gps_end, detectors)}."""
     runs = {}
     url = f"{host}/api/v2/runs?format=json"
     while url:
         page = _get_json(url)
         for run in page["results"]:
-            runs[run["name"]] = (int(run["gps_start"]), int(run["gps_end"]))
+            runs[run["name"]] = (int(run["gps_start"]), int(run["gps_end"]), tuple(run["detectors"]))
         url = page.get("next")
     return runs
 
@@ -294,18 +302,29 @@ def get_gwosc_segments(
         start, end: Optional GPS bounds to clip the result to.
 
     Returns:
-        A sorted, coalesced (N, 2) float64 array of [start, end) GPS segments.
+        A sorted, coalesced (N, 2) float64 array of [start, end) GPS segments. A run
+        GWOSC publishes no data of the detector in (``GWOSC_RUNS``' detectors, such as
+        Virgo in O4a) holds none of its time, and is never asked for a timeline.
+
+    Raises:
+        ValueError: an unknown run, or a detector none of ``gwosc_runs`` has data of
+            (Virgo in O1 alone), by name.
     """
     flags = tuple(flags)
     if not flags:
         raise ValueError("At least one GWOSC flag is required (e.g. 'DATA').")
+    unknown = [run for run in gwosc_runs if run not in GWOSC_RUNS]
+    if unknown:
+        raise ValueError(f"Unknown GWOSC run {unknown[0]!r}; known runs: {sorted(GWOSC_RUNS)}.")
+    published = [run for run in gwosc_runs if ifo_name in GWOSC_RUNS[run]["detectors"]]
+    if gwosc_runs and not published:
+        raise ValueError(
+            f"GWOSC publishes no {ifo_name} data in {', '.join(gwosc_runs)}: "
+            + "; ".join(f"{run} has {', '.join(GWOSC_RUNS[run]['detectors'])}" for run in gwosc_runs) + "."
+        )
 
     per_run = []
-    for run_name in gwosc_runs:
-        if run_name not in GWOSC_RUNS:
-            raise ValueError(
-                f"Unknown GWOSC run {run_name!r}; known runs: {sorted(GWOSC_RUNS)}."
-            )
+    for run_name in published:
         run = GWOSC_RUNS[run_name]
         segments = None
         for flag in flags:

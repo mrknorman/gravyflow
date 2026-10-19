@@ -4,7 +4,8 @@ Gravitational-wave events from the GWOSC event API.
 ``get_event_catalogue`` is the one event list behind the noise vetoes, the glitch
 catalogue's event exclusion and the event-time functions: every event in every
 catalogue GWOSC's event API lists (https://gwosc.org/eventapi/json/). That is the GWTC
-releases (confident, marginal and auxiliary, and the cumulative GWTC table) and also
+releases (confident, marginal and auxiliary, O4's GWTC-4.0, GWTC-4.1 and GWTC-5.0, and
+the cumulative GWTC table) and also
 the other lists GWOSC hosts, such as O3_IMBH_marginal, IAS-O3a, O3_Discovery_Papers,
 O4_Discovery_Papers and O1_O2-Preliminary: the conservative reading of "real events",
 at a negligible cost in livetime.
@@ -71,13 +72,19 @@ def mass_ambiguous(mass1: float, mass1_lower: float, mass1_upper: float,
             return True
     return False
 
-# Catalog mappings by event type
+# Catalog mappings by event type. The cumulative GWTC table comes first, so an event it
+# lists is given from it (``get_events_with_params``). GWTC-4.0 and its update GWTC-4.1
+# (O4a) and GWTC-5.0 (O4b) are published as one list each, with no marginal list; every
+# entry of each has p_astro of at least 0.5 (GWOSC's event API, 2026-10-19).
 CONFIDENT_CATALOGS = [
     "GWTC",
     "GWTC-1-confident",
     "GWTC-2",
     "GWTC-2.1-confident",
     "GWTC-3-confident",
+    "GWTC-4.0",
+    "GWTC-4.1",
+    "GWTC-5.0",
 ]
 
 MARGINAL_CATALOGS = [

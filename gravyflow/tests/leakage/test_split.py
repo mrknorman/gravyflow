@@ -27,10 +27,10 @@ SPLITS = ("train", "validate", "test")
 GUARD_SECONDS = 128.0
 
 
-def _time_sets(fixture, runs):
-    """{split: SegmentList} of every detector's served time, inside O3, for one configuration."""
-    o3 = gf.ObservingRun.O3.value
-    bound = SegmentList([Segment(o3.start_gps_time, o3.end_gps_time)])
+def _time_sets(fixture, runs, inside="O3"):
+    """{split: SegmentList} of every detector's served time, inside run ``inside``, for one configuration."""
+    run = gf.ObservingRun[inside].value
+    bound = SegmentList([Segment(run.start_gps_time, run.end_gps_time)])
     out = {}
     for split in SPLITS:
         obtainer = gf.IFODataObtainer(
@@ -44,24 +44,27 @@ def _time_sets(fixture, runs):
     return out
 
 
-def test_split_is_absolute(world):
+@pytest.mark.parametrize("inside, configurations", [
+    ("O3", {"[O3]": ("O3",), "[O1, O2, O3]": ("O1", "O2", "O3"), "[O3, O1]": ("O3", "O1"),
+            "[O3, O4]": ("O3", "O4"), "[O1, O2, O3, O4]": ("O1", "O2", "O3", "O4")}),
+    ("O4", {"[O4]": ("O4",), "[O1, O2, O3, O4]": ("O1", "O2", "O3", "O4"), "[O4, O3]": ("O4", "O3")}),
+], ids=["O3 time", "O4 time"])
+def test_split_is_absolute(world, inside, configurations):
     """
     A GPS time's split depends only on the time: the same O3 time sets result whether
-    the runs are [O3], [O1, O2, O3] or [O3, O1].
+    the runs are [O3], [O1, O2, O3], [O3, O1] or include O4; and O4's time is split
+    into train, validate and test as every run's is, whatever runs are configured with it.
     """
-    o3 = gf.ObservingRun.O3.value.start_gps_time
     o1 = gf.ObservingRun.O1.value.start_gps_time
     o2 = gf.ObservingRun.O2.value.start_gps_time
-    intervals = [(o1 + 1e5, o1 + 2e5), (o2 + 1e5, o2 + 2e5), (o3 + 1e4, o3 + 1e4 + 400 * 8192.0)]
+    o3 = gf.ObservingRun.O3.value.start_gps_time
+    o4 = gf.ObservingRun.O4.value.start_gps_time
+    intervals = [(o1 + 1e5, o1 + 2e5), (o2 + 1e5, o2 + 2e5), (o3 + 1e4, o3 + 1e4 + 400 * 8192.0),
+                 (o4 + 1e4, o4 + 1e4 + 400 * 8192.0)]
     fixture = fx._fixture(intervals, 256.0, "O3", ("O3",))
-    configurations = {
-        "[O3]": ("O3",),
-        "[O1, O2, O3]": ("O1", "O2", "O3"),
-        "[O3, O1]": ("O3", "O1"),
-    }
     with world(fixture):
-        sets = {name: _time_sets(fixture, runs) for name, runs in configurations.items()}
-    reference = sets["[O3]"]
+        sets = {name: _time_sets(fixture, runs, inside) for name, runs in configurations.items()}
+    reference = sets[next(iter(configurations))]
     for split in SPLITS:
         assert abs(reference[split]) > 0, split
     for a, b in [(s, t) for i, s in enumerate(SPLITS) for t in SPLITS[i + 1:]]:
@@ -71,7 +74,24 @@ def test_split_is_absolute(world):
         for name in configurations for split in SPLITS
     }
     moved = {key: seconds for key, seconds in differences.items() if seconds > 0}
-    assert not moved, f"seconds of O3 time whose split changed with the configuration: {moved}"
+    assert not moved, f"seconds of {inside} time whose split changed with the configuration: {moved}"
+
+
+def test_o4_blocks_take_the_default_fractions_and_no_reservation():
+    """
+    O4's blocks (O4a's start to O4b's end) fall in test, validate and train at the
+    default fractions, as every run's do, and none is reserved: the default reservation
+    is MLGWSC-1's O3a time alone. A run never enters the split's fingerprint.
+    """
+    spec = gf.SplitSpec()
+    o4 = gf.ObservingRun.O4.value
+    blocks = range(spec.block_of(o4.start_gps_time), spec.block_of(o4.end_gps_time) + 1)
+    counts = Counter(spec.block_split(block) for block in blocks)
+    for name, fraction in spec.fractions:
+        assert abs(counts[name] / len(blocks) - fraction) < 0.02, (name, counts, len(blocks))
+    reserved = spec.reserved_time()
+    assert len(reserved) and not np.any((reserved[:, 1] > o4.start_gps_time) & (reserved[:, 0] < o4.end_gps_time))
+    assert spec.reserving(o4.start_gps_time, o4.end_gps_time) is None
 
 
 PAIRS = [("train", "test"), ("validate", "train"), ("test", "validate")]

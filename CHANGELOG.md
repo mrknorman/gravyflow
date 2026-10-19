@@ -136,6 +136,13 @@ repository before it may need the changes below.
 
 ### Fixed
 
+- O4's GWTC releases (GWTC-4.0 and GWTC-4.1 for O4a, GWTC-5.0 for O4b) were read as neither confident nor
+  marginal: the event-time queries by confidence left them out (the noise vetoes always held them). They are
+  confident catalogues now.
+- A detector was asked for in every configured run, so Virgo over `ObservingRun.O4` asked GWOSC for an O4a
+  timeline it does not publish (404, then the slow paginated fallback), and Virgo in O1 alone read as no data.
+  `GWOSC_RUNS` now names each run's detectors, from GWOSC's run API: a detector is read only in the runs that
+  publish it, and one no configured run publishes is refused by name.
 - No GWOSC strain could be fetched: `gf.GWOSC()` asked gwosc for the release by name (`O3a_4KHZ_R1`), which
   gwosc 0.8 does not list (it names a run's bulk data by the run, `O3a`, and picks the release by the rate), so
   every real-noise read, in every run, was refused. It now names the run, and refuses any file GWOSC lists outside
