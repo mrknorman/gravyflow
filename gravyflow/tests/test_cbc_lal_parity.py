@@ -34,9 +34,11 @@ F_REF = 20.0
 PHASE = 0.3
 DISTANCE_MPC = 400.0
 #: A stated target, not a derivation: a match M lowers the SNR by M and the volume a
-#: search reaches by M ** 3, so 0.9999 costs at most 0.03% of it. Measured worst, at
-#: gravyflow df4acab on CPU: 1 - 2.6e-8 (TaylorF2), so a regression to 1 - 1e-4 still passes.
-MINIMUM_MATCH = 0.9999
+#: search reaches by M ** 3, so 0.99999 costs at most 0.003% of it. Measured worst, at
+#: gravyflow df4acab on CPU: 1 - 2.6e-8 (TaylorF2). The floor admits a loss of 1e-5,
+#: about 400 times the measured worst, so a regression to 1 - 1e-5 still passes and
+#: anything larger fails.
+MINIMUM_MATCH = 0.99999
 
 # A band: the window, the merger time within it, and the match's lower frequency.
 BINARY_BLACK_HOLE = dict(duration=32.0, coalescence_time=30.0, f_low=20.0)
@@ -73,10 +75,11 @@ CASES = {
 # each source's whole inspiral from it. The reference is
 # lalsimulation.SimInspiralTD, LAL's own time-domain waveform for the same source.
 TD_SAMPLE_RATE = 2048.0
-#: A stated target, as MINIMUM_MATCH: 0.999 costs at most 0.3% of a search's volume.
+#: A stated target, as MINIMUM_MATCH: 0.9995 costs at most 0.15% of a search's volume.
 #: Measured worst, at gravyflow df4acab on CPU: 1 - 1.1e-4 (TaylorF2, whose LAL
-#: time-domain waveform is conditioned differently: tapered and high-passed).
-TD_MINIMUM_MATCH = 0.999
+#: time-domain waveform is conditioned differently: tapered and high-passed). The
+#: floor admits a loss of 5e-4, about 4.5 times the measured worst.
+TD_MINIMUM_MATCH = 0.9995
 TD_BINARY_BLACK_HOLE = dict(window=64.0, f_low=20.0)
 TD_BINARY_NEUTRON_STAR = dict(window=128.0, f_low=40.0)
 
