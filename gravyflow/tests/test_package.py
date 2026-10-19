@@ -222,6 +222,24 @@ def test_the_public_api_is_the_documented_list():
         gf.estimate_psd
 
 
+def test_every_gf_name_the_docs_use_resolves():
+    # A doc that names `gf.TransientObtainer` or `gf.EventType` teaches a name that
+    # does not exist: each dotted `gf.` path in docs/*.md must resolve.
+    unresolved, used = [], 0
+    for doc in sorted((ROOT / "docs").glob("*.md")):
+        for number, line in enumerate(doc.read_text().splitlines(), start=1):
+            for path in re.findall(r"\bgf\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)", line):
+                used += 1
+                target = gf
+                for part in path.split("."):
+                    target = getattr(target, part, None)
+                    if target is None:
+                        unresolved.append(f"{doc.name}:{number}: gf.{path}")
+                        break
+    assert used > 50, f"found only {used} gf names in the docs"
+    assert not unresolved, unresolved
+
+
 @pytest.fixture(scope="module")
 def wheel(tmp_path_factory):
     """The wheel built from a copy of this checkout (the build writes beside its source)."""

@@ -1,16 +1,16 @@
 # Transient Obtainer Documentation
 
 ## Overview
-The `TransientObtainer` is a specialized data acquisition class designed to fetch discrete, localized segments of time-series data. Unlike the `NoiseObtainer` (which generates continuous or random noise), the `TransientObtainer` focuses on specific "interesting" times, such as:
+The `TransientDataObtainer` is a specialized data acquisition class designed to fetch discrete, localized segments of time-series data. Unlike the `NoiseDataObtainer` (which draws continuous or random noise), the `TransientDataObtainer` focuses on specific "interesting" times, such as:
 *   **Gravitational Wave Events**: Known mergers (e.g., GW150914).
 *   **Glitches**: Short-duration noise artifacts identified by GravitySpy (e.g., "Blip", "Scattered_Light").
 
-It acts as a high-level wrapper around `IFODataObtainer`, managing the logic of identifying these times, splitting them and planning each detector's read, reading the strain through the store, and serving it in batches.
+`gf.IFODataObtainer` is the factory that returns it, when `data_labels` names events or glitches (and a `NoiseDataObtainer` for noise). It manages the logic of identifying these times, splitting them and planning each detector's read, reading the strain through the store, and serving it in batches.
 
 ## Key Concepts
 
 ### 1. Identify -> Split and plan -> Read
-When initialized, the `TransientObtainer` performs three main steps:
+When initialized, the `TransientDataObtainer` performs three main steps:
 1.  **Identify**: It queries a metadata source (GWOSC event catalogues for events, the public Gravity Spy release for glitches) to find a list of GPS times and labels.
 2.  **Split and plan**: Each record takes its footprint's split (`acquisition.md`, section 2). Each requested detector is planned one read: the transient's own detectors at its time, every other detector at a partner time of its own, in a block of the record's split (a glitch's own; an event's nearest in its run), never at the transient's time (`acquisition.md`, Transient detectors and partners). A record with no partner time is not served, and is counted under `"no partner"`.
 3.  **Read**: Each example reads each detector through the strain store, as noise does: the source's own files (tiles), fetched whole the first time a read needs them and kept under the user cache (`$GRAVYFLOW_CACHE_DIR`, else `~/.gravyflow/cache`), then viewed and resampled to the request's rate. A tile is fetched once and shared by every rate, split and configuration. A planned transient whose strain the source does not deliver is refused by name (`TransientUnavailable`, naming the `exclusions` entry that plans around it); nothing is skipped or zero-filled.
@@ -27,7 +27,7 @@ A split's batches are addressed by index. Training concatenates passes over the 
 
 ## Configuration
 
-The behavior is primarily controlled by the `IFODataObtainer` passed to the constructor.
+The obtainer is built by `gf.IFODataObtainer(...)`, which returns a `TransientDataObtainer` for events and glitches. A dataset reads it through a `gf.NoiseObtainer` (`ifo_data_obtainer=`, with the detectors in `ifos=`), and says the split it serves with `group`.
 
 ### Acquiring Events (GWs)
 
@@ -36,24 +36,31 @@ To fetch known gravitational waves:
 ```python
 import gravyflow as gf
 
-# 1. Configure the source
+# 1. Configure the source: a TransientDataObtainer
 ifo_obtainer = gf.IFODataObtainer(
+    data_quality=gf.DataQuality.BEST,
     observing_runs=[gf.ObservingRun.O3],
-    data_labels=[gf.DataLabel.EVENTS],      # Target Events
-    event_types=[gf.EventType.CONFIDENT]    # Only confirmed detections
+    data_labels=[gf.DataLabel.EVENTS],              # Target Events
+    event_types=[gf.EventConfidence.CONFIDENT],     # Only confirmed detections
 )
 
-# 2. Create the TransientObtainer
-transient_obt = gf.TransientObtainer(
+# 2. Read it through a noise obtainer
+transient_obt = gf.NoiseObtainer(
     ifo_data_obtainer=ifo_obtainer,
-    ifos=[gf.IFO.L1]
+    ifos=[gf.IFO.L1],
+    noise_type=gf.NoiseType.REAL,
 )
 
-# 3. Generate data
-generator = transient_obt(
+# 3. Serve the events (real events are evaluation data: the test split)
+dataset = gf.Dataset(
+    noise_obtainer=transient_obt,
     sample_rate_hertz=2048.0,
-    onsource_duration_seconds=1.0, # Center on event
-    crop=True
+    onsource_duration_seconds=1.0,                  # Centred on the event
+    offsource_duration_seconds=16.0,
+    num_examples_per_batch=4,
+    group="test",
+    input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
+    output_variables=[gf.ReturnVariables.START_GPS_TIME],
 )
 ```
 
@@ -64,15 +71,17 @@ To fetch specific noise shapes (glitches):
 ```python
 # 1. Configure for Glitches
 ifo_obtainer = gf.IFODataObtainer(
+    data_quality=gf.DataQuality.BEST,
     observing_runs=[gf.ObservingRun.O3],
     data_labels=[gf.DataLabel.GLITCHES],     # Target Glitches
     balanced_glitch_types=True               # Optional: Balance classes
 )
 
 # 2. Create Obtainer
-transient_obt = gf.TransientObtainer(
+transient_obt = gf.NoiseObtainer(
     ifo_data_obtainer=ifo_obtainer,
-    ifos=[gf.IFO.L1]
+    ifos=[gf.IFO.L1],
+    noise_type=gf.NoiseType.REAL,
 )
 ```
 
@@ -86,8 +95,8 @@ Nothing is downloaded ahead: a batch's reads fetch the tiles they need, together
 
 ### Handling Glitch Labels
 
-The generator returns: `(onsource, offsource, gps_times, labels)`.
-*   `labels`: An array of integers representing the `GlitchType` index.
+A dataset that lists `gf.ReturnVariables.GLITCH_TYPE` in its `output_variables` returns it per example and detector:
+*   `labels`: An array of integers representing the `GlitchType` index (-1 for an event).
 
 To convert these back to readable names:
 
