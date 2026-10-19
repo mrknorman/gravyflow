@@ -1,17 +1,16 @@
 """
 Aligned-spin template banks: spins through the templates and the bank, the
-placement's metric shortlist, and the streaming filter's bundled bank (its
-key, its range, its coverage by its own metric and by PyCBC's overlap).
+placement's metric shortlist, and the streaming span's match against PyCBC's
+overlap.
 """
 import json
 
 import numpy as np
-import pytest
 
 import gravyflow as gf
 from gravyflow.src.detection import TemplateBank
-from gravyflow.src.detection.stream import STREAM_BANK_MAX_TEMPLATES, StreamingMatchedFilter, stream_bank_placement
-from gravyflow.src.detection.template_grid import MatchSpace, max_matches
+from gravyflow.src.detection.stream import stream_bank_placement
+from gravyflow.src.detection.template_grid import max_matches
 
 SPACE = stream_bank_placement().space
 
@@ -62,57 +61,6 @@ def test_a_spinning_placement_reaches_its_minimal_match():
     shortlisted = bank.fitting_factors(draws[0], draws[1], None, draws[2], draws[3], neighbours=16)
     assert np.median(exact) >= 0.97 and np.min(exact) >= 0.95, (np.median(exact), np.min(exact))
     assert np.all(shortlisted <= exact + 1e-6) and np.mean(shortlisted == exact) >= 0.95
-
-
-# ---------------------------------------------------------------------------
-# The streaming filter's bundled bank
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(scope="module")
-def bundled():
-    return TemplateBank.place(stream_bank_placement(), max_templates=STREAM_BANK_MAX_TEMPLATES, use_bundled=True)
-
-
-def test_the_streaming_filters_default_bank_is_bundled_and_names_what_it_depends_on(bundled):
-    from gravyflow.src.detection.bundle_banks import BUNDLED
-    from gravyflow.src.detection.template_grid import BUNDLED_BANK_DIRECTORY
-    from gravyflow.src.resources import PACKAGE
-    name = "bbh_aligned_5_95_s0.99_mm0.97_2048hz_24s_20hz_o4high.json"
-    assert BUNDLED[name] is stream_bank_placement
-    record = json.loads((PACKAGE / BUNDLED_BANK_DIRECTORY / name).read_text())
-    key = json.loads(json.dumps(stream_bank_placement().key()))
-    assert record["arguments"] == key, \
-        "a stale bundled bank: place it again with python -m gravyflow.src.detection.bundle_banks"
-    assert key["space"]["noise_profile_name"] == "O4_HIGH" and key["space"]["visible_seconds"] == 24.0
-    assert key["spin_range"] == 0.99 and key["minimal_match"] == 0.97 and key["mass_range"] == [5.0, 95.0]
-    assert bundled.to_dict() == record
-    assert StreamingMatchedFilter().bank.to_dict() == record
-
-
-def test_the_bundled_bank_spans_its_range(bundled):
-    # Boundary sweeps put templates on every edge and spin corner.
-    m1, m2, s1, s2 = bundled.parameters
-    assert np.all(m1 >= m2) and m2.min() == 5.0 and m1.max() == 95.0
-    for spin in (s1, s2):
-        assert spin.min() == -0.99 and spin.max() == 0.99
-
-
-def test_the_bundled_bank_covers_its_boundary(bundled):
-    # The mass edges (m2 = 5, m1 = 95) at each spin corner are swept in
-    # order, so between the placement's own boundary candidates the fitting
-    # factor stays near the minimal match (the window-mode banks' bound).
-    edge = np.exp(np.linspace(np.log(5.0), np.log(95.0), 25))
-    m1, m2, s1, s2 = [], [], [], []
-    for a in (0.99, -0.99):
-        for b in (0.99, -0.99):
-            m1 += [edge, np.full(25, 95.0)]
-            m2 += [np.full(25, 5.0), edge]
-            s1 += [np.full(50, a)]
-            s2 += [np.full(50, b)]
-    m1, m2, s1, s2 = (np.concatenate(v) for v in (m1, m2, s1, s2))
-    ff = bundled.fitting_factors(m1, m2, None, s1, s2, neighbours=32)
-    worst = np.argsort(ff)[:3]
-    assert ff.min() >= 0.965, [(m1[i], m2[i].round(2), s1[i], s2[i], ff[i].round(4)) for i in worst]
 
 
 def test_the_bank_metric_with_spins_is_pycbcs_overlap():

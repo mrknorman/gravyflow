@@ -89,7 +89,7 @@ def stream_bank_placement(
     noise_profile_name: str = "O4_HIGH",
 ) -> BankPlacement:
     """
-    The placement of the streaming filter's default bank: aligned-spin
+    A placement of the streaming filter's bank: aligned-spin
     IMRPhenomD binaries with both component masses in `mass_range` and each
     aligned spin in [-spin_range, spin_range], at `minimal_match`, on L1's
     curve in `noise_profile_name` (aLIGO's O4 high projection, H1's and L1's
@@ -103,9 +103,6 @@ def stream_bank_placement(
     return BankPlacement(space, (float(mass_range[0]), float(mass_range[1])), float(minimal_match),
                          spin_range=float(spin_range), neighbours=32)
 
-
-#: The largest bank the default placement may make.
-STREAM_BANK_MAX_TEMPLATES = 20000
 
 #: The fraction of its peak below which a template's ends are cut. Measured at
 #: the default bank's corners (5 to 95 solar masses, spins +-0.99): the energy
@@ -393,10 +390,14 @@ class StreamingMatchedFilter:
     docstring).
 
     Args:
-        bank: the template bank; default the bundled aligned-spin bank of
+        bank: the template bank, for example `TemplateBank.place` of
             `stream_bank_placement`. Its templates are whole over its match
-            space's span (`MatchSpace.templates`), which must have this
-            filter's sample rate and lower band edge.
+            space's span (`MatchSpace.templates`; a bank with no placement
+            takes `stream_bank_placement`'s), which must have this filter's
+            sample rate and lower band edge. There is no default yet: the
+            aligned-spin bank over 5-95 solar masses and spins to 0.99 holds
+            more than 20,000 templates, which this machine cannot filter
+            over a month of strain.
         sample_rate_hertz: the strain's sample rate.
         spectral_config: the band, PSD estimate and whitening filter of each
             block (default STREAM_SPECTRAL_CONFIG).
@@ -408,7 +409,7 @@ class StreamingMatchedFilter:
             per chi-squared step; memory grows with each times the block.
     """
 
-    bank: Optional[TemplateBank] = None
+    bank: TemplateBank
     sample_rate_hertz: float = 2048.0
     spectral_config: SpectralConfig = STREAM_SPECTRAL_CONFIG
     block_seconds: float = 256.0
@@ -426,10 +427,6 @@ class StreamingMatchedFilter:
         if config.lower_frequency_hertz is None:
             raise ValueError("The streaming filter needs a lower band edge (spectral_config.lower_frequency_hertz).")
         config.validate_band(fs)
-        if self.bank is None:
-            self.bank = TemplateBank.place(stream_bank_placement(sample_rate_hertz=fs,
-                                                                 lower_frequency_hertz=config.lower_frequency_hertz),
-                                           max_templates=STREAM_BANK_MAX_TEMPLATES)
         space = self.bank.space
         if space is None:
             space = stream_bank_placement(sample_rate_hertz=fs, lower_frequency_hertz=config.lower_frequency_hertz).space
