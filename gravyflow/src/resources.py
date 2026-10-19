@@ -3,15 +3,17 @@ The data files gravyflow ships, and the manifest of the files it does not.
 
 ``RESOURCES`` is the package's ``res`` directory: the noise profiles, the template
 banks, the smaller trained models and MLGWSC-1's segment list are installed with
-the package. ``MANIFEST`` is every file gravyflow knows that lives elsewhere, each a
-``RemoteFile`` pinned by size and sha256, with its licence and whether gravyflow may
-redistribute it: weights above the wheel's size budget, attached to a GitHub
-release, and benchmark data published by its authors.
+the package. ``MANIFEST`` holds the pinned files gravyflow knows that live
+elsewhere, each a ``RemoteFile`` pinned by size and sha256, with its licence and
+whether gravyflow may redistribute it: weights above the wheel's size budget,
+attached to a GitHub release, and benchmark data published by its authors (such
+as MLGWSC-1's). GWOSC strain and Gravity Spy's catalogues are not pinned files:
+their acquisition modules fetch them, by their own paths.
 
 ``path(name)`` finds a file by its name under ``res``: the package's own copy, else
-the store's copy of the manifest entry. Nothing is downloaded implicitly; ``fetch``
-is the one explicit download, into the store (``dataset.store.files``).
-``weights(name)`` is ``path`` for a trained model.
+the store's copy of the manifest entry. A pinned file is never downloaded
+implicitly; ``fetch`` is its one explicit download, into the store
+(``dataset.store.files``). ``weights(name)`` is ``path`` for a trained model.
 """
 
 from pathlib import Path
@@ -26,8 +28,8 @@ RESOURCES = PACKAGE / "res"
 #: gravyflow's release that publishes the weights too large to ship.
 _RELEASE = GRAVYFLOW_RELEASES + "download/v1.0.0/"
 
-#: Every file gravyflow knows that is not (or not always) installed with it, by its
-#: name under ``res``.
+#: The pinned files gravyflow knows that are not (or not always) installed with it,
+#: by their names under ``res``.
 MANIFEST: Dict[str, RemoteFile] = {entry.name: entry for entry in (
     RemoteFile(
         "model/georgehuerta2017deep_classification.keras",
@@ -68,13 +70,17 @@ def path(name: str) -> Path:
 def fetch(file: Union[str, RemoteFile]) -> Path:
     """
     Download ``file`` (a manifest name, or a ``RemoteFile``) into the store, once,
-    explicitly, and return its path: the one download gravyflow makes. It is checked
-    against its pinned size and sha256 and kept only if both match.
+    explicitly, and return its path: the one download of a pinned file. It is checked
+    against its pinned size and sha256 and kept only if both match. A manifest file
+    the package ships is not downloaded: its shipped copy is returned.
     """
     if isinstance(file, str):
         if file not in MANIFEST:
             raise ValueError(f"{file!r} is not in gravyflow's manifest; known: {sorted(MANIFEST)}.")
         file = MANIFEST[file]
+    shipped = RESOURCES / file.name
+    if MANIFEST.get(file.name) == file and shipped.is_file():
+        return shipped
     return _files.fetch(file)
 
 

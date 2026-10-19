@@ -105,6 +105,34 @@ def test_an_altered_file_is_refused(tmp_path):
         files.cached(remote, root)
 
 
+def test_an_explicit_fetch_rehashes_the_cached_file(tmp_path):
+    """
+    A file altered in place at its pinned size passes ``cached`` (size only, by
+    design) but not an explicit fetch, which refuses it, removes it and names why.
+    """
+    root = tmp_path / "store"
+    _, remote = published(tmp_path)
+    path = files.fetch(remote, root)
+    path.chmod(0o644)
+    path.write_bytes(b"x" * len(PAYLOAD))
+    assert files.cached(remote, root) == path
+    with pytest.raises(RemoteFileMismatch, match=f"sha256 {hashlib.sha256(b'x' * len(PAYLOAD)).hexdigest()}"):
+        files.fetch(remote, root)
+    assert leftovers(remote, root) == [], "nothing corrupt is kept"
+    assert files.fetch(remote, root).read_bytes() == PAYLOAD
+
+
+def test_an_explicit_fetch_removes_a_cached_file_of_another_size(tmp_path):
+    root = tmp_path / "store"
+    _, remote = published(tmp_path)
+    path = files.fetch(remote, root)
+    path.chmod(0o644)
+    path.write_bytes(PAYLOAD + b"x")
+    with pytest.raises(RemoteFileMismatch, match="altered"):
+        files.fetch(remote, root)
+    assert leftovers(remote, root) == []
+
+
 def test_a_lost_race_verifies_the_committed_file(tmp_path, monkeypatch):
     """A writer that finds the name taken checks those bytes against the pin."""
     root = tmp_path / "store"
@@ -135,7 +163,14 @@ def test_a_lost_race_verifies_the_committed_file(tmp_path, monkeypatch):
     (dict(size=-1), "whole number of bytes"),
     (dict(licence=None, redistributable=True), "no licence"),
     (dict(redistributable=False, url=files.GRAVYFLOW_RELEASES + "download/v1/x"), "authors' source"),
-], ids=["absolute", "parent", "scheme", "sha256", "size", "unlicensed", "rehosted"])
+    (dict(redistributable=False, url="http://github.com/mrknorman/gravyflow/releases/download/v1/x"),
+     "authors' source"),
+    (dict(redistributable=False, url="https://GitHub.com:443/MrKNorman/GravyFlow/releases/download/v1/x"),
+     "authors' source"),
+    (dict(redistributable=False, url="https://www.github.com/mrknorman/gravyflow//releases/download/v1/x"),
+     "authors' source"),
+], ids=["absolute", "parent", "scheme", "sha256", "size", "unlicensed", "rehosted", "rehosted-http",
+        "rehosted-case", "rehosted-www"])
 def test_an_entry_is_checked_as_it_is_made(change, message):
     entry = dict(name="model/x.keras", url="https://example.org/x.keras", sha256=SHA256, size=1,
                  licence="MIT", redistributable=True)
@@ -147,6 +182,23 @@ def test_the_manifest_names_its_files_where_they_live():
     assert all(entry.name == name for name, entry in resources.MANIFEST.items())
     with pytest.raises(ValueError, match="not in gravyflow's manifest"):
         resources.fetch("absent/file")
+
+
+def test_an_entry_from_another_source_is_not_a_gravyflow_release():
+    for url in ("https://github.com/mrknorman/gravyflow-data/releases/x",
+                "https://example.org/mrknorman/gravyflow/releases/x"):
+        assert not RemoteFile("m/x", url, SHA256, 1, licence=None, redistributable=False).redistributable
+
+
+def test_fetching_a_shipped_file_returns_the_shipped_copy(monkeypatch):
+    """A file installed with the package is never downloaded, by name or by its entry."""
+    def no_network(*args, **kwargs):
+        raise AssertionError("a shipped file was downloaded")
+
+    monkeypatch.setattr(files.urllib.request, "urlopen", no_network)
+    shipped = resources.RESOURCES / "mlgwsc1" / "segments.csv"
+    assert resources.fetch(mlgwsc1.SEGMENTS) == shipped
+    assert gf.fetch(resources.MANIFEST[mlgwsc1.SEGMENTS]) == shipped
 
 
 # =============================================================================

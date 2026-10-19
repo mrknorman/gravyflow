@@ -3,16 +3,19 @@ Remote files in the store: whole files pinned by sha256, fetched only when asked
 
 A ``RemoteFile`` names one file somewhere else (trained weights, a benchmark's
 segment list, its noise): where it is published, its size, its sha256, its licence
-and whether gravyflow may redistribute it. The manifest of every file gravyflow
-knows is ``resources.MANIFEST``.
+and whether gravyflow may redistribute it. The manifest of the pinned files
+gravyflow knows is ``resources.MANIFEST``. (GWOSC strain and Gravity Spy's
+catalogues are not pinned files: their acquisition modules fetch them.)
 
 - ``cached(remote)`` is the committed file, or ``RemoteFileMissing`` naming the
-  fetch that would make it: nothing is ever downloaded implicitly.
+  fetch that would make it: a remote file is never downloaded implicitly. It
+  checks the file's size, not its sha256.
 - ``fetch(remote)`` downloads it, explicitly, and commits it the way the store
   commits a tile: streamed into a read-only temporary file in its directory,
   fsync'd and hashed on the way, then ``os.link``'d to its name, which fails if the
   name exists, so nothing is overwritten. A download whose size or sha256 differs
-  from the pin is refused and nothing is kept.
+  from the pin is refused and nothing is kept. A file already committed is hashed
+  again; one altered is removed and refused.
 
 A file lives at ``<store root>/files/<sha256>/<basename>``: named by its content,
 so a pin can never serve other bytes, and keeping its basename for readers that
@@ -33,7 +36,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterator, Optional
+from typing import Iterator, NoReturn, Optional
 
 from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
 
@@ -111,7 +114,7 @@ class RemoteFile:
             raise ValueError(f"{self.name}: redistributable must be True or False.")
         if self.redistributable and self.licence is None:
             raise ValueError(f"{self.name} has no licence, so gravyflow may not redistribute it.")
-        if not self.redistributable and self.url.startswith(GRAVYFLOW_RELEASES):
+        if not self.redistributable and _is_gravyflow_release(self.url):
             raise ValueError(
                 f"{self.name} may not be redistributed, so it is fetched from its authors' source, "
                 f"never from gravyflow's releases ({self.url})."
@@ -123,13 +126,31 @@ class RemoteFile:
         return root / FILES_DIRECTORY / self.sha256 / PurePosixPath(self.name).name
 
 
+def _is_gravyflow_release(url: str) -> bool:
+    """
+    Whether ``url`` is under ``GRAVYFLOW_RELEASES`` however it is spelled: either
+    web scheme, any case of host and path, a port, a ``www.`` host or doubled
+    slashes. Compared parsed, so no spelling slips past a string prefix.
+    """
+    def parts(url: str):
+        split = urllib.parse.urlsplit(url)
+        host = (split.hostname or "").removeprefix("www.")
+        scheme = "web" if split.scheme.lower() in ("http", "https") else split.scheme.lower()
+        return scheme, host, tuple(part.lower() for part in split.path.split("/") if part)
+
+    scheme, host, path = parts(url)
+    release_scheme, release_host, release_path = parts(GRAVYFLOW_RELEASES)
+    return (scheme, host) == (release_scheme, release_host) and path[:len(release_path)] == release_path
+
+
 def cached(remote: RemoteFile, root: Optional[Path] = None) -> Path:
     """
     The committed copy of ``remote`` under the store's ``root``; ``RemoteFileMissing``
     when it has not been fetched, naming the explicit fetch. A file of another size
-    at its path was altered and is refused by name. Its sha256 was checked when it
-    was committed and is not read again here: the file is read-only and named by
-    that sha256, so only a change from outside the store could alter it.
+    at its path was altered and is refused by name. Its sha256 is not read here, to
+    keep every read cheap: it was checked when the file was committed, the file is
+    read-only and named by that sha256, so only a change from outside the store
+    could alter it, and an explicit ``fetch`` reads it again.
     """
     path = remote.path(root)
     try:
@@ -151,16 +172,23 @@ def fetch(remote: RemoteFile, root: Optional[Path] = None,
           timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Path:
     """
     Download ``remote`` into the store under ``root``, once, and return its path; the
-    committed copy when it is already there. Explicit by design: nothing else
-    downloads. Refuses, keeping nothing: too little free disk for it
-    (``StoreWriteError``, ENOSPC), a failed download (``RemoteFetchFailed``), and
-    bytes of another size or sha256 (``RemoteFileMismatch``).
+    committed copy when it is already there, hashed again first, since an explicit
+    fetch is where a file altered in place is caught (``cached`` checks its size
+    only). Explicit by design: nothing else downloads. Refuses, keeping nothing:
+    too little free disk for it (``StoreWriteError``, ENOSPC), a failed download
+    (``RemoteFetchFailed``), and bytes of another size or sha256, downloaded or
+    already committed (``RemoteFileMismatch``; an altered committed file is removed,
+    so the next fetch downloads it afresh).
     """
     path = remote.path(root)
     try:
-        return cached(remote, root)
+        cached(remote, root)
     except RemoteFileMissing:
         pass
+    except RemoteFileMismatch:
+        _refuse_altered(remote, path, f"{path.stat().st_size:,} bytes")
+    else:
+        return _verified(remote, path)
     directory = path.parent
     with _named("make the directory", directory):
         directory.mkdir(parents=True, exist_ok=True)
@@ -208,6 +236,25 @@ def fetch(remote: RemoteFile, root: Optional[Path] = None,
     finally:
         _remove_temporary(temporary)
     return path
+
+
+def _verified(remote: RemoteFile, path: Path) -> Path:
+    """``path``, the committed copy of ``remote``, if its bytes hash to the pin; else refused."""
+    with _named("verify the committed file", path), open(path, "rb") as handle:
+        found = file_sha256(handle)
+    if found != remote.sha256:
+        _refuse_altered(remote, path, f"bytes with sha256 {found}")
+    return path
+
+
+def _refuse_altered(remote: RemoteFile, path: Path, held: str) -> NoReturn:
+    """Remove ``path``, a committed copy of ``remote`` altered to hold ``held``, and refuse it."""
+    with _named("remove the altered file", path):
+        path.unlink()
+    raise RemoteFileMismatch(
+        f"{path} held {held}, not the {remote.size:,} bytes with sha256 {remote.sha256} pinned for "
+        f"{remote.name}: it was altered. It is removed; fetch it again."
+    )
 
 
 @contextlib.contextmanager
