@@ -99,6 +99,10 @@ def write_validation(path, model, dataset_args, config):
     saved.config_sha256 = config_fingerprint(saved.config, dataset_args)
     saved.far_scores, saved.noise_gps_times = np.zeros(4), np.zeros(4)
     saved.efficiency_data = {"snrs": np.zeros(4), "scores": np.zeros(4)}
+    # Every stage, the volume set's too, so that a matching checkpoint scores nothing again.
+    saved.volume_data = {"scores": np.zeros(4), "chirp_distances": np.ones(4), "distances": np.ones(4),
+                         "snrs": np.zeros(4), "mass1": np.full(4, 30.0), "mass2": np.full(4, 30.0),
+                         "reach_mpc": np.float64(1.0)}
     saved.save(path)
 
 
