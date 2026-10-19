@@ -21,6 +21,7 @@ import pytest
 
 import gravyflow as gf
 from gravyflow.src.rng import DIRECT_SPLIT, platform
+from gravyflow.tests.conftest import child_env
 
 SAMPLE_RATE = 512.0
 BATCH = 4
@@ -159,7 +160,8 @@ class TestSeedTree:
             import gravyflow as gf
             print(gf.SeedTree(42).stream("validate", "sky/g", 2, 9).random(3).tolist())
         """)
-        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                             env=child_env())
         assert out.stdout.strip().splitlines()[-1] == str(here)
 
 
@@ -414,14 +416,10 @@ class TestRemovedSeedPaths:
     def test_deprecations_show_under_default_filters(self, tmp_path):
         # A fixed stacklevel pointed most of these warnings at library code,
         # where Python's default filters drop a DeprecationWarning.
-        import os
         script = tmp_path / "user_script.py"
         script.write_text(self.SCRIPT)
-        env = {k: v for k, v in os.environ.items() if k != "PYTHONWARNINGS"}
-        env["PYTHONPATH"] = os.pathsep.join(
-            [str(__import__("pathlib").Path(gf.__file__).parents[1]), env.get("PYTHONPATH", "")]
-        )
-        out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env)
+        out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                             env=child_env(PYTHONWARNINGS=None))
         assert out.returncode == 0, out.stderr
         assert "Curriculum(verbose=) is deprecated" in out.stderr
         assert "user_script.py" in out.stderr

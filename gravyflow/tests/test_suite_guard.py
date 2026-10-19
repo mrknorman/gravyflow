@@ -19,8 +19,15 @@ import gravyflow
 
 from gravyflow.src.dataset.acquisition.gwosc_data import user_cache_dir
 from gravyflow.tests.conftest import (
-    PROXY_VARIABLES, WriteAudit, refuse_internet, tree_changes, tree_snapshot,
+    PROXY_VARIABLES, WriteAudit, child_env, refuse_internet, tree_changes, tree_snapshot,
 )
+
+pytest_plugins = ["pytester"]  # the guards are proved by running tests under them
+
+#: Test files that start Python without ``child_env``, and why the child still imports the tree under test.
+CHILDREN_WITHOUT_CHILD_ENV = {
+    "test_package.py": "runs in the checkout's root, the first entry of the path of ``python -c``",
+}
 
 #: Run in a fresh interpreter, where no event module is imported yet: the offline
 #: catalogue is entered and left, and only then are the event lookups imported.
@@ -100,7 +107,7 @@ def test_the_offline_catalogue_restores_every_event_lookup_it_patched():
     child = subprocess.run(
         [sys.executable, "-c", FIRST_IMPORT_INSIDE_THE_CATALOGUE],
         capture_output=True, text=True, timeout=300,
-        env={**os.environ, "PYTHONPATH": str(Path(gravyflow.__file__).resolve().parents[1])},
+        env=child_env(),
     )
     assert child.returncode == 0 and child.stdout.strip() == "RESTORED", child.stderr[-2000:]
 
@@ -138,3 +145,63 @@ def test_write_audit_sees_a_write_through_a_symlink(tmp_path):
         (elsewhere / "link" / "file").write_bytes(b"1")
     assert (watched / "file").exists()
     assert [entry.split(" ")[0] for entry in audit.writes["watched"]] == ["open"], audit.writes
+
+
+# --- A child process imports the tree under test --------------------------------------
+
+def test_a_child_imports_the_tree_under_test():
+    """
+    The environment's editable install can point at another checkout of gravyflow (a
+    worktree's gates would then judge the main checkout), so a child's ``child_env``
+    puts the tree under test first. It runs from the suite's temporary working
+    directory, where nothing else puts a gravyflow on the path.
+    """
+    child = subprocess.run(
+        [sys.executable, "-c", "import gravyflow; print(gravyflow.__file__)"],
+        capture_output=True, text=True, timeout=300, env=child_env(),
+    )
+    assert child.returncode == 0, child.stderr[-2000:]
+    assert Path(child.stdout.strip().splitlines()[-1]).resolve() == Path(gravyflow.__file__).resolve()
+
+
+def test_child_env_sets_and_removes_variables_and_keeps_the_callers_path(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/somewhere/else")
+    monkeypatch.setenv("PYTHONWARNINGS", "ignore")
+    env = child_env(GRAVYFLOW_CACHE_DIR="/cache", PYTHONWARNINGS=None)
+    assert env["GRAVYFLOW_CACHE_DIR"] == "/cache" and "PYTHONWARNINGS" not in env
+    tree, *rest = env["PYTHONPATH"].split(os.pathsep)
+    assert (Path(tree) / "gravyflow").resolve() == Path(gravyflow.__file__).resolve().parent
+    assert rest == ["/somewhere/else"]
+    assert os.environ["PYTHONWARNINGS"] == "ignore", "child_env changed this process's environment"
+
+
+def test_every_test_that_starts_python_pins_the_tree_under_test():
+    tests = Path(__file__).parent
+    unpinned = sorted(
+        path.name for path in tests.glob("test_*.py")
+        if "sys.executable" in path.read_text() and "child_env" not in path.read_text()
+        and path.name not in CHILDREN_WITHOUT_CHILD_ENV
+    )
+    assert not unpinned, f"these start Python without child_env: {unpinned}"
+    stale = sorted(name for name in CHILDREN_WITHOUT_CHILD_ENV if "sys.executable" not in (tests / name).read_text())
+    assert not stale, f"CHILDREN_WITHOUT_CHILD_ENV names files that start no Python: {stale}"
+
+
+# --- gf.Defaults is restored after every test -----------------------------------------
+
+def test_a_failing_test_cannot_leak_defaults(pytester):
+    """A test that changes ``gf.Defaults`` and then fails leaves the next test the defaults it started with."""
+    pytester.makeconftest("from gravyflow.tests.conftest import defaults_guard  # noqa: F401\n")
+    pytester.makepyfile(test_leak="""
+        import gravyflow as gf
+
+        SEED, RATE = gf.Defaults.seed, gf.Defaults.sample_rate_hertz
+
+        def test_a_changes_the_defaults_then_fails():
+            gf.Defaults.set(seed=SEED + 1, sample_rate_hertz=2 * RATE)
+            assert False, "fails after changing the defaults"
+
+        def test_b_starts_from_the_defaults_test_a_started_from():
+            assert (gf.Defaults.seed, gf.Defaults.sample_rate_hertz) == (SEED, RATE)
+    """)
+    pytester.runpytest_inprocess().assert_outcomes(failed=1, passed=1)

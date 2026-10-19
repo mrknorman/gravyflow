@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 import gravyflow as gf
+from gravyflow.tests.conftest import child_env
 from gravyflow.src.dataset.store import (
     STORE_FORMAT, BudgetRefused, BudgetTimeout, ByteBudget, Fetched, ForgetRaced, Store,
     StoreConflict, StoreError, StoreWriteError, TileIncomplete, TileKey, TileMissing,
@@ -684,9 +685,7 @@ RACE_TILES = 20
 
 
 def _child(role, *args):
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join([str(Path(gf.__file__).parents[1]), env.get("PYTHONPATH", "")])
-    return subprocess.Popen([sys.executable, __file__, role, *map(str, args)], env=env,
+    return subprocess.Popen([sys.executable, __file__, role, *map(str, args)], env=child_env(),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 

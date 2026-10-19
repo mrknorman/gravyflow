@@ -74,6 +74,55 @@ def global_rng_guard(request):
     )
 
 
+def defaults_state() -> dict:
+    """``gf.Defaults``' values, comparable with ==."""
+    return {
+        key: value for key, value in vars(gf.Defaults).items()
+        if not key.startswith("__") and not callable(value) and not isinstance(value, classmethod)
+    }
+
+
+@contextmanager
+def restoring_defaults():
+    """Leave ``gf.Defaults`` as it was found, whatever the block does or raises."""
+    state = defaults_state()
+    try:
+        yield
+    finally:
+        for key, value in state.items():
+            setattr(gf.Defaults, key, value)
+
+
+@pytest.fixture(autouse=True)
+def defaults_guard():
+    """
+    ``gf.Defaults`` is global state: restore it after every test, so a test that
+    changes it, and then fails before it can undo the change, leaves no test after it
+    the wrong defaults (an order-dependent failure far from its cause).
+    """
+    with restoring_defaults():
+        yield
+
+
+def child_env(**overrides) -> dict:
+    """
+    The environment for a child Python process, which imports the gravyflow tree under
+    test: its root is first on ``PYTHONPATH``, ahead of the environment's editable
+    install, which can point at another checkout (so a worktree's gate would judge the
+    main checkout's library). ``overrides`` set variables; a ``None`` removes one.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(Path(PACKAGE).resolve().parent), env.get("PYTHONPATH")])
+    )
+    for name, value in overrides.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
+    return env
+
+
 @pytest.fixture
 def tree():
     """A seed tree for tests that need one."""

@@ -27,6 +27,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -156,11 +157,18 @@ def write_timelines(
     """
     Write the GWOSC timeline of every run, detector and flag into the current
     ``GRAVYFLOW_CACHE_DIR``: DATA is ``data_segments[ifo]``; every other flag is DATA
-    minus ``flag_gaps[(ifo, flag)]``.
+    minus ``flag_gaps[(ifo, flag)]``. The files take GWOSC's own cache names, so the
+    cache root must be a temporary one: anywhere else this would replace real timelines.
     """
     from gwpy.segments import Segment, SegmentList
     from gravyflow.src.dataset.acquisition import gwosc_data
 
+    cache_root = os.environ.get("GRAVYFLOW_CACHE_DIR")
+    if not cache_root or not Path(cache_root).resolve().is_relative_to(Path(tempfile.gettempdir()).resolve()):
+        raise RuntimeError(
+            "write_timelines writes under GWOSC's real timeline-cache names, so "
+            f"GRAVYFLOW_CACHE_DIR must be a temporary directory; it is {cache_root!r}."
+        )
     flag_gaps = flag_gaps or {}
     for ifo in CODE_DETECTORS:
         data = SegmentList(Segment(*map(float, s)) for s in data_segments.get(ifo, ())).coalesce()

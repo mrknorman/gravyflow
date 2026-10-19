@@ -29,6 +29,7 @@ from gravyflow.src.dataset.materialise import (
     encode_batch, json_bytes,
 )
 from gravyflow.src.rng import platform
+from gravyflow.tests.conftest import child_env
 from gravyflow.src.utils import fingerprint as fingerprint_module
 from gravyflow.src.utils.fingerprint import (
     BATCH_LIBRARIES, UnfingerprintableError, config_fingerprint, library_versions,
@@ -480,8 +481,7 @@ print(the_set.set_id)
 
 
 def test_two_processes_materialise_one_set(tmp_path):
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
-    procs = [subprocess.Popen([sys.executable, "-c", _WRITER, str(tmp_path)], env=env,
+    procs = [subprocess.Popen([sys.executable, "-c", _WRITER, str(tmp_path)], env=child_env(),
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
     outputs = [p.communicate(timeout=240) for p in procs]
     assert [p.returncode for p in procs] == [0, 0], [err[-2000:] for _, err in outputs]

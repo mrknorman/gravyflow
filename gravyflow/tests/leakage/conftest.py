@@ -10,19 +10,17 @@ this package (unless the run passes ``--network``):
 - connections to this machine are refused too, and every name lookup of another
   host, so no socket opens at all, a proxy on this machine included;
 - a test that causes a refused connection it did not declare (through the
-  ``refusals`` fixture) fails, since the library would have zero-filled it silently;
-- ``gf.Defaults`` is restored after every test.
+  ``refusals`` fixture) fails, since the library would have zero-filled it silently.
 
 ``world`` installs a fake world (see ``fakes`` and ``fixtures``).
 """
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import List
 
 import pytest
 
-import gravyflow as gf
 from gravyflow.tests.conftest import refuse_internet
 from gravyflow.tests.test_public_sources import offline_public_sources  # noqa: F401  (offline GWOSC and Zenodo)
 
@@ -71,23 +69,6 @@ def no_undeclared_refusals(request, hermetic):
     seen = hermetic.refusals[start:]
     if seen:
         pytest.fail(f"{len(seen)} undeclared network refusal(s), e.g. {seen[:3]}")
-
-
-def _defaults_state() -> Dict:
-    return {
-        key: value for key, value in vars(gf.Defaults).items()
-        if not key.startswith("__") and not isinstance(value, (staticmethod, classmethod))
-        and not callable(value)
-    }
-
-
-@pytest.fixture(autouse=True)
-def restore_defaults():
-    """``gf.Defaults`` is global state: restore it after every test."""
-    state = _defaults_state()
-    yield
-    for key, value in state.items():
-        setattr(gf.Defaults, key, value)
 
 
 @pytest.fixture

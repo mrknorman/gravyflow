@@ -14,8 +14,8 @@ Each case runs for k from 1e-23 to 1 on O(1) data. A case that may refuse may
 raise ValueError instead, naming float32, at the amplitudes whose result float32 cannot hold.
 
 `test_every_public_numeric_function_is_in_the_census` lists the public names of
-the modules that compute on data (PSD, SNR, whitening, Pearson, spectrogram, the
-matched filter, plotting and the augmentations): a new public function there
+the modules that compute on data (PSD, SNR, injection, the detector network, whitening,
+Pearson, spectrogram, the matched filter, plotting and the augmentations): a new public function there
 fails until it joins CENSUS, or EXEMPT with the reason it takes no raw strain.
 """
 import functools
@@ -83,6 +83,12 @@ def _psd():
 def _matched_filter():
     return MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS)
 
+#: Two sources' plus and cross polarisations, at unit scale, for the projection.
+POLARISATIONS = np.stack([TEMPLATE, np.roll(TEMPLATE, 7)])[None].repeat(2, axis=0)
+NETWORK = gf.Network([gf.IFO.H1, gf.IFO.L1])
+SKY = dict(right_ascension=[0.4, 2.1], declination=[-0.3, 0.8], polarization=[0.2, 1.1],
+           gps_time_seconds=1187008882.4)
+
 ELEMENT, PEAK = "element", "peak"
 
 #: name -> (f(k x) taken back to k = 1, comparison, whether it may refuse). The
@@ -122,6 +128,8 @@ CENSUS = {
     "gf.TimeReversal": (lambda k: _augmented(TimeReversal(probability=1.0), k), PEAK, False),
     "gf.RandomShift": (lambda k: _augmented(RandomShift(probability=1.0), k), PEAK, False),
     "gf.AddNoise": (lambda k: _augmented(AddNoise(probability=1.0, amplitude=0.1), k), PEAK, False),
+    "gf.project_wave": (lambda k: np.asarray(NETWORK.project_wave(at(POLARISATIONS, k), FS, **SKY)) / k,
+                        PEAK, False),
 }
 
 #: Measured: each case's worst error over SCALES, by its comparison's metric (relative
@@ -145,6 +153,7 @@ WORST_ERROR = {
     "gf.matched_filter_fft (PowerSpectrum)": 1.2e-6,
     "gf.matched_filter_fft (white)": 7.0e-7,
     "gf.optimal_snr": 6.3e-8,
+    "gf.project_wave": 3.0e-7,
     "gf.psd": 7.6e-7,
     "gf.rolling_pearson": 2.8e-7,
     "gf.scale_to_snr": 3.4e-7,
@@ -169,12 +178,31 @@ EXEMPT = {
     "generate_correlation_plot": "plots gf.rolling_pearson's output",
     "generate_segment_timeline_plot": "plots segment times",
     "generate_example_extraction_plot": "plots the values it is given; forms no square",
+    "greenwich_mean_sidereal_time": "takes a GPS time, not strain",
+    "IFO": "a detector's name and site",
+    "Network": "detector geometry; its project_wave is checked as gf.project_wave",
+    "NoiseProfile": "an enumeration of noise-curve names",
+    "InjectionGenerator": "generates injections at unit scale and scales them to their SNR or HRSS "
+                          "target; takes no strain input",
+    "CBCGenerator": "a waveform generator; takes parameters, not strain",
+    "IncoherentGenerator": "a waveform generator; takes parameters, not strain",
+    "WNBGenerator": "a waveform generator; takes parameters, not strain",
+    "WaveformGenerator": "a waveform generator; takes parameters, not strain",
+    "WaveformParameter": "a parameter's distribution; takes no strain",
+    "WaveformParameters": "an enumeration of parameter names",
+    "ReturnVariables": "an enumeration of the names a dataset returns",
+    "ScalingMethod": "the rule that sets an injection's scale; takes the SNR or HRSS target, not strain",
+    "ScalingOrdinality": "an enumeration",
+    "ScalingType": "a scaling target's description; takes no strain",
+    "ScalingTypes": "an enumeration of scaling targets",
 }
 
 NUMERIC_MODULES = (
     "gravyflow.src.dataset.tools.psd",
     "gravyflow.src.dataset.tools.snr",
+    "gravyflow.src.dataset.features.injection",
     "gravyflow.src.dataset.conditioning.conditioning",
+    "gravyflow.src.dataset.conditioning.detector",
     "gravyflow.src.dataset.conditioning.pearson",
     "gravyflow.src.dataset.conditioning.whiten",
     "gravyflow.src.detection",

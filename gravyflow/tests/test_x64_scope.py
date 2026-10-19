@@ -19,6 +19,7 @@ from keras import ops
 import gravyflow as gf
 from gravyflow.src.dataset.features.waveforms import cbc
 from gravyflow.src.utils.shapes import ShapeEnforcer
+from gravyflow.tests.conftest import child_env
 
 GPS = 1238167546.7832
 SAMPLE_RATE = 2048.0
@@ -27,7 +28,8 @@ SAMPLE_RATE = 2048.0
 def _run(code):
     """Run ``code`` in a fresh interpreter and return its last line of output."""
     result = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(code)], capture_output=True, text=True, timeout=300
+        [sys.executable, "-c", textwrap.dedent(code)], capture_output=True, text=True, timeout=300,
+        env=child_env(),
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip().splitlines()[-1]

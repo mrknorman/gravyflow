@@ -13,7 +13,6 @@ warning, not that a GPU's kernels are deterministic under its flag.
 """
 
 import json
-import os
 import platform as host_platform
 import subprocess
 import sys
@@ -27,6 +26,7 @@ import pytest
 import gravyflow as gf
 from gravyflow.src.dataset.materialise import ForeignPlatform, MaterialisedSet
 from gravyflow.src.rng import platform
+from gravyflow.tests.conftest import child_env
 
 CPU_FLAG = "--xla_cpu_multi_thread_eigen=false"
 OTHER_FLAG = "--xla_force_host_platform_device_count=1"   # a known flag: XLA aborts on unknown ones
@@ -130,9 +130,7 @@ def test_cbc_without_a_cpu_backend_refuses_by_name(tmp_path):
     # "tpu" in JAX's registry (a private table of jax 0.9) and clears its cache:
     # jax.devices("cpu") then refuses as JAX does in a TPU-only process, while
     # the default backend still computes everything else.
-    package_root = Path(gf.__file__).resolve().parents[1]
-    env = {**os.environ, "KERAS_BACKEND": "jax", "JAX_PLATFORMS": "cpu",
-           "PYTHONPATH": str(package_root), "GRAVYFLOW_CACHE_DIR": str(tmp_path / "cache")}
+    env = child_env(KERAS_BACKEND="jax", JAX_PLATFORMS="cpu", GRAVYFLOW_CACHE_DIR=str(tmp_path / "cache"))
     child = textwrap.dedent("""
         import json
         import jax

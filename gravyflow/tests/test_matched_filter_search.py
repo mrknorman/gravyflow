@@ -180,6 +180,24 @@ def test_a_psd_array_is_not_mistaken_for_a_spectrum():
         mf.max_snr(np.zeros((1, N + 2 * CROP), dtype=np.float32))
 
 
+def test_a_bare_array_is_noise_to_estimate_a_spectrum_from():
+    """
+    Long enough to estimate from, an array gives the search of the spectrum estimated
+    from that same array as noise, not the search of that array taken as a spectrum.
+    """
+    mf = MatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0]), sample_rate_hertz=FS)
+    rng = np.random.default_rng(23)
+    window = rng.standard_normal((1, N)).astype(np.float32)
+    noise = rng.standard_normal((1, 16 * N)).astype(np.float32)
+    from_array = mf.max_snr(window, noise)
+    from_estimate = mf.max_snr(window, estimate_psd(noise, FS, mf.spectral_config))
+    for name, value in from_estimate.items():
+        np.testing.assert_array_equal(from_array[name], value, err_msg=name)
+    # A different array is a different estimate, so the equality above is not vacuous.
+    other = mf.max_snr(window, (3.0 * rng.standard_normal((1, 16 * N))).astype(np.float32))
+    assert other["snr"][0] != from_array["snr"][0]
+
+
 def white_signal(mf, merger_samples):
     """A unit-SNR (30, 25) signal in white data, merger `merger_samples` into the window."""
     t = cbc_templates([30.0], [25.0], FS, 3.0, 20.0)[0].astype(np.float64)

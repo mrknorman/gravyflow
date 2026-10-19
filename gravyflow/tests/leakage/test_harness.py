@@ -491,6 +491,30 @@ def test_every_cache_lives_under_the_one_cache_root():
         assert root in Path(path).parents, path
 
 
+def test_fake_timelines_are_written_only_to_a_temporary_cache(monkeypatch, tmp_path):
+    """
+    They are written under GWOSC's own cache names, so a cache the user keeps (or the
+    default one, when no cache root is set) is refused by name, and nothing is made there.
+    """
+    import tempfile
+
+    from .fakes import write_timelines
+
+    kept = Path(tempfile.gettempdir()).resolve().anchor + "gravyflow-kept-cache"
+    monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", kept)
+    with pytest.raises(RuntimeError, match="GRAVYFLOW_CACHE_DIR"):
+        write_timelines({"H1": [(0.0, 100.0)]})
+    assert not Path(kept).exists()
+
+    monkeypatch.delenv("GRAVYFLOW_CACHE_DIR")
+    with pytest.raises(RuntimeError, match="GRAVYFLOW_CACHE_DIR"):
+        write_timelines({"H1": [(0.0, 100.0)]})
+
+    monkeypatch.setenv("GRAVYFLOW_CACHE_DIR", str(tmp_path / "cache"))
+    write_timelines({"H1": [(0.0, 100.0)]})
+    assert list((tmp_path / "cache" / "gwosc_timeline").glob("*.json"))
+
+
 def test_strain_downloads_are_kept_only_by_the_store(monkeypatch):
     """gwpy's GWOSC strain download keeps no copy of its own: the store keeps the tile."""
     from astropy.config import get_cache_dir_path
