@@ -171,9 +171,11 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 
 ## Matched filtering
 
-- `MatchedFilter`: a matched-filter search over a template bank.
-- `MatchedFilterLayer`: the matched filter as a Keras layer.
-- `TemplateBank`: a CBC template bank, placed or bundled.
+- `StreamingMatchedFilter`: the matched filter over continuous strain, each detector filtered once into triggers with a chi-squared veto and a reweighted SNR; its `search` gives each detector's triggers and the network's.
+- `coincide`: the network triggers of per-detector triggers (the same template within the light travel time); a time slide is a call with one detector's triggers shifted.
+- `MatchedFilter`: a matched-filter search over a template bank, on whitened windows.
+- `MatchedFilterLayer`: the window matched filter as a Keras layer.
+- `TemplateBank`: a CBC template bank, non-spinning or aligned-spin, placed or bundled.
 - `TemplateGrid`: a grid of template parameters.
 - `matched_filter_fft`: the matched-filter SNR time series. A PSD array is normalised on the host, so it cannot be a `jax.jit` argument (close over it, or pass a `PowerSpectrum`).
 - `optimal_snr`: the optimal SNR of a template. A PSD array is normalised on the host, so it cannot be a `jax.jit` argument (close over it, or pass a `PowerSpectrum`).

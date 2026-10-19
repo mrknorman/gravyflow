@@ -167,6 +167,8 @@ _MODULES = {
     # Matched filtering
     "MatchedFilter": "gravyflow.src.detection",
     "MatchedFilterLayer": "gravyflow.src.detection",
+    "StreamingMatchedFilter": "gravyflow.src.detection",
+    "coincide": "gravyflow.src.detection",
     "TemplateBank": "gravyflow.src.detection",
     "TemplateGrid": "gravyflow.src.detection",
     "matched_filter_fft": "gravyflow.src.detection",

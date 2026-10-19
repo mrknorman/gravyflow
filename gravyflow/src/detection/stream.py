@@ -107,6 +107,12 @@ def stream_bank_placement(
 #: The largest bank the default placement may make.
 STREAM_BANK_MAX_TEMPLATES = 20000
 
+#: The fraction of its peak below which a template's ends are cut. Measured at
+#: the default bank's corners (5 to 95 solar masses, spins +-0.99): the energy
+#: cut is at most 5e-8 of the template's (its match with the uncut template
+#: at least 0.9999999), and the inspiral at 20 Hz is at least 9% of the peak.
+TEMPLATE_SUPPORT = 1e-4
+
 
 def reweighted_snr(snr, reduced_chisq):
     """PyCBC's newsnr (see the module docstring): the SNR, lowered where the reduced chi-squared exceeds 1."""
@@ -338,33 +344,42 @@ def _snr_peaks(white_fft, response, templates, *, n, first, windows, width):
     return jax.lax.map(one_chunk, templates)
 
 
-@partial(jax.jit, static_argnames=("n", "bins"))
-def _chisq(white_fft, response, templates, phase, *, n, bins):
+@partial(jax.jit, static_argnames=("n", "bins", "band"))
+def _chisq(white_fft, response, templates, phase, *, n, bins, band):
     """
     Allen's chi-squared of each (template, time) pair.
 
     templates (P, L) raw; phase (P, F): 2 pi k t / n at each pair's merger
-    sample t, computed exactly by the caller. Returns chi^2 (P,).
+    sample t, computed exactly by the caller; band: [kmin, kmax), the band's
+    frequency bins (SpectralConfig.band_indices). Returns chi^2 (P,).
     """
     weights = jnp.asarray(_one_sided_weights(n))
     g = jnp.fft.rfft(templates, n=n, axis=-1) * response                       # (P, F)
     power = weights * jnp.abs(g) ** 2 / n                                       # sigma^2 per frequency
-    cumulative = jnp.cumsum(power, axis=-1)
-    sigma2 = cumulative[:, -1]
-    # Contiguous bins of equal template power: bin j ends where the
-    # cumulative power reaches (j + 1) / p of the total.
-    targets = sigma2[:, None] * (jnp.arange(1, bins + 1) / bins)
-    edges = jax.vmap(lambda c, t: jnp.searchsorted(c, t, side="left"))(cumulative, targets)
-    edges = jnp.minimum(edges, cumulative.shape[-1] - 1).at[:, -1].set(cumulative.shape[-1] - 1)
+    frequency = jnp.arange(power.shape[-1])
+    # Contiguous bins of equal template power over the band, as PyCBC places
+    # them (pycbc.vetoes.power_chisq_bins): bin j is [k_j, k_(j+1)), k_j the
+    # first frequency whose cumulative in-band power exceeds j / p of the
+    # total. The template's sliver below the band (the whitening filter's
+    # ramp) joins the first bin and the Nyquist frequency the last, so the
+    # bins sum to the SNR. In noise one frequency carries about 1 / sqrt(N_j)
+    # of a bin's sum, so the edge convention moves chi-squared by a few per
+    # cent; this one is PyCBC's.
+    in_band = (frequency >= band[0]) & (frequency < band[1])
+    cumulative = jnp.cumsum(jnp.where(in_band, power, 0.0), axis=-1)
+    targets = cumulative[:, -1:] * (jnp.arange(bins) / bins)
+    starts = jax.vmap(lambda c, t: jnp.searchsorted(c, t, side="right"))(cumulative, targets)
+    frequency_bin = jax.vmap(lambda s: jnp.searchsorted(s, frequency, side="right") - 1)(starts)
+    frequency_bin = jnp.maximum(frequency_bin, 0)
     contribution = weights * white_fft * jnp.conj(g) * jnp.exp(1j * phase) / n
-    running = jnp.cumsum(contribution, axis=-1)
 
     def per_bin(values):
-        at = jnp.take_along_axis(values, edges, axis=-1)
-        return jnp.diff(at, axis=-1, prepend=jnp.zeros_like(at[:, :1]))
+        return jnp.stack([jnp.sum(jnp.where(frequency_bin == j, values, 0.0), axis=-1) for j in range(bins)],
+                         axis=-1)
 
-    z_bins = per_bin(running)                                                   # (P, p)
-    sigma2_bins = per_bin(cumulative)
+    z_bins = per_bin(contribution)                                              # (P, p)
+    sigma2_bins = per_bin(power)
+    sigma2 = jnp.sum(sigma2_bins, axis=-1)
     z = jnp.sum(z_bins, axis=-1)
     share = sigma2_bins / jnp.where(sigma2 > 0, sigma2, 1.0)[:, None]
     residual = jnp.abs(z_bins - share * z[:, None]) ** 2 / jnp.where(sigma2_bins > 0, sigma2_bins, 1.0)
@@ -439,7 +454,12 @@ class StreamingMatchedFilter:
         """
         The raw templates (T, pre + post), float32: each the part of its match
         space template from `pre` samples before its merger to `post` after,
-        the merger at index `pre`. Generated once.
+        the merger at index `pre`, the span every template's support fits.
+        Generated once.
+
+        A template's support is where it exceeds TEMPLATE_SUPPORT of its peak:
+        the generator leaves numerical residue far below that before its taper
+        starts, which would otherwise lengthen every template to the whole span.
         """
         if self._templates is None:
             full = []
@@ -448,8 +468,9 @@ class StreamingMatchedFilter:
                 full.append(self.space.templates(*(values[rows] for values in self.bank.parameters)))
             full = np.concatenate(full)
             centre = self.space.num_samples // 2
-            first = int(np.argmax(np.any(full != 0, axis=0)))
-            last = full.shape[-1] - int(np.argmax(np.any(full[:, ::-1] != 0, axis=0)))
+            support = np.any(np.abs(full) > TEMPLATE_SUPPORT, axis=0)  # templates are unit peak
+            first = int(np.argmax(support))
+            last = full.shape[-1] - int(np.argmax(support[::-1]))
             self.pre, self.post = centre - first, max(last - centre, 1)
             self._templates = jnp.asarray(full[:, first:centre + self.post])
         return self._templates
@@ -475,10 +496,22 @@ class StreamingMatchedFilter:
         return n, first, stride
 
     def _spectrum(self, block, psd) -> PowerSpectrum:
+        """
+        The block's spectrum: estimated from it, or the given one. A given
+        spectrum must have this filter's sample rate, whitening filter length
+        (the blocks' corrupted margins) and lower band edge (the templates'),
+        or it is refused by name; the rest of its config (how it was
+        estimated) is its own.
+        """
         if psd is None:
             return estimate_psd(block[None], self.sample_rate_hertz, self.spectral_config)
-        if psd.config != self.spectral_config or psd.sample_rate_hertz != self.sample_rate_hertz:
-            raise ValueError("The given PowerSpectrum's config or sample rate differs from the filter's.")
+        given = psd.config
+        if (psd.sample_rate_hertz != self.sample_rate_hertz
+                or given.num_taps(self.sample_rate_hertz) + given.num_taps(self.sample_rate_hertz) % 2 != self.num_taps
+                or given.lower_frequency_hertz != self.spectral_config.lower_frequency_hertz):
+            raise ValueError(
+                "The given PowerSpectrum's sample rate, filter_duration_seconds or lower_frequency_hertz differs "
+                "from the filter's spectral_config: build the filter with the spectrum's config.")
         return psd
 
     def _response(self, spectrum: PowerSpectrum, n: int) -> jnp.ndarray:
@@ -566,7 +599,8 @@ class StreamingMatchedFilter:
             phase = (2.0 * np.pi / n) * np.mod(np.outer(t, k), n).astype(np.float64)
             phase = np.pad(phase.astype(np.float32), ((0, pad), (0, 0)))
             pair_templates = jnp.pad(templates[r], ((0, pad), (0, 0)))
-            chisq = _chisq(white_fft, response, pair_templates, jnp.asarray(phase), n=n, bins=self.chisq_bins)
+            chisq = _chisq(white_fft, response, pair_templates, jnp.asarray(phase), n=n, bins=self.chisq_bins,
+                           band=self.spectral_config.band_indices(n, self.sample_rate_hertz))
             out[start:start + len(r)] = np.asarray(chisq)[:len(r)]
         return out
 

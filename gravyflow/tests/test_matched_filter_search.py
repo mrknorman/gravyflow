@@ -528,7 +528,9 @@ def test_the_bundled_bank_is_the_default_filters_and_names_what_it_depends_on(if
     assert key["code"]["files"] == ["cbc.py", "template_grid.py"]
     paths = sorted((PACKAGE / BUNDLED_BANK_DIRECTORY).glob("*.json"))
     assert sorted(BUNDLED) == [path.name for path in paths]  # bundle_banks writes every bundled file
+    # The window-mode banks: the measured O3 curve's (the streaming filter's bank is tested with it).
     records = [json.loads(path.read_text()) for path in paths]
+    records = [r for r in records if r["arguments"]["space"]["noise_profile_name"] == "O3_ACTUAL"]
     assert sorted(r["arguments"]["space"]["ifo_name"] for r in records) == sorted(i.name for i in BUNDLED_IFOS)
     # After any change to what the key names, the bundled bank is placed again.
     mine = [r for r in records if r["arguments"]["space"]["ifo_name"] == ifo.name]
@@ -572,14 +574,19 @@ def test_the_bank_metric_never_extrapolates_its_curve():
         noise_curve_psd(gf.IFO.L1, np.array([5.0, 100.0]), gf.NoiseProfile.O3_LOW)
 
 
+def placed_elsewhere(*args):
+    """A stand-in placement: one template, (m1, m2, s1, s2), candidates tried and acceptance."""
+    return np.array([40.0]), np.array([30.0]), np.zeros(1), np.zeros(1), 128, 0.0
+
+
 def test_a_bank_record_is_found_by_its_key_and_a_stale_one_is_not(monkeypatch):
     from gravyflow.src.detection import template_grid
     from gravyflow.src.detection.matched_filter import default_bank_placement
     placement = default_bank_placement(mass_range=(30.0, 40.0))
-    record = TemplateBank(np.array([35.0, 31.0]), np.array([33.0, 30.0]), placement, 256, 0.004).to_dict()
+    record = TemplateBank(np.array([35.0, 31.0]), np.array([33.0, 30.0]), placement=placement, candidates_tried=256,
+                          final_acceptance=0.004).to_dict()
     monkeypatch.setattr(template_grid, "_bundled_banks", lambda: (record,))
-    monkeypatch.setattr(template_grid, "_stochastic_masses",
-                        lambda *args: (np.array([40.0]), np.array([30.0]), 128, 0.0))
+    monkeypatch.setattr(template_grid, "_stochastic_placement", placed_elsewhere)
     found = TemplateBank.place(placement)
     np.testing.assert_array_equal(found.mass_1, [35.0, 31.0])
     assert found.placement == placement and found.to_dict() == record
@@ -612,8 +619,7 @@ def test_the_bank_key_names_the_placement_code(tmp_path, monkeypatch):
     module.write_text(source.replace("0.1 * self.visible_seconds", "0.2 * self.visible_seconds"))
     changed = placement.key()
     assert changed["code"] != key["code"] and {**changed, "code": None} == {**key, "code": None}
-    monkeypatch.setattr(template_grid, "_stochastic_masses",
-                        lambda *args: (np.array([40.0]), np.array([30.0]), 128, 0.0))
+    monkeypatch.setattr(template_grid, "_stochastic_placement", placed_elsewhere)
     with pytest.warns(UserWarning, match="code"):
         placed = TemplateBank.place(placement)
     np.testing.assert_array_equal(placed.mass_1, [40.0])
