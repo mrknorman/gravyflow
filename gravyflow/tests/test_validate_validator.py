@@ -295,6 +295,32 @@ def test_a_placed_source_does_not_depend_on_the_distance_its_generator_drew(data
     np.testing.assert_allclose(near, between, rtol=1e-4)
 
 
+def test_a_source_placed_at_its_own_distance_keeps_its_generated_amplitude(dataset_args):
+    # Absolute calibration: placed at the distance its generator drew, a source is the
+    # generated source itself, so it has the SNR another path gives the same source: scaled,
+    # before projection, to its own hrss (the generated strain's). A constant scale anywhere
+    # in the placement, which the relative tests above cannot see, breaks it.
+    def first_batch(scaling_method, outputs):
+        generator = deepcopy(dataset_args["waveform_generators"])
+        generator.distance_mpc = gf.Distribution(value=1000.0, type_=gf.DistributionType.CONSTANT)
+        generator.scaling_method = scaling_method
+        generator.injection_chance = 1.0
+        args = {**dataset_args, "waveform_generators": [generator], "num_examples_per_batch": 32,
+                "steps_per_epoch": 1, "group": "test", "seed": gf.SeedTree(7).sub("validator/vol"),
+                "output_variables": outputs}
+        _, y = gf.Dataset(**args)[0]
+        return {label.name: per_example(y[label.name], 32, label.name) for label in outputs}
+
+    labels = [gf.ScalingTypes.SNR, gf.ScalingTypes.HRSS, gf.WaveformParameters.MASS_1_MSUN]
+    placed = first_batch(gf.ScalingMethod(value=np.full(32, 1000.0), type_=gf.WaveformParameters.DISTANCE_MPC),
+                         labels)
+    own = first_batch(gf.ScalingMethod(value=placed["HRSS"], type_=gf.ScalingTypes.HRSS), labels)
+    np.testing.assert_array_equal(placed["MASS_1_MSUN"], own["MASS_1_MSUN"])
+    np.testing.assert_allclose(own["HRSS"], placed["HRSS"], rtol=1e-6)
+    assert np.all(np.isfinite(placed["SNR"]) & (placed["SNR"] > 0)), placed["SNR"]
+    np.testing.assert_allclose(placed["SNR"], own["SNR"], rtol=1e-4)
+
+
 def test_a_source_placed_at_a_distance_is_the_generated_source_scaled_by_it(dataset_args):
     # ScalingMethod(type_=DISTANCE_MPC) places each generated source at its target distance:
     # labelled there, and the same sources twice as far have half the SNR.
