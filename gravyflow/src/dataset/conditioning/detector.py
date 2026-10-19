@@ -344,6 +344,9 @@ NOISE_PROFILE_DIRECTORY_PATH : Path = RESOURCES / "noise_profiles"
 _ALIGO_O3_ACTUAL_H1 = "aligo_o3actual_h1_t2000012.csv"  # LIGO-T2000012-v2, aligo_O3actual_H1.txt
 _ALIGO_O3_ACTUAL_L1 = "aligo_o3actual_l1_t2000012.csv"  # LIGO-T2000012-v2, aligo_O3actual_L1.txt
 _ADVIRGO_O3_ACTUAL = "advirgo_o3actual_t2000012.csv"    # LIGO-T2000012-v2, avirgo_O3actual.txt
+_ALIGO_O4_HIGH = "aligo_o4high_t2000012.csv"     # LIGO-T2000012-v2, aligo_O4high.txt
+_ALIGO_O4_LOW = "aligo_o4low_t2000012.csv"       # LIGO-T2000012-v2, aligo_O4low.txt
+_ADVIRGO_O4_HIGH = "advirgo_o4high_t2000012.csv" # LIGO-T2000012-v2, avirgo_O4high_NEW.txt
 _ALIGO_O3_LOW = "aligo_o3low_t1800545.csv"      # LIGO-T1800545, aLIGOO3LowT1800545
 _ADVIRGO_O3_LOW = "advirgo_o3low_t1800545.csv"  # LIGO-T1800545, AdVO3LowT1800545
 _ALIGO_DESIGN = "aligo_design_t1800044.csv"     # LIGO-T1800044, aLIGODesignSensitivityT1800044
@@ -358,8 +361,15 @@ class NoiseProfile(Enum):
     O3_ACTUAL, the default (``DEFAULT_NOISE_PROFILE``), is each detector's
     measured sensitivity in the third observing run, from LIGO-T2000012-v2:
     H1, L1 and V1 each have their own curve, spectral lines included, from
-    10 Hz to 5 kHz (H1, L1) and to 10 kHz (V1). O3_LOW is the O3 low-noise
-    projection of the observing scenarios (Living Rev. Relativ. 21, 3 (2018),
+    10 Hz to 5 kHz (H1, L1) and to 10 kHz (V1). O4_HIGH and O4_LOW are the
+    fourth run's projections for the updated observing scenarios (Living Rev.
+    Relativ. 23, 3 (2020), doi:10.1007/s41114-020-00026-9), LIGO-T2000012-v2's
+    tables as published: projections, not measurements. O4_HIGH is aLIGO's high
+    projection for H1 and L1 (a 1.4 + 1.4 solar-mass range near 190 Mpc) and Advanced
+    Virgo's for V1; O4_LOW is aLIGO's low projection (near 170 Mpc), for H1 and L1
+    only, since the document gives Virgo no low projection. No measured O4 curve is
+    published as a table; O4's real strain is read with real noise. O3_LOW is the O3
+    low-noise projection of the observing scenarios (Living Rev. Relativ. 21, 3 (2018),
     doi:10.1007/s41114-018-0012-9), as lalsimulation tabulates it in
     https://git.ligo.org/lscsoft/lalsuite/-/tree/lalsimulation-v6.2.1/lalsimulation/lib
     (aLIGO for H1 and L1, Advanced Virgo for V1). DESIGN is the aLIGO design curve
@@ -371,8 +381,16 @@ class NoiseProfile(Enum):
     evaluates it (aLIGOZeroDetHighPower), for H1 and L1 only: the noise of MLGWSC-1's
     dataset 1. Each file's header names its exact source. A curve is used only on its
     own band (``read_noise_curve``), and only for a detector its profile covers.
+
+    The aLIGO O3_LOW and DESIGN curves are lalsimulation's functions evaluated to
+    8192 Hz, but the tables lalsimulation reads stop near 5 kHz (4995 Hz and 5000 Hz):
+    above that their rows are lalsimulation's extrapolation of its table, rising to
+    1.9 times the last tabulated ASD at 8191 Hz, as lalsimulation (and PyCBC through
+    it) evaluates them. Their headers say where the table ends.
     """
     O3_ACTUAL = {"Hanford": _ALIGO_O3_ACTUAL_H1, "Livingston": _ALIGO_O3_ACTUAL_L1, "Virgo": _ADVIRGO_O3_ACTUAL}
+    O4_HIGH = {"Hanford": _ALIGO_O4_HIGH, "Livingston": _ALIGO_O4_HIGH, "Virgo": _ADVIRGO_O4_HIGH}
+    O4_LOW = {"Hanford": _ALIGO_O4_LOW, "Livingston": _ALIGO_O4_LOW}
     O3_LOW = {"Hanford": _ALIGO_O3_LOW, "Livingston": _ALIGO_O3_LOW, "Virgo": _ADVIRGO_O3_LOW}
     DESIGN = {"Hanford": _ALIGO_DESIGN, "Livingston": _ALIGO_DESIGN, "Virgo": _ADVIRGO_DESIGN}
     ZERO_DET_HIGH_POWER = {"Hanford": _ALIGO_ZERO_DET_HIGH_POWER, "Livingston": _ALIGO_ZERO_DET_HIGH_POWER}

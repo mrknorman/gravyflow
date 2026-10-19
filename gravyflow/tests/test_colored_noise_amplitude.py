@@ -258,18 +258,70 @@ def test_noise_profiles_are_per_detector_with_provenance():
         assert np.max(np.abs(np.log(np.interp(grid, f_v, asd_v) / np.interp(grid, f_h, asd_h)))) > 0.1
 
 
-def test_colored_noise_uses_the_named_profile():
+@pytest.mark.parametrize("profile, ifo", [
+    (gf.NoiseProfile.DESIGN, gf.IFO.H1),
+    (gf.NoiseProfile.O4_HIGH, gf.IFO.L1),
+    (gf.NoiseProfile.O4_HIGH, gf.IFO.V1),
+    (gf.NoiseProfile.O4_LOW, gf.IFO.H1),
+], ids=lambda value: value.name)
+def test_colored_noise_uses_the_named_profile(profile, ifo):
     """NoiseObtainer(noise_profile=...) colours the noise with that profile."""
     obtainer = gf.NoiseObtainer(
-        noise_type=gf.NoiseType.COLORED, ifos=[gf.IFO.H1],
-        noise_profile=gf.NoiseProfile.DESIGN,
+        noise_type=gf.NoiseType.COLORED, ifos=[ifo],
+        noise_profile=profile,
     )
     batch = next(obtainer(
         group="train", sample_rate_hertz=FS, onsource_duration_seconds=16.0,
         crop_duration_seconds=0.0, offsource_duration_seconds=16.0,
         num_examples_per_batch=OBTAINER_EXAMPLES, seed=5,
     ))
-    ratio, f = _welch_ratio(
-        batch[gf.ReturnVariables.ONSOURCE], [gf.IFO.H1], FS, gf.NoiseProfile.DESIGN
-    )
+    ratio, f = _welch_ratio(batch[gf.ReturnVariables.ONSOURCE], [ifo], FS, profile)
     _assert_median_matches_the_profile(ratio, f, OBTAINER_EXAMPLES, 16.0)
+
+
+# The LIGO-T2000012-v2 table each O4 curve was written from, and its SHA-256 as downloaded.
+O4_SOURCES = {
+    (gf.NoiseProfile.O4_HIGH, gf.IFO.H1): ("aligo_O4high.txt",
+                                           "eb5ec9b081c3d86d2f4257b9aff6a57566d168b8a95e5e57b7909eebad021780"),
+    (gf.NoiseProfile.O4_HIGH, gf.IFO.L1): ("aligo_O4high.txt",
+                                           "eb5ec9b081c3d86d2f4257b9aff6a57566d168b8a95e5e57b7909eebad021780"),
+    (gf.NoiseProfile.O4_HIGH, gf.IFO.V1): ("avirgo_O4high_NEW.txt",
+                                           "07eae64166a762db30cda3f757b6546723ce6209be633f7915efc7f270ae0a00"),
+    (gf.NoiseProfile.O4_LOW, gf.IFO.H1): ("aligo_O4low.txt",
+                                          "9a7449cda558e4f5c124c5693cf5149d464a9d9c5383acd24030fac1400b88bd"),
+    (gf.NoiseProfile.O4_LOW, gf.IFO.L1): ("aligo_O4low.txt",
+                                          "9a7449cda558e4f5c124c5693cf5149d464a9d9c5383acd24030fac1400b88bd"),
+}
+
+
+def test_the_o4_curves_name_their_source_and_are_projections():
+    """
+    Each O4 curve names its LIGO-T2000012-v2 table, where it is published and its
+    SHA-256, and says it is a projection; O4_LOW has no Virgo curve and refuses V1 by
+    name. The projections order as published: aLIGO's high below its low, both below
+    O3's measured curves through the bucket.
+    """
+    for (profile, ifo), (source, sha256) in O4_SOURCES.items():
+        header = _header(profile.path(ifo))
+        assert "LIGO-T2000012-v2" in header and "projection" in header, (profile.name, ifo.name)
+        assert f"Source: {O3_ACTUAL_URL}{source}\n" in header, (profile.name, ifo.name)
+        assert f"Source sha256: {sha256}\n" in header, (profile.name, ifo.name)
+    with pytest.raises(ValueError, match="O4_LOW has no curve for V1"):
+        gf.NoiseProfile.O4_LOW.path(gf.IFO.V1)
+    bucket = np.geomspace(60.0, 400.0, 50)
+    for ifo in (gf.IFO.H1, gf.IFO.L1):
+        high, low, o3 = (np.interp(bucket, *_profile(ifo, profile))
+                         for profile in (gf.NoiseProfile.O4_HIGH, gf.NoiseProfile.O4_LOW, gf.NoiseProfile.O3_ACTUAL))
+        assert np.median(high / low) < 1.0 and np.median(low / o3) < 1.0, ifo.name
+
+
+@pytest.mark.parametrize("profile, table_end", [(gf.NoiseProfile.O3_LOW, "4995.38"),
+                                                (gf.NoiseProfile.DESIGN, "5000")], ids=lambda v: getattr(v, "name", v))
+def test_the_lalsimulation_curves_say_where_their_table_ends(profile, table_end):
+    """
+    The aLIGO O3_LOW and DESIGN curves run to 8192 Hz as lalsimulation evaluates them,
+    though its tables stop near 5 kHz: the header says where, and that the rows above
+    are lalsimulation's extrapolation.
+    """
+    header = _header(profile.path(gf.IFO.H1))
+    assert f"stops at {table_end} Hz" in header and "extrapolation" in header
