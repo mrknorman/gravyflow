@@ -31,8 +31,11 @@ from gravyflow.src.rng import platform
 from gravyflow.src.dataset.config import batch_size, ignore_scale_factor
 from gravyflow.src.dataset.features.waveforms.cbc import (
     _generate_cbc_window,
+    time_to_merger_seconds,
     Approximant
 )
+from gravyflow.src.dataset.conditioning.whiten import whiten, whitened_noise_std
+from gravyflow.src.dataset.tools.snr import _spectrum_for
 
 class ScalingOrdinality(Enum):
     BEFORE_PROJECTION = auto()
@@ -301,8 +304,36 @@ class ReturnVariables(Enum):
     # several detectors), else 0.
     COINCIDENT = ReturnVariable(20, (BATCH,))
 
+    # Records of each injection for later analysis (INJECTION_RECORDS), NaN
+    # where generator g injected nothing into example b. The band is the
+    # dataset's SpectralConfig's, [lower, upper) Hz, as the SNR's.
+    # - A CBC's time from the band's lower frequency to its merger, by its
+    #   waveform model, in seconds, whatever the window (CBCGenerator.
+    #   in_band_duration_seconds); NaN for other sources.
+    IN_BAND_DURATION_SECONDS = ReturnVariable(21, (BATCH, GENERATOR))
+    # The peak of the injection's whitened strain in each detector over the
+    # whitened noise's standard deviation, max_t |w_i(t)| / sigma, in the
+    # returned onsource window: the injection whitened as the data are (the
+    # batch's PSD), and sigma that of whitened stationary Gaussian noise
+    # (gf.whitened_noise_std).
+    WHITENED_PEAK = ReturnVariable(22, (BATCH, GENERATOR, IFO))
+    # Its network value: sqrt(sum_i WHITENED_PEAK_i ** 2), as the network SNR is.
+    NETWORK_WHITENED_PEAK = ReturnVariable(23, (BATCH, GENERATOR))
+
+    # Each example's detector sensitivity: the BNS range, in Mpc, of the PSD
+    # the batch estimated from its offsource (gf.bns_range_mpc).
+    BNS_RANGE_MPC = ReturnVariable(24, (BATCH, IFO))
+
     def __lt__(self, other):
         return self.value.index < other.value.index
+
+# The records InjectionGenerator.add_injections_to_onsource measures for each
+# generator, when they are asked for.
+INJECTION_RECORDS = (
+    ReturnVariables.IN_BAND_DURATION_SECONDS,
+    ReturnVariables.WHITENED_PEAK,
+    ReturnVariables.NETWORK_WHITENED_PEAK,
+)
 
 @dataclass
 class WaveformGenerator:
@@ -416,6 +447,14 @@ class WaveformGenerator:
         """
         half = 0.5 * float(self.get_max_generated_duration())
         return half, half
+
+    def in_band_duration_seconds(self, parameters, lower_frequency_hertz : float):
+        """
+        Each waveform's time from ``lower_frequency_hertz`` to its reference
+        time, in seconds, from its drawn ``parameters`` (generate's): None
+        where the source defines none (only a CBC, a chirp to its merger, does).
+        """
+        return None
 
     def placement_range_seconds(self, window_seconds : float):
         """
@@ -1249,6 +1288,21 @@ class CBCGenerator(WaveformGenerator):
         
             return waveforms, enum_parameters
 
+    def in_band_duration_seconds(self, parameters, lower_frequency_hertz : float):
+        """
+        Each source's time from ``lower_frequency_hertz`` to its merger, by its
+        waveform model (``time_to_merger_seconds``): the source's own, not cut
+        by the window.
+        """
+        P = WaveformParameters
+        return time_to_merger_seconds(
+            lower_frequency_hertz, self.approximant,
+            parameters[P.MASS_1_MSUN], parameters[P.MASS_2_MSUN],
+            parameters[P.SPIN_1_IN], parameters[P.SPIN_2_IN],
+            parameters[P.LAMBDA_1], parameters[P.LAMBDA_2],
+            parameters[P.REFERENCE_ORBITAL_PHASE_IN], parameters[P.INCLINATION_RADIANS],
+        )
+
 
 class IncoherentGenerator(WaveformGenerator):
     """
@@ -1889,7 +1943,18 @@ class InjectionGenerator:
 
         scaled_injections_list = []
         labels_list = []
-        
+
+        # The records asked for, measured with the batch's spectrum: the one
+        # given, or the default estimate from the offsource, as the SNR's.
+        records = [
+            record for record in INJECTION_RECORDS
+            if parameters_to_return and record in parameters_to_return
+        ]
+        spectrum = _spectrum_for(
+            offsource if offsource is not None else onsource, self.sample_rate_hertz,
+            None, None, None, None, None,
+        ) if records else None
+
         final_onsource = onsource
         
         # Determine if we need to return injection times
@@ -2105,6 +2170,12 @@ class InjectionGenerator:
                     )
                 generator_labels[label_type] = value
 
+            if records:
+                generator_labels.update(self._injection_records(
+                    records, generator, i, injection_parameters, projected, spectrum,
+                    onsource_duration_seconds,
+                ))
+
             labels_list.append(_absent_as_nan(generator_labels, present, num_examples))
 
         if scaled_injections_list:
@@ -2113,6 +2184,39 @@ class InjectionGenerator:
             scaled_injections = ops.zeros((0,) + tuple(ops.shape(onsource)), "float32")
 
         return final_onsource, scaled_injections, _stack_generator_labels(labels_list)
+
+    def _injection_records(
+        self, records, generator, index, injection_parameters, projected, spectrum,
+        onsource_duration_seconds,
+    ):
+        """
+        Generator ``index``'s ``records`` (of INJECTION_RECORDS) for the batch:
+        its ``projected`` injection, (Batch, IFOs, Time) strain, measured with
+        the batch's ``spectrum`` and its band. A record the generator cannot
+        give is left out (NaN in a dataset's batch).
+        """
+        result = {}
+        sample_rate = self.sample_rate_hertz
+        if ReturnVariables.IN_BAND_DURATION_SECONDS in records:
+            lower = spectrum.config.lower_frequency_hertz
+            parameters = {
+                key: self._generator_parameter(injection_parameters, key, index)
+                for key in (injection_parameters or {})
+            }
+            duration = None if lower is None else generator.in_band_duration_seconds(parameters, lower)
+            if duration is not None:
+                result[ReturnVariables.IN_BAND_DURATION_SECONDS] = duration
+
+        if ReturnVariables.WHITENED_PEAK in records or ReturnVariables.NETWORK_WHITENED_PEAK in records:
+            whitened = whiten(projected, spectrum, sample_rate)
+            if onsource_duration_seconds is not None:
+                whitened = gf.crop_samples(whitened, onsource_duration_seconds, sample_rate)
+            peak = ops.max(ops.abs(whitened), axis=-1) / whitened_noise_std(spectrum.config, sample_rate)
+            if ReturnVariables.WHITENED_PEAK in records:
+                result[ReturnVariables.WHITENED_PEAK] = peak
+            if ReturnVariables.NETWORK_WHITENED_PEAK in records:
+                result[ReturnVariables.NETWORK_WHITENED_PEAK] = ops.sqrt(ops.sum(peak * peak, axis=-1))
+        return result
 
     def _generator_parameter(self, injection_parameters, key, index):
         """Generator ``index``'s value of a batched injection parameter, or None."""

@@ -270,7 +270,7 @@ def _fd_comparisons(approximant):
     _, edge = _taper_band(m1, m2, np.full(len(points), coalescence_time))
     assert np.all(np.asarray(edge) < f_low), edge
 
-    waveforms = _generate_cbc_waveform_jit(
+    waveforms, _ = _generate_cbc_waveform_jit(
         num_waveforms=len(points),
         sample_rate_hertz=SAMPLE_RATE,
         duration_seconds=duration,

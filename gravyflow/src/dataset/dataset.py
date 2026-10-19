@@ -72,6 +72,13 @@ def validate_noise_settings(
                 "Simulated noise has no GPS time: START_GPS_TIME is NaN.",
                 UserWarning
             )
+
+    if noise_obtainer.noise_type is gf.NoiseType.WHITE \
+            and gf.ReturnVariables.BNS_RANGE_MPC in variables_to_return:
+        raise ValueError(
+            "BNS_RANGE_MPC needs noise in strain: WHITE noise is dimensionless (unit "
+            "variance), so it has no range. Use COLORED, PSEUDO_REAL or REAL noise."
+        )
     
     # Validate whitening for white noise
     if noise_obtainer.noise_type is gf.NoiseType.WHITE:
@@ -1056,7 +1063,12 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         # SNR labels of HRSS/HPEAK-scaled injections are measured against the
         # batch's spectrum too, so they share the one definition.
         has_snr_label = self.waveform_generators and gf.ScalingTypes.SNR in self.variables_to_return
-        self._needs_spectrum = self._needs_whitening or has_snr_scaling or bool(has_snr_label)
+        # The injection records and the BNS range read it too.
+        has_records = any(
+            variable in self.variables_to_return
+            for variable in gf.INJECTION_RECORDS + (gf.ReturnVariables.BNS_RANGE_MPC,)
+        )
+        self._needs_spectrum = self._needs_whitening or has_snr_scaling or bool(has_snr_label) or has_records
 
         if self._needs_whitening:
             ntaps = config.num_taps(fs)
@@ -1272,6 +1284,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             pool_label=self._process_transient_label(pool_label),
             augmentations=augmentations,
             coincident=self._process_transient_label(coincident),
+            bns_range=self._process_bns_range(spectrum),
         )
         self.batch_contract.check(
             (self.input_variables, self.output_variables), input_dict, output_dict
@@ -1418,6 +1431,12 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             return as_gps_times(gps_times)
         return None
 
+    def _process_bns_range(self, spectrum):
+        """Each example's BNS range per detector (B, I), from the batch's spectrum, if required."""
+        if gf.ReturnVariables.BNS_RANGE_MPC in self.variables_to_return:
+            return gf.bns_range_mpc(spectrum)
+        return None
+
     @staticmethod
     def _process_transient_label(label):
         """A class label (a transient's ids per detector, a pool's) as float32, like every label."""
@@ -1438,7 +1457,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         }
         for key in self.variables_to_return:
             if isinstance(key, (gf.WaveformParameters, gf.ScalingTypes)) \
-                    or key is gf.ReturnVariables.CENTRAL_TIME:
+                    or key is gf.ReturnVariables.CENTRAL_TIME or key in gf.INJECTION_RECORDS:
                 value = labels.get(key)
                 batch[key] = _batch_first(value) if value is not None else \
                     ops.full(self.batch_contract.shape(key), np.nan, dtype="float32")
@@ -1478,6 +1497,7 @@ def create_variable_dictionary(
     pool_label = None,
     augmentations = None,
     coincident = None,
+    bns_range = None,
     ) -> Dict:
     """
     Create dictionary of requested return variables.
@@ -1495,6 +1515,7 @@ def create_variable_dictionary(
         pool_label: POOL_LABEL values (a ComposedDataset's pools).
         augmentations: AUGMENTATIONS, each example's augmentation flags.
         coincident: COINCIDENT, 1 where an example's detectors were read at one time.
+        bns_range: BNS_RANGE_MPC, each example's BNS range per detector.
     """
     from keras import ops
     
@@ -1516,6 +1537,7 @@ def create_variable_dictionary(
         gf.ReturnVariables.POOL_LABEL: pool_label,
         gf.ReturnVariables.AUGMENTATIONS: augmentations,
         gf.ReturnVariables.COINCIDENT: coincident,
+        gf.ReturnVariables.BNS_RANGE_MPC: bns_range,
     }
 
     # Add WaveformParameters from injection_parameters

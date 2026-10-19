@@ -270,6 +270,20 @@ def whitening_gain(
     return float(np.mean(np.concatenate(gains)))
 
 
+def whitened_noise_std(config: SpectralConfig, sample_rate_hertz: float) -> float:
+    """
+    The standard deviation of stationary Gaussian noise whitened with `config`'s
+    band: its PSD is white noise's of unit variance on [lower, upper) and zero
+    outside, so its variance is the band's share of [0, Nyquist), (upper - lower)
+    / (sample_rate_hertz / 2), with no lower edge at 0 Hz and no upper edge at the
+    Nyquist frequency. The 5-bin edge tapers outside the band are neglected.
+    """
+    nyquist = sample_rate_hertz / 2.0
+    lower = config.lower_frequency_hertz or 0.0
+    upper = nyquist if config.upper_frequency_hertz is None else config.upper_frequency_hertz
+    return float(np.sqrt((upper - lower) / nyquist))
+
+
 def _resolve_spectrum(
         background,
         sample_rate_hertz: float,

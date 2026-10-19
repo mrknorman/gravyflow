@@ -118,6 +118,13 @@ repository before it may need the changes below.
 
 ### Added
 
+- **Injection records for analysis.** A dataset returns, when asked: `ReturnVariables.IN_BAND_DURATION_SECONDS`
+  (B, G), a CBC's time from the band's lower frequency to its merger (the envelope's peak) by its waveform model,
+  not cut by the window (`gf.CBCGenerator.in_band_duration_seconds`; NaN for other sources);
+  `ReturnVariables.WHITENED_PEAK` (B, G, I), the peak of the injection's whitened strain over the whitened noise's
+  deviation (`gf.whitened_noise_std`), and `NETWORK_WHITENED_PEAK` (B, G), their root-sum-square; and
+  `ReturnVariables.BNS_RANGE_MPC` (B, I), each example's BNS range from the batch's PSD (`gf.bns_range_mpc`,
+  LIGO's SenseMonitor range; refused for WHITE noise). `gf.INJECTION_RECORDS` lists the per-injection records.
 - **A timing harness.** `gf.time_batch` (throughput: compute-seconds per second of strain, over a fixed segment),
   `gf.time_streaming` (latency: the per-step compute time of a streaming replay, its median, p90, p99 and max over at
   least 1000 steps, plus the algorithmic wait the caller declares) and `gf.compare_abba` (two callables run A, B, B, A,

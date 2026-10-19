@@ -142,6 +142,7 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 - `ScalingOrdinality`: whether a scaling is measured before or after projection onto the detectors.
 - `calculate_hrss`: the root-sum-square strain of waveforms.
 - `calculate_hpeak`: the peak strain of waveforms.
+- `INJECTION_RECORDS`: the records of each injection a dataset returns when asked, for later analysis: `IN_BAND_DURATION_SECONDS` (a CBC's time from the band's lower frequency to its merger, by its waveform model, whatever the window; NaN for other sources) and `WHITENED_PEAK` / `NETWORK_WHITENED_PEAK` (the peak of the injection's whitened strain in each detector over the whitened noise's deviation, `gf.whitened_noise_std`, and their root-sum-square). With the existing loudness labels (`ScalingTypes.SNR`, the optimal network SNR; `ScalingTypes.HRSS`, the source's root-sum-square strain) and `ReturnVariables.BNS_RANGE_MPC` (each example's BNS range per detector), they are the injection records of the validation standard. The merger's GPS time at each detector is `START_GPS_TIME + CENTRAL_TIME x onsource_duration_seconds` for real noise; simulated noise has no GPS time (NaN), and its projection uses the generator's `reference_gps_time_seconds`.
 - `WaveShape`: the simple waveform shapes.
 - `PeriodicWaveGenerator`: sines, squares, sawtooths and triangles.
 - `SineGaussianGenerator`: sine-Gaussians.
@@ -157,6 +158,8 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 - `snr`: the optimal SNR of injections in noise.
 - `scale_to_snr`: scale injections to a target SNR.
 - `whiten`: whiten strain by its offsource PSD.
+- `whitened_noise_std`: the standard deviation of stationary Gaussian noise whitened over a band.
+- `bns_range_mpc`: the BNS range (LIGO's SenseMonitor range, as LALSimulation's) of each row of a `PowerSpectrum`, in Mpc.
 - `Whiten`: the whitening Keras layer.
 - `WhitenPass`: the layer that crops the onsource and scales each example to unit RMS, without whitening.
 - `rolling_pearson`: the rolling Pearson correlation between detectors.

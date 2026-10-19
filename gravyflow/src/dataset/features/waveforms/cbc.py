@@ -242,6 +242,92 @@ def _frequency_domain_polarisations(
     return hp, hc
 
 
+# The half-step of the group delay's central difference. The phase difference
+# across it is 4 pi * step * delay, so delays up to 1 / (4 * step) = 2500 s
+# (a 1 + 1 solar-mass binary from 7 Hz) are measured without wrapping.
+_GROUP_DELAY_STEP_HERTZ = 1.0e-4
+
+
+@_in_x64
+@jax.jit(static_argnames=["approximant", "f_ref"])
+def _group_delay_seconds(frequency_hertz, parameters: dict, approximant: Approximant, f_ref: float):
+    """
+    The time each source has frequency ``frequency_hertz``, relative to its
+    model's own t = 0: the group delay -(1 / 2 pi) d(arg h~) / df of its two
+    polarisations together, sum_p h~_p(f + d) conj(h~_p(f - d)), so neither a
+    zero of one polarisation (an edge-on source's cross) nor the phase's
+    wrapping matters.
+    """
+    model = ripplegw.waveform(approximant.value, f_ref=f_ref)
+    step = _GROUP_DELAY_STEP_HERTZ
+
+    def one(frequency, source):
+        strain = model(
+            jnp.stack([frequency - step, frequency + step]),
+            {name: source[name] for name in model.parameter_names},
+        )
+        product = sum(strain[p][1] * jnp.conj(strain[p][0]) for p in ("p", "c"))
+        return -jnp.angle(product) / (4.0 * jnp.pi * step)
+
+    return jax.vmap(one)(frequency_hertz, parameters)
+
+
+# The buffer on which time_to_merger_seconds finds each merger: long enough to
+# hold any merger and ringdown, sampled finely enough to place it within 0.12 ms
+# and to keep a binary neutron star's merger below the Nyquist frequency.
+_MERGER_BUFFER_SECONDS = 0.5
+_MERGER_SAMPLE_RATE_HERTZ = 8192.0
+
+
+def time_to_merger_seconds(
+    frequency_hertz,
+    approximant: Approximant,
+    mass_1_msun,
+    mass_2_msun,
+    spin_1,
+    spin_2,
+    lambda_1,
+    lambda_2,
+    reference_orbital_phase,
+    inclination_radians,
+    f_ref: float = 20.0,
+):
+    """
+    Each source's time from frequency ``frequency_hertz`` to its merger, in
+    seconds, (num_sources,) float64: from the time its waveform model gives that
+    frequency (the stationary-phase time, ``_group_delay_seconds``) to its
+    merger, the peak of its envelope, where gravyflow places its reference time
+    (found as ``_generate_cbc_waveform_jit`` finds it, on a short buffer). 0 for
+    a source whose merger comes before that frequency.
+
+    It is the model's own, whatever the window: the time from 20 Hz of a
+    1.4 + 1.4 solar-mass binary (about 160 s) is not cut by a 1 s window.
+    Masses are in solar masses, spins (num_sources, 3).
+    """
+    approximant = _as_approximant(approximant)
+    num_sources = int(np.size(mass_1_msun))
+    _, merger_offsets = _generate_cbc_waveform_jit(
+        num_waveforms=num_sources,
+        sample_rate_hertz=_MERGER_SAMPLE_RATE_HERTZ,
+        duration_seconds=_MERGER_BUFFER_SECONDS,
+        mass_1_msun=mass_1_msun, mass_2_msun=mass_2_msun,
+        spin_1_in=spin_1, spin_2_in=spin_2,
+        lambda_1=lambda_1, lambda_2=lambda_2,
+        reference_orbital_phase_in=reference_orbital_phase,
+        inclination_radians=inclination_radians,
+        approximant=approximant, f_ref=float(f_ref),
+        coalescence_time=0.5 * _MERGER_BUFFER_SECONDS,
+    )
+    with jax.enable_x64(True):
+        frequency = jnp.full((num_sources,), float(frequency_hertz), dtype=jnp.float64)
+        parameters = _source_parameters(
+            mass_1_msun, mass_2_msun, spin_1, spin_2, lambda_1, lambda_2,
+            jnp.ones_like(frequency), reference_orbital_phase, inclination_radians,
+        )
+        delay = _group_delay_seconds(frequency, parameters, approximant, float(f_ref))
+        return np.maximum(np.asarray(merger_offsets, dtype=np.float64) - np.asarray(delay), 0.0)
+
+
 def _envelope_power(spectrum, num_samples: int):
     """
     The squared envelope, |analytic signal|^2, of the real series of
@@ -286,7 +372,10 @@ def _generate_cbc_waveform_jit(
 ):
     """
     Generates time-domain waveforms using ripple.
-    Returns array of shape (num_waveforms, 2, num_samples).
+
+    Returns ``(waveforms, merger_offsets)``: the waveforms, (num_waveforms, 2,
+    num_samples), and the time of each one's merger after its model's own
+    t = 0, (num_waveforms,) seconds.
 
     Each waveform's merger, the peak of its envelope (``_envelope_power`` of
     both polarisations), is on the sample nearest ``coalescence_time``.
@@ -394,6 +483,11 @@ def _generate_cbc_waveform_jit(
     # post-merger mask below zeroes.
     envelope = _envelope_power(hp_freq, num_samples) + _envelope_power(hc_freq, num_samples)
     peaks = jnp.argmax(envelope, axis=-1)
+    # The model's t = 0 is at coalescence_time before the roll, so the merger
+    # lies peaks / fs - coalescence_time after it, modulo the buffer.
+    merger_offsets = jnp.mod(
+        peaks / sample_rate_hertz - tc_jax + 0.5 * duration_seconds, duration_seconds
+    ) - 0.5 * duration_seconds
     merger_samples = jnp.round(tc_jax * sample_rate_hertz).astype(peaks.dtype)
     roll = jax.vmap(jnp.roll)
     hp_time = roll(hp_time, merger_samples - peaks)
@@ -430,8 +524,7 @@ def _generate_cbc_waveform_jit(
     # fail graph capture with float64)
     waveforms = waveforms.astype(jnp.float32)
     
-    # Return JAX array (which Keras 3 can handle as Tensor)
-    return waveforms
+    return waveforms, merger_offsets
 
 def _cbc_buffer_seconds(window_seconds: float) -> float:
     """
@@ -471,7 +564,7 @@ def _generate_cbc_window(
     """
     buffer_seconds = _cbc_buffer_seconds(window_seconds)
     num_samples_keep = int(window_seconds * sample_rate_hertz)
-    waveforms = _generate_cbc_waveform_jit(
+    waveforms, _ = _generate_cbc_waveform_jit(
         num_waveforms=num_waveforms,
         sample_rate_hertz=sample_rate_hertz,
         duration_seconds=buffer_seconds,

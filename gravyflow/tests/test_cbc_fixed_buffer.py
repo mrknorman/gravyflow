@@ -174,7 +174,7 @@ def test_the_kept_window_matches_a_long_buffer(monkeypatch, approximant, mass_ra
         coalescence_time=long_buffer - (kept_samples - kept_samples // 2) / SAMPLE_RATE,
         min_frequency_hertz=f_min,
         **source,
-    )[..., -int(window * SAMPLE_RATE):]
+    )[0][..., -int(window * SAMPLE_RATE):]
 
     assert kept.shape == reference.shape
     assert _overlap(kept, reference).min() >= MINIMUM_BUFFER_OVERLAP
