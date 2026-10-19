@@ -275,10 +275,14 @@ class GWOSC(DataSource):
 
 
 #: The frames ``LocalFrames()`` reads when given no table: LVK's calibrated, cleaned
-#: strain of O3 and O4, at 16384 Hz, on clusters that hold it. GWOSC's own O1 and O2
-#: frames (``LOSC_4_V1``, ``LOSC-STRAIN``; ``GWOSC_O2_4KHZ_R1``, ``GWOSC-4KHZ_R1_STRAIN``)
-#: are 4096 Hz, so they are named in a table of their own.
-LOCAL_FRAMETYPES: Dict[str, str] = {run: "HOFT_C01" for run in ("O3a", "O3b", "O4a", "O4b")}
+#: strain of O3, at 16384 Hz, on clusters that hold it. GWOSC's own O1 and O2 frames
+#: (``LOSC_4_V1``, ``LOSC-STRAIN``; ``GWOSC_O2_4KHZ_R1``, ``GWOSC-4KHZ_R1_STRAIN``) are
+#: 4096 Hz, so they are named in a table of their own. O4 has no default: GWOSC's O4
+#: releases come from other channels (O4a ``GDS-CALIB_STRAIN_CLEAN_AR``, O4b
+#: ``DCS-CALIB_STRAIN_CLEAN_AR01``, and Virgo's ``Hrec_hoftRepro1AR_16384Hz``,
+#: https://gwosc.org/O4/O4a/, https://gwosc.org/O4/O4b/), so the frames to read in O4
+#: are named by whoever reads them, and an unnamed run is refused by name.
+LOCAL_FRAMETYPES: Dict[str, str] = {run: "HOFT_C01" for run in ("O3a", "O3b")}
 LOCAL_CHANNELS: Dict[str, str] = {run: "DCS-CALIB_STRAIN_CLEAN_C01" for run in LOCAL_FRAMETYPES}
 
 

@@ -7,6 +7,10 @@ repository before it may need the changes below.
 
 ### Breaking changes
 
+- **`gf.LocalFrames()` names no O4 frames by default.** Its table named LVK's O3 frame type and channel
+  (`HOFT_C01`, `DCS-CALIB_STRAIN_CLEAN_C01`) for O4a and O4b too, which GWOSC's O4 releases do not come from
+  (O4a `GDS-CALIB_STRAIN_CLEAN_AR`, O4b `DCS-CALIB_STRAIN_CLEAN_AR01`, Virgo `Hrec_hoftRepro1AR_16384Hz`). Reading
+  O4 from local frames now names them (`frametypes=`, `channels=`); an unnamed run is refused by name.
 - **MLGWSC-1's test strain is reserved by default.** `gf.SplitSpec` gains `reserved`, by default `gf.MLGWSC1_O3A`:
   the challenge's 362 O3a segments, exactly, on H1 and L1, held out of every train and validate
   draw of real data (noise, glitches, partners); test keeps them. `gf.SplitSpec(reserved=())` is the explicit
@@ -94,6 +98,9 @@ repository before it may need the changes below.
 
 ### Added
 
+- **O4 noise profiles**: `gf.NoiseProfile.O4_HIGH` (aLIGO's high projection for H1 and L1, Advanced Virgo's for
+  V1) and `gf.NoiseProfile.O4_LOW` (aLIGO's low projection, H1 and L1 only), LIGO-T2000012-v2's O4 tables as
+  published: the observing scenarios' projections (Living Rev. Relativ. 23, 3 (2020)), not measurements.
 - **Materialised sets.** `ds.materialise(root, batches=N)` (or `k_range=`) writes a dataset's batches once, as
   content-named files under a manifest that records its fingerprint (`ds.fingerprint`), platform, contract, split,
   epoch and range; `ds.load_materialised(set)` serves `ds[k]` from it, verified on every read (README §7). The

@@ -287,6 +287,12 @@ class ObservingRun(Enum):
         return list(ObservingRun).index(self)
 
 
+#: The runs an obtainer reads when it is given none. O4 is not among them: Gravity Spy's
+#: public glitch catalogue ends at O3b, so O4's noise could not be glitch-vetoed as the
+#: other runs' is, and adding a run changes every default dataset. Name O4 to read it.
+DEFAULT_OBSERVING_RUNS: Tuple[ObservingRun, ...] = (ObservingRun.O1, ObservingRun.O2, ObservingRun.O3)
+
+
 
 # =============================================================================
 # RANDOM SUBSECTION FUNCTIONS (JIT-compiled)
@@ -543,8 +549,7 @@ class BaseDataObtainer(ABC):
         
         self.acquisition_mode = None
 
-        # Default to all observing runs (O1, O2, O3) if not specified
-        observing_runs = ensure_list(observing_runs) or [ObservingRun.O1, ObservingRun.O2, ObservingRun.O3]
+        observing_runs = ensure_list(observing_runs) or list(DEFAULT_OBSERVING_RUNS)
 
         # Set class attributes with parameters:
         self.data_quality = data_quality

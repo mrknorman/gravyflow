@@ -536,6 +536,10 @@ class TestDataSource:
             o3a_only.fetch(gf.IFO.H1, 16384.0, (o3b, o3b + 32.0))
         with pytest.raises(ValueError, match="names no frame type for GWOSC run O1"):
             gf.LocalFrames().segments(gf.IFO.H1, ("DATA",), (O1_GPS, O1_GPS + 100.0))
+        # O4 has no default frames: its GWOSC channels are not LVK's O3 ones, so a reader names them.
+        with pytest.raises(ValueError, match="names no frame type for GWOSC run O4a"):
+            gf.LocalFrames().fetch(gf.IFO.H1, 16384.0, (O4A_GPS, O4A_GPS + 32.0))
+        assert sorted(gf.LocalFrames().frametypes) == ["O3a", "O3b"]
 
         def read_4096(files, start=None, end=None, **kwargs):
             return _fake_strain(start, 4096.0, end - start)
@@ -825,6 +829,22 @@ class TestObservingRunO4:
             (veto,) = [v for v in gwosc_data.coalesce_segments(vetoes) if v[0] <= gps <= v[1]]
             assert len(gwosc_data.intersect_segments(admissible, [veto])) == 0, name
         assert bitten >= 1, f"no O4 event lies in {ifo}'s fixture data: the test proves nothing"
+
+    def test_o4_is_read_only_when_named(self):
+        """
+        Both obtainers default to O1, O2 and O3, from one home: O4's noise has no
+        Gravity Spy veto, and adding a run would change every default dataset.
+        """
+        from gravyflow.src.dataset.acquisition.base import DEFAULT_OBSERVING_RUNS
+
+        assert DEFAULT_OBSERVING_RUNS == (gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3)
+        o3_end = gf.ObservingRun.O3.value.end_gps_time
+        for labels in ([gf.DataLabel.NOISE], [gf.DataLabel.GLITCHES]):
+            default = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=labels)
+            assert max(default.end_gps_times) == o3_end, labels
+            named = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=labels,
+                                       observing_runs=[gf.ObservingRun.O3, gf.ObservingRun.O4])
+            assert named.end_gps_times[-1] == GWOSC_RUN_BOUNDS["O4b"][1], labels
 
     def test_a_detector_is_read_only_in_the_runs_gwosc_publishes_it_in(self, offline_public_sources):
         """

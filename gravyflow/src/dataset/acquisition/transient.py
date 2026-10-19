@@ -29,7 +29,7 @@ from gravyflow.src.dataset.features.event import EventConfidence
 from gravyflow.src.dataset.features.injection import ReturnVariables as RV
 from .base import (
     BaseDataObtainer, DataQuality, DataLabel, SegmentOrder, Coincidence,
-    AcquisitionMode, SamplingMode, ObservingRun, label_kinds
+    AcquisitionMode, SamplingMode, ObservingRun, DEFAULT_OBSERVING_RUNS, label_kinds
 )
 from gravyflow.src.utils.numerics import ensure_list
 from gravyflow.src.utils.gps import as_gps_times
@@ -141,11 +141,7 @@ class TransientDataObtainer(BaseDataObtainer):
                 "batches carry the COINCIDENT flag."
             )
         
-        # Default observing runs matching BaseDataObtainer behavior
-        if observing_runs is None:
-            observing_runs = [ObservingRun.O1, ObservingRun.O2, ObservingRun.O3]
-        if not isinstance(observing_runs, list):
-            observing_runs = [observing_runs]
+        observing_runs = ensure_list(observing_runs) or list(DEFAULT_OBSERVING_RUNS)
             
         self.observing_runs = observing_runs
         self.event_names = event_names
