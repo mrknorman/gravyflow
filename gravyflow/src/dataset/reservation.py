@@ -6,7 +6,7 @@ a benchmark's test strain. ``SplitSpec.reserved`` holds them; test keeps the tim
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Mapping, Tuple
 
 import numpy as np
@@ -35,7 +35,8 @@ class Reservation:
     """
 
     name: str
-    intervals: Tuple[Tuple[str, Tuple[Tuple[float, float], ...]], ...]
+    # Out of the repr: hundreds of intervals would swamp every message naming a split.
+    intervals: Tuple[Tuple[str, Tuple[Tuple[float, float], ...]], ...] = field(repr=False)
 
     def __post_init__(self):
         if not isinstance(self.name, str) or not self.name:

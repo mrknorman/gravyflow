@@ -172,3 +172,19 @@ def test_reservation_names_the_mode(world):
         for spec in (strict, faithful):
             record = fx.dataset(fixture, "train", split_spec=spec).seed_metadata
             assert (record["split_fingerprint"], record["split_mode"]) == (spec.fingerprint(), spec.mode)
+
+
+def test_a_reservation_is_checked_as_it_is_made():
+    """Reservations are named apart and are gf.Reservation objects; a repr stays short."""
+    other = gf.Reservation.from_segments("other", [[0.0, 10.0]], {"V1": 5.0})
+    assert np.array_equal(other.of("V1"), [[-5.0, 15.0]]) and len(other.of("H1")) == 0
+    spec = gf.SplitSpec(reserved=(gf.MLGWSC1_O3A, other))
+    assert spec.mode == "reserved: mlgwsc1-o3a, other"
+    assert spec.reserving(-1.0, 0.0, "V1") is other and spec.reserving(-6.0, -5.0, "V1") is None
+    with pytest.raises(ValueError, match="distinct names"):
+        gf.SplitSpec(reserved=(other, other))
+    with pytest.raises(TypeError, match="gf.Reservation"):
+        gf.SplitSpec(reserved=([(0.0, 1.0)],))
+    with pytest.raises(ValueError, match="non-negative"):
+        gf.Reservation.from_segments("bad", [[0.0, 1.0]], {"H1": -1.0})
+    assert len(repr(gf.DEFAULT_SPLIT)) < 400
