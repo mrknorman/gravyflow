@@ -59,7 +59,7 @@ def population_box(generator) -> Dict[str, Tuple[float, ...]]:
         if not (np.isfinite(low) and np.isfinite(high) and low > 0):
             raise ValueError(
                 f"The population's {attribute} is unbounded, so it has no loudest source: set "
-                "ValidationConfig.volume_max_distance_mpc."
+                "ValidationConfig.volume_reach_mpc."
             )
         box[attribute] = (low, high)
     for attribute in ("spin_1_in", "spin_2_in"):
@@ -69,7 +69,7 @@ def population_box(generator) -> Dict[str, Tuple[float, ...]]:
         if any(bound != (0.0, 0.0) for bound in bounds[:2]):
             raise ValueError(
                 f"The population's {attribute} has in-plane components (precession), for which a "
-                "face-on source is not the loudest: set ValidationConfig.volume_max_distance_mpc."
+                "face-on source is not the loudest: set ValidationConfig.volume_reach_mpc."
             )
         low, high = bounds[2]
         box[attribute] = tuple(sorted({low, high} | ({0.0} if low < 0.0 < high else set())))
@@ -170,8 +170,8 @@ def loudest_snr(generator, psds, sample_rate_hertz: float, window_seconds: float
     return snr
 
 
-def horizon_distance(generator, psds, sample_rate_hertz: float, window_seconds: float, config,
-                     snr: float) -> float:
+def reach_distance(generator, psds, sample_rate_hertz: float, window_seconds: float, config,
+                   snr: float) -> float:
     """
     The population's reach (Mpc): the distance at which its loudest possible
     source (`loudest_snr`) has network SNR ``snr``, so that every source beyond

@@ -47,7 +47,8 @@ class Validator:
     # 4: every stored array and score is of physical strain; format 3 could
     # hold internally scaled strain (a raw ONSOURCE input) and its scores.
     # 5: the sensitive-volume set (``volume_data``): injections at physical
-    # distances drawn uniformly in volume out to its recorded reach.
+    # distances drawn uniformly in volume out to its recorded reach (``reach_mpc``),
+    # with their SNRs.
     FORMAT_VERSION = 5
 
     def __init__(self, name: str = "model", config: Optional[ValidationConfig] = None,
@@ -180,23 +181,23 @@ class Validator:
 
     def sensitive_volume_curve(self, fars_hz=None) -> Optional[SensitiveVolumeCurve]:
         """
-        Sensitive volume (Gpc^3) and distance (Mpc) at each target FAR (Hz), with their
-        injection, background and joint intervals, noise floor and reach guard (`volume`;
-        Euclidean, detector-frame masses), from the sensitive-volume set; None without
-        one (a burst population, or WHITE noise).
-        The joint interval's bootstrap draws from the validator's own seed, so a record
-        gives the same curve whenever it is read.
+        Sensitive volume (Gpc^3) and distance (Mpc) within the reach R the volume set was
+        drawn to, at each target FAR (Hz), with their injection, background and joint
+        intervals, noise floor, and the estimated volume beyond R with its interval
+        (`volume`; Euclidean, detector-frame masses); None without a volume set (a burst
+        population, or WHITE noise). The bootstrap draws from the validator's own seed,
+        so a record gives the same curve whenever it is read.
         """
         data = self.volume_data
         if self.far_scores is None or data is None:
             return None
         cfg = self.config
         return sensitive_volume_curve(
-            InjectionVolumes(data["scores"], float(data["max_distance_mpc"]), data["distances"]), self.background(),
-            cfg.far_thresholds if fars_hz is None else fars_hz,
+            InjectionVolumes(data["scores"], float(data["reach_mpc"]), data["distances"], data["snrs"]),
+            self.background(), cfg.far_thresholds if fars_hz is None else fars_hz,
             gf.SeedTree(cfg.seed).stream(cfg.group, "validator/volume"),
             cfg.volume_bootstrap_samples, cfg.confidence, cfg.efficiency_interval,
-            cfg.volume_noise_floor_fraction)
+            cfg.volume_noise_floor_fraction, cfg.volume_beyond_reach_fraction)
 
     def roc_curves(self) -> Dict[str, Dict[str, Any]]:
         """Exact ROC curves of noise against injection populations, keyed by population."""

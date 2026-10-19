@@ -40,22 +40,27 @@ class ValidationConfig:
     confidence: float = 0.9
     efficiency_interval: str = "clopper-pearson"
 
-    # Sensitive volume against FAR (`volume`), at the same targets, from a set of
-    # this many injections of its own (default num_examples), each at a physical
-    # distance drawn uniformly in volume out to volume_max_distance_mpc: by default
-    # the distance beyond which no source of the population can have this network
-    # SNR, whatever its sky, orientation, masses and spins
-    # (`ValidationBank.horizon_distance`). The volume is Euclidean and the masses
-    # are in the detector frame (as in MLGWSC-1's evaluate.py). A lower SNR is a
-    # longer reach: fewer targets reach-limited (the reach's outermost shell found
-    # more often than noise is), more injections for the same interval. The joint
-    # interval bootstraps this many replicates of the injections and background. A
-    # target where noise alone finds more than this fraction of V is marked.
+    # Sensitive volume within a reach R against FAR (`volume`), at the same targets,
+    # from a set of this many injections of its own (default num_examples), each at
+    # a physical distance drawn uniformly in volume out to R: volume_reach_mpc, by
+    # default the distance beyond which no source of the population can have
+    # volume_reach_snr, whatever its sky, orientation, masses and spins
+    # (`ValidationBank.reach_distance`). The volume is Euclidean and the masses are
+    # in the detector frame (as in MLGWSC-1's evaluate.py). The reach SNR sets how
+    # far the validator injects: a lower one is a longer reach, so V within it counts
+    # more of what a detector finds, and its volume grows as its cube, so the same
+    # interval takes more injections (from SNR 4 to 3: the reach 4/3 times as far,
+    # its volume 2.4 times, about 2 times the injections for the example population).
+    # The joint interval bootstraps this many replicates of the injections and the
+    # background. A target where noise alone finds more than the first fraction of V
+    # is marked noise-dominated (not quoted); one where the estimated volume beyond
+    # the reach exceeds the second is marked reach-limited (quoted, with a warning).
     volume_num_injections: Optional[int] = None
-    volume_max_distance_mpc: Optional[float] = None
-    volume_horizon_snr: float = 3.0
+    volume_reach_mpc: Optional[float] = None
+    volume_reach_snr: float = 3.0
     volume_bootstrap_samples: int = 1000
     volume_noise_floor_fraction: float = 0.1
+    volume_beyond_reach_fraction: float = 0.1
 
     # ROC populations: injections at SNR >= default_roc_min_snr, plus extra
     # pools given as (min_snr, max_snr) or a centre with a width of 1.
@@ -92,12 +97,11 @@ class ValidationConfig:
             raise ValueError(f"snr_range must be increasing, got {self.snr_range}.")
         if self.volume_num_injections is not None and self.volume_num_injections < 1:
             raise ValueError(f"volume_num_injections must be >= 1, got {self.volume_num_injections}.")
-        if self.volume_max_distance_mpc is not None and not self.volume_max_distance_mpc > 0:
-            raise ValueError(f"volume_max_distance_mpc must be > 0, got {self.volume_max_distance_mpc}.")
-        if not 0 < self.volume_noise_floor_fraction:
-            raise ValueError(f"volume_noise_floor_fraction must be > 0, got {self.volume_noise_floor_fraction}.")
-        if not self.volume_horizon_snr > 0:
-            raise ValueError(f"volume_horizon_snr must be > 0, got {self.volume_horizon_snr}.")
+        if self.volume_reach_mpc is not None and not self.volume_reach_mpc > 0:
+            raise ValueError(f"volume_reach_mpc must be > 0, got {self.volume_reach_mpc}.")
+        for name in ("volume_noise_floor_fraction", "volume_beyond_reach_fraction", "volume_reach_snr"):
+            if not getattr(self, name) > 0:
+                raise ValueError(f"{name} must be > 0, got {getattr(self, name)}.")
         if self.volume_bootstrap_samples < 1:
             raise ValueError(f"volume_bootstrap_samples must be >= 1, got {self.volume_bootstrap_samples}.")
 

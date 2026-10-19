@@ -545,9 +545,10 @@ def generate_far_curves(
     _style(p, "bottom_left")
     return p
 
-#: The sensitive volume plot's y axes: Euclidean volume, detector-frame masses (as MLGWSC-1's evaluate.py).
-VOLUME_AXIS_LABELS = ("Sensitive Volume (Gpc³, Euclidean, detector-frame masses)",
-                      "Sensitive Distance (Mpc, Euclidean, detector-frame masses)")
+#: The sensitive volume plot's y axes: within each curve's reach R; Euclidean volume, detector-frame masses (as
+#: MLGWSC-1's evaluate.py).
+VOLUME_AXIS_LABELS = ("Sensitive Volume within reach R (Gpc³, Euclidean, detector-frame masses)",
+                      "Sensitive Distance within reach R (Mpc, Euclidean, detector-frame masses)")
 
 
 def generate_sensitive_volume_plot(
@@ -557,16 +558,18 @@ def generate_sensitive_volume_plot(
         height: int = 600
     ):
     """
-    Sensitive volume (Gpc³) and sensitive distance (Mpc) against FAR per month: each
-    curve with its joint interval (the wider band), its injection interval (the
-    narrower band), the Poisson interval of the FAR its threshold achieves (the
-    horizontal bars, the background's term), and its noise floor (dashed), with the
-    points where the floor exceeds its stated fraction of V ringed and the
-    reach-limited points (the reach's outermost shell found more often than noise
-    is, so V misses what lies beyond the reach) crossed: neither is a number to
-    quote. Volumes are Euclidean, of populations whose masses are in the detector
-    frame, as the axes say. A FAR the background cannot resolve, and a validator
-    with no volume set, have no points.
+    Sensitive volume (Gpc³) and sensitive distance (Mpc) within each curve's reach R
+    (named in its legend) against FAR per month: each curve with its joint interval
+    (the wider band), its injection interval (the narrower band), the Poisson
+    interval of the FAR its threshold achieves (the horizontal bars, the
+    background's term), its noise floor (dashed), and, dotted, V within R plus the
+    estimated volume beyond R (out to the curve's ``beyond_reach_factor`` times R),
+    whose interval the tooltip gives. The points `SensitiveVolumeCurve.quote` will
+    not quote are ringed (noise-dominated); the reach-limited ones, where the
+    estimate beyond R exceeds its stated fraction of V, are crossed: a warning.
+    Volumes are Euclidean, of populations whose masses are in the detector frame, as
+    the axes say. A FAR the background cannot resolve, and a validator with no
+    volume set, have no points.
 
     Returns:
         A column of the two figures.
@@ -575,11 +578,11 @@ def generate_sensitive_volume_plot(
 
     tooltips = [
         ("FAR (per month)", "@x{0.00e}"), ("FAR (per year)", "@per_year{0.00e}"),
-        ("Value", "@y{0.000}"), ("Joint", "@joint_lower{0.000} – @joint_upper{0.000}"),
+        ("Within reach R", "@y{0.000}"), ("Joint", "@joint_lower{0.000} – @joint_upper{0.000}"),
         ("Injections", "@injection_lower{0.000} – @injection_upper{0.000}"),
         ("Background", "@background_lower{0.000} – @background_upper{0.000}"),
         ("Noise floor", "@noise_floor{0.000}"),
-        ("Reach's outer shell found", "@shell_found{0.00e}"),
+        ("With the estimate beyond R", "@with_beyond{0.000} (@with_beyond_lower{0.000} – @with_beyond_upper{0.000})"),
     ]
     figures = [
         figure(width=width, height=height, x_axis_type="log", x_axis_label="False Alarm Rate (per month)",
@@ -591,15 +594,17 @@ def generate_sensitive_volume_plot(
         if curve is None:
             continue
         ok = curve.resolved
-        title = _title(validator, index)
+        title = f"{_title(validator, index)} (R = {curve.reach_mpc:,.0f} Mpc)"
+        within = curve.volume_within_reach_gpc3
         for p, convert in zip(figures, (np.asarray, sensitive_distance)):
             source = ColumnDataSource(data=dict(
                 x=curve.far_hz[ok] * SECONDS_PER_MONTH, per_year=curve.far_hz[ok] * SECONDS_PER_YEAR,
                 x_lower=curve.far_lower_hz[ok] * SECONDS_PER_MONTH,
                 x_upper=curve.far_upper_hz[ok] * SECONDS_PER_MONTH,
-                y=convert(curve.volume_gpc3[ok]),
+                y=convert(within[ok]),
                 noise_floor=convert(curve.noise_floor_gpc3[ok]),
-                shell_found=curve.shell_found_fraction[ok],
+                **{f"with_beyond{end}": convert(within[ok] + getattr(curve, f"beyond_reach{end}_gpc3")[ok])
+                   for end in ("", "_lower", "_upper")},
                 **{f"{term}_{end}": convert(getattr(curve, f"{term}_{end}_gpc3")[ok])
                    for term in ("joint", "injection", "background") for end in ("lower", "upper")},
             ))
@@ -613,16 +618,15 @@ def generate_sensitive_volume_plot(
             p.scatter("x", "y", source=source, size=6, color=color, legend_label=title)
             p.line("x", "noise_floor", source=source, line_color=color, line_dash="dashed",
                    legend_label=f"{title} (noise floor)")
-            noisy = curve.noise_dominated[ok]
-            if noisy.any():
-                p.scatter(x=curve.far_hz[ok][noisy] * SECONDS_PER_MONTH, y=convert(curve.volume_gpc3[ok][noisy]),
-                          size=14, marker="circle", fill_alpha=0, line_color=color,
-                          legend_label=f"{title} (noise floor > {curve.noise_floor_fraction:.0%} of V)")
-            limited = curve.reach_limited[ok]
-            if limited.any():
-                p.scatter(x=curve.far_hz[ok][limited] * SECONDS_PER_MONTH, y=convert(curve.volume_gpc3[ok][limited]),
-                          size=14, marker="x", line_color=color, line_width=2,
-                          legend_label=f"{title} (reach-limited)")
+            p.line("x", "with_beyond", source=source, line_color=color, line_dash="dotted",
+                   legend_label=f"{title} (with the estimate to {curve.beyond_reach_factor:g} R)")
+            for marked, marker, what in (
+                    (~curve.quotable[ok], "circle", f"not quoted: noise floor > {curve.noise_floor_fraction:.0%} of V"),
+                    (curve.reach_limited[ok], "x", f"reach-limited: beyond R > {curve.beyond_reach_fraction:.0%} of V")):
+                if marked.any():
+                    p.scatter(x=curve.far_hz[ok][marked] * SECONDS_PER_MONTH, y=convert(within[ok][marked]),
+                              size=14, marker=marker, fill_alpha=0, line_color=color, line_width=2,
+                              legend_label=f"{title} ({what})")
     for p in figures:
         if p.renderers:
             _style(p, "bottom_right")

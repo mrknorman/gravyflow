@@ -141,12 +141,15 @@ class ScoreStream:
     Window ``i`` starts at ``i * stride_seconds`` and lasts ``window_seconds``;
     the stream's livetime is the span it covers. ``block`` labels the stretch of
     data it came from, so that an estimator can treat correlated blocks
-    together (`Background.by_block`).
+    together (`Background.by_block`). ``slide`` is the time slide the stream's
+    windows were read at (0: unslid), so that the background knows how often it
+    reuses each detector's data (`Background.data_reuse`).
     """
     scores: np.ndarray
     stride_seconds: float
     window_seconds: float
     block: Optional[Hashable] = None
+    slide: int = 0
 
     def __post_init__(self):
         object.__setattr__(self, "scores", _finite_scores(self.scores, "stream scores"))
@@ -391,20 +394,49 @@ class Background:
             groups.setdefault(stream.block, []).append(stream)
         return groups
 
-    def bootstrap(self, rng: np.random.Generator) -> "Background":
+    @property
+    def data_reuse(self) -> int:
         """
-        A bootstrap replicate of this background: its blocks (the ``block`` labels of
-        `by_block`) drawn with replacement, as many as it has, each with all its streams;
-        or, for independent windows, the windows themselves, each its own block.
+        How many of the background's windows each detector's window of data enters:
+        the number of time slides its streams were read at (each slide reads the
+        same data again), 1 for unslid streams or independent windows.
         """
-        if not self.streams:
-            n = self.num_windows
-            window_seconds = self.livetime_seconds / n
-            return Background.independent_windows(self._opens[rng.integers(0, n, n)], window_seconds,
-                                                  self._independent_block)
-        blocks = list(self._blocks().values())
-        drawn = rng.integers(0, len(blocks), len(blocks))
-        return Background([stream for b in drawn for stream in blocks[b]], self.cluster_seconds)
+        return max(len({stream.slide for stream in self.streams}), 1)
+
+    def bootstrap_thresholds(self, fars_hz, rng: np.random.Generator) -> np.ndarray:
+        """
+        One bootstrap replicate of the thresholds for the targets ``fars_hz`` (Hz):
+        NaN where the background cannot resolve a target.
+
+        The information in a background is its count of independent events above a
+        threshold, Poisson, each counted `data_reuse` times among its windows (a
+        loud excursion in one detector's data opens a trigger in every slide). A
+        replicate's count above every threshold is `data_reuse` times a unit-rate
+        Poisson process run over the background's count in events, ``c / reuse``,
+        and a target's threshold is the lowest one that process allows: the
+        threshold allowing ``ceil(reuse * S_j) - 1`` triggers, ``S_j`` the
+        process's ``j``-th arrival and ``j - 1`` the events the target allows,
+        ``floor(allowed / reuse)``. One process serves every target, its arrivals
+        drawn as Gamma increments, so a replicate's thresholds fall as the target
+        rises. Unslid (reuse 1), it is the bootstrap of independent windows: the
+        replicate's count at a threshold of count ``c`` is Poisson of mean ``c``.
+        """
+        self._require_livetime()
+        fars = np.asarray(fars_hz, dtype=np.float64).reshape(-1)
+        allowed = np.floor(fars * self.livetime_seconds * (1 + 1e-12))
+        thresholds = np.full(fars.size, np.nan)
+        resolved = np.flatnonzero(allowed >= 1)
+        if resolved.size == 0:
+            return thresholds
+        reuse = self.data_reuse
+        arrival = (np.floor(allowed[resolved] / reuse) + 1).astype(np.int64)
+        order = np.argsort(arrival, kind="stable")
+        steps = np.diff(np.concatenate([[0], arrival[order]]))
+        times = np.empty(order.size)
+        times[order] = np.cumsum(rng.gamma(steps.astype(np.float64)))
+        counts = np.ceil(reuse * times) - 1
+        thresholds[resolved] = [self._threshold_allowing(int(count)) for count in counts]
+        return thresholds
 
     def _require_livetime(self) -> None:
         if self.livetime_seconds <= 0:

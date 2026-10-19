@@ -58,7 +58,7 @@ def test_validator_runs_offline_on_synthetic_noise(validated, tmp_path):
     assert v.noise_gps_times is None
     assert set(v.efficiency_data) == {"snrs", "scores", "mass1", "mass2", "central_times", "hpeak", "hrss"}
     assert all(a.shape == (64,) for a in v.efficiency_data.values())
-    assert set(v.volume_data) == {"scores", "distances", "snrs", "mass1", "mass2", "max_distance_mpc"}
+    assert set(v.volume_data) == {"scores", "distances", "snrs", "mass1", "mass2", "reach_mpc"}
     assert path.exists()
     report = tmp_path / "report.html"
     v.plot(report)
@@ -98,42 +98,47 @@ def test_checkpoint_round_trip(validated):
 
 def test_the_sensitive_volume_is_recorded_and_plotted(validated, small_config):
     # The volume set: sources at physical distances, uniform in volume out to the
-    # population's reach; the curve follows from the record alone, with its three
-    # intervals and noise floor, and the record read back gives the same curve.
+    # population's reach R, recorded; the curve follows from the record alone, with
+    # V within R, its three intervals and noise floor, and the estimate beyond R, and
+    # the record read back gives the same curve.
     _, path, v = validated
     data = v.volume_data
-    max_distance = float(data["max_distance_mpc"])
-    assert np.all((data["distances"] > 0) & (data["distances"] <= max_distance))
+    reach = float(data["reach_mpc"])
+    assert np.all((data["distances"] > 0) & (data["distances"] <= reach))
     # Each source's SNR goes as one over its distance: its SNR at the reach is at most the
-    # loudest possible source's, the horizon SNR, to the scatter of each window's own PSD
+    # loudest possible source's, the reach SNR, to the scatter of each window's own PSD
     # estimate (a few per cent), against which its SNR is measured.
-    assert np.all(data["snrs"] * data["distances"] / max_distance <= small_config.volume_horizon_snr * 1.1)
+    assert np.all(data["snrs"] * data["distances"] / reach <= small_config.volume_reach_snr * 1.1)
     curve = v.sensitive_volume_curve()
     assert curve.far_hz.tolist() == small_config.far_thresholds
     resolved = curve.resolved
     assert resolved.any() and not resolved.all()  # 64 s of background resolves only the higher FARs
-    assert np.all(np.isnan(curve.volume_gpc3[~resolved]))
-    for lower, upper in ((curve.injection_lower_gpc3, curve.injection_upper_gpc3),
-                         (curve.background_lower_gpc3, curve.background_upper_gpc3)):
-        assert np.all(lower[resolved] <= curve.volume_gpc3[resolved])
-        assert np.all(curve.volume_gpc3[resolved] <= upper[resolved])
-    complete = resolved & (curve.joint_unresolved == 0)
-    assert np.all(curve.joint_lower_gpc3[complete] <= curve.joint_upper_gpc3[complete])
-    assert np.all(np.isnan(curve.joint_lower_gpc3[resolved & ~complete]))
-    assert np.all(curve.volume_gpc3[resolved] <= curve.reference_volume_gpc3)
-    assert curve.max_distance_mpc == max_distance
+    within = curve.volume_within_reach_gpc3
+    assert np.all(np.isnan(within[~resolved])) and np.all(np.isnan(curve.beyond_reach_gpc3[~resolved]))
+    for value, lower, upper in ((within, curve.injection_lower_gpc3, curve.injection_upper_gpc3),
+                                (within, curve.background_lower_gpc3, curve.background_upper_gpc3),
+                                (within, curve.joint_lower_gpc3, curve.joint_upper_gpc3),
+                                (curve.beyond_reach_gpc3, curve.beyond_reach_lower_gpc3,
+                                 curve.beyond_reach_upper_gpc3)):
+        assert np.all(lower[resolved] <= value[resolved]) and np.all(value[resolved] <= upper[resolved])
+    assert np.all(within[resolved] <= curve.reference_volume_gpc3)
+    assert curve.reach_mpc == reach and curve.data_reuse == 1
     assert curve.num_injections == small_config.volume_num_injections
     assert curve.num_bootstrap == small_config.volume_bootstrap_samples
+    assert curve.beyond_reach_fraction == small_config.volume_beyond_reach_fraction
     loaded = Validator.load(path).sensitive_volume_curve()
     for field in dataclasses.fields(curve):
         np.testing.assert_array_equal(getattr(loaded, field.name), getattr(curve, field.name), err_msg=field.name)
 
     plot = generate_sensitive_volume_plot([v])
-    # The axes say what the number is: a Euclidean volume, of detector-frame masses.
+    # The axes say what the number is: a Euclidean volume within the reach, of detector-frame
+    # masses; the legend names the reach.
     assert [child.yaxis.axis_label for child in plot.children] == [
-        "Sensitive Volume (Gpc³, Euclidean, detector-frame masses)",
-        "Sensitive Distance (Mpc, Euclidean, detector-frame masses)"]
+        "Sensitive Volume within reach R (Gpc³, Euclidean, detector-frame masses)",
+        "Sensitive Distance within reach R (Mpc, Euclidean, detector-frame masses)"]
     assert all(child.renderers for child in plot.children)
+    labels = {item.label.value for child in plot.children for item in child.legend[0].items}
+    assert f"Tiny (R = {reach:,.0f} Mpc)" in labels
 
 
 def volume_set(dataset_args, **settings):
@@ -154,12 +159,12 @@ def test_the_sensitive_volume_does_not_depend_on_the_efficiency_snr_range(datase
 def test_the_reach_is_the_populations_and_can_be_set(dataset_args):
     # The reach reads the population's bounds and the noise, never the injections drawn:
     # another number of injections has the same reach, and a configured one is used as given.
-    assert volume_set(dataset_args)["max_distance_mpc"] == volume_set(
-        dataset_args, volume_num_injections=64)["max_distance_mpc"]
-    given = volume_set(dataset_args, volume_max_distance_mpc=250.0)
-    assert given["max_distance_mpc"] == 250.0 and np.all(given["distances"] <= 250.0)
-    with pytest.raises(ValueError, match="volume_max_distance_mpc"):
-        ValidationConfig(volume_max_distance_mpc=0.0)
+    assert volume_set(dataset_args)["reach_mpc"] == volume_set(
+        dataset_args, volume_num_injections=64)["reach_mpc"]
+    given = volume_set(dataset_args, volume_reach_mpc=250.0)
+    assert given["reach_mpc"] == 250.0 and np.all(given["distances"] <= 250.0)
+    with pytest.raises(ValueError, match="volume_reach_mpc"):
+        ValidationConfig(volume_reach_mpc=0.0)
 
 
 def reach_of(dataset_args, masses=None, spins=None, **settings):
@@ -173,7 +178,7 @@ def reach_of(dataset_args, masses=None, spins=None, **settings):
                     if bounds[0] == bounds[1] else
                     gf.Distribution(min_=bounds[0], max_=bounds[1], type_=gf.DistributionType.UNIFORM))
     config = ValidationConfig(**{"num_examples": 32, "batch_size": 32, **settings})
-    return ValidationBank(logit_model(1), args, config).horizon_distance()
+    return ValidationBank(logit_model(1), args, config).reach_distance()
 
 
 def test_the_reach_is_the_loudest_source_of_the_whole_population(dataset_args):

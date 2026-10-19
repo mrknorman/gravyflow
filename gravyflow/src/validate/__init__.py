@@ -19,6 +19,7 @@ from .metrics import (
 from .volume import (
     InjectionVolumes,
     SensitiveVolumeCurve,
+    VolumeQuote,
     sensitive_distance,
     sensitive_volume_curve,
 )

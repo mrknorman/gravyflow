@@ -45,7 +45,7 @@ _INJECTION_LABELS = {
     "central_times": gf.ReturnVariables.CENTRAL_TIME,
 }
 _CBC_LABELS = ("mass1", "mass2")
-#: The noise windows whose median PSD the reach is computed in (`ValidationBank.horizon_distance`).
+#: The noise windows whose median PSD the reach is computed in (`ValidationBank.reach_distance`).
 REACH_NOISE_WINDOWS = 64
 # Per-example labels of the sensitive-volume set (`generate_volume`).
 _VOLUME_LABELS = {
@@ -81,8 +81,8 @@ def noise_background(scores, streams: Optional[Dict[str, np.ndarray]], window_se
         return Background.independent_windows(scores, window_seconds)
     edges = np.cumsum(streams["lengths"])[:-1]
     return Background(
-        [ScoreStream(part, window_seconds, window_seconds, int(block))
-         for part, block in zip(np.split(np.asarray(scores), edges), streams["blocks"])],
+        [ScoreStream(part, window_seconds, window_seconds, int(block), int(slide))
+         for part, block, slide in zip(np.split(np.asarray(scores), edges), streams["blocks"], streams["slides"])],
         window_seconds if cluster_seconds is None else cluster_seconds,
     )
 
@@ -363,7 +363,7 @@ class ValidationBank:
     @property
     def has_volume(self) -> bool:
         """
-        Whether the injections have a sensitive volume: a CBC population (whose
+        Whether the injections have a sensitive volume: one CBC population (whose
         amplitude goes as one over a physical distance) in noise of physical strain
         (not WHITE, which is dimensionless).
         """
@@ -371,17 +371,17 @@ class ValidationBank:
         return (isinstance(self._generator(), gf.CBCGenerator)
                 and getattr(noise, "noise_type", None) is not gf.NoiseType.WHITE)
 
-    def horizon_distance(self) -> float:
+    def reach_distance(self) -> float:
         """
         The population's reach (Mpc): the distance at which its loudest possible
-        source has network SNR ``volume_horizon_snr``, so that every source beyond
+        source has network SNR ``volume_reach_snr``, so that every source beyond
         it has less, whatever its sky position, orientation and parameters
-        (`reach.horizon_distance`: face-on, the best response every detector can
+        (`reach.reach_distance`: face-on, the best response every detector can
         have, maximised over the population's masses and aligned spins). The noise's
         PSD is the median, over `REACH_NOISE_WINDOWS` windows of the stage's own
         noise, of the data path's estimate (``Dataset.spectral_config``). It reads
         the population's bounds and the noise, never the injections drawn, nor the
-        batch size; ``volume_max_distance_mpc`` overrides it.
+        batch size; ``volume_reach_mpc`` overrides it.
         """
         from gravyflow.src.dataset.tools.psd import estimate_psd
         from . import reach
@@ -392,15 +392,15 @@ class ValidationBank:
         spectrum = estimate_psd(y[gf.ReturnVariables.OFFSOURCE.name], dataset.sample_rate_hertz,
                                 dataset.spectral_config)
         psds = np.median(spectrum.value(), axis=0)
-        return reach.horizon_distance(self._generator(), psds, dataset.sample_rate_hertz,
-                                      dataset.window_spec.onsource_duration_seconds, dataset.spectral_config,
-                                      self.config.volume_horizon_snr)
+        return reach.reach_distance(self._generator(), psds, dataset.sample_rate_hertz,
+                                    dataset.window_spec.onsource_duration_seconds, dataset.spectral_config,
+                                    self.config.volume_reach_snr)
 
     def generate_volume(self) -> None:
         """
         Score the sensitive-volume set: ``num_volume_injections`` sources from the
         population, each at a physical distance drawn uniformly in volume out to the
-        population's reach (``volume_max_distance_mpc``, else `horizon_distance`):
+        population's reach R (``volume_reach_mpc``, else `reach_distance`):
         the generated source placed at that distance, never scaled to an SNR.
         Distances are Euclidean and masses in the detector frame, as the generator
         draws them.
@@ -409,8 +409,8 @@ class ValidationBank:
         if not self.has_volume:
             raise ValueError("Only a CBC population in noise of physical strain has a sensitive volume.")
         n = cfg.num_volume_injections
-        max_distance = cfg.volume_max_distance_mpc or self.horizon_distance()
-        targets = uniform_in_volume(n, max_distance, gf.SeedTree(cfg.seed).stream(cfg.group, "validator/distance"))
+        reach = cfg.volume_reach_mpc or self.reach_distance()
+        targets = uniform_in_volume(n, reach, gf.SeedTree(cfg.seed).stream(cfg.group, "validator/distance"))
         generator = self._generator()
         generator.scaling_method = gf.ScalingMethod(value=targets, type_=gf.WaveformParameters.DISTANCE_MPC)
         generator.injection_chance = 1.0
@@ -431,7 +431,7 @@ class ValidationBank:
         if not np.allclose(volume["distances"], targets, rtol=1e-5, atol=0):
             raise RuntimeError("The volume set's injections were not given their targets in the order drawn.")
         volume["distances"] = targets
-        volume["max_distance_mpc"] = np.float64(max_distance)
+        volume["reach_mpc"] = np.float64(reach)
         self.volume = volume
 
     def generate_real_events(self, observing_runs: List = None) -> None:
@@ -544,7 +544,7 @@ class ValidationBank:
         return dict(self.efficiency)
 
     def get_volume_data(self) -> Dict[str, np.ndarray]:
-        """The volume set's scores, distances and labels, and its reach (``max_distance_mpc``)."""
+        """The volume set's scores, distances and labels, and its reach (``reach_mpc``)."""
         if self.volume is None:
             raise ValueError("Call generate_volume() first.")
         return dict(self.volume)

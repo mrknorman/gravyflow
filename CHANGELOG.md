@@ -173,31 +173,38 @@ repository before it may need the changes below.
 - **`gf.NoiseProfile.ZERO_DET_HIGH_POWER`**: Advanced LIGO's zero-detuning, high-power design curve
   (LIGO-T0900288-v3, aLIGOZeroDetHighPower), for H1 and L1 only; a profile refuses a detector it does not cover, by
   name.
-- **Sensitive volume and distance.** `Validator.sensitive_volume_curve()` gives the sensitive volume (Gpc³) and
-  distance (Mpc) at each target FAR, with three intervals: the injections' (exact binomial), the background's
-  livetime, and a joint bootstrap over both whose ends are at least as far out as the background's (so it covers
-  where the background allows only a trigger or two, or has only a few blocks). The volume is Euclidean (no
-  cosmology) and the population's masses are in the detector frame, as in MLGWSC-1's `evaluate.py`. It is measured,
-  as an injection campaign measures it, on a set of its own (`volume_num_injections`, by default `num_examples`): CBC
-  sources at physical distances drawn uniformly in volume out to the population's reach, or
-  `volume_max_distance_mpc`; the reach is recorded. By default the reach is the distance beyond which no source of
-  the population can have network SNR `volume_horizon_snr` (3), whatever its sky, orientation, masses and aligned
-  spins, in the noise's PSD: it does not depend on the batch size, and a population whose masses are unbounded, or
-  whose spins precess, refuses it by name. The volume noise alone finds (the chance a noise window passes, times the
-  reference volume) is recorded at each target, and a point where it exceeds `volume_noise_floor_fraction` (0.1) of
-  V is marked noise-dominated. A point where the reach's outermost shell is found more often than noise is (an exact
-  one-sided test) is marked reach-limited: the detector finds sources beyond the reach, which V cannot count.
-  `SensitiveVolumeCurve.quote` refuses a noise-dominated or reach-limited point by name. The dashboard plots them
-  beside efficiency, marking both. A burst population, or WHITE noise, has none.
+- **Sensitive volume and distance within a reach.** `Validator.sensitive_volume_curve()` gives the sensitive volume
+  (Gpc³) and distance (Mpc) **within a reach R** at each target FAR, exactly what MLGWSC-1's `evaluate.py` computes,
+  and every result carries its R (`reach_mpc`; the curve's `volume_within_reach_gpc3`, the plot's axes and legend).
+  It comes with three intervals: the injections' (exact binomial), the background's livetime, and a joint bootstrap
+  over the injections and the background's thresholds whose ends are at least as far out as the background's (so it
+  covers where the background allows only a trigger or two). The bootstrap counts a time-slid background's
+  independent information, not its slid windows: each detector's data enters one window per slide
+  (`Background.data_reuse`). The volume is Euclidean (no cosmology) and the population's masses are in the detector
+  frame, as in `evaluate.py`. It is measured, as an injection campaign measures it, on a set of its own
+  (`volume_num_injections`, by default `num_examples`): CBC sources at physical distances drawn uniformly in volume
+  out to R, `volume_reach_mpc` or by default the distance beyond which no source of the population can have network
+  SNR `volume_reach_snr` (3), whatever its sky, orientation, masses and aligned spins, in the noise's PSD; R is
+  recorded. A population whose masses are unbounded, or whose spins precess, has no such distance and is refused by
+  name when the validator is built, before any stage runs. The volume noise alone finds (the chance a noise window
+  passes, times R's volume) is recorded at each target, and a point where it exceeds `volume_noise_floor_fraction`
+  (0.1) of V is noise-dominated and not quoted (`SensitiveVolumeCurve.quotable`). Beside V, each target reports an
+  estimate, with its interval, of the volume found by signal between R and twice R (`beyond_reach_gpc3`), assuming a
+  source's chance of being found depends on it through its SNR; where it exceeds `volume_beyond_reach_fraction`
+  (0.1) of V the point is marked reach-limited, a warning. `SensitiveVolumeCurve.quote` gives a `VolumeQuote`: V
+  within R with its joint interval, R, and the estimate beyond R; it refuses an unresolved or noise-dominated point
+  by name and warns at a reach-limited one. The dashboard plots them beside efficiency. A burst population, or WHITE
+  noise, has none.
 - **Injections at a physical distance.** `ScalingMethod(value=distances, type_=WaveformParameters.DISTANCE_MPC)`
   places each generated CBC source at a target distance (Mpc), scaling it by the ratio of its drawn distance to the
   target, and no other measure; WHITE noise refuses it, as it refuses HRSS and HPEAK.
 - **Validation records are format 5.** A record holds the sensitive-volume set (`volume_data`). `Validator.load`
   refuses a record of any other format by name (`StaleCheckpointError`), and converts none: validate the model again.
   The new settings change the validation's fingerprint, so older checkpoints are not resumed.
-- **`Background.bootstrap`** draws a bootstrap replicate of a background (its blocks, or its independent windows),
-  `Background.windows_at_or_above` the number of its windows that pass a threshold, and
-  `Background.window_exceedance` the chance that a noise window passes it.
+- **`Background.bootstrap_thresholds`** draws one bootstrap replicate of the thresholds for target FARs (the count
+  above a threshold Poisson in independent events, each `Background.data_reuse` windows: the number of time slides
+  a `ScoreStream`'s `slide` names), `Background.windows_at_or_above` the number of its windows that pass a
+  threshold, and `Background.window_exceedance` the chance that a noise window passes it.
 
 - `gravyflow.__version__`.
 - `docs/api.md`, the public API, which a test holds equal to `gravyflow.__all__`.

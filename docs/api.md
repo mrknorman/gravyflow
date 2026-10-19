@@ -225,10 +225,10 @@ validates as it trains: they need the `viz` extra.
 
 ## Validation (the `viz` extra)
 
-- `Validator`: validate a model: efficiency, false-alarm rate, sensitive volume and distance against false-alarm
-  rate (Euclidean, detector-frame masses; on injections at physical distances uniform in volume out to the
-  population's reach, with injection, background and joint intervals, the noise floor and the reach guard), ROC and
-  the dashboard.
+- `Validator`: validate a model: efficiency, false-alarm rate, sensitive volume and distance within a reach R
+  against false-alarm rate (Euclidean, detector-frame masses; on injections at physical distances uniform in volume
+  out to R, with injection, background and joint intervals, the noise floor, and an estimate of the volume beyond R),
+  ROC and the dashboard.
 - `ValidationConfig`: the settings of a validation.
 
 ## Plotting (the `viz` extra)
