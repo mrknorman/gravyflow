@@ -57,6 +57,7 @@ the first detector's merger time. Coincidences are clustered in time (the
 loudest within +-cluster_seconds), and become `gf.Triggers`.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Dict, Mapping, Optional, Sequence, Tuple, Union
@@ -71,6 +72,15 @@ from gravyflow.src.dataset.tools.psd import PowerSpectrum, SpectralConfig, estim
 from gravyflow.src.detection.matched_filter import COINCIDENCE_MARGIN_SECONDS
 from gravyflow.src.detection.template_grid import BankPlacement, MatchSpace, TemplateBank
 from gravyflow.src.detection.triggers import Triggers
+from gravyflow.src.rng.platform import cbc_device
+
+# ripplegw builds float64 tables when it is imported (the CBC module imports
+# it), on JAX's default device: on an accelerator without float64 (an Apple
+# GPU) the import fails. The templates are made on the host, so the module is
+# imported there, whatever the default device; imported already, this is a
+# no-op.
+with jax.default_device(cbc_device()):
+    from gravyflow.src.dataset.features.waveforms import cbc as _cbc  # noqa: F401
 
 # The spectrum of each block: 16 s Welch segments overlapping by 8 s, and a
 # 16 s whitening filter, as PyCBC's searches estimate theirs
@@ -294,6 +304,22 @@ def _cluster_in_time(time, stat, cluster_seconds: float) -> np.ndarray:
 # The filter
 # ---------------------------------------------------------------------------
 
+@contextmanager
+def float32_on(device):
+    """
+    Run JAX on `device` with 64-bit mode off, whatever the process's setting.
+
+    The filter's correlation, peak finding and chi-squared are float32 and
+    complex64 kernels. Importing some of ripplegw's models (IMRPhenomXP)
+    switches 64-bit mode on for the whole process, which would make parts of
+    them float64 (an index divided by a count, a cumulative sum), and an
+    Apple GPU has no float64. So the kernels are traced and run with it off,
+    whatever was imported before, and on the device the caller chose.
+    """
+    with jax.enable_x64(False), jax.default_device(device):
+        yield
+
+
 def _one_sided_weights(num_samples: int) -> np.ndarray:
     """The analytic signal's weights on the rfft grid: 1 at DC and an even length's Nyquist, 2 between."""
     weights = np.full(num_samples // 2 + 1, 2.0, dtype=np.float32)
@@ -408,6 +434,13 @@ class StreamingMatchedFilter:
         cluster_seconds: a trigger is the loudest within +-this of itself.
         template_chunk, pair_chunk: templates per filter step, and triggers
             per chi-squared step; memory grows with each times the block.
+        device: the JAX device the float32 kernels (correlation, peak
+            finding, chi-squared) run on, for example an accelerator; the
+            host's CPU when None, whatever JAX's default device. Templates
+            (ripplegw, float64), spectra and whitening filters are always
+            computed on the host's CPU (`cbc_device`), since an accelerator may
+            have no float64; the kernels run with 64-bit mode off
+            (`float32_on`).
     """
 
     bank: TemplateBank
@@ -419,10 +452,13 @@ class StreamingMatchedFilter:
     cluster_seconds: float = 1.0
     template_chunk: int = 16
     pair_chunk: int = 32
+    device: Optional[object] = None
 
     _templates: Optional[jnp.ndarray] = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
+        self._host = cbc_device()
+        self._device = self._host if self.device is None else self.device
         fs = self.sample_rate_hertz = float(self.sample_rate_hertz)
         config = self.spectral_config
         if config.lower_frequency_hertz is None:
@@ -470,7 +506,9 @@ class StreamingMatchedFilter:
             first = int(np.argmax(support))
             last = full.shape[-1] - int(np.argmax(support[::-1]))
             self.pre, self.post = centre - first, max(last - centre, 1)
-            self._templates = jnp.asarray(full[:, first:centre + self.post])
+            with float32_on(self._device):
+                self._templates = jax.device_put(np.ascontiguousarray(full[:, first:centre + self.post]),
+                                                 self._device)
         return self._templates
 
     # --------------------------------------------------------------- blocks
@@ -519,7 +557,7 @@ class StreamingMatchedFilter:
         # (ntaps - 1) // 2 on; the templates' merger is at index pre.
         shift = (len(fir) - 1) // 2 + self.pre
         response = np.fft.rfft(fir, n=n) * np.exp(2j * np.pi * k * (shift % n) / n)
-        return jnp.asarray(response.astype(np.complex64))
+        return jax.device_put(response.astype(np.complex64), self._device)
 
     def filter(self, strain, start_gps: float, detector, psd: Optional[PowerSpectrum] = None) -> DetectorTriggers:
         """
@@ -571,9 +609,10 @@ class StreamingMatchedFilter:
         return n, first, blocks
 
     def _chunked(self, templates):
-        pad = (-templates.shape[0]) % self.template_chunk
-        padded = jnp.pad(templates, ((0, pad), (0, 0))) if pad else templates
-        return padded.reshape((-1, self.template_chunk, templates.shape[-1]))
+        with float32_on(self._device):
+            pad = (-templates.shape[0]) % self.template_chunk
+            padded = jnp.pad(templates, ((0, pad), (0, 0))) if pad else templates
+            return padded.reshape((-1, self.template_chunk, templates.shape[-1]))
 
     def stretch_samples(self, lo: int, hi: int, first: int) -> Tuple[int, int]:
         """
@@ -600,23 +639,28 @@ class StreamingMatchedFilter:
         """
         n, fs, width = len(block), self.sample_rate_hertz, self.cluster_samples
         block = np.asarray(block, dtype=np.float32)
-        spectrum = self._spectrum(block, psd)
-        white = np.asarray(whiten(block, spectrum, fs), dtype=np.float32).reshape(-1)
-        fir = np.asarray(whitening_filter(spectrum, n), dtype=np.float64).reshape(-1)
+        with jax.default_device(self._host):  # the spectrum and its filter: the host's precision
+            spectrum = self._spectrum(block, psd)
+            white = np.asarray(whiten(block, spectrum, fs), dtype=np.float32).reshape(-1)
+            fir = np.asarray(whitening_filter(spectrum, n), dtype=np.float64).reshape(-1)
         a, need = self.stretch_samples(lo, hi, first)
         windows = (need - self.pre - self.post - self.num_taps) // width
         length = need if length is None else min(length, need)
         size = int(next_fast_len(need))  # zero padding past the stretch wraps nothing into it
-        peak, offset, local = (np.asarray(v).reshape(-1, windows - 2) for v in _snr_peaks(
-            jnp.fft.rfft(jnp.asarray(white[a:a + length]), n=size), self._response(fir, size), chunked,
-            n=size, first=self.pre + self.num_taps // 2, windows=windows, width=width))
+        with float32_on(self._device):
+            stretch = jax.device_put(np.ascontiguousarray(white[a:a + length]), self._device)
+            peak, offset, local = (np.asarray(v).reshape(-1, windows - 2) for v in _snr_peaks(
+                jnp.fft.rfft(stretch, n=size), self._response(fir, size), chunked,
+                n=size, first=self.pre + self.num_taps // 2, windows=windows, width=width))
         rows, window = np.nonzero(local & (peak >= self.snr_threshold))
         real = rows < self.bank.num_templates  # not the zero templates padding the last chunk
         rows, window = rows[real], window[real]
         sample = a + self.pre + self.num_taps // 2 + (window + 1) * width + offset[rows, window]
         keep = (sample >= lo) & (sample < hi)
         rows, sample, snr = rows[keep], sample[keep], peak[rows[keep], window[keep]]
-        chisq = self._chisq(jnp.fft.rfft(jnp.asarray(white), n=n), self._response(fir, n), rows, sample, n)
+        with float32_on(self._device):
+            white_fft = jnp.fft.rfft(jax.device_put(white, self._device), n=n)
+            chisq = self._chisq(white_fft, self._response(fir, n), rows, sample, n)
         return rows, sample, snr, chisq
 
     def _chisq(self, white_fft, response, rows, sample, n) -> np.ndarray:
@@ -632,7 +676,8 @@ class StreamingMatchedFilter:
             phase = (2.0 * np.pi / n) * np.mod(np.outer(t, k), n).astype(np.float64)
             phase = np.pad(phase.astype(np.float32), ((0, pad), (0, 0)))
             pair_templates = jnp.pad(templates[r], ((0, pad), (0, 0)))
-            chisq = _chisq(white_fft, response, pair_templates, jnp.asarray(phase), n=n, bins=self.chisq_bins,
+            chisq = _chisq(white_fft, response, pair_templates, jax.device_put(phase, self._device), n=n,
+                           bins=self.chisq_bins,
                            band=self.spectral_config.band_indices(n, self.sample_rate_hertz))
             out[start:start + len(r)] = np.asarray(chisq)[:len(r)]
         return out

@@ -312,6 +312,62 @@ def test_injections_scored_locally_equal_the_full_pass():
     assert len(short[0]) != len(exact[0]) or not np.allclose(short[2], exact[2], rtol=1e-4)
 
 
+def assert_same_triggers(mine, theirs, snr_rtol=1e-5, chisq_rtol=1e-4):
+    """Two runs' triggers are the same triggers, with SNR and chi-squared equal to float32 rounding."""
+    np.testing.assert_array_equal(mine.time, theirs.time)
+    np.testing.assert_array_equal(mine.template, theirs.template)
+    np.testing.assert_allclose(mine.snr, theirs.snr, rtol=snr_rtol)
+    np.testing.assert_allclose(mine.reduced_chisq, theirs.reduced_chisq, rtol=chisq_rtol, atol=1e-6)
+
+
+def test_the_kernels_are_float32_whatever_the_processes_64_bit_mode():
+    # ripplegw's XP models switch 64-bit mode on for the process at import:
+    # traced then, chi-squared's bin edges would be float64, which an Apple
+    # GPU cannot run. Under float32_on the kernels hold no 64-bit type.
+    import jax
+    import jax.numpy as jnp
+    from gravyflow.src.detection.stream import _chisq, _snr_peaks, float32_on
+    n = 4096
+    spectrum = jnp.zeros(n // 2 + 1, jnp.complex64)
+    chisq_args = (spectrum, spectrum, jnp.zeros((2, 512), jnp.float32), jnp.zeros((2, n // 2 + 1), jnp.float32))
+    peak_args = (spectrum, spectrum, jnp.zeros((1, 2, 512), jnp.float32))
+    lower = lambda: (_chisq.lower(*chisq_args, n=n, bins=4, band=(40, 1000)).as_text(),
+                     _snr_peaks.lower(*peak_args, n=n, first=600, windows=4, width=256).as_text())
+    with jax.enable_x64(True):
+        bare = lower()
+        with float32_on(jax.devices("cpu")[0]):
+            scoped = lower()
+    import re
+    # A float64 or complex128 tensor anywhere in the program.
+    wide = lambda text: re.findall(r"tensor<[0-9x]*(?:f64|complex<f64>)>", text)
+    assert wide(bare[0])  # what the process-wide switch does to an unscoped kernel
+    for text in scoped:
+        assert not wide(text), wide(text)[:3]
+
+
+def test_the_device_placed_path_equals_the_host_path():
+    # The kernels on a device the caller names give the host path's
+    # triggers, with SNR and chi-squared equal to float32 rounding, also with
+    # the process in 64-bit mode. (The CPU stands in for an accelerator here;
+    # the evidence holds the same comparison on an Apple GPU.)
+    import jax
+    rng = np.random.default_rng(31)
+    params = ([14.0, 40.0, 25.0], [9.0, 30.0, 6.0], [0.6, 0.0, 0.3], [-0.4, 0.2, -0.5])
+    bank = TemplateBank.from_masses(*params)
+    strain = coloured_noise(rng, 200.0)
+    wave = signal(([40.0], [30.0], [0.0], [0.2]), [120.4], 200.0)
+    strain += wave * (12.0 / optimal_snr(wave, exact_spectrum()))
+    host = search(bank, snr_threshold=5.0).filter(strain, 0.0, "L1")
+    cpu = jax.devices("cpu")[0]
+    placed = search(bank, snr_threshold=5.0, device=cpu)
+    assert placed.templates().devices() == {cpu}
+    assert_same_triggers(placed.filter(strain, 0.0, "L1"), host)
+    with jax.enable_x64(True):
+        wide = search(bank, snr_threshold=5.0, device=cpu).filter(strain, 0.0, "L1")
+    assert_same_triggers(wide, host)
+    assert len(host) >= 3 and np.max(host.snr) > 11.0
+
+
 def test_a_bank_from_another_space_is_refused():
     bank = TemplateBank(np.array([30.0]), np.array([25.0]), placement=stream_bank_placement(sample_rate_hertz=4096.0))
     with pytest.raises(ValueError, match="4096"):
