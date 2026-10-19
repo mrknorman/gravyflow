@@ -171,7 +171,10 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 
 ## Matched filtering
 
-- `StreamingMatchedFilter`: the matched filter over continuous strain, each detector filtered once into triggers with a chi-squared veto and a reweighted SNR; its `search` gives each detector's triggers and the network's.
+- `StreamingMatchedFilter`: the matched filter over continuous strain, each detector filtered once into triggers with Allen's chi-squared, the sine-Gaussian veto, autogating and the PSD-variation statistic, ranked by PyCBC's `newsnr_sgveto_psdvar`; its `search` gives each detector's triggers and the network's, `score_injections` scores injections locally, and `device=` runs its float32 kernels on another device (an accelerator).
+- `DetectorTriggers`: one detector's triggers with every ranking input; `ranked` recomputes the ranking, `save`/`load` keep them whole.
+- `Autogating`, `autogate`: PyCBC's gating of loud transients, for any search's input. `PSDVariation`: the PSD-variation statistic's settings. `ranking_statistic`: PyCBC's `newsnr_sgveto_psdvar`.
+- `fit_templates`, `TemplateFits`, `coincident_ranking`: per-template exponential background fits, smoothed in chirp time, and the fit statistic of coincidences.
 - `coincide`: the network triggers of per-detector triggers (the same template within the light travel time); a time slide is a call with one detector's triggers shifted.
 - `MatchedFilter`: a matched-filter search over a template bank, on whitened windows.
 - `MatchedFilterLayer`: the window matched filter as a Keras layer.

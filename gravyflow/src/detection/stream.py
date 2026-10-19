@@ -48,6 +48,13 @@ uses them):
     rho_hat = rho                                   if chi_r^2 <= 1,
     rho_hat = rho / ((1 + (chi_r^2)^3) / 2)^(1/6)   otherwise.
 
+**The toolkit** (`vetoes`, `background`), each as PyCBC runs it: each block
+is autogated before its spectrum is estimated, the PSD-variation statistic
+of the (gated) block and the sine-Gaussian chi-squared of each trigger are
+stored with it, and a trigger's ranking (its `reweighted_snr`) is PyCBC's
+newsnr_sgveto_psdvar of them all. Per-template exponential fits of the
+background rank coincidences (`background.coincident_ranking`).
+
 **Coincidence** (`coincide`). Triggers of the same template in every
 detector, each within the light travel time between it and the first
 detector plus `COINCIDENCE_MARGIN_SECONDS` of the first detector's trigger
@@ -499,10 +506,10 @@ class StreamingMatchedFilter:
             `stream_bank_placement`. Its templates are whole over its match
             space's span (`MatchSpace.templates`; a bank with no placement
             takes `stream_bank_placement`'s), which must have this filter's
-            sample rate and lower band edge. There is no default yet: the
-            aligned-spin bank over 5-95 solar masses and spins to 0.99 holds
-            more than 20,000 templates, which this machine cannot filter
-            over a month of strain.
+            sample rate and lower band edge. There is no default: the
+            standard's aligned-spin bank (5-100 solar masses, spins to 0.99,
+            minimal match 0.97) holds tens of thousands of templates and
+            takes hours to place, so it is shipped as data, not placed here.
         sample_rate_hertz: the strain's sample rate.
         spectral_config: the band, PSD estimate and whitening filter of each
             block (default STREAM_SPECTRAL_CONFIG).

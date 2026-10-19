@@ -125,6 +125,16 @@ repository before it may need the changes below.
   deviation (`gf.whitened_noise_std`), and `NETWORK_WHITENED_PEAK` (B, G), their root-sum-square; and
   `ReturnVariables.BNS_RANGE_MPC` (B, I), each example's BNS range from the batch's PSD (`gf.bns_range_mpc`,
   LIGO's SenseMonitor range; refused for WHITE noise). `gf.INJECTION_RECORDS` lists the per-injection records.
+- **A streaming matched filter with PyCBC's toolkit.** `StreamingMatchedFilter` filters each detector's continuous
+  strain once into triggers (so a time slide costs only `coincide`), with aligned-spin `TemplateBank`s, Allen's
+  chi-squared and, each as PyCBC runs it: autogating of loud transients (`Autogating`, also `autogate` for any
+  search's input), the PSD-variation statistic (`PSDVariation`), Nitz's sine-Gaussian veto, and the ranking
+  `newsnr_sgveto_psdvar` (`ranking_statistic`). `DetectorTriggers` store every ranking input, `save`/`load` whole
+  and recompute their ranking without filtering (`ranked`); `fit_templates` gives per-template exponential
+  background fits and `coincident_ranking` the fit statistic. `score_injections` scores each injection on a short
+  stretch, equal to the full pass with it added. The float32 kernels run on a device the caller names
+  (`device=`, for example an Apple GPU through jax-graft); templates, spectra and whitening filters stay on the
+  host's CPU in double precision, and template banks are placed on the host's CPU whatever the default device.
 - **A timing harness.** `gf.time_batch` (throughput: compute-seconds per second of strain, over a fixed segment),
   `gf.time_streaming` (latency: the per-step compute time of a streaming replay, its median, p90, p99 and max over at
   least 1000 steps, plus the algorithmic wait the caller declares) and `gf.compare_abba` (two callables run A, B, B, A,
