@@ -183,6 +183,11 @@ def test_the_volume_beyond_the_reach_moves_the_outer_injections_out_at_their_snr
     for p in (0.0, 0.1):
         assert injections.beyond_reach(3.0, p) == pytest.approx(v_ref * k**3 / n * moved * (found - p), rel=1e-12)
     assert np.isnan(injections.beyond_reach(np.nan, 0.0))
+    # Its injections' interval: each reading stands for 4 / 8 when found, so the found sum is
+    # 4 times the found fraction, Clopper-Pearson's on 3 of 8, less the noise's part.
+    lower, upper = injections.beyond_reach_interval(3.0, 0.1, confidence=0.9)
+    for bound, fraction in ((lower, stats.beta.ppf(0.05, 3, 6)), (upper, stats.beta.ppf(0.95, 4, 5))):
+        assert bound == pytest.approx(v_ref * k**3 / n * moved * (fraction - 0.1), rel=1e-12)
     # With a weight, each moved injection stands for its weight; a multiplicity counts it (as a moved
     # source and as a reading) that many times.
     weighted = InjectionVolumes(scores, 100.0, distances, np.ones(n), weights=np.arange(1.0, 9.0))
@@ -440,6 +445,22 @@ def test_the_interval_beyond_the_reach_covers_at_its_level():
         curve = sensitive_volume_curve(detected(rng, 4000, realistic_scores), background, fars, rng, num_bootstrap=100)
         misses[:, 0] += np.array(truths) < curve.beyond_reach_lower_gpc3
         misses[:, 1] += np.array(truths) > curve.beyond_reach_upper_gpc3
+    assert np.all(misses / replicas <= 0.05 + coverage_tolerance(replicas, 0.05)), misses / replicas
+
+
+def test_the_interval_beyond_the_reach_covers_nothing_where_few_injections_are_found():
+    # A silent detector (injections scored as noise is): nothing lies beyond the reach. At
+    # 1e-3 Hz about four of 4000 injections are found, by their noise, and a bootstrap of so
+    # few found understates their error; the binomial interval on the found sum covers.
+    replicas = 200
+    rng = np.random.default_rng(44)
+    misses = np.zeros(2)
+    for _ in range(replicas):
+        background = Background.independent_windows(rng.normal(size=10_000), 1.0)
+        snrs, distances = population(rng, 4000)
+        injections = InjectionVolumes(rng.normal(size=4000), REACH_MPC, distances, snrs)
+        curve = sensitive_volume_curve(injections, background, [1e-3], rng, num_bootstrap=100)
+        misses += curve.beyond_reach_lower_gpc3[0] > 0, curve.beyond_reach_upper_gpc3[0] < 0
     assert np.all(misses / replicas <= 0.05 + coverage_tolerance(replicas, 0.05)), misses / replicas
 
 

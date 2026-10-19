@@ -31,7 +31,7 @@ Three intervals are reported, each two-sided and central at ``confidence``:
 - **joint**: a bootstrap over injections and the background's thresholds
   (`Background.bootstrap_thresholds`, which counts a time-slid background's
   independent information, not its slid windows), each end at least as far
-  out as the background interval's (`sensitive_volume_curve`).
+  out as the other two intervals' (`sensitive_volume_curve`).
 
 **The noise floor.** An injection is found when its window passes the
 threshold, whatever passes it: one beyond reach is found by its noise alone,
@@ -65,7 +65,8 @@ moved sources and as the found chance's estimate) and the thresholds redrawn,
 with ``p`` the noise's chance at the estimated threshold in every replicate (the
 estimator's own, so a threshold's error moves the found chance against it, as
 it moves the truth); each end at least as far out as at the background
-interval's thresholds. It is a warning, never a refusal: a target where it
+interval's thresholds and as the injections' binomial interval on its found sum
+(`InjectionVolumes.beyond_reach_interval`). It is a warning, never a refusal: a target where it
 exceeds a stated fraction of V(R) is marked reach-limited, and `quote` reports it
 and warns. Where the found chance depends on more than the SNR (a detector that
 finds one part of the population's masses better), the estimate is biased by
@@ -212,47 +213,77 @@ class InjectionVolumes:
         threshold. ``multiplicity`` counts each injection that many times, both as a
         moved source and as a reading of the found chance (a bootstrap draw).
         """
+        each, moved = self._beyond_reach_shares(multiplicity)
+        return self._beyond_reach_scale * (self._found_sum(thresholds, each[self._order])
+                                           - np.asarray(noise_chance, dtype=np.float64) * moved)
+
+    def beyond_reach_interval(self, thresholds, noise_chance, confidence: float = DEFAULT_CONFIDENCE,
+                              method: str = "clopper-pearson") -> Tuple[np.ndarray, np.ndarray]:
+        """
+        The injections' interval on the volume beyond the reach at each threshold: the
+        binomial interval on its found sum (`_found_interval`), less the noise's part.
+        Where few injections are found (a low FAR, few injections) it is the exact
+        term a bootstrap of the found count understates.
+        """
+        each, moved = self._beyond_reach_shares()
+        noise = np.asarray(noise_chance, dtype=np.float64) * moved
+        lower, upper = self._found_interval(thresholds, each, confidence, method)
+        return self._beyond_reach_scale * (lower - noise), self._beyond_reach_scale * (upper - noise)
+
+    @property
+    def _beyond_reach_scale(self) -> float:
+        return self.reference_volume_gpc3 * BEYOND_REACH_FACTOR**3 / self.num_injections
+
+    def _beyond_reach_shares(self, multiplicity=None) -> Tuple[np.ndarray, float]:
+        """
+        What each injection stands for, found, in the volume beyond the reach: a
+        reading injection, its bin's moved sources' weight over its bin's readings
+        (each counted ``multiplicity`` times); and the moved sources' total weight.
+        """
         m = np.ones(self.num_injections) if multiplicity is None else np.asarray(multiplicity, dtype=np.float64)
         bins = self._num_bins
         readings = np.bincount(self._reading_bin, weights=m[self._reading], minlength=bins)
         moved = np.bincount(self._moved_bin, weights=(self.weights * m)[self._moved], minlength=bins)
-        # Each reading injection, when found, stands for its bin's moved sources over its bin's readings.
         each = np.zeros(self.num_injections)
         share = np.divide(moved, readings, out=np.zeros(bins), where=readings > 0)
         each[self._reading] = m[self._reading] * share[self._reading_bin]
-        found = self._found_sum(thresholds, each[self._order])
-        scale = self.reference_volume_gpc3 * BEYOND_REACH_FACTOR**3 / self.num_injections
-        return scale * (found - np.asarray(noise_chance, dtype=np.float64) * moved.sum())
-
-    def _moments(self, thresholds) -> Tuple[np.ndarray, np.ndarray]:
-        w = self.weights[self._order]
-        return self._found_sum(thresholds, w), self._found_sum(thresholds, w**2)
+        return each, float(moved.sum())
 
     def standard_error(self, thresholds) -> np.ndarray:
         """
         The Monte Carlo standard error of V: ``V_ref sqrt(sum w^2 f - (sum w f)^2 / N) / N``;
         unweighted, ``V_ref sqrt(N p (1 - p)) / N``.
         """
-        s1, s2 = self._moments(thresholds)
+        w = self.weights[self._order]
+        s1, s2 = self._found_sum(thresholds, w), self._found_sum(thresholds, w**2)
         n = self.num_injections
         return self.reference_volume_gpc3 * np.sqrt(np.maximum(s2 - s1**2 / n, 0.0)) / n
 
     def interval(self, thresholds, confidence: float = DEFAULT_CONFIDENCE,
                  method: str = "clopper-pearson") -> Tuple[np.ndarray, np.ndarray]:
+        """A binomial interval on V at each threshold (`_found_interval` of the weights)."""
+        lower, upper = self._found_interval(thresholds, self.weights, confidence, method)
+        return self.reference_volume_gpc3 * lower / self.num_injections, \
+            self.reference_volume_gpc3 * upper / self.num_injections
+
+    def _found_interval(self, thresholds, values, confidence: float,
+                        method: str) -> Tuple[np.ndarray, np.ndarray]:
         """
-        A binomial interval on V at each threshold (`binomial_interval`, by
-        ``method``): exact on the found count when the weights are equal. Weighted,
-        V is taken as ``k = (sum w f)^2 / sum w^2 f`` effective injections of N, each
-        of weight ``sum w^2 f / sum w f``, which matches V and its variance. With
-        nothing found, a found injection's weight is the largest.
+        A binomial interval (`binomial_interval`, by ``method``) on the sum of
+        ``values`` (one per injection) over the injections found at each threshold:
+        exact on the found count when the values are equal. Otherwise the sum is
+        taken as ``k = (sum v f)^2 / sum v^2 f`` effective injections of N, each of
+        value ``sum v^2 f / sum v f``, which matches the sum and its variance. With
+        nothing found, a found injection's value is the largest. NaN at NaN.
         """
-        s1, s2 = self._moments(thresholds)
+        v = np.asarray(values, dtype=np.float64)[self._order]
+        s1, s2 = self._found_sum(thresholds, v), self._found_sum(thresholds, v**2)
         found = np.nan_to_num(s1) > 0
         with np.errstate(divide="ignore", invalid="ignore"):
-            each = np.where(found, s2 / s1, self.weights.max())
+            each = np.where(found, s2 / s1, v.max())
             effective = np.where(found, s1**2 / s2, 0.0)
         lower, upper = binomial_interval(effective, self.num_injections, confidence, method)
-        scale = self.reference_volume_gpc3 * each
+        scale = self.num_injections * each
         unresolved = np.isnan(s1)
         return np.where(unresolved, np.nan, scale * lower), np.where(unresolved, np.nan, scale * upper)
 
@@ -408,7 +439,9 @@ def sensitive_volume_curve(
     the true threshold may lie there: the background interval's high threshold
     can (+inf when even no trigger leaves the FAR's upper bound above the
     target), so each interval's ends are at least as far out as the volumes at
-    the background interval's thresholds.
+    the background interval's thresholds. Where few injections are found, the
+    replicates' found counts understate their error: each end is also at least as
+    far out as the injections' binomial interval.
     """
     if num_bootstrap < 1:
         raise ValueError(f"num_bootstrap must be >= 1, got {num_bootstrap}.")
@@ -436,10 +469,15 @@ def sensitive_volume_curve(
     ends = np.full((2, 2, fars.size), np.nan)
     if np.any(resolved):
         ends[:, :, resolved] = np.quantile(replicates[:, :, resolved], [alpha / 2, 1 - alpha / 2], axis=0)
-    lower = np.minimum(ends[0], at_bands.min(axis=0))
-    upper = np.maximum(ends[1], at_bands.max(axis=0))
     volume, beyond = volumes(threshold)
     injection_lower, injection_upper = injections.interval(threshold, confidence, method)
+    # Each term's interval: the injections' (exact where few are found, which a bootstrap
+    # of the found count understates) and the background's.
+    terms = np.stack([np.stack([injection_lower, injection_upper]),
+                      np.stack(injections.beyond_reach_interval(threshold, noise_chance, confidence, method))],
+                     axis=1)  # (end, quantity, target)
+    lower = np.minimum.reduce([ends[0], at_bands.min(axis=0), terms[0]])
+    upper = np.maximum.reduce([ends[1], at_bands.max(axis=0), terms[1]])
     return SensitiveVolumeCurve(
         far_hz=fars,
         threshold=threshold,
