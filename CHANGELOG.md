@@ -84,6 +84,14 @@ repository before it may need the changes below.
   SQLAlchemy, psycopg2-binary or ipykernel. Real data needs `gravyflow[realdata]`; plots, the validator and the example
   models need `gravyflow[viz]`; the notebooks need `gravyflow[notebooks]` and the tests `gravyflow[test]`. The `metal`
   extra is gone (jax-metal has no float64 and breaks `import jax`), and `dev` is now `test`.
+- **JAX 0.12.** GravyFlow needs JAX and jaxlib 0.12 (`>=0.12.0,<0.13`; it took 0.8.1 or later). A seed draws the
+  same random streams as under JAX 0.9: the same random bits, uniforms and parameters. Batches differ only by float
+  rounding (JAX 0.12's FFTs and float64 `erfinv` round differently). The whitened strain moves by up to 4e-5 of its
+  peak, less than JAX 0.9's multi-threaded CPU kernels already move it. A dataset's fingerprint names the
+  jax and jaxlib versions, so it changes, and a materialised set written under an earlier JAX is refused by name:
+  write it again. The `cuda` extra is now `jax[cuda12]` at the same release, which installs NVIDIA's libraries at
+  the versions JAX's CUDA plugin declares (cuDNN 9.10.2 or later) in place of the CUDA 12.5 and cuDNN 9.8 pins.
+  The `tpu` extra installs JAX 0.12's libtpu.
 - **Model directories from before this release.** A `gf.Model` directory, or a recipe's run directory, saved without
   `run.json` (the record of the data split its weights were trained and selected on) can no longer be validated or
   trained: retrain it.
