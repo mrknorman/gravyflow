@@ -267,14 +267,15 @@ class TransientDataObtainer(BaseDataObtainer):
     def _partner_segments(self, ifo: gf.IFO, group_name: str) -> np.ndarray:
         """
         Where a partner of ``ifo`` may read: its usable data in split
-        ``group_name`` (``SplitSpec.admissible``), less every event's footprint and
+        ``group_name`` (``SplitSpec.admissible``, which in train and validate holds
+        out ``ifo``'s reserved benchmark time), less every event's footprint and
         guard and every one of its catalogued glitches, as noise is vetoed.
         """
         vetoes = np.concatenate([
             np.reshape(self.get_event_veto_segments(), (-1, 2)),
             np.reshape(self.get_glitch_veto_segments(ifo), (-1, 2)),
         ])
-        admissible = self.split_spec.admissible(self.get_all_segment_times(ifo), group_name)
+        admissible = self.split_spec.admissible(self.get_all_segment_times(ifo), group_name, ifo)
         return self.veto_time_segments(admissible, vetoes)
 
     def _partner_blocks(self, record: TransientSegment, group_name: str) -> Iterator[Tuple[float, float]]:

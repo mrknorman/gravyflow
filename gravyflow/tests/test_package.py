@@ -268,7 +268,8 @@ def test_the_wheel_ships_the_package_data(wheel):
         assert expected and expected <= names, sorted(expected - names)
     from gravyflow.src import resources
     for path in (PACKAGE / "res" / "model").glob("*.keras"):
-        assert (f"gravyflow/res/model/{path.name}" in names) == (path.name not in resources.RELEASE_WEIGHTS), path.name
+        assert (f"gravyflow/res/model/{path.name}" in names) == (f"model/{path.name}" not in resources.MANIFEST), path.name
+    assert {"gravyflow/res/mlgwsc1/segments.csv", "gravyflow/res/mlgwsc1/NOTICE"} <= names, "MLGWSC-1's segments"
     assert not shipped(r"gravyflow/tests/.*"), "the tests are not shipped"
     assert not shipped(r"gravyflow/res/tests/.*"), "the test data is not shipped"
 
@@ -290,25 +291,27 @@ def test_the_wheel_declares_the_extras(wheel):
 
 def test_large_weights_are_release_downloads(tmp_path, monkeypatch):
     from gravyflow.src import resources
+    from gravyflow.src.dataset.store.files import RemoteFile, RemoteFileMismatch, RemoteFileMissing
     # A bundled model is found in the package.
     assert resources.weights("gabbard_2017.keras") == resources.RESOURCES / "model" / "gabbard_2017.keras"
-    # A release download is fetched into the cache and checked against its recorded SHA-256.
+    # A manifest entry is found only once fetched, explicitly, into the store's cache,
+    # checked against its pinned size and sha256.
     payload = tmp_path / "remote" / "large.keras"
     payload.parent.mkdir()
     payload.write_bytes(b"weights")
-    digest = hashlib.sha256(b"weights").hexdigest()
-    monkeypatch.setitem(resources.RELEASE_WEIGHTS, "large.keras", digest)
-    monkeypatch.setattr(resources, "RELEASE_URL", payload.parent.as_uri() + "/{version}/{name}")
-    with pytest.raises(FileNotFoundError, match="download_weights"):
+    entry = RemoteFile("model/large.keras", payload.as_uri(), hashlib.sha256(b"weights").hexdigest(), 7,
+                       licence="Apache-2.0", redistributable=True)
+    monkeypatch.setitem(resources.MANIFEST, entry.name, entry)
+    with pytest.raises(RemoteFileMissing, match=r"gravyflow.fetch\('model/large.keras'\)"):
         resources.weights("large.keras")
-    (payload.parent / gf.__version__).mkdir()
-    payload.rename(payload.parent / gf.__version__ / "large.keras")
-    path = resources.download_weights("large.keras")
+    path = resources.fetch("model/large.keras")
     assert path.read_bytes() == b"weights" and resources.weights("large.keras") == path
-    assert str(path).startswith(os.environ["GRAVYFLOW_CACHE_DIR"])
+    assert str(path).startswith(os.environ["GRAVYFLOW_CACHE_DIR"]) and path.name == "large.keras"
     # A download whose checksum differs is refused and not kept.
-    monkeypatch.setitem(resources.RELEASE_WEIGHTS, "large.keras", "0" * 64)
-    path.unlink()
-    with pytest.raises(ValueError, match="SHA-256"):
-        resources.download_weights("large.keras")
-    assert not path.exists()
+    monkeypatch.setitem(resources.MANIFEST, entry.name, RemoteFile(
+        entry.name, entry.url, "0" * 64, 7, licence="Apache-2.0", redistributable=True))
+    with pytest.raises(RemoteFileMismatch, match="sha256"):
+        resources.fetch("model/large.keras")
+    assert not resources.MANIFEST[entry.name].path().exists()
+    with pytest.raises(FileNotFoundError, match="no trained weights named 'absent.keras'"):
+        resources.weights("absent.keras")

@@ -167,14 +167,16 @@ def test_a_footprint_in_the_guard_is_left_out():
     other split's time (judged by the golden block table, not by ``spec.assign``),
     so footprints served in two splits are at least the guard apart. Records near
     each kind of edge test it from both sides: those whose footprint reaches into
-    the guard are left out, the others served.
+    the guard are left out, the others served. Some edges lie in MLGWSC-1's reserved
+    time, so nothing is reserved here: reserved records are ``test_reservation``'s.
     """
     rows = blips([edge + offset for edge in SPLIT_EDGES for offset in EDGE_OFFSETS])
     served = []
     with glitch_catalogue(rows):
         for split in SPLITS:
             reader = gf.TransientDataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.GLITCHES],
-                                              observing_runs=[gf.ObservingRun.O3])
+                                              observing_runs=[gf.ObservingRun.O3],
+                                              split_spec=gf.SplitSpec(reserved=()))
             reader.get_valid_segments([gf.IFO.L1], 0, split)
             served += [(split, *transient_footprint(record)) for record in reader.transient_segments]
 

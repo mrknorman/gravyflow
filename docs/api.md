@@ -16,6 +16,11 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `SplitSpec`: how GPS time is split into train, validate and test.
 - `DEFAULT_SPLIT`: the default `SplitSpec`.
 - `EXCLUDED`: the label of time that belongs to no split.
+- `Reservation`: time held out of every train and validate draw of real data (a benchmark's test strain); test keeps it.
+- `CHALLENGE_FAITHFUL`: the `SplitSpec.mode` of a spec that reserves nothing (`SplitSpec(reserved=())`).
+- `MLGWSC1_O3A`: MLGWSC-1's 362 O3a segments (H1; L1 with 240 s either side), the `Reservation` every split holds by default.
+- `RemoteFile`: a file published elsewhere, pinned by size and sha256, with its licence and whether gravyflow may redistribute it.
+- `fetch`: download a file of gravyflow's manifest (or a `RemoteFile`) into the store, explicitly; nothing else downloads one.
 - `SeedTree`: the one seed tree every random draw comes from.
 - `BatchStreams`: the random streams of one batch, from a `SeedTree`.
 - `set_random_seeds`: seed Python's, NumPy's and Keras's global generators (for your own code; gravyflow never draws from them).

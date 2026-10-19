@@ -645,6 +645,7 @@ class IndexedBatches:
             **self.tree.metadata(),
             "split": self.group,
             "split_fingerprint": None if self.split_spec is None else self.split_spec.fingerprint(),
+            "split_mode": None if self.split_spec is None else self.split_spec.mode,
             "epoch_mode": self.epoch_mode.name,
             "index_addressed": self.index_addressed,
             "platform": platform.platform_record(),

@@ -102,8 +102,8 @@ include = ["gravyflow*"]
 exclude = ["gravyflow.tests*", "gravyflow.res*"]
 
 # The data files the package reads; the test data in res/tests stays in the
-# repository, and the weights in gravyflow.src.resources.RELEASE_WEIGHTS are
-# release downloads.
+# repository, and the weights in gravyflow.src.resources.MANIFEST are release
+# downloads. MLGWSC-1's segment list ships with its NOTICE (Apache-2.0).
 [tool.setuptools.package-data]
 gravyflow = [
   "res/noise_profiles/*.csv",
@@ -111,6 +111,8 @@ gravyflow = [
   "res/model/gabbard_2017.keras",
   "res/model/georgehuerta2017shallow_classification.keras",
   "res/model/georgehuerta2017shallow_regression.keras",
+  "res/mlgwsc1/segments.csv",
+  "res/mlgwsc1/NOTICE",
 ]
 
 [tool.pytest.ini_options]
