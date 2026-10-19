@@ -14,7 +14,7 @@ Each case runs for k from 1e-23 to 1 on O(1) data. A case that may refuse may
 raise ValueError instead, naming float32, at the amplitudes whose result float32 cannot hold.
 
 `test_every_public_numeric_function_is_in_the_census` lists the public names of
-the modules that compute on data (PSD, SNR, injection, the detector network, whitening,
+the modules that compute on data (PSD, SNR, sensitivity, injection, the detector network, whitening,
 Pearson, spectrogram, the matched filter, plotting and the augmentations): a new public function there
 fails until it joins CENSUS, or EXEMPT with the reason it takes no raw strain.
 """
@@ -116,6 +116,8 @@ CENSUS = {
         sample_rate_hertz=FS), PEAK, False),
     "gf.matched_filter_fft (white)": (lambda k: np.asarray(gf.matched_filter_fft(
         at(ONSOURCE[:, 0], k), TEMPLATE[None], sample_rate_hertz=FS)) / k, PEAK, False),
+    "gf.bns_range_mpc": (lambda k: np.asarray(gf.bns_range_mpc(estimate_psd(at(OFFSOURCE, k), FS)), np.float64) * k,
+                         PEAK, False),
     "gf.optimal_snr": (lambda k: gf.optimal_snr(at(TEMPLATE, k), psd=_psd() * k ** 2, sample_rate_hertz=FS),
                        PEAK, False),
     "template_sigma": (lambda k: template_sigma(at(TEMPLATE[None], k), psd=_psd() * k ** 2, sample_rate_hertz=FS),
@@ -140,6 +142,7 @@ CENSUS = {
 WORST_ERROR = {
     "estimate_psd": 6.4e-5,
     "gf.AddNoise": 1.1e-7,
+    "gf.bns_range_mpc": 1.5e-7,  # measured with the injection records (1.497e-7)
     "gf.MatchedFilter": 3.4e-7,
     "gf.RandomShift": 1.1e-7,
     "gf.SignReversal": 1.1e-7,
@@ -170,6 +173,7 @@ EXEMPT = {
     "SpectralConfig": "configuration; takes no data",
     "PowerSpectrum": "the estimate gf.psd and estimate_psd return; value() is checked through them",
     "spectrogram_shape": "shapes only",
+    "whitened_noise_std": "whitened noise's deviation from a SpectralConfig's band and a sample rate; takes no strain",
     "MatchedFilterLayer": "runs gf.MatchedFilter's search (_run) on the model's inputs",
     "TemplateBank": "templates, generated at unit scale",
     "TemplateGrid": "a grid of template parameters",
@@ -201,6 +205,7 @@ EXEMPT = {
 NUMERIC_MODULES = (
     "gravyflow.src.dataset.tools.psd",
     "gravyflow.src.dataset.tools.snr",
+    "gravyflow.src.dataset.tools.sensitivity",
     "gravyflow.src.dataset.features.injection",
     "gravyflow.src.dataset.conditioning.conditioning",
     "gravyflow.src.dataset.conditioning.detector",
