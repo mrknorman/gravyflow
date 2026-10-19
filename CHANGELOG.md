@@ -11,6 +11,10 @@ repository before it may need the changes below.
   (`HOFT_C01`, `DCS-CALIB_STRAIN_CLEAN_C01`) for O4a and O4b too, which GWOSC's O4 releases do not come from
   (O4a `GDS-CALIB_STRAIN_CLEAN_AR`, O4b `DCS-CALIB_STRAIN_CLEAN_AR01`, Virgo `Hrec_hoftRepro1AR_16384Hz`). Reading
   O4 from local frames now names them (`frametypes=`, `channels=`); an unnamed run is refused by name.
+- **The aLIGO `O3_LOW` and `DESIGN` noise curves stop where their tables do** (4995.38 Hz and 5000 Hz). Their rows
+  above that were lalsimulation's extrapolation of its table (1.9 times the last tabulated ASD by 8191 Hz), not
+  tabulated values; no curve is extrapolated now, so coloured noise from them at 16384 Hz (any sample rate whose
+  Nyquist frequency is past the table) is refused by name. Every row below the cut is unchanged.
 - **MLGWSC-1's test strain is reserved by default.** `gf.SplitSpec` gains `reserved`, by default `gf.MLGWSC1_O3A`:
   the challenge's 362 O3a segments, exactly, on H1 and L1, held out of every train and validate
   draw of real data (noise, glitches, partners); test keeps them. `gf.SplitSpec(reserved=())` is the explicit

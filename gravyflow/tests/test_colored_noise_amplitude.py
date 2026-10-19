@@ -78,10 +78,10 @@ def _assert_median_matches_the_profile(ratio, f, examples, duration):
 
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("sample_rate_hertz", [2048.0, 16384.0])
+@pytest.mark.parametrize("sample_rate_hertz", [2048.0, 8192.0])
 def test_colored_noise_psd_matches_its_profile(sample_rate_hertz):
     """The coloured noise has its profile's PSD (O3_LOW, a smooth curve, to the
-    8192 Hz Nyquist frequency of 16384 Hz): median within 1 % over 30-900 Hz
+    4096 Hz Nyquist frequency of 8192 Hz): median within 1 % over 30-900 Hz
     and every bin within 5 standard errors, for every detector. Each bin
     averages over 7 half-overlapping Hann segments of each example, at least
     112 in all, so the median's own bias is under 0.4 %; a bin's standard error
@@ -153,7 +153,9 @@ def test_a_curve_is_never_extrapolated():
     """A curve colours noise only on its own band: below it the noise has no
     power, as at DC, and a sample rate whose Nyquist frequency lies beyond it
     is refused, naming the band. The aLIGO O3 curves end at 5 kHz, Virgo's at
-    10 kHz; the O3 low curves reach the 8192 Hz Nyquist frequency of 16384 Hz."""
+    10 kHz; Advanced Virgo's O3 low curve reaches the 8192 Hz Nyquist frequency of
+    16384 Hz, and aLIGO's stops where its table does
+    (``test_a_sample_rate_past_a_curves_table_is_refused``)."""
     def batcher(ifos, sample_rate_hertz, noise_profile=None):
         return gf_noise.colored_noise_batcher(
             num_examples_per_batch=1, onsource_duration_seconds=1.0, crop_duration_seconds=0.0,
@@ -164,8 +166,8 @@ def test_a_curve_is_never_extrapolated():
         with pytest.raises(ValueError, match="10-5000 Hz"):
             batcher([ifo], 16384.0)
         batcher([ifo], 8192.0)
-        batcher([ifo], 16384.0, gf.NoiseProfile.O3_LOW)
     batcher([gf.IFO.V1], 16384.0)
+    batcher([gf.IFO.V1], 16384.0, gf.NoiseProfile.O3_LOW)
 
     x = np.asarray(batcher([gf.IFO.H1], FS)(gf.SeedTree(3).batch("train", 0, 0))[gf.ReturnVariables.ONSOURCE])
     spectrum = np.abs(np.fft.rfft(x.astype(np.float64)))
@@ -315,13 +317,57 @@ def test_the_o4_curves_name_their_source_and_are_projections():
         assert np.median(high / low) < 1.0 and np.median(low / o3) < 1.0, ifo.name
 
 
-@pytest.mark.parametrize("profile, table_end", [(gf.NoiseProfile.O3_LOW, "4995.38"),
-                                                (gf.NoiseProfile.DESIGN, "5000")], ids=lambda v: getattr(v, "name", v))
-def test_the_lalsimulation_curves_say_where_their_table_ends(profile, table_end):
+#: The aLIGO curves made with lalsimulation from a table that ends below 8192 Hz: the
+#: lalsimulation function, and where the table it reads ends (Hz).
+LALSIMULATION_TABLE_ENDS = {
+    gf.NoiseProfile.O3_LOW: ("SimNoisePSDaLIGOO3LowT1800545", 4995.378),
+    gf.NoiseProfile.DESIGN: ("SimNoisePSDaLIGODesignSensitivityT1800044", 5000.0),
+}
+
+
+def _lalsimulation_asd(function_name, frequencies):
+    """lalsimulation's ASD at ``frequencies``, from its PSD evaluated every 1/64 Hz to
+    8192 Hz and interpolated log-log, as the bundled curves were made."""
+    import lal
+    import lalsimulation
+
+    step = 1.0 / 64.0
+    series = lal.CreateREAL8FrequencySeries("", 0, 0.0, step, lal.DimensionlessUnit, int(8192 / step) + 1)
+    getattr(lalsimulation, function_name)(series, 0.0)
+    grid, psd = np.arange(series.data.length) * step, series.data.data
+    positive = psd > 0
+    return np.exp(np.interp(np.log(frequencies), np.log(grid[positive]), 0.5 * np.log(psd[positive])))
+
+
+@pytest.mark.parametrize("profile", list(LALSIMULATION_TABLE_ENDS), ids=lambda v: v.name)
+def test_the_lalsimulation_curves_stop_where_their_table_ends(profile):
     """
-    The aLIGO O3_LOW and DESIGN curves run to 8192 Hz as lalsimulation evaluates them,
-    though its tables stop near 5 kHz: the header says where, and that the rows above
-    are lalsimulation's extrapolation.
+    The aLIGO O3_LOW and DESIGN curves are never extrapolated: lalsimulation's tables
+    stop at 4995.38 Hz and 5000 Hz, beyond which it extrapolates them, so the bundled
+    rows stop there too, and the header says so. Every row kept is lalsimulation's
+    value, as before the cut.
     """
+    function_name, table_end = LALSIMULATION_TABLE_ENDS[profile]
     header = _header(profile.path(gf.IFO.H1))
-    assert f"stops at {table_end} Hz" in header and "extrapolation" in header
+    assert f"stops at {table_end:g} Hz" in header and "never extrapolated" in header, header
+    frequencies, asd = _profile(gf.IFO.H1, profile)
+    assert table_end - 15.0 < frequencies[-1] <= table_end
+    np.testing.assert_allclose(asd, _lalsimulation_asd(function_name, frequencies), rtol=1e-4)
+
+
+@pytest.mark.parametrize("profile", list(LALSIMULATION_TABLE_ENDS), ids=lambda v: v.name)
+def test_a_sample_rate_past_a_curves_table_is_refused(profile):
+    """
+    Coloured noise at 16384 Hz needs the curve to its 8192 Hz Nyquist frequency, past
+    the end of the aLIGO O3_LOW and DESIGN tables: refused, by name. 8192 Hz (to
+    4096 Hz) is served.
+    """
+    def batcher(sample_rate_hertz):
+        return gf_noise.colored_noise_batcher(
+            num_examples_per_batch=1, onsource_duration_seconds=1.0, crop_duration_seconds=0.0,
+            offsource_duration_seconds=1.0, ifos=[gf.IFO.H1], sample_rate_hertz=sample_rate_hertz,
+            noise_profile=profile,
+        )
+    with pytest.raises(ValueError, match=r"8192 Hz is needed: a curve is never extrapolated"):
+        batcher(16384.0)
+    batcher(8192.0)

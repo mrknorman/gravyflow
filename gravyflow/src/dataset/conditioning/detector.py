@@ -382,11 +382,11 @@ class NoiseProfile(Enum):
     dataset 1. Each file's header names its exact source. A curve is used only on its
     own band (``read_noise_curve``), and only for a detector its profile covers.
 
-    The aLIGO O3_LOW and DESIGN curves are lalsimulation's functions evaluated to
-    8192 Hz, but the tables lalsimulation reads stop near 5 kHz (4995 Hz and 5000 Hz):
-    above that their rows are lalsimulation's extrapolation of its table, rising to
-    1.9 times the last tabulated ASD at 8191 Hz, as lalsimulation (and PyCBC through
-    it) evaluates them. Their headers say where the table ends.
+    No curve is extrapolated. The aLIGO O3_LOW and DESIGN curves are lalsimulation's
+    functions, whose tables stop at 4995.38 Hz and 5000 Hz; above that lalsimulation
+    (and PyCBC through it) extrapolates them, to 1.9 times the last tabulated ASD at
+    8191 Hz. Their bundled rows stop at the table's end, so a sample rate whose Nyquist
+    frequency is past it (16384 Hz) is refused by name; their headers say so.
     """
     O3_ACTUAL = {"Hanford": _ALIGO_O3_ACTUAL_H1, "Livingston": _ALIGO_O3_ACTUAL_L1, "Virgo": _ADVIRGO_O3_ACTUAL}
     O4_HIGH = {"Hanford": _ALIGO_O4_HIGH, "Livingston": _ALIGO_O4_HIGH, "Virgo": _ADVIRGO_O4_HIGH}
