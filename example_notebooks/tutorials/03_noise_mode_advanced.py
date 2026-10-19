@@ -95,6 +95,9 @@ How it works:
   2. A hash of each block's index decides its split
   3. 128 s at every edge between splits belongs to no split, so data of two
      splits is always at least 128 s apart
+  4. MLGWSC-1's test strain (its 362 O3a segments; L1 with 240 s either side)
+     is reserved: in no train or validate draw, while test keeps it.
+     gf.SplitSpec(reserved=()) is the explicit challenge-faithful mode.
 
 Name the split with the 'group' parameter on every call (it is required):
   noise(group="train"), noise(group="validate"), noise(group="test")
@@ -103,6 +106,7 @@ Name the split with the 'group' parameter on every call (it is required):
 split = gf.SplitSpec()  # the default: the obtainer takes it as split_spec
 print(f"Split fractions: {dict(split.fractions)}, guard {split.guard_seconds} s")
 print(f"Split fingerprint (each model trained on this split records it): {split.fingerprint()}")
+print(f"Split mode: {split.mode}; the challenge-faithful spec's is {gf.SplitSpec(reserved=()).mode}")
 
 # One obtainer serves every split: each call reads its split from a fresh copy.
 obtainer = gf.IFODataObtainer(
