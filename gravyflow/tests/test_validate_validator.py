@@ -383,7 +383,9 @@ def test_the_network_bound_is_the_best_response_each_detector_can_have():
     bound = network_snr_bound(h, psd[None], rate, config)
     overhead = np.stack([np.asarray(template_sigma(np.cos(2 * psi) * h[:, 0] + np.sin(2 * psi) * h[:, 1], psd,
                                                    rate, 20.0, None)) for psi in np.linspace(0, np.pi / 2, 91)])
-    assert np.all(overhead <= bound * (1 + 1e-5))
+    # Both are float32 sums over the band, so they agree to its rounding, the 1e-4 the next line allows (on JAX
+    # 0.12 the overhead SNR exceeds the bound by 1.6e-5 of it, at 30 + 20; 1e-5 held on 0.9).
+    assert np.all(overhead <= bound * (1 + 1e-4))
     np.testing.assert_allclose(overhead.max(axis=0), bound, rtol=1e-4)
     np.testing.assert_allclose(network_snr_bound(h, np.stack([psd, psd]), rate, config), np.sqrt(2) * bound,
                                rtol=1e-6)
