@@ -10,6 +10,7 @@ moves NumPy's, Python's or Keras' global random state, and the first test says
 so itself.
 """
 
+import copy
 import random
 
 import numpy as np
@@ -103,3 +104,14 @@ def test_loading_a_checkpoint_leaves_python_randoms_state_alone(tmp_path):
     )
     assert loaded.loaded and random.getstate() == before
     assert same(weights(loaded), weights(built))
+
+
+def test_a_hyperparameter_draws_from_its_seed_and_changes_no_distribution():
+    distribution = gf.Distribution(min_=1.0, max_=9.0, type_=gf.DistributionType.UNIFORM)
+    before = copy.deepcopy(distribution)
+    first, second = gf.HyperParameter(distribution, seed=5), gf.HyperParameter(distribution, seed=5)
+    assert first.value == second.value != gf.HyperParameter(distribution, seed=6).value
+    first.reseed(6)
+    first.randomize()
+    assert first.value == gf.HyperParameter(distribution, seed=6).value
+    assert distribution == before

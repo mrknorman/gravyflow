@@ -38,7 +38,8 @@ _LEAVES = tuple(re.compile(pattern) for pattern in (
     r"pool/assign",
     # The validator's own draws outside its datasets.
     r"validator/(roc|plot|pad)",
-    # Model search (genetics and model selection).
+    # A model's hyperparameters, its layers and its build seeds
+    # (gravyflow.src.model.hyperparameter.search_stream).
     rf"search(/{_SEGMENT})+",
     # A training run's model: the seeds Keras gives its layers when they are
     # built (initialisers, dropout).

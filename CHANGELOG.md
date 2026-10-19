@@ -26,17 +26,27 @@ repository before it may need the changes below.
 - **The top level is a curated API**, listed in `docs/api.md`, and each name imports its module on first use. These
   left the top level; they are internal, importable from their modules under `gravyflow.src`:
   `estimate_psd` (`gf.psd` is the one public PSD), `PATH` (package paths are in `gravyflow.src.resources`),
-  `data` (use `gf.Dataset`), `ensure_even`, `ensure_list`, `ShapeContract`, `ShapeEnforcer`, `explain_exit_code`,
-  `calculate_fitness`, `generate_mask`, `batch_injection_parameters`, `RENAMED_SKY_KEYS` and
-  `generate_transient_cache_path`. These are deleted: `get_current_repo`, `get_file_parent_path`, `transform_string`,
+  `data` (use `gf.Dataset`), `ensure_even`, `ensure_list`, `ShapeContract`, `ShapeEnforcer`, `generate_mask`,
+  `batch_injection_parameters`, `RENAMED_SKY_KEYS` and `generate_transient_cache_path`. These are deleted: `get_current_repo`, `get_file_parent_path`, `transform_string`,
   `randomise_arguments` (it called a function that did not exist), `get_element_shape`, `calculate_sample_counts`,
   `Axis_BIS`, `Axis_BI`, and, since nothing in GravyFlow used them, `expand_tensor`, `batch_tensor`,
   `roll_vector_zero_padding` and `is_not_inherited`.
 - **The CUDA-cluster tooling moved to its own project, GravEvolve.** `gf.env`, `gf.setup_cuda`,
   `gf.find_available_GPUs` and `gf.get_tf_memory_usage` left the public API, with the GPU monitor script
   (`gravyflow/src/tools/gpu_checker.py`, which called two functions that did not exist). GravEvolve, built on
-  GravyFlow, selects free GPUs and runs on CUDA clusters. `gf.get_gpu_memory_info` stays: `gf.Manager` places its
-  processes by it. A `with gf.env():` block needs nothing in its place: GravyFlow runs on whatever devices JAX sees.
+  GravyFlow, selects free GPUs and runs on CUDA clusters. A `with gf.env():` block needs nothing in its place:
+  GravyFlow runs on whatever devices JAX sees.
+- **The cluster tools are removed from the library**: the genetic model search and the multi-process training
+  supervisor it ran on. These left the public API: `gf.Population`, `gf.PopulationSector`, `gf.ModelGenome`,
+  `gf.HyperInjectionGenerator`, `gf.Process`, `gf.Manager`, `gf.Heart`, `gf.HeartbeatCallback`, `gf.send_email` and
+  `gf.get_gpu_memory_info`, with the internal `calculate_fitness` and `explain_exit_code`, `Model.from_genome`,
+  `Model`'s `genome` argument, `Model.load`'s `genome`, `load_genome` and `dataset_args`, `Model.train`'s `heart`
+  (pass a callback in `callbacks` instead), the hyperparameters' and layers' `mutate` and `crossover`, and
+  `Model.crossover`, `Model.mutate` and `Model.test` (the first two could not run: they called `Model` with too few
+  arguments). What a single host needs stays: `gf.Model` builds, trains, validates and loads as before, from the same
+  seeds; `gf.HyperParameter` and the layer specifications keep their seeded draws (`reseed`, `randomize`);
+  `Model.validate`'s `heart` takes any object with a `beat()` method. `Model.restore` is new: it loads the checkpoint
+  in a model's directory into a model built another way, as `Model.load` does for its blueprints.
 - **Unused code is deleted** (none of it had a caller in GravyFlow): from `gravyflow.src.dataset.acquisition`,
   `concatenate_batches`, `ifo_canonical_key`, `NoiseSegment`, `SegmentCollection` and the obtainers'
   `compress_segments` (use `coalesce_segments` in `gravyflow.src.dataset.acquisition.gwosc_data`),

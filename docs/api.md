@@ -185,21 +185,17 @@ validates as it trains: they need the `viz` extra.
 - `MatchedFilterBaseline`: matched filtering as a baseline model.
 - `MatchedFilterBaselineConfig`: its configuration.
 - `Model`: a gravyflow model: its network, training run and run record.
-- `BaseLayer`: the base of the genome's layers.
+- `BaseLayer`: the base of a `Model`'s layer specifications.
 - `Reshape`: the reshape layer.
-- `DenseLayer`: a dense layer gene.
-- `FlattenLayer`: a flatten layer gene.
-- `ConvLayer`: a convolutional layer gene.
-- `PoolLayer`: a pooling layer gene.
-- `DropLayer`: a dropout layer gene.
-- `BatchNormLayer`: a batch-normalisation layer gene.
-- `WhitenLayer`: a whitening layer gene.
-- `WhitenPassLayer`: a whitened-input layer gene.
-- `Population`: a population of models for the genetic search.
-- `PopulationSector`: one sector of a `Population`.
-- `HyperParameter`: a hyperparameter and its distribution.
-- `HyperInjectionGenerator`: injection settings as hyperparameters.
-- `ModelGenome`: a model's hyperparameters as a genome.
+- `DenseLayer`: a dense layer specification.
+- `FlattenLayer`: a flatten layer specification.
+- `ConvLayer`: a convolutional layer specification.
+- `PoolLayer`: a pooling layer specification.
+- `DropLayer`: a dropout layer specification.
+- `BatchNormLayer`: a batch-normalisation layer specification.
+- `WhitenLayer`: a whitening layer specification.
+- `WhitenPassLayer`: a whitened-input layer specification.
+- `HyperParameter`: a model or layer setting: a value drawn from its distribution by its seed.
 
 ## Validation (the `viz` extra)
 
@@ -215,7 +211,7 @@ validates as it trains: they need the `viz` extra.
 - `generate_segment_timeline_plot`: a Bokeh timeline of segments.
 - `generate_example_extraction_plot`: a Bokeh plot of extracted examples.
 
-## Training, I/O and process utilities
+## Training and I/O utilities
 
 - `crop_samples`: crop the padding from both ends of strain.
 - `replace_nan_and_inf_with_zero`: replace non-finite values with zero.
@@ -229,14 +225,3 @@ validates as it trains: they need the `viz` extra.
 - `CustomHistorySaver`: the Keras callback that saves the training history.
 - `EarlyStoppingWithLoad`: early stopping that restores the best weights.
 - `PrintWaitCallback`: the Keras callback that reports early stopping's patience.
-- `Heart`: a heartbeat a supervised process beats.
-- `HeartbeatCallback`: the Keras callback that beats a `Heart`.
-- `Process`: a supervised training process.
-- `Manager`: runs `Process`es across GPUs.
-- `send_email`: send a notification email.
-
-## GPUs (the `cuda` extra)
-
-- `get_gpu_memory_info`: each GPU's memory, from `nvidia-smi`.
-
-Selecting GPUs and running on CUDA clusters is a separate project, GravEvolve, built on GravyFlow.

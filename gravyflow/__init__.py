@@ -191,11 +191,7 @@ _MODULES = {
     "BatchNormLayer": "gravyflow.src.model.model",
     "WhitenLayer": "gravyflow.src.model.model",
     "WhitenPassLayer": "gravyflow.src.model.model",
-    "Population": "gravyflow.src.model.model",
-    "PopulationSector": "gravyflow.src.model.model",
-    "HyperParameter": "gravyflow.src.model.genetics",
-    "HyperInjectionGenerator": "gravyflow.src.model.genetics",
-    "ModelGenome": "gravyflow.src.model.genetics",
+    "HyperParameter": "gravyflow.src.model.hyperparameter",
 
     # Validation (the viz extra)
     "Validator": "gravyflow.src.validate",
@@ -209,7 +205,7 @@ _MODULES = {
     "generate_segment_timeline_plot": "gravyflow.src.utils.plotting",
     "generate_example_extraction_plot": "gravyflow.src.utils.plotting",
 
-    # Training, I/O and process utilities
+    # Training and I/O utilities
     "crop_samples": "gravyflow.src.utils.tensor",
     "replace_nan_and_inf_with_zero": "gravyflow.src.utils.tensor",
     "ensure_directory_exists": "gravyflow.src.utils.io",
@@ -222,14 +218,6 @@ _MODULES = {
     "CustomHistorySaver": "gravyflow.src.utils.io",
     "EarlyStoppingWithLoad": "gravyflow.src.utils.io",
     "PrintWaitCallback": "gravyflow.src.utils.io",
-    "Heart": "gravyflow.src.utils.processes",
-    "HeartbeatCallback": "gravyflow.src.utils.processes",
-    "Process": "gravyflow.src.utils.processes",
-    "Manager": "gravyflow.src.utils.processes",
-    "send_email": "gravyflow.src.utils.alert",
-
-    # GPUs (CUDA)
-    "get_gpu_memory_info": "gravyflow.src.utils.gpu",
 }
 
 __all__ = list(_MODULES)

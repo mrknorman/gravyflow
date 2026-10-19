@@ -109,6 +109,17 @@ def test_a_saved_model_loads_with_its_weights(tmp_path, layers, output_config):
         np.testing.assert_allclose(out_a[name], out_b[name], rtol=1e-6)
 
 
+def test_restore_loads_the_checkpoint_into_a_model_built_another_way(tmp_path):
+    trained = model(tmp_path, [gf.DenseLayer(4)])
+    fresh = model(tmp_path, [gf.DenseLayer(4)])
+    assert not fresh.restore() and not fresh.loaded  # no checkpoint yet
+    save(trained, tmp_path)
+    assert not fresh.restore(force_overwrite=True) and not fresh.loaded
+    assert fresh.restore() and fresh.loaded
+    for a, b in zip(trained.model.get_weights(), fresh.model.get_weights()):
+        np.testing.assert_array_equal(a, b)
+
+
 def test_a_checkpoint_that_cannot_load_is_an_error(tmp_path):
     # A failed load logged an error and returned the untrained blueprint.
     gf.ensure_directory_exists(tmp_path / "tiny")

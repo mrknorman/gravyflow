@@ -1,6 +1,6 @@
 """
-DEPRECATED: This module is deprecated and not actively maintained.
-It is excluded from test coverage requirements.
+``gf.Model``: a network built from layer specifications, its training run and its
+run record, and the layer specifications themselves.
 """
 from dataclasses import dataclass
 from typing import Union, List, Dict, Optional
@@ -9,14 +9,10 @@ from pathlib import Path
 import os
 import logging
 import json
-import time
-import pickle
-import datetime
 
 logger = logging.getLogger(__name__)
 
 import numpy as np
-from tqdm import tqdm
 import keras
 from keras import ops
 from keras import layers
@@ -25,7 +21,7 @@ from keras.layers import Layer
 import jax.numpy as jnp
 
 import gravyflow as gf
-from gravyflow.src.model.genetics import search_stream
+from gravyflow.src.model.hyperparameter import search_stream
 from gravyflow.src.rng import keras_draws
 
 
@@ -74,49 +70,28 @@ class IndependentFoldedNormal(layers.Layer):
 
 @dataclass
 class BaseLayer:
+    """
+    A layer specification: its type and its settings, each a
+    ``gf.HyperParameter`` (``mutable_attributes`` lists those a draw may vary).
+    """
     layer_type: str = "Base"
     seed : int = None
     activation: Union[gf.HyperParameter, str] = None
     mutable_attributes: List = None
 
     def reseed(self, seed):
-        
+
         rng = search_stream(seed, "layer")
         for attribute in self.mutable_attributes:
             attribute.reseed(rng.integers(1E10))
-    
+
     def randomize(self):
         """
         Randomizes all mutable attributes of this layer.
         """
         for attribute in self.mutable_attributes:
             attribute.randomize()
-            
-    def mutate(self, mutation_rate: float):
-        """
-        Returns a new layer with mutated hyperparameters based on the mutation_rate.
-        
-        Args:
-        mutation_rate: Probability of mutation.
-        
-        Returns:
-        mutated_layer: New BaseLayer instance with potentially mutated hyperparameters.
-        """
-        for attribute in self.mutable_attributes:
-            attribute.mutate(mutation_rate)
 
-    def crossover(self, other, crossover_rate: float = 0.5):
-        """
-        Returns a new layer with mutated hyperparameters based on the mutation_rate.
-        
-        Args:
-        mutation_rate: Probability of mutation.
-        
-        Returns:
-        mutated_layer: New BaseLayer instance with potentially mutated hyperparameters.
-        """
-        for old, new in (self.mutable_attributes, other.mutable_attributes):
-            old.crossover(new, crossover_rate)
 
 @keras.saving.register_keras_serializable(package="gravyflow")
 class Reshape(Layer):
@@ -424,7 +399,6 @@ class Model:
         batch_size: int = None,
         model_path : Path = None,
         metrics : list = [],
-        genome : gf.ModelGenome = None,
         seed : int = None
     ):
         """
@@ -447,7 +421,6 @@ class Model:
 
         self.name = name
         self.path = model_path
-        self.genome = genome
         self.seed = seed
         self.rng = search_stream(seed, "model")
 
@@ -480,7 +453,6 @@ class Model:
         self.training_config = training_config
         self.loaded = False
         
-        self.fitness = []
         self.metrics = []
 
         self.build(
@@ -489,123 +461,6 @@ class Model:
             model_path,
             metrics
         )
-
-    @classmethod
-    def from_genome(
-        cls,
-        genome : gf.ModelGenome,
-        name : str,
-        input_configs : dict, 
-        output_config : dict,
-        training_config : dict,
-        dataset_args : dict,
-        model_path : Path,
-        metrics : List,
-        seed : int = None
-    ):
-        if seed is None:
-            seed = gf.Defaults.seed
-
-        layers = []            
-        for i in range(genome.num_layers.value):
-            layers.append(
-                deepcopy(genome.layer_genomes[i].value)
-            )
-        
-        training_config["model_path"] = model_path
-        training_config["learning_rate"] = genome.learning_rate.value
-        training_config["batch_size"] = genome.batch_size.value
-        training_config["onsource_duration_seconds"] = genome.onsource_duration_seconds.value
-        training_config["offsource_duration_seconds"] = genome.offsource_duration_seconds.value
-        training_config["sample_rate_hertz"] = genome.sample_rate_hertz.value
-
-        dataset_args["num_examples_per_batch"] = genome.batch_size.value
-        dataset_args["onsource_duration_seconds"] = genome.onsource_duration_seconds.value
-        dataset_args["offsource_duration_seconds"] = genome.offsource_duration_seconds.value
-        dataset_args["sample_rate_hertz"] = genome.sample_rate_hertz.value
-
-        # Use WindowSpec for consistent sample count calculation
-        window_spec = gf.WindowSpec.from_params(
-            sample_rate_hertz=genome.sample_rate_hertz.value,
-            onsource_duration_seconds=genome.onsource_duration_seconds.value,
-            offsource_duration_seconds=genome.offsource_duration_seconds.value
-        )
-        num_onsource_samples = window_spec.num_onsource_samples
-        num_offsource_samples = window_spec.num_offsource_samples
-
-        if genome.layer_genomes[0].value.layer_type == "WhitenPass":
-            dataset_args["input_variables"] = [
-                gf.ReturnVariables.ONSOURCE
-            ]
-            input_configs = [
-                {
-                    "name" : gf.ReturnVariables.ONSOURCE.name,
-                    "shape" : (1, num_onsource_samples,)
-                }
-            ]
-
-        else:
-            input_configs = [
-                {
-                    "name" : gf.ReturnVariables.ONSOURCE.name,
-                    "shape" : (1, num_onsource_samples,)
-                },
-                {
-                    "name" : gf.ReturnVariables.OFFSOURCE.name,
-                    "shape" : (1, num_offsource_samples,)
-                }
-            ]
-
-        gf.Defaults.set(
-            num_examples_per_batch=dataset_args["num_examples_per_batch"],
-            sample_rate_hertz=dataset_args["sample_rate_hertz"],
-            onsource_duration_seconds=dataset_args["onsource_duration_seconds"],
-            offsource_duration_seconds=dataset_args["offsource_duration_seconds"]
-        )
-
-        output_config = {
-            "name" : gf.ReturnVariables.INJECTION_PRESENT.name,
-            "type" : "binary"
-        }
-
-        dataset_args = deepcopy(dataset_args)
-
-        # This is currently quite specific:
-        dataset_args["waveform_generators"] = {
-            name : { 
-                "generator" : generator["hp"].return_generator(),
-                "excluded" : generator["excluded"],
-                "exclusive" : generator["exclusive"]
-            } for name, generator in genome.injection_generators.items()
-        }
-        dataset_args["noise_obtainer"].noise_type = genome.noise_type.value
-        
-        # Log training_config
-        for key, value in training_config.items():
-            logger.info(f"Training config: {key} = {value}")
-
-        # Log dataset_args
-        for key, value in dataset_args.items():
-            logger.info(f"Dataset args: {key} = {value}")
-
-        # Create an instance of DenseModel with num_neurons list
-        model = cls(
-            name=name,
-            layers=layers, 
-            optimizer=genome.optimizer.value, 
-            loss=gf.HyperParameter(losses.BinaryCrossentropy(from_logits=True), seed=100), 
-            input_configs=input_configs, 
-            output_config=output_config,
-            training_config=training_config,
-            dataset_args=dataset_args,
-            batch_size=genome.batch_size.value,
-            model_path=model_path,
-            metrics=metrics,
-            genome=genome,
-            seed=seed
-        )
-
-        return model
 
     @classmethod
     def from_config(
@@ -748,11 +603,13 @@ class Model:
             num_offsource_samples : int = None,
             model_path : Path = None,
             force_overwrite : bool = False,
-            load_genome : bool = False, 
-            dataset_args : Union[Dict, None]  = None,
-            genome : None = None,
             seed : int = None
         ):
+        """
+        The model of a blueprint (``hidden_layers``, else ``model_config_path``)
+        with the checkpoint in ``model_path`` (``model_load_path`` by default)
+        loaded into it (``restore``); with no blueprint, only a checkpoint.
+        """
         
         if num_onsource_samples is None:
             # Use WindowSpec.default() for consistent calculation
@@ -791,32 +648,6 @@ class Model:
                 model_path=model_path,
                 seed=seed
             )
-        elif genome is not None:
-            model = cls.from_genome(
-                genome=genome, 
-                name=name,
-                input_configs=input_configs, 
-                output_config=output_config,
-                training_config=training_config,
-                dataset_args=dataset_args, 
-                model_path=model_path,
-                metrics=[],
-                seed=seed
-            )
-        elif load_genome:
-            genome = gf.ModelGenome.load(model_path / "genome")
-
-            model = cls.from_genome(
-                genome=genome, 
-                name=name,
-                input_configs=input_configs, 
-                output_config=output_config,
-                training_config=training_config,
-                dataset_args=dataset_args, 
-                model_path=model_path,
-                metrics=[],
-                seed=seed
-            )
         else:  
             blueprint_exists = False
             model = cls(
@@ -831,27 +662,33 @@ class Model:
                 seed=seed
             )
         
-        # A checkpoint that exists is loaded or refused: never replaced by an
-        # untrained model.
-        checkpoint = gf.model_file(model_path)
-        if os.path.exists(checkpoint) and not force_overwrite:
-            logger.info(f"Loading model from {model_path}")
-            try:
-                model.model = model._load_checkpoint()
-            except Exception as error:
-                raise ValueError(
-                    f"The checkpoint {checkpoint} exists but cannot be loaded. Pass "
-                    "force_overwrite=True to start an untrained model in its place."
-                ) from error
-            model.loaded = True
+        if model.restore(force_overwrite):
             return model
-        else:
-            # If the model doesn't exist, build a new one
-            if blueprint_exists:
-                logger.info("No saved model found. Using new model...")
-                return model
-            else:
-                raise ValueError("No default model blueprint exists!")
+        # If the model doesn't exist, build a new one
+        if blueprint_exists:
+            logger.info("No saved model found. Using new model...")
+            return model
+        raise ValueError("No default model blueprint exists!")
+
+    def restore(self, force_overwrite : bool = False) -> bool:
+        """
+        Load the checkpoint in the model's directory into this model, unless
+        ``force_overwrite``: True when one was loaded. A checkpoint that exists
+        is loaded or refused, never replaced by an untrained model.
+        """
+        checkpoint = gf.model_file(self.model_path)
+        if force_overwrite or not os.path.exists(checkpoint):
+            return False
+        logger.info(f"Loading model from {self.model_path}")
+        try:
+            self.model = self._load_checkpoint()
+        except Exception as error:
+            raise ValueError(
+                f"The checkpoint {checkpoint} exists but cannot be loaded. Pass "
+                "force_overwrite=True to start an untrained model in its place."
+            ) from error
+        self.loaded = True
+        return True
 
     @property
     def build_seed(self) -> int:
@@ -1035,8 +872,7 @@ class Model:
         training_config: dict = None,
         force_retrain : bool = True,
         max_epochs_per_lesson = None,
-        callbacks = None,
-        heart = None
+        callbacks = None
     ):
         """
         Trains the model.
@@ -1068,18 +904,6 @@ class Model:
             raise ValueError("Validation argument and validateion datasets")
 
         if validate_args is not None:
-
-            if self.genome is not None:
-                validate_args["onsource_duration_seconds"] = self.genome.onsource_duration_seconds.value
-                validate_args["offsource_duration_seconds"] = self.genome.offsource_duration_seconds.value
-                validate_args["sample_rate_hertz"] = self.genome.sample_rate_hertz.value
-                validate_args["num_examples_per_batch"] = 32
-
-                if self.genome.layer_genomes[0].value.layer_type == "WhitenPass":
-                    validate_args["input_variables"] = [
-                        gf.ReturnVariables.ONSOURCE
-                    ]
-
             # The validation dataset is the validate split; arguments naming another refuse.
             validate_args = {**validate_args}
             group = validate_args.pop("group", "validate")
@@ -1160,8 +984,6 @@ class Model:
             gf.model_file(self.model_path).unlink(missing_ok=True)
         self._write_run_record(record)
         with_run_record(self.model, record)
-        if self.genome is not None:
-            self.genome.save(self.model_path / "genome")
 
         if max_epochs_per_lesson is None:
             current_max_epoch = training_config["max_epochs"]
@@ -1216,9 +1038,6 @@ class Model:
         verbose : int = 1
         if gf.is_redirected():
             verbose : int = 2
-            
-            if heart is not None:
-                callbacks += [gf.HeartbeatCallback(heart, 32)]
         else:
             logger.info("Training... or at least trying to.")
 
@@ -1239,9 +1058,6 @@ class Model:
                 **epoch_steps
             )
         )
-
-        if heart is not None:
-            heart.beat()
 
         gf.save_dict_to_hdf5(
             self.metrics[0].history, 
@@ -1292,7 +1108,7 @@ class Model:
         validate_args : dict,
         config : "gf.ValidationConfig" = None,
         model_path : Path = None,
-        heart : "gf.Heart" = None
+        heart = None
     ) -> "gf.Validator":
         """
         Score the model with the validator (its logit output is the score),
@@ -1300,21 +1116,12 @@ class Model:
         ``model_path`` (the model's own directory by default). The validator
         reads the record the model's weights carry (``run_record``), so it
         refuses to score the split that selected them or data split by another
-        spec.
+        spec. ``heart``, any object with a ``beat()`` method, is beaten as the
+        validator works, for a supervisor that watches the process.
         """
         model_path = Path(model_path if model_path is not None else self.model_path)
         validation_file_path : Path = model_path / "validation_data.h5"
 
-        if self.genome is not None:
-            validate_args["onsource_duration_seconds"] = self.genome.onsource_duration_seconds.value
-            validate_args["offsource_duration_seconds"] = self.genome.offsource_duration_seconds.value
-            validate_args["sample_rate_hertz"] = self.genome.sample_rate_hertz.value
-
-            if self.genome.layer_genomes[0].value.layer_type == "WhitenPass":
-                validate_args["input_variables"] = [
-                    gf.ReturnVariables.ONSOURCE
-                ]
-        
         # Validate model:
         validator = gf.Validator.validate(
                 self.model, 
@@ -1330,454 +1137,8 @@ class Model:
         )
         return validator
 
-    def test(self, validation_datasets, num_batches: int):
-        """
-        Tests the model.
-        
-        Args:
-        validation_datasets: Dataset to test on.
-        batch_size: Batch size to use when testing.
-        """
-        
-        self.fitness.append(1.0 / self.model.evaluate(validation_datasets, steps=num_batches)[0])
-        
-        return self.fitness[-1]
-        
     def summary(self):
         """
         Prints a summary of the model.
         """
         self.model.summary()
-    
-    @staticmethod
-    def crossover(parent1: 'Model', parent2: 'Model') -> 'Model':
-        """
-        Creates a new model whose hyperparameters are a combination of two parent models.
-        The child model is then returned.
-        """
-        # Determine the shorter and longer layers lists
-        short_layers, long_layers = (parent1.layers, parent2.layers) if len(parent1.layers) < len(parent2.layers) else (parent2.layers, parent1.layers)
-
-        # Choose a random split point in the shorter layers list
-        split_point = np.random.randint(1, len(short_layers))
-
-        # Choose which parent to take the first part from
-        first_part, second_part = (short_layers[:split_point], long_layers[split_point:]) if np.random.random() < 0.5 else (long_layers[:split_point], short_layers[split_point:])
-        child_layers = first_part + second_part
-
-        child_model = Model(child_layers, parent1.optimizer, parent1.loss, parent1.batch_size)
-
-        return child_model
-    
-    def mutate(self, mutation_rate: float) -> 'Model':
-        """
-        Returns a new model with mutated layers based on the mutation_rate.
-        
-        Args:
-        mutation_rate: Probability of mutation.
-        
-        Returns:
-        mutated_model: New Model instance with potentially mutated layers.
-        """
-        mutated_layers = [layer.mutate(mutation_rate) for layer in self.layers]
-        mutated_model = Model(mutated_layers, self.optimizer, self.loss, self.batch_size)
-
-        return mutated_model
-@dataclass
-class PopulationSector:
-    name : str
-    save_directory : Path
-    models : List = None
-    num_models : int = 0
-    fitnesses : float = None
-    accuracies : List = None
-    losses : List = None
-
-    mean_accuracy_history : List = None
-    mean_fitness_history : List = None
-    mean_loss_history : List = None
-
-    def __post_init__(self):
-        if self.models is None:
-            self.models = []
-        self.num_models = len(self.models)
-        self.fitnesses = list(np.ones(self.num_models))
-        self.accuracies = list(np.zeros(self.num_models))
-        self.losses = list(np.ones(self.num_models))
-
-        self.mean_accuracy_history = []
-        self.mean_fitness_history = []
-        self.mean_loss_history = []
-
-    def add(self, new_model):
-        self.models.append(new_model)
-        self.fitnesses.append(1)
-        self.accuracies.append(0)
-        self.losses.append(1)
-        self.num_models += 1
-
-    def transfer(self, population, index):
-        self.models.append(population.models.pop(index))
-        self.fitnesses.append(population.fitnesses.pop(index))
-        self.num_models += 1
-    
-    def save(self):
-        np.save(self.save_directory / f"{self.name}_fitnesses", self.fitnesses)
-        np.save(self.save_directory / f"{self.name}_accuracies", self.fitnesses)
-        np.save(self.save_directory / f"{self.name}_losses", self.losses)
-
-        np.save(self.save_directory / f"{self.name}_fitness_history", self.mean_accuracy_history)
-        np.save(self.save_directory / f"{self.name}_accuracy_history", self.mean_fitness_history)
-        np.save(self.save_directory / f"{self.name}_loss_history", self.mean_loss_history)
-
-class Population:
-    def __init__(
-        self, 
-        num_population_members: int,
-        default_genome: gf.ModelGenome,
-        population_directory_path : Path = None,
-        seed : int = None
-    ):
-
-        if population_directory_path is None:
-            current_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            population_directory_path = Path(f"./population_{current_timestamp}")
-
-
-        self.generation = 0
-
-        self.num_population_members = num_population_members
-        self.population_directory_path = Path(population_directory_path)
-        self.default_genome = default_genome
-        self.current_id = 0
-
-        self.orchard = PopulationSector("orchard", population_directory_path)
-        self.nursary = PopulationSector("nursary", population_directory_path)
-        self.lumberyard = PopulationSector("lumberyard", population_directory_path)
-
-        if seed == None:
-            seed = gf.Defaults.seed
-
-        self.rng = search_stream(seed, "population")
-
-        self.initilize()
-        self.save()
-    
-    def save(self, path = None):
-        if path is None:
-            path = self.population_directory_path / "checkpoint.pkl"
-
-        with open(path, 'wb') as file:
-            pickle.dump(self, file)
-
-    @classmethod
-    def load(cls, path):
-        if path.exists():
-            with open(path, 'rb') as file:
-                return pickle.load(file)
-        else:
-            return None
-
-    def load_model(self):
-        model_number = self.current_id
-        self.current_id += 1
-
-        model_name = f"model_{model_number}"
-        model_path = self.population_directory_path / f"generation_{self.generation}/{model_name}"
-        
-        try:
-            genome = gf.ModelGenome.load(model_path / "genome")
-        except:
-            raise FileNotFoundError(f"Model genome {self.generation}/{model_name} does not exist.")
-        
-        model = {
-            "name" : model_name,
-            "number" : model_number,
-            "path" : model_path,
-            "genome" : genome
-        }
-
-        self.nursary.add(model)
-
-    def add_model(self, genome):
-
-        model_number = self.current_id
-
-        model_name = f"model_{model_number}"
-        model_path = self.population_directory_path / f"generation_{self.generation}/{model_name}"
-
-        gf.ensure_directory_exists(model_path)
-        model = {
-            "name" : model_name,
-            "number" : model_number,
-            "path" : model_path,
-            "genome" : genome
-        }
-
-        genome.save(model_path / "genome")
-
-        self.nursary.add(model)
-        self.current_id += 1
-
-    def initilize(self):
-        if self.generation == 0:
-            for j in tqdm(range(self.num_population_members)): 
-                if not Path(
-                    self.population_directory_path / f"generation_{self.generation}/model_{j}/genome"
-                ).exists():
-                    self.random_sapling()
-                else:
-                    self.load_model()
-                
-    def roulette_wheel_selection(self, fitnesses):
-        """
-        Performs roulette wheel selection on the population.
-
-        Args:
-            population (list): The population of individuals.
-            fitnesses (list): The fitness of each individual in the population.
-
-        Returns:
-            The selected individual from the population.
-        """
-
-        # Convert the fitnesses to probabilities.
-        total_fit = sum(fitnesses)
-        prob = [fit/total_fit for fit in fitnesses]
-
-        # Calculate the cumulative probabilities.
-        cumulative_probs = np.cumsum(prob)
-
-        # Generate a random number in the range [0, 1).
-        r = self.rng.random()
-
-        # Find the index of the individual to select.
-        for i in range(len(fitnesses)):
-            if r <= cumulative_probs[i]:
-                return i
-
-        # If we've gotten here, just return the last individual in the population.
-        # This should only happen due to rounding errors, and should be very rare.
-        return 0
-
-    def train_generation(self):
-
-        initial_processes = []
-        for model in self.nursary.models:    
-            if not Path(model["path"] / "validation_plots.html").exists():
-                initial_processes.append(gf.Process(
-                    f"python train.py --path {model['path']}", model["name"], 
-                    tensorflow_memory_mb=1000, 
-                    cuda_overhead_mb=500, 
-                    initial_restart_count=1
-                ))
-            else:
-                logger.info(
-                    f"Model {model['path']} has already completed validation, skipping."
-                )
-
-        if initial_processes:
-            manager = gf.Manager(
-                initial_processes,
-                max_restarts=8,
-                restart_timeout_seconds=3600.0,
-                process_start_wait_seconds=3.0,
-                management_tick_length_seconds=5.0,
-                max_num_concurent_processes=60,
-                log_directory_path = (
-                    self.population_directory_path / f"generation_{self.generation}/logs/"
-                )
-            )
-
-            interval_seconds : float = 60.0
-            last_save_time = time.time()  # Tracks the last save time.
-
-            while manager:
-                manager()  # Call the manager function.
-        
-        if not initial_processes:
-            logger.info(
-                f"Generation {self.generation} empty or completed. Skipping."
-            )
-
-    def load_config(
-        self,
-        path : Path
-    ):
-        """Loads configuration parameters from a JSON file."""
-        try:
-            with open(path, 'r') as file:
-                return json.load(file)
-        except Exception as e:
-            logger.error(f"Failed to load configuration: {e}")
-            raise
-
-    def train(
-        self, 
-        num_generations
-    ):  
-
-        current_dir = Path(__file__).resolve().parent.parent
-
-        email_config_path = Path("./gravyflow/alert_settings.json")
-        email_config = self.load_config(email_config_path)
-
-        gf.send_email(
-            f"Started optimising {self.population_directory_path}..", 
-            (f"Started optimization of {self.num_population_members} population members over {num_generations}"
-            " generations"), 
-            email_config['recipient_email'], 
-            Path(email_config['email_config_path'])
-        )
-
-        logger.info("Starting training...")
-
-        """
-        self.generation = 5
-        self.current_id = 5000
-
-        self.nursary = PopulationSector("nursary", self.population_directory_path)
-        for _ in range(self.num_population_members):
-            if (self.population_directory_path / f"generation_{self.generation}/model_{self.current_id}/genome").exists():
-                self.load_model()
-            else:
-                logger.warning("Can't find file!")
-        """
-
-        for generation_index in range(self.generation, num_generations):
-            logger.info(f"Training Generation: {self.generation}")
-            
-            self.train_generation()
-            self.generation += 1
-
-            self.nursary.models=sorted(self.nursary.models, key=lambda x: x['number'])
-            self.nursary.fitnesses = self.load_and_calculate_fitness(
-                generation_index
-            )
-
-            logger.info(
-                f"Current Fitnesses: {self.nursary.fitnesses}"
-            )
-
-            gf.send_email(
-                f"Generation {self.generation} completed.", 
-                f"Completed generation, current fitnesses {self.nursary.fitnesses}", 
-                email_config['recipient_email'], 
-                Path(email_config['email_config_path'])
-            )
-
-            while self.nursary.models:
-                self.orchard.transfer(self.nursary, -1)
-                        
-            for _ in range(self.num_population_members):
-                if (self.population_directory_path / f"/generation_{self.generation}/model_{self.current_id}/genome").exists():
-                    self.load_model()
-                else:
-                    self.germinate_sapling()
-
-            while self.orchard.models:
-                self.lumberyard.transfer(self.orchard, -1)
-
-            self.save()
-    
-    def germinate_sapling(self):
-
-        parent_a_index = self.roulette_wheel_selection(self.orchard.fitnesses)
-        parent_b_index = self.roulette_wheel_selection(self.orchard.fitnesses)
-
-        parent_a = self.orchard.models[parent_a_index]
-        parent_b = self.orchard.models[parent_b_index]
-
-        #Crossover
-        new_genome = deepcopy(parent_a["genome"])
-        new_genome.reseed(self.rng.integers(1E10))
-        new_genome.crossover(deepcopy(parent_b["genome"]))
-
-        #Mutate
-        new_genome.mutate(0.05)
-
-        logger.info('Germinated new model.')
-
-        self.add_model(new_genome)
-
-    def random_sapling(self):
-        new_genome = deepcopy(self.default_genome)  
-        new_genome.reseed(self.rng.integers(1E10))
-        new_genome.randomize()
-
-        logger.info('Randomised new model.')
-
-        self.add_model(new_genome)    
-
-    def load_and_calculate_fitness(
-            self,
-            generation,
-            scaling_threshold = 8,
-            far_hz = 1e-3
-        ):
-        """
-        The fitness of each model of ``generation`` (`calculate_fitness`), from
-        the files its training left: the share of its injections above SNR
-        ``scaling_threshold`` that score above its threshold at ``far_hz`` (its
-        validator's results, ``validation_data.h5``), and its best validation
-        loss (its history). A model with no results yet scores 0, logged by
-        name; a result that cannot be read raises.
-        """
-        directory_path = Path(self.population_directory_path) / f"generation_{generation}"
-        fitnesses = np.zeros(self.num_population_members)
-        for entry in sorted(directory_path.iterdir()):
-            if not entry.name.startswith("model_"):
-                continue
-            model_index = int(entry.name.split("_")[-1]) - self.num_population_members * generation
-            results = entry / "validation_data.h5"
-            if not results.exists():
-                logger.warning(f"{entry.name} of generation {generation} has no validation results: fitness 0.")
-                continue
-            validator = gf.Validator.load(results)
-            threshold = validator.background().threshold_for_far(far_hz).threshold
-            efficiency = validator.efficiency_data
-            valid_scores = efficiency["scores"][efficiency["snrs"] > scaling_threshold]
-            fitnesses[model_index] = calculate_fitness(valid_scores, threshold, gf.load_history(entry))
-
-        return list(fitnesses)
-
-def calculate_fitness(valid_scores: List[float], score_threshold : float, history: Dict[str, List[float]]) -> float:
-    """
-    Calculate the fitness based on the number of valid scores above a threshold,
-    the list of valid scores, and the history of validation losses. Sets fitness to
-    0 if any term is NaN or infinite.
-
-    Parameters
-    ----------
-    num_valid_scores_above : int
-        Number of valid scores above the threshold.
-    valid_scores : List[float]
-        List of valid scores.
-    history : Dict[str, List[float]]
-        History dictionary containing validation loss under the key "val_loss".
-
-    Returns
-    -------
-    float
-        The calculated fitness value or 0 if any term is NaN or infinite.
-
-    """
-    num_valid_scores_above = len(valid_scores[valid_scores > score_threshold])
-
-    len_valid_scores = len(valid_scores)
-    min_val_loss = np.min(history["val_loss"])
-    
-    # Pre-calculation checks for NaN or inf
-    terms = [num_valid_scores_above, len_valid_scores, min_val_loss]
-    if np.any(np.isnan(terms)) or np.any(np.isinf(terms)):
-        logger.info("One or more terms are NaN or infinite. Setting fitness to 0.")
-        return 0.0
-    
-    fitness = 1.0 / (1.0 - (num_valid_scores_above / len_valid_scores) + min_val_loss + 1E-8)
-    
-    # Post-calculation check for NaN or inf in the fitness result
-    if np.isnan(fitness) or np.isinf(fitness):
-        logger.info("Calculated fitness is NaN or infinite. Setting fitness to 0.")
-        return 0.0
-
-    return fitness
