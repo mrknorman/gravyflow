@@ -265,6 +265,53 @@ def test_the_network_search_emits_mlgwsc_triggers(tmp_path):
     np.testing.assert_array_equal(read.var, 0.1)
 
 
+def test_injections_scored_locally_equal_the_full_pass():
+    # Each injection scored on a short stretch around it equals the full
+    # pass over the strain with that injection added, trigger for trigger,
+    # to float32 precision; a stretch shorter than the rule does not.
+    from gravyflow.src.detection.stream import Injection
+    rng = np.random.default_rng(30)
+    spectrum = exact_spectrum()
+    params = ([14.0, 40.0, 25.0], [9.0, 30.0, 6.0], [0.6, 0.0, 0.3], [-0.4, 0.2, -0.5])
+    mf = search(TemplateBank.from_masses(*params), snr_threshold=5.0)
+    seconds = 260.0
+    noise = {"H1": coloured_noise(rng, seconds), "L1": coloured_noise(rng, seconds)}
+    n, first, blocks = mf._blocks(int(seconds * FS))
+    boundary = blocks[1][1] / FS  # where the second block's search begins
+    mergers = [round(m * FS) / FS for m in (boundary + 0.05, 150.3, 200.7)]  # on the sample grid
+    templates = SPACE.templates(*params).astype(np.float64)
+    centre = templates.shape[-1] // 2
+    injections = []
+    for row, merger in zip(templates, mergers):
+        wave = row * (rng.uniform(9.0, 15.0) / optimal_snr(row, spectrum))
+        injections.append(Injection(merger, {"H1": merger - centre / FS, "L1": merger + (8 - centre) / FS},
+                                    {"H1": wave, "L1": wave}))
+    local = mf.score_injections(noise, 0.0, injections, window_seconds=0.5)
+    for injection, result in zip(injections, local):
+        full = {d: mf.filter(injection.add_to(noise[d].copy(), d, 0.0, FS), 0.0, d) for d in noise}
+        for d, mine in result.detectors.items():
+            near = (full[d].time >= mine.span[0]) & (full[d].time < mine.span[1])
+            np.testing.assert_array_equal(mine.time, full[d].time[near])
+            np.testing.assert_array_equal(mine.template, full[d].template[near])
+            np.testing.assert_allclose(mine.snr, full[d].snr[near], rtol=1e-4)
+            np.testing.assert_allclose(mine.reduced_chisq, full[d].reduced_chisq[near], rtol=1e-3)
+            assert np.max(mine.snr) > 8.0
+        network = coincide(full)
+        loud = np.argmax(result.coincidences.stat)
+        at = np.argmin(np.abs(network.time - result.coincidences.time[loud]))
+        np.testing.assert_allclose(result.coincidences.stat[loud], network.stat[at], rtol=1e-4)
+    # The stretch rule is tight: half a template span shorter, the SNR near the merger is not the full pass's.
+    injection = injections[1]
+    start, lo, hi = next(b for b in blocks if b[1] <= int(150.3 * FS) < b[2])
+    block = injection.add_to(np.array(noise["H1"][start:start + n]), "H1", start / FS, FS)
+    window = (int(149.8 * FS) - start, int(150.8 * FS) - start)
+    chunked = mf._chunked(mf.templates())
+    _, need = mf.stretch_samples(*window, first)
+    exact = mf._search_block(block, chunked, None, first, *window)
+    short = mf._search_block(block, chunked, None, first, *window, length=need - mf.pre // 2)
+    assert len(short[0]) != len(exact[0]) or not np.allclose(short[2], exact[2], rtol=1e-4)
+
+
 def test_a_bank_from_another_space_is_refused():
     bank = TemplateBank(np.array([30.0]), np.array([25.0]), placement=stream_bank_placement(sample_rate_hertz=4096.0))
     with pytest.raises(ValueError, match="4096"):

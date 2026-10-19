@@ -16,11 +16,12 @@ from gravyflow.src.detection.template_grid import TemplateBank, TemplateGrid
 from gravyflow.src.dataset.tools.snr import matched_filter_fft, optimal_snr, template_sigma
 from gravyflow.src.detection.matched_filter import MatchedFilter, MatchedFilterLayer, find_triggers
 from gravyflow.src.detection.stream import (
-    Coincidences, DetectorTriggers, StreamResult, StreamingMatchedFilter, coincide, reweighted_snr)
+    Coincidences, DetectorTriggers, Injection, StreamResult, StreamingMatchedFilter, coincide, reweighted_snr)
 
 __all__ = [
     'Coincidences',
     'DetectorTriggers',
+    'Injection',
     'MatchedFilter',
     'MatchedFilterLayer',
     'StreamResult',

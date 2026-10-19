@@ -64,6 +64,7 @@ from typing import Dict, Mapping, Optional, Sequence, Tuple, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+from scipy.fft import next_fast_len
 
 from gravyflow.src.dataset.conditioning.whiten import whiten, whitening_filter
 from gravyflow.src.dataset.tools.psd import PowerSpectrum, SpectralConfig, estimate_psd
@@ -511,9 +512,8 @@ class StreamingMatchedFilter:
                 "from the filter's spectral_config: build the filter with the spectrum's config.")
         return psd
 
-    def _response(self, spectrum: PowerSpectrum, n: int) -> jnp.ndarray:
-        """The whitening filter's response on the block's grid, aligned as `whiten` applies it, times the merger shift."""
-        fir = np.asarray(whitening_filter(spectrum, n), dtype=np.float64).reshape(-1)
+    def _response(self, fir: np.ndarray, n: int) -> jnp.ndarray:
+        """The whitening filter's response on an n-sample grid, aligned as `whiten` applies it, times the merger shift."""
         k = np.arange(n // 2 + 1)
         # whiten's 'same'-mode convolution keeps the full convolution from
         # (ntaps - 1) // 2 on; the templates' merger is at index pre.
@@ -536,51 +536,87 @@ class StreamingMatchedFilter:
             raise ValueError("strain must be one detector's (samples,) series.")
         if not np.isfinite(strain).all():
             raise ValueError("The strain holds a NaN or an infinity: split it into finite stretches.")
-        templates = self.templates()
-        n, first, stride = self._layout(len(strain))
-        chunked = self._chunked(templates)
-        fs = self.sample_rate_hertz
-        starts = list(range(0, len(strain) - n + 1, stride))
-        if starts[-1] + first + stride < len(strain) - (n - first - stride):
-            starts.append(len(strain) - n)  # the last block ends with the strain
-        parts, searched_until = [], None
-        for block_start in starts:
-            block = strain[block_start:block_start + n]
-            # Each block searches [first, first + stride) of itself, less what
-            # the previous block searched.
-            lo = first if searched_until is None else max(first, searched_until - block_start)
-            found = self._filter_block(block, chunked, psd, n, first, stride)
-            keep = found[1] >= lo
-            parts.append((found[0][keep], found[1][keep] + block_start, found[2][keep], found[3][keep]))
-            searched_until = block_start + first + stride
+        n, first, blocks = self._blocks(len(strain))
+        chunked = self._chunked(self.templates())
+        parts = []
+        for start, lo, hi in blocks:
+            found = self._search_block(strain[start:start + n], chunked, psd, first, lo - start, hi - start)
+            parts.append((found[0], found[1] + start, found[2], found[3]))
+        span = (start_gps + blocks[0][1] / self.sample_rate_hertz, start_gps + blocks[-1][2] / self.sample_rate_hertz)
+        return self._triggers(name, start_gps, parts, span)
+
+    def _triggers(self, name, start_gps, parts, span) -> DetectorTriggers:
         template, sample, snr, chisq = (np.concatenate(values) for values in zip(*parts))
         reduced = chisq / self.chisq_dof
-        span = (start_gps + (starts[0] + first) / fs, start_gps + searched_until / fs)
-        return DetectorTriggers(name, start_gps + sample / fs, template, snr, reduced,
+        return DetectorTriggers(name, start_gps + sample / self.sample_rate_hertz, template, snr, reduced,
                                 reweighted_snr(snr, reduced), span)
+
+    def _blocks(self, num_samples: int):
+        """
+        (n, first, blocks): the block length, a block's first searchable merger
+        sample, and each block's (start, lo, hi) in the strain's samples: it
+        searches the merger samples [lo, hi), [start + first, start + first +
+        stride) less what the block before it searched. The last block ends
+        with the strain.
+        """
+        n, first, stride = self._layout(num_samples)
+        starts = list(range(0, num_samples - n + 1, stride))
+        if starts[-1] + first + stride < num_samples - (n - first - stride):
+            starts.append(num_samples - n)
+        blocks, until = [], None
+        for start in starts:
+            lo = start + first if until is None else max(start + first, until)
+            until = start + first + stride
+            blocks.append((start, lo, until))
+        return n, first, blocks
 
     def _chunked(self, templates):
         pad = (-templates.shape[0]) % self.template_chunk
         padded = jnp.pad(templates, ((0, pad), (0, 0))) if pad else templates
         return padded.reshape((-1, self.template_chunk, templates.shape[-1]))
 
-    def _filter_block(self, block, chunked, psd, n, first, stride):
-        """(template, sample in block, snr, chi^2) of one block's triggers."""
-        spectrum = self._spectrum(block.astype(np.float32), psd)
-        white = whiten(block.astype(np.float32), spectrum, self.sample_rate_hertz)
-        white_fft = jnp.fft.rfft(jnp.asarray(white).reshape(-1), n=n)
-        response = self._response(spectrum, n)
-        width = self.cluster_samples
-        windows = stride // width + 2
-        peak, offset, local = (np.asarray(v) for v in _snr_peaks(
-            white_fft, response, chunked, n=n, first=first - width, windows=windows, width=width))
-        peak, offset, local = (v.reshape(-1, windows - 2) for v in (peak, offset, local))
+    def stretch_samples(self, lo: int, hi: int, first: int) -> Tuple[int, int]:
+        """
+        (a, length): the stretch of a block's whitened data the SNR at merger
+        samples [lo, hi) depends on, clustering included. The clustering
+        windows (cluster_seconds wide, on the block's grid from `first`) that
+        hold [lo, hi), one more on each side, then the template span before
+        (pre) and after (post) and half the whitening filter beyond each:
+        length = windows * width + pre + post + num_taps.
+        """
+        width, half = self.cluster_samples, self.num_taps // 2
+        j0, j1 = (lo - first) // width, -(-(hi - first) // width)
+        windows = j1 - j0 + 2
+        return first + (j0 - 1) * width - self.pre - half, windows * width + self.pre + self.post + 2 * half
+
+    def _search_block(self, block, chunked, psd, first, lo, hi, length=None):
+        """
+        (template, sample in block, snr, chi^2) of one block's triggers with
+        merger samples in [lo, hi). The block is whitened whole, with its own
+        (or the given) spectrum, as the full pass whitens it; the SNR is then
+        correlated over `stretch_samples` of it only (or its first `length`
+        samples, to test that rule), and chi-squared, a statistic of the
+        block, on the block's grid at the triggers.
+        """
+        n, fs, width = len(block), self.sample_rate_hertz, self.cluster_samples
+        block = np.asarray(block, dtype=np.float32)
+        spectrum = self._spectrum(block, psd)
+        white = np.asarray(whiten(block, spectrum, fs), dtype=np.float32).reshape(-1)
+        fir = np.asarray(whitening_filter(spectrum, n), dtype=np.float64).reshape(-1)
+        a, need = self.stretch_samples(lo, hi, first)
+        windows = (need - self.pre - self.post - self.num_taps) // width
+        length = need if length is None else min(length, need)
+        size = int(next_fast_len(need))  # zero padding past the stretch wraps nothing into it
+        peak, offset, local = (np.asarray(v).reshape(-1, windows - 2) for v in _snr_peaks(
+            jnp.fft.rfft(jnp.asarray(white[a:a + length]), n=size), self._response(fir, size), chunked,
+            n=size, first=self.pre + self.num_taps // 2, windows=windows, width=width))
         rows, window = np.nonzero(local & (peak >= self.snr_threshold))
         real = rows < self.bank.num_templates  # not the zero templates padding the last chunk
         rows, window = rows[real], window[real]
-        sample = first + window * width + offset[rows, window]
-        snr = peak[rows, window]
-        chisq = self._chisq(white_fft, response, rows, sample, n)
+        sample = a + self.pre + self.num_taps // 2 + (window + 1) * width + offset[rows, window]
+        keep = (sample >= lo) & (sample < hi)
+        rows, sample, snr = rows[keep], sample[keep], peak[rows[keep], window[keep]]
+        chisq = self._chisq(jnp.fft.rfft(jnp.asarray(white), n=n), self._response(fir, n), rows, sample, n)
         return rows, sample, snr, chisq
 
     def _chisq(self, white_fft, response, rows, sample, n) -> np.ndarray:
@@ -618,6 +654,83 @@ class StreamingMatchedFilter:
         cluster = self.cluster_seconds if coincidence_cluster_seconds is None else coincidence_cluster_seconds
         return StreamResult(detectors, coincide(detectors, cluster_seconds=cluster))
 
+    # ----------------------------------------------------------- injections
+
+    def score_injections(self, strain: Mapping, start_gps: float, injections: Sequence["Injection"],
+                         window_seconds: float = 0.1, psds: Optional[Mapping] = None,
+                         coincidence_cluster_seconds: Optional[float] = None) -> list:
+        """
+        Each injection's triggers, scored locally: what `search` over the
+        strain with that injection added would give within `window_seconds`
+        of its time, without filtering the strain again.
+
+        strain: the clean data, a mapping from gf.IFO or name to raw strain
+        (an array or a memory map; all start at `start_gps`), the data the
+        full pass filtered. For each injection and detector, each block of
+        the full pass whose searched merger times meet [time - window, time +
+        window] is read, the injection added, and the block whitened whole
+        (its spectrum, from the block, is the full pass's); the templates are
+        then correlated over `stretch_samples` of it only, chi-squared is
+        taken on the block's grid at those triggers, and the window's
+        coincidences are formed. Returns one StreamResult per injection; each
+        detector's triggers span the window.
+        """
+        fs = self.sample_rate_hertz
+        chunked = self._chunked(self.templates())
+        half = int(round(window_seconds * fs))
+        cluster = self.cluster_seconds if coincidence_cluster_seconds is None else coincidence_cluster_seconds
+        series = {(d if isinstance(d, str) else d.name): s for d, s in strain.items()}
+        layouts = {name: self._blocks(len(s)) for name, s in series.items()}
+        results = []
+        for injection in injections:
+            centre = int(round((injection.time - start_gps) * fs))
+            detectors = {}
+            for name, data in series.items():
+                psd = None if psds is None else psds.get(name)
+                n, first, blocks = layouts[name]
+                parts = []
+                for start, lo, hi in blocks:
+                    lo, hi = max(lo, centre - half), min(hi, centre + half + 1)
+                    if lo >= hi:
+                        continue
+                    block = injection.add_to(np.array(data[start:start + n], dtype=np.float64), name,
+                                             start_gps + start / fs, fs)
+                    found = self._search_block(block, chunked, psd, first, lo - start, hi - start)
+                    parts.append((found[0], found[1] + start, found[2], found[3]))
+                if not parts:
+                    raise ValueError(f"The injection at {injection.time} is outside {name}'s searched span.")
+                span = (start_gps + (centre - half) / fs, start_gps + (centre + half + 1) / fs)
+                detectors[name] = self._triggers(name, start_gps, parts, span)
+            network = coincide(detectors, cluster_seconds=cluster) if len(detectors) > 1 else None
+            results.append(StreamResult(detectors, network))
+        return results
+
+
+@dataclass(frozen=True, eq=False)
+class Injection:
+    """
+    A signal to score: its time (GPS; the triggers within the scoring window
+    of it are its), and each detector's projected strain, `waveform[name]`,
+    whose first sample is at GPS `start[name]` on the strain's sample grid.
+    """
+    time: float
+    start: Mapping[str, float]
+    waveform: Mapping[str, np.ndarray]
+
+    def add_to(self, series: np.ndarray, detector: str, series_start_gps: float, sample_rate_hertz: float):
+        """`series` (starting at `series_start_gps`) with this injection's strain in `detector` added where they overlap."""
+        if detector not in self.waveform:
+            return series
+        offset = (self.start[detector] - series_start_gps) * sample_rate_hertz
+        first = int(round(offset))
+        if abs(offset - first) > 1e-3:
+            raise ValueError("The injection's waveform is not on the strain's sample grid.")
+        wave = np.asarray(self.waveform[detector], dtype=np.float64)
+        lo, hi = max(first, 0), min(first + len(wave), len(series))
+        if lo < hi:
+            series[lo:hi] += wave[lo - first:hi - first]
+        return series
+
 
 @dataclass(frozen=True, eq=False)
 class StreamResult:
@@ -632,6 +745,7 @@ class StreamResult:
 __all__ = [
     "Coincidences",
     "DetectorTriggers",
+    "Injection",
     "STREAM_SPECTRAL_CONFIG",
     "StreamResult",
     "StreamingMatchedFilter",
