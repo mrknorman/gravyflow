@@ -69,8 +69,7 @@ from typing import Optional, Sequence, Tuple
 import numpy as np
 
 from gravyflow.src.dataset.features.injection import REFERENCE_CHIRP_MASS_MSUN, chirp_mass
-from .metrics import (DEFAULT_SIGMAS, MIN_BACKGROUND_EVENTS, Background, binomial_interval, independent_events,
-                      nested, sigma_level)
+from .metrics import DEFAULT_SIGMAS, MIN_BACKGROUND_EVENTS, Background, binomial_interval, nested, sigma_level
 
 GPC3_PER_MPC3 = 1e-9
 #: A Julian year, and a twelfth of it.
