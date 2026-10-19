@@ -303,7 +303,8 @@ class MatchedFilter:
         if self._templates is None:
             self._templates = cbc_templates(
                 self.bank.mass_1, self.bank.mass_2, self.sample_rate_hertz,
-                self.template_samples / self.sample_rate_hertz, self.spectral_config.lower_frequency_hertz)
+                self.template_samples / self.sample_rate_hertz, self.spectral_config.lower_frequency_hertz,
+                None, self.bank.spin_1z, self.bank.spin_2z)
         return self._templates
 
     def template_spectra(self, templates=None) -> jnp.ndarray:
