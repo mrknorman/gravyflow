@@ -80,16 +80,6 @@ class Prefetcher(Generic[T]):
             self._stopped, self._pool = True, None
             return None
 
-    def close(self) -> None:
-        """Cancel every read ahead and stop the threads."""
-        with self._lock:
-            for future in self._futures.values():
-                future.cancel()
-            self._futures.clear()
-            pool, self._pool = self._pool, None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
-
     def __getstate__(self):
         """A copy reads ahead on threads of its own: reads in flight stay behind."""
         state = dict(self.__dict__)
