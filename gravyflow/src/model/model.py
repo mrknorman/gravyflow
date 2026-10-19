@@ -26,6 +26,7 @@ import jax.numpy as jnp
 
 import gravyflow as gf
 from gravyflow.src.model.genetics import search_stream
+from gravyflow.src.rng import keras_draws
 
 
 def folded_normal_log_prob(x, loc, scale):
@@ -447,6 +448,7 @@ class Model:
         self.name = name
         self.path = model_path
         self.genome = genome
+        self.seed = seed
         self.rng = search_stream(seed, "model")
 
         if batch_size is None:
@@ -851,8 +853,13 @@ class Model:
             else:
                 raise ValueError("No default model blueprint exists!")
 
+    @property
+    def build_seed(self) -> int:
+        """The seed Keras builds (and loads) the model's layers from: a stream of the model's seed."""
+        return int(search_stream(self.seed, "model/build").integers(2**63))
+
     def build(
-            self, 
+            self,
             input_configs : Union[List[Dict], Dict],
             output_config : dict,
             model_path : Path = None,
@@ -875,33 +882,36 @@ class Model:
 
         if not isinstance(input_configs, list):
             input_configs = [input_configs]
-        
-        # Create input tensors based on the provided configurations
-        inputs = {
-            config["name"]: keras.Input(shape=config["shape"], name=config["name"]) for config in input_configs
-        }
 
-        # The last output tensor, starting with the input tensors
-        last_output_tensors = list(inputs.values())
+        # Keras seeds the layers built here (initialisers, dropout) from Python's
+        # global random: they draw from the model's seed instead.
+        with keras_draws(self.build_seed):
+            # Create input tensors based on the provided configurations
+            inputs = {
+                config["name"]: keras.Input(shape=config["shape"], name=config["name"]) for config in input_configs
+            }
 
-        for layer in self.layers:
-            new_layers = self.build_hidden_layer(layer)
-            for new_layer in new_layers:
-                # Apply the layer to the last output tensor(s)
-                if isinstance(new_layer, gf.Whiten):
-                    # Whiten expects a list of tensors
-                    last_output_tensors = [new_layer(last_output_tensors)]
-                else:
-                    # Apply the layer to each of the last output tensors (assuming they can all be processed by this layer)
-                    last_output_tensors = [new_layer(tensor) for tensor in last_output_tensors]
-        
-        # Build output layer
-        output_tensor = self.build_output_layer(last_output_tensors[-1], output_config)
+            # The last output tensor, starting with the input tensors
+            last_output_tensors = list(inputs.values())
 
-        # Named, as the dataset's targets are: Keras 3 matches a dict of targets
-        # only to a dict of outputs.
-        self.model = keras.Model(inputs=inputs, outputs={output_config["name"]: output_tensor})
-        
+            for layer in self.layers:
+                new_layers = self.build_hidden_layer(layer)
+                for new_layer in new_layers:
+                    # Apply the layer to the last output tensor(s)
+                    if isinstance(new_layer, gf.Whiten):
+                        # Whiten expects a list of tensors
+                        last_output_tensors = [new_layer(last_output_tensors)]
+                    else:
+                        # Apply the layer to each of the last output tensors (assuming they can all be processed by this layer)
+                        last_output_tensors = [new_layer(tensor) for tensor in last_output_tensors]
+
+            # Build output layer
+            output_tensor = self.build_output_layer(last_output_tensors[-1], output_config)
+
+            # Named, as the dataset's targets are: Keras 3 matches a dict of targets
+            # only to a dict of outputs.
+            self.model = keras.Model(inputs=inputs, outputs={output_config["name"]: output_tensor})
+
         # If metrics is empty use best guess
         if not metrics:
             match output_config["type"]:
@@ -1267,8 +1277,9 @@ class Model:
         """
         from gravyflow.src.validate.config import with_run_record
 
-        return with_run_record(keras.models.load_model(gf.model_file(self.model_path)),
-                               self._saved_run_record() or {})
+        with keras_draws(self.build_seed):  # a load draws its layers' seeds as a build does
+            loaded = keras.models.load_model(gf.model_file(self.model_path))
+        return with_run_record(loaded, self._saved_run_record() or {})
 
     def _write_run_record(self, record: dict) -> None:
         path = Path(self.model_path) / "run.json"

@@ -463,7 +463,6 @@ def test_a_run_records_the_split_its_data_reads(world, tmp_path):
             resume(FOLD_2)
 
 
-@pytest.mark.global_rng  # gf.Model builds its Keras model from Python's global random (unseeded initialisers)
 def test_a_gf_model_records_its_split_for_the_validator(tmp_path):
     """
     gf.Model records the split its data reads and the split that selected it, and its
@@ -841,7 +840,6 @@ def _fold_2_data(fixture):
             "validate_args": {**real, "steps_per_epoch": 2, "group": "validate"}}
 
 
-@pytest.mark.global_rng  # gf.Model builds its Keras model from Python's global random (unseeded initialisers)
 @pytest.mark.parametrize("force_retrain", [True, False])
 def test_trained_weights_keep_to_their_split(world, tmp_path, force_retrain):
     """
@@ -861,7 +859,6 @@ def test_trained_weights_keep_to_their_split(world, tmp_path, force_retrain):
             assert model.run_record == _selected_on_validate(gf.DEFAULT_SPLIT)
 
 
-@pytest.mark.global_rng  # gf.Model builds its Keras model from Python's global random (unseeded initialisers)
 def test_a_resumed_gf_model_keeps_to_its_directorys_split(world, tmp_path):
     """
     Resuming (force_retrain=False) continues the run saved in the model's directory,
@@ -885,7 +882,6 @@ class _InterruptTraining(keras.callbacks.Callback):
         raise _Interrupted
 
 
-@pytest.mark.global_rng  # gf.Model builds its Keras model from Python's global random (unseeded initialisers)
 def test_a_new_run_never_leaves_an_earlier_runs_weights_beside_its_record(world, tmp_path):
     """
     New weights trained in a directory holding a run of another split start a new run
@@ -902,7 +898,6 @@ def test_a_new_run_never_leaves_an_earlier_runs_weights_beside_its_record(world,
     assert _gf_model(tmp_path / "model", load=True).run_record is None, "loaded an earlier run's weights"
 
 
-@pytest.mark.global_rng  # gf.Model builds its Keras model from Python's global random (unseeded initialisers)
 def test_gravyflow_models_carry_their_record(world, tmp_path):
     """
     Every model gravyflow trains or loads carries its training record, so the validator

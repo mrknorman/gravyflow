@@ -59,22 +59,18 @@ def tiny_model(tmp_path, **extra):
 
 
 class TestOneEpochLength:
-    """Each test builds a Keras model, whose initialisers draw from Keras' global seed."""
+    """A gf.Model's training dataset takes its epoch's length from the training config."""
 
-    @pytest.mark.global_rng
     def test_the_dataset_takes_its_epoch_length_from_the_training_config(self, tmp_path):
         assert len(tiny_model(tmp_path).training_dataset) == 3
 
-    @pytest.mark.global_rng
     def test_the_same_explicit_epoch_length_is_accepted(self, tmp_path):
         assert len(tiny_model(tmp_path, steps_per_epoch=3).training_dataset) == 3
 
-    @pytest.mark.global_rng
     def test_a_different_explicit_epoch_length_is_refused(self, tmp_path):
         with pytest.raises(ValueError, match="steps_per_epoch=5"):
             tiny_model(tmp_path, steps_per_epoch=5)
 
-    @pytest.mark.global_rng
     def test_train_runs_its_epochs(self, tmp_path):
         model = tiny_model(tmp_path)
         with pytest.raises(ValueError, match="validates on the 'validate' split"):
@@ -88,7 +84,6 @@ class TestOneEpochLength:
 class TestResume:
     """force_retrain=False resumes the run in the model's directory, and never discards it."""
 
-    @pytest.mark.global_rng
     @pytest.mark.parametrize("record", ["kept", "removed"])
     def test_a_checkpoint_with_no_history_is_kept_and_refused(self, tmp_path, record):
         # A run whose history is empty cannot be resumed; starting a new one would
@@ -110,7 +105,6 @@ class TestResume:
 
 class TestPlatform:
 
-    @pytest.mark.global_rng
     def test_training_on_multi_threaded_cpu_kernels_warns(self, tmp_path, monkeypatch):
         # gf.Model.train ran on multi-threaded CPU kernels without a word, unlike
         # a recipe run: such a run is not reproducible from its seed.

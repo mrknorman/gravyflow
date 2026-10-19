@@ -89,6 +89,8 @@ repository before it may need the changes below.
 
 ### Fixed
 
+- Building or loading a `gf.Model` drew its initialisers and dropout seeds from Python's global random: it changed
+  that state, and two models of one seed differed. They now come from a stream of the model's `seed`.
 - The chirp-time helpers took the solar mass in seconds as G·1.98855e30/c³, 7.05e-5 above LALSimulation's
   `MTSUN_SI`, so their times to merger were 1.2e-4 short. They now use ripple's value, which is LAL's.
 - `import gravyflow` failed after a clean install: it imported datashader, which no requirement named.

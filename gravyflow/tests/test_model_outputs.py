@@ -48,7 +48,6 @@ def predict(m, seed=0):
 
 # ------------------------------------------------------------------ logits
 
-@pytest.mark.global_rng
 def test_a_binary_model_outputs_a_logit(tmp_path):
     # The output was a sigmoid probability, which the validator refuses
     # (and which saturates, so scores tie).
@@ -59,7 +58,6 @@ def test_a_binary_model_outputs_a_logit(tmp_path):
     assert isinstance(loss, keras.losses.BinaryCrossentropy) and loss.get_config()["from_logits"]
 
 
-@pytest.mark.global_rng
 def test_binary_accuracy_reads_a_logit(tmp_path):
     m = model(tmp_path, [gf.DenseLayer(4)])
     # With a zero kernel the output is the bias: a logit of 0.3, so signal
@@ -73,7 +71,6 @@ def test_binary_accuracy_reads_a_logit(tmp_path):
     assert logs["binary_accuracy"] == pytest.approx(1.0)
 
 
-@pytest.mark.global_rng
 def test_the_validator_scores_a_gf_model(tmp_path):
     # Model.validate called the validator with arguments it no longer takes.
     samples = 2048
@@ -93,7 +90,6 @@ def test_the_validator_scores_a_gf_model(tmp_path):
 
 # ------------------------------------------------------------- checkpoints
 
-@pytest.mark.global_rng
 @pytest.mark.parametrize("layers,output_config", [
     ([gf.DenseLayer(4)], BINARY),
     ([gf.DenseLayer(4)], NORMAL),  # IndependentFoldedNormal and folded_normal_nll
@@ -113,7 +109,6 @@ def test_a_saved_model_loads_with_its_weights(tmp_path, layers, output_config):
         np.testing.assert_allclose(out_a[name], out_b[name], rtol=1e-6)
 
 
-@pytest.mark.global_rng
 def test_a_checkpoint_that_cannot_load_is_an_error(tmp_path):
     # A failed load logged an error and returned the untrained blueprint.
     gf.ensure_directory_exists(tmp_path / "tiny")

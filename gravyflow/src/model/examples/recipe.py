@@ -48,8 +48,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -58,7 +56,7 @@ import keras
 import numpy as np
 
 import gravyflow as gf
-from gravyflow.src.rng import platform
+from gravyflow.src.rng import keras_draws, platform
 from gravyflow.src.validate.bank import per_example
 from gravyflow.src.validate.config import require_same_split, run_record_of, split_record, with_run_record
 from gravyflow.src.utils.fingerprint import canonical, config_fingerprint
@@ -68,26 +66,6 @@ SPLITS = ("train", "validate", "test")
 
 #: The name Keras gives the state variable of each seed generator (dropout's).
 _SEED_STATE = "seed_generator_state"
-
-
-@contextmanager
-def keras_draws(seed: int):
-    """
-    Give Keras' unseeded draws ``seed``, leaving the global random state alone.
-
-    Keras seeds every layer built without a seed (its initialisers, a dropout
-    layer's seed generator) from Python's global random, when the layer is
-    built or loaded. Within this context those draws come from ``seed``, and
-    Python's random state is restored afterwards: a model built here is the
-    same for the same seed, and building or loading one changes no global
-    random state.
-    """
-    state = random.getstate()
-    random.seed(seed)
-    try:
-        yield
-    finally:
-        random.setstate(state)
 
 
 def _seed_generators(model: keras.Model) -> list:
@@ -479,5 +457,5 @@ class TrainingRun:
 
 __all__ = [
     "DetectionBatches", "FixedBatches", "RegressionBatches", "RunDirectory", "StaleCheckpointError",
-    "TrainingRun", "TrainingSchedule", "keras_draws", "materialise",
+    "TrainingRun", "TrainingSchedule", "materialise",
 ]
