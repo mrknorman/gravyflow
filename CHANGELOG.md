@@ -110,6 +110,14 @@ repository before it may need the changes below.
 
 ### Added
 
+- **A timing harness.** `gf.time_batch` (throughput: compute-seconds per second of strain, over a fixed segment),
+  `gf.time_streaming` (latency: the per-step compute time of a streaming replay, its median, p90, p99 and max over at
+  least 1000 steps, plus the algorithmic wait the caller declares) and `gf.compare_abba` (two callables run A, B, B, A,
+  reporting the four walls, both pair means and the spread of the two A runs) time any model or search callable by the
+  wall time of the whole call. Each `gf.Timing` keeps the walls, the cold-start time apart, the strain seconds, the
+  thread count, the machine's description and the host's load at the start and end (a timing taken under load is
+  flagged), and gives its numbers as runtime records (quantity, statistic, value, units, normalised, hardware, scope,
+  mode, grade `measured`). See README section 11.
 - **O4 noise profiles**: `gf.NoiseProfile.O4_HIGH` (aLIGO's high projection for H1 and L1, Advanced Virgo's for
   V1) and `gf.NoiseProfile.O4_LOW` (aLIGO's low projection, H1 and L1 only), LIGO-T2000012-v2's O4 tables as
   published: the observing scenarios' projections (Living Rev. Relativ. 23, 3 (2020)), not measurements.

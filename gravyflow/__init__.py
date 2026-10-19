@@ -204,6 +204,13 @@ _MODULES = {
     "generate_segment_timeline_plot": "gravyflow.src.utils.plotting",
     "generate_example_extraction_plot": "gravyflow.src.utils.plotting",
 
+    # Timing
+    "time_batch": "gravyflow.src.utils.timing",
+    "time_streaming": "gravyflow.src.utils.timing",
+    "compare_abba": "gravyflow.src.utils.timing",
+    "Timing": "gravyflow.src.utils.timing",
+    "AbbaComparison": "gravyflow.src.utils.timing",
+
     # Training and I/O utilities
     "crop_samples": "gravyflow.src.utils.tensor",
     "replace_nan_and_inf_with_zero": "gravyflow.src.utils.tensor",

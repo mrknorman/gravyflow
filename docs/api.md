@@ -210,6 +210,20 @@ validates as it trains: they need the `viz` extra.
 - `generate_segment_timeline_plot`: a Bokeh timeline of segments.
 - `generate_example_extraction_plot`: a Bokeh plot of extracted examples.
 
+## Timing
+
+Throughput, latency and A-B-B-A comparisons of any model or search callable, by the wall time of the whole call, on
+the machine and at the thread count the caller declares. See README section 11.
+
+- `time_batch`: throughput, the compute-seconds a call takes per second of strain it processes, over a fixed segment.
+- `time_streaming`: latency, the per-step compute time of a streaming replay (median, p90, p99, max over at least
+  1000 steps) plus the algorithmic wait the caller declares.
+- `compare_abba`: two callables run A, B, B, A, reporting the four walls, both pair means and the spread of the two A
+  runs.
+- `Timing`: one timing's record: its walls, cold-start time, strain seconds, thread count, machine, host load and
+  runtime records.
+- `AbbaComparison`: the result of `compare_abba`.
+
 ## Training and I/O utilities
 
 - `crop_samples`: crop the padding from both ends of strain.

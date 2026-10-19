@@ -456,3 +456,41 @@ models, and never runs through `gf.Validator`.
 
 Running a model needs no licence for its weights: they come from their authors' source into your own store. Publishing
 a file again does: only a `gf.RemoteFile` marked redistributable may be, and one with no licence cannot be marked so.
+
+## 11. Timing a model or a search
+
+`gf.time_batch`, `gf.time_streaming` and `gf.compare_abba` time any callable (a model's forward pass, a matched-filter
+search, an external search) by the wall time of the whole call. A result that is computed asynchronously (a JAX array)
+is waited for. A *compute-second* is a wall second of the whole call on the machine the record describes, at the thread
+count you declare (`threads=`; the harness records the count, and you set it for your backend, for XLA's CPU backend
+with `XLA_FLAGS` and the process's affinity): it is not CPU-seconds, and not comparable across hardware.
+
+```python
+# Throughput: compute-seconds per second of strain, over a fixed 64-second segment.
+timing = gf.time_batch(lambda: model(segment), strain_seconds=64.0, threads=1, scope="network", repeats=5)
+
+# Latency: the time from a chunk's arrival to its step returning, over a replay of at least 1000 steps,
+# plus the data the algorithm needs after the event (here, 0.5 s).
+timing = gf.time_streaming(search.step, chunks, algorithmic_wait_seconds=0.5, threads=1, scope="end_to_end")
+
+# A comparison: run A, B, B, A, each its own call.
+comparison = gf.compare_abba(lambda: model_a(segment), lambda: model_b(segment), threads=1)
+comparison.walls_in_order, comparison.mean_a, comparison.mean_b, comparison.spread_a
+comparison.distinguishable   # False when the difference is inside the spread of the two A runs
+```
+
+A single run of each callable says nothing about a difference, since a host's speed drifts, so a comparison is always
+A-B-B-A on one quiet host state: all four walls, both pair means and the spread of the two A runs are reported, and a
+difference inside that spread is no difference.
+
+The first call (a streaming replay's first step) is the *cold start*: compilation, caches, page faults. It is recorded
+apart (`cold_seconds`) and enters no statistic. A streaming latency is a statistic of the step times, nearest-rank (an
+observed step, never an interpolation), plus the algorithmic wait you declare. The stream's own cost is not timed.
+
+Each timing records the host's one-minute load average at its start and end. A timing is flagged as taken under load
+(`timing.load.loaded`, and a sentence in each record's `notes`) when either sample exceeds the timed work's own
+threads plus a quarter of a process per core; on a host with no load average the flag is `None`, never "quiet".
+`timing.records()` gives the numbers as runtime records, one per statistic, with the fields `quantity`
+(`inference_cost` or `latency`), `statistic`, `value`, `units`, `normalised` (compute-seconds per second of strain, or
+seconds for latency), `hardware`, `scope` (`network` or `end_to_end`), `mode` (`batch` or `streaming`), `grade`
+(`measured`) and `notes`; `timing.to_dict()` adds the walls, cold start, strain seconds, thread count and machine.
