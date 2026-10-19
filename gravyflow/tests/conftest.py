@@ -131,10 +131,6 @@ def tree():
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--plot", action="store_true", default=False,
-        help="Enable plotting of results"
-    )
-    parser.addoption(
         "--network", action="store_true", default=False,
         help="Lift the suite's internet refusal, for the online unit (gravyflow/tests/online), "
              "whose tests query GWOSC and Zenodo"

@@ -11,10 +11,8 @@ import numpy as np
 import jax.numpy as jnp
 from bokeh.io import output_file, save
 from bokeh.layouts import gridplot
-from _pytest.config import Config
 
 import gravyflow as gf
-from gravyflow.src.resources import PACKAGE
 
 
 # =============================================================================
@@ -23,12 +21,10 @@ from gravyflow.src.resources import PACKAGE
 
 def _test_periodic_wave_generation(
     wave_shape: gf.WaveShape,
+    output_directory_path: Path,
     num_tests: int = 4,
-    plot_results: bool = False
 ) -> None:
     """Test periodic wave generation for a given shape."""
-    output_directory_path = PACKAGE.parent.parent / "gravyflow_data/tests/"
-    
     gen = gf.PeriodicWaveGenerator(
         wave_shape=wave_shape,
         frequency_hertz=gf.Distribution(value=100.0, type_=gf.DistributionType.CONSTANT),
@@ -55,53 +51,53 @@ def _test_periodic_wave_generation(
     assert gf.WaveformParameters.AMPLITUDE in params
     assert gf.WaveformParameters.DURATION_SECONDS in params
     
-    if plot_results:
-        layout = [
-            [gf.generate_strain_plot(
-                {"Plus": waveform[0], "Cross": waveform[1]},
-                title=f"{wave_shape.name} wave: freq={float(freq):.1f}Hz"
-            )]
-            for waveform, freq in zip(
-                waveforms, 
-                params[gf.WaveformParameters.FREQUENCY_HERTZ]
-            )
-        ]
-        
-        gf.ensure_directory_exists(output_directory_path)
-        output_file(output_directory_path / f"periodic_{wave_shape.name.lower()}_plots.html")
-        grid = gridplot(layout)
-        save(grid)
+    layout = [
+        [gf.generate_strain_plot(
+            {"Plus": waveform[0], "Cross": waveform[1]},
+            title=f"{wave_shape.name} wave: freq={float(freq):.1f}Hz"
+        )]
+        for waveform, freq in zip(
+            waveforms, 
+            params[gf.WaveformParameters.FREQUENCY_HERTZ]
+        )
+    ]
+    
+    gf.ensure_directory_exists(output_directory_path)
+    plot_path = output_directory_path / f"periodic_{wave_shape.name.lower()}_plots.html"
+    output_file(plot_path)
+    save(gridplot(layout))
+    assert plot_path.stat().st_size > 0
 
 
-def test_sine_wave_generation(pytestconfig: Config) -> None:
+def test_sine_wave_generation(tmp_path: Path) -> None:
     """Test sine wave generation."""
     _test_periodic_wave_generation(
         wave_shape=gf.WaveShape.SINE,
-        plot_results=pytestconfig.getoption("plot")
+        output_directory_path=tmp_path,
     )
 
 
-def test_square_wave_generation(pytestconfig: Config) -> None:
+def test_square_wave_generation(tmp_path: Path) -> None:
     """Test square wave generation."""
     _test_periodic_wave_generation(
         wave_shape=gf.WaveShape.SQUARE,
-        plot_results=pytestconfig.getoption("plot")
+        output_directory_path=tmp_path,
     )
 
 
-def test_sawtooth_wave_generation(pytestconfig: Config) -> None:
+def test_sawtooth_wave_generation(tmp_path: Path) -> None:
     """Test sawtooth wave generation."""
     _test_periodic_wave_generation(
         wave_shape=gf.WaveShape.SAWTOOTH,
-        plot_results=pytestconfig.getoption("plot")
+        output_directory_path=tmp_path,
     )
 
 
-def test_triangle_wave_generation(pytestconfig: Config) -> None:
+def test_triangle_wave_generation(tmp_path: Path) -> None:
     """Test triangle wave generation."""
     _test_periodic_wave_generation(
         wave_shape=gf.WaveShape.TRIANGLE,
-        plot_results=pytestconfig.getoption("plot")
+        output_directory_path=tmp_path,
     )
 
 
@@ -134,12 +130,10 @@ def test_periodic_frequency_distribution() -> None:
 # =============================================================================
 
 def _test_sine_gaussian_generation(
+    output_directory_path: Path,
     num_tests: int = 4,
-    plot_results: bool = False
 ) -> None:
     """Test sine-Gaussian generation."""
-    output_directory_path = PACKAGE.parent.parent / "gravyflow_data/tests/"
-    
     gen = gf.SineGaussianGenerator(
         frequency_hertz=gf.Distribution(value=150.0, type_=gf.DistributionType.CONSTANT),
         quality_factor=gf.Distribution(value=10.0, type_=gf.DistributionType.CONSTANT),
@@ -162,29 +156,29 @@ def _test_sine_gaussian_generation(
     assert gf.WaveformParameters.QUALITY_FACTOR in params
     assert gf.WaveformParameters.TAU_SECONDS in params
     
-    if plot_results:
-        layout = [
-            [gf.generate_strain_plot(
-                {"Plus": waveform[0], "Cross": waveform[1]},
-                title=f"Sine-Gaussian: Q={float(q):.1f}, f={float(freq):.1f}Hz"
-            )]
-            for waveform, freq, q in zip(
-                waveforms, 
-                params[gf.WaveformParameters.FREQUENCY_HERTZ],
-                params[gf.WaveformParameters.QUALITY_FACTOR]
-            )
-        ]
-        
-        gf.ensure_directory_exists(output_directory_path)
-        output_file(output_directory_path / "sine_gaussian_plots.html")
-        grid = gridplot(layout)
-        save(grid)
+    layout = [
+        [gf.generate_strain_plot(
+            {"Plus": waveform[0], "Cross": waveform[1]},
+            title=f"Sine-Gaussian: Q={float(q):.1f}, f={float(freq):.1f}Hz"
+        )]
+        for waveform, freq, q in zip(
+            waveforms, 
+            params[gf.WaveformParameters.FREQUENCY_HERTZ],
+            params[gf.WaveformParameters.QUALITY_FACTOR]
+        )
+    ]
+    
+    gf.ensure_directory_exists(output_directory_path)
+    plot_path = output_directory_path / "sine_gaussian_plots.html"
+    output_file(plot_path)
+    save(gridplot(layout))
+    assert plot_path.stat().st_size > 0
 
 
-def test_sine_gaussian_generation(pytestconfig: Config) -> None:
+def test_sine_gaussian_generation(tmp_path: Path) -> None:
     """Test sine-Gaussian generation."""
     _test_sine_gaussian_generation(
-        plot_results=pytestconfig.getoption("plot")
+        output_directory_path=tmp_path,
     )
 
 
@@ -239,12 +233,10 @@ def test_sine_gaussian_centered_peak() -> None:
 # =============================================================================
 
 def _test_chirplet_generation(
+    output_directory_path: Path,
     num_tests: int = 4,
-    plot_results: bool = False
 ) -> None:
     """Test chirplet generation."""
-    output_directory_path = PACKAGE.parent.parent / "gravyflow_data/tests/"
-    
     gen = gf.ChirpletGenerator(
         start_frequency_hertz=gf.Distribution(value=50.0, type_=gf.DistributionType.CONSTANT),
         end_frequency_hertz=gf.Distribution(value=200.0, type_=gf.DistributionType.CONSTANT),
@@ -267,29 +259,29 @@ def _test_chirplet_generation(
     assert gf.WaveformParameters.END_FREQUENCY_HERTZ in params
     assert gf.WaveformParameters.CHIRP_RATE in params
     
-    if plot_results:
-        layout = [
-            [gf.generate_strain_plot(
-                {"Plus": waveform[0], "Cross": waveform[1]},
-                title=f"Chirplet: {float(f0):.1f}Hz → {float(f1):.1f}Hz"
-            )]
-            for waveform, f0, f1 in zip(
-                waveforms, 
-                params[gf.WaveformParameters.START_FREQUENCY_HERTZ],
-                params[gf.WaveformParameters.END_FREQUENCY_HERTZ]
-            )
-        ]
-        
-        gf.ensure_directory_exists(output_directory_path)
-        output_file(output_directory_path / "chirplet_plots.html")
-        grid = gridplot(layout)
-        save(grid)
+    layout = [
+        [gf.generate_strain_plot(
+            {"Plus": waveform[0], "Cross": waveform[1]},
+            title=f"Chirplet: {float(f0):.1f}Hz → {float(f1):.1f}Hz"
+        )]
+        for waveform, f0, f1 in zip(
+            waveforms, 
+            params[gf.WaveformParameters.START_FREQUENCY_HERTZ],
+            params[gf.WaveformParameters.END_FREQUENCY_HERTZ]
+        )
+    ]
+    
+    gf.ensure_directory_exists(output_directory_path)
+    plot_path = output_directory_path / "chirplet_plots.html"
+    output_file(plot_path)
+    save(gridplot(layout))
+    assert plot_path.stat().st_size > 0
 
 
-def test_chirplet_generation(pytestconfig: Config) -> None:
+def test_chirplet_generation(tmp_path: Path) -> None:
     """Test chirplet generation."""
     _test_chirplet_generation(
-        plot_results=pytestconfig.getoption("plot")
+        output_directory_path=tmp_path,
     )
 
 
@@ -324,12 +316,10 @@ def test_chirplet_frequency_sweep() -> None:
 # =============================================================================
 
 def _test_ringdown_generation(
+    output_directory_path: Path,
     num_tests: int = 4,
-    plot_results: bool = False
 ) -> None:
     """Test ringdown generation."""
-    output_directory_path = PACKAGE.parent.parent / "gravyflow_data/tests/"
-    
     gen = gf.RingdownGenerator(
         frequency_hertz=gf.Distribution(value=200.0, type_=gf.DistributionType.CONSTANT),
         damping_time_seconds=gf.Distribution(value=0.05, type_=gf.DistributionType.CONSTANT),
@@ -350,29 +340,29 @@ def _test_ringdown_generation(
     # Check parameters
     assert gf.WaveformParameters.DAMPING_TIME_SECONDS in params
     
-    if plot_results:
-        layout = [
-            [gf.generate_strain_plot(
-                {"Plus": waveform[0], "Cross": waveform[1]},
-                title=f"Ringdown: f={float(freq):.1f}Hz, τ={float(tau)*1000:.1f}ms"
-            )]
-            for waveform, freq, tau in zip(
-                waveforms, 
-                params[gf.WaveformParameters.FREQUENCY_HERTZ],
-                params[gf.WaveformParameters.DAMPING_TIME_SECONDS]
-            )
-        ]
-        
-        gf.ensure_directory_exists(output_directory_path)
-        output_file(output_directory_path / "ringdown_plots.html")
-        grid = gridplot(layout)
-        save(grid)
+    layout = [
+        [gf.generate_strain_plot(
+            {"Plus": waveform[0], "Cross": waveform[1]},
+            title=f"Ringdown: f={float(freq):.1f}Hz, τ={float(tau)*1000:.1f}ms"
+        )]
+        for waveform, freq, tau in zip(
+            waveforms, 
+            params[gf.WaveformParameters.FREQUENCY_HERTZ],
+            params[gf.WaveformParameters.DAMPING_TIME_SECONDS]
+        )
+    ]
+    
+    gf.ensure_directory_exists(output_directory_path)
+    plot_path = output_directory_path / "ringdown_plots.html"
+    output_file(plot_path)
+    save(gridplot(layout))
+    assert plot_path.stat().st_size > 0
 
 
-def test_ringdown_generation(pytestconfig: Config) -> None:
+def test_ringdown_generation(tmp_path: Path) -> None:
     """Test ringdown generation."""
     _test_ringdown_generation(
-        plot_results=pytestconfig.getoption("plot")
+        output_directory_path=tmp_path,
     )
 
 

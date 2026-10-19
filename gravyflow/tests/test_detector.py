@@ -127,7 +127,7 @@ def _polarisations(sample_rate_hertz, num_samples):
 
 
 @pytest.mark.parametrize("ifos", [IFOS[:1], IFOS], ids=["one_detector", "three_detectors"])
-def test_project_wave_matches_lal(ifos, pytestconfig, tmp_path):
+def test_project_wave_matches_lal(ifos, tmp_path):
     sample_rate_hertz, num_samples, num_sources = 2048.0, 2048, 16
     gps = 1187008882.4
     polarisations = _polarisations(sample_rate_hertz, num_samples)
@@ -167,12 +167,13 @@ def test_project_wave_matches_lal(ifos, pytestconfig, tmp_path):
     )
     np.testing.assert_allclose(projected, expected, rtol=0, atol=tolerance)
 
-    if pytestconfig.getoption("plot"):
-        output_file(tmp_path / f"projection_{len(ifos)}.html")
-        save(gridplot([[
-            gf.generate_strain_plot({"Projected": row}, sample_rate_hertz, title=f"{ifo.name} projection")
-            for row, ifo in zip(projected[0], ifos)
-        ]]))
+    plot_path = tmp_path / f"projection_{len(ifos)}.html"
+    output_file(plot_path)
+    save(gridplot([[
+        gf.generate_strain_plot({"Projected": row}, sample_rate_hertz, title=f"{ifo.name} projection")
+        for row, ifo in zip(projected[0], ifos)
+    ]]))
+    assert plot_path.stat().st_size > 0
 
 
 def test_network_load(tmp_path):

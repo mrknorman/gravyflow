@@ -1,6 +1,8 @@
 import numpy as np
 import pytest
 import scipy.signal
+from bokeh.io import output_file, save
+from bokeh.layouts import gridplot
 from keras import ops
 
 import gravyflow as gf
@@ -9,7 +11,7 @@ from gravyflow.tests._helpers import representation_tolerance, statistical_bound
 from gravyflow.tests.test_psd import welch_relative_sigma
 
 
-def test_whitening_removes_spectral_lines(pytestconfig, tmp_path):
+def test_whitening_removes_spectral_lines(tmp_path):
     """
     Two sines on unit white noise, whitened with their own PSD: the raw data's
     line bins stand far above the noise, the whitened data's are level with it.
@@ -44,12 +46,11 @@ def test_whitening_removes_spectral_lines(pytestconfig, tmp_path):
     assert np.all(raw > 100.0 * bound), f"the control's lines are not visible: {raw}"
     assert np.all(flat < bound), f"whitened line levels {flat}, above {bound:.3f}"
 
-    if pytestconfig.getoption("plot"):
-        from bokeh.io import output_file, save
-        from bokeh.layouts import gridplot
-        output_file(tmp_path / "whitening_lines.html")
-        save(gridplot([[gf.generate_psd_plot(psd={"raw": raw_psd}, frequencies=f, title="Raw")],
-                       [gf.generate_psd_plot(psd={"whitened": flat_psd}, frequencies=f, title="Whitened")]]))
+    plot_path = tmp_path / "whitening_lines.html"
+    output_file(plot_path)
+    save(gridplot([[gf.generate_psd_plot(psd={"raw": raw_psd}, frequencies=f, title="Raw")],
+                   [gf.generate_psd_plot(psd={"whitened": flat_psd}, frequencies=f, title="Whitened")]]))
+    assert plot_path.stat().st_size > 0
 
 
 def test_planck():
