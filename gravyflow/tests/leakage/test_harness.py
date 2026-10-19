@@ -527,7 +527,12 @@ def test_strain_downloads_are_kept_only_by_the_store(monkeypatch):
         seen.append((get_cache_dir_path(), kwargs.get("cache")))
         return TimeSeries(np.ones(4096), t0=args[1], sample_rate=4096)
 
+    from gwosc import locate
+
+    from gravyflow.tests.conftest import GwoscLocator
+
     before = get_cache_dir_path()
+    monkeypatch.setattr(locate, "get_urls", GwoscLocator())
     monkeypatch.setattr(TimeSeries, "fetch_open_data", fetch_open_data)
     gf.GWOSC().fetch(gf.IFO.L1, 4096.0, (1238166018.0, 1238166019.0))
     (directory, cache), = seen
