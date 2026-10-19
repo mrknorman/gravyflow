@@ -140,6 +140,9 @@ repository before it may need the changes below.
 - `gravyflow.src.resources`: the package's data files, the manifest of pinned remote files (`MANIFEST`), `path(name)`
   and `weights(name)` to find a file bundled or fetched, and `fetch(name)` (`gf.fetch`), the one explicit download of a pinned file.
 - `gf.Reservation`, `gf.MLGWSC1_O3A`, `gf.CHALLENGE_FAITHFUL` and `gf.RemoteFile` (see Breaking changes).
+- `gf.NoGlitchVetoWarning`: noise with no public Gravity Spy labels (O4, and Virgo in any run) is served with no
+  glitch veto under this warning, shown by default and naming the detector and time; it was a log message, hidden by
+  default.
 
 ### Fixed
 

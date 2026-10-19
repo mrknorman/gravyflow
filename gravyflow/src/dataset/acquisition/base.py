@@ -1,6 +1,7 @@
 # Standard library imports:
 import logging
 import sys
+import warnings
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -893,10 +894,13 @@ class BaseDataObtainer(ABC):
 
     def _glitch_catalogues(self, ifo: gf.IFO, **kwargs) -> List[Dict]:
         """
-        The Gravity Spy catalogue of ``ifo`` over every configured run. Runs that the
-        public release does not cover (O4) give a warning and no glitches.
+        The Gravity Spy catalogue of ``ifo`` over every configured run. A run or detector
+        the public release does not cover (O4, Virgo) gives no glitches and a
+        ``NoGlitchVetoWarning``: a Python warning, so it is shown by default, once per
+        detector and run in a process under Python's default filter.
         """
         from gravyflow.src.dataset.features.glitch import get_glitch_catalogue
+        from gravyflow.src.dataset.features.gravity_spy import NoGlitchVetoWarning
 
         catalogues = []
         for start, end in zip(self.start_gps_times, self.end_gps_times):
@@ -905,7 +909,10 @@ class BaseDataObtainer(ABC):
                     ifo, start_gps_time=start, end_gps_time=end, **kwargs
                 ))
             except ValueError as error:
-                logger.warning(f"No glitch veto for {ifo.name} over GPS {start}-{end}: {error}")
+                warnings.warn(NoGlitchVetoWarning(
+                    f"No glitch veto for {ifo.name} over GPS {start}-{end}: its noise is served "
+                    f"with its glitches in. {error}"
+                ), stacklevel=2)
         return catalogues
 
     def get_glitch_veto_segments(self, ifo: gf.IFO) -> np.ndarray:

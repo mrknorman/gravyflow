@@ -42,6 +42,16 @@ from gravyflow.src.dataset.acquisition import gwosc_data
 
 logger = logging.getLogger(__name__)
 
+
+class NoGlitchVetoWarning(UserWarning):
+    """
+    Noise is served with no glitch veto: no public Gravity Spy labels cover its detector
+    and time (the release covers H1 and L1 in O1, O2, O3a and O3b; not O4, not Virgo).
+    Its glitches stay in. Filter it by name to silence it, for example
+    ``warnings.simplefilter("ignore", gf.NoGlitchVetoWarning)``.
+    """
+
+
 ZENODO_RECORD = 5649212
 ZENODO_DOI = "10.5281/zenodo.5649212"
 RELEASE_VERSION = "v1.0.0"

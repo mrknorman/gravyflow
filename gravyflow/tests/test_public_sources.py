@@ -862,11 +862,10 @@ class TestObservingRunO4:
         with pytest.raises(ValueError, match=r"GWOSC publishes no V1 data in O1: O1 has H1, L1"):
             o1.get_all_segment_times(gf.IFO.V1)
 
-    def test_o4_glitches_are_refused_by_name(self, offline_public_sources, caplog):
+    def test_o4_glitches_are_refused_by_name(self, offline_public_sources):
         """
         Gravity Spy's public release covers O1 to O3b, H1 and L1. Asking for glitches in
-        O4, or Virgo's in any run, is refused by name, never served empty; noise in O4
-        (and Virgo's) is served with no glitch veto, and a warning names why.
+        O4, or Virgo's in any run, is refused by name, never served empty.
         """
         with pytest.raises(ValueError, match=r"No public Gravity Spy release covers GPS .*O1, O2, O3a, O3b"):
             gf.get_glitch_catalogue(gf.IFO.H1, observing_run=gf.ObservingRun.O4)
@@ -876,11 +875,38 @@ class TestObservingRunO4:
                                       observing_runs=gf.ObservingRun.O4)
         with pytest.raises(ValueError, match="No public Gravity Spy release covers"):
             glitches.get_valid_segments(ifos=[gf.IFO.L1], seed=1, group_name="train")
-        with caplog.at_level("WARNING"):
-            vetoes = _o4_noise_obtainer().get_glitch_veto_segments(gf.IFO.L1)
+
+    @pytest.mark.parametrize("runs, ifo", [
+        (gf.ObservingRun.O4, gf.IFO.L1),
+        (gf.ObservingRun.O3, gf.IFO.V1),
+    ])
+    def test_noise_without_a_glitch_veto_is_served_with_a_visible_warning(self, offline_public_sources, runs, ifo):
+        """
+        Noise in O4, and Virgo's in any run, has no Gravity Spy labels to veto its
+        glitches: it is served with no glitch veto, under a ``gf.NoGlitchVetoWarning``
+        (a Python warning, shown by default) naming the detector, the time and why.
+        """
+        obtainer = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
+                                      observing_runs=runs)
+        with pytest.warns(gf.NoGlitchVetoWarning) as caught:
+            vetoes = obtainer.get_glitch_veto_segments(ifo)
         assert vetoes.shape == (0, 2)
-        assert any("No glitch veto for L1" in record.getMessage() and "Gravity Spy" in record.getMessage()
-                   for record in caplog.records), caplog.text
+        (warning,) = [w for w in caught if issubclass(w.category, gf.NoGlitchVetoWarning)]
+        message = str(warning.message)
+        assert f"No glitch veto for {ifo.name}" in message and "Gravity Spy" in message, message
+        assert issubclass(gf.NoGlitchVetoWarning, UserWarning)
+
+    def test_noise_with_a_glitch_veto_gives_no_warning(self, offline_public_sources):
+        """O3's LIGO noise is glitch-vetoed from Gravity Spy: no warning."""
+        import warnings
+
+        obtainer = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=[gf.DataLabel.NOISE],
+                                      observing_runs=gf.ObservingRun.O3)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            vetoes = obtainer.get_glitch_veto_segments(gf.IFO.H1)
+        assert len(vetoes) > 0
+        assert not [w for w in caught if "glitch veto" in str(w.message)], [str(w.message) for w in caught]
 
 
 # =============================================================================
