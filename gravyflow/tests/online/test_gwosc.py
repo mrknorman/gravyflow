@@ -12,7 +12,7 @@ import numpy as np
 
 import gravyflow as gf
 from gravyflow.src.dataset.acquisition.gwosc_data import (
-    GWOSC_RUNS, fetch_gwosc_runs, fetch_timeline_segments,
+    GWOSC_RUNS, GWOSC_STRAIN_DATASETS, fetch_gwosc_runs, fetch_timeline_segments,
 )
 from gravyflow.src.dataset.features.event import get_event_catalogue
 
@@ -58,6 +58,23 @@ def test_the_default_configuration_builds_from_gwosc():
     starts = segments[:, :, 0].ravel()
     for run in (gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3):
         assert np.any((starts >= run.value.start_gps_time) & (starts < run.value.end_gps_time)), run.name
+
+
+def test_gwosc_locates_every_runs_release_at_every_rate():
+    """
+    GWOSC's locator finds every run's bulk strain by the run's name, at each rate, in
+    the release ``GWOSC_STRAIN_DATASETS`` names: the lookup ``GWOSC.fetch`` makes, for
+    every run, without downloading a file.
+    """
+    from gwosc.locate import get_urls
+
+    for run, releases in GWOSC_STRAIN_DATASETS.items():
+        bounds = GWOSC_RUNS[run]
+        data = fetch_timeline_segments(bounds["dataset"], "L1_DATA", bounds["gps_start"], bounds["gps_end"])
+        start = int(data[0, 0]) + 1  # a second L1 has data in
+        for rate, release in releases.items():
+            urls = get_urls("L1", start, start + 1, dataset=f"^{run}$", sample_rate=int(rate))
+            assert urls and all(f"/archive/data/{release}/" in url for url in urls), (run, rate, urls)
 
 
 def test_the_source_fetches_strain_at_the_rate_and_time_asked():

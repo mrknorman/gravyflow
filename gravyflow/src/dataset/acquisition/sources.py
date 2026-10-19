@@ -197,9 +197,15 @@ class GWOSC(DataSource):
 
     Segments come from the GWOSC timeline. Strain is each run's bulk release at 4096 Hz
     or 16384 Hz (``GWOSC_STRAIN_DATASETS``), downloaded by gwpy and kept nowhere but the
-    store: gwpy's download cache is off, so a file is never kept twice. The release is
-    named on every download, so an event release that overlaps the interval is never
-    served in its place.
+    store: gwpy's download cache is off, so a file is never kept twice.
+
+    GWOSC's locator (gwosc 0.8, its v2 API) names a run's bulk data by the run, such as
+    ``O3a``, and its release by the sample rate; the release names (``O3a_4KHZ_R1``)
+    match no dataset there. Every download therefore names the run, which no event
+    release matches, so an event release that overlaps the interval is never served in
+    its place; and the files GWOSC lists for it must lie in the release
+    ``GWOSC_STRAIN_DATASETS`` names (its ``/archive/data/<release>/`` directory), or the
+    fetch is refused by name, so ``source_id`` names the strain served.
     """
 
     def segments(self, detector, flags, interval) -> np.ndarray:
@@ -212,10 +218,11 @@ class GWOSC(DataSource):
         return FILE_SECONDS
 
     def source_id(self, gps, sample_rate_hertz) -> str:
-        return f"gwosc-{self._dataset(gps, gps + self.tile_seconds(sample_rate_hertz), sample_rate_hertz)}"
+        _, release = self._release(gps, gps + self.tile_seconds(sample_rate_hertz), sample_rate_hertz)
+        return f"gwosc-{release}"
 
-    def _dataset(self, start: float, end: float, sample_rate_hertz: float) -> str:
-        """The bulk release holding [start, end) at a rate, refusing a rate not published."""
+    def _release(self, start: float, end: float, sample_rate_hertz: float) -> Tuple[str, str]:
+        """(run, bulk release) holding [start, end) at a rate, refusing a rate not published."""
         rate = float(sample_rate_hertz)
         if rate not in self.rates():
             raise ValueError(
@@ -226,25 +233,38 @@ class GWOSC(DataSource):
         release = GWOSC_STRAIN_DATASETS.get(run, {}).get(rate)
         if release is None:
             raise ValueError(f"No GWOSC strain release is named for run {run} at {rate:g} Hz.")
-        return release
+        return run, release
 
     def fetch(self, detector, sample_rate_hertz, interval) -> SegmentStrain:
         start, end = float(interval[0]), float(interval[1])
-        dataset = self._dataset(start, end, sample_rate_hertz)
-        # Real data is the realdata extra's: gwpy loads only when strain is fetched.
+        run, release = self._release(start, end, sample_rate_hertz)
+        name, dataset = _detector_name(detector), f"^{re.escape(run)}$"
+        # Real data is the realdata extra's: gwosc and gwpy load only when strain is fetched.
+        from gwosc.locate import get_urls
         from gwpy.timeseries import TimeSeries
 
         try:
+            urls = get_urls(name, start, end, dataset=dataset, sample_rate=int(sample_rate_hertz))
+        except Exception as error:
+            raise StrainUnavailable(self, detector, interval, error) from error
+        outside = [url for url in urls if f"/archive/data/{release}/" not in url]
+        if outside:
+            raise StrainUnavailable(
+                self, detector, interval,
+                f"GWOSC lists {outside} for run {run} at {float(sample_rate_hertz):g} Hz, outside its "
+                f"release {release}",
+            )
+        try:
             series = TimeSeries.fetch_open_data(
-                _detector_name(detector), start, end,
+                name, start, end,
                 sample_rate=int(sample_rate_hertz),
-                dataset=f"^{re.escape(dataset)}$",
+                dataset=dataset,
                 cache=False,  # the store keeps the tile; a download is read once and deleted
                 timeout=DOWNLOAD_TIMEOUT_SECONDS,
             )
         except Exception as error:
             raise StrainUnavailable(self, detector, interval, error) from error
-        return _served(self, detector, interval, series, sample_rate_hertz, f"gwosc-{dataset}")
+        return _served(self, detector, interval, series, sample_rate_hertz, f"gwosc-{release}")
 
     def specification(self) -> Dict[str, Any]:
         return {"strain_datasets": {run: {f"{rate:g}": name for rate, name in releases.items()}

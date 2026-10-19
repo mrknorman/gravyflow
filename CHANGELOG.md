@@ -136,6 +136,10 @@ repository before it may need the changes below.
 
 ### Fixed
 
+- No GWOSC strain could be fetched: `gf.GWOSC()` asked gwosc for the release by name (`O3a_4KHZ_R1`), which
+  gwosc 0.8 does not list (it names a run's bulk data by the run, `O3a`, and picks the release by the rate), so
+  every real-noise read, in every run, was refused. It now names the run, and refuses any file GWOSC lists outside
+  the release it names for that run and rate.
 - Building or loading a `gf.Model` drew its initialisers and dropout seeds from Python's global random: it changed
   that state, and two models of one seed differed. They now come from a stream of the model's `seed`.
 - The chirp-time helpers took the solar mass in seconds as G·1.98855e30/c³, 7.05e-5 above LALSimulation's

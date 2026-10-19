@@ -24,6 +24,8 @@ That the live sources still agree with these fixtures is checked apart, in
 import csv
 import hashlib
 import json
+import re
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -371,8 +373,9 @@ class TestDefaultConfiguration:
 # THE DATA SOURCE: GWOSC() BY DEFAULT, LocalFrames(...) BY NAME, NEVER A FALLBACK
 # =============================================================================
 
-#: A GPS time inside GWOSC's O3a run, and one inside O1.
+#: A GPS time inside GWOSC's O3a run, one inside O1, and one in each of O4a and O4b.
 O3A_GPS, O1_GPS = 1238170000.0, 1126259446.0
+O4A_GPS, O4B_GPS = 1378824192.0, 1410000000.0
 #: Sources that must never share a cache entry or a fingerprint: equal but for the source.
 SOURCES = {
     "GWOSC": lambda: gf.GWOSC(),
@@ -400,19 +403,43 @@ def _fake_strain(start, rate, duration, channel="H1:FAKE-STRAIN"):
 
 
 class GwoscRecorder:
-    """gwpy's ``fetch_open_data``: records each call's keywords; serves Gaussian strain."""
+    """
+    GWOSC as gwosc 0.8 and gwpy see it, offline. ``locate`` is gwosc's ``get_urls``: a
+    run's bulk data is the dataset named by the run (``O3a``), its release chosen by the
+    rate, and its files lie in ``/archive/data/<release>/`` (``releases``, by run and
+    rate; GWOSC's own by default). A release name such as ``O3a_4KHZ_R1`` matches no
+    dataset, as at GWOSC. ``__call__`` is gwpy's ``fetch_open_data``, which locates the
+    same way and serves Gaussian strain. Each records its calls' keywords.
+    """
 
-    def __init__(self):
-        self.calls = []
+    def __init__(self, releases=None):
+        self.releases = releases or sources.GWOSC_STRAIN_DATASETS
+        self.located, self.calls = [], []
+
+    def _release(self, dataset, sample_rate):
+        runs = [run for run in self.releases if dataset is not None and re.fullmatch(dataset, run)]
+        if len(runs) != 1:
+            raise ValueError(f"Cannot find a GWOSC dataset matching {dataset!r}")
+        return self.releases[runs[0]][float(sample_rate)]
+
+    def locate(self, detector, start, end, dataset=None, sample_rate=4096, **kwargs):
+        self.located.append({"detector": detector, "dataset": dataset, "sample_rate": sample_rate})
+        release = self._release(dataset, sample_rate)
+        tile = int(start // 4096 * 4096)
+        return [f"https://gwosc.org/archive/data/{release}/{tile}/{detector[0]}-{detector}_{release}-{tile}-4096.hdf5"]
 
     def __call__(self, ifo, start, end, sample_rate=4096, **kwargs):
         self.calls.append({"ifo": ifo, "start": start, "end": end, "sample_rate": sample_rate, **kwargs})
+        self._release(kwargs.get("dataset"), sample_rate)
         return _fake_strain(start, sample_rate, end - start)
 
 
+@contextmanager
 def serving_gwosc(recorder):
-    """Every GWOSC download is served by ``recorder``."""
-    return patch("gwpy.timeseries.TimeSeries.fetch_open_data", side_effect=recorder)
+    """Every GWOSC lookup and download is served by ``recorder``."""
+    with patch("gwosc.locate.get_urls", side_effect=recorder.locate), \
+         patch("gwpy.timeseries.TimeSeries.fetch_open_data", side_effect=recorder):
+        yield recorder
 
 
 class TestDataSource:
@@ -544,23 +571,50 @@ class TestDataSource:
         np.testing.assert_array_equal(local, [[first, last]])
         assert find_times.call_args.args[:2] == ("H", "H1_HOFT_C01")
 
-    def test_gwosc_fetches_the_runs_bulk_release_only(self):
+    @pytest.mark.parametrize("ifo, gps, rate, run, release", [
+        (gf.IFO.L1, O3A_GPS, 4096.0, "O3a", "O3a_4KHZ_R1"),
+        (gf.IFO.L1, O1_GPS, 16384.0, "O1", "O1_16KHZ"),
+        (gf.IFO.H1, O4A_GPS, 4096.0, "O4a", "O4a_4KHZ_R1"),
+        (gf.IFO.V1, O4B_GPS, 16384.0, "O4b", "O4b_16KHZ_R1"),
+    ])
+    def test_gwosc_fetches_the_runs_bulk_release_only(self, ifo, gps, rate, run, release):
+        """
+        gwosc names a run's bulk data by the run, and an event release never by a run, so
+        the run is named on every lookup and download; the files GWOSC lists lie in the
+        release ``source_id`` names. Naming the release itself (``^O3a_4KHZ_R1$``) matches
+        no GWOSC dataset: every real fetch failed so.
+        """
         gwosc = GwoscRecorder()
         with serving_gwosc(gwosc):
-            strain = gf.GWOSC().fetch(gf.IFO.L1, 4096.0, (O3A_GPS, O3A_GPS + 32.0))
-            gf.GWOSC().fetch(gf.IFO.L1, 16384.0, (O1_GPS, O1_GPS + 32.0))
-        # The dataset is pinned, so an event release overlapping the time is never served.
-        assert [(call["dataset"], call["sample_rate"]) for call in gwosc.calls] == [
-            ("^O3a_4KHZ_R1$", 4096), ("^O1_16KHZ$", 16384)]
-        assert all(call["cache"] is False for call in gwosc.calls)  # the store keeps the tile
-        assert strain.source == "gwosc-O3a_4KHZ_R1" and strain.sample_rate_hertz == 4096.0
-        assert strain.t0 == O3A_GPS and len(strain.data) == 32 * 4096
+            strain = gf.GWOSC().fetch(ifo, rate, (gps, gps + 32.0))
+        assert [(call["dataset"], call["sample_rate"]) for call in gwosc.located] == [(f"^{run}$", int(rate))]
+        assert [(call["dataset"], call["sample_rate"]) for call in gwosc.calls] == [(f"^{run}$", int(rate))]
+        assert gwosc.calls[0]["cache"] is False  # the store keeps the tile
+        assert strain.source == f"gwosc-{release}" == gf.GWOSC().source_id(gps, rate)
+        assert strain.sample_rate_hertz == rate and strain.t0 == gps and len(strain.data) == 32 * rate
+
+    def test_a_file_outside_the_named_release_is_refused_by_name(self):
+        """A run GWOSC serves from another release than the table names is never fetched as the named one."""
+        releases = {run: dict(rates) for run, rates in sources.GWOSC_STRAIN_DATASETS.items()}
+        releases["O4a"][4096.0] = "O4a_4KHZ_R2"
+        gwosc = GwoscRecorder(releases)
+        with serving_gwosc(gwosc):
+            with pytest.raises(gf.StrainUnavailable, match=(
+                    r"H1 strain over GPS .*GWOSC lists \['https://gwosc.org/archive/data/O4a_4KHZ_R2/.*'\] "
+                    r"for run O4a at 4096 Hz, outside its release O4a_4KHZ_R1")):
+                gf.GWOSC().fetch(gf.IFO.H1, 4096.0, (O4A_GPS, O4A_GPS + 32.0))
+        assert gwosc.calls == [], "fetched strain from another release"
 
     def test_a_gwosc_failure_refuses_by_name(self):
         def refused(*args, **kwargs):
             raise ConnectionRefusedError("gwosc.org unreachable")
 
-        with patch("gwpy.timeseries.TimeSeries.fetch_open_data", side_effect=refused):
+        # Whether the lookup or the download fails, the fetch is refused by name.
+        with patch("gwosc.locate.get_urls", side_effect=refused):
+            with pytest.raises(gf.StrainUnavailable, match=r"GWOSC\(\) could not deliver L1 strain.*unreachable"):
+                gf.GWOSC().fetch(gf.IFO.L1, 4096.0, (O3A_GPS, O3A_GPS + 32.0))
+        with serving_gwosc(GwoscRecorder()), \
+                patch("gwpy.timeseries.TimeSeries.fetch_open_data", side_effect=refused):
             with pytest.raises(gf.StrainUnavailable, match=r"GWOSC\(\) could not deliver L1 strain.*unreachable"):
                 gf.GWOSC().fetch(gf.IFO.L1, 4096.0, (O3A_GPS, O3A_GPS + 32.0))
 
@@ -570,6 +624,8 @@ class TestDataSource:
         (1126072320.0, 4096.0, "gwosc-O1"),
         (1126072320.0, 16384.0, "gwosc-O1_16KHZ"),
         (1260000000.0, 4096.0, "gwosc-O3b_4KHZ_R1"),
+        (1368195072.0, 4096.0, "gwosc-O4a_4KHZ_R1"),  # the tile begins before O4a does
+        (O4B_GPS, 16384.0, "gwosc-O4b_16KHZ_R1"),
     ])
     def test_gwosc_names_the_release_of_the_run_a_tile_lies_in(self, gps, rate, expected):
         assert gf.GWOSC().source_id(gps, rate) == expected

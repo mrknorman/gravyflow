@@ -435,6 +435,37 @@ def usable_over_its_runs(obtainer, ifo):
     return np.array([[min(obtainer.start_gps_times), max(obtainer.end_gps_times)]])
 
 
+class GwoscLocator:
+    """
+    gwosc's ``get_urls``, offline, as gwosc 0.8 answers it: a run's bulk data is the
+    dataset named by the run (``O3a``), its release chosen by the rate, and its files lie
+    in ``/archive/data/<release>/``; a release name such as ``O3a_4KHZ_R1`` matches no
+    dataset. ``releases`` (by run and rate) defaults to the ones GWOSC publishes, as
+    ``GWOSC_STRAIN_DATASETS`` names them. Records each call.
+    """
+
+    def __init__(self, releases=None):
+        from gravyflow.src.dataset.acquisition.gwosc_data import GWOSC_STRAIN_DATASETS
+
+        self.releases = releases or GWOSC_STRAIN_DATASETS
+        self.calls = []
+
+    def release(self, dataset, sample_rate):
+        import re
+
+        runs = [run for run in self.releases if dataset is not None and re.fullmatch(dataset, run)]
+        if len(runs) != 1:
+            raise ValueError(f"Cannot find a GWOSC dataset matching {dataset!r}")
+        return self.releases[runs[0]][float(sample_rate)]
+
+    def __call__(self, detector, start, end, dataset=None, sample_rate=4096, **kwargs):
+        self.calls.append({"detector": detector, "dataset": dataset, "sample_rate": sample_rate})
+        release = self.release(dataset, sample_rate)
+        tile = int(start // 4096 * 4096)
+        return [f"https://gwosc.org/archive/data/{release}/{tile}/"
+                f"{detector[0]}-{detector}_{release}-{tile}-4096.hdf5"]
+
+
 @contextmanager
 def gwosc_serving(fetch):
     """

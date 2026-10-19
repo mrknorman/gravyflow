@@ -23,6 +23,7 @@ import gravyflow as gf
 from gravyflow.src.dataset.acquisition import gwosc_data
 from gravyflow.src.dataset.features import gravity_spy
 from gravyflow.tests import test_public_sources as public
+from gravyflow.tests.conftest import GwoscLocator
 from gravyflow.tests.test_public_sources import (  # noqa: F401  (pytest fixture)
     FIXTURE_EVENTS, offline_public_sources,
 )
@@ -734,8 +735,8 @@ class TestWholeSegments:
     def _get(self, start, end, rate):
         fetch = _RecordingFetch()
         obtainer = _noise_obtainer(gf.ObservingRun.O3)
-        with patch("gwpy.timeseries.TimeSeries.fetch_open_data",
-                   side_effect=fetch):
+        with patch("gwosc.locate.get_urls", side_effect=GwoscLocator()), \
+                patch("gwpy.timeseries.TimeSeries.fetch_open_data", side_effect=fetch):
             [row] = obtainer.acquire(rate, np.array([[[start, end]]]), [gf.IFO.L1])
         return row.data[0], fetch.calls
 
