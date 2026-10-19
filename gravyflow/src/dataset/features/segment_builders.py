@@ -9,6 +9,7 @@ from typing import List
 import numpy as np
 from gravyflow.src.dataset.acquisition.transient_segment import TransientSegment
 from gravyflow.src.dataset.acquisition.base import DataLabel, ObservingRun
+from gravyflow.src.dataset.features import gravity_spy
 from gravyflow.src.dataset.features.glitch import GlitchType, get_glitch_catalogue, get_glitch_type_from_index
 from gravyflow.src.dataset.features.event import (
     EventConfidence, SourceType, get_events_with_params, source_type_from_masses,
@@ -31,7 +32,12 @@ def build_glitch_segments(
 ) -> List[TransientSegment]:
     """
     Build TransientSegments for glitches with acquisition boundaries.
-    
+
+    Each detector's glitches are read in the runs Gravity Spy's public release covers
+    for it (H1 and L1, O1 to O3b), as a detector's strain is read only in the runs
+    that publish it: O4 adds none. A detector no run covers (Virgo; O4 alone) is
+    refused by name, never served empty.
+
     Args:
         ifos: List of IFOs to fetch glitches for.
         observing_runs: Filter to specific runs. None = [O3].
@@ -44,10 +50,21 @@ def build_glitch_segments(
     if observing_runs is None:
         observing_runs = [ObservingRun.O3]
     
+    covered = {ifo: [run for run in observing_runs
+                     if gravity_spy.covers(ifo.name, run.value.start_gps_time, run.value.end_gps_time)]
+               for ifo in ifos}
+    for ifo, runs in covered.items():
+        if not runs:
+            raise ValueError(
+                f"No public Gravity Spy release covers {ifo.name} in "
+                f"{', '.join(run.name for run in observing_runs)}: the release ({gravity_spy.ZENODO_DOI}) "
+                f"covers H1 and L1 in {', '.join(gravity_spy.ERAS)}."
+            )
+
     segments = []
     
     for run in observing_runs:
-        for ifo in ifos:
+        for ifo in (ifo for ifo in ifos if run in covered[ifo]):
             # Glitches and their Gravity Spy metadata for this IFO/run
             catalogue = get_glitch_catalogue(
                 ifo=ifo,

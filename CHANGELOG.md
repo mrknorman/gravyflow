@@ -11,6 +11,13 @@ repository before it may need the changes below.
   (`HOFT_C01`, `DCS-CALIB_STRAIN_CLEAN_C01`) for O4a and O4b too, which GWOSC's O4 releases do not come from
   (O4a `GDS-CALIB_STRAIN_CLEAN_AR`, O4b `DCS-CALIB_STRAIN_CLEAN_AR01`, Virgo `Hrec_hoftRepro1AR_16384Hz`). Reading
   O4 from local frames now names them (`frametypes=`, `channels=`); an unnamed run is refused by name.
+- **O4 is a default observing run.** `DEFAULT_OBSERVING_RUNS` is O1, O2, O3 and O4, and every default reads it: an
+  obtainer given no runs (so `gf.NoiseObtainer(noise_type=REAL)` and a transient obtainer), the validation bank's real
+  events and the segment timeline plot. Every default real-data dataset changes, with its fingerprint; split blocks are
+  absolute GPS, so O1 to O3's time keeps its splits. O4's noise has no glitch veto (`gf.NoGlitchVetoWarning`), and
+  glitches are read only in the runs Gravity Spy's release covers (O1 to O3b, H1 and L1): over the default runs, O1
+  to O3's. Name the runs to keep the old default: `observing_runs=[gf.ObservingRun.O1, gf.ObservingRun.O2,
+  gf.ObservingRun.O3]`.
 - **The aLIGO `O3_LOW` and `DESIGN` noise curves stop where their tables do** (4995.38 Hz and 5000 Hz). Their rows
   above that were lalsimulation's extrapolation of its table (1.9 times the last tabulated ASD by 8191 Hz), not
   tabulated values; no curve is extrapolated now, so coloured noise from them at 16384 Hz (any sample rate whose

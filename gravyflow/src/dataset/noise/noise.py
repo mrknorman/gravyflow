@@ -270,9 +270,10 @@ class NoiseObtainer(Obtainer):
     """
     Obtainer for noise data (white, colored, pseudo-real, or real).
 
-    Real noise with no ``ifo_data_obtainer`` uses public GWOSC data: O1, O2 and O3,
-    DATA with the BURST_CAT1 and BURST_CAT2 vetoes, with known events and Gravity Spy
-    glitches removed.
+    Real noise with no ``ifo_data_obtainer`` uses public GWOSC data: O1 to O4
+    (``DEFAULT_OBSERVING_RUNS``), DATA with the BURST_CAT1 and BURST_CAT2 vetoes, with
+    known events and Gravity Spy glitches removed. Gravity Spy's labels stop at O3b,
+    so O4's noise has no glitch veto, and a ``gf.NoGlitchVetoWarning`` says so.
 
     Noise is returned in strain (WHITE noise, which has no detector, in unit
     variance). COLORED noise follows ``noise_profile``: by default

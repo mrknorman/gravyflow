@@ -98,6 +98,11 @@ def cache_dir() -> Path:
     return gwosc_data.user_cache_dir("gravityspy")
 
 
+def covers(ifo_name: str, start_gps_time: float, end_gps_time: float) -> bool:
+    """Whether the release has ``ifo_name``'s glitches in any era overlapping [start, end]."""
+    return any((ifo_name, era) in RELEASE_FILES for era in eras_overlapping(start_gps_time, end_gps_time))
+
+
 def eras_overlapping(start_gps_time: float, end_gps_time: float) -> List[str]:
     """Release eras whose GWOSC run bounds overlap [start, end]."""
     eras = []

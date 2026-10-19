@@ -52,7 +52,7 @@ def IFODataObtainer(
     Args:
         data_quality: Quality level of data to acquire (RAW or BEST)
         data_labels: What type of data to acquire (NOISE, EVENTS, GLITCHES)
-        observing_runs: Which observing runs to use (O1, O2, O3, O4)
+        observing_runs: Which observing runs to use; None reads every run, O1 to O4
         segment_order: How to order segments (RANDOM, CHRONOLOGICAL, SHORTEST_FIRST)
         max_segment_duration_seconds: Maximum segment length
         saturation: Oversampling factor for random sampling

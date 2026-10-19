@@ -343,7 +343,8 @@ class ValidationBank:
 
         Real events are test data: the confident events, each once (by name),
         are scored when the validator's split is ``test``, and none otherwise;
-        marginal events are never examples. Needs network access. Each event is
+        marginal events are never examples. ``observing_runs`` defaults to the
+        default runs (``DEFAULT_OBSERVING_RUNS``, O1 to O4). Needs network access. Each event is
         read in the background's window geometry and conditioned by the
         background's dataset (`score_windows`), so its score is comparable with
         the background's, and its FAR is read from that background.
@@ -353,13 +354,14 @@ class ValidationBank:
         (``score_real_events`` off) beside synthetic noise names none, and refuses
         by name before it reads any.
         """
+        from gravyflow.src.dataset.acquisition.base import DEFAULT_OBSERVING_RUNS
         from gravyflow.src.dataset.features.event import EventConfidence, get_events_with_params
         from gravyflow.src.dataset.dataset import noise_ifos
 
         if self.far_scores is None:
             raise ValueError("Score the noise background (generate_noise) before real events.")
         if observing_runs is None:
-            observing_runs = [gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3]
+            observing_runs = list(DEFAULT_OBSERVING_RUNS)
         ifos = noise_ifos(self.dataset_args.get("ifos"), self.dataset_args.get("noise_obtainer"))
 
         if self.config.group != "test":

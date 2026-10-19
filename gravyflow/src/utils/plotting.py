@@ -426,7 +426,8 @@ def generate_segment_timeline_plot(
         Dictionary mapping IFO detectors to segment arrays.
         Each array has shape (N, 2) with [start_gps, end_gps].
     observing_runs : List[gf.ObservingRun], optional
-        List of observing runs to show (O1, O2, O3). Defaults to all.
+        List of observing runs to show. Defaults to the default runs
+        (``DEFAULT_OBSERVING_RUNS``): O1 to O4.
     title : str
         Plot title.
     height : int
@@ -444,7 +445,8 @@ def generate_segment_timeline_plot(
         The Bokeh figure object.
     """
     if observing_runs is None:
-        observing_runs = [gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3]
+        from gravyflow.src.dataset.acquisition.base import DEFAULT_OBSERVING_RUNS
+        observing_runs = list(DEFAULT_OBSERVING_RUNS)
     
     if width is None:
         width = int(height * golden)
@@ -468,6 +470,7 @@ def generate_segment_timeline_plot(
         gf.ObservingRun.O1: "#e377c2",  # Pink
         gf.ObservingRun.O2: "#bcbd22",  # Yellow-green
         gf.ObservingRun.O3: "#17becf",  # Cyan
+        gf.ObservingRun.O4: "#9467bd",  # Purple
     }
     
     # Calculate time range from observing runs and segments

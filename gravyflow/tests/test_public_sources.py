@@ -330,7 +330,7 @@ class TestGwoscSegments:
 
 
 # =============================================================================
-# THE DEFAULT [O1, O2, O3] CONFIGURATION
+# THE DEFAULT [O1, O2, O3, O4] CONFIGURATION
 # =============================================================================
 
 class TestDefaultConfiguration:
@@ -344,6 +344,7 @@ class TestDefaultConfiguration:
             np.array([[1.0, 2.0], [3.0, 4.0]]),
             np.array([[5.0, 6.0]]),
             np.array([[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]]),
+            np.array([[13.0, 14.0]]),
         ]
         with patch.object(obtainer, "get_segment_times", side_effect=per_run):
             segments = obtainer.get_all_segment_times(gf.IFO.H1)
@@ -354,12 +355,14 @@ class TestDefaultConfiguration:
             data_quality=gf.DataQuality.BEST,
             data_labels=[gf.DataLabel.NOISE],
         )
-        segments = obtainer.get_valid_segments(
-            ifos=[gf.IFO.H1, gf.IFO.L1], seed=1, group_name="train"
-        )
+        # O4's time is served with no glitch veto, and says so.
+        with pytest.warns(gf.NoGlitchVetoWarning, match="No glitch veto for H1"):
+            segments = obtainer.get_valid_segments(
+                ifos=[gf.IFO.H1, gf.IFO.L1], seed=1, group_name="train"
+            )
         assert segments.ndim == 3 and segments.shape[1:] == (2, 2)
         assert len(segments) > 0
-        runs = [gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3]
+        runs = [gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3, gf.ObservingRun.O4]
         starts = segments[:, :, 0].ravel()
         for run in runs:
             assert np.any((starts >= run.value.start_gps_time) & (starts < run.value.end_gps_time))
@@ -830,21 +833,41 @@ class TestObservingRunO4:
             assert len(gwosc_data.intersect_segments(admissible, [veto])) == 0, name
         assert bitten >= 1, f"no O4 event lies in {ifo}'s fixture data: the test proves nothing"
 
-    def test_o4_is_read_only_when_named(self):
+    def test_o4_is_a_default_run(self):
         """
-        Both obtainers default to O1, O2 and O3, from one home: O4's noise has no
-        Gravity Spy veto, and adding a run would change every default dataset.
+        Both obtainers default to O1, O2, O3 and O4, from one home
+        (``DEFAULT_OBSERVING_RUNS``); the validation bank's real events and the segment
+        timeline read it too.
         """
         from gravyflow.src.dataset.acquisition.base import DEFAULT_OBSERVING_RUNS
 
-        assert DEFAULT_OBSERVING_RUNS == (gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3)
-        o3_end = gf.ObservingRun.O3.value.end_gps_time
+        assert DEFAULT_OBSERVING_RUNS == (
+            gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3, gf.ObservingRun.O4)
         for labels in ([gf.DataLabel.NOISE], [gf.DataLabel.GLITCHES]):
             default = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=labels)
-            assert max(default.end_gps_times) == o3_end, labels
-            named = gf.IFODataObtainer(data_quality=gf.DataQuality.BEST, data_labels=labels,
-                                       observing_runs=[gf.ObservingRun.O3, gf.ObservingRun.O4])
-            assert named.end_gps_times[-1] == GWOSC_RUN_BOUNDS["O4b"][1], labels
+            assert default.start_gps_times[0] == gf.ObservingRun.O1.value.start_gps_time, labels
+            assert default.end_gps_times[-1] == GWOSC_RUN_BOUNDS["O4b"][1], labels
+
+    def test_glitches_are_read_in_the_runs_gravity_spy_covers(self, offline_public_sources):
+        """
+        A detector's glitches are read in the configured runs Gravity Spy's release
+        covers, as a detector's strain is read in the runs that publish it: over the
+        default runs, O1 to O3's, and none from O4. A detector no configured run covers
+        is refused by name (O4 alone; Virgo in any run), never served empty.
+        """
+        from gravyflow.src.dataset.acquisition.base import DEFAULT_OBSERVING_RUNS
+        from gravyflow.src.dataset.features.segment_builders import build_glitch_segments
+
+        segments = build_glitch_segments(ifos=[gf.IFO.H1], observing_runs=list(DEFAULT_OBSERVING_RUNS))
+        runs = {segment.observing_run for segment in segments}
+        assert runs == {gf.ObservingRun.O1, gf.ObservingRun.O2, gf.ObservingRun.O3}, runs
+        o3 = build_glitch_segments(ifos=[gf.IFO.H1], observing_runs=[gf.ObservingRun.O3])
+        assert {s.transient_gps_time for s in o3} == {
+            s.transient_gps_time for s in segments if s.observing_run is gf.ObservingRun.O3}
+        with pytest.raises(ValueError, match=r"No public Gravity Spy release covers L1 in O4: .*O1, O2, O3a, O3b"):
+            build_glitch_segments(ifos=[gf.IFO.L1], observing_runs=[gf.ObservingRun.O4])
+        with pytest.raises(ValueError, match=r"No public Gravity Spy release covers V1 in O1, O2, O3, O4"):
+            build_glitch_segments(ifos=[gf.IFO.V1], observing_runs=list(DEFAULT_OBSERVING_RUNS))
 
     def test_a_detector_is_read_only_in_the_runs_gwosc_publishes_it_in(self, offline_public_sources):
         """
