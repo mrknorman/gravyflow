@@ -127,7 +127,7 @@ def test_a_pure_backend_does_not_warn(monkeypatch, backend, flags):
 def test_cbc_without_a_cpu_backend_refuses_by_name(tmp_path):
     # A process started with JAX_PLATFORMS=tpu has no CPU backend. No TPU runs
     # here, so the child starts on the CPU and then files its one backend under
-    # "tpu" in JAX's registry (a private table of jax 0.9) and clears its cache:
+    # "tpu" in JAX's registry (a private table of jax 0.12) and clears its cache:
     # jax.devices("cpu") then refuses as JAX does in a TPU-only process, while
     # the default backend still computes everything else.
     env = child_env(KERAS_BACKEND="jax", JAX_PLATFORMS="cpu", GRAVYFLOW_CACHE_DIR=str(tmp_path / "cache"))
