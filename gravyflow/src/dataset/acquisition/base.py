@@ -877,22 +877,12 @@ class BaseDataObtainer(ABC):
 
     def get_event_veto_segments(self) -> np.ndarray:
         """
-        Veto segments for every event GWOSC publishes: the signal's time in band from
-        20 Hz plus padding (``gravyflow.get_event_veto_segments``), and the event's
-        footprint, the time an example of it may read (``event_footprints``), widened
-        by the split's guard. Events are test data, so no other data comes within the
-        guard of them.
+        Veto segments for every event GWOSC publishes, widened by the split's guard
+        (``event.noise_event_vetoes``).
         """
-        from gravyflow.src.dataset.features.event import get_event_catalogue, get_event_veto_segments
-        from gravyflow.src.dataset.features.transient_index import event_footprints
+        from gravyflow.src.dataset.features.event import noise_event_vetoes
 
-        catalogue = get_event_catalogue()
-        guard = self.split_spec.guard_seconds
-        footprints = event_footprints(catalogue["gps"], catalogue["chirp_mass_source"])
-        return np.concatenate([
-            np.reshape(get_event_veto_segments(catalogue=catalogue), (-1, 2)),
-            footprints + np.array([-guard, guard]),
-        ])
+        return noise_event_vetoes(self.split_spec.guard_seconds)
 
     def _glitch_catalogues(self, ifo: gf.IFO, **kwargs) -> List[Dict]:
         """

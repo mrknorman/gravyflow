@@ -110,6 +110,15 @@ _MODULES = {
     "get_confident_events_with_params": "gravyflow.src.dataset.features.event",
     "get_event_veto_segments": "gravyflow.src.dataset.features.event",
 
+    # Standard datasets
+    "StandardDataset": "gravyflow.src.dataset.standard.presets",
+    "STANDARD_DATASETS": "gravyflow.src.dataset.standard.presets",
+    "standard_dataset": "gravyflow.src.dataset.standard.presets",
+    "GaussianTwin": "gravyflow.src.dataset.standard.presets",
+    "BBHPopulation": "gravyflow.src.dataset.standard.population",
+    "InjectionSchedule": "gravyflow.src.dataset.standard.population",
+    "PinnedFileChanged": "gravyflow.src.dataset.standard.presets",
+
     # Injections
     "InjectionGenerator": "gravyflow.src.dataset.features.injection",
     "WaveformGenerator": "gravyflow.src.dataset.features.injection",

@@ -198,6 +198,31 @@ The data source changes these, with no transition period:
   side of a transient, the resampler's margin counted. A saved `TransientIndex` keeps each record's SNR, peak
   frequency, duration, confidence and event parameters; an index saved before is refused, to be built again.
 
+### Standard datasets
+
+The data every model is measured on is fixed and named, so two results on one standard dataset are comparable:
+
+```python
+import gravyflow as gf
+
+o4 = gf.standard_dataset("O4 standard")          # or "O3 open-weights"
+twin = gf.standard_dataset("O4 standard", gaussian_twin=True)
+o4.segments        # (S, 2) GPS seconds, H1 and L1 both observing
+o4.events          # the published events in that time, scored apart
+o4.injections      # 100,000 binary black holes, the same for the twin
+o4.fingerprint()   # names all of it
+```
+
+Each is the test split of gravyflow's partition of its runs (O4a and O4b, or O3a and O3b), on H1 and L1 at 2048 Hz,
+with the default data-quality flags, every published event vetoed and no glitch vetoed (a search's background holds
+the glitches the detectors had), in segments of at least 64 s. Its segment list, event list and injection
+population ship with the package, pinned by sha256, and a changed file is refused (`gf.PinnedFileChanged`). The
+injections are a broad binary-black-hole population: component masses uniform in 5 to 100 solar masses (detector
+frame), aligned spins uniform in -0.99 to 0.99, isotropic sky and orientation, uniform in volume out to a reach R past
+which even the loudest source is too quiet to detect (50 Gpc for O4, 35 Gpc for O3), one per 64 s slot per pass.
+The Gaussian twin replaces the strain with coloured Gaussian noise from each segment's measured spectrum. Nothing is
+downloaded until the strain is read; see `docs/api.md`.
+
 ## 7. Randomness: one seed tree
 
 Every random draw comes from one seed tree, rooted at a dataset's `seed` (default `gf.Defaults.seed`) and addressed

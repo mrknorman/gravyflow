@@ -1,0 +1,16 @@
+{
+ "format": 1,
+ "population": {
+  "mass_msun": [5.0, 100.0],
+  "spin_z": [-0.99, 0.99],
+  "reach_mpc": 50000.0,
+  "approximant": "IMRPhenomXAS",
+  "lower_frequency_hertz": 20.0
+ },
+ "schedule": {
+  "count": 100000,
+  "spacing_seconds": 64.0,
+  "padding_seconds": 32.0
+ },
+ "reach": "R: the population's loudest source (100 + 100 solar masses, both spins +0.99, face-on, F+ = 1 in H1 and L1) has a network optimal SNR of 185.6 at 1 Gpc in the lowest of gravyflow's bundled O4 aLIGO curves (O4 low and high), up to 1024 Hz, so SNR 4 at 46.4 Gpc; R is that, rounded up."
+}

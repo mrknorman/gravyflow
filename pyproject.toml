@@ -108,6 +108,8 @@ exclude = ["gravyflow.tests*", "gravyflow.res*"]
 gravyflow = [
   "res/noise_profiles/*.csv",
   "res/template_banks/*.json",
+  "res/standard/*/*.csv",
+  "res/standard/*/*.json",
   "res/model/gabbard_2017.keras",
   "res/model/georgehuerta2017shallow_classification.keras",
   "res/model/georgehuerta2017shallow_regression.keras",

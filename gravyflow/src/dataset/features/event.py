@@ -306,6 +306,25 @@ def get_event_veto_segments(
     return coalesce_segments(segments)
 
 
+def noise_event_vetoes(guard_seconds: float, catalogue: Optional[dict] = None) -> np.ndarray:
+    """
+    The time real noise is never drawn from because of events: each catalogued event's
+    in-band signal (``get_event_veto_segments``) and its footprint, the time an example
+    of it may read (``transient_index.event_footprints``), widened by ``guard_seconds``
+    each side. Events are test data, so no other data comes within the guard of them.
+    Returns (N, 2) GPS segments, not coalesced.
+    """
+    from gravyflow.src.dataset.features.transient_index import event_footprints
+
+    if catalogue is None:
+        catalogue = get_event_catalogue()
+    footprints = event_footprints(catalogue["gps"], catalogue["chirp_mass_source"])
+    return np.concatenate([
+        np.reshape(get_event_veto_segments(catalogue=catalogue), (-1, 2)),
+        footprints + np.array([-guard_seconds, guard_seconds]),
+    ])
+
+
 def _event_times(catalogs: Optional[List[str]], use_cache: bool) -> np.ndarray:
     """GPS times from ``get_event_catalogue``, of the given catalogues or of all."""
     catalogue = get_event_catalogue(use_cache)

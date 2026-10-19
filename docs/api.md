@@ -103,6 +103,24 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `get_confident_events_with_params`: confident events with their parameters.
 - `get_event_veto_segments`: the segments real noise excludes around events.
 
+## Standard datasets
+
+Fixed, fingerprinted test data every model is measured on: results on one are comparable, results on two
+are never mixed. Each preset's files ship with the package, pinned by sha256; the strain is not downloaded.
+
+- `standard_dataset`: a preset by name (`"O4 standard"`, `"O3 open-weights"`), or its Gaussian twin
+  (`gaussian_twin=True`).
+- `STANDARD_DATASETS`: every preset, by name.
+- `StandardDataset`: one preset: `segments` ((S, 2) GPS seconds, H1 and L1 both holding each whole: the
+  test split of gravyflow's partition, gravyflow's default flags, every published event vetoed, no glitch
+  vetoed), `events` (the published events in its test time, scored apart), `population` and `schedule`,
+  `injections` (the table, the same for the twin), `sample_rate_hertz` (2048), `livetime_seconds`,
+  `gaussian_twin()`, `fingerprint()` and `metadata()`.
+- `GaussianTwin`: how a twin is made: coloured Gaussian noise from each segment's measured spectrum.
+- `BBHPopulation`: a broad binary-black-hole population, uniform in volume out to a reach R.
+- `InjectionSchedule`: when injections happen: one per slot per pass, mergers at least half a slot apart.
+- `PinnedFileChanged`: refused: a preset's pinned file, or the injection table it makes, is not the one pinned.
+
 ## Injections
 
 - `InjectionGenerator`: injects waveforms into a dataset's noise.
