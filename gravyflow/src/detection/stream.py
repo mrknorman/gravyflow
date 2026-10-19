@@ -58,7 +58,7 @@ loudest within +-cluster_seconds), and become `gf.Triggers`.
 """
 
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Dict, Mapping, Optional, Sequence, Tuple, Union
 
@@ -72,6 +72,8 @@ from gravyflow.src.dataset.tools.psd import PowerSpectrum, SpectralConfig, estim
 from gravyflow.src.detection.matched_filter import COINCIDENCE_MARGIN_SECONDS
 from gravyflow.src.detection.template_grid import BankPlacement, MatchSpace, TemplateBank
 from gravyflow.src.detection.triggers import Triggers
+from gravyflow.src.detection.vetoes import (
+    Autogating, PSDVariation, gate, loud_glitches, psd_variation, ranking_statistic, value_at)
 from gravyflow.src.rng.platform import cbc_device
 
 # ripplegw builds float64 tables when it is imported (the CBC module imports
@@ -145,8 +147,17 @@ class DetectorTriggers:
         template: its template's index in the bank.
         snr: its SNR.
         reduced_chisq: its chi-squared over its 2p - 2 degrees of freedom.
-        reweighted_snr: its SNR reweighted by the chi-squared.
+        reweighted_snr: its ranking statistic: the SNR reweighted by the
+            chi-squared, the sine-Gaussian chi-squared and the PSD variation
+            (`vetoes.ranking_statistic`).
         span: (start, end), GPS seconds: the merger times searched.
+        sg_chisq: its sine-Gaussian reduced chi-squared (1 where not applied).
+        psd_variation: the PSD variation at its time (1 where not computed).
+        gates: the GPS times of the gates applied to the strain searched.
+
+    Every input of the ranking is stored, so `ranked` recomputes it (for
+    example with other settings) without filtering again, and `save` /
+    `load` keep the triggers whole.
     """
     detector: str
     time: np.ndarray
@@ -155,15 +166,42 @@ class DetectorTriggers:
     reduced_chisq: np.ndarray
     reweighted_snr: np.ndarray
     span: Tuple[float, float]
+    sg_chisq: Optional[np.ndarray] = None
+    psd_variation: Optional[np.ndarray] = None
+    gates: Optional[np.ndarray] = None
+
+    _ARRAYS = {"time": np.float64, "template": np.int32, "snr": np.float32, "reduced_chisq": np.float32,
+               "reweighted_snr": np.float32, "sg_chisq": np.float32, "psd_variation": np.float32}
 
     def __post_init__(self):
-        dtypes = {"time": np.float64, "template": np.int32, "snr": np.float32, "reduced_chisq": np.float32,
-                  "reweighted_snr": np.float32}
-        for name, dtype in dtypes.items():
+        for name in ("sg_chisq", "psd_variation"):
+            if getattr(self, name) is None:
+                object.__setattr__(self, name, np.ones(np.shape(np.atleast_1d(self.snr))))
+        for name, dtype in self._ARRAYS.items():
             object.__setattr__(self, name, np.asarray(getattr(self, name), dtype=dtype).reshape(-1))
-        if len({len(getattr(self, name)) for name in dtypes}) != 1:
+        if len({len(getattr(self, name)) for name in self._ARRAYS}) != 1:
             raise ValueError("DetectorTriggers' arrays must have one length.")
+        gates = np.zeros(0) if self.gates is None else self.gates
+        object.__setattr__(self, "gates", np.unique(np.asarray(gates, dtype=np.float64).reshape(-1)))
         object.__setattr__(self, "span", (float(self.span[0]), float(self.span[1])))
+
+    def ranked(self, sine_gaussian: bool = True, psd_variation: bool = True) -> "DetectorTriggers":
+        """These triggers with their ranking recomputed from the stored inputs (each correction optional)."""
+        from gravyflow.src.detection.vetoes import ranking_statistic
+        rank = ranking_statistic(self.snr, self.reduced_chisq, self.sg_chisq if sine_gaussian else None,
+                                 self.psd_variation if psd_variation else None)
+        return replace(self, reweighted_snr=rank)
+
+    def save(self, path) -> None:
+        """Write the triggers whole (every ranking input, the span and the gates) to an .npz file."""
+        np.savez(path, detector=np.array(self.detector), span=np.array(self.span), gates=self.gates,
+                 **{name: getattr(self, name) for name in self._ARRAYS})
+
+    @classmethod
+    def load(cls, path) -> "DetectorTriggers":
+        with np.load(path) as data:
+            return cls(str(data["detector"]), span=tuple(data["span"]), gates=data["gates"],
+                       **{name: data[name] for name in cls._ARRAYS})
 
     def __len__(self) -> int:
         return len(self.time)
@@ -178,23 +216,24 @@ class DetectorTriggers:
         wrapped around the span, so the slid triggers cover the same span.
         """
         time = self.time + float(seconds)
+        gates = self.gates + float(seconds)
         span = self.span
         if wrap:
             time = span[0] + np.mod(time - span[0], span[1] - span[0])
+            gates = span[0] + np.mod(gates - span[0], span[1] - span[0])
         else:
             span = (span[0] + seconds, span[1] + seconds)
-        return DetectorTriggers(self.detector, time, self.template, self.snr, self.reduced_chisq,
-                                self.reweighted_snr, span)
+        return replace(self, time=time, span=span, gates=gates)
 
     @classmethod
     def concatenate(cls, parts: Sequence["DetectorTriggers"]) -> "DetectorTriggers":
         """Triggers of consecutive stretches of one detector's strain, as one."""
         if len({part.detector for part in parts}) != 1:
             raise ValueError("Only one detector's triggers can be concatenated.")
-        joined = {name: np.concatenate([getattr(part, name) for part in parts])
-                  for name in ("time", "template", "snr", "reduced_chisq", "reweighted_snr")}
+        joined = {name: np.concatenate([getattr(part, name) for part in parts]) for name in cls._ARRAYS}
         span = (min(part.span[0] for part in parts), max(part.span[1] for part in parts))
-        return cls(parts[0].detector, span=span, **joined)
+        gates = np.concatenate([part.gates for part in parts])
+        return cls(parts[0].detector, span=span, gates=gates, **joined)
 
 
 @dataclass(frozen=True, eq=False)
@@ -368,14 +407,17 @@ def _snr_peaks(white_fft, response, templates, *, n, first, windows, width):
     return jax.lax.map(one_chunk, templates)
 
 
-@partial(jax.jit, static_argnames=("n", "bins", "band"))
-def _chisq(white_fft, response, templates, phase, *, n, bins, band):
+@partial(jax.jit, static_argnames=("n", "bins", "band", "sample_rate_hertz"))
+def _chisq(white_fft, response, templates, phase, tile_response=None, *, n, bins, band, sample_rate_hertz=None):
     """
-    Allen's chi-squared of each (template, time) pair.
+    Allen's chi-squared of each (template, time) pair, and with
+    `tile_response` its sine-Gaussian chi-squared (see `vetoes`).
 
     templates (P, L) raw; phase (P, F): 2 pi k t / n at each pair's merger
     sample t, computed exactly by the caller; band: [kmin, kmax), the band's
-    frequency bins (SpectralConfig.band_indices). Returns chi^2 (P,).
+    frequency bins (SpectralConfig.band_indices); tile_response (F,): the
+    whitening filter's response aligned for a waveform centred at index 0.
+    Returns chi^2 (P,), or (chi^2, chi_sg^2) with tile_response.
     """
     weights = jnp.asarray(_one_sided_weights(n))
     g = jnp.fft.rfft(templates, n=n, axis=-1) * response                       # (P, F)
@@ -407,7 +449,43 @@ def _chisq(white_fft, response, templates, phase, *, n, bins, band):
     z = jnp.sum(z_bins, axis=-1)
     share = sigma2_bins / jnp.where(sigma2 > 0, sigma2, 1.0)[:, None]
     residual = jnp.abs(z_bins - share * z[:, None]) ** 2 / jnp.where(sigma2_bins > 0, sigma2_bins, 1.0)
-    return jnp.sum(jnp.where(sigma2_bins > 0, residual, 0.0), axis=-1)
+    chisq = jnp.sum(jnp.where(sigma2_bins > 0, residual, 0.0), axis=-1)
+    if tile_response is None:
+        return chisq
+    return chisq, _sg_chisq(white_fft, tile_response, weights, starts, phase, n=n, band=band,
+                            sample_rate_hertz=sample_rate_hertz)
+
+
+def _sg_chisq(white_fft, tile_response, weights, starts, phase, *, n, band, sample_rate_hertz):
+    """
+    The sine-Gaussian chi-squared (Nitz 2018; `vetoes`) of each pair, from
+    its chi-squared bins' starts (P, p): each tile over its +-50 Hz only.
+    """
+    from gravyflow.src.detection.vetoes import (
+        SG_HALF_WIDTH_HERTZ, SG_NYQUIST_FRACTION, SG_OFFSETS_HERTZ, SG_QUALITY)
+    df = sample_rate_hertz / n
+    num_freqs = white_fft.shape[-1]
+    width = int(2 * SG_HALF_WIDTH_HERTZ / df) + 2
+    # PyCBC's peak frequency: the last bin's start plus the width of the bin before it.
+    peak = (2 * starts[:, -1] - starts[:, -2]).astype(jnp.float32) * df              # (P,)
+    centre = peak[:, None] + jnp.asarray(SG_OFFSETS_HERTZ, dtype=jnp.float32)[None]  # (P, N)
+    low = jnp.maximum(band[0] * df, centre - SG_HALF_WIDTH_HERTZ)
+    high = centre + SG_HALF_WIDTH_HERTZ
+    applies = jnp.all(high <= SG_NYQUIST_FRACTION * sample_rate_hertz / 2.0, axis=-1)
+    kmin, kmax = (low / df).astype(jnp.int32), (high / df).astype(jnp.int32)
+    first = jnp.clip(kmin, 0, num_freqs - width)
+    index = first[..., None] + jnp.arange(width, dtype=jnp.int32)                    # (P, N, W)
+    inside = (index >= kmin[..., None]) & (index < kmax[..., None])
+    tau = SG_QUALITY / (2.0 * jnp.pi * centre)
+    frequency = index.astype(jnp.float32) * df
+    tile = jnp.where(inside, jnp.exp(-(jnp.pi * tau[..., None] * (frequency - centre[..., None])) ** 2), 0.0)
+    g = tile * tile_response[index]
+    pair_phase = jnp.take_along_axis(phase, index.reshape(index.shape[0], -1), axis=-1).reshape(index.shape)
+    z = jnp.sum(weights[index] * white_fft[index] * jnp.conj(g) * jnp.exp(1j * pair_phase), axis=-1) / n
+    sigma2 = jnp.sum(weights[index] * jnp.abs(g) ** 2, axis=-1) / n
+    rho2 = jnp.where(sigma2 > 0, jnp.abs(z) ** 2 / jnp.where(sigma2 > 0, sigma2, 1.0), 0.0)
+    sg = jnp.sum(rho2, axis=-1) / (2.0 * len(SG_OFFSETS_HERTZ))
+    return jnp.where(applies, sg, 1.0)
 
 
 @dataclass
@@ -441,6 +519,13 @@ class StreamingMatchedFilter:
             computed on the host's CPU (`cbc_device`), since an accelerator may
             have no float64; the kernels run with 64-bit mode off
             (`float32_on`).
+        autogating: PyCBC's autogating of each block (`vetoes.Autogating`),
+            before its spectrum is estimated; None for none.
+        psd_variation: PyCBC's PSD-variation statistic of each block
+            (`vetoes.PSDVariation`; the block is its long segment), applied in
+            the ranking; None for none.
+        sine_gaussian_veto: compute Nitz's sine-Gaussian chi-squared at each
+            trigger and apply it in the ranking.
     """
 
     bank: TemplateBank
@@ -453,6 +538,9 @@ class StreamingMatchedFilter:
     template_chunk: int = 16
     pair_chunk: int = 32
     device: Optional[object] = None
+    autogating: Optional[Autogating] = Autogating()
+    psd_variation: Optional[PSDVariation] = PSDVariation()
+    sine_gaussian_veto: bool = True
 
     _templates: Optional[jnp.ndarray] = field(default=None, init=False, repr=False)
 
@@ -550,12 +638,16 @@ class StreamingMatchedFilter:
                 "from the filter's spectral_config: build the filter with the spectrum's config.")
         return psd
 
-    def _response(self, fir: np.ndarray, n: int) -> jnp.ndarray:
-        """The whitening filter's response on an n-sample grid, aligned as `whiten` applies it, times the merger shift."""
+    def _response(self, fir: np.ndarray, n: int, shift_merger: bool = True) -> jnp.ndarray:
+        """
+        The whitening filter's response on an n-sample grid, aligned as `whiten`
+        applies it, times the shift that puts a template's merger (index pre)
+        at index 0 (without `shift_merger`, for a waveform centred at index 0).
+        """
         k = np.arange(n // 2 + 1)
         # whiten's 'same'-mode convolution keeps the full convolution from
         # (ntaps - 1) // 2 on; the templates' merger is at index pre.
-        shift = (len(fir) - 1) // 2 + self.pre
+        shift = (len(fir) - 1) // 2 + (self.pre if shift_merger else 0)
         response = np.fft.rfft(fir, n=n) * np.exp(2j * np.pi * k * (shift % n) / n)
         return jax.device_put(response.astype(np.complex64), self._device)
 
@@ -579,15 +671,24 @@ class StreamingMatchedFilter:
         parts = []
         for start, lo, hi in blocks:
             found = self._search_block(strain[start:start + n], chunked, psd, first, lo - start, hi - start)
-            parts.append((found[0], found[1] + start, found[2], found[3]))
+            parts.append(self._shifted(found, start))
         span = (start_gps + blocks[0][1] / self.sample_rate_hertz, start_gps + blocks[-1][2] / self.sample_rate_hertz)
         return self._triggers(name, start_gps, parts, span)
 
     def _triggers(self, name, start_gps, parts, span) -> DetectorTriggers:
-        template, sample, snr, chisq = (np.concatenate(values) for values in zip(*parts))
+        template, sample, snr, chisq, sg, variation, gates = (np.concatenate(values) for values in zip(*parts))
         reduced = chisq / self.chisq_dof
-        return DetectorTriggers(name, start_gps + sample / self.sample_rate_hertz, template, snr, reduced,
-                                reweighted_snr(snr, reduced), span)
+        rank = ranking_statistic(snr, reduced, sg if self.sine_gaussian_veto else None,
+                                 variation if self.psd_variation is not None else None)
+        fs = self.sample_rate_hertz
+        return DetectorTriggers(name, start_gps + sample / fs, template, snr, reduced, rank, span,
+                                sg_chisq=sg, psd_variation=variation, gates=start_gps + gates / fs)
+
+    @staticmethod
+    def _shifted(found, start):
+        """A block's triggers (and gates) with their samples counted from the strain's start."""
+        rows, sample, snr, chisq, sg, variation, gates = found
+        return rows, sample + start, snr, chisq, sg, variation, gates + start
 
     def _blocks(self, num_samples: int):
         """
@@ -639,9 +740,18 @@ class StreamingMatchedFilter:
         """
         n, fs, width = len(block), self.sample_rate_hertz, self.cluster_samples
         block = np.asarray(block, dtype=np.float32)
+        gates = np.zeros(0, dtype=np.int64)
         with jax.default_device(self._host):  # the spectrum and its filter: the host's precision
             spectrum = self._spectrum(block, psd)
             white = np.asarray(whiten(block, spectrum, fs), dtype=np.float32).reshape(-1)
+            if self.autogating is not None:
+                # PyCBC gates the raw strain before its spectrum is estimated.
+                gates = loud_glitches(white, fs, self.autogating, self.num_taps // 2)
+                if len(gates):
+                    block = gate(block, gates, fs, self.autogating.width_seconds,
+                                 self.autogating.taper_seconds).astype(np.float32)
+                    spectrum = self._spectrum(block, psd)
+                    white = np.asarray(whiten(block, spectrum, fs), dtype=np.float32).reshape(-1)
             fir = np.asarray(whitening_filter(spectrum, n), dtype=np.float64).reshape(-1)
         a, need = self.stretch_samples(lo, hi, first)
         windows = (need - self.pre - self.post - self.num_taps) // width
@@ -660,13 +770,21 @@ class StreamingMatchedFilter:
         rows, sample, snr = rows[keep], sample[keep], peak[rows[keep], window[keep]]
         with float32_on(self._device):
             white_fft = jnp.fft.rfft(jax.device_put(white, self._device), n=n)
-            chisq = self._chisq(white_fft, self._response(fir, n), rows, sample, n)
-        return rows, sample, snr, chisq
+            chisq, sg = self._chisq(white_fft, fir, rows, sample, n)
+        if self.psd_variation is not None and len(rows):
+            times, values = psd_variation(block, fs, self.psd_variation)
+            variation = value_at(times, values, sample / fs)
+        else:
+            variation = np.ones(len(rows))
+        return rows, sample, snr, chisq, sg, variation, gates
 
-    def _chisq(self, white_fft, response, rows, sample, n) -> np.ndarray:
-        """Allen's chi-squared at each (template row, merger sample) of a block."""
+    def _chisq(self, white_fft, fir, rows, sample, n) -> Tuple[np.ndarray, np.ndarray]:
+        """Allen's and the sine-Gaussian chi-squared at each (template row, merger sample) of a block."""
         out = np.zeros(len(rows), dtype=np.float32)
+        sg_out = np.ones(len(rows), dtype=np.float32)
         templates = self.templates()
+        response = self._response(fir, n)
+        tile_response = self._response(fir, n, shift_merger=False) if self.sine_gaussian_veto else None
         k = np.arange(n // 2 + 1, dtype=np.int64)
         for start in range(0, len(rows), self.pair_chunk):
             r = rows[start:start + self.pair_chunk]
@@ -676,11 +794,16 @@ class StreamingMatchedFilter:
             phase = (2.0 * np.pi / n) * np.mod(np.outer(t, k), n).astype(np.float64)
             phase = np.pad(phase.astype(np.float32), ((0, pad), (0, 0)))
             pair_templates = jnp.pad(templates[r], ((0, pad), (0, 0)))
-            chisq = _chisq(white_fft, response, pair_templates, jax.device_put(phase, self._device), n=n,
-                           bins=self.chisq_bins,
-                           band=self.spectral_config.band_indices(n, self.sample_rate_hertz))
-            out[start:start + len(r)] = np.asarray(chisq)[:len(r)]
-        return out
+            result = _chisq(white_fft, response, pair_templates, jax.device_put(phase, self._device),
+                            tile_response, n=n, bins=self.chisq_bins,
+                            band=self.spectral_config.band_indices(n, self.sample_rate_hertz),
+                            sample_rate_hertz=self.sample_rate_hertz)
+            if tile_response is None:
+                out[start:start + len(r)] = np.asarray(result)[:len(r)]
+            else:
+                out[start:start + len(r)] = np.asarray(result[0])[:len(r)]
+                sg_out[start:start + len(r)] = np.asarray(result[1])[:len(r)]
+        return out, sg_out
 
     # -------------------------------------------------------------- network
 
@@ -741,7 +864,7 @@ class StreamingMatchedFilter:
                     block = injection.add_to(np.array(data[start:start + n], dtype=np.float64), name,
                                              start_gps + start / fs, fs)
                     found = self._search_block(block, chunked, psd, first, lo - start, hi - start)
-                    parts.append((found[0], found[1] + start, found[2], found[3]))
+                    parts.append(self._shifted(found, start))
                 if not parts:
                     raise ValueError(f"The injection at {injection.time} is outside {name}'s searched span.")
                 span = (start_gps + (centre - half) / fs, start_gps + (centre + half + 1) / fs)

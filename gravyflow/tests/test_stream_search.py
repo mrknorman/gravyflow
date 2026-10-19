@@ -83,8 +83,9 @@ def test_the_reweighted_snr_is_pycbcs_newsnr():
 def test_a_template_recovers_its_signals_snr_at_its_merger_time():
     # A noise-free aligned-spin signal against its own template: the SNR the
     # data path's whitening gives it, at its merger sample, with chi-squared 0.
+    # (Noise-free strain has no PSD variation to measure.)
     spectrum = exact_spectrum()
-    mf = search(TemplateBank.from_masses(*SPINNING))
+    mf = search(TemplateBank.from_masses(*SPINNING), psd_variation=None)
     strain = signal(SPINNING, [97.3], 200.0)
     strain *= 20.0 / optimal_snr(strain, spectrum)
     out = mf.filter(strain, 1000.0, "L1", psd=spectrum)
