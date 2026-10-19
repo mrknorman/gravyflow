@@ -133,6 +133,28 @@ def test_dataset_empty_segment_list():
         )[0]
 
 
+def constant_wnb():
+    constant = lambda value: gf.Distribution(value=value, type_=gf.DistributionType.CONSTANT)
+    return gf.WNBGenerator(
+        duration_seconds=constant(0.5), min_frequency_hertz=constant(100.0), max_frequency_hertz=constant(200.0),
+        scaling_method=gf.ScalingMethod(value=constant(10.0), type_=gf.ScalingTypes.SNR),
+    )
+
+
+def test_waveform_generators_given_as_a_dict_are_refused_by_name():
+    """Generators are a list: a dict never worked and its keys did nothing, so it is refused, not crashed on."""
+    generators = {"noise_like": {"generator": constant_wnb(), "excluded": False, "exclusive": False}}
+    with pytest.raises(TypeError, match="waveform_generators.*dict.*pass a list"):
+        white_dataset(generators=generators)
+    with pytest.raises(TypeError, match="waveform_generators.*dict.*pass a list"):
+        gf.InjectionGenerator(waveform_generators=generators)
+
+
+def test_a_single_waveform_generator_is_a_list_of_one():
+    dataset = white_dataset(generators=constant_wnb())
+    assert len(dataset.waveform_generators) == 1
+
+
 def test_a_dataset_with_no_return_variables_is_refused():
     with pytest.raises(ValueError, match="No return variables requested"):
         GravyflowDataset(group="train")

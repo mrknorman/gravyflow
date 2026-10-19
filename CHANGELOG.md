@@ -88,6 +88,9 @@ repository before it may need the changes below.
   holds a list. It serves the set's own epoch every epoch: its `on_epoch_end` no longer moves its dataset on.
 - `config_fingerprint` (and so a checkpoint's, a validation's and a dataset's fingerprint) refuses a NaN or infinite
   setting by name (`UnfingerprintableError`).
+- **`waveform_generators` takes a list (or a single generator), no longer a dict.** The dict form crashed in
+  `gf.InjectionGenerator`, and its `excluded` and `exclusive` keys were read nowhere. A dict is refused by name
+  (`TypeError`) in `gf.Dataset` and `gf.InjectionGenerator`. `Prefetcher.close` is gone: nothing called it.
 
 ### Added
 

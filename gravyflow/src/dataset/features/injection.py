@@ -1519,10 +1519,26 @@ SOURCE_HPEAK = "source_hpeak"
 # An IncoherentGenerator's per-example (before, after) extent, (Batch, 2) seconds.
 SIGNAL_EXTENT = "signal_extent_seconds"
 
+def as_generator_list(waveform_generators) -> List:
+    """
+    The waveform generators as a list: a list is kept, a single generator is wrapped.
+
+    A dict is refused by name: generators are given as a list.
+    """
+    if isinstance(waveform_generators, dict):
+        raise TypeError(
+            "waveform_generators takes a list of generators (or a single generator), not a dict; "
+            "pass a list."
+        )
+    if isinstance(waveform_generators, list):
+        return waveform_generators
+    return [waveform_generators]
+
+
 class InjectionGenerator:
     def __init__(
         self,
-        waveform_generators: List[WaveformGenerator],
+        waveform_generators: Union[List[WaveformGenerator], WaveformGenerator],
         parameters_to_return: List = None,
         scale_factor: None = None,
         scopes: Optional[List[str]] = None,
@@ -1552,9 +1568,7 @@ class InjectionGenerator:
             scale_factor: Deprecated and ignored: injections are physical strain.
         """
         ignore_scale_factor(scale_factor)
-        self.waveform_generators = waveform_generators
-        if not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
-            self.waveform_generators = [self.waveform_generators]
+        self.waveform_generators = as_generator_list(waveform_generators)
 
         if parameters_to_return is None:
             self.parameters_to_return = []

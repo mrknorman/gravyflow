@@ -99,9 +99,7 @@ class MatchedFilterBaseline(ExampleModel):
         """
         window = float(dataset_args["onsource_duration_seconds"])
         generators = dataset_args.get("waveform_generators") or []
-        if isinstance(generators, dict):
-            generators = [entry["generator"] for entry in generators.values()]
-        elif not isinstance(generators, (list, tuple)):
+        if not isinstance(generators, (list, tuple)):
             generators = [generators]
         if not generators:
             raise ValueError(

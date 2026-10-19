@@ -25,7 +25,7 @@ from gravyflow.src.dataset.config import Defaults, WindowSpec, ignore_scale_fact
 from gravyflow.src.dataset.noise.noise import NoiseBatcher, addressed_by_index, obtainer_batcher, reads_real_data
 from gravyflow.src.dataset.acquisition.augmentations import Augmented, augment
 from gravyflow.src.dataset.acquisition.base import BaseDataObtainer
-from gravyflow.src.dataset.features.injection import InjectionGenerator, check_scaling_matches_noise
+from gravyflow.src.dataset.features.injection import InjectionGenerator, as_generator_list, check_scaling_matches_noise
 from gravyflow.src.rng import TREE_VERSION, BatchStreams, SeedTree, check_coordinate, check_name, check_split
 from gravyflow.src.rng import platform
 from gravyflow.src.dataset.acquisition.versions import DATA_VERSIONS
@@ -984,9 +984,9 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
             raise ValueError(f"pearson_max_lag_seconds must be >= 0, got {pearson_max_lag_seconds}.")
 
         # Initialize waveform generators
-        self.waveform_generators = copy.deepcopy(waveform_generators) if waveform_generators is not None else []
-        if not isinstance(self.waveform_generators, list) and not isinstance(self.waveform_generators, dict):
-            self.waveform_generators = [self.waveform_generators]
+        self.waveform_generators = (
+            as_generator_list(copy.deepcopy(waveform_generators)) if waveform_generators is not None else []
+        )
 
         # Set network for waveform generators if not provided
         self._set_generator_networks()
@@ -1021,15 +1021,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                 check_network_matches_ifos(generator.network, noise_ifos)
             return generator
 
-        if isinstance(self.waveform_generators, list):
-            self.waveform_generators = [bind(generator) for generator in self.waveform_generators]
-        elif isinstance(self.waveform_generators, dict):
-            bound = {}
-            for name, entry in self.waveform_generators.items():
-                entry = dict(entry)
-                entry["generator"] = bind(entry["generator"])
-                bound[name] = entry
-            self.waveform_generators = bound
+        self.waveform_generators = [bind(generator) for generator in self.waveform_generators]
 
     def _validate_settings(self):
         """Validate the generator settings."""
@@ -1037,16 +1029,9 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         if not self.variables_to_return:
             raise ValueError("No return variables requested. What's the point?")
         validate_noise_settings(self.noise_obtainer, self.variables_to_return)
-        check_scaling_matches_noise(self.noise_obtainer, self._generator_list())
+        check_scaling_matches_noise(self.noise_obtainer, self.waveform_generators)
         self._validate_padding_settings()
         self._validate_spectral_settings()
-
-    def _generator_list(self) -> List:
-        if isinstance(self.waveform_generators, list):
-            return list(self.waveform_generators)
-        if isinstance(self.waveform_generators, dict):
-            return [g["generator"] for g in self.waveform_generators.values()]
-        return []
 
     def _validate_spectral_settings(self):
         """
@@ -1067,11 +1052,11 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         )
         has_snr_scaling = any(
             getattr(getattr(generator, "scaling_method", None), "type_", None) == gf.ScalingTypes.SNR
-            for generator in self._generator_list()
+            for generator in self.waveform_generators
         )
         # SNR labels of HRSS/HPEAK-scaled injections are measured against the
         # batch's spectrum too, so they share the one definition.
-        has_snr_label = self._generator_list() and gf.ScalingTypes.SNR in self.variables_to_return
+        has_snr_label = self.waveform_generators and gf.ScalingTypes.SNR in self.variables_to_return
         self._needs_spectrum = self._needs_whitening or has_snr_scaling or bool(has_snr_label)
 
         if self._needs_whitening:
@@ -1104,7 +1089,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
                 )
 
         if config.lower_frequency_hertz:
-            for generator in self._generator_list():
+            for generator in self.waveform_generators:
                 lowest = lowest_generator_frequency(generator)
                 if lowest is not None and lowest < config.lower_frequency_hertz:
                     warn(
@@ -1119,7 +1104,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
         """The shapes and dtypes every batch of this dataset is checked against."""
         return BatchContract(
             batch=self.num_examples_per_batch,
-            generators=len(self._generator_list()),
+            generators=len(self.waveform_generators),
             ifos=len(self._noise_ifos()),
             onsource_samples=window_samples(self.onsource_duration_seconds, self.sample_rate_hertz),
         )
@@ -1131,13 +1116,7 @@ class GravyflowDataset(IndexedBatches, keras.utils.PyDataset):
     def _validate_padding_settings(self):
         """Validate that padding does not exceed half of onsource duration."""
         if self.waveform_generators:
-            generators = []
-            if isinstance(self.waveform_generators, list):
-                generators = self.waveform_generators
-            elif isinstance(self.waveform_generators, dict):
-                generators = [g["generator"] for g in self.waveform_generators.values()]
-            
-            for generator in generators:
+            for generator in self.waveform_generators:
                 if getattr(generator, "scaling_method", None) is None:
                     raise ValueError(
                         f"{type(generator).__name__} has no scaling_method; give it a "
