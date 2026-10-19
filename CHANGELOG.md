@@ -118,6 +118,15 @@ repository before it may need the changes below.
   subprocess under a deadline, on a whole `gf.SearchSegment`, with its weights fetched only by `gf.fetch`; its
   `gf.ExternalResult` names the card's mode (`gf.AS_PUBLISHED`) and fingerprint. A missing adapter is refused by name
   (`gf.AdapterMissing`), as is another release of it or another environment (`gf.AdapterMismatch`) (README §10).
+- **MLGWSC-1's dataset 1, streamed.** `gf.MLGWSC1Stream(1, seed=...)` makes the challenge's dataset 1 from a seed:
+  its segments (generate_data.py's `restrict_segments`, 30 days by default), stationary Gaussian noise of
+  aLIGOZeroDetHighPower from 15 Hz on H1 and L1, and its injection population and schedule (`ds1.ini`, every 24 to
+  30 s), each IMRPhenomXAS (the challenge's zero-spin, (2, 2)-mode IMRPhenomXPHM) conditioned as PyCBC conditions
+  the challenge's injections. It is read over any span of its segments (`read`, a `gf.SearchSegment`, foreground or
+  background), never written whole; every sample is a function of the seed and its GPS time, whatever span is
+  read, and `fingerprint()` names the stream. Its noise reads no real strain, so no reservation applies (`mode`).
+  `gf.NoiseProfile.ZERO_DET_HIGH_POWER` is that curve (H1 and L1 only; a profile refuses a detector it does not
+  cover, by name).
 
 - `gravyflow.__version__`.
 - `docs/api.md`, the public API, which a test holds equal to `gravyflow.__all__`.

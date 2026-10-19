@@ -161,6 +161,7 @@ _MODULES = {
     # Triggers and external models
     "Triggers": "gravyflow.src.detection.triggers",
     "SearchSegment": "gravyflow.src.external",
+    "MLGWSC1Stream": "gravyflow.src.dataset.acquisition.mlgwsc1_stream",
     "ExternalSearch": "gravyflow.src.external",
     "ExternalCard": "gravyflow.src.external",
     "InputContract": "gravyflow.src.external",

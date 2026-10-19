@@ -348,6 +348,7 @@ _ALIGO_O3_LOW = "aligo_o3low_t1800545.csv"      # LIGO-T1800545, aLIGOO3LowT1800
 _ADVIRGO_O3_LOW = "advirgo_o3low_t1800545.csv"  # LIGO-T1800545, AdVO3LowT1800545
 _ALIGO_DESIGN = "aligo_design_t1800044.csv"     # LIGO-T1800044, aLIGODesignSensitivityT1800044
 _ADVIRGO_DESIGN = "advirgo_design_p1200087.csv" # LIGO-P1200087, AdVDesignSensitivityP1200087
+_ALIGO_ZERO_DET_HIGH_POWER = "aligo_zerodet_highpower_t0900288.csv"  # LIGO-T0900288-v3, aLIGOZeroDetHighPower
 
 
 class NoiseProfile(Enum):
@@ -365,15 +366,28 @@ class NoiseProfile(Enum):
     of Barsotti, Fritschel, Evans and Gras, "Updated Advanced LIGO sensitivity
     design curve" (https://dcc.ligo.org/LIGO-T1800044/public) for H1 and L1, and
     the Advanced Virgo design curve (Living Rev. Relativ. 19, 1 (2016),
-    doi:10.1007/lrr-2016-1) for V1. Each file's header names its exact source.
-    A curve is used only on its own band (``read_noise_curve``).
+    doi:10.1007/lrr-2016-1) for V1. ZERO_DET_HIGH_POWER is Advanced LIGO's earlier
+    zero-detuning, high-power design curve (LIGO-T0900288-v3), as lalsimulation
+    evaluates it (aLIGOZeroDetHighPower), for H1 and L1 only: the noise of MLGWSC-1's
+    dataset 1. Each file's header names its exact source. A curve is used only on its
+    own band (``read_noise_curve``), and only for a detector its profile covers.
     """
     O3_ACTUAL = {"Hanford": _ALIGO_O3_ACTUAL_H1, "Livingston": _ALIGO_O3_ACTUAL_L1, "Virgo": _ADVIRGO_O3_ACTUAL}
     O3_LOW = {"Hanford": _ALIGO_O3_LOW, "Livingston": _ALIGO_O3_LOW, "Virgo": _ADVIRGO_O3_LOW}
     DESIGN = {"Hanford": _ALIGO_DESIGN, "Livingston": _ALIGO_DESIGN, "Virgo": _ADVIRGO_DESIGN}
+    ZERO_DET_HIGH_POWER = {"Hanford": _ALIGO_ZERO_DET_HIGH_POWER, "Livingston": _ALIGO_ZERO_DET_HIGH_POWER}
+
+    def covers(self, ifo: "IFO") -> bool:
+        """Whether this profile has a curve for ``ifo``."""
+        return ifo.value.name in self.value
 
     def path(self, ifo: "IFO") -> Path:
-        """The ASD file of this profile for ``ifo``."""
+        """The ASD file of this profile for ``ifo``; ValueError, by name, for a detector it does not cover."""
+        if not self.covers(ifo):
+            raise ValueError(
+                f"The noise profile {self.name} has no curve for {ifo.name}: it covers "
+                f"{', '.join(sorted(self.value))}. Choose a profile that covers every detector."
+            )
         return NOISE_PROFILE_DIRECTORY_PATH / self.value[ifo.value.name]
 
 

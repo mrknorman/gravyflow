@@ -162,6 +162,7 @@ models are, and never through the `Validator`.
 
 - `Triggers`: a search's triggers (GPS `time`, ranking `stat`, timing tolerance `var`); `Triggers.read` and `write` read and write the MLGWSC-1 trigger file.
 - `SearchSegment`: the strain an external search runs on: every detector over the same samples, searched whole; `SearchSegment.from_strains` builds one from a data source's strain.
+- `MLGWSC1Stream`: one of the MLGWSC-1 challenge's datasets (dataset 1), made by gravyflow from a seed and streamed, never written whole: `segments`, `read(start, end)` (a `SearchSegment`; `injections=False` for the background), `chunks(seconds)`, the `injections` table (the challenge's injection-file fields), `fingerprint()` and `mode` (simulated: no reservation applies).
 - `ExternalSearch`: what an adapter implements: `prepare(fetch)`, `preprocess(segment)` and `search(segment)`, published under the entry-point group `gravyflow.external`.
 - `ExternalCard`: an external model: its adapter, the adapter's version and environment lock, its contracts, weights, published rows and declared training data; `card.fingerprint`, its identity, is the sha256 of exactly what decides a run's outputs (adapter name and version, lock, contracts, each weights file's name, sha256, format and framework, mode), never of its provenance (published rows, training data).
 - `InputContract`: the input a model takes: rate, detectors in order, window, stride, context, whitening, band-pass and normalisation.

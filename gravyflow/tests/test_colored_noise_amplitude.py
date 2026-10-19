@@ -234,9 +234,14 @@ def test_the_o3_actual_headers_name_their_source_and_its_sha256():
 
 
 def test_noise_profiles_are_per_detector_with_provenance():
-    """Each bundled profile names its source, Virgo's curve is Virgo's, and the
-    O3 low and aLIGO design curves stay available as named profiles."""
+    """Each bundled profile names its source, Virgo's curve is Virgo's where a
+    profile has one, and the O3 low and aLIGO design curves stay available as
+    named profiles. A LIGO-only profile refuses Virgo by name."""
+    with pytest.raises(ValueError, match="ZERO_DET_HIGH_POWER has no curve for V1"):
+        gf.NoiseProfile.ZERO_DET_HIGH_POWER.path(gf.IFO.V1)
     for profile, ifo, source in [
+        (gf.NoiseProfile.ZERO_DET_HIGH_POWER, gf.IFO.H1, "aLIGOZeroDetHighPower"),
+        (gf.NoiseProfile.ZERO_DET_HIGH_POWER, gf.IFO.L1, "LIGO-T0900288-v3"),
         (gf.NoiseProfile.O3_LOW, gf.IFO.H1, "aLIGOO3LowT1800545"),
         (gf.NoiseProfile.O3_LOW, gf.IFO.L1, "aLIGOO3LowT1800545"),
         (gf.NoiseProfile.O3_LOW, gf.IFO.V1, "AdVO3LowT1800545"),
@@ -247,7 +252,7 @@ def test_noise_profiles_are_per_detector_with_provenance():
         assert source in _header(profile.path(ifo)), f"{profile.name} {ifo.name} does not name {source}"
 
     grid = np.geomspace(20.0, 2000.0, 200)
-    for profile in gf.NoiseProfile:
+    for profile in (p for p in gf.NoiseProfile if p.covers(gf.IFO.V1)):
         f_h, asd_h = _profile(gf.IFO.H1, profile)
         f_v, asd_v = _profile(gf.IFO.V1, profile)
         assert np.max(np.abs(np.log(np.interp(grid, f_v, asd_v) / np.interp(grid, f_h, asd_h)))) > 0.1
