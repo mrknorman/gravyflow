@@ -181,7 +181,17 @@ def test_the_efficiency_tab_restores_the_owners_plot(validated):
     labels = {item.label.value for item in main.legend[0].items}
     assert {"Tiny (rolling ±0.5 SNR)", "Tiny (1σ, pointwise)", "Tiny (2σ, pointwise)", "Tiny (sigmoid fit)",
             "Tiny (50% and 90% SNR, 1σ)", "Tiny (50% and 90% SNR, 2σ)", "Tiny (threshold)",
-            "Tiny (volume set, cross-check)"} <= labels
+            "Tiny (volume set, cross-check)", "Tiny (binned, 1σ and 2σ)"} <= labels
+    # The binned points (removed on 16 October, restored): a point per bin with its 1 and 2 sigma
+    # error bars, under a hover of their own that names both levels.
+    from bokeh.models import HoverTool, Scatter, Segment
+    binned = [item for item in main.legend[0].items if item.label.value == "Tiny (binned, 1σ and 2σ)"][0]
+    glyphs = [type(r.glyph) for r in binned.renderers]
+    assert glyphs.count(Segment) == 2 and glyphs.count(Scatter) == 1
+    points = next(r for r in binned.renderers if isinstance(r.glyph, Scatter))
+    hovers = [tool for tool in main.tools if isinstance(tool, HoverTool) and points in (tool.renderers or [])]
+    assert len(hovers) == 1 and {"1σ", "2σ", "Injections"} <= {label for label, _ in hovers[0].tooltips}
+    assert set(points.data_source.data) >= {"x", "y", "n", "lower_0", "upper_0", "lower_1", "upper_1"}
     assert main.legend[0].click_policy == "hide" and main.xaxis.axis_label_text_font_size == "21pt"
     select, slider = controls.children
     assert isinstance(select, Select) and isinstance(slider, Slider)

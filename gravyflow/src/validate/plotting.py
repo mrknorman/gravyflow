@@ -26,7 +26,7 @@ from holoviews.operation.datashader import datashade
 import holoviews.operation.datashader
 
 import gravyflow as gf
-from .metrics import ROLLING_HALF_WIDTH, sigma_level
+from .metrics import MIN_BACKGROUND_EVENTS, ROLLING_HALF_WIDTH, sigma_level
 from .utils import downsample_data
 
 logger = logging.getLogger(__name__)
@@ -533,6 +533,7 @@ def generate_far_curves(
         ("False Alarm Rate (Hz)", "@y{0.0e}"),
         ("1σ (Hz)", "@lower_0{0.0e} – @upper_0{0.0e}"),
         ("2σ (Hz)", "@lower_1{0.0e} – @upper_1{0.0e}"),
+        ("Independent events", "@events"),
     ]
     p = figure(
         width=width,
@@ -553,12 +554,18 @@ def generate_far_curves(
             x=curves[0].thresholds[keep], y=curves[0].rate_hz[keep],
             **{f"lower_{j}": curve.lower_hz[keep] for j, curve in enumerate(curves)},
             **{f"upper_{j}": curve.upper_hz[keep] for j, curve in enumerate(curves)},
+            events=curves[0].counts[keep] // curves[0].data_reuse,
         ))
         title = _title(validator, index)
         for j, sigma in reversed(list(enumerate(sigmas))):
             p.varea(x="x", y1=f"lower_{j}", y2=f"upper_{j}", source=source, fill_color=color,
                     fill_alpha=_band_alpha(sigma), legend_label=f"{title} ({_sigma_label(sigma)})")
         p.line("x", "y", source=source, line_color=color, line_width=2, legend_label=title)
+        # The rates below the standard's floor: plotted, marked, never quoted.
+        thin = ~curves[0].quotable[keep]
+        if thin.any():
+            p.scatter(x=curves[0].thresholds[keep][thin], y=curves[0].rate_hz[keep][thin], marker="x", size=8,
+                      color=color, legend_label=f"{title} (not quoted: < {MIN_BACKGROUND_EVENTS} independent events)")
     _style(p, "bottom_left")
     return p
 
@@ -632,6 +639,7 @@ def generate_sensitive_volume_plot(
         ("Injections 1σ", "@injection_lower_0{0.000} – @injection_upper_0{0.000}"),
         ("Background 1σ", "@background_lower_0{0.000} – @background_upper_0{0.000}"),
         ("Noise alone finds", "@chance_volume{0.000}"),
+        ("Independent background events", "@events"),
     ]
     figures = [
         figure(width=width, height=height, x_axis_type="log", x_axis_label="False Alarm Rate (per month)",
@@ -667,6 +675,7 @@ def generate_sensitive_volume_plot(
                 x_upper=curve.far_upper_hz[0, ok] * SECONDS_PER_MONTH,
                 y=convert(within[ok]),
                 chance_volume=convert(curve.chance_gpc3[ok]),
+                events=curve.background_events[ok],
                 **{f"{term}_{end}_{j}": convert(np.clip(getattr(curve, f"{term}_{end}_gpc3")[j, ok], 0.0, None))
                    for term in ("joint", "injection", "background") for end in ("lower", "upper")
                    for j in range(len(sigmas))},
@@ -680,11 +689,16 @@ def generate_sensitive_volume_plot(
             p.scatter("x", "y", source=source, size=6, color=color, legend_label=title)
             p.line("x", "chance_volume", source=source, line_color=color, line_dash="dashed",
                    legend_label=f"{name} (noise alone finds; subtracted)")
-            marked = ~curve.quotable[ok]
+            marked = curve.chance_dominated[ok]
             if marked.any():
                 p.scatter(x=curve.far_hz[ok][marked] * SECONDS_PER_MONTH, y=convert(within[ok][marked]),
                           size=14, marker="circle", fill_alpha=0, line_color=color, line_width=2,
                           legend_label=f"{name} (not quoted: noise alone > {curve.chance_fraction:.0%} of found)")
+            thin = ~curve.enough_background[ok]
+            if thin.any():
+                p.scatter(x=curve.far_hz[ok][thin] * SECONDS_PER_MONTH, y=convert(within[ok][thin]),
+                          size=16, marker="square", fill_alpha=0, line_color=color, line_width=2,
+                          legend_label=f"{name} (not quoted: < {MIN_BACKGROUND_EVENTS} independent background events)")
 
         # The found fraction against chirp distance, at each resolved target.
         injections = validator.injection_volumes()
@@ -1404,8 +1418,13 @@ def generate_efficiency_plot(
       sigmoid fit (dashed), and its 50% and 90% SNR points marked with their 1 sigma
       (thick) and 2 sigma (thin) bootstrap error bars; and the volume set's own rolling
       curve (dotted), a cross-check;
+    - for each model, the binned record: a point per SNR bin at its injections' mean
+      SNR, with its 1 sigma (thick) and 2 sigma (thin) bands as error bars and its own
+      hover;
     - a FAR slider over every level the background resolves, and a powers-of-ten
-      selector that moves it; click a legend entry to hide it.
+      selector that moves it; click a legend entry to hide it. A FAR with fewer than
+      `MIN_BACKGROUND_EVENTS` independent background events is shown and marked as not
+      quoted (and dashed in the levels plot below).
 
     Below it, the primary model's rolling curve at each power of ten of FAR the
     background resolves, one curve per level with its 1 sigma band.
@@ -1444,7 +1463,7 @@ def generate_efficiency_plot(
         p.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source=density_source, y_range_name="score",
                      level="underlay")
 
-    all_data, sources, thresholds, threshold_sources, threshold_labels = {}, {}, {}, {}, {}
+    all_data, sources, thresholds, threshold_sources, threshold_labels, notes = {}, {}, {}, {}, {}, {}
     far_keys: List[str] = []
     hovered = []
     for index, (validator, color) in enumerate(zip(validators, cycle(colors))):
@@ -1461,7 +1480,12 @@ def generate_efficiency_plot(
             rolling, fit = result.rolling, result.fit
             fitted = np.isfinite(fit.snr_50)
             points = [fit.snr_50, fit.snr_90]
+            binned = result.binned
+            shown = np.isfinite(binned.efficiency)
             curves[key] = dict(
+                binned=dict(x=binned.snr_mean[shown], y=binned.efficiency[shown], n=binned.total[shown],
+                            **{f"lower_{j}": binned.lower[j][shown] for j in range(len(sigmas))},
+                            **{f"upper_{j}": binned.upper[j][shown] for j in range(len(sigmas))}),
                 rolling=dict(x=rolling.snr, y=rolling.efficiency, n=rolling.total,
                              **{f"lower_{j}": rolling.lower[j] for j in range(len(sigmas))},
                              **{f"upper_{j}": rolling.upper[j] for j in range(len(sigmas))}),
@@ -1474,11 +1498,16 @@ def generate_efficiency_plot(
                        else dict(x=np.array([]), y=np.array([]))),
             )
             model_thresholds[key] = float(result.threshold.threshold)
+            if validator is primary:
+                notes[key] = ("" if result.quotable or not result.threshold.resolved else
+                              f"Not quoted at this FAR: {result.threshold.independent_events} independent background "
+                              f"events at or above its threshold, fewer than {MIN_BACKGROUND_EVENTS}")
             if result.threshold.resolved and validator is primary and key not in far_keys:
                 far_keys.append(key)
         all_data[name], thresholds[name] = curves, model_thresholds
         empty = lambda part: {k: np.array([]) for k in next(iter(curves.values()))[part]}
-        sources[name] = {part: ColumnDataSource(data=empty(part)) for part in ("rolling", "fit", "points", "cross")}
+        sources[name] = {part: ColumnDataSource(data=empty(part))
+                         for part in ("binned", "rolling", "fit", "points", "cross")}
         rolling_source, points_source = sources[name]["rolling"], sources[name]["points"]
         for j, sigma in reversed(list(enumerate(sigmas))):
             p.varea(x="x", y1=f"lower_{j}", y2=f"upper_{j}", source=rolling_source, fill_color=color,
@@ -1493,6 +1522,19 @@ def generate_efficiency_plot(
                       line_width=6 if j == 0 else 2, legend_label=f"{name} (50% and 90% SNR, {_sigma_label(sigma)})")
         p.scatter(x="x", y="y", source=points_source, size=12, marker="diamond", color=color,
                   legend_label=f"{name} (50% and 90% SNR, {_sigma_label(sigmas[0])})")
+        # The binned record (the owner's dashboard before 16 October): each bin's point at its injections' mean
+        # SNR with its 1 and 2 sigma bands as error bars, under its own hover.
+        binned_source = sources[name]["binned"]
+        binned_label = f"{name} (binned, {' and '.join(_sigma_label(s) for s in sigmas)})"
+        for j, sigma in enumerate(sigmas):
+            p.segment(x0="x", x1="x", y0=f"lower_{j}", y1=f"upper_{j}", source=binned_source, line_color=color,
+                      line_width=4 if j == 0 else 1.5, alpha=0.8, legend_label=binned_label)
+        binned_points = p.scatter(x="x", y="y", source=binned_source, size=9, marker="square", color=color,
+                                  legend_label=binned_label)
+        p.add_tools(HoverTool(renderers=[binned_points], tooltips=[
+            ("Bin mean SNR", "@x{0.00}"), ("Efficiency (binned)", "@y{0.000}"),
+            *[(_sigma_label(s), f"@lower_{j}{{0.000}} – @upper_{j}{{0.000}}") for j, s in enumerate(sigmas)],
+            ("Injections", "@n")]))
         if cross is not None:
             p.line(x="x", y="y", source=sources[name]["cross"], line_width=2, color=color, line_dash="dotted",
                    legend_label=f"{name} (volume set, cross-check)")
@@ -1502,6 +1544,9 @@ def generate_efficiency_plot(
         threshold_labels[name] = Label(x=5, y=score_range[0], x_units="screen", y_range_name="score", text="",
                                        text_font_size="15pt", text_color=color, x_offset=5)
         p.add_layout(threshold_labels[name])
+    note = Label(x=10, y=10, x_units="screen", y_units="screen", text="", text_font_size="15pt",
+                 text_color="#ff6666")
+    p.add_layout(note)
     if hovered:
         p.add_tools(HoverTool(renderers=hovered, tooltips=[
             ("SNR", "@x{0.0}"), ("Efficiency", "@y{0.000}"), ("1σ", "@lower_0{0.000} – @upper_0{0.000}"),
@@ -1534,12 +1579,14 @@ def generate_efficiency_plot(
             counts = density_source.data["counts"][0].reshape(DENSITY_CELLS, DENSITY_CELLS)
             density_source.data["image"] = [_paint_density(counts, score_range[0], score_range[1] - score_range[0],
                                                            threshold)]
+        note.text = notes.get(key, "")
 
     if far_keys:
         show(far_keys[first])
     slider.js_on_change("value", CustomJS(
         args=dict(sources=sources, all_data=all_data, far_options=far_keys, thresholds=thresholds,
                   threshold_sources=threshold_sources, threshold_labels=threshold_labels, density=density_source,
+                  note=note, notes=notes,
                   primary=_title(primary, len(validators) - 1) if primary is not None else "",
                   labels={key: _far_display(key) for key in far_keys}),
         code=_DENSITY_JS + """
@@ -1559,6 +1606,7 @@ def generate_efficiency_plot(
             }
         }
         if (density) { paint(density, thresholds[primary][key]); }
+        note.text = notes[key] || "";
         """))
     select.js_on_change("value", CustomJS(args=dict(slider=slider, far_options=far_keys), code="""
         const chosen = Math.log10(parseFloat(cb_obj.value));
@@ -1585,15 +1633,27 @@ def _efficiency_levels_plot(validator, decades, width: int):
     results = validator.efficiency_curves([float(key) for key, _ in decades])
     palette = Viridis[max(len(decades), 3)]
     for (key, label), color in zip(decades, palette):
-        rolling = results[float(key)].rolling
+        result = results[float(key)]
+        rolling = result.rolling
+        if not result.quotable:
+            label = f"{label} (not quoted: < {MIN_BACKGROUND_EVENTS} independent background events)"
         source = ColumnDataSource(data=dict(x=rolling.snr, y=rolling.efficiency, lower=rolling.lower[0],
                                             upper=rolling.upper[0]))
         p.varea(x="x", y1="lower", y2="upper", source=source, fill_color=color, fill_alpha=0.25,
                 legend_label=f"{label} ({_sigma_label(rolling.sigmas[0])})")
-        p.line(x="x", y="y", source=source, line_width=3, color=color, legend_label=label)
+        p.line(x="x", y="y", source=source, line_width=3, color=color, legend_label=label,
+               line_dash="solid" if result.quotable else "dashed")
     _legend_beside(p)
     p.title.text_font_size = "16pt"
     return p
+
+
+def _far_note(event: dict) -> str:
+    """An event's FAR is quoted only with at least `MIN_BACKGROUND_EVENTS` independent background events at or above its score."""
+    events = event.get("far_background_events")
+    if events is None or int(events) >= MIN_BACKGROUND_EVENTS:
+        return ""
+    return f" (not quoted: {int(events)} independent background events, fewer than {MIN_BACKGROUND_EVENTS})"
 
 
 def generate_real_events_table(
@@ -1670,8 +1730,10 @@ def generate_real_events_table(
             "M₂ (M☉)": safe_fmt("mass2", ".1f"),
             "D (Mpc)": safe_fmt("distance", ".0f"),
             "p(astro)": safe_fmt("p_astro", ".2f"),
+            "p(BBH)": safe_fmt("p_bbh", ".2f"),
+            "p(BNS)": safe_fmt("p_bns", ".2f"),
             "Score": f"{score:.3f}" if score is not None else "Pending",
-            "FAR (Hz)": f"{far_hz:.1e} [{intervals}]" if far_hz is not None else "-",
+            "FAR (Hz)": (f"{far_hz:.1e} [{intervals}]" + _far_note(event)) if far_hz is not None else "-",
             "_score_num": score if score is not None else -1,
             "_type": event.get("event_type", "Unknown"),
         }
@@ -1704,7 +1766,8 @@ def generate_real_events_table(
     )
     
     # Display columns (exclude internal columns)
-    display_cols = ["Name", "Type", "Run", "Date", "M₁ (M☉)", "M₂ (M☉)", "D (Mpc)", "p(astro)", "Score", "FAR (Hz)"]
+    display_cols = ["Name", "Type", "Run", "Date", "M₁ (M☉)", "M₂ (M☉)", "D (Mpc)", "p(astro)", "p(BBH)", "p(BNS)",
+                    "Score", "FAR (Hz)"]
     
     # Summary stats
     num_confident = len(confident)
@@ -1800,6 +1863,8 @@ def generate_real_events_table(
                 <b>M2:</b> {safe_val('mass2', '.1f')} M☉<br>
                 <b>Dist:</b> {safe_val('distance', '.0f')} Mpc<br>
                 <b>p(astro):</b> {safe_val('p_astro', '.2f')}<br>
+                <b>p(BBH):</b> {safe_val('p_bbh', '.2f')}<br>
+                <b>p(BNS):</b> {safe_val('p_bns', '.2f')}<br>
                 <b>Status:</b> {event.get('event_type', 'Unknown')}
             </div>
             """

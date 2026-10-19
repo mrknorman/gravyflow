@@ -36,7 +36,11 @@ def test_generate_spectrogram_puts_a_tone_at_its_frequency():
 
 
 def test_the_real_events_report_shows_each_events_p_astro():
-    """The event list gives p_astro; the real-events table and parameter box show it."""
+    """
+    The event list gives p_astro; the real-events table and parameter box show it, beside
+    p(BBH) and p(BNS) (the owner's columns, kept: "-" where the list gives none). An event's FAR
+    with fewer than ten independent background events at or above its score is marked not quoted.
+    """
     import panel as pn
     from gravyflow.src.validate.plotting import generate_real_events_table
 
@@ -50,8 +54,18 @@ def test_the_real_events_report_shows_each_events_p_astro():
     layout, _ = generate_real_events_table([event], input_duration_seconds=1.0)
     table = next(item for item in layout if isinstance(item, pn.widgets.DataFrame))
     assert table.value["p(astro)"].tolist() == ["0.97"]
+    assert table.value["p(BBH)"].tolist() == ["-"] and table.value["p(BNS)"].tolist() == ["-"]
+    columns = list(table.value.columns)
+    assert columns.index("p(astro)") + 1 == columns.index("p(BBH)") == columns.index("p(BNS)") - 1
     assert table.value["FAR (Hz)"].tolist() == ["1.0e-03 [5.0e-04–2.0e-03 (1σ), 2.0e-04–4.0e-03 (2σ)]"]
     boxes = [pane.object for row in layout if isinstance(row, pn.Row)
              for pane in row if isinstance(pane, pn.pane.HTML)]
     assert len(boxes) == 1 and "<b>p(astro):</b> 0.97" in boxes[0]
+    assert "<b>p(BBH):</b> -" in boxes[0] and "<b>p(BNS):</b> -" in boxes[0]
+    classified = {**event, "p_bbh": 0.95, "p_bns": 0.01, "far_background_events": 3}
+    layout, _ = generate_real_events_table([classified], input_duration_seconds=1.0)
+    table = next(item for item in layout if isinstance(item, pn.widgets.DataFrame))
+    assert table.value["p(BBH)"].tolist() == ["0.95"] and table.value["p(BNS)"].tolist() == ["0.01"]
+    assert table.value["FAR (Hz)"].tolist()[0].endswith(
+        "(not quoted: 3 independent background events, fewer than 10)")
 

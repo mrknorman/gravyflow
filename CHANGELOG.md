@@ -192,6 +192,19 @@ repository before it may need the changes below.
   drawn on it, the check that the reach is long enough. The volume is Euclidean (no cosmology) and the masses are in
   the detector frame, as in MLGWSC-1's `evaluate.py`. A burst population, or WHITE noise, has none. Records are
   format 6.
+- **Nothing is quoted below ten independent background events.** The standard's rule, for every rate, volume and
+  efficiency: a point is quoted only where at least `MIN_BACKGROUND_EVENTS` (10) independent background events,
+  `floor(count / data_reuse)`, lie at or above its threshold (`FarThreshold.quotable`, `FarCurve.quotable`,
+  `EfficiencyAgainstSnr.quotable`, `SensitiveVolumeCurve.background_events` and `quotable`; a real event's
+  `far_background_events`). Below it the point is computed, plotted and marked, and `quote` refuses it by name.
+- **A target's threshold has the target's FAR on average.** `Background.threshold_for_far` puts the threshold for a
+  target allowing `k` triggers at the `k`-th loudest (it was just above the `(k+1)`-th, a true FAR `(k+1)/k` the
+  target's: 10% high at the ten-event floor). Its bootstrap (`bootstrap_thresholds`) follows it; the FAR band's ends
+  (`far_band_thresholds`) are unchanged.
+- **The new parameters of the efficiency and volume functions are keyword-only.** `efficiency_curve`'s fifth
+  positional argument was `confidence`: everything after `bin_edges` is keyword-only (`chance`, `sigmas`,
+  `method`), so an old call fails by name instead of reading a confidence as a chance. So are the options of
+  `rolling_efficiency_curve`, `fit_efficiency_sigmoid`, `efficiency_against_snr` and `sensitive_volume_curve`.
 - **Efficiency against SNR, the owner's rolling curve.** `Validator.efficiency_curves()` gives, at each target FAR,
   the rolling efficiency (a window of ±0.5 in SNR at 50 points, `rolling_efficiency_curve`) with pointwise bands, a
   sigmoid fit with its 50% and 90% SNR points and their bootstrap intervals (`fit_efficiency_sigmoid`), and the
@@ -225,6 +238,18 @@ repository before it may need the changes below.
 
 ### Fixed
 
+- **The volume's and efficiency's bootstrap no longer undercovers at loose FARs.** Each replicate drew its own chance
+  of a noise-only pass from its law at the replicate's threshold, independently of the found volume, losing their
+  correlation (1σ coverage 0.60 at 1e-2 Hz). It now subtracts the estimator's chance, which the target fixes.
+- **The volume's background interval holds V at every threshold of its band**, not only at the band's two ends (V
+  need not be monotone in the threshold).
+- **The reach searches the relative azimuth of the two in-plane spins** (body 2's at six azimuths to body 1's), keeps
+  every spin candidate physical (`|chi| <= 1`: a corner of separately bounded components could reach 1.13 and inflate
+  the reach), and, where the loudest orientation is searched rather than face-on, sets the reach `SEARCH_MARGIN`
+  (1%) past the search's best case, the largest gap a brute force found (0.6% at two bodies of 95).
+- **The dashboard keeps what it had.** The efficiency tab draws the binned points again, with their 1σ and 2σ bands
+  as error bars and their hover; the real-events table and parameter box show p(BBH) and p(BNS) beside p(astro);
+  points not quoted for want of background are marked on every plot.
 - O4's GWTC releases (GWTC-4.0 and GWTC-4.1 for O4a, GWTC-5.0 for O4b) were read as neither confident nor
   marginal: the event-time queries by confidence left them out (the noise vetoes always held them). They are
   confident catalogues now.

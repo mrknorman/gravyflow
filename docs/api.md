@@ -229,7 +229,8 @@ validates as it trains: they need the `viz` extra.
   50% and 90% SNR points, the binned record), false-alarm rate, sensitive volume and distance within the per-mass
   reach against false-alarm rate (Euclidean, detector-frame masses; on injections uniform in chirp distance out to
   the chirp reach, weighted by chirp mass, with injection, background and joint intervals), every interval at 1σ
-  and 2σ and the chance of a noise-only pass subtracted, ROC and the dashboard.
+  and 2σ and the chance of a noise-only pass subtracted, each quoted only with at least ten independent background
+  events at or above its threshold, ROC and the dashboard.
 - `ValidationConfig`: the settings of a validation.
 
 ## Plotting (the `viz` extra)

@@ -28,7 +28,7 @@ from tqdm import tqdm
 
 import gravyflow as gf
 from .config import ValidationConfig
-from .metrics import Background, ScoreStream, logit_scores, sigma_level
+from .metrics import Background, ScoreStream, independent_events, logit_scores, sigma_level
 from .slides import TimeSlideBackground, TimeSlides
 from .volume import uniform_in_volume
 from .utils import _extract_sample_data
@@ -543,7 +543,9 @@ class ValidationBank:
                 # The FAR's interval at each level of interval_sigmas: (levels, 2).
                 event.update(score=float(s), status="scored", far_hz=fars[0].rate_hz,
                              far_interval_hz=np.array([[far.lower_hz, far.upper_hz] for far in fars]),
-                             far_sigmas=np.array(self.config.interval_sigmas))
+                             far_sigmas=np.array(self.config.interval_sigmas),
+                             # Quoted only with MIN_BACKGROUND_EVENTS independent events at or above it.
+                             far_background_events=int(independent_events(fars[0].count, background.data_reuse)))
                 if whitened is not None:
                     event["whitened_strain"] = np.asarray(whitened[i])
         self.real_events = events
