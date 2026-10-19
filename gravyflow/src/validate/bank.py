@@ -21,7 +21,7 @@ import logging
 import math
 from copy import deepcopy
 from functools import cached_property
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
 import numpy as np
 from tqdm import tqdm
@@ -34,6 +34,12 @@ from .volume import uniform_in_volume
 from .utils import _extract_sample_data
 
 logger = logging.getLogger(__name__)
+
+
+class Heartbeat(Protocol):
+    """What the validator beats as it scores, for a supervisor that watches the process: anything with ``beat()``."""
+
+    def beat(self) -> None: ...
 
 # Per-example labels of the injection set, by attribute name.
 _INJECTION_LABELS = {
@@ -125,7 +131,7 @@ class ValidationBank:
         model,
         dataset_args: dict,
         config: Optional[ValidationConfig] = None,
-        heart: Optional[gf.Heart] = None,
+        heart: Optional[Heartbeat] = None,
     ):
         require_logit_model(model)
         if not dataset_args.get("input_variables"):
@@ -134,6 +140,10 @@ class ValidationBank:
         self.dataset_args = dataset_args
         self.config = config or ValidationConfig()
         self.heart = heart
+        if self.has_volume and self.config.volume_reach_mpc is None:
+            # A population with no loudest source has no reach: refused here, before any stage runs.
+            from .reach import population_box
+            population_box(self._generator())
 
         self.far_scores: Optional[np.ndarray] = None
         self.noise_gps_times: Optional[np.ndarray] = None
@@ -301,11 +311,15 @@ class ValidationBank:
         self.noise_gps_times = np.concatenate(gps)[: self.config.num_examples] if gps else None
         self._worst_false_positives = [sample for _, sample in sorted(heap, key=lambda t: t[0], reverse=True)]
 
+    def _generators(self) -> list:
+        """The dataset's waveform generators, as a list."""
+        generators = self.dataset_args.get("waveform_generators")
+        return [g for g in (generators if isinstance(generators, list) else [generators]) if g is not None]
+
     def _generator(self):
         """A copy of the one waveform generator the injection sets draw from."""
-        generators = self.dataset_args.get("waveform_generators")
-        generators = generators if isinstance(generators, list) else [generators]
-        if len(generators) != 1 or generators[0] is None:
+        generators = self._generators()
+        if len(generators) != 1:
             raise ValueError("The injection set takes exactly one waveform generator.")
         return deepcopy(generators[0])
 
@@ -368,7 +382,8 @@ class ValidationBank:
         (not WHITE, which is dimensionless).
         """
         noise = self.dataset_args.get("noise_obtainer")
-        return (isinstance(self._generator(), gf.CBCGenerator)
+        generators = self._generators()
+        return (len(generators) == 1 and isinstance(generators[0], gf.CBCGenerator)
                 and getattr(noise, "noise_type", None) is not gf.NoiseType.WHITE)
 
     def reach_distance(self) -> float:
@@ -407,7 +422,7 @@ class ValidationBank:
         """
         cfg = self.config
         if not self.has_volume:
-            raise ValueError("Only a CBC population in noise of physical strain has a sensitive volume.")
+            raise ValueError("Only one CBC population in noise of physical strain has a sensitive volume.")
         n = cfg.num_volume_injections
         reach = cfg.volume_reach_mpc or self.reach_distance()
         targets = uniform_in_volume(n, reach, gf.SeedTree(cfg.seed).stream(cfg.group, "validator/distance"))

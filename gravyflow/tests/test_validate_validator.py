@@ -222,6 +222,28 @@ def test_the_reach_refuses_a_population_it_cannot_bound(dataset_args):
         population_box(precessing)
 
 
+def test_a_population_with_no_reach_is_refused_before_any_stage_runs(dataset_args, tmp_path):
+    # A precessing or unbounded population has no loudest source, so no reach: the validator
+    # refuses it as it is built, before it scores a window or writes a checkpoint. A reach
+    # set by hand needs no loudest source.
+    precessing = deepcopy(dataset_args)
+    precessing["waveform_generators"].approximant = gf.Approximant.IMRPhenomPv2
+    precessing["waveform_generators"].spin_1_in = (
+        gf.Distribution(min_=0.0, max_=0.5, type_=gf.DistributionType.UNIFORM), 0.0, 0.0)
+    unbounded = deepcopy(dataset_args)
+    unbounded["waveform_generators"].mass_1_msun = gf.Distribution(mean=30.0, std=5.0,
+                                                                   type_=gf.DistributionType.NORMAL)
+    config = ValidationConfig(num_examples=32, batch_size=32)
+    model = logit_model(1)
+    path = tmp_path / "validation.h5"
+    with mock.patch.object(model, "predict_on_batch", side_effect=AssertionError("a window was scored")):
+        for args, match in ((precessing, "spin_1_in has in-plane components"), (unbounded, "mass_1_msun is unbounded")):
+            with pytest.raises(ValueError, match=match):
+                Validator.validate(model, "no reach", args, config, path)
+            assert not path.exists()
+    ValidationBank(model, precessing, dataclasses.replace(config, volume_reach_mpc=500.0))
+
+
 def test_the_network_bound_is_the_best_response_each_detector_can_have():
     # One detector: a face-on source overhead is within it at every polarisation angle,
     # and reaches it at the best; two detectors of one PSD, root two times it.
@@ -359,6 +381,23 @@ def test_checkpoint_without_provenance_is_refused(tmp_path, dataset_args, small_
     # Written before checkpoints had formats: refused, and said so.
     with pytest.raises(StaleCheckpointError, match="has no format version"):
         Validator.validate(logit_model(1), "tiny", dataset_args, small_config, path)
+
+
+def test_the_heart_is_anything_that_beats(dataset_args):
+    # The validator's annotations name no class gravyflow does not have: they resolve, and the
+    # heart it beats as it scores is any object with a beat() method.
+    import typing
+
+    from gravyflow.src.validate.bank import Heartbeat
+
+    for function in (ValidationBank.__init__, Validator.validate):
+        hints = typing.get_type_hints(function, localns={"keras": keras})
+        assert hints["heart"] == typing.Optional[Heartbeat]
+    beats = []
+    heart = type("Pulse", (), {"beat": lambda self: beats.append(1)})()
+    bank = ValidationBank(logit_model(1), dataset_args, ValidationConfig(num_examples=32, batch_size=16), heart)
+    bank.generate_noise()
+    assert len(beats) == 2
 
 
 def test_probability_models_are_refused(dataset_args):

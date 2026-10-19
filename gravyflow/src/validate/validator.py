@@ -10,7 +10,7 @@ import h5py
 import numpy as np
 
 import gravyflow as gf
-from .bank import ValidationBank, noise_background
+from .bank import Heartbeat, ValidationBank, noise_background
 from .config import ValidationConfig, check_held_out, run_record_of
 from .metrics import Background, EfficiencyCurve, FarThreshold, efficiency_curve, roc_curve
 from .provenance import StaleCheckpointError, model_fingerprint, require_match
@@ -84,7 +84,7 @@ class Validator:
         dataset_args: dict,
         config: Optional[ValidationConfig] = None,
         checkpoint_file_path: Optional[Path] = None,
-        heart: Optional[gf.Heart] = None,
+        heart: Optional[Heartbeat] = None,
     ) -> "Validator":
         """
         Score ``model`` and return its results.
