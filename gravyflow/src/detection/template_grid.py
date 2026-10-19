@@ -13,6 +13,8 @@ masses for a 16 x 16 grid over 5-95), so it is kept only as a simple utility.
 
 import hashlib
 import json
+import logging
+import time
 import warnings
 from dataclasses import asdict, dataclass
 from functools import lru_cache
@@ -27,6 +29,10 @@ from gravyflow.src.dataset.conditioning.detector import DEFAULT_NOISE_PROFILE
 
 #: G M_sun / c^3: a solar mass in seconds.
 SOLAR_MASS_SECONDS = 4.925490947e-6
+
+# A placement's progress (templates kept, candidates offered, seconds), at
+# INFO every 64 rounds: a long placement is sized from it while it runs.
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -119,8 +125,13 @@ def cbc_templates(
     (`_generate_cbc_window`), with the merger at the centre of a
     `window_seconds` buffer, whole from `lower_frequency_hertz` and tapered
     below it. Unit-peak rows, float32, shape (n, samples).
+
+    The waveforms are computed on the host's CPU (`cbc_device`), in float64,
+    whatever JAX's default device: an accelerator may have no float64 (Apple
+    GPUs have none), as a dataset's CBC stage runs on the host.
     """
     from gravyflow.src.dataset.features.waveforms.cbc import Approximant, _generate_cbc_window
+    from gravyflow.src.rng.platform import cbc_device
     approximant = Approximant.IMRPhenomD if approximant is None else approximant
     mass_1 = np.atleast_1d(np.asarray(mass_1, dtype=np.float64))
     mass_2 = np.atleast_1d(np.asarray(mass_2, dtype=np.float64))
@@ -130,21 +141,22 @@ def cbc_templates(
         spins[name] = np.zeros((n, 3))
         if value is not None:
             spins[name][:, 2] = value
-    waveforms = _generate_cbc_window(
-        num_waveforms=n,
-        sample_rate_hertz=float(sample_rate_hertz),
-        window_seconds=float(window_seconds),
-        min_frequency_hertz=np.full(n, float(lower_frequency_hertz)),
-        approximant=approximant,
-        f_ref=float(lower_frequency_hertz),
-        mass_1_msun=mass_1,
-        mass_2_msun=mass_2,
-        distance_mpc=np.full(n, 100.0),
-        reference_orbital_phase_in=np.zeros(n),
-        inclination_radians=np.zeros(n),
-        **spins,
-    )
-    plus = np.asarray(waveforms[:, 0, :], dtype=np.float64)
+    with jax.default_device(cbc_device()):
+        waveforms = _generate_cbc_window(
+            num_waveforms=n,
+            sample_rate_hertz=float(sample_rate_hertz),
+            window_seconds=float(window_seconds),
+            min_frequency_hertz=np.full(n, float(lower_frequency_hertz)),
+            approximant=approximant,
+            f_ref=float(lower_frequency_hertz),
+            mass_1_msun=mass_1,
+            mass_2_msun=mass_2,
+            distance_mpc=np.full(n, 100.0),
+            reference_orbital_phase_in=np.zeros(n),
+            inclination_radians=np.zeros(n),
+            **spins,
+        )
+        plus = np.asarray(waveforms[:, 0, :], dtype=np.float64)
     peak = np.max(np.abs(plus), axis=-1, keepdims=True)
     return (plus / np.where(peak > 0, peak, 1.0)).astype(np.float32)
 
@@ -331,6 +343,50 @@ def pair_matches(a: np.ndarray, b: np.ndarray, rows_a, rows_b, chunk: int = 256)
         bi = np.pad(b[rb], ((0, pad), (0, 0)))
         out[k:k + len(ra)] = np.asarray(_pair_overlap(jnp.asarray(ai), jnp.asarray(bi)))[:len(ra)]
     return out
+
+
+class _RowStore:
+    """
+    Rows of one width, appended in blocks and read by index like an array.
+
+    A placement's template spectra (each row 393 kB at the streaming bank's
+    span) grow to gigabytes: appended to one array, every round would copy the
+    whole bank and hold it twice. Here a block is filled in place and a full
+    one is never copied again.
+    """
+
+    def __init__(self, width: int, block_rows: int = 512, dtype=np.complex64):
+        self.width, self.block_rows, self.dtype = int(width), int(block_rows), dtype
+        self.blocks, self.size = [], 0
+
+    def __len__(self) -> int:
+        return self.size
+
+    def extend(self, rows: np.ndarray) -> None:
+        rows = np.asarray(rows, dtype=self.dtype)
+        done = 0
+        while done < len(rows):
+            if self.size == len(self.blocks) * self.block_rows:
+                self.blocks.append(np.empty((self.block_rows, self.width), dtype=self.dtype))
+            block, at = divmod(self.size, self.block_rows)
+            count = min(self.block_rows - at, len(rows) - done)
+            self.blocks[block][at:at + count] = rows[done:done + count]
+            done += count
+            self.size += count
+
+    def __getitem__(self, index) -> np.ndarray:
+        """The rows at `index` (an integer array), or every row (a slice `[:]`)."""
+        if isinstance(index, slice):
+            index = np.arange(self.size)[index]
+        index = np.asarray(index, dtype=np.int64)
+        if index.size and (index.min() < 0 or index.max() >= self.size):
+            raise IndexError("row index out of range")
+        out = np.empty(index.shape + (self.width,), dtype=self.dtype)
+        block, at = np.divmod(index, self.block_rows)
+        for b in np.unique(block):
+            where = block == b
+            out[where] = self.blocks[b][at[where]]
+        return out
 
 
 def nearest(coordinates: np.ndarray, to: np.ndarray, count: int) -> np.ndarray:
@@ -560,7 +616,12 @@ class TemplateBank:
                 if stale and _settings(record["arguments"]) == _settings(key):
                     warnings.warn(f"The bundled bank for these arguments was placed with another {' and '.join(stale)} "
                                   "(regenerate it with gravyflow.src.detection.bundle_banks); placing a new bank.")
-        m1, m2, s1, s2, tried, acceptance = _stochastic_placement(placement, int(max_templates))
+        from gravyflow.src.rng.platform import cbc_device
+        # On the host's CPU whatever the default device, so a bank's bits do
+        # not depend on it (an accelerator was no faster: the matches move
+        # more data than they compute).
+        with jax.default_device(cbc_device()):
+            m1, m2, s1, s2, tried, acceptance = _stochastic_placement(placement, int(max_templates))
         return cls(m1, m2, s1, s2, placement=placement, candidates_tried=tried, final_acceptance=acceptance)
 
     def fitting_factors(self, mass_1, mass_2, space: Optional[MatchSpace] = None, spin_1z=None, spin_2z=None,
@@ -577,20 +638,30 @@ class TemplateBank:
         space = space or self.space or MatchSpace()
         mass_1, mass_2 = np.atleast_1d(mass_1), np.atleast_1d(mass_2)
         out = np.zeros(len(mass_1), dtype=np.float32)
-        bank = space.whitened_spectra(*self.parameters)
         coordinates = space.metric_coordinates(*self.parameters) if neighbours else None
         spin = lambda value, rows: None if value is None else np.atleast_1d(value)[rows]
+        templates = lambda rows: space.whitened_spectra(*(values[rows] for values in self.parameters))
         for start in range(0, len(mass_1), chunk):
             rows = slice(start, start + chunk)
             signal = (mass_1[rows], mass_2[rows], spin(spin_1z, rows), spin(spin_2z, rows))
             spectra = space.whitened_spectra(*signal)
             if neighbours:
                 shortlist = nearest(coordinates, space.metric_coordinates(*signal), neighbours)
+                # Only the shortlisted templates' spectra are made.
+                needed, index = np.unique(shortlist.ravel(), return_inverse=True)
+                bank = np.concatenate([templates(needed[k:k + chunk]) for k in range(0, len(needed), chunk)])
                 matches = pair_matches(spectra, bank, np.repeat(np.arange(len(spectra)), shortlist.shape[1]),
-                                       shortlist.ravel()).reshape(shortlist.shape)
+                                       index.ravel()).reshape(shortlist.shape)
+                out[rows] = np.max(matches, axis=1)
             else:
-                matches = max_matches(spectra, bank)
-            out[rows] = np.max(matches, axis=1)
+                # The bank's spectra a chunk at a time: a large bank's whole
+                # set does not fit in memory (30,000 templates of the
+                # streaming span are 12 GB).
+                best = np.zeros(len(spectra), dtype=np.float32)
+                for first in range(0, self.num_templates, 4 * chunk):
+                    bank = templates(slice(first, first + 4 * chunk))
+                    best = np.maximum(best, np.max(max_matches(spectra, bank), axis=1))
+                out[rows] = best
         return out
 
     def to_dict(self) -> dict:
@@ -689,14 +760,15 @@ def _stochastic_placement(placement: BankPlacement, max_templates: int):
     spin_range, neighbours = placement.spin_range, placement.neighbours
     convergence_candidates, target_coverage = placement.convergence_candidates, placement.target_coverage
     rng = np.random.default_rng(placement.seed)
-    bank_spectra = np.zeros((0, space.num_samples // 2 + 1), dtype=np.complex64)
+    bank_spectra = _RowStore(space.num_samples // 2 + 1)
     bank_coordinates = np.zeros((0, 3))
     kept = [[], [], [], []]
+    clock = {"start": time.perf_counter(), "rounds": 0}
 
     def matches_with(spectra, coordinates, others, other_coordinates):
         """(n, len(others)) matches of each candidate with `others`: every one, or its nearest `neighbours` (-1 elsewhere)."""
         if neighbours is None:
-            return max_matches(spectra, others)
+            return max_matches(spectra, others[:])
         out = np.full((len(spectra), len(others)), -1.0, dtype=np.float32)
         shortlist = nearest(other_coordinates, coordinates, neighbours)
         rows = np.repeat(np.arange(len(spectra)), shortlist.shape[1])
@@ -705,7 +777,7 @@ def _stochastic_placement(placement: BankPlacement, max_templates: int):
 
     def offer(c1, c2, cs1, cs2):
         """Keep each candidate, in order, unless a template already kept covers it: 1 for kept, 0 for not."""
-        nonlocal bank_spectra, bank_coordinates
+        nonlocal bank_coordinates
         spectra = space.whitened_spectra(c1, c2, cs1, cs2)
         coordinates = space.metric_coordinates(c1, c2, cs1, cs2) if neighbours is not None else None
         against_bank = (np.max(matches_with(spectra, coordinates, bank_spectra, bank_coordinates), axis=1)
@@ -715,8 +787,13 @@ def _stochastic_placement(placement: BankPlacement, max_templates: int):
         for i in range(len(c1)):
             if against_bank[i] < minimal_match and all(among[i, j] < minimal_match for j in kept_now):
                 kept_now.append(i)
+        clock["rounds"] += 1
+        clock["offered"] = clock.get("offered", 0) + len(c1)
+        if clock["rounds"] % 64 == 0:
+            _log.info("placement (%s): %d templates kept, %d candidates offered, %.0f s", clock.get("phase"),
+                      len(kept[0]) + len(kept_now), clock["offered"], time.perf_counter() - clock["start"])
         if kept_now:
-            bank_spectra = np.concatenate([bank_spectra, spectra[kept_now]])
+            bank_spectra.extend(spectra[kept_now])
             if neighbours is not None:
                 bank_coordinates = np.concatenate([bank_coordinates, coordinates[kept_now]])
             for values, candidates in zip(kept, (c1, c2, cs1, cs2)):
@@ -736,6 +813,7 @@ def _stochastic_placement(placement: BankPlacement, max_templates: int):
 
     b1, b2 = _boundary_candidates(lo, hi)
     tried = 0
+    clock["phase"] = "boundary"
     for corner in _spin_corners(spin_range):
         bs1, bs2 = np.full(len(b1), corner[0]), np.full(len(b1), corner[1])
         for start in range(0, len(b1), per_round):
@@ -743,8 +821,12 @@ def _stochastic_placement(placement: BankPlacement, max_templates: int):
             offer(b1[rows], b2[rows], bs1[rows], bs2[rows])
         tried += len(b1)
     if spin_range:
+        clock["phase"] = "faces"
         tried += converge(_draw_faces)[0]
+    clock["phase"] = "interior"
     interior, acceptance = converge(_draw_interior)
+    _log.info("placement done: %d templates, %d candidates, %.0f s", len(kept[0]), tried + interior,
+              time.perf_counter() - clock["start"])
     return (*(np.array(values) for values in kept), tried + interior, acceptance)
 
 

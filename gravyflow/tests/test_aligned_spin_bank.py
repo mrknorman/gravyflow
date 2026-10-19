@@ -6,6 +6,7 @@ overlap.
 import json
 
 import numpy as np
+import pytest
 
 import gravyflow as gf
 from gravyflow.src.detection import TemplateBank
@@ -80,3 +81,36 @@ def test_the_bank_metric_with_spins_is_pycbcs_overlap():
     theirs = [pycbc.filter.match(x, y, psd=psd, low_frequency_cutoff=20.0)[0] for x, y in zip(series(a), series(b))]
     np.testing.assert_allclose(own, theirs, atol=1e-3)
     assert own.min() < 0.97 < own.max()  # either side of the minimal match
+
+
+def test_the_placements_row_store_reads_like_one_array():
+    # The placement keeps its spectra in fixed blocks, filled in place, so a
+    # large bank is never copied whole; read by index it is one array.
+    from gravyflow.src.detection.template_grid import _RowStore
+    rng = np.random.default_rng(3)
+    rows = (rng.standard_normal((23, 5)) + 1j * rng.standard_normal((23, 5))).astype(np.complex64)
+    store = _RowStore(5, block_rows=4)
+    for part in np.split(rows, [3, 4, 11, 12]):
+        store.extend(part)
+    assert len(store) == 23 and len(store.blocks) == 6
+    index = rng.integers(0, 23, size=40)
+    np.testing.assert_array_equal(store[index], rows[index])
+    np.testing.assert_array_equal(store[:], rows)
+    with pytest.raises(IndexError):
+        store[np.array([23])]
+
+
+def test_fitting_factors_by_bank_chunk_equal_the_whole_bank():
+    # Fitting factors read the bank a chunk at a time (a large bank's spectra
+    # do not fit in memory); with every template, or a metric shortlist, they
+    # equal the matches with the whole bank at once.
+    rng = np.random.default_rng(4)
+    bank = TemplateBank.from_masses(*(values for values in (
+        rng.uniform(20, 40, 21), rng.uniform(20, 40, 21), rng.uniform(-0.5, 0.5, 21), rng.uniform(-0.5, 0.5, 21))))
+    bank = TemplateBank(*bank.parameters, placement=stream_bank_placement(mass_range=(20.0, 40.0), spin_range=0.5))
+    draws = (rng.uniform(20, 40, 5), rng.uniform(20, 40, 5), rng.uniform(-0.5, 0.5, 5), rng.uniform(-0.5, 0.5, 5))
+    whole = np.max(max_matches(SPACE.whitened_spectra(*draws), SPACE.whitened_spectra(*bank.parameters)), axis=1)
+    np.testing.assert_allclose(bank.fitting_factors(draws[0], draws[1], None, draws[2], draws[3], chunk=2),
+                               whole, atol=1e-6)
+    near = bank.fitting_factors(draws[0], draws[1], None, draws[2], draws[3], neighbours=21, chunk=2)
+    np.testing.assert_allclose(near, whole, atol=1e-6)
