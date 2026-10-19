@@ -39,10 +39,9 @@ pip install -e ".[test]"
 The package ships the bundled noise curves, template banks and the smaller trained models. The two deep models of
 George and Huerta (2017), 66 MB each, are attached to a release instead: fetch one once with
 `gf.fetch("model/<name>")`, which checks it against its pinned size and SHA-256 and keeps it in the strain store's
-`files/` (below); `pretrained()` finds it there. The pinned remote files, trained weights and benchmark data such as
-MLGWSC-1's, are entries of one manifest (`gravyflow.src.resources.MANIFEST`), each a `gf.RemoteFile` with its URL,
-size, SHA-256, licence and whether gravyflow may redistribute it; `gf.fetch` is their one download, and none is ever
-downloaded implicitly. GWOSC strain and Gravity Spy's glitch catalogues are not pinned files: their acquisition
+`files/` (below); `pretrained()` finds it there. The pinned remote files are entries of one manifest
+(`gravyflow.src.resources.MANIFEST`), each a `gf.RemoteFile` with its URL, size, SHA-256, licence and whether
+gravyflow may redistribute it; `gf.fetch` is their one download, and none is ever downloaded implicitly. GWOSC strain and Gravity Spy's glitch catalogues are not pinned files: their acquisition
 modules download them, by their own paths.
 
 ## 2. Choose Keras's JAX backend
@@ -284,14 +283,6 @@ are gone, with no shim: a generator's `generate(seed=)` (pass streams, or the ge
   the data obtainer's `split_spec`, so a GPS time is in one split whatever reads it. A transient record takes its
   footprint's split; one that crosses an edge between splits is in no split. Noise and records have moved between
   splits: do not evaluate a model trained on an earlier release's split on this release's validate or test split.
-- MLGWSC-1's test strain is reserved (`gf.SplitSpec.reserved`, `docs/acquisition.md`, section 2): the challenge's
-  362 O3a segments (`gf.MLGWSC1_O3A`; exactly, on H1 and L1, since the challenge shifts L1 only within a segment)
-  are in no train or validate draw of real data, so no model gravyflow trains or selects has seen the strain
-  it would be compared on; test keeps them. That removes nearly all O3a coincident time from training. The
-  challenge-faithful mode, `gf.SplitSpec(reserved=())`, asked for explicitly, trains on it as the challenge's entries
-  could; the mode is in the split's fingerprint, so a model of one mode is never validated as the other, and
-  `SplitSpec.mode` names it in a dataset's `seed_metadata`. Every earlier fingerprint, the default's included, has
-  changed with it.
   A model's split is its data's: `gf.Model.train` and the recipes' `TrainingRun.train` read it from their
   training and validation data (a gravyflow dataset names its `split_spec` and `group`), refuse data that names
   none or is split by two specs (synthetic noise, WHITE or COLORED, reads no real data: a gravyflow dataset of it

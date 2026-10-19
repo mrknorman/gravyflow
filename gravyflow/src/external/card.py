@@ -173,8 +173,8 @@ class PublishedRow:
     match before its results count.
 
     Args:
-        citation: Where it is published (``"schaefer2023, Table IV"``).
-        dataset: The data it was measured on (``"MLGWSC-1 dataset 1"``).
+        citation: Where it is published (``"gabbard2018, Fig. 3"``).
+        dataset: The data it was measured on (``"O3a, H1 and L1"``).
         quantity: What it is (``"sensitive distance"``).
         value: Its value, in ``unit``.
         unit: Its unit (``"Mpc"``).
@@ -207,7 +207,7 @@ class ExternalCard:
     An external model, as gravyflow runs it.
 
     Args:
-        name: The model's name (``"tpi-mlgwsc1"``).
+        name: The model's name (``"gabbard-2018"``).
         adapter: The entry-point name its adapter is published under, in
             ``protocol.ADAPTER_GROUP``.
         adapter_version: The version of the distribution that publishes the adapter;

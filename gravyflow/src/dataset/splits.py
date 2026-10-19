@@ -16,47 +16,24 @@ datasets, composed datasets, the validator), from absolute GPS alone:
   the rest. Raising the test or validate fraction thus takes time from train
   alone, and changing one of them never moves the other.
 
-- Time a benchmark tests on is reserved (``Reservation``): it is in no train or
-  validate draw, so no model gravyflow trains or selects has seen it, and test
-  keeps it. By default MLGWSC-1's O3a segments are reserved
-  (``acquisition.mlgwsc1``); ``reserved=()``, asked for explicitly, is the
-  challenge-faithful mode, which trains on them as the challenge's entries did.
-
-A spec's ``fingerprint`` names it, its reservations included, in every cache key,
-index file and model's metadata, so data split by one spec is never read as
-another's; ``mode`` says in words whether benchmark time is reserved.
+A spec's ``fingerprint`` names it in every cache key, index file and model's
+metadata, so data split by one spec is never read as another's.
 """
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional, Tuple, Union
+from typing import Tuple, Union
 
 import numpy as np
-
-from gravyflow.src.dataset.acquisition.gwosc_data import coalesce_segments, subtract_segments
-from gravyflow.src.dataset.reservation import Reservation
 
 #: The splits, in canonical order: test first.
 SPLIT_NAMES: Tuple[str, ...] = ("test", "validate", "train")
 
-#: The splits reserved time is held out of: those a model trains and is selected on.
-RESERVED_SPLITS: Tuple[str, ...] = ("validate", "train")
-
 #: What ``SplitSpec.assign`` returns for an interval that belongs to no split:
-#: it crosses an edge between splits, lies inside a guard, or, in train or
-#: validate, meets reserved time.
+#: it crosses an edge between splits, or lies inside a guard.
 EXCLUDED = "excluded"
-
-#: ``SplitSpec.mode`` of a spec that reserves nothing.
-CHALLENGE_FAITHFUL = "challenge-faithful"
-
-
-def _default_reservations() -> Tuple[Reservation, ...]:
-    from gravyflow.src.dataset.acquisition.mlgwsc1 import MLGWSC1_O3A
-
-    return (MLGWSC1_O3A,)
 
 
 def hash_uniform(*parts) -> float:
@@ -101,26 +78,14 @@ class SplitSpec:
             that belongs to no split, half on each side.
         version: A salt: specs of different versions split time independently
             (cross-validation folds, say).
-        reserved: The ``Reservation``s held out of train and validate; by default
-            MLGWSC-1's O3a segments (``acquisition.mlgwsc1.MLGWSC1_O3A``). ``()`` is
-            the challenge-faithful mode: only ask for it to reproduce a benchmark's
-            published training, never for a model meant to be compared on it.
     """
 
     fractions: Tuple[Tuple[str, float], ...] = (("test", 0.10), ("validate", 0.10), ("train", 0.80))
     block_seconds: float = 8192.0
     guard_seconds: float = 128.0
     version: str = "gravyflow-split-v1"
-    reserved: Tuple[Reservation, ...] = field(default_factory=_default_reservations)
 
     def __post_init__(self):
-        reserved = tuple(self.reserved)
-        if not all(isinstance(reservation, Reservation) for reservation in reserved):
-            raise TypeError(f"reserved holds gf.Reservation objects, got {reserved!r}.")
-        names = [reservation.name for reservation in reserved]
-        if len(set(names)) != len(names):
-            raise ValueError(f"Reservations must have distinct names, got {names}.")
-        object.__setattr__(self, "reserved", reserved)
         object.__setattr__(self, "fractions", _canonical_fractions(self.fractions))
         object.__setattr__(self, "block_seconds", float(self.block_seconds))
         object.__setattr__(self, "guard_seconds", float(self.guard_seconds))
@@ -179,21 +144,9 @@ class SplitSpec:
 
     def assign(self, start: float, end: float) -> str:
         """
-        The split of the interval [start, end): its split by blocks and guards
-        (``block_assign``) when, for train or validate, it meets no detector's
-        reserved time (``reserving``); else ``EXCLUDED``.
-        """
-        name = self.block_assign(start, end)
-        if name in RESERVED_SPLITS and self.reserving(start, end) is not None:
-            return EXCLUDED
-        return name
-
-    def block_assign(self, start: float, end: float) -> str:
-        """
-        The split of the interval [start, end) by blocks and guards alone: the
-        split of every block it touches when that is one split and the interval
-        keeps half the guard from every edge with another split; else ``EXCLUDED``.
-        Reserved time is ``assign``'s.
+        The split of the interval [start, end): the split of every block it
+        touches when that is one split and the interval keeps half the guard
+        from every edge with another split; else ``EXCLUDED``.
         """
         start, end = float(start), float(end)
         if not end >= start:
@@ -207,43 +160,11 @@ class SplitSpec:
         _, upper = self._interior(last)
         return name if lower <= start and end <= upper else EXCLUDED
 
-    # ------------------------------------------------------------ reservations
-
-    @property
-    def mode(self) -> str:
-        """In words, what the spec holds out of train and validate."""
-        if not self.reserved:
-            return CHALLENGE_FAITHFUL
-        return "reserved: " + ", ".join(reservation.name for reservation in self.reserved)
-
-    def reserved_time(self, detector=None) -> np.ndarray:
-        """
-        The time held out of train and validate on ``detector`` (a ``gf.IFO`` or its
-        name): every reservation's, as sorted, coalesced (N, 2) GPS intervals. For
-        None, every detector's: the time a record read on any detector must avoid.
-        """
-        return coalesce_segments(np.concatenate(
-            [np.empty((0, 2))] + [reservation.of(detector) for reservation in self.reserved]))
-
-    def reserving(self, start: float, end: float, detector=None) -> Optional[Reservation]:
-        """
-        The first reservation whose time on ``detector`` (every detector's for None)
-        meets [start, end), or None.
-        """
-        for reservation in self.reserved:
-            time = reservation.of(detector)
-            k = np.searchsorted(time[:, 1], float(start), side="right")
-            if k < len(time) and time[k, 0] < float(end):
-                return reservation
-        return None
-
-    def admissible(self, segments, name: str, detector=None) -> np.ndarray:
+    def admissible(self, segments, name: str) -> np.ndarray:
         """
         ``segments`` ((N, 2) GPS intervals) intersected with the time of split
         ``name``: its blocks, less half the guard at each edge with another
-        split, and for train or validate less ``detector``'s reserved time
-        (``reserved_time``; every detector's for None). Returns sorted (M, 2)
-        intervals; same-split blocks stay joined.
+        split. Returns sorted (M, 2) intervals; same-split blocks stay joined.
         """
         self.check_name(name)
         segments = np.reshape(np.asarray(segments, dtype=np.float64), (-1, 2))
@@ -263,25 +184,17 @@ class SplitSpec:
                     out[-1][1] = max(out[-1][1], upper)
                 else:
                     out.append([lower, upper])
-        out = np.array(out, dtype=np.float64).reshape(-1, 2)
-        if name in RESERVED_SPLITS and self.reserved:
-            out = subtract_segments(out, self.reserved_time(detector)).reshape(-1, 2)
-        return out
+        return np.array(out, dtype=np.float64).reshape(-1, 2)
 
     # ------------------------------------------------------------ provenance
 
     def fingerprint(self) -> str:
-        """
-        The spec's identity: sha256 of its canonical JSON, first 16 hex digits. Its
-        reservations are in it by name and time, so the challenge-faithful mode
-        (none) and the default never share a fingerprint.
-        """
+        """The spec's identity: sha256 of its canonical JSON, first 16 hex digits."""
         text = json.dumps({
             "fractions": [[name, value] for name, value in self.fractions],
             "block_seconds": self.block_seconds,
             "guard_seconds": self.guard_seconds,
             "version": self.version,
-            "reserved": [reservation.specification() for reservation in self.reserved],
         }, sort_keys=True)
         return hashlib.sha256(text.encode()).hexdigest()[:16]
 

@@ -22,14 +22,8 @@ repository before it may need the changes below.
   above that were lalsimulation's extrapolation of its table (1.9 times the last tabulated ASD by 8191 Hz), not
   tabulated values; no curve is extrapolated now, so coloured noise from them at 16384 Hz (any sample rate whose
   Nyquist frequency is past the table) is refused by name. Every row below the cut is unchanged.
-- **MLGWSC-1's test strain is reserved by default.** `gf.SplitSpec` gains `reserved`, by default `gf.MLGWSC1_O3A`:
-  the challenge's 362 O3a segments, exactly, on H1 and L1, held out of every train and validate
-  draw of real data (noise, glitches, partners); test keeps them. `gf.SplitSpec(reserved=())` is the explicit
-  challenge-faithful mode. The reservation is in `SplitSpec.fingerprint()`, so every split fingerprint has changed,
-  and a model recorded under an earlier one is refused by the validator.
 - **One manifest of pinned remote files, one explicit fetch.** `gravyflow.src.resources.download_weights` and
-  `RELEASE_WEIGHTS` are gone: `resources.MANIFEST` holds the pinned remote files (trained weights, and benchmark
-  data such as MLGWSC-1's) as `gf.RemoteFile`s (URL, size, SHA-256, licence, redistributable), and `gf.fetch(name)`
+  `RELEASE_WEIGHTS` are gone: `resources.MANIFEST` holds the pinned remote files (trained weights) as `gf.RemoteFile`s (URL, size, SHA-256, licence, redistributable), and `gf.fetch(name)`
   downloads one into the strain store's `files/`, checked, and is the only download of a pinned file; an explicit
   fetch hashes a file already in the store again. GWOSC strain and Gravity Spy's catalogues keep their own fetchers.
   `resources.weights(name)` refuses a release download not yet fetched, naming the fetch.
@@ -106,6 +100,13 @@ repository before it may need the changes below.
 - **`waveform_generators` takes a list (or a single generator), no longer a dict.** The dict form crashed in
   `gf.InjectionGenerator`, and its `excluded` and `exclusive` keys were read nowhere. A dict is refused by name
   (`TypeError`) in `gf.Dataset` and `gf.InjectionGenerator`. `Prefetcher.close` is gone: nothing called it.
+- **MLGWSC-1 support was removed before this release.** The default split's reservation of the challenge's O3a test
+  segments is gone, with `gf.Reservation`, `gf.MLGWSC1_O3A`, `gf.CHALLENGE_FAITHFUL`, `SplitSpec.reserved`,
+  `SplitSpec.mode` (and a dataset's `seed_metadata["split_mode"]`), the challenge-faithful mode and the shipped
+  segment list; so is `gf.MLGWSC1Stream`, which generated the challenge's first dataset. A `gf.SplitSpec` holds out
+  only its guards again, and its fingerprint names no reservation: the default split's is `ad5a8b11f77a360c`, as
+  before the reservation. `gf.Triggers` and its file format, the external-model runner, `gf.fetch` and
+  `gf.NoiseProfile.ZERO_DET_HIGH_POWER` stay.
 
 ### Added
 
@@ -136,21 +137,15 @@ repository before it may need the changes below.
   subprocess under a deadline, on a whole `gf.SearchSegment`, with its weights fetched only by `gf.fetch`; its
   `gf.ExternalResult` names the card's mode (`gf.AS_PUBLISHED`) and fingerprint. A missing adapter is refused by name
   (`gf.AdapterMissing`), as is another release of it or another environment (`gf.AdapterMismatch`) (README §10).
-- **MLGWSC-1's dataset 1, streamed.** `gf.MLGWSC1Stream(1, seed=...)` makes the challenge's dataset 1 from a seed:
-  its segments (generate_data.py's `restrict_segments`, 30 days by default), stationary Gaussian noise of
-  aLIGOZeroDetHighPower from 15 Hz on H1 and L1, and its injection population and schedule (`ds1.ini`, every 24 to
-  30 s), each IMRPhenomXAS (the challenge's zero-spin, (2, 2)-mode IMRPhenomXPHM) conditioned as PyCBC conditions
-  the challenge's injections. It is read over any span of its segments (`read`, a `gf.SearchSegment`, foreground or
-  background), never written whole; every sample is a function of the seed and its GPS time, whatever span is
-  read, and `fingerprint()` names the stream. Its noise reads no real strain, so no reservation applies (`mode`).
-  `gf.NoiseProfile.ZERO_DET_HIGH_POWER` is that curve (H1 and L1 only; a profile refuses a detector it does not
-  cover, by name).
+- **`gf.NoiseProfile.ZERO_DET_HIGH_POWER`**: Advanced LIGO's zero-detuning, high-power design curve
+  (LIGO-T0900288-v3, aLIGOZeroDetHighPower), for H1 and L1 only; a profile refuses a detector it does not cover, by
+  name.
 
 - `gravyflow.__version__`.
 - `docs/api.md`, the public API, which a test holds equal to `gravyflow.__all__`.
 - `gravyflow.src.resources`: the package's data files, the manifest of pinned remote files (`MANIFEST`), `path(name)`
   and `weights(name)` to find a file bundled or fetched, and `fetch(name)` (`gf.fetch`), the one explicit download of a pinned file.
-- `gf.Reservation`, `gf.MLGWSC1_O3A`, `gf.CHALLENGE_FAITHFUL` and `gf.RemoteFile` (see Breaking changes).
+- `gf.RemoteFile` (see Breaking changes).
 - `gf.NoGlitchVetoWarning`: noise with no public Gravity Spy labels (O4, and Virgo in any run) is served with no
   glitch veto under this warning, shown by default and naming the detector and time; it was a log message, hidden by
   default.

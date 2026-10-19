@@ -269,7 +269,6 @@ def test_the_wheel_ships_the_package_data(wheel):
     from gravyflow.src import resources
     for path in (PACKAGE / "res" / "model").glob("*.keras"):
         assert (f"gravyflow/res/model/{path.name}" in names) == (f"model/{path.name}" not in resources.MANIFEST), path.name
-    assert {"gravyflow/res/mlgwsc1/segments.csv", "gravyflow/res/mlgwsc1/NOTICE"} <= names, "MLGWSC-1's segments"
     assert not shipped(r"gravyflow/tests/.*"), "the tests are not shipped"
     assert not shipped(r"gravyflow/res/tests/.*"), "the test data is not shipped"
 

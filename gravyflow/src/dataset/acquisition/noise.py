@@ -548,11 +548,10 @@ class NoiseDataObtainer(BaseDataObtainer):
         """
         ``ifo``'s noise of split ``group_name``: its segments inside the split's
         admissible time (``SplitSpec.admissible``: its absolute blocks, less the
-        guard at every edge with another split, and in train and validate less
-        ``ifo``'s reserved benchmark time), less every vetoed event and glitch
-        (``remove_unwanted_segments``). Sorted (N, 2) GPS intervals.
+        guard at every edge with another split), less every vetoed event and
+        glitch (``remove_unwanted_segments``). Sorted (N, 2) GPS intervals.
         """
-        return self.split_spec.admissible(self.noise_admissible_segments(ifo), group_name, ifo)
+        return self.split_spec.admissible(self.noise_admissible_segments(ifo), group_name)
 
     def coincident_segments(self, ifos: List[gf.IFO], group_name: str) -> np.ndarray:
         """The time of split ``group_name`` every IFO's noise holds (``available_segments``)."""

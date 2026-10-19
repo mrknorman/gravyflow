@@ -77,11 +77,10 @@ def test_split_is_absolute(world, inside, configurations):
     assert not moved, f"seconds of {inside} time whose split changed with the configuration: {moved}"
 
 
-def test_o4_blocks_take_the_default_fractions_and_no_reservation():
+def test_o4_blocks_take_the_default_fractions():
     """
     O4's blocks (O4a's start to O4b's end) fall in test, validate and train at the
-    default fractions, as every run's do, and none is reserved: the default reservation
-    is MLGWSC-1's O3a time alone. A run never enters the split's fingerprint.
+    default fractions, as every run's do. A run never enters the split's fingerprint.
     """
     spec = gf.SplitSpec()
     o4 = gf.ObservingRun.O4.value
@@ -89,9 +88,6 @@ def test_o4_blocks_take_the_default_fractions_and_no_reservation():
     counts = Counter(spec.block_split(block) for block in blocks)
     for name, fraction in spec.fractions:
         assert abs(counts[name] / len(blocks) - fraction) < 0.02, (name, counts, len(blocks))
-    reserved = spec.reserved_time()
-    assert len(reserved) and not np.any((reserved[:, 1] > o4.start_gps_time) & (reserved[:, 0] < o4.end_gps_time))
-    assert spec.reserving(o4.start_gps_time, o4.end_gps_time) is None
 
 
 PAIRS = [("train", "test"), ("validate", "train"), ("test", "validate")]

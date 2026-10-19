@@ -16,9 +16,6 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `SplitSpec`: how GPS time is split into train, validate and test.
 - `DEFAULT_SPLIT`: the default `SplitSpec`.
 - `EXCLUDED`: the label of time that belongs to no split.
-- `Reservation`: time held out of every train and validate draw of real data (a benchmark's test strain); test keeps it.
-- `CHALLENGE_FAITHFUL`: the `SplitSpec.mode` of a spec that reserves nothing (`SplitSpec(reserved=())`).
-- `MLGWSC1_O3A`: MLGWSC-1's 362 O3a segments (exactly, on H1 and L1), the `Reservation` every split holds by default.
 - `RemoteFile`: a file published elsewhere, pinned by size and sha256, with its licence and whether gravyflow may redistribute it.
 - `fetch`: download a file of gravyflow's manifest (or a `RemoteFile`) into the store, explicitly, hashing a copy already there again (a file the package ships is returned as shipped); nothing else downloads one.
 - `SeedTree`: the one seed tree every random draw comes from.
@@ -164,7 +161,6 @@ models are, and never through the `Validator`.
 
 - `Triggers`: a search's triggers (GPS `time`, ranking `stat`, timing tolerance `var`); `Triggers.read` and `write` read and write the MLGWSC-1 trigger file.
 - `SearchSegment`: the strain an external search runs on: every detector over the same samples, searched whole; `SearchSegment.from_strains` builds one from a data source's strain.
-- `MLGWSC1Stream`: one of the MLGWSC-1 challenge's datasets (dataset 1), made by gravyflow from a seed and streamed, never written whole: `segments`, `read(start, end)` (a `SearchSegment`; `injections=False` for the background), `chunks(seconds)`, the `injections` table (the challenge's injection-file fields), `fingerprint()` and `mode` (simulated: no reservation applies).
 - `ExternalSearch`: what an adapter implements: `prepare(fetch)`, `preprocess(segment)` and `search(segment)`, published under the entry-point group `gravyflow.external`.
 - `ExternalCard`: an external model: its adapter, the adapter's version and environment lock, its contracts, weights, published rows and declared training data; `card.fingerprint`, its identity, is the sha256 of exactly what decides a run's outputs (adapter name and version, lock, contracts, each weights file's name, sha256, format and framework, mode), never of its provenance (published rows, training data).
 - `InputContract`: the input a model takes: rate, detectors in order, window, stride, context, whitening, band-pass and normalisation.

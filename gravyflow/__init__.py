@@ -28,9 +28,6 @@ _MODULES = {
     "SplitSpec": "gravyflow.src.dataset.splits",
     "DEFAULT_SPLIT": "gravyflow.src.dataset.splits",
     "EXCLUDED": "gravyflow.src.dataset.splits",
-    "Reservation": "gravyflow.src.dataset.reservation",
-    "CHALLENGE_FAITHFUL": "gravyflow.src.dataset.splits",
-    "MLGWSC1_O3A": "gravyflow.src.dataset.acquisition.mlgwsc1",
     "RemoteFile": "gravyflow.src.dataset.store.files",
     "fetch": "gravyflow.src.resources",
     "SeedTree": "gravyflow.src.rng",
@@ -163,7 +160,6 @@ _MODULES = {
     # Triggers and external models
     "Triggers": "gravyflow.src.detection.triggers",
     "SearchSegment": "gravyflow.src.external",
-    "MLGWSC1Stream": "gravyflow.src.dataset.acquisition.mlgwsc1_stream",
     "ExternalSearch": "gravyflow.src.external",
     "ExternalCard": "gravyflow.src.external",
     "InputContract": "gravyflow.src.external",

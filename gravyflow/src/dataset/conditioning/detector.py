@@ -378,9 +378,9 @@ class NoiseProfile(Enum):
     the Advanced Virgo design curve (Living Rev. Relativ. 19, 1 (2016),
     doi:10.1007/lrr-2016-1) for V1. ZERO_DET_HIGH_POWER is Advanced LIGO's earlier
     zero-detuning, high-power design curve (LIGO-T0900288-v3), as lalsimulation
-    evaluates it (aLIGOZeroDetHighPower), for H1 and L1 only: the noise of MLGWSC-1's
-    dataset 1. Each file's header names its exact source. A curve is used only on its
-    own band (``read_noise_curve``), and only for a detector its profile covers.
+    evaluates it (aLIGOZeroDetHighPower), for H1 and L1 only. Each file's header
+    names its exact source. A curve is used only on its own band
+    (``read_noise_curve``), and only for a detector its profile covers.
 
     No curve is extrapolated. The aLIGO O3_LOW and DESIGN curves are lalsimulation's
     functions, whose tables stop at 4995.38 Hz and 5000 Hz; above that lalsimulation

@@ -24,10 +24,6 @@ _LEAVES = tuple(re.compile(pattern) for pattern in (
     rf"noise/start/{_SEGMENT}",
     # A reader of the caller's own, read in order: its seed.
     r"noise/reader",
-    # A continuous stream on absolute time (a benchmark's data): each detector's
-    # white noise, block k at k, and each injection parameter of its schedule.
-    rf"stream/noise/{_SEGMENT}",
-    rf"stream/injection/{_SEGMENT}",
     # A transient split's passes: pass p's order and balance, at epoch p.
     r"transient/(order|balance)",
     rf"augment/{_SEGMENT}",

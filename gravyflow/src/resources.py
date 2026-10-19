@@ -2,13 +2,12 @@
 The data files gravyflow ships, and the manifest of the files it does not.
 
 ``RESOURCES`` is the package's ``res`` directory: the noise profiles, the template
-banks, the smaller trained models and MLGWSC-1's segment list are installed with
-the package. ``MANIFEST`` holds the pinned files gravyflow knows that live
-elsewhere, each a ``RemoteFile`` pinned by size and sha256, with its licence and
-whether gravyflow may redistribute it: weights above the wheel's size budget,
-attached to a GitHub release, and benchmark data published by its authors (such
-as MLGWSC-1's). GWOSC strain and Gravity Spy's catalogues are not pinned files:
-their acquisition modules fetch them, by their own paths.
+banks and the smaller trained models are installed with the package. ``MANIFEST``
+holds the pinned files gravyflow knows that live elsewhere, each a ``RemoteFile``
+pinned by size and sha256, with its licence and whether gravyflow may redistribute
+it: weights above the wheel's size budget, attached to a GitHub release. GWOSC
+strain and Gravity Spy's catalogues are not pinned files: their acquisition modules
+fetch them, by their own paths.
 
 ``path(name)`` finds a file by its name under ``res``: the package's own copy, else
 the store's copy of the manifest entry. A pinned file is never downloaded
@@ -40,14 +39,6 @@ MANIFEST: Dict[str, RemoteFile] = {entry.name: entry for entry in (
         "model/georgehuerta2017deep_regression.keras",
         _RELEASE + "georgehuerta2017deep_regression.keras",
         "429bf415bcf41126f71b39928de2529b989c0345cc34e4d70c2c2429b15ba3f2", 69415130,
-        licence="Apache-2.0", redistributable=True),
-    # MLGWSC-1's segment list: published only on the authors' server (the file the
-    # challenge's generate_data.py downloads), so pinned by content, not by commit.
-    # Shipped too (res/mlgwsc1, with its NOTICE), so the reservation holds offline.
-    RemoteFile(
-        "mlgwsc1/segments.csv",
-        "https://www.atlas.aei.uni-hannover.de/work/marlin.schaefer/MDC/segments.csv",
-        "f8da2e50914fa6c84ca79f1e8449211bc5596fd610e80084d1daf8a5988272c8", 9313,
         licence="Apache-2.0", redistributable=True),
 )}
 

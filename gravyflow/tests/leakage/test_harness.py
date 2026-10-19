@@ -394,10 +394,9 @@ def test_helpers_refuse_empty_and_small_inputs():
 def test_golden_table_agrees_with_the_library():
     """
     Every literal of the table is the split the library admits a second of the block's
-    middle to, and no other split admits it. The table is the blocks' split, so it is
-    read with nothing reserved; reserved time is judged in ``test_reservation``.
+    middle to, and no other split admits it.
     """
-    spec = gf.SplitSpec(reserved=())
+    spec = gf.SplitSpec()
     checked = 0
     for origin in fx.GOLDEN_BLOCKS:
         for block, split in fx.golden_blocks(origin).items():

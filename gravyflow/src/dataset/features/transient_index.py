@@ -177,10 +177,7 @@ class TransientIndex:
           its block, unless ``train_on_real_events``, when an event too takes its
           footprint's split.
         - A record whose footprint straddles an edge between splits, or lies in a
-          guard, is in no split; so is one in train or validate time whose
-          footprint meets any detector's reserved benchmark time
-          (``SplitSpec.reserving``), whichever detector saw it, since a record may
-          be read on every detector at its time.
+          guard, is in no split.
         - No glitch holds an event: a glitch whose footprint meets an event's
           footprint (``event_footprints_gps``: every catalogued event, (N, 2)), or,
           outside ``test``, comes within ``spec.guard_seconds`` of one, is in no
@@ -207,10 +204,7 @@ class TransientIndex:
                 continue
             split = spec.assign(start, end)
             if split == EXCLUDED:
-                if spec.block_assign(start, end) == EXCLUDED:
-                    excluded["straddles a split edge or guard"] += 1
-                else:
-                    excluded[f"lies in reserved time ({spec.reserving(start, end).name})"] += 1
+                excluded["straddles a split edge or guard"] += 1
                 continue
             if record.label != DataLabel.EVENTS and len(events) and (
                     _overlaps(touching, start, end)

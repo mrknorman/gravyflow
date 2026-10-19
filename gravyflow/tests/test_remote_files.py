@@ -1,7 +1,6 @@
 """
 Remote files: pinned by size and sha256, fetched into the store only when asked,
-and refused, keeping nothing, when the bytes are not the pinned ones. MLGWSC-1's
-segment list is one: shipped, and pinned to the authors' copy.
+and refused, keeping nothing, when the bytes are not the pinned ones.
 
 Every download here is from a ``file://`` URL in a temporary directory; no socket
 opens.
@@ -11,12 +10,10 @@ import hashlib
 import os
 from collections import namedtuple
 
-import numpy as np
 import pytest
 
 import gravyflow as gf
 from gravyflow.src import resources
-from gravyflow.src.dataset.acquisition import mlgwsc1
 from gravyflow.src.dataset.store import files
 from gravyflow.src.dataset.store.commit import TMP_PREFIX, StoreWriteError
 from gravyflow.src.dataset.store.files import (
@@ -191,45 +188,13 @@ def test_an_entry_from_another_source_is_not_a_gravyflow_release():
 
 
 def test_fetching_a_shipped_file_returns_the_shipped_copy(monkeypatch):
-    """A file installed with the package is never downloaded, by name or by its entry."""
+    """A manifest file the package's res holds is never downloaded, by name or by its entry."""
     def no_network(*args, **kwargs):
         raise AssertionError("a shipped file was downloaded")
 
     monkeypatch.setattr(files.urllib.request, "urlopen", no_network)
-    shipped = resources.RESOURCES / "mlgwsc1" / "segments.csv"
-    assert resources.fetch(mlgwsc1.SEGMENTS) == shipped
-    assert gf.fetch(resources.MANIFEST[mlgwsc1.SEGMENTS]) == shipped
-
-
-# =============================================================================
-# MLGWSC-1
-# =============================================================================
-
-def test_the_shipped_segment_list_is_the_pinned_one():
-    """The shipped copy is byte-for-byte the authors' file the manifest pins."""
-    entry = resources.MANIFEST[mlgwsc1.SEGMENTS]
-    shipped = resources.path(mlgwsc1.SEGMENTS)
-    assert shipped == resources.RESOURCES / "mlgwsc1" / "segments.csv"
-    data = shipped.read_bytes()
-    assert (len(data), hashlib.sha256(data).hexdigest()) == (entry.size, entry.sha256)
-    assert (entry.licence, entry.redistributable) == ("Apache-2.0", True)
-
-
-def test_the_segments_are_the_challenges():
-    """362 O3a segments, GPS 1238205077 to 1253966055, 7,111,579 s, sorted and disjoint."""
-    segments = mlgwsc1.segments()
-    assert segments.shape == (362, 2)
-    assert (segments[0, 0], segments[-1, 1]) == (1238205077.0, 1253966055.0)
-    assert np.sum(segments[:, 1] - segments[:, 0]) == 7111579.0
-    assert np.all(segments[1:, 0] > segments[:-1, 1])
-
-
-def test_the_reservation_is_the_segments_exactly():
-    """H1 and L1 each reserve exactly the 362 segments; no other detector reserves any time."""
-    segments = mlgwsc1.segments()
-    reservation = gf.MLGWSC1_O3A
-    assert np.array_equal(reservation.of("H1"), segments)
-    assert np.array_equal(reservation.of(gf.IFO.L1), segments)
-    assert np.array_equal(reservation.of(None), segments)
-    assert len(reservation.of("V1")) == 0
-    assert gf.DEFAULT_SPLIT.reserved == (reservation,)
+    name = "model/georgehuerta2017deep_classification.keras"
+    shipped = resources.RESOURCES / name
+    assert shipped.is_file(), "the repository holds this release download"
+    assert resources.fetch(name) == shipped
+    assert gf.fetch(resources.MANIFEST[name]) == shipped
