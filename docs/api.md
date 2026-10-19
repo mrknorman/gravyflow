@@ -144,8 +144,8 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `MatchedFilterLayer`: the matched filter as a Keras layer.
 - `TemplateBank`: a CBC template bank, placed or bundled.
 - `TemplateGrid`: a grid of template parameters.
-- `matched_filter_fft`: the matched-filter SNR time series.
-- `optimal_snr`: the optimal SNR of a template.
+- `matched_filter_fft`: the matched-filter SNR time series. A PSD array is normalised on the host, so it cannot be a `jax.jit` argument (close over it, or pass a `PowerSpectrum`).
+- `optimal_snr`: the optimal SNR of a template. A PSD array is normalised on the host, so it cannot be a `jax.jit` argument (close over it, or pass a `PowerSpectrum`).
 
 ## Models
 

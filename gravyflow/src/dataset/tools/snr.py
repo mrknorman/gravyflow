@@ -205,7 +205,10 @@ def _weight_on_grid(psd, num_samples: int, sample_rate_hertz: float):
     on a uniform grid from DC to Nyquist, in the data's units squared per hertz
     (interpolated, each row floored at 1e-4 of its median). An array is
     normalised in float64 by its median: the PSD of physical strain (~1e-46) is
-    below float32's range.
+    below float32's range. That normalisation (and its refusal of an unusable
+    median) runs on the host, so an array must be a concrete value: it is not
+    traceable under ``jax.jit`` as an argument (close over it, or pass a
+    PowerSpectrum). ``None`` and a PowerSpectrum stay on the device.
     Returns (weight (..., F), scale or None).
     """
     num_freqs = num_samples // 2 + 1
@@ -273,6 +276,8 @@ def template_sigma(
     sigma = sqrt(<h|h>) of each template with the module's SNR definition.
     templates: (NumTemplates, Samples) -> (NumTemplates,); with a per-row PSD
     (B, F) -> (B, NumTemplates).
+    A PSD array is normalised on the host, so it cannot be a ``jax.jit``
+    argument (``_weight_on_grid``); ``None`` and a PowerSpectrum can.
     """
     templates = ops.cast(ops.convert_to_tensor(templates), "float32")
     num_samples = int(templates.shape[-1])
@@ -295,7 +300,11 @@ def optimal_snr(
     lower_frequency_cutoff: Optional[float] = None,
     upper_frequency_cutoff: Optional[float] = None,
 ) -> float:
-    """Optimal SNR of one signal (Samples,): the SNR an exactly matching template recovers."""
+    """
+    Optimal SNR of one signal (Samples,): the SNR an exactly matching template recovers.
+    A PSD array is normalised on the host, so it cannot be a ``jax.jit``
+    argument (``_weight_on_grid``); ``None`` and a PowerSpectrum can.
+    """
     signal = ops.convert_to_tensor(signal)
     return template_sigma(signal[None, :], psd, sample_rate_hertz,
                           lower_frequency_cutoff, upper_frequency_cutoff)[..., 0]
@@ -316,7 +325,9 @@ def matched_filter_fft(
     data: (Samples,) or (Batch, Samples); templates: (NumTemplates, Samples).
     psd: None for whitened data (unit-variance white noise), otherwise the
     one-sided PSD of the data: an array (shared, or one row per batch entry) or
-    a PowerSpectrum with one row per batch entry.
+    a PowerSpectrum with one row per batch entry. An array is normalised on the
+    host, so it cannot be a ``jax.jit`` argument (``_weight_on_grid``): close
+    over it, or pass a PowerSpectrum; ``None`` and a PowerSpectrum trace.
     The correlation is circular and the data are not windowed: give conditioned
     data (whitened, or tapered and high-passed). Raw strain leaks its
     low-frequency power into every bin. The template-bank search on whitened

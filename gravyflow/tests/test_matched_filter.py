@@ -5,6 +5,8 @@ template_sigma and optimal_snr, and the template grid. The search itself
 in test_matched_filter_search.py.
 """
 
+from pathlib import Path
+
 import pytest
 
 import numpy as np
@@ -535,3 +537,57 @@ class TestTemplateGridCoverage:
         assert jnp.max(m1) <= 50.0
         assert jnp.min(m2) >= 5.0
         assert jnp.max(m2) <= 30.0
+
+
+class TestPsdUnderJit:
+    """A PSD array is normalised on the host: the documented limit of the array path."""
+
+    RATE = 1024.0
+
+    def templates(self):
+        return whole_cycles(100.0, self.RATE, 1.0)[None, :]
+
+    def array(self):
+        # The one-sided PSD of unit-variance white noise, as a float64 array.
+        return np.full(int(self.RATE) // 2 + 1, 2.0 / self.RATE)
+
+    def test_a_psd_array_closed_over_traces_and_matches_eager(self):
+        import jax
+        psd, templates = self.array(), self.templates()
+        eager = template_sigma(templates, psd=psd, sample_rate_hertz=self.RATE)
+        traced = jax.jit(lambda t: template_sigma(t, psd=psd, sample_rate_hertz=self.RATE))(templates)
+        np.testing.assert_allclose(np.asarray(traced), np.asarray(eager), rtol=1e-6)
+
+    def test_a_psd_array_passed_as_a_jit_argument_is_refused(self):
+        import jax
+        with pytest.raises(jax.errors.TracerArrayConversionError):
+            jax.jit(lambda t, p: template_sigma(t, psd=p, sample_rate_hertz=self.RATE))(
+                self.templates(), self.array())
+
+    def test_a_power_spectrum_passed_as_a_jit_argument_traces(self):
+        import jax
+        config = gf.SpectralConfig(lower_frequency_hertz=20.0)
+        spectrum = gf.PowerSpectrum(np.full((1, 1, int(self.RATE) // 2 + 1), 2.0, dtype=np.float32),
+                                    np.ones((1, 1, 1), dtype=np.float32), self.RATE, config)
+        templates = self.templates()
+        eager = template_sigma(templates, psd=spectrum, sample_rate_hertz=self.RATE)
+        traced = jax.jit(lambda t, p: template_sigma(t, psd=p, sample_rate_hertz=self.RATE))(templates, spectrum)
+        np.testing.assert_allclose(np.asarray(traced), np.asarray(eager), rtol=1e-5)
+
+    def test_no_psd_traces_with_the_data_as_arguments(self):
+        import jax
+        templates = self.templates()
+        data = templates[0] + 0.5
+        traced = jax.jit(lambda d, t: matched_filter_fft(d, t, psd=None, sample_rate_hertz=self.RATE))(
+            data, templates)
+        eager = matched_filter_fft(data, templates, psd=None, sample_rate_hertz=self.RATE)
+        np.testing.assert_allclose(np.asarray(traced), np.asarray(eager), rtol=1e-5, atol=1e-6)
+
+    def test_the_array_limit_is_documented_where_users_read_it(self):
+        from gravyflow.src.dataset.tools import snr as gf_snr
+        for function in (gf_snr.template_sigma, gf_snr.optimal_snr, gf_snr.matched_filter_fft):
+            assert "jax.jit" in function.__doc__, function.__name__
+        api = (Path(__file__).resolve().parents[2] / "docs" / "api.md").read_text()
+        for name in ("matched_filter_fft", "optimal_snr"):
+            entry = next(line for line in api.splitlines() if line.startswith(f"- `{name}`"))
+            assert "jax.jit" in entry, entry
