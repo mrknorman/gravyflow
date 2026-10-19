@@ -285,8 +285,8 @@ are gone, with no shim: a generator's `generate(seed=)` (pass streams, or the ge
   footprint's split; one that crosses an edge between splits is in no split. Noise and records have moved between
   splits: do not evaluate a model trained on an earlier release's split on this release's validate or test split.
 - MLGWSC-1's test strain is reserved (`gf.SplitSpec.reserved`, `docs/acquisition.md`, section 2): the challenge's
-  362 O3a segments (`gf.MLGWSC1_O3A`; H1 over each, L1 with 240 s either side, since the challenge shifts L1 by up to
-  240 s) are in no train or validate draw of real data, so no model gravyflow trains or selects has seen the strain
+  362 O3a segments (`gf.MLGWSC1_O3A`; exactly, on H1 and L1, since the challenge shifts L1 only within a segment)
+  are in no train or validate draw of real data, so no model gravyflow trains or selects has seen the strain
   it would be compared on; test keeps them. That removes nearly all O3a coincident time from training. The
   challenge-faithful mode, `gf.SplitSpec(reserved=())`, asked for explicitly, trains on it as the challenge's entries
   could; the mode is in the split's fingerprint, so a model of one mode is never validated as the other, and

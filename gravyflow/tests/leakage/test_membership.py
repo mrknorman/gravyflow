@@ -1,7 +1,9 @@
 """
 A transient record's split is its footprint's: ``spec.assign`` of the time the
 library may read for it, whatever the seed, the runs, the detectors, the window or
-the route. Records whose footprint is in no split are left out and counted.
+the route. Records whose footprint is in no split are left out and counted, and so
+is a record of a split that cannot be read there (its census, ``rejections``: a
+detector it was not seen in with no partner time in its block, for one).
 """
 
 import hashlib
@@ -66,24 +68,41 @@ def expected(rows, spec):
     return out
 
 
-def assert_membership_is_assign(served, rows, spec, where):
-    """Each split served exactly the records whose footprint ``spec.assign`` puts in it."""
+def assert_membership_is_assign(served, rows, spec, where, rejected=None):
+    """
+    Each split served only records whose footprint ``spec.assign`` puts in it, and
+    all of them but the ones its census counts as rejected (``rejected``: {split:
+    count}, none when None).
+    """
     truth = expected(rows, spec)
     for split in SPLITS:
-        wrong = served[split] ^ truth.get(split, set())
-        assert not wrong, f"{where}: {len(wrong)} records in or out of {split} against spec.assign"
+        intruders = served[split] - truth.get(split, set())
+        assert not intruders, f"{where}: {len(intruders)} records served in {split} against spec.assign"
+        missing = truth.get(split, set()) - served[split]
+        count = (rejected or {}).get(split, 0)
+        assert len(missing) == count, (
+            f"{where}: {len(missing)} records of {split} not served, {count} counted as rejected")
 
 
 class Stop(Exception):
     pass
 
 
+def census(reader):
+    """The records ``reader`` served and the number it counted as rejected."""
+    return ({record.gps_key for record in reader.transient_segments},
+            reader.get_acquisition_stats()["dropped_segments"])
+
+
 def served_by_dataset(obtainer, split, onsource_seconds, seed):
-    """The records a dataset serves for ``split``, stopped where it would read its first example."""
+    """
+    The census (``census``) of a dataset for ``split``, taken where it would read
+    its first example.
+    """
     served = {}
 
     def stop(self, *args, **kwargs):
-        served["keys"] = {record.gps_key for record in self.transient_segments}
+        served["census"] = census(self)
         raise Stop
 
     with mock.patch.object(gf.TransientDataObtainer, "_read_example", stop), \
@@ -91,7 +110,7 @@ def served_by_dataset(obtainer, split, onsource_seconds, seed):
         gf.Dataset(noise_obtainer=obtainer, group=split, seed=seed, sample_rate_hertz=256.0,
                    onsource_duration_seconds=onsource_seconds, offsource_duration_seconds=16.0,
                    input_variables=[gf.ReturnVariables.ONSOURCE], steps_per_epoch=1)[0]
-    return served["keys"]
+    return served["census"]
 
 
 CONFIGURATIONS = {
@@ -119,10 +138,12 @@ def test_record_split_is_spec_assign(catalogue, configuration, spec_name):
     for split in SPLITS:
         reader = obtainer()
         reader.get_valid_segments(settings["ifos"], settings["seed"], split)
-        by_segments[split] = {record.gps_key for record in reader.transient_segments}
+        by_segments[split] = census(reader)
         by_dataset[split] = served_by_dataset(obtainer(), split, settings["onsource"], settings["seed"])
-    assert_membership_is_assign(by_segments, catalogue, spec, f"get_valid_segments, {configuration}")
-    assert_membership_is_assign(by_dataset, catalogue, spec, f"a dataset, {configuration}")
+    for route, censuses in (("get_valid_segments", by_segments), ("a dataset", by_dataset)):
+        served = {split: keys for split, (keys, _) in censuses.items()}
+        rejected = {split: count for split, (_, count) in censuses.items()}
+        assert_membership_is_assign(served, catalogue, spec, f"{route}, {configuration}", rejected)
 
     index = TransientIndex(catalogue)
     excluded = index.assign_splits(spec)

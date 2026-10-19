@@ -7,7 +7,7 @@ a benchmark's test strain. ``SplitSpec.reserved`` holds them; test keeps the tim
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Dict, Mapping, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 
@@ -72,19 +72,6 @@ class Reservation:
 
     def __reduce__(self):
         return type(self), (self.name, self.intervals)
-
-    @classmethod
-    def from_segments(cls, name: str, segments, guards: Mapping[str, float]) -> "Reservation":
-        """
-        ``segments`` ((N, 2) GPS) reserved on each detector of ``guards``, widened on
-        both sides by that detector's guard in seconds.
-        """
-        segments = np.reshape(np.asarray(segments, dtype=np.float64), (-1, 2))
-        if any(not guard >= 0.0 for guard in guards.values()):
-            raise ValueError(f"A reservation's guards must be non-negative, got {dict(guards)}.")
-        return cls(name, tuple(
-            (detector, segments + np.array([-float(guard), float(guard)])) for detector, guard in guards.items()
-        ))
 
     def of(self, detector=None) -> np.ndarray:
         """

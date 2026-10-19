@@ -1,8 +1,8 @@
 """
 Benchmark time is reserved: MLGWSC-1's O3a segments, the strain its test month was
-cut from, are in no train or validate draw of real data by default. H1 is held out
-over each segment, and L1 over each segment and 240 s either side, since the
-challenge shifts L1 by up to 240 s within a segment. Test keeps the time: the
+cut from, are in no train or validate draw of real data by default, on H1 and L1
+alike over exactly each segment: the challenge shifts L1 only within a segment, so
+it reads nothing outside one. Test keeps the time: the
 reservation holds data out of training and model selection, never out of
 evaluation. Only the explicit challenge-faithful mode (``gf.SplitSpec(reserved=())``)
 serves it, and that mode is in the split's fingerprint.
@@ -28,7 +28,6 @@ from . import fixtures as fx
 
 IFOS = ["H1", "L1"]
 MODES = [gf.SamplingMode.RANDOM, gf.SamplingMode.GRID]
-L1_GUARD_SECONDS = 240.0
 
 #: MLGWSC-1 segments.csv row 0: it runs from a train block (151148) into a validate
 #: block (151149) of the golden table.
@@ -38,9 +37,8 @@ SEGMENT_11 = (1238834634.0, 1238853959.0)
 
 
 def reserved(segment):
-    """The time ``segment`` holds out, per detector: H1 the segment, L1 with its guard."""
-    start, end = segment
-    return {"H1": [(start, end)], "L1": [(start - L1_GUARD_SECONDS, end + L1_GUARD_SECONDS)]}
+    """The time ``segment`` holds out, per detector: exactly the segment, on each."""
+    return {ifo: [segment] for ifo in IFOS}
 
 
 def around_segment_0():
@@ -81,7 +79,7 @@ def _check_reserved(world, fixture, segment, splits, **overrides):
 def test_benchmark_time_is_reserved_from_training(world):
     """
     No train or validate noise window, in RANDOM or GRID, reads H1 inside an MLGWSC-1
-    segment or L1 within 240 s of one; both splits still serve the time around it.
+    segment, on either detector; both splits still serve the time around it.
     """
     _check_reserved(world, around_segment_0(), SEGMENT_0, ("train", "validate"))
 
@@ -130,16 +128,16 @@ def blip(t, ifo="H1"):
                             observing_run=gf.ObservingRun.O3, seen_in=[gf.IFO[ifo]])
 
 
-#: Glitches in row 0's train block: inside the segment, inside only L1's guard (an
-#: H1 glitch: the guard holds every detector's records out, whichever saw them), and
-#: clear of both.
-INSIDE, L1_GUARD_ONLY, CLEAR = 1238208000.0, 1238204900.0, 1238204600.0
+#: Glitches in row 0's train block: one inside the segment, and two before it, the
+#: nearer with a footprint ending 128.8 s before the segment starts: reserved time is
+#: the segment exactly, on every detector, so train keeps both.
+INSIDE, JUST_BEFORE, CLEAR = 1238208000.0, 1238204900.0, 1238204600.0
 
 
 def _splits(spec):
-    index = TransientIndex([blip(INSIDE), blip(L1_GUARD_ONLY), blip(CLEAR)])
+    index = TransientIndex([blip(INSIDE), blip(JUST_BEFORE), blip(CLEAR)])
     excluded = index.assign_splits(spec)
-    return {t: index._groups.get(gps_to_key(t)) for t in (INSIDE, L1_GUARD_ONLY, CLEAR)}, excluded
+    return {t: index._groups.get(gps_to_key(t)) for t in (INSIDE, JUST_BEFORE, CLEAR)}, excluded
 
 
 def test_glitches_in_benchmark_time_are_in_no_split():
@@ -148,10 +146,10 @@ def test_glitches_in_benchmark_time_are_in_no_split():
     split, and counted as reserved; challenge-faithful mode keeps it in train.
     """
     groups, excluded = _splits(gf.SplitSpec())
-    assert groups == {INSIDE: None, L1_GUARD_ONLY: None, CLEAR: "train"}, groups
-    assert excluded == {"lies in reserved time (mlgwsc1-o3a)": 2}, excluded
+    assert groups == {INSIDE: None, JUST_BEFORE: "train", CLEAR: "train"}, groups
+    assert excluded == {"lies in reserved time (mlgwsc1-o3a)": 1}, excluded
     groups, excluded = _splits(gf.SplitSpec(reserved=()))
-    assert groups == {INSIDE: "train", L1_GUARD_ONLY: "train", CLEAR: "train"}, groups
+    assert groups == {INSIDE: "train", JUST_BEFORE: "train", CLEAR: "train"}, groups
     assert excluded == {}, excluded
 
 
@@ -167,8 +165,7 @@ def test_reservation_names_the_mode(world):
     assert strict.mode == "reserved: mlgwsc1-o3a"
     assert faithful.mode == "challenge-faithful"
     assert gf.SplitSpec(reserved=(gf.MLGWSC1_O3A,)).fingerprint() == strict.fingerprint()
-    assert np.array_equal(strict.reserved_time(gf.IFO.L1)[0],
-                          [SEGMENT_0[0] - L1_GUARD_SECONDS, SEGMENT_0[1] + L1_GUARD_SECONDS])
+    assert np.array_equal(strict.reserved_time(gf.IFO.L1)[0], SEGMENT_0)
     fixture = around_segment_0()
     with world(fixture):
         for spec in (strict, faithful):
@@ -176,9 +173,28 @@ def test_reservation_names_the_mode(world):
             assert (record["split_fingerprint"], record["split_mode"]) == (spec.fingerprint(), spec.mode)
 
 
+def test_l1_is_reserved_exactly_over_the_segments():
+    """
+    L1's reserved time is the segments, to the second, as H1's is: a train window on
+    L1 ending one sample (1/4096 s) before row 0 starts is admissible whole, one
+    reaching a sample into it is cut at its start, and validate after row 0 ends
+    likewise starts at its end.
+    """
+    spec, sample = gf.DEFAULT_SPLIT, 1.0 / 4096.0
+    start, end = SEGMENT_0
+    assert np.array_equal(spec.reserved_time("L1")[0], SEGMENT_0)
+    assert np.array_equal(spec.reserved_time("L1")[11], SEGMENT_11)
+    window = [start - 1.0 - sample, start - sample]
+    for ifo in IFOS:
+        assert np.array_equal(spec.admissible([window], "train", ifo), [window])
+        assert spec.reserving(*window, ifo) is None
+        assert np.array_equal(spec.admissible([[window[0], start + sample]], "train", ifo), [[window[0], start]])
+        assert np.array_equal(spec.admissible([[end, end + 1.0]], "validate", ifo), [[end, end + 1.0]])
+
+
 def test_a_reservation_is_checked_as_it_is_made():
     """Reservations are named apart and are gf.Reservation objects; a repr stays short."""
-    other = gf.Reservation.from_segments("other", [[0.0, 10.0]], {"V1": 5.0})
+    other = gf.Reservation("other", (("V1", [[-5.0, 15.0]]),))
     assert np.array_equal(other.of("V1"), [[-5.0, 15.0]]) and len(other.of("H1")) == 0
     spec = gf.SplitSpec(reserved=(gf.MLGWSC1_O3A, other))
     assert spec.mode == "reserved: mlgwsc1-o3a, other"
@@ -187,8 +203,6 @@ def test_a_reservation_is_checked_as_it_is_made():
         gf.SplitSpec(reserved=(other, other))
     with pytest.raises(TypeError, match="gf.Reservation"):
         gf.SplitSpec(reserved=([(0.0, 1.0)],))
-    with pytest.raises(ValueError, match="non-negative"):
-        gf.Reservation.from_segments("bad", [[0.0, 1.0]], {"H1": -1.0})
     assert len(repr(gf.DEFAULT_SPLIT)) < 400
 
 
@@ -203,17 +217,10 @@ def test_a_reservation_that_reserves_nothing_is_refused(intervals):
         gf.Reservation("hollow", intervals)
 
 
-def test_a_reservation_with_no_detector_is_refused():
-    with pytest.raises(ValueError, match="reserves no time"):
-        gf.Reservation.from_segments("hollow", [[0.0, 10.0]], {})
-
-
 def test_a_detector_is_named_once():
     """A detector named twice, as gf.IFO and as its name, would keep only one's time."""
     with pytest.raises(ValueError, match="H1 twice"):
         gf.Reservation("twice", ((gf.IFO.H1, [[0.0, 10.0]]), ("H1", [[100.0, 110.0]])))
-    with pytest.raises(ValueError, match="H1 twice"):
-        gf.Reservation.from_segments("twice", [[0.0, 10.0]], {gf.IFO.H1: 0.0, "H1": 5.0})
 
 
 def test_a_reservation_stays_read_only_through_pickling():

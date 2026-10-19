@@ -224,12 +224,12 @@ def test_the_segments_are_the_challenges():
     assert np.all(segments[1:, 0] > segments[:-1, 1])
 
 
-def test_the_reservation_guards_l1():
+def test_the_reservation_is_the_segments_exactly():
+    """H1 and L1 each reserve exactly the 362 segments; no other detector reserves any time."""
     segments = mlgwsc1.segments()
     reservation = gf.MLGWSC1_O3A
     assert np.array_equal(reservation.of("H1"), segments)
-    l1 = reservation.of(gf.IFO.L1)
-    assert (l1[0, 0], l1[-1, 1]) == (segments[0, 0] - 240.0, segments[-1, 1] + 240.0)
-    assert np.sum(l1[:, 1] - l1[:, 0]) > np.sum(segments[:, 1] - segments[:, 0])
+    assert np.array_equal(reservation.of(gf.IFO.L1), segments)
+    assert np.array_equal(reservation.of(None), segments)
     assert len(reservation.of("V1")) == 0
     assert gf.DEFAULT_SPLIT.reserved == (reservation,)

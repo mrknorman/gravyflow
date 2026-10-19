@@ -8,7 +8,7 @@ repository before it may need the changes below.
 ### Breaking changes
 
 - **MLGWSC-1's test strain is reserved by default.** `gf.SplitSpec` gains `reserved`, by default `gf.MLGWSC1_O3A`:
-  the challenge's 362 O3a segments, H1 over each and L1 with 240 s either side, held out of every train and validate
+  the challenge's 362 O3a segments, exactly, on H1 and L1, held out of every train and validate
   draw of real data (noise, glitches, partners); test keeps them. `gf.SplitSpec(reserved=())` is the explicit
   challenge-faithful mode. The reservation is in `SplitSpec.fingerprint()`, so every split fingerprint has changed,
   and a model recorded under an earlier one is refused by the validator.

@@ -7,12 +7,14 @@ Its files are entries of gravyflow's manifest of pinned remote files
 list ships with gravyflow too, so its reservation holds offline.
 
 Its fourth dataset is real O3a noise from 362 segments (``segments.csv``): H1 as
-recorded, L1 shifted within each segment by up to 240 s. So that no model
-gravyflow trains or selects has seen that strain, ``MLGWSC1_O3A`` reserves it from
-every train and validate draw by default (``gf.SplitSpec.reserved``): H1 over each
-segment, and L1 over each segment widened by 240 s on both sides. The
-challenge-faithful mode, ``gf.SplitSpec(reserved=())``, trains on it as the
-challenge's entries could; every fingerprint says which mode a result came from.
+recorded, L1 shifted by up to 240 s within each segment. The shift moves L1 strain
+from one place in a segment to another, never in from outside it, so every sample the
+challenge reads lies inside a segment on both detectors. So that no model gravyflow
+trains or selects has seen that strain, ``MLGWSC1_O3A`` reserves exactly those
+segments, on H1 and L1, from every train and validate draw by default
+(``gf.SplitSpec.reserved``). The challenge-faithful mode,
+``gf.SplitSpec(reserved=())``, trains on it as the challenge's entries could; every
+fingerprint says which mode a result came from.
 """
 
 import csv
@@ -23,9 +25,6 @@ from gravyflow.src.dataset.reservation import Reservation
 
 #: The challenge's segment list, by its manifest name.
 SEGMENTS = "mlgwsc1/segments.csv"
-
-#: How far the challenge shifts L1 within a segment, at most, in seconds.
-L1_GUARD_SECONDS = 240.0
 
 
 def segments() -> np.ndarray:
@@ -40,5 +39,4 @@ def segments() -> np.ndarray:
 
 
 #: MLGWSC-1's test strain, held out of train and validate by default.
-MLGWSC1_O3A = Reservation.from_segments(
-    "mlgwsc1-o3a", segments(), {"H1": 0.0, "L1": L1_GUARD_SECONDS})
+MLGWSC1_O3A = Reservation("mlgwsc1-o3a", tuple(dict.fromkeys(("H1", "L1"), segments()).items()))

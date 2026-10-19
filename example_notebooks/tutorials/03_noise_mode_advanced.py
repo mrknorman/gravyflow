@@ -95,7 +95,7 @@ How it works:
   2. A hash of each block's index decides its split
   3. 128 s at every edge between splits belongs to no split, so data of two
      splits is always at least 128 s apart
-  4. MLGWSC-1's test strain (its 362 O3a segments; L1 with 240 s either side)
+  4. MLGWSC-1's test strain (its 362 O3a segments, on H1 and L1)
      is reserved: in no train or validate draw, while test keeps it.
      gf.SplitSpec(reserved=()) is the explicit challenge-faithful mode.
 
