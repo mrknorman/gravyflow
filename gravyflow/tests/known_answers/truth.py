@@ -34,6 +34,7 @@ from scipy import integrate, optimize, special, stats
 ONE_SIGMA = float(special.erf(1.0 / np.sqrt(2.0)))   # 0.682689...
 TWO_SIGMA = float(special.erf(2.0 / np.sqrt(2.0)))   # 0.954499...
 LEVELS = (ONE_SIGMA, TWO_SIGMA)
+LEVEL_IDS = ("1sigma", "2sigma")
 
 GPC3_PER_MPC3 = 1e-9
 
