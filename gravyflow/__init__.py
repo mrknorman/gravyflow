@@ -175,8 +175,6 @@ _MODULES = {
     "ExternalDeadlineExpired": "gravyflow.src.external",
     "AdapterMissing": "gravyflow.src.external",
     "AdapterMismatch": "gravyflow.src.external",
-    "release_manifest": "gravyflow.src.external",
-    "LicenceRefused": "gravyflow.src.external",
 
     # Models
     "Gabbard2017": "gravyflow.src.model.examples.gabbard_2017",

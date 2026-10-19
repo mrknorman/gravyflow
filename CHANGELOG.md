@@ -104,8 +104,7 @@ repository before it may need the changes below.
   `gf.ExternalRunner` runs one in its own environment (`gf.AdapterEnvironment`) as an isolated `python -I`
   subprocess under a deadline, on a whole `gf.SearchSegment`, with its weights fetched only by `gf.fetch`; its
   `gf.ExternalResult` names the card's mode (`gf.AS_PUBLISHED`) and fingerprint. A missing adapter is refused by name
-  (`gf.AdapterMissing`), as is another release of it or another environment (`gf.AdapterMismatch`). The licence gate,
-  `gf.release_manifest`, refuses to publish a file with no licence (`gf.LicenceRefused`) (README §10).
+  (`gf.AdapterMissing`), as is another release of it or another environment (`gf.AdapterMismatch`) (README §10).
 
 - `gravyflow.__version__`.
 - `docs/api.md`, the public API, which a test holds equal to `gravyflow.__all__`.

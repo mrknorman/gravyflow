@@ -1,6 +1,6 @@
 """
-External models: a card's fingerprint, the runner that runs an adapter in its own
-environment, and the licence gate.
+External models: a card's fingerprint, and the runner that runs an adapter in its own
+environment.
 
 The adapter here is a toy in numpy, installed into a temporary directory as
 ``pip install --target`` would install it (a module and its ``.dist-info`` with the
@@ -163,7 +163,7 @@ def test_a_card_fingerprints_what_decides_its_results(tmp_path):
     }
     prints = {name: c.fingerprint for name, c in changed.items()}
     assert base.fingerprint not in prints.values() and len(set(prints.values())) == len(prints), prints
-    assert base.mode == gf.AS_PUBLISHED == "as-published" and base.files == (weights,)
+    assert base.mode == gf.AS_PUBLISHED == "as-published"
 
 
 def test_a_cards_provenance_is_not_its_identity(tmp_path):
@@ -323,17 +323,3 @@ def test_a_segment_is_built_from_a_sources_strain():
     with pytest.raises(ValueError, match="NaN"):
         gf.SearchSegment(np.full((1, 4), np.nan), ("H1",), T0, RATE)
 
-
-def test_the_licence_gate_refuses_to_publish_an_unlicensed_file(toy):
-    toy_card = toy[0]
-    with pytest.raises(gf.LicenceRefused, match=r"toy/scale\.npy \(it has no licence\)"):
-        gf.release_manifest(toy_card.files)
-    licensed = RemoteFile("model/x.keras", "https://example.org/x.keras", "c" * 64, 1, licence="Apache-2.0",
-                          redistributable=True)
-    restricted = dataclasses.replace(licensed, name="model/y.keras", redistributable=False)
-    assert gf.release_manifest([licensed, licensed]) == (licensed,)
-    with pytest.raises(gf.LicenceRefused, match=r"model/y\.keras \(its licence, Apache-2\.0, is not marked"):
-        gf.release_manifest([licensed, restricted])
-    # A licence of None can never be marked redistributable in the first place.
-    with pytest.raises(ValueError, match="has no licence"):
-        dataclasses.replace(licensed, licence=None)

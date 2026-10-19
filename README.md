@@ -459,5 +459,4 @@ signal column and direction its card declares (`gf.OutputContract`): it is never
 models, and never runs through `gf.Validator`.
 
 Running a model needs no licence for its weights: they come from their authors' source into your own store. Publishing
-a file again does: every list of files a release publishes passes `gf.release_manifest`, which refuses a file with no
-licence, or one not marked redistributable (`gf.LicenceRefused`).
+a file again does: only a `gf.RemoteFile` marked redistributable may be, and one with no licence cannot be marked so.

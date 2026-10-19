@@ -176,9 +176,6 @@ models are, and never through the `Validator`.
 - `ExternalDeadlineExpired`: an external run outlived its deadline; every process in its session was stopped.
 - `AdapterMissing`: the environment has no adapter by the card's name.
 - `AdapterMismatch`: the environment is not the card's: another lock, another adapter release, or not an `ExternalSearch`.
-- `release_manifest`: the licence gate: the files a release may publish, refusing any with no licence or not redistributable.
-- `LicenceRefused`: a file a release would publish is not redistributable.
-
 ## Models
 
 The example models (`Gabbard2017`, `MatchedFilterBaseline`) come with their training recipe, which

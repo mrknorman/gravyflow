@@ -257,11 +257,6 @@ class ExternalCard:
             raise ValueError(f"{self.name}: its mode is one of {MODES}, got {self.mode!r}.")
 
     @property
-    def files(self) -> Tuple[RemoteFile, ...]:
-        """Its weights' remote files."""
-        return tuple(w.file for w in self.weights)
-
-    @property
     def fingerprint(self) -> str:
         """The sha256, by content, of what decides a run's outputs; never the model's
         name, its weights' URLs or licences, its published rows or its training data."""
