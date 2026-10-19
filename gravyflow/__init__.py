@@ -117,6 +117,9 @@ _MODULES = {
     "GaussianTwin": "gravyflow.src.dataset.standard.presets",
     "BBHPopulation": "gravyflow.src.dataset.standard.population",
     "InjectionSchedule": "gravyflow.src.dataset.standard.population",
+    "VolumeSet": "gravyflow.src.dataset.standard.population",
+    "SNRSet": "gravyflow.src.dataset.standard.population",
+    "Reach": "gravyflow.src.dataset.standard.population",
     "PinnedFileChanged": "gravyflow.src.dataset.standard.presets",
 
     # Injections

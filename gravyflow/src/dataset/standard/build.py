@@ -155,3 +155,59 @@ def build_files(definition, directory: Path) -> Dict[str, str]:
         (directory / name).write_bytes(data)
         pins[name] = sha256(data)
     return pins
+
+
+#: The aligned spins the best case is searched over, per component: the extremes and none.
+BEST_CASE_SPINS = (-0.99, 0.0, 0.99)
+
+
+def best_case_snr_grid(mass_grid_msun: Sequence[float], noise_profiles: Sequence[str], detectors: Sequence[str],
+                       lower_frequency_hertz: float, upper_frequency_hertz: float,
+                       approximant: str = "IMRPhenomXAS", spins: Sequence[float] = BEST_CASE_SPINS,
+                       frequency_step_hertz: float = 0.125) -> np.ndarray:
+    """
+    The best-case network optimal SNR at 1 Gpc of every pair of ``mass_grid_msun``
+    (detector frame): the (G, G) symmetric table of ``population.Reach``.
+
+    The best case is a face-on source directly above every detector (F+ = 1, Fx = 0, so
+    each sees |h+|, which face-on equals |hx|), each detector's noise the lowest, per
+    frequency, of the ``noise_profiles`` curves (``gf.NoiseProfile`` names) of all
+    ``detectors``, and the spins the loudest of every aligned pair from ``spins``. The
+    SNR is gravyflow's definition (``tools.snr``) in the frequency domain,
+    rho^2 = 4 df sum |h+|^2 / S over [lower, upper), and the network SNR is
+    sqrt(len(detectors)) times one detector's. The waveforms are ripple's
+    ``approximant`` from ``lower_frequency_hertz``.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from gravyflow.src.dataset.conditioning.detector import IFO, NoiseProfile
+    from gravyflow.src.dataset.features.waveforms.cbc import (
+        _as_approximant, _frequency_domain_polarisations, _in_x64, _source_parameters,
+    )
+    from gravyflow.src.detection.template_grid import noise_curve_psd
+
+    model = _as_approximant(approximant)
+    frequencies = np.arange(0.0, upper_frequency_hertz, frequency_step_hertz)
+    band = frequencies >= lower_frequency_hertz
+    inverse_psd = 1.0 / np.min([noise_curve_psd(IFO[ifo], frequencies[band], NoiseProfile[profile])
+                                for profile in noise_profiles for ifo in detectors], axis=0)
+
+    def one(m1, m2, s1, s2):
+        zero = jnp.zeros(())
+        parameters = _source_parameters(m1, m2, jnp.stack([zero, zero, s1]), jnp.stack([zero, zero, s2]),
+                                        0.0, 0.0, 1000.0, 0.0, 0.0)
+        plus, _ = _frequency_domain_polarisations(model, jnp.asarray(frequencies), parameters,
+                                                  lower_frequency_hertz, 0.0)
+        return jnp.abs(plus) ** 2
+
+    plus_power = _in_x64(jax.jit(jax.vmap(one)))
+    grid = np.asarray(mass_grid_msun, dtype=np.float64)
+    s1, s2 = np.array([(a, b) for a in spins for b in spins], dtype=np.float64).T
+    table = np.zeros((len(grid), len(grid)))
+    for i in range(len(grid)):
+        for j in range(i + 1):
+            power = np.asarray(plus_power(np.full(len(s1), grid[i]), np.full(len(s1), grid[j]), s1, s2))
+            single = np.sqrt(4.0 * frequency_step_hertz * np.sum(power[:, band] * inverse_psd, axis=-1))
+            table[i, j] = table[j, i] = np.sqrt(len(detectors)) * single.max()
+    return table

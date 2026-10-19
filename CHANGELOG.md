@@ -121,10 +121,13 @@ repository before it may need the changes below.
 - **Standard datasets**: `gf.standard_dataset("O4 standard")` and `gf.standard_dataset("O3 open-weights")`, each
   with a Gaussian twin (`gaussian_twin=True`): fixed, fingerprinted test data (the test split of gravyflow's
   partition on H1 and L1 at 2048 Hz, default flags, events vetoed and listed apart, no glitch veto), with a pinned
-  segment list, event list and binary-black-hole injection population shipped in `res/standard/`, and 100,000
-  injections drawn from a fixed seed. A changed pinned file is refused (`gf.PinnedFileChanged`). See `docs/api.md`.
-  `gf.StandardDataset`, `gf.STANDARD_DATASETS`, `gf.GaussianTwin`, `gf.BBHPopulation` and `gf.InjectionSchedule`
-  are exported.
+  segment list, event list and binary-black-hole injection population shipped in `res/standard/`. Two injection
+  sets are drawn from a fixed seed on the same segments: the volume set (100,000, uniform in distance out to each
+  mass's reach, where the best-case source has network SNR 2, weighted so the sensitive volume is exact) and the SNR
+  set (50,000, network SNR uniform over 0 to 20); the population is IMRPhenomXPHM, with precessing spins. A changed
+  pinned file or table is refused (`gf.PinnedFileChanged`). See `docs/api.md`. `gf.StandardDataset`,
+  `gf.STANDARD_DATASETS`, `gf.GaussianTwin`, `gf.BBHPopulation`, `gf.VolumeSet`, `gf.SNRSet`, `gf.Reach` and
+  `gf.InjectionSchedule` are exported.
 - **O4 noise profiles**: `gf.NoiseProfile.O4_HIGH` (aLIGO's high projection for H1 and L1, Advanced Virgo's for
   V1) and `gf.NoiseProfile.O4_LOW` (aLIGO's low projection, H1 and L1 only), LIGO-T2000012-v2's O4 tables as
   published: the observing scenarios' projections (Living Rev. Relativ. 23, 3 (2020)), not measurements.

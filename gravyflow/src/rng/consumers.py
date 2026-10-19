@@ -36,6 +36,9 @@ _LEAVES = tuple(re.compile(pattern) for pattern in (
     rf"inject/{_SEGMENT}/shift",
     rf"(sky|pol|scale)/{_SEGMENT}",
     r"pool/assign",
+    # A standard dataset's injection sets, one stream per parameter
+    # (gravyflow.src.dataset.standard.population).
+    rf"standard/(volume|snr)/{_SEGMENT}",
     # The validator's own draws outside its datasets.
     r"validator/(roc|plot|pad)",
     # A model's hyperparameters, its layers and its build seeds

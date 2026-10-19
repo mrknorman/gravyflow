@@ -18,7 +18,7 @@ import gravyflow as gf
 from gravyflow.src.dataset.features.event import noise_event_vetoes
 from gravyflow.src.dataset.standard import build, presets
 from gravyflow.src.dataset.standard.population import (
-    BBHPopulation, InjectionSchedule, injection_table, table_sha256,
+    BBHPopulation, InjectionSchedule, Reach, SNRSet, VolumeSet, injection_table, table_sha256,
 )
 from gravyflow.src.rng import SeedTree
 
@@ -122,16 +122,24 @@ def test_the_event_file_has_its_columns_and_spells_a_missing_value_nan():
 # -------------------------------------------------------------- injections
 
 
-POPULATION = BBHPopulation(mass_msun=(5.0, 100.0), spin_z=(-0.99, 0.99), reach_mpc=1000.0,
-                           approximant="IMRPhenomXAS", lower_frequency_hertz=20.0)
+POPULATION = BBHPopulation(mass_msun=(5.0, 100.0), spin_magnitude=(0.0, 0.99), approximant="IMRPhenomXPHM",
+                           lower_frequency_hertz=20.0, reference_frequency_hertz=20.0)
+# A toy reach whose best-case SNR at 1 Gpc grows with the masses: R(5, 5) = 1 Gpc * 2 * 2 / 2.
+GRID = (5.0, 50.0, 100.0)
+REACH = Reach(network_snr=2.0, safety_factor=2.0, approximant="IMRPhenomXAS", noise_profiles=("O4_LOW",),
+              mass_grid_msun=GRID, best_case_snr_at_1_gpc=[[a + b for b in (1, 5, 10)] for a in (1, 5, 10)])
+
+
+def _volume(count, spacing=64.0):
+    return VolumeSet(InjectionSchedule(count, spacing, 32.0), REACH)
 
 
 def test_the_schedule_keeps_mergers_apart_and_inside_the_segments():
     segments = np.array([[0, 1000], [2000, 2100], [3000, 3200]], dtype=np.int64)
     schedule = InjectionSchedule(count=40, spacing_seconds=64.0, padding_seconds=32.0)
     # 1000 s holds 14 slots, 100 s none, 200 s two: 16 slots, so two full passes and 8 more.
-    assert len(schedule.slots(segments)) == 16
-    table = injection_table(POPULATION, schedule, SeedTree(3), segments)
+    assert len(schedule.slots(segments)) == 16 and schedule.passes(segments) == 3
+    table = injection_table(POPULATION, _volume(40), SeedTree(3), segments)
     assert np.bincount(table["pass"]).tolist() == [16, 16, 8]
     for p in range(3):
         tc = table["tc"][table["pass"] == p]
@@ -142,42 +150,114 @@ def test_the_schedule_keeps_mergers_apart_and_inside_the_segments():
     assert inside.all()
 
 
-def test_the_population_is_in_its_ranges():
-    table = injection_table(POPULATION, InjectionSchedule(2000, 64.0, 32.0), SeedTree(5),
-                            np.array([[0, 64 * 3000]], dtype=np.int64))
+def test_the_population_is_in_its_ranges_and_its_spins_are_isotropic():
+    table = injection_table(POPULATION, _volume(4000), SeedTree(5), np.array([[0, 64 * 5000]], dtype=np.int64))
     assert np.all(table["mass1"] >= table["mass2"])
     assert table["mass2"].min() >= 5.0 and table["mass1"].max() <= 100.0
-    assert np.abs(table[["spin1z", "spin2z"]].tolist()).max() <= 0.99
-    assert 0.0 <= table["distance"].min() and table["distance"].max() <= 1000.0
-    # Uniform in volume: the median distance is R / 2^(1/3).
-    assert abs(np.median(table["distance"]) / 1000.0 - 2 ** (-1 / 3)) < 0.03
+    for component in ("spin1", "spin2"):
+        spin = np.stack([table[f"{component}{axis}"] for axis in "xyz"])
+        magnitude = np.linalg.norm(spin, axis=0)
+        assert magnitude.max() <= 0.99
+        # Isotropic directions: the tilt's cosine is uniform, its mean 0 and its mean
+        # square 1/3; the in-plane spin is what makes the sources precess.
+        cos_tilt = spin[2] / magnitude
+        assert abs(cos_tilt.mean()) < 0.03 and abs(np.mean(cos_tilt ** 2) - 1 / 3) < 0.02
+
+
+def test_the_reach_is_the_largest_corner_of_its_cell_scaled_to_the_snr():
+    # Inside the cell [5, 50] x [5, 50] the reach is that of its loudest corner, (50, 50):
+    # 1 Gpc * 2 * (5 + 5) / 2; its edges included.
+    for masses in ((20.0, 10.0), (5.0, 5.0), (49.0, 5.0)):
+        np.testing.assert_allclose(REACH.distance_mpc(np.array([masses[0]]), np.array([masses[1]])), [10000.0])
+    # In [50, 100] x [5, 50], of (100, 50); in [50, 100] x [50, 100], of (100, 100).
+    np.testing.assert_allclose(REACH.distance_mpc(np.array([60.0, 100.0]), np.array([10.0, 100.0])),
+                               [15000.0, 20000.0])
+    with pytest.raises(ValueError, match="outside"):
+        REACH.distance_mpc(np.array([120.0]), np.array([5.0]))
+    with pytest.raises(ValueError, match="symmetric"):
+        dataclasses.replace(REACH, best_case_snr_at_1_gpc=[[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+
+
+def test_the_volume_sets_distances_lie_within_each_mass_reach_uniform_in_distance():
+    table = injection_table(POPULATION, _volume(20000, 8.0), SeedTree(6), np.array([[0, 8 * 21000]], dtype=np.int64))
+    np.testing.assert_allclose(table["reach"], REACH.distance_mpc(table["mass1"], table["mass2"]))
+    fraction = table["distance"] / table["reach"]
+    assert fraction.min() >= 0.0 and fraction.max() <= 1.0
+    assert abs(np.median(fraction) - 0.5) < 0.02  # uniform in distance, not in volume
+
+
+def test_the_volume_weights_give_the_volume_exactly():
+    table = injection_table(POPULATION, _volume(40000, 4.0), SeedTree(7), np.array([[0, 4 * 41000]], dtype=np.int64))
+    # Over all injections the mean weight is the population's mean volume within reach.
+    expected = np.mean(4.0 / 3.0 * np.pi * table["reach"] ** 3)
+    assert abs(table["volume_weight"].mean() / expected - 1.0) < 0.02
+    # A search that finds everything within a third of each reach sees, of a population
+    # uniform in volume, (1/3)^3 of that volume: the weighted sum over the found says so.
+    found = table["distance"] < table["reach"] / 3.0
+    assert abs(table["volume_weight"][found].sum() / len(table) / (expected / 27.0) - 1.0) < 0.03
+
+
+def test_the_snr_set_spreads_its_sources_evenly_in_snr_from_zero():
+    snr_set = SNRSet(InjectionSchedule(30000, 4.0, 32.0), (0.0, 20.0))
+    table = injection_table(POPULATION, snr_set, SeedTree(8), np.array([[0, 4 * 31000]], dtype=np.int64))
+    assert table.dtype.names[-1] == "network_snr" and "distance" not in table.dtype.names
+    assert 0.0 <= table["network_snr"].min() and table["network_snr"].max() <= 20.0
+    counts, _ = np.histogram(table["network_snr"], bins=10, range=(0.0, 20.0))
+    assert counts.min() > 0.9 * len(table) / 10
+    with pytest.raises(ValueError, match="ordered"):
+        SNRSet(InjectionSchedule(10, 4.0, 0.0), (5.0, 2.0))
+
+
+def test_the_two_sets_draw_from_streams_of_their_own():
+    segments = np.array([[0, 64 * 100]], dtype=np.int64)
+    volume = injection_table(POPULATION, _volume(50), SeedTree(9), segments)
+    snr = injection_table(POPULATION, SNRSet(InjectionSchedule(50, 64.0, 32.0), (0.0, 20.0)), SeedTree(9), segments)
+    assert not np.any(np.isin(volume["mass1"], snr["mass1"]))
 
 
 def test_a_schedule_with_nowhere_to_inject_is_refused():
     with pytest.raises(ValueError, match="nowhere to inject"):
-        InjectionSchedule(5, 64.0, 32.0).times(SeedTree(1), np.array([[0, 100]]))
+        injection_table(POPULATION, _volume(5), SeedTree(1), np.array([[0, 100]]))
 
 
 def test_the_table_is_a_function_of_the_seed():
     segments = np.array([[0, 64 * 100]], dtype=np.int64)
-    schedule = InjectionSchedule(150, 64.0, 32.0)
-    one = injection_table(POPULATION, schedule, SeedTree(9), segments)
-    assert table_sha256(one) == table_sha256(injection_table(POPULATION, schedule, SeedTree(9), segments))
-    assert table_sha256(one) != table_sha256(injection_table(POPULATION, schedule, SeedTree(10), segments))
+    one = injection_table(POPULATION, _volume(150), SeedTree(9), segments)
+    assert table_sha256(one) == table_sha256(injection_table(POPULATION, _volume(150), SeedTree(9), segments))
+    assert table_sha256(one) != table_sha256(injection_table(POPULATION, _volume(150), SeedTree(10), segments))
 
 
 # ------------------------------------------------------------------ presets
 
 
-@pytest.mark.parametrize("name", sorted(gf.STANDARD_DATASETS))
-def test_each_preset_ships_its_pinned_files_and_makes_its_pinned_injections(name):
+@pytest.mark.parametrize("name, passes", [("O4 standard", 4), ("O3 open-weights", 6)])
+def test_each_preset_ships_its_pinned_files_and_makes_its_pinned_injections(name, passes):
     preset = gf.standard_dataset(name)
     assert preset.segments.shape[1] == 2 and len(preset.segments) > 0
     assert np.all(np.diff(preset.segments, axis=1) >= preset.minimum_segment_seconds)
     assert np.all(preset.segments[1:, 0] > preset.segments[:-1, 1])
-    assert len(preset.injections) == preset.schedule.count == 100_000
-    assert preset.sample_rate_hertz == 2048.0 and preset.detectors == ("H1", "L1")
-    assert preset.population.reach_mpc > 0 and preset.events
+    assert preset.sample_rate_hertz == 2048.0 and preset.detectors == ("H1", "L1") and preset.events
+    assert preset.population.approximant == "IMRPhenomXPHM"
+    assert len(preset.volume_injections) == preset.volume_set.schedule.count == 100_000
+    assert preset.volume_set.schedule.passes(preset.segments) == passes
+    assert preset.volume_set.reach.network_snr == 2.0
+    assert len(preset.snr_injections) == preset.snr_set.schedule.count == 50_000
+    assert preset.snr_set.network_snr == (0.0, 20.0)
+    # Heavier sources are heard further.
+    reach = preset.volume_set.reach
+    assert reach.distance_mpc(5.0, 5.0) < reach.distance_mpc(30.0, 30.0) < reach.distance_mpc(100.0, 100.0)
+
+
+@pytest.mark.parametrize("name", sorted(gf.STANDARD_DATASETS))
+def test_each_presets_reach_is_the_one_its_noise_and_model_give(name):
+    preset = gf.standard_dataset(name)
+    reach = preset.volume_set.reach
+    grid = np.asarray(reach.mass_grid_msun)
+    index = [0, len(grid) // 2, len(grid) - 1]
+    computed = build.best_case_snr_grid(grid[index], reach.noise_profiles, preset.detectors,
+                                        preset.population.lower_frequency_hertz, preset.sample_rate_hertz / 2,
+                                        approximant=reach.approximant)
+    np.testing.assert_allclose(computed, np.asarray(reach.best_case_snr_at_1_gpc)[np.ix_(index, index)], rtol=1e-5)
 
 
 def test_the_twin_has_the_same_segments_and_injections_and_another_fingerprint():
@@ -185,7 +265,8 @@ def test_the_twin_has_the_same_segments_and_injections_and_another_fingerprint()
     twin = gf.standard_dataset("O4 standard", gaussian_twin=True)
     assert twin.twin == gf.GaussianTwin() and real.twin is None
     np.testing.assert_array_equal(real.segments, twin.segments)
-    assert table_sha256(real.injections) == table_sha256(twin.injections)
+    assert table_sha256(real.volume_injections) == table_sha256(twin.volume_injections)
+    assert table_sha256(real.snr_injections) == table_sha256(twin.snr_injections)
     assert real.fingerprint() != twin.fingerprint()
     assert twin.label == "O4 standard (Gaussian twin)"
 
@@ -197,7 +278,7 @@ def test_an_unknown_preset_is_refused_by_name():
 
 @pytest.mark.parametrize("change", [
     dict(seed=1), dict(minimum_segment_seconds=128.0), dict(sample_rate_hertz=4096.0),
-    dict(flags=gf.GWOSC_DATA_FLAGS), dict(injections_sha256="0" * 64),
+    dict(flags=gf.GWOSC_DATA_FLAGS), dict(injections_sha256={"volume": "0" * 64, "snr": "0" * 64}),
     dict(split=gf.SplitSpec(guard_seconds=256.0)), dict(gwosc_runs=("O4a",)),
     dict(twin=gf.GaussianTwin(psd_seconds=8.0)),
 ])
@@ -229,7 +310,14 @@ def test_a_changed_pinned_file_is_refused_by_name(file, tmp_path, monkeypatch):
          "population.json": lambda: fresh.population}[file]()
 
 
-def test_injections_drawn_otherwise_are_refused():
-    preset = dataclasses.replace(gf.standard_dataset("O3 open-weights"), injections_sha256="0" * 64)
-    with pytest.raises(gf.PinnedFileChanged, match="injection table"):
-        preset.injections
+@pytest.mark.parametrize("injection_set", presets.INJECTION_SETS)
+def test_injections_drawn_otherwise_are_refused(injection_set):
+    preset = gf.standard_dataset("O3 open-weights")
+    preset = dataclasses.replace(preset, injections_sha256={**preset.injections_sha256, injection_set: "0" * 64})
+    with pytest.raises(gf.PinnedFileChanged, match=f"{injection_set} injection table"):
+        getattr(preset, f"{injection_set}_injections")
+
+
+def test_a_preset_pins_both_injection_sets():
+    with pytest.raises(ValueError, match="tables of exactly"):
+        dataclasses.replace(gf.standard_dataset("O4 standard"), injections_sha256={"volume": "0" * 64})

@@ -12,9 +12,12 @@ A preset (``StandardDataset``) fixes:
 - **Events**: the published events whose footprints the test split holds, for scoring
   separately (``events.csv``, pinned). They are never in the segments.
 - **Rate**: 2048 Hz.
-- **Injections**: a broad binary-black-hole population and its schedule, from the
-  pinned parameter file ``population.json`` and the preset's seed; the table they make
-  is pinned by sha256 too, so a change of random streams is refused, never served.
+- **Injections**: two sets from one broad binary-black-hole population, on the same
+  segments (``population``): the volume set, out to each mass's reach with weights that
+  keep the volume exact, and the SNR set, spread evenly in network SNR. Both are fixed
+  by the pinned parameter file ``population.json`` and the preset's seed; each table
+  they make is pinned by sha256 too, so a change of random streams is refused, never
+  served.
 - **Gaussian twin** (``gaussian_twin``): coloured Gaussian noise from each segment's
   measured spectrum, over the same segments with the same injections.
 
@@ -39,17 +42,20 @@ from gravyflow.src.dataset.acquisition.gwosc_data import DEFAULT_GWOSC_FLAGS
 from gravyflow.src.dataset.splits import DEFAULT_SPLIT, SplitSpec
 from gravyflow.src.dataset.standard.build import sha256
 from gravyflow.src.dataset.standard.population import (
-    BBHPopulation, InjectionSchedule, injection_table, table_sha256,
+    BBHPopulation, InjectionSchedule, Reach, SNRSet, VolumeSet, injection_table, table_sha256,
 )
 from gravyflow.src.rng import SeedTree
 from gravyflow.src.utils.fingerprint import config_fingerprint
 
 #: The presets' version: part of every fingerprint, so a change to what a preset means
 #: changes the fingerprint of every preset.
-STANDARD_VERSION = 1
+STANDARD_VERSION = 2
 
 #: The pinned files of every preset, under ``res/standard/<slug>/``.
 PINNED_FILES = ("segments.csv", "events.csv", "population.json")
+
+#: The injection sets of every preset, by name.
+INJECTION_SETS = ("volume", "snr")
 
 
 class PinnedFileChanged(ValueError):
@@ -60,9 +66,9 @@ class PinnedFileChanged(ValueError):
 class GaussianTwin:
     """
     How a preset's Gaussian twin is made: on each segment, coloured Gaussian noise with
-    that segment's measured spectrum (one detector at a time), on absolute time, as
-    ``noise.stationary.StationaryNoise`` colours a curve; the same segments and
-    injections as the real data.
+    that segment's measured spectrum (one detector at a time), on absolute time, coloured
+    as ``noise.color_noise`` colours a curve; the same segments and injections as the
+    real data.
 
     Args:
         psd_seconds: Welch's segment length for the measured spectrum.
@@ -90,7 +96,8 @@ class StandardDataset:
         slug: Its directory under ``res/standard`` and its streams' name.
         gwosc_runs: The GWOSC runs its time is drawn from.
         pins: The sha256 of each of ``PINNED_FILES``.
-        injections_sha256: The sha256 of the injection table (``table_sha256``).
+        injections_sha256: The sha256 of each injection set's table (``table_sha256``), by
+            set name (``INJECTION_SETS``).
         seed: The root of its random streams.
         detectors: Its detectors, by name.
         sample_rate_hertz: Its sample rate.
@@ -104,7 +111,7 @@ class StandardDataset:
     slug: str
     gwosc_runs: Tuple[str, ...]
     pins: Mapping[str, str]
-    injections_sha256: str
+    injections_sha256: Mapping[str, str]
     seed: int = 20261019
     detectors: Tuple[str, ...] = ("H1", "L1")
     sample_rate_hertz: float = 2048.0
@@ -118,8 +125,12 @@ class StandardDataset:
 
     def __post_init__(self):
         object.__setattr__(self, "pins", dict(self.pins))
+        object.__setattr__(self, "injections_sha256", dict(self.injections_sha256))
         if sorted(self.pins) != sorted(PINNED_FILES):
             raise ValueError(f"A standard dataset pins exactly {PINNED_FILES}, got {sorted(self.pins)}.")
+        if sorted(self.injections_sha256) != sorted(INJECTION_SETS):
+            raise ValueError(f"A standard dataset pins the tables of exactly {INJECTION_SETS}, "
+                             f"got {sorted(self.injections_sha256)}.")
 
     # --------------------------------------------------------------- variants
 
@@ -175,28 +186,49 @@ class StandardDataset:
         return BBHPopulation(**self._population_file["population"])
 
     @property
-    def schedule(self) -> InjectionSchedule:
-        """When its injections happen, from its pinned ``population.json``."""
-        return InjectionSchedule(**self._population_file["schedule"])
+    def volume_set(self) -> VolumeSet:
+        """Its volume set's schedule and reach, from its pinned ``population.json``."""
+        volume = self._population_file["volume"]
+        return VolumeSet(InjectionSchedule(**volume["schedule"]), Reach(**volume["reach"]))
+
+    @property
+    def snr_set(self) -> SNRSet:
+        """Its SNR set's schedule and range, from its pinned ``population.json``."""
+        snr = self._population_file["snr"]
+        return SNRSet(InjectionSchedule(**snr["schedule"]), snr["network_snr"])
 
     @property
     def tree(self) -> SeedTree:
         """Its random streams: its seed's, under its own name. A twin draws its noise from them too."""
         return SeedTree(self.seed).sub(f"dataset/{self.slug}")
 
-    @cached_property
-    def injections(self) -> np.ndarray:
-        """
-        Its injections, the same for the twin: a structured array of
-        ``population.INJECTION_DTYPE``, sorted by pass then merger time.
-        """
-        table = injection_table(self.population, self.schedule, self.tree, self.segments)
-        if table_sha256(table) != self.injections_sha256:
+    def _table(self, injection_set) -> np.ndarray:
+        table = injection_table(self.population, injection_set, self.tree, self.segments)
+        pinned = self.injections_sha256[injection_set.name]
+        if table_sha256(table) != pinned:
             raise PinnedFileChanged(
-                f"{self.name}'s injection table has sha256 {table_sha256(table)}, but {self.injections_sha256} "
+                f"{self.name}'s {injection_set.name} injection table has sha256 {table_sha256(table)}, but {pinned} "
                 "is pinned: its random streams or its schedule now draw other injections.")
         table.setflags(write=False)
         return table
+
+    @cached_property
+    def volume_injections(self) -> np.ndarray:
+        """
+        Its volume set, the same for the twin: a structured array of ``VolumeSet.dtype``,
+        sorted by pass then merger time. The sensitive volume of a search is the sum of
+        ``volume_weight`` over the found injections over their count (``VolumeSet``).
+        """
+        return self._table(self.volume_set)
+
+    @cached_property
+    def snr_injections(self) -> np.ndarray:
+        """
+        Its SNR set, the same for the twin: a structured array of ``SNRSet.dtype``, sorted
+        by pass then merger time, each injection scaled at run time to its
+        ``network_snr``.
+        """
+        return self._table(self.snr_set)
 
     # -------------------------------------------------------------- identity
 
@@ -221,7 +253,8 @@ class StandardDataset:
             "dataset": self.label, "fingerprint": self.fingerprint(), "gwosc_runs": list(self.gwosc_runs),
             "detectors": list(self.detectors), "sample_rate_hertz": self.sample_rate_hertz,
             "segments": len(self.segments), "seconds": self.livetime_seconds, "events": len(self.events),
-            "injections": len(self.injections), "seed": self.seed,
+            "injections": {"volume": len(self.volume_injections), "snr": len(self.snr_injections)},
+            "seed": self.seed,
             "twin": None if self.twin is None else dataclasses.asdict(self.twin),
         }
 
@@ -232,14 +265,16 @@ STANDARD_DATASETS: Dict[str, StandardDataset] = {preset.name: preset for preset 
         name="O4 standard", slug="o4-standard", gwosc_runs=("O4a", "O4b"),
         pins={"segments.csv": "4effed063523cbbee1cc92fea6433528f2b8faec0e019c0104fba32569e09605",
               "events.csv": "540b4e829a6704b0cad611c620f4f12ccd75c067ccddaca6bfa1f92092c38c2e",
-              "population.json": "fb01337d400ea773888a028dd6dee7f06dac58a8b94ba140d8172074459cbc23"},
-        injections_sha256="926f07e7ae75cb0889d0064d91f6979732c59daa2192b9334a9750929f571550"),
+              "population.json": "7a3fdb0a166b07ed1264259878a1d7984f3529f997b8cc6f5d08b49a1760b4a9"},
+        injections_sha256={"volume": "0e39185c08245f59e41d23554500a97f7ad944b084daf0b774b90aab70216882",
+                           "snr": "27c755d62dd620f2bfd05e51b8429e6f98650b88eac541fafa80e88575989f74"}),
     StandardDataset(
         name="O3 open-weights", slug="o3-open-weights", gwosc_runs=("O3a", "O3b"),
         pins={"segments.csv": "0b4ab9ab20af5d857798bd6affa5607c890361b97415a701b86fc540919eb22d",
               "events.csv": "e8f0cc4f6c8f01a90e5e1bc40ad2e65246a4438264112f559990dd1c73d49d1b",
-              "population.json": "16520a97a4d56d242bd11ca07728b7533a1f2e853cc49dda50aa53f3190f303f"},
-        injections_sha256="e5c538bdf3d525cf0cb47d6a0ab304200345fb9ebc0976720bb258a8f31598b4"),
+              "population.json": "279f362c0328a32b9bf0cda8a3ebb49b6c6fc371dbe9ee93bb6306fd164bbbcd"},
+        injections_sha256={"volume": "4431b2a7f151ab988f9825574d1bf9fb880d7d30b0a8af2e87285f72197b06cb",
+                           "snr": "191a14c063bc8c32a439d8d4feb1546abe991846f5c46e53396d55ea6b4d3d41"}),
 )}
 
 

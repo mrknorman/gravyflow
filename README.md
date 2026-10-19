@@ -209,17 +209,28 @@ o4 = gf.standard_dataset("O4 standard")          # or "O3 open-weights"
 twin = gf.standard_dataset("O4 standard", gaussian_twin=True)
 o4.segments        # (S, 2) GPS seconds, H1 and L1 both observing
 o4.events          # the published events in that time, scored apart
-o4.injections      # 100,000 binary black holes, the same for the twin
-o4.fingerprint()   # names all of it
+o4.volume_injections  # 100,000 binary black holes out to each mass's reach, weighted to the volume
+o4.snr_injections     # 50,000 from the same population, network SNR even over 0 to 20
+o4.fingerprint()      # names all of it
 ```
 
 Each is the test split of gravyflow's partition of its runs (O4a and O4b, or O3a and O3b), on H1 and L1 at 2048 Hz,
 with the default data-quality flags, every published event vetoed and no glitch vetoed (a search's background holds
 the glitches the detectors had), in segments of at least 64 s. Its segment list, event list and injection
-population ship with the package, pinned by sha256, and a changed file is refused (`gf.PinnedFileChanged`). The
-injections are a broad binary-black-hole population: component masses uniform in 5 to 100 solar masses (detector
-frame), aligned spins uniform in -0.99 to 0.99, isotropic sky and orientation, uniform in volume out to a reach R past
-which even the loudest source is too quiet to detect (50 Gpc for O4, 35 Gpc for O3), one per 64 s slot per pass.
+population ship with the package, pinned by sha256, and a changed file is refused (`gf.PinnedFileChanged`).
+
+The injections are a broad binary-black-hole population with precession and higher modes (IMRPhenomXPHM):
+component masses uniform in 5 to 100 solar masses (detector frame), spin magnitudes uniform in 0 to 0.99 with
+isotropic directions, isotropic sky and orientation. Two sets are drawn from it, on the same segments, one injection
+per 64 s slot per pass:
+
+- the **volume set** places each source uniform in distance out to its masses' reach R(m1, m2), where the best-case
+  source of those masses (optimal sky and orientation) has a network SNR of 2, so nothing beyond it is findable.
+  Each injection's weight `4 pi d^2 R` makes the sensitive volume of a population uniform in Euclidean volume
+  exact: the sum of the found injections' weights over the number injected;
+- the **SNR set** gives each source a network optimal SNR uniform over 0 to 20, reached at run time in each
+  segment's measured spectrum; its foot shows the chance level.
+
 The Gaussian twin replaces the strain with coloured Gaussian noise from each segment's measured spectrum. Nothing is
 downloaded until the strain is read; see `docs/api.md`.
 

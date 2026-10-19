@@ -113,13 +113,18 @@ are never mixed. Each preset's files ship with the package, pinned by sha256; th
 - `STANDARD_DATASETS`: every preset, by name.
 - `StandardDataset`: one preset: `segments` ((S, 2) GPS seconds, H1 and L1 both holding each whole: the
   test split of gravyflow's partition, gravyflow's default flags, every published event vetoed, no glitch
-  vetoed), `events` (the published events in its test time, scored apart), `population` and `schedule`,
-  `injections` (the table, the same for the twin), `sample_rate_hertz` (2048), `livetime_seconds`,
-  `gaussian_twin()`, `fingerprint()` and `metadata()`.
+  vetoed), `events` (the published events in its test time, scored apart), `population`, `volume_set` and
+  `snr_set`, `volume_injections` and `snr_injections` (the tables, the same for the twin),
+  `sample_rate_hertz` (2048), `livetime_seconds`, `gaussian_twin()`, `fingerprint()` and `metadata()`.
 - `GaussianTwin`: how a twin is made: coloured Gaussian noise from each segment's measured spectrum.
-- `BBHPopulation`: a broad binary-black-hole population, uniform in volume out to a reach R.
+- `BBHPopulation`: a broad binary-black-hole population with precession and higher modes (IMRPhenomXPHM).
+- `VolumeSet`: sources uniform in distance out to their masses' `Reach`, each with the weight `4 pi d^2 R` that
+  makes the sensitive volume exact (the found weights' sum over the number injected).
+- `Reach`: R(m1, m2), where the best-case source of those masses has network SNR 2: a pinned table of the
+  best-case SNR at 1 Gpc and a safety factor for precession and higher modes.
+- `SNRSet`: sources scaled at run time to a network optimal SNR uniform over a range (0 to 20).
 - `InjectionSchedule`: when injections happen: one per slot per pass, mergers at least half a slot apart.
-- `PinnedFileChanged`: refused: a preset's pinned file, or the injection table it makes, is not the one pinned.
+- `PinnedFileChanged`: refused: a preset's pinned file, or an injection table it makes, is not the one pinned.
 
 ## Injections
 
