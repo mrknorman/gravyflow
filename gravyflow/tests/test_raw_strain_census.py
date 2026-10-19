@@ -173,6 +173,7 @@ EXEMPT = {
     "MatchedFilterLayer": "runs gf.MatchedFilter's search (_run) on the model's inputs",
     "TemplateBank": "templates, generated at unit scale",
     "TemplateGrid": "a grid of template parameters",
+    "Triggers": "a search's trigger times, statistics and tolerances; takes no strain",
     "generate_strain_plot": "plots the values it is given; forms no square",
     "generate_psd_plot": "plots PSD values it is given, in float64",
     "generate_correlation_plot": "plots gf.rolling_pearson's output",

@@ -571,6 +571,7 @@ class TestOneReadPath:
     HDF5_READERS = {
         "validate/validator.py": "validation results",
         "utils/io.py": "training histories and saved results",
+        "detection/triggers.py": "a search's triggers, in the MLGWSC-1 trigger file",
     }
 
     def sources(self):

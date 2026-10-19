@@ -412,3 +412,48 @@ pytest gravyflow --ignore=gravyflow/tests/online
 No test is skipped. The tests that check GWOSC and Zenodo themselves live apart, in `gravyflow/tests/online`, and
 need the network: `pytest --network gravyflow/tests/online`. Offline, each of them fails and names the host it could
 not reach. Tests may fail for lack of GPU memory when GPUs are under heavy use.
+
+## 10. External models: published searches, run as published
+
+A published search with released weights, written for another framework (PyTorch, an older TensorFlow), runs through
+an adapter: a package of its own, published under the entry-point group `gravyflow.external`, installed in an
+environment of its own. gravyflow imports neither the adapter nor its framework. An adapter implements
+`gf.ExternalSearch`:
+
+```python
+class PublishedSearch:
+    def prepare(self, fetch):        # fetch(name): the local path of a weights file the card names
+        self.model = load_the_model(fetch("authors/weights.pt"))
+
+    def preprocess(self, segment):   # the model's input for a gf.SearchSegment, as one array
+        ...
+
+    def search(self, segment):       # the published search over the whole segment: an object with
+        ...                          # time, stat and var arrays (gf.Triggers, or a named tuple)
+```
+
+Its environment needs Python 3.8 or later and numpy, and nothing of gravyflow's. A `gf.ExternalCard` names the
+adapter and its version, the sha256 of the environment's lock file, the model's input and output contracts, its
+weights (each a `gf.RemoteFile` pinned to its authors' commit, with its licence), the rows its authors published and
+the data it was trained on. `card.fingerprint` is the sha256 of all of it.
+
+```python
+runner = gf.ExternalRunner(card, gf.AdapterEnvironment(python=env / "bin" / "python", lock="model.lock"),
+                           deadline_seconds=3600)
+result = runner.search(gf.SearchSegment.from_strains({"H1": h1, "L1": l1}))
+result.triggers.write("foreground.hdf")   # the MLGWSC-1 trigger file its evaluate.py reads
+```
+
+Each call fetches the card's weights with `gf.fetch` (checked against their sha256), checks the lock, and runs the
+adapter as `python -I -B` with the environment's interpreter, in a temporary directory it removes. At the deadline,
+every process in the adapter's session is stopped (`gf.ExternalDeadlineExpired`). An environment without the adapter
+is refused by name (`gf.AdapterMissing`), as is another release of it or another lock (`gf.AdapterMismatch`), before
+the model runs.
+
+A result names its mode, `gf.AS_PUBLISHED`, and the card's fingerprint. Its statistic is the published one, with the
+signal column and direction its card declares (`gf.OutputContract`): it is never rescored as gravyflow scores its own
+models, and never runs through `gf.Validator`.
+
+Running a model needs no licence for its weights: they come from their authors' source into your own store. Publishing
+a file again does: every list of files a release publishes passes `gf.release_manifest`, which refuses a file with no
+licence, or one not marked redistributable (`gf.LicenceRefused`).

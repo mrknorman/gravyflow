@@ -92,6 +92,19 @@ repository before it may need the changes below.
   warn on any backend whose determinism flag is missing (CPU, GPU) or unknown (TPU). A dataset's CBC waveforms are
   generated on the host's CPU; a process without a CPU backend refuses the first CBC batch (`NoHostBackend`)
   (README, "Platforms").
+- **Triggers in the MLGWSC-1 format.** `gf.Triggers` (GPS `time`, ranking `stat`, timing tolerance `var`) reads and
+  writes the challenge's trigger file, byte for byte the file its examples write and its `evaluate.py` reads.
+- **External models, run as published.** An `gf.ExternalCard` describes a published search with released weights:
+  its input and output contracts (`gf.InputContract`, `gf.OutputContract`: the signal column and direction of its
+  published statistic), its weights (`gf.Weights`, each a `gf.RemoteFile` pinned by sha256 with its licence), the
+  rows its authors published (`gf.PublishedRow`), its declared training data, and the version and environment lock
+  of its adapter; `card.fingerprint` hashes all of it. An adapter implements `gf.ExternalSearch` in a package of its
+  own, published under the entry-point group `gravyflow.external`; gravyflow imports none, nor their frameworks.
+  `gf.ExternalRunner` runs one in its own environment (`gf.AdapterEnvironment`) as an isolated `python -I`
+  subprocess under a deadline, on a whole `gf.SearchSegment`, with its weights fetched only by `gf.fetch`; its
+  `gf.ExternalResult` names the card's mode (`gf.AS_PUBLISHED`) and fingerprint. A missing adapter is refused by name
+  (`gf.AdapterMissing`), as is another release of it or another environment (`gf.AdapterMismatch`). The licence gate,
+  `gf.release_manifest`, refuses to publish a file with no licence (`gf.LicenceRefused`) (README §10).
 
 - `gravyflow.__version__`.
 - `docs/api.md`, the public API, which a test holds equal to `gravyflow.__all__`.

@@ -27,6 +27,8 @@ pytest_plugins = ["pytester"]  # the guards are proved by running tests under th
 #: Test files that start Python without ``child_env``, and why the child still imports the tree under test.
 CHILDREN_WITHOUT_CHILD_ENV = {
     "test_package.py": "runs in the checkout's root, the first entry of the path of ``python -c``",
+    "test_external.py": "its adapter's process imports no gravyflow: the runner starts it as ``python -I`` "
+                        "on a script it names by path",
 }
 
 #: Run in a fresh interpreter, where no event module is imported yet: the offline

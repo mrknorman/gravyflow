@@ -152,6 +152,33 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `matched_filter_fft`: the matched-filter SNR time series. A PSD array is normalised on the host, so it cannot be a `jax.jit` argument (close over it, or pass a `PowerSpectrum`).
 - `optimal_snr`: the optimal SNR of a template. A PSD array is normalised on the host, so it cannot be a `jax.jit` argument (close over it, or pass a `PowerSpectrum`).
 
+## Triggers and external models
+
+A search's triggers are written as the MLGWSC-1 challenge's trigger file, byte for byte what its examples write and
+its `evaluate.py` reads. An external model (a published search with released weights, in another framework) runs
+through an adapter, a package of its own that gravyflow never imports, in its own environment: a subprocess under a
+deadline. Its results are in one mode, `AS_PUBLISHED`: the published statistic, never rescored as gravyflow's own
+models are, and never through the `Validator`.
+
+- `Triggers`: a search's triggers (GPS `time`, ranking `stat`, timing tolerance `var`); `Triggers.read` and `write` read and write the MLGWSC-1 trigger file.
+- `SearchSegment`: the strain an external search runs on: every detector over the same samples, searched whole; `SearchSegment.from_strains` builds one from a data source's strain.
+- `ExternalSearch`: what an adapter implements: `prepare(fetch)`, `preprocess(segment)` and `search(segment)`, published under the entry-point group `gravyflow.external`.
+- `ExternalCard`: an external model: its adapter, the adapter's version and environment lock, its contracts, weights, published rows and declared training data; `card.fingerprint` is the sha256 of all of it.
+- `InputContract`: the input a model takes: rate, detectors in order, window, stride, context, whitening, band-pass and normalisation.
+- `OutputContract`: the statistic it returns: what it is, its signal column, its direction, threshold, clustering and time offset.
+- `Weights`: one released weights file: its `RemoteFile` (pinned by sha256, with its licence), format and framework.
+- `PublishedRow`: a number a model's authors published, which a reproduction must match.
+- `AS_PUBLISHED`: the mode of a model run as its authors released it.
+- `AdapterEnvironment`: where an adapter runs: the environment's interpreter, its lock file, and extra directories on its path.
+- `ExternalRunner`: run a card's adapter on a segment (`search`, `preprocess`) as a `python -I` subprocess under a deadline, in a temporary directory it removes; weights come only through `fetch`.
+- `ExternalResult`: an external search's triggers with the card's name, mode, fingerprint and output contract.
+- `ExternalRunFailed`: an external run did not return its result; its log's end is in the message.
+- `ExternalDeadlineExpired`: an external run outlived its deadline; every process in its session was stopped.
+- `AdapterMissing`: the environment has no adapter by the card's name.
+- `AdapterMismatch`: the environment is not the card's: another lock, another adapter release, or not an `ExternalSearch`.
+- `release_manifest`: the licence gate: the files a release may publish, refusing any with no licence or not redistributable.
+- `LicenceRefused`: a file a release would publish is not redistributable.
+
 ## Models
 
 The example models (`Gabbard2017`, `MatchedFilterBaseline`) come with their training recipe, which

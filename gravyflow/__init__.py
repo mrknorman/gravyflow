@@ -158,6 +158,26 @@ _MODULES = {
     "matched_filter_fft": "gravyflow.src.detection",
     "optimal_snr": "gravyflow.src.detection",
 
+    # Triggers and external models
+    "Triggers": "gravyflow.src.detection.triggers",
+    "SearchSegment": "gravyflow.src.external",
+    "ExternalSearch": "gravyflow.src.external",
+    "ExternalCard": "gravyflow.src.external",
+    "InputContract": "gravyflow.src.external",
+    "OutputContract": "gravyflow.src.external",
+    "Weights": "gravyflow.src.external",
+    "PublishedRow": "gravyflow.src.external",
+    "AS_PUBLISHED": "gravyflow.src.external",
+    "AdapterEnvironment": "gravyflow.src.external",
+    "ExternalRunner": "gravyflow.src.external",
+    "ExternalResult": "gravyflow.src.external",
+    "ExternalRunFailed": "gravyflow.src.external",
+    "ExternalDeadlineExpired": "gravyflow.src.external",
+    "AdapterMissing": "gravyflow.src.external",
+    "AdapterMismatch": "gravyflow.src.external",
+    "release_manifest": "gravyflow.src.external",
+    "LicenceRefused": "gravyflow.src.external",
+
     # Models
     "Gabbard2017": "gravyflow.src.model.examples.gabbard_2017",
     "MatchedFilterBaseline": "gravyflow.src.model.examples.matched_filter_baseline",
