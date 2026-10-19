@@ -163,7 +163,7 @@ models are, and never through the `Validator`.
 - `Triggers`: a search's triggers (GPS `time`, ranking `stat`, timing tolerance `var`); `Triggers.read` and `write` read and write the MLGWSC-1 trigger file.
 - `SearchSegment`: the strain an external search runs on: every detector over the same samples, searched whole; `SearchSegment.from_strains` builds one from a data source's strain.
 - `ExternalSearch`: what an adapter implements: `prepare(fetch)`, `preprocess(segment)` and `search(segment)`, published under the entry-point group `gravyflow.external`.
-- `ExternalCard`: an external model: its adapter, the adapter's version and environment lock, its contracts, weights, published rows and declared training data; `card.fingerprint` is the sha256 of all of it.
+- `ExternalCard`: an external model: its adapter, the adapter's version and environment lock, its contracts, weights, published rows and declared training data; `card.fingerprint`, its identity, is the sha256 of exactly what decides a run's outputs (adapter name and version, lock, contracts, each weights file's name, sha256, format and framework, mode), never of its provenance (published rows, training data).
 - `InputContract`: the input a model takes: rate, detectors in order, window, stride, context, whitening, band-pass and normalisation.
 - `OutputContract`: the statistic it returns: what it is, its signal column, its direction, threshold, clustering and time offset.
 - `Weights`: one released weights file: its `RemoteFile` (pinned by sha256, with its licence), format and framework.
@@ -171,7 +171,7 @@ models are, and never through the `Validator`.
 - `AS_PUBLISHED`: the mode of a model run as its authors released it.
 - `AdapterEnvironment`: where an adapter runs: the environment's interpreter, its lock file, and extra directories on its path.
 - `ExternalRunner`: run a card's adapter on a segment (`search`, `preprocess`) as a `python -I` subprocess under a deadline, in a temporary directory it removes; weights come only through `fetch`.
-- `ExternalResult`: an external search's triggers with the card's name, mode, fingerprint and output contract.
+- `ExternalResult`: an external search's triggers with the card's name, mode, fingerprint and output contract, and its published rows and training data as provenance.
 - `ExternalRunFailed`: an external run did not return its result; its log's end is in the message.
 - `ExternalDeadlineExpired`: an external run outlived its deadline; every process in its session was stopped.
 - `AdapterMissing`: the environment has no adapter by the card's name.

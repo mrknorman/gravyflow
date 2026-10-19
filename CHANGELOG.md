@@ -98,7 +98,8 @@ repository before it may need the changes below.
   its input and output contracts (`gf.InputContract`, `gf.OutputContract`: the signal column and direction of its
   published statistic), its weights (`gf.Weights`, each a `gf.RemoteFile` pinned by sha256 with its licence), the
   rows its authors published (`gf.PublishedRow`), its declared training data, and the version and environment lock
-  of its adapter; `card.fingerprint` hashes all of it. An adapter implements `gf.ExternalSearch` in a package of its
+  of its adapter; `card.fingerprint` hashes exactly what decides a run's outputs, and the published rows and
+  training data are provenance outside it, carried with each result. An adapter implements `gf.ExternalSearch` in a package of its
   own, published under the entry-point group `gravyflow.external`; gravyflow imports none, nor their frameworks.
   `gf.ExternalRunner` runs one in its own environment (`gf.AdapterEnvironment`) as an isolated `python -I`
   subprocess under a deadline, on a whole `gf.SearchSegment`, with its weights fetched only by `gf.fetch`; its

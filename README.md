@@ -435,7 +435,10 @@ class PublishedSearch:
 Its environment needs Python 3.8 or later and numpy, and nothing of gravyflow's. A `gf.ExternalCard` names the
 adapter and its version, the sha256 of the environment's lock file, the model's input and output contracts, its
 weights (each a `gf.RemoteFile` pinned to its authors' commit, with its licence), the rows its authors published and
-the data it was trained on. `card.fingerprint` is the sha256 of all of it.
+the data it was trained on. `card.fingerprint` is the model's identity: the sha256 of exactly what decides a run's
+outputs (the adapter's name and version, the lock, the contracts, each weights file's name, sha256, format and
+framework, and the mode). The published rows and the training data are provenance, not identity: correcting a
+citation leaves the model the same model.
 
 ```python
 runner = gf.ExternalRunner(card, gf.AdapterEnvironment(python=env / "bin" / "python", lock="model.lock"),
@@ -450,7 +453,8 @@ every process in the adapter's session is stopped (`gf.ExternalDeadlineExpired`)
 is refused by name (`gf.AdapterMissing`), as is another release of it or another lock (`gf.AdapterMismatch`), before
 the model runs.
 
-A result names its mode, `gf.AS_PUBLISHED`, and the card's fingerprint. Its statistic is the published one, with the
+A result names its mode, `gf.AS_PUBLISHED`, and the card's fingerprint, and carries the card's published rows and
+training data as provenance. Its statistic is the published one, with the
 signal column and direction its card declares (`gf.OutputContract`): it is never rescored as gravyflow scores its own
 models, and never runs through `gf.Validator`.
 

@@ -3,7 +3,8 @@ External models: published searches with released weights, run as published.
 
 - ``ExternalCard`` (``card``): what decides a model's results (its input and output
   contracts, its weights pinned by sha256, its adapter's version and environment
-  lock), the rows its authors published, and its mode, ``AS_PUBLISHED``.
+  lock, its mode ``AS_PUBLISHED``), which its fingerprint covers; and its provenance,
+  the rows its authors published and its training data, which it does not.
 - ``ExternalSearch`` and ``SearchSegment`` (``protocol``): the methods an adapter
   implements, and the whole segment it searches.
 - ``ExternalRunner`` (``runner``): an adapter run in its own environment as an

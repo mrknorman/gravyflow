@@ -1,6 +1,6 @@
 """
 An external model's card: everything that decides what its search returns, and the
-published numbers it must reproduce.
+provenance its results carry: the numbers its authors published, and its training data.
 
 A card names the adapter that runs the model (``protocol.ExternalSearch``, by its
 entry-point name), the adapter's version and the sha256 of the environment lock it
@@ -9,10 +9,16 @@ runs in; the input the model takes (``InputContract``) and the statistic it retu
 licence (``Weights``); the rows its authors published (``PublishedRow``); the data it
 was trained on, as declared; and the mode its results are in.
 
-``ExternalCard.fingerprint`` is the sha256 of all of it, by content
-(``utils.fingerprint``): another weights file, adapter release, environment or
-contract is another fingerprint, and every result names the fingerprint of the card
-that made it.
+``ExternalCard.fingerprint`` is the model's identity: the sha256, by content
+(``utils.fingerprint``), of exactly what decides a run's outputs: the adapter's
+entry-point name and version, the environment lock, the two contracts, each weights
+file's name (the adapter finds it by name), sha256, format and framework, and the
+mode. Another weights file, adapter release, environment or contract is another
+fingerprint. The published rows and the declared training data are provenance, not
+identity: a corrected citation or a new published row leaves the model the same
+model, and every result carries them beside its card's fingerprint. The model's name
+and its weights' URLs and licences decide nothing a run returns, so they are not in
+the fingerprint either.
 
 The one mode is ``AS_PUBLISHED``: the model run as its authors released it, its
 statistic reported as published, with its signal column and direction declared. It
@@ -212,8 +218,9 @@ class ExternalCard:
         output: The statistic its search returns.
         weights: Its weights files, by distinct names.
         training_data: The data it was trained on, as its authors declare it (so a
-            result can name its overlap with the data it is tested on).
-        published: The rows it must reproduce.
+            result can name its overlap with the data it is tested on); provenance,
+            not in the fingerprint.
+        published: The rows it must reproduce; provenance, not in the fingerprint.
         mode: The mode its results are in, one of ``MODES``.
     """
 
@@ -256,9 +263,15 @@ class ExternalCard:
 
     @property
     def fingerprint(self) -> str:
-        """The sha256 of the whole card by content: its contracts, its weights' sha256,
-        its adapter's version and its environment lock among them."""
-        return config_fingerprint(self)
+        """The sha256, by content, of what decides a run's outputs; never the model's
+        name, its weights' URLs or licences, its published rows or its training data."""
+        return config_fingerprint({
+            "adapter": self.adapter, "adapter_version": self.adapter_version,
+            "environment_lock": self.environment_lock, "input": self.input, "output": self.output,
+            "weights": [{"name": w.file.name, "sha256": w.file.sha256, "format": w.format,
+                         "framework": w.framework} for w in self.weights],
+            "mode": self.mode,
+        })
 
 
 __all__ = [

@@ -22,8 +22,8 @@ mirrors the adapter's own methods across that boundary: for one segment it
 
 The child refuses an adapter that is not installed (``AdapterMissing``) or not the
 card's (``AdapterMismatch``) before the model runs. A search's result names the card's
-mode and fingerprint (``ExternalResult``): its statistic is the published one, never
-rescored.
+mode and fingerprint, and carries its published rows and training data as provenance
+(``ExternalResult``): its statistic is the published one, never rescored.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from gravyflow.src.dataset.store.tile import file_sha256
 from gravyflow.src.detection.triggers import Triggers
 
 from . import child
-from .card import ExternalCard, OutputContract
+from .card import ExternalCard, OutputContract, PublishedRow
 from .protocol import SearchSegment
 
 logger = logging.getLogger(__name__)
@@ -113,9 +113,11 @@ class ExternalResult:
     Args:
         name: The card's model name.
         mode: The card's mode (``AS_PUBLISHED``).
-        card_fingerprint: The card's fingerprint.
+        card_fingerprint: The card's fingerprint: the model's identity.
         output: The statistic the triggers carry: its signal column and direction.
         triggers: The search's triggers, as its published code returns them.
+        published: The card's published rows, as provenance.
+        training_data: The card's declared training data, as provenance.
     """
 
     name: str
@@ -123,6 +125,8 @@ class ExternalResult:
     card_fingerprint: str
     output: OutputContract
     triggers: Triggers
+    published: Tuple[PublishedRow, ...]
+    training_data: str
 
 
 class ExternalRunner:
@@ -154,8 +158,9 @@ class ExternalRunner:
                     raise ExternalRunFailed(f"{self.card.name}'s search returned triggers gravyflow "
                                             f"refuses: {error}") from error
 
-        triggers = self._run(child.SEARCH, segment, read)
-        return ExternalResult(self.card.name, self.card.mode, self.card.fingerprint, self.card.output, triggers)
+        card = self.card
+        return ExternalResult(card.name, card.mode, card.fingerprint, card.output,
+                              self._run(child.SEARCH, segment, read), card.published, card.training_data)
 
     def preprocess(self, segment: SearchSegment) -> np.ndarray:
         """The input the adapter's model takes for ``segment``."""

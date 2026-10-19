@@ -153,12 +153,40 @@ def test_a_card_fingerprints_what_decides_its_results(tmp_path):
         "output": card(weights, output=dataclasses.replace(base.output, signal_column=1)),
         "weights sha256": card(weights, weights=(gf.Weights(
             dataclasses.replace(weights, sha256="b" * 64), format="npy", framework="numpy"),)),
+        "weights name": card(weights, weights=(gf.Weights(
+            dataclasses.replace(weights, name="toy/other.npy"), format="npy", framework="numpy"),)),
+        "weights format": card(weights, weights=(gf.Weights(weights, format="torchscript", framework="numpy"),)),
+        "weights framework": card(weights, weights=(gf.Weights(weights, format="npy", framework="numpy==2.0"),)),
+        "adapter": card(weights, adapter="toy-2"),
         "adapter version": card(weights, adapter_version="0.1.1"),
         "environment lock": card(weights, environment_lock="1" * 64),
     }
     prints = {name: c.fingerprint for name, c in changed.items()}
     assert base.fingerprint not in prints.values() and len(set(prints.values())) == len(prints), prints
     assert base.mode == gf.AS_PUBLISHED == "as-published" and base.files == (weights,)
+
+
+def test_a_cards_provenance_is_not_its_identity(tmp_path):
+    """A corrected citation, a new published row or a restated training set leaves the
+    model the same model: only what decides a run's outputs is in the fingerprint."""
+    weights = RemoteFile("toy/scale.npy", (tmp_path / "w").as_uri(), "a" * 64, 10, licence=None,
+                         redistributable=False)
+    base = card(weights)
+    row = base.published[0]
+    unchanged = {
+        "citation": card(weights, published=(dataclasses.replace(row, citation="toy2026, Table 2"),)),
+        "value": card(weights, published=(dataclasses.replace(row, value=101.0),)),
+        "another row": card(weights, published=(row, dataclasses.replace(row, far_per_month=0.1))),
+        "no rows": card(weights, published=()),
+        "training data": card(weights, training_data="toy data, 2026 release"),
+        "name": card(weights, name="toy, renamed"),
+        "weights url": card(weights, weights=(gf.Weights(
+            dataclasses.replace(weights, url="https://example.org/scale.npy"), format="npy", framework="numpy"),)),
+        "weights licence": card(weights, weights=(gf.Weights(
+            dataclasses.replace(weights, licence="MIT", redistributable=True), format="npy", framework="numpy"),)),
+    }
+    prints = {name: c.fingerprint for name, c in unchanged.items()}
+    assert set(prints.values()) == {base.fingerprint}, prints
 
 
 def test_a_card_refuses_what_it_cannot_honour(tmp_path):
@@ -189,6 +217,8 @@ def test_the_runner_runs_the_adapter_isolated_and_removes_its_directory(toy):
     assert isinstance(result, gf.ExternalResult) and isinstance(result.triggers, gf.Triggers)
     assert result.mode == "as-published" and result.card_fingerprint == toy_card.fingerprint
     assert result.name == "toy" and result.output == toy_card.output
+    # The card's provenance travels with the result, outside its identity.
+    assert result.published == toy_card.published and result.training_data == toy_card.training_data
     np.testing.assert_array_equal(result.triggers.time, [T0 + 100 / RATE])
     np.testing.assert_allclose(result.triggers.stat, [1.4])
     np.testing.assert_array_equal(result.triggers.var, [0.25])
