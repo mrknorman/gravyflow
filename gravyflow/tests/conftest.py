@@ -224,6 +224,18 @@ def refuse_internet(monkeypatch, refusals: Optional[List[str]] = None,
         monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
 
 
+def is_bytecode_cache(path) -> bool:
+    """
+    Whether ``path`` is the interpreter's bytecode cache: a ``__pycache__`` directory,
+    or a file in one (with the temporary name it is written under), or a ``.pyc``.
+    The interpreter makes these on the first import of a module (pytest's assertion
+    rewriter too), whatever the suite does, so neither the snapshot nor the audit
+    counts them as its writes.
+    """
+    path = Path(os.fsdecode(path))
+    return "__pycache__" in path.parts or path.suffix == ".pyc"
+
+
 def tree_snapshot(root: Path) -> Dict[str, Tuple[int, int]]:
     """
     {relative path: (size, mtime_ns)} of every file under ``root`` but bytecode. A
@@ -234,7 +246,7 @@ def tree_snapshot(root: Path) -> Dict[str, Tuple[int, int]]:
     if not root.is_dir():
         return snapshot
     for path in root.rglob("*"):
-        if "__pycache__" in path.parts or path.suffix == ".pyc":
+        if is_bytecode_cache(path):
             continue
         try:
             stat = path.stat()
@@ -292,6 +304,8 @@ class WriteAudit:
             path = os.path.abspath(os.fsdecode(path))
             paths = {path, os.path.realpath(path)}
         except (TypeError, ValueError, OSError):  # a hook must never fail the operation
+            return
+        if is_bytecode_cache(path):
             return
         for name, roots in self.roots.items():
             if any(p == root or p.startswith(root + os.sep) for p in paths for root in roots):

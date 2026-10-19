@@ -136,6 +136,32 @@ def test_write_audit_sees_this_process_writes_and_no_one_elses(tmp_path):
     assert len(audit.writes["watched"]) == 5, "the audit saw a write after it ended"
 
 
+def test_the_interpreters_bytecode_caches_are_not_the_suites_writes(tmp_path, monkeypatch):
+    """
+    Importing a module for the first time makes its ``__pycache__`` (and a temporary
+    file renamed into it). That is the interpreter's write, not the suite's, in the
+    audit as in the snapshot; a plain file written beside it is still recorded.
+    """
+    import importlib
+
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "cold_module.py").write_text("VALUE = 1\n")
+    monkeypatch.syspath_prepend(str(package))
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    monkeypatch.setattr(sys, "pycache_prefix", None)
+    importlib.invalidate_caches()
+    before = tree_snapshot(package)
+    with WriteAudit({"package": package}) as audit:
+        module = importlib.import_module("cold_module")
+        assert Path(module.__cached__).exists(), "the import wrote no bytecode, so this proves nothing"
+        assert audit.writes == {}, audit.writes
+        (package / "plain.txt").write_text("a suite write")
+    monkeypatch.delitem(sys.modules, "cold_module")
+    assert [entry.split(" ")[0] for entry in audit.writes["package"]] == ["open"], audit.writes
+    assert tree_changes(before, tree_snapshot(package)) == ["added plain.txt"]
+
+
 def test_write_audit_sees_a_write_through_a_symlink(tmp_path):
     watched, elsewhere = tmp_path / "watched", tmp_path / "elsewhere"
     watched.mkdir()
