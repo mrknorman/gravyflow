@@ -118,7 +118,7 @@ class ExampleModel(ABC):
     def pretrained(cls, weights_path: Optional[Path] = None) -> keras.Model:
         """
         Load trained weights, by default the example's own (``gravyflow.src.resources.weights``:
-        shipped in the package, or a release download in the user cache).
+        shipped in the package, or a release download that ``gravyflow.fetch`` put in the store).
 
         Raises:
             FileNotFoundError: no weights at the path.

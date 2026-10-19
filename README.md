@@ -39,9 +39,11 @@ pip install -e ".[test]"
 The package ships the bundled noise curves, template banks and the smaller trained models. The two deep models of
 George and Huerta (2017), 66 MB each, are attached to a release instead: fetch one once with
 `gf.fetch("model/<name>")`, which checks it against its pinned size and SHA-256 and keeps it in the strain store's
-`files/` (below); `pretrained()` finds it there. Every file gravyflow knows that lives elsewhere is an entry of one
-manifest (`gravyflow.src.resources.MANIFEST`), each a `gf.RemoteFile` with its URL, size, SHA-256, licence and whether
-gravyflow may redistribute it; `gf.fetch` is the one download, and nothing is ever downloaded implicitly.
+`files/` (below); `pretrained()` finds it there. The pinned remote files, trained weights and benchmark data such as
+MLGWSC-1's, are entries of one manifest (`gravyflow.src.resources.MANIFEST`), each a `gf.RemoteFile` with its URL,
+size, SHA-256, licence and whether gravyflow may redistribute it; `gf.fetch` is their one download, and none is ever
+downloaded implicitly. GWOSC strain and Gravity Spy's glitch catalogues are not pinned files: their acquisition
+modules download them, by their own paths.
 
 ## 2. Choose Keras's JAX backend
 

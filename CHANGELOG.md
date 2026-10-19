@@ -13,10 +13,11 @@ repository before it may need the changes below.
   challenge-faithful mode. The reservation is in `SplitSpec.fingerprint()`, so every split fingerprint has changed,
   and a model recorded under an earlier one is refused by the validator.
 - **One manifest of pinned remote files, one explicit fetch.** `gravyflow.src.resources.download_weights` and
-  `RELEASE_WEIGHTS` are gone: `resources.MANIFEST` holds every file gravyflow knows that lives elsewhere as a
-  `gf.RemoteFile` (URL, size, SHA-256, licence, redistributable), and `gf.fetch(name)` downloads one into the strain
-  store's `files/`, checked, and is the only download. `resources.weights(name)` refuses a release download not yet
-  fetched, naming the fetch.
+  `RELEASE_WEIGHTS` are gone: `resources.MANIFEST` holds the pinned remote files (trained weights, and benchmark
+  data such as MLGWSC-1's) as `gf.RemoteFile`s (URL, size, SHA-256, licence, redistributable), and `gf.fetch(name)`
+  downloads one into the strain store's `files/`, checked, and is the only download of a pinned file; an explicit
+  fetch hashes a file already in the store again. GWOSC strain and Gravity Spy's catalogues keep their own fetchers.
+  `resources.weights(name)` refuses a release download not yet fetched, naming the fetch.
 - **`import gravyflow` sets nothing.** It used to set `JAX_PLATFORMS=cuda,cpu`, `KERAS_BACKEND=jax`,
   `TF_CPP_MIN_LOG_LEVEL`, `XLA_PYTHON_CLIENT_PREALLOCATE=false` and `LD_LIBRARY_PATH`, add a warnings filter and
   change the log levels of `jax`, `gwpy` and `gwosc`. Now set `KERAS_BACKEND=jax` yourself, before Keras is imported:
@@ -95,7 +96,7 @@ repository before it may need the changes below.
 - `gravyflow.__version__`.
 - `docs/api.md`, the public API, which a test holds equal to `gravyflow.__all__`.
 - `gravyflow.src.resources`: the package's data files, the manifest of pinned remote files (`MANIFEST`), `path(name)`
-  and `weights(name)` to find a file bundled or fetched, and `fetch(name)` (`gf.fetch`), the one explicit download.
+  and `weights(name)` to find a file bundled or fetched, and `fetch(name)` (`gf.fetch`), the one explicit download of a pinned file.
 - `gf.Reservation`, `gf.MLGWSC1_O3A`, `gf.CHALLENGE_FAITHFUL` and `gf.RemoteFile` (see Breaking changes).
 
 ### Fixed
