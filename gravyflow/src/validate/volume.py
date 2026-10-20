@@ -131,8 +131,11 @@ class InjectionVolumes:
         if scores.size == 0 or any(a.shape != scores.shape for a in (weights, distances)):
             raise ValueError(f"{weights.size} weights and {distances.size} distances for {scores.size} "
                              "injection scores: need one of each per injection.")
-        if not (np.all(np.isfinite(scores)) and np.all(np.isfinite(weights)) and np.all(weights >= 0)):
-            raise ValueError("Injection scores must be finite, and their weights finite and >= 0.")
+        # A score of -inf is an injection nothing finds (stream mode: no trigger within its found window).
+        if not (np.all(np.isfinite(scores) | (scores == -np.inf)) and np.all(np.isfinite(weights))
+                and np.all(weights >= 0)):
+            raise ValueError("Injection scores must be finite (or -inf, found by nothing), and their weights "
+                             "finite and >= 0.")
         if not self.reach_mpc > 0:
             raise ValueError(f"reach_mpc must be > 0, got {self.reach_mpc}.")
         if not np.all((distances > 0) & (distances <= self.reach_mpc)):

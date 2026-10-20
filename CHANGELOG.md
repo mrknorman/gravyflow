@@ -7,6 +7,19 @@ repository before it may need the changes below.
 
 ### Breaking changes
 
+- **The validator streams by default.** `ValidationConfig.mode` is `"stream"`: the model slides along continuous raw
+  strain at `stride_seconds` (by default a quarter of its window, recorded in the result), each window conditioned by
+  the model's own dataset code; its scores are clustered into triggers (the loudest within `cluster_seconds`, by
+  default 1 s, as the matched filter clusters), which are `gf.Triggers`. The background is the triggers of time slides
+  of real noise at the stride, or of segments of continuous synthetic noise (`stream_segment_seconds`, 256 s). An
+  injection is found when the loudest trigger within `found_window_seconds` (0.1 s) of its merger passes the
+  threshold (its score is that trigger's, `-inf` where none lies there), and the chance that a noise trigger does so
+  (the trigger rate times the window) is subtracted at every threshold. Each injection is scored locally: placed in
+  the background's own streams, on a short stretch of that data around it, which is what scoring the whole stream with
+  it added gives. Each injection's in-band duration, whitened peak and BNS range are recorded. `mode="window"` keeps
+  the old behaviour, unchanged, for backward compatibility and to reproduce earlier results. Validation records are
+  format 7 (they record the mode); records of format 6 are refused by name, never converted. In stream mode the real
+  events are still scored as single windows, their FARs read from the stream background.
 - **`gf.LocalFrames()` names no O4 frames by default.** Its table named LVK's O3 frame type and channel
   (`HOFT_C01`, `DCS-CALIB_STRAIN_CLEAN_C01`) for O4a and O4b too, which GWOSC's O4 releases do not come from
   (O4a `GDS-CALIB_STRAIN_CLEAN_AR`, O4b `DCS-CALIB_STRAIN_CLEAN_AR01`, Virgo `Hrec_hoftRepro1AR_16384Hz`). Reading

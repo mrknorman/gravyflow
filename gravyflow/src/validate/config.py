@@ -9,6 +9,11 @@ import gravyflow as gf
 
 from .provenance import StaleCheckpointError
 
+#: The validator's modes (`ValidationConfig.mode`): the standard's, then the one kept for compatibility.
+MODES = ("stream", "window")
+#: Stream mode's default trigger clustering: the loudest score within this many seconds of itself.
+STREAM_CLUSTER_SECONDS = 1.0
+
 
 @dataclass
 class ValidationConfig:
@@ -74,13 +79,28 @@ class ValidationConfig:
 
     # The background of real noise of several detectors: time slides, detector j
     # slid by j k steps in slide k = 1 .. num_time_slides (`slides.TimeSlides`);
-    # the step defaults to twice a window's footprint. Synthetic noise has no
-    # time to slide: its background is independent windows.
+    # the step defaults to twice a window's footprint. In window mode synthetic
+    # noise has no time to slide: its background is independent windows.
     num_time_slides: int = 16
     time_slide_step_seconds: Optional[float] = None
-    # Above-threshold windows of real noise starting within this of the one before
-    # are one trigger; by default one window, so adjacent windows join.
+    # How scores become triggers. Stream mode: the loudest score within this of
+    # itself is a trigger (by default 1 s). Window mode: above-threshold windows of
+    # real noise starting within this of the one before are one trigger (by default
+    # one window, so adjacent windows join).
     cluster_seconds: Optional[float] = None
+
+    # "stream" (the standard): the model slides along continuous raw strain at
+    # stride_seconds (by default a quarter of its window), its scores clustered into
+    # triggers, and an injection is found by the loudest trigger within
+    # found_window_seconds of its merger (`stream`). The background is time slides of
+    # the data (real noise), or segments of stream_segment_seconds (synthetic noise),
+    # and each injection is scored on a short stretch of that data around it.
+    # "window": every example is one window, scored on its own: kept for backward
+    # compatibility and to reproduce earlier results.
+    mode: str = "stream"
+    stride_seconds: Optional[float] = None
+    found_window_seconds: float = 0.1
+    stream_segment_seconds: float = 256.0
 
     def __post_init__(self):
         from .slides import TimeSlides
@@ -88,6 +108,13 @@ class ValidationConfig:
         TimeSlides(self.num_time_slides, self.time_slide_step_seconds)  # refuses bad settings
         if self.cluster_seconds is not None and not self.cluster_seconds >= 0:
             raise ValueError(f"cluster_seconds must be >= 0, got {self.cluster_seconds}.")
+        if self.mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}, got {self.mode!r}.")
+        if self.stride_seconds is not None and not self.stride_seconds > 0:
+            raise ValueError(f"stride_seconds must be > 0, got {self.stride_seconds}.")
+        for name in ("found_window_seconds", "stream_segment_seconds"):
+            if not getattr(self, name) > 0:
+                raise ValueError(f"{name} must be > 0, got {getattr(self, name)}.")
         # Pairs are tuples, however they arrive (JSON gives lists).
         self.snr_range = tuple(self.snr_range)
         self.extra_roc_pools = [tuple(p) if isinstance(p, (list, tuple)) else p for p in self.extra_roc_pools]
@@ -111,6 +138,20 @@ class ValidationConfig:
         for name in ("volume_bootstrap_samples", "efficiency_bootstrap_samples"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}.")
+
+    @property
+    def stream(self) -> bool:
+        """Whether the run is in stream mode, the standard's."""
+        return self.mode == "stream"
+
+    def stream_stride_seconds(self, window_seconds: float) -> float:
+        """Stream mode's stride for a model of ``window_seconds``: ``stride_seconds``, else a quarter of the window."""
+        return float(self.stride_seconds) if self.stride_seconds is not None else window_seconds / 4.0
+
+    @property
+    def stream_cluster_seconds(self) -> float:
+        """Stream mode's clustering: ``cluster_seconds``, else `STREAM_CLUSTER_SECONDS`."""
+        return STREAM_CLUSTER_SECONDS if self.cluster_seconds is None else float(self.cluster_seconds)
 
     @property
     def num_volume_injections(self) -> int:

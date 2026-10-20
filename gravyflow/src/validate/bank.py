@@ -21,7 +21,7 @@ import logging
 import math
 from copy import deepcopy
 from functools import cached_property
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 import numpy as np
 from tqdm import tqdm
@@ -29,7 +29,11 @@ from tqdm import tqdm
 import gravyflow as gf
 from .config import ValidationConfig
 from .metrics import Background, ScoreStream, independent_events, logit_scores, sigma_level
-from .slides import TimeSlideBackground, TimeSlides
+from .slides import SlideStream, TimeSlideBackground, TimeSlides
+from .stream import (
+    Placement, StreamGeometry, StreamReader, SyntheticSegments, found_in_stretch, local_windows, place_injections,
+    stream_background,
+)
 from .volume import uniform_in_volume
 from .utils import _extract_sample_data
 
@@ -178,14 +182,17 @@ class ValidationBank:
 
     def stage_dataset(self, stage: str, waveform_generators=(),
                       outputs=(gf.ReturnVariables.WHITENED_ONSOURCE,),
-                      num_examples: Optional[int] = None, batch_size: Optional[int] = None) -> gf.Dataset:
+                      num_examples: Optional[int] = None, batch_size: Optional[int] = None,
+                      overrides: Optional[dict] = None) -> gf.Dataset:
         """
         Stage ``stage``'s dataset (``far``, ``inj``, ``vol`` or ``horizon``) of
         ``num_examples`` (default ``num_examples``) in batches of ``batch_size``
-        (default ``batch_size``): its own seeds, in the held-out split.
+        (default ``batch_size``): its own seeds, in the held-out split. ``overrides``
+        replace dataset arguments (stream mode's: its noise and window).
         """
         batch_size = batch_size or self.config.batch_size
         args = deepcopy(self.dataset_args)
+        args.update(overrides or {})
         args.update(
             waveform_generators=list(waveform_generators),
             num_examples_per_batch=batch_size,
@@ -550,12 +557,275 @@ class ValidationBank:
                     event["whitened_strain"] = np.asarray(whitened[i])
         self.real_events = events
 
+    # ------------------------------------------------------------ stream mode
+
+    @property
+    def stream_geometry(self) -> StreamGeometry:
+        """Where the model's windows lie on a stream: its own window, one stride apart (`stream`)."""
+        window = self._noise_dataset.window_spec
+        return StreamGeometry.of(window, self.config.stream_stride_seconds(float(window.onsource_duration_seconds)))
+
+    @property
+    def _reach_seconds(self) -> float:
+        """How far from a merger the found test reads scores: the found window, then a cluster either side."""
+        return self.config.found_window_seconds + self.config.stream_cluster_seconds
+
+    @cached_property
+    def stream_source(self):
+        """
+        Stream mode's data: time slides of real noise at the stride (`slides`), or
+        segments of synthetic noise (`stream.SyntheticSegments`), from the noise
+        stage's seeds.
+        """
+        from gravyflow.src.dataset.dataset import noise_ifos
+
+        cfg, geometry = self.config, self.stream_geometry
+        if self._real_noise:
+            dataset = self._noise_dataset
+            return TimeSlideBackground(
+                dataset.noise_obtainer.ifo_data_obtainer,
+                noise_ifos(self.dataset_args.get("ifos"), self.dataset_args.get("noise_obtainer")),
+                self.split_spec, cfg.group, dataset.window_spec,
+                TimeSlides(cfg.num_time_slides, cfg.time_slide_step_seconds),
+                gf.SeedTree(cfg.seed).sub("validator/far").stream(cfg.group, "noise/segment_order"),
+                stride_seconds=geometry.stride_seconds,
+            )
+        num_segments = math.ceil(cfg.num_examples / geometry.num_windows(
+            int(round(cfg.stream_segment_seconds * geometry.sample_rate_hertz))) + 1e-9)
+        dataset = self.stage_dataset("far", outputs=(gf.ReturnVariables.ONSOURCE,), num_examples=num_segments,
+                                     batch_size=1, overrides={
+                                         "onsource_duration_seconds": cfg.stream_segment_seconds,
+                                         "input_variables": [gf.ReturnVariables.ONSOURCE]})
+        return SyntheticSegments(dataset, geometry, cfg.stream_segment_seconds)
+
+    def generate_stream_noise(self) -> None:
+        """
+        Stream mode's background: the model slid along the data at its stride
+        (`stream_source`), ``num_examples`` windows in all, each window's score kept in
+        stream order with its stream's slide, block and extent, so that its triggers are
+        the background (`stream.StreamBackground`) and its streams can be read again for
+        the injections.
+        """
+        source = self.stream_source
+        streams = []
+
+        def scored():
+            for batch in source.batches(self.config.batch_size, self.config.num_examples):
+                if not streams or streams[-1] is not batch.stream:
+                    streams.append(batch.stream)
+                x = self._noise_dataset.model_inputs(batch.onsource, batch.offsource)
+                yield self._score(x), x, {gf.ReturnVariables.START_GPS_TIME.name: batch.start_gps}
+
+        self._score_noise(scored())
+        self.noise_streams = {
+            "lengths": np.array([s.num_windows for s in streams], dtype=np.int64),
+            "slides": np.array([s.slide for s in streams], dtype=np.int64),
+            "blocks": np.array([s.block for s in streams], dtype=np.int64),
+            "stretch_starts": np.array([s.stretch[0] for s in streams], dtype=np.float64),
+            "stretch_ends": np.array([s.stretch[1] for s in streams], dtype=np.float64),
+            "samples": np.array([s.num_samples for s in streams], dtype=np.int64),
+            "stride_seconds": np.float64(self.stream_geometry.stride_seconds),
+        }
+        logger.info(f"Stream background: {len(streams)} streams at a {self.stream_geometry.stride_seconds:g} s stride.")
+
+    def _recorded_streams(self) -> List[SlideStream]:
+        """The background's streams, as its record gives them (`generate_stream_noise`)."""
+        if self.noise_streams is None or "samples" not in self.noise_streams:
+            raise ValueError("Score the stream background (generate_stream_noise) before its injections.")
+        s = self.noise_streams
+        return [SlideStream((float(a), float(b)), int(slide), int(n), int(block), int(samples))
+                for a, b, slide, n, block, samples in zip(s["stretch_starts"], s["stretch_ends"], s["slides"],
+                                                          s["lengths"], s["blocks"], s["samples"])]
+
+    def _score_locally(self, stage: str, generator, num: int, labels: Dict[str, Any],
+                       worst_edges: Optional[np.ndarray] = None) -> Dict[str, np.ndarray]:
+        """
+        Score ``num`` injections of ``generator`` locally in the background's streams
+        (`stream`, local injection scoring): each placed at a merger drawn uniformly in
+        the streams (`stream.place_injections`), its stretch of the clean stream read by
+        the stage's dataset (`stream.StreamReader`), which injects the signal with its
+        merger at the stretch's centre, scales it against the clean data before the
+        merger's window and records it; the windows the found test reads are cut from
+        the stretch on the stream's own grid, scored, and clustered. Returns each
+        injection's found statistic (``scores``, ``-inf`` for none), its trigger's time
+        from the merger (``trigger_offsets``), its merger's time (``merger_times``: GPS
+        in real noise, the segment's timeline in synthetic), its records
+        (``in_band_durations``, ``whitened_peaks``, ``bns_ranges`` per detector) and
+        ``labels``. With ``worst_edges``, keeps the worst found per SNR bin.
+        """
+        cfg, geometry = self.config, self.stream_geometry
+        RV = gf.ReturnVariables
+        records = {"in_band_durations": RV.IN_BAND_DURATION_SECONDS, "whitened_peaks": RV.NETWORK_WHITENED_PEAK}
+        white = getattr(self.dataset_args.get("noise_obtainer"), "noise_type", None) is gf.NoiseType.WHITE
+        outputs = [RV.ONSOURCE, *labels.values(), *records.values(), *([] if white else [RV.BNS_RANGE_MPC])]
+        dataset, placement, half, streams = self.local_dataset(stage, generator, num, outputs)
+
+        columns: Dict[str, list] = {k: [] for k in ("scores", "trigger_offsets", "merger_times", *labels, *records)}
+        if not white:
+            columns["bns_ranges"] = []
+        worst = None if worst_edges is None else [[] for _ in range(worst_edges.size - 1)]
+        batch = cfg.batch_size
+        for b in tqdm(range(self._num_batches(num)), desc=f"Scoring injections locally ({stage})", unit="batch"):
+            x, y = dataset[b]
+            rows = min(batch, num - b * batch)
+            samples = placement.sample[b * batch:b * batch + rows]
+            stretches = np.asarray(y[RV.ONSOURCE.name])
+            windows = [local_windows(geometry, half, int(m), self._reach_seconds) for m in samples]
+            scores = self._score_stretch_windows(geometry, stretches, [w[1] for w in windows])
+            ends = np.cumsum([w[0].size for w in windows])
+            for j, (index, _) in enumerate(windows):
+                stat, when = found_in_stretch(geometry, index, scores[ends[j] - index.size:ends[j]], int(samples[j]),
+                                              cfg.stream_cluster_seconds, cfg.found_window_seconds)
+                columns["scores"].append([stat])
+                columns["trigger_offsets"].append([when])
+            if self._real_noise:  # each stretch's first sample's GPS, on the first detector
+                first = per_example(y[RV.START_GPS_TIME.name], batch, "START_GPS_TIME", per_detector=True)[:rows]
+                columns["merger_times"].append(first + half / geometry.sample_rate_hertz)
+            else:  # the segment's own timeline
+                starts = np.array([streams[i].stretch[0] for i in placement.stream[b * batch:b * batch + rows]])
+                columns["merger_times"].append(starts + samples / geometry.sample_rate_hertz)
+            for key, label in {**labels, **records}.items():
+                columns[key].append(per_example(y[label.name], batch, label.name)[:rows])
+            if not white:
+                columns["bns_ranges"].append(np.asarray(y[RV.BNS_RANGE_MPC.name], dtype=np.float64)[:rows])
+            if worst is not None:
+                self._keep_worst(worst, worst_edges, geometry, stretches, windows, samples, b,
+                                 np.concatenate(columns["scores"][-rows:]), columns["snrs"][-1], y)
+        data = {k: np.concatenate(v)[:num] for k, v in columns.items()}
+        if self._real_noise:
+            data["gps_times"] = data["merger_times"]
+        if worst is not None:
+            self._worst_false_negatives = {
+                f"{worst_edges[i]:g}-{worst_edges[i + 1]:g}": [s for _, s in sorted(h, key=lambda t: t[0], reverse=True)]
+                for i, h in enumerate(worst)}
+        return data
+
+    def local_dataset(self, stage: str, generator, num: int, outputs) -> Tuple[gf.Dataset, Placement, int, list]:
+        """
+        Stage ``stage``'s local-injection dataset (`_score_locally`): ``num`` mergers placed
+        in the background's streams (`stream.place_injections`, from the stage's own
+        seeds), each batch the placed stretches of clean data (`stream.StreamReader`)
+        with ``generator``'s signals injected at their centres, serving ``outputs``. Returns
+        it with the placement, the stretches' half length (samples) and the streams.
+        """
+        cfg, geometry = self.config, self.stream_geometry
+        half = geometry.local_half_samples(self._reach_seconds)
+        streams = self._recorded_streams()
+        placement = place_injections(num, streams, half,
+                                     gf.SeedTree(cfg.seed).sub(f"validator/{stage}").stream(cfg.group, "noise/row"))
+        source = self.stream_source
+        reader = StreamReader(source, streams, placement, geometry, half, self.split_spec,
+                              getattr(source, "step_samples", 0))
+        generator.front_padding_duration_seconds = 0.0
+        generator.back_padding_duration_seconds = 0.0
+        # The stretch is cut from the whole signal: what lies outside it reaches no window the test reads.
+        generator.allow_partially_out_of_window = True
+        generator.injection_chance = 1.0
+        dataset = self.stage_dataset(stage, [generator], outputs, num_examples=num, overrides={
+            "noise_obtainer": reader, "onsource_duration_seconds": 2 * half / geometry.sample_rate_hertz,
+            "crop_duration_seconds": 0.0, "input_variables": [gf.ReturnVariables.ONSOURCE]})
+        return dataset, placement, half, streams
+
+    def _score_stretch_windows(self, geometry: StreamGeometry, stretches: np.ndarray, starts: List[np.ndarray]
+                               ) -> np.ndarray:
+        """
+        The scores of the windows whose data start at ``starts[j]`` of stretch ``j``
+        (detectors, samples), in order, conditioned by the noise dataset's code and scored
+        in batches of exactly ``batch_size`` windows (the last filled by repeating its
+        last window), so that the model sees one batch shape throughout.
+        """
+        batch = self.config.batch_size
+        scores, pending, count = [], [], 0
+
+        def flush(final: bool):
+            nonlocal pending, count
+            if not pending:
+                return
+            on, off = (np.concatenate(parts) for parts in zip(*pending))
+            while on.shape[0] >= batch or (final and on.shape[0]):
+                take = min(batch, on.shape[0])
+                chunk_on, chunk_off = on[:take], off[:take]
+                if take < batch:
+                    chunk_on = np.concatenate([chunk_on, np.repeat(chunk_on[-1:], batch - take, axis=0)])
+                    chunk_off = np.concatenate([chunk_off, np.repeat(chunk_off[-1:], batch - take, axis=0)])
+                scores.append(self._score(self._noise_dataset.model_inputs(chunk_on, chunk_off))[:take])
+                on, off = on[take:], off[take:]
+            pending, count = ([(on, off)], on.shape[0]) if on.shape[0] else ([], 0)
+
+        for stretch, first in zip(stretches, starts):
+            pending.append(geometry.gather(stretch, first))
+            count += len(first)
+            if count >= batch:
+                flush(False)
+        flush(True)
+        return np.concatenate(scores) if scores else np.empty(0)
+
+    def _keep_worst(self, worst, edges, geometry, stretches, windows, samples, b, scores, snrs, y) -> None:
+        """Keep, per SNR bin, the lowest-found injections, each as its merger's nearest window (`_score_locally`)."""
+        RV = gf.ReturnVariables
+        batch, rows = self.config.batch_size, len(windows)
+        nearest = [w[1][int(np.argmin(np.abs(geometry.window_time(w[0]) - m / geometry.sample_rate_hertz)))]
+                   for w, m in zip(windows, samples)]
+        on, off = (np.concatenate(parts) for parts in
+                   zip(*(geometry.gather(stretches[j], [start]) for j, start in enumerate(nearest))))
+        x = self._noise_dataset.model_inputs(on, off)
+        labels = {k: v for k, v in y.items() if k != RV.ONSOURCE.name}
+        bins = np.clip(np.searchsorted(edges, snrs, side="right") - 1, 0, len(worst) - 1)
+        for j in range(rows):
+            key = (-float(scores[j]), -(b * batch + j))
+            heap = worst[bins[j]]
+            if len(heap) < self.config.num_worst_per_bin:
+                heapq.heappush(heap, (key, _extract_sample_data(x, labels, j, float(scores[j]))))
+            elif key > heap[0][0]:
+                heapq.heapreplace(heap, (key, _extract_sample_data(x, labels, j, float(scores[j]))))
+
+    def generate_stream_injections(self) -> None:
+        """
+        Stream mode's injection set: ``num_examples`` sources at SNR uniform over the
+        range, each scored locally in the background's streams (`_score_locally`).
+        """
+        cfg = self.config
+        generator = self._generator()
+        generator.scaling_method = gf.ScalingMethod(
+            value=gf.Distribution(min_=cfg.snr_range[0], max_=cfg.snr_range[1], type_=gf.DistributionType.UNIFORM),
+            type_=gf.ScalingTypes.SNR)
+        labels = {k: v for k, v in _INJECTION_LABELS.items()
+                  if k != "central_times" and (k not in _CBC_LABELS or isinstance(generator, gf.CBCGenerator))}
+        self.efficiency = self._score_locally("inj", generator, cfg.num_examples, labels, cfg.snr_bin_edges)
+
+    def generate_stream_volume(self) -> None:
+        """
+        Stream mode's sensitive-volume set: as `generate_volume` draws it (chirp distances
+        uniform in volume out to the chirp reach), each source scored locally in the
+        background's streams (`_score_locally`).
+        """
+        cfg = self.config
+        if not self.has_volume:
+            raise ValueError("Only one CBC population in noise of physical strain has a sensitive volume.")
+        n = cfg.num_volume_injections
+        reach = cfg.volume_reach_mpc or self.reach_distance()
+        targets = uniform_in_volume(n, reach, gf.SeedTree(cfg.seed).stream(cfg.group, "validator/distance"))
+        generator = self._generator()
+        generator.scaling_method = gf.ScalingMethod(value=targets, type_=gf.WaveformParameters.CHIRP_DISTANCE_MPC)
+        volume = self._score_locally("vol", generator, n, dict(_VOLUME_LABELS))
+        if not np.allclose(volume["chirp_distances"], targets, rtol=1e-5, atol=0):
+            raise RuntimeError("The volume set's injections were not given their targets in the order drawn.")
+        volume["chirp_distances"] = targets
+        volume["reach_mpc"] = np.float64(reach)
+        self.volume = volume
+
     # ------------------------------------------------------------- results
 
     def background(self) -> Background:
-        """The noise scores as a background: time-slid streams, or independent windows."""
+        """
+        The noise scores as a background: in stream mode the triggers of its streams
+        (`stream.StreamBackground`); in window mode time-slid streams, or independent windows.
+        """
         if self.far_scores is None:
             raise ValueError("Call generate_noise() first.")
+        if self.config.stream:
+            return stream_background(self.far_scores, self.noise_streams, self.window_seconds,
+                                     self.config.stream_cluster_seconds, self.config.found_window_seconds)
         return noise_background(self.far_scores, self.noise_streams, self.window_seconds,
                                 self.config.cluster_seconds)
 

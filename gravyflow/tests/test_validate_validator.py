@@ -2,6 +2,9 @@
 The validator end to end on synthetic noise: it runs offline, ranks logits,
 draws its own seeds, and reuses a checkpoint only for the model and settings
 that wrote it.
+
+These are window mode's tests (``mode="window"``, kept for compatibility and
+reproduction): stream mode, the default, has its own (`test_validate_stream`).
 """
 
 import dataclasses
@@ -41,7 +44,7 @@ def dataset_args():
 
 @pytest.fixture(scope="module")
 def small_config():
-    return ValidationConfig(num_examples=64, batch_size=32, snr_range=(0.0, 15.0), volume_num_injections=64)
+    return ValidationConfig(mode="window", num_examples=64, batch_size=32, snr_range=(0.0, 15.0), volume_num_injections=64)
 
 
 @pytest.fixture(scope="module")
@@ -202,7 +205,7 @@ def test_the_efficiency_tab_keeps_every_layer_of_its_plot(validated):
 
 
 def volume_set(dataset_args, **settings):
-    config = ValidationConfig(**{"num_examples": 32, "batch_size": 32, "volume_num_injections": 32, **settings})
+    config = ValidationConfig(mode="window", **{"num_examples": 32, "batch_size": 32, "volume_num_injections": 32, **settings})
     bank = ValidationBank(logit_model(1), dataset_args, config)
     bank.generate_volume()
     return bank.get_volume_data()
@@ -224,7 +227,7 @@ def test_the_reach_is_the_populations_and_can_be_set(dataset_args):
     given = volume_set(dataset_args, volume_reach_mpc=250.0)
     assert given["reach_mpc"] == 250.0 and np.all(given["chirp_distances"] <= 250.0)
     with pytest.raises(ValueError, match="volume_reach_mpc"):
-        ValidationConfig(volume_reach_mpc=0.0)
+        ValidationConfig(mode="window", volume_reach_mpc=0.0)
 
 
 def reach_of(dataset_args, masses=None, spins=None, **settings):
@@ -237,7 +240,7 @@ def reach_of(dataset_args, masses=None, spins=None, **settings):
             setattr(generator, attribute, gf.Distribution(value=bounds[0], type_=gf.DistributionType.CONSTANT)
                     if bounds[0] == bounds[1] else
                     gf.Distribution(min_=bounds[0], max_=bounds[1], type_=gf.DistributionType.UNIFORM))
-    config = ValidationConfig(**{"num_examples": 32, "batch_size": 32, **settings})
+    config = ValidationConfig(mode="window", **{"num_examples": 32, "batch_size": 32, **settings})
     return ValidationBank(logit_model(1), args, config).reach_distance()
 
 
@@ -311,7 +314,7 @@ def test_a_population_with_no_reach_is_refused_before_any_stage_runs(dataset_arg
     unbounded = deepcopy(dataset_args)
     unbounded["waveform_generators"].mass_1_msun = gf.Distribution(mean=30.0, std=5.0,
                                                                    type_=gf.DistributionType.NORMAL)
-    config = ValidationConfig(num_examples=32, batch_size=32)
+    config = ValidationConfig(mode="window", num_examples=32, batch_size=32)
     model = logit_model(1)
     path = tmp_path / "validation.h5"
     with mock.patch.object(model, "predict_on_batch", side_effect=AssertionError("a window was scored")):
@@ -539,19 +542,19 @@ def test_checkpoint_refuses_another_model(validated, dataset_args, small_config)
 def test_checkpoint_refuses_other_settings(validated, dataset_args):
     model, path, _ = validated
     with pytest.raises(StaleCheckpointError, match="validation configuration"):
-        Validator.validate(model, "tiny", dataset_args, ValidationConfig(num_examples=32, batch_size=32), path)
+        Validator.validate(model, "tiny", dataset_args, ValidationConfig(mode="window", num_examples=32, batch_size=32), path)
 
 
 def test_a_record_of_another_format_is_refused(validated, dataset_args, small_config, tmp_path):
-    # Format 5 drew its volume set out to one reach for every mass: it is refused by name, read or
+    # Format 6 records no mode (stream or window, format 7): it is refused by name, read or
     # resumed, never converted.
     model, path, _ = validated
-    assert Validator.FORMAT_VERSION == 6
+    assert Validator.FORMAT_VERSION == 7
     old = tmp_path / "format.h5"
     old.write_bytes(path.read_bytes())
     with h5py.File(old, "a") as f:
-        f.attrs["format_version"] = 5
-    refusal = "is in validation format 5; this version reads only format 6.*Validate the model again"
+        f.attrs["format_version"] = 6
+    refusal = "is in validation format 6; this version reads only format 7.*Validate the model again"
     with pytest.raises(StaleCheckpointError, match=refusal):
         Validator.load(old)
     # Refused for its format, by name: not as written for another model.
@@ -580,7 +583,7 @@ def test_the_heart_is_anything_that_beats(dataset_args):
         assert hints["heart"] == typing.Optional[Heartbeat]
     beats = []
     heart = type("Pulse", (), {"beat": lambda self: beats.append(1)})()
-    bank = ValidationBank(logit_model(1), dataset_args, ValidationConfig(num_examples=32, batch_size=16), heart)
+    bank = ValidationBank(logit_model(1), dataset_args, ValidationConfig(mode="window", num_examples=32, batch_size=16), heart)
     bank.generate_noise()
     assert len(beats) == 2
 
@@ -594,7 +597,7 @@ def test_probability_models_are_refused(dataset_args):
 def test_the_validator_draws_its_own_streams(dataset_args):
     # B68: the FAR set and the injection set shared noise, and validation
     # reused training's seed. Each stage now draws under validator/{stage}.
-    config = ValidationConfig(seed=42, num_examples=32, batch_size=32)
+    config = ValidationConfig(mode="window", seed=42, num_examples=32, batch_size=32)
     bank = ValidationBank(logit_model(1), dataset_args, config)
     outputs = [gf.ReturnVariables.WHITENED_ONSOURCE]
     far = bank.stage_dataset("far", outputs=outputs)
@@ -607,7 +610,7 @@ def test_the_validator_draws_its_own_streams(dataset_args):
             assert not np.array_equal(batches[i], batches[j])
     assert far.seed_metadata["prefix"] == "validator/far"
     with pytest.raises(ValueError):
-        ValidationConfig(group="train")
+        ValidationConfig(mode="window", group="train")
 
 
 def test_per_example_labels_are_strict():
@@ -670,7 +673,7 @@ def test_the_waveform_plot_takes_the_first_detector():
 
 def test_the_validator_scores_injections_on_two_detectors(tmp_path):
     # The injection stage read CENTRAL_TIME, (B, G, I), as one value per example.
-    config = ValidationConfig(num_examples=32, batch_size=32, snr_range=(0.0, 15.0))
+    config = ValidationConfig(mode="window", num_examples=32, batch_size=32, snr_range=(0.0, 15.0))
     args = validation_dataset_args(config=ValidationDatasetConfig(
         sample_rate_hertz=2048.0, ifos=[gf.IFO.H1, gf.IFO.L1]))
     v = Validator.validate(logit_model(1, detectors=2), "two", args, config, tmp_path / "v.h5")
@@ -682,7 +685,7 @@ def test_the_validator_scores_injections_on_two_detectors(tmp_path):
 
 def test_the_validator_scores_real_events(dataset_args, offline_events):
     # The real-event stage scores every confident event, once: real events are test data.
-    config = ValidationConfig(num_examples=32, batch_size=32, score_real_events=True)
+    config = ValidationConfig(mode="window", num_examples=32, batch_size=32, score_real_events=True)
     bank = ValidationBank(logit_model(1), dataset_args, config)
     bank.far_scores = np.random.default_rng(3).standard_normal(64)
     bank.generate_real_events(observing_runs=[gf.ObservingRun.O3])
@@ -706,7 +709,7 @@ def test_a_window_scores_as_the_background_scores_it():
     # so an event's score was not comparable with the background's.
     args = _scoring_args()
     model = logit_model(1)
-    bank = ValidationBank(model, args, ValidationConfig(num_examples=8, batch_size=8))
+    bank = ValidationBank(model, args, ValidationConfig(mode="window", num_examples=8, batch_size=8))
     dataset = bank.stage_dataset("far")
     raw = dataset.noise(dataset.streams(0))
     inputs, _ = dataset[0]
@@ -725,7 +728,7 @@ def test_real_events_are_read_in_the_backgrounds_window(offline_events):
         return original(self, record, reads, window_spec)
 
     args = _scoring_args()
-    bank = ValidationBank(logit_model(1), args, ValidationConfig(num_examples=8, batch_size=8, score_real_events=True))
+    bank = ValidationBank(logit_model(1), args, ValidationConfig(mode="window", num_examples=8, batch_size=8, score_real_events=True))
     bank.far_scores = np.random.default_rng(3).standard_normal(64)
     with mock.patch.object(gf.TransientDataObtainer, "_read_example", recording):
         bank.generate_real_events(observing_runs=[gf.ObservingRun.O3])
@@ -743,7 +746,7 @@ def test_the_injection_set_is_scaled_to_its_snr_range_whatever_the_training_scal
     generator.scaling_method = gf.ScalingMethod(
         value=gf.Distribution(value=value, type_=gf.DistributionType.CONSTANT), type_=scaling)
     args["waveform_generators"] = generator
-    config = ValidationConfig(num_examples=32, batch_size=32, snr_range=(8.0, 20.0))
+    config = ValidationConfig(mode="window", num_examples=32, batch_size=32, snr_range=(8.0, 20.0))
     bank = ValidationBank(logit_model(1), args, config)
     bank.generate()
     snrs = bank.get_efficiency_data()["snrs"]
@@ -792,7 +795,7 @@ def test_the_backgrounds_livetime_is_the_span_of_the_windows_it_scored(dataset_a
     args = {k: v for k, v in dataset_args.items() if k != "onsource_duration_seconds"}
     window = SAMPLES / args["sample_rate_hertz"]  # the model's input; the default is set to it, whatever it was
     monkeypatch.setattr(gf.Defaults, "onsource_duration_seconds", window)
-    bank = ValidationBank(logit_model(1), args, ValidationConfig(num_examples=32, batch_size=32))
+    bank = ValidationBank(logit_model(1), args, ValidationConfig(mode="window", num_examples=32, batch_size=32))
     bank.generate_noise()
     assert bank._noise_dataset.window_spec.onsource_duration_seconds == window
     monkeypatch.setattr(gf.Defaults, "onsource_duration_seconds", 2.0 * window)

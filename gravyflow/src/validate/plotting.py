@@ -1068,6 +1068,10 @@ def generate_parameter_space_plot(
     # Extract and filter by SNR
     snrs = np.array(data['snrs'])
     scores = np.array(data['scores'])
+    # Stream mode: an injection no trigger found scores -inf; shown just below the lowest found.
+    if not np.all(np.isfinite(scores)):
+        finite = scores[np.isfinite(scores)]
+        scores = np.where(np.isfinite(scores), scores, (finite.min() if finite.size else 0.0) - 1.0)
     mass1 = np.array(data.get('mass1', []))
     mass2 = np.array(data.get('mass2', []))
     mass2 = np.array(data.get('mass2', []))
@@ -1448,7 +1452,9 @@ def generate_efficiency_plot(
     density_source, score_range = None, (0.0, 1.0)
     if primary is not None and primary.efficiency_data is not None:
         snrs, scores = primary.efficiency_data["snrs"], primary.efficiency_data["scores"]
-        low, high = np.quantile(scores, [0.002, 0.998])
+        # Stream mode: an injection no trigger found scores -inf, below the axis.
+        low, high = np.quantile(scores[np.isfinite(scores)], [0.002, 0.998]) if np.isfinite(scores).any() \
+            else (0.0, 1.0)
         pad = 0.05 * max(high - low, 1e-6)
         score_range = (float(low - pad), float(high + pad))
         counts, _, _ = np.histogram2d(scores, snrs, bins=DENSITY_CELLS, range=[score_range, snr_range])

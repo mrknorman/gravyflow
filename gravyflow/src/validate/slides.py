@@ -20,9 +20,13 @@ its own (`ValidationBank.score_windows`).
   noise path keeps. A single detector has nothing to slide against: its
   background is its own data, unslid (slide 0).
 - **Windows.** Each slide of a stretch is a stream of windows tiled one onsource
-  apart, every one whole: no window wraps round the stretch. A slide of k steps
+  apart (window mode), or one stride apart (stream mode, ``stride_seconds``),
+  every one whole: no window wraps round the stretch. A slide of k steps
   therefore holds fewer windows than one of k - 1, and its livetime is its own
   windows' span (`metrics.ScoreStream`), counted exactly per slide.
+- **Stream mode** reads a stream's slid strain back whole (`stream_strain`): the
+  data its windows were cut from, detector j's read ``j k step`` later, so that an
+  injection is scored on the very stream the background was (`stream`).
 """
 
 from __future__ import annotations
@@ -83,6 +87,9 @@ class SlideStream:
     slide: int
     num_windows: int
     block: int
+    #: The samples of the stream's slid strain (`TimeSlideBackground.stream_strain`): every
+    #: detector's, less its slide; 0 where not counted.
+    num_samples: int = 0
 
 
 @dataclass(frozen=True)
@@ -106,11 +113,12 @@ class TimeSlideBackground:
     in its split ``group``, and its blocks are the streams'.
 
     ``stretches`` are visited in an order drawn from ``rng`` (a NumPy Generator),
-    and each stretch's slides in turn, until a budget of windows is spent.
+    and each stretch's slides in turn, until a budget of windows is spent. Windows
+    are ``stride_seconds`` apart: by default one onsource (window mode).
     """
 
     def __init__(self, obtainer, ifos: Sequence, split_spec: "gf.SplitSpec", group: str, window: WindowSpec,
-                 slides: TimeSlides, rng: np.random.Generator):
+                 slides: TimeSlides, rng: np.random.Generator, stride_seconds: Optional[float] = None):
         if not hasattr(obtainer, "available_segments"):
             raise TypeError(
                 f"Time slides read a real-noise obtainer's segments; {type(obtainer).__name__} has none."
@@ -123,8 +131,12 @@ class TimeSlideBackground:
         self.slides = slides
         rate = float(window.sample_rate_hertz)
         self.step_samples = int(round(slides.step(window) * rate))
-        self.stride_samples = int(round(window.onsource_duration_seconds * rate))
+        stride = window.onsource_duration_seconds if stride_seconds is None else stride_seconds
+        self.stride_samples = int(round(stride * rate))
+        if self.stride_samples < 1:
+            raise ValueError(f"A stride of {stride} s is less than one sample at {rate} Hz.")
         self.stretches = self._stretches(rng)
+        self._loaded = None  # the last stretch read back by `stream_strain`, with its data
 
     # ---------------------------------------------------------------- stretches
 
@@ -186,10 +198,30 @@ class TimeSlideBackground:
                 if count <= 0:
                     break
                 stream = SlideStream((float(stretch[0]), float(stretch[1])), slide, count,
-                                     self.split_spec.block_of(stretch[0]))
+                                     self.split_spec.block_of(stretch[0]),
+                                     num_samples - (len(self.ifos) - 1) * slide * self.step_samples)
                 for first in range(0, count, batch_size):
                     yield self._batch(stream, data, first_gps, np.arange(first, min(first + batch_size, count)))
                 remaining -= count
+
+    def stream_strain(self, stream: SlideStream) -> Tuple[np.ndarray, float]:
+        """
+        ``stream``'s slid strain, (detectors, ``stream.num_samples``), float64: detector
+        j's data read ``j k step`` later than detector 0's, so that the stream's window
+        ``i`` is cut from samples ``i * stride`` on, as `batches` cuts it; and the GPS time
+        of detector 0's first sample. The stretch is read again (the last one read is kept).
+        """
+        key = tuple(stream.stretch)
+        if self._loaded is None or self._loaded[0] != key:
+            data, first_gps = self._load(np.asarray(stream.stretch, dtype=np.float64))
+            self._loaded = (key, [np.asarray(d, dtype=np.float64) for d in data], first_gps)
+        _, data, first_gps = self._loaded
+        n = stream.num_samples
+        offsets = [j * stream.slide * self.step_samples for j in range(len(data))]
+        if n < 1 or any(offset + n > d.shape[0] for offset, d in zip(offsets, data)):
+            raise ValueError(f"The stretch [{stream.stretch[0]}, {stream.stretch[1]}) read back holds fewer "
+                             f"samples than its stream at slide {stream.slide} was scored on.")
+        return np.stack([d[offset:offset + n] for offset, d in zip(offsets, data)]), first_gps
 
     def _batch(self, stream: SlideStream, data: list, first_gps: float, index: np.ndarray) -> SlideBatch:
         """Windows ``index`` of ``stream``: detector j's padded onsource starts ``j k step`` later."""

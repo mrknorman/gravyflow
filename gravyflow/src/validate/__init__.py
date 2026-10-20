@@ -24,6 +24,7 @@ from .metrics import (
     sigma_level,
     subtract_chance,
 )
+from .stream import StreamBackground, StreamGeometry, stream_triggers
 from .efficiency import EfficiencyAgainstSnr, efficiency_against_snr
 from .volume import (
     REFERENCE_CHIRP_MASS_MSUN,

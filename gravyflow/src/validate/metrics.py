@@ -24,11 +24,13 @@ set of conventions holds throughout:
   with the chance of a noise window passing (`Background.found_by_chance`, a
   `ChanceLaw`), so the fraction found by the signal is ``(f - c) / (1 - c)``
   (`subtract_chance`). It is subtracted at every threshold; at the tight
-  thresholds c is negligible, at loose ones it is not. In stream mode an
-  injection will be found by the loudest trigger within a fixed window of its
-  merger, and the chance will be the false-alarm rate times that window: the
-  estimators take the found test (a threshold on scores) and a `ChanceLaw`, the
-  two things stream mode replaces.
+  thresholds c is negligible, at loose ones it is not. In stream mode
+  (`stream`) an injection's score is the loudest trigger's within a fixed window
+  of its merger (``-inf`` where no trigger lies there, so nothing finds it), and
+  the chance is that a noise trigger passing the threshold lies in that window,
+  about the false-alarm rate times the window (`stream.StreamBackground`): the
+  estimators take the found test (a threshold on scores) and the background's
+  `ChanceLaw`, the two things stream mode replaces.
 """
 
 from __future__ import annotations
@@ -97,9 +99,37 @@ def _finite_scores(scores, what: str) -> np.ndarray:
     return s
 
 
+def injection_scores(scores, what: str = "injection scores") -> np.ndarray:
+    """
+    Injection scores as float64: finite, or ``-inf`` for an injection nothing can
+    find (stream mode: no trigger within its found window). NaN and ``+inf`` refuse.
+    """
+    s = np.asarray(scores, dtype=np.float64).reshape(-1)
+    bad = np.isnan(s) | (s == np.inf)
+    if np.any(bad):
+        raise ValueError(f"{what} contain {np.count_nonzero(bad)} NaN or +inf scores.")
+    return s
+
+
 def _count_at_or_above(sorted_ascending: np.ndarray, thresholds) -> np.ndarray:
     """Number of values >= each threshold, for values sorted ascending."""
     return sorted_ascending.size - np.searchsorted(sorted_ascending, thresholds, side="left")
+
+
+def chosen_count(sorted_ascending: np.ndarray, threshold) -> np.ndarray:
+    """
+    The count of values (sorted ascending, at least one) a threshold chosen from them
+    stands on (`Background.chosen_window_chance`): those at or above it when it is one
+    of them; else those at or above the highest value below it (a threshold between
+    values is taken as just above the one below); all of them when none is below.
+    """
+    n = sorted_ascending.size
+    t = np.asarray(threshold, dtype=np.float64)
+    below = np.searchsorted(sorted_ascending, t, side="left")
+    at_a_value = (below < n) & (sorted_ascending[np.minimum(below, n - 1)] == t)
+    highest_below = sorted_ascending[np.maximum(below - 1, 0)]
+    return np.where(at_a_value, n - below,
+                    np.where(below > 0, _count_at_or_above(sorted_ascending, highest_below), n))
 
 
 # ----------------------------------------------------------------- intervals
@@ -408,12 +438,7 @@ class Background:
         if self.num_windows == 0:
             raise ValueError("The background has no windows.")
         n, reuse = self.num_windows, self.data_reuse
-        t = np.asarray(threshold, dtype=np.float64)
-        below = np.searchsorted(self._opens, t, side="left")
-        at_a_window = (below < n) & (self._opens[np.minimum(below, n - 1)] == t)
-        highest_below = self._opens[np.maximum(below - 1, 0)]
-        count = np.where(at_a_window, n - below,
-                         np.where(below > 0, _count_at_or_above(self._opens, highest_below), n))
+        count = chosen_count(self._opens, threshold)
         return count / reuse, (n - count) / reuse + 1.0
 
     def found_by_chance(self, threshold) -> "ChanceLaw":
@@ -677,7 +702,7 @@ def chance_subtracted_interval(detected, total, chance: "ChanceLaw", sigmas: Seq
 
 def _injections(snrs, scores) -> Tuple[np.ndarray, np.ndarray]:
     snrs = np.asarray(snrs, dtype=np.float64).reshape(-1)
-    scores = _finite_scores(scores, "injection scores")
+    scores = injection_scores(scores)
     if snrs.shape != scores.shape:
         raise ValueError(f"{snrs.size} SNRs for {scores.size} scores.")
     return snrs, scores
@@ -1043,7 +1068,7 @@ def roc_curve(negative_scores, positive_scores) -> RocCurve:
     counted one half.
     """
     neg = np.sort(_finite_scores(negative_scores, "negative scores"))
-    pos = np.sort(_finite_scores(positive_scores, "positive scores"))
+    pos = np.sort(injection_scores(positive_scores, "positive scores"))
     if neg.size == 0 or pos.size == 0:
         raise ValueError("An ROC needs at least one negative and one positive score.")
     thresholds = np.concatenate([[np.inf], np.unique(np.concatenate([neg, pos]))[::-1]])

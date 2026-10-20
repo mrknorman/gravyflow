@@ -86,7 +86,7 @@ def main(argv=None) -> Validator:
     validator.plot(output_dir / "validation.html")
 
     background = validator.background()
-    print(f"Background: {background.num_windows} windows, {background.livetime_seconds:.0f} s livetime")
+    print(f"Background: {validator.far_scores.size} windows scored, {background.livetime_seconds:.0f} s livetime")
     for far, result in validator.efficiency_curves([1e-1, 1e-2, 1e-3]).items():
         threshold, fit = result.threshold, result.fit
         if threshold.resolved:

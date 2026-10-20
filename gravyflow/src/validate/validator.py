@@ -15,6 +15,7 @@ from .config import ValidationConfig, check_held_out, run_record_of
 from .efficiency import EfficiencyAgainstSnr, efficiency_against_snr
 from .metrics import Background, roc_curve, sigma_level
 from .provenance import StaleCheckpointError, model_fingerprint, require_match
+from .stream import stream_background
 from .volume import InjectionVolumes, SensitiveVolumeCurve, chirp_weights, sensitive_volume_curve
 from gravyflow.src.utils.fingerprint import config_fingerprint
 
@@ -53,7 +54,12 @@ class Validator:
     # 6: the volume set placed per mass: chirp distances (``chirp_distances``) drawn
     # uniformly in volume out to its recorded chirp reach (``reach_mpc``), with their
     # physical distances; intervals at 1 and 2 sigma (``interval_sigmas``).
-    FORMAT_VERSION = 6
+    # 7: the mode (``config.mode``): stream mode's records (the default) hold every
+    # stream window's score with its streams' extents and stride, and each
+    # injection's found statistic (-inf: no trigger within the found window), its
+    # trigger's time from the merger, its merger's time and its records; window
+    # mode's are format 6's.
+    FORMAT_VERSION = 7
 
     def __init__(self, name: str = "model", config: Optional[ValidationConfig] = None,
                  dataset_args: Optional[dict] = None):
@@ -109,6 +115,10 @@ class Validator:
         A CBC population in noise of physical strain also gets a sensitive-volume
         set (`ValidationBank.generate_volume`); any other has none.
 
+        In stream mode (``config.mode``, the default) the model is slid along the
+        data and its triggers are the background, and each injection is scored
+        locally in that data (`stream`); in window mode each example is one window.
+
         Raises:
             StaleCheckpointError: the checkpoint is in another format, or belongs
                 to another model or to other settings.
@@ -132,8 +142,9 @@ class Validator:
             if path is not None:
                 v.save(path)
 
+        stream = v.config.stream
         if v.far_scores is None:
-            bank.generate_noise()
+            bank.generate_stream_noise() if stream else bank.generate_noise()
             v.far_scores, v.noise_gps_times, v.noise_streams = (
                 bank.far_scores, bank.noise_gps_times, bank.noise_streams)
             v.worst_performers["false_positives"] = bank.get_worst_performers()["false_positives"]
@@ -141,13 +152,13 @@ class Validator:
         bank.far_scores, bank.noise_streams = v.far_scores, v.noise_streams
 
         if v.efficiency_data is None:
-            bank.generate()
+            bank.generate_stream_injections() if stream else bank.generate()
             v.efficiency_data = bank.get_efficiency_data()
             v.worst_performers["false_negatives"] = bank.get_worst_performers()["false_negatives"]
             checkpoint()
 
         if v.volume_data is None and bank.has_volume:
-            bank.generate_volume()
+            bank.generate_stream_volume() if stream else bank.generate_volume()
             v.volume_data = bank.get_volume_data()
             checkpoint()
 
@@ -163,11 +174,16 @@ class Validator:
 
     def background(self) -> Background:
         """
-        The noise scores as a background: streams of time-slid windows of real
-        noise, or independently drawn windows of synthetic noise (`noise_background`).
+        The noise scores as a background. Stream mode: the triggers of the streams the
+        model was slid along (`stream.StreamBackground`). Window mode: streams of
+        time-slid windows of real noise, or independently drawn windows of synthetic
+        noise (`noise_background`).
         """
         if self.far_scores is None:
             raise ValueError(f"Validator {self.name!r} has no noise scores.")
+        if self.config.stream:
+            return stream_background(self.far_scores, self.noise_streams, self.input_duration_seconds,
+                                     self.config.stream_cluster_seconds, self.config.found_window_seconds)
         return noise_background(self.far_scores, self.noise_streams, self.input_duration_seconds,
                                 self.config.cluster_seconds)
 
@@ -228,9 +244,14 @@ class Validator:
                                 chirp_weights(data["mass1"], data["mass2"]))
 
     def roc_curves(self) -> Dict[str, Dict[str, Any]]:
-        """Exact ROC curves of noise against injection populations, keyed by population."""
+        """
+        Exact ROC curves of noise against injection populations, keyed by population:
+        the noise is every window in window mode, and every background trigger in stream
+        mode, as the injections' scores are triggers' there.
+        """
         if self.far_scores is None or self.efficiency_data is None:
             return {}
+        negatives = self.background().window_scores if self.config.stream else self.far_scores
         snrs, scores = self.efficiency_data["snrs"], self.efficiency_data["scores"]
         pools = {f"SNR≥{self.config.default_roc_min_snr:g}": snrs >= self.config.default_roc_min_snr}
         for pool in self.config.extra_roc_pools:
@@ -241,7 +262,7 @@ class Validator:
             if not np.any(mask):
                 logger.warning(f"No injections in ROC population {key}.")
                 continue
-            roc = roc_curve(self.far_scores, scores[mask])
+            roc = roc_curve(negatives, scores[mask])
             results[key] = {"fpr": roc.false_positive_rate, "tpr": roc.true_positive_rate,
                             "roc_auc": roc.auc}
         return results
@@ -336,7 +357,7 @@ class Validator:
                 v.far_scores = f["far_scores/scores"][:]
                 v.noise_gps_times = f["far_scores/gps_times"][:] if "gps_times" in f["far_scores"] else None
                 if "streams" in f["far_scores"]:
-                    v.noise_streams = {k: f["far_scores/streams"][k][:] for k in f["far_scores/streams"]}
+                    v.noise_streams = {k: f["far_scores/streams"][k][()] for k in f["far_scores/streams"]}
             for key in ("efficiency_data", "volume_data"):
                 if key in f:
                     setattr(v, key, {k: f[key][k][()] for k in f[key]})
@@ -351,6 +372,17 @@ class Validator:
         return v
 
     # ---------------------------------------------------------- plotting
+
+    def mode_summary(self) -> str:
+        """How the result was measured, for its dashboard's header: the mode, and in stream mode its stride and rules."""
+        cfg = self.config
+        if not cfg.stream:
+            return f"{self.name}: window mode (each example one window; kept for compatibility and reproduction)."
+        stride = (float(np.asarray(self.noise_streams["stride_seconds"])) if self.noise_streams is not None
+                  and "stride_seconds" in self.noise_streams else cfg.stream_stride_seconds(self.input_duration_seconds))
+        return (f"{self.name}: stream mode, stride {stride:g} s over a {self.input_duration_seconds:g} s window; a "
+                f"trigger is the loudest score within {cfg.stream_cluster_seconds:g} s; an injection is found by the "
+                f"loudest trigger within ±{cfg.found_window_seconds:g} s of its merger.")
 
     def _cached_segments(self) -> Optional[np.ndarray]:
         """The real-noise segments the noise obtainer already holds, for the GPS plot."""
@@ -413,8 +445,9 @@ class Validator:
             tabs.append(("Worst False Positives", pn.Column(
                 *[generate_waveform_plot(s, self.input_duration_seconds) for s in fp[:25]])))
 
+        header = pn.pane.Markdown("  \n".join(v.mode_summary() for v in validators), sizing_mode="stretch_width")
         template = pn.template.FastListTemplate(
-            title=f"Validation Dashboard: {self.name}", theme="dark", theme_toggle=False, main=[tabs],
+            title=f"Validation Dashboard: {self.name}", theme="dark", theme_toggle=False, main=[header, tabs],
         )
         if output_path:
             output_path = Path(output_path)
