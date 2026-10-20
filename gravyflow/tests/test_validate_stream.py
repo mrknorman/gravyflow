@@ -74,9 +74,10 @@ def test_the_validator_streams_by_default(validated, stream_config, tmp_path):
     assert v.far_scores.shape == (64,) and v.noise_streams["stride_seconds"] == 0.25
     background = v.background()
     assert isinstance(background, StreamBackground)
-    assert background.livetime_seconds == pytest.approx(63 * 0.25 + 1.0)
+    assert background.livetime_seconds == pytest.approx(63 * 0.25 + 1.0 - 2.0)
     times = np.arange(64) * 0.25
-    assert background.num_triggers == cluster(times, v.far_scores, 1.0).size
+    keep = cluster(times, v.far_scores, 1.0)
+    assert background.num_triggers == np.sum((times[keep] >= 1.0) & (times[keep] <= 63 * 0.25 - 1.0))
     # Each injection: its found statistic (a trigger's score, or -inf), its trigger's time from
     # the merger within the found window, its merger's time and its source's records.
     data = v.efficiency_data
@@ -160,7 +161,7 @@ def test_the_stride_is_the_models_own_when_given(dataset_args):
     bank = ValidationBank(logit_model(), dataset_args, config)
     bank.generate_stream_noise()
     assert bank.noise_streams["stride_seconds"] == 0.125
-    assert bank.background().livetime_seconds == pytest.approx(39 * 0.125 + 1.0)
+    assert bank.background().livetime_seconds == pytest.approx(39 * 0.125 + 1.0 - 2.0)
 
 
 def _cluster_earliest_of_ties(time, stat, cluster_seconds):

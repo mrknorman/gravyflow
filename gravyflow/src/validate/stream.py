@@ -203,8 +203,10 @@ class StreamBackground(Background):
     its stride, in time order) as false-alarm rates (`metrics.Background`): a
     stream's triggers are its scores that are the loudest within
     ``cluster_seconds`` of themselves (`cluster`), counted at or above each
-    threshold per second of the streams' livetime. The count is monotone in the
-    threshold. ``window_scores`` are the triggers' scores.
+    threshold per second of the streams' livetime. No trigger is taken within
+    ``cluster_seconds`` of a stream's ends, and the livetime is less those stretches
+    (`trigger_indices`). The count is monotone in the threshold. ``window_scores``
+    are the triggers' scores.
 
     Its chance (`found_by_chance`) is stream mode's: a noise trigger passing the
     threshold within ``found_window_seconds`` of a merger (module docstring).
@@ -222,10 +224,24 @@ class StreamBackground(Background):
         self.cluster_seconds = float(cluster_seconds)
         self.found_window_seconds = float(found_window_seconds)
         self._independent_block = None
-        triggers = [stream.scores[cluster(np.arange(stream.scores.size) * stream.stride_seconds, stream.scores,
-                                          self.cluster_seconds)] for stream in self.streams]
+        triggers = [stream.scores[self.trigger_indices(stream)] for stream in self.streams]
         self._init_counts(np.concatenate(triggers) if triggers else np.empty(0), np.empty(0),
-                          sum(stream.livetime_seconds for stream in self.streams))
+                          sum(self.stream_livetime_seconds(stream) for stream in self.streams))
+
+    def trigger_indices(self, stream: ScoreStream) -> np.ndarray:
+        """
+        ``stream``'s triggers (`cluster`), but none within ``cluster_seconds`` of either
+        end of its windows' times, where a score's neighbourhood runs off the stream and
+        it would be the loudest of fewer scores than any other.
+        """
+        times = np.arange(stream.scores.size) * stream.stride_seconds
+        keep = cluster(times, stream.scores, self.cluster_seconds)
+        span = times[-1] if times.size else 0.0
+        return keep[(times[keep] >= self.cluster_seconds) & (times[keep] <= span - self.cluster_seconds)]
+
+    def stream_livetime_seconds(self, stream: ScoreStream) -> float:
+        """``stream``'s livetime less the ``cluster_seconds`` at each end its triggers are dropped from."""
+        return max(stream.livetime_seconds - 2.0 * self.cluster_seconds, 0.0)
 
     @property
     def num_triggers(self) -> int:

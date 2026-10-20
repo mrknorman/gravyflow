@@ -75,11 +75,12 @@ def test_the_background_counts_the_papers_triggers(far_hz):
     background, streams = noise_background(rng)
     t = float(stats.norm.ppf((1.0 - far_hz * (2 * NEIGHBOURS + 1) * STRIDE) ** (1.0 / (2 * NEIGHBOURS + 1))))
     assert trigger_rate_hz(t) == pytest.approx(far_hz, rel=1e-9)
-    assert background.livetime_seconds == sum(s.livetime_seconds for s in streams)
+    # Each stream's livetime less a cluster at each end, where no trigger is taken.
+    assert background.livetime_seconds == pytest.approx(sum(s.livetime_seconds - 2 * CLUSTER for s in streams))
     expected = trigger_rate_hz(t) * background.livetime_seconds
     count = background.far_count(t)
-    # Poisson, plus the streams' edges (four windows each end may be a trigger more often): 5 sd.
-    assert abs(count - expected) <= 5.0 * np.sqrt(expected) + 2 * 2 * NEIGHBOURS * len(streams) * far_hz
+    # Poisson, 5 sd: no edge allowance, the edges' triggers are not taken.
+    assert abs(count - expected) <= 5.0 * np.sqrt(expected)
 
 
 @pytest.mark.parametrize("far_hz", [0.2, 0.02])
@@ -151,10 +152,25 @@ def test_slides_count_each_slide_and_reuse_each_detector_once_per_slide():
                for k in range(1, num_slides + 1)]
     background = StreamBackground(streams, CLUSTER, FOUND)
     assert background.data_reuse == num_slides
-    assert background.livetime_seconds == sum(s.livetime_seconds for s in streams)
+    assert background.livetime_seconds == pytest.approx(sum(s.livetime_seconds - 2 * CLUSTER for s in streams))
     t = 2.5
     expected = trigger_rate_hz(t, lambda x: stats.norm.cdf(x) ** 2) * background.livetime_seconds
     # The slides share each detector's data, so the count's spread is up to num_slides times Poisson's.
     assert abs(background.far_count(t) - expected) <= 5.0 * np.sqrt(num_slides * expected)
     lower, upper = background.count_interval(background.far_count(t), 0.9545)
     assert lower <= expected <= upper
+
+
+def test_no_trigger_is_taken_within_a_cluster_of_a_streams_ends():
+    # The loudest scores sit at the stream's two ends: each is the loudest within 1 s of itself
+    # only because its neighbourhood runs off the stream, so neither is a trigger, and the
+    # livetime is less 1 s at each end. The middle's 5 is a trigger.
+    scores = np.zeros(17)
+    scores[[0, 16, 8]] = [9.0, 8.0, 5.0]
+    stream = ScoreStream(scores, STRIDE, 1.0)
+    background = StreamBackground([stream], CLUSTER, FOUND)
+    assert background.trigger_indices(stream).tolist() == [8]
+    assert background.num_triggers == 1 and background.far_count(4.0) == 1
+    assert background.livetime_seconds == pytest.approx(16 * STRIDE + 1.0 - 2 * CLUSTER)
+    short = ScoreStream(scores[:5], STRIDE, 1.0)
+    assert StreamBackground([short], CLUSTER, FOUND).livetime_seconds == 0.0
