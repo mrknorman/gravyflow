@@ -368,6 +368,25 @@ class TimeSlideBackground:
                              f"samples than its stream at slide {stream.slide} was scored on.")
         return np.stack([d[offset:offset + n] for offset, d in zip(offsets, data)]), first_gps
 
+    def detector_offsets(self, stream: SlideStream, num_detectors: int) -> np.ndarray:
+        """Where the stream's data start on each detector's timeline (GPS s): detector j's ``j k step`` later."""
+        step = self.step_samples / float(self.window.sample_rate_hertz)
+        return stream.stretch[0] + np.arange(num_detectors) * stream.slide * step
+
+    def ring_segments(self, num_windows: int = 0) -> Iterator[Tuple[np.ndarray, float, SlideStream]]:
+        """
+        The segments a ring of wrapping slides lays end to end: every stretch, in time
+        order, each its strain (detectors, samples), float64, its first sample's GPS time
+        and its zero-lag stream. ``num_windows`` is not a bound: the ring is all the data.
+        """
+        for stretch in self.stretches[np.argsort(self.stretches[:, 0], kind="stable")]:
+            data, first_gps = self._load(stretch)
+            num_samples = min(int(ops.shape(d)[0]) for d in data)
+            count = self._num_windows(num_samples, 0)
+            strain = np.stack([np.asarray(d, dtype=np.float64)[:num_samples] for d in data])
+            yield strain, first_gps, SlideStream((float(stretch[0]), float(stretch[1])), 0, count,
+                                                 self.split_spec.block_of(stretch[0]), num_samples)
+
     def _batch(self, stream: SlideStream, data: list, first_gps: float, index: np.ndarray) -> SlideBatch:
         """Windows ``index`` of ``stream``: detector j's padded onsource starts ``j k step`` later."""
         window = self.window

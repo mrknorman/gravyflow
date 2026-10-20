@@ -146,8 +146,10 @@ def test_the_per_detector_path_gives_the_joint_path_s_background():
         np.testing.assert_allclose(a.scores, b.scores, rtol=0, atol=1e-12)
         assert (a.slide, a.block) == (b.slide, b.block)
     pd_background, joint_background = (StreamBackground(s, 1.0, 0.1) for s in (per_detector, joint))
-    assert pd_background.livetime_seconds == pytest.approx(slides.background_seconds)
-    assert joint_background.livetime_seconds == pytest.approx(slides.background_seconds)
+    # Each slide's ring loses a cluster (1 s) either side of its join (`stream._stream_triggers`).
+    trimmed = slides.background_seconds - 2 * 1.0 * len(slides)
+    assert pd_background.livetime_seconds == pytest.approx(trimmed)
+    assert joint_background.livetime_seconds == pytest.approx(trimmed)
     np.testing.assert_allclose(np.sort(pd_background.window_scores), np.sort(joint_background.window_scores),
                                rtol=0, atol=1e-12)
     thresholds = np.quantile(pd_background.window_scores, [0.5, 0.9, 0.99])

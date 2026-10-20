@@ -2,8 +2,8 @@ from .config import ValidationConfig
 from .bank import ValidationBank
 from .slides import (SlideBatch, SlideStream, TimeSlideBackground, TimeSlides, WrappedSlides,
                      minimum_shift_seconds)
-from .per_detector import (DetectorScores, joint_slide_streams, score_detectors, slide_coincidences,
-                           slide_streams)
+from .per_detector import (DetectorScores, PerDetectorModel, joint_slide_streams, score_detectors,
+                           slide_coincidences, slide_streams)
 from .validator import Validator
 from .metrics import (
     DEFAULT_SIGMAS,
@@ -18,6 +18,7 @@ from .metrics import (
     ScoreStream,
     SigmoidFit,
     binomial_interval,
+    disjoint_events,
     efficiency_curve,
     fit_efficiency_sigmoid,
     logit_scores,

@@ -250,7 +250,7 @@ validates as it trains: they need the `viz` extra.
   training-period flag), at the levels `FAR_LEVELS_HZ` (one per month, year, ten and hundred years). The dashboard's
   tabs: Summary, Efficiency, Volume, ROC and false alarms, Parameter Space, Real events and the worst cases.
 - `ValidationConfig`: the settings of a validation (`mode`, `stride_seconds`, `cluster_seconds`,
-  `found_window_seconds`, `stream_segment_seconds` for stream mode).
+  `found_window_seconds`, `stream_segment_seconds`, `injection_stretch_seconds` for stream mode).
 - Wrapping time slides and the per-detector path (`gravyflow.src.validate`): `WrappedSlides` lays the network's
   segments end to end as one ring and reads detector j `j lag` further round it in each slide, wrapping round each
   segment and across segments, so every slide adds the whole ring of background (`background_seconds`) and a 30-day
@@ -271,7 +271,16 @@ validates as it trains: they need the `viz` extra.
   throughput per second of strain and data-to-trigger latency of a model slid along a stream, median and tail, on
   the machine and at the thread count recorded, with the host's load; rounds of A-B-B-A; no ratio across hardware.
   The dashboard's Timing tab shows them.
-  `found_window_seconds`, `stream_segment_seconds`, `injection_stretch_seconds` for stream mode).
+- Wrapping slides in the validator (`ValidationConfig.wrapping_slides`, `max_wrapping_slides`; stream mode): a
+  model wrapped as `PerDetectorModel(model, combine)` (`combine` "sum" or "max") is scored once per detector, its
+  background every slide's combination of those scores, and its injections scored at zero lag through the same
+  combination; any other model is run on every slide, as many as the background budget (`num_examples` windows)
+  holds. Each ring loses a cluster either side of its join, triggers and livetime alike.
+- `disjoint_events` and `Background.independent_count`: a slid background's independent events, counted by the data
+  they share: triggers taken loudest first, each accepted only if its data lie a window's padded onsource (the data
+  that set a score) from every accepted trigger's in every detector. Every stream background counts so, slid or not.
+  Quotability, the count's overdispersion in its intervals (`Background.reuse_at`) and the dashboard's event counts
+  read it.
 
 ## Plotting (the `viz` extra)
 

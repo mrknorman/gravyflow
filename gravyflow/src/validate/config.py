@@ -87,6 +87,15 @@ class ValidationConfig:
     # noise has no time to slide: its background is independent windows.
     num_time_slides: int = 16
     time_slide_step_seconds: Optional[float] = None
+    # Stream mode: slides that wrap round the data (`slides.WrappedSlides`), every slide
+    # the whole ring of the network's segments, as many as the ring holds (at most
+    # max_wrapping_slides), the lag k steps (time_slide_step_seconds, whole strides; by
+    # default the fewest strides past the light-travel time and the model's input). A
+    # per-detector model (`per_detector.PerDetectorModel`) is scored once per detector
+    # and each slide costs only the coincidence; any other model is run on every slide,
+    # as many slides as the background budget (num_examples windows) holds.
+    wrapping_slides: bool = False
+    max_wrapping_slides: Optional[int] = None
     # How scores become triggers. Stream mode: the loudest score within this of
     # itself is a trigger (by default 1 s). Window mode: above-threshold windows of
     # real noise starting within this of the one before are one trigger (by default
@@ -119,6 +128,10 @@ class ValidationConfig:
             raise ValueError(f"cluster_seconds must be >= 0, got {self.cluster_seconds}.")
         if self.mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {self.mode!r}.")
+        if self.wrapping_slides and self.mode != "stream":
+            raise ValueError("Wrapping slides are stream mode's: set mode='stream'.")
+        if self.max_wrapping_slides is not None and not self.max_wrapping_slides >= 1:
+            raise ValueError(f"max_wrapping_slides must be >= 1, got {self.max_wrapping_slides}.")
         if self.stride_seconds is not None and not self.stride_seconds > 0:
             raise ValueError(f"stride_seconds must be > 0, got {self.stride_seconds}.")
         for name in ("found_window_seconds", "stream_segment_seconds", "injection_stretch_seconds"):

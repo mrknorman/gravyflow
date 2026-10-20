@@ -226,7 +226,8 @@ class StreamBackground(Background):
     threshold within ``found_window_seconds`` of a merger (module docstring).
     """
 
-    def __init__(self, streams: Sequence[ScoreStream], cluster_seconds: float, found_window_seconds: float):
+    def __init__(self, streams: Sequence[ScoreStream], cluster_seconds: float, found_window_seconds: float,
+                 footprint_seconds: Optional[float] = None):
         if not cluster_seconds >= 0:
             raise ValueError(f"cluster_seconds must be >= 0, got {cluster_seconds}.")
         if not found_window_seconds > 0:
@@ -237,16 +238,30 @@ class StreamBackground(Background):
         self.streams = tuple(streams)
         self.cluster_seconds = float(cluster_seconds)
         self.found_window_seconds = float(found_window_seconds)
+        self.footprint_seconds = footprint_seconds
         self._independent_block = None
-        triggers = [stream.scores[self.trigger_indices(stream)] for stream in self.streams]
+        self._disjoint = None
+        triggers, positions = [], []
+        for stream in self.streams:
+            keep = self.trigger_indices(stream)
+            triggers.append(stream.scores[keep])
+            if stream.detector_offsets is not None:
+                positions.append(stream.data_positions(keep))
         self._init_counts(np.concatenate(triggers) if triggers else np.empty(0), np.empty(0),
                           sum(self.stream_livetime_seconds(stream) for stream in self.streams))
+        rings = {stream.ring_seconds for stream in self.streams}
+        if (footprint_seconds is not None and positions and len(positions) == len(self.streams)
+                and len(rings) == 1 and len({p.shape[1] for p in positions}) == 1):
+            # Count independent events by the data their triggers share.
+            self._count_disjoint(np.concatenate(triggers), np.concatenate(positions), footprint_seconds,
+                                 rings.pop())
 
     def trigger_indices(self, stream: ScoreStream) -> np.ndarray:
         """
         ``stream``'s triggers (`cluster`), but none within ``cluster_seconds`` of either
         end of its windows' times, where a score's neighbourhood runs off the stream and
-        it would be the loudest of fewer scores than any other.
+        it would be the loudest of fewer scores than any other. A ring of wrapping slides
+        is a stream cut at its join, so nothing is counted across the join either.
         """
         times = np.arange(stream.scores.size) * stream.stride_seconds
         keep = cluster(times, stream.scores, self.cluster_seconds)
@@ -272,23 +287,25 @@ class StreamBackground(Background):
         trigger at or above it lies within ``found_window_seconds`` of the merger. Of the
         livetime's ``n`` found windows, a threshold chosen from the triggers stands on
         ``c`` of them (`metrics.chosen_count`), so the chance is ``Beta(c / r, (n - c) / r
-        + 1)``, ``r`` the background's `data_reuse`: on average the trigger rate times
-        ``2 w``. Nothing past every trigger (an infinite threshold); certainty at
+        + 1)``, ``r`` the count's overdispersion (`reuse_at`): on average the trigger rate
+        times ``2 w``. Nothing past every trigger (an infinite threshold); certainty at
         ``-inf``, which every injection passes; NaN at NaN.
         """
         t = np.atleast_1d(np.asarray(threshold, dtype=np.float64))
         if self.num_triggers == 0:
             a, b = np.zeros(t.shape), np.ones(t.shape)
         else:
-            n, reuse = self.found_windows, self.data_reuse
+            n = self.found_windows
             count = chosen_count(self._opens, np.where(np.isfinite(t), t, 0.0))
+            reuse = self.reuse_at(count)
             a, b = count / reuse, (n - count) / reuse + 1.0
         a = np.where(t == np.inf, 0.0, np.where(t == -np.inf, 1.0, a))
         b = np.where(t == -np.inf, 0.0, b)
         return ChanceLaw(np.where(np.isnan(t), np.nan, a), np.where(np.isnan(t), np.nan, b))
 
     def by_block(self) -> Dict:
-        return {block: StreamBackground(streams, self.cluster_seconds, self.found_window_seconds)
+        return {block: StreamBackground(streams, self.cluster_seconds, self.found_window_seconds,
+                                        self.footprint_seconds)
                 for block, streams in self._blocks().items()}
 
 
@@ -299,15 +316,29 @@ def stream_background(scores, streams: Dict[str, np.ndarray], window_seconds: fl
     stream's number of windows, slide and block, in the order of the scores, the
     stride they were scored at (``stride_seconds``) and the found window used
     (``found_window_seconds``; if not recorded, `found_window` of the one given).
+    Where it also gives where each stream's data start on each detector's timeline
+    (``detector_offsets``) and the data that set a score (``footprint_seconds``, the
+    padded onsource), the background counts its independent events by the data they
+    share (`metrics.disjoint_events`). A record of wrapping slides
+    (``ring_lags_seconds``) is rebuilt slide by slide (`per_detector.ring_background_streams`).
     """
-    edges = np.cumsum(streams["lengths"])[:-1]
     stride = float(np.asarray(streams["stride_seconds"]))
     found_window_seconds = (float(np.asarray(streams["found_window_seconds"])) if "found_window_seconds" in streams
                             else found_window(found_window_seconds, stride))
+    footprint = float(np.asarray(streams["footprint_seconds"])) if "footprint_seconds" in streams else None
+    if "ring_lags_seconds" in streams:  # wrapping slides (`per_detector.ring_record`)
+        from .per_detector import ring_background_streams
+
+        return StreamBackground(ring_background_streams(scores, streams, stride), cluster_seconds,
+                                found_window_seconds, footprint)
+    edges = np.cumsum(streams["lengths"])[:-1]
+    offsets = streams.get("detector_offsets")
+    offsets = [None] * len(streams["lengths"]) if offsets is None else [tuple(o) for o in np.asarray(offsets)]
     return StreamBackground(
-        [ScoreStream(part, stride, window_seconds, int(block), int(slide))
-         for part, block, slide in zip(np.split(np.asarray(scores), edges), streams["blocks"], streams["slides"])],
-        cluster_seconds, found_window_seconds)
+        [ScoreStream(part, stride, window_seconds, int(block), int(slide), detector_offsets=offset)
+         for part, block, slide, offset in zip(np.split(np.asarray(scores), edges), streams["blocks"],
+                                                streams["slides"], offsets)],
+        cluster_seconds, found_window_seconds, footprint)
 
 
 # ------------------------------------------------------------ the data
@@ -353,6 +384,26 @@ class SyntheticSegments:
     def stream_strain(self, stream: SlideStream) -> Tuple[np.ndarray, float]:
         """The stream's strain (its segment) and its first sample's time on the segment's timeline."""
         return self.segment(int(round(stream.stretch[0] / self.segment_seconds))), float(stream.stretch[0])
+
+    def detector_offsets(self, stream: SlideStream, num_detectors: int) -> np.ndarray:
+        """
+        Where the stream's data start on each detector's timeline (s): segment ``b``'s at
+        ``b`` segments and footprints on, so that no two segments' windows seem to share data.
+        """
+        index = int(round(stream.stretch[0] / self.segment_seconds))
+        footprint = self.geometry.footprint_samples / self.geometry.sample_rate_hertz
+        return np.full(num_detectors, index * (self.segment_seconds + footprint))
+
+    def ring_segments(self, num_windows: int) -> Iterator[Tuple[np.ndarray, float, SlideStream]]:
+        """
+        The segments a ring of wrapping slides lays end to end: enough for ``num_windows``
+        windows, each its strain, its first sample's time and its zero-lag stream.
+        """
+        per_segment = self.geometry.num_windows(self.num_samples)
+        for index in range(max(math.ceil(num_windows / per_segment), 1)):
+            start = index * self.segment_seconds
+            yield (self.segment(index), start,
+                   SlideStream((start, start + self.segment_seconds), 0, per_segment, index, self.num_samples))
 
 
 # ------------------------------------------------------- local injections

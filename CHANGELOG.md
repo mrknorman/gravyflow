@@ -147,8 +147,7 @@ repository before it may need the changes below.
   holds. A model that scores each detector separately is scored once per detector (`score_detectors`); each slide
   then costs only the coincidence step (`slide_streams`, whose streams `StreamBackground` reads). For such a model
   the joint path (`joint_slide_streams`, a full run per slide) gives the same background and found injections. The
-  matched filter's stored triggers (`DetectorTriggers`) take the same slides (`slide_coincidences`). The validator's
-  window and stream modes are unchanged: their slides still do not wrap.
+  matched filter's stored triggers (`DetectorTriggers`) take the same slides (`slide_coincidences`).
 - **Glitch robustness in the validator.** `gf.Glitches` holds labelled glitches (Gravity Spy's public release, O1 to
   O3b, H1 and L1, through its existing md5-checked catalogue loader). `validate.glitches` runs a model over every
   labelled glitch, each scored on the stream's grid as an injection is (the loudest trigger within the found window
@@ -193,6 +192,25 @@ repository before it may need the changes below.
   binned volume), ROC and false alarms (detection probability, the FAR curves, the calibration and the window-level
   ROC, kept as a bridge) and Real events (counts per level and the training-period flag beside the events table);
   every earlier plot, control and table is kept. `Validator.plot` takes `matched_filter=` and `training_periods=`.
+- **Wrapping slides in the validator.** Stream mode takes them with `ValidationConfig(wrapping_slides=True)`, as many
+  as the ring holds (at most `max_wrapping_slides`). A model declared per-detector, `PerDetectorModel(model,
+  combine)` (`combine` "sum" or "max"; the wrapped model takes one detector's inputs), is scored once per detector:
+  the record keeps each detector's scores and rebuilds every slide's background from them, and its injections are
+  scored at zero lag through the same combination. Any other model is run on every slide, as many as `num_examples`
+  windows hold. A ring is a stream cut at its join, so, as at every stream's ends, its triggers within
+  `cluster_seconds` of the join are dropped and its livetime loses as much at each end, once. The settings change every validation's configuration fingerprint, so checkpoints written before them
+  are refused on resume.
+- **Independent background events counted by the data they share.** A stream background counts its independent
+  events as the triggers that share no data (`disjoint_events`): taken loudest first, a trigger is accepted only if,
+  in every detector, its data lie a window's padded onsource (the data that set a score; the offsource only feeds
+  the spectrum) from every accepted trigger's, slid or not. One
+  detector's loud excursion met in every slide counts once, slides of independent noise count close to every
+  trigger, and the quotable depth of wrapping slides grows with their number, where `count / slides` capped it near
+  ten per data length. Quotability (`Background.independent_count`), the count's overdispersion in its intervals
+  and bootstrap (`Background.reuse_at`, count over independent events) and the dashboard's event counts read it.
+  Unslid, triggers further apart than the padded onsource all count, so the default depth barely changes. Stream
+  mode's records place each stream's data (`detector_offsets`, `footprint_seconds`); window mode and records without
+  placed data keep `floor(count / data_reuse)`; `metrics.independent_events` is removed.
 - **Injection records for analysis.** A dataset returns, when asked: `ReturnVariables.IN_BAND_DURATION_SECONDS`
   (B, G), a CBC's time from the band's lower frequency to its merger (the envelope's peak) by its waveform model,
   not cut by the window (`gf.CBCGenerator.in_band_duration_seconds`; NaN for other sources);

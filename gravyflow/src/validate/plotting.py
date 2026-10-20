@@ -562,7 +562,7 @@ def generate_far_curves(
             x=curves[0].thresholds[keep], y=curves[0].rate_hz[keep],
             **{f"lower_{j}": curve.lower_hz[keep] for j, curve in enumerate(curves)},
             **{f"upper_{j}": curve.upper_hz[keep] for j, curve in enumerate(curves)},
-            events=curves[0].counts[keep] // curves[0].data_reuse,
+            events=curves[0].independent_events[keep],
         ))
         title = _title(validator, index)
         for j, sigma in reversed(list(enumerate(sigmas))):

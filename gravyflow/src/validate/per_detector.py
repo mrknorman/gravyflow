@@ -21,6 +21,11 @@ once per detector, and every time slide then costs only the coincidence step.
   whose network score is ``combine`` of per-detector scores, the two paths give the
   same streams, so the same background, and the same found injections
   (`found_statistic`).
+- **In the validator.** A model declares itself per-detector by its wrapper,
+  `PerDetectorModel`, with its combination rule; with wrapping slides
+  (``ValidationConfig.wrapping_slides``) its record keeps each detector's scores and
+  the slides (`ring_record`), from which the background is rebuilt
+  (`ring_background_streams`).
 - **Stored triggers.** The matched filter's per-detector triggers
   (`detection.DetectorTriggers`) take the same slides: detector j's trigger times are
   moved round the ring (`slides.WrappedSlides.slid_times`) and coincided with
@@ -48,6 +53,60 @@ JointModel = Callable[[np.ndarray, np.ndarray], np.ndarray]
 
 def _sum(scores: np.ndarray) -> np.ndarray:
     return np.sum(scores, axis=0)
+
+
+#: The combination rules a per-detector model may declare (`PerDetectorModel`): (detectors, N) -> (N,).
+COMBINE_RULES = {"sum": _sum, "max": lambda scores: np.max(scores, axis=0)}
+
+
+def combine_rule(name: str) -> Callable[[np.ndarray], np.ndarray]:
+    """The combination rule ``name`` (`COMBINE_RULES`)."""
+    if isinstance(name, bytes):
+        name = name.decode()
+    if name not in COMBINE_RULES:
+        raise ValueError(f"combine must be one of {sorted(COMBINE_RULES)}, got {name!r}.")
+    return COMBINE_RULES[name]
+
+
+class PerDetectorModel:
+    """
+    A model that scores each detector separately, with the rule (``combine``, a name
+    of `COMBINE_RULES`) that makes its network score of the detectors' scores.
+
+    ``model`` (a Keras logit model) takes one detector's model inputs (each input's
+    detector axis, axis 1, of length 1). As a network model (`predict_on_batch`) it
+    splits each input along its detector axis, scores each detector, and combines:
+    so its injections, scored at zero lag, pass the very combination its
+    background does. With wrapping slides (``ValidationConfig.wrapping_slides``) the
+    validator scores each detector's data once and builds every slide's background
+    from those scores (`slide_streams`). Anything else (its layers, weights, training
+    record) is the wrapped model's.
+    """
+
+    def __init__(self, model, combine: str = "sum"):
+        self.model = model
+        self.combine = combine.decode() if isinstance(combine, bytes) else str(combine)
+        self.combine_scores = combine_rule(self.combine)
+
+    def __getattr__(self, name):
+        if name == "model":  # not yet set: never recurse
+            raise AttributeError(name)
+        return getattr(self.model, name)
+
+    def detector_scores(self, inputs) -> np.ndarray:
+        """Each detector's scores of network ``inputs`` (each (B, I, ...)): (I, B)."""
+        from .metrics import logit_scores
+
+        arrays = {k: np.asarray(v) for k, v in inputs.items()}
+        num = {a.shape[1] for a in arrays.values()}
+        if len(num) != 1:
+            raise ValueError(f"The inputs hold different numbers of detectors on axis 1: {sorted(num)}.")
+        return np.stack([logit_scores(self.model.predict_on_batch({k: a[:, j:j + 1] for k, a in arrays.items()}))
+                         for j in range(num.pop())])
+
+    def predict_on_batch(self, inputs) -> np.ndarray:
+        """The network scores of ``inputs``: each detector scored, then combined (B,)."""
+        return np.asarray(self.combine_scores(self.detector_scores(inputs)), dtype=np.float64)
 
 
 @dataclass(frozen=True)
@@ -153,8 +212,16 @@ def slide_streams(scores: DetectorScores, slides: WrappedSlides,
     for k in range(len(slides)):
         m = _strides(slides, k, stride)
         paired = np.stack([np.roll(scores.scores[j], -j * m) for j in range(scores.num_detectors)])
-        streams.append(ScoreStream(np.asarray(combine(paired), dtype=np.float64), stride, stride, 0, k + 1))
+        streams.append(_ring_stream(np.asarray(combine(paired), dtype=np.float64), stride, k, m,
+                                    scores.num_detectors))
     return streams
+
+
+def _ring_stream(scores: np.ndarray, stride: float, slide: int, lag_strides: int, num_detectors: int) -> ScoreStream:
+    """Slide ``slide``'s stream round the ring: detector j's data of ring window i are its ring window ``i + j m``."""
+    return ScoreStream(scores, stride, stride, 0, slide + 1,
+                       detector_offsets=tuple(j * lag_strides * stride for j in range(num_detectors)),
+                       ring_seconds=scores.size * stride)
 
 
 def paired_windows(geometry: StreamGeometry, segment_windows: np.ndarray, slides: WrappedSlides, slide: int,
@@ -199,8 +266,58 @@ def joint_slide_streams(model: JointModel, strains: Sequence[np.ndarray], first_
             pairs = paired_windows(geometry, counts, slides, k, ring, num_detectors)
             parts.append(np.asarray(model(*_gather_paired(strains, geometry, pairs)), dtype=np.float64).reshape(-1))
         stride = geometry.stride_seconds
-        streams.append(ScoreStream(np.concatenate(parts), stride, stride, 0, k + 1))
+        streams.append(_ring_stream(np.concatenate(parts), stride, k, _strides(slides, k, stride), num_detectors))
     return streams
+
+
+def ring_record(slides: WrappedSlides, geometry: StreamGeometry, segment_windows, combine: Optional[str] = None
+                ) -> dict:
+    """
+    What a validation record keeps of wrapping slides beside its zero-lag segments, so
+    that its background is rebuilt from its scores (`ring_background_streams`): each
+    slide's lag, where each segment's first window's data start, the least shift the
+    lags kept clear of, the detectors and, for a per-detector model, its combination
+    rule (the record's scores then each detector's, not each slide's).
+    """
+    record = {"ring_lags_seconds": np.asarray(slides.lags, dtype=np.float64),
+              "ring_first_seconds": np.asarray(slides.segments[:, 0], dtype=np.float64),
+              "ring_segment_windows": np.asarray(segment_windows, dtype=np.int64),
+              "ring_minimum_seconds": np.float64(slides.minimum_seconds),
+              "ring_detectors": np.int64(slides.num_detectors)}
+    if combine is not None:
+        record["ring_combine"] = str(combine)
+    return record
+
+
+def ring_background_streams(scores, record: Mapping, stride_seconds: float) -> List[ScoreStream]:
+    """
+    The wrapping slides' streams of a record (`ring_record`): from each detector's
+    scores (`slide_streams`) where the record names a combination rule, else the
+    slides' own network scores, slide after slide.
+    """
+    windows = np.asarray(record["ring_segment_windows"], dtype=np.int64)
+    first = np.asarray(record["ring_first_seconds"], dtype=np.float64)
+    num_detectors = int(np.asarray(record["ring_detectors"]))
+    slides = WrappedSlides(np.stack([first, first + windows * stride_seconds], axis=1),
+                           record["ring_lags_seconds"], num_detectors,
+                           float(np.asarray(record["ring_minimum_seconds"])))
+    scores = np.asarray(scores, dtype=np.float64)
+    total = int(windows.sum())
+    if "ring_combine" in record:
+        rule = np.asarray(record["ring_combine"]).item()
+        detector = DetectorScores(scores.reshape(num_detectors, total), windows, first,
+                                  _StrideOnly(stride_seconds))
+        return slide_streams(detector, slides, combine_rule(rule))
+    if scores.size != len(slides) * total:
+        raise ValueError(f"The record holds {scores.size} scores, not {len(slides)} slides of {total} windows.")
+    return [_ring_stream(part, stride_seconds, k, _strides(slides, k, stride_seconds), num_detectors)
+            for k, part in enumerate(scores.reshape(len(slides), total))]
+
+
+@dataclass(frozen=True)
+class _StrideOnly:
+    """A ring's geometry as a record keeps it: its stride."""
+    stride_seconds: float
 
 
 def found_statistic(window_scores: np.ndarray, ring_index: np.ndarray, merger_ring_seconds: float,
@@ -250,10 +367,15 @@ def slide_coincidences(triggers: Mapping[str, DetectorTriggers], slides: Wrapped
 
 
 __all__ = [
+    "COMBINE_RULES",
     "DetectorScores",
+    "PerDetectorModel",
+    "combine_rule",
     "found_statistic",
     "joint_slide_streams",
     "paired_windows",
+    "ring_background_streams",
+    "ring_record",
     "score_detectors",
     "slide_coincidences",
     "slide_streams",

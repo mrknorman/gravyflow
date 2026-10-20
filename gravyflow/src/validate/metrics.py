@@ -16,7 +16,7 @@ set of conventions holds throughout:
   one trigger.
 - **Intervals are two-sided and central**, reported at 1 and 2 sigma
   (`DEFAULT_SIGMAS`: 68.27% and 95.45%, `sigma_level`): Garwood for Poisson
-  counts, in the background's independent information (`Background.data_reuse`),
+  counts, in the background's independent information (`Background.independent_count`),
   and Clopper-Pearson (or Wilson) for binomial efficiencies. A building block
   takes one ``confidence``; a result carries every level.
 - **Found, and found by chance.** In window mode an injection is found when its
@@ -198,12 +198,20 @@ class ScoreStream:
     together (`Background.by_block`). ``slide`` is the time slide the stream's
     windows were read at (0: unslid), so that the background knows how often it
     reuses each detector's data (`Background.data_reuse`).
+
+    ``detector_offsets`` places each window's data on each detector's own timeline
+    (s): detector j's data of window ``i`` start at ``detector_offsets[j] + i *
+    stride_seconds``, taken round a ring of ``ring_seconds`` when one is given
+    (wrapping slides). With them a stream background counts its independent events
+    by the data they share (`disjoint_events`); without, by its slides (`data_reuse`).
     """
     scores: np.ndarray
     stride_seconds: float
     window_seconds: float
     block: Optional[Hashable] = None
     slide: int = 0
+    detector_offsets: Optional[Tuple[float, ...]] = None
+    ring_seconds: Optional[float] = None
 
     def __post_init__(self):
         object.__setattr__(self, "scores", _finite_scores(self.scores, "stream scores"))
@@ -212,6 +220,17 @@ class ScoreStream:
                 "A stream tiles its data without gaps: need 0 < stride_seconds <= window_seconds, "
                 f"got stride {self.stride_seconds} and window {self.window_seconds}."
             )
+        if self.detector_offsets is not None:
+            object.__setattr__(self, "detector_offsets", tuple(float(o) for o in self.detector_offsets))
+        if self.ring_seconds is not None and not self.ring_seconds > 0:
+            raise ValueError(f"ring_seconds must be > 0, got {self.ring_seconds}.")
+
+    def data_positions(self, index) -> np.ndarray:
+        """Where windows ``index``'s data start on each detector's timeline (s): (len(index), detectors)."""
+        if self.detector_offsets is None:
+            raise ValueError("The stream records no detector offsets.")
+        times = np.asarray(index, dtype=np.float64)[:, None] * self.stride_seconds + np.asarray(self.detector_offsets)
+        return np.mod(times, self.ring_seconds) if self.ring_seconds is not None else times
 
     @property
     def livetime_seconds(self) -> float:
@@ -232,14 +251,64 @@ class FarEstimate:
 
 
 #: A rate, volume or efficiency is quoted only
-#: where at least this many independent background events lie at or above its threshold, ``floor(count /
-#: data_reuse)`` (`independent_events`). Below it the point is still computed, plotted and marked, never quoted.
+#: where at least this many independent background events lie at or above its threshold
+#: (`Background.independent_count`). Below it the point is still computed, plotted and marked, never quoted.
 MIN_BACKGROUND_EVENTS = 10
 
 
-def independent_events(count, data_reuse: int) -> np.ndarray:
-    """The independent background events in a trigger ``count`` of a background reusing its data ``data_reuse`` times."""
-    return np.floor(np.asarray(count, dtype=np.float64) / max(int(data_reuse), 1)).astype(np.int64)
+def disjoint_events(scores, positions, footprint_seconds: float, ring_seconds: Optional[float] = None) -> np.ndarray:
+    """
+    The background triggers that share no data, as their scores (ascending).
+
+    Triggers are taken loudest first (ties: in the order given), and one is accepted
+    only if, in every detector, its data lie at least ``footprint_seconds`` (the data
+    that set a score: a window's padded onsource; its offsource only feeds the
+    spectrum) from every accepted trigger's data in that detector. ``positions``
+    (triggers, detectors) is where each trigger's window starts on each detector's
+    timeline (s), taken round a ring of ``ring_seconds`` if given: every window's
+    onsource lies at the same offset from its start, so their distance is the same.
+
+    Since acceptance runs loudest first, the independent events at a threshold are
+    the accepted triggers at or above it. Accepted triggers share no data, so this is
+    a lower bound on the background's independent events: one detector's loud
+    excursion, met again in every time slide, counts once.
+    """
+    scores = np.asarray(scores, dtype=np.float64).reshape(-1)
+    positions = np.asarray(positions, dtype=np.float64).reshape(scores.size, -1)
+    footprint = float(footprint_seconds)
+    if not footprint > 0:
+        raise ValueError(f"footprint_seconds must be > 0, got {footprint_seconds}.")
+    ring = None if ring_seconds is None else float(ring_seconds)
+    if ring is not None:
+        positions = np.mod(positions, ring)
+        num_bins = max(int(math.ceil(ring / footprint)), 1)
+    bins = np.floor(positions / footprint).astype(np.int64)
+    if ring is not None:
+        bins = bins % num_bins
+    # Accepted triggers in one detector lie at least a footprint apart: at most one per bin.
+    taken = [dict() for _ in range(positions.shape[1])]
+    accepted = []
+    for k in np.argsort(-scores, kind="stable"):
+        clear = True
+        for j, held in enumerate(taken):
+            p, b = positions[k, j], int(bins[k, j])
+            for d in (-2, -1, 0, 1, 2):  # a ring's last bin is short: look two bins either side
+                q = held.get((b + d) % num_bins if ring is not None else b + d)
+                if q is None:
+                    continue
+                gap = abs(p - q)
+                if ring is not None:
+                    gap = min(gap, ring - gap)
+                if gap < footprint:
+                    clear = False
+                    break
+            if not clear:
+                break
+        if clear:
+            for j, held in enumerate(taken):
+                held[int(bins[k, j])] = positions[k, j]
+            accepted.append(scores[k])
+    return np.sort(np.asarray(accepted, dtype=np.float64))
 
 
 @dataclass(frozen=True)
@@ -250,7 +319,7 @@ class FarThreshold:
     ``resolved`` is False when the background is too short to resolve the
     target (it allows less than one trigger in the livetime); the threshold is
     then NaN, and so is any efficiency measured at it. ``independent_events`` is the
-    background's independent events at or above the threshold (`independent_events`);
+    background's independent events at or above the threshold (`Background.independent_count`);
     ``quotable`` holds where they are at least `MIN_BACKGROUND_EVENTS`.
     """
     target_hz: float
@@ -269,7 +338,8 @@ class FarThreshold:
 class FarCurve:
     """
     FAR as a step function of the threshold, exact at every breakpoint. ``quotable``
-    marks the breakpoints with at least `MIN_BACKGROUND_EVENTS` independent events.
+    marks the breakpoints with at least `MIN_BACKGROUND_EVENTS` independent events
+    (``independent``, `Background.independent_count`).
     """
     thresholds: np.ndarray   # descending; the FAR holds on (next threshold, threshold]
     counts: np.ndarray
@@ -279,10 +349,18 @@ class FarCurve:
     upper_hz: np.ndarray
     confidence: float
     data_reuse: int = 1
+    independent: Optional[np.ndarray] = None
+
+    @property
+    def independent_events(self) -> np.ndarray:
+        """The independent background events at each breakpoint."""
+        if self.independent is not None:
+            return np.asarray(self.independent, dtype=np.int64)
+        return np.floor(np.asarray(self.counts, dtype=np.float64) / max(int(self.data_reuse), 1)).astype(np.int64)
 
     @property
     def quotable(self) -> np.ndarray:
-        return independent_events(self.counts, self.data_reuse) >= MIN_BACKGROUND_EVENTS
+        return self.independent_events >= MIN_BACKGROUND_EVENTS
 
 
 class Background:
@@ -311,6 +389,7 @@ class Background:
         self.streams: Tuple[ScoreStream, ...] = tuple(streams)
         self.cluster_seconds = float(cluster_seconds)
         self._independent_block = None
+        self._disjoint = None
         opens, merges = [], []
         for stream in self.streams:
             s = stream.scores
@@ -346,6 +425,7 @@ class Background:
         background.streams = ()
         background.cluster_seconds = 0.0
         background._independent_block = block
+        background._disjoint = None
         background._init_counts(scores, np.empty(0), scores.size * float(window_seconds))
         return background
 
@@ -379,17 +459,19 @@ class Background:
         """
         Garwood's interval on the mean of the background's trigger ``count``, counted in
         its independent information: a time-slid background reads each detector's data
-        in `data_reuse` slides, and a loud excursion in one detector's data opens a
-        trigger in each, so its count is that many times a Poisson count of independent
-        events, ``r Poisson(c / r)``, as `bootstrap_thresholds` draws it. The interval is
-        Garwood's on ``c / r``, times ``r``: on an unslid background (``r = 1``) Garwood's
-        own. ``r`` bounds the count's overdispersion (each excursion opens at most one
-        trigger per slide), so the interval is exact where one detector's excursions make
-        the triggers (a statistic like the detectors' maximum) and conservative where
-        both must (their sum: there the variance is nearer Poisson's).
+        in many slides, and a loud excursion in one detector's data opens a trigger in
+        each, so its count is ``r`` times a Poisson count of independent events, ``r
+        Poisson(c / r)``, as `bootstrap_thresholds` draws it, ``r`` the count over its
+        independent events (`reuse_at`). The interval is Garwood's on ``c / r``, times
+        ``r``: on a background whose triggers share no data (``r = 1``) Garwood's own.
+        ``r`` bounds the count's overdispersion, so the interval is exact where one
+        detector's excursions make the triggers (a statistic like the detectors' maximum)
+        and conservative where both must (their sum: there the variance is nearer
+        Poisson's).
         """
-        reuse = self.data_reuse
-        lower, upper = poisson_interval(np.asarray(count, dtype=np.float64) / reuse, confidence)
+        count = np.asarray(count, dtype=np.float64)
+        reuse = self.reuse_at(count)
+        lower, upper = poisson_interval(count / reuse, confidence)
         return lower * reuse, upper * reuse
 
     def _estimate(self, threshold: float, count: int, confidence: float) -> FarEstimate:
@@ -431,14 +513,15 @@ class Background:
         between windows is taken as just above the highest window below it, ``c``
         counting the windows at or above that one (on average ``c / (n + 1)``, not the
         ``(c - 1) / n`` of `window_exceedance`). A background that reuses its data
-        (`data_reuse`, ``r``) holds the information of ``n / r`` windows, so both
+        (`reuse_at`, ``r``) holds the information of ``n / r`` windows, so both
         counts are taken in ``r``'s: ``Beta(c / r, (n - c) / r + 1)``. Where no window
         is below the threshold, ``c = n``.
         """
         if self.num_windows == 0:
             raise ValueError("The background has no windows.")
-        n, reuse = self.num_windows, self.data_reuse
+        n = self.num_windows
         count = chosen_count(self._opens, threshold)
+        reuse = self.reuse_at(count)
         return count / reuse, (n - count) / reuse + 1.0
 
     def found_by_chance(self, threshold) -> "ChanceLaw":
@@ -479,8 +562,7 @@ class Background:
             return FarThreshold(float(far_hz), nan, False, unresolved)
         threshold = self._threshold_at(allowed)
         achieved = self.far(threshold, confidence)
-        return FarThreshold(float(far_hz), threshold, True, achieved,
-                            int(independent_events(achieved.count, self.data_reuse)))
+        return FarThreshold(float(far_hz), threshold, True, achieved, int(self.independent_count(achieved.count)))
 
     def _threshold_at(self, count: int) -> float:
         """
@@ -541,6 +623,7 @@ class Background:
             thresholds=self._breakpoints.copy(), counts=self._envelope.copy(), livetime_seconds=T,
             rate_hz=self._envelope / T, lower_hz=lower / T, upper_hz=upper / T,
             confidence=confidence, data_reuse=self.data_reuse,
+            independent=self.independent_count(self._envelope),
         )
 
     def by_block(self) -> Dict[Hashable, "Background"]:
@@ -565,9 +648,45 @@ class Background:
         """
         How many of the background's windows each detector's window of data enters:
         the number of time slides its streams were read at (each slide reads the
-        same data again), 1 for unslid streams or independent windows.
+        same data again), 1 for unslid streams or independent windows. A stream
+        background whose streams place their data (`ScoreStream.detector_offsets`)
+        counts its independent events by the data its triggers share instead
+        (`independent_count`).
         """
         return max(len({stream.slide for stream in self.streams}), 1)
+
+    def _count_disjoint(self, triggers, positions, footprint_seconds: float, ring_seconds) -> None:
+        """Count the independent events by the data triggers share (`disjoint_events`), at each breakpoint."""
+        accepted = disjoint_events(triggers, positions, footprint_seconds, ring_seconds)
+        self._disjoint = _count_at_or_above(accepted, self._breakpoints)
+
+    def independent_count(self, count) -> np.ndarray:
+        """
+        The independent background events behind a FAR ``count`` (`far_count`): where the
+        streams place their data, the triggers that share none (`disjoint_events`) at the
+        threshold where the count is reached (past every trigger: all of them); else the
+        count over the slides, ``floor(count / data_reuse)``.
+        """
+        c = np.asarray(count, dtype=np.float64)
+        if self._disjoint is None:
+            return np.floor(c / self.data_reuse).astype(np.int64)
+        if not self._disjoint.size:
+            return np.zeros(c.shape, dtype=np.int64)
+        # The first breakpoint (thresholds falling) at which the envelope reaches the count.
+        at = np.minimum(np.searchsorted(self._envelope, c, side="left"), self._envelope.size - 1)
+        return np.where(c > 0, self._disjoint[at], 0).astype(np.int64)
+
+    def reuse_at(self, count) -> np.ndarray:
+        """
+        The overdispersion of a FAR ``count``: the count over its independent events
+        (`independent_count`), at least 1; `data_reuse` where the streams do not place
+        their data.
+        """
+        c = np.asarray(count, dtype=np.float64)
+        if self._disjoint is None:
+            return np.full(c.shape, float(self.data_reuse))
+        independent = self.independent_count(c).astype(np.float64)
+        return np.where(independent > 0, np.maximum(c / np.maximum(independent, 1.0), 1.0), 1.0)
 
     def bootstrap_thresholds(self, fars_hz, rng: np.random.Generator) -> np.ndarray:
         """
@@ -575,7 +694,7 @@ class Background:
         NaN where the background cannot resolve a target.
 
         The information in a background is its count of independent events above a
-        threshold, Poisson, each counted `data_reuse` times among its windows (a
+        threshold, Poisson, each counted `reuse_at` times among its windows (a
         loud excursion in one detector's data opens a trigger in every slide). The
         estimator puts a target's threshold at its ``k``-th loudest trigger
         (`threshold_for_far`), ``k / reuse`` events down, where a unit-rate Poisson
@@ -594,7 +713,7 @@ class Background:
         resolved = np.flatnonzero(allowed >= 1)
         if resolved.size == 0:
             return thresholds
-        reuse = self.data_reuse
+        reuse = self.reuse_at(allowed[resolved])
         shape = allowed[resolved] / reuse
         order = np.argsort(shape, kind="stable")
         steps = np.diff(np.concatenate([[0.0], shape[order]]))

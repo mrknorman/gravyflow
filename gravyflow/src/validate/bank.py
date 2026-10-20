@@ -28,7 +28,7 @@ from tqdm import tqdm
 
 import gravyflow as gf
 from .config import ValidationConfig
-from .metrics import Background, ScoreStream, independent_events, logit_scores, sigma_level
+from .metrics import Background, ScoreStream, logit_scores, sigma_level
 from .slides import SlideStream, TimeSlideBackground, TimeSlides
 from .stream import (
     Placement, StreamGeometry, StreamReader, SyntheticSegments, found_in_stretch, found_window, local_windows,
@@ -507,7 +507,7 @@ class ValidationBank:
         self.glitch_stage = stage.glitch_stage(
             self._noise_dataset.noise_obtainer.ifo_data_obtainer, ifos, self.split_spec, cfg.group,
             self.stream_geometry, lambda on, off: self.score_windows(self._noise_dataset, on, off),
-            cfg.stream_cluster_seconds, cfg.found_window_seconds,
+            cfg.stream_cluster_seconds, self.stream_found_window_seconds,
             per_class=None if isinstance(cfg.score_glitches, bool) else int(cfg.score_glitches),
             rng=gf.SeedTree(cfg.seed).stream(cfg.group, "validator/glitches"), glitches=glitches)
 
@@ -621,7 +621,7 @@ class ValidationBank:
                              far_interval_hz=np.array([[far.lower_hz, far.upper_hz] for far in fars]),
                              far_sigmas=np.array(self.config.interval_sigmas),
                              # Quoted only with MIN_BACKGROUND_EVENTS independent events at or above it.
-                             far_background_events=int(independent_events(fars[0].count, background.data_reuse)))
+                             far_background_events=int(background.independent_count(fars[0].count)))
                 if offsets is not None:  # stream mode: its trigger's time from the event's (NaN: none)
                     event["trigger_offset"] = float(offsets[i])
                 if whitened is not None:
@@ -645,7 +645,7 @@ class ValidationBank:
         for j, (index, _) in enumerate(windows):
             statistics[j], offsets[j] = found_in_stretch(
                 geometry, index, scores[ends[j] - index.size:ends[j]], half, self.config.stream_cluster_seconds,
-                self.config.found_window_seconds)
+                self.stream_found_window_seconds)
         event_time = half / geometry.sample_rate_hertz
         nearest = [w[1][int(np.argmin(np.abs(geometry.window_time(w[0]) - event_time)))] for w in windows]
         on, off = (np.concatenate(parts) for parts in
@@ -716,6 +716,8 @@ class ValidationBank:
         the background (`stream.StreamBackground`) and its streams can be read again for
         the injections.
         """
+        if self.config.wrapping_slides:
+            return self._generate_wrapped_noise()
         source = self.stream_source
         streams = []
 
@@ -739,8 +741,103 @@ class ValidationBank:
             # The test data's own observing time, at zero lag (VT's live time).
             "live_time_seconds": np.float64(zero_lag_seconds(streams, self.stream_geometry.stride_seconds,
                                                              self.window_seconds)),
+            # Where each stream's data lie, for the count of independent events (`metrics.disjoint_events`).
+            "detector_offsets": np.array([source.detector_offsets(s, self._num_detectors) for s in streams],
+                                         dtype=np.float64).reshape(len(streams), self._num_detectors),
+            "footprint_seconds": np.float64(self._footprint_seconds),
         }
         logger.info(f"Stream background: {len(streams)} streams at a {self.stream_geometry.stride_seconds:g} s stride.")
+
+    @property
+    def _num_detectors(self) -> int:
+        from gravyflow.src.dataset.dataset import noise_ifos
+
+        return len(noise_ifos(self.dataset_args.get("ifos"), self.dataset_args.get("noise_obtainer")))
+
+    @property
+    def _footprint_seconds(self) -> float:
+        """The data that set a score, for the count of independent events: the padded onsource (the offsource only feeds the spectrum)."""
+        geometry = self.stream_geometry
+        return geometry.window.num_onsource_samples / geometry.sample_rate_hertz
+
+    def _generate_wrapped_noise(self) -> None:
+        """
+        Stream mode's background in wrapping slides (`slides.WrappedSlides`): the data's
+        segments laid end to end as one ring, every slide the whole ring. A per-detector
+        model (`per_detector.PerDetectorModel`) has each detector's data scored once
+        (`per_detector.score_detectors`), and the record keeps those scores, from which
+        every slide's network scores are combined (`per_detector.slide_streams`); any other
+        model is run on every slide (`per_detector.joint_slide_streams`), as many slides as
+        ``num_examples`` windows hold. The record's streams are the segments at zero lag,
+        where the injections are placed and scored through the same model.
+        """
+        from gravyflow.src.dataset.dataset import noise_ifos
+        from .per_detector import (DetectorScores, PerDetectorModel, joint_slide_streams, ring_record,
+                                   score_detectors)
+        from .slides import minimum_shift_seconds
+
+        cfg, geometry, source = self.config, self.stream_geometry, self.stream_source
+        per_detector = isinstance(self.model, PerDetectorModel)
+        # Synthetic noise's ring: the budget's windows, or for a joint model a share of them per slide.
+        wanted = cfg.max_wrapping_slides or cfg.num_time_slides
+        strains, first, streams = [], [], []
+        for strain, first_gps, stream in source.ring_segments(cfg.num_examples if per_detector
+                                                              else max(cfg.num_examples // wanted, 1)):
+            if stream.num_windows < 1:
+                continue
+            strains.append(strain)
+            first.append(first_gps)
+            streams.append(stream)
+        if not streams:
+            raise ValueError(f"The '{cfg.group}' split gave no segment long enough for a window.")
+        num_detectors = strains[0].shape[0]
+        if num_detectors < 2:
+            raise ValueError("Wrapping slides slide detectors against each other: the network has one.")
+        windows = np.array([s.num_windows for s in streams], dtype=np.int64)
+        ifos = noise_ifos(self.dataset_args.get("ifos"), self.dataset_args.get("noise_obtainer"))
+        minimum = minimum_shift_seconds(ifos, geometry.window)
+        dataset = self._noise_dataset
+
+        def detector_model(onsource, offsource, detector):
+            if self.heart:
+                self.heart.beat()
+            return self.model.detector_scores(dataset.model_inputs(onsource, offsource))[0]
+
+        def joint_model(onsource, offsource):
+            return self._score(dataset.model_inputs(onsource, offsource))
+
+        total = int(windows.sum())
+        if per_detector:
+            scores = score_detectors(detector_model, strains, first, geometry, cfg.batch_size)
+            slides = scores.slides(minimum, cfg.time_slide_step_seconds, cfg.max_wrapping_slides)
+            self.far_scores = scores.scores.reshape(-1)
+            record = ring_record(slides, geometry, windows, self.model.combine)
+        else:
+            budget = cfg.num_examples // total
+            if budget < 1:
+                raise ValueError(f"One wrapping slide of a model that sees every detector scores the ring's {total} "
+                                 f"windows, more than num_examples ({cfg.num_examples}).")
+            limit = budget if cfg.max_wrapping_slides is None else min(budget, cfg.max_wrapping_slides)
+            plan = DetectorScores(np.zeros((num_detectors, total)), windows, np.asarray(first), geometry)
+            slides = plan.slides(minimum, cfg.time_slide_step_seconds, limit)
+            self.far_scores = np.concatenate([s.scores for s in joint_slide_streams(
+                joint_model, strains, first, geometry, slides, cfg.batch_size)])
+            record = ring_record(slides, geometry, windows)
+        self.noise_gps_times = None
+        self._worst_false_positives = []
+        self.noise_streams = {
+            "lengths": windows,
+            "slides": np.zeros(len(streams), dtype=np.int64),
+            "blocks": np.array([s.block for s in streams], dtype=np.int64),
+            "stretch_starts": np.array([s.stretch[0] for s in streams], dtype=np.float64),
+            "stretch_ends": np.array([s.stretch[1] for s in streams], dtype=np.float64),
+            "samples": np.array([s.num_samples for s in streams], dtype=np.int64),
+            "stride_seconds": np.float64(geometry.stride_seconds),
+            "footprint_seconds": np.float64(self._footprint_seconds),
+            **record,
+        }
+        logger.info(f"Wrapping slides: {len(slides)} slides of a {slides.ring_seconds:g} s ring, "
+                    f"{slides.background_seconds:g} s of background.")
 
     def _recorded_streams(self) -> List[SlideStream]:
         """The background's streams, as its record gives them (`generate_stream_noise`)."""

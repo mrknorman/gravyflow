@@ -260,7 +260,8 @@ def test_the_validators_family_follows_from_its_record(validated):
     assert set(counts) == {"SNR set", "volume set"} and counts["SNR set"].found[0] == roc.detected[0, -1]
     timing = v.timing_accuracy(fars)
     assert timing.num_found[0] == np.count_nonzero((data["scores"] >= threshold) & np.isfinite(data["trigger_offsets"]))
-    assert np.nanmax(timing.p90_abs_seconds) <= v.config.found_window_seconds + 1e-9
+    # The found window in force: found_window_seconds, but at least half the stride (recorded).
+    assert np.nanmax(timing.p90_abs_seconds) <= float(v.noise_streams["found_window_seconds"]) + 1e-9
     vt = v.sensitive_vt(fars)
     curve = v.sensitive_volume_curve(fars)
     # VT's live time is the test data's own, recorded by the background's stage: here every segment once.
@@ -387,10 +388,10 @@ def test_a_real_event_in_stream_mode_is_the_loudest_trigger_near_its_time(offlin
         times = geometry.window_time(index)
         keep = cluster(times, scores, config.stream_cluster_seconds)
         stat, when = loudest_within(times[keep], scores[keep], [half / geometry.sample_rate_hertz],
-                                    config.found_window_seconds)
+                                    bank.stream_found_window_seconds)
         assert event["score"] == pytest.approx(stat[0], rel=1e-5, abs=1e-5)
         if np.isfinite(stat[0]):
             assert event["trigger_offset"] == pytest.approx(when[0] - half / geometry.sample_rate_hertz, abs=1e-9)
-            assert abs(event["trigger_offset"]) <= config.found_window_seconds + 1e-9
+            assert abs(event["trigger_offset"]) <= bank.stream_found_window_seconds + 1e-9
         assert event["far_hz"] == pytest.approx(background.far(event["score"]).rate_hz)
         assert event["whitened_strain"].shape[-1] == 2048
