@@ -741,7 +741,8 @@ class ValidationBank:
         pad = int(round(crop * geometry.sample_rate_hertz))
         streams = self._recorded_streams()
         placement = place_injections(num, streams, half + pad,
-                                     gf.SeedTree(cfg.seed).sub(f"validator/{stage}").stream(cfg.group, "noise/row"))
+                                     gf.SeedTree(cfg.seed).sub(f"validator/{stage}").stream(cfg.group, "noise/row"),
+                                     geometry, self._reach_seconds)
         source = self.stream_source
         from gravyflow.src.dataset.dataset import noise_ifos
 

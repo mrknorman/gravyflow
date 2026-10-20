@@ -354,19 +354,28 @@ class Placement:
 
 
 def place_injections(num: int, streams: Sequence[SlideStream], half_samples: int,
-                     rng: np.random.Generator) -> Placement:
+                     rng: np.random.Generator, geometry: StreamGeometry, reach_seconds: float) -> Placement:
     """
     ``num`` mergers placed in the background's streams, uniformly over the samples
-    whose local stretch (``half_samples`` either side) lies inside the stream, sorted
-    by stream and time so that each stream is read once.
+    whose local stretch (``half_samples`` either side) lies inside the stream and
+    whose found test (every window within ``reach_seconds`` of the merger) reads only
+    windows the background scored, its triggers none it drops at a stream's ends
+    (`StreamBackground.trigger_indices`); sorted by stream and time so that each
+    stream is read once.
     """
-    room = np.array([max(s.num_samples - 2 * half_samples, 0) for s in streams], dtype=np.float64)
+    reach = reach_seconds * geometry.sample_rate_hertz
+    first = np.array([max(half_samples, math.ceil(geometry.centre_samples + reach)) for s in streams],
+                     dtype=np.int64)
+    last = np.array([min(s.num_samples - half_samples,
+                         math.floor((s.num_windows - 1) * geometry.stride_samples + geometry.centre_samples - reach))
+                     for s in streams], dtype=np.int64)
+    room = np.maximum(last - first + 1, 0).astype(np.float64)
     if room.sum() <= 0:
         raise ValueError(f"No stream of the background is long enough for a local stretch of "
-                         f"{2 * half_samples} samples: lengthen the streams (stream_segment_seconds, or real "
-                         "noise's segments).")
+                         f"{2 * half_samples} samples within its scored windows: lengthen the streams "
+                         "(stream_segment_seconds, or real noise's segments), or score more windows.")
     stream = rng.choice(len(streams), size=num, p=room / room.sum())
-    sample = half_samples + np.floor(rng.random(num) * (room[stream] + 1)).astype(np.int64)
+    sample = first[stream] + np.floor(rng.random(num) * room[stream]).astype(np.int64)
     order = np.lexsort((sample, stream))
     return Placement(stream[order].astype(np.int64), sample[order])
 

@@ -238,3 +238,24 @@ def test_the_synthetic_segments_are_as_many_as_the_budget_needs(dataset_args):
         bank = ValidationBank(logit_model(), dataset_args,
                               ValidationConfig(num_examples=num, batch_size=8, stream_segment_seconds=64.0))
         assert len(bank.stream_source.dataset) == segments, num
+
+
+def test_injections_are_placed_only_where_the_background_scored_its_windows():
+    # A stream cut short at the budget scores 50 windows of its 100,000 samples: every merger's
+    # found test reads only those windows, and its triggers none dropped at the ends.
+    from gravyflow.src.dataset.config import WindowSpec
+    from gravyflow.src.validate.slides import SlideStream
+    from gravyflow.src.validate.stream import StreamGeometry, place_injections
+
+    geometry = StreamGeometry.of(WindowSpec(100.0, 1.0, 2.0, 0.25), None)
+    streams = [SlideStream((0.0, 1000.0), 0, 50, 0, 100_000), SlideStream((0.0, 1000.0), 1, 400, 0, 100_000)]
+    placement = place_injections(2000, streams, 400, np.random.default_rng(3), geometry, 1.1)
+    for k in range(len(placement)):
+        stream, m = streams[int(placement.stream[k])], int(placement.sample[k])
+        first, last = geometry.windows_near(m, 1.1)
+        assert 0 <= first and last <= stream.num_windows - 1, (k, first, last)
+        assert 400 <= m <= stream.num_samples - 400
+    assert set(placement.stream.tolist()) == {0, 1}
+    with pytest.raises(ValueError, match="scored windows"):
+        place_injections(1, [SlideStream((0.0, 1000.0), 0, 10, 0, 100_000)], 400, np.random.default_rng(3),
+                         geometry, 1.1)
