@@ -146,8 +146,11 @@ python -m gravyflow.src.model.examples.train_gabbard_2017 --output-dir ~/gravyfl
   300 batches of 32 one-second windows, Nadam at 0.002; the best epoch by validation loss is saved as `model.keras`.
   The run directory keeps a checkpoint per epoch: the same command resumes an interrupted run, and refuses a
   directory holding a run of another configuration.
-- **Validation** (about 4 minutes, 246 s measured): 100,000 noise windows (100,000 s of background) and 100,000 injections at SNR
-  0–15, from the validator's own seeds. It prints the score threshold for each false-alarm rate (in Hz, with its
+- **Validation**: by default in stream mode, the model slid along continuous strain at its own stride, with
+  triggers clustered and injections found within the found window of their merger. The figures in this bullet were
+  measured in window mode (`--mode window`, each example one window), which reproduces them: about 4 minutes (246 s
+  measured), 100,000 noise windows (100,000 s of background) and 100,000 injections at SNR 0–15, from the validator's
+  own seeds. It prints the score threshold for each false-alarm rate (in Hz, with its
   achieved rate), the efficiency by SNR bin at that threshold, and the ROC AUC, and writes the dashboard
   `validation/validation.html` in the run directory. With the default `NoiseProfile.O3_ACTUAL` noise, expect an AUC near 0.978 and, at a false-alarm rate
   of 1e-3 Hz, an efficiency near 0.75 at SNR 7–8 and 0.97 at SNR 9–10.
