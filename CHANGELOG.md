@@ -142,6 +142,26 @@ repository before it may need the changes below.
   the joint path (`joint_slide_streams`, a full run per slide) gives the same background and found injections. The
   matched filter's stored triggers (`DetectorTriggers`) take the same slides (`slide_coincidences`). The validator's
   window and stream modes are unchanged: their slides still do not wrap.
+- **Glitch robustness in the validator.** `gf.Glitches` holds labelled glitches (Gravity Spy's public release, O1 to
+  O3b, H1 and L1, through its existing md5-checked catalogue loader). `validate.glitches` runs a model over every
+  labelled glitch, each scored on the stream's grid as an injection is (the loudest trigger within the found window
+  of its peak), and gives the false-positive rate per glitch class at each false-alarm-rate level with binomial
+  intervals at 1σ and 2σ; each background trigger's nearest glitch (in any detector, at that detector's own slid
+  time) and its class, and the classes of the triggers above each level; and the volume on real data over its
+  Gaussian twin's, its interval the two joint intervals' log-widths in quadrature. A validation record keeps
+  `glitch_data` and `trigger_glitches` when present; records without them read as before.
+- **Timing and training cost in the validator.** `validate.timing` times a model slid along a stream: throughput in
+  compute-seconds per second of strain (median, p90, p99, max over repeated calls after a cold one) and
+  data-to-trigger latency in a streaming replay (each step one stride; the step's compute plus the algorithmic wait,
+  half the window's onsource and the clustering's `cluster_seconds`), with the machine, the declared thread count
+  and the host's load, flagged when busy; rounds of A-B-B-A; and refuses a ratio of timings taken on different
+  hardware, thread counts or modes. `gf.TrainingCost` records a model's training cost, measured where we train
+  (`measure_training`) or quoted with its source, never without one. A validation record keeps `timing` and
+  `training_cost` when present.
+- **The dashboard's Glitches and Timing tabs.** Glitches: the false-positive rate per class at each level with 1σ
+  and 2σ bars, the volume on real data against its Gaussian twin (`Validator.plot(twins=...)`), and which glitch
+  classes make the tail. Timing: throughput and latency, median and tail, with the machine, thread count and load,
+  the A-B-B-A rounds and the training cost. A part with no record says so. Every existing tab is kept.
 - **Injection records for analysis.** A dataset returns, when asked: `ReturnVariables.IN_BAND_DURATION_SECONDS`
   (B, G), a CBC's time from the band's lower frequency to its merger (the envelope's peak) by its waveform model,
   not cut by the window (`gf.CBCGenerator.in_band_duration_seconds`; NaN for other sources);

@@ -79,6 +79,12 @@ class Validator:
         self.volume_data: Optional[Dict[str, np.ndarray]] = None
         self.worst_performers: Dict[str, Any] = {"false_negatives": {}, "false_positives": []}
         self.real_events: Optional[List[Dict[str, Any]]] = None
+        # Glitch robustness (`glitches`): each labelled glitch and its statistic; each background
+        # trigger's nearest glitch. Timing (`timing`): the timing record and the training cost.
+        self.glitch_data: Optional[Dict[str, np.ndarray]] = None
+        self.trigger_glitches: Optional[Dict[str, np.ndarray]] = None
+        self.timing: Optional[Dict[str, Any]] = None
+        self.training_cost: Optional[Dict[str, Any]] = None
 
         self.model_sha256: Optional[str] = None
         self.config_sha256: Optional[str] = None
@@ -134,7 +140,7 @@ class Validator:
             require_match("model", saved.model_sha256, v.model_sha256, path)
             require_match("validation configuration", saved.config_sha256, v.config_sha256, path)
             for attr in ("far_scores", "noise_gps_times", "noise_streams", "efficiency_data", "volume_data",
-                         "worst_performers", "real_events"):
+                         "worst_performers", "real_events", *cls._EXTRA_RECORDS):
                 setattr(v, attr, getattr(saved, attr))
             logger.info(f"Resuming validation from {path}.")
 
@@ -269,6 +275,30 @@ class Validator:
 
     # -------------------------------------------------------- checkpoint
 
+    #: Records kept beside the stages' results, written when present and read back when found.
+    _EXTRA_RECORDS = ("glitch_data", "trigger_glitches", "timing", "training_cost")
+
+    def _write_extra(self, f: h5py.File) -> None:
+        for key in ("glitch_data", "trigger_glitches"):
+            data = getattr(self, key)
+            if data is not None:
+                g = f.create_group(key)
+                for k, v in data.items():
+                    v = np.asarray(v)
+                    g.create_dataset(k, data=v.astype("S") if v.dtype.kind == "U" else v)
+        for key in ("timing", "training_cost"):
+            if getattr(self, key) is not None:
+                f.attrs[key] = json.dumps(getattr(self, key))
+
+    def _read_extra(self, f: h5py.File) -> None:
+        for key in ("glitch_data", "trigger_glitches"):
+            if key in f:
+                setattr(self, key, {k: (f[key][k][()].astype(str) if f[key][k].dtype.kind == "S" else f[key][k][()])
+                                    for k in f[key]})
+        for key in ("timing", "training_cost"):
+            if key in f.attrs:
+                setattr(self, key, json.loads(f.attrs[key]))
+
     @staticmethod
     def _write_value(group: h5py.Group, key: str, value: Any) -> None:
         if value is None:
@@ -331,6 +361,7 @@ class Validator:
 
             if self.real_events is not None:
                 self._write_samples(f.create_group("real_events"), self.real_events)
+            self._write_extra(f)
 
     @classmethod
     def load(cls, file_path: Path) -> "Validator":
@@ -369,6 +400,7 @@ class Validator:
             }
             if "real_events" in f:
                 v.real_events = cls._read_samples(f["real_events"])
+            v._read_extra(f)
         return v
 
     # ---------------------------------------------------------- plotting
@@ -392,8 +424,13 @@ class Validator:
         segments = plan.rows if plan is not None else getattr(obtainer, "valid_segments", None)
         return None if segments is None else np.asarray(segments)
 
-    def plot(self, output_path: Path = None, comparison_validators: Optional[List["Validator"]] = None):
-        """Generate the validation dashboard (a Panel template); save it if given a path."""
+    def plot(self, output_path: Path = None, comparison_validators: Optional[List["Validator"]] = None,
+             twins: Optional[Dict[str, "Validator"]] = None):
+        """
+        Generate the validation dashboard (a Panel template); save it if given a path.
+        ``twins`` maps a validator's name to the validator of its Gaussian twin, for the
+        Glitches tab's real-against-twin comparison.
+        """
         import panel as pn
         from .plotting import (
             generate_efficiency_plot,
@@ -405,6 +442,7 @@ class Validator:
             generate_waveform_plot,
             generate_real_events_table,
         )
+        from .tabs import generate_glitch_tab, generate_timing_tab
 
         validators = [*(comparison_validators or []), self]
         eff_plot, eff_controls = generate_efficiency_plot(validators)
@@ -431,6 +469,8 @@ class Validator:
         if self.real_events:
             events_table, _ = generate_real_events_table(self.real_events, self.input_duration_seconds)
             tabs.append(("Real Events", events_table))
+        tabs.append(("Glitches", generate_glitch_tab(validators, twins)))
+        tabs.append(("Timing", generate_timing_tab(validators)))
 
         fn = self.worst_performers.get("false_negatives", {})
         fn_tabs = []

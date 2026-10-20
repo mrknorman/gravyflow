@@ -160,8 +160,9 @@ class AbbaRounds:
 
     @property
     def ratio(self) -> float:
-        """B's median wall over A's."""
-        return self.summary("b")["median"] / self.summary("a")["median"]
+        """B's median wall over A's; NaN when A's is zero (no time to divide by)."""
+        a = self.summary("a")["median"]
+        return self.summary("b")["median"] / a if a > 0 else float("nan")
 
     @property
     def spread_a(self) -> float:

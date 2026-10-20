@@ -212,6 +212,8 @@ _MODULES = {
     # Validation (the viz extra)
     "Validator": "gravyflow.src.validate",
     "ValidationConfig": "gravyflow.src.validate",
+    "Glitches": "gravyflow.src.validate.glitches",
+    "TrainingCost": "gravyflow.src.validate.timing",
 
     # Plotting (the viz extra)
     "generate_strain_plot": "gravyflow.src.utils.plotting",

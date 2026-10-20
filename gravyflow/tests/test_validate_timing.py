@@ -150,6 +150,31 @@ def test_timing_record_carries_machine_load_and_threads():
         0.01 * geometry.num_windows(strain.shape[1]) / 16.0)
 
 
+def test_the_timing_tab_shows_median_tail_machine_and_cost():
+    from types import SimpleNamespace
+
+    from gravyflow.src.validate import tabs
+
+    clock = FakeClock()
+    geometry = StreamGeometry.of(WINDOW, 0.25)
+    throughput = vt.stream_throughput(costed_model(clock, 0.01), geometry, np.zeros((2, 64 * 16)), threads=4,
+                                      repeats=3, clock=clock, hardware=MACHINE["hardware"])
+    steps = np.zeros((2, geometry.footprint_samples + MIN_STEPS * geometry.stride_samples))
+    latency = vt.stream_latency(costed_model(clock, 0.002), geometry, steps, cluster_seconds=1.0, threads=4,
+                                clock=clock, hardware=MACHINE["hardware"])
+    abba = vt.abba_rounds(lambda: None, lambda: None, rounds=1, threads=4, clock=clock, hardware="x")
+    v = SimpleNamespace(name="model", timing=vt.timing_record(throughput, latency, abba),
+                        training_cost=vt.TrainingCost.quoted(12.0, "GPU-hours", "Author et al. 2021").to_dict())
+    table = tabs.timing_tables(v)
+    assert list(table["Statistic"][:4]) == ["median", "p90", "p99", "max"]
+    latency_rows = table[table["Quantity"].str.startswith("Data-to-trigger")]
+    np.testing.assert_allclose(latency_rows["Value"], 1.752)
+    assert table["Quantity"].iloc[-1] == "Training cost (quoted)" and "Author" in table["Units"].iloc[-1]
+    tab = tabs.generate_timing_tab([v, SimpleNamespace(name="other", timing=None, training_cost=None)])
+    text = " ".join(str(getattr(o, "object", "")) for o in tab.objects)
+    assert MACHINE["hardware"] in text and "**Threads:** 4" in text and "Not timed" in text
+
+
 # ------------------------------------------------------------ training cost
 
 def test_training_cost_measured_and_quoted():

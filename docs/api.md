@@ -253,6 +253,16 @@ validates as it trains: they need the `viz` extra.
   `StreamBackground`); `joint_slide_streams` scores the same pairings with a model that sees every detector at once (a
   full run per slide). Stored matched-filter triggers (`DetectorTriggers`) take the same slides
   (`slide_coincidences`).
+- `Glitches`: labelled glitches (detector, peak GPS time, class), from Gravity Spy's public release
+  (`Glitches.from_gravity_spy`). With them the validator's glitch robustness (`gravyflow.src.validate.glitches`): the
+  false-positive rate per glitch class at each false-alarm-rate level, with 1σ and 2σ intervals, from the model run
+  over every labelled glitch; each background trigger's nearest glitch and its class; the volume on real data against
+  its Gaussian twin. The dashboard's Glitches tab shows them.
+- `TrainingCost`: what a model cost to train, measured where we train or quoted with its source for released
+  weights; a validation record's `training_cost`. The validator's timing (`gravyflow.src.validate.timing`):
+  throughput per second of strain and data-to-trigger latency of a model slid along a stream, median and tail, on
+  the machine and at the thread count recorded, with the host's load; rounds of A-B-B-A; no ratio across hardware.
+  The dashboard's Timing tab shows them.
 
 ## Plotting (the `viz` extra)
 

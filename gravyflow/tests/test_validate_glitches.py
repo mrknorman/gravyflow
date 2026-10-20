@@ -216,3 +216,83 @@ def test_twin_comparison_refuses_other_levels():
     twin.far_hz = np.array([1e-4])
     with pytest.raises(ValueError, match="same false-alarm"):
         gl.twin_comparison(real, twin)
+
+
+# ------------------------------------------------- the record and the dashboard
+
+def built_validator(num=4000, seed=5):
+    """A stream-mode result built by hand: one stream of real-noise windows at 0.25 s, H1 and L1 at zero lag."""
+    from gravyflow.src.validate import ValidationConfig, Validator
+
+    v = Validator("model", ValidationConfig(num_examples=num, far_thresholds=[1e-1, 1e-2]),
+                  {"onsource_duration_seconds": 1.0, "offsource_duration_seconds": 16.0})
+    v.far_scores = np.random.default_rng(seed).standard_normal(num)
+    starts = 1_000_000.0 + np.arange(num) * 0.25
+    v.noise_gps_times = np.stack([starts, starts], axis=1)
+    v.noise_streams = {"lengths": np.array([num]), "slides": np.array([0]), "blocks": np.array([0]),
+                       "stride_seconds": np.float64(0.25)}
+    rng = np.random.default_rng(seed + 1)
+    g = gl.Glitches(ifos=rng.choice(["H1", "L1"], 60), gps=1_000_000.0 + rng.uniform(0, num * 0.25, 60),
+                    labels=rng.choice(["Blip", "Koi_Fish", "Scattered_Light"], 60))
+    v.glitch_data = gl.glitch_data(g, rng.normal(1.0, 1.5, len(g)))
+    v.trigger_glitches = gl.trigger_glitch_record(v, g, ["H1", "L1"])
+    return v
+
+
+def test_the_glitch_records_round_trip(tmp_path):
+    from gravyflow.src.validate import Validator
+
+    v = built_validator()
+    v.timing = {"threads": 4, "machine": {"hardware": "Test CPU"}, "throughput": None, "latency": None, "abba": None}
+    v.training_cost = {"kind": "quoted", "value": 12.0, "units": "GPU-hours", "hardware": None,
+                       "source": "Author et al. 2021", "epochs": None, "notes": None}
+    v.save(tmp_path / "v.h5")
+    w = Validator.load(tmp_path / "v.h5")
+    for key in ("glitch_data", "trigger_glitches"):
+        assert set(getattr(w, key)) == set(getattr(v, key))
+        for k, value in getattr(v, key).items():
+            np.testing.assert_array_equal(getattr(w, key)[k], value)
+    assert w.glitch_data["labels"].dtype.kind == "U" and w.trigger_glitches["label"].dtype.kind == "U"
+    assert w.timing == v.timing and w.training_cost == v.training_cost
+    # A record without them reads them as absent.
+    bare = Validator("bare", v.config)
+    bare.save(tmp_path / "bare.h5")
+    b = Validator.load(tmp_path / "bare.h5")
+    assert b.glitch_data is None and b.trigger_glitches is None and b.timing is None and b.training_cost is None
+
+
+def test_the_glitch_tab_shows_rates_twin_and_tail():
+    from gravyflow.src.validate import tabs
+
+    v = built_validator()
+    rates = gl.validator_glitch_rates(v)
+    assert rates.labels == ("Blip", "Koi_Fish", "Scattered_Light") and rates.rate.shape == (2, 3)
+    plot = tabs.glitch_rate_plot([v])
+    resolved = int(np.isfinite(rates.threshold).sum())
+    assert resolved >= 1
+    # Per resolved level: a 2σ bar, a 1σ bar and the points.
+    assert len(plot.renderers) == 3 * resolved
+    by_class, loudest = tabs.tail_tables(v)
+    assert set(by_class["Nearest glitch class"]) <= {"Blip", "Koi_Fish", "Scattered_Light", "none"}
+    assert len(loudest) == tabs.TAIL_ROWS and loudest["Score"].is_monotonic_decreasing
+    real = SimpleNamespace(name="model", sensitive_volume_curve=lambda: curve(2.0, (1.5, 1.0), (2.5, 3.0)))
+    twin = SimpleNamespace(name="model twin", sensitive_volume_curve=lambda: curve(4.0, (3.0, 2.0), (5.0, 6.0)))
+    plot, table = tabs.twin_plot([real], {"model": twin})
+    assert table["Real / twin"].tolist() == [0.5]
+    tab = tabs.generate_glitch_tab([v], {})
+    text = " ".join(str(getattr(o, "object", "")) for o in tab.objects)
+    assert "No Gaussian twin given" in text and "No glitch record" not in text
+
+
+def test_the_dashboard_keeps_every_tab_and_adds_glitches_and_timing(tmp_path):
+    v = built_validator()
+    # The GPS timeline plot reads one time per window, not one per detector: kept out of this test.
+    v.noise_gps_times = None
+    template = v.plot(tmp_path / "report.html")
+    tabs_ = template.main[1]
+    names = list(tabs_._names)
+    # Every tab the dashboard had is kept; Glitches and Timing are added after them.
+    for kept in ("Efficiency", "ROC Curves", "FAR Curves", "Parameter Space"):
+        assert kept in names
+    assert names[-2:] == ["Glitches", "Timing"]
+    assert (tmp_path / "report.html").stat().st_size > 0
