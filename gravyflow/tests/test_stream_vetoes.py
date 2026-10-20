@@ -9,7 +9,7 @@ import pytest
 
 from gravyflow.src.detection import TemplateBank
 from gravyflow.src.detection.background import exponential_fit, fit_templates, coincident_ranking
-from gravyflow.src.detection.stream import DetectorTriggers, coincide
+from gravyflow.src.detection.stream import DetectorTriggers, bank_identity, coincide
 from gravyflow.src.detection.vetoes import (
     PSDVariation, gate, newsnr, psd_variation, ranking_statistic, value_at)
 from gravyflow.tests.test_stream_search import (
@@ -29,6 +29,33 @@ def test_gating_is_pycbcs_gate_data():
                                     [(g / FS, 0.25, 0.25) for g in gates])
     np.testing.assert_allclose(mine, theirs.numpy(), atol=1e-12)
     assert np.all(mine[int(5.1 * FS):int(5.5 * FS)] == 0.0)
+
+
+def test_gating_follows_its_stated_sample_convention():
+    # Widths in whole samples and gate times on whole nanoseconds (at 2048
+    # Hz, samples that are multiples of 4): gate_data exactly, at any epoch.
+    # At other samples gate_data, truncating its nanosecond time, starts one
+    # sample earlier. A width that is not whole samples is floored.
+    import pycbc.strain
+    import pycbc.types
+    ones = np.ones(int(20 * FS))
+    theirs = lambda epoch, c, width, taper: pycbc.strain.gate_data(
+        pycbc.types.TimeSeries(ones.copy(), delta_t=1 / FS, epoch=epoch), [(epoch + c / FS, width, taper)]).numpy()
+    shifted = 0
+    for epoch in (0.0, 1126259462.0):
+        for width, taper in ((0.25, 0.25), (0.5, 0.125)):
+            for c in range(int(5 * FS), int(5 * FS) + 200):
+                mine = gate(ones, [c], FS, width, taper)
+                if c % 4 == 0:
+                    np.testing.assert_array_equal(mine, theirs(epoch, c, width, taper))
+                elif not np.array_equal(mine, theirs(epoch, c, width, taper)):
+                    np.testing.assert_array_equal(np.roll(mine, -1), theirs(epoch, c, width, taper))
+                    shifted += 1
+    assert shifted > 0
+    c, width, taper = int(5 * FS), 0.1, 0.1  # 204.8 samples each
+    mine = gate(ones, [c], FS, width, taper)
+    assert np.all(mine[c - 204:c + 204] == 0.0) and mine[c - 205] > 0.0 and mine[c + 204] > 0.0
+    assert np.all(mine[:c - 204 - 204] == 1.0) and np.all(mine[c + 204 + 204:] == 1.0)
 
 
 def test_a_loud_glitch_is_gated_and_a_signal_elsewhere_is_not():
@@ -121,9 +148,10 @@ def test_stored_triggers_recompute_their_ranking(tmp_path):
     # newsnr.
     rng = np.random.default_rng(45)
     noise = coloured_noise(rng, 200.0)
-    out = search(TemplateBank.from_masses(*HEAVY), snr_threshold=5.0).filter(noise, 1000.0, "L1")
+    bank = TemplateBank.from_masses(*HEAVY)
+    out = search(bank, snr_threshold=5.0).filter(noise, 1000.0, "L1")
     out.save(tmp_path / "l1.npz")
-    back = DetectorTriggers.load(tmp_path / "l1.npz")
+    back = DetectorTriggers.load(tmp_path / "l1.npz", bank)
     for name in ("time", "template", "snr", "reduced_chisq", "reweighted_snr", "sg_chisq", "psd_variation", "gates"):
         np.testing.assert_array_equal(getattr(back, name), getattr(out, name))
     assert back.span == out.span and back.detector == "L1"
@@ -145,7 +173,7 @@ def test_the_ranking_is_pycbcs_newsnr_sgveto_psdvar():
                                rtol=1e-6)
 
 
-def background_triggers(rng, alphas, live_seconds, threshold=6.0):
+def background_triggers(rng, alphas, live_seconds, bank, threshold=6.0):
     """Synthetic background: per template, Poisson counts of exponential excesses above the threshold."""
     template, value = [], []
     for k, alpha in enumerate(alphas):
@@ -154,7 +182,7 @@ def background_triggers(rng, alphas, live_seconds, threshold=6.0):
         value.append(threshold + rng.exponential(1.0 / alpha, n))
     value = np.concatenate(value).astype(np.float32)
     return DetectorTriggers("H1", np.sort(rng.uniform(0, live_seconds, len(value))), np.concatenate(template),
-                            value, np.ones_like(value), value, (0.0, live_seconds))
+                            value, np.ones_like(value), value, (0.0, live_seconds), bank=bank_identity(bank))
 
 
 def test_exponential_fits_are_pycbcs_and_recover_their_slopes():
@@ -168,7 +196,7 @@ def test_exponential_fits_are_pycbcs_and_recover_their_slopes():
     # Per template, unsmoothed (a width below the templates' spacing), the
     # fits find each template's own slope and rate.
     bank = TemplateBank.from_masses([10.0, 30.0, 80.0], [8.0, 25.0, 70.0])
-    triggers = background_triggers(rng, [2.0, 4.0, 6.0], 1000.0)
+    triggers = background_triggers(rng, [2.0, 4.0, 6.0], 1000.0, bank)
     fits = fit_templates(triggers, bank, threshold=6.0, smoothing_width=1e-6, lower_frequency_hertz=20.0)
     np.testing.assert_allclose(fits.alpha, [2.0, 4.0, 6.0], rtol=0.2)
     np.testing.assert_allclose(fits.rate, fits.count / 1000.0)
@@ -185,12 +213,13 @@ def test_the_fit_statistic_ranks_by_each_detectors_background():
     # equal SNRs in a template with a long tail.
     rng = np.random.default_rng(48)
     bank = TemplateBank.from_masses([10.0, 80.0], [8.0, 70.0])
-    fits = {d: fit_templates(background_triggers(rng, [5.0, 1.0], 1000.0), bank, 6.0, 1e-6, 20.0)
+    fits = {d: fit_templates(background_triggers(rng, [5.0, 1.0], 1000.0, bank), bank, 6.0, 1e-6, 20.0)
             for d in ("H1", "L1")}
     x = np.array([8.0, 8.0])
     expected = -fits["H1"].alpha * 2.0 + np.log(fits["H1"].alpha) + np.log(fits["H1"].rate)
     np.testing.assert_allclose(fits["H1"].log_noise_rate([0, 1], x), expected)
-    pair = {d: DetectorTriggers(d, [100.0, 300.0], [0, 1], x, [1.0, 1.0], x, (0.0, 1000.0)) for d in ("H1", "L1")}
+    pair = {d: DetectorTriggers(d, [100.0, 300.0], [0, 1], x, [1.0, 1.0], x, (0.0, 1000.0), bank=bank_identity(bank))
+            for d in ("H1", "L1")}
     network = coincide(pair)
     ranking = coincident_ranking(network, fits)
     assert ranking[network.template == 0][0] > ranking[network.template == 1][0]

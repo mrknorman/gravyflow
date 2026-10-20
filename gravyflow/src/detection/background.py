@@ -77,8 +77,12 @@ def fit_templates(triggers, bank, threshold: float = 6.0, smoothing_width: float
     (`DetectorTriggers`, for example from time slides or the clean data, its
     `reweighted_snr` the ranking statistic and its span the live time), per
     template of `bank`. `smoothing_width` is the half-width of the top-hat in
-    log10 chirp time.
+    log10 chirp time. The triggers must index `bank` (their `bank` its
+    `bank_identity`), or they are refused by name.
     """
+    from gravyflow.src.detection.stream import bank_identity
+    if triggers.bank != bank_identity(bank):
+        raise ValueError(f"The triggers index the bank {triggers.bank}, not the bank given ({bank_identity(bank)}).")
     num = bank.num_templates
     f_low = lower_frequency_hertz if lower_frequency_hertz is not None else (
         bank.space.lower_frequency_hertz if bank.space is not None else 20.0)

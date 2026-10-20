@@ -91,8 +91,7 @@ SKY = dict(right_ascension=[0.4, 2.1], declination=[-0.3, 0.8], polarization=[0.
 
 ELEMENT, PEAK = "element", "peak"
 
-#: name -> (f(k x) taken back to k = 1, comparison, whether it may refuse). The
-#: augmentations run as a dataset applies them (``augment``), to glitches.
+
 @functools.lru_cache(maxsize=1)
 def _stream_strain() -> np.ndarray:
     """64 s of O(1) white noise with a loud (SNR about 30) aligned-spin chirp at 32 s."""
@@ -117,6 +116,8 @@ def _streamed(k):
     return np.array([out.snr, out.reduced_chisq, out.sg_chisq, out.psd_variation, out.reweighted_snr]).ravel()
 
 
+#: name -> (f(k x) taken back to k = 1, comparison, whether it may refuse). The
+#: augmentations run as a dataset applies them (``augment``), to glitches.
 CENSUS = {
     "gf.psd": (lambda k: gf.psd(at(OFFSOURCE, k), nperseg=1024, sample_rate_hertz=FS).value() / k ** 2,
                ELEMENT, False),

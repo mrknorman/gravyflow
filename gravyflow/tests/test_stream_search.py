@@ -15,7 +15,8 @@ import gravyflow as gf
 from gravyflow.src.dataset.conditioning.whiten import whiten
 from gravyflow.src.detection import TemplateBank
 from gravyflow.src.detection.stream import (
-    Coincidences, DetectorTriggers, StreamingMatchedFilter, coincide, reweighted_snr, stream_bank_placement)
+    Coincidences, DetectorTriggers, StreamingMatchedFilter, bank_identity, coincide, reweighted_snr,
+    stream_bank_placement)
 from gravyflow.src.detection.template_grid import noise_curve_psd
 
 FS = 2048.0
@@ -99,9 +100,9 @@ def test_each_merger_time_is_searched_once():
     # Overlapping blocks search consecutive spans: the searched span is one
     # stretch from the first block's first searchable merger time to the last
     # block's last, and a signal at any merger time, block edges included, is
-    # one trigger.
+    # one trigger. (Noise-free strain has no PSD variation to measure.)
     spectrum = exact_spectrum()
-    mf = search(TemplateBank.from_masses(*SPINNING))
+    mf = search(TemplateBank.from_masses(*SPINNING), psd_variation=None)
     seconds = 301.0
     n, first, stride = mf._layout(int(seconds * FS))
     starts = np.arange(0, int(seconds * FS) - n + 1, stride)
@@ -205,9 +206,13 @@ def test_a_glitch_is_vetoed_and_a_signal_is_not():
     assert out.reweighted_snr[loud_signal] > 0.9 * out.snr[loud_signal]
 
 
+#: The identity of a bank of eight templates, for synthetic triggers' indices.
+EIGHT = bank_identity(TemplateBank.from_masses(np.arange(8) + 20.0, np.arange(8) + 10.0))
+
+
 def triggers(detector, time, template, snr, span=(0.0, 1000.0)):
     snr = np.asarray(snr, dtype=np.float32)
-    return DetectorTriggers(detector, time, template, snr, np.ones_like(snr), snr, span)
+    return DetectorTriggers(detector, time, template, snr, np.ones_like(snr), snr, span, bank=EIGHT)
 
 
 def test_a_coincidence_is_one_template_within_the_light_travel_time():

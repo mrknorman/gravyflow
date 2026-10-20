@@ -64,6 +64,10 @@ the first detector's merger time. Coincidences are clustered in time (the
 loudest within +-cluster_seconds), and become `gf.Triggers`.
 """
 
+import hashlib
+import json
+import re
+import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -72,6 +76,7 @@ from typing import Dict, Mapping, Optional, Sequence, Tuple, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+from numpy.lib.npyio import NpzFile
 from scipy.fft import next_fast_len
 
 from gravyflow.src.dataset.conditioning.whiten import whiten, whitening_filter
@@ -80,7 +85,8 @@ from gravyflow.src.detection.matched_filter import COINCIDENCE_MARGIN_SECONDS
 from gravyflow.src.detection.template_grid import BankPlacement, MatchSpace, TemplateBank
 from gravyflow.src.detection.triggers import Triggers
 from gravyflow.src.detection.vetoes import (
-    Autogating, PSDVariation, gate, loud_glitches, psd_variation, ranking_statistic, value_at)
+    Autogating, PSDVariation, gate, loud_glitches, psd_variation, ranking_corrections, ranking_definition,
+    ranking_statistic, value_at)
 from gravyflow.src.rng.platform import cbc_device
 
 # ripplegw builds float64 tables when it is imported (the CBC module imports
@@ -143,6 +149,38 @@ def reweighted_snr(snr, reduced_chisq):
 # Triggers
 # ---------------------------------------------------------------------------
 
+#: The stored-trigger file's format name and schema version. Version 1 (the
+#: first layout: the arrays, the detector, span and gates, with no header)
+#: named neither the ranking nor the bank, and is refused.
+TRIGGER_FORMAT = "gravyflow.DetectorTriggers"
+TRIGGER_SCHEMA_VERSION = 2
+
+_BANK_IDENTITY = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def bank_identity(bank: TemplateBank) -> str:
+    """
+    The identity of a bank's template indices, "sha256:<hex>": the SHA-256 of
+    its template count and parameters (mass_1, mass_2, spin_1z and spin_2z,
+    each little-endian float64). Triggers carry it, so their template indices
+    are only ever read against the bank they index.
+    """
+    digest = hashlib.sha256(f"templates {bank.num_templates}\0".encode())
+    for values in bank.parameters:
+        digest.update(np.ascontiguousarray(values, dtype="<f8").tobytes())
+    return "sha256:" + digest.hexdigest()
+
+
+def _identity_of(bank) -> str:
+    """A bank's identity: computed from a TemplateBank, or an identity given, which must be one."""
+    if not isinstance(bank, (str, TemplateBank)):
+        raise ValueError(f"The bank must be a TemplateBank or its bank_identity, not {type(bank).__name__}.")
+    identity = bank if isinstance(bank, str) else bank_identity(bank)
+    if not _BANK_IDENTITY.fullmatch(identity):
+        raise ValueError(f"The bank identity {identity!r} is not one bank_identity gives ('sha256:' and 64 hex digits).")
+    return identity
+
+
 @dataclass(frozen=True, eq=False)
 class DetectorTriggers:
     """
@@ -156,59 +194,175 @@ class DetectorTriggers:
         reduced_chisq: its chi-squared over its 2p - 2 degrees of freedom.
         reweighted_snr: its ranking statistic: the SNR reweighted by the
             chi-squared, the sine-Gaussian chi-squared and the PSD variation
-            (`vetoes.ranking_statistic`).
+            (`vetoes.ranking_statistic`), as `ranking` defines it; None to
+            compute it from the stored inputs.
         span: (start, end), GPS seconds: the merger times searched.
         sg_chisq: its sine-Gaussian reduced chi-squared (1 where not applied).
         psd_variation: the PSD variation at its time (1 where not computed).
         gates: the GPS times of the gates applied to the strain searched.
+        bank: the identity of the bank its template indices index
+            (`bank_identity`).
+        ranking: the definition of the ranking (`vetoes.ranking_definition`:
+            its name, parameters and corrections); default PyCBC's with both
+            corrections.
 
-    Every input of the ranking is stored, so `ranked` recomputes it (for
-    example with other settings) without filtering again, and `save` /
-    `load` keep the triggers whole.
+    Every input of the ranking is stored, in the dtypes it is stored with
+    (time float64, template int32, the rest float32), and the filter ranks
+    exactly those, so `ranked` recomputes the stored ranking bit for bit (on
+    the same platform) without filtering again. Every value must be finite:
+    a NaN or an infinity is refused by name, on construction and on `save`.
+    `save` / `load` keep the triggers whole, in a strict format: see `save`.
     """
     detector: str
     time: np.ndarray
     template: np.ndarray
     snr: np.ndarray
     reduced_chisq: np.ndarray
-    reweighted_snr: np.ndarray
+    reweighted_snr: Optional[np.ndarray]
     span: Tuple[float, float]
     sg_chisq: Optional[np.ndarray] = None
     psd_variation: Optional[np.ndarray] = None
     gates: Optional[np.ndarray] = None
+    bank: str = field(kw_only=True)
+    ranking: Mapping = field(default_factory=ranking_definition, kw_only=True)
 
     _ARRAYS = {"time": np.float64, "template": np.int32, "snr": np.float32, "reduced_chisq": np.float32,
                "reweighted_snr": np.float32, "sg_chisq": np.float32, "psd_variation": np.float32}
 
     def __post_init__(self):
+        if not isinstance(self.detector, str) or not self.detector:
+            raise ValueError("DetectorTriggers' detector must be a detector's name.")
+        object.__setattr__(self, "bank", _identity_of(self.bank))
+        object.__setattr__(self, "ranking", ranking_definition(*ranking_corrections(self.ranking)))
         for name in ("sg_chisq", "psd_variation"):
             if getattr(self, name) is None:
                 object.__setattr__(self, name, np.ones(np.shape(np.atleast_1d(self.snr))))
         for name, dtype in self._ARRAYS.items():
+            if name == "reweighted_snr" and self.reweighted_snr is None:
+                continue
             object.__setattr__(self, name, np.asarray(getattr(self, name), dtype=dtype).reshape(-1))
-        if len({len(getattr(self, name)) for name in self._ARRAYS}) != 1:
-            raise ValueError("DetectorTriggers' arrays must have one length.")
+        self._check_finite([name for name in self._ARRAYS if name not in ("template", "reweighted_snr")])
+        if self.reweighted_snr is None:
+            # Ranked from exactly the stored (float32) inputs, so it recomputes exactly from them.
+            sine_gaussian, psd_variation = ranking_corrections(self.ranking)
+            object.__setattr__(self, "reweighted_snr", ranking_statistic(
+                self.snr, self.reduced_chisq, self.sg_chisq if sine_gaussian else None,
+                self.psd_variation if psd_variation else None))
         gates = np.zeros(0) if self.gates is None else self.gates
         object.__setattr__(self, "gates", np.unique(np.asarray(gates, dtype=np.float64).reshape(-1)))
-        object.__setattr__(self, "span", (float(self.span[0]), float(self.span[1])))
+        span = np.asarray(self.span, dtype=np.float64)
+        if span.shape != (2,):
+            raise ValueError("DetectorTriggers' span must be (start, end).")
+        object.__setattr__(self, "span", (float(span[0]), float(span[1])))
+        self._check()
 
-    def ranked(self, sine_gaussian: bool = True, psd_variation: bool = True) -> "DetectorTriggers":
-        """These triggers with their ranking recomputed from the stored inputs (each correction optional)."""
-        from gravyflow.src.detection.vetoes import ranking_statistic
-        rank = ranking_statistic(self.snr, self.reduced_chisq, self.sg_chisq if sine_gaussian else None,
-                                 self.psd_variation if psd_variation else None)
-        return replace(self, reweighted_snr=rank)
+    def _check(self) -> None:
+        """Refuse, by name, arrays of the wrong dtype or length, a non-finite value or span, or a negative index."""
+        for name, dtype in {**self._ARRAYS, "gates": np.float64}.items():
+            value = getattr(self, name)
+            if not isinstance(value, np.ndarray) or value.dtype != dtype or value.ndim != 1:
+                raise ValueError(f"DetectorTriggers' {name} must be a 1D {np.dtype(dtype).name} array.")
+        self._check_finite([name for name in self._ARRAYS if name != "template"] + ["gates"])
+        if len({len(getattr(self, name)) for name in self._ARRAYS}) != 1:
+            raise ValueError("DetectorTriggers' arrays must have one length.")
+        if len(self.template) and int(np.min(self.template)) < 0:
+            raise ValueError("DetectorTriggers' template indices must be non-negative.")
+        if not all(np.isfinite(self.span)) or self.span[0] > self.span[1]:
+            raise ValueError(f"DetectorTriggers' span {self.span} must be finite, (start, end) with start <= end.")
+
+    def _check_finite(self, names) -> None:
+        for name in names:
+            value = getattr(self, name)
+            if not np.all(np.isfinite(value)):
+                bad = int(np.flatnonzero(~np.isfinite(value))[0])
+                raise ValueError(f"DetectorTriggers' {name} holds a NaN or an infinity ({value[bad]} at index {bad}): "
+                                 "every stored value must be finite.")
+
+    def ranked(self, sine_gaussian: Optional[bool] = None, psd_variation: Optional[bool] = None) -> "DetectorTriggers":
+        """
+        These triggers with their ranking recomputed from the stored inputs,
+        each correction on or off (None: as the stored ranking has it); the
+        ranking's definition names the corrections applied.
+        """
+        stored = ranking_corrections(self.ranking)
+        corrections = (stored[0] if sine_gaussian is None else bool(sine_gaussian),
+                       stored[1] if psd_variation is None else bool(psd_variation))
+        return replace(self, reweighted_snr=None, ranking=ranking_definition(*corrections))
 
     def save(self, path) -> None:
-        """Write the triggers whole (every ranking input, the span and the gates) to an .npz file."""
-        np.savez(path, detector=np.array(self.detector), span=np.array(self.span), gates=self.gates,
-                 **{name: getattr(self, name) for name in self._ARRAYS})
+        """
+        Write the triggers whole to an .npz file (numpy's, no pickled
+        objects), checked first as on construction. The file holds `header`,
+        JSON: its format (TRIGGER_FORMAT), schema version
+        (TRIGGER_SCHEMA_VERSION), the detector, the bank's identity and the
+        ranking's definition; then `span` and `gates` (float64) and each
+        array in its dtype. `load` refuses a file of another format, schema
+        version, ranking or bank, with arrays missing, extra or of another
+        dtype, or holding a NaN or an infinity.
+        """
+        self._check()
+        header = {"format": TRIGGER_FORMAT, "schema_version": TRIGGER_SCHEMA_VERSION, "detector": self.detector,
+                  "bank": self.bank, "ranking": self.ranking}
+        np.savez(path, header=np.array(json.dumps(header, sort_keys=True)), span=np.array(self.span, np.float64),
+                 gates=self.gates, **{name: getattr(self, name) for name in self._ARRAYS})
 
     @classmethod
-    def load(cls, path) -> "DetectorTriggers":
-        with np.load(path) as data:
-            return cls(str(data["detector"]), span=tuple(data["span"]), gates=data["gates"],
-                       **{name: data[name] for name in cls._ARRAYS})
+    def load(cls, path, bank) -> "DetectorTriggers":
+        """
+        The triggers `save` wrote to `path`, of `bank` (a TemplateBank, or its
+        `bank_identity`): a file of another bank, another ranking definition
+        or another schema version (the first layout, with no header,
+        included) is refused by name. See `save`.
+        """
+        expected = _identity_of(bank)
+        try:
+            archive = np.load(path, allow_pickle=False)
+        except (FileNotFoundError, IsADirectoryError, PermissionError):
+            raise
+        except (OSError, ValueError, EOFError, zipfile.BadZipFile) as error:
+            raise ValueError(f"{path} is not a file of stored DetectorTriggers ({error}).") from None
+        if not isinstance(archive, NpzFile):
+            raise ValueError(f"{path} is not a file of stored DetectorTriggers (not an .npz archive).")
+        with archive as data:
+            files = set(data.files)
+            if "header" not in files:
+                if {"detector", "span", "gates", *cls._ARRAYS} <= files:
+                    raise ValueError(
+                        f"{path} holds stored triggers of schema version 1, the first layout (no header, so no "
+                        f"ranking definition or bank identity); this gravyflow reads schema version "
+                        f"{TRIGGER_SCHEMA_VERSION} only: filter the strain again.")
+                raise ValueError(f"{path} is not a file of stored DetectorTriggers (it has no header).")
+            header = _trigger_header(data, path)
+            try:
+                ranking = ranking_definition(*ranking_corrections(header.get("ranking")))
+            except ValueError as error:
+                raise ValueError(f"{path}: {error}") from None
+            if header.get("bank") != expected:
+                raise ValueError(f"{path} holds triggers of the bank {header.get('bank')!r}, not of the bank given "
+                                 f"({expected}): their template indices index another bank.")
+            if not isinstance(header.get("detector"), str):
+                raise ValueError(f"{path}'s header names no detector.")
+            dtypes = {**cls._ARRAYS, "span": np.float64, "gates": np.float64}
+            missing, extra = sorted(set(dtypes) - files), sorted(files - set(dtypes) - {"header"})
+            if missing or extra:
+                raise ValueError(f"{path} is not a file of stored DetectorTriggers of schema version "
+                                 f"{TRIGGER_SCHEMA_VERSION}: " + "; ".join(
+                                     part for part in (missing and f"it lacks {', '.join(missing)}",
+                                                       extra and f"it holds unexpected {', '.join(extra)}") if part))
+            arrays = {}
+            for name, dtype in dtypes.items():
+                try:
+                    value = data[name]
+                except ValueError as error:  # a pickled object array
+                    raise ValueError(f"{path}'s {name} is not a numeric array ({error}).") from None
+                if value.dtype != dtype or value.ndim != 1:
+                    raise ValueError(f"{path}'s {name} is a {value.ndim}D {value.dtype} array, not the 1D "
+                                     f"{np.dtype(dtype).name} array its schema stores.")
+                arrays[name] = value
+        span = arrays.pop("span")
+        if span.shape != (2,):
+            raise ValueError(f"{path}'s span must be (start, end).")
+        return cls(header["detector"], span=(span[0], span[1]), bank=expected, ranking=ranking, **arrays)
 
     def __len__(self) -> int:
         return len(self.time)
@@ -234,13 +388,43 @@ class DetectorTriggers:
 
     @classmethod
     def concatenate(cls, parts: Sequence["DetectorTriggers"]) -> "DetectorTriggers":
-        """Triggers of consecutive stretches of one detector's strain, as one."""
+        """Triggers of consecutive stretches of one detector's strain, of one bank and ranking, as one."""
         if len({part.detector for part in parts}) != 1:
             raise ValueError("Only one detector's triggers can be concatenated.")
+        _same_bank_and_ranking(parts)
         joined = {name: np.concatenate([getattr(part, name) for part in parts]) for name in cls._ARRAYS}
         span = (min(part.span[0] for part in parts), max(part.span[1] for part in parts))
         gates = np.concatenate([part.gates for part in parts])
-        return cls(parts[0].detector, span=span, gates=gates, **joined)
+        return cls(parts[0].detector, span=span, gates=gates, bank=parts[0].bank, ranking=parts[0].ranking, **joined)
+
+
+def _trigger_header(data, path) -> dict:
+    """The header of a stored-trigger file, refused by name unless it is this format's, of this schema version."""
+    try:
+        header = json.loads(str(data["header"][()]))
+    except (ValueError, TypeError, IndexError) as error:
+        raise ValueError(f"{path} is not a file of stored DetectorTriggers (its header is not JSON: {error}).") from None
+    if not isinstance(header, dict) or header.get("format") != TRIGGER_FORMAT:
+        named = header.get("format") if isinstance(header, dict) else None
+        raise ValueError(f"{path} is not a file of stored DetectorTriggers (its format is {named!r}, not "
+                         f"{TRIGGER_FORMAT!r}).")
+    version = header.get("schema_version")
+    if type(version) is not int or version != TRIGGER_SCHEMA_VERSION:
+        raise ValueError(f"{path} holds stored triggers of schema version {version!r}; this gravyflow reads schema "
+                         f"version {TRIGGER_SCHEMA_VERSION} only.")
+    return header
+
+
+def _same_bank_and_ranking(parts: Sequence["DetectorTriggers"]) -> None:
+    """Refuse, by name, triggers of different banks (their indices index different templates) or rankings."""
+    banks = sorted({part.bank for part in parts})
+    if len(banks) > 1:
+        raise ValueError(f"These triggers index different banks ({', '.join(banks)}): their template indices "
+                         "cannot be compared.")
+    rankings = [part.ranking for part in parts]
+    if any(ranking != rankings[0] for ranking in rankings):
+        raise ValueError(f"These triggers are ranked by different ranking definitions ({rankings}): their rankings "
+                         "cannot be compared.")
 
 
 @dataclass(frozen=True, eq=False)
@@ -279,6 +463,7 @@ def coincide(
     names = list(triggers)
     if len(names) < 2:
         raise ValueError("A coincidence needs triggers from at least two detectors.")
+    _same_bank_and_ranking(list(triggers.values()))
     reference = triggers[names[0]]
     template, time = reference.template, reference.time
     rows = np.arange(len(reference))
@@ -577,6 +762,8 @@ class StreamingMatchedFilter:
         ntaps = config.num_taps(fs)
         self.num_taps = ntaps + ntaps % 2
         self.block_samples = int(round(self.block_seconds * fs))
+        self.bank_identity = bank_identity(self.bank)
+        self.ranking = ranking_definition(self.sine_gaussian_veto, self.psd_variation is not None)
 
     # ------------------------------------------------------------ templates
 
@@ -684,13 +871,16 @@ class StreamingMatchedFilter:
         return self._triggers(name, start_gps, parts, span)
 
     def _triggers(self, name, start_gps, parts, span) -> DetectorTriggers:
+        """
+        One detector's triggers from its blocks' parts. The ranking is left to
+        DetectorTriggers, which ranks the inputs as stored (float32), so the
+        stored ranking recomputes exactly from them.
+        """
         template, sample, snr, chisq, sg, variation, gates = (np.concatenate(values) for values in zip(*parts))
-        reduced = chisq / self.chisq_dof
-        rank = ranking_statistic(snr, reduced, sg if self.sine_gaussian_veto else None,
-                                 variation if self.psd_variation is not None else None)
         fs = self.sample_rate_hertz
-        return DetectorTriggers(name, start_gps + sample / fs, template, snr, reduced, rank, span,
-                                sg_chisq=sg, psd_variation=variation, gates=start_gps + gates / fs)
+        return DetectorTriggers(name, start_gps + sample / fs, template, snr, chisq / self.chisq_dof, None, span,
+                                sg_chisq=sg, psd_variation=variation, gates=start_gps + gates / fs,
+                                bank=self.bank_identity, ranking=self.ranking)
 
     @staticmethod
     def _shifted(found, start):
@@ -925,6 +1115,8 @@ __all__ = [
     "STREAM_SPECTRAL_CONFIG",
     "StreamResult",
     "StreamingMatchedFilter",
+    "TRIGGER_SCHEMA_VERSION",
+    "bank_identity",
     "coincide",
     "reweighted_snr",
     "stream_bank_placement",

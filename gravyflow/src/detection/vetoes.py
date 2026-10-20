@@ -62,6 +62,13 @@ SG_THRESHOLD = 4.0
 #: PyCBC's minimum expected PSD variation, below which v is taken as 1.
 MIN_EXPECTED_PSD_VARIATION = 0.65
 
+#: newsnr's exponents (Babak et al. 2013, eq. 6), as pycbc.events.ranking uses them.
+NEWSNR_Q = 6
+NEWSNR_N = 2
+
+#: The ranking's name: PyCBC's function of the same name.
+RANKING_NAME = "newsnr_sgveto_psdvar"
+
 
 # ---------------------------------------------------------------------------
 # The ranking
@@ -71,7 +78,38 @@ def newsnr(snr, reduced_chisq):
     """PyCBC's newsnr (Babak et al. 2013, eq. 6; q = 6, n = 2): the SNR lowered where chi_r^2 exceeds 1."""
     snr = np.asarray(snr, dtype=np.float64)
     reduced_chisq = np.asarray(reduced_chisq, dtype=np.float64)
-    return snr / ((1.0 + np.maximum(reduced_chisq, 1.0) ** 3) / 2.0) ** (1.0 / 6.0)
+    return snr / ((1.0 + np.maximum(reduced_chisq, 1.0) ** (NEWSNR_Q // NEWSNR_N)) / 2.0) ** (1.0 / NEWSNR_Q)
+
+
+def ranking_definition(sine_gaussian: bool = True, psd_variation: bool = True) -> dict:
+    """
+    The identity of the ranking `ranking_statistic` computes: its name and
+    every parameter (newsnr's exponents, the PSD variation's floor, the
+    sine-Gaussian threshold, and which corrections are applied). Stored
+    triggers carry it, so a file ranked by another definition is refused.
+    """
+    return {"name": RANKING_NAME,
+            "parameters": {"newsnr_q": float(NEWSNR_Q), "newsnr_n": float(NEWSNR_N),
+                           "min_expected_psd_variation": float(MIN_EXPECTED_PSD_VARIATION),
+                           "sg_threshold": float(SG_THRESHOLD),
+                           "sine_gaussian": bool(sine_gaussian), "psd_variation": bool(psd_variation)}}
+
+
+def ranking_corrections(definition) -> Tuple[bool, bool]:
+    """
+    (sine_gaussian, psd_variation): the corrections of a ranking definition,
+    which must be one `ranking_definition` gives (this gravyflow's ranking),
+    or it is refused by name.
+    """
+    try:
+        corrections = (definition["parameters"]["sine_gaussian"], definition["parameters"]["psd_variation"])
+    except (TypeError, KeyError):
+        corrections = None
+    if (corrections is None or not all(isinstance(value, bool) for value in corrections)
+            or definition != ranking_definition(*corrections)):
+        raise ValueError(f"The ranking {definition!r} is not this gravyflow's ranking, "
+                         f"{ranking_definition()!r} (with either correction on or off).")
+    return corrections
 
 
 def ranking_statistic(snr, reduced_chisq, sg_chisq=None, psd_variation=None) -> np.ndarray:
@@ -153,6 +191,20 @@ def gate(strain: np.ndarray, samples: Sequence[int], sample_rate_hertz: float,
     `strain` gated at each of `samples` (``pycbc.strain.gate_data``): zero over
     +-width_seconds, tapered by a Hann half-window over taper_seconds on each
     side (an inverted Tukey window), clipped to the series.
+
+    The gate is defined on samples, not times: with h = floor(width_seconds
+    fs) and p = floor(taper_seconds fs), the gate at sample c zeroes samples
+    [c - h, c + h) and tapers the p samples before and after. This equals
+    ``gate_data`` exactly when both widths are whole samples and the gate's
+    time, c / fs from the series' start, is a whole number of nanoseconds (at
+    2048 Hz, c a multiple of 4). ``gate_data`` takes the gate's time in
+    seconds, which PyCBC holds to whole nanoseconds, and truncates the start
+    sample it computes from it, so for other gate times its window starts
+    one sample earlier; for widths that are not whole samples its zeroed
+    stretch can also be a sample longer (it floors 2 fs (width + taper)
+    whole, not each half). The search gates at samples (`loud_glitches`), so
+    this convention is the exact one; one sample of a 0.25 s taper does not
+    change what is gated.
     """
     out = np.array(strain, dtype=np.float64, copy=True)
     pad = int(taper_seconds * sample_rate_hertz)
@@ -229,6 +281,14 @@ def psd_variation(strain: np.ndarray, sample_rate_hertz: float,
     (times, v): the PSD variation of one long segment of raw strain, times in
     seconds from its first sample (each the end of its averaging window, as
     PyCBC labels them), one a second. See the module docstring.
+
+    v compares the strain with its own long-term spectrum, which noise
+    defines. Strain without noise (a lone signal, or zeros) has a long-term
+    median spectrum that is zero, or at rounding level, somewhere: there v is
+    0 / 0 or rounding, not a measurement. So the long-term spectrum must be
+    positive and finite at every frequency above 0 and span at most
+    1 / (float64's epsilon) over the band (real detector noise spans far
+    less), and v must be finite; otherwise the strain is refused by name.
     """
     fs = int(sample_rate_hertz)
     strain = np.asarray(strain, dtype=np.float64)
@@ -237,6 +297,11 @@ def psd_variation(strain: np.ndarray, sample_rate_hertz: float,
     band = np.concatenate([band, np.zeros(int(settings.psd_seconds * fs) - len(band))])  # PyCBC's resize
     band = np.abs(np.fft.rfft(band))
     freqs, plong = _median_welch(strain, fs, settings.psd_seconds, settings.psd_stride_seconds)
+    in_band = (freqs >= settings.low_frequency_hertz) & (freqs <= settings.high_frequency_hertz)
+    if (not np.all(np.isfinite(plong[1:])) or not np.all(plong[1:] > 0.0)
+            or np.max(plong[in_band]) > np.min(plong[in_band]) / np.finfo(np.float64).eps):
+        raise _no_psd_variation("its long-term (median Welch) spectrum is zero, not finite or at rounding level "
+                                "at some frequency")
     with np.errstate(divide="ignore"):
         weight = freqs ** (-7.0 / 6.0) * band / np.sqrt(plong)
     weight[0] = 0.0
@@ -261,7 +326,15 @@ def psd_variation(strain: np.ndarray, sample_rate_hertz: float,
     segment = int(settings.segment_seconds)
     values = np.array([np.mean(short_ms[per * j:per * (j + segment)]) for j in range(max(count, 0))])
     times = settings.crop_seconds + settings.segment_seconds + np.arange(len(values), dtype=np.float64)
+    if not np.all(np.isfinite(values)):
+        raise _no_psd_variation("its PSD variation is not finite")
     return times, values
+
+
+def _no_psd_variation(reason: str) -> ValueError:
+    return ValueError(f"The strain has no PSD variation: {reason}, as for strain without noise (a lone signal, or "
+                      "zeros). PSD variation measures noise against its own long-term spectrum; search such strain "
+                      "with psd_variation=None.")
 
 
 def value_at(times: np.ndarray, values: np.ndarray, at: np.ndarray) -> np.ndarray:
@@ -284,6 +357,7 @@ __all__ = [
     "loud_glitches",
     "newsnr",
     "psd_variation",
+    "ranking_definition",
     "ranking_statistic",
     "value_at",
 ]
