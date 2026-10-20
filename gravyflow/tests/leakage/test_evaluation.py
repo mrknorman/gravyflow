@@ -237,7 +237,8 @@ def test_the_stream_validator_draws_only_test_data(monkeypatch):
         validate_script.parse_args(["--run-dir", "unused", "--num-examples", "8", "--batch-size", "8"]),
         run_record)
     assert config.mode == "stream" and config.group == "test"
-    config = dataclasses.replace(config, stream_segment_seconds=32.0)
+    # Injections are placed only where the background scored, a stretch's width clear of the ends.
+    config = dataclasses.replace(config, stream_segment_seconds=32.0, injection_stretch_seconds=14.0, num_examples=96)
     built = []
     build = gf.Dataset
 
