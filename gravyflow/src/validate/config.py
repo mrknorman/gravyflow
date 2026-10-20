@@ -28,7 +28,7 @@ class ValidationConfig:
     batch_size: int = 512
 
     # Injections: SNR uniform over this range; efficiency in bins of this width (the
-    # record), and the owner's rolling curve and its sigmoid fit over it (`efficiency`).
+    # record), and the rolling curve (±0.5 SNR) and its sigmoid fit over it (`efficiency`).
     snr_range: Tuple[float, float] = (0.0, 20.0)
     snr_bin_width: float = 1.0
     num_worst_per_bin: int = 5

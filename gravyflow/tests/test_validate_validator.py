@@ -164,8 +164,8 @@ def test_the_sensitive_volume_is_recorded_and_plotted(validated, small_config):
     assert {"Tiny (1σ joint)", "Tiny (2σ joint)", "Tiny (chance level)"} <= labels
 
 
-def test_the_efficiency_tab_restores_the_owners_plot(validated):
-    # Nothing of the owner's efficiency plot is lost: the density of every injection's score
+def test_the_efficiency_tab_keeps_every_layer_of_its_plot(validated):
+    # Nothing of the efficiency plot is lost: the density of every injection's score
     # against its SNR behind the curves, on the score axis, painted by the threshold; the
     # threshold's line; a FAR slider and a powers-of-ten selector; legends that hide on click.
     # Beside them, the rolling curve's pointwise 1 and 2 sigma bands, the sigmoid fit, its 50%

@@ -201,7 +201,7 @@ class FarEstimate:
     confidence: float
 
 
-#: The standard's rule (agreed with the owner, 19 October 2026): a rate, volume or efficiency is quoted only
+#: A rate, volume or efficiency is quoted only
 #: where at least this many independent background events lie at or above its threshold, ``floor(count /
 #: data_reuse)`` (`independent_events`). Below it the point is still computed, plotted and marked, never quoted.
 MIN_BACKGROUND_EVENTS = 10
@@ -760,7 +760,7 @@ def efficiency_curve(
                            lower, upper, sigmas, method)
 
 
-#: The owner's rolling efficiency curve: a window of +-0.5 in SNR, evaluated at 50 points; a
+#: The rolling efficiency curve: a window of +-0.5 in SNR, evaluated at 50 points; a
 #: point with fewer injections in its window than this has none.
 ROLLING_HALF_WIDTH = 0.5
 ROLLING_POINTS = 50
@@ -770,7 +770,7 @@ ROLLING_MIN_INJECTIONS = 20
 @dataclass(frozen=True)
 class RollingEfficiency:
     """
-    The owner's rolling efficiency curve: at each ``snr``, the fraction of the
+    The rolling efficiency curve: at each ``snr``, the fraction of the
     injections within ``half_width`` of it (``[snr - w, snr + w)``) found by their
     signal (the ``chance`` subtracted), with **pointwise** bands at each of
     ``sigmas`` (``(levels, points)``): each covers its own point at its level, not
@@ -800,7 +800,7 @@ def rolling_windows(snr_range: Optional[Tuple[float, float]], snrs: np.ndarray,
     """
     The rolling curve's window centres: ``num_points`` from the range's low end plus
     ``half_width`` to its high end less it (the injected SNR range; by default the
-    injections' own, rounded out to whole SNRs, as the owner's curve took it).
+    injections' own, rounded out to whole SNRs).
     """
     lo, hi = (np.floor(snrs.min()), np.ceil(snrs.max())) if snr_range is None else snr_range
     return np.linspace(lo + half_width, hi - half_width, num_points)

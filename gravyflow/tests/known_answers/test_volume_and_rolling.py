@@ -23,9 +23,8 @@ untouched). The landed API:
 The adapters ask for the one level a test names, as sigma.
 
 The sigmoid fit's point test uses 300,000 injections (50,000 when written): its 90%
-point's error has an sd of 0.027 at 50,000 (the independent check, 40 seeds, no
-bias), so the tolerance of 0.05 was 1.8 sd; at 300,000 it is at least 4 sd
-(measured: `data/volume-standard/r1`).
+point's error has an sd of 0.027 at 50,000 (40 seeds, no
+bias), so the tolerance of 0.05 was 1.8 sd; at 300,000 it is at least 4 sd.
 """
 
 import dataclasses

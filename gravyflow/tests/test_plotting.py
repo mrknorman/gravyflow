@@ -38,7 +38,7 @@ def test_generate_spectrogram_puts_a_tone_at_its_frequency():
 def test_the_real_events_report_shows_each_events_p_astro():
     """
     The event list gives p_astro; the real-events table and parameter box show it, beside
-    p(BBH) and p(BNS) (the owner's columns, kept: "-" where the list gives none). An event's FAR
+    p(BBH) and p(BNS) ("-" where the list gives none). An event's FAR
     with fewer than ten independent background events at or above its score is marked not quoted.
     """
     import panel as pn

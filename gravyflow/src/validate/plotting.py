@@ -561,7 +561,7 @@ def generate_far_curves(
             p.varea(x="x", y1=f"lower_{j}", y2=f"upper_{j}", source=source, fill_color=color,
                     fill_alpha=_band_alpha(sigma), legend_label=f"{title} ({_sigma_label(sigma)})")
         p.line("x", "y", source=source, line_color=color, line_width=2, legend_label=title)
-        # The rates below the standard's floor: plotted, marked, never quoted.
+        # The rates with fewer than ten independent background events: plotted, marked, never quoted.
         thin = ~curves[0].quotable[keep]
         if thin.any():
             p.scatter(x=curves[0].thresholds[keep][thin], y=curves[0].rate_hz[keep][thin], marker="x", size=8,
@@ -1355,7 +1355,7 @@ def generate_parameter_space_plot(
     full_layout = column(p, controls, p_rolling)
     return full_layout, None
 
-#: The score density layer's grid: cells along SNR and along score, as the owner's plot had it.
+#: The score density layer's grid: cells along SNR and along score.
 DENSITY_CELLS = 400
 #: Its colours (RGBA packed little-endian, as image_rgba reads them): found above the threshold, missed below.
 _FOUND_RGB, _MISSED_RGB = 0x00CC00, 0xAAAAAA
@@ -1406,8 +1406,7 @@ def generate_efficiency_plot(
     height: int = 800
 ):
     """
-    Efficiency against optimal network SNR at a chosen false-alarm rate, the owner's
-    design restored and extended:
+    Efficiency against optimal network SNR at a chosen false-alarm rate:
 
     - behind the curves, the density of every injection's score against its SNR (the
       score on the right axis), painted green where the score passes the chosen FAR's
@@ -1523,7 +1522,7 @@ def generate_efficiency_plot(
                       line_width=6 if j == 0 else 2, legend_label=f"{name} (50% and 90% SNR, {_sigma_label(sigma)})")
         p.scatter(x="x", y="y", source=points_source, size=12, marker="diamond", color=color,
                   legend_label=f"{name} (50% and 90% SNR, {_sigma_label(sigmas[0])})")
-        # The binned record (the owner's dashboard before 16 October): each bin's point at its injections' mean
+        # The binned record: each bin's point at its injections' mean
         # SNR with its 1 and 2 sigma bands as error bars, under its own hover.
         binned_source = sources[name]["binned"]
         binned_label = f"{name} (binned, {' and '.join(_sigma_label(s) for s in sigmas)})"

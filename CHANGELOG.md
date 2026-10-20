@@ -195,8 +195,8 @@ repository before it may need the changes below.
   drawn on it, the check that the reach is long enough. The volume is Euclidean (no cosmology) and the masses are in
   the detector frame, as in MLGWSC-1's `evaluate.py`. A burst population, or WHITE noise, has none. Records are
   format 6.
-- **Nothing is quoted below ten independent background events.** The standard's rule, for every rate, volume and
-  efficiency: a point is quoted only where at least `MIN_BACKGROUND_EVENTS` (10) independent background events,
+- **Nothing is quoted below ten independent background events.** For every rate, volume and
+  efficiency, a point is quoted only where at least `MIN_BACKGROUND_EVENTS` (10) independent background events,
   `floor(count / data_reuse)`, lie at or above its threshold (`FarThreshold.quotable`, `FarCurve.quotable`,
   `EfficiencyAgainstSnr.quotable`, `SensitiveVolumeCurve.background_events` and `quotable`; a real event's
   `far_background_events`). Below it the point is computed, plotted and marked, and `quote` refuses it by name.
@@ -214,7 +214,7 @@ repository before it may need the changes below.
   positional argument was `confidence`: everything after `bin_edges` is keyword-only (`chance`, `sigmas`,
   `method`), so an old call fails by name instead of reading a confidence as a chance. So are the options of
   `rolling_efficiency_curve`, `fit_efficiency_sigmoid`, `efficiency_against_snr` and `sensitive_volume_curve`.
-- **Efficiency against SNR, the owner's rolling curve.** `Validator.efficiency_curves()` gives, at each target FAR,
+- **Efficiency against SNR, a rolling curve (±0.5 SNR).** `Validator.efficiency_curves()` gives, at each target FAR,
   the rolling efficiency (a window of ±0.5 in SNR at 50 points, `rolling_efficiency_curve`) with pointwise bands, a
   sigmoid fit with its 50% and 90% SNR points and their bootstrap intervals (`fit_efficiency_sigmoid`), and the
   binned values the record keeps (`efficiency_curve`), each with the chance of a noise-only pass subtracted and

@@ -174,7 +174,7 @@ class Validator:
     def efficiency_curves(self, fars_hz=None) -> Dict[float, EfficiencyAgainstSnr]:
         """
         Efficiency against SNR at each target FAR (Hz) (`efficiency`): the binned record,
-        the owner's rolling curve and its sigmoid fit with the 50% and 90% SNR points,
+        the rolling curve (±0.5 SNR) and its sigmoid fit with the 50% and 90% SNR points,
         the chance of a noise-only pass subtracted, each with joint intervals at every
         level of ``interval_sigmas``. The bootstrap draws from the validator's own seed,
         so a record gives the same curves whenever it is read.

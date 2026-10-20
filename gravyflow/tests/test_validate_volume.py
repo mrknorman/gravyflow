@@ -657,7 +657,7 @@ def test_each_bootstrap_replicate_subtracts_the_estimators_chance():
 
 @pytest.mark.parametrize("slides", [0, 4])
 def test_nothing_is_quoted_with_fewer_than_ten_independent_background_events(slides):
-    # The standard's rule: a volume is quoted only where at least ten independent background
+    # A volume is quoted only where at least ten independent background
     # events lie at or above its threshold, floor(count / data_reuse) >= 10. Below it the point is
     # computed and kept (plotted, marked), never quoted. Slid four times, each event is four triggers.
     rng = np.random.default_rng(62)

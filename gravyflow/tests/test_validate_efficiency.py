@@ -1,7 +1,7 @@
 """
 Efficiency against SNR at a target false-alarm rate, against a detector whose
 efficiency is known in closed form (score = SNR + N(0, 1), noise N(0, 1)): the
-binned record, the owner's rolling curve and the sigmoid fit, each with the
+binned record, the rolling curve (±0.5 SNR) and the sigmoid fit, each with the
 chance of a noise-only pass subtracted, and their bands at 1 and 2 sigma
 carrying the threshold's own uncertainty where the background is thin.
 """
@@ -162,7 +162,7 @@ def test_the_band_holds_the_efficiency_at_every_threshold_the_fars_interval_allo
 
 
 def test_an_efficiency_with_fewer_than_ten_independent_background_events_is_not_quotable():
-    # The standard's rule, as for every output: kept and shown, marked, not quoted.
+    # As for every output, below ten independent background events: kept and shown, marked, not quoted.
     rng = np.random.default_rng(72)
     snrs, scores, background = draw(rng, 2000, 10_000)
     results = efficiency_against_snr(snrs, scores, background, [9e-4, 1e-3], rng, bin_edges=EDGES,

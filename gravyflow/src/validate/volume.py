@@ -25,8 +25,8 @@ and the volume found by signal is
 V is the estimand: without the subtraction the found volume would grow with the
 reach's cube however far the detector sees. At tight thresholds ``c`` is
 negligible. A result is not quoted (`quotable`) where fewer than ten independent
-background events lie at or above the threshold (`metrics.MIN_BACKGROUND_EVENTS`, the
-standard's rule for every output). Where what noise alone finds exceeds a stated
+background events lie at or above the threshold (`metrics.MIN_BACKGROUND_EVENTS`, as
+for every rate and efficiency). Where what noise alone finds exceeds a stated
 fraction of what is found, the result rests on the subtraction: it is quoted with a
 warning (`SensitiveVolumeCurve.chance_dominated`), never refused. At a target's
 threshold ``c`` is fixed by the target, so the found volume is V's own estimate up to

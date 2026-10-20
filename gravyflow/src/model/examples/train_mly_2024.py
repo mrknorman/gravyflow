@@ -140,7 +140,7 @@ def validate(args, model_class, config, model) -> Validator:
                   f"{threshold.achieved.rate_hz:.2e} Hz (1σ upper end {threshold.achieved.upper_hz:.2e}); "
                   f"efficiency by SNR bin {[round(e, 2) for e in result.binned.efficiency.tolist()]}; "
                   f"50% and 90% SNR {fit.snr_50:.2f}, {fit.snr_90:.2f}")
-            if not result.quotable:  # the standard's rule: ten independent background events above it
+            if not result.quotable:  # quoted only with ten independent background events above it
                 print(f"    not quoted: {threshold.independent_events} independent background events, fewer than 10")
         else:
             print(f"FAR {far:.0e} Hz: unresolved by {background.livetime_seconds:.0f} s of background")

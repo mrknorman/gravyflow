@@ -399,8 +399,8 @@ def test_efficiency_at_an_unresolved_far_is_nan():
     assert np.all(np.isnan(curve.efficiency)) and np.all(np.isnan(curve.lower)) and curve.total[0] == 2
 
 
-def test_the_rolling_efficiency_is_the_owners_window():
-    # The owner's curve: a window of +-0.5 in SNR, evaluated at 50 points from the range's low
+def test_the_rolling_efficiency_is_a_window_of_half_an_snr_each_side():
+    # The rolling curve: a window of +-0.5 in SNR, evaluated at 50 points from the range's low
     # end plus 0.5 to its high end less 0.5; a point with fewer than 20 injections in its window
     # has none. Its bands are pointwise binomial intervals at 1 and 2 sigma on each window's count.
     assert (ROLLING_HALF_WIDTH, ROLLING_POINTS, ROLLING_MIN_INJECTIONS) == (0.5, 50, 20)

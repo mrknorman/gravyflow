@@ -7,7 +7,7 @@ curves of `metrics` read it, the chance of a noise-only pass subtracted
 (`metrics.subtract_chance`):
 
 - the **binned** curve (`metrics.efficiency_curve`), the record's estimator;
-- the owner's **rolling** curve (`metrics.rolling_efficiency_curve`: a window of +-0.5 in
+- the **rolling** curve (`metrics.rolling_efficiency_curve`: a window of +-0.5 in
   SNR at 50 points), the one the dashboard plots;
 - the **sigmoid fit** (`metrics.fit_efficiency_sigmoid`) and its 50% and 90% SNR points.
 
