@@ -533,11 +533,13 @@ def test_augmentation_stays_in_split(world, monkeypatch):
     strain as recorded, forward and positive, and every training row is that
     strain negated and reversed. The validator's rows are every window it scores,
     served or read raw and conditioned (`model_inputs`): its time-slid noise in both
-    splits, and a real event in test, read at the rate real events are read at.
+    splits, and a real event in test, read at the rate real events are read at, in
+    window mode and in stream mode (the event's stretch slid along at the stride).
     Real events refuse time reversal and random shift.
     """
     from gravyflow.src.validate import ValidationConfig
     from gravyflow.src.validate.bank import ValidationBank
+    from gravyflow.src.validate.stream import local_windows
 
     fixture = augmented_world()
     with world(fixture):
@@ -558,10 +560,10 @@ def test_augmentation_stays_in_split(world, monkeypatch):
         tap = DatasetTap(monkeypatch, STRAIN)
         args = dict(noise_obtainer=noise, input_variables=[RV.WHITENED_ONSOURCE],
                     **world_settings(rate=EVENT_RATE))
-        for group, events in (("validate", 0), ("test", 1)):
-            config = ValidationConfig(group=group, num_examples=16, batch_size=8)
+        for mode, (group, events) in itertools.product(("window", "stream"), (("validate", 0), ("test", 1))):
+            config = ValidationConfig(group=group, num_examples=16, batch_size=8, mode=mode)
             bank = ValidationBank(logit_model(EVENT_RATE), args, config)
-            bank.generate_noise()
+            bank.generate_stream_noise() if config.stream else bank.generate_noise()
             bank.generate_real_events([gf.ObservingRun.O3])
             assert [event["status"] for event in bank.real_events] == ["scored"] * events
             (stage,) = tap.take()
@@ -572,9 +574,17 @@ def test_augmentation_stays_in_split(world, monkeypatch):
             for k, windows in enumerate(stage.prepared):
                 recorded(windows[RV.ONSOURCE.name], windows[RV.OFFSOURCE.name], fixture, padded=True,
                          adjacent=k < len(stage.prepared) - events)
-            # Every window scored was read here.
+            # Every window scored was read here. In stream mode an event's windows are
+            # every window its found test reads, scored in whole batches (the last filled
+            # by repeating its last window), then the one nearest it, for display.
+            per_event = 1
+            if config.stream:
+                geometry = bank.stream_geometry
+                half = geometry.local_half_samples(bank._reach_seconds)
+                found_test = local_windows(geometry, half, half, bank._reach_seconds)[0].size
+                per_event += -(-found_test // config.batch_size) * config.batch_size
             seen = sum(len(rows[RV.ONSOURCE.name]) for rows in (*stage.batches, *stage.prepared))
-            assert seen == len(bank.far_scores) + events, (group, seen)
+            assert seen == len(bank.far_scores) + events * per_event, (mode, group, seen)
 
     for labels in ([gf.DataLabel.EVENTS], [gf.DataLabel.GLITCHES, gf.EventConfidence.CONFIDENT]):
         for augmentation in (gf.TimeReversal(), gf.RandomShift()):
