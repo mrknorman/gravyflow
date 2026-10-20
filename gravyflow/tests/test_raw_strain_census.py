@@ -93,6 +93,30 @@ ELEMENT, PEAK = "element", "peak"
 
 #: name -> (f(k x) taken back to k = 1, comparison, whether it may refuse). The
 #: augmentations run as a dataset applies them (``augment``), to glitches.
+@functools.lru_cache(maxsize=1)
+def _stream_strain() -> np.ndarray:
+    """64 s of O(1) white noise with a loud (SNR about 30) aligned-spin chirp at 32 s."""
+    from gravyflow.src.detection.stream import stream_bank_placement
+    rng = np.random.default_rng(7)
+    strain = rng.standard_normal(int(64 * FS))
+    template = stream_bank_placement().space.templates([30.0], [25.0], [0.3], [-0.2])[0].astype(np.float64)
+    start = int(32 * FS) - len(template) // 2
+    lo = max(start, 0)
+    strain[lo:start + len(template)] += 3.0 * template[lo - start:len(strain) - start]
+    return strain
+
+
+def _streamed(k):
+    """The streaming filter's one trigger (SNR, chi-squared, its ranking inputs and ranking) on k x strain."""
+    from gravyflow.src.detection.stream import StreamingMatchedFilter
+    config = gf.SpectralConfig(lower_frequency_hertz=20.0, fft_duration_seconds=4.0, overlap_duration_seconds=2.0,
+                               filter_duration_seconds=4.0)
+    mf = StreamingMatchedFilter(bank=TemplateBank.from_masses([30.0], [25.0], [0.3], [-0.2]),
+                                spectral_config=config, block_seconds=64.0, snr_threshold=12.0)
+    out = mf.filter(at(_stream_strain(), k), 0.0, "L1")
+    return np.array([out.snr, out.reduced_chisq, out.sg_chisq, out.psd_variation, out.reweighted_snr]).ravel()
+
+
 CENSUS = {
     "gf.psd": (lambda k: gf.psd(at(OFFSOURCE, k), nperseg=1024, sample_rate_hertz=FS).value() / k ** 2,
                ELEMENT, False),
@@ -132,6 +156,7 @@ CENSUS = {
     "gf.AddNoise": (lambda k: _augmented(AddNoise(probability=1.0, amplitude=0.1), k), PEAK, False),
     "gf.project_wave": (lambda k: np.asarray(NETWORK.project_wave(at(POLARISATIONS, k), FS, **SKY)) / k,
                         PEAK, False),
+    "gf.StreamingMatchedFilter": (_streamed, PEAK, False),
 }
 
 #: Measured: each case's worst error over SCALES, by its comparison's metric (relative
@@ -146,6 +171,7 @@ WORST_ERROR = {
     "gf.MatchedFilter": 3.4e-7,
     "gf.RandomShift": 1.1e-7,
     "gf.SignReversal": 1.1e-7,
+    "gf.StreamingMatchedFilter": 2.3e-7,
     "gf.TimeReversal": 1.1e-7,
     "gf.Whiten": 1.1e-6,
     "gf.WhitenPass": 2.4e-7,
@@ -177,6 +203,7 @@ EXEMPT = {
     "MatchedFilterLayer": "runs gf.MatchedFilter's search (_run) on the model's inputs",
     "TemplateBank": "templates, generated at unit scale",
     "TemplateGrid": "a grid of template parameters",
+    "coincide": "single-detector triggers in, no strain",
     "Triggers": "a search's trigger times, statistics and tolerances; takes no strain",
     "generate_strain_plot": "plots the values it is given; forms no square",
     "generate_psd_plot": "plots PSD values it is given, in float64",

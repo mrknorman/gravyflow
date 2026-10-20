@@ -326,7 +326,8 @@ def _range_max(values, lo, hi):
         return np.zeros(0, dtype=values.dtype)
     padded = np.append(values, values.dtype.type(0))  # reduceat needs each end index to exist
     bounds = np.stack([lo, hi], axis=1).ravel()
-    return np.maximum.reduceat(padded, bounds)[::2]
+    maxima = np.maximum.reduceat(padded, bounds)
+    return maxima[np.arange(0, len(maxima), 2)]  # each [lo, hi) range's maximum
 
 
 def _cluster_in_time(time, stat, cluster_seconds: float) -> np.ndarray:
