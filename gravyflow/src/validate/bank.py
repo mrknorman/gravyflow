@@ -101,6 +101,20 @@ def noise_background(scores, streams: Optional[Dict[str, np.ndarray]], window_se
     )
 
 
+def zero_lag_seconds(streams, stride_seconds: float, window_seconds: float) -> float:
+    """
+    The observing time of the test data the streams scored, at zero lag: each stretch of
+    data counted once, whatever slides read it, as the span its windows cover
+    (``(n - 1) stride + window``, the most any of its slides scored).
+    """
+    spans: Dict[Tuple[float, float], float] = {}
+    for stream in streams:
+        if stream.num_windows > 0:
+            span = (stream.num_windows - 1) * float(stride_seconds) + float(window_seconds)
+            spans[tuple(stream.stretch)] = max(spans.get(tuple(stream.stretch), 0.0), span)
+    return float(sum(spans.values()))
+
+
 def per_example(value, n: int, name: str, per_detector: bool = False) -> np.ndarray:
     """
     One float64 value per example, from a label array of any singleton layout.
@@ -297,6 +311,8 @@ class ValidationBank:
             "lengths": np.array([stream.num_windows for stream in streams], dtype=np.int64),
             "slides": np.array([stream.slide for stream in streams], dtype=np.int64),
             "blocks": np.array([stream.block for stream in streams], dtype=np.int64),
+            # The test data's own observing time, at zero lag (VT's live time).
+            "live_time_seconds": np.float64(zero_lag_seconds(streams, self.window_seconds, self.window_seconds)),
         }
         logger.info(f"Time slides: {len(streams)} streams from {len(background.stretches)} stretches.")
 
@@ -665,6 +681,9 @@ class ValidationBank:
             "samples": np.array([s.num_samples for s in streams], dtype=np.int64),
             "stride_seconds": np.float64(self.stream_geometry.stride_seconds),
             "found_window_seconds": np.float64(self.stream_found_window_seconds),
+            # The test data's own observing time, at zero lag (VT's live time).
+            "live_time_seconds": np.float64(zero_lag_seconds(streams, self.stream_geometry.stride_seconds,
+                                                             self.window_seconds)),
         }
         logger.info(f"Stream background: {len(streams)} streams at a {self.stream_geometry.stride_seconds:g} s stride.")
 

@@ -296,9 +296,18 @@ class Validator:
         return list(self.config.far_thresholds if fars_hz is None else fars_hz)
 
     @property
-    def live_time_seconds(self) -> float:
-        """The live time of the data searched (`family.live_time_seconds`): VT's."""
-        return family.live_time_seconds(self.background())
+    def live_time_seconds(self) -> Optional[float]:
+        """
+        The test data's own observing time at zero lag, VT's live time: as the background's
+        stage recorded it (each stretch of data once, whatever slides read it), or, for
+        windows drawn independently, their total length. None for a record that holds neither.
+        """
+        if self.far_scores is None:
+            return None
+        if self.noise_streams is None:
+            return self.background().livetime_seconds
+        recorded = self.noise_streams.get("live_time_seconds")
+        return None if recorded is None else float(np.asarray(recorded))
 
     def detection_roc(self, fars_hz=None) -> Optional[family.DetectionRoc]:
         """Detection probability against FAR per SNR band and over every injection (`family.detection_roc`)."""
@@ -315,7 +324,8 @@ class Validator:
     def sensitive_vt(self, fars_hz=None) -> Optional[SensitiveVt]:
         """VT (Gpc^3 yr): the sensitive volume within the reach times the live time searched (`volume.sensitive_vt`)."""
         curve = self.sensitive_volume_curve(fars_hz)
-        return None if curve is None else sensitive_vt(curve, self.live_time_seconds)
+        live_time = self.live_time_seconds
+        return None if curve is None or live_time is None else sensitive_vt(curve, live_time)
 
     def binned_volumes(self, fars_hz=None, num_bins: int = 5) -> Dict[str, BinnedVolume]:
         """

@@ -48,7 +48,8 @@ def summary_rows(validator, matched_filter=None) -> List[Dict[str, str]]:
     sigmas = validator.config.interval_sigmas
     targets = [background.threshold_for_far(far) for far in levels]
     volume = validator.sensitive_volume_curve(levels)
-    vt = None if volume is None else sensitive_vt(volume, validator.live_time_seconds)
+    live_time = validator.live_time_seconds
+    vt = None if volume is None or live_time is None else sensitive_vt(volume, live_time)
     efficiency = validator.efficiency_curves(levels) if validator.efficiency_data is not None else {}
     counts = validator.recovered_counts(levels)
     ratio = validator.matched_filter_ratio(matched_filter, levels) if matched_filter is not None else None
@@ -69,7 +70,8 @@ def summary_rows(validator, matched_filter=None) -> List[Dict[str, str]]:
                                             *volume.joint_upper_gpc3[:, i]], 0.0, None))
             k = len(sigmas)
             row["Distance (Mpc)"] = _with_interval(d[0], d[1:1 + k], d[1 + k:], sigmas, ".4g")
-            row["VT (Gpc³ yr)"] = _with_interval(vt.vt_gpc3_yr[i], vt.lower_gpc3_yr[:, i], vt.upper_gpc3_yr[:, i], sigmas)
+            row["VT (Gpc³ yr)"] = ("no live time recorded" if vt is None else
+                                   _with_interval(vt.vt_gpc3_yr[i], vt.lower_gpc3_yr[:, i], vt.upper_gpc3_yr[:, i], sigmas))
         if efficiency:
             fit = efficiency[float(far)].fit
             row["50% SNR"] = _with_interval(fit.snr_50, fit.lower[:, 0], fit.upper[:, 0], sigmas)
@@ -106,12 +108,14 @@ def generate_summary_tab(validators: list, matched_filter=None, width: int = 145
             continue
         background = validator.background()
         resolve, quote = family.far_floor_hz(background)
+        live_time = validator.live_time_seconds
+        searched = ("not recorded" if live_time is None else
+                    f"{live_time:,.0f} s ({live_time / SECONDS_PER_YEAR:.3g} yr) at zero lag")
+        deepest = "none" if not np.isfinite(quote) else f"{quote * SECONDS_PER_YEAR:.3g} per year"
         header = (f"### {_title(validator, index)}\n\n{validator.mode_summary()}  \n"
-                  f"Live time searched: {validator.live_time_seconds:,.0f} s "
-                  f"({validator.live_time_seconds / SECONDS_PER_YEAR:.3g} yr); background "
-                  f"{background.livetime_seconds:,.0f} s over {background.data_reuse} slide(s). "
+                  f"Live time searched: {searched}; background {background.livetime_seconds:,.0f} s. "
                   f"Deepest FAR resolved: {resolve * SECONDS_PER_YEAR:.3g} per year; deepest quoted "
-                  f"(≥ {MIN_BACKGROUND_EVENTS} independent background events): {quote * SECONDS_PER_YEAR:.3g} per year. "
+                  f"(≥ {MIN_BACKGROUND_EVENTS} independent background events): {deepest}. "
                   "Intervals are 1σ and 2σ.")
         if matched_filter is None:
             header += " No matched-filter result was supplied, so there is no ratio to it."
@@ -341,8 +345,8 @@ def generate_real_event_levels(validator, training_periods: Optional[Sequence[Tu
         "Name": row["name"], "GPS": f"{row['gps']:.1f}", "Statistic": f"{row['score']:.4g}",
         "FAR (per year)": _with_interval(row["far_hz"], row["far_interval_hz"][:, 0], row["far_interval_hz"][:, 1],
                                          summary.sigmas, ".3g", SECONDS_PER_YEAR)
-                          + ("" if row["background_events"] >= MIN_BACKGROUND_EVENTS else
-                             f" (not quoted: {row['background_events']} independent background events)"),
+                          + ("" if row["quotable"] else
+                             f" (not quoted: fewer than {MIN_BACKGROUND_EVENTS} independent background events)"),
         "In training period": ("yes" if row["in_training"] else "no") if flagged else "no period given",
     } for row in summary.rows])
     note = ("Events inside the model's training period are flagged: an as-published model may have trained on them."

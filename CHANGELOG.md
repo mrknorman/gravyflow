@@ -175,7 +175,7 @@ repository before it may need the changes below.
 - **The validator's metric family**, all from the same injections and background, each with its interval at 1σ
   and 2σ (`gravyflow.src.validate.family`): detection probability against false-alarm rate per SNR band, with the
   joint interval efficiency carries, and for the population (the found share of its volume within the reach)
-  (`Validator.detection_roc`); VT, the sensitive volume times the live time searched (`Validator.sensitive_vt`,
+  (`Validator.detection_roc`); VT, the sensitive volume times the test data's own observing time at zero lag, which the background's stage records (`live_time_seconds` in the record's streams: each stretch of data once, whatever slides read it) (`Validator.sensitive_vt`,
   `volume.sensitive_vt`); the sensitive volume binned by chirp mass, mass ratio and, where the volume set records
   spins, effective spin (`Validator.binned_volumes`, `volume.binned_volume`); the injections recovered at each level
   (`Validator.recovered_counts`); the ratio of the sensitive volume to the matched filter's on the same injections,

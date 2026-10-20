@@ -50,7 +50,6 @@ from .metrics import (
     _injections,
     binomial_interval,
     chance_subtracted_interval,
-    independent_events,
     resample_groups,
     sigma_level,
     subtract_chance,
@@ -64,19 +63,29 @@ FAR_LEVEL_NAMES = ("1 per month", "1 per year", "1 per 10 years", "1 per 100 yea
 ROC_SNR_BANDS = ((0.0, 5.0), (5.0, 10.0), (10.0, 15.0), (15.0, 20.0))
 
 
+def quotable_at(background: Background, thresholds) -> np.ndarray:
+    """
+    Whether the background quotes a rate at each threshold: at least
+    `metrics.MIN_BACKGROUND_EVENTS` independent events at or above it, as its FAR curve
+    counts them (`metrics.FarCurve.quotable`). False at NaN.
+    """
+    t = np.atleast_1d(np.asarray(thresholds, dtype=np.float64))
+    curve = background.far_curve()
+    # The count at t is the curve's at its last breakpoint >= t (breakpoints descend).
+    at = np.searchsorted(-curve.thresholds, -np.where(np.isnan(t), np.inf, t), side="right") - 1
+    quotable = np.concatenate([[False], curve.quotable])
+    return np.where(np.isnan(t), False, quotable[at + 1])
+
+
 def far_floor_hz(background: Background) -> Tuple[float, float]:
     """
     How deep a background reaches: the least FAR it resolves (one trigger in its
-    livetime) and the least it quotes (`metrics.MIN_BACKGROUND_EVENTS` independent events,
-    each counted `Background.data_reuse` times).
+    livetime) and the least it quotes (`metrics.MIN_BACKGROUND_EVENTS` independent events
+    at or above the threshold, as its FAR curve counts them; NaN where none is quotable).
     """
-    T = background.livetime_seconds
-    return 1.0 / T, MIN_BACKGROUND_EVENTS * background.data_reuse / T
-
-
-def live_time_seconds(background: Background) -> float:
-    """The live time of the data a background searched: its livetime over the slides that reuse it."""
-    return background.livetime_seconds / background.data_reuse
+    curve = background.far_curve()
+    quoted = curve.rate_hz[curve.quotable]
+    return 1.0 / background.livetime_seconds, float(quoted.min()) if quoted.size else float("nan")
 
 
 def _targets(background: Background, fars_hz):
@@ -393,7 +402,7 @@ def far_calibration(calibration: Background, held_out: Background, fars_hz: Sequ
     measured = np.where(resolved, count / T, np.nan)
     with np.errstate(invalid="ignore", divide="ignore"):
         ratio = np.where(resolved & (claimed > 0), measured / claimed, np.nan)
-    enough = independent_events(count, held_out.data_reuse) >= MIN_BACKGROUND_EVENTS
+    enough = quotable_at(held_out, thresholds)
     return FarCalibration(fars, thresholds, claimed, count, float(T), measured, lower, upper, ratio,
                           resolved[None, :] & (lower <= claimed) & (claimed <= upper),
                           np.array([t.quotable for t in targets]) & enough, sigmas)
@@ -406,7 +415,7 @@ class RealEventSummary:
     """
     The known events in the test data: one row per scored event (``rows``: its name, GPS
     time, statistic, FAR from the background with its interval at each of ``sigmas``,
-    independent background events at or above it, and ``in_training``: whether it lies in
+    whether the background quotes its FAR (``quotable``), and ``in_training``: whether it lies in
     a training period given), and at each target FAR (Hz) the events found
     (``found``: statistic at or above the background's threshold) and those found outside
     every training period (``found_outside_training``). Unresolved targets count 0.
@@ -443,7 +452,7 @@ def real_event_summary(events: Sequence[Dict[str, Any]], background: Background,
         rows.append(dict(name=event.get("name", "?"), gps=float(event.get("gps", np.nan)), score=float(score),
                          far_hz=estimates[0].rate_hz,
                          far_interval_hz=np.array([[e.lower_hz, e.upper_hz] for e in estimates]),
-                         background_events=int(independent_events(estimates[0].count, background.data_reuse)),
+                         quotable=bool(quotable_at(background, float(score))[0]),
                          in_training=in_periods(event.get("gps", np.nan), training_periods)))
     fars, _, thresholds, resolved = _targets(background, fars_hz)
     scores = np.array([r["score"] for r in rows], dtype=np.float64)
@@ -471,7 +480,7 @@ __all__ = [
     "far_floor_hz",
     "held_out_split",
     "in_periods",
-    "live_time_seconds",
+    "quotable_at",
     "population_detection_probability",
     "quantile_interval",
     "real_event_summary",

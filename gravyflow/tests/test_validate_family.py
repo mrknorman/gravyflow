@@ -14,7 +14,7 @@ from gravyflow.src.validate.family import (
     far_calibration,
     far_floor_hz,
     held_out_split,
-    live_time_seconds,
+    quotable_at,
     population_detection_probability,
     real_event_summary,
     recovered_counts,
@@ -185,11 +185,26 @@ def test_the_held_out_halves_share_no_data():
     full = StreamBackground(streams, 1.0, 0.1)
     first, second = held_out_split(full)
     assert {s.block for s in first.streams} == {0, 2} and {s.block for s in second.streams} == {1, 3}
-    assert isinstance(first, StreamBackground) and first.data_reuse == 2
+    assert isinstance(first, StreamBackground)
     assert first.livetime_seconds + second.livetime_seconds == pytest.approx(full.livetime_seconds)
     assert held_out_split(background()) is None
-    assert live_time_seconds(full) == pytest.approx(full.livetime_seconds / 2)
-    assert far_floor_hz(full) == pytest.approx((1 / full.livetime_seconds, 20 / full.livetime_seconds))
+
+
+def test_the_floor_and_quotability_are_read_from_the_far_curve():
+    # 100 one-second windows: the least resolved FAR is one trigger in 100 s; the least quoted ten.
+    assert far_floor_hz(background()) == pytest.approx((0.01, 0.1))
+    assert quotable_at(background(), [95.0, 90.0, 89.5, np.nan]).tolist() == [False, True, True, False]
+
+
+def test_the_live_time_is_the_test_datas_own_at_zero_lag():
+    # Two stretches, each read at three slides that score different numbers of windows: each stretch
+    # counts once, as the most any slide scored: (8 - 1) 0.25 + 1 and (4 - 1) 0.25 + 1.
+    from gravyflow.src.validate.bank import zero_lag_seconds
+    from gravyflow.src.validate.slides import SlideStream
+
+    streams = [SlideStream((0.0, 10.0), slide, n, 0) for slide, n in ((1, 8), (2, 7), (3, 6))]
+    streams += [SlideStream((50.0, 60.0), slide, n, 1) for slide, n in ((1, 3), (2, 4), (3, 0))]
+    assert zero_lag_seconds(streams, 0.25, 1.0) == pytest.approx(2.75 + 1.75)
 
 
 # ---------------------------------------------------------------- real events
@@ -203,7 +218,7 @@ def test_real_events_have_their_far_and_counts_at_each_level():
     assert [r["far_hz"] for r in summary.rows] == pytest.approx([0.95, 0.50, 0.05])
     lower, upper = poisson_interval(5, sigma_level(1.0))
     assert summary.rows[2]["far_interval_hz"][0] == pytest.approx([lower / 100, upper / 100])
-    assert summary.rows[2]["background_events"] == 5
+    assert [r["quotable"] for r in summary.rows] == [True, True, False]  # 95: five events at or above it
     assert summary.found.tolist() == [1, 2, 0] and summary.found_outside_training.tolist() == [1, 1, 0]
     assert summary.resolved.tolist() == [True, True, False]
 
@@ -248,7 +263,13 @@ def test_the_validators_family_follows_from_its_record(validated):
     assert np.nanmax(timing.p90_abs_seconds) <= v.config.found_window_seconds + 1e-9
     vt = v.sensitive_vt(fars)
     curve = v.sensitive_volume_curve(fars)
-    np.testing.assert_allclose(vt.vt_gpc3_yr, curve.volume_within_reach_gpc3 * v.live_time_seconds / SECONDS_PER_YEAR)
+    # VT's live time is the test data's own, recorded by the background's stage: here every segment once.
+    from gravyflow.src.validate.bank import zero_lag_seconds  # noqa: F401  (the recorded value's definition)
+    streams = v.noise_streams
+    stride = float(streams["stride_seconds"])
+    expected = sum((n - 1) * stride + v.input_duration_seconds for n in streams["lengths"] if n > 0)
+    assert v.live_time_seconds == pytest.approx(expected)
+    np.testing.assert_allclose(vt.vt_gpc3_yr, curve.volume_within_reach_gpc3 * expected / SECONDS_PER_YEAR)
     # Synthetic noise: one block per segment, so half the segments are held out.
     calibration = v.far_calibration(fars)
     assert calibration is not None and calibration.held_out_livetime_seconds < background.livetime_seconds
