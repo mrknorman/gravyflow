@@ -140,22 +140,38 @@ def network_snr_bound(polarisations, psds, sample_rate_hertz: float, config) -> 
     ``psds`` ((I, F), strain^2 / Hz from DC to Nyquist), over ``config``'s band
     (a ``gf.SpectralConfig``): the root sum over detectors of the largest
     eigenvalue of the polarisations' Gram matrix (module docstring). (P,).
-    """
-    from gravyflow.src.dataset.tools.snr import template_sigma
 
-    plus = np.asarray(polarisations[:, 0], dtype=np.float32)
-    cross = np.asarray(polarisations[:, 1], dtype=np.float32)
+    The Gram matrix is computed on the host in float64, with the inner product of
+    `snr.template_sigma` (``<x|y> = (2 / N) sum Re(X Y*) / w`` over the band's rfft
+    bins, ``w`` the PSD times ``fs / 2`` on the grid, floored at 1e-4 of its median),
+    which works in float32: the bound is exact to float64's rounding, not float32's.
+    """
+    plus = np.fft.rfft(np.asarray(polarisations[:, 0], dtype=np.float64), axis=-1)
+    cross = np.fft.rfft(np.asarray(polarisations[:, 1], dtype=np.float64), axis=-1)
+    num_samples = int(np.shape(polarisations)[-1])
+    kmin, kmax = config.band_indices(num_samples, sample_rate_hertz)
+    plus, cross = plus[:, kmin:kmax], cross[:, kmin:kmax]
     total = np.zeros(plus.shape[0])
     for psd in np.asarray(psds, dtype=np.float64):
-        def power(h):
-            sigma = template_sigma(h, psd, sample_rate_hertz, config.lower_frequency_hertz,
-                                   config.upper_frequency_hertz)
-            return np.asarray(sigma, dtype=np.float64) ** 2
-
-        a, c = power(plus), power(cross)
-        b = 0.5 * (power(plus + cross) - a - c)
+        weight = _weight_on_grid(psd, num_samples, sample_rate_hertz)[kmin:kmax]
+        inner = lambda x, y: (2.0 / num_samples) * np.sum(np.real(x * np.conj(y)) / weight, axis=-1)
+        a, b, c = inner(plus, plus), inner(plus, cross), inner(cross, cross)
         total += 0.5 * (a + c) + np.sqrt(0.25 * (a - c) ** 2 + b**2)
     return np.sqrt(total)
+
+
+def _weight_on_grid(psd: np.ndarray, num_samples: int, sample_rate_hertz: float) -> np.ndarray:
+    """
+    A one-sided PSD (F,), DC to Nyquist, as `snr.template_sigma` weights its inner
+    product, in float64: times ``fs / 2``, interpolated onto the rfft grid of
+    ``num_samples``, floored at 1e-4 of its median.
+    """
+    weight = np.asarray(psd, dtype=np.float64) * (sample_rate_hertz / 2.0)
+    num_freqs = num_samples // 2 + 1
+    if weight.size != num_freqs:
+        weight = np.interp(np.arange(num_freqs) * (sample_rate_hertz / num_samples),
+                           np.linspace(0.0, sample_rate_hertz / 2.0, weight.size), weight)
+    return np.maximum(weight, 1.0e-4 * np.median(weight))
 
 
 def _chirp_scaled_snrs(generator, box, points, psds, sample_rate_hertz, window_seconds, config) -> np.ndarray:

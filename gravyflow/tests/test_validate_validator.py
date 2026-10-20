@@ -367,8 +367,14 @@ def test_a_source_placed_at_a_chirp_distance_is_at_its_masss_physical_distance(d
 
 
 def test_the_network_bound_is_the_best_response_each_detector_can_have():
-    # One detector: a face-on source overhead is within it at every polarisation angle,
-    # and reaches it at the best; two detectors of one PSD, root two times it.
+    # One detector: a source overhead is within the bound at every polarisation angle, and
+    # reaches it at the best; two detectors of one PSD, root two times it. Both sides in
+    # float64, to 1e-6. A (2, 2)-mode source's polarisations are in quadrature at any
+    # inclination, so its cross term <h+|hx> is about zero and a wrong cross term would pass:
+    # the last source mixes them (hx' = 0.6 h+ + 0.8 hx), a cross term of 0.6 <h+|h+>, whose
+    # best angle is neither 0 nor pi / 4.
+    from scipy.optimize import minimize_scalar
+
     from gravyflow.src.dataset.features.waveforms.cbc import _generate_cbc_window
     from gravyflow.src.dataset.tools.snr import template_sigma
     from gravyflow.src.validate.reach import network_snr_bound
@@ -377,18 +383,46 @@ def test_the_network_bound_is_the_best_response_each_detector_can_have():
     h = np.asarray(_generate_cbc_window(num_waveforms=n, sample_rate_hertz=rate, window_seconds=2.0,
                                         min_frequency_hertz=np.full(n, 20.0), mass_1_msun=np.array([10.0, 30.0, 60.0]),
                                         mass_2_msun=np.array([10.0, 20.0, 50.0]), distance_mpc=np.full(n, 100.0),
-                                        inclination_radians=np.zeros(n), reference_orbital_phase_in=np.zeros(n)))
-    psd = np.full(int(rate) // 2 + 1, 1e-46)
+                                        inclination_radians=np.array([0.0, 1.0, 0.0]),
+                                        reference_orbital_phase_in=np.zeros(n)), dtype=np.float64)
+    mixed = np.stack([h[1, 0], 0.6 * h[1, 0] + 0.8 * h[1, 1]])
+    h = np.concatenate([h, mixed[None]])
+    psd = np.linspace(2e-46, 1e-46, h.shape[-1] // 2 + 1)  # on the rfft grid: no interpolation
     config = gf.SpectralConfig()
     bound = network_snr_bound(h, psd[None], rate, config)
-    overhead = np.stack([np.asarray(template_sigma(np.cos(2 * psi) * h[:, 0] + np.sin(2 * psi) * h[:, 1], psd,
-                                                   rate, 20.0, None)) for psi in np.linspace(0, np.pi / 2, 91)])
-    # Both are float32 sums over the band, so they agree to its rounding, the 1e-4 the next line allows (on JAX
-    # 0.12 the overhead SNR exceeds the bound by 1.6e-5 of it, at 30 + 20; 1e-5 held on 0.9).
-    assert np.all(overhead <= bound * (1 + 1e-4))
-    np.testing.assert_allclose(overhead.max(axis=0), bound, rtol=1e-4)
+
+    # The SNR of the polarisations seen overhead at angle psi, F+ = cos 2 psi, Fx = sin 2 psi, in float64.
+    num_samples = h.shape[-1]
+    kmin, kmax = config.band_indices(num_samples, rate)
+    weight = psd * rate / 2.0
+    spectra = np.fft.rfft(h, axis=-1)[..., kmin:kmax]
+    inner = lambda x, y: (2.0 / num_samples) * np.sum(np.real(x * np.conj(y)) / weight[kmin:kmax], axis=-1)
+
+    def overhead(psi, i):
+        x = np.cos(2 * psi) * spectra[i, 0] + np.sin(2 * psi) * spectra[i, 1]
+        return np.sqrt(inner(x, x))
+
+    cross_term = inner(spectra[:, 0], spectra[:, 1]) / np.sqrt(inner(spectra[:, 0], spectra[:, 0])
+                                                               * inner(spectra[:, 1], spectra[:, 1]))
+    assert np.all(np.abs(cross_term[:3]) < 0.05) and cross_term[3] > 0.5, cross_term
+    angles = np.linspace(0.0, np.pi, 721)
+    for i in range(len(h)):
+        grid = np.array([overhead(psi, i) for psi in angles])
+        assert np.all(grid <= bound[i] * (1 + 1e-6)), i
+        best = angles[int(np.argmax(grid))]
+        step = angles[1] - angles[0]
+        refined = minimize_scalar(lambda psi: -overhead(psi, i), bounds=(best - step, best + step), method="bounded",
+                                  options={"xatol": 1e-12})
+        np.testing.assert_allclose(-refined.fun, bound[i], rtol=1e-6)
+        if i == 3:
+            assert min(abs(refined.x % (np.pi / 4)), np.pi / 4 - refined.x % (np.pi / 4)) > 0.1, refined.x
+        # The inner product is template_sigma's (float32, so to 1e-4).
+        projected = np.cos(2 * refined.x) * h[i, 0] + np.sin(2 * refined.x) * h[i, 1]
+        np.testing.assert_allclose(float(np.asarray(template_sigma(projected[None], psd, rate, config.lower_frequency_hertz,
+                                                                  config.upper_frequency_hertz))[0]),
+                                   bound[i], rtol=1e-4)
     np.testing.assert_allclose(network_snr_bound(h, np.stack([psd, psd]), rate, config), np.sqrt(2) * bound,
-                               rtol=1e-6)
+                               rtol=1e-12)
 
 
 def test_a_placed_source_does_not_depend_on_the_distance_its_generator_drew(dataset_args):

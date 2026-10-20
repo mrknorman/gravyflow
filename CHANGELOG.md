@@ -184,10 +184,13 @@ repository before it may need the changes below.
   spin of the population (precessing: a search over orientations, stated); a population whose masses are unbounded is
   refused by name when the validator is built. An injection is found when its window passes the threshold, whatever
   passes it: the chance that noise alone passes (`Background.found_by_chance`) is subtracted, `(V_found - c V_pop) /
-  (1 - c)`, and a point where noise alone finds more than `volume_chance_fraction` (0.1) of what is found is not
-  quoted (`SensitiveVolumeCurve.quotable`). Three intervals at 1σ and 2σ: the injections' (exact binomial), the
-  background's, and a joint bootstrap over the injections, the background's thresholds (counting a time-slid
-  background's independent information) and the chance. `SensitiveVolumeCurve.quote` gives a `VolumeQuote`. The
+  (1 - c)`; a point where noise alone finds more than `volume_chance_fraction` (0.1) of what is found is quoted
+  with a warning (`SensitiveVolumeCurve.chance_dominated`, `VolumeQuote.chance_dominated`), never refused: the
+  chance is fixed at a target's threshold, so a refusal on the found volume would select on the volume's own noise
+  (near such a cut the quoted volume ran 12-16% high). Three intervals at 1σ and 2σ: the injections' (exact
+  binomial), the background's (V's least and greatest over every threshold the FAR's interval allows), and a joint
+  bootstrap over the injections, the background's thresholds (counting a time-slid background's independent
+  information) and the chance. `SensitiveVolumeCurve.quote` gives a `VolumeQuote`. The
   dashboard plots V and the distance against FAR, and the found fraction against chirp distance with the chance level
   drawn on it, the check that the reach is long enough. The volume is Euclidean (no cosmology) and the masses are in
   the detector frame, as in MLGWSC-1's `evaluate.py`. A burst population, or WHITE noise, has none. Records are
@@ -201,6 +204,12 @@ repository before it may need the changes below.
   target allowing `k` triggers at the `k`-th loudest (it was just above the `(k+1)`-th, a true FAR `(k+1)/k` the
   target's: 10% high at the ten-event floor). Its bootstrap (`bootstrap_thresholds`) follows it; the FAR band's ends
   (`far_band_thresholds`) are unchanged.
+- **The efficiency's background term spans its whole FAR band.** At a target FAR the efficiency bands
+  (`efficiency_against_snr`) hold the binned and rolling efficiency's least and greatest over every threshold the
+  FAR's interval allows, as the volume's do; they were read at the band's two thresholds only, and the efficiency
+  need not be monotone between them.
+- **The reach's network bound is computed in float64** (`reach.network_snr_bound`), with `template_sigma`'s inner
+  product, which works in float32: the bound is exact to float64's rounding.
 - **The new parameters of the efficiency and volume functions are keyword-only.** `efficiency_curve`'s fifth
   positional argument was `confidence`: everything after `bin_edges` is keyword-only (`chance`, `sigmas`,
   `method`), so an old call fails by name instead of reading a confidence as a chance. So are the options of
