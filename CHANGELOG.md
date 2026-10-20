@@ -15,7 +15,8 @@ repository before it may need the changes below.
   run), which are `gf.Triggers`. The background is the triggers of time slides of real noise at the stride, or of
   segments of continuous synthetic noise (`stream_segment_seconds`, 256 s), none within `cluster_seconds` of a
   stream's ends, whose livetime is less those stretches. An
-  injection is found when the loudest trigger within `found_window_seconds` (0.1 s) of its merger passes the
+  injection is found when the loudest trigger within `found_window_seconds` (0.1 s, but at least half the stride, so
+  that a perfectly timed signal is always found; recorded) of its merger passes the
   threshold (its score is that trigger's, `-inf` where none lies there), and the chance that a noise trigger does so
   (the trigger rate times the window) is subtracted at every threshold. Each injection is scored locally: placed in
   the background's own scored streams, on a stretch of that data around it (`injection_stretch_seconds`, 40 s,

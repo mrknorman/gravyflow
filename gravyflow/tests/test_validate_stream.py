@@ -86,7 +86,10 @@ def test_the_validator_streams_by_default(validated, stream_config, tmp_path):
     assert data["scores"].shape == (64,) and data["bns_ranges"].shape == (64, 1)
     found = np.isfinite(data["scores"])
     assert found.any()
-    assert np.all(np.abs(data["trigger_offsets"][found]) <= 0.1 + 1e-9)
+    # The found window: 0.1 s, but at least half the 0.25 s stride, recorded.
+    assert v.noise_streams["found_window_seconds"] == 0.125
+    assert background.found_window_seconds == 0.125
+    assert np.all(np.abs(data["trigger_offsets"][found]) <= 0.125 + 1e-9)
     assert np.all(np.isnan(data["trigger_offsets"][~found]))
     assert np.all(data["in_band_durations"] > 0) and np.all(data["whitened_peaks"] >= 0)
     assert np.all(data["bns_ranges"] > 0)
@@ -161,6 +164,7 @@ def test_the_stride_is_the_models_own_when_given(dataset_args):
     bank = ValidationBank(logit_model(), dataset_args, config)
     bank.generate_stream_noise()
     assert bank.noise_streams["stride_seconds"] == 0.125
+    assert bank.noise_streams["found_window_seconds"] == 0.1  # half the stride is less than 0.1 s
     assert bank.background().livetime_seconds == pytest.approx(39 * 0.125 + 1.0 - 2.0)
 
 
@@ -293,3 +297,21 @@ def test_an_injections_labels_do_not_depend_on_the_models_window():
         for name in a:
             assert np.all(np.isfinite(a[name]) & (a[name] > 0)), name
             np.testing.assert_allclose(a[name], b[name], rtol=1e-6, err_msg=name)
+
+
+def test_the_found_window_is_at_least_half_the_stride():
+    from gravyflow.src.validate.stream import found_window
+    assert found_window(0.1, 0.25) == 0.125 and found_window(0.1, 0.5) == 0.25 and found_window(0.1, 0.125) == 0.1
+    # A perfectly timed, loud signal: its loudest window is the one nearest its merger, within
+    # half a stride of it, so it is always found, at any stride.
+    rng = np.random.default_rng(9)
+    for stride in (0.0625, 0.25, 0.5):
+        times = np.arange(2000) * stride
+        mergers = rng.uniform(20.0, times[-1] - 20.0, 500)
+        found = []
+        for merger in mergers:
+            scores = -np.abs(times - merger)  # loudest nearest the merger
+            keep = cluster(times, scores, 1.0)
+            found.append(np.isfinite(loudest_within(times[keep], scores[keep], [merger],
+                                                    found_window(0.1, stride))[0][0]))
+        assert np.all(found), stride

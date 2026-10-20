@@ -23,7 +23,9 @@ backward compatibility and to reproduce earlier results.
   second of livetime, counted in the background's independent information as
   everywhere (`metrics.Background`).
 - **What counts as found.** An injection is found at a threshold when the loudest
-  trigger within ``found_window_seconds`` (0.1 s) of its merger passes it; one
+  trigger within the found window of its merger passes it: ``found_window_seconds``
+  (0.1 s), but at least half the stride (`found_window`; recorded), so that a
+  perfectly timed signal is never missed for the grid's sake; one
   trigger per injection, the loudest. An injection's score is therefore that
   trigger's statistic, ``-inf`` where no trigger lies in the window, and found is
   ``score >= threshold`` as in window mode, so the estimators (`efficiency`,
@@ -157,6 +159,16 @@ class StreamGeometry:
 
 # --------------------------------------------------------------- triggers
 
+def found_window(found_window_seconds: float, stride_seconds: float) -> float:
+    """
+    The found window used at a stride: ``found_window_seconds``, but at least half the
+    stride, so that a perfectly timed loud signal, whose nearest window lies within half
+    a stride of its merger, is always found (at ±0.1 s and a 0.25 s stride it was found
+    only 80% of the time, ``2 w / stride``).
+    """
+    return max(float(found_window_seconds), float(stride_seconds) / 2.0)
+
+
 def cluster(times, scores, cluster_seconds: float) -> np.ndarray:
     """
     The scores that are triggers: each the loudest within ``cluster_seconds`` of
@@ -284,11 +296,14 @@ def stream_background(scores, streams: Dict[str, np.ndarray], window_seconds: fl
                       found_window_seconds: float) -> StreamBackground:
     """
     The stream background of a record's noise ``scores``: ``streams`` gives each
-    stream's number of windows, slide and block, in the order of the scores, and the
-    stride they were scored at (``stride_seconds``).
+    stream's number of windows, slide and block, in the order of the scores, the
+    stride they were scored at (``stride_seconds``) and the found window used
+    (``found_window_seconds``; if not recorded, `found_window` of the one given).
     """
     edges = np.cumsum(streams["lengths"])[:-1]
     stride = float(np.asarray(streams["stride_seconds"]))
+    found_window_seconds = (float(np.asarray(streams["found_window_seconds"])) if "found_window_seconds" in streams
+                            else found_window(found_window_seconds, stride))
     return StreamBackground(
         [ScoreStream(part, stride, window_seconds, int(block), int(slide))
          for part, block, slide in zip(np.split(np.asarray(scores), edges), streams["blocks"], streams["slides"])],
@@ -484,6 +499,7 @@ __all__ = [
     "SyntheticSegments",
     "cluster",
     "found_in_stretch",
+    "found_window",
     "local_windows",
     "loudest_within",
     "place_injections",

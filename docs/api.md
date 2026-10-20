@@ -235,7 +235,8 @@ validates as it trains: they need the `viz` extra.
   events at or above its threshold (a volume where noise alone finds more than a tenth of what is found is quoted
   with a warning), ROC and the dashboard. By default in stream mode: the model slid along continuous raw strain at
   its stride, its scores clustered into triggers, its background the triggers of time slides of the data, each
-  injection scored locally and found by the loudest trigger within 0.1 s of its merger; window mode
+  injection scored locally and found by the loudest trigger within 0.1 s (at least half the stride) of its merger;
+  window mode
   (`mode="window"`) is kept for backward compatibility and reproduction.
 - `generate_volume_3d_plot` (`gravyflow.src.validate.volume_3d`): the dashboard's 3D volume tab: the volume set's
   injections at sky direction times distance, found or missed at a false-alarm rate chosen with a slider, a sphere at

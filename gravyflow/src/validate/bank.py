@@ -31,7 +31,8 @@ from .config import ValidationConfig
 from .metrics import Background, ScoreStream, independent_events, logit_scores, sigma_level
 from .slides import SlideStream, TimeSlideBackground, TimeSlides
 from .stream import (
-    Placement, StreamGeometry, StreamReader, SyntheticSegments, found_in_stretch, local_windows, place_injections,
+    Placement, StreamGeometry, StreamReader, SyntheticSegments, found_in_stretch, found_window, local_windows,
+    place_injections,
     stream_background,
 )
 from .volume import uniform_in_volume
@@ -592,9 +593,21 @@ class ValidationBank:
         return StreamGeometry.of(self._noise_dataset.window_spec, self.config.stride_seconds)
 
     @property
+    def stream_found_window_seconds(self) -> float:
+        """
+        The found window at the model's stride: ``found_window_seconds``, but at least half
+        the stride (`stream.found_window`), recorded with the background's streams.
+        """
+        found = found_window(self.config.found_window_seconds, self.stream_geometry.stride_seconds)
+        if not self.config.stream_cluster_seconds >= 2.0 * found:
+            raise ValueError(f"A found window of ±{found:g} s (half the stride) needs cluster_seconds >= {2 * found:g}, "
+                             f"got {self.config.stream_cluster_seconds:g}.")
+        return found
+
+    @property
     def _reach_seconds(self) -> float:
         """How far from a merger the found test reads scores: the found window, then a cluster either side."""
-        return self.config.found_window_seconds + self.config.stream_cluster_seconds
+        return self.stream_found_window_seconds + self.config.stream_cluster_seconds
 
     @cached_property
     def stream_source(self):
@@ -651,6 +664,7 @@ class ValidationBank:
             "stretch_ends": np.array([s.stretch[1] for s in streams], dtype=np.float64),
             "samples": np.array([s.num_samples for s in streams], dtype=np.int64),
             "stride_seconds": np.float64(self.stream_geometry.stride_seconds),
+            "found_window_seconds": np.float64(self.stream_found_window_seconds),
         }
         logger.info(f"Stream background: {len(streams)} streams at a {self.stream_geometry.stride_seconds:g} s stride.")
 
@@ -703,7 +717,7 @@ class ValidationBank:
             ends = np.cumsum([w[0].size for w in windows])
             for j, (index, _) in enumerate(windows):
                 stat, when = found_in_stretch(geometry, index, scores[ends[j] - index.size:ends[j]], int(samples[j]),
-                                              cfg.stream_cluster_seconds, cfg.found_window_seconds)
+                                              cfg.stream_cluster_seconds, self.stream_found_window_seconds)
                 columns["scores"].append([stat])
                 columns["trigger_offsets"].append([when])
             if self._real_noise:  # each stretch's first sample's GPS, on the first detector

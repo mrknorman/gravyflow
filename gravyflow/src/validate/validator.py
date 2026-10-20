@@ -15,7 +15,7 @@ from .config import ValidationConfig, check_held_out, run_record_of
 from .efficiency import EfficiencyAgainstSnr, efficiency_against_snr
 from .metrics import Background, roc_curve, sigma_level
 from .provenance import StaleCheckpointError, model_fingerprint, require_match
-from .stream import stream_background
+from .stream import found_window, stream_background
 from .volume import (
     BinnedVolume, InjectionVolumes, SensitiveVolumeCurve, SensitiveVt, VolumeRatio, binned_volume, chirp_weights,
     sensitive_volume_curve, sensitive_vt, volume_ratio,
@@ -534,9 +534,11 @@ class Validator:
             return f"{self.name}: window mode (each example one window; kept for compatibility and reproduction)."
         stride = (float(np.asarray(self.noise_streams["stride_seconds"])) if self.noise_streams is not None
                   and "stride_seconds" in self.noise_streams else cfg.stream_stride_seconds(self.input_duration_seconds))
+        found = (float(np.asarray(self.noise_streams["found_window_seconds"])) if self.noise_streams is not None
+                 and "found_window_seconds" in self.noise_streams else found_window(cfg.found_window_seconds, stride))
         return (f"{self.name}: stream mode, stride {stride:g} s over a {self.input_duration_seconds:g} s window; a "
                 f"trigger is the loudest score within {cfg.stream_cluster_seconds:g} s; an injection is found by the "
-                f"loudest trigger within ±{cfg.found_window_seconds:g} s of its merger.")
+                f"loudest trigger within ±{found:g} s of its merger.")
 
     def _cached_segments(self) -> Optional[np.ndarray]:
         """The real-noise segments the noise obtainer already holds, for the GPS plot."""
