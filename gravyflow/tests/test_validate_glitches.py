@@ -286,8 +286,6 @@ def test_the_glitch_tab_shows_rates_twin_and_tail():
 
 def test_the_dashboard_keeps_every_tab_and_adds_glitches_and_timing(tmp_path):
     v = built_validator()
-    # The GPS timeline plot reads one time per window, not one per detector: kept out of this test.
-    v.noise_gps_times = None
     template = v.plot(tmp_path / "report.html")
     tabs_ = template.main[1]
     names = list(tabs_._names)
@@ -296,3 +294,18 @@ def test_the_dashboard_keeps_every_tab_and_adds_glitches_and_timing(tmp_path):
         assert kept in names
     assert names[-2:] == ["Glitches", "Timing"]
     assert (tmp_path / "report.html").stat().st_size > 0
+
+
+def test_the_gps_timeline_takes_per_detector_times():
+    # Stream-mode real-noise records hold one GPS time per window and detector (windows, detectors).
+    from gravyflow.src.validate.plotting import generate_gps_distribution_plot
+
+    starts = 1_000_000.0 + np.concatenate([np.arange(400) * 0.25, 5000.0 + np.arange(400) * 0.25])
+    slid = SimpleNamespace(noise_gps_times=np.stack([starts, starts + 3.5], axis=1))
+    flat = SimpleNamespace(noise_gps_times=starts)
+    layout = generate_gps_distribution_plot([slid])
+    title = layout.children[0].title.text
+    assert "2 segments" in title and "detector 0 of 2" in title
+    # Detector 0's times are the timeline, as a one-detector record's are.
+    flat_title = generate_gps_distribution_plot([flat]).children[0].title.text
+    assert flat_title.startswith(title.split(";")[0].rstrip(")")) and "detector" not in flat_title

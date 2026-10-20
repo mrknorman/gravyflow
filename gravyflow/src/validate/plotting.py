@@ -82,6 +82,14 @@ def generate_gps_distribution_plot(
         p = figure(title="GPS Time Distribution (No Data)", width=width, height=height)
         return p
     
+    # Per-detector times (windows, detectors), as real-noise records hold them: the timeline is
+    # detector 0's; the others are the same data, time-slid, and are noted in the title.
+    detector_note = ""
+    if gps_times.ndim == 2:
+        if gps_times.shape[1] > 1:
+            detector_note = f"; detector 0 of {gps_times.shape[1]}, the others time-slid from it"
+        gps_times = gps_times[:, 0]
+
     # Sort GPS times
     gps_times = np.sort(gps_times)
     min_gps = np.min(gps_times)
@@ -175,7 +183,7 @@ def generate_gps_distribution_plot(
     
     # Main timeline plot
     p_main = figure(
-        title=f"Noise Sampling Timeline ({len(segments)} segments, {time_span/86400:.1f} days span)",
+        title=f"Noise Sampling Timeline ({len(segments)} segments, {time_span/86400:.1f} days span{detector_note})",
         x_axis_type="datetime",
         x_axis_label="Date (UTC)",
         y_axis_label="",

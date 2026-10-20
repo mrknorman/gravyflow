@@ -351,6 +351,9 @@ repository before it may need the changes below.
   placed again. The key (`placement_code`, field `syntax_sha256`) now hashes the code's syntax without comments,
   docstrings or layout: the whole template-bank module, and from the CBC generator only the definitions placement
   uses and what they use in turn. The bundled banks are unchanged apart from that key.
+- **The dashboard's noise timeline reads per-detector GPS times.** Real-noise records hold one GPS time per window
+  and detector (windows, detectors), and the timeline failed on them. It now draws detector 0's times and notes the
+  others, time-slid from it, in its title.
 - **The volume's and efficiency's bootstrap no longer undercovers at loose FARs.** Each replicate drew its own chance
   of a noise-only pass from its law at the replicate's threshold, independently of the found volume, losing their
   correlation (1σ coverage 0.60 at 1e-2 Hz). It now subtracts the estimator's chance, which the target fixes.
