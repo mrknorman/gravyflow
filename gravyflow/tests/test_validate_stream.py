@@ -206,3 +206,23 @@ def test_the_default_stride_is_a_whole_number_of_samples_and_no_longer_than_the_
     assert StreamGeometry.of(WindowSpec(1000.0, 1.5, 2.0, 0.25), 1.5).stride_samples == 1500
     with pytest.raises(ValueError, match="at most"):
         StreamGeometry.of(WindowSpec(1000.0, 1.5, 2.0, 0.25), 1.6)
+
+
+def test_the_stream_reader_keeps_the_stretches_in_float64():
+    from gravyflow.src.dataset.config import WindowSpec
+    from gravyflow.src.validate.slides import SlideStream
+    from gravyflow.src.validate.stream import Placement, StreamGeometry, StreamReader
+
+    strain = 1e-21 * (1.0 + 1e-9 * np.arange(2 * 4000, dtype=np.float64).reshape(2, 4000))
+
+    class Source:
+        def stream_strain(self, stream):
+            return strain, 0.0
+
+    geometry = StreamGeometry.of(WindowSpec(100.0, 1.0, 2.0, 0.25), None)
+    reader = StreamReader(Source(), [SlideStream((0.0, 40.0), 0, 10, 0, 4000)],
+                          Placement(np.array([0]), np.array([2000])), geometry, 500, None)
+    batch = next(reader(1))
+    on = batch[RV.ONSOURCE]
+    assert on.dtype == np.float64 and batch[RV.OFFSOURCE].dtype == np.float64
+    np.testing.assert_array_equal(on[0], strain[:, 1500:2500])

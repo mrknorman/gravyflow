@@ -417,7 +417,8 @@ class StreamReader:
     def _batch(items) -> Dict:
         RV = gf.ReturnVariables
         stretch, offsource, gps = (np.stack(values) for values in zip(*items))
-        return {RV.ONSOURCE: stretch.astype(np.float32), RV.OFFSOURCE: offsource.astype(np.float32),
+        # float64, as the stream was read: the dataset narrows it where it computes.
+        return {RV.ONSOURCE: stretch.astype(np.float64), RV.OFFSOURCE: offsource.astype(np.float64),
                 RV.START_GPS_TIME: gps}
 
 
