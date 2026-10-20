@@ -604,15 +604,25 @@ def _range_max(values, lo, hi):
 def _cluster_in_time(time, stat, cluster_seconds: float) -> np.ndarray:
     """
     The indices of the events that are the loudest within +-cluster_seconds
-    of themselves (of equal statistics, the earliest), in time order.
+    of themselves, in time order. Of equal statistics, the one nearest the
+    middle of its run (consecutive events, in time order, of that statistic;
+    of a run's two middles, the earlier), then the earliest: a statistic
+    constant over a stretch (a window score that holds while a window holds
+    its peak) stands at the stretch's centre, not its start. Distinct
+    statistics cluster as by loudness alone.
     """
     if not len(time):
         return np.zeros(0, dtype=np.int64)
     order = np.argsort(time, kind="stable")
     t, s = time[order], stat[order]
-    # A strict order: louder first, then earlier.
+    position = np.arange(len(t))
+    start = np.flatnonzero(np.r_[True, s[1:] != s[:-1]])
+    run = np.cumsum(np.r_[True, s[1:] != s[:-1]]) - 1
+    end = np.r_[start[1:], len(t)] - 1
+    off_middle = np.abs(2 * position - start[run] - end[run])
+    # A strict order: louder first, then nearer its run's middle, then earlier.
     rank = np.empty(len(t), dtype=np.int64)
-    rank[np.lexsort((-np.arange(len(t)), s))] = np.arange(len(t))
+    rank[np.lexsort((-position, -off_middle, s))] = position
     lo = np.searchsorted(t, t - cluster_seconds, side="left")
     hi = np.searchsorted(t, t + cluster_seconds, side="right")
     return order[rank == _range_max(rank, lo, hi)]

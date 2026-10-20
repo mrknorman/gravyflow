@@ -144,8 +144,10 @@ class StreamGeometry:
 def cluster(times, scores, cluster_seconds: float) -> np.ndarray:
     """
     The scores that are triggers: each the loudest within ``cluster_seconds`` of
-    itself (ties: the earliest), in time order, as the matched filter clusters
-    (`detection.stream`). Indices into ``times``.
+    itself (ties: the middle of a run of equal scores, `detection.stream`), in time
+    order, as the matched filter clusters. Indices into ``times``. A run of equal
+    scores is read whole only where the scores given hold it whole: local scoring
+    reads every window within ``found_window_seconds + cluster_seconds`` of a merger.
     """
     return _cluster_in_time(np.asarray(times, dtype=np.float64), np.asarray(scores, dtype=np.float64),
                             float(cluster_seconds))
@@ -161,7 +163,8 @@ def stream_triggers(times, scores, cluster_seconds: float, found_window_seconds:
 def loudest_within(trigger_times, trigger_stats, centres, half_width: float) -> Tuple[np.ndarray, np.ndarray]:
     """
     For each of ``centres``, the loudest trigger within ``half_width`` of it (both
-    ends in): its statistic and time; ``-inf`` and NaN where none lies there.
+    ends in; of equal statistics, the middle one, the earlier of two): its statistic
+    and time; ``-inf`` and NaN where none lies there.
     """
     times = np.asarray(trigger_times, dtype=np.float64)
     stats = np.asarray(trigger_stats, dtype=np.float64)
@@ -172,7 +175,8 @@ def loudest_within(trigger_times, trigger_stats, centres, half_width: float) -> 
     hi = np.searchsorted(times, centres + half_width, side="right")
     best, when = np.full(centres.size, -np.inf), np.full(centres.size, np.nan)
     for k in np.flatnonzero(hi > lo):
-        j = lo[k] + int(np.argmax(stats[lo[k]:hi[k]]))
+        tied = np.flatnonzero(stats[lo[k]:hi[k]] == stats[lo[k]:hi[k]].max())
+        j = lo[k] + int(tied[(tied.size - 1) // 2])
         best[k], when[k] = stats[j], times[j]
     return best, when
 

@@ -149,3 +149,34 @@ def test_the_stride_is_the_models_own_when_given(dataset_args):
     bank.generate_stream_noise()
     assert bank.noise_streams["stride_seconds"] == 0.125
     assert bank.background().livetime_seconds == pytest.approx(39 * 0.125 + 1.0)
+
+
+def _cluster_earliest_of_ties(time, stat, cluster_seconds):
+    """The clustering's earlier tie rule (of equal statistics, the earliest), for comparison."""
+    from gravyflow.src.detection.stream import _range_max
+    order = np.argsort(time, kind="stable")
+    t, s = time[order], stat[order]
+    rank = np.empty(len(t), dtype=np.int64)
+    rank[np.lexsort((-np.arange(len(t)), s))] = np.arange(len(t))
+    lo = np.searchsorted(t, t - cluster_seconds, side="left")
+    hi = np.searchsorted(t, t + cluster_seconds, side="right")
+    return order[rank == _range_max(rank, lo, hi)]
+
+
+def test_a_run_of_equal_scores_triggers_at_its_middle():
+    # A score that holds while every window holds the peak (a window's largest SNR) is one
+    # run: its trigger stands at the run's middle (the earlier of two middles), not its start.
+    times = np.arange(12) * 0.25
+    for run, middle in (((3, 4, 5), 4), ((3, 4, 5, 6), 4), ((5,), 5)):
+        scores = np.zeros(12)
+        scores[list(run)] = 7.0
+        keep = cluster(times, scores, 1.0)
+        assert times[keep][scores[keep] == 7.0].tolist() == [times[middle]]
+        stat, when = loudest_within(times[list(run)], scores[list(run)], [times[run[0]] + 0.3], 1.0)
+        assert stat[0] == 7.0 and when[0] == times[middle]
+    # Distinct statistics: exactly the matched filter's clustering as it was.
+    rng = np.random.default_rng(5)
+    for _ in range(20):
+        t = np.sort(rng.uniform(0, 100, 400))
+        s = rng.permutation(400).astype(np.float64)
+        np.testing.assert_array_equal(cluster(t, s, 1.0), _cluster_earliest_of_ties(t, s, 1.0))
