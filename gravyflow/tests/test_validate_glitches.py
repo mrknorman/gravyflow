@@ -289,10 +289,10 @@ def test_the_dashboard_keeps_every_tab_and_adds_glitches_and_timing(tmp_path):
     template = v.plot(tmp_path / "report.html")
     tabs_ = template.main[1]
     names = list(tabs_._names)
-    # Every tab the dashboard had is kept; Glitches and Timing are added after them.
-    for kept in ("Efficiency", "ROC Curves", "FAR Curves", "Parameter Space"):
+    # Every tab the dashboard had is kept; Glitches and Timing are added, Timing right after Glitches.
+    for kept in ("Summary", "Efficiency", "ROC and false alarms", "Parameter Space"):
         assert kept in names
-    assert names[-2:] == ["Glitches", "Timing"]
+    assert names[names.index("Glitches") + 1] == "Timing"
     assert (tmp_path / "report.html").stat().st_size > 0
 
 
