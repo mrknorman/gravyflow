@@ -24,10 +24,14 @@ and the volume found by signal is
 
 V is the estimand: without the subtraction the found volume would grow with the
 reach's cube however far the detector sees. At tight thresholds ``c`` is
-negligible; where what noise alone finds exceeds a stated fraction of what is
-found, the result rests on the subtraction and is not quoted (`quotable`); nor is it
-where fewer than ten independent background events lie at or above the threshold
-(`metrics.MIN_BACKGROUND_EVENTS`, the standard's rule for every output).
+negligible. A result is not quoted (`quotable`) where fewer than ten independent
+background events lie at or above the threshold (`metrics.MIN_BACKGROUND_EVENTS`, the
+standard's rule for every output). Where what noise alone finds exceeds a stated
+fraction of what is found, the result rests on the subtraction: it is quoted with a
+warning (`SensitiveVolumeCurve.chance_dominated`), never refused. At a target's
+threshold ``c`` is fixed by the target, so the found volume is V's own estimate up to
+known constants, and refusing on it would select on V's noise: the quoted V would run
+high near the cut.
 
 Every result states its reach: ``R`` (chirp distance), the reach SNR it was drawn
 for, and the range of physical reaches its masses span. The volume is Euclidean
@@ -63,6 +67,7 @@ Units: distances in Mpc, volumes in Gpc^3 (Euclidean: no cosmology), FAR in Hz;
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
@@ -249,7 +254,9 @@ class VolumeQuote:
     The number a comparison quotes at one target FAR: the sensitive volume within the
     reach (Gpc^3, Euclidean) with its joint interval at each of ``sigmas``, and the
     reach it is within: ``reach_mpc`` (chirp distance), spanning ``reach_range_mpc``
-    of physical distance over the population's masses.
+    of physical distance over the population's masses. ``chance_dominated``: noise
+    alone finds more than the curve's ``chance_fraction`` of what is found there, so
+    the volume rests on the chance's subtraction (a warning, shown beside the number).
     """
     far_hz: float
     reach_mpc: float
@@ -258,6 +265,7 @@ class VolumeQuote:
     lower_gpc3: Tuple[float, ...]
     upper_gpc3: Tuple[float, ...]
     sigmas: Tuple[float, ...]
+    chance_dominated: bool = False
 
 
 @dataclass(frozen=True)
@@ -273,10 +281,10 @@ class SensitiveVolumeCurve:
     of ``population_volume_gpc3``), V within the reach (the chance subtracted), and
     each interval's bounds; ``injection_error_gpc3`` is the found volume's Monte Carlo
     standard error. ``chance_dominated`` marks the targets where noise alone finds
-    more than ``chance_fraction`` of what is found; ``background_events`` counts the
-    independent background events at or above each threshold, and
-    ``enough_background`` marks the targets with at least `MIN_BACKGROUND_EVENTS`;
-    ``quotable`` is the one rule of what `quote` gives.
+    more than ``chance_fraction`` of what is found (a warning, never a refusal: module
+    docstring); ``background_events`` counts the independent background events at or
+    above each threshold, and ``enough_background`` marks the targets with at least
+    `MIN_BACKGROUND_EVENTS`; ``quotable`` is the one rule of what `quote` gives.
     """
     far_hz: np.ndarray
     threshold: np.ndarray
@@ -317,7 +325,10 @@ class SensitiveVolumeCurve:
 
     @property
     def chance_dominated(self) -> np.ndarray:
-        """The resolved targets where noise alone finds more than ``chance_fraction`` of what is found."""
+        """
+        The resolved targets where noise alone finds more than ``chance_fraction`` of what
+        is found: a warning, never a refusal (module docstring).
+        """
         with np.errstate(invalid="ignore"):
             return self.resolved & (self.chance_gpc3 > self.chance_fraction * self.found_gpc3)
 
@@ -328,16 +339,21 @@ class SensitiveVolumeCurve:
 
     @property
     def quotable(self) -> np.ndarray:
-        """The targets `quote` gives: resolved, with enough background, and not chance-dominated."""
-        return self.enough_background & ~self.chance_dominated
+        """
+        The targets `quote` gives: resolved, with enough background. It reads the
+        background alone, never the injections' scores, so it does not select on V's
+        noise (module docstring).
+        """
+        return self.enough_background
 
     def quote(self, far_hz: float) -> VolumeQuote:
         """
         V within the reach at the target ``far_hz``, with its joint interval at each
         level and the reach: the number a comparison quotes. Refuses, by name, a target
-        the background cannot resolve, one with fewer than `MIN_BACKGROUND_EVENTS`
-        independent background events at or above its threshold, and one
-        chance-dominated (V rests mostly on the subtraction of what noise alone finds).
+        the background cannot resolve, and one with fewer than `MIN_BACKGROUND_EVENTS`
+        independent background events at or above its threshold. Warns at a
+        chance-dominated one (V rests mostly on the subtraction of what noise alone
+        finds), and says so in the quote (`VolumeQuote.chance_dominated`).
         """
         matches = np.flatnonzero(np.isclose(self.far_hz, far_hz, rtol=1e-9, atol=0))
         if matches.size == 0:
@@ -346,14 +362,18 @@ class SensitiveVolumeCurve:
         if not self.quotable[i]:
             why = ("the background cannot resolve it" if not self.resolved[i] else
                    f"{int(self.background_events[i])} independent background events at or above its threshold, "
-                   f"fewer than {MIN_BACKGROUND_EVENTS}" if not self.enough_background[i] else
-                   f"noise alone finds more than {self.chance_fraction:.0%} of what is found there")
+                   f"fewer than {MIN_BACKGROUND_EVENTS}")
             raise ValueError(f"No sensitive volume to quote at {far_hz:g} Hz: {why}.")
+        dominated = bool(self.chance_dominated[i])
+        if dominated:
+            warnings.warn(f"At {far_hz:g} Hz noise alone finds more than {self.chance_fraction:.0%} of what is found: "
+                          "the sensitive volume rests on the chance's subtraction.", stacklevel=2)
         return VolumeQuote(
             far_hz=float(self.far_hz[i]), reach_mpc=self.reach_mpc, reach_range_mpc=self.reach_range_mpc,
             volume_within_reach_gpc3=float(self.volume_within_reach_gpc3[i]),
             lower_gpc3=tuple(float(v) for v in self.joint_lower_gpc3[:, i]),
-            upper_gpc3=tuple(float(v) for v in self.joint_upper_gpc3[:, i]), sigmas=self.sigmas)
+            upper_gpc3=tuple(float(v) for v in self.joint_upper_gpc3[:, i]), sigmas=self.sigmas,
+            chance_dominated=dominated)
 
 
 def _volume_range(injections: InjectionVolumes, background: Background, high: float, low: float) -> Tuple[float, float]:

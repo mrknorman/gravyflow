@@ -230,7 +230,8 @@ validates as it trains: they need the `viz` extra.
   reach against false-alarm rate (Euclidean, detector-frame masses; on injections uniform in chirp distance out to
   the chirp reach, weighted by chirp mass, with injection, background and joint intervals), every interval at 1σ
   and 2σ and the chance of a noise-only pass subtracted, each quoted only with at least ten independent background
-  events at or above its threshold, ROC and the dashboard.
+  events at or above its threshold (a volume where noise alone finds more than a tenth of what is found is quoted
+  with a warning), ROC and the dashboard.
 - `ValidationConfig`: the settings of a validation.
 
 ## Plotting (the `viz` extra)

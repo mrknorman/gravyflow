@@ -55,7 +55,8 @@ class ValidationConfig:
     # further check is made. The volume is Euclidean and the masses are in the detector
     # frame (as in MLGWSC-1's evaluate.py). The chance of a noise-only pass is
     # subtracted; a target where noise alone finds more than volume_chance_fraction of
-    # what is found is not quoted. The joint interval bootstraps this many replicates of
+    # what is found is quoted with a warning, never refused (a refusal on the found
+    # volume would select on the volume's own noise). The joint interval bootstraps this many replicates of
     # the injections, the background and the chance.
     volume_num_injections: Optional[int] = None
     volume_reach_mpc: Optional[float] = None

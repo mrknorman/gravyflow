@@ -612,8 +612,9 @@ def generate_sensitive_volume_plot(
     The first two figures: each curve with its joint interval at 1 sigma and 2
     sigma (the darker band the 1 sigma), the FAR's 1 sigma interval its threshold
     achieves (horizontal bars), and the volume noise alone finds (dashed, subtracted
-    from V). The points `SensitiveVolumeCurve.quote` will not quote (noise alone
-    finds more than its stated fraction) are ringed. The legend states each curve's
+    from V). The points where noise alone finds more than the curve's stated
+    fraction of what is found are ringed: quoted with a warning, resting on the
+    subtraction; those with too few background events, which are not quoted, squared. The legend states each curve's
     reach: its chirp reach, the reach SNR, and the title the range of physical
     reaches over its masses. Volumes are Euclidean, of populations whose masses are
     in the detector frame, as the axes say.
@@ -693,7 +694,7 @@ def generate_sensitive_volume_plot(
             if marked.any():
                 p.scatter(x=curve.far_hz[ok][marked] * SECONDS_PER_MONTH, y=convert(within[ok][marked]),
                           size=14, marker="circle", fill_alpha=0, line_color=color, line_width=2,
-                          legend_label=f"{name} (not quoted: noise alone > {curve.chance_fraction:.0%} of found)")
+                          legend_label=f"{name} (noise alone > {curve.chance_fraction:.0%} of found: rests on the subtraction)")
             thin = ~curve.enough_background[ok]
             if thin.any():
                 p.scatter(x=curve.far_hz[ok][thin] * SECONDS_PER_MONTH, y=convert(within[ok][thin]),

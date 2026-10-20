@@ -572,9 +572,9 @@ def test_the_curve_reads_volume_at_the_backgrounds_threshold_with_the_chance_sub
         assert (curve.far_lower_hz[1, i] <= curve.far_lower_hz[0, i] <= curve.far_upper_hz[0, i]
                 <= curve.far_upper_hz[1, i])
         assert value == pytest.approx(realistic_truth(curve.far_hz[i]), rel=0.1)
-    # At 0.1 Hz a tenth of the noise windows pass: most of what is found, noise found.
+    # At 0.1 Hz a tenth of the noise windows pass: most of what is found, noise found (quoted, warned).
     assert curve.chance_dominated.tolist() == [True, False, False, False]
-    assert curve.quotable.tolist() == [False, True, True, False]
+    assert curve.quotable.tolist() == [True, True, True, False]
     assert curve.chance_fraction == 0.1
     assert curve.volume_within_reach_gpc3[1] > curve.volume_within_reach_gpc3[2]
     np.testing.assert_array_equal(curve.distance_within_reach_mpc, sensitive_distance(curve.volume_within_reach_gpc3))
@@ -594,12 +594,14 @@ def test_quote_gives_the_volume_within_the_reach_at_both_levels_and_refuses_what
     curve = sensitive_volume_curve(detected(rng, 20_000, offset_scores(-1.0)), background,
                                    [1e-1, 1e-3, 1e-5], rng, num_bootstrap=50)
     assert curve.chance_dominated[0] and not curve.resolved[2]
-    assert curve.quotable.tolist() == [False, True, False]
+    assert curve.quotable.tolist() == [True, True, False]
     quote = curve.quote(1e-3)
     assert quote == VolumeQuote(1e-3, REACH_MPC, (REACH_MPC, REACH_MPC), curve.volume_within_reach_gpc3[1],
                                 tuple(curve.joint_lower_gpc3[:, 1]), tuple(curve.joint_upper_gpc3[:, 1]), (1.0, 2.0))
-    with pytest.raises(ValueError, match="noise alone finds more than 10%"):
-        curve.quote(1e-1)
+    assert not quote.chance_dominated
+    with pytest.warns(UserWarning, match="noise alone finds more than 10%"):
+        dominated = curve.quote(1e-1)
+    assert dominated.chance_dominated and dominated.volume_within_reach_gpc3 == curve.volume_within_reach_gpc3[0]
     with pytest.raises(ValueError, match="cannot resolve"):
         curve.quote(1e-5)
     with pytest.raises(ValueError, match="not one of the curve's target FARs"):
@@ -607,6 +609,28 @@ def test_quote_gives_the_volume_within_the_reach_at_both_levels_and_refuses_what
 
 
 # ------------------------------------------- the correction round's witnesses
+
+def test_quotability_reads_the_background_alone_never_the_injections_scores():
+    # At a target's threshold the chance c is fixed by the target, so the found volume is V's own
+    # estimate up to known constants: a quoting rule that read it would select on V's noise (on
+    # 16 slides, V quoted at a 10% chance cut ran 12-16% high). Two detectors scoring the same
+    # sources on the same background, one of them chance-dominated at 0.01 Hz and the other not,
+    # are quotable at the same targets; the chance-dominated volume is quoted with a warning.
+    rng = np.random.default_rng(63)
+    background = Background.independent_windows(rng.normal(size=20_000), 1.0)
+    snrs, distances = population(rng, 20_000)
+    noise = rng.normal(size=snrs.size)
+    fars = [1e-2, 1e-3]
+    curves = [sensitive_volume_curve(InjectionVolumes(snrs - offset + noise, REACH_MPC, distances), background, fars,
+                                     np.random.default_rng(65), num_bootstrap=20) for offset in (-1.0, 4.0)]
+    strong, weak = curves
+    assert not strong.chance_dominated[0] and weak.chance_dominated[0]
+    np.testing.assert_array_equal(strong.quotable, weak.quotable)
+    assert weak.quotable.all()
+    with pytest.warns(UserWarning, match="rests on the chance's subtraction"):
+        quote = weak.quote(1e-2)
+    assert quote.chance_dominated and quote.volume_within_reach_gpc3 == weak.volume_within_reach_gpc3[0]
+
 
 class _RecordedVolumes(InjectionVolumes):
     """InjectionVolumes recording the chance each bootstrap replicate (a volume with a multiplicity) subtracts."""
