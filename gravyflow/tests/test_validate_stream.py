@@ -66,7 +66,7 @@ def test_the_validator_streams_by_default(validated, stream_config, tmp_path):
     times = np.arange(64) * 0.25
     assert background.num_triggers == cluster(times, v.far_scores, 1.0).size
     # Each injection: its found statistic (a trigger's score, or -inf), its trigger's time from
-    # the merger within the found window, its merger's time and the records of the standard.
+    # the merger within the found window, its merger's time and its source's records.
     data = v.efficiency_data
     assert {"scores", "trigger_offsets", "merger_times", "snrs", "hpeak", "hrss", "mass1", "mass2",
             "in_band_durations", "whitened_peaks", "bns_ranges"} <= set(data)

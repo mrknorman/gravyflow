@@ -1,8 +1,8 @@
 """
 The validator's intervals cover at their stated levels: computed exactly, by
 summing the count's distribution over the counts whose interval holds the
-truth, with no Monte Carlo. Both levels of the standard (1 and 2 sigma), and
-the validator's default.
+truth, with no Monte Carlo. Both levels the validator reports (1 and 2 sigma),
+and its default.
 """
 
 import numpy as np

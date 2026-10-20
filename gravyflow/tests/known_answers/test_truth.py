@@ -125,7 +125,7 @@ def test_the_step_detector_s_volume_is_closed_form():
 
 @pytest.mark.parametrize("common_reach", [None, 600.0])
 def test_the_volume_within_reach_matches_an_injection_campaign(common_reach):
-    # Brute force: draw the campaign as the standard draws it (uniform in volume out to
+    # Brute force: draw the campaign as the validator draws it (uniform in volume out to
     # each mass's reach, weighted by its sphere), and count what is found.
     d, rng, n = truth.GaussianBank.single(), np.random.default_rng(13), 400_000
     t = 5.0

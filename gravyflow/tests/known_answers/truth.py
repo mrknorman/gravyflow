@@ -30,7 +30,7 @@ from typing import Tuple
 import numpy as np
 from scipy import integrate, optimize, special, stats
 
-#: The standard's two interval levels: 1 sigma and 2 sigma, two-sided.
+#: The validator's two interval levels: 1 sigma and 2 sigma, two-sided.
 ONE_SIGMA = float(special.erf(1.0 / np.sqrt(2.0)))   # 0.682689...
 TWO_SIGMA = float(special.erf(2.0 / np.sqrt(2.0)))   # 0.954499...
 LEVELS = (ONE_SIGMA, TWO_SIGMA)
@@ -212,7 +212,7 @@ class Population:
     a source of mass ``m`` at distance ``d`` (Mpc) with orientation factor ``g``
     (uniform on [0, 1]; 1 is optimal sky and orientation) has optimal SNR
     ``amplitudes[m] g / d``. Its reach is where the best-case source (``g = 1``)
-    has SNR ``reach_snr``: ``R_m = amplitudes[m] / reach_snr`` (the standard's
+    has SNR ``reach_snr``: ``R_m = amplitudes[m] / reach_snr`` (the validator's
     per-mass reach; SNR about 2).
     """
     amplitudes: Tuple[float, ...]

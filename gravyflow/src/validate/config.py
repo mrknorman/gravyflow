@@ -9,7 +9,7 @@ import gravyflow as gf
 
 from .provenance import StaleCheckpointError
 
-#: The validator's modes (`ValidationConfig.mode`): the standard's, then the one kept for compatibility.
+#: The validator's modes (`ValidationConfig.mode`): the default, then the one kept for compatibility.
 MODES = ("stream", "window")
 #: Stream mode's default trigger clustering: the loudest score within this many seconds of itself.
 STREAM_CLUSTER_SECONDS = 1.0
@@ -89,7 +89,7 @@ class ValidationConfig:
     # one window, so adjacent windows join).
     cluster_seconds: Optional[float] = None
 
-    # "stream" (the standard): the model slides along continuous raw strain at
+    # "stream" (the default): the model slides along continuous raw strain at
     # stride_seconds (by default a quarter of its window), its scores clustered into
     # triggers, and an injection is found by the loudest trigger within
     # found_window_seconds of its merger (`stream`). The background is time slides of
@@ -141,7 +141,7 @@ class ValidationConfig:
 
     @property
     def stream(self) -> bool:
-        """Whether the run is in stream mode, the standard's."""
+        """Whether the run is in stream mode, the default."""
         return self.mode == "stream"
 
     def stream_stride_seconds(self, window_seconds: float) -> float:

@@ -176,7 +176,7 @@ def get_glitch_catalogue(
             veto segment (confident or marginal), so no real event is ever a glitch.
         exclude_hardware_injections: Drop entries whose extent overlaps a hardware-
             injection gap (``gwosc_data.hardware_injection_gaps``), whatever their
-            class, and log how many (the owner's ruling: no hardware injections).
+            class, and log how many, so no hardware injection is served as a glitch.
             The noise vetoes keep them, so noise is vetoed around every entry.
 
     Returns:

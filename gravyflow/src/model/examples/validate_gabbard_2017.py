@@ -37,7 +37,7 @@ def parse_args(argv=None):
     parser.add_argument("--real-events", action="store_true",
                         help="Also score real GW events (needs network access)")
     parser.add_argument("--mode", choices=["stream", "window"], default="stream",
-                        help="stream (the standard: the model slid along continuous strain) or window "
+                        help="stream (the default: the model slid along continuous strain) or window "
                              "(each example one window; kept for compatibility and reproduction)")
     return parser.parse_args(argv)
 

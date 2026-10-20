@@ -170,7 +170,7 @@ def test_every_read_is_exact_at_its_edges(cache):
 
 
 # ---------------------------------------------------------------------------
-# Contradictions refuse by name (B19); exclusions plan around them
+# Contradictions refuse by name; exclusions plan around them
 # ---------------------------------------------------------------------------
 
 def test_an_outage_refuses_by_name_and_is_never_zero_filled(cache, quick_retries):
@@ -267,7 +267,7 @@ def test_the_named_exclusion_plans_around_the_contradiction(cache):
 
 
 # ---------------------------------------------------------------------------
-# Nothing truncated on a read error (B86); old caches never read (owner, Q8)
+# Nothing truncated on a read error; caches of an older format are never read
 # ---------------------------------------------------------------------------
 
 def test_a_read_error_refuses_by_name_and_changes_no_byte(cache):
@@ -337,7 +337,7 @@ def test_naming_old_caches_never_fails_a_read(cache, monkeypatch, trouble):
 
 
 # ---------------------------------------------------------------------------
-# The memory cap (owner, Q5)
+# The memory cap
 # ---------------------------------------------------------------------------
 
 def test_the_memory_cap_holds_below_the_working_set(cache, monkeypatch):

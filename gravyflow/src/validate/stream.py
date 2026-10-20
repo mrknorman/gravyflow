@@ -1,15 +1,15 @@
 """
 Stream mode: every test runs the model over continuous strain, as a search does.
 
-The validator's default (`ValidationConfig.mode`), the standard's "continuous
-streams". Window mode, which scores each example as one window, is kept for
+The validator's default (`ValidationConfig.mode`): continuous streams, as a
+search runs. Window mode, which scores each example as one window, is kept for
 backward compatibility and to reproduce earlier results.
 
 - **Streams.** The model is slid along continuous raw strain at its own stride
   (``stride_seconds``; a quarter of its window if unstated, recorded on the
   result). Each window is the model's own geometry, its offsource the data just
   before its onsource, and is conditioned by the model's own dataset code
-  (``Dataset.model_inputs``: whitening included), so the standard supplies raw
+  (``Dataset.model_inputs``: whitening included), so the validator supplies raw
   strain and the model does its own conditioning. A window's score stands at its
   onsource's centre (`StreamGeometry.window_time`).
 - **Triggers.** A score is a trigger when it is the loudest within

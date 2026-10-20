@@ -168,7 +168,7 @@ class WindowSpec:
         """
         ``START_GPS_TIME``: the GPS time of the first sample of the onsource window
         returned after cropping, from the GPS time of the padded window's first sample
-        (the owner's ruling, every path: real noise and transients, obtainer and
+        (on every path: real noise and transients, obtainer and
         Dataset). Float64, whatever the global precision.
         """
         from gravyflow.src.utils.gps import as_gps_times

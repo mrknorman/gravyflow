@@ -202,7 +202,7 @@ SEEN = -1
 
 
 class TestStartGpsTime:
-    """START_GPS_TIME is the first returned onsource sample's time (the owner's ruling)."""
+    """START_GPS_TIME is the GPS time of the first onsource sample returned, after cropping."""
 
     @pytest.mark.parametrize("ifos", IFO_SETS, ids=lambda ifos: "".join(i.name for i in ifos))
     def test_obtainer_labels_the_first_cropped_sample(self, ifos):

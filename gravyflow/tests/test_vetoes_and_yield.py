@@ -437,7 +437,7 @@ class TestHardwareInjections:
     def test_glitches_in_injection_gaps_are_dropped_from_every_class_and_counted(
             self, offline_public_sources, monkeypatch, caplog):
         """
-        The owner's ruling: Gravity Spy entries inside any NO_CBC, NO_BURST, NO_STOCH
+        Gravity Spy entries inside any NO_CBC, NO_BURST, NO_STOCH
         or NO_DETCHAR hardware-injection gap are dropped from every class, and
         counted. The noise vetoes still veto them.
         """
