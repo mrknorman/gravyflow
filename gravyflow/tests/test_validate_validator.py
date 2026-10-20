@@ -62,7 +62,7 @@ def test_validator_runs_offline_on_synthetic_noise(validated, tmp_path):
     assert set(v.efficiency_data) == {"snrs", "scores", "mass1", "mass2", "central_times", "hpeak", "hrss"}
     assert all(a.shape == (64,) for a in v.efficiency_data.values())
     assert set(v.volume_data) == {"scores", "distances", "chirp_distances", "snrs", "mass1", "mass2",
-                                  "right_ascension", "declination", "reach_mpc"}
+                                  "right_ascension", "declination", "spin1z", "spin2z", "reach_mpc"}
     assert path.exists()
     report = tmp_path / "report.html"
     v.plot(report)

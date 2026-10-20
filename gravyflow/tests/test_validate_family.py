@@ -274,12 +274,26 @@ def test_the_validators_family_follows_from_its_record(validated):
     calibration = v.far_calibration(fars)
     assert calibration is not None and calibration.held_out_livetime_seconds < background.livetime_seconds
     binned = v.binned_volumes(fars)
-    assert set(binned) == {"chirp mass (M☉)", "mass ratio"}  # the volume set records no spins yet
+    # The volume set records each body's aligned spin, the z component of its spin vector, so it bins by spin too.
+    assert set(binned) == {"chirp mass (M☉)", "mass ratio", "effective spin"}
     assert all(b.total.sum() == 32 for b in binned.values())
+    spins = v.volume_data
+    assert spins["spin1z"].shape == spins["spin2z"].shape == (32,)
+    assert np.all(np.abs(spins["spin1z"]) <= 1) and np.all(np.abs(spins["spin2z"]) <= 1)
     # The matched filter's ratio is on the same injections: a model against itself is exactly 1.
     ratio = v.matched_filter_ratio(v, fars)
     assert np.all((ratio.ratio == 1.0) | np.isnan(ratio.ratio))
     assert v.real_event_summary() is None  # no real events scored
+
+
+def test_a_vector_label_is_recorded_as_its_component():
+    import gravyflow as gf
+    from gravyflow.src.validate.bank import _VOLUME_LABELS, label_column
+
+    spin = np.array([[[0.1, 0.2, 0.3]], [[0.4, 0.5, -0.6]]])  # (B, G, 3)
+    y = {gf.WaveformParameters.SPIN_1_IN.name: spin, gf.WaveformParameters.SPIN_2_IN.name: spin[:, 0]}
+    assert label_column(y, "spin1z", _VOLUME_LABELS["spin1z"], 2).tolist() == [0.3, -0.6]
+    assert label_column(y, "spin2z", _VOLUME_LABELS["spin2z"], 2).tolist() == [0.3, -0.6]
 
 
 def _plots(layout, kind):

@@ -67,7 +67,20 @@ _VOLUME_LABELS = {
     "mass2": gf.WaveformParameters.MASS_2_MSUN,
     "right_ascension": gf.WaveformParameters.RIGHT_ASCENSION_RADIANS,
     "declination": gf.WaveformParameters.DECLINATION_RADIANS,
+    # Each body's aligned spin: the z component of its spin vector (`_LABEL_COMPONENTS`).
+    "spin1z": gf.WaveformParameters.SPIN_1_IN,
+    "spin2z": gf.WaveformParameters.SPIN_2_IN,
 }
+#: Labels recorded as one component of a vector parameter: its index on the last axis.
+_LABEL_COMPONENTS = {"spin1z": 2, "spin2z": 2}
+
+
+def label_column(y, key: str, label, n: int) -> np.ndarray:
+    """One value per example of label ``key`` (`per_example`), its component taken where it is a vector's."""
+    value = y[label.name]
+    if key in _LABEL_COMPONENTS:
+        value = np.asarray(value, dtype=np.float64)[..., _LABEL_COMPONENTS[key]]
+    return per_example(value, n, label.name)
 
 
 def require_logit_model(model) -> None:
@@ -466,7 +479,7 @@ class ValidationBank:
             batch_scores = self._score(x)
             columns["scores"].append(batch_scores)
             for key, label in _VOLUME_LABELS.items():
-                columns[key].append(per_example(y[label.name], batch_scores.size, label.name))
+                columns[key].append(label_column(y, key, label, batch_scores.size))
         volume = {k: np.concatenate(v)[:n] for k, v in columns.items()}
         # The dataset reads the targets in order, batch after batch. The chirp-distance label
         # is the target by construction, so this proves the order; the physical distance is
@@ -788,7 +801,7 @@ class ValidationBank:
                 starts = np.array([streams[i].stretch[0] for i in placement.stream[b * batch:b * batch + rows]])
                 columns["merger_times"].append(starts + samples / geometry.sample_rate_hertz)
             for key, label in {**labels, **records}.items():
-                columns[key].append(per_example(y[label.name], batch, label.name)[:rows])
+                columns[key].append(label_column(y, key, label, batch)[:rows])
             if not white:
                 columns["bns_ranges"].append(np.asarray(y[RV.BNS_RANGE_MPC.name], dtype=np.float64)[:rows])
             if worst is not None:
