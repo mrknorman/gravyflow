@@ -22,9 +22,11 @@ the fingerprint either.
 
 The one mode is ``AS_PUBLISHED``: the model run as its authors released it, its
 statistic reported as published, with its signal column and direction declared. It
-is never rescored as gravyflow scores its own models (the logit of column 1), and it
-never passes through the Keras validator. A variant that changes the published
-model (a softmax removed) is another mode, with its own name.
+is never rescored as gravyflow scores its own models (the logit of column 1): the
+validator (``Validator.validate`` with an ``ExternalRunner``) streams it on raw
+strain at its own stride and ranks its windows by the published statistic, in the
+card's direction. A variant that changes the published model (a softmax removed)
+is another mode, with its own name.
 """
 
 from __future__ import annotations
@@ -81,6 +83,10 @@ class InputContract:
             PSD, or for a filter's edges), in seconds.
         band_pass_hertz: The pass band it filters to, (low, high), or None.
         normalisation: How it scales a whitened window, or ``"none"``.
+        segment_seconds: The shortest segment, centred on a window, in which its search
+            scores that window (its slicing and edges included), or None: the window
+            with its context either side. The validator scores each injection on a
+            segment this long, plus the found test's reach either side.
     """
 
     sample_rate_hertz: float
@@ -91,12 +97,15 @@ class InputContract:
     context_seconds: float = 0.0
     band_pass_hertz: Optional[Tuple[float, float]] = None
     normalisation: str = "none"
+    segment_seconds: Optional[float] = None
 
     def __post_init__(self):
         object.__setattr__(self, "detectors", tuple(self.detectors))
         for field in ("sample_rate_hertz", "window_seconds", "stride_seconds"):
             _number(self, field, "An input contract", above=0)
         _number(self, "context_seconds", "An input contract", at_least=0)
+        if self.segment_seconds is not None:
+            _number(self, "segment_seconds", "An input contract", above=0)
         if not self.detectors or len(set(self.detectors)) != len(self.detectors) \
                 or not all(isinstance(d, str) and d for d in self.detectors):
             raise ValueError(f"An input contract's detectors are distinct names, got {self.detectors}.")

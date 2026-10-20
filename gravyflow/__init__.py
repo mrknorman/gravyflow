@@ -187,6 +187,7 @@ _MODULES = {
     "AdapterEnvironment": "gravyflow.src.external",
     "ExternalRunner": "gravyflow.src.external",
     "ExternalResult": "gravyflow.src.external",
+    "WindowScores": "gravyflow.src.external",
     "ExternalRunFailed": "gravyflow.src.external",
     "ExternalDeadlineExpired": "gravyflow.src.external",
     "AdapterMissing": "gravyflow.src.external",

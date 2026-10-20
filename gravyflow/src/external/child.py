@@ -3,10 +3,11 @@ The process the runner starts in an adapter's environment, as
 ``python -I -B child.py <directory>``.
 
 It reads the request the runner left in ``directory`` (``REQUEST``, and the
-segment's strain, ``STRAIN``), finds the adapter by its entry point, checks its
-version against the card's, prepares it with the local paths of its weights, runs
-the one action asked for on the segment, and leaves the result (``TRIGGERS`` or
-``INPUT``) and its outcome (``OUTCOME``) in the directory.
+segment's strain, ``STRAIN``, or for ``SCORES`` the strains of several segments,
+``STRAINS``), finds the adapter by its entry point, checks its version against the
+card's, prepares it with the local paths of its weights, runs the one action asked
+for, and leaves the result (``TRIGGERS``, ``INPUT`` or ``WINDOW_SCORES``) and its
+outcome (``OUTCOME``) in the directory.
 
 An adapter's environment holds its own framework and not gravyflow, so this file
 imports only the standard library and numpy, loads ``protocol.py`` beside it by
@@ -30,9 +31,14 @@ ADAPTER_PYTHON = (3, 8)
 
 #: The files the runner and this process exchange, in the request's directory.
 REQUEST, STRAIN, OUTCOME, TRIGGERS, INPUT = "request.json", "strain.npy", "outcome.json", "triggers.npz", "input.npy"
+STRAINS, WINDOW_SCORES = "strains.npz", "scores.npz"
 
-#: The actions a request may ask for, one per ``ExternalSearch`` method that takes a segment.
-SEARCH, PREPROCESS = "search", "preprocess"
+#: The actions a request may ask for, one per ``ExternalSearch`` method that takes a
+#: segment; ``SCORES`` runs ``scores`` on each of several segments in one process.
+SEARCH, PREPROCESS, SCORES = "search", "preprocess", "scores"
+
+#: The arrays of one segment's window scores (``ExternalSearch.scores``).
+SCORE_FIELDS = ("time", "stat")
 
 #: The kinds of refusal: no adapter by the card's name, or one that is not the card's.
 MISSING, MISMATCH = "missing", "mismatch"
@@ -87,8 +93,24 @@ def serve(request: dict, directory: Path) -> dict:
             raise KeyError(f"The card names no weights file {name!r}; it names {sorted(weights)}.") from None
 
     adapter.prepare(fetch)
-    segment = protocol.SearchSegment(
-        np.load(directory / STRAIN), tuple(request["detectors"]), request["t0"], request["sample_rate_hertz"])
+    detectors, rate = tuple(request["detectors"]), request["sample_rate_hertz"]
+    served = {"adapter_version": distribution.version, "python": platform.python_version()}
+    if request["action"] == SCORES:
+        if not callable(getattr(adapter, "scores", None)):
+            raise Refusal(MISMATCH, f"{entry_point.value} has no scores: it gives no window's statistic before "
+                                    "its threshold, which the validator reads.")
+        arrays = {}
+        with np.load(directory / STRAINS) as strains:
+            for k, t0 in enumerate(request["t0s"]):
+                found = adapter.scores(protocol.SearchSegment(strains[f"strain_{k}"], detectors, t0, rate))
+                missing = [name for name in SCORE_FIELDS if not hasattr(found, name)]
+                if missing:
+                    raise Refusal(MISMATCH, f"{entry_point.value}'s scores returned a {type(found).__name__}, "
+                                            f"which has no {missing}: window scores have {SCORE_FIELDS}.")
+                arrays.update({f"{name}_{k}": np.asarray(getattr(found, name)) for name in SCORE_FIELDS})
+        np.savez(directory / WINDOW_SCORES, **arrays)
+        return served
+    segment = protocol.SearchSegment(np.load(directory / STRAIN), detectors, request["t0"], rate)
     if request["action"] == SEARCH:
         found = adapter.search(segment)
         missing = [name for name in TRIGGER_FIELDS if not hasattr(found, name)]
@@ -99,8 +121,9 @@ def serve(request: dict, directory: Path) -> dict:
     elif request["action"] == PREPROCESS:
         np.save(directory / INPUT, np.asarray(adapter.preprocess(segment)), allow_pickle=False)
     else:
-        raise ValueError(f"No action {request['action']!r}; the actions are {SEARCH!r} and {PREPROCESS!r}.")
-    return {"adapter_version": distribution.version, "python": platform.python_version()}
+        raise ValueError(f"No action {request['action']!r}; the actions are {SEARCH!r}, {PREPROCESS!r} and "
+                         f"{SCORES!r}.")
+    return served
 
 
 def find_adapter(name: str, group: str):

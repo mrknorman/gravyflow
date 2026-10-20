@@ -108,6 +108,13 @@ class ExternalSearch(Protocol):
       returns its triggers: anything with ``time``, ``stat`` and ``var`` arrays
       (``detection.triggers.Triggers``, or a named tuple where gravyflow is not
       installed). ``stat`` is the published statistic as published.
+
+    An adapter may also give ``scores(segment)``: every window the search scores over
+    the segment, before its threshold and its clustering, as anything with ``time``
+    and ``stat`` arrays (one entry per window: the time the search would give its
+    trigger, and its statistic as published). It is what the validator reads
+    (``Validator.validate`` with an ``ExternalRunner``), which thresholds and clusters
+    every model's windows alike; an adapter without it is refused there by name.
     """
 
     def prepare(self, fetch: Callable[[str], Path]) -> None:

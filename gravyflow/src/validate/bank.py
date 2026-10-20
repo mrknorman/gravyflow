@@ -31,9 +31,8 @@ from .config import ValidationConfig
 from .metrics import Background, ScoreStream, logit_scores, sigma_level
 from .slides import SlideStream, TimeSlideBackground, TimeSlides
 from .stream import (
-    Placement, StreamGeometry, StreamReader, SyntheticSegments, found_in_stretch, found_window, local_windows,
-    place_injections,
-    stream_background,
+    Placement, StreamGeometry, StreamReader, SyntheticSegments, cluster, found_in_stretch, found_window,
+    local_windows, loudest_within, place_injections, stream_background,
 )
 from .volume import uniform_in_volume
 from .utils import _extract_sample_data
@@ -93,6 +92,40 @@ def require_logit_model(model) -> None:
             "validator ranks logits: build the output layer without an activation, and train "
             "with a loss that takes logits (from_logits=True)."
         )
+
+
+def is_released(model) -> bool:
+    """Whether ``model`` is a released-weights model: an external model's runner (`gf.ExternalRunner`)."""
+    from gravyflow.src.external import ExternalRunner
+
+    return isinstance(model, ExternalRunner)
+
+
+def released_detector_order(runner, dataset_args: dict, config: ValidationConfig) -> List[int]:
+    """
+    Refuse what a released-weights model cannot be validated on, by name: window mode, a
+    stride other than its card's, real events (not built for it), and data of other
+    detectors or another rate than its card reads. The data's detector rows, in the
+    order the card stacks them.
+    """
+    from gravyflow.src.dataset.dataset import noise_ifos
+
+    card = runner.card
+    if not config.stream:
+        raise ValueError(f"{card.name} is a released-weights model: it is validated in stream mode only, on "
+                         "continuous strain, as its search runs.")
+    if config.stride_seconds is not None and float(config.stride_seconds) != card.input.stride_seconds:
+        raise ValueError(f"{card.name} streams at its own stride, its card's {card.input.stride_seconds:g} s; "
+                         f"the configuration asks for {config.stride_seconds:g} s (leave stride_seconds unset).")
+    if config.score_real_events:
+        raise ValueError(f"{card.name}: real events are not scored for a released-weights model; set "
+                         "score_real_events off.")
+    names = tuple(ifo.name for ifo in noise_ifos(dataset_args.get("ifos"), dataset_args.get("noise_obtainer")))
+    rate = float(dataset_args.get("sample_rate_hertz", gf.Defaults.sample_rate_hertz))
+    if sorted(names) != sorted(card.input.detectors) or rate != card.input.sample_rate_hertz:
+        raise ValueError(f"{card.name} reads {card.input.detectors} at {card.input.sample_rate_hertz} Hz, and the "
+                         f"validation data holds {names} at {rate} Hz.")
+    return [names.index(d) for d in card.input.detectors]
 
 
 def noise_background(scores, streams: Optional[Dict[str, np.ndarray]], window_seconds: float,
@@ -168,13 +201,17 @@ class ValidationBank:
         config: Optional[ValidationConfig] = None,
         heart: Optional[Heartbeat] = None,
     ):
-        require_logit_model(model)
-        if not dataset_args.get("input_variables"):
-            raise ValueError("dataset_args must name the model's input_variables.")
         self.model = model
         self.dataset_args = dataset_args
         self.config = config or ValidationConfig()
         self.heart = heart
+        self.released = is_released(model)
+        if self.released:
+            self._detector_order = released_detector_order(model, dataset_args, self.config)
+        else:
+            require_logit_model(model)
+            if not dataset_args.get("input_variables"):
+                raise ValueError("dataset_args must name the model's input_variables.")
         if self.has_volume and self.config.volume_reach_mpc is None:
             # A population with no loudest source (an unbounded mass) has no reach: refused here,
             # before any stage runs.
@@ -659,9 +696,10 @@ class ValidationBank:
         """
         Where the model's windows lie on a stream: its own window, one stride apart
         (`stream`); by default a quarter window, rounded to whole samples, and recorded
-        (``noise_streams["stride_seconds"]``).
+        (``noise_streams["stride_seconds"]``). A released-weights model's stride is its card's.
         """
-        return StreamGeometry.of(self._noise_dataset.window_spec, self.config.stride_seconds)
+        stride = self.model.card.input.stride_seconds if self.released else self.config.stride_seconds
+        return StreamGeometry.of(self._noise_dataset.window_spec, stride)
 
     @property
     def stream_found_window_seconds(self) -> float:
@@ -679,6 +717,24 @@ class ValidationBank:
     def _reach_seconds(self) -> float:
         """How far from a merger the found test reads scores: the found window, then a cluster either side."""
         return self.stream_found_window_seconds + self.config.stream_cluster_seconds
+
+    @property
+    def _local_half_samples(self) -> int:
+        """
+        Half a local stretch around a merger (`stream.StreamGeometry.local_half_samples`).
+        A released-weights model's stretch is a segment its adapter searches whole, so it
+        also holds, centred on the merger, the found test's reach either side of the
+        segment its search needs: its card's ``segment_seconds``, else its window with its
+        context either side; and a stride more, which its front loses to the stream's grid.
+        """
+        geometry = self.stream_geometry
+        half = geometry.local_half_samples(self._reach_seconds)
+        if self.released:
+            contract = self.model.card.input
+            need = contract.segment_seconds or contract.window_seconds + 2 * contract.context_seconds
+            half = max(half, int(math.ceil((need / 2 + self._reach_seconds) * geometry.sample_rate_hertz)) + 1)
+            half += geometry.stride_samples
+        return half
 
     @cached_property
     def stream_source(self):
@@ -715,11 +771,18 @@ class ValidationBank:
         stream order with its stream's slide, block and extent, so that its triggers are
         the background (`stream.StreamBackground`) and its streams can be read again for
         the injections.
+
+        A released-weights model (`is_released`) is handed each stream's raw strain whole,
+        as its search runs over continuous data, and every window it scores there is kept,
+        its statistic as published (`released_scores`): the budget counts the streams'
+        windows on the stride's grid, and the record holds the adapter's own windows.
         """
         if self.config.wrapping_slides:
             return self._generate_wrapped_noise()
         source = self.stream_source
         streams = []
+        if self.released:
+            return self._released_stream_noise(source, streams)
 
         def scored():
             for batch in source.batches(self.config.batch_size, self.config.num_examples):
@@ -729,8 +792,12 @@ class ValidationBank:
                 yield self._score(x), x, {gf.ReturnVariables.START_GPS_TIME.name: batch.start_gps}
 
         self._score_noise(scored())
+        self._record_streams(streams, [s.num_windows for s in streams])
+
+    def _record_streams(self, streams: List[SlideStream], lengths: List[int]) -> None:
+        """The background's streams as its record keeps them: ``lengths`` scores each, in order."""
         self.noise_streams = {
-            "lengths": np.array([s.num_windows for s in streams], dtype=np.int64),
+            "lengths": np.array(lengths, dtype=np.int64),
             "slides": np.array([s.slide for s in streams], dtype=np.int64),
             "blocks": np.array([s.block for s in streams], dtype=np.int64),
             "stretch_starts": np.array([s.stretch[0] for s in streams], dtype=np.float64),
@@ -742,8 +809,8 @@ class ValidationBank:
             "live_time_seconds": np.float64(zero_lag_seconds(streams, self.stream_geometry.stride_seconds,
                                                              self.window_seconds)),
             # Where each stream's data lie, for the count of independent events (`metrics.disjoint_events`).
-            "detector_offsets": np.array([source.detector_offsets(s, self._num_detectors) for s in streams],
-                                         dtype=np.float64).reshape(len(streams), self._num_detectors),
+            "detector_offsets": np.array([self.stream_source.detector_offsets(s, self._num_detectors)
+                                          for s in streams], dtype=np.float64).reshape(len(streams), self._num_detectors),
             "footprint_seconds": np.float64(self._footprint_seconds),
         }
         logger.info(f"Stream background: {len(streams)} streams at a {self.stream_geometry.stride_seconds:g} s stride.")
@@ -839,6 +906,67 @@ class ValidationBank:
         logger.info(f"Wrapping slides: {len(slides)} slides of a {slides.ring_seconds:g} s ring, "
                     f"{slides.background_seconds:g} s of background.")
 
+    # ---------------------------------------------------- released-weights models
+
+    def released_scores(self, strains, t0s) -> list:
+        """
+        A released-weights model's scores of raw strains (each (detectors, samples) in
+        the data's detector order, its first sample at ``t0s[k]``): every window its
+        adapter scores in each, in time order (`gf.WindowScores`), the statistic signed
+        so that higher is more signal-like (the card's direction), never rescored.
+        """
+        from gravyflow.src.external import SearchSegment, WindowScores
+
+        card = self.model.card
+        if self.heart:
+            self.heart.beat()
+        segments = [SearchSegment(np.asarray(strain, dtype=np.float64)[self._detector_order], card.input.detectors,
+                                  float(t0), card.input.sample_rate_hertz) for strain, t0 in zip(strains, t0s)]
+        sign = -1.0 if card.output.direction == "lower" else 1.0
+        return [WindowScores(found.time, sign * found.stat) for found in self.model.scores(segments)]
+
+    def _released_stream_noise(self, source, streams: List[SlideStream]) -> None:
+        """`generate_stream_noise` for a released-weights model: each stream scored whole by its adapter."""
+        geometry = self.stream_geometry
+        for batch in source.batches(self.config.batch_size, self.config.num_examples):
+            if not streams or streams[-1] is not batch.stream:
+                streams.append(batch.stream)
+        scores, times = [], []
+        for stream in tqdm(streams, desc="Scoring noise streams", unit="stream"):
+            strain, t0 = source.stream_strain(stream)
+            # The span of the stream's counted windows.
+            span = (stream.num_windows - 1) * geometry.stride_samples + geometry.footprint_samples
+            (found,) = self.released_scores([strain[:, :span]], [t0])
+            scores.append(found.stat)
+            times.append(found.time)
+        if not sum(s.size for s in scores):
+            raise ValueError(f"{self.model.card.name} scored no window of the background's streams: lengthen them "
+                             "(stream_segment_seconds, or real noise's segments).")
+        self.far_scores = np.concatenate(scores)
+        self.noise_gps_times = np.concatenate(times) if self._real_noise else None
+        self._worst_false_positives = []
+        self._record_streams(streams, [s.size for s in scores])
+
+    def _released_found(self, found, merger: float) -> Tuple[float, float]:
+        """
+        An injection's found statistic from its adapter's scores of its stretch: the
+        loudest trigger (`stream.cluster`) of the windows within the found window and a
+        cluster of the merger, within the found window of it; ``-inf`` and NaN for none.
+        """
+        cfg = self.config
+        found_window_seconds = self.stream_found_window_seconds
+        if found.time.size == 0 or found.time[0] > merger - found_window_seconds \
+                or found.time[-1] < merger + found_window_seconds:
+            raise ValueError(
+                f"{self.model.card.name}'s search scored no windows either side of a merger in its stretch of "
+                f"{cfg.injection_stretch_seconds:g} s: give its card's "
+                "input contract the segment its search needs (segment_seconds).")
+        near = np.abs(found.time - merger) <= self._reach_seconds + 1e-9
+        times, stats = found.time[near], found.stat[near]
+        keep = cluster(times, stats, cfg.stream_cluster_seconds)
+        stat, when = loudest_within(times[keep], stats[keep], [merger], found_window_seconds)
+        return float(stat[0]), float(when[0] - merger)
+
     def _recorded_streams(self) -> List[SlideStream]:
         """The background's streams, as its record gives them (`generate_stream_noise`)."""
         if self.noise_streams is None or "samples" not in self.noise_streams:
@@ -876,21 +1004,35 @@ class ValidationBank:
         columns: Dict[str, list] = {k: [] for k in ("scores", "trigger_offsets", "merger_times", *labels, *records)}
         if not white:
             columns["bns_ranges"] = []
-        worst = None if worst_edges is None else [[] for _ in range(worst_edges.size - 1)]
+        # A released-weights model's worst cases are not kept: its adapter's input is its own.
+        worst = None if worst_edges is None or self.released else [[] for _ in range(worst_edges.size - 1)]
         batch = cfg.batch_size
         for b in tqdm(range(self._num_batches(num)), desc=f"Scoring injections locally ({stage})", unit="batch"):
             x, y = dataset[b]
             rows = min(batch, num - b * batch)
             samples = placement.sample[b * batch:b * batch + rows]
             stretches = np.asarray(y[RV.ONSOURCE.name])
-            windows = [local_windows(geometry, half, int(m), self._reach_seconds) for m in samples]
-            scores = self._score_stretch_windows(geometry, stretches, [w[1] for w in windows])
-            ends = np.cumsum([w[0].size for w in windows])
-            for j, (index, _) in enumerate(windows):
-                stat, when = found_in_stretch(geometry, index, scores[ends[j] - index.size:ends[j]], int(samples[j]),
-                                              cfg.stream_cluster_seconds, self.stream_found_window_seconds)
-                columns["scores"].append([stat])
-                columns["trigger_offsets"].append([when])
+            if self.released:
+                # Each stretch one segment of the adapter's, its front cut to start on the stream's
+                # grid (as the stream's own segment does), so that its windows are the stream's;
+                # times from the stream's first sample.
+                rate, stride = geometry.sample_rate_hertz, geometry.stride_samples
+                firsts = [int(math.ceil((int(m) - half) / stride)) * stride for m in samples]
+                strains = [stretches[j][:, firsts[j] - (int(samples[j]) - half):] for j in range(rows)]
+                for found, m in zip(self.released_scores(strains, np.array(firsts) / rate), samples):
+                    stat, when = self._released_found(found, int(m) / rate)
+                    columns["scores"].append([stat])
+                    columns["trigger_offsets"].append([when])
+            else:
+                windows = [local_windows(geometry, half, int(m), self._reach_seconds) for m in samples]
+                scores = self._score_stretch_windows(geometry, stretches, [w[1] for w in windows])
+                ends = np.cumsum([w[0].size for w in windows])
+                for j, (index, _) in enumerate(windows):
+                    stat, when = found_in_stretch(geometry, index, scores[ends[j] - index.size:ends[j]],
+                                                  int(samples[j]), cfg.stream_cluster_seconds,
+                                                  self.stream_found_window_seconds)
+                    columns["scores"].append([stat])
+                    columns["trigger_offsets"].append([when])
             if self._real_noise:  # each stretch's first sample's GPS, on the first detector
                 first = per_example(y[RV.START_GPS_TIME.name], batch, "START_GPS_TIME", per_detector=True)[:rows]
                 columns["merger_times"].append(first + half / geometry.sample_rate_hertz)
@@ -925,10 +1067,10 @@ class ValidationBank:
         # A stretch of injection_stretch_seconds, whatever the model's window: its labels
         # are measured within it, against its own clean spectrum, alike for every model.
         half = int(round(cfg.injection_stretch_seconds * geometry.sample_rate_hertz / 2.0))
-        needed = geometry.local_half_samples(self._reach_seconds)
+        needed = self._local_half_samples
         if half < needed:
-            raise ValueError(f"The model's found test reads {2 * needed / geometry.sample_rate_hertz:g} s around a "
-                             f"merger, more than injection_stretch_seconds ({cfg.injection_stretch_seconds:g} s): "
+            raise ValueError(f"The model's found test (and a released model's search) reads "
+                             f"{2 * needed / geometry.sample_rate_hertz:g} s around a merger, more than injection_stretch_seconds ({cfg.injection_stretch_seconds:g} s): "
                              "lengthen it.")
         # The dataset pads its onsource by the window's crop either side, and crops it back.
         crop = float(geometry.window.crop_duration_seconds)

@@ -24,6 +24,9 @@ The child refuses an adapter that is not installed (``AdapterMissing``) or not t
 card's (``AdapterMismatch``) before the model runs. A search's result names the card's
 mode and fingerprint, and carries its published rows and training data as provenance
 (``ExternalResult``): its statistic is the published one, never rescored.
+
+``scores`` serves the validator: every window's statistic over several segments, before
+the search's threshold and clustering (``WindowScores``), in one process.
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -129,6 +132,21 @@ class ExternalResult:
     training_data: str
 
 
+@dataclass(frozen=True, eq=False)
+class WindowScores:
+    """
+    Every window an external search scores over one segment, before its threshold and
+    clustering (``ExternalRunner.scores``), in time order.
+
+    Args:
+        time: Each window's time (s): the time the search gives a trigger it makes there.
+        stat: Each window's statistic, as published (its direction is the card's).
+    """
+
+    time: np.ndarray
+    stat: np.ndarray
+
+
 class ExternalRunner:
     """
     Runs ``card``'s adapter in ``environment``, each call in a fresh process held to
@@ -169,14 +187,44 @@ class ExternalRunner:
 
         return self._run(child.PREPROCESS, segment, read)
 
-    def _run(self, action: str, segment: SearchSegment, read):
+    def scores(self, segments: Sequence[SearchSegment]) -> List[WindowScores]:
+        """
+        Every window the adapter's search scores over each of ``segments``, before its
+        threshold and clustering (``ExternalSearch.scores``), in time order: what the
+        validator reads. Every segment is scored in one process, which loads the model once.
+        """
+        segments = list(segments)
+        if not segments:
+            return []
+
+        def read(directory: Path) -> List[WindowScores]:
+            found = []
+            with np.load(directory / child.WINDOW_SCORES, allow_pickle=False) as arrays:
+                for k in range(len(segments)):
+                    time, stat = (np.asarray(arrays[f"{name}_{k}"], dtype=np.float64).reshape(-1)
+                                  for name in child.SCORE_FIELDS)
+                    if time.size != stat.size or not np.isfinite(time).all() or np.isnan(stat).any():
+                        raise ExternalRunFailed(
+                            f"{self.card.name}'s scores returned window scores gravyflow refuses: each window "
+                            f"needs a finite time and a statistic that is not NaN ({time.size} times, "
+                            f"{stat.size} statistics).")
+                    order = np.argsort(time, kind="stable")
+                    found.append(WindowScores(time[order], stat[order]))
+            return found
+
+        return self._run(child.SCORES, segments, read)
+
+    def _run(self, action: str, segment: Union[SearchSegment, List[SearchSegment]], read):
         card, environment = self.card, self.environment
-        if not isinstance(segment, SearchSegment):
-            raise TypeError(f"An external model searches a SearchSegment, got {type(segment).__name__}.")
-        if segment.detectors != card.input.detectors or segment.sample_rate_hertz != card.input.sample_rate_hertz:
-            raise ValueError(
-                f"{card.name} reads {card.input.detectors} at {card.input.sample_rate_hertz} Hz, and the segment "
-                f"holds {segment.detectors} at {segment.sample_rate_hertz} Hz.")
+        segments = segment if isinstance(segment, list) else [segment]
+        for segment in segments:
+            if not isinstance(segment, SearchSegment):
+                raise TypeError(f"An external model searches a SearchSegment, got {type(segment).__name__}.")
+            if segment.detectors != card.input.detectors \
+                    or segment.sample_rate_hertz != card.input.sample_rate_hertz:
+                raise ValueError(
+                    f"{card.name} reads {card.input.detectors} at {card.input.sample_rate_hertz} Hz, and the "
+                    f"segment holds {segment.detectors} at {segment.sample_rate_hertz} Hz.")
         for name, path in (("interpreter", environment.python), ("lock file", environment.lock)):
             if not path.is_file():
                 raise FileNotFoundError(f"{card.name}'s environment has no {name} at {path}.")
@@ -190,12 +238,16 @@ class ExternalRunner:
         request = {
             "action": action, "adapter": card.adapter, "adapter_version": card.adapter_version,
             "paths": [str(p) for p in environment.paths], "weights": weights,
-            "detectors": list(segment.detectors), "t0": segment.t0, "sample_rate_hertz": segment.sample_rate_hertz,
+            "detectors": list(segment.detectors), "t0": segments[0].t0, "t0s": [s.t0 for s in segments],
+            "sample_rate_hertz": segment.sample_rate_hertz,
         }
         with tempfile.TemporaryDirectory(prefix="gravyflow-external-", dir=self.scratch) as name:
             directory = Path(name)
             (directory / child.REQUEST).write_text(json.dumps(request))
-            np.save(directory / child.STRAIN, segment.strain, allow_pickle=False)
+            if action == child.SCORES:
+                np.savez(directory / child.STRAINS, **{f"strain_{k}": s.strain for k, s in enumerate(segments)})
+            else:
+                np.save(directory / child.STRAIN, segment.strain, allow_pickle=False)
             log = directory / "log.txt"
             status = _supervise([str(environment.python), "-I", "-B", str(CHILD), str(directory)],
                                 directory, log, self.deadline_seconds)
@@ -277,5 +329,5 @@ def _tail(log: Path) -> str:
 
 __all__ = [
     "AdapterEnvironment", "AdapterMismatch", "AdapterMissing", "ExternalDeadlineExpired", "ExternalResult",
-    "ExternalRunFailed", "ExternalRunner", "GRACE_SECONDS",
+    "ExternalRunFailed", "ExternalRunner", "GRACE_SECONDS", "WindowScores",
 ]

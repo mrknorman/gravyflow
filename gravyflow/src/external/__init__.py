@@ -18,11 +18,12 @@ from .card import AS_PUBLISHED, ExternalCard, InputContract, OutputContract, Pub
 from .protocol import ADAPTER_GROUP, ExternalSearch, SearchSegment
 from .runner import (
     AdapterEnvironment, AdapterMismatch, AdapterMissing, ExternalDeadlineExpired, ExternalResult,
-    ExternalRunFailed, ExternalRunner,
+    ExternalRunFailed, ExternalRunner, WindowScores,
 )
 
 __all__ = [
     "ADAPTER_GROUP", "AS_PUBLISHED", "AdapterEnvironment", "AdapterMismatch", "AdapterMissing",
     "ExternalCard", "ExternalDeadlineExpired", "ExternalResult", "ExternalRunFailed", "ExternalRunner",
     "ExternalSearch", "InputContract", "OutputContract", "PublishedRow", "SearchSegment", "Weights",
+    "WindowScores",
 ]

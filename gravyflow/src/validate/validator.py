@@ -4,7 +4,7 @@ import dataclasses
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, Union
 
 import h5py
 import numpy as np
@@ -100,7 +100,7 @@ class Validator:
     @classmethod
     def validate(
         cls,
-        model: "keras.Model",
+        model: Union["keras.Model", "gf.ExternalRunner"],
         name: str,
         dataset_args: dict,
         config: Optional[ValidationConfig] = None,
@@ -129,6 +129,18 @@ class Validator:
         In stream mode (``config.mode``, the default) the model is slid along the
         data and its triggers are the background, and each injection is scored
         locally in that data (`stream`); in window mode each example is one window.
+
+        ``model`` may also be a released-weights model: an external model's runner
+        (`gf.ExternalRunner`, its adapter in its own environment). It is validated in
+        stream mode only, at its card's stride, on raw strain in the card's detectors and
+        rate: each background stream is one segment its adapter searches whole, and each
+        injection's stretch (its card's ``segment_seconds`` plus the found test's reach
+        either side) another, so the adapter's own conditioning sees exactly that strain.
+        Every window it scores is kept before its threshold (`gf.WindowScores`), ranked by
+        its published statistic in the card's direction, never rescored, and clustered
+        and found as every model's are. Its fingerprint is its card's; it has no
+        training record (the split it trained on is unknown), no worst cases are kept,
+        and real events are refused.
 
         Raises:
             StaleCheckpointError: the checkpoint is in another format, or belongs

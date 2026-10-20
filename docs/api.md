@@ -186,19 +186,20 @@ A search's triggers are written as the MLGWSC-1 challenge's trigger file, byte f
 its `evaluate.py` reads. An external model (a published search with released weights, in another framework) runs
 through an adapter, a package of its own that gravyflow never imports, in its own environment: a subprocess under a
 deadline. Its results are in one mode, `AS_PUBLISHED`: the published statistic, never rescored as gravyflow's own
-models are, and never through the `Validator`.
+models are. The `Validator` takes its runner and streams it in stream mode at its own stride (`ExternalRunner.scores`).
 
 - `Triggers`: a search's triggers (GPS `time`, ranking `stat`, timing tolerance `var`); `Triggers.read` and `write` read and write the MLGWSC-1 trigger file.
 - `SearchSegment`: the strain an external search runs on: every detector over the same samples, searched whole; `SearchSegment.from_strains` builds one from a data source's strain.
-- `ExternalSearch`: what an adapter implements: `prepare(fetch)`, `preprocess(segment)` and `search(segment)`, published under the entry-point group `gravyflow.external`.
+- `ExternalSearch`: what an adapter implements: `prepare(fetch)`, `preprocess(segment)` and `search(segment)`, published under the entry-point group `gravyflow.external`; and, for the validator, `scores(segment)`: every window's time and statistic before the search's threshold and clustering.
 - `ExternalCard`: an external model: its adapter, the adapter's version and environment lock, its contracts, weights, published rows and declared training data; `card.fingerprint`, its identity, is the sha256 of exactly what decides a run's outputs (adapter name and version, lock, contracts, each weights file's name, sha256, format and framework, mode), never of its provenance (published rows, training data).
-- `InputContract`: the input a model takes: rate, detectors in order, window, stride, context, whitening, band-pass and normalisation.
+- `InputContract`: the input a model takes: rate, detectors in order, window, stride, context, whitening, band-pass and normalisation, and the segment its search needs to score a window (`segment_seconds`).
 - `OutputContract`: the statistic it returns: what it is, its signal column, its direction, threshold, clustering and time offset.
 - `Weights`: one released weights file: its `RemoteFile` (pinned by sha256, with its licence), format and framework.
 - `PublishedRow`: a number a model's authors published, which a reproduction must match.
 - `AS_PUBLISHED`: the mode of a model run as its authors released it.
 - `AdapterEnvironment`: where an adapter runs: the environment's interpreter, its lock file, and extra directories on its path.
-- `ExternalRunner`: run a card's adapter on a segment (`search`, `preprocess`) as a `python -I` subprocess under a deadline, in a temporary directory it removes; weights come only through `fetch`.
+- `ExternalRunner`: run a card's adapter on a segment (`search`, `preprocess`), or on several in one process (`scores`), as a `python -I` subprocess under a deadline, in a temporary directory it removes; weights come only through `fetch`.
+- `WindowScores`: every window an external search scores over one segment, before its threshold and clustering: `time` and `stat`, in time order.
 - `ExternalResult`: an external search's triggers with the card's name, mode, fingerprint and output contract, and its published rows and training data as provenance.
 - `ExternalRunFailed`: an external run did not return its result; its log's end is in the message.
 - `ExternalDeadlineExpired`: an external run outlived its deadline; every process in its session was stopped.
@@ -236,9 +237,11 @@ validates as it trains: they need the `viz` extra.
   with a warning), ROC and the dashboard. By default in stream mode: the model slid along continuous raw strain at
   its stride, its scores clustered into triggers, its background the triggers of time slides of the data, each
   injection scored locally and found by the loudest trigger within 0.1 s (at least half the stride) of its merger;
-  window mode
-  (`mode="window"`) is kept for backward compatibility and reproduction.
-- `generate_volume_3d_plot` (`gravyflow.src.validate.volume_3d`): the dashboard's 3D volume tab: the volume set's
+  window mode (`mode="window"`) is kept for backward compatibility and reproduction. `Validator.validate` takes a
+  Keras model or a released-weights model's `ExternalRunner`: the latter in stream mode only, at its card's stride,
+  each background stream and each injection's stretch (starting on the stream's grid) one segment its adapter scores
+  whole (`ExternalRunner.scores`), its published statistic ranked in the card's direction, never rescored.
+- The dashboard's 3D volume tab (`generate_volume_3d_plot`, `gravyflow.src.validate.volume_3d`): the volume set's
   injections at sky direction times distance, found or missed at a false-alarm rate chosen with a slider, a sphere at
   the sensitive distance and the reach's outline, coloured by found state or chirp mass, at physical or scaled
   (chirp) distance; None for a record without sky positions. `volume_3d_levels` gives what it reads at each level.
@@ -276,7 +279,7 @@ validates as it trains: they need the `viz` extra.
   background every slide's combination of those scores, and its injections scored at zero lag through the same
   combination; any other model is run on every slide, as many as the background budget (`num_examples` windows)
   holds. Each ring loses a cluster either side of its join, triggers and livetime alike.
-- `disjoint_events` and `Background.independent_count`: a slid background's independent events, counted by the data
+- Independent background events (`disjoint_events`, `Background.independent_count`): counted by the data
   they share: triggers taken loudest first, each accepted only if its data lie a window's padded onsource (the data
   that set a score) from every accepted trigger's in every detector. Every stream background counts so, slid or not.
   Quotability, the count's overdispersion in its intervals (`Background.reuse_at`) and the dashboard's event counts

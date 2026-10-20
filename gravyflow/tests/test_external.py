@@ -57,6 +57,19 @@ TOY = textwrap.dedent('''
             return SimpleNamespace(time=segment.t0 + index / segment.sample_rate_hertz,
                                    stat=summed[index], var=np.full(len(index), 0.25))
 
+        def scores(self, segment):
+            # Every 16-sample start's 64-sample window: its largest scaled sum, at its centre; latest first.
+            summed = self.preprocess(segment).sum(axis=0)
+            starts = np.arange(0, summed.size - 64 + 1, 16)[::-1]
+            with RECORD.joinpath("scored.txt").open("a") as log:
+                log.write(f"{segment.t0}\\n")
+            return SimpleNamespace(time=segment.t0 + (starts + 32) / segment.sample_rate_hertz,
+                                   stat=np.array([summed[s:s + 64].max() for s in starts]))
+
+
+    class SearchOnly(Toy):
+        scores = None
+
 
     class Sleeper(Toy):
         def search(self, segment):
@@ -68,6 +81,9 @@ TOY = textwrap.dedent('''
     class Unrankable(Toy):
         def search(self, segment):
             return SimpleNamespace(time=[1.0], stat=[float("nan")], var=[0.1])
+
+        def scores(self, segment):
+            return SimpleNamespace(time=[1.0, 2.0], stat=[0.5, float("nan")])
 
 
     class Crashes(Toy):
@@ -86,6 +102,7 @@ sleeper = toy_search:Sleeper
 unrankable = toy_search:Unrankable
 crashes = toy_search:Crashes
 not-a-search = toy_search:NotASearch
+search-only = toy_search:SearchOnly
 """
 
 LOCK = b"toy environment: numpy\n"
@@ -229,6 +246,39 @@ def test_the_runner_runs_the_adapter_isolated_and_removes_its_directory(toy):
     assert list(scratch.iterdir()) == [], "the runner left its temporary directory"
 
 
+def test_the_runner_gives_every_windows_score_of_several_segments_in_one_process(toy):
+    toy_card, environment, scratch, record = toy
+    run = gf.ExternalRunner(toy_card, environment, deadline_seconds=120, scratch=scratch)
+    later = gf.SearchSegment(np.ones((2, 96)), ("H1", "L1"), T0 + 10.0, RATE)
+    first, second = run.scores([segment(), later])
+    # In time order (the toy gives them latest first), every window before any threshold.
+    starts = np.arange(0, 256 - 64 + 1, 16)
+    np.testing.assert_array_equal(first.time, T0 + (starts + 32) / RATE)
+    expected = [2 * segment().strain.sum(axis=0)[s:s + 64].max() for s in starts]
+    np.testing.assert_allclose(first.stat, expected)
+    assert first.time.dtype == first.stat.dtype == np.float64
+    np.testing.assert_array_equal(second.time, T0 + 10.0 + (np.arange(0, 33, 16) + 32) / RATE)
+    np.testing.assert_allclose(second.stat, [4.0] * 3)
+    # One process, one preparation, both segments scored.
+    assert (record / "scored.txt").read_text().split() == [str(T0), str(T0 + 10.0)]
+    assert run.scores([]) == []
+    assert list(scratch.iterdir()) == []
+
+
+def test_the_runner_refuses_window_scores_it_cannot_rank(toy):
+    toy_card, environment, scratch, _ = toy
+    with pytest.raises(gf.AdapterMismatch, match="has no scores"):
+        gf.ExternalRunner(dataclasses.replace(toy_card, adapter="search-only"), environment, 60,
+                          scratch).scores([segment()])
+    with pytest.raises(gf.ExternalRunFailed, match="window scores gravyflow refuses: .*NaN"):
+        gf.ExternalRunner(dataclasses.replace(toy_card, adapter="unrankable"), environment, 60,
+                          scratch).scores([segment()])
+    with pytest.raises(ValueError, match=r"reads \('H1', 'L1'\) at 64.0 Hz"):
+        gf.ExternalRunner(toy_card, environment, 60, scratch).scores(
+            [segment(), gf.SearchSegment(np.zeros((1, 64)), ("H1",), T0, RATE)])
+    assert list(scratch.iterdir()) == []
+
+
 def test_the_runner_refuses_an_adapter_by_name(toy):
     toy_card, environment, scratch, _ = toy
     with pytest.raises(gf.AdapterMissing, match=r"No adapter named 'absent' in the entry-point group "
@@ -289,6 +339,11 @@ def test_the_child_serves_the_runners_request_in_process(toy, monkeypatch):
     try:
         result = gf.ExternalRunner(toy_card, environment, 60, scratch).search(segment())
         np.testing.assert_array_equal(result.triggers.time, [T0 + 100 / RATE])
+        (scored,) = gf.ExternalRunner(toy_card, environment, 60, scratch).scores([segment()])
+        assert scored.time.size == scored.stat.size == 13
+        with pytest.raises(gf.AdapterMismatch, match="has no scores"):
+            gf.ExternalRunner(dataclasses.replace(toy_card, adapter="search-only"), environment, 60,
+                              scratch).scores([segment()])
         with pytest.raises(gf.AdapterMissing, match="'absent'"):
             gf.ExternalRunner(dataclasses.replace(toy_card, adapter="absent"), environment, 60,
                               scratch).search(segment())

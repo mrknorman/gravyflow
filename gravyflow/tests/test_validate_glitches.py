@@ -386,6 +386,7 @@ def test_the_bank_runs_the_glitch_stage_when_asked(monkeypatch):
     monkeypatch.setattr(gl, "glitch_stage", stage)
     bank = ValidationBank.__new__(ValidationBank)
     bank.config = ValidationConfig(score_glitches=50)
+    bank.released = False  # set by __init__, which this bank skips
     bank.dataset_args = {"ifos": [gf.IFO.H1, gf.IFO.L1],
                          "noise_obtainer": SimpleNamespace(noise_type=gf.NoiseType.REAL)}
     bank.__dict__["_noise_dataset"] = SimpleNamespace(

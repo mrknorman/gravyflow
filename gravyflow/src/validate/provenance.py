@@ -28,7 +28,15 @@ def model_fingerprint(model) -> str:
     Layer names are left out (Keras numbers unnamed layers per session). A
     model saved and loaded again keeps its fingerprint; retraining, a new output
     activation or a different layer changes it.
+
+    A released-weights model (an external model's runner, `gf.ExternalRunner`) is its
+    card's fingerprint (`gf.ExternalCard.fingerprint`): its weights' sha256, adapter,
+    environment and contracts.
     """
+    from gravyflow.src.external import ExternalRunner
+
+    if isinstance(model, ExternalRunner):
+        return model.card.fingerprint
     import keras
 
     digest = hashlib.sha256()
