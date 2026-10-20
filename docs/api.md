@@ -193,7 +193,7 @@ models are. The `Validator` takes its runner and streams it in stream mode at it
 - `ExternalSearch`: what an adapter implements: `prepare(fetch)`, `preprocess(segment)` and `search(segment)`, published under the entry-point group `gravyflow.external`; and, for the validator, `scores(segment)`: every window's time and statistic before the search's threshold and clustering.
 - `ExternalCard`: an external model: its adapter, the adapter's version and environment lock, its contracts, weights, published rows and declared training data; `card.fingerprint`, its identity, is the sha256 of exactly what decides a run's outputs (adapter name and version, lock, contracts, each weights file's name, sha256, format and framework, mode), never of its provenance (published rows, training data).
 - `InputContract`: the input a model takes: rate, detectors in order, window, stride, context, whitening, band-pass and normalisation, and the segment its search needs to score a window (`segment_seconds`).
-- `OutputContract`: the statistic it returns: what it is, its signal column, its direction, threshold, clustering and time offset.
+- `OutputContract`: the statistic it returns: what it is, its signal column, its direction, threshold, clustering and time offset; and where its authors place the merger from the time its search gives a window (`merger_offset_seconds`, with the range they spread it over, `merger_range_seconds`), where the validator times each window's triggers.
 - `Weights`: one released weights file: its `RemoteFile` (pinned by sha256, with its licence), format and framework.
 - `PublishedRow`: a number a model's authors published, which a reproduction must match.
 - `AS_PUBLISHED`: the mode of a model run as its authors released it.

@@ -328,8 +328,7 @@ def found_statistic(window_scores: np.ndarray, ring_index: np.ndarray, merger_ri
     trigger within ``found_window_seconds`` of its merger, at ring time
     ``merger_ring_seconds``; ``-inf`` for none. Either path's local scores give it.
     """
-    times = np.asarray(ring_index, dtype=np.float64) * geometry.stride_seconds \
-        + geometry.centre_samples / geometry.sample_rate_hertz
+    times = geometry.window_time(np.asarray(ring_index, dtype=np.float64))
     scores = np.asarray(window_scores, dtype=np.float64)
     keep = cluster(times, scores, cluster_seconds)
     stat, _ = loudest_within(times[keep], scores[keep], [merger_ring_seconds], found_window_seconds)

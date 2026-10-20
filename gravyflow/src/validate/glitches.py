@@ -333,9 +333,11 @@ def glitch_data(glitches: Glitches, scores) -> Dict[str, np.ndarray]:
 def background_triggers(validator) -> Tuple[np.ndarray, np.ndarray]:
     """
     A validator's background triggers: their statistics and each one's GPS time in each
-    detector (triggers, detectors), the centre of its window's onsource. Stream mode:
-    each stream's clustered triggers (`stream.cluster`); window mode: every window. Real
-    noise only: synthetic noise has no GPS time.
+    detector (triggers, detectors), the centre of its window's onsource, moved in stream
+    mode by the merger offset the model declared (recorded with the streams;
+    `stream.StreamGeometry.trigger_time`). Stream mode: each stream's clustered triggers
+    (`stream.cluster`); window mode: every window. Real noise only: synthetic noise has
+    no GPS time.
     """
     if validator.noise_gps_times is None:
         raise ValueError("The background has no GPS times (synthetic noise): no glitch lies in it.")
@@ -347,6 +349,7 @@ def background_triggers(validator) -> Tuple[np.ndarray, np.ndarray]:
     if not validator.config.stream:
         return scores, centre
     streams = validator.noise_streams
+    centre = centre + float(np.asarray(streams.get("merger_offset_seconds", 0.0)))
     stride = float(np.asarray(streams["stride_seconds"]))
     keep, offset = [], 0
     for length in np.asarray(streams["lengths"], dtype=np.int64):

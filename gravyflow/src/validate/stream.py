@@ -10,8 +10,11 @@ backward compatibility and to reproduce earlier results.
   result). Each window is the model's own geometry, its offsource the data just
   before its onsource, and is conditioned by the model's own dataset code
   (``Dataset.model_inputs``: whitening included), so the validator supplies raw
-  strain and the model does its own conditioning. A window's score stands at its
-  onsource's centre (`StreamGeometry.window_time`).
+  strain and the model does its own conditioning. A window's score stands where the
+  model places the merger in its window: its onsource's centre unless the model
+  declares an offset from it (``merger_offset_seconds``; a released model's from the
+  time its search gives the window), recorded with the streams
+  (`StreamGeometry.trigger_time`, the one place a window's time is made).
 - **Triggers.** A score is a trigger when it is the loudest within
   ``cluster_seconds`` (1 s) of itself: the matched filter's clustering
   (`detection.stream`), reused, so every model's triggers are made alike. They are
@@ -74,10 +77,13 @@ class StreamGeometry:
     """
     Where a window model's windows lie on a stream of continuous strain: window ``i``'s
     data (its offsource, then its padded onsource) starts ``i * stride_samples`` into
-    the stream, and its score stands at its onsource's centre.
+    the stream, and its score stands where the model places the merger in its window
+    (`trigger_time`): its onsource's centre moved by ``merger_offset_seconds`` (later
+    positive; 0, the centre, unless the model declares otherwise).
     """
     window: WindowSpec
     stride_samples: int
+    merger_offset_seconds: float = 0.0
 
     def __post_init__(self):
         window_samples = float(self.window.onsource_duration_seconds) * float(self.window.sample_rate_hertz)
@@ -85,21 +91,29 @@ class StreamGeometry:
             raise ValueError(f"A stride of {self.stride_samples} samples must be at least one sample and at most "
                              f"the model's window ({self.window.onsource_duration_seconds} s): a longer one "
                              "leaves data no window reads.")
+        offset = self.merger_offset_seconds
+        if isinstance(offset, bool) or not isinstance(offset, (int, float)) or not math.isfinite(offset):
+            raise ValueError(f"merger_offset_seconds must be a finite number of seconds, got {offset!r}.")
+        object.__setattr__(self, "merger_offset_seconds", float(offset))
 
     @classmethod
-    def of(cls, window: WindowSpec, stride_seconds: Optional[float]) -> "StreamGeometry":
+    def of(cls, window: WindowSpec, stride_seconds: Optional[float],
+           merger_offset_seconds: float = 0.0) -> "StreamGeometry":
         """
         The geometry at ``stride_seconds``, which must be a whole number of samples; by
         default (None) a quarter of the window, rounded to the nearest whole sample.
+        ``merger_offset_seconds``: where the model places the merger in its window
+        (`trigger_time`).
         """
         rate = float(window.sample_rate_hertz)
         if stride_seconds is None:
-            return cls(window, max(int(round(float(window.onsource_duration_seconds) * rate / 4.0)), 1))
+            return cls(window, max(int(round(float(window.onsource_duration_seconds) * rate / 4.0)), 1),
+                       merger_offset_seconds)
         stride = int(round(stride_seconds * rate))
         if stride < 1 or abs(stride - stride_seconds * rate) > 1e-6:
             raise ValueError(f"A stride of {stride_seconds} s is not a whole number of samples (>= 1) at "
                              f"{window.sample_rate_hertz} Hz.")
-        return cls(window, stride)
+        return cls(window, stride, merger_offset_seconds)
 
     @property
     def sample_rate_hertz(self) -> float:
@@ -116,31 +130,51 @@ class StreamGeometry:
 
     @property
     def centre_samples(self) -> float:
-        """A window's time from the start of its data: its onsource's centre."""
+        """A window's onsource's centre from the start of its data."""
         return self.window.num_offsource_samples + self.window.num_onsource_samples / 2.0
+
+    @property
+    def time_samples(self) -> float:
+        """A window's time from the start of its data (`trigger_time`), in samples."""
+        return self.centre_samples + self.merger_offset_seconds * self.sample_rate_hertz
+
+    def trigger_time(self, times) -> np.ndarray:
+        """
+        The time a window's score stands at, as every trigger made of it is timed (the
+        found test, the background, real events, glitches and timing accuracy alike):
+        where the model places the merger in its window. ``times`` are each window's
+        reference time, its onsource's centre (`window_time`) or, for a released model,
+        the time its search gives the window; the declared ``merger_offset_seconds`` is
+        added to them.
+        """
+        return np.asarray(times, dtype=np.float64) + self.merger_offset_seconds
 
     def num_windows(self, num_samples: int) -> int:
         """The whole windows a stream of ``num_samples`` holds."""
         return max((int(num_samples) - self.footprint_samples) // self.stride_samples + 1, 0)
 
     def window_time(self, index) -> np.ndarray:
-        """Window ``index``'s time (s) from the stream's first sample."""
-        return (np.asarray(index, dtype=np.float64) * self.stride_samples + self.centre_samples) / self.sample_rate_hertz
+        """Window ``index``'s time (s) from the stream's first sample (`trigger_time`)."""
+        return self.trigger_time((np.asarray(index, dtype=np.float64) * self.stride_samples + self.centre_samples)
+                                 / self.sample_rate_hertz)
 
     def windows_near(self, sample: int, reach_seconds: float) -> Tuple[int, int]:
         """The first and last windows whose times lie within ``reach_seconds`` of stream sample ``sample``."""
         reach = reach_seconds * self.sample_rate_hertz
-        first = math.ceil((sample - self.centre_samples - reach) / self.stride_samples - 1e-9)
-        last = math.floor((sample - self.centre_samples + reach) / self.stride_samples + 1e-9)
+        first = math.ceil((sample - self.time_samples - reach) / self.stride_samples - 1e-9)
+        last = math.floor((sample - self.time_samples + reach) / self.stride_samples + 1e-9)
         return first, last
 
     def local_half_samples(self, reach_seconds: float) -> int:
         """
         Half a local stretch around a merger: enough that every window within
-        ``reach_seconds`` of the merger, data and all, lies inside it (`windows_near`).
+        ``reach_seconds`` of the merger, data and all, lies inside it (`windows_near`):
+        a window's data reach ``time_samples`` before its time and the rest of its
+        footprint after it.
         """
-        return int(self.window.num_offsource_samples + math.ceil(self.window.num_onsource_samples / 2.0)
-                   + math.ceil(reach_seconds * self.sample_rate_hertz) + 1)
+        before = self.time_samples
+        after = self.footprint_samples - self.time_samples
+        return int(math.ceil(max(before, after) - 1e-9) + math.ceil(reach_seconds * self.sample_rate_hertz) + 1)
 
     def gather(self, strain: np.ndarray, first_sample: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -432,10 +466,10 @@ def place_injections(num: int, streams: Sequence[SlideStream], half_samples: int
     stream is read once.
     """
     reach = reach_seconds * geometry.sample_rate_hertz
-    first = np.array([max(half_samples, math.ceil(geometry.centre_samples + reach)) for s in streams],
+    first = np.array([max(half_samples, math.ceil(geometry.time_samples + reach)) for s in streams],
                      dtype=np.int64)
     last = np.array([min(s.num_samples - half_samples,
-                         math.floor((s.num_windows - 1) * geometry.stride_samples + geometry.centre_samples - reach))
+                         math.floor((s.num_windows - 1) * geometry.stride_samples + geometry.time_samples - reach))
                      for s in streams], dtype=np.int64)
     room = np.maximum(last - first + 1, 0).astype(np.float64)
     if room.sum() <= 0:
@@ -535,10 +569,21 @@ def found_in_stretch(geometry: StreamGeometry, index: np.ndarray, scores: np.nda
     stream's grid): the loudest trigger within the found window of its merger at
     ``sample``, and that trigger's time from the merger (s); ``-inf`` and NaN for none.
     """
-    times = geometry.window_time(index)
+    return found_at(geometry.window_time(index), scores, sample / geometry.sample_rate_hertz, cluster_seconds,
+                    found_window_seconds)
+
+
+def found_at(times, scores, merger: float, cluster_seconds: float, found_window_seconds: float
+             ) -> Tuple[float, float]:
+    """
+    One injection's found statistic from the scores of the windows around its merger at
+    ``merger`` (s), each timed as its triggers are (`StreamGeometry.trigger_time`): the
+    loudest of their triggers (`cluster`) within ``found_window_seconds`` of the merger,
+    and that trigger's time from the merger (s); ``-inf`` and NaN for none.
+    """
+    times, scores = np.asarray(times, dtype=np.float64), np.asarray(scores, dtype=np.float64)
     keep = cluster(times, scores, cluster_seconds)
-    merger = sample / geometry.sample_rate_hertz
-    stat, when = loudest_within(times[keep], np.asarray(scores)[keep], [merger], found_window_seconds)
+    stat, when = loudest_within(times[keep], scores[keep], [merger], found_window_seconds)
     return float(stat[0]), float(when[0] - merger)
 
 
@@ -549,6 +594,7 @@ __all__ = [
     "StreamReader",
     "SyntheticSegments",
     "cluster",
+    "found_at",
     "found_in_stretch",
     "found_window",
     "local_windows",

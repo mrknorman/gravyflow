@@ -214,3 +214,41 @@ def test_what_a_released_model_cannot_be_validated_on_is_refused(released, datas
             sample_rate_hertz=RATE, ifos=[gf.IFO.H1])), config)
     # A probability is ranked as published: the statistic is never refused or rescored.
     ValidationBank(released, dataset_args, config)
+    with pytest.raises(ValueError, match="glitch stage"):
+        ValidationBank(released, dataset_args, dataclasses.replace(config, score_glitches=True))
+    with pytest.raises(ValueError, match="leave merger_offset_seconds unset"):
+        ValidationBank(released, dataset_args, dataclasses.replace(config, merger_offset_seconds=0.2))
+
+
+def _late(released, offset):
+    """The toy's runner, its card declaring the merger ``offset`` s after the time its search gives a window."""
+    card = dataclasses.replace(released.card, output=dataclasses.replace(
+        released.card.output, merger_offset_seconds=offset, merger_range_seconds=(offset - 0.1, offset + 0.1)))
+    return gf.ExternalRunner(card, released.environment, 120, released.scratch)
+
+
+def test_a_released_model_is_timed_where_its_card_places_the_merger(released, dataset_args, config):
+    # A released model whose response peaks 0.3 s before the merger, on the time its search
+    # gives each window (as a model trained with the merger 0.3 s after that time would):
+    # found, its trigger timed at the merger, only when its card declares where its authors
+    # place the merger; never without, whatever the merger's place on the stride's grid.
+    rng = np.random.default_rng(4)
+    for declared, expect_found in ((0.0, False), (0.3, True)):
+        runner = released if declared == 0.0 else _late(released, declared)
+        bank = ValidationBank(runner, dataset_args, config)
+        assert bank.stream_geometry.merger_offset_seconds == declared
+        found_window = bank.stream_found_window_seconds
+        for merger in 100.0 + rng.uniform(0.0, 0.25, 40):
+            time = np.arange(320, 480) * 0.25  # the search's windows, on its grid
+            stat = 10.0 - np.abs(time + 0.3 - merger)  # loudest 0.3 s before the merger
+            stat_found, when = bank._released_found(gf.WindowScores(time, stat), merger)
+            assert np.isfinite(stat_found) == expect_found, (declared, merger)
+            if expect_found:
+                assert abs(when) <= found_window + 1e-9
+    with pytest.raises(ValueError, match="merger range"):
+        dataclasses.replace(released.card.output, merger_offset_seconds=0.3, merger_range_seconds=(0.0, 0.2))
+
+
+def test_the_record_keeps_the_declared_merger_offset(validated):
+    _, v, _ = validated
+    assert float(v.noise_streams["merger_offset_seconds"]) == 0.0

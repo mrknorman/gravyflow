@@ -221,6 +221,15 @@ repository before it may need the changes below.
   as every model's are. Its record's fingerprint is its card's; no worst cases are kept for it. Adapters give these
   window scores through a new optional method, `ExternalSearch.scores(segment)`, which `ExternalRunner.scores` runs
   on several segments in one process (`gf.WindowScores`); an adapter without it is refused by name.
+- **A model's trigger stands where it places the merger.** Each window's triggers are timed where the model
+  places the merger in its window (`StreamGeometry.trigger_time`, the one place a window's time is made: the
+  background, the found test, real events, glitches, timing accuracy and latency's wait read it): for a Keras
+  model its onsource's centre unless `ValidationConfig.merger_offset_seconds` declares an offset from it (by
+  default none, so results are unchanged); for a released-weights model the time its search gives the window moved
+  by its card's new `OutputContract.merger_offset_seconds`, where its authors' training data placed the merger
+  (`merger_range_seconds` records the range they spread it over). The offset in force is recorded with the streams
+  (`noise_streams["merger_offset_seconds"]`). A released model's configuration may only repeat its card's offset,
+  and its glitch stage is refused by name.
 - **Injection records for analysis.** A dataset returns, when asked: `ReturnVariables.IN_BAND_DURATION_SECONDS`
   (B, G), a CBC's time from the band's lower frequency to its merger (the envelope's peak) by its waveform model,
   not cut by the window (`gf.CBCGenerator.in_band_duration_seconds`; NaN for other sources);

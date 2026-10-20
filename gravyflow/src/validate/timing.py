@@ -96,8 +96,13 @@ def throughput_summary(timing: Timing) -> Dict[str, float]:
 # ------------------------------------------------------------- latency
 
 def algorithmic_wait_seconds(geometry: StreamGeometry, cluster_seconds: float) -> float:
-    """The data a trigger needs after its time: half the window's (padded) onsource, then the clustering's wait."""
-    return geometry.window.num_onsource_samples / 2.0 / geometry.sample_rate_hertz + float(cluster_seconds)
+    """
+    The data a trigger needs after its time: its window's data after the time its score
+    stands at (half the padded onsource, less the model's declared merger offset;
+    `stream.StreamGeometry.trigger_time`), then the clustering's wait.
+    """
+    after = (geometry.footprint_samples - geometry.time_samples) / geometry.sample_rate_hertz
+    return after + float(cluster_seconds)
 
 
 def stream_latency(score: Callable[[np.ndarray, np.ndarray], Any], geometry: StreamGeometry, strain: np.ndarray, *,

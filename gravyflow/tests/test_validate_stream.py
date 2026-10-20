@@ -315,3 +315,57 @@ def test_the_found_window_is_at_least_half_the_stride():
             found.append(np.isfinite(loudest_within(times[keep], scores[keep], [merger],
                                                     found_window(0.1, stride))[0][0]))
         assert np.all(found), stride
+
+
+def test_a_declared_merger_offset_times_every_trigger():
+    # A model trained with the merger 0.3 s after its onsource's centre responds loudest to the
+    # window whose centre lies 0.3 s before the merger. Timed at the centre, it is never found
+    # (0.3 s is beyond the found window, wherever the merger falls on the grid); timed where it
+    # declares the merger, it always is, its trigger at the merger.
+    from gravyflow.src.dataset.config import WindowSpec
+    from gravyflow.src.validate.stream import StreamGeometry, found_in_stretch, found_window, local_windows
+
+    window = WindowSpec(2048.0, 1.0, 2.0, 0.25)
+    stride = 0.25
+    w = found_window(0.1, stride)
+    rng = np.random.default_rng(11)
+    for offset, expect in ((None, False), (0.3, True)):
+        geometry = StreamGeometry.of(window, stride) if offset is None else StreamGeometry.of(window, stride, offset)
+        centre = StreamGeometry.of(window, stride)  # where the response is set: the onsource's centre
+        half = geometry.local_half_samples(w + 1.0)
+        for sample in rng.integers(200_000, 200_000 + 512, 40):
+            index, starts = local_windows(geometry, half, int(sample), w + 1.0)
+            assert starts.min() >= 0 and starts.max() + geometry.footprint_samples <= 2 * half
+            scores = 10.0 - np.abs(centre.window_time(index) + 0.3 - sample / 2048.0)
+            stat, when = found_in_stretch(geometry, index, scores, int(sample), 1.0, w)
+            assert np.isfinite(stat) == expect, (offset, sample)
+            if expect:
+                assert abs(when) <= w + 1e-9
+
+
+def test_without_a_declaration_a_window_stands_at_its_onsource_centre(dataset_args):
+    # The default is unchanged: every window's time, the stretch read around a merger and the
+    # latency's wait are the centre's, and the record says so.
+    from gravyflow.src.dataset.config import WindowSpec
+    from gravyflow.src.validate.stream import StreamGeometry
+    from gravyflow.src.validate.timing import algorithmic_wait_seconds
+
+    window = WindowSpec(2048.0, 1.0, 2.0, 0.25)
+    geometry = StreamGeometry.of(window, 0.25)
+    assert geometry == StreamGeometry.of(window, 0.25, 0.0) and geometry.merger_offset_seconds == 0.0
+    index = np.arange(50)
+    np.testing.assert_array_equal(geometry.window_time(index),
+                                  (index * geometry.stride_samples + geometry.centre_samples) / 2048.0)
+    assert geometry.local_half_samples(1.125) == int(window.num_offsource_samples
+                                                     + np.ceil(window.num_onsource_samples / 2.0)
+                                                     + np.ceil(1.125 * 2048.0) + 1)
+    assert algorithmic_wait_seconds(geometry, 1.0) == window.num_onsource_samples / 2.0 / 2048.0 + 1.0
+    config = ValidationConfig(num_examples=40, batch_size=20, stream_segment_seconds=64.0)
+    bank = ValidationBank(logit_model(), dataset_args, config)
+    assert bank.stream_geometry == StreamGeometry.of(bank._noise_dataset.window_spec, None)
+    declared = ValidationBank(logit_model(), dataset_args,
+                              dataclasses.replace(config, merger_offset_seconds=0.2)).stream_geometry
+    assert declared.merger_offset_seconds == 0.2
+    np.testing.assert_allclose(declared.window_time(index), bank.stream_geometry.window_time(index) + 0.2)
+    bank.generate_stream_noise()
+    assert bank.noise_streams["merger_offset_seconds"] == 0.0

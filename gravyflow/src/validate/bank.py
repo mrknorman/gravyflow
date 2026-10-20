@@ -31,8 +31,8 @@ from .config import ValidationConfig
 from .metrics import Background, ScoreStream, logit_scores, sigma_level
 from .slides import SlideStream, TimeSlideBackground, TimeSlides
 from .stream import (
-    Placement, StreamGeometry, StreamReader, SyntheticSegments, cluster, found_in_stretch, found_window,
-    local_windows, loudest_within, place_injections, stream_background,
+    Placement, StreamGeometry, StreamReader, SyntheticSegments, found_at, found_in_stretch, found_window,
+    local_windows, place_injections, stream_background,
 )
 from .volume import uniform_in_volume
 from .utils import _extract_sample_data
@@ -120,6 +120,14 @@ def released_detector_order(runner, dataset_args: dict, config: ValidationConfig
     if config.score_real_events:
         raise ValueError(f"{card.name}: real events are not scored for a released-weights model; set "
                          "score_real_events off.")
+    if config.score_glitches:
+        raise ValueError(f"{card.name}: the glitch stage is not run for a released-weights model; set "
+                         "score_glitches off.")
+    declared = card.output.merger_offset_seconds
+    if config.merger_offset_seconds is not None and float(config.merger_offset_seconds) != declared:
+        raise ValueError(f"{card.name} places the merger {declared:g} s from the time its search gives a window "
+                         f"(its card's merger_offset_seconds); the configuration asks for "
+                         f"{config.merger_offset_seconds:g} s (leave merger_offset_seconds unset).")
     names = tuple(ifo.name for ifo in noise_ifos(dataset_args.get("ifos"), dataset_args.get("noise_obtainer")))
     rate = float(dataset_args.get("sample_rate_hertz", gf.Defaults.sample_rate_hertz))
     if sorted(names) != sorted(card.input.detectors) or rate != card.input.sample_rate_hertz:
@@ -699,7 +707,20 @@ class ValidationBank:
         (``noise_streams["stride_seconds"]``). A released-weights model's stride is its card's.
         """
         stride = self.model.card.input.stride_seconds if self.released else self.config.stride_seconds
-        return StreamGeometry.of(self._noise_dataset.window_spec, stride)
+        return StreamGeometry.of(self._noise_dataset.window_spec, stride, self.merger_offset_seconds)
+
+    @property
+    def merger_offset_seconds(self) -> float:
+        """
+        Where the model places the merger in its window (`stream.StreamGeometry.trigger_time`),
+        recorded with the streams: a released-weights model's card's declaration, from the
+        time its search gives a window; else ``config.merger_offset_seconds`` from the
+        onsource's centre, by default 0 (the centre).
+        """
+        if self.released:
+            return float(self.model.card.output.merger_offset_seconds)
+        offset = self.config.merger_offset_seconds
+        return 0.0 if offset is None else float(offset)
 
     @property
     def stream_found_window_seconds(self) -> float:
@@ -732,7 +753,9 @@ class ValidationBank:
         if self.released:
             contract = self.model.card.input
             need = contract.segment_seconds or contract.window_seconds + 2 * contract.context_seconds
-            half = max(half, int(math.ceil((need / 2 + self._reach_seconds) * geometry.sample_rate_hertz)) + 1)
+            # The windows read are those whose triggers, moved by the declared merger offset, lie in reach.
+            reach = self._reach_seconds + abs(geometry.merger_offset_seconds)
+            half = max(half, int(math.ceil((need / 2 + reach) * geometry.sample_rate_hertz)) + 1)
             half += geometry.stride_samples
         return half
 
@@ -805,6 +828,8 @@ class ValidationBank:
             "samples": np.array([s.num_samples for s in streams], dtype=np.int64),
             "stride_seconds": np.float64(self.stream_geometry.stride_seconds),
             "found_window_seconds": np.float64(self.stream_found_window_seconds),
+            # Where the model places the merger in its window (`stream.StreamGeometry.trigger_time`).
+            "merger_offset_seconds": np.float64(self.stream_geometry.merger_offset_seconds),
             # The test data's own observing time, at zero lag (VT's live time).
             "live_time_seconds": np.float64(zero_lag_seconds(streams, self.stream_geometry.stride_seconds,
                                                              self.window_seconds)),
@@ -900,6 +925,7 @@ class ValidationBank:
             "stretch_ends": np.array([s.stretch[1] for s in streams], dtype=np.float64),
             "samples": np.array([s.num_samples for s in streams], dtype=np.int64),
             "stride_seconds": np.float64(geometry.stride_seconds),
+            "merger_offset_seconds": np.float64(geometry.merger_offset_seconds),
             "footprint_seconds": np.float64(self._footprint_seconds),
             **record,
         }
@@ -938,7 +964,7 @@ class ValidationBank:
             span = (stream.num_windows - 1) * geometry.stride_samples + geometry.footprint_samples
             (found,) = self.released_scores([strain[:, :span]], [t0])
             scores.append(found.stat)
-            times.append(found.time)
+            times.append(geometry.trigger_time(found.time))  # each window's trigger time
         if not sum(s.size for s in scores):
             raise ValueError(f"{self.model.card.name} scored no window of the background's streams: lengthen them "
                              "(stream_segment_seconds, or real noise's segments).")
@@ -949,23 +975,21 @@ class ValidationBank:
 
     def _released_found(self, found, merger: float) -> Tuple[float, float]:
         """
-        An injection's found statistic from its adapter's scores of its stretch: the
-        loudest trigger (`stream.cluster`) of the windows within the found window and a
-        cluster of the merger, within the found window of it; ``-inf`` and NaN for none.
+        An injection's found statistic from its adapter's scores of its stretch, each
+        window timed where its card places the merger (`stream.StreamGeometry.trigger_time`):
+        the loudest trigger (`stream.found_at`) of the windows within the found window and
+        a cluster of the merger, within the found window of it; ``-inf`` and NaN for none.
         """
         cfg = self.config
         found_window_seconds = self.stream_found_window_seconds
-        if found.time.size == 0 or found.time[0] > merger - found_window_seconds \
-                or found.time[-1] < merger + found_window_seconds:
+        time = self.stream_geometry.trigger_time(found.time)
+        if time.size == 0 or time[0] > merger - found_window_seconds or time[-1] < merger + found_window_seconds:
             raise ValueError(
                 f"{self.model.card.name}'s search scored no windows either side of a merger in its stretch of "
                 f"{cfg.injection_stretch_seconds:g} s: give its card's "
                 "input contract the segment its search needs (segment_seconds).")
-        near = np.abs(found.time - merger) <= self._reach_seconds + 1e-9
-        times, stats = found.time[near], found.stat[near]
-        keep = cluster(times, stats, cfg.stream_cluster_seconds)
-        stat, when = loudest_within(times[keep], stats[keep], [merger], found_window_seconds)
-        return float(stat[0]), float(when[0] - merger)
+        near = np.abs(time - merger) <= self._reach_seconds + 1e-9
+        return found_at(time[near], found.stat[near], merger, cfg.stream_cluster_seconds, found_window_seconds)
 
     def _recorded_streams(self) -> List[SlideStream]:
         """The background's streams, as its record gives them (`generate_stream_noise`)."""

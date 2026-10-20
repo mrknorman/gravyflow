@@ -558,8 +558,11 @@ class Validator:
                   and "stride_seconds" in self.noise_streams else cfg.stream_stride_seconds(self.input_duration_seconds))
         found = (float(np.asarray(self.noise_streams["found_window_seconds"])) if self.noise_streams is not None
                  and "found_window_seconds" in self.noise_streams else found_window(cfg.found_window_seconds, stride))
-        return (f"{self.name}: stream mode, stride {stride:g} s over a {self.input_duration_seconds:g} s window; a "
-                f"trigger is the loudest score within {cfg.stream_cluster_seconds:g} s; an injection is found by the "
+        offset = (float(np.asarray(self.noise_streams.get("merger_offset_seconds", 0.0)))
+                  if self.noise_streams is not None else 0.0)
+        timed = f"; each window's trigger timed {offset:+g} s from its declared reference" if offset else ""
+        return (f"{self.name}: stream mode, stride {stride:g} s over a {self.input_duration_seconds:g} s window{timed}; "
+                f"a trigger is the loudest score within {cfg.stream_cluster_seconds:g} s; an injection is found by the "
                 f"loudest trigger within ±{found:g} s of its merger.")
 
     def _cached_segments(self) -> Optional[np.ndarray]:

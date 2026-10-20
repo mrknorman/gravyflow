@@ -29,6 +29,9 @@ CHILDREN_WITHOUT_CHILD_ENV = {
     "test_package.py": "runs in the checkout's root, the first entry of the path of ``python -c``",
     "test_external.py": "its adapter's process imports no gravyflow: the runner starts it as ``python -I`` "
                         "on a script it names by path",
+    "test_validate_external.py": "as test_external.py: its released model's adapter runs through the runner, "
+                                 "as ``python -I`` (which ignores PYTHONPATH) on a script it names by path, and "
+                                 "imports no gravyflow",
 }
 
 #: Run in a fresh interpreter, where no event module is imported yet: the offline

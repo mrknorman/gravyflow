@@ -168,6 +168,7 @@ def test_a_card_fingerprints_what_decides_its_results(tmp_path):
     changed = {
         "contract": card(weights, input=dataclasses.replace(base.input, window_seconds=2.0)),
         "output": card(weights, output=dataclasses.replace(base.output, signal_column=1)),
+        "merger offset": card(weights, output=dataclasses.replace(base.output, merger_offset_seconds=0.1)),
         "weights sha256": card(weights, weights=(gf.Weights(
             dataclasses.replace(weights, sha256="b" * 64), format="npy", framework="numpy"),)),
         "weights name": card(weights, weights=(gf.Weights(

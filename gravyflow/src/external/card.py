@@ -131,6 +131,17 @@ class OutputContract:
         threshold: The value a window must pass to become a trigger.
         cluster_seconds: The window its triggers are clustered over (0 for none).
         time_offset_seconds: What it adds to a window's start to give a trigger's time.
+        merger_offset_seconds: Where the merger sits relative to the time its search
+            gives a window (``ExternalRunner.scores``; later positive), as its authors
+            place it: where their training data put the merger in each window, or their
+            own trigger-time convention. The validator times each window's triggers
+            there (`gravyflow.src.validate.stream.StreamGeometry.trigger_time`), so that
+            the found test reads the model's trigger as its authors meant it. 0: the
+            given time is the merger's.
+        merger_range_seconds: Where the authors' training data put the merger, as
+            (earliest, latest) on the same footing, when they spread it over a range
+            (``merger_offset_seconds`` is then its centre), or None. A record of the
+            model's timing scatter; the validator does not read it.
     """
 
     statistic: str
@@ -139,6 +150,8 @@ class OutputContract:
     threshold: float
     cluster_seconds: float
     time_offset_seconds: float = 0.0
+    merger_offset_seconds: float = 0.0
+    merger_range_seconds: Optional[Tuple[float, float]] = None
 
     def __post_init__(self):
         _text("An output contract", "statistic", self.statistic)
@@ -149,6 +162,14 @@ class OutputContract:
         _number(self, "threshold", "An output contract")
         _number(self, "cluster_seconds", "An output contract", at_least=0)
         _number(self, "time_offset_seconds", "An output contract")
+        _number(self, "merger_offset_seconds", "An output contract")
+        if self.merger_range_seconds is not None:
+            span = tuple(float(t) for t in self.merger_range_seconds)
+            if len(span) != 2 or not all(math.isfinite(t) for t in span) \
+                    or not span[0] <= self.merger_offset_seconds <= span[1]:
+                raise ValueError(f"An output contract's merger range is (earliest, latest) about its merger offset "
+                                 f"{self.merger_offset_seconds}, got {self.merger_range_seconds}.")
+            object.__setattr__(self, "merger_range_seconds", span)
 
 
 @dataclass(frozen=True)

@@ -113,6 +113,12 @@ class ValidationConfig:
     mode: str = "stream"
     stride_seconds: Optional[float] = None
     found_window_seconds: float = 0.1
+    # Stream mode: where the model places the merger in its window, from its onsource's
+    # centre (s, later positive), as its training data placed it: each window's triggers
+    # stand there (`stream.StreamGeometry.trigger_time`), and it is recorded with the
+    # streams. None: the centre (0), or a released model's own declaration (its card's
+    # output contract, ``merger_offset_seconds``), which this may only repeat.
+    merger_offset_seconds: Optional[float] = None
     stream_segment_seconds: float = 256.0
     # Each injection's local stretch in stream mode: this long, centred on its merger,
     # whatever the model's window, so that its SNR, hrss and hpeak (measured on the
@@ -134,6 +140,11 @@ class ValidationConfig:
             raise ValueError(f"max_wrapping_slides must be >= 1, got {self.max_wrapping_slides}.")
         if self.stride_seconds is not None and not self.stride_seconds > 0:
             raise ValueError(f"stride_seconds must be > 0, got {self.stride_seconds}.")
+        if self.merger_offset_seconds is not None and (
+                isinstance(self.merger_offset_seconds, bool) or not isinstance(self.merger_offset_seconds, (int, float))
+                or not np.isfinite(self.merger_offset_seconds)):
+            raise ValueError(f"merger_offset_seconds must be a finite number of seconds, got "
+                             f"{self.merger_offset_seconds!r}.")
         for name in ("found_window_seconds", "stream_segment_seconds", "injection_stretch_seconds"):
             if not getattr(self, name) > 0:
                 raise ValueError(f"{name} must be > 0, got {getattr(self, name)}.")
