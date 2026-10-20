@@ -189,3 +189,60 @@ def test_the_stream_validator_slides_real_network_noise_at_its_stride(world):
             local = bank._score_stretch_windows(geometry, strain[None], [starts])
             np.testing.assert_allclose(local, bank.far_scores[offset + index], rtol=1e-5, atol=1e-6)
             offset += stream.num_windows
+
+
+def test_the_stream_validator_injects_into_real_network_noise_as_the_whole_stream_would(world):
+    # Injections scored locally in the slid real-noise streams: each merger's GPS is its stream's
+    # first sample's (detector 0) plus its sample over the rate, and its found statistic and trigger
+    # are what scoring the whole slid stream, the injection added, gives.
+    from gravyflow.src.validate.stream import cluster, loudest_within
+
+    fixture = fx.straddle("test", "train", half_width=600.0)
+    config = gf.ValidationConfig(num_examples=6000, batch_size=64, num_time_slides=2, time_slide_step_seconds=50.0,
+                                 snr_range=(40.0, 80.0))
+    generator = gf.WNBGenerator(
+        scaling_method=gf.ScalingMethod(value=gf.Distribution(min_=40.0, max_=80.0, type_=gf.DistributionType.UNIFORM),
+                                        type_=gf.ScalingTypes.SNR),
+        injection_chance=1.0,
+        duration_seconds=gf.Distribution(min_=0.1, max_=0.3, type_=gf.DistributionType.UNIFORM),
+        min_frequency_hertz=gf.Distribution(min_=20.0, max_=40.0, type_=gf.DistributionType.UNIFORM),
+        max_frequency_hertz=gf.Distribution(min_=60.0, max_=110.0, type_=gf.DistributionType.UNIFORM),
+    )
+    with world(fixture):
+        args = dict(
+            noise_obtainer=fx.noise_obtainer(fixture), waveform_generators=generator,
+            ifos=[gf.IFO[name] for name in IFOS], sample_rate_hertz=RATE,
+            onsource_duration_seconds=fx.ONSOURCE_SECONDS, crop_duration_seconds=fx.CROP_SECONDS,
+            offsource_duration_seconds=fx.OFFSOURCE_SECONDS,
+            input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
+        )
+        bank = ValidationBank(logit_model(2, int(RATE)), args, config)
+        bank.generate_stream_noise()
+        num = 8
+        local = bank._score_locally("inj", bank._generator(), num, {"snrs": gf.ScalingTypes.SNR})
+        dataset, placement, half, streams = bank.local_dataset(
+            "inj", bank._generator(), num, [gf.ReturnVariables.ONSOURCE, gf.ReturnVariables.INJECTIONS])
+        _, y = dataset[0]
+        injections = np.asarray(y[gf.ReturnVariables.INJECTIONS.name], dtype=np.float64)[:, 0]
+        geometry = bank.stream_geometry
+        rate = geometry.sample_rate_hertz
+        assert any(streams[int(i)].slide > 0 for i in placement.stream)  # slid detectors among them
+        for k in range(num):
+            stream = streams[int(placement.stream[k])]
+            clean, first_gps = bank.stream_source.stream_strain(stream)
+            m = int(placement.sample[k])
+            assert local["merger_times"][k] == pytest.approx(first_gps + m / rate, abs=0.5 / rate)
+            assert stream.stretch[0] <= local["gps_times"][k] <= stream.stretch[1]
+            full = clean.copy()
+            full[:, m - half:m + half] += injections[k]
+            index = np.arange(stream.num_windows)  # the windows the background scored
+            scores = np.concatenate([
+                bank._score(bank._noise_dataset.model_inputs(*geometry.gather(full, chunk * geometry.stride_samples)))
+                for chunk in np.array_split(index, max(index.size // 64, 1))])
+            times = geometry.window_time(index)
+            keep = cluster(times, scores, config.stream_cluster_seconds)
+            merger = m / rate
+            stat, when = loudest_within(times[keep], scores[keep], [merger], config.found_window_seconds)
+            assert local["scores"][k] == pytest.approx(stat[0], rel=1e-5, abs=1e-5), k
+            if np.isfinite(stat[0]):
+                assert local["trigger_offsets"][k] == pytest.approx(when[0] - merger, abs=1e-9)
