@@ -8,15 +8,19 @@ repository before it may need the changes below.
 ### Breaking changes
 
 - **The validator streams by default.** `ValidationConfig.mode` is `"stream"`: the model slides along continuous raw
-  strain at `stride_seconds` (by default a quarter of its window, recorded in the result), each window conditioned by
+  strain at `stride_seconds` (by default a quarter of its window in whole samples, recorded in the result; no longer
+  than the window), each window conditioned by
   the model's own dataset code; its scores are clustered into triggers (the loudest within `cluster_seconds`, by
-  default 1 s, as the matched filter clusters), which are `gf.Triggers`. The background is the triggers of time slides
-  of real noise at the stride, or of segments of continuous synthetic noise (`stream_segment_seconds`, 256 s). An
+  default 1 s, at least twice the found window, as the matched filter clusters; of equal scores, the middle of their
+  run), which are `gf.Triggers`. The background is the triggers of time slides of real noise at the stride, or of
+  segments of continuous synthetic noise (`stream_segment_seconds`, 256 s), none within `cluster_seconds` of a
+  stream's ends, whose livetime is less those stretches. An
   injection is found when the loudest trigger within `found_window_seconds` (0.1 s) of its merger passes the
   threshold (its score is that trigger's, `-inf` where none lies there), and the chance that a noise trigger does so
   (the trigger rate times the window) is subtracted at every threshold. Each injection is scored locally: placed in
-  the background's own streams, on a short stretch of that data around it, which is what scoring the whole stream with
-  it added gives. Each injection's in-band duration, whitened peak and BNS range are recorded. `mode="window"` keeps
+  the background's own scored streams, on a stretch of that data around it (`injection_stretch_seconds`, 40 s,
+  whatever the model, its SNR, hrss and hpeak measured within it against its own clean spectrum, so alike for every
+  model), which is what scoring the whole stream with it added gives. Each injection's in-band duration, whitened peak and BNS range are recorded. `mode="window"` keeps
   the old behaviour, unchanged, for backward compatibility and to reproduce earlier results. Validation records are
   format 7 (they record the mode); records of format 6 are refused by name, never converted. In stream mode the real
   events are still scored as single windows, their FARs read from the stream background.

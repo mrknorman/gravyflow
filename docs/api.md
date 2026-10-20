@@ -270,6 +270,7 @@ validates as it trains: they need the `viz` extra.
   throughput per second of strain and data-to-trigger latency of a model slid along a stream, median and tail, on
   the machine and at the thread count recorded, with the host's load; rounds of A-B-B-A; no ratio across hardware.
   The dashboard's Timing tab shows them.
+  `found_window_seconds`, `stream_segment_seconds`, `injection_stretch_seconds` for stream mode).
 
 ## Plotting (the `viz` extra)
 
