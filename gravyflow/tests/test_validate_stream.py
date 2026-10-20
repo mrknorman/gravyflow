@@ -226,3 +226,14 @@ def test_the_stream_reader_keeps_the_stretches_in_float64():
     on = batch[RV.ONSOURCE]
     assert on.dtype == np.float64 and batch[RV.OFFSOURCE].dtype == np.float64
     np.testing.assert_array_equal(on[0], strain[:, 1500:2500])
+
+
+def test_the_synthetic_segments_are_as_many_as_the_budget_needs(dataset_args):
+    # A budget of exactly two segments' windows draws two segments, not three.
+    probe = ValidationBank(logit_model(), dataset_args, ValidationConfig(num_examples=8, stream_segment_seconds=64.0))
+    geometry = probe.stream_geometry
+    per = geometry.num_windows(int(round(64.0 * geometry.sample_rate_hertz)))
+    for num, segments in ((2 * per, 2), (2 * per + 1, 3), (1, 1)):
+        bank = ValidationBank(logit_model(), dataset_args,
+                              ValidationConfig(num_examples=num, batch_size=8, stream_segment_seconds=64.0))
+        assert len(bank.stream_source.dataset) == segments, num

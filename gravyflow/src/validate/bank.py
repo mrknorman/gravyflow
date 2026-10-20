@@ -616,8 +616,8 @@ class ValidationBank:
                 gf.SeedTree(cfg.seed).sub("validator/far").stream(cfg.group, "noise/segment_order"),
                 stride_seconds=geometry.stride_seconds,
             )
-        num_segments = math.ceil(cfg.num_examples / geometry.num_windows(
-            int(round(cfg.stream_segment_seconds * geometry.sample_rate_hertz))) + 1e-9)
+        per_segment = geometry.num_windows(int(round(cfg.stream_segment_seconds * geometry.sample_rate_hertz)))
+        num_segments = -(-int(cfg.num_examples) // per_segment)  # whole segments, in integers
         dataset = self.stage_dataset("far", outputs=(gf.ReturnVariables.ONSOURCE,), num_examples=num_segments,
                                      batch_size=1, overrides={
                                          "onsource_duration_seconds": cfg.stream_segment_seconds,
