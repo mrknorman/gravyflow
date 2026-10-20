@@ -108,7 +108,7 @@ def population_box(generator) -> Dict[str, object]:
         aligned = sorted({low, high} | ({0.0} if low < 0.0 < high else set()))
         in_plane = min(np.hypot(*(max(abs(b) for b in bound) for bound in bounds[:2])), 1.0)
         # Each (in-plane, aligned) corner of the components' bounds, kept physical: a corner past
-        # |chi| = 1 (the generator checks no magnitude) is replaced by the two points of unit
+        # |chi| = 1 (which the generator refuses) is replaced by the two points of unit
         # magnitude inside it, one keeping its aligned part, the other its in-plane part.
         corners = set()
         for x in sorted({0.0, in_plane}):
