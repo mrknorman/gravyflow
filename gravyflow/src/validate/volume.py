@@ -61,8 +61,13 @@ The found fraction against distance (`found_fraction_by_distance`), drawn with t
 chance level, is the visual check that the reach is long enough: at its far end it
 falls to the chance. No other check of the reach is made.
 
-Units: distances in Mpc, volumes in Gpc^3 (Euclidean: no cosmology), FAR in Hz;
-`SECONDS_PER_YEAR` and `SECONDS_PER_MONTH` convert it for display.
+From the same curve: VT, the volume times the live time of the data searched
+(`sensitive_vt`); the volume of the sources in bins of chirp mass, mass ratio or spin
+(`binned_volume`, each bin its own volume set); and the ratio of a model's volume to the
+matched filter's on the same injections (`volume_ratio`).
+
+Units: distances in Mpc, volumes in Gpc^3 (Euclidean: no cosmology), VT in Gpc^3 yr,
+FAR in Hz; `SECONDS_PER_YEAR` and `SECONDS_PER_MONTH` convert it for display.
 """
 
 from __future__ import annotations
@@ -514,3 +519,203 @@ def sensitive_volume_curve(
         num_bootstrap=int(num_bootstrap),
         sigmas=sigmas,
     )
+
+
+# --------------------------------------------------------------------- VT
+
+@dataclass(frozen=True)
+class SensitiveVt:
+    """
+    Volume times live time (Gpc^3 yr) against target FAR (Hz): the sensitive volume within
+    the reach (`SensitiveVolumeCurve`) times the live time of the data searched
+    (``live_time_seconds``, exact), the unit rate papers use. Its interval at each of
+    ``sigmas`` (``(levels, targets)``) is the volume's joint interval times the live
+    time; ``quotable`` is the volume's.
+    """
+    far_hz: np.ndarray
+    live_time_seconds: float
+    vt_gpc3_yr: np.ndarray
+    lower_gpc3_yr: np.ndarray
+    upper_gpc3_yr: np.ndarray
+    quotable: np.ndarray
+    sigmas: Tuple[float, ...]
+
+    @property
+    def live_time_years(self) -> float:
+        return self.live_time_seconds / SECONDS_PER_YEAR
+
+
+def sensitive_vt(curve: SensitiveVolumeCurve, live_time_seconds: float) -> SensitiveVt:
+    """VT (Gpc^3 yr) at each of the curve's targets: its volume within the reach times ``live_time_seconds``."""
+    if not live_time_seconds > 0:
+        raise ValueError(f"live_time_seconds must be > 0, got {live_time_seconds}.")
+    years = float(live_time_seconds) / SECONDS_PER_YEAR
+    return SensitiveVt(curve.far_hz, float(live_time_seconds), curve.volume_within_reach_gpc3 * years,
+                       curve.joint_lower_gpc3 * years, curve.joint_upper_gpc3 * years, curve.quotable, curve.sigmas)
+
+
+# ---------------------------------------------------------- binned volume
+
+@dataclass(frozen=True)
+class BinnedVolume:
+    """
+    The sensitive volume within the reach of the sources in each bin of a parameter
+    (``parameter``: chirp mass, mass ratio, spin), against target FAR: bin ``j``
+    (``[edges[j], edges[j + 1])``, the last closed) holds ``total[j]`` of the volume
+    set's injections, and ``curves[j]`` is their own `SensitiveVolumeCurve` (None for an
+    empty bin), with its three intervals: the volume a source of that bin is seen in.
+    """
+    parameter: str
+    edges: np.ndarray
+    total: np.ndarray
+    curves: Tuple[Optional[SensitiveVolumeCurve], ...]
+
+    def _stack(self, field: str, shape) -> np.ndarray:
+        return np.stack([np.full(shape, np.nan) if c is None else np.asarray(getattr(c, field), dtype=np.float64)
+                         for c in self.curves], axis=-1)
+
+    @property
+    def far_hz(self) -> np.ndarray:
+        return next(c.far_hz for c in self.curves if c is not None)
+
+    @property
+    def volume_gpc3(self) -> np.ndarray:
+        """V within the reach of each bin's sources: (targets, bins)."""
+        return self._stack("volume_within_reach_gpc3", self.far_hz.shape)
+
+    @property
+    def lower_gpc3(self) -> np.ndarray:
+        """The joint interval's lower ends: (levels, targets, bins)."""
+        sigmas = next(c.sigmas for c in self.curves if c is not None)
+        return self._stack("joint_lower_gpc3", (len(sigmas), self.far_hz.size))
+
+    @property
+    def upper_gpc3(self) -> np.ndarray:
+        sigmas = next(c.sigmas for c in self.curves if c is not None)
+        return self._stack("joint_upper_gpc3", (len(sigmas), self.far_hz.size))
+
+
+def binned_volume(
+    injections: InjectionVolumes,
+    background: Background,
+    fars_hz: Sequence[float],
+    values,
+    edges: Sequence[float],
+    rng: np.random.Generator,
+    *,
+    parameter: str = "parameter",
+    num_bootstrap: int = 1000,
+    sigmas: Sequence[float] = DEFAULT_SIGMAS,
+    method: str = "clopper-pearson",
+    chance_fraction: float = 0.1,
+) -> BinnedVolume:
+    """
+    The sensitive volume within the reach in bins of a parameter's ``values`` (one per
+    injection) at each of ``fars_hz`` (`BinnedVolume`): each bin's injections are their own
+    volume set (`sensitive_volume_curve`, every interval and the chance subtraction as for
+    the whole set), on the same background and reach.
+    """
+    from .metrics import bin_index
+
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    if values.shape != injections.scores.shape:
+        raise ValueError(f"{values.size} {parameter} values for {injections.num_injections} injections.")
+    edges = np.asarray(edges, dtype=np.float64)
+    index = bin_index(values, edges)
+    curves, totals = [], []
+    for j in range(edges.size - 1):
+        inside = index == j
+        totals.append(int(inside.sum()))
+        if not inside.any():
+            curves.append(None)
+            continue
+        subset = InjectionVolumes(injections.scores[inside], injections.reach_mpc, injections.distances[inside],
+                                  injections.weights[inside])
+        curves.append(sensitive_volume_curve(subset, background, fars_hz, rng, num_bootstrap=num_bootstrap,
+                                             sigmas=sigmas, method=method, chance_fraction=chance_fraction))
+    if all(c is None for c in curves):
+        raise ValueError(f"No injection's {parameter} lies within the bins {edges.tolist()}.")
+    return BinnedVolume(parameter, edges, np.array(totals, dtype=np.int64), tuple(curves))
+
+
+# ------------------------------------------------------ ratio of volumes
+
+@dataclass(frozen=True)
+class VolumeRatio:
+    """
+    The ratio of a model's sensitive volume within the reach to a reference's (the matched
+    filter's), on the same injections, at each target FAR (Hz): each volume at its own
+    background's threshold for the target, its chance subtracted. Its interval at each of
+    ``sigmas`` (``(levels, targets)``) is the central range of a bootstrap that redraws the
+    injections once for both (they are the same injections, so their errors largely cancel)
+    and each background's threshold independently, at least wide enough to hold the
+    ratio itself. ``quotable``: both volumes are. NaN where either target is unresolved or
+    the reference finds no volume.
+    """
+    far_hz: np.ndarray
+    ratio: np.ndarray
+    lower: np.ndarray
+    upper: np.ndarray
+    quotable: np.ndarray
+    num_bootstrap: int
+    sigmas: Tuple[float, ...]
+
+
+def volume_ratio(
+    injections: InjectionVolumes,
+    background: Background,
+    reference_injections: InjectionVolumes,
+    reference_background: Background,
+    fars_hz: Sequence[float],
+    rng: np.random.Generator,
+    *,
+    num_bootstrap: int = 1000,
+    sigmas: Sequence[float] = DEFAULT_SIGMAS,
+) -> VolumeRatio:
+    """
+    A model's sensitive volume over a reference's (`VolumeRatio`), at each of ``fars_hz``.
+
+    Raises:
+        ValueError: the two volume sets are not the same injections (the same reach,
+            distances and weights, in the same order).
+    """
+    same = (injections.num_injections == reference_injections.num_injections
+            and injections.reach_mpc == reference_injections.reach_mpc
+            and np.array_equal(injections.distances, reference_injections.distances)
+            and np.array_equal(injections.weights, reference_injections.weights))
+    if not same:
+        raise ValueError("A ratio of sensitive volumes needs the same injections for both: the two volume sets differ "
+                         "in their reach, distances or weights.")
+    if num_bootstrap < 1:
+        raise ValueError(f"num_bootstrap must be >= 1, got {num_bootstrap}.")
+    sigmas = tuple(float(s) for s in sigmas)
+    fars = np.asarray(fars_hz, dtype=np.float64).reshape(-1)
+    sides = []
+    for inj, bg in ((injections, background), (reference_injections, reference_background)):
+        targets = [bg.threshold_for_far(float(far)) for far in fars]
+        threshold = np.array([t.threshold for t in targets])
+        chance = bg.found_by_chance(threshold).mean
+        quotable = np.array([t.quotable for t in targets])
+        sides.append((inj, bg, threshold, chance, quotable))
+
+    def ratio_of(model_volume, reference_volume):
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(reference_volume > 0, model_volume / reference_volume, np.nan)
+
+    point = ratio_of(*(inj.volume(t, c) for inj, _, t, c, _ in sides))
+    n = injections.num_injections
+    replicates = np.empty((num_bootstrap, fars.size))
+    for b in range(num_bootstrap):
+        multiplicity = np.bincount(rng.integers(0, n, n), minlength=n)
+        volumes = [inj.volume(bg.bootstrap_thresholds(fars, rng), c, multiplicity) for inj, bg, _, c, _ in sides]
+        replicates[b] = ratio_of(*volumes)
+    lower, upper = np.full((len(sigmas), fars.size), np.nan), np.full((len(sigmas), fars.size), np.nan)
+    for level, sigma in enumerate(sigmas):
+        alpha = 1.0 - sigma_level(sigma)
+        for i in np.flatnonzero(np.isfinite(point)):
+            values = replicates[:, i][np.isfinite(replicates[:, i])]
+            if values.size:
+                low, high = np.quantile(values, [alpha / 2, 1 - alpha / 2])
+                lower[level, i], upper[level, i] = min(low, point[i]), max(high, point[i])
+    lower, upper = nested(lower, upper)
+    return VolumeRatio(fars, point, lower, upper, sides[0][4] & sides[1][4], int(num_bootstrap), sigmas)
