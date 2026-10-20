@@ -210,11 +210,15 @@ def test_validator_scores_a_burst_model():
     # The validator asked every injection set for CBC masses, which a WNB set lacks.
     config = small(HL)
     model = MLyCoherence.model(config)
+    # Stream mode scores each injection on a stretch of injection_stretch_seconds (40 s),
+    # placed only where the background scored every window its found test reads: 192
+    # windows at the default quarter-window stride span enough of one stream for that.
+    validation = ValidationConfig(num_examples=192, batch_size=32, snr_range=(0.0, 20.0))
     validator = Validator.validate(
-        model=model, name="mly", dataset_args=MLyCoherence.validation_dataset_args(config),
-        config=ValidationConfig(num_examples=8, batch_size=4, snr_range=(0.0, 20.0)))
-    assert validator.far_scores.shape == (8,)
-    assert validator.efficiency_data["scores"].shape == (8,) and "mass1" not in validator.efficiency_data
+        model=model, name="mly", dataset_args=MLyCoherence.validation_dataset_args(config), config=validation)
+    assert validator.far_scores.shape == (validation.num_examples,)
+    assert validator.efficiency_data["scores"].shape == (validation.num_examples,)
+    assert "mass1" not in validator.efficiency_data
 
 
 # ------------------------------------------------------------- the script
