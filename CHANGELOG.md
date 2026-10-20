@@ -129,15 +129,18 @@ repository before it may need the changes below.
   strain once into triggers (so a time slide costs only `coincide`), with aligned-spin `TemplateBank`s, Allen's
   chi-squared and, each as PyCBC runs it: autogating of loud transients (`Autogating`, also `autogate` for any
   search's input), the PSD-variation statistic (`PSDVariation`), Nitz's sine-Gaussian veto, and the ranking
-  `newsnr_sgveto_psdvar` (`ranking_statistic`). `DetectorTriggers` store every ranking input, and the filter ranks
-  exactly the inputs stored (float32), so `ranked` recomputes the stored ranking bit for bit. Each carries its
-  bank's identity (`bank_identity`, a hash of the bank's parameters) and its ranking's definition
-  (`ranking_definition`: name, parameters and corrections), refuses a NaN or an infinity by name, and `coincide`,
-  `concatenate` and `fit_templates` refuse triggers of another bank or ranking. `save`/`load(path, bank)` keep them
-  whole in a strict .npz format (schema version 2, `TRIGGER_SCHEMA_VERSION`): a file of another format, schema
-  version (the earlier layout with no header included), ranking or bank, or with arrays missing, extra or of
-  another dtype, is refused by name. Strain without noise has no PSD variation (`psd_variation` refuses it by
-  name); search it with `psd_variation=None`. `gate` is defined on samples (its docstring states when it equals
+  `newsnr_sgveto_psdvar` (`ranking_statistic`). `DetectorTriggers` store every ranking input (read-only), and
+  their ranking (`reweighted_snr`) is never given or stored but derived from those inputs as stored (float32), so
+  it is the same bit for bit at filtering, after `ranked` and after `load`. Each carries its bank's identity
+  (`bank_identity`, a hash of the bank's parameters; given the bank itself, template indices outside it are
+  refused) and its ranking's definition (`ranking_definition`: name, parameters and corrections), names an
+  interferometer gravyflow knows, refuses a NaN or an infinity by name, and `coincide`, `concatenate` and
+  `fit_templates` refuse triggers of another bank or ranking. `save`/`load(path, bank)` keep them whole in a strict
+  .npz format (schema version 3, `TRIGGER_SCHEMA_VERSION`): a file of another format, schema version (the earlier
+  layouts included), ranking, bank, header key or detector, with arrays missing, extra or of another dtype, or with
+  a template index outside the bank given, is refused by name. PSD variation requires strain with noise: search
+  noise-free strain with `psd_variation=None` (`psd_variation` refuses strain where it is undefined; a signal's
+  faint tail can still give a huge finite value). `gate` is defined on samples (its docstring states when it equals
   PyCBC's `gate_data`). `fit_templates` gives per-template exponential
   background fits and `coincident_ranking` the fit statistic. `score_injections` scores each injection on a short
   stretch, equal to the full pass with it added. The float32 kernels run on a device the caller names

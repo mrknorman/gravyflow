@@ -9,7 +9,7 @@ import pytest
 
 from gravyflow.src.detection import TemplateBank
 from gravyflow.src.detection.background import exponential_fit, fit_templates, coincident_ranking
-from gravyflow.src.detection.stream import DetectorTriggers, bank_identity, coincide
+from gravyflow.src.detection.stream import DetectorTriggers, coincide
 from gravyflow.src.detection.vetoes import (
     PSDVariation, gate, newsnr, psd_variation, ranking_statistic, value_at)
 from gravyflow.tests.test_stream_search import (
@@ -144,8 +144,7 @@ def test_the_sine_gaussian_veto_follows_its_distribution_and_cuts_a_blip():
 
 def test_stored_triggers_recompute_their_ranking(tmp_path):
     # Every input of the ranking is stored: saved and loaded, the triggers
-    # recompute their ranking exactly, and without the corrections it is
-    # newsnr.
+    # derive their ranking exactly, and without the corrections it is newsnr.
     rng = np.random.default_rng(45)
     noise = coloured_noise(rng, 200.0)
     bank = TemplateBank.from_masses(*HEAVY)
@@ -182,7 +181,7 @@ def background_triggers(rng, alphas, live_seconds, bank, threshold=6.0):
         value.append(threshold + rng.exponential(1.0 / alpha, n))
     value = np.concatenate(value).astype(np.float32)
     return DetectorTriggers("H1", np.sort(rng.uniform(0, live_seconds, len(value))), np.concatenate(template),
-                            value, np.ones_like(value), value, (0.0, live_seconds), bank=bank_identity(bank))
+                            value, np.ones_like(value), (0.0, live_seconds), bank=bank)  # ranked = value
 
 
 def test_exponential_fits_are_pycbcs_and_recover_their_slopes():
@@ -218,8 +217,7 @@ def test_the_fit_statistic_ranks_by_each_detectors_background():
     x = np.array([8.0, 8.0])
     expected = -fits["H1"].alpha * 2.0 + np.log(fits["H1"].alpha) + np.log(fits["H1"].rate)
     np.testing.assert_allclose(fits["H1"].log_noise_rate([0, 1], x), expected)
-    pair = {d: DetectorTriggers(d, [100.0, 300.0], [0, 1], x, [1.0, 1.0], x, (0.0, 1000.0), bank=bank_identity(bank))
-            for d in ("H1", "L1")}
+    pair = {d: DetectorTriggers(d, [100.0, 300.0], [0, 1], x, [1.0, 1.0], (0.0, 1000.0), bank=bank) for d in ("H1", "L1")}
     network = coincide(pair)
     ranking = coincident_ranking(network, fits)
     assert ranking[network.template == 0][0] > ranking[network.template == 1][0]

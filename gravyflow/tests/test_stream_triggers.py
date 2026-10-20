@@ -23,11 +23,12 @@ BANK = TemplateBank.from_masses(*HEAVY)
 OTHER = TemplateBank.from_masses([60.0, 40.0], [45.0, 30.0], [0.0, 0.5], [0.0, 0.4])
 
 
-def test_the_stored_ranking_recomputes_exactly_across_seeds():
+def test_the_ranking_recomputes_exactly_across_seeds_and_files(tmp_path):
     # The ranking is computed from exactly the inputs stored (v in float32),
-    # so recomputing it from them gives the stored ranking bit for bit: 24
-    # seeds, about 1300 triggers. (Ranked from float64 v and stored with
-    # float32 v, about 12% of triggers differed by one float32 unit.)
+    # so recomputing it from them, or from a file of them, gives the ranking
+    # at filtering time bit for bit (on one platform): 24 seeds, about 1300
+    # triggers. (Ranked from float64 v and stored with float32 v, about 12% of
+    # triggers differed by one float32 unit.)
     mf = search(BANK, snr_threshold=4.0)
     count = 0
     for seed in range(1, 25):
@@ -35,16 +36,83 @@ def test_the_stored_ranking_recomputes_exactly_across_seeds():
         recomputed = ranking_statistic(out.snr, out.reduced_chisq, out.sg_chisq, out.psd_variation)
         np.testing.assert_array_equal(recomputed, out.reweighted_snr, err_msg=f"seed {seed}")
         np.testing.assert_array_equal(out.ranked().reweighted_snr, out.reweighted_snr, err_msg=f"seed {seed}")
+        out.save(tmp_path / f"{seed}.npz")
+        back = DetectorTriggers.load(tmp_path / f"{seed}.npz", BANK)
+        np.testing.assert_array_equal(back.reweighted_snr, out.reweighted_snr, err_msg=f"seed {seed}")
         count += len(out)
     assert count > 1000, count
 
 
 def triggers(**overrides):
     values = dict(detector="L1", time=[1000.5, 1001.5], template=[0, 1], snr=[6.0, 7.0], reduced_chisq=[1.0, 2.0],
-                  reweighted_snr=None, span=(1000.0, 1100.0), sg_chisq=[1.0, 5.0], psd_variation=[1.0, 1.2],
-                  gates=[1050.0], bank=bank_identity(BANK))
+                  span=(1000.0, 1100.0), sg_chisq=[1.0, 5.0], psd_variation=[1.0, 1.2], gates=[1050.0],
+                  bank=bank_identity(BANK))
     values.update(overrides)
     return DetectorTriggers(**values)
+
+
+def test_the_ranking_is_derived_never_given_or_stored(tmp_path):
+    # The ranking is a function of the stored inputs and the ranking's
+    # definition, so it is neither an argument nor in the file: a file can
+    # hold no ranking that disagrees with its inputs.
+    with pytest.raises(TypeError, match="reweighted_snr"):
+        triggers(reweighted_snr=[10.0, 10.0])
+    out = triggers()
+    np.testing.assert_array_equal(out.reweighted_snr, ranking_statistic(out.snr, out.reduced_chisq, out.sg_chisq,
+                                                                        out.psd_variation))
+    path = tmp_path / "triggers.npz"
+    out.save(path)
+    with np.load(path) as data:
+        assert "reweighted_snr" not in data.files
+        header = json.loads(str(data["header"]))
+    # A definition with the sine-Gaussian veto off ranks the same inputs without it, on load.
+    rewrite(path, {**header, "ranking": ranking_definition(sine_gaussian=False)})
+    back = DetectorTriggers.load(path, BANK)
+    np.testing.assert_array_equal(back.reweighted_snr, ranking_statistic(out.snr, out.reduced_chisq, None,
+                                                                         out.psd_variation))
+    assert back.reweighted_snr[1] > out.reweighted_snr[1]  # its sg_chisq of 5 no longer lowers it
+    # The arrays are read-only, so the derived ranking cannot go stale.
+    with pytest.raises(ValueError, match="read-only"):
+        out.snr[0] = 100.0
+
+
+def test_a_file_of_schema_version_2_with_a_stored_ranking_is_refused(tmp_path):
+    path, header = stored(tmp_path)
+    with np.load(path) as data:
+        snr = data["snr"]
+    rewrite(path, {**header, "schema_version": 2}, extra={"reweighted_snr": 2.0 * snr})
+    with pytest.raises(ValueError, match="schema version 2"):
+        DetectorTriggers.load(path, BANK)
+
+
+def test_template_indices_outside_the_bank_are_refused(tmp_path):
+    # BANK holds two templates: index 2 is outside it.
+    for bad in (2, 999):
+        with pytest.raises(ValueError, match="template"):
+            triggers(template=[0, bad], bank=BANK)
+        out = triggers(template=[0, bad])  # an identity alone cannot bound them
+        out.save(tmp_path / "triggers.npz")
+        with pytest.raises(ValueError, match="template"):
+            DetectorTriggers.load(tmp_path / "triggers.npz", BANK)
+    assert triggers(template=[0, 1], bank=BANK).bank == bank_identity(BANK)
+
+
+def test_an_unknown_header_key_is_refused(tmp_path):
+    path, header = stored(tmp_path)
+    rewrite(path, {**header, "note": "anything"})
+    with pytest.raises(ValueError, match="note"):
+        DetectorTriggers.load(path, BANK)
+
+
+def test_a_detector_gravyflow_does_not_know_is_refused(tmp_path):
+    for name in ("X1", "l1", ""):
+        with pytest.raises(ValueError, match="detector"):
+            triggers(detector=name)
+    path, header = stored(tmp_path)
+    rewrite(path, {**header, "detector": "X1"})
+    with pytest.raises(ValueError, match="X1"):
+        DetectorTriggers.load(path, BANK)
+    assert triggers(detector="V1").detector == "V1"
 
 
 def test_a_file_holds_its_schema_ranking_and_bank_and_round_trips(tmp_path):
@@ -54,7 +122,9 @@ def test_a_file_holds_its_schema_ranking_and_bank_and_round_trips(tmp_path):
     out.save(path)
     with np.load(path) as data:
         header = json.loads(str(data["header"]))
-    assert header["schema_version"] == TRIGGER_SCHEMA_VERSION
+        assert "reweighted_snr" not in data.files
+    assert header["schema_version"] == TRIGGER_SCHEMA_VERSION == 3
+    assert set(header) == {"format", "schema_version", "detector", "bank", "ranking"}
     assert header["bank"] == bank_identity(BANK) and header["ranking"] == ranking_definition()
     for bank in (BANK, bank_identity(BANK)):
         back = DetectorTriggers.load(path, bank)
@@ -98,7 +168,7 @@ def stored(tmp_path):
         return path, json.loads(str(data["header"]))
 
 
-@pytest.mark.parametrize("version", [1, 3, "2"])
+@pytest.mark.parametrize("version", [1, 2, 4, "3"])
 def test_a_file_of_another_schema_version_is_refused(tmp_path, version):
     path, header = stored(tmp_path)
     rewrite(path, {**header, "schema_version": version})
@@ -135,9 +205,11 @@ def test_a_file_of_another_bank_is_refused(tmp_path):
 
 
 def test_a_file_in_the_first_layout_is_refused_by_name(tmp_path):
-    # Schema version 1 stored the arrays, the detector, span and gates, with no header.
+    # Schema version 1 stored the arrays (the ranking among them), the detector, span and gates, with no header.
     path, _ = stored(tmp_path)
-    rewrite(path, drop=("header",), extra={"detector": np.array("L1")})
+    with np.load(path) as data:
+        snr = data["snr"]
+    rewrite(path, drop=("header",), extra={"detector": np.array("L1"), "reweighted_snr": snr})
     with pytest.raises(ValueError, match="schema version 1"):
         DetectorTriggers.load(path, BANK)
 
@@ -170,12 +242,11 @@ def test_a_file_that_is_not_an_npz_archive_is_refused(tmp_path):
         DetectorTriggers.load(tmp_path / "empty.npz", BANK)
 
 
-@pytest.mark.parametrize("name", ["snr", "time", "psd_variation", "sg_chisq", "reduced_chisq", "reweighted_snr",
-                                  "gates"])
+@pytest.mark.parametrize("name", ["snr", "time", "psd_variation", "sg_chisq", "reduced_chisq", "gates"])
 @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
 def test_a_non_finite_value_is_refused_on_construction(name, bad):
     values = {"time": [1000.5, 1001.5], "snr": [6.0, 7.0], "psd_variation": [1.0, 1.2], "sg_chisq": [1.0, 5.0],
-              "reduced_chisq": [1.0, 2.0], "reweighted_snr": [6.0, 6.5], "gates": [1050.0]}
+              "reduced_chisq": [1.0, 2.0], "gates": [1050.0]}
     value = np.array(values[name], dtype=np.float64)
     value[-1] = bad
     with pytest.raises(ValueError, match=name):
@@ -188,11 +259,13 @@ def test_a_non_finite_span_is_refused_on_construction(bad):
         triggers(span=(1000.0, bad))
 
 
-@pytest.mark.parametrize("name", ["snr", "time", "psd_variation", "sg_chisq", "reduced_chisq", "reweighted_snr"])
+@pytest.mark.parametrize("name", ["snr", "time", "psd_variation", "sg_chisq", "reduced_chisq", "gates"])
 def test_a_non_finite_value_is_refused_on_save(tmp_path, name):
-    # The arrays are numpy's: one changed in place after construction is still refused when saved.
+    # The arrays are read-only; one made writable and changed in place is still refused when saved.
     out = triggers()
-    getattr(out, name)[0] = np.nan
+    value = getattr(out, name)
+    value.setflags(write=True)
+    value[0] = np.nan
     with pytest.raises(ValueError, match=name):
         out.save(tmp_path / "triggers.npz")
     assert not (tmp_path / "triggers.npz").exists()

@@ -212,7 +212,7 @@ EIGHT = bank_identity(TemplateBank.from_masses(np.arange(8) + 20.0, np.arange(8)
 
 def triggers(detector, time, template, snr, span=(0.0, 1000.0)):
     snr = np.asarray(snr, dtype=np.float32)
-    return DetectorTriggers(detector, time, template, snr, np.ones_like(snr), snr, span, bank=EIGHT)
+    return DetectorTriggers(detector, time, template, snr, np.ones_like(snr), span, bank=EIGHT)  # ranked = snr
 
 
 def test_a_coincidence_is_one_template_within_the_light_travel_time():

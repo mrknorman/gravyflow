@@ -23,7 +23,10 @@ twice the mean of its neighbours replaced by that mean, is averaged over 8 s
 windows once a second: v(t), about 1 in stationary noise, larger where the
 noise is louder than the long-term PSD. As in PyCBC, the 8 s window that
 starts at t0 is labelled with time t0 + 8 s, and a trigger takes v linearly
-interpolated at its time (`value_at`).
+interpolated at its time (`value_at`). It is a statistic of noise: strain
+without noise must be searched with `psd_variation=None` (see
+`psd_variation`; it is refused where v is undefined, but a signal's faint
+tail can give a huge finite v that ranks its trigger away).
 
 **The ranking** (``pycbc.events.ranking.newsnr_sgveto_psdvar``). With the SNR
 rho, the reduced chi-squared chi_r^2, the sine-Gaussian chi-squared chi_sg^2
@@ -282,13 +285,18 @@ def psd_variation(strain: np.ndarray, sample_rate_hertz: float,
     seconds from its first sample (each the end of its averaging window, as
     PyCBC labels them), one a second. See the module docstring.
 
-    v compares the strain with its own long-term spectrum, which noise
-    defines. Strain without noise (a lone signal, or zeros) has a long-term
-    median spectrum that is zero, or at rounding level, somewhere: there v is
-    0 / 0 or rounding, not a measurement. So the long-term spectrum must be
-    positive and finite at every frequency above 0 and span at most
-    1 / (float64's epsilon) over the band (real detector noise spans far
-    less), and v must be finite; otherwise the strain is refused by name.
+    **The statistic requires strain with noise.** v compares the strain with
+    its own long-term spectrum, which noise defines; run noise-free strain
+    (a signal alone, as in a test) with the streaming filter's
+    `psd_variation=None`. Strain without noise has a long-term median
+    spectrum that is zero, or at rounding level, somewhere: there v is 0 / 0
+    or rounding, not a measurement, and the strain is refused by name (the
+    long-term spectrum must be positive and finite at every frequency above
+    0 and span at most 1 / (float64's epsilon) over the band, and v must be
+    finite). Not every noise-free strain is caught: where a signal's faint
+    tail fills the quiet segments the spectrum is positive and resolved, and
+    v is finite but huge (measured up to about 1e27), which silently ranks a
+    trigger there away. No bound on v is applied.
     """
     fs = int(sample_rate_hertz)
     strain = np.asarray(strain, dtype=np.float64)
