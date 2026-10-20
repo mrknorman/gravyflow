@@ -43,7 +43,9 @@ backward compatibility and to reproduce earlier results.
   data alone, so this is what scoring the whole stream with the injection added
   gives there (`test_validate_stream`). The stretch is read by the injection
   stage's dataset (`StreamReader`), which injects, scales and records as it does
-  for windows, against the spectrum of the clean data before the merger's window.
+  for windows. The stretch is ``injection_stretch_seconds`` (40 s) whatever the
+  model, and the spectrum the clean stretch's own, so an injection's SNR, hrss and
+  hpeak are the same for every model it is scored on.
 """
 
 from __future__ import annotations
@@ -386,8 +388,9 @@ class StreamReader:
     (`noise.sequential_batcher`) serving, in order, each placed injection's stretch of
     the clean stream (``ONSOURCE``, ``2 half_samples`` centred on the merger: the local
     stretch padded by the window's crop either side, which the dataset crops back) and the
-    clean data just before the merger's window (``OFFSOURCE``, the window's own
-    offsource: the spectrum the injection is scaled, whitened and recorded against),
+    same clean stretch, uncropped (``OFFSOURCE``: the spectrum the injection is scaled,
+    whitened and recorded against, measured on the very noise it is added to and the
+    same whatever the model's window),
     with the GPS time of each stretch's first returned sample per detector (NaN in
     synthetic noise). The dataset places each signal's merger at its onsource's centre. The
     last batch is filled by repeating its last stretch; the stage keeps only the
@@ -411,8 +414,7 @@ class StreamReader:
 
     def stretches(self) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """Each placed injection's (stretch (I, 2h), offsource (I, O), first-sample GPS (I,)), in order."""
-        window, h = self.geometry.window, self.half_samples
-        before = int(math.ceil(window.num_onsource_samples / 2.0)) + window.num_offsource_samples
+        h, crop = self.half_samples, self.crop_samples
         loaded = None
         for k in range(len(self.placement)):
             index, m = int(self.placement.stream[k]), int(self.placement.sample[k])
@@ -420,7 +422,7 @@ class StreamReader:
                 loaded = (index, *self.source.stream_strain(self.streams[index]))
             _, strain, first_gps = loaded
             stretch = strain[:, m - h:m + h]
-            offsource = strain[:, m - before:m - before + window.num_offsource_samples]
+            offsource = strain[:, m - h + crop:m + h - crop]  # the returned stretch, clean
             slide = self.streams[index].slide
             # The GPS time of each detector's first returned (cropped) sample, as an obtainer gives it.
             gps = first_gps + (m - h + self.crop_samples + np.arange(strain.shape[0]) * slide * self.step_samples) \

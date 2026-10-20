@@ -259,3 +259,37 @@ def test_injections_are_placed_only_where_the_background_scored_its_windows():
     with pytest.raises(ValueError, match="scored windows"):
         place_injections(1, [SlideStream((0.0, 1000.0), 0, 10, 0, 100_000)], 400, np.random.default_rng(3),
                          geometry, 1.1)
+
+
+def test_an_injections_labels_do_not_depend_on_the_models_window():
+    # Two models of different offsource lengths: the same injection at the same place gets the
+    # same SNR (measured, distance-scaled), hrss and hpeak (SNR-scaled): its stretch and spectrum
+    # are the same whatever the model's window.
+    def bank_of(offsource):
+        args = validation_dataset_args(config=ValidationDatasetConfig(sample_rate_hertz=2048.0,
+                                                                      offsource_duration_seconds=offsource))
+        probe = ValidationBank(logit_model(), args, ValidationConfig(num_examples=8, stream_segment_seconds=64.0))
+        per = probe.stream_geometry.num_windows(int(round(64.0 * 2048.0)))  # one whole segment scored
+        bank = ValidationBank(logit_model(), args, ValidationConfig(num_examples=per, batch_size=32,
+                                                                    stream_segment_seconds=64.0))
+        bank.generate_stream_noise()
+        return bank
+
+    def labels(bank, type_, value, outputs):
+        g = bank._generator()
+        g.scaling_method = gf.ScalingMethod(value=value, type_=type_)
+        dataset, placement, half, _ = bank.local_dataset("vol", g, 4, [RV.ONSOURCE, *outputs])
+        _, y = dataset[0]
+        return placement, {o.name: np.asarray(y[o.name], dtype=np.float64)[:4] for o in outputs}
+
+    banks = [bank_of(16.0), bank_of(8.0)]
+    snr = [gf.Distribution(min_=8.0, max_=12.0, type_=gf.DistributionType.UNIFORM), gf.ScalingTypes.SNR,
+           [gf.ScalingTypes.HRSS, gf.ScalingTypes.HPEAK]]
+    distance = [np.array([300.0, 500.0, 700.0, 900.0]), gf.WaveformParameters.CHIRP_DISTANCE_MPC,
+                [gf.ScalingTypes.SNR]]
+    for value, type_, outputs in (snr, distance):
+        (p0, a), (p1, b) = (labels(bank, type_, value, outputs) for bank in banks)
+        np.testing.assert_array_equal(p0.sample, p1.sample)
+        for name in a:
+            assert np.all(np.isfinite(a[name]) & (a[name] > 0)), name
+            np.testing.assert_allclose(a[name], b[name], rtol=1e-6, err_msg=name)

@@ -105,6 +105,11 @@ class ValidationConfig:
     stride_seconds: Optional[float] = None
     found_window_seconds: float = 0.1
     stream_segment_seconds: float = 256.0
+    # Each injection's local stretch in stream mode: this long, centred on its merger,
+    # whatever the model's window, so that its SNR, hrss and hpeak (measured on the
+    # signal within it, against the clean stretch's own spectrum) do not depend on
+    # the model. It must hold every window the found test reads.
+    injection_stretch_seconds: float = 40.0
 
     def __post_init__(self):
         from .slides import TimeSlides
@@ -116,7 +121,7 @@ class ValidationConfig:
             raise ValueError(f"mode must be one of {MODES}, got {self.mode!r}.")
         if self.stride_seconds is not None and not self.stride_seconds > 0:
             raise ValueError(f"stride_seconds must be > 0, got {self.stride_seconds}.")
-        for name in ("found_window_seconds", "stream_segment_seconds"):
+        for name in ("found_window_seconds", "stream_segment_seconds", "injection_stretch_seconds"):
             if not getattr(self, name) > 0:
                 raise ValueError(f"{name} must be > 0, got {getattr(self, name)}.")
         if self.stream and not self.stream_cluster_seconds >= 2.0 * self.found_window_seconds:

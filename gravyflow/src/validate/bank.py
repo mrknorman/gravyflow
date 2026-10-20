@@ -672,7 +672,9 @@ class ValidationBank:
         the stage's dataset (`stream.StreamReader`), which injects the signal with its
         merger at the stretch's centre, scales it against the clean data before the
         merger's window and records it; the windows the found test reads are cut from
-        the stretch on the stream's own grid, scored, and clustered. Returns each
+        the stretch on the stream's own grid, scored, and clustered. The stretch is
+        ``injection_stretch_seconds`` whatever the model, and its spectrum the clean
+        stretch's own, so the labels do not depend on the model's window. Returns each
         injection's found statistic (``scores``, ``-inf`` for none), its trigger's time
         from the merger (``trigger_offsets``), its merger's time (``merger_times``: GPS
         in real noise, the segment's timeline in synthetic), its records
@@ -735,7 +737,14 @@ class ValidationBank:
         it with the placement, the stretches' half length (samples) and the streams.
         """
         cfg, geometry = self.config, self.stream_geometry
-        half = geometry.local_half_samples(self._reach_seconds)
+        # A stretch of injection_stretch_seconds, whatever the model's window: its labels
+        # are measured within it, against its own clean spectrum, alike for every model.
+        half = int(round(cfg.injection_stretch_seconds * geometry.sample_rate_hertz / 2.0))
+        needed = geometry.local_half_samples(self._reach_seconds)
+        if half < needed:
+            raise ValueError(f"The model's found test reads {2 * needed / geometry.sample_rate_hertz:g} s around a "
+                             f"merger, more than injection_stretch_seconds ({cfg.injection_stretch_seconds:g} s): "
+                             "lengthen it.")
         # The dataset pads its onsource by the window's crop either side, and crops it back.
         crop = float(geometry.window.crop_duration_seconds)
         pad = int(round(crop * geometry.sample_rate_hertz))
@@ -757,6 +766,7 @@ class ValidationBank:
         generator.injection_chance = 1.0
         dataset = self.stage_dataset(stage, [generator], outputs, num_examples=num, overrides={
             "noise_obtainer": reader, "onsource_duration_seconds": 2 * half / geometry.sample_rate_hertz,
+            "offsource_duration_seconds": 2 * half / geometry.sample_rate_hertz,
             "crop_duration_seconds": crop, "input_variables": [gf.ReturnVariables.ONSOURCE]})
         return dataset, placement, half, streams
 
