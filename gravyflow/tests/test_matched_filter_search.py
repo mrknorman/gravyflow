@@ -625,6 +625,71 @@ def test_the_bank_key_names_the_placement_code(tmp_path, monkeypatch):
     np.testing.assert_array_equal(placed.mass_1, [40.0])
 
 
+def placement_copies(tmp_path, monkeypatch):
+    """Copies of the placement sources, used in their place; returns {name: path}."""
+    from gravyflow.src.detection import template_grid
+    copies = {}
+    for path in template_grid.PLACEMENT_SOURCES:
+        copies[path.name] = tmp_path / path.name
+        copies[path.name].write_bytes(path.read_bytes())
+    monkeypatch.setattr(template_grid, "PLACEMENT_SOURCES", tuple(copies.values()))
+    return copies
+
+
+def edit(path, old, new):
+    source = path.read_text()
+    assert source.count(old) == 1, old
+    path.write_text(source.replace(old, new))
+
+
+@pytest.mark.parametrize("name, old, new", [
+    # A comment, a docstring and a blank line in the CBC generator.
+    ("cbc.py", "_TAPER_START_RATIO = 0.75\n", "_TAPER_START_RATIO = 0.75  # a new comment\n\n"),
+    ("cbc.py", "    Generates time-domain waveforms using ripple.\n", "    Generates time-domain waveforms.\n"),
+    # A function placement never calls: the time from a frequency to merger.
+    ("cbc.py", "_GROUP_DELAY_STEP_HERTZ = 1.0e-4", "_GROUP_DELAY_STEP_HERTZ = 2.0e-4"),
+    # A comment in the template-bank module.
+    ("template_grid.py", "def placement_code() -> dict:\n", "# A comment.\ndef placement_code() -> dict:\n"),
+])
+def test_an_edit_placement_does_not_run_keeps_the_bundled_banks(tmp_path, monkeypatch, name, old, new):
+    """A comment, a docstring or a function placement does not use leaves the bank's key, so the bundled bank loads."""
+    from gravyflow.src.detection import template_grid
+    from gravyflow.src.detection.matched_filter import default_bank_placement
+
+    def refused(*args):
+        raise AssertionError("the bank was placed again instead of loaded")
+
+    placement = default_bank_placement()
+    key = placement.key()
+    copies = placement_copies(tmp_path, monkeypatch)
+    edit(copies[name], old, new)
+    assert placement.key() == key
+    monkeypatch.setattr(template_grid, "_stochastic_placement", refused)
+    assert TemplateBank.place(placement).num_templates > 0
+
+
+@pytest.mark.parametrize("old, new", [
+    # The taper every template is generated with.
+    ("_TAPER_START_RATIO = 0.75", "_TAPER_START_RATIO = 0.7"),
+    # A function the generator calls: the envelope that places each merger.
+    ("    weights = jnp.full(spectrum.shape[-1], 2.0).at[0].set(1.0)",
+     "    weights = jnp.full(spectrum.shape[-1], 2.0).at[0].set(0.5)"),
+])
+def test_a_change_to_code_placement_runs_marks_the_bundled_banks_stale(tmp_path, monkeypatch, old, new):
+    from gravyflow.src.detection import template_grid
+    from gravyflow.src.detection.matched_filter import default_bank_placement
+    placement = default_bank_placement()
+    key = placement.key()
+    copies = placement_copies(tmp_path, monkeypatch)
+    edit(copies["cbc.py"], old, new)
+    changed = placement.key()
+    assert changed["code"] != key["code"] and {**changed, "code": None} == {**key, "code": None}
+    monkeypatch.setattr(template_grid, "_stochastic_placement", placed_elsewhere)
+    with pytest.warns(UserWarning, match="code"):
+        placed = TemplateBank.place(placement)
+    np.testing.assert_array_equal(placed.mass_1, [40.0])
+
+
 def test_max_templates_holds_for_a_bundled_bank():
     # The limit is the same whether the bank is placed or loaded.
     with pytest.raises(ValueError, match="max_templates"):

@@ -11,6 +11,7 @@ leaves light binaries badly covered (a fitting factor near 0.5 below 30 solar
 masses for a 16 x 16 grid over 5-95), so it is kept only as a simple utility.
 """
 
+import ast
 import hashlib
 import json
 import logging
@@ -411,15 +412,80 @@ PLACEMENT_SOURCES = (
 
 def placement_code() -> dict:
     """
-    The version of the gravyflow code a placement runs: the SHA-256 of the
-    contents of PLACEMENT_SOURCES, with line endings normalised so that a
-    checkout's conversion does not change it. Any edit to those files changes
-    it, so a bank placed by other code is never reused for this code.
+    The version of the gravyflow code a placement runs: the SHA-256 of its
+    syntax, without comments, docstrings or layout. From this module, the whole
+    module; from the CBC generator, the definitions this module imports from it
+    and every top-level definition they use, in turn (`_used_definitions`).
+    A change to that code changes it, so a bank placed by other code is never
+    reused for this code; a comment, a docstring or a change to a function
+    placement does not use leaves it, and the bundled banks with it.
     """
-    digest = hashlib.sha256()
-    for path in PLACEMENT_SOURCES:
-        digest.update(path.name.encode() + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
-    return {"files": [path.name for path in PLACEMENT_SOURCES], "sha256": digest.hexdigest()}
+    generator, module = (ast.parse(path.read_text()) for path in PLACEMENT_SOURCES)
+    imported = {alias.asname or alias.name for node in ast.walk(module)
+                if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[-1] == PLACEMENT_SOURCES[0].stem
+                for alias in node.names}
+    syntax = [_canonical(_used_definitions(generator, imported)), _canonical(module.body)]
+    digest = hashlib.sha256(json.dumps(syntax, separators=(",", ":")).encode())
+    return {"files": [path.name for path in PLACEMENT_SOURCES], "syntax_sha256": digest.hexdigest()}
+
+
+def _canonical(node):
+    """
+    `node`'s syntax as plain lists, without docstrings or source positions, and
+    without empty fields, so it does not depend on the Python version's
+    optional fields.
+    """
+    if isinstance(node, list):
+        return [_canonical(item) for item in node]
+    if not isinstance(node, ast.AST):
+        return repr(node)
+    fields = []
+    for name, value in ast.iter_fields(node):
+        if name == "body" and isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            value = [statement for statement in value if not _is_docstring(statement)]
+        if value is None or value == []:
+            continue
+        fields.append([name, _canonical(value)])
+    return [type(node).__name__, fields]
+
+
+def _is_docstring(statement) -> bool:
+    return (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant)
+            and isinstance(statement.value.value, str))
+
+
+def _used_definitions(tree: ast.Module, roots) -> list:
+    """
+    The top-level statements of `tree` that define `roots` and every top-level
+    name they use, in turn, in source order. Statements that define nothing
+    (module set-up, such as a configuration call) are always kept.
+    """
+    statements = [statement for statement in tree.body if not _is_docstring(statement)]
+    defines = {}
+    kept = set()
+    for index, statement in enumerate(statements):
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = {statement.name}
+        else:
+            names = {node.id for node in ast.walk(statement)
+                     if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
+            names |= {(alias.asname or alias.name).split(".")[0] for node in ast.walk(statement)
+                      if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names}
+        for name in names:
+            defines.setdefault(name, []).append(index)
+        if not names:
+            kept.add(index)
+    wanted = set(roots) | {node.id for index in kept for node in ast.walk(statements[index])
+                           if isinstance(node, ast.Name)}
+    seen = set()
+    while wanted - seen:
+        name = (wanted - seen).pop()
+        seen.add(name)
+        for index in defines.get(name, ()):
+            if index not in kept:
+                kept.add(index)
+                wanted |= {node.id for node in ast.walk(statements[index]) if isinstance(node, ast.Name)}
+    return [statements[index] for index in sorted(kept)]
 
 
 @dataclass(frozen=True)

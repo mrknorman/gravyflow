@@ -8,11 +8,11 @@ res/template_banks, or check the bundled files against a fresh placement.
 
 Each file stores its placement's key (`BankPlacement.key`): the match space,
 the noise curve's hash, the waveform model, the placement settings and the
-hash of the gravyflow code that places it. `TemplateBank.place` loads a bundled
-bank only when that key equals the key of the placement asked for, so after a
-change to any of them (including any edit to the CBC generator or the
-template-bank module) the bank is placed again, with a warning, until this
-script is rerun. `--check` also catches what the key cannot name, such as a
+hash of the gravyflow code that places it (`placement_code`: the syntax of the
+template-bank module and of the CBC generator's code it uses, so a comment or
+docstring does not count). `TemplateBank.place` loads a bundled bank only when
+that key equals the key of the placement asked for, so after a change to any of
+them the bank is placed again, with a warning, until this script is rerun. `--check` also catches what the key cannot name, such as a
 dependency's change within its release series. Each bank is named by its
 detector and noise curve; placing one takes about three minutes on a CPU.
 """

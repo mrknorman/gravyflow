@@ -346,6 +346,11 @@ repository before it may need the changes below.
   generated without complaint and made a louder source than any physical one. A spin with |chi| > 1 is now refused,
   naming the spin and its magnitude; a spin of magnitude 1 built from its components (rotated, or rounded to float32)
   still generates.
+- **A comment no longer marks the bundled template banks stale.** A bank's key named its code by the SHA-256 of the
+  whole of `cbc.py` and `template_grid.py`, so any edit to either, a comment included, made every bundled bank be
+  placed again. The key (`placement_code`, field `syntax_sha256`) now hashes the code's syntax without comments,
+  docstrings or layout: the whole template-bank module, and from the CBC generator only the definitions placement
+  uses and what they use in turn. The bundled banks are unchanged apart from that key.
 - **The volume's and efficiency's bootstrap no longer undercovers at loose FARs.** Each replicate drew its own chance
   of a noise-only pass from its law at the replicate's threshold, independently of the found volume, losing their
   correlation (1σ coverage 0.60 at 1e-2 Hz). It now subtracts the estimator's chance, which the target fixes.
