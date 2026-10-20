@@ -134,6 +134,33 @@ def test_each_bootstrap_replicate_subtracts_the_estimators_chance(monkeypatch):
         np.testing.assert_array_equal(chance, point)
 
 
+def test_the_band_holds_the_efficiency_at_every_threshold_the_fars_interval_allows():
+    # The background term is the efficiency's least and greatest over every threshold between
+    # the FAR band's two, as the volume's is: the efficiency need not be monotone in the threshold
+    # (the chance subtracted moves with it), so its two ends are not enough. Read at the ends
+    # only, this case had 12 binned and rolling points with a value in the band outside the
+    # 2 sigma joint band (at 1e-3 Hz, 38-42% of replicas of the independent check's instrument).
+    rng = np.random.default_rng(5)
+    snrs, scores, background = draw(rng, 20_000, 20_000)
+    result = efficiency_against_snr(snrs, scores, background, [1e-3], rng, bin_edges=EDGES, snr_range=SNR_RANGE,
+                                    num_bootstrap=50)[0]
+    for level, sigma in enumerate(DEFAULT_SIGMAS):
+        high, low = background.far_band_thresholds(1e-3, sigma_level(sigma))
+        steps = np.concatenate([scores, background.window_scores])
+        steps = steps[(steps >= low) & (steps <= high)]
+        thresholds = np.unique(np.concatenate([steps, np.nextafter(steps, np.inf), [low, high]]))
+        for curve, joint in (
+                (lambda t: efficiency_curve(snrs, scores, t, EDGES, chance=background.found_by_chance(t)),
+                 result.binned),
+                (lambda t: rolling_efficiency_curve(snrs, scores, t, snr_range=SNR_RANGE,
+                                                    chance=background.found_by_chance(t)), result.rolling)):
+            values = np.array([curve(t).efficiency for t in thresholds[np.isfinite(thresholds)]])
+            clipped = np.clip(values, 0.0, 1.0)  # as the bands are; NaN where a point has too few injections
+            with np.errstate(invalid="ignore"):
+                assert not np.any(clipped < joint.lower[level] - 1e-12), sigma
+                assert not np.any(clipped > joint.upper[level] + 1e-12), sigma
+
+
 def test_an_efficiency_with_fewer_than_ten_independent_background_events_is_not_quotable():
     # The standard's rule, as for every output: kept and shown, marked, not quoted.
     rng = np.random.default_rng(72)

@@ -26,8 +26,10 @@ found by noise move with the replicate's threshold. (Drawing a replicate's chanc
 its law at the replicate's threshold, independently, loses the correlation between the
 two and undercovers.)
 Each band's ends are the central range of its replicates, at least as far out as the
-binomial interval at the threshold and as the efficiency at the two thresholds the
-FAR's interval allows (`Background.far_band_thresholds`). The bands are pointwise.
+binomial interval at the threshold and as the efficiency's least and greatest over every
+threshold between the two the FAR's interval allows (`Background.far_band_thresholds`,
+`_efficiency_range`; the efficiency need not be monotone in the threshold, so the two
+ends are not enough). The bands are pointwise.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ import numpy as np
 from .metrics import (
     DEFAULT_SIGMAS,
     ROLLING_HALF_WIDTH,
+    ROLLING_MIN_INJECTIONS,
     Background,
     ChanceLaw,
     EfficiencyCurve,
@@ -113,11 +116,48 @@ def _signal_fraction(found: np.ndarray, total: np.ndarray, chance: np.ndarray) -
         return subtract_chance(np.where(total > 0, found / total, np.nan), chance[:, None])
 
 
+#: Thresholds `_efficiency_range` reads at once: bounds its memory (thresholds x groups counts).
+RANGE_CHUNK = 4096
+
+
+def _efficiency_range(grouped: _GroupedScores, counts, scores: np.ndarray, background: Background, high: float,
+                      low: float) -> np.ndarray:
+    """
+    The efficiency's least and greatest at each point over every threshold from ``low``
+    to ``high`` (a FAR band's, `Background.far_band_thresholds`; ``high`` may be +inf),
+    each with the chance at it, as the volume's background term takes V's
+    (`volume._volume_range`): the efficiency need not be monotone in the threshold, and
+    it steps only at the injections' and the background windows' scores, so it is read
+    at each of them in the band and just above each. ``counts`` maps the groups' found
+    counts (thresholds, groups) to the points' found and total counts. ``(2, points)``,
+    least then greatest; NaN for NaN ends.
+    """
+    points = counts(grouped.found(np.array([np.inf])))[0].shape[-1]
+    extremes = np.full((2, points), np.nan)
+    if np.isnan(high) or np.isnan(low):
+        return extremes
+    steps = np.concatenate([scores, background.window_scores])
+    steps = steps[(steps >= low) & (steps <= high)]
+    candidates = np.concatenate([steps, np.nextafter(steps, np.inf), [low, high]])
+    candidates = np.unique(candidates[(candidates >= low) & (candidates <= high) & np.isfinite(candidates)
+                                      | (candidates == np.inf)])
+    for start in range(0, candidates.size, RANGE_CHUNK):
+        chunk = candidates[start:start + RANGE_CHUNK]
+        found, total = counts(grouped.found(chunk))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            values = subtract_chance(np.where(total > 0, found / total, np.nan),
+                                     background.found_by_chance(chunk).mean[:, None])
+        extremes[0] = np.fmin(extremes[0], np.fmin.reduce(values, axis=0))
+        extremes[1] = np.fmax(extremes[1], np.fmax.reduce(values, axis=0))
+    return extremes
+
+
 def _joint_bands(point_lower, point_upper, replicates, at_bands, sigmas) -> Tuple[np.ndarray, np.ndarray]:
     """
     Each level's band: the replicates' central range (``replicates`` (B, P)), at least as
     far out as the binomial ends (``point_lower``/``point_upper``, (levels, P)) and the
-    efficiencies at the FAR band's thresholds (``at_bands`` (levels, 2, P)); within [0, 1].
+    efficiency's least and greatest over the FAR band's thresholds (``at_bands`` (levels,
+    2, P), `_efficiency_range`); within [0, 1].
     """
     lowers, uppers = [], []
     for level, sigma in enumerate(sigmas):
@@ -191,6 +231,10 @@ def efficiency_against_snr(
         cumulative = np.concatenate([np.zeros((piece_counts.shape[0], 1)), np.cumsum(piece_counts, axis=1)], axis=1)
         return cumulative[:, last] - cumulative[:, first]
 
+    # A rolling window with too few injections has no efficiency (`rolling_efficiency_curve`).
+    rolling_total = window_counts(groups["rolling"].total[None])[0]
+    rolling_total = np.where(rolling_total >= ROLLING_MIN_INJECTIONS, rolling_total, 0)
+
     point_fit = fit_sigmoid(fit_snr, groups["fit"].found(thresholds), np.broadcast_to(fit_total, (fars.size, fit_total.size)),
                             chance.mean, snr_range)
 
@@ -219,16 +263,12 @@ def efficiency_against_snr(
             results.append(EfficiencyAgainstSnr(float(far), target, binned[i], rolling[i], fit, int(num_bootstrap)))
             continue
         bands = [background.far_band_thresholds(float(far), sigma_level(s)) for s in sigmas]
-
-        def at_bands(curve_at):
-            return np.array([[curve_at(t) for t in band] for band in bands])
-
-        band_laws = lambda t: background.found_by_chance(t)
-        binned_at = at_bands(lambda t: efficiency_curve(snrs, scores, t, edges, chance=band_laws(t), sigmas=sigmas,
-                                                        method=method).efficiency)
-        rolling_at = at_bands(lambda t: rolling_efficiency_curve(snrs, scores, t, snr_range=snr_range,
-                                                                 chance=band_laws(t), sigmas=sigmas,
-                                                                 method=method).efficiency)
+        binned_at = np.array([_efficiency_range(
+            groups["binned"], lambda found: (found, groups["binned"].total), scores, background, *band)
+            for band in bands])
+        rolling_at = np.array([_efficiency_range(
+            groups["rolling"], lambda found: (window_counts(found), rolling_total), scores, background, *band)
+            for band in bands])
         lower, upper = _joint_bands(binned[i].lower, binned[i].upper, binned_replicates[:, i], binned_at, sigmas)
         binned_i = replace(binned[i], lower=lower, upper=upper)
         lower, upper = _joint_bands(rolling[i].lower, rolling[i].upper, rolling_replicates[:, i], rolling_at, sigmas)
