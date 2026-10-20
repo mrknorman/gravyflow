@@ -244,6 +244,82 @@ def score_glitches(score: Callable[[np.ndarray, np.ndarray], np.ndarray],
     return statistics
 
 
+@dataclass(frozen=True)
+class GlitchStage:
+    """
+    The glitch stage's result: every labelled glitch of the held-out time (``all``, for
+    the background's nearest-glitch record), the glitches scored (``scored``: those with
+    room for their stretch, at most ``per_class`` of each class) and their statistics.
+    """
+    all: Glitches
+    scored: Glitches
+    scores: np.ndarray
+
+
+def _subset(glitches: Glitches, keep: np.ndarray) -> Glitches:
+    return Glitches(glitches.ifos[keep], glitches.gps[keep], glitches.labels[keep], glitches.source)
+
+
+def glitch_stage(obtainer, ifos: Sequence, split_spec, group: str, geometry: StreamGeometry,
+                 score: Callable[[np.ndarray, np.ndarray], np.ndarray], cluster_seconds: float,
+                 found_window_seconds: float, per_class: Optional[int] = None,
+                 rng: Optional[np.random.Generator] = None, glitches: Optional[Glitches] = None) -> GlitchStage:
+    """
+    Run the model over every labelled glitch of split ``group`` of a real-noise obtainer.
+
+    The held-out time is every detector's readable time in the split (`SplitSpec.admissible`),
+    intersected, less the known events' vetoes; the glitch veto noise draws under does not
+    apply, since the glitches are the point. ``glitches`` defaults to Gravity Spy's over that
+    time (`Glitches.from_gravity_spy`, which downloads its catalogue on first use). A glitch
+    is scored when its whole stretch lies inside the held-out time: every detector's strain
+    at zero lag, read through the obtainer's own ``acquire``, the glitch's peak at the
+    stretch's centre (`score_glitches`). ``per_class`` keeps at most that many of each class,
+    drawn by ``rng``.
+    """
+    from gravyflow.src.dataset.acquisition.gwosc_data import intersect_segments, subtract_segments
+
+    ifos = list(ifos)
+    names = [getattr(ifo, "name", str(ifo)) for ifo in ifos]
+    rate = geometry.sample_rate_hertz
+    half = geometry.local_half_samples(float(found_window_seconds) + float(cluster_seconds))
+    pad = half / rate + 1.0  # a second's margin each side, for the source's sample grid
+    time = None
+    for ifo in ifos:
+        held_out = split_spec.admissible(obtainer.get_all_segment_times(ifo), group)
+        time = held_out if time is None else intersect_segments(time, held_out)
+    vetoes = np.reshape(np.asarray(obtainer.get_event_veto_segments(), dtype=np.float64), (-1, 2))
+    if vetoes.size:
+        time = subtract_segments(time, vetoes)
+    time = np.reshape(np.asarray(time, dtype=np.float64), (-1, 2))
+    if time.size == 0:
+        raise ValueError(f"No held-out time of split {group!r} on {names}: no glitch to score.")
+    if glitches is None:
+        glitches = Glitches.from_gravity_spy(names, float(time[:, 0].min()), float(time[:, 1].max()))
+    everything = _subset(glitches, np.isin(glitches.ifos, names))
+    k = np.searchsorted(time[:, 0], everything.gps, side="right") - 1
+    inside = (k >= 0) & (everything.gps - pad >= time[np.clip(k, 0, None), 0]) \
+        & (everything.gps + pad <= time[np.clip(k, 0, None), 1])
+    keep = np.flatnonzero(inside)
+    if per_class is not None:
+        rng = rng if rng is not None else np.random.default_rng(0)
+        keep = np.concatenate([rng.permutation(keep[everything.labels[keep] == label])[:int(per_class)]
+                               for label in np.unique(everything.labels[keep])] or [np.empty(0, dtype=np.int64)])
+    scored = _subset(everything, np.isin(np.arange(len(everything)), keep))
+
+    def strain_around(ifo: str, gps: float, half_samples: int) -> np.ndarray:
+        rows = np.array([[[gps - pad, gps + pad]] * len(ifos)], dtype=np.float64)
+        (row,) = list(obtainer.acquire(rate, rows, ifos))
+        first = np.asarray(row.start_gps_time, dtype=np.float64).reshape(-1)
+        out = []
+        for j, data in enumerate(row.data):
+            centre = int(round((gps - first[j]) * rate))
+            out.append(np.asarray(data, dtype=np.float64)[centre - half_samples:centre + half_samples])
+        return np.stack(out)
+
+    scores = score_glitches(score, strain_around, geometry, scored, cluster_seconds, found_window_seconds)
+    return GlitchStage(everything, scored, scores)
+
+
 def glitch_data(glitches: Glitches, scores) -> Dict[str, np.ndarray]:
     """A validator's glitch record (`Validator.glitch_data`): each glitch and its statistic."""
     scores = np.asarray(scores, dtype=np.float64)
@@ -357,12 +433,14 @@ def twin_comparison(real, twin) -> TwinComparison:
 
 __all__ = [
     "GlitchClassRates",
+    "GlitchStage",
     "Glitches",
     "NearestGlitch",
     "TwinComparison",
     "background_triggers",
     "glitch_data",
     "glitch_false_positive_rates",
+    "glitch_stage",
     "nearest_glitch",
     "score_glitches",
     "tail_by_class",

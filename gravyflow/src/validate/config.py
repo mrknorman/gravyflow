@@ -76,6 +76,10 @@ class ValidationConfig:
 
     # Real GW events, scored for evaluation only. They need network access.
     score_real_events: bool = False
+    # The glitch stage (`glitches.glitch_stage`; stream mode, real noise in runs Gravity
+    # Spy labels): False skips it, True scores every labelled glitch of the held-out
+    # split, an int at most that many of each class. It downloads Gravity Spy's catalogue.
+    score_glitches: Union[bool, int] = False
 
     # The background of real noise of several detectors: time slides, detector j
     # slid by j k steps in slide k = 1 .. num_time_slides (`slides.TimeSlides`);
@@ -135,6 +139,8 @@ class ValidationConfig:
         for name in ("volume_chance_fraction", "volume_reach_snr"):
             if not getattr(self, name) > 0:
                 raise ValueError(f"{name} must be > 0, got {getattr(self, name)}.")
+        if not isinstance(self.score_glitches, bool) and not self.score_glitches >= 1:
+            raise ValueError(f"score_glitches is a bool or a count >= 1, got {self.score_glitches!r}.")
         for name in ("volume_bootstrap_samples", "efficiency_bootstrap_samples"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be >= 1, got {getattr(self, name)}.")

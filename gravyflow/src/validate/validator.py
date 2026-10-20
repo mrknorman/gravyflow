@@ -178,6 +178,14 @@ class Validator:
             v.real_events = bank.get_real_events()
             checkpoint()
 
+        if v.config.score_glitches and v.glitch_data is None:
+            from .glitches import glitch_data, trigger_glitch_record
+
+            bank.generate_glitches()
+            v.glitch_data = glitch_data(bank.glitch_stage.scored, bank.glitch_stage.scores)
+            v.trigger_glitches = trigger_glitch_record(v, bank.glitch_stage.all, bank.glitch_ifos)
+            checkpoint()
+
         v.bank = bank
         return v
 

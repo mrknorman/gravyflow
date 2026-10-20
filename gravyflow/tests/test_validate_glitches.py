@@ -296,6 +296,111 @@ def test_the_dashboard_keeps_every_tab_and_adds_glitches_and_timing(tmp_path):
     assert (tmp_path / "report.html").stat().st_size > 0
 
 
+class FixtureObtainer:
+    """A real-noise obtainer serving fixture strain: zeros at 64 Hz with each glitch a spike in its own detector."""
+
+    def __init__(self, readable, glitches, loudness, vetoes=np.empty((0, 2))):
+        self.readable, self.glitches, self.loudness, self.vetoes = readable, glitches, loudness, vetoes
+        self.reads = []
+
+    def get_all_segment_times(self, ifo):
+        return self.readable
+
+    def get_event_veto_segments(self):
+        return self.vetoes
+
+    def acquire(self, sample_rate_hertz, rows, ifos):
+        for row in rows:
+            data, starts = [], []
+            for j, ifo in enumerate(ifos):
+                start, end = row[j]
+                self.reads.append((ifo.name, float(start), float(end)))
+                first = np.ceil(start * sample_rate_hertz) / sample_rate_hertz
+                times = first + np.arange(int((end - first) * sample_rate_hertz)) / sample_rate_hertz
+                strain = np.zeros(times.size)
+                for name, gps in zip(self.glitches.ifos, self.glitches.gps):
+                    if name == ifo.name and times[0] <= gps <= times[-1]:
+                        strain[int(round((gps - first) * sample_rate_hertz))] = self.loudness[float(gps)]
+                data.append(strain)
+                starts.append(first)
+            yield SimpleNamespace(data=data, start_gps_time=np.array(starts))
+
+
+def fixture_stage(per_class=None, vetoes=np.empty((0, 2))):
+    import gravyflow as gf
+
+    spec = gf.SplitSpec()
+    a = 1_256_000_000.0
+    readable = np.array([[a, a + 200_000.0]])
+    test = spec.admissible(readable, "test")
+    t0 = float(test[0, 0])
+    gps = [t0 + 100.25, t0 + 200.5, t0 + 300.75, t0 + 400.0, t0 + 1.0, test[0, 1] + 5000.0]
+    glitches = gl.Glitches(ifos=np.array(["H1", "L1", "H1", "L1", "H1", "H1"]), gps=np.array(gps),
+                           labels=np.array(["Blip", "Blip", "Koi_Fish", "Blip", "Blip", "Blip"]))
+    loudness = dict(zip(map(float, gps), [7.0, 3.0, 5.0, 2.0, 9.0, 9.0]))
+    obtainer = FixtureObtainer(readable, glitches, loudness, vetoes)
+    window = WindowSpec(sample_rate_hertz=64.0, onsource_duration_seconds=1.0, offsource_duration_seconds=1.0,
+                        crop_duration_seconds=0.25)
+    stage = gl.glitch_stage(obtainer, [gf.IFO.H1, gf.IFO.L1], spec, "test", StreamGeometry.of(window, 0.25),
+                            spike_model, cluster_seconds=1.0, found_window_seconds=0.2, glitches=glitches,
+                            per_class=per_class, rng=np.random.default_rng(0))
+    return stage, obtainer, t0
+
+
+def test_the_glitch_stage_scores_every_glitch_of_the_held_out_split():
+    stage, obtainer, t0 = fixture_stage()
+    # The glitch 1 s into the test time has no room for its stretch; the one in the train split is not read.
+    assert len(stage.all) == 6
+    np.testing.assert_allclose(stage.scored.gps - t0, [100.25, 300.75, 200.5, 400.0])
+    np.testing.assert_allclose(stage.scores, [7.0, 5.0, 3.0, 2.0])
+    np.testing.assert_array_equal(stage.scored.labels, ["Blip", "Koi_Fish", "Blip", "Blip"])
+    # Every read is both detectors at zero lag, within the test time.
+    assert {name for name, _, _ in obtainer.reads} == {"H1", "L1"}
+    assert all(t0 < start and end < t0 + 9000 for _, start, end in obtainer.reads)
+
+
+def test_the_glitch_stage_keeps_out_events_and_subsamples_per_class():
+    _, _, t0 = fixture_stage()
+    stage, _, _ = fixture_stage(vetoes=np.array([[t0 + 290.0, t0 + 310.0]]))
+    assert "Koi_Fish" not in stage.scored.labels
+    stage, _, _ = fixture_stage(per_class=1)
+    assert sorted(stage.scored.labels) == ["Blip", "Koi_Fish"]
+
+
+def test_the_bank_runs_the_glitch_stage_when_asked(monkeypatch):
+    import gravyflow as gf
+    from gravyflow.src.validate import ValidationConfig
+    from gravyflow.src.validate.bank import ValidationBank
+
+    assert ValidationConfig().score_glitches is False   # no default run reads glitches
+    with pytest.raises(ValueError, match="score_glitches"):
+        ValidationConfig(score_glitches=0)
+    seen = {}
+
+    def stage(obtainer, ifos, split_spec, group, geometry, score, cluster_seconds, found_window_seconds,
+              per_class=None, rng=None, glitches=None):
+        seen.update(ifos=[i.name for i in ifos], group=group, per_class=per_class, cluster=cluster_seconds)
+        g = gl.Glitches(ifos=np.array(["H1"]), gps=np.array([1.0]), labels=np.array(["Blip"]))
+        return gl.GlitchStage(g, g, np.array([2.0]))
+
+    monkeypatch.setattr(gl, "glitch_stage", stage)
+    bank = ValidationBank.__new__(ValidationBank)
+    bank.config = ValidationConfig(score_glitches=50)
+    bank.dataset_args = {"ifos": [gf.IFO.H1, gf.IFO.L1],
+                         "noise_obtainer": SimpleNamespace(noise_type=gf.NoiseType.REAL)}
+    bank.__dict__["_noise_dataset"] = SimpleNamespace(
+        noise_obtainer=SimpleNamespace(ifo_data_obtainer=object()),
+        window_spec=WindowSpec(sample_rate_hertz=64.0, onsource_duration_seconds=1.0,
+                               offsource_duration_seconds=1.0, crop_duration_seconds=0.25))
+    monkeypatch.setattr(ValidationBank, "split_spec", property(lambda self: gf.SplitSpec()))
+    bank.generate_glitches()
+    assert seen == {"ifos": ["H1", "L1"], "group": "test", "per_class": 50, "cluster": 1.0}
+    assert bank.glitch_stage.scores.tolist() == [2.0] and bank.glitch_ifos == ["H1", "L1"]
+    bank.config = ValidationConfig(score_glitches=True, mode="window")
+    with pytest.raises(ValueError, match="stream mode"):
+        bank.generate_glitches()
+
+
 def test_the_gps_timeline_takes_per_detector_times():
     # Stream-mode real-noise records hold one GPS time per window and detector (windows, detectors).
     from gravyflow.src.validate.plotting import generate_gps_distribution_plot

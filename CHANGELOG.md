@@ -149,7 +149,12 @@ repository before it may need the changes below.
   intervals at 1σ and 2σ; each background trigger's nearest glitch (in any detector, at that detector's own slid
   time) and its class, and the classes of the triggers above each level; and the volume on real data over its
   Gaussian twin's, its interval the two joint intervals' log-widths in quadrature. A validation record keeps
-  `glitch_data` and `trigger_glitches` when present; records without them read as before.
+  `glitch_data` and `trigger_glitches` when present; records without them read as before. The validator runs the
+  glitch stage when `ValidationConfig.score_glitches` asks (off by default, so no default run downloads anything;
+  `True` for every labelled glitch, a count for at most that many per class): in stream mode on real noise, each
+  glitch of the held-out split (every detector's readable time in it, less the known events) read at zero lag
+  through the noise obtainer and scored on the stream's grid. A new configuration field changes every validation
+  configuration's fingerprint, so checkpoints written before it are refused as of other settings.
 - **Timing and training cost in the validator.** `validate.timing` times a model slid along a stream: throughput in
   compute-seconds per second of strain (median, p90, p99, max over repeated calls after a cold one) and
   data-to-trigger latency in a streaming replay (each step one stride; the step's compute plus the algorithmic wait,

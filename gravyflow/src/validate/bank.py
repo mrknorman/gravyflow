@@ -460,6 +460,27 @@ class ValidationBank:
         volume["reach_mpc"] = np.float64(reach)
         self.volume = volume
 
+    def generate_glitches(self, glitches=None) -> None:
+        """
+        The glitch stage (`glitches.glitch_stage`, ``config.score_glitches``): the model run
+        over the labelled glitches of the held-out split's real noise, each read through the
+        noise obtainer and scored on the stream's grid. Stream mode and real noise only.
+        """
+        from gravyflow.src.dataset.dataset import noise_ifos
+        from . import glitches as stage
+
+        cfg = self.config
+        if not (cfg.stream and self._real_noise):
+            raise ValueError("The glitch stage runs in stream mode on real noise.")
+        ifos = noise_ifos(self.dataset_args.get("ifos"), self.dataset_args.get("noise_obtainer"))
+        self.glitch_ifos = [ifo.name for ifo in ifos]
+        self.glitch_stage = stage.glitch_stage(
+            self._noise_dataset.noise_obtainer.ifo_data_obtainer, ifos, self.split_spec, cfg.group,
+            self.stream_geometry, lambda on, off: self.score_windows(self._noise_dataset, on, off),
+            cfg.stream_cluster_seconds, cfg.found_window_seconds,
+            per_class=None if isinstance(cfg.score_glitches, bool) else int(cfg.score_glitches),
+            rng=gf.SeedTree(cfg.seed).stream(cfg.group, "validator/glitches"), glitches=glitches)
+
     def generate_real_events(self, observing_runs: List = None) -> None:
         """
         Score real GW events from the GWTC catalogues, for evaluation only.
