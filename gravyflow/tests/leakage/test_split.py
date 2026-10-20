@@ -100,6 +100,12 @@ def test_guard_between_splits(world, tmp_path, pair, mode):
     Across an edge between two splits' blocks, every footprint of one split lies at
     least 128 s from every footprint of the other, in the served time and in decoded
     windows, cold and then warm from one cache root.
+
+    The cache root is the test's own temporary directory, and the obtainers read on
+    demand (no read ahead), so every fetch is made by the batch being drawn. With read
+    ahead, a cold build's background reads of the batches after the ones drawn could
+    still be running, or not yet started, when the warm build began, and on a loaded
+    host the warm build's fetch count would include them.
     """
     fixture = fx.straddle(*pair, half_width=512.0)
     with world(fixture, cache_dir=tmp_path / "cache") as harness:
@@ -108,7 +114,7 @@ def test_guard_between_splits(world, tmp_path, pair, mode):
         for warm in (False, True):
             sets = {
                 f"{split} {'warm' if warm else 'cold'}": (split, fx.noise_batches(
-                    fixture, split, mode=mode))
+                    fixture, split, mode=mode, prefetch_depth=0))
                 for split in pair
             }
             records.update(audit.collect(harness, sets, 2, IFOS, fx.window(), False, warm=warm))
