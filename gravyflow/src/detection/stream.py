@@ -64,6 +64,7 @@ the first detector's merger time. Coincidences are clustered in time (the
 loudest within +-cluster_seconds), and become `gf.Triggers`.
 """
 
+import collections.abc
 import hashlib
 import json
 import re
@@ -71,6 +72,7 @@ import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import cached_property, partial
+from types import MappingProxyType
 from typing import Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import jax
@@ -185,6 +187,52 @@ def _identity_of(bank) -> str:
     return identity
 
 
+class _FrozenMapping(collections.abc.Mapping):
+    """
+    An immutable mapping (nested mappings frozen too) over a private copy:
+    item assignment and deletion raise TypeError, and it has no mutators. It
+    compares equal to a dict of the same items, and pickles as one.
+    """
+    __slots__ = ("_items",)
+
+    def __init__(self, mapping: Mapping):
+        items = {key: _FrozenMapping(value) if isinstance(value, collections.abc.Mapping) else value
+                 for key, value in mapping.items()}
+        object.__setattr__(self, "_items", MappingProxyType(items))
+
+    def __setattr__(self, name, value):
+        raise AttributeError(f"{type(self).__name__} is immutable.")
+
+    def __getitem__(self, key):
+        return self._items[key]
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __repr__(self) -> str:
+        return repr(self.thawed())
+
+    def __reduce__(self):
+        return (_FrozenMapping, (self.thawed(),))
+
+    def thawed(self) -> dict:
+        """A mutable dict copy (nested mappings too), as JSON writes it."""
+        return {key: value.thawed() if isinstance(value, _FrozenMapping) else value for key, value in self.items()}
+
+
+def _read_only(values, dtype) -> np.ndarray:
+    """
+    `values` as a 1D array of `dtype`: a view of an immutable buffer (a copy
+    of them, as bytes), so neither the array's write flag nor its base's can
+    be set again.
+    """
+    array = np.ascontiguousarray(np.asarray(values, dtype=dtype).reshape(-1))
+    return np.frombuffer(array.tobytes(), dtype=array.dtype)
+
+
 def _known_detectors() -> Tuple[str, ...]:
     from gravyflow.src.dataset.conditioning.detector import IFO
     return tuple(ifo.name for ifo in IFO)
@@ -219,8 +267,10 @@ class DetectorTriggers:
     the stored inputs, in the dtypes they are stored with (time float64,
     template int32, the rest float32), so it is the same bit for bit (on one
     platform) at filtering, after `ranked` and after `load`, and cannot
-    disagree with them. The arrays are copies, read-only, so it cannot go
-    stale. Every value must be finite: a NaN or an infinity is refused by
+    disagree with them. It cannot go stale: each array is a view of an
+    immutable copy (its write flag cannot be set again), and `ranking` is
+    held as an immutable mapping (it compares equal to the dict
+    `ranking_definition` gives). Every value must be finite: a NaN or an infinity is refused by
     name, on construction and on `save`. `save` / `load` keep the triggers
     whole, in a strict format: see `save`.
     """
@@ -246,16 +296,14 @@ class DetectorTriggers:
                              f"({', '.join(_known_detectors())}).")
         num_templates = self.bank.num_templates if isinstance(self.bank, TemplateBank) else None
         object.__setattr__(self, "bank", _identity_of(self.bank))
-        object.__setattr__(self, "ranking", ranking_definition(*ranking_corrections(self.ranking)))
+        object.__setattr__(self, "ranking", _FrozenMapping(ranking_definition(*ranking_corrections(self.ranking))))
         for name in ("sg_chisq", "psd_variation"):
             if getattr(self, name) is None:
                 object.__setattr__(self, name, np.ones(np.shape(np.atleast_1d(self.snr))))
         gates = np.zeros(0) if self.gates is None else self.gates
         object.__setattr__(self, "gates", np.unique(np.asarray(gates, dtype=np.float64).reshape(-1)))
         for name, dtype in {**self._INPUTS, "gates": np.float64}.items():
-            value = np.array(getattr(self, name), dtype=dtype, copy=True).reshape(-1)
-            value.setflags(write=False)
-            object.__setattr__(self, name, value)
+            object.__setattr__(self, name, _read_only(getattr(self, name), dtype))
         span = np.asarray(self.span, dtype=np.float64)
         if span.shape != (2,):
             raise ValueError("DetectorTriggers' span must be (start, end).")
@@ -272,8 +320,7 @@ class DetectorTriggers:
         sine_gaussian, psd_variation = ranking_corrections(self.ranking)
         rank = ranking_statistic(self.snr, self.reduced_chisq, self.sg_chisq if sine_gaussian else None,
                                  self.psd_variation if psd_variation else None)
-        rank.setflags(write=False)
-        return rank
+        return _read_only(rank, rank.dtype)
 
     def _check(self) -> None:
         """Refuse, by name, arrays of the wrong dtype or length, a non-finite value or span, or a negative index."""
@@ -318,7 +365,7 @@ class DetectorTriggers:
         """
         self._check()
         header = {"format": TRIGGER_FORMAT, "schema_version": TRIGGER_SCHEMA_VERSION, "detector": self.detector,
-                  "bank": self.bank, "ranking": self.ranking}
+                  "bank": self.bank, "ranking": self.ranking.thawed()}
         np.savez(path, header=np.array(json.dumps(header, sort_keys=True)), span=np.array(self.span, np.float64),
                  gates=self.gates, **{name: getattr(self, name) for name in self._INPUTS})
 
@@ -388,6 +435,11 @@ class DetectorTriggers:
     def __len__(self) -> int:
         return len(self.time)
 
+    def __reduce__(self):
+        # Pickled by its constructor, so the copy's arrays and definition are immutable too.
+        fields = {name: getattr(self, name) for name in (*self._INPUTS, "detector", "span", "gates", "bank")}
+        return (_rebuild_detector_triggers, (fields, self.ranking.thawed()))
+
     @property
     def live_seconds(self) -> float:
         return self.span[1] - self.span[0]
@@ -417,6 +469,11 @@ class DetectorTriggers:
         span = (min(part.span[0] for part in parts), max(part.span[1] for part in parts))
         gates = np.concatenate([part.gates for part in parts])
         return cls(parts[0].detector, span=span, gates=gates, bank=parts[0].bank, ranking=parts[0].ranking, **joined)
+
+
+def _rebuild_detector_triggers(fields: dict, ranking: dict) -> DetectorTriggers:
+    """A pickled DetectorTriggers, constructed (and so checked and frozen) again."""
+    return DetectorTriggers(**fields, ranking=ranking)
 
 
 def _trigger_header(data, path) -> dict:

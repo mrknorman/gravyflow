@@ -142,9 +142,12 @@ repository before it may need the changes below.
   strain once into triggers (so a time slide costs only `coincide`), with aligned-spin `TemplateBank`s, Allen's
   chi-squared and, each as PyCBC runs it: autogating of loud transients (`Autogating`, also `autogate` for any
   search's input), the PSD-variation statistic (`PSDVariation`), Nitz's sine-Gaussian veto, and the ranking
-  `newsnr_sgveto_psdvar` (`ranking_statistic`). `DetectorTriggers` store every ranking input (read-only), and
+  `newsnr_sgveto_psdvar` (`ranking_statistic`). `DetectorTriggers` store every ranking input, and
   their ranking (`reweighted_snr`) is never given or stored but derived from those inputs as stored (float32), so
-  it is the same bit for bit at filtering, after `ranked` and after `load`. Each carries its bank's identity
+  it is the same bit for bit at filtering, after `ranked` and after `load`. Neither can change under the cached
+  ranking: each array is a view of an immutable copy (its write flag cannot be set again) and the ranking's
+  definition is held as an immutable mapping (equal to the dict `ranking_definition` gives); a pickled copy is
+  rebuilt by the constructor, so it is immutable too. Each carries its bank's identity
   (`bank_identity`, a hash of the bank's parameters; given the bank itself, template indices outside it are
   refused) and its ranking's definition (`ranking_definition`: name, parameters and corrections), names an
   interferometer gravyflow knows, refuses a NaN or an infinity by name, and `coincide`, `concatenate` and

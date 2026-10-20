@@ -259,13 +259,56 @@ def test_a_non_finite_span_is_refused_on_construction(bad):
         triggers(span=(1000.0, bad))
 
 
+def test_the_inputs_and_the_ranking_definition_cannot_be_changed_under_the_cached_ranking():
+    # The ranking is cached from the inputs and the definition, so neither may
+    # change after construction: each input is a view of an immutable buffer
+    # (its write flag cannot be set again, nor its base's), and the definition
+    # is an immutable mapping, its parameters too.
+    out = triggers()
+    before = out.reweighted_snr.copy()
+    for name in ("time", "template", "snr", "reduced_chisq", "sg_chisq", "psd_variation", "gates"):
+        value = getattr(out, name)
+        with pytest.raises(ValueError, match="WRITEABLE"):
+            value.setflags(write=True)
+        base = value.base
+        while isinstance(base, np.ndarray):
+            with pytest.raises(ValueError):
+                base.setflags(write=True)
+            base = base.base
+        with pytest.raises(ValueError, match="read-only"):
+            value[0] = 0
+    with pytest.raises(ValueError, match="WRITEABLE"):
+        out.reweighted_snr.setflags(write=True)
+    with pytest.raises(TypeError):
+        out.ranking["name"] = "newsnr"
+    with pytest.raises(TypeError):
+        out.ranking["parameters"]["sine_gaussian"] = False
+    with pytest.raises(TypeError):
+        del out.ranking["parameters"]
+    with pytest.raises((AttributeError, TypeError)):
+        out.ranking.clear()
+    # It still compares as the definition, ranks, saves, loads and pickles as before.
+    assert out.ranking == ranking_definition() and ranking_definition() == out.ranking
+    np.testing.assert_array_equal(out.reweighted_snr, before)
+    np.testing.assert_array_equal(out.ranked(sine_gaussian=False).reweighted_snr,
+                                  ranking_statistic(out.snr, out.reduced_chisq, None, out.psd_variation))
+    import pickle
+    back = pickle.loads(pickle.dumps(out))
+    assert back.ranking == out.ranking
+    np.testing.assert_array_equal(back.reweighted_snr, before)
+    with pytest.raises(ValueError, match="WRITEABLE"):
+        back.snr.setflags(write=True)
+    empty = triggers(time=[], template=[], snr=[], reduced_chisq=[], sg_chisq=[], psd_variation=[], gates=[])
+    assert len(empty) == 0 and empty.reweighted_snr.shape == (0,)
+
+
 @pytest.mark.parametrize("name", ["snr", "time", "psd_variation", "sg_chisq", "reduced_chisq", "gates"])
 def test_a_non_finite_value_is_refused_on_save(tmp_path, name):
-    # The arrays are read-only; one made writable and changed in place is still refused when saved.
+    # The arrays cannot be made writable; one swapped in by force is still refused when saved.
     out = triggers()
-    value = getattr(out, name)
-    value.setflags(write=True)
+    value = np.array(getattr(out, name))
     value[0] = np.nan
+    object.__setattr__(out, name, value)
     with pytest.raises(ValueError, match=name):
         out.save(tmp_path / "triggers.npz")
     assert not (tmp_path / "triggers.npz").exists()
