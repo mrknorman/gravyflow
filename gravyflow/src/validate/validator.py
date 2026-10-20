@@ -139,8 +139,9 @@ class Validator:
         Every window it scores is kept before its threshold (`gf.WindowScores`), ranked by
         its published statistic in the card's direction, never rescored, and clustered
         and found as every model's are. Its fingerprint is its card's; it has no
-        training record (the split it trained on is unknown), no worst cases are kept,
-        and real events are refused.
+        training record (the split it trained on is unknown). Its real events and glitches
+        are each a stretch centred on it that its adapter searches whole, found as an
+        injection is; its worst cases are kept as a Keras model's are.
 
         Raises:
             StaleCheckpointError: the checkpoint is in another format, or belongs

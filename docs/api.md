@@ -240,7 +240,8 @@ validates as it trains: they need the `viz` extra.
   window mode (`mode="window"`) is kept for backward compatibility and reproduction. `Validator.validate` takes a
   Keras model or a released-weights model's `ExternalRunner`: the latter in stream mode only, at its card's stride,
   each background stream and each injection's stretch (starting on the stream's grid) one segment its adapter scores
-  whole (`ExternalRunner.scores`), its published statistic ranked in the card's direction, never rescored.
+  whole (`ExternalRunner.scores`), its published statistic ranked in the card's direction, never rescored; its real
+  events and glitches likewise, each on a stretch centred on it, and its worst cases kept as a Keras model's are.
 - The dashboard's 3D volume tab (`generate_volume_3d_plot`, `gravyflow.src.validate.volume_3d`): the volume set's
   injections at sky direction times distance, found or missed at a false-alarm rate chosen with a slider, a sphere at
   the sensitive distance and the reach's outline, coloured by found state or chirp mass, at physical or scaled

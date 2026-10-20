@@ -212,13 +212,17 @@ repository before it may need the changes below.
   mode's records place each stream's data (`detector_offsets`, `footprint_seconds`); window mode and records without
   placed data keep `floor(count / data_reuse)`; `metrics.independent_events` is removed.
 - **Released-weights models inside the validator.** `Validator.validate` takes an external model's
-  `gf.ExternalRunner` as well as a Keras model. It is validated in stream mode only (window mode, a stride other than
-  its card's and real events are refused by name), at its card's stride, on raw strain in the card's detectors (in
+  `gf.ExternalRunner` as well as a Keras model. It is validated in stream mode only (window mode and a stride other
+  than its card's are refused by name), at its card's stride, on raw strain in the card's detectors (in
   its order) and rate: each background stream is one segment its adapter scores whole, and each injection's stretch
   another (starting on the stream's grid, long enough for the card's new `InputContract.segment_seconds`, else its
   window with its context either side, plus the found test's reach). Every window its adapter scores is kept before
   its threshold, ranked by the published statistic in the card's direction, never rescored, then clustered and found
-  as every model's are. Its record's fingerprint is its card's; no worst cases are kept for it. Adapters give these
+  as every model's are. Real events and glitches are scored the same way, each on a stretch centred on it that its
+  adapter searches whole, found as an injection is. Its worst cases are kept as a Keras model's are (its loudest
+  background windows and its lowest-found injections, each as the stream's nearest window, conditioned for display
+  by the background's dataset, with its statistic), and its background's GPS times are its triggers' own
+  (`noise_streams["gps_times_are_trigger_times"]`). Its record's fingerprint is its card's. Adapters give these
   window scores through a new optional method, `ExternalSearch.scores(segment)`, which `ExternalRunner.scores` runs
   on several segments in one process (`gf.WindowScores`); an adapter without it is refused by name.
 - **A model's trigger stands where it places the merger.** Each window's triggers are timed where the model
@@ -228,8 +232,7 @@ repository before it may need the changes below.
   default none, so results are unchanged); for a released-weights model the time its search gives the window moved
   by its card's new `OutputContract.merger_offset_seconds`, where its authors' training data placed the merger
   (`merger_range_seconds` records the range they spread it over). The offset in force is recorded with the streams
-  (`noise_streams["merger_offset_seconds"]`). A released model's configuration may only repeat its card's offset,
-  and its glitch stage is refused by name.
+  (`noise_streams["merger_offset_seconds"]`). A released model's configuration may only repeat its card's offset.
 - **Injection records for analysis.** A dataset returns, when asked: `ReturnVariables.IN_BAND_DURATION_SECONDS`
   (B, G), a CBC's time from the band's lower frequency to its merger (the envelope's peak) by its waveform model,
   not cut by the window (`gf.CBCGenerator.in_band_duration_seconds`; NaN for other sources);

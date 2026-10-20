@@ -209,7 +209,9 @@ def validator_glitch_rates(validator, fars_hz=None) -> Optional[GlitchClassRates
 def score_glitches(score: Callable[[np.ndarray, np.ndarray], np.ndarray],
                    strain_around: Callable[[str, float, int], np.ndarray], geometry: StreamGeometry,
                    glitches: Glitches, cluster_seconds: float, found_window_seconds: float,
-                   batch_size: int = 64) -> np.ndarray:
+                   batch_size: int = 64,
+                   statistics: Optional[Callable[[np.ndarray, int], np.ndarray]] = None,
+                   half_samples: Optional[int] = None) -> np.ndarray:
     """
     Run the model over every glitch: each glitch's statistic, in the order of ``glitches``.
 
@@ -220,28 +222,35 @@ def score_glitches(score: Callable[[np.ndarray, np.ndarray], np.ndarray],
     ``found_window_seconds + cluster_seconds`` of the peak, `stream.local_windows`), clustered
     into triggers, and the loudest trigger within ``found_window_seconds`` of the peak is the
     glitch's statistic: ``-inf`` where none lies there.
+
+    A model that scores a stretch its own way (a released-weights model, whose adapter
+    searches each stretch whole) gives ``statistics(stretches, half)``: the found statistics
+    of stretches (B, detectors, ``2 half``) each centred on its glitch, timed and found as
+    every model's triggers are; ``half_samples`` is then the half stretch it needs.
     """
     reach = float(found_window_seconds) + float(cluster_seconds)
-    half = geometry.local_half_samples(reach)
+    half = int(half_samples) if half_samples is not None else geometry.local_half_samples(reach)
     index, starts = local_windows(geometry, half, half, reach)
-    statistics = np.full(len(glitches), -np.inf)
+    found = np.full(len(glitches), -np.inf)
     for first in range(0, len(glitches), int(batch_size)):
         rows = range(first, min(first + int(batch_size), len(glitches)))
-        onsource, offsource = [], []
+        stretches = []
         for k in rows:
             stretch = np.asarray(strain_around(str(glitches.ifos[k]), float(glitches.gps[k]), half), dtype=np.float64)
             if stretch.ndim != 2 or stretch.shape[1] != 2 * half:
                 raise ValueError(f"strain_around gave {stretch.shape} for the glitch at {glitches.gps[k]}; a stretch "
                                  f"is (detectors, {2 * half} samples).")
-            on, off = geometry.gather(stretch, starts)
-            onsource.append(on)
-            offsource.append(off)
+            stretches.append(stretch)
+        if statistics is not None:
+            found[first:first + len(rows)] = np.asarray(statistics(np.stack(stretches), half), dtype=np.float64)
+            continue
+        onsource, offsource = zip(*(geometry.gather(stretch, starts) for stretch in stretches))
         scores = np.asarray(score(np.concatenate(onsource), np.concatenate(offsource)), dtype=np.float64)
         scores = scores.reshape(len(rows), index.size)
         for row, k in enumerate(rows):
-            statistics[k], _ = found_in_stretch(geometry, index, scores[row], half, cluster_seconds,
-                                                found_window_seconds)
-    return statistics
+            found[k], _ = found_in_stretch(geometry, index, scores[row], half, cluster_seconds,
+                                           found_window_seconds)
+    return found
 
 
 @dataclass(frozen=True)
@@ -263,7 +272,9 @@ def _subset(glitches: Glitches, keep: np.ndarray) -> Glitches:
 def glitch_stage(obtainer, ifos: Sequence, split_spec, group: str, geometry: StreamGeometry,
                  score: Callable[[np.ndarray, np.ndarray], np.ndarray], cluster_seconds: float,
                  found_window_seconds: float, per_class: Optional[int] = None,
-                 rng: Optional[np.random.Generator] = None, glitches: Optional[Glitches] = None) -> GlitchStage:
+                 rng: Optional[np.random.Generator] = None, glitches: Optional[Glitches] = None,
+                 statistics: Optional[Callable[[np.ndarray, int], np.ndarray]] = None,
+                 half_samples: Optional[int] = None) -> GlitchStage:
     """
     Run the model over every labelled glitch of split ``group`` of a real-noise obtainer.
 
@@ -274,14 +285,16 @@ def glitch_stage(obtainer, ifos: Sequence, split_spec, group: str, geometry: Str
     is scored when its whole stretch lies inside the held-out time: every detector's strain
     at zero lag, read through the obtainer's own ``acquire``, the glitch's peak at the
     stretch's centre (`score_glitches`). ``per_class`` keeps at most that many of each class,
-    drawn by ``rng``.
+    drawn by ``rng``. ``statistics`` and ``half_samples``: a model that scores each stretch
+    its own way (`score_glitches`).
     """
     from gravyflow.src.dataset.acquisition.gwosc_data import intersect_segments, subtract_segments
 
     ifos = list(ifos)
     names = [getattr(ifo, "name", str(ifo)) for ifo in ifos]
     rate = geometry.sample_rate_hertz
-    half = geometry.local_half_samples(float(found_window_seconds) + float(cluster_seconds))
+    half = (int(half_samples) if half_samples is not None
+            else geometry.local_half_samples(float(found_window_seconds) + float(cluster_seconds)))
     pad = half / rate + 1.0  # a second's margin each side, for the source's sample grid
     time = None
     for ifo in ifos:
@@ -316,7 +329,8 @@ def glitch_stage(obtainer, ifos: Sequence, split_spec, group: str, geometry: Str
             out.append(np.asarray(data, dtype=np.float64)[centre - half_samples:centre + half_samples])
         return np.stack(out)
 
-    scores = score_glitches(score, strain_around, geometry, scored, cluster_seconds, found_window_seconds)
+    scores = score_glitches(score, strain_around, geometry, scored, cluster_seconds, found_window_seconds,
+                            statistics=statistics, half_samples=half_samples)
     return GlitchStage(everything, scored, scores)
 
 
@@ -349,7 +363,10 @@ def background_triggers(validator) -> Tuple[np.ndarray, np.ndarray]:
     if not validator.config.stream:
         return scores, centre
     streams = validator.noise_streams
-    centre = centre + float(np.asarray(streams.get("merger_offset_seconds", 0.0)))
+    if bool(np.asarray(streams.get("gps_times_are_trigger_times", False))):
+        centre = starts  # a released model's record: its triggers' own times
+    else:
+        centre = centre + float(np.asarray(streams.get("merger_offset_seconds", 0.0)))
     stride = float(np.asarray(streams["stride_seconds"]))
     keep, offset = [], 0
     for length in np.asarray(streams["lengths"], dtype=np.int64):

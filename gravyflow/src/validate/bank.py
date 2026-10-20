@@ -104,7 +104,7 @@ def is_released(model) -> bool:
 def released_detector_order(runner, dataset_args: dict, config: ValidationConfig) -> List[int]:
     """
     Refuse what a released-weights model cannot be validated on, by name: window mode, a
-    stride other than its card's, real events (not built for it), and data of other
+    stride other than its card's, a merger offset other than its card's, and data of other
     detectors or another rate than its card reads. The data's detector rows, in the
     order the card stacks them.
     """
@@ -117,12 +117,6 @@ def released_detector_order(runner, dataset_args: dict, config: ValidationConfig
     if config.stride_seconds is not None and float(config.stride_seconds) != card.input.stride_seconds:
         raise ValueError(f"{card.name} streams at its own stride, its card's {card.input.stride_seconds:g} s; "
                          f"the configuration asks for {config.stride_seconds:g} s (leave stride_seconds unset).")
-    if config.score_real_events:
-        raise ValueError(f"{card.name}: real events are not scored for a released-weights model; set "
-                         "score_real_events off.")
-    if config.score_glitches:
-        raise ValueError(f"{card.name}: the glitch stage is not run for a released-weights model; set "
-                         "score_glitches off.")
     declared = card.output.merger_offset_seconds
     if config.merger_offset_seconds is not None and float(config.merger_offset_seconds) != declared:
         raise ValueError(f"{card.name} places the merger {declared:g} s from the time its search gives a window "
@@ -549,12 +543,15 @@ class ValidationBank:
             raise ValueError("The glitch stage runs in stream mode on real noise.")
         ifos = noise_ifos(self.dataset_args.get("ifos"), self.dataset_args.get("noise_obtainer"))
         self.glitch_ifos = [ifo.name for ifo in ifos]
+        # A released-weights model's adapter searches each glitch's stretch whole (`released_statistics`).
+        released = dict(statistics=lambda stretches, half: self.released_statistics(stretches, half)[0],
+                        half_samples=self._local_half_samples) if self.released else {}
         self.glitch_stage = stage.glitch_stage(
             self._noise_dataset.noise_obtainer.ifo_data_obtainer, ifos, self.split_spec, cfg.group,
             self.stream_geometry, lambda on, off: self.score_windows(self._noise_dataset, on, off),
             cfg.stream_cluster_seconds, self.stream_found_window_seconds,
             per_class=None if isinstance(cfg.score_glitches, bool) else int(cfg.score_glitches),
-            rng=gf.SeedTree(cfg.seed).stream(cfg.group, "validator/glitches"), glitches=glitches)
+            rng=gf.SeedTree(cfg.seed).stream(cfg.group, "validator/glitches"), glitches=glitches, **released)
 
     def generate_real_events(self, observing_runs: List = None) -> None:
         """
@@ -623,7 +620,7 @@ class ValidationBank:
         stream = self.config.stream
         if stream:  # a stretch centred on the event, long enough for every window its found test reads
             geometry = self.stream_geometry
-            half = geometry.local_half_samples(self._reach_seconds)
+            half = self._local_half_samples  # a released model's search also needs its own segment
             read = dict(onsource_duration_seconds=2 * half / float(window.sample_rate_hertz), crop_duration_seconds=0.0)
         else:  # the event's own window
             read = dict(onsource_duration_seconds=window.onsource_duration_seconds,
@@ -681,16 +678,21 @@ class ValidationBank:
         the event's statistic is the loudest trigger within the found window of its time
         (``-inf`` where none lies there), as an injection's (`stream.found_in_stretch`).
         Returns the statistics, each trigger's time from the event (NaN for none), and the
-        model inputs of the window nearest each event, for display.
+        model inputs of the window nearest each event, for display (the background's
+        dataset's conditioning). A released-weights model's adapter searches each stretch
+        whole (`released_statistics`).
         """
         windows = [local_windows(geometry, half, half, self._reach_seconds) for _ in range(len(stretches))]
-        scores = self._score_stretch_windows(geometry, stretches, [w[1] for w in windows])
-        ends = np.cumsum([w[0].size for w in windows])
-        statistics, offsets = np.full(len(stretches), -np.inf), np.full(len(stretches), np.nan)
-        for j, (index, _) in enumerate(windows):
-            statistics[j], offsets[j] = found_in_stretch(
-                geometry, index, scores[ends[j] - index.size:ends[j]], half, self.config.stream_cluster_seconds,
-                self.stream_found_window_seconds)
+        if self.released:  # its adapter searches each stretch whole
+            statistics, offsets = self.released_statistics(stretches, half)
+        else:
+            scores = self._score_stretch_windows(geometry, stretches, [w[1] for w in windows])
+            ends = np.cumsum([w[0].size for w in windows])
+            statistics, offsets = np.full(len(stretches), -np.inf), np.full(len(stretches), np.nan)
+            for j, (index, _) in enumerate(windows):
+                statistics[j], offsets[j] = found_in_stretch(
+                    geometry, index, scores[ends[j] - index.size:ends[j]], half, self.config.stream_cluster_seconds,
+                    self.stream_found_window_seconds)
         event_time = half / geometry.sample_rate_hertz
         nearest = [w[1][int(np.argmin(np.abs(geometry.window_time(w[0]) - event_time)))] for w in windows]
         on, off = (np.concatenate(parts) for parts in
@@ -957,21 +959,59 @@ class ValidationBank:
         for batch in source.batches(self.config.batch_size, self.config.num_examples):
             if not streams or streams[-1] is not batch.stream:
                 streams.append(batch.stream)
-        scores, times = [], []
-        for stream in tqdm(streams, desc="Scoring noise streams", unit="stream"):
+        scores, times, worst = [], [], []
+        keep = self.config.num_worst_per_bin * 5
+        step = getattr(source, "step_samples", 0) / geometry.sample_rate_hertz
+        for k, stream in enumerate(tqdm(streams, desc="Scoring noise streams", unit="stream")):
             strain, t0 = source.stream_strain(stream)
             # The span of the stream's counted windows.
             span = (stream.num_windows - 1) * geometry.stride_samples + geometry.footprint_samples
             (found,) = self.released_scores([strain[:, :span]], [t0])
+            trigger = geometry.trigger_time(found.time)  # each window's trigger time, on detector 0's timeline
             scores.append(found.stat)
-            times.append(geometry.trigger_time(found.time))  # each window's trigger time
+            # Each detector's own time of it: detector j's data are slid j slides' steps later.
+            times.append(trigger[:, None] + np.arange(strain.shape[0])[None, :] * stream.slide * step)
+            # The loudest windows, as the background's worst cases (`_released_false_positives`).
+            for j in np.argsort(-found.stat, kind="stable")[:keep]:
+                worst.append((float(found.stat[j]), -len(worst), k, float(trigger[j] - t0)))
         if not sum(s.size for s in scores):
             raise ValueError(f"{self.model.card.name} scored no window of the background's streams: lengthen them "
                              "(stream_segment_seconds, or real noise's segments).")
         self.far_scores = np.concatenate(scores)
         self.noise_gps_times = np.concatenate(times) if self._real_noise else None
-        self._worst_false_positives = []
+        self._worst_false_positives = self._released_false_positives(
+            source, streams, sorted(worst, reverse=True)[:keep])
         self._record_streams(streams, [s.size for s in scores])
+        # Its GPS times are its triggers' own (the Keras path records each window's start).
+        self.noise_streams["gps_times_are_trigger_times"] = np.bool_(True)
+
+    def _window_at(self, strain: np.ndarray, seconds: float) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        The window of the stream's grid whose trigger time lies nearest ``seconds`` from
+        ``strain``'s first sample (`stream.StreamGeometry.trigger_time`): its padded
+        onsource and offsource, (1, I, P) and (1, I, O), for display.
+        """
+        geometry = self.stream_geometry
+        count = geometry.num_windows(strain.shape[1])
+        index = int(np.clip(np.rint((seconds * geometry.sample_rate_hertz - geometry.time_samples)
+                                    / geometry.stride_samples), 0, max(count - 1, 0)))
+        return geometry.gather(strain, [index * geometry.stride_samples])
+
+    def _released_false_positives(self, source, streams, loudest) -> List[Dict[str, Any]]:
+        """
+        A released-weights model's worst false positives: its loudest background windows
+        (statistic, order, stream, trigger time from the stream's start), each as the
+        stream's window nearest its trigger, conditioned for display as the Keras path's
+        are (the background's dataset, `model_inputs`), with its statistic and GPS time.
+        """
+        out = []
+        for stat, _, k, seconds in loudest:
+            strain, t0 = source.stream_strain(streams[k])
+            on, off = self._window_at(strain, seconds)
+            x = self._noise_dataset.model_inputs(on, off)
+            gps = {gf.ReturnVariables.START_GPS_TIME.name: np.array([[t0 + seconds]])} if self._real_noise else {}
+            out.append(_extract_sample_data(x, gps, 0, stat))
+        return out
 
     def _released_found(self, found, merger: float) -> Tuple[float, float]:
         """
@@ -985,11 +1025,26 @@ class ValidationBank:
         time = self.stream_geometry.trigger_time(found.time)
         if time.size == 0 or time[0] > merger - found_window_seconds or time[-1] < merger + found_window_seconds:
             raise ValueError(
-                f"{self.model.card.name}'s search scored no windows either side of a merger in its stretch of "
-                f"{cfg.injection_stretch_seconds:g} s: give its card's "
-                "input contract the segment its search needs (segment_seconds).")
+                f"{self.model.card.name}'s search scored no windows either side of a merger, event or glitch in "
+                f"its stretch: give its card's input contract the segment its search needs (segment_seconds), or "
+                "lengthen injection_stretch_seconds.")
         near = np.abs(time - merger) <= self._reach_seconds + 1e-9
         return found_at(time[near], found.stat[near], merger, cfg.stream_cluster_seconds, found_window_seconds)
+
+    def released_statistics(self, stretches, half: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        A released-weights model's found statistics of stretches (B, I, 2 ``half``; the
+        data's detector order) each centred on its time of interest (a real event's, a
+        glitch's peak): each stretch one segment its adapter searches whole, its windows
+        timed and found as an injection's (`_released_found`). The statistics, and each
+        trigger's time from the centre (NaN for none).
+        """
+        stretches = np.asarray(stretches, dtype=np.float64)
+        rate = self.stream_geometry.sample_rate_hertz
+        found = self.released_scores(list(stretches), np.zeros(len(stretches)))
+        pairs = [self._released_found(scored, half / rate) for scored in found]
+        return (np.array([p[0] for p in pairs], dtype=np.float64).reshape(-1),
+                np.array([p[1] for p in pairs], dtype=np.float64).reshape(-1))
 
     def _recorded_streams(self) -> List[SlideStream]:
         """The background's streams, as its record gives them (`generate_stream_noise`)."""
@@ -1028,14 +1083,16 @@ class ValidationBank:
         columns: Dict[str, list] = {k: [] for k in ("scores", "trigger_offsets", "merger_times", *labels, *records)}
         if not white:
             columns["bns_ranges"] = []
-        # A released-weights model's worst cases are not kept: its adapter's input is its own.
-        worst = None if worst_edges is None or self.released else [[] for _ in range(worst_edges.size - 1)]
+        # The worst found per SNR bin, each as its merger's nearest window, conditioned for display
+        # by the background's dataset (`_keep_worst`), whatever the model.
+        worst = None if worst_edges is None else [[] for _ in range(worst_edges.size - 1)]
         batch = cfg.batch_size
         for b in tqdm(range(self._num_batches(num)), desc=f"Scoring injections locally ({stage})", unit="batch"):
             x, y = dataset[b]
             rows = min(batch, num - b * batch)
             samples = placement.sample[b * batch:b * batch + rows]
             stretches = np.asarray(y[RV.ONSOURCE.name])
+            windows = [local_windows(geometry, half, int(m), self._reach_seconds) for m in samples]
             if self.released:
                 # Each stretch one segment of the adapter's, its front cut to start on the stream's
                 # grid (as the stream's own segment does), so that its windows are the stream's;
@@ -1048,7 +1105,6 @@ class ValidationBank:
                     columns["scores"].append([stat])
                     columns["trigger_offsets"].append([when])
             else:
-                windows = [local_windows(geometry, half, int(m), self._reach_seconds) for m in samples]
                 scores = self._score_stretch_windows(geometry, stretches, [w[1] for w in windows])
                 ends = np.cumsum([w[0].size for w in windows])
                 for j, (index, _) in enumerate(windows):

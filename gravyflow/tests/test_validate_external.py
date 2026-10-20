@@ -22,7 +22,7 @@ from gravyflow.src.dataset.store.files import RemoteFile
 from gravyflow.src.model.examples.base import ValidationDatasetConfig, validation_dataset_args
 from gravyflow.src.validate import ValidationConfig, Validator
 from gravyflow.src.validate.bank import ValidationBank
-from gravyflow.src.validate.stream import StreamBackground, cluster, loudest_within
+from gravyflow.src.validate.stream import StreamBackground, cluster, found_at, loudest_within
 
 RATE = 2048.0
 
@@ -204,8 +204,6 @@ def test_what_a_released_model_cannot_be_validated_on_is_refused(released, datas
         ValidationBank(released, dataset_args, dataclasses.replace(config, mode="window"))
     with pytest.raises(ValueError, match="its own stride"):
         ValidationBank(released, dataset_args, dataclasses.replace(config, stride_seconds=0.5))
-    with pytest.raises(ValueError, match="real events"):
-        ValidationBank(released, dataset_args, dataclasses.replace(config, score_real_events=True))
     with pytest.raises(ValueError, match=r"reads \('L1',\) at 2048.0 Hz"):
         ValidationBank(released, validation_dataset_args(config=ValidationDatasetConfig(sample_rate_hertz=1024.0)),
                        config)
@@ -214,8 +212,6 @@ def test_what_a_released_model_cannot_be_validated_on_is_refused(released, datas
             sample_rate_hertz=RATE, ifos=[gf.IFO.H1])), config)
     # A probability is ranked as published: the statistic is never refused or rescored.
     ValidationBank(released, dataset_args, config)
-    with pytest.raises(ValueError, match="glitch stage"):
-        ValidationBank(released, dataset_args, dataclasses.replace(config, score_glitches=True))
     with pytest.raises(ValueError, match="leave merger_offset_seconds unset"):
         ValidationBank(released, dataset_args, dataclasses.replace(config, merger_offset_seconds=0.2))
 
@@ -252,3 +248,86 @@ def test_a_released_model_is_timed_where_its_card_places_the_merger(released, da
 def test_the_record_keeps_the_declared_merger_offset(validated):
     _, v, _ = validated
     assert float(v.noise_streams["merger_offset_seconds"]) == 0.0
+
+
+def _stretch_oracle(runner, bank, stretches, half):
+    """Each stretch's found statistic and trigger offset, from the adapter's own scores of it."""
+    out = []
+    for stretch in stretches:
+        (scored,) = gf.ExternalRunner.scores(runner, [gf.SearchSegment(stretch, ("L1",), 0.0, RATE)])
+        time = scored.time + runner.card.output.merger_offset_seconds
+        out.append(found_at(time, scored.stat, half / RATE, bank.config.stream_cluster_seconds,
+                            bank.stream_found_window_seconds))
+    return np.array(out)
+
+
+def test_a_released_models_real_events_are_found_as_its_injections(released, dataset_args, config):
+    # A real event's stretch, centred on it, is one segment its adapter searches whole: its
+    # statistic the loudest trigger within the found window of the event, timed where the card
+    # places the merger, as an injection's; the window nearest it kept for display.
+    rng = np.random.default_rng(6)
+    for runner in (released, _late(released, 0.3)):
+        bank = ValidationBank(runner, dataset_args, config)
+        half = bank._local_half_samples
+        stretches = rng.normal(size=(3, 1, 2 * half))
+        # A loud stretch where the model responds to the event: its declared offset before it.
+        loud = half - int(round(runner.card.output.merger_offset_seconds * RATE))
+        stretches[:, :, loud - 600:loud + 600] *= 4.0
+        statistics, offsets, x = bank._stream_event_statistics(stretches, bank.stream_geometry, half)
+        expected = _stretch_oracle(runner, bank, stretches, half)
+        np.testing.assert_array_equal(statistics, expected[:, 0])
+        np.testing.assert_allclose(offsets, expected[:, 1], atol=1e-12)
+        assert np.isfinite(statistics).any()  # the toy's 1 s energy windows localise only roughly
+        assert np.asarray(x[gf.ReturnVariables.WHITENED_ONSOURCE.name]).shape[0] == 3
+
+
+def test_a_released_models_glitches_are_found_as_its_injections(released, dataset_args, config):
+    # The glitch stage hands each glitch's stretch to the adapter whole; the Keras scorer is never called.
+    from gravyflow.src.validate.glitches import Glitches, score_glitches
+
+    runner = _late(released, 0.3)
+    bank = ValidationBank(runner, dataset_args, config)
+    half = bank._local_half_samples
+    rng = np.random.default_rng(8)
+    stretches = rng.normal(size=(5, 1, 2 * half))
+    glitches = Glitches(np.array(["L1"] * 5), 1.0e9 + 100.0 * np.arange(5), np.array(["Blip"] * 5), "test")
+    lookup = {float(gps): stretch for gps, stretch in zip(glitches.gps, stretches)}
+
+    def keras_scorer(on, off):
+        raise AssertionError("a released model is never scored window by window")
+
+    scores = score_glitches(keras_scorer, lambda ifo, gps, h: lookup[gps], bank.stream_geometry, glitches,
+                            config.stream_cluster_seconds, bank.stream_found_window_seconds, batch_size=2,
+                            statistics=lambda s, h: bank.released_statistics(s, h)[0], half_samples=half)
+    np.testing.assert_array_equal(scores, _stretch_oracle(runner, bank, stretches, half)[:, 0])
+
+
+def test_a_released_models_worst_cases_are_kept(validated, tmp_path):
+    # As the Keras path keeps them: its loudest background windows and, per SNR bin, its
+    # lowest-found injections, each conditioned for display with its statistic.
+    path, v, _ = validated
+    positives = v.worst_performers["false_positives"]
+    assert len(positives) == v.config.num_worst_per_bin * 5
+    np.testing.assert_array_equal([p["score"] for p in positives], np.sort(v.far_scores)[::-1][:len(positives)])
+    negatives = [s for samples in v.worst_performers["false_negatives"].values() for s in samples]
+    assert negatives and all(s["score"] <= max(v.efficiency_data["scores"]) for s in negatives)
+    for sample in positives + negatives:
+        assert np.asarray(sample[gf.ReturnVariables.WHITENED_ONSOURCE.name]).ndim == 2
+    loaded = Validator.load(path)
+    assert len(loaded.worst_performers["false_positives"]) == len(positives)
+    assert sum(map(len, loaded.worst_performers["false_negatives"].values())) == len(negatives)
+
+
+def test_a_released_models_background_triggers_carry_their_own_times():
+    # Its record's GPS times are its triggers' (the Keras record's are each window's start).
+    from types import SimpleNamespace
+    from gravyflow.src.validate.glitches import background_triggers
+
+    times = 1.0e9 + np.arange(8)[:, None] * 0.25 + np.array([[0.0, 3.0]])
+    streams = {"stride_seconds": np.float64(0.25), "lengths": np.array([8]), "merger_offset_seconds": np.float64(0.3),
+               "gps_times_are_trigger_times": np.bool_(True)}
+    scores = np.array([0, 1, 5, 1, 0, 0, 0, 0], dtype=np.float64)
+    v = SimpleNamespace(noise_gps_times=times, far_scores=scores, input_duration_seconds=1.0, noise_streams=streams,
+                        config=ValidationConfig(num_examples=8))
+    stats, at = background_triggers(v)
+    assert stats.tolist() == [5.0] and at.tolist() == [times[2].tolist()]
