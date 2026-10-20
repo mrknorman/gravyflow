@@ -338,18 +338,23 @@ class StreamReader:
     """
     The noise of a local-injection stage's dataset: a reader of the caller's own
     (`noise.sequential_batcher`) serving, in order, each placed injection's stretch of
-    the clean stream (``ONSOURCE``, ``2 half_samples`` centred on the merger) and the
+    the clean stream (``ONSOURCE``, ``2 half_samples`` centred on the merger: the local
+    stretch padded by the window's crop either side, which the dataset crops back) and the
     clean data just before the merger's window (``OFFSOURCE``, the window's own
     offsource: the spectrum the injection is scaled, whitened and recorded against),
-    with each stretch's first sample's GPS time per detector (NaN in synthetic
-    noise). The dataset places each signal's merger at its onsource's centre. The
+    with the GPS time of each stretch's first returned sample per detector (NaN in
+    synthetic noise). The dataset places each signal's merger at its onsource's centre. The
     last batch is filled by repeating its last stretch; the stage keeps only the
     placed ones.
     """
 
     def __init__(self, source, streams: Sequence[SlideStream], placement: Placement, geometry: StreamGeometry,
-                 half_samples: int, split_spec: Optional["gf.SplitSpec"], step_samples: int = 0):
+                 half_samples: int, split_spec: Optional["gf.SplitSpec"], step_samples: int = 0,
+                 ifos: Sequence = (), crop_samples: int = 0):
         self.source, self.streams, self.placement = source, list(streams), placement
+        self.crop_samples = int(crop_samples)  # the dataset crops this much off each end of the stretch
+        # The detectors of the data it reads, in order: the dataset's noise detectors.
+        self.ifos = list(ifos) or None
         self.geometry, self.half_samples, self.step_samples = geometry, int(half_samples), int(step_samples)
         # The split of the data it reads, for the dataset's split check (a reader of the
         # caller's own is taken to read real data).
@@ -371,7 +376,8 @@ class StreamReader:
             stretch = strain[:, m - h:m + h]
             offsource = strain[:, m - before:m - before + window.num_offsource_samples]
             slide = self.streams[index].slide
-            gps = first_gps + (m - h + np.arange(strain.shape[0]) * slide * self.step_samples) \
+            # The GPS time of each detector's first returned (cropped) sample, as an obtainer gives it.
+            gps = first_gps + (m - h + self.crop_samples + np.arange(strain.shape[0]) * slide * self.step_samples) \
                 / self.geometry.sample_rate_hertz
             yield stretch, offsource, gps
 

@@ -716,7 +716,8 @@ def test_the_validator_scores_the_baseline():
         config=ValidationDatasetConfig(mass_range_msun=(25.0, 35.0), batch_size=8), baseline=cfg)
     validator = Validator.validate(
         model=MatchedFilterBaseline.model(config=cfg), name="matched_filter", dataset_args=args,
-        config=ValidationConfig(num_examples=16, batch_size=8, snr_range=(12.0, 20.0), snr_bin_width=8.0))
+        config=ValidationConfig(mode="window", num_examples=16, batch_size=8, snr_range=(12.0, 20.0),
+                                snr_bin_width=8.0))
     noise = validator.far_scores * cfg.temperature + cfg.snr_threshold
     signal = validator.efficiency_data["scores"] * cfg.temperature + cfg.snr_threshold
     assert noise.shape == (16,) and signal.shape == (16,)

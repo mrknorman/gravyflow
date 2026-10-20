@@ -12,6 +12,7 @@ injection label stream is compared too, at every offset; and a run resumed
 part-way trains on the batches the uninterrupted run did.
 """
 
+import dataclasses
 from unittest import mock
 
 import keras
@@ -96,9 +97,15 @@ def train_george_huerta(directory, task, steps=1, validation_batches=2):
 
 
 def validate(run_directory, num_examples):
-    """Score the shipped validation script's sets for the run in ``run_directory``, with a stub model."""
+    """
+    Score the shipped validation script's sets for the run in ``run_directory``, with a stub model,
+    in window mode: these tests compare its stages' sets one by one (`VALIDATOR_STAGES`). Stream
+    mode's stages share data by design (its injections are scored in the background's own
+    streams); its datasets are checked by `test_the_stream_validator_draws_only_test_data`.
+    """
     args = validate_script.parse_args([
         "--run-dir", str(run_directory), "--num-examples", str(num_examples), "--batch-size", str(BATCH),
+        "--mode", "window",
     ])
     run_record = RunDirectory(run_directory).run
     dataset_args, config = validate_script.build_validation(args, run_record)
@@ -216,6 +223,37 @@ def test_validator_default_is_test(monkeypatch):
     bank.generate()
     bank.generate_volume()  # the reach's batch, then the volume set
     assert groups == ["test"] * 4, f"the validator built datasets in {groups}"
+
+
+def test_the_stream_validator_draws_only_test_data(monkeypatch):
+    """
+    Stream mode (the default) builds every dataset in the test split, each from the
+    validator's own seeds: the model's windows, the noise segments, the local injection
+    stretches (read from those segments), the reach's noise and the volume set's stretches.
+    """
+    run_record = {"description": {"config": {
+        "sample_rate_hertz": 256.0, "onsource_duration_seconds": 1.0, "offsource_duration_seconds": 4.0}}}
+    dataset_args, config = validate_script.build_validation(
+        validate_script.parse_args(["--run-dir", "unused", "--num-examples", "8", "--batch-size", "8"]),
+        run_record)
+    assert config.mode == "stream" and config.group == "test"
+    config = dataclasses.replace(config, stream_segment_seconds=32.0)
+    built = []
+    build = gf.Dataset
+
+    def spy(**kwargs):
+        built.append((kwargs.get("group"), kwargs.get("seed")))
+        return build(**kwargs)
+
+    monkeypatch.setattr(gf, "Dataset", spy)
+    bank = ValidationBank(stub_model(256), dataset_args, config)
+    bank.generate_stream_noise()
+    bank.generate_stream_injections()
+    bank.generate_stream_volume()
+    assert [group for group, _ in built] == ["test"] * 5, f"the validator built datasets in {built}"
+    root = gf.SeedTree(config.seed)
+    assert [seed for _, seed in built] == [root.sub(f"validator/{stage}")
+                                           for stage in ("far", "far", "inj", "horizon", "vol")]
 
 
 # A label stream is compared over the examples present in both sets at an

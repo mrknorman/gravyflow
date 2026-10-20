@@ -710,12 +710,19 @@ class ValidationBank:
         """
         cfg, geometry = self.config, self.stream_geometry
         half = geometry.local_half_samples(self._reach_seconds)
+        # The dataset pads its onsource by the window's crop either side, and crops it back.
+        crop = float(geometry.window.crop_duration_seconds)
+        pad = int(round(crop * geometry.sample_rate_hertz))
         streams = self._recorded_streams()
-        placement = place_injections(num, streams, half,
+        placement = place_injections(num, streams, half + pad,
                                      gf.SeedTree(cfg.seed).sub(f"validator/{stage}").stream(cfg.group, "noise/row"))
         source = self.stream_source
-        reader = StreamReader(source, streams, placement, geometry, half, self.split_spec,
-                              getattr(source, "step_samples", 0))
+        from gravyflow.src.dataset.dataset import noise_ifos
+
+        reader = StreamReader(source, streams, placement, geometry, half + pad, self.split_spec,
+                              getattr(source, "step_samples", 0),
+                              noise_ifos(self.dataset_args.get("ifos"), self.dataset_args.get("noise_obtainer")),
+                              crop_samples=pad)
         generator.front_padding_duration_seconds = 0.0
         generator.back_padding_duration_seconds = 0.0
         # The stretch is cut from the whole signal: what lies outside it reaches no window the test reads.
@@ -723,7 +730,7 @@ class ValidationBank:
         generator.injection_chance = 1.0
         dataset = self.stage_dataset(stage, [generator], outputs, num_examples=num, overrides={
             "noise_obtainer": reader, "onsource_duration_seconds": 2 * half / geometry.sample_rate_hertz,
-            "crop_duration_seconds": 0.0, "input_variables": [gf.ReturnVariables.ONSOURCE]})
+            "crop_duration_seconds": crop, "input_variables": [gf.ReturnVariables.ONSOURCE]})
         return dataset, placement, half, streams
 
     def _score_stretch_windows(self, geometry: StreamGeometry, stretches: np.ndarray, starts: List[np.ndarray]
@@ -818,12 +825,13 @@ class ValidationBank:
 
     def background(self) -> Background:
         """
-        The noise scores as a background: in stream mode the triggers of its streams
-        (`stream.StreamBackground`); in window mode time-slid streams, or independent windows.
+        The noise scores as a background, as the stage that scored them made them: stream
+        mode's (`generate_stream_noise`) the triggers of its streams
+        (`stream.StreamBackground`); window mode's time-slid streams, or independent windows.
         """
         if self.far_scores is None:
             raise ValueError("Call generate_noise() first.")
-        if self.config.stream:
+        if self.noise_streams is not None and "stride_seconds" in self.noise_streams:  # stream mode's scores
             return stream_background(self.far_scores, self.noise_streams, self.window_seconds,
                                      self.config.stream_cluster_seconds, self.config.found_window_seconds)
         return noise_background(self.far_scores, self.noise_streams, self.window_seconds,

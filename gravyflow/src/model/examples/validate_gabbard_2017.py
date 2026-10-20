@@ -36,6 +36,9 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=int, default=gf.Defaults.seed, help="The validator's own root seed")
     parser.add_argument("--real-events", action="store_true",
                         help="Also score real GW events (needs network access)")
+    parser.add_argument("--mode", choices=["stream", "window"], default="stream",
+                        help="stream (the standard: the model slid along continuous strain) or window "
+                             "(each example one window; kept for compatibility and reproduction)")
     return parser.parse_args(argv)
 
 
@@ -59,6 +62,7 @@ def build_validation(args, run: dict) -> tuple:
         num_examples=args.num_examples,
         batch_size=args.batch_size,
         score_real_events=args.real_events,
+        mode=args.mode,
     )
     return dataset_args, config
 

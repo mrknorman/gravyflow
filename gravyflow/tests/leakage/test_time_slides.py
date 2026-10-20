@@ -153,3 +153,39 @@ def test_the_validator_backgrounds_real_network_noise_by_time_slides(world):
     # Adjacent windows above a threshold are one trigger.
     assert background.cluster_seconds == fx.ONSOURCE_SECONDS
     assert np.all(np.isfinite(bank.far_scores)) and bank.far_scores.shape == (budget,)
+
+
+def test_the_stream_validator_slides_real_network_noise_at_its_stride(world):
+    # Stream mode (the default): the same time slides, one stride (a quarter window) apart, and
+    # each stream read back whole for the injections is the data its windows were cut from, so a
+    # stretch around a merger scores, window for window, as the background scored that stream.
+    from gravyflow.src.validate.stream import StreamBackground, local_windows
+
+    fixture = fx.straddle("test", "train", half_width=600.0)
+    config = gf.ValidationConfig(num_examples=400, batch_size=64, num_time_slides=2, time_slide_step_seconds=50.0)
+    with world(fixture):
+        args = dict(
+            noise_obtainer=fx.noise_obtainer(fixture),
+            ifos=[gf.IFO[name] for name in IFOS], sample_rate_hertz=RATE,
+            onsource_duration_seconds=fx.ONSOURCE_SECONDS, crop_duration_seconds=fx.CROP_SECONDS,
+            offsource_duration_seconds=fx.OFFSOURCE_SECONDS,
+            input_variables=[gf.ReturnVariables.WHITENED_ONSOURCE],
+        )
+        bank = ValidationBank(logit_model(2, int(RATE)), args, config)
+        bank.generate_stream_noise()
+        background = bank.background()
+        assert isinstance(background, StreamBackground)
+        assert bank.noise_streams["stride_seconds"] == fx.ONSOURCE_SECONDS / 4
+        assert background.data_reuse == len(set(bank.noise_streams["slides"].tolist()))
+        geometry, streams = bank.stream_geometry, bank._recorded_streams()
+        offset = 0
+        for stream in streams:
+            strain, first_gps = bank.stream_source.stream_strain(stream)
+            assert strain.shape == (len(IFOS), stream.num_samples)
+            assert stream.stretch[0] <= first_gps < stream.stretch[1]
+            sample = geometry.footprint_samples + 2 * geometry.stride_samples  # well inside the scored part
+            index, starts = local_windows(geometry, sample, sample, 0.3)
+            assert index.min() >= 0 and index.max() < stream.num_windows
+            local = bank._score_stretch_windows(geometry, strain[None], [starts])
+            np.testing.assert_allclose(local, bank.far_scores[offset + index], rtol=1e-5, atol=1e-6)
+            offset += stream.num_windows
