@@ -445,6 +445,11 @@ class Validator:
             tabs.append(("Worst False Positives", pn.Column(
                 *[generate_waveform_plot(s, self.input_duration_seconds) for s in fp[:25]])))
 
+        from .volume_3d import generate_volume_3d_plot
+        volume_3d = generate_volume_3d_plot(self)
+        if volume_3d is not None:
+            tabs.append(("3D Volume", volume_3d))
+
         header = pn.pane.Markdown("  \n".join(v.mode_summary() for v in validators), sizing_mode="stretch_width")
         template = pn.template.FastListTemplate(
             title=f"Validation Dashboard: {self.name}", theme="dark", theme_toggle=False, main=[header, tabs],

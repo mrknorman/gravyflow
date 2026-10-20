@@ -278,6 +278,12 @@ repository before it may need the changes below.
 - `gf.NoGlitchVetoWarning`: noise with no public Gravity Spy labels (O4, and Virgo in any run) is served with no
   glitch veto under this warning, shown by default and naming the detector and time; it was a log message, hidden by
   default.
+- **The dashboard's 3D volume tab** (`generate_volume_3d_plot`). The volume set's injections at their sky direction
+  times distance (physical, or the chirp distance the reach is measured in), found or missed at the false-alarm rate
+  a slider chooses among the record's levels, with a sphere at that rate's sensitive distance and the outline of the
+  reach, coloured by found state or by chirp mass, turned by azimuth and elevation sliders. An orthographic
+  projection drawn in the page, so the dashboard stays one self-contained file. Shown for a record whose volume set
+  carries sky positions (`right_ascension`, `declination`); every other tab is unchanged.
 
 ### Fixed
 
