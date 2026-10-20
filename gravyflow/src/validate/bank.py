@@ -64,6 +64,8 @@ _VOLUME_LABELS = {
     "snrs": gf.ScalingTypes.SNR,
     "mass1": gf.WaveformParameters.MASS_1_MSUN,
     "mass2": gf.WaveformParameters.MASS_2_MSUN,
+    "right_ascension": gf.WaveformParameters.RIGHT_ASCENSION_RADIANS,
+    "declination": gf.WaveformParameters.DECLINATION_RADIANS,
 }
 
 

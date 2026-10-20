@@ -283,7 +283,9 @@ repository before it may need the changes below.
   a slider chooses among the record's levels, with a sphere at that rate's sensitive distance and the outline of the
   reach, coloured by found state or by chirp mass, turned by azimuth and elevation sliders. An orthographic
   projection drawn in the page, so the dashboard stays one self-contained file. Shown for a record whose volume set
-  carries sky positions (`right_ascension`, `declination`); every other tab is unchanged.
+  carries sky positions (`right_ascension`, `declination`); every other tab is unchanged. The volume set now records
+  each source's sky position (radians) in `volume_data`; this falls within record format 7 (unreleased), so the
+  format version is not bumped again, and a record written before it has no 3D tab.
 
 ### Fixed
 

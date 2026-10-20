@@ -61,7 +61,8 @@ def test_validator_runs_offline_on_synthetic_noise(validated, tmp_path):
     assert v.noise_gps_times is None
     assert set(v.efficiency_data) == {"snrs", "scores", "mass1", "mass2", "central_times", "hpeak", "hrss"}
     assert all(a.shape == (64,) for a in v.efficiency_data.values())
-    assert set(v.volume_data) == {"scores", "distances", "chirp_distances", "snrs", "mass1", "mass2", "reach_mpc"}
+    assert set(v.volume_data) == {"scores", "distances", "chirp_distances", "snrs", "mass1", "mass2",
+                                  "right_ascension", "declination", "reach_mpc"}
     assert path.exists()
     report = tmp_path / "report.html"
     v.plot(report)
@@ -165,6 +166,25 @@ def test_the_sensitive_volume_is_recorded_and_plotted(validated, small_config):
     labels = {item.label.value for child in (volume, distance, found) for item in child.legend[0].items}
     assert f"Tiny (reach {reach:,.0f} Mpc chirp distance, SNR {small_config.volume_reach_snr:g})" in labels
     assert {"Tiny (1σ joint)", "Tiny (2σ joint)", "Tiny (chance level)"} <= labels
+
+
+def test_the_dashboard_shows_the_volume_set_in_3d(validated):
+    # The volume set records each source's sky position, so the dashboard carries the 3D
+    # volume tab after every other tab, and the tab holds every injection of the record.
+    import panel as pn
+    from bokeh.models import Scatter
+
+    _, _, v = validated
+    data = v.volume_data
+    assert np.all((data["right_ascension"] >= 0) & (data["right_ascension"] <= 2 * np.pi))
+    assert np.all(np.abs(data["declination"]) <= np.pi / 2)
+    template = v.plot()
+    tabs = next(item for item in template.main if isinstance(item, pn.Tabs))
+    assert tabs._names[-1] == "3D Volume"
+    assert {"Efficiency", "ROC Curves", "FAR Curves", "Parameter Space"} <= set(tabs._names)
+    figure = tabs[-1].object.children[2]
+    points = next(r for r in figure.renderers if isinstance(r.glyph, Scatter)).data_source.data
+    assert len(points["px"]) == data["scores"].size
 
 
 def test_the_efficiency_tab_keeps_every_layer_of_its_plot(validated):
