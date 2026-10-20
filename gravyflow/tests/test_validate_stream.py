@@ -192,3 +192,17 @@ def test_a_run_of_equal_scores_triggers_at_its_middle():
         t = np.sort(rng.uniform(0, 100, 400))
         s = rng.permutation(400).astype(np.float64)
         np.testing.assert_array_equal(cluster(t, s, 1.0), _cluster_earliest_of_ties(t, s, 1.0))
+
+
+def test_the_default_stride_is_a_whole_number_of_samples_and_no_longer_than_the_window():
+    from gravyflow.src.dataset.config import WindowSpec
+    from gravyflow.src.validate.stream import StreamGeometry
+    # A quarter of a 1.5 s window at 1000 Hz is 375 samples; at 1001 Hz, 375.375, rounded to 375.
+    assert StreamGeometry.of(WindowSpec(1000.0, 1.5, 2.0, 0.25), None).stride_samples == 375
+    geometry = StreamGeometry.of(WindowSpec(1001.0, 1.5, 2.0, 0.25), None)
+    assert geometry.stride_samples == 375 and geometry.stride_seconds == 375 / 1001.0
+    with pytest.raises(ValueError, match="whole number"):
+        StreamGeometry.of(WindowSpec(1001.0, 1.5, 2.0, 0.25), 0.375)
+    assert StreamGeometry.of(WindowSpec(1000.0, 1.5, 2.0, 0.25), 1.5).stride_samples == 1500
+    with pytest.raises(ValueError, match="at most"):
+        StreamGeometry.of(WindowSpec(1000.0, 1.5, 2.0, 0.25), 1.6)

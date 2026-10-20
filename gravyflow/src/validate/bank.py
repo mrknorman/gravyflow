@@ -584,9 +584,12 @@ class ValidationBank:
 
     @property
     def stream_geometry(self) -> StreamGeometry:
-        """Where the model's windows lie on a stream: its own window, one stride apart (`stream`)."""
-        window = self._noise_dataset.window_spec
-        return StreamGeometry.of(window, self.config.stream_stride_seconds(float(window.onsource_duration_seconds)))
+        """
+        Where the model's windows lie on a stream: its own window, one stride apart
+        (`stream`); by default a quarter window, rounded to whole samples, and recorded
+        (``noise_streams["stride_seconds"]``).
+        """
+        return StreamGeometry.of(self._noise_dataset.window_spec, self.config.stride_seconds)
 
     @property
     def _reach_seconds(self) -> float:

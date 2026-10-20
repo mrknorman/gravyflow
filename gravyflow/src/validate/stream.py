@@ -75,10 +75,24 @@ class StreamGeometry:
     window: WindowSpec
     stride_samples: int
 
+    def __post_init__(self):
+        window_samples = float(self.window.onsource_duration_seconds) * float(self.window.sample_rate_hertz)
+        if not 1 <= self.stride_samples <= window_samples + 1e-6:
+            raise ValueError(f"A stride of {self.stride_samples} samples must be at least one sample and at most "
+                             f"the model's window ({self.window.onsource_duration_seconds} s): a longer one "
+                             "leaves data no window reads.")
+
     @classmethod
-    def of(cls, window: WindowSpec, stride_seconds: float) -> "StreamGeometry":
-        stride = int(round(stride_seconds * float(window.sample_rate_hertz)))
-        if stride < 1 or abs(stride - stride_seconds * float(window.sample_rate_hertz)) > 1e-6:
+    def of(cls, window: WindowSpec, stride_seconds: Optional[float]) -> "StreamGeometry":
+        """
+        The geometry at ``stride_seconds``, which must be a whole number of samples; by
+        default (None) a quarter of the window, rounded to the nearest whole sample.
+        """
+        rate = float(window.sample_rate_hertz)
+        if stride_seconds is None:
+            return cls(window, max(int(round(float(window.onsource_duration_seconds) * rate / 4.0)), 1))
+        stride = int(round(stride_seconds * rate))
+        if stride < 1 or abs(stride - stride_seconds * rate) > 1e-6:
             raise ValueError(f"A stride of {stride_seconds} s is not a whole number of samples (>= 1) at "
                              f"{window.sample_rate_hertz} Hz.")
         return cls(window, stride)
