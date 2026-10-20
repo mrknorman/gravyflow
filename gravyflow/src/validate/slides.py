@@ -27,6 +27,17 @@ its own (`ValidationBank.score_windows`).
 - **Stream mode** reads a stream's slid strain back whole (`stream_strain`): the
   data its windows were cut from, detector j's read ``j k step`` later, so that an
   injection is scored on the very stream the background was (`stream`).
+- **Wrapping slides** (`WrappedSlides`) reach far deeper. The network's segments,
+  laid end to end in time order, form one ring of length ``L`` (their summed
+  length); in slide k detector j is read ``j lag_k`` further round the ring,
+  wrapping round each segment's end into the next segment and from the last
+  segment back to the first. No data is lost to a slide, so each slide adds the
+  whole ``L`` of background: ``K`` slides give ``K L``. Every lag between two
+  detectors, of every slide, lies further than `minimum_shift_seconds` (the
+  light-travel time plus the model's input length) round the ring from zero lag
+  and from every other slide's lag between them, so no slide reuses zero lag or
+  another slide's pairing. Two times a ring distance apart are at least that far
+  apart in GPS time, so the rule holds in GPS time too.
 """
 
 from __future__ import annotations
@@ -74,6 +85,140 @@ class TimeSlides:
     def slides(self, num_detectors: int) -> range:
         """The slides of a network: 1 .. num_slides, or only 0 for a single detector."""
         return range(1, self.num_slides + 1) if num_detectors > 1 else range(0, 1)
+
+
+def minimum_shift_seconds(ifos: Sequence, window: Optional[WindowSpec] = None, input_seconds: float = 0.0) -> float:
+    """
+    The least shift between two detectors that a slide may use: the network's
+    largest light-travel time plus the model's input length (``window``'s
+    footprint, its offsource and padded onsource, or ``input_seconds``).
+    """
+    names = [ifo.name if hasattr(ifo, "name") else str(ifo) for ifo in ifos]
+    light = gf.Network([gf.IFO[name] for name in names]).max_arrival_time_difference_seconds if len(names) > 1 else 0.0
+    return float(light) + (footprint_seconds(window) if window is not None else float(input_seconds))
+
+
+class WrappedSlides:
+    """
+    Slides that wrap round the network's segments (module docstring).
+
+    Args:
+        segments: (start, end) pairs, GPS seconds: the time every detector has
+            data in, disjoint; they are laid end to end in time order as one ring.
+        lags: each slide's lag (s): in slide k detector j is read ``j lags[k]``
+            further round the ring than detector 0.
+        num_detectors: the detectors slid.
+        minimum_seconds: the least ring distance any lag between two detectors
+            may lie from zero lag and from another slide's lag between them
+            (`minimum_shift_seconds`); a lag too near is refused by slide.
+    """
+
+    def __init__(self, segments, lags, num_detectors: int, minimum_seconds: float):
+        segments = np.asarray(segments, dtype=np.float64).reshape(-1, 2)
+        segments = segments[np.argsort(segments[:, 0], kind="stable")]
+        if not len(segments) or not np.all(segments[:, 1] > segments[:, 0]):
+            raise ValueError("WrappedSlides need at least one segment, each with end > start.")
+        if np.any(segments[1:, 0] < segments[:-1, 1]):
+            raise ValueError("WrappedSlides' segments must not overlap.")
+        if int(num_detectors) != num_detectors or num_detectors < 2:
+            raise ValueError(f"A slide needs at least two detectors, got {num_detectors}.")
+        if not minimum_seconds >= 0:
+            raise ValueError(f"minimum_seconds must be >= 0, got {minimum_seconds}.")
+        self.segments = segments
+        self.lags = np.asarray(lags, dtype=np.float64).reshape(-1)
+        self.num_detectors = int(num_detectors)
+        self.minimum_seconds = float(minimum_seconds)
+        lengths = segments[:, 1] - segments[:, 0]
+        #: Where each segment starts round the ring.
+        self.ring_starts = np.concatenate([[0.0], np.cumsum(lengths)[:-1]])
+        self.ring_seconds = float(lengths.sum())
+        self._check_lags()
+
+    @classmethod
+    def spaced(cls, segments, num_detectors: int, minimum_seconds: float, step_seconds: Optional[float] = None,
+               max_slides: Optional[int] = None) -> "WrappedSlides":
+        """
+        Lags ``k step`` for k = 1 .. K, as many as the ring holds (at most
+        ``max_slides``): ``step`` (by default just over ``minimum_seconds``) must exceed
+        ``minimum_seconds``, and the largest lag between two detectors,
+        ``(num_detectors - 1) K step``, stays a step short of the ring's length.
+        """
+        step = float(step_seconds) if step_seconds is not None else float(minimum_seconds) * (1 + 1e-9) + 1e-9
+        if not step > minimum_seconds:
+            raise ValueError(f"step_seconds {step} must exceed minimum_seconds {minimum_seconds}.")
+        segments = np.asarray(segments, dtype=np.float64).reshape(-1, 2)
+        ring = float((segments[:, 1] - segments[:, 0]).sum())
+        count = int(np.floor((ring - step) / ((num_detectors - 1) * step) * (1 + 1e-12)))
+        while count > 0 and ring - (num_detectors - 1) * count * step <= minimum_seconds:
+            count -= 1
+        if max_slides is not None:
+            count = min(count, int(max_slides))
+        if count < 1:
+            raise ValueError(f"A ring of {ring} s holds no slide {step} s apart from zero lag.")
+        return cls(segments, step * np.arange(1, count + 1), num_detectors, minimum_seconds)
+
+    def __len__(self) -> int:
+        return self.lags.size
+
+    def _circular(self, values) -> np.ndarray:
+        """Ring distance from zero of each of ``values``."""
+        wrapped = np.mod(values, self.ring_seconds)
+        return np.minimum(wrapped, self.ring_seconds - wrapped)
+
+    def _check_lags(self) -> None:
+        if not np.all(np.isfinite(self.lags)):
+            raise ValueError("WrappedSlides' lags must be finite.")
+        for d in range(1, self.num_detectors):
+            pair = d * self.lags
+            near_zero = self._circular(pair) <= self.minimum_seconds
+            if near_zero.any():
+                k = int(np.flatnonzero(near_zero)[0])
+                raise ValueError(
+                    f"Slide {k} (lag {self.lags[k]} s) puts detectors {d} apart at {pair[k]} s, within "
+                    f"{self.minimum_seconds} s of zero lag round a ring of {self.ring_seconds} s.")
+            order = np.argsort(np.mod(pair, self.ring_seconds), kind="stable")
+            sorted_pair = np.mod(pair, self.ring_seconds)[order]
+            gaps = np.diff(sorted_pair)
+            close = gaps <= self.minimum_seconds
+            if close.any():
+                i = int(np.flatnonzero(close)[0])
+                a, b = sorted((int(order[i]), int(order[i + 1])))
+                raise ValueError(
+                    f"Slides {a} and {b} put detectors {d} apart at lags within {self.minimum_seconds} s of each "
+                    "other round the ring: they would reuse one pairing of the data.")
+
+    @property
+    def background_seconds(self) -> float:
+        """The background the slides give: every slide the whole ring."""
+        return self.lags.size * self.ring_seconds
+
+    def to_ring(self, gps) -> np.ndarray:
+        """Each GPS time's position round the ring; a time outside every segment is refused."""
+        gps = np.asarray(gps, dtype=np.float64)
+        index = np.searchsorted(self.segments[:, 0], gps, side="right") - 1
+        inside = (index >= 0) & (gps < self.segments[np.clip(index, 0, None), 1])
+        if not np.all(inside):
+            bad = gps[~inside].reshape(-1)[0]
+            raise ValueError(f"The time {bad} lies outside every segment of the slides.")
+        return self.ring_starts[index] + (gps - self.segments[index, 0])
+
+    def from_ring(self, position) -> np.ndarray:
+        """The GPS time of each ring position (taken round the ring)."""
+        position = np.mod(np.asarray(position, dtype=np.float64), self.ring_seconds)
+        index = np.searchsorted(self.ring_starts, position, side="right") - 1
+        return self.segments[index, 0] + (position - self.ring_starts[index])
+
+    def lag(self, slide: int, detector: int) -> float:
+        """How far round the ring detector ``detector`` is read in slide ``slide``."""
+        return float(detector * self.lags[slide])
+
+    def slid_times(self, gps, slide: int, detector: int) -> np.ndarray:
+        """
+        Detector ``detector``'s times ``gps`` as they stand against detector 0 in slide
+        ``slide``: its data read ``lag`` further round the ring stand ``lag`` earlier,
+        wrapped round segments.
+        """
+        return self.from_ring(self.to_ring(gps) - self.lag(slide, detector))
 
 
 @dataclass(frozen=True)

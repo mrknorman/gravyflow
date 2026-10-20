@@ -131,6 +131,17 @@ repository before it may need the changes below.
 
 ### Added
 
+- **Wrapping time slides and the per-detector path.** `WrappedSlides` (`gravyflow.src.validate`) lays the network's
+  segments end to end as one ring; in slide k detector j is read `j lag_k` further round it, wrapping round each
+  segment's end into the next and from the last back to the first, so no data is lost to a slide and K slides give K
+  times the ring of background: thousands of years from a 30-day test set. Every lag between two detectors must lie
+  further than the light-travel time plus the model's input length (`minimum_shift_seconds`) round the ring from zero
+  lag and from every other slide's lag, or it is refused by slide; `WrappedSlides.spaced` gives as many as the ring
+  holds. A model that scores each detector separately is scored once per detector (`score_detectors`); each slide
+  then costs only the coincidence step (`slide_streams`, whose streams `StreamBackground` reads). For such a model
+  the joint path (`joint_slide_streams`, a full run per slide) gives the same background and found injections. The
+  matched filter's stored triggers (`DetectorTriggers`) take the same slides (`slide_coincidences`). The validator's
+  window and stream modes are unchanged: their slides still do not wrap.
 - **Injection records for analysis.** A dataset returns, when asked: `ReturnVariables.IN_BAND_DURATION_SECONDS`
   (B, G), a CBC's time from the band's lower frequency to its merger (the envelope's peak) by its waveform model,
   not cut by the window (`gf.CBCGenerator.in_band_duration_seconds`; NaN for other sources);

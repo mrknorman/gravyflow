@@ -243,6 +243,16 @@ validates as it trains: they need the `viz` extra.
   (chirp) distance; None for a record without sky positions. `volume_3d_levels` gives what it reads at each level.
 - `ValidationConfig`: the settings of a validation (`mode`, `stride_seconds`, `cluster_seconds`,
   `found_window_seconds`, `stream_segment_seconds` for stream mode).
+- Wrapping time slides and the per-detector path (`gravyflow.src.validate`): `WrappedSlides` lays the network's
+  segments end to end as one ring and reads detector j `j lag` further round it in each slide, wrapping round each
+  segment and across segments, so every slide adds the whole ring of background (`background_seconds`) and a 30-day
+  test set yields thousands of years; every lag between two detectors lies further than `minimum_shift_seconds`
+  (the light-travel time plus the model's input length) round the ring from zero lag and from every other slide's,
+  or is refused by slide. A model that scores each detector separately is scored once per detector
+  (`score_detectors`), and each slide costs only the coincidence step (`slide_streams`, streams for
+  `StreamBackground`); `joint_slide_streams` scores the same pairings with a model that sees every detector at once (a
+  full run per slide). Stored matched-filter triggers (`DetectorTriggers`) take the same slides
+  (`slide_coincidences`).
 
 ## Plotting (the `viz` extra)
 
