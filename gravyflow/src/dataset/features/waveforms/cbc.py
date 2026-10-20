@@ -155,6 +155,32 @@ def _as_approximant(approximant) -> Approximant:
         ) from None
 
 
+# The Kerr bound's allowance for rounding: a spin of magnitude 1 built from its
+# components (a unit vector rotated, or a float32 copy of one) may come out a few
+# float32 ulp above 1.
+_KERR_BOUND_TOLERANCE = 1.0e-6
+
+
+def _check_spins(spins: dict) -> None:
+    """
+    Refuse a spin past the Kerr bound, |chi| <= 1, by its name. ``spins`` maps each
+    spin's name to its (3,) or (num_sources, 3) vectors, or a flat list of them. A
+    traced value (under ``jax.jit``) is not checked: its values are not known.
+    """
+    for name, spin in spins.items():
+        if isinstance(spin, jax.core.Tracer):
+            continue
+        vectors = np.asarray(spin, dtype=np.float64)
+        if vectors.size == 0 or vectors.size % 3:
+            continue
+        magnitude = np.sqrt(np.sum(vectors.reshape(-1, 3) ** 2, axis=-1))
+        if not np.all(magnitude <= 1.0 + _KERR_BOUND_TOLERANCE):
+            raise ValueError(
+                f"{name} must satisfy the Kerr bound |chi| <= 1; its largest magnitude is "
+                f"{np.max(magnitude):.4g}."
+            )
+
+
 def _source_parameters(
     mass_1_msun,
     mass_2_msun,
@@ -302,9 +328,11 @@ def time_to_merger_seconds(
 
     It is the model's own, whatever the window: the time from 20 Hz of a
     1.4 + 1.4 solar-mass binary (about 160 s) is not cut by a 1 s window.
-    Masses are in solar masses, spins (num_sources, 3).
+    Masses are in solar masses, spins (num_sources, 3), each within the Kerr
+    bound |chi| <= 1 (a spin past it is refused by name).
     """
     approximant = _as_approximant(approximant)
+    _check_spins({"spin_1": spin_1, "spin_2": spin_2})
     num_sources = int(np.size(mass_1_msun))
     _, merger_offsets = _generate_cbc_waveform_jit(
         num_waveforms=num_sources,
@@ -559,9 +587,11 @@ def _generate_cbc_window(
     ``min_frequency_hertz`` and tapered below it, as LAL's time-domain waveforms
     are, with the band edge raised only where the buffer's start cannot hold the
     taper (``_taper_band``), so the kept window does not depend on the buffer or
-    on the other sources in the batch.
+    on the other sources in the batch. Each spin is within the Kerr bound,
+    |chi| <= 1; a spin past it is refused by name.
     Returns an array of shape (num_waveforms, 2, int(window_seconds * sample_rate_hertz)).
     """
+    _check_spins({name: source[name] for name in ("spin_1_in", "spin_2_in") if name in source})
     buffer_seconds = _cbc_buffer_seconds(window_seconds)
     num_samples_keep = int(window_seconds * sample_rate_hertz)
     waveforms, _ = _generate_cbc_waveform_jit(

@@ -341,6 +341,11 @@ repository before it may need the changes below.
 
 ### Fixed
 
+- **The CBC generator refuses a spin past the Kerr bound.** `_generate_cbc_window` and `time_to_merger_seconds`
+  accepted any spin vector, so a corner of separately bounded components, such as (0.8, 0, 0.8) at |chi| = 1.13,
+  generated without complaint and made a louder source than any physical one. A spin with |chi| > 1 is now refused,
+  naming the spin and its magnitude; a spin of magnitude 1 built from its components (rotated, or rounded to float32)
+  still generates.
 - **The volume's and efficiency's bootstrap no longer undercovers at loose FARs.** Each replicate drew its own chance
   of a noise-only pass from its law at the replicate's threshold, independently of the found volume, losing their
   correlation (1σ coverage 0.60 at 1e-2 Hz). It now subtracts the estimator's chance, which the target fixes.

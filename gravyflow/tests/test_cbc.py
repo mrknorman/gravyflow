@@ -83,6 +83,44 @@ def test_an_unknown_approximant_is_refused():
         )
 
 
+@pytest.mark.parametrize("name, spin_1, spin_2", [
+    ("spin_1_in", [0.8, 0.0, 0.8], [0.0, 0.0, 0.0]),
+    ("spin_2_in", [[0.0, 0.0, 0.1], [0.0, 0.0, 0.2]], [[0.0, 0.0, 0.0], [0.0, 0.0, -1.01]]),
+])
+def test_a_spin_above_one_is_refused_by_name(name, spin_1, spin_2):
+    """A spin past the Kerr bound, |chi| > 1, is refused, naming the spin and its magnitude."""
+    with pytest.raises(ValueError, match=rf"{name}.*\|chi\| <= 1"):
+        _generate_cbc_window(
+            num_waveforms=2 if np.ndim(spin_1) == 2 else 1,
+            sample_rate_hertz=SAMPLE_RATE, window_seconds=1.0, min_frequency_hertz=None,
+            approximant="IMRPhenomPv2", spin_1_in=spin_1, spin_2_in=spin_2,
+        )
+    # time_to_merger_seconds names its spins spin_1 and spin_2.
+    with pytest.raises(ValueError, match=rf"{name[:6]}.*\|chi\| <= 1"):
+        n = 2 if np.ndim(spin_1) == 2 else 1
+        cbc.time_to_merger_seconds(
+            20.0, "IMRPhenomPv2", np.full(n, 30.0), np.full(n, 30.0),
+            np.reshape(spin_1, (n, 3)), np.reshape(spin_2, (n, 3)),
+            np.zeros(n), np.zeros(n), np.zeros(n), np.zeros(n),
+        )
+
+
+def test_spins_at_the_kerr_bound_generate():
+    """
+    Spins of magnitude 1, as built from components (a unit vector rotated, a float32
+    copy of one), are physical and generate: the bound allows their rounding.
+    """
+    phi = np.linspace(0.0, 2.0 * np.pi, 6, endpoint=False)
+    x = np.sqrt(1.0 - 0.3 ** 2)
+    spin_1 = np.stack([x * np.cos(phi), x * np.sin(phi), np.full(6, 0.3)], axis=-1).astype(np.float32)
+    spin_2 = np.tile([0.0, 0.0, -1.0], (6, 1))
+    waveforms = np.asarray(_generate_cbc_window(
+        num_waveforms=6, sample_rate_hertz=SAMPLE_RATE, window_seconds=1.0, min_frequency_hertz=None,
+        approximant="IMRPhenomPv2", spin_1_in=spin_1, spin_2_in=spin_2,
+    ))
+    assert np.all(np.isfinite(waveforms))
+
+
 # The merger is the peak of the envelope, |analytic h+|^2 + |analytic hx|^2, at
 # sample K // 2 of every K-sample window, for every approximant.
 #
