@@ -23,8 +23,10 @@ repository before it may need the changes below.
   whatever the model, its SNR, hrss and hpeak measured within it against its own clean spectrum, so alike for every
   model), which is what scoring the whole stream with it added gives. Each injection's in-band duration, whitened peak and BNS range are recorded. `mode="window"` keeps
   the old behaviour, unchanged, for backward compatibility and to reproduce earlier results. Validation records are
-  format 7 (they record the mode); records of format 6 are refused by name, never converted. In stream mode the real
-  events are still scored as single windows, their FARs read from the stream background.
+  format 7 (they record the mode); records of format 6 are refused by name, never converted. In stream mode a real
+  event is scored as an injection is: the model slides along a stretch centred on the event, and its statistic is
+  the loudest trigger within the found window of its time (`-inf` where none lies there; the trigger's time from the
+  event is its `trigger_offset`), its FAR read from the stream background; window mode scores its one window.
 - **`gf.LocalFrames()` names no O4 frames by default.** Its table named LVK's O3 frame type and channel
   (`HOFT_C01`, `DCS-CALIB_STRAIN_CLEAN_C01`) for O4a and O4b too, which GWOSC's O4 releases do not come from
   (O4a `GDS-CALIB_STRAIN_CLEAN_AR`, O4b `DCS-CALIB_STRAIN_CLEAN_AR01`, Virgo `Hrec_hoftRepro1AR_16384Hz`). Reading

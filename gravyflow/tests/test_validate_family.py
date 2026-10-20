@@ -325,3 +325,58 @@ def test_the_summary_names_each_level_and_whether_the_background_reaches_it(vali
     assert all(r["Background"] == NOT_REACHED for r in rows)  # a few minutes of background reaches none
     assert {"Volume (Gpc³)", "VT (Gpc³ yr)", "50% SNR", "Found (SNR set)", "Ratio to matched filter",
             "|Δt| median (ms)"} <= set(rows[0])
+
+
+def test_a_real_event_in_stream_mode_is_the_loudest_trigger_near_its_time(offline_events):
+    # Each event's stretch, read from fixture strain centred on its time, scored at every window of its
+    # grid and clustered as the background is: the event's statistic is the loudest trigger within the
+    # found window of its time, as an injection's.
+    from unittest import mock
+
+    import keras
+
+    import gravyflow as gf
+    from gravyflow.src.model.examples.base import ValidationDatasetConfig, validation_dataset_args
+    from gravyflow.src.validate import ValidationConfig
+    from gravyflow.src.validate.bank import ValidationBank
+    from gravyflow.src.validate.stream import cluster, loudest_within
+
+    inputs = keras.Input(shape=(1, 2048), name="WHITENED_ONSOURCE")
+    model = keras.Model({"WHITENED_ONSOURCE": inputs}, keras.layers.Dense(
+        2, name="output", kernel_initializer=keras.initializers.GlorotUniform(seed=2))(keras.layers.Flatten()(inputs)))
+    args = validation_dataset_args(config=ValidationDatasetConfig(sample_rate_hertz=2048.0))
+    config = ValidationConfig(num_examples=8, batch_size=8, score_real_events=True)
+    bank = ValidationBank(model, args, config)
+    bank.far_scores = np.random.default_rng(3).standard_normal(64)
+    bank.noise_streams = {"lengths": np.array([64]), "slides": np.array([0]), "blocks": np.array([0]),
+                          "stride_seconds": np.float64(0.25)}
+    read = []
+    original = gf.TransientDataObtainer._read_example
+
+    def recording(self, record, reads, window_spec):
+        onsource, offsource = original(self, record, reads, window_spec)
+        read.append((float(np.ravel(record.transient_gps_time)[0]), onsource))
+        return onsource, offsource
+
+    with mock.patch.object(gf.TransientDataObtainer, "_read_example", recording):
+        bank.generate_real_events(observing_runs=[gf.ObservingRun.O3])
+    geometry = bank.stream_geometry
+    half = geometry.local_half_samples(bank._reach_seconds)
+    background = bank.background()
+    scored = [e for e in bank.real_events if e.get("status") == "scored"]
+    assert len(scored) == len(offline_events)
+    for event in scored:
+        stretch = next(on for t, on in read if abs(t - event["gps"]) < 1.0)
+        assert stretch.shape[-1] == 2 * half  # centred on the event, long enough for every window the test reads
+        index = np.arange(geometry.num_windows(stretch.shape[-1]))
+        scores = bank._score(bank._noise_dataset.model_inputs(*geometry.gather(stretch, index * geometry.stride_samples)))
+        times = geometry.window_time(index)
+        keep = cluster(times, scores, config.stream_cluster_seconds)
+        stat, when = loudest_within(times[keep], scores[keep], [half / geometry.sample_rate_hertz],
+                                    config.found_window_seconds)
+        assert event["score"] == pytest.approx(stat[0], rel=1e-5, abs=1e-5)
+        if np.isfinite(stat[0]):
+            assert event["trigger_offset"] == pytest.approx(when[0] - half / geometry.sample_rate_hertz, abs=1e-9)
+            assert abs(event["trigger_offset"]) <= config.found_window_seconds + 1e-9
+        assert event["far_hz"] == pytest.approx(background.far(event["score"]).rate_hz)
+        assert event["whitened_strain"].shape[-1] == 2048

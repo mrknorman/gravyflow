@@ -506,9 +506,13 @@ class ValidationBank:
         are scored when the validator's split is ``test``, and none otherwise;
         marginal events are never examples. ``observing_runs`` defaults to the
         default runs (``DEFAULT_OBSERVING_RUNS``, O1 to O4). Needs network access. Each event is
-        read in the background's window geometry and conditioned by the
-        background's dataset (`score_windows`), so its score is comparable with
-        the background's, and its FAR is read from that background.
+        read in the background's geometry and conditioned by the background's dataset
+        (`score_windows`), so its statistic is comparable with the background's, and its
+        FAR is read from that background. In stream mode the model slides along a stretch
+        centred on the event at its stride and the event's statistic is the loudest
+        trigger within the found window of its time, as an injection's
+        (`_stream_event_statistics`; its trigger's time from the event is
+        ``trigger_offset``); in window mode it is the event's one window's score.
 
         The events are read under the bank's split (`split_spec`), the one the
         model is checked against. A bank whose split counts no real events
@@ -558,10 +562,17 @@ class ValidationBank:
         )
         dataset = self._noise_dataset
         window = dataset.window_spec
+        stream = self.config.stream
+        if stream:  # a stretch centred on the event, long enough for every window its found test reads
+            geometry = self.stream_geometry
+            half = geometry.local_half_samples(self._reach_seconds)
+            read = dict(onsource_duration_seconds=2 * half / float(window.sample_rate_hertz), crop_duration_seconds=0.0)
+        else:  # the event's own window
+            read = dict(onsource_duration_seconds=window.onsource_duration_seconds,
+                        crop_duration_seconds=window.crop_duration_seconds)
         chunks = obtainer.get_onsource_offsource_chunks(
             sample_rate_hertz=window.sample_rate_hertz,
-            onsource_duration_seconds=window.onsource_duration_seconds,
-            crop_duration_seconds=window.crop_duration_seconds,
+            **read,
             offsource_duration_seconds=window.offsource_duration_seconds,
             num_examples_per_batch=min(len(events), 256) or 1,
             ifos=ifos,
@@ -580,9 +591,14 @@ class ValidationBank:
 
         background = self.background()
         if onsource:
-            x = dataset.model_inputs(np.concatenate(onsource), np.concatenate(offsource))
+            offsets = None
+            if stream:
+                statistics, offsets, x = self._stream_event_statistics(np.concatenate(onsource), geometry, half)
+            else:
+                x = dataset.model_inputs(np.concatenate(onsource), np.concatenate(offsource))
+                statistics = self._score(x)
             whitened = x.get(gf.ReturnVariables.WHITENED_ONSOURCE.name)
-            for i, (t, s) in enumerate(zip(gps, self._score(x))):
+            for i, (t, s) in enumerate(zip(gps, statistics)):
                 event = next((e for e in events if abs(e["gps"] - t) < 20.0), None)
                 if event is None:
                     continue
@@ -593,9 +609,35 @@ class ValidationBank:
                              far_sigmas=np.array(self.config.interval_sigmas),
                              # Quoted only with MIN_BACKGROUND_EVENTS independent events at or above it.
                              far_background_events=int(independent_events(fars[0].count, background.data_reuse)))
+                if offsets is not None:  # stream mode: its trigger's time from the event's (NaN: none)
+                    event["trigger_offset"] = float(offsets[i])
                 if whitened is not None:
                     event["whitened_strain"] = np.asarray(whitened[i])
         self.real_events = events
+
+    def _stream_event_statistics(self, stretches: np.ndarray, geometry: StreamGeometry, half: int
+                                 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
+        """
+        Real events in stream geometry: each stretch (B, I, 2 half) centred on its event,
+        slid along at the stride as the background is, its scores clustered into triggers;
+        the event's statistic is the loudest trigger within the found window of its time
+        (``-inf`` where none lies there), as an injection's (`stream.found_in_stretch`).
+        Returns the statistics, each trigger's time from the event (NaN for none), and the
+        model inputs of the window nearest each event, for display.
+        """
+        windows = [local_windows(geometry, half, half, self._reach_seconds) for _ in range(len(stretches))]
+        scores = self._score_stretch_windows(geometry, stretches, [w[1] for w in windows])
+        ends = np.cumsum([w[0].size for w in windows])
+        statistics, offsets = np.full(len(stretches), -np.inf), np.full(len(stretches), np.nan)
+        for j, (index, _) in enumerate(windows):
+            statistics[j], offsets[j] = found_in_stretch(
+                geometry, index, scores[ends[j] - index.size:ends[j]], half, self.config.stream_cluster_seconds,
+                self.config.found_window_seconds)
+        event_time = half / geometry.sample_rate_hertz
+        nearest = [w[1][int(np.argmin(np.abs(geometry.window_time(w[0]) - event_time)))] for w in windows]
+        on, off = (np.concatenate(parts) for parts in
+                   zip(*(geometry.gather(stretch, [start]) for stretch, start in zip(stretches, nearest))))
+        return statistics, offsets, self._noise_dataset.model_inputs(on, off)
 
     # ------------------------------------------------------------ stream mode
 

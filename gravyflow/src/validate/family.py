@@ -446,7 +446,7 @@ def real_event_summary(events: Sequence[Dict[str, Any]], background: Background,
     rows: List[Dict[str, Any]] = []
     for event in events:
         score = event.get("score")
-        if score is None or not np.isfinite(float(score)):
+        if score is None or np.isnan(float(score)):  # unscored; -inf: scored, with no trigger near it
             continue
         estimates = [background.far(float(score), sigma_level(s)) for s in sigmas]
         rows.append(dict(name=event.get("name", "?"), gps=float(event.get("gps", np.nan)), score=float(score),
