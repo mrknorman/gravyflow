@@ -257,6 +257,10 @@ class VolumeQuote:
     of physical distance over the population's masses. ``chance_dominated``: noise
     alone finds more than the curve's ``chance_fraction`` of what is found there, so
     the volume rests on the chance's subtraction (a warning, shown beside the number).
+    It points to the result's dependence on the chance model (that the background's
+    windows are exchangeable with the noise under the injections), which the intervals
+    do not carry. Never use it to drop, keep or discount a quote: it reads the found
+    volume, so it selects on the volume's own noise (`SensitiveVolumeCurve.chance_dominated`).
     """
     far_hz: float
     reach_mpc: float
@@ -328,6 +332,15 @@ class SensitiveVolumeCurve:
         """
         The resolved targets where noise alone finds more than ``chance_fraction`` of what
         is found: a warning, never a refusal (module docstring).
+
+        What it is for: a pointer to the result's dependence on the chance model, that the
+        background's windows are exchangeable with the noise under the injections, on which
+        the subtraction rests and which the intervals do not carry. What it is not for:
+        dropping, keeping or discounting points. It reads the found volume, so it selects on
+        the volume's own noise: measured near a 0.1 fraction, flagged points ran V/truth
+        0.85 and 0.83 and unflagged ones 1.20 and 1.18, and on independent
+        background flagged points at 5e-4 Hz covered the truth only 0.44 and 0.91 of the
+        time at 1 and 2 sigma. Use every quotable point, flagged or not.
         """
         with np.errstate(invalid="ignore"):
             return self.resolved & (self.chance_gpc3 > self.chance_fraction * self.found_gpc3)
@@ -353,7 +366,9 @@ class SensitiveVolumeCurve:
         the background cannot resolve, and one with fewer than `MIN_BACKGROUND_EVENTS`
         independent background events at or above its threshold. Warns at a
         chance-dominated one (V rests mostly on the subtraction of what noise alone
-        finds), and says so in the quote (`VolumeQuote.chance_dominated`).
+        finds), and says so in the quote (`VolumeQuote.chance_dominated`): a pointer to
+        the chance model's assumption, never a reason to drop, keep or discount the quote,
+        since the flag selects on the volume's own noise (`chance_dominated`).
         """
         matches = np.flatnonzero(np.isclose(self.far_hz, far_hz, rtol=1e-9, atol=0))
         if matches.size == 0:
@@ -367,7 +382,10 @@ class SensitiveVolumeCurve:
         dominated = bool(self.chance_dominated[i])
         if dominated:
             warnings.warn(f"At {far_hz:g} Hz noise alone finds more than {self.chance_fraction:.0%} of what is found: "
-                          "the sensitive volume rests on the chance's subtraction.", stacklevel=2)
+                          "the sensitive volume rests on the chance's subtraction, so on the chance model (the "
+                          "background exchangeable with the noise under the injections), which its intervals do not "
+                          "carry. Do not drop, keep or discount it for this: the flag selects on the volume's own "
+                          "noise.", stacklevel=2)
         return VolumeQuote(
             far_hz=float(self.far_hz[i]), reach_mpc=self.reach_mpc, reach_range_mpc=self.reach_range_mpc,
             volume_within_reach_gpc3=float(self.volume_within_reach_gpc3[i]),
