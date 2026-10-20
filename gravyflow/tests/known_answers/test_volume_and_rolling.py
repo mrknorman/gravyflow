@@ -1,7 +1,8 @@
 """
 Known answers for the sensitive volume within the per-mass reach and the rolling
-efficiency curve with its sigmoid fit (the validation standard's agreed design),
-written before that API landed.
+efficiency curve with its sigmoid fit (injections drawn out to each mass's own reach,
+a rolling window in SNR with pointwise bands, a fitted logistic's 50% and 90% points,
+intervals at 1 and 2 sigma), written before that API landed.
 
 The API is reached only through `api` and the three adapters below it: they are
 the only lines changed to enable the module (the truths and the tolerances are
