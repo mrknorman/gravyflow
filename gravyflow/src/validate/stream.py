@@ -28,8 +28,8 @@ backward compatibility and to reproduce earlier results.
   trigger's statistic, ``-inf`` where no trigger lies in the window, and found is
   ``score >= threshold`` as in window mode, so the estimators (`efficiency`,
   `volume`) read it unchanged.
-- **Chance.** Triggers lie more than ``cluster_seconds`` apart, so at most one
-  lies in a found window: noise alone finds an injection with the chance that a
+- **Chance.** Triggers lie more than ``cluster_seconds`` apart, at least twice
+  the found window (refused otherwise), so at most one lies in a found window: noise alone finds an injection with the chance that a
   noise trigger passing the threshold lies there, the trigger rate times the
   window (``2 w``). As a law (`StreamBackground.found_by_chance`), the background's
   livetime is ``T / 2w`` found windows, of which the triggers at or above a
@@ -201,6 +201,9 @@ class StreamBackground(Background):
             raise ValueError(f"cluster_seconds must be >= 0, got {cluster_seconds}.")
         if not found_window_seconds > 0:
             raise ValueError(f"found_window_seconds must be > 0, got {found_window_seconds}.")
+        if not cluster_seconds >= 2.0 * found_window_seconds:
+            raise ValueError(f"Triggers must lie more than a found window (2 x {found_window_seconds} s) apart: "
+                             f"cluster_seconds {cluster_seconds} is too short.")
         self.streams = tuple(streams)
         self.cluster_seconds = float(cluster_seconds)
         self.found_window_seconds = float(found_window_seconds)

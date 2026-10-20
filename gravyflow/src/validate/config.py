@@ -119,6 +119,10 @@ class ValidationConfig:
         for name in ("found_window_seconds", "stream_segment_seconds"):
             if not getattr(self, name) > 0:
                 raise ValueError(f"{name} must be > 0, got {getattr(self, name)}.")
+        if self.stream and not self.stream_cluster_seconds >= 2.0 * self.found_window_seconds:
+            # Triggers more than 2 w apart: at most one lies in a found window, as the chance assumes.
+            raise ValueError(f"Stream mode needs cluster_seconds >= 2 found_window_seconds, got "
+                             f"{self.stream_cluster_seconds} and {self.found_window_seconds}.")
         # Pairs are tuples, however they arrive (JSON gives lists).
         self.snr_range = tuple(self.snr_range)
         self.extra_roc_pools = [tuple(p) if isinstance(p, (list, tuple)) else p for p in self.extra_roc_pools]

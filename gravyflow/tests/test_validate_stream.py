@@ -51,9 +51,21 @@ def test_stream_mode_is_the_default():
     assert config.stream_stride_seconds(1.0) == 0.25 and config.stream_cluster_seconds == 1.0
     assert config.found_window_seconds == 0.1
     assert ValidationConfig(stride_seconds=0.5, cluster_seconds=2.0).stream_stride_seconds(1.0) == 0.5
-    for bad in ({"mode": "windows"}, {"stride_seconds": 0.0}, {"found_window_seconds": 0.0}):
+    for bad in ({"mode": "windows"}, {"stride_seconds": 0.0}, {"found_window_seconds": 0.0},
+                {"cluster_seconds": 0.19}, {"found_window_seconds": 0.6}):
         with pytest.raises(ValueError):
             ValidationConfig(**bad)
+    # Window mode clusters as it always has.
+    assert ValidationConfig(mode="window", cluster_seconds=0.0).cluster_seconds == 0.0
+    assert ValidationConfig(cluster_seconds=0.2).stream_cluster_seconds == 0.2
+
+
+def test_the_stream_background_refuses_a_cluster_shorter_than_two_found_windows():
+    from gravyflow.src.validate.metrics import ScoreStream
+    streams = [ScoreStream(np.arange(8.0), 0.25, 1.0)]
+    assert StreamBackground(streams, 0.2, 0.1).cluster_seconds == 0.2
+    with pytest.raises(ValueError, match="apart"):
+        StreamBackground(streams, 0.19, 0.1)
 
 
 def test_the_validator_streams_by_default(validated, stream_config, tmp_path):
