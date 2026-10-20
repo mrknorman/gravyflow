@@ -181,7 +181,7 @@ def test_the_dashboard_shows_the_volume_set_in_3d(validated):
     template = v.plot()
     tabs = next(item for item in template.main if isinstance(item, pn.Tabs))
     assert tabs._names[-1] == "3D Volume"
-    assert {"Efficiency", "ROC Curves", "FAR Curves", "Parameter Space"} <= set(tabs._names)
+    assert {"Summary", "Efficiency", "ROC and false alarms", "Parameter Space"} <= set(tabs._names)
     figure = tabs[-1].object.children[2]
     points = next(r for r in figure.renderers if isinstance(r.glyph, Scatter)).data_source.data
     assert len(points["px"]) == data["scores"].size
