@@ -211,3 +211,96 @@ def test_real_events_have_their_far_and_counts_at_each_level():
 def test_the_levels_are_one_per_month_to_one_per_hundred_years():
     np.testing.assert_allclose(np.array(FAR_LEVELS_HZ) * SECONDS_PER_YEAR, [12.0, 1.0, 0.1, 0.01])
     assert FAR_LEVELS_HZ[0] == 1.0 / SECONDS_PER_MONTH
+
+
+# ------------------------------------------------------- the validator's record
+
+@pytest.fixture(scope="module")
+def validated():
+    import keras
+
+    from gravyflow.src.model.examples.base import ValidationDatasetConfig, validation_dataset_args
+    from gravyflow.src.validate import ValidationConfig, Validator
+
+    inputs = keras.Input(shape=(1, 2048), name="WHITENED_ONSOURCE")
+    outputs = keras.layers.Dense(2, name="output", kernel_initializer=keras.initializers.GlorotUniform(seed=1))(
+        keras.layers.Flatten()(inputs))
+    config = ValidationConfig(num_examples=200, batch_size=50, snr_range=(0.0, 15.0), volume_num_injections=32,
+                              stream_segment_seconds=64.0, efficiency_bootstrap_samples=50,
+                              volume_bootstrap_samples=50)
+    args = validation_dataset_args(config=ValidationDatasetConfig(sample_rate_hertz=2048.0))
+    return Validator.validate(keras.Model({"WHITENED_ONSOURCE": inputs}, outputs), "family", args, config)
+
+
+def test_the_validators_family_follows_from_its_record(validated):
+    v = validated
+    background = v.background()
+    fars = [1.0, 0.1]
+    roc = v.detection_roc(fars)
+    assert roc.labels == ("SNR 0-5", "SNR 5-10", "SNR 10-15", "all SNRs") and roc.total[-1] == 200
+    data = v.efficiency_data
+    threshold = background.threshold_for_far(1.0).threshold
+    assert roc.detected[0, -1] == np.count_nonzero(data["scores"] >= threshold)
+    counts = v.recovered_counts(fars)
+    assert set(counts) == {"SNR set", "volume set"} and counts["SNR set"].found[0] == roc.detected[0, -1]
+    timing = v.timing_accuracy(fars)
+    assert timing.num_found[0] == np.count_nonzero((data["scores"] >= threshold) & np.isfinite(data["trigger_offsets"]))
+    assert np.nanmax(timing.p90_abs_seconds) <= v.config.found_window_seconds + 1e-9
+    vt = v.sensitive_vt(fars)
+    curve = v.sensitive_volume_curve(fars)
+    np.testing.assert_allclose(vt.vt_gpc3_yr, curve.volume_within_reach_gpc3 * v.live_time_seconds / SECONDS_PER_YEAR)
+    # Synthetic noise: one block per segment, so half the segments are held out.
+    calibration = v.far_calibration(fars)
+    assert calibration is not None and calibration.held_out_livetime_seconds < background.livetime_seconds
+    binned = v.binned_volumes(fars)
+    assert set(binned) == {"chirp mass (M☉)", "mass ratio"}  # the volume set records no spins yet
+    assert all(b.total.sum() == 32 for b in binned.values())
+    # The matched filter's ratio is on the same injections: a model against itself is exactly 1.
+    ratio = v.matched_filter_ratio(v, fars)
+    assert np.all((ratio.ratio == 1.0) | np.isnan(ratio.ratio))
+    assert v.real_event_summary() is None  # no real events scored
+
+
+def _plots(layout, kind):
+    """Every Bokeh model of ``kind`` inside a Panel layout."""
+    found = []
+    for item in layout.select(lambda o: hasattr(getattr(o, "object", None), "select")):
+        found += list(item.object.select({"type": kind}))
+    return found
+
+
+def test_the_dashboard_has_the_family_tabs_and_keeps_every_element(validated, tmp_path):
+    from bokeh.models import Plot, Select
+
+    v = validated
+    v.real_events = [dict(name="E", gps=5.0, event_type="CONFIDENT", score=float(np.max(v.far_scores)),
+                          far_hz=0.1, far_interval_hz=np.array([[0.05, 0.2], [0.02, 0.3]]),
+                          far_sigmas=np.array([1.0, 2.0]), far_background_events=3)]
+    try:
+        template = v.plot(tmp_path / "report.html", matched_filter=v, training_periods=[(0.0, 10.0)])
+    finally:
+        v.real_events = None
+    tabs = template.main[1]
+    names = list(tabs._names)
+    assert names[:5] == ["Summary", "Efficiency", "Volume", "ROC and false alarms", "Parameter Space"]
+    assert "Real events" in names and "Worst False Negatives" in names
+    # Nothing is lost: the volume tab keeps the sensitive volume plot, the ROC tab the FAR curves and the
+    # window-level ROC with its selector, beside the new views.
+    volume = {p.yaxis[0].axis_label for p in _plots(tabs.objects[2], Plot)}
+    assert {"Sensitive Volume within the reach (Gpc³)", "Sensitive Distance within the reach (Mpc)",
+            "Fraction of the volume set found", "VT within the reach (Gpc³ yr)"} <= volume
+    roc = {p.yaxis[0].axis_label for p in _plots(tabs.objects[3], Plot)}
+    assert {"Detection probability (chance subtracted)", "False Alarm Rate (Hz)", "True Positive Rate (%)",
+            "Held-out rate / claimed rate"} <= roc
+    assert {"Injections:", "Test Population:"} <= {s.title for s in _plots(tabs.objects[3], Select)}
+    assert (tmp_path / "report.html").stat().st_size > 0
+
+
+def test_the_summary_names_each_level_and_whether_the_background_reaches_it(validated):
+    from gravyflow.src.validate.family_plots import NOT_REACHED, summary_rows
+
+    rows = summary_rows(validated, matched_filter=validated)
+    assert [r["Level"] for r in rows] == ["1 per month", "1 per year", "1 per 10 years", "1 per 100 years"]
+    assert all(r["Background"] == NOT_REACHED for r in rows)  # a few minutes of background reaches none
+    assert {"Volume (Gpc³)", "VT (Gpc³ yr)", "50% SNR", "Found (SNR set)", "Ratio to matched filter",
+            "|Δt| median (ms)"} <= set(rows[0])

@@ -162,6 +162,24 @@ repository before it may need the changes below.
   and 2σ bars, the volume on real data against its Gaussian twin (`Validator.plot(twins=...)`), and which glitch
   classes make the tail. Timing: throughput and latency, median and tail, with the machine, thread count and load,
   the A-B-B-A rounds and the training cost. A part with no record says so. Every existing tab is kept.
+- **The validator's metric family**, all from the same injections and background, each with its interval at 1σ
+  and 2σ (`gravyflow.src.validate.family`): detection probability against false-alarm rate per SNR band, with the
+  joint interval efficiency carries, and for the population (the found share of its volume within the reach)
+  (`Validator.detection_roc`); VT, the sensitive volume times the live time searched (`Validator.sensitive_vt`,
+  `volume.sensitive_vt`); the sensitive volume binned by chirp mass, mass ratio and, where the volume set records
+  spins, effective spin (`Validator.binned_volumes`, `volume.binned_volume`); the injections recovered at each level
+  (`Validator.recovered_counts`); the ratio of the sensitive volume to the matched filter's on the same injections,
+  with a bootstrap that redraws the injections once for both (`Validator.matched_filter_ratio`,
+  `volume.volume_ratio`); timing accuracy, the median and 90th percentile of the trigger's offset from the merger
+  with order-statistic intervals (`Validator.timing_accuracy`); false-alarm calibration, the FAR claimed on half the
+  background's blocks checked on the other half (`Validator.far_calibration`); and the real events' statistics,
+  FARs and counts at each level, with events inside a given training period flagged
+  (`Validator.real_event_summary`). The levels are one per month, year, ten years and hundred years
+  (`FAR_LEVELS_HZ`). The dashboard gains a Summary tab (the headline numbers at each level, with how deep the
+  background reaches) and regroups its tabs as the standard names them: Volume (the sensitive volume, VT and the
+  binned volume), ROC and false alarms (detection probability, the FAR curves, the calibration and the window-level
+  ROC, kept as a bridge) and Real events (counts per level and the training-period flag beside the events table);
+  every earlier plot, control and table is kept. `Validator.plot` takes `matched_filter=` and `training_periods=`.
 - **Injection records for analysis.** A dataset returns, when asked: `ReturnVariables.IN_BAND_DURATION_SECONDS`
   (B, G), a CBC's time from the band's lower frequency to its merger (the envelope's peak) by its waveform model,
   not cut by the window (`gf.CBCGenerator.in_band_duration_seconds`; NaN for other sources);

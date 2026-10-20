@@ -16,7 +16,12 @@ from .efficiency import EfficiencyAgainstSnr, efficiency_against_snr
 from .metrics import Background, roc_curve, sigma_level
 from .provenance import StaleCheckpointError, model_fingerprint, require_match
 from .stream import stream_background
-from .volume import InjectionVolumes, SensitiveVolumeCurve, chirp_weights, sensitive_volume_curve
+from .volume import (
+    BinnedVolume, InjectionVolumes, SensitiveVolumeCurve, SensitiveVt, VolumeRatio, binned_volume, chirp_weights,
+    sensitive_volume_curve, sensitive_vt, volume_ratio,
+)
+from . import family
+from gravyflow.src.dataset.features.injection import chirp_mass
 from gravyflow.src.utils.fingerprint import config_fingerprint
 
 if TYPE_CHECKING:  # avoids importing keras at runtime
@@ -273,6 +278,115 @@ class Validator:
                             "roc_auc": roc.auc}
         return results
 
+    # ------------------------------------------- the metric family (`family`)
+
+    def _rng(self, name: str) -> np.random.Generator:
+        """A metric's own random stream, from the validator's seed: a record gives the same result whenever read."""
+        return gf.SeedTree(self.config.seed).stream(self.config.group, f"validator/{name}")
+
+    def _fars(self, fars_hz) -> List[float]:
+        return list(self.config.far_thresholds if fars_hz is None else fars_hz)
+
+    @property
+    def live_time_seconds(self) -> float:
+        """The live time of the data searched (`family.live_time_seconds`): VT's."""
+        return family.live_time_seconds(self.background())
+
+    def detection_roc(self, fars_hz=None) -> Optional[family.DetectionRoc]:
+        """Detection probability against FAR per SNR band and over every injection (`family.detection_roc`)."""
+        if self.far_scores is None or self.efficiency_data is None:
+            return None
+        cfg = self.config
+        lo, hi = cfg.snr_range
+        bands = tuple((max(a, lo), min(b, hi)) for a, b in family.ROC_SNR_BANDS if a < hi and b > lo)
+        return family.detection_roc(
+            self.efficiency_data["snrs"], self.efficiency_data["scores"], self.background(), self._fars(fars_hz),
+            self._rng("roc"), bands=bands, num_bootstrap=cfg.efficiency_bootstrap_samples, sigmas=cfg.interval_sigmas,
+            method=cfg.efficiency_interval)
+
+    def sensitive_vt(self, fars_hz=None) -> Optional[SensitiveVt]:
+        """VT (Gpc^3 yr): the sensitive volume within the reach times the live time searched (`volume.sensitive_vt`)."""
+        curve = self.sensitive_volume_curve(fars_hz)
+        return None if curve is None else sensitive_vt(curve, self.live_time_seconds)
+
+    def binned_volumes(self, fars_hz=None, num_bins: int = 5) -> Dict[str, BinnedVolume]:
+        """
+        The sensitive volume within the reach in ``num_bins`` equal bins of chirp mass, of mass
+        ratio (``m2 / m1 <= 1``) and, where the volume set records spins (``spin1z``, ``spin2z``),
+        of the effective spin (`volume.binned_volume`): the bins span the set's own range, the
+        same for every model on the same injections. Empty without a volume set.
+        """
+        data = self.volume_data
+        if self.far_scores is None or data is None:
+            return {}
+        cfg = self.config
+        m1, m2 = np.maximum(data["mass1"], data["mass2"]), np.minimum(data["mass1"], data["mass2"])
+        parameters = {"chirp mass (M☉)": chirp_mass(m1, m2), "mass ratio": m2 / m1}
+        if "spin1z" in data and "spin2z" in data:
+            parameters["effective spin"] = (m1 * data["spin1z"] + m2 * data["spin2z"]) / (m1 + m2)
+        injections, background, fars = self.injection_volumes(), self.background(), self._fars(fars_hz)
+        results = {}
+        for name, values in parameters.items():
+            lo, hi = float(np.min(values)), float(np.max(values))
+            edges = np.linspace(lo, hi if hi > lo else lo + 1.0, num_bins + 1)
+            results[name] = binned_volume(injections, background, fars, values, edges, self._rng("volume"),
+                                          parameter=name, num_bootstrap=cfg.volume_bootstrap_samples,
+                                          sigmas=cfg.interval_sigmas, method=cfg.efficiency_interval,
+                                          chance_fraction=cfg.volume_chance_fraction)
+        return results
+
+    def recovered_counts(self, fars_hz=None) -> Dict[str, family.RecoveredCounts]:
+        """The injections found at each target FAR, of the SNR set and of the volume set (`family.recovered_counts`)."""
+        if self.far_scores is None:
+            return {}
+        cfg, background, fars = self.config, self.background(), self._fars(fars_hz)
+        sets = {"SNR set": self.efficiency_data, "volume set": self.volume_data}
+        return {name: family.recovered_counts(data["scores"], background, fars, sigmas=cfg.interval_sigmas,
+                                              method=cfg.efficiency_interval)
+                for name, data in sets.items() if data is not None}
+
+    def timing_accuracy(self, fars_hz=None) -> Optional[family.TimingAccuracy]:
+        """Trigger time against merger of the SNR set's found injections (`family.timing_accuracy`): stream mode's."""
+        data = self.efficiency_data
+        if self.far_scores is None or data is None or "trigger_offsets" not in data:
+            return None
+        return family.timing_accuracy(data["scores"], data["trigger_offsets"], self.background(), self._fars(fars_hz),
+                                      sigmas=self.config.interval_sigmas)
+
+    def far_calibration(self, fars_hz=None) -> Optional[family.FarCalibration]:
+        """The FAR claimed on half the background checked on the other (`family.far_calibration`); None unsplittable."""
+        if self.far_scores is None:
+            return None
+        halves = family.held_out_split(self.background())
+        if halves is None:
+            return None
+        return family.far_calibration(*halves, self._fars(fars_hz), sigmas=self.config.interval_sigmas)
+
+    def real_event_summary(self, fars_hz=None, training_periods=None) -> Optional[family.RealEventSummary]:
+        """
+        The real events' statistics, FARs and counts at each target (`family.real_event_summary`),
+        those inside ``training_periods`` (GPS ``(start, end)``: an as-published model's) flagged.
+        """
+        if self.far_scores is None or not self.real_events:
+            return None
+        return family.real_event_summary(self.real_events, self.background(),
+                                         family.FAR_LEVELS_HZ if fars_hz is None else fars_hz,
+                                         training_periods=training_periods, sigmas=self.config.interval_sigmas)
+
+    def matched_filter_ratio(self, matched_filter: "Validator", fars_hz=None) -> Optional[VolumeRatio]:
+        """
+        This model's sensitive volume over the matched filter's, on the same injections and
+        background data (`volume.volume_ratio`): ``matched_filter`` is the matched filter's
+        result through this validator. None where either has no volume set.
+        """
+        if (self.volume_data is None or matched_filter is None or matched_filter.volume_data is None
+                or self.far_scores is None or matched_filter.far_scores is None):
+            return None
+        cfg = self.config
+        return volume_ratio(self.injection_volumes(), self.background(), matched_filter.injection_volumes(),
+                            matched_filter.background(), self._fars(fars_hz), self._rng("volume"),
+                            num_bootstrap=cfg.volume_bootstrap_samples, sigmas=cfg.interval_sigmas)
+
     # -------------------------------------------------------- checkpoint
 
     #: Records kept beside the stages' results, written when present and read back when found.
@@ -425,13 +539,29 @@ class Validator:
         return None if segments is None else np.asarray(segments)
 
     def plot(self, output_path: Path = None, comparison_validators: Optional[List["Validator"]] = None,
+             matched_filter: Optional["Validator"] = None, training_periods=None,
              twins: Optional[Dict[str, "Validator"]] = None):
         """
         Generate the validation dashboard (a Panel template); save it if given a path.
-        ``twins`` maps a validator's name to the validator of its Gaussian twin, for the
-        Glitches tab's real-against-twin comparison.
+
+        Its tabs: Summary (the headline numbers at each false-alarm-rate level), Efficiency,
+        Volume, ROC and false alarms, Parameter Space, Real events, Glitches, Timing and
+        the worst cases.
+        ``matched_filter``: the matched filter's result on the same injections and data,
+        for the ratio of volumes; ``training_periods``: GPS ``(start, end)`` pairs of an
+        as-published model's training data, whose real events are flagged; ``twins`` maps
+        a validator's name to the validator of its Gaussian twin, for the Glitches tab's
+        real-against-twin comparison.
         """
         import panel as pn
+        from .family_plots import (
+            generate_binned_volume_plot,
+            generate_detection_roc_plot,
+            generate_far_calibration_plot,
+            generate_real_event_levels,
+            generate_summary_tab,
+            generate_vt_plot,
+        )
         from .plotting import (
             generate_efficiency_plot,
             generate_far_curves,
@@ -459,16 +589,23 @@ class Validator:
 
         volume_plot = generate_sensitive_volume_plot(validators)
         has_volume = any(getattr(child, "renderers", None) for child in volume_plot.children)
+        detection_plot, detection_select = generate_detection_roc_plot(validators)
+        window_roc_note = pn.pane.Markdown(
+            "**Window-level ROC** (true against false positives per scored window; in stream mode per background "
+            "trigger), kept as a bridge to papers that report only that.", sizing_mode="stretch_width")
         tabs = pn.Tabs(
+            ("Summary", generate_summary_tab(validators, matched_filter)),
             ("Efficiency", pn.Column(eff_controls, eff_plot)),
-            *([("Sensitive Volume", volume_plot)] if has_volume else []),
-            ("ROC Curves", pn.Column(roc_select, roc_plot)),
-            ("FAR Curves", pn.Column(*far_tab)),
+            *([("Volume", pn.Column(volume_plot, generate_vt_plot(validators),
+                                    generate_binned_volume_plot(validators)))] if has_volume else []),
+            ("ROC and false alarms", pn.Column(detection_select, detection_plot, *far_tab,
+                                               generate_far_calibration_plot(validators), window_roc_note,
+                                               roc_select, roc_plot)),
             ("Parameter Space", pn.Column(param_controls, param_plot) if param_controls else param_plot),
         )
         if self.real_events:
             events_table, _ = generate_real_events_table(self.real_events, self.input_duration_seconds)
-            tabs.append(("Real Events", events_table))
+            tabs.append(("Real events", pn.Column(generate_real_event_levels(self, training_periods), events_table)))
         tabs.append(("Glitches", generate_glitch_tab(validators, twins)))
         tabs.append(("Timing", generate_timing_tab(validators)))
 

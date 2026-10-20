@@ -241,6 +241,13 @@ validates as it trains: they need the `viz` extra.
   injections at sky direction times distance, found or missed at a false-alarm rate chosen with a slider, a sphere at
   the sensitive distance and the reach's outline, coloured by found state or chirp mass, at physical or scaled
   (chirp) distance; None for a record without sky positions. `volume_3d_levels` gives what it reads at each level.
+  The metric family, from the same injections and background, each with its 1σ and 2σ intervals:
+  `detection_roc` (detection probability against false-alarm rate per SNR band and for the population),
+  `sensitive_vt` (VT), `binned_volumes` (by chirp mass, mass ratio and spin), `recovered_counts`,
+  `matched_filter_ratio` (on the same injections), `timing_accuracy` (median and 90th percentile),
+  `far_calibration` (on held-out background) and `real_event_summary` (statistics, FARs, counts per level and a
+  training-period flag), at the levels `FAR_LEVELS_HZ` (one per month, year, ten and hundred years). The dashboard's
+  tabs: Summary, Efficiency, Volume, ROC and false alarms, Parameter Space, Real events and the worst cases.
 - `ValidationConfig`: the settings of a validation (`mode`, `stride_seconds`, `cluster_seconds`,
   `found_window_seconds`, `stream_segment_seconds` for stream mode).
 - Wrapping time slides and the per-detector path (`gravyflow.src.validate`): `WrappedSlides` lays the network's
