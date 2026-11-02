@@ -596,6 +596,60 @@ class IFO(Enum):
         """Get integer index for this IFO (L1=0, H1=1, V1=2)."""
         return list(IFO).index(self)
 
+
+@dataclass(frozen=True)
+class Site_:
+    """
+    A detector's site and arms, as a slot's geometry names them (angles in
+    radians, the azimuths clockwise from North), and the cached detector of lal
+    it is taken from (``lal_name``).
+    """
+    lal_name : str
+    latitude_radians : float
+    longitude_radians : float
+    height_meters : float
+    x_angle_radians : float
+    y_angle_radians : float
+    x_altitude_radians : float
+    y_altitude_radians : float
+    x_length_meters : float
+    y_length_meters : float
+
+
+class Site(Enum):
+    """
+    The sites of detectors with no bundled noise curve, for test networks: a
+    detector at one is a fixed slot (``DetectorSlot.at``), with the noise curve
+    of a bundled detector it is given.
+
+    Each vertex (latitude, longitude, elevation above the WGS84 ellipsoid) and
+    each arm's azimuth and altitude is lal's cached detector of that name, as
+    LALSuite's lal 7.7.1 holds it (``lal.CachedDetectors[...].frDetector``;
+    its REAL4 fields to their float32 values): LIGO-India, I1 (``LIO_4k``);
+    KAGRA, K1 (``KAGRA``); and the Einstein Telescope's triangle, E1, E2 and E3
+    (``ET1_T1400308``, ``ET2_T1400308``, ``ET3_T1400308``, from LIGO-T1400308,
+    E1 at Virgo's vertex). The arm lengths are the detectors' nominal ones, as
+    the bundled detectors' are: 4 km for LIGO-India (Advanced LIGO's design),
+    3 km for KAGRA (Akutsu et al., PTEP 2021, 05A101) and 10 km, the side of the
+    Einstein Telescope's triangle (its design study, ET-0106C-10); lal's arm
+    midpoints are near half of each. Arm lengths enter no projection.
+    """
+    I1 = Site_(
+        "LIO_4k", 0.34231676739, 1.34444215058, 440.0, 5.801201343536377, 4.230390548706055,
+        0.0, 0.0, 4000.0, 4000.0)
+    K1 = Site_(
+        "KAGRA", 0.6355068497, 2.396441015, 414.1809997558594, 1.0541130304336548, -0.5166798233985901,
+        0.0031413999386131763, -0.0036269999109208584, 3000.0, 3000.0)
+    E1 = Site_(
+        "ET1_T1400308", 0.76151183984, 0.18333805213, 51.88399887084961, 0.3391628563404083, 5.575150489807129,
+        0.0, 0.0, 10000.0, 10000.0)
+    E2 = Site_(
+        "ET2_T1400308", 0.7629930799, 0.1840585887, 59.73500061035156, 4.528450965881348, 3.481253147125244,
+        -0.0007836215663701296, -0.0015702445525676012, 10000.0, 10000.0)
+    E3 = Site_(
+        "ET3_T1400308", 0.76270463257, 0.1819299673, 59.72700119018555, 2.4325857162475586, 1.385387659072876,
+        -0.0015685210237279534, -0.0007818980957381427, 10000.0, 10000.0)
+
 class Network:
     def __init__ (
             self,
@@ -1090,6 +1144,29 @@ class DetectorSlot:
                     f"{self.name}'s {parameter} can lie only in {ends}{low:g}, {high:g}{')' if open_ else ']'}, "
                     f"but {value!r} reaches {least:g} to {most:g}."
                 )
+
+    @classmethod
+    def at(cls, site : "Site", noise_curve : IFO, name : Optional[str] = None) -> "DetectorSlot":
+        """
+        A detector at a bundled site (a gf.Site) with the noise curve
+        ``noise_curve`` has: a slot with all its geometry fixed, so a fixed
+        network's detector in a plain list as in gf.Detectors. It is named for
+        the site (I1, K1, E1...) unless ``name`` is given, and its noise
+        streams are named for it.
+        """
+        if not isinstance(site, Site):
+            raise TypeError(f"DetectorSlot.at takes a site, a gf.Site ({', '.join(Site.__members__)}), not {site!r}.")
+        geometry = site.value
+        return cls(
+            site.name if name is None else name, noise_curve,
+            latitude_radians=geometry.latitude_radians, longitude_radians=geometry.longitude_radians,
+            x_angle_radians=geometry.x_angle_radians,
+            # The y arm lies the opening angle anticlockwise of the x arm, seen from above.
+            opening_angle_radians=float(np.mod(geometry.x_angle_radians - geometry.y_angle_radians, 2.0 * np.pi)),
+            height_meters=geometry.height_meters,
+            x_length_meters=geometry.x_length_meters, y_length_meters=geometry.y_length_meters,
+            x_altitude_radians=geometry.x_altitude_radians, y_altitude_radians=geometry.y_altitude_radians,
+        )
 
     @property
     def drawn(self) -> bool:

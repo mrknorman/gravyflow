@@ -138,6 +138,15 @@ repository before it may need the changes below.
 
 ### Added
 
+- **Sites for test networks: LIGO-India, KAGRA and the Einstein Telescope.** `gf.Site` bundles the sites of I1, K1
+  and the Einstein Telescope's triangle E1, E2 and E3: each vertex's latitude, longitude and elevation and each arm's
+  azimuth and altitude as lal 7.7.1 caches them (`LIO_4k`, `KAGRA`, `ET1_T1400308` to `ET3_T1400308`), with their
+  nominal arm lengths (4, 3 and 10 km). `gf.DetectorSlot.at(site, noise_curve)` is a detector at one, its geometry
+  fixed and named for the site, with a bundled detector's noise curve; it is a fixed network's detector, in a plain
+  `ifos=` list beside H1, L1 and V1 as in `gf.Detectors`. No noise curve is added, and `gf.IFO` is unchanged. The
+  sites, their Earth-fixed vertices (to 3 mm, the rounding of lal's own angles) and response tensors are tested
+  against lal's, recorded by the script that writes the geometry fixture.
+
 - **Each detector's own SNR.** `ReturnVariables.DETECTOR_SNR` (B, G, I) is each detector's optimal SNR of each
   generator's injection as it is injected (scaled and projected), by the measure SNR scaling uses (`gf.snr`, now
   with `per_detector=True` for each detector's term, against the batch's spectrum over the onsource window): its

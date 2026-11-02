@@ -62,6 +62,7 @@ _MODULES = {
     "IFO": "gravyflow.src.dataset.conditioning.detector",
     "Network": "gravyflow.src.dataset.conditioning.detector",
     "DetectorSlot": "gravyflow.src.dataset.conditioning.detector",
+    "Site": "gravyflow.src.dataset.conditioning.detector",
     "Detectors": "gravyflow.src.dataset.conditioning.detector",
     "ExampleNetworks": "gravyflow.src.dataset.conditioning.detector",
     "NoiseProfile": "gravyflow.src.dataset.conditioning.detector",

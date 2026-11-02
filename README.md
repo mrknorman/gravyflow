@@ -143,6 +143,9 @@ the network SNR it was scaled to (0 in an absent detector).
 `DETECTOR_GEOMETRY` (each detector's Earth-fixed position in Earth radii and its response tensor's six components)
 and `DETECTOR_MASK` give each example's network, so a model can take them as inputs; a fixed network gives its own
 geometry and every detector. Detectors that repeat a name are refused: they would have identical noise.
+`gf.DetectorSlot.at(gf.Site.I1, noise_curve=gf.IFO.H1)` is a detector at LIGO-India's site with H1's curve; KAGRA
+(`K1`) and the Einstein Telescope's triangle (`E1`, `E2`, `E3`) are bundled too, from lal's cached detectors, for
+test networks such as `[gf.IFO.H1, gf.IFO.L1, gf.IFO.V1, gf.DetectorSlot.at(gf.Site.K1, noise_curve=gf.IFO.V1)]`.
 
 ```python
 slots = [gf.DetectorSlot(f"D{j}", noise_curve=gf.IFO.H1) for j in range(4)]

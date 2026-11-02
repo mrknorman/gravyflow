@@ -51,7 +51,8 @@ gravyflow runs on Keras's JAX backend. Set `KERAS_BACKEND=jax` before Keras is i
 - `Obtainer`: the base of the data obtainers (noise and transients).
 - `IFO`: the detectors gravyflow knows.
 - `Network`: a network of detectors, and the projection of waves onto it.
-- `DetectorSlot`: a detector at no bundled site, its geometry drawn per example, with noise of its own.
+- `DetectorSlot`: a detector at no bundled site, its geometry drawn per example, with noise of its own. `DetectorSlot.at(site, noise_curve)` is a detector at one of the bundled sites, its geometry fixed, with a bundled detector's noise curve: a fixed network's detector, in a plain `ifos=` list beside `IFO.H1`, `IFO.L1` and `IFO.V1` or in `Detectors`.
+- `Site`: the sites of LIGO-India (`I1`), KAGRA (`K1`) and the Einstein Telescope's triangle (`E1`, `E2`, `E3`), lal 7.7.1's cached detectors (`LIO_4k`, `KAGRA`, `ET1_T1400308` to `ET3_T1400308`) with their nominal arm lengths. They have no noise curves of their own.
 - `Detectors`: a dataset's detectors when each example has its own network: bundled detectors and slots, and how many are present.
 - `ExampleNetworks`: each example's network in one batch, and the projection of each example onto its own.
 - `NoiseProfile`: a named set of per-detector noise curves for coloured noise (bundled with the package).

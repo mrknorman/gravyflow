@@ -219,6 +219,7 @@ EXEMPT = {
     "IFO": "a detector's name and site",
     "Network": "detector geometry; its project_wave is checked as gf.project_wave",
     "DetectorSlot": "a detector's geometry distribution and noise curve; takes no strain",
+    "Site": "an enumeration of detector sites; takes no strain",
     "Detectors": "detectors and their per-example draws; takes no strain (ExampleNetworks projects)",
     "NoiseProfile": "an enumeration of noise-curve names",
     "InjectionGenerator": "generates injections at unit scale and scales them to their SNR or HRSS "

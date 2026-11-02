@@ -1,9 +1,13 @@
 """
-Write ``reference.json``: lal's geometry of the bundled detectors (L1, H1, V1),
-which ``test_detector_reference.py`` checks the Network against without lal.
+Write ``reference.json``: lal's geometry of the bundled detectors (L1, H1, V1)
+and of the bundled sites (``gf.Site``: I1, K1 and the Einstein Telescope's E1,
+E2 and E3), which ``test_detector_reference.py`` and ``test_detector_sites.py``
+check gravyflow's geometry against without lal.
 
-For each detector, lal's Earth-fixed vertex (``CachedDetectors[...].location``,
-metres); and for each of a set of isotropic sky positions at GPS times spread
+For each detector, its site as lal caches it (``CachedDetectors[...].frDetector``:
+the vertex's latitude, longitude and elevation, each arm's azimuth, altitude
+and midpoint), its Earth-fixed vertex (``location``, metres) and its response
+tensor (``response``); and for each of a set of isotropic sky positions at GPS times spread
 over the observing runs, lal's arrival-time delay from the geocentre
 (``TimeDelayFromEarthCenter``, seconds) and antenna pattern
 (``ComputeDetAMResponse`` at ``GreenwichMeanSiderealTime``, F+ and Fx). The sky
@@ -20,7 +24,17 @@ from pathlib import Path
 import lal
 import numpy as np
 
-DETECTORS = {"L1": lal.LLO_4K_DETECTOR, "H1": lal.LHO_4K_DETECTOR, "V1": lal.VIRGO_DETECTOR}
+DETECTORS = {
+    "L1": lal.LLO_4K_DETECTOR, "H1": lal.LHO_4K_DETECTOR, "V1": lal.VIRGO_DETECTOR,
+    "I1": lal.LIO_4K_DETECTOR, "K1": lal.KAGRA_DETECTOR,
+    "E1": lal.ET1_DETECTOR, "E2": lal.ET2_DETECTOR, "E3": lal.ET3_DETECTOR,
+}
+#: The fields of lal's frDetector recorded for each site.
+SITE_FIELDS = (
+    "name", "prefix", "vertexLatitudeRadians", "vertexLongitudeRadians", "vertexElevation",
+    "xArmAzimuthRadians", "yArmAzimuthRadians", "xArmAltitudeRadians", "yArmAltitudeRadians",
+    "xArmMidpoint", "yArmMidpoint",
+)
 NUM_POSITIONS = 64
 SEED = 20261102
 
@@ -43,8 +57,12 @@ def main():
             patterns.append(list(lal.ComputeDetAMResponse(
                 detector.response, float(ra), float(dec), float(psi), lal.GreenwichMeanSiderealTime(time)
             )))
+        site = detector.frDetector
         detectors[name] = {
+            "site": {field: getattr(site, field) if field in ("name", "prefix") else float(getattr(site, field))
+                     for field in SITE_FIELDS},
             "location_meters": [float(value) for value in detector.location],
+            "response": np.asarray(detector.response, dtype=np.float64).tolist(),
             "time_delay_seconds": delays,
             "antenna_pattern": patterns,
         }
