@@ -439,8 +439,9 @@ repository before it may need the changes below.
 - **A generator's own network is refused where examples draw their networks.** A dataset given `gf.Detectors` that
   vary (slots, or `num_present`) replaced each generator's network with them, so a generator given geometry of its
   own (a Network built from a dict or a config) was projected onto the drawn networks instead, silently, though a
-  fixed network keeps it. It is now refused by name; a generator's network may be the dataset's Detectors or a
-  Network of their bundled detectors.
+  fixed network keeps it. It is now refused by name; a generator's network may be the dataset's Detectors or, when
+  they have no slots, a Network of their (bundled) detectors in order: a Network cannot hold a slot, so with slots
+  it does not match the dataset's detectors and is refused by name.
 
 - **A Network's geometry is computed and held in float64.** `gf.Network` rounded its detectors' sites to float32
   before placing their vertices (through astropy, one detector at a time) and held its geometry in float32, so the
@@ -450,12 +451,15 @@ repository before it may need the changes below.
   0.1 mm. The projection still computes in float32 (JAX's 64-bit mode is on only for waveform generation and
   templates), casting the geometry it reads, so its delays stay within float32's rounding of the hour angle (lal's to
   about 6 ns). Every batch projected onto a fixed network changes slightly: its delays by up to 2 ns (one float32
-  step), its antenna patterns by about 1e-7 and its projected strain by a few parts in a million; so do the bundled
-  detectors' geometry in per-example networks (`gf.Detectors`); a slot's drawn geometry is unchanged.
+  step), its antenna patterns by about 1e-7 and its projected strain by a few parts in a million, and with them
+  what is measured from it: `CENTRAL_TIME` (by the delays), the `HRSS` an SNR-scaled injection implies, and the
+  whitened onsource of coloured noise carrying an injection; so do the bundled detectors' geometry in per-example
+  networks (`gf.Detectors`); a slot's drawn geometry is unchanged. Noise-only batches are unchanged, byte for byte.
   `detector_geometry` returns float64. A Network's specification holds the float64 geometry, and a `gf.Detectors`'
   now holds its bundled detectors' Network (it held only its fields, so their geometry could change under one
-  fingerprint): the fingerprint of every dataset projected onto a network changes, and a set materialised before is
-  refused by name (`FingerprintMismatch`), never served.
+  fingerprint): the fingerprint of every dataset with a network changes, a noise-only dataset's too, though its
+  bytes do not, and a set materialised before is refused by name (`FingerprintMismatch`), never served: materialise
+  it again.
 
 - **Detectors that repeat a name are refused.** A detector's noise streams are named for it, so a dataset or noise
   batcher given one detector twice (H1 and H1) served identical noise in both channels, silently; it is refused by
