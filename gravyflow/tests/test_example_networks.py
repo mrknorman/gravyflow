@@ -460,3 +460,14 @@ def test_a_dataset_of_slots_is_copied_by_its_specification():
     assert ds._copy_refusal() is None
     copy = pickle.loads(pickle.dumps(ds))
     np.testing.assert_array_equal(copy[1][0]["DETECTOR_GEOMETRY"], ds[1][0]["DETECTOR_GEOMETRY"])
+
+
+def test_a_change_of_a_bundled_site_changes_a_varying_datasets_fingerprint(monkeypatch):
+    """Detectors are fingerprinted by the geometry they project with: their bundled detectors' by content."""
+    def fingerprint():
+        return dataset(gf.Detectors([gf.IFO.H1, gf.IFO.L1, *slots(1)])).fingerprint
+
+    before = fingerprint()
+    assert fingerprint() == before
+    monkeypatch.setattr(gf.IFO.H1.value, "height_meters", gf.IFO.H1.value.height_meters + 1.0)
+    assert fingerprint() != before

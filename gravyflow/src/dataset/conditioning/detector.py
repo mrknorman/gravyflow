@@ -1284,6 +1284,15 @@ class Detectors:
                 f"num_present is a gf.Distribution of the number of detectors present, not {self.num_present!r}."
             )
 
+    def specification(self) -> Dict:
+        """
+        The detectors by content (``utils.fingerprint.canonical`` reads it):
+        the fields, and the geometry the bundled detectors project with, their
+        Network's, so a fingerprint changes with that geometry as with a fixed
+        network's.
+        """
+        return {"detectors": self.detectors, "num_present": self.num_present, "bundled": self._bundled}
+
     @property
     def num_detectors(self) -> int:
         return len(self.detectors)

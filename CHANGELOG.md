@@ -418,9 +418,10 @@ repository before it may need the changes below.
   about 6 ns). Every batch projected onto a fixed network changes slightly: its delays by up to 2 ns (one float32
   step), its antenna patterns by about 1e-7 and its projected strain by a few parts in a million; so do the bundled
   detectors' geometry in per-example networks (`gf.Detectors`); a slot's drawn geometry is unchanged.
-  `detector_geometry` returns float64. A Network's specification holds the float64 geometry, so the fingerprint of
-  every dataset projected onto one changes, and a set materialised before is refused by name
-  (`FingerprintMismatch`), never served.
+  `detector_geometry` returns float64. A Network's specification holds the float64 geometry, and a `gf.Detectors`'
+  now holds its bundled detectors' Network (it held only its fields, so their geometry could change under one
+  fingerprint): the fingerprint of every dataset projected onto a network changes, and a set materialised before is
+  refused by name (`FingerprintMismatch`), never served.
 
 - **Detectors that repeat a name are refused.** A detector's noise streams are named for it, so a dataset or noise
   batcher given one detector twice (H1 and H1) served identical noise in both channels, silently; it is refused by
